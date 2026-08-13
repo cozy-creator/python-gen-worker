@@ -52,8 +52,6 @@ from gen_worker.topology import (
     KEY_GPU_COUNT,
     KEY_GPUS_PER_GROUP,
     KEY_PARALLEL,
-    LEGACY_KEY_EXECUTION_GROUPS,
-    LEGACY_KEY_GPUS_PER_GROUP,
     PARALLEL_CFG,
     PARALLEL_INTERNAL,
     PARALLEL_NONE,
@@ -172,9 +170,10 @@ _VALUES = st.one_of(
 
 _KEYS = st.sampled_from([
     KEY_GPU_COUNT, KEY_GPUS_PER_GROUP, KEY_EXECUTION_GROUPS, KEY_PARALLEL,
-    LEGACY_KEY_GPUS_PER_GROUP, LEGACY_KEY_EXECUTION_GROUPS,
-    # Keys that are NOT in the closed set, including the near-misses a rename
-    # produces and the case variants the Go side is known to mis-handle.
+    # Keys that are NOT in the closed set: the retired pre-rename spellings,
+    # the near-misses a rename produces, and the case variants the Go side is
+    # known to mis-handle.
+    "group_degree", "groups",
     "gpus_per_group", "group_size", "GPU_COUNT", "tensor_parallel_size", "", "0",
 ])
 
@@ -183,11 +182,11 @@ _KEYS = st.sampled_from([
 @given(st.dictionaries(_KEYS, _VALUES, max_size=7))
 # Seeds from the shipped defects — always run, whatever hypothesis draws.
 @example({KEY_GPU_COUNT: 0, KEY_GPUS_PER_GROUP: 1})                       # the `or 1` launder
-@example({KEY_GPU_COUNT: 0, LEGACY_KEY_GPUS_PER_GROUP: 1})
+@example({KEY_GPU_COUNT: 0, "group_degree": 1})
 @example({KEY_GPU_COUNT: 4, KEY_GPUS_PER_GROUP: 2, "gpus_per_group": 2})  # unknown field
 @example({KEY_GPU_COUNT: 4, "tensor_parallel_size": 2})
-@example({KEY_GPU_COUNT: 4, KEY_GPUS_PER_GROUP: 2, LEGACY_KEY_GPUS_PER_GROUP: 1,
-          KEY_PARALLEL: PARALLEL_SEQUENCE})                               # alias disagree
+@example({KEY_GPU_COUNT: 4, KEY_GPUS_PER_GROUP: 2, "group_degree": 1,
+          KEY_PARALLEL: PARALLEL_SEQUENCE})                               # retired spelling
 @example({KEY_GPU_COUNT: 4, KEY_GPUS_PER_GROUP: 2, KEY_EXECUTION_GROUPS: 4,
           KEY_PARALLEL: PARALLEL_SEQUENCE})                               # groups disagree
 @example({KEY_GPU_COUNT: 4, KEY_GPUS_PER_GROUP: 3, KEY_PARALLEL: PARALLEL_SEQUENCE})
@@ -248,10 +247,10 @@ def test_round_trip(gpu_count: int, degree: int, parallel: str) -> None:
     except TopologyError:
         return
     payload = topo.as_dict()
-    # the canonical spelling ONLY. The dual write is gone; the dual
-    # READ stays until th#1376 stops tensorhub emitting the legacy names.
-    assert LEGACY_KEY_GPUS_PER_GROUP not in payload
-    assert LEGACY_KEY_EXECUTION_GROUPS not in payload
+    # the canonical spelling ONLY -- the retired names are neither written
+    # nor read.
+    assert "group_degree" not in payload
+    assert "groups" not in payload
     back = _decode(json.dumps(payload))
     assert back == topo, f"round trip changed the value: {topo} -> {payload} -> {back}"
     assert _decode(json.dumps(back.as_dict())) == back, "as_dict is not a fixed point"

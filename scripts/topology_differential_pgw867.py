@@ -47,23 +47,25 @@ from gen_worker.topology import (  # noqa: E402
     KEY_GPU_COUNT,
     KEY_GPUS_PER_GROUP,
     KEY_PARALLEL,
-    LEGACY_KEY_EXECUTION_GROUPS,
-    LEGACY_KEY_GPUS_PER_GROUP,
     ExecutionTopology,
     TopologyError,
 )
 
-# The legacy-spelling deprecation warning fires on a large fraction of generated
-# inputs; at fuzz volumes it buries the report.
 logging.getLogger("gen_worker.topology").setLevel(logging.ERROR)
+
+# The pre-rename spellings. Neither side knows them any more, so they stay in
+# the generated key space as the differential's retired-spelling case: both
+# decoders must refuse them, and must refuse them the SAME way.
+RETIRED_KEY_GPUS_PER_GROUP = "group_degree"
+RETIRED_KEY_EXECUTION_GROUPS = "groups"
 
 KEYS = [
     KEY_GPU_COUNT,
     KEY_GPUS_PER_GROUP,
     KEY_EXECUTION_GROUPS,
     KEY_PARALLEL,
-    LEGACY_KEY_GPUS_PER_GROUP,
-    LEGACY_KEY_EXECUTION_GROUPS,
+    RETIRED_KEY_GPUS_PER_GROUP,
+    RETIRED_KEY_EXECUTION_GROUPS,
 ]
 
 
@@ -142,7 +144,7 @@ UNKNOWN_KEYS = ["gpus_per_group", "group_size", "GPU_COUNT", "parallel_mode", ""
 def structured(rng: random.Random) -> str:
     obj: dict[str, Any] = {}
     for key in (KEY_GPU_COUNT, KEY_GPUS_PER_GROUP, KEY_EXECUTION_GROUPS,
-                LEGACY_KEY_GPUS_PER_GROUP, LEGACY_KEY_EXECUTION_GROUPS):
+                RETIRED_KEY_GPUS_PER_GROUP, RETIRED_KEY_EXECUTION_GROUPS):
         if rng.random() < 0.55:
             obj[key] = rng.choice(INTERESTING_NUMBERS)
     if rng.random() < 0.6:
@@ -172,8 +174,8 @@ def coherent(rng: random.Random) -> str:
     obj: dict[str, Any] = {KEY_GPU_COUNT: d * g, KEY_GPUS_PER_GROUP: d,
                            KEY_EXECUTION_GROUPS: g}
     if rng.random() < 0.7:
-        obj[LEGACY_KEY_GPUS_PER_GROUP] = d
-        obj[LEGACY_KEY_EXECUTION_GROUPS] = g
+        obj[RETIRED_KEY_GPUS_PER_GROUP] = d
+        obj[RETIRED_KEY_EXECUTION_GROUPS] = g
     if parallel:
         obj[KEY_PARALLEL] = parallel
     return json.dumps(obj)
@@ -189,14 +191,15 @@ def noise(rng: random.Random) -> str:
 def generate(n: int, rng: random.Random) -> list[str]:
     out: list[str] = []
     # Exhaustive small cross-product first: every legal-shaped payload whose
-    # two th#1375 spellings are written in every combination of present /
-    # absent / zero / disagreeing. That cell is where the rename hole lived.
+    # current and RETIRED degree spellings are written in every combination of
+    # present / absent / zero / disagreeing. That cell is where the rename hole
+    # lived, and it is where a one-sided un-retirement would show up.
     for gc, d, legacy_d in itertools.product([0, 1, 2, 4], [None, 0, 1, 2], [None, 0, 1, 2]):
         obj: dict[str, Any] = {KEY_GPU_COUNT: gc}
         if d is not None:
             obj[KEY_GPUS_PER_GROUP] = d
         if legacy_d is not None:
-            obj[LEGACY_KEY_GPUS_PER_GROUP] = legacy_d
+            obj[RETIRED_KEY_GPUS_PER_GROUP] = legacy_d
         obj[KEY_PARALLEL] = "sequence" if max(d or 0, legacy_d or 0) > 1 else ""
         out.append(json.dumps(obj))
     while len(out) < n:

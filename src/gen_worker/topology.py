@@ -199,28 +199,8 @@ KEY_GPUS_PER_GROUP = "gpus_per_execution_group"
 KEY_EXECUTION_GROUPS = "execution_groups"
 KEY_PARALLEL = "parallel"
 
-# th#1375's pre-rename spelling. NO LONGER EMITTED — ``as_dict``
-# writes the canonical names only, which every hub already reads: tensorhub's
-# ``reconcileAlias`` treats an absent legacy key as "not written".
-#
-# Still ACCEPTED, and that is the entire remaining transition. It cannot be
-# deleted from this repo alone: the key set below is CLOSED, so an unrecognised
-# key is a hard ``topology_unknown_field`` refusal, and tensorhub's
-# ``internal/orchestrator/topology/topology.go`` STILL EMITS both spellings
-# (``wireValue.LegacyGroupDegree``/``LegacyGroups``). Dropping these two names
-# here before that changes fails EVERY topology decode on EVERY pod.
-#
-# th#1376 is the deletion, and TENSORHUB GOES FIRST: drop the legacy fields
-# from ``wireValue``, collapse it back into ``ExecutionTopology``, delete
-# ``reconcileAlias`` and the ``LegacyKey*`` constants. Once that ships, delete
-# these two names, ``_aliased``, and the two ``_KNOWN_KEYS`` entries — after
-# which they fall through to ``topology_unknown_field`` by construction.
-LEGACY_KEY_GPUS_PER_GROUP = "group_degree"
-LEGACY_KEY_EXECUTION_GROUPS = "groups"
-
 _KNOWN_KEYS = frozenset({
     KEY_GPU_COUNT, KEY_GPUS_PER_GROUP, KEY_EXECUTION_GROUPS, KEY_PARALLEL,
-    LEGACY_KEY_GPUS_PER_GROUP, LEGACY_KEY_EXECUTION_GROUPS,
 })
 
 # a CEILING, not just a floor, and the same number on both
@@ -482,34 +462,6 @@ class ExecutionTopology:
                 )
             return value
 
-        def _aliased(key: str, legacy_key: str) -> Optional[int]:
-            """One field under either spelling.
-
-            Both present must AGREE. During the transition every hub emits
-            both, so a disagreement is not a stale producer to be tolerated —
-            it is a producer whose two spellings describe two different
-            packings, and picking either one is picking silently.
-            """
-            new_value = _opt(key)
-            legacy_value = _opt(legacy_key)
-            if legacy_value is None:
-                return new_value
-            if new_value is not None and new_value != legacy_value:
-                raise TopologyError(
-                    "topology_alias_disagree",
-                    f"{key}={new_value} but {legacy_key}={legacy_value} — one "
-                    "producer wrote both spellings of the same field with "
-                    "different values; refusing rather than choosing",
-                )
-            if new_value is None:
-                logger.warning(
-                    "topology: %r is the pre-th#1375 spelling of %r and is "
-                    "accepted for this release only (th#1376 removes it)",
-                    legacy_key, key,
-                )
-                return legacy_value
-            return new_value
-
         # TYPE-CHECK BEFORE DEFAULTING. This was
         # ``obj.get(KEY_PARALLEL) or ""``, the `or 1` launder in a second
         # field: every falsy non-string (``false``, ``0``, ``[]``, ``{}``)
@@ -525,8 +477,8 @@ class ExecutionTopology:
         else:
             parallel = parallel_raw
         # an ABSENT field is a refusal, not a default. The hub and
-        # this worker both always emit gpu_count and the degree (under one
-        # spelling or the other), so an object missing either did not come
+        # this worker both always emit gpu_count and the degree, so an
+        # object missing either did not come
         # from a producer this contract knows — and a default reads it as
         # ONE SLOT, which is the exact silence th#1375 exists to prevent.
         # (An absent ENV VAR is still legal and still means one slot; that is
@@ -537,12 +489,12 @@ class ExecutionTopology:
                 "topology_gpu_count_invalid",
                 f"{KEY_GPU_COUNT} is absent; a present topology must declare it",
             )
-        degree = _aliased(KEY_GPUS_PER_GROUP, LEGACY_KEY_GPUS_PER_GROUP)
+        degree = _opt(KEY_GPUS_PER_GROUP)
         if degree is None:
             raise TopologyError(
                 "topology_degree_invalid",
-                f"{KEY_GPUS_PER_GROUP} is absent under both spellings; a present "
-                "topology must declare it",
+                f"{KEY_GPUS_PER_GROUP} is absent; a present topology must "
+                "declare it",
             )
         topo = cls(
             gpu_count=gpu_count,
@@ -553,7 +505,7 @@ class ExecutionTopology:
         # it, so a disagreement means the value did not come from the hub.
         # Refuse it rather than pick a winner — a wrong slot count is a wrong
         # fleet capacity, and it is silent.
-        declared = _aliased(KEY_EXECUTION_GROUPS, LEGACY_KEY_EXECUTION_GROUPS)
+        declared = _opt(KEY_EXECUTION_GROUPS)
         if declared is not None and declared != topo.execution_groups:
             raise TopologyError(
                 "topology_execution_groups_disagree",

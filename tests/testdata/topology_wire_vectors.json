@@ -1,160 +1,350 @@
 {
-  "_comment": "th#1382 / pgw#867: THE WORKER_EXECUTION_TOPOLOGY conformance vectors. Vendored BYTE-IDENTICALLY in tensorhub (internal/orchestrator/topology/testdata/) and python-gen-worker (tests/testdata/); the Go decoder (topology.Parse) and the Python decoder (gen_worker.topology.ExecutionTopology.decode) must reach the recorded verdict on every vector in `agreed`. Contract: gpu_count = execution_groups * gpus_per_execution_group; the key set is CLOSED (th#1375) and both spellings of the two renamed fields are accepted but must agree; absent/blank is legal and means ONE slot; anything else present-but-not-conforming is a TYPED refusal, never a silent default. `agreed` runs as an ordinary fast test on both sides every merge. `divergent` is a DEFECT LEDGER, not an assertion: inputs on which the two decoders are known to disagree today, with each side's actual answer and the tracker issue that owns the fix. It is EMPTY as of 2026-08-02 — th#1385 and pgw#870 closed all nine recorded classes and their witnesses moved into `agreed`. The differential driver (python-gen-worker/scripts/topology_differential_pgw867.py) treats it as its suppression list, so its exit code means 'no NEW disagreement'.",
-
+  "_comment": "THE WORKER_EXECUTION_TOPOLOGY conformance vectors. Vendored BYTE-IDENTICALLY in tensorhub (internal/orchestrator/topology/testdata/) and python-gen-worker (tests/testdata/); the Go decoder (topology.Parse) and the Python decoder (gen_worker.topology.ExecutionTopology.decode) must reach the recorded verdict on every vector in `agreed`. Contract: gpu_count = execution_groups * gpus_per_execution_group; the key set is CLOSED; absent/blank is legal and means ONE slot; anything else present-but-not-conforming is a TYPED refusal, never a silent default. `agreed` runs as an ordinary fast test on both sides every merge. `divergent` is a DEFECT LEDGER, not an assertion: inputs on which the two decoders are known to disagree today, with each side's actual answer and the tracker issue that owns the fix. The differential driver (python-gen-worker/scripts/topology_differential_pgw867.py) treats it as its suppression list, so its exit code means 'no NEW disagreement'. It is EMPTY as of 2026-08-13: the pre-rename spelling (`group_degree`/`groups`) is now deleted on BOTH sides \u2014 the hub half shipped with th#1376, the worker half is the pre-launch hard cut \u2014 so the eight interim vectors moved into `agreed` as `topology_unknown_field` refusals and stand as the regression seeds that keep the spelling retired.",
   "agreed": [
-    {"wire": "", "accept": true, "code": "absent",
-     "note": "no decision delivered — every CPU pod and every pod created before the field existed"},
-    {"wire": "   ", "accept": true, "code": "absent",
-     "note": "blank is absent, not a malformed value"},
-
-    {"wire": "{\"gpu_count\":1,\"gpus_per_execution_group\":1,\"execution_groups\":1}",
-     "accept": true, "gpu_count": 1, "gpus_per_execution_group": 1, "execution_groups": 1, "parallel": "",
-     "note": "the historical single slot"},
-    {"wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":1,\"execution_groups\":4}",
-     "accept": true, "gpu_count": 4, "gpus_per_execution_group": 1, "execution_groups": 4, "parallel": "",
-     "note": "4x1 data parallel"},
-    {"wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"parallel\":\"sequence\"}",
-     "accept": true, "gpu_count": 4, "gpus_per_execution_group": 2, "execution_groups": 2, "parallel": "sequence",
-     "note": "2x2 platform-sharded — the shape the rename endangered"},
-    {"wire": "{\"gpu_count\":2,\"gpus_per_execution_group\":2,\"execution_groups\":1,\"parallel\":\"internal\"}",
-     "accept": true, "gpu_count": 2, "gpus_per_execution_group": 2, "execution_groups": 1, "parallel": "internal",
-     "note": "the model spans its own devices; never fabric-gated"},
-    {"wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"group_degree\":2,\"groups\":2,\"parallel\":\"sequence\"}",
-     "accept": true, "gpu_count": 4, "gpus_per_execution_group": 2, "execution_groups": 2, "parallel": "sequence",
-     "note": "th#1375 transition: BOTH spellings emitted, agreeing — what a current hub actually writes"},
-    {"wire": "{\"gpu_count\":4,\"group_degree\":2,\"groups\":2,\"parallel\":\"sequence\"}",
-     "accept": true, "gpu_count": 4, "gpus_per_execution_group": 2, "execution_groups": 2, "parallel": "sequence",
-     "note": "OLD spelling only — a pre-th#1375 hub talking to a current worker"},
-    {"wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"parallel\":\"sequence\"}",
-     "accept": true, "gpu_count": 4, "gpus_per_execution_group": 2, "execution_groups": 2, "parallel": "sequence",
-     "note": "NEW spelling only — a post-th#1376 hub"},
-    {"wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"groups\":2,\"parallel\":\"sequence\"}",
-     "accept": true, "gpu_count": 4, "gpus_per_execution_group": 2, "execution_groups": 2, "parallel": "sequence",
-     "note": "MIXED spellings, agreeing — deploy order must not matter"},
-    {"wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"parallel\":\" sequence \"}",
-     "accept": true, "gpu_count": 4, "gpus_per_execution_group": 2, "execution_groups": 2, "parallel": "sequence",
-     "note": "surrounding whitespace on parallel is trimmed by both"},
-
-    {"wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"group_degree\":1,\"parallel\":\"sequence\"}",
-     "accept": false, "code": "topology_alias_disagree",
-     "note": "CONFLICTING spellings of the same field. Picking either one is picking silently"},
-    {"wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"groups\":4,\"parallel\":\"sequence\"}",
-     "accept": false, "code": "topology_alias_disagree",
-     "note": "conflicting spellings of execution_groups"},
-
-    {"wire": "{\"gpu_count\":0,\"gpus_per_execution_group\":1,\"execution_groups\":0}",
-     "accept": false, "code": "topology_gpu_count_invalid",
-     "note": "REGRESSION SEED — `_opt(\"gpu_count\") or 1` laundered this refusal into the legal single-slot default"},
-    {"wire": "{\"gpu_count\":0,\"group_degree\":1,\"groups\":0}",
-     "accept": false, "code": "topology_gpu_count_invalid",
-     "note": "same launder under the pre-rename spelling"},
-    {"wire": "{\"gpu_count\":-1,\"gpus_per_execution_group\":1,\"execution_groups\":-1}",
-     "accept": false, "code": "topology_gpu_count_invalid",
-     "note": "negative is not a packing"},
-    {"wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":0,\"execution_groups\":4}",
-     "accept": false, "code": "topology_degree_invalid",
-     "note": "degree 0 — the field's zero value must never be a legal packing"},
-    {"wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":3,\"execution_groups\":1,\"parallel\":\"sequence\"}",
-     "accept": false, "code": "topology_degree_not_divisor",
-     "note": "the partition invariant: a group exclusively owns its devices"},
-    {"wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":4,\"parallel\":\"sequence\"}",
-     "accept": false, "code": "topology_execution_groups_disagree",
-     "note": "declared slot count contradicts the derived one — a wrong slot count is a wrong fleet capacity, and it is silent"},
-    {"wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2}",
-     "accept": false, "code": "topology_parallel_required",
-     "note": "a group of 2 cards with no mechanism would hold 2 cards and serve one card's worth"},
-    {"wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":1,\"execution_groups\":4,\"parallel\":\"sequence\"}",
-     "accept": false, "code": "topology_parallel_without_degree",
-     "note": "a mechanism at degree 1 shards nothing — the producer meant something it did not say"},
-    {"wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"parallel\":\"ulysses\"}",
-     "accept": false, "code": "topology_parallel_unknown",
-     "note": "unknown mechanism"},
-
-    {"wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"parallel\":\"sequence\",\"gpus_per_group\":2}",
-     "accept": false, "code": "topology_unknown_field",
-     "note": "REGRESSION SEED (th#1375/pgw#856) — 5 of 5 skew payloads decoded CLEAN against the shipped worker. Ignoring the key reads the field it names as ABSENT, absent is legal, and absent means one slot"},
-    {"wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"parallel\":\"sequence\",\"tensor_parallel_size\":2}",
-     "accept": false, "code": "topology_unknown_field",
-     "note": "another stack's spelling of the same fact is still not this contract"},
-    {"wire": "{\"gpu_count\":1,\"gpus_per_execution_group\":1,\"execution_groups\":1,\"\":1}",
-     "accept": false, "code": "topology_unknown_field",
-     "note": "the empty key is a key"},
-
-    {"wire": "not json", "accept": false, "code": "topology_decode_failed"},
-    {"wire": "[1,2,3]", "accept": false, "code": "topology_decode_failed",
-     "note": "an array is not the object this contract is"},
-    {"wire": "\"{}\"", "accept": false, "code": "topology_decode_failed",
-     "note": "double-encoded JSON — a producer that stringified twice"},
-    {"wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,", "accept": false, "code": "topology_decode_failed",
-     "note": "truncated payload"},
-    {"wire": "{\"gpu_count\":\"4\",\"gpus_per_execution_group\":1,\"execution_groups\":4}",
-     "accept": false, "code": "topology_decode_failed",
-     "note": "a stringified number is not a number"},
-    {"wire": "{\"gpu_count\":true,\"gpus_per_execution_group\":1,\"execution_groups\":1}",
-     "accept": false, "code": "topology_decode_failed",
-     "note": "true is not 1"},
-    {"wire": "{\"gpu_count\":2,\"gpus_per_execution_group\":2,\"execution_groups\":1,\"parallel\":\"sequence\",\"parallel\":\"internal\"}",
-     "accept": true, "gpu_count": 2, "gpus_per_execution_group": 2, "execution_groups": 1, "parallel": "internal",
-     "note": "DUPLICATE KEY: both decoders take the LAST occurrence. Recorded because it is the kind of agreement nobody chose deliberately"},
-
-    {"wire": "{\"GPU_COUNT\":8,\"Gpus_Per_Execution_Group\":1}",
-     "accept": false, "code": "topology_unknown_field",
-     "note": "th#1385 REGRESSION SEED: encoding/json matches field names CASE-INSENSITIVELY, so DisallowUnknownFields never fired and the closed key set was not closed. The Go decoder now checks the key set case-SENSITIVELY on a raw key map"},
-    {"wire": "{\"gpu_count\":1,\"gpus_per_execution_group\":1,\"execution_groups\":1} trailing garbage",
-     "accept": false, "code": "topology_decode_failed",
-     "note": "th#1385 REGRESSION SEED: json.Decoder.Decode reads ONE value and leaves the rest in the stream; dec.More() now refuses it"},
-    {"wire": "{\"gpu_count\":1,\"gpus_per_execution_group\":1,\"execution_groups\":1}{\"gpu_count\":1}",
-     "accept": false, "code": "topology_decode_failed",
-     "note": "the same hole with a second WELL-FORMED value appended — a concatenated env var must not decode as its first half"},
-    {"wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"parallel\":\"SEQUENCE\"}",
-     "accept": false, "code": "topology_parallel_unknown",
-     "note": "th#1385: `parallel` is a closed vocabulary on a machine-written wire. The Go decoder no longer case-folds it — a producer that shouts is not the hub"},
-    {"wire": "{\"gpu_count\":2,\"gpus_per_execution_group\":2,\"group_degree\":0,\"execution_groups\":1,\"parallel\":\"sequence\"}",
-     "accept": false, "code": "topology_alias_disagree",
-     "note": "th#1385: an EXPLICIT zero in a legacy alias. Go read 0 as encoding/json's 'not written'; every wire number is now a pointer, so absent and written-zero are different states"},
-    {"wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"parallel\":\"sequence\",\"groups\":0}",
-     "accept": false, "code": "topology_alias_disagree",
-     "note": "the same explicit zero in the OTHER legacy alias"},
-    {"wire": "{\"gpu_count\":1,\"gpus_per_execution_group\":1,\"execution_groups\":0}",
-     "accept": false, "code": "topology_execution_groups_disagree",
-     "note": "an explicitly-written execution_groups of 0 is CHECKED against the derived count; Go's Validate skipped a zero because it could not see the difference between absent and written"},
-
-    {"wire": "{}", "accept": false, "code": "topology_gpu_count_invalid",
-     "note": "th#1385 THE DEFAULTS RULING: an absent FIELD inside a present object is a REFUSAL on both sides. Python defaulted gpu_count to 1, which is legal — so the object that says nothing served one slot. (An absent ENV VAR is still legal and still means one slot; that is from_env, not this.)"},
-    {"wire": "{\"gpu_count\":2}", "accept": false, "code": "topology_degree_invalid",
-     "note": "the same ruling for the degree, under both of its spellings"},
-    {"wire": "{\"gpu_count\":null,\"gpus_per_execution_group\":1,\"execution_groups\":1}",
-     "accept": false, "code": "topology_gpu_count_invalid",
-     "note": "an explicit null is 'not written', which is still a refusal"},
-    {"wire": "{\"gpu_count\":1,\"gpus_per_execution_group\":1,\"execution_groups\":1,\"parallel\":null}",
-     "accept": true, "gpu_count": 1, "gpus_per_execution_group": 1, "execution_groups": 1, "parallel": "",
-     "note": "parallel is the one OPTIONAL field (omitempty on the wire); null reads as the empty mechanism"},
-
-    {"wire": "{\"gpu_count\":1,\"parallel\":false}", "accept": false, "code": "topology_decode_failed",
-     "note": "pgw#870 REGRESSION SEED: `obj.get(KEY_PARALLEL) or \"\"` laundered every FALSY non-string into PARALLEL_NONE before the isinstance guard could run — the `or 1` bug in a second field. Type-check BEFORE defaulting"},
-    {"wire": "{\"gpu_count\":1,\"gpus_per_execution_group\":1,\"execution_groups\":1,\"parallel\":0}",
-     "accept": false, "code": "topology_decode_failed",
-     "note": "the same launder with a falsy NUMBER"},
-    {"wire": "{\"gpu_count\":2.0}", "accept": false, "code": "topology_decode_failed",
-     "note": "pgw#870: a float is not an integer. Python compared `int(value) != value`, which let an integral float through"},
-    {"wire": "{\"gpu_count\":1e400}", "accept": false, "code": "topology_decode_failed",
-     "note": "pgw#870: json.loads accepts the non-standard Infinity/NaN literals and int() of them escaped UNTYPED past every caller that catches TopologyError. A float is refused before it can reach int()"},
-    {"wire": "{\"gpu_count\":9223372036854775808}", "accept": false, "code": "topology_decode_failed",
-     "note": "pgw#870: the wire integers are int64 on the hub side; outside that range is not a number this contract can carry"},
-    {"wire": "{\"gpu_count\":1000000000000000000000000000000}", "accept": false, "code": "topology_decode_failed",
-     "note": "pgw#870 REGRESSION SEED: Python had no bound at all, so execution_groups became 10^30 and all_groups() over it is unbounded work"},
-    {"wire": "{\"gpu_count\":1024,\"gpus_per_execution_group\":1,\"execution_groups\":1024}",
-     "accept": true, "gpu_count": 1024, "gpus_per_execution_group": 1, "execution_groups": 1024,
-     "parallel": "", "note": "the ceiling itself: MaxGPUCount/MAX_GPU_COUNT is 1024 and 1024 is legal"},
-    {"wire": "{\"gpu_count\":2048,\"gpus_per_execution_group\":1,\"execution_groups\":2048}",
-     "accept": false, "code": "topology_gpu_count_invalid",
-     "note": "one past the ceiling. A decoder with only a floor turns a wire number into unbounded work in every consumer that walks the groups"},
-    {"wire": "{\"gpu_count\":2,\"gpus_per_execution_group\":4,\"parallel\":\"sequence\"}",
-     "accept": false, "code": "topology_degree_invalid",
-     "note": "a degree wider than the pod. Both sides now answer with the SAME code — Python used to reach the divisor check first"},
-    {"wire": "null", "accept": false, "code": "topology_decode_failed",
-     "note": "JSON null is not the object this contract is"}
+    {
+      "wire": "",
+      "accept": true,
+      "code": "absent",
+      "note": "no decision delivered \u2014 every CPU pod and every pod created before the field existed"
+    },
+    {
+      "wire": "   ",
+      "accept": true,
+      "code": "absent",
+      "note": "blank is absent, not a malformed value"
+    },
+    {
+      "wire": "{\"gpu_count\":1,\"gpus_per_execution_group\":1,\"execution_groups\":1}",
+      "accept": true,
+      "gpu_count": 1,
+      "gpus_per_execution_group": 1,
+      "execution_groups": 1,
+      "parallel": "",
+      "note": "the historical single slot"
+    },
+    {
+      "wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":1,\"execution_groups\":4}",
+      "accept": true,
+      "gpu_count": 4,
+      "gpus_per_execution_group": 1,
+      "execution_groups": 4,
+      "parallel": "",
+      "note": "4x1 data parallel"
+    },
+    {
+      "wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"parallel\":\"sequence\"}",
+      "accept": true,
+      "gpu_count": 4,
+      "gpus_per_execution_group": 2,
+      "execution_groups": 2,
+      "parallel": "sequence",
+      "note": "2x2 platform-sharded \u2014 the shape the rename endangered"
+    },
+    {
+      "wire": "{\"gpu_count\":2,\"gpus_per_execution_group\":2,\"execution_groups\":1,\"parallel\":\"internal\"}",
+      "accept": true,
+      "gpu_count": 2,
+      "gpus_per_execution_group": 2,
+      "execution_groups": 1,
+      "parallel": "internal",
+      "note": "the model spans its own devices; never fabric-gated"
+    },
+    {
+      "wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"parallel\":\"sequence\"}",
+      "accept": true,
+      "gpu_count": 4,
+      "gpus_per_execution_group": 2,
+      "execution_groups": 2,
+      "parallel": "sequence",
+      "note": "the ONLY spelling \u2014 exactly what a post-th#1376 hub writes"
+    },
+    {
+      "wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"parallel\":\" sequence \"}",
+      "accept": true,
+      "gpu_count": 4,
+      "gpus_per_execution_group": 2,
+      "execution_groups": 2,
+      "parallel": "sequence",
+      "note": "surrounding whitespace on parallel is trimmed by both"
+    },
+    {
+      "wire": "{\"gpu_count\":0,\"gpus_per_execution_group\":1,\"execution_groups\":0}",
+      "accept": false,
+      "code": "topology_gpu_count_invalid",
+      "note": "REGRESSION SEED \u2014 `_opt(\"gpu_count\") or 1` laundered this refusal into the legal single-slot default"
+    },
+    {
+      "wire": "{\"gpu_count\":-1,\"gpus_per_execution_group\":1,\"execution_groups\":-1}",
+      "accept": false,
+      "code": "topology_gpu_count_invalid",
+      "note": "negative is not a packing"
+    },
+    {
+      "wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":0,\"execution_groups\":4}",
+      "accept": false,
+      "code": "topology_degree_invalid",
+      "note": "degree 0 \u2014 the field's zero value must never be a legal packing"
+    },
+    {
+      "wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":3,\"execution_groups\":1,\"parallel\":\"sequence\"}",
+      "accept": false,
+      "code": "topology_degree_not_divisor",
+      "note": "the partition invariant: a group exclusively owns its devices"
+    },
+    {
+      "wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":4,\"parallel\":\"sequence\"}",
+      "accept": false,
+      "code": "topology_execution_groups_disagree",
+      "note": "declared slot count contradicts the derived one \u2014 a wrong slot count is a wrong fleet capacity, and it is silent"
+    },
+    {
+      "wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2}",
+      "accept": false,
+      "code": "topology_parallel_required",
+      "note": "a group of 2 cards with no mechanism would hold 2 cards and serve one card's worth"
+    },
+    {
+      "wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":1,\"execution_groups\":4,\"parallel\":\"sequence\"}",
+      "accept": false,
+      "code": "topology_parallel_without_degree",
+      "note": "a mechanism at degree 1 shards nothing \u2014 the producer meant something it did not say"
+    },
+    {
+      "wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"parallel\":\"ulysses\"}",
+      "accept": false,
+      "code": "topology_parallel_unknown",
+      "note": "unknown mechanism"
+    },
+    {
+      "wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"parallel\":\"sequence\",\"gpus_per_group\":2}",
+      "accept": false,
+      "code": "topology_unknown_field",
+      "note": "REGRESSION SEED (th#1375/pgw#856) \u2014 5 of 5 skew payloads decoded CLEAN against the shipped worker. Ignoring the key reads the field it names as ABSENT, absent is legal, and absent means one slot"
+    },
+    {
+      "wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"parallel\":\"sequence\",\"tensor_parallel_size\":2}",
+      "accept": false,
+      "code": "topology_unknown_field",
+      "note": "another stack's spelling of the same fact is still not this contract"
+    },
+    {
+      "wire": "{\"gpu_count\":1,\"gpus_per_execution_group\":1,\"execution_groups\":1,\"\":1}",
+      "accept": false,
+      "code": "topology_unknown_field",
+      "note": "the empty key is a key"
+    },
+    {
+      "wire": "not json",
+      "accept": false,
+      "code": "topology_decode_failed"
+    },
+    {
+      "wire": "[1,2,3]",
+      "accept": false,
+      "code": "topology_decode_failed",
+      "note": "an array is not the object this contract is"
+    },
+    {
+      "wire": "\"{}\"",
+      "accept": false,
+      "code": "topology_decode_failed",
+      "note": "double-encoded JSON \u2014 a producer that stringified twice"
+    },
+    {
+      "wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,",
+      "accept": false,
+      "code": "topology_decode_failed",
+      "note": "truncated payload"
+    },
+    {
+      "wire": "{\"gpu_count\":\"4\",\"gpus_per_execution_group\":1,\"execution_groups\":4}",
+      "accept": false,
+      "code": "topology_decode_failed",
+      "note": "a stringified number is not a number"
+    },
+    {
+      "wire": "{\"gpu_count\":true,\"gpus_per_execution_group\":1,\"execution_groups\":1}",
+      "accept": false,
+      "code": "topology_decode_failed",
+      "note": "true is not 1"
+    },
+    {
+      "wire": "{\"gpu_count\":2,\"gpus_per_execution_group\":2,\"execution_groups\":1,\"parallel\":\"sequence\",\"parallel\":\"internal\"}",
+      "accept": true,
+      "gpu_count": 2,
+      "gpus_per_execution_group": 2,
+      "execution_groups": 1,
+      "parallel": "internal",
+      "note": "DUPLICATE KEY: both decoders take the LAST occurrence. Recorded because it is the kind of agreement nobody chose deliberately"
+    },
+    {
+      "wire": "{\"GPU_COUNT\":8,\"Gpus_Per_Execution_Group\":1}",
+      "accept": false,
+      "code": "topology_unknown_field",
+      "note": "th#1385 REGRESSION SEED: encoding/json matches field names CASE-INSENSITIVELY, so DisallowUnknownFields never fired and the closed key set was not closed. The Go decoder now checks the key set case-SENSITIVELY on a raw key map"
+    },
+    {
+      "wire": "{\"gpu_count\":1,\"gpus_per_execution_group\":1,\"execution_groups\":1} trailing garbage",
+      "accept": false,
+      "code": "topology_decode_failed",
+      "note": "th#1385 REGRESSION SEED: json.Decoder.Decode reads ONE value and leaves the rest in the stream; dec.More() now refuses it"
+    },
+    {
+      "wire": "{\"gpu_count\":1,\"gpus_per_execution_group\":1,\"execution_groups\":1}{\"gpu_count\":1}",
+      "accept": false,
+      "code": "topology_decode_failed",
+      "note": "the same hole with a second WELL-FORMED value appended \u2014 a concatenated env var must not decode as its first half"
+    },
+    {
+      "wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"parallel\":\"SEQUENCE\"}",
+      "accept": false,
+      "code": "topology_parallel_unknown",
+      "note": "th#1385: `parallel` is a closed vocabulary on a machine-written wire. The Go decoder no longer case-folds it \u2014 a producer that shouts is not the hub"
+    },
+    {
+      "wire": "{\"gpu_count\":1,\"gpus_per_execution_group\":1,\"execution_groups\":0}",
+      "accept": false,
+      "code": "topology_execution_groups_disagree",
+      "note": "an explicitly-written execution_groups of 0 is CHECKED against the derived count; Go's Validate skipped a zero because it could not see the difference between absent and written"
+    },
+    {
+      "wire": "{}",
+      "accept": false,
+      "code": "topology_gpu_count_invalid",
+      "note": "th#1385 THE DEFAULTS RULING: an absent FIELD inside a present object is a REFUSAL on both sides. Python defaulted gpu_count to 1, which is legal \u2014 so the object that says nothing served one slot. (An absent ENV VAR is still legal and still means one slot; that is from_env, not this.)"
+    },
+    {
+      "wire": "{\"gpu_count\":2}",
+      "accept": false,
+      "code": "topology_degree_invalid",
+      "note": "the same ruling for the degree"
+    },
+    {
+      "wire": "{\"gpu_count\":null,\"gpus_per_execution_group\":1,\"execution_groups\":1}",
+      "accept": false,
+      "code": "topology_gpu_count_invalid",
+      "note": "an explicit null is 'not written', which is still a refusal"
+    },
+    {
+      "wire": "{\"gpu_count\":1,\"gpus_per_execution_group\":1,\"execution_groups\":1,\"parallel\":null}",
+      "accept": true,
+      "gpu_count": 1,
+      "gpus_per_execution_group": 1,
+      "execution_groups": 1,
+      "parallel": "",
+      "note": "parallel is the one OPTIONAL field (omitempty on the wire); null reads as the empty mechanism"
+    },
+    {
+      "wire": "{\"gpu_count\":1,\"parallel\":false}",
+      "accept": false,
+      "code": "topology_decode_failed",
+      "note": "pgw#870 REGRESSION SEED: `obj.get(KEY_PARALLEL) or \"\"` laundered every FALSY non-string into PARALLEL_NONE before the isinstance guard could run \u2014 the `or 1` bug in a second field. Type-check BEFORE defaulting"
+    },
+    {
+      "wire": "{\"gpu_count\":1,\"gpus_per_execution_group\":1,\"execution_groups\":1,\"parallel\":0}",
+      "accept": false,
+      "code": "topology_decode_failed",
+      "note": "the same launder with a falsy NUMBER"
+    },
+    {
+      "wire": "{\"gpu_count\":2.0}",
+      "accept": false,
+      "code": "topology_decode_failed",
+      "note": "pgw#870: a float is not an integer. Python compared `int(value) != value`, which let an integral float through"
+    },
+    {
+      "wire": "{\"gpu_count\":1e400}",
+      "accept": false,
+      "code": "topology_decode_failed",
+      "note": "pgw#870: json.loads accepts the non-standard Infinity/NaN literals and int() of them escaped UNTYPED past every caller that catches TopologyError. A float is refused before it can reach int()"
+    },
+    {
+      "wire": "{\"gpu_count\":9223372036854775808}",
+      "accept": false,
+      "code": "topology_decode_failed",
+      "note": "pgw#870: the wire integers are int64 on the hub side; outside that range is not a number this contract can carry"
+    },
+    {
+      "wire": "{\"gpu_count\":1000000000000000000000000000000}",
+      "accept": false,
+      "code": "topology_decode_failed",
+      "note": "pgw#870 REGRESSION SEED: Python had no bound at all, so execution_groups became 10^30 and all_groups() over it is unbounded work"
+    },
+    {
+      "wire": "{\"gpu_count\":1024,\"gpus_per_execution_group\":1,\"execution_groups\":1024}",
+      "accept": true,
+      "gpu_count": 1024,
+      "gpus_per_execution_group": 1,
+      "execution_groups": 1024,
+      "parallel": "",
+      "note": "the ceiling itself: MaxGPUCount/MAX_GPU_COUNT is 1024 and 1024 is legal"
+    },
+    {
+      "wire": "{\"gpu_count\":2048,\"gpus_per_execution_group\":1,\"execution_groups\":2048}",
+      "accept": false,
+      "code": "topology_gpu_count_invalid",
+      "note": "one past the ceiling. A decoder with only a floor turns a wire number into unbounded work in every consumer that walks the groups"
+    },
+    {
+      "wire": "{\"gpu_count\":2,\"gpus_per_execution_group\":4,\"parallel\":\"sequence\"}",
+      "accept": false,
+      "code": "topology_degree_invalid",
+      "note": "a degree wider than the pod. Both sides now answer with the SAME code \u2014 Python used to reach the divisor check first"
+    },
+    {
+      "wire": "null",
+      "accept": false,
+      "code": "topology_decode_failed",
+      "note": "JSON null is not the object this contract is"
+    },
+    {
+      "wire": "{\"gpu_count\":4,\"group_degree\":2,\"groups\":2,\"parallel\":\"sequence\"}",
+      "accept": false,
+      "code": "topology_unknown_field",
+      "note": "RETIRED pre-rename spelling \u2014 refused BY NAME on both sides. THE ordering case"
+    },
+    {
+      "wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"group_degree\":2,\"groups\":2,\"parallel\":\"sequence\"}",
+      "accept": false,
+      "code": "topology_unknown_field",
+      "note": "RETIRED pre-rename spelling \u2014 refused BY NAME on both sides. what a th#1375-transition hub wrote: both spellings, agreeing"
+    },
+    {
+      "wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"groups\":2,\"parallel\":\"sequence\"}",
+      "accept": false,
+      "code": "topology_unknown_field",
+      "note": "RETIRED pre-rename spelling \u2014 refused BY NAME on both sides. mixed spellings, agreeing"
+    },
+    {
+      "wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"group_degree\":1,\"parallel\":\"sequence\"}",
+      "accept": false,
+      "code": "topology_unknown_field",
+      "note": "RETIRED pre-rename spelling \u2014 refused BY NAME on both sides. BOTH SIDES STILL REFUSE \u2014 only the code differs"
+    },
+    {
+      "wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"groups\":4,\"parallel\":\"sequence\"}",
+      "accept": false,
+      "code": "topology_unknown_field",
+      "note": "RETIRED pre-rename spelling \u2014 refused BY NAME on both sides. conflicting spellings of execution_groups; both refuse, codes differ"
+    },
+    {
+      "wire": "{\"gpu_count\":2,\"gpus_per_execution_group\":2,\"group_degree\":0,\"execution_groups\":1,\"parallel\":\"sequence\"}",
+      "accept": false,
+      "code": "topology_unknown_field",
+      "note": "RETIRED pre-rename spelling \u2014 refused BY NAME on both sides. th#1385's explicit zero in a legacy alias"
+    },
+    {
+      "wire": "{\"gpu_count\":4,\"gpus_per_execution_group\":2,\"execution_groups\":2,\"parallel\":\"sequence\",\"groups\":0}",
+      "accept": false,
+      "code": "topology_unknown_field",
+      "note": "RETIRED pre-rename spelling \u2014 refused BY NAME on both sides. the same explicit zero in the OTHER legacy alias"
+    },
+    {
+      "wire": "{\"gpu_count\":0,\"group_degree\":1,\"groups\":0}",
+      "accept": false,
+      "code": "topology_unknown_field",
+      "note": "RETIRED pre-rename spelling \u2014 refused BY NAME on both sides. the `_opt(\"gpu_count\") or 1` launder seed under the pre-rename spelling"
+    }
   ],
-
   "divergent": []
 }
