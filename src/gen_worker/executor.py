@@ -96,6 +96,7 @@ from .models import provision
 from .models import residency as residency_mod
 from .models.memory import (
     aflush_memory,
+    cuda_allocated_bytes,
     estimate_cuda_resident_gb,
     estimate_pipeline_size_gb,
     flush_memory,
@@ -106,6 +107,7 @@ from .models.memory import (
 )
 from .models import rung as rungspec
 from .models.rung import touches_host_ram, transition_line
+from .models.records import record_in_use, record_refs, records_holding
 from .models.envelope import ArtifactEnvelopeExceeded
 from .models.errors import MissingSnapshotError, UrlExpiredError
 from .models.execution_lanes import ExecutionLaneUnavailableError
@@ -2100,7 +2102,7 @@ class Executor:
             if not rec.ready or not rec.stale:
                 return
             async with self._load_lock:
-                if self._record_in_use(rec):
+                if record_in_use(rec, records=self._classes.values(), jobs=self.jobs.values(), residency=self.store.residency):
                     return
                 await self._vacate_record(rec)
         self._on_state_change()
@@ -5315,7 +5317,7 @@ class Executor:
             setup = getattr(instance, "setup", None)
             inj = _InjectionResult(kwargs={}, loaded={})
 
-            vram_before = self._vram_allocated()
+            vram_before = cuda_allocated_bytes()
             if spec.runtime:
                 rec.server = await self._boot_engine_server(spec, paths)
             if callable(setup):
@@ -6148,7 +6150,7 @@ class Executor:
             self._assert_mint_termini(
                 spec,
                 [p for p in mint_obligations if id(p) not in owned_by_driver])
-            vram_delta = max(0, self._vram_allocated() - vram_before)
+            vram_delta = max(0, cuda_allocated_bytes() - vram_before)
             if rec.server is not None:
                 # Engine subprocess VRAM is invisible to torch's allocator;
                 # book the measured per-PID footprint so the LRU ledger is
@@ -6759,17 +6761,17 @@ class Executor:
             # ref that appeared in the snapshot of LRU candidates.
             if res.tier(ref) is not residency_mod.Tier.RAM:
                 continue
-            owners = self._records_holding(ref)
+            owners = records_holding(self._classes.values(), ref)
             if len(owners) > 1:
                 # A ref shared by several endpoint instances is not an
                 # ownership key. Their unique refs drive record teardown.
                 continue
             rec = owners[0] if owners else None
             if rec is not None:
-                if self._record_in_use(rec, reclaim_ref=ref):
+                if record_in_use(rec, records=self._classes.values(), jobs=self.jobs.values(), residency=self.store.residency, reclaim_ref=ref):
                     continue
                 owned = [
-                    held for held in self._record_refs(rec)
+                    held for held in record_refs(rec)
                     if res.tier(held) in (residency_mod.Tier.RAM, residency_mod.Tier.VRAM)
                 ]
                 released = await self._vacate_record(rec)
@@ -6915,13 +6917,13 @@ class Executor:
         # Movable demotions weren't enough: tear down idle records holding
         # non-movable LRU victims (tenant-loaded refs).
         for ref in res.lru_vram_victims():
-            owners = self._records_holding(ref)
+            owners = records_holding(self._classes.values(), ref)
             if len(owners) != 1:
                 # Shared refs cannot identify which instance owns the
                 # residency object; wait for a unique record-owned victim.
                 continue
             rec = owners[0]
-            if self._record_in_use(rec, reclaim_ref=ref):
+            if record_in_use(rec, records=self._classes.values(), jobs=self.jobs.values(), residency=self.store.residency, reclaim_ref=ref):
                 continue
             await self._vacate_record(rec)
             if await asyncio.to_thread(make_room):
@@ -7233,7 +7235,7 @@ class Executor:
                         if excl_bytes > 0:
                             await _to_thread_complete(functools.partial(
                                 res.make_room, excl_bytes, for_refs=(ref,)))
-                    before = self._vram_allocated()
+                    before = cuda_allocated_bytes()
                     try:
                         sl = await _to_thread_complete(
                             provision.load_slot, ann, path, binding=binding,
@@ -7422,7 +7424,7 @@ class Executor:
                                 result.pending_self_mints[id(pipe)] = pipe_mint
                             elif armed and selection is not None:
                                 result.active_compile_artifacts[id(pipe)] = selection
-                    delta = max(0, self._vram_allocated() - before)
+                    delta = max(0, cuda_allocated_bytes() - before)
                     if slot_share:
                         execution_lane_obj, execution_lane_bytes = self._register_execution_lane(
                             slot,
@@ -8428,14 +8430,6 @@ class Executor:
             publisher=self._cell_publisher(),
         )
 
-    @staticmethod
-    def _vram_allocated() -> int:
-        if torch is not None and torch.cuda.is_available():
-            try:
-                return int(torch.cuda.memory_allocated())
-            except Exception:
-                return 0
-        return 0
 
     def declares_compile(self) -> bool:
         """Whether ANY discovered spec declares a compile family.
@@ -8569,48 +8563,8 @@ class Executor:
             await self._send(pb.WorkerMessage(model_event=event))
         inj.adoptions.clear()
 
-    def _record_refs(self, rec: _ClassRecord) -> List[str]:
-        """The wire refs a record's instance holds: the load-time booking
-        keys when stamped (gw#494), else the current binding derivation
-        (records that never completed a setup)."""
-        if rec.held_refs:
-            return list(rec.held_refs)
-        return [wire_ref(b) for s in rec.specs for b in s.models.values()]
 
-    def _records_holding(self, ref: str) -> List[_ClassRecord]:
-        return [
-            rec for rec in self._classes.values()
-            if rec.ready and ref in self._record_refs(rec)
-        ]
 
-    def _record_in_use(
-        self, rec: _ClassRecord, *, reclaim_ref: Optional[str] = None,
-    ) -> bool:
-        """Whether teardown would disturb live work.
-
-        ``reclaim_ref`` narrows a pressure-driven teardown to the candidate
-        that selected this record. A different held ref can be pinned by an
-        incoming job before its own setup (the common SDXL VAE); that does not
-        make this record's idle checkpoint active. ``_vacate_record`` leaves
-        such a pinned ref resident because ``release_to_disk`` refuses it.
-        Full-record invalidation omits the argument and remains conservative.
-
-        A job on a rebound spec no longer references the record's held refs;
-        membership of the job's spec in this record is the honest instance-use
-        signal (gw#494).
-        """
-        for job in self.jobs.values():
-            if job.finished or job.superseded or job.spec is None:
-                continue
-            if job.spec in rec.specs:
-                return True
-        refs = [reclaim_ref] if reclaim_ref is not None else self._record_refs(rec)
-        for ref in refs:
-            owners = self._records_holding(ref)
-            if (len(owners) == 1 and owners[0] is rec
-                    and self.store.residency.in_use(ref)):
-                return True
-        return False
 
     async def _vacate_record(self, rec: _ClassRecord) -> List[str]:
         """Tear an instance down and return refs whose owner was released."""
@@ -8618,7 +8572,7 @@ class Executor:
         # stop the driver before any module teardown races a warm forward.
         await self.abandon_background_mint(
             rec, reason="instance vacate", code="vacate")
-        held_refs = self._record_refs(rec)
+        held_refs = record_refs(rec)
         held_objects = rec.held_objects
         released_refs: List[str] = []
         old_obj: Any = None
@@ -8660,7 +8614,7 @@ class Executor:
         for ref in held_refs:
             tier_before = self.store.residency.tier(ref)
             old_obj = held_objects.get(ref)
-            owners = self._records_holding(ref)
+            owners = records_holding(self._classes.values(), ref)
             if owners:
                 # Residency keeps one representative object per wire ref. If
                 # it points at the departing record, transfer it to a survivor
@@ -9823,7 +9777,7 @@ class Executor:
                         # peak - baseline is this request's transient
                         # (activation) footprint, as opposed to the resident
                         # weights already allocated when it took the GPU.
-                        alloc_at_start = self._vram_allocated()
+                        alloc_at_start = cuda_allocated_bytes()
                 # Last execution fence: no adapter mutation or tenant handler
                 # has run yet. The repeated check catches a replacement between
                 # scheduler assignment/intake and this GPU turn.
