@@ -96,10 +96,29 @@ def test_the_manifest_digest_is_a_label_not_an_identity() -> None:
 def test_a_ck1_key_is_not_an_entry_key() -> None:
     """The re-key, enforced at the grammar. A ck1 key names a 36-entry
     all-or-nothing cell, which this runtime cannot arm at all; admitting it
-    would let a cell ref reach a per-entry path and fail late."""
+    would let a cell ref reach a per-entry path and fail late.
+
+    THE FIFTH SWEEP ERROR, and it landed in the atom's own proof: a blanket
+    ``ck1-`` -> ``ek1-`` fixture sweep rewrote the REFUSAL line here, leaving
+    a contradictory pair one character apart —
+    ``assert not is_key("ek1-…")`` beside ``assert is_key("ek1-…")``. The row
+    went red, which is the only reason it surfaced, and while it was red the
+    ck1-refusal invariant had NO passing guard in this file at all.
+
+    It is the exact class this branch's handover brief documents: **a
+    mechanical sweep neuters the file whose purpose is to be an exception**,
+    and the exception here is the one line that must keep naming the OLD
+    scheme. Fixed, and annotated so the next sweep leaves it alone.
+    """
     assert cell_key.KEY_SCHEME == "ek1"
-    assert not cell_key.is_key("ek1-" + "0" * 56)
+    # fence-symbol-exempt: `ck1` is the SUPERSEDED scheme and naming it is the
+    # whole assertion — a sweep that renames this line deletes the invariant.
+    assert not cell_key.is_key("ck1-" + "0" * 56)
     assert cell_key.is_key("ek1-" + "0" * 56)
+    # The refusal is about the PREFIX, not the length: a well-formed ck1 key
+    # of exactly the right shape is still refused, which is what makes an
+    # orphaned ref fail at the comparison rather than late.
+    assert len("ck1-" + "0" * 56) == len("ek1-" + "0" * 56)
 
 
 # --- 2. ARTIFACT -----------------------------------------------------------

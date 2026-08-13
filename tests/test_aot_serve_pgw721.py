@@ -512,8 +512,17 @@ def test_swap_falls_permanently_eager_and_revokes_proof_on_artifact_error():
     runner.bind(module.state_dict(), {})
     meta = _meta()
     aot.wrap_module(module, runner, meta)
-    setattr(pipeline, "_cozy_aot", {"meta": meta, "module": module,
-                                    "state": getattr(module, "_cozy_aot")["state"]})
+    # pgw#1176: the PIPELINE marker `arm_entry` publishes — `targets`, not a
+    # bare `module`/`state`. The old shape is one nothing in production writes;
+    # `_marker_states`' pipeline-level fallback for it is deleted, and this was
+    # the last fixture building it.
+    setattr(pipeline, "_cozy_aot", {
+        "meta": meta,
+        "targets": {"unet": {
+            "module": module, "attr": "forward",
+            "state": getattr(module, "_cozy_aot")["state"]}},
+        "entries": {ENTRY: {"key": meta["cell_key"], "target": "unet"}},
+    })
     seen: list[str] = []
     assert aot.set_guard_failure_callback(pipeline, seen.append) is True
 
