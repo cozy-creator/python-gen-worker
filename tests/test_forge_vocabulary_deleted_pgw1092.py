@@ -1,7 +1,7 @@
 """pgw#1092 / th#1751 W4 (DESIGN-RULINGS §4.28) — the forge vocabulary is GONE.
 
 Paul, 2026-08-10: *"the forge-system is kind of stupid and should be deleted
-entirely honestly… untrusted machines that need a cell that doesn't exist can
+entirely honestly… untrusted machines that need a compiled graph that doesn't exist can
 always create it themselves on their end; they don't need to request anything.
 Yeah just delete the entire mint-request + forge system."*
 
@@ -47,14 +47,14 @@ def test_the_mint_goal_module_is_gone_and_the_package_still_imports() -> None:
     assert not hasattr(executor, "mint_goal_mod")
     # ...and the accessors that existed ONLY so the driver could decide it
     # was finished go with it. A serving pod never retires and never asks.
-    from gen_worker import fleet_cells
+    from gen_worker import fleet_compiled_graphs
 
     assert not hasattr(executor.Executor, "background_mint_tasks")
-    assert not hasattr(fleet_cells, "published_cells")
-    assert not hasattr(fleet_cells, "refused_publishes")
+    assert not hasattr(fleet_compiled_graphs, "published_compiled_graphs")
+    assert not hasattr(fleet_compiled_graphs, "refused_publishes")
     # The serve-path readback the executor's own publish wait uses SURVIVES.
-    assert hasattr(fleet_cells, "publishes_in_flight")
-    assert hasattr(fleet_cells, "publish_durable_progress")
+    assert hasattr(fleet_compiled_graphs, "publishes_in_flight")
+    assert hasattr(fleet_compiled_graphs, "publish_durable_progress")
     assert hasattr(executor.Executor, "declares_compile")
 
 

@@ -1,7 +1,7 @@
 """pgw#903 — does this compiled artifact belong to the execution the hub
 issued? Answered BEFORE ``dlopen``, by comparing DECLARED identities.
 
-An AOT cell is not data. It is a ``dlopen``-ed ELF this pod executes, built by
+An AOT compiled graph is not data. It is a ``dlopen``-ed ELF this pod executes, built by
 some other pod against one exact toolchain, one environment seal and one traced
 graph contract. Until now the serve path verified the package against ITSELF —
 ``aot_serve.verify`` rules on sm/torch/cuda/host-ISA/family, all probed from
@@ -12,7 +12,7 @@ consistency. Both are necessary and neither asks the question this module asks:
 Nothing asked it because nothing could: before th#1457 there was no immutable
 spec to compare against, so the mint's baked facts (``aot_mint``'s
 ``shared_identity_blocks``) had no counterpart. They do now —
-``ExecutionSpec.arm.artifact`` carries the cell key, toolchain digest and env
+``ExecutionSpec.arm.artifact`` carries the compiled graph key, toolchain digest and env
 seal digest, and ``ExecutionSpec.arm.graph_contract_digest`` carries the graph
 contract — so the comparison is a lookup on both sides rather than a
 reconstruction on either.
@@ -20,7 +20,7 @@ reconstruction on either.
 **The comparison is DECLARED-IDENTITY, never bytes.** §4.25/§4.26 forbid
 confirming an artifact by comparing it to another mint of the same key: pgw#1006
 measured that two mints of one key legitimately differ, so a byte comparison
-would refuse healthy cells and prove nothing about unhealthy ones. What is
+would refuse healthy compiled graphs and prove nothing about unhealthy ones. What is
 compared here are the digests each side already committed to. (Verifying the
 DELIVERED bytes against the content digest the hub named is a different and
 legitimate check — it belongs to delivery, pgw#904, not to identity.)
@@ -29,7 +29,7 @@ Every refusal names the axis, the expectation and what arrived, because these
 are read as fleet events: "toolchain_digest: expected a1b2…, have c3d4…" tells
 the hub team an image rebuilt without re-minting; "compatibility failed" tells
 them nothing. And compatibility is never a preference — a mismatch on any axis
-is a refusal, never a reason to prefer a different cell. That is the whole
+is a refusal, never a reason to prefer a different compiled graph. That is the whole
 distinction between this and the fetch-and-filter resolver pgw#904 deletes.
 
 Scope note: the publisher claim is verified where the hub-signed receipt is
@@ -44,19 +44,19 @@ from typing import Any, Mapping, Protocol
 
 import msgspec
 
-from . import cell_key, env_seal
+from . import compiled_graph_key, env_seal
 
 
 class NamesAnArtifact(Protocol):
-    """A source that NAMES one compiled cell, by the axes it already carries.
+    """A source that NAMES one compiled compiled graph, by the axes it already carries.
 
-    ``cell_resolve.ResolvedCell`` (the hub answered a pull by derived key) is
+    ``compiled_graph_resolve.ResolvedCompiledGraph`` (the hub answered a pull by derived key) is
     the source today; the Protocol stays because the map must not learn a
     second shape when a second source appears.
     """
 
     @property
-    def cell_key(self) -> str: ...
+    def compiled_graph_key(self) -> str: ...
 
     @property
     def toolchain_digest(self) -> str: ...
@@ -78,11 +78,11 @@ class ExpectedIdentity(msgspec.Struct, frozen=True):
 
     ONE map builds it — :meth:`named_by`, fenced by
     ``scripts/lint_arm_state_feeders.py``. This is the object every arm gate
-    compares a cell against, so a field reaching one source's map and not the
+    compares a compiled graph against, so a field reaching one source's map and not the
     other's is pgw#1150's defect one level in.
     """
 
-    cell_key: str
+    compiled_graph_key: str
     toolchain_digest: str
     env_seal_digest: str
     graph_contract_digest: str
@@ -96,9 +96,9 @@ class ExpectedIdentity(msgspec.Struct, frozen=True):
     # `code_closure` = {source path: content digest} from `cc.static_code_closure`.
     # They are different quantities, and asserting they are equal would be this
     # lane inventing a cross-repo contract on the strength of two similar names
-    # — which would then refuse every healthy cell in the fleet.
+    # — which would then refuse every healthy compiled graph in the fleet.
     #
-    # Note also that the closure is not a `cell_key` axis, so it is not covered
+    # Note also that the closure is not a `compiled_graph_key` axis, so it is not covered
     # transitively either. Closing this needs ONE ruling from the th#1457 lane:
     # either `ArtifactIdentity` gains a `code_closure_digest` the mint stamps
     # and the hub echoes, or the closure block goes (pgw#1034 already carries a
@@ -118,7 +118,7 @@ class ExpectedIdentity(msgspec.Struct, frozen=True):
         cannot reach one source and not the other.
         """
         return ExpectedIdentity(
-            cell_key=named.cell_key,
+            compiled_graph_key=named.compiled_graph_key,
             toolchain_digest=named.toolchain_digest,
             env_seal_digest=named.env_seal_digest,
             graph_contract_digest=graph_contract_digest,
@@ -131,7 +131,7 @@ def artifact_identity(meta: Mapping[str, Any]) -> ExpectedIdentity:
 
     Recomputed from the blocks the mint stored (``aot_mint``'s
     ``shared_identity_blocks``), never read from a separate stamp — the same
-    discipline ``cell_key`` already enforces, for the same reason: a stamp that
+    discipline ``compiled_graph_key`` already enforces, for the same reason: a stamp that
     is not derived from the facts it summarizes can disagree with them, and
     then the disagreement is invisible.
 
@@ -148,25 +148,25 @@ def artifact_identity(meta: Mapping[str, Any]) -> ExpectedIdentity:
     seal = meta.get(env_seal.SEAL_KEY)
     toolchain = meta.get("toolchain")
     return ExpectedIdentity(
-        cell_key=str(meta.get("cell_key") or ""),
+        compiled_graph_key=str(meta.get("compiled_graph_key") or ""),
         toolchain_digest=(
-            cell_key.toolchain_axis_digest(dict(toolchain))
+            compiled_graph_key.toolchain_axis_digest(dict(toolchain))
             if isinstance(toolchain, dict) else ""),
         env_seal_digest=(
             env_seal.seal_digest(dict(seal)) if isinstance(seal, dict) else ""),
         # pgw#1176: the DECLARATION-wide coverage label, not identity.
-        # Identity is `cell_key` above, per entry.
+        # Identity is `compiled_graph_key` above, per entry.
         graph_contract_digest=str(meta.get("manifest_digest") or ""),
         publisher_org="",
     )
 
 
 #: The axes compared, in the order they are reported. Order is deliberate:
-#: identity first (which cell is this), then what it was built from, then what
-#: it traced. A cell that is the wrong cell should say so before it says its
+#: identity first (which compiled graph is this), then what it was built from, then what
+#: it traced. A compiled graph that is the wrong compiled graph should say so before it says its
 #: toolchain differs, because the second fact is a consequence of the first.
 _COMPARED_AXES: tuple[str, ...] = (
-    "cell_key", "toolchain_digest", "env_seal_digest", "graph_contract_digest")
+    "compiled_graph_key", "toolchain_digest", "env_seal_digest", "graph_contract_digest")
 
 #: The axes NOT compared here, each with the gate that does compare them. An
 #: axis is verified here or it is verified somewhere named — never neither.
@@ -174,7 +174,7 @@ _COMPARED_AXES: tuple[str, ...] = (
 #: imports each named gate and asserts it reads the axis.
 _VERIFIED_ELSEWHERE: Mapping[str, str] = {
     "publisher_org": (
-        "fleet_cells.arm_ordered — an artifact cannot attest to its own "
+        "fleet_compiled_graphs.arm_ordered — an artifact cannot attest to its own "
         "producer, so §4.26's match is against the hub-signed RECEIPT's "
         "publisher_org_id, fail-closed on silence. Distinct from "
         "receipts.refuse_untrusted_publisher, which asks whether the producer "
@@ -186,7 +186,7 @@ if set(_COMPARED_AXES) | set(_VERIFIED_ELSEWHERE) != set(
 ):
     # Unspellable rather than merely tested: an axis added to the identity and
     # to neither set is an axis NOTHING verifies, and a silently unverified
-    # axis on this object is how a cell gets armed on an unchecked claim.
+    # axis on this object is how a compiled graph gets armed on an unchecked claim.
     raise AssertionError(
         "every ExpectedIdentity axis must be compared by "
         "verify_declared_identity or named in _VERIFIED_ELSEWHERE; "
@@ -199,7 +199,7 @@ def verify_declared_identity(
     """``''`` when the artifact IS the one the spec named, else the reason.
 
     Fail-closed on every compared axis: an axis the artifact is SILENT on is a
-    refusal, not a skip. A cell that cannot state its own toolchain cannot be
+    refusal, not a skip. A compiled graph that cannot state its own toolchain cannot be
     shown to match the toolchain the spec named, and "cannot be shown to match"
     is exactly what a refusal means here.
 
@@ -215,7 +215,7 @@ def verify_declared_identity(
             # An expectation that names no value cannot be verified, and an
             # unverifiable expectation must not read as a pass. BOTH sources
             # refuse an artifact missing any of these at the point they read
-            # it — `plan._artifact` and `cell_resolve.resolve` — so reaching
+            # it — `plan._artifact` and `compiled_graph_resolve.resolve` — so reaching
             # this branch means a caller built an ExpectedIdentity by hand.
             return f"{axis}: the spec named no expected value"
         if want != got:
@@ -234,10 +234,10 @@ GRAPH_WITNESS_FIELD = "graph_witness"
 def verify_graph_witness(
     meta: Mapping[str, Any], witnesses: Mapping[str, str],
 ) -> str:
-    """``''`` when the cell's recorded graph witnesses equal the ones this pod
+    """``''`` when the compiled graph's recorded graph witnesses equal the ones this pod
     traced, else the reason. pgw#1031's fail-closed backstop.
 
-    Since pgw#1031 (option a) the cell key IS the traced computation:
+    Since pgw#1031 (option a) the compiled graph key IS the traced computation:
     ``class_hash`` folds ``graph_witness`` (the node-level body digest) beside
     target, fork, class dims, declared ranges, the graph-interface block and
     the declared envelope, so two endpoints whose bodies differ while their
@@ -251,13 +251,13 @@ def verify_graph_witness(
     This function is the belt-and-braces beneath the now-sound key: the mint
     records ``graph_witness`` per entry, the adopter derives its own from the
     same traced programs its key came from (``boot_key``), and a disagreement —
-    a witness-blind cell, a hash-broken entry, a cross forced by any non-key
+    a witness-blind compiled graph, a hash-broken entry, a cross forced by any non-key
     path — is a typed refusal naming both digests. The pod then boots exactly
     as it booted before pull-by-key existed — eager, then mint — which is the
-    correct outcome for "this cell is not my computation".
+    correct outcome for "this compiled graph is not my computation".
 
     Fail-closed in both directions, the doctrine
-    :func:`verify_declared_identity` already keeps: a cell that is SILENT on an
+    :func:`verify_declared_identity` already keeps: a compiled graph that is SILENT on an
     entry's witness cannot be shown to compute this pod's graph, and "cannot be
     shown to match" is what a refusal means. A witness set that does not cover
     the same entries is the same failure — a partial agreement is not a
@@ -269,7 +269,7 @@ def verify_graph_witness(
     """
     if not witnesses:
         return (
-            "this pod derived no graph witnesses, so the cell's compiled "
+            "this pod derived no graph witnesses, so the compiled_graph's compiled "
             "graphs cannot be shown to be the graphs it traced (pgw#1031)")
     entry = meta.get("entry")
     if not isinstance(entry, Mapping) or not entry:
@@ -282,20 +282,20 @@ def verify_graph_witness(
     if silent:
         return (
             f"entries {silent[:4]!r} record no {GRAPH_WITNESS_FIELD!r}: this "
-            f"cell predates pgw#1031 and cannot state which graph it compiled")
+            f"compiled_graph predates pgw#1031 and cannot state which graph it compiled")
     extra = sorted(set(recorded) - set(witnesses))
     missing = sorted(set(witnesses) - set(recorded))
     if extra or missing:
         return (
-            f"graph witness class set differs (cell-only {extra[:3]!r}, "
-            f"traced-only {missing[:3]!r}): the cell was compiled from a "
+            f"graph witness class set differs (compiled_graph-only {extra[:3]!r}, "
+            f"traced-only {missing[:3]!r}): the compiled_graph was compiled from a "
             f"different class set than this pod traced")
     for name in sorted(recorded):
         want, have = recorded[name], str(witnesses[name] or "")
         if want != have:
             return (
-                f"entry {name!r}: graph witness {want} on the cell, {have} "
-                f"traced here — the cell key matched but the COMPUTATION did "
+                f"entry {name!r}: graph witness {want} on the compiled_graph, {have} "
+                f"traced here — the compiled_graph key matched but the COMPUTATION did "
                 f"not (pgw#1031: the key folds the ingress contract, not the "
                 f"graph nodes). Refusing to arm another graph's kernels")
     return ""

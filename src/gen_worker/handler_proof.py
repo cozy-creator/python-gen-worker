@@ -2,7 +2,7 @@
 
 WHAT THIS REPLACES, AND WHY IT IS A CORRECTION AND NOT A CLEANUP
 ----------------------------------------------------------------
-pgw#984 proves the endpoint's own handler RUNS before a cell seals, because
+pgw#984 proves the endpoint's own handler RUNS before a compiled graph seals, because
 ``torch.export`` traces the declared graph classes off the modules directly and
 never enters the handler — so a mint's phase table could read green for an
 endpoint whose handler could not run at all (pgw#969: ``ctx.slots["pipeline"]``,
@@ -12,12 +12,12 @@ It ran in the MINT CHILD, which on a weight-free mint holds no weights — so th
 child first materialised REAL random values for every virtual parameter. That is
 one full checkpoint at compute dtype, in the child, **concurrently with the
 parent's resident copy**. Measured on pod ``729431an6ugbvq`` (H100-80, wan-2.2):
-56.2 GB wanted, 15.5 GiB free, `CUDA out of memory` twice, no cell, eager for
+56.2 GB wanted, 15.5 GiB free, `CUDA out of memory` twice, no compiled graph, eager for
 life. §4.33's *"compile weight-free … VRAM cost is negligible"* was true of the
 compile and false of the mint, and the ~8 GiB figure that anchored the subsystem
 was measuring exactly this allocation for an sdxl-sized family.
 
-§4.33 steps 4-5 already say where verification goes: *"load the cell into the
+§4.33 steps 4-5 already say where verification goes: *"load the compiled graph into the
 LIVE pipeline — already running eager — and verify it works"*, against weights
 that are resident and are not paid for twice. The proof was in the wrong
 process. This module is that correction, and the SDK had already made the same
@@ -36,7 +36,7 @@ The record is a per-PROCESS ledger keyed by function name, because that is the
 scope of the claim: *this* process ran *that* handler against the weights it is
 about to mint for. It never crosses a process boundary as a ledger — the mint
 request carries the PROVENANCE string, so the child's report says which proof
-stood behind the cell it sealed rather than asserting one it cannot see.
+stood behind the compiled graph it sealed rather than asserting one it cannot see.
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ _LOCK = threading.Lock()
 class HandlerProofFailed(Exception):
     """The endpoint's own handler does not run on the resident pipeline.
 
-    A cell must not seal for a handler that cannot serve — pgw#984's sentence,
+    A compiled graph must not seal for a handler that cannot serve — pgw#984's sentence,
     unchanged. What moved is only WHERE the sentence is spoken: here, in the
     process that holds the weights, instead of in a child that had to allocate
     a second copy of them to say it.
@@ -200,7 +200,7 @@ def prove(
         raise HandlerProofFailed(
             f"the endpoint's own warm plan does not run on the resident "
             f"pipeline — warm job {job.spec.name!r} raised "
-            f"{type(exc).__name__}: {exc}. A cell must not seal for a handler "
+            f"{type(exc).__name__}: {exc}. A compiled_graph must not seal for a handler "
             f"that cannot serve.") from exc
     how = f"resident warm forward {job.spec.name!r} (real weights)"
     record(name, how)

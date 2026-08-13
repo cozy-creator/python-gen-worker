@@ -36,7 +36,7 @@ EDGE. :func:`plan_layout_conversions` and :func:`classify_layout` are fixed
 logic — membership, then reachability — and must never gain a per-format
 branch, a similarity score or a "close enough" fallback (§1.33's extensibility
 invariant, `f6f95736`). Neither function contains a literal handle string, and
-`scripts/lint_cell_key_layout_fence.py` fails if one appears.
+`scripts/lint_compiled_graph_key_layout_fence.py` fails if one appears.
 
 **4. Preference is NOT here.** §1.33 point 2 as amended (th#1803): the accepted
 set is a compatibility FILTER whose order carries no preference, and preference
@@ -964,7 +964,7 @@ def run_layout_conversion(
 
     Upstream of compute, always: this runs before the tree is materialized for
     `setup()`, so the endpoint observes only its own declared layout and the
-    traced graph — hence the cell key — cannot move (§1.33 point 5).
+    traced graph — hence the compiled graph key — cannot move (§1.33 point 5).
     """
     if not str(produced_by or "").strip():
         raise DeclarationError(

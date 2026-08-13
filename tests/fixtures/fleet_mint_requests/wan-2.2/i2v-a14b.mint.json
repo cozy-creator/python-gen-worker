@@ -1,9 +1,9 @@
 {
   "_declaration": "wan-2.2/src/wan_2_2/main.py \u2014 the @endpoint(compile=...) blocks. pgw#1107: ONE declaration per family, on the class decorators; aot/declaration.py and src/wan_2_2/aot_declaration.py are DELETED.",
   "_notes": [
-    "pgw#758: ONE cell for the family's whole declared class set — the former i2v-a14b-{transformer,transformer_2,vae-decode}.mint.json trio collapsed here and ie#574 dropped the decoder entry; targets/forks/class rows derive from declaration.py.",
+    "pgw#758: ONE compiled_graph for the family's whole declared class set — the former i2v-a14b-{transformer,transformer_2,vae-decode}.mint.json trio collapsed here and ie#574 dropped the decoder entry; targets/forks/class rows derive from declaration.py.",
     "I2V conditions by CHANNEL CONCATENATION (in_channels=36 = 16 noisy + 4 mask + 16 cond, read off the module's own config by the declaration's ('config','in_channels') axis) — no request vocabulary needed.",
-    "ie#574: the decoder is NOT a target and not in this cell (compiling it is a measured 0.46x); lora_bucket scopes to branch-capable denoisers by composed truth. See t2v-a14b.mint.json notes for lane/bucket/deploy-time caveats — identical here."
+    "ie#574: the decoder is NOT a target and not in this compiled_graph (compiling it is a measured 0.46x); lora_bucket scopes to branch-capable denoisers by composed truth. See t2v-a14b.mint.json notes for lane/bucket/deploy-time caveats — identical here."
   ],
   "family": "wan-2.2-i2v-a14b",
   "weight_lane": "",

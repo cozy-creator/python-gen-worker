@@ -19,7 +19,7 @@ had to give up either 9.5 GB of residency or 19% of its step time, because a
 single switch cannot express "baseline linears, packed modulation".
 
 This module replaces both tuples with a measurement taken on the card the
-cell is being minted for, recorded INTO the cell, and adopted by serving:
+compiled graph is being minted for, recorded INTO the compiled graph, and adopted by serving:
 
     mint      probe(candidates, ...) -> Verdict     (every buildable
               combination built, compiled, and timed on the target card, in
@@ -33,9 +33,9 @@ cell is being minted for, recorded INTO the cell, and adopted by serving:
               load-time swap reads the pin, each axis projecting its own
               value out of it
 
-CELL KEYS ARE KEYED ON SM, AND THE LANE IS DELIBERATELY NOT A KEY AXIS (that
+COMPILED GRAPH KEYS ARE KEYED ON SM, AND THE LANE IS DELIBERATELY NOT A KEY AXIS (that
 would fork the namespace and halve reuse). One SM class is therefore many
-cards: a cell minted on a 96 GB RTX PRO 6000 and a 32 GB RTX 5090 share a
+cards: a compiled graph minted on a 96 GB RTX PRO 6000 and a 32 GB RTX 5090 share a
 key. Two GPUs of one compute capability cannot be assumed to want the same
 kernels, so a recorded verdict is EVIDENCE, not an instruction — serving
 RE-APPLIES the fit constraint against its own detected total before it
@@ -129,7 +129,7 @@ EXECUTION_LANES = tuple(
     execution_lane_of(linear, modulation)
     for linear in LINEAR_EXECUTION_LANES for modulation in MOD_EXECUTION_LANES)
 
-# What a worker runs when no cell says otherwise: the pair that exists on
+# What a worker runs when no compiled graph says otherwise: the pair that exists on
 # every card and is a pessimisation on none of them.
 DEFAULT_EXECUTION_LANE = execution_lane_of(LINEAR_BASELINE, MOD_DENSE)
 
@@ -162,7 +162,7 @@ FRAGMENTATION_HEADROOM_BYTES = 1 << 30  # 1 GiB
 # `max_memory_allocated()` is a MEASUREMENT, and an unrounded measurement in
 # metadata.json is precisely what the #699 double-mint byte-compare forbids —
 # an autotuned kernel picking a different workspace on the second mint would
-# move the number and strand the cell. Rounding to a coarse grain makes the
+# move the number and strand the compiled graph. Rounding to a coarse grain makes the
 # recorded byte count reproducible for the same reason `MARGIN_FRACTION`
 # makes the winner reproducible, and rounding UP can only make the fit test
 # stricter, never optimistic (the strict_vram rule).
@@ -184,12 +184,12 @@ FUSED_MIN_SM = 100
 REASON_ABSENT = "kernel_lane_verdict_absent"
 REASON_UNREADABLE = "kernel_lane_verdict_unreadable"
 REASON_UNKNOWN_EXECUTION_LANE = "kernel_lane_verdict_unknown_lane"
-REASON_NO_CELL = "kernel_lane_no_cell"
+REASON_NO_COMPILED_GRAPH = "kernel_lane_no_compiled_graph"
 REASON_ADOPTED = "kernel_lane_verdict_adopted"
 # The recorded winner does not fit THIS card (same SM class, smaller card):
 # the rule was re-applied locally and a different lane was pinned.
 REASON_REFIT_LOCAL = "kernel_lane_refit_local"
-# Nothing the cell measured fits this card. The smallest peak is pinned and
+# Nothing the compiled graph measured fits this card. The smallest peak is pinned and
 # says so — obeying a verdict into an OOM is not conservatism.
 REASON_REFIT_NO_FIT = "kernel_lane_refit_no_fit"
 # The fit could not be re-applied here (no per-candidate peaks recorded, or
@@ -387,7 +387,7 @@ def unmeasured(execution_lane: str, detail: str) -> Verdict:
     The lane A/B is a whole-model benchmark: it loads one full pipeline per
     candidate and times a real step, so it needs weight-scale residency —
     which is exactly the property a structure-only mint exists to keep. A
-    cell with no verdict is the documented conservative-default case on the
+    compiled graph with no verdict is the documented conservative-default case on the
     serving side, and below Blackwell the A/B has no candidates to compare
     anyway (`fused_candidate_gap`), so this costs nothing that has a consumer
     today. Recorded as a TYPED verdict with its reason rather than as an
@@ -403,7 +403,7 @@ def unmeasured(execution_lane: str, detail: str) -> Verdict:
 def sole(execution_lane: str, detail: str) -> Verdict:
     """The verdict for a card that can only build ONE lane. No benchmark is
     run: with nothing to compare against, a measurement would buy a compile
-    and decide nothing. The cell still records a real, typed verdict rather
+    and decide nothing. The compiled graph still records a real, typed verdict rather
     than the absence a serving worker has to guess about."""
     total, name, sm = device_facts()
     return Verdict(
@@ -671,12 +671,12 @@ def fit_block(verdict: Verdict) -> Dict[str, Any]:
 
 
 def envelope_block(verdict: Verdict) -> Dict[str, Any]:
-    """The DISCRETE verdict, for ``metadata.json`` inside the packed cell.
+    """The DISCRETE verdict, for ``metadata.json`` inside the packed compiled graph.
 
     Deliberately carries no wall clocks: the #699 double-mint byte-compare
     requires the artifact to be reproducible, and milliseconds are not. Peak
     BYTES are a different kind of number — discrete, quantized here, and
-    load-bearing for a card that shares this cell's SM but not its memory —
+    load-bearing for a card that shares this compiled graph's SM but not its memory —
     so they ride the envelope while the timings stay in
     :func:`evidence_block`, which rides the published checkpoint metadata
     beside ``mint_phases``.
@@ -766,30 +766,30 @@ def verdict_from_evidence(block: Mapping[str, Any]) -> Verdict:
 
 
 def execution_lane_from_metadata(meta: Mapping[str, Any]) -> Tuple[str, str]:
-    """``(lane, reason)`` a cell's envelope states.
+    """``(lane, reason)`` a compiled graph's envelope states.
 
-    A cell minted before this mechanism records nothing — that is the
+    A compiled graph minted before this mechanism records nothing — that is the
     DECLARED default with a typed reason, never a silent fall-through. An
     unreadable or unknown verdict is the same: conservative, and it says so.
     """
     block = meta.get(META_KEY) if isinstance(meta, Mapping) else None
     if block is None:
         return DEFAULT_EXECUTION_LANE, (
-            f"{REASON_ABSENT}: cell records no kernel-lane verdict "
-            f"(pre-pgw#947 cell); serving the declared default "
+            f"{REASON_ABSENT}: compiled_graph records no kernel-lane verdict "
+            f"(pre-pgw#947 compiled_graph); serving the declared default "
             f"{DEFAULT_EXECUTION_LANE!r}")
     if not isinstance(block, Mapping):
         return DEFAULT_EXECUTION_LANE, (
-            f"{REASON_UNREADABLE}: cell's {META_KEY!r} is "
+            f"{REASON_UNREADABLE}: compiled_graph's {META_KEY!r} is "
             f"{type(block).__name__}, not a block; serving {DEFAULT_EXECUTION_LANE!r}")
     winner = str(block.get("winner") or "")
     if winner not in EXECUTION_LANES:
         return DEFAULT_EXECUTION_LANE, (
-            f"{REASON_UNKNOWN_EXECUTION_LANE}: cell names lane {winner!r}, which this "
+            f"{REASON_UNKNOWN_EXECUTION_LANE}: compiled_graph names lane {winner!r}, which this "
             f"worker does not implement ({list(EXECUTION_LANES)!r}); serving "
             f"{DEFAULT_EXECUTION_LANE!r}")
     return winner, (
-        f"{REASON_ADOPTED}: cell verdict {winner!r} "
+        f"{REASON_ADOPTED}: compiled_graph verdict {winner!r} "
         f"(binding={block.get('binding') or '?'}, "
         f"rule={block.get('rule') or '?'})")
 
@@ -809,9 +809,9 @@ def recorded_fit(
       enough to re-run :func:`select` outright.
     * the packed envelope's ``fit`` block — quantized peaks and the fallback
       order, and nothing else. This is what a serving worker actually holds,
-      because it reads ``metadata.json`` out of the delivered cell.
+      because it reads ``metadata.json`` out of the delivered compiled graph.
 
-    Empty when neither is there (a cell minted before this block existed, or
+    Empty when neither is there (a compiled graph minted before this block existed, or
     a ``sole_candidate`` verdict that measured nothing) — the caller must
     then say so rather than pretend the fit was checked.
     """
@@ -847,9 +847,9 @@ def refit(
     """Re-apply the fit constraint against THIS card and return the lane to
     pin with the reason it is pinned.
 
-    Cells are keyed on SM and the lane is not a key axis, so the card that
+    Compiled graphs are keyed on SM and the lane is not a key axis, so the card that
     minted this verdict may be much larger than the card serving it — a
-    96 GB RTX PRO 6000 and a 32 GB RTX 5090 are one cell key. The recorded
+    96 GB RTX PRO 6000 and a 32 GB RTX 5090 are one compiled graph key. The recorded
     winner is therefore checked against this device's honestly detected
     total before it is obeyed:
 
@@ -871,14 +871,14 @@ def refit(
     if not total:
         return execution_lane, (
             f"{reason}; {REASON_FIT_UNVERIFIED}: this process cannot detect a "
-            f"device total, so the cell's fit constraint could not be "
+            f"device total, so the compiled_graph's fit constraint could not be "
             f"re-applied here")
     if execution_lane not in peaks:
         return execution_lane, (
-            f"{reason}; {REASON_FIT_UNVERIFIED}: the cell records no measured "
+            f"{reason}; {REASON_FIT_UNVERIFIED}: the compiled_graph records no measured "
             f"peak for {execution_lane!r}, so its fit could not be re-applied on "
             f"{device}, {total} B — adopting it unverified across cards "
-            f"(cells are keyed on SM, not on card memory)")
+            f"(compiled_graphs are keyed on SM, not on card memory)")
     if fits_bytes(peaks[execution_lane], total):
         return execution_lane, (
             f"{reason}; re-checked here: {required_for(peaks[execution_lane])} B "
@@ -903,7 +903,7 @@ def refit(
                 f"wins ({winner!r}, {required_for(peaks[winner])} B required)")
     tag = REASON_REFIT_LOCAL if binding != BIND_NO_FIT else REASON_REFIT_NO_FIT
     return winner, (
-        f"{tag}: the cell's verdict {execution_lane!r} asks "
+        f"{tag}: the compiled_graph's verdict {execution_lane!r} asks "
         f"{required_for(peaks[execution_lane])} B and {device} has {total} B, so it "
         f"does not fit here; re-applied the rule locally -> {winner!r} "
         f"(binding={binding}) — {detail} [{provenance}]")
@@ -919,7 +919,7 @@ def pin(execution_lane: str, reason: str) -> None:
     """Pin the lane THIS process loads on, with the reason it is pinned.
 
     Set by the mint (once per candidate while probing, then to the winner)
-    and by the executor from the delivered cell before ``setup()`` runs —
+    and by the executor from the delivered compiled graph before ``setup()`` runs —
     the swap happens at model load, so the pin must precede it.
     """
     global _PIN, _PIN_REASON
@@ -943,21 +943,21 @@ def clear() -> None:
 
 
 def adopt(meta: Optional[Mapping[str, Any]], *, source: str = "") -> str:
-    """Adopt the lane a delivered cell's metadata states, RE-CHECKED against
+    """Adopt the lane a delivered compiled graph's metadata states, RE-CHECKED against
     this card, and return it.
 
-    ``None`` (no cell for this boot) is the declared default with its own
+    ``None`` (no compiled graph for this boot) is the declared default with its own
     typed reason — an eager or self-minting boot has no verdict yet and must
     say so rather than guessing that a hand-written tuple was right.
 
-    A verdict that IS present is not obeyed on sight. The cell key is keyed
+    A verdict that IS present is not obeyed on sight. The compiled graph key is keyed
     on SM and the lane is not one of its axes, so the minting card and this
     one can differ by 64 GB of memory; :func:`refit` re-applies the fit
     constraint here before the lane is pinned.
     """
     if meta is None:
         execution_lane, reason = DEFAULT_EXECUTION_LANE, (
-            f"{REASON_NO_CELL}: no compiled cell delivered for this load; "
+            f"{REASON_NO_COMPILED_GRAPH}: no compiled compiled_graph delivered for this load; "
             f"serving the declared default {DEFAULT_EXECUTION_LANE!r}")
     else:
         execution_lane, reason = execution_lane_from_metadata(meta)
@@ -970,7 +970,7 @@ def adopt(meta: Optional[Mapping[str, Any]], *, source: str = "") -> str:
 
 
 def adopt_from_artifact(artifact: Any, *, source: str = "") -> str:
-    """Adopt the verdict recorded in a packed cell on disk.
+    """Adopt the verdict recorded in a packed compiled graph on disk.
 
     Reads ``metadata.json`` out of the tar without unpacking it (both the
     exported and the inductor-cache artifact kinds put it at the root). Any
@@ -1021,7 +1021,7 @@ __all__ = [
     "REASON_ABSENT",
     "REASON_ADOPTED",
     "REASON_FIT_UNVERIFIED",
-    "REASON_NO_CELL",
+    "REASON_NO_COMPILED_GRAPH",
     "REASON_REFIT_LOCAL",
     "REASON_REFIT_NO_FIT",
     "REASON_UNKNOWN_EXECUTION_LANE",

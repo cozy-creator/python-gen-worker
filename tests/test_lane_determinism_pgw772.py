@@ -2,17 +2,17 @@
 
 The gw#534 voluntary bf16-resident upgrade probed LIVE free VRAM
 (`bf16_resident_fits` / BF16_RESIDENT_MARGIN_GB) and made `lane` — the only
-GPU-dependent axis of the ten in the cell key — a function of the
+GPU-dependent axis of the ten in the compiled graph key — a function of the
 individual card's headroom: an RTX 4090's ~1.5 GiB surplus over an L4 (same
 release, same image, both sm_89) flipped its base lane to "", a lane nothing
 mints for, so the better card missed all 144 published checkpoints INCLUDING
-its own same-SKU cell and served eager for life (th#1198 CP-D wire evidence;
+its own same-SKU compiled graph and served eager for life (th#1198 CP-D wire evidence;
 the −21% request-level AOT win forfeited). The tax the upgrade dodged is
 +1.9% for the structural fp8 storage lane (pgw#727 re-measure).
 
 Red-verified on the pre-fix tree (probe restored): the headline test fails —
 the high-headroom load lands base lane "" while the low-headroom load lands
-"fp8-hooks", and the two requested cell keys diverge on the `lane` axis.
+"fp8-hooks", and the two requested compiled graph keys diverge on the `lane` axis.
 
 Standing rule (the pgw#765 `sku` guard, applied to `lane`): no adoption or
 identity path may take a live device measurement as a hash input. A card
@@ -90,12 +90,12 @@ def _load_and_key(
         DDPMPipeline, str(root), slot="pipeline", device="cpu",
         binding=type("B", (), {"dtype": "", "storage_dtype": "fp8"})(),
     )
-    execution_lane = cc.cell_base_execution_lane(sl.obj)
+    execution_lane = cc.compiled_graph_base_execution_lane(sl.obj)
     cfg = _ContractCfg()
     # pgw#1059: the pre-trace surface is the obligation identity
-    # (fleet_cells.arm_identity), not a cell key.
-    from gen_worker import fleet_cells
-    identity = fleet_cells.arm_identity(
+    # (fleet_compiled_graphs.arm_identity), not a compiled graph key.
+    from gen_worker import fleet_compiled_graphs
+    identity = fleet_compiled_graphs.arm_identity(
         "sdxl", execution_lane, cfg.lora_bucket, cfg)
     return sl.obj, execution_lane, identity
 
@@ -104,8 +104,8 @@ def test_same_declared_config_same_key_across_free_vram(
         monkeypatch: pytest.MonkeyPatch) -> None:
     """THE HEADLINE (pgw#772 acceptance): two runtimes differing ONLY in
     free VRAM, same (release-declared config, sm), resolve the same base
-    lane and compute IDENTICAL requested cell keys — so both request the
-    same published cell. Pre-fix: 999 GiB of headroom voluntarily upcast
+    lane and compute IDENTICAL requested compiled graph keys — so both request the
+    same published compiled graph. Pre-fix: 999 GiB of headroom voluntarily upcast
     the declared fp8 lane to bf16-resident (base ""), key lane `lora64`,
     which no mint ever publishes."""
     monkeypatch.setattr(cc, "runtime_key", lambda: dict(_RT))

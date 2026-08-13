@@ -88,14 +88,14 @@ def _declared_hint(family: str) -> int:
     decl = aot_mint.export_declaration(family)
     if decl is None:
         raise SystemExit(f"family {family!r} has no export declaration")
-    return len(list(aot_declaration.cell_plans(decl)))
+    return len(list(aot_declaration.compiled_graph_plans(decl)))
 
 
 def _spec(veh: Any) -> Any:
-    from gen_worker.mint_process import CompileCellSpec
+    from gen_worker.mint_process import CompileCompiledGraphSpec
 
-    cfg = veh.compile_cell()
-    return CompileCellSpec(
+    cfg = veh.compile_compiled_graph()
+    return CompileCompiledGraphSpec(
         shapes=tuple(tuple(int(v) for v in row) for row in (cfg.shapes or ())),
         targets=tuple(str(t) for t in (cfg.targets or ())),
         family=str(cfg.family or ""),
@@ -110,9 +110,9 @@ def derive_once(
     veh: Any, tree: Path, root: Path, *, workers: int, memo_dir: Optional[Path],
     label: str, trust_memo: bool = True,
 ) -> Any:
-    from gen_worker import boot_key, fleet_cells
+    from gen_worker import boot_key, fleet_compiled_graphs
 
-    cfg = veh.compile_cell()
+    cfg = veh.compile_compiled_graph()
     work = root / f"work-{label}"
     work.mkdir(parents=True, exist_ok=True)
     t0 = time.monotonic()
@@ -123,7 +123,7 @@ def derive_once(
         cfg=_spec(veh),
         slots=_slots(veh, tree),
         declared_hint=_declared_hint(str(cfg.family or "")),
-        envelope=fleet_cells.declared_envelope_block(cfg),
+        envelope=fleet_compiled_graphs.declared_envelope_block(cfg),
         work_root=work,
         memo_dir=memo_dir,
         workers=int(workers),
@@ -139,7 +139,7 @@ def real_weight_class_hashes(veh: Any, tree: Path) -> Dict[str, str]:
 
     THE residual risk of the whole derivation, isolated. The boot path and the
     mint path already call the identical functions (``aot_mint.keying_block`` ->
-    ``aot_serve.artifact_metadata`` -> ``cell_key.from_exported_artifact_metadata``),
+    ``aot_serve.artifact_metadata`` -> ``compiled_graph_key.from_exported_artifact_metadata``),
     so the ONLY thing a real mint can still disagree with a boot derivation
     about is whether the STRUCTURE-ONLY composition traces the same graph as the
     weight-bearing one. That question needs no compile: load the checkpoint for
@@ -148,12 +148,12 @@ def real_weight_class_hashes(veh: Any, tree: Path) -> Dict[str, str]:
     A mismatch here would mean the derived key can never equal the stamped key,
     and it would say so for **$0** instead of on a pod.
     """
-    from gen_worker import aot_mint, boot_key, fleet_cells
+    from gen_worker import aot_mint, boot_key, fleet_compiled_graphs
     from gen_worker.cli.run import run_setup
     from gen_worker.mint_child import pick_compile_target
     from gen_worker.registry import collect_endpoints
 
-    cfg = veh.compile_cell()
+    cfg = veh.compile_compiled_graph()
     specs = collect_endpoints(list(veh.modules))
     chosen = next(s for s in specs if s.name == veh.function)
     instance = chosen.cls()
@@ -162,7 +162,7 @@ def real_weight_class_hashes(veh: Any, tree: Path) -> Dict[str, str]:
         instance, {"pipeline": str(tree)}, arm_compile=False,
         return_loaded=True) or {}
     _slot, pipeline = pick_compile_target(loaded, cfg)
-    export_spec = fleet_cells.aot_export_spec(pipeline, cfg)
+    export_spec = fleet_compiled_graphs.aot_export_spec(pipeline, cfg)
     decl = aot_mint.export_declaration(export_spec.family)
     blocks: Dict[str, Any] = {}
     for traced in aot_mint.trace_for_key(pipeline, export_spec, decl):

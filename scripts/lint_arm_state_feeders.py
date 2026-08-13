@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""pgw#1152: a process-global fact about an ARMED cell is fed at a SEAM, never
+"""pgw#1152: a process-global fact about an ARMED compiled graph is fed at a SEAM, never
 by a caller who remembered — and a TEST may not feed one at all.
 
 THE DEFECT CLASS. ``aot_serve._KNOWN_AOT_KEYS`` decides which failure detector
 applies to a serving object: the DYNAMO lane's per-class cache-hit ledger (which
 an AOTI artifact can never move, so it reads every honest adoption as a disproof)
 or §4.31's serve-first rule. pgw#1033 wrote its feeding rule as a CONVENTION —
-*"whoever reads a `cell_key` off an aot-inductor envelope registers it"* — and it
-had exactly two feeders, ``fleet_cells.arm_from_local_store`` and
+*"whoever reads a `compiled_graph_key` off an aot-inductor envelope registers it"* — and it
+had exactly two feeders, ``fleet_compiled_graphs.arm_from_local_store`` and
 ``adopt_delegated_mint``, **both SELF-PRODUCED routes**. ``arm_ordered`` (every
 hub Plan arm and every §4.27 boot-adopt) fed it nothing. Measured on a real pod
-(pgw#1141b, POD PROOF #4): a cell that resolved, materialized and armed was
+(pgw#1141b, POD PROOF #4): a compiled graph that resolved, materialized and armed was
 scored on the dynamo ledger, disarmed, and the pod served eager for life.
 
 That was the FOURTH gate in a row with the same shape (pgw#1108, pgw#1122,
@@ -20,7 +20,7 @@ happens inside ``aot_serve.arm_entry``, the one function every arm route
 passes — and this script keeps it that way.
 
 pgw#1176 MOVED that seam and did not weaken it. ``load_and_wrap`` armed a whole
-36-entry cell; ``arm_entry`` arms ONE graph class, and every arm route still
+36-entry compiled graph; ``arm_entry`` arms ONE graph class, and every arm route still
 passes through it exactly once per class. The convention is unchanged: the
 registration is a property of the function that arms, never of a caller
 remembering to announce.
@@ -37,7 +37,7 @@ a habit).
               exempt because it IS the structure. Never written in the allowlist.
     VERDICT   the site records a decision only this frame can know, and it sits
               AT that decision — no seam can derive it (a proof pass concluding
-              a cell served its own graph; a disarm concluding one did not).
+              a compiled graph served its own graph; a disarm concluding one did not).
     OWNER     the module that owns the state, writing it from its own primary
               write path (a mint finalize putting its own bytes in its own
               store).
@@ -45,7 +45,7 @@ a habit).
 **There is deliberately NO ``CONVENTION`` classification, and no ``RELAY``.**
 A feeder called because a docstring asked the caller to remember is exactly the
 bug, twice. It has no label to write down: move the call to the seam, or delete
-it and ask the OBJECT instead (``aot_serve.holds_exported_cell``, pgw#1141b).
+it and ask the OBJECT instead (``aot_serve.holds_exported_compiled_graph``, pgw#1141b).
 
 **tests/** — a hand-feed is RED, and so is stubbing a lane ACCESSOR. pgw#1141
 shipped thirteen green rows whose fleet-policy stand-ins called
@@ -53,7 +53,7 @@ shipped thirteen green rows whose fleet-policy stand-ins called
 another suite stubbed ``is_aot_ref`` outright. Those fixtures answered the
 question the gate was supposed to ask, so the tests entered one gate east of the
 bug and RED-first prevented nothing. A test that needs an armed, boot-adopted
-object drives ``tests/harness/adopt_rig.py``, which arms a real packed cell
+object drives ``tests/harness/adopt_rig.py``, which arms a real packed compiled graph
 through the real ordered path.
 
 There is exactly ONE test classification, ``RECOGNIZER``, and **the lint checks
@@ -115,27 +115,27 @@ class Feeder:
 FEEDERS: Tuple[Feeder, ...] = (
     Feeder(
         dotted="aot_serve.note_aot_key", owner="aot_serve.py",
-        state="aot_serve._KNOWN_AOT_KEYS (which lane a cell ref is on)",
+        state="aot_serve._KNOWN_AOT_KEYS (which lane a compiled_graph ref is on)",
         seam=("aot_serve.py", "arm_entry"),
     ),
     Feeder(
-        dotted="compile_cache.record_cell_proven", owner="compile_cache.py",
-        state="compile_cache._PROVEN_CELLS (this process served this cell)",
+        dotted="compile_cache.record_compiled_graph_proven", owner="compile_cache.py",
+        state="compile_cache._PROVEN_COMPILED_GRAPHS (this process served this compiled_graph)",
         seam=None,
     ),
     Feeder(
-        dotted="compile_cache.record_cell_quarantined", owner="compile_cache.py",
-        state="compile_cache._QUARANTINED_CELLS (this identity failed here)",
+        dotted="compile_cache.record_compiled_graph_quarantined", owner="compile_cache.py",
+        state="compile_cache._QUARANTINED_COMPILED_GRAPHS (this identity failed here)",
         seam=None, arm_simulating=False,
     ),
     Feeder(
-        dotted="local_cell_store.store", owner="local_cell_store.py",
-        state="this machine's own cell store (§4.28)",
+        dotted="local_compiled_graph_store.store", owner="local_compiled_graph_store.py",
+        state="this machine's own compiled_graph store (§4.28)",
         seam=None, arm_simulating=False,
-        distinctive=False, receivers=("local_cell_store", "store"),
+        distinctive=False, receivers=("local_compiled_graph_store", "store"),
     ),
     Feeder(
-        dotted="local_cell_store.note_memo", owner="local_cell_store.py",
+        dotted="local_compiled_graph_store.note_memo", owner="local_compiled_graph_store.py",
         state="the pre-trace arm-token -> ck1 memo (§4.28)",
         seam=None, arm_simulating=False,
     ),
@@ -145,14 +145,14 @@ FEEDERS: Tuple[Feeder, ...] = (
 #: replaces one has answered the gate's question for it — the pgw#1141 fixture
 #: sin, in its second form.
 #: Scoped to the LANE-IDENTITY question — "is this the exported lane, and has
-#: this process served this cell?" — not to the broader "is anything armed"
+#: this process served this compiled graph?" — not to the broader "is anything armed"
 #: (``is_armed`` / ``is_compile_armed``), which is a different and much older
 #: pattern this issue makes no claim about.
 ACCESSORS: Dict[str, Tuple[str, ...]] = {
-    "aot_serve": ("is_aot_ref", "holds_exported_cell", "proven_since"),
-    "aot": ("is_aot_ref", "holds_exported_cell", "proven_since"),
-    "compile_cache": ("cell_proven_in_process", "cell_quarantined_in_process"),
-    "cc": ("cell_proven_in_process", "cell_quarantined_in_process"),
+    "aot_serve": ("is_aot_ref", "holds_exported_compiled_graph", "proven_since"),
+    "aot": ("is_aot_ref", "holds_exported_compiled_graph", "proven_since"),
+    "compile_cache": ("compiled_graph_proven_in_process", "compiled_graph_quarantined_in_process"),
+    "cc": ("compiled_graph_proven_in_process", "compiled_graph_quarantined_in_process"),
 }
 
 RIG = "tests/harness/adopt_rig.py"
@@ -163,8 +163,8 @@ class OneConstructor:
     """A production object that must have exactly ONE map into it.
 
     THE THIRD VARIANT of the same bug class (pgw#1150, second pass). Two sites
-    mapped a ``Compile`` onto a ``CompileCell`` — the registry's
-    ``compile_cell()`` and ``cli.run``'s §4.28 desktop arm — and the
+    mapped a ``Compile`` onto a ``CompileCompiledGraph`` — the registry's
+    ``compile_compiled_graph()`` and ``cli.run``'s §4.28 desktop arm — and the
     ``numerics_floor``/``numerics_warn`` fields reached one and not the other,
     so a whole serving path was judged at an SDK default nobody chose while
     every record said ``declared``. The instance was a missing field; the CAUSE
@@ -188,8 +188,8 @@ class OneConstructor:
 
 ONE_CONSTRUCTOR: Tuple[OneConstructor, ...] = (
     OneConstructor(
-        name="CompileCell",
-        constructor=("registry.py", "CompileCell.from_declaration"),
+        name="CompileCompiledGraph",
+        constructor=("registry.py", "CompileCompiledGraph.from_declaration"),
         why="pgw#1150: a Compile field that reaches one map and not the other "
             "judges a whole path at a default nobody chose",
     ),
@@ -213,7 +213,7 @@ ONE_CONSTRUCTOR: Tuple[OneConstructor, ...] = (
         name="ExpectedIdentity",
         constructor=("aot_identity.py", "ExpectedIdentity.named_by"),
         why="pgw#1152's last reported duplicate: this is the object EVERY arm "
-            "gate compares a cell against, and its two expectation sources "
+            "gate compares a compiled_graph against, and its two expectation sources "
             "are the hub PLAN and the §4.27 pull-by-key resolve — the same "
             "plan-vs-adopt pair that produced pgw#1108/#1122/#1141/#1141b",
     ),
@@ -273,7 +273,7 @@ class _Calls(ast.NodeVisitor):
             bare = feeder.dotted.split(".")[-1]
             # Deliberately by NAME rather than by resolved receiver, except
             # where the name is too generic to be one: the receiver is
-            # `aot_serve`, `aot`, `cc`, `fleet_cells.aot_serve` or a module
+            # `aot_serve`, `aot`, `cc`, `fleet_compiled_graphs.aot_serve` or a module
             # alias at different sites, and a fence that only catches the
             # spellings we thought of is not a fence (pgw#1122's rule).
             if tail != bare:
@@ -365,7 +365,7 @@ def scan_src(root: Path) -> Tuple[Dict[Tuple[str, str], int], List[str]]:
             f"{feeder.dotted}. That call is what feeds {feeder.state} for "
             "EVERY arm route — with it gone, a new route is one forgotten "
             "convention away from pgw#1141b (a resolved, materialized, armed "
-            "cell scored on the dynamo ledger and thrown away on a real pod). "
+            "compiled_graph scored on the dynamo ledger and thrown away on a real pod). "
             "Put it back, or move the seam and update FEEDERS here.")
     return sites, problems
 
@@ -502,7 +502,7 @@ def check(
         if (rel, name) not in allowed:
             problems.append(
                 f"{rel}:{lineno}: UNCLASSIFIED arm-state feed: {name} — this "
-                "writes a process-global fact about an armed cell from "
+                "writes a process-global fact about an armed compiled_graph from "
                 "somewhere that is not the seam every arm route passes. That "
                 "is pgw#1033's convention, and the route that did not keep it "
                 "cost four pods and four gates (pgw#1141b). Move it to the "

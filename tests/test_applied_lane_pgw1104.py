@@ -6,7 +6,7 @@ serve-narrowed` — a bare tag with an EMPTY flavor — and then quantizes 300
 Linears of the DiT to w8a8 fp8 with torchao INSIDE `setup()`. Every request
 reported `bf16-w16a16+compiled` while a 21.7 GiB fp8 DiT executed against a
 37.5 GiB bf16 checkpoint. The lane id is a KEY (th#935 verdicts, compile
-cells, floors, pricing, the executed-lane proof), so the label was wrong
+compiled graphs, floors, pricing, the executed-lane proof), so the label was wrong
 everywhere the key is joined.
 
 REVERT-TURNS-RED: `test_a_serve_time_recipe_moves_the_reported_lane` fails on
@@ -158,7 +158,7 @@ def test_a_serve_time_recipe_moves_the_reported_lane(boot) -> None:
         # The binding on its own still says bf16 — the divergence is real,
         # not a mis-resolved binding.
         assert ex._bound_execution_body(eff) == "bf16-w16a16"
-        # ie#655: this rig has no compiled cell, so the honest execution axis
+        # ie#655: this rig has no compiled compiled graph, so the honest execution axis
         # is `+eager`. Until ie#655 this line read `+compiled` — the lane
         # table's compiled-only PLAN for the w8a8 body coerced an observed
         # eager posture, and the test encoded the over-claim.

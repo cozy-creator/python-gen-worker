@@ -4,11 +4,11 @@ Live root cause (master fleet, 2026-07-23): ``ensure_desired_instance``
 demanded ``set(bindings) == set(spec.models)``, but every fleet endpoint now
 declares deploy-bound Slots with NO code default (ie#524/th#980), so
 ``spec.models`` is EMPTY and every hub hot intent — gw#587 self-mint
-prewarm, th#912 slot-default seeding, #567 compile-cell reload — was refused
+prewarm, th#912 slot-default seeding, #567 compile-compiled graph reload — was refused
 with ``ValidationError("must bind exactly []")``, swallowed by
 ``_reconcile_pass`` as one pod-local warning. Zero events, zero VRAM, no
 retry signal: the th#868 w8a8 fence never opened (qwen H100 rigs, sdxl
-ie529.r2, ltx B200 all deadlocked) and precompiled cells never armed
+ie529.r2, ltx B200 all deadlocked) and precompiled compiled graphs never armed
 fleet-wide.
 
 Pinned here:
@@ -43,7 +43,7 @@ from gen_worker.executor import Executor
 from gen_worker.models import provision
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 
 FAMILY = "th1055-fam"
 AUTHORED = Hub("acme/qwen-image", tag="prod")
@@ -55,7 +55,7 @@ AUTHORED_REF = "acme/qwen-image"
 RESOLVED_REF = AUTHORED_REF
 RESOLVED_CAST = "fp8"
 ADAPTER_REF = "acme/qwen-lightning"
-CELL_REF = f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9-w8a8"
+COMPILED_GRAPH_REF = f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9-w8a8"
 
 
 class _Denoiser:
@@ -140,25 +140,25 @@ def _snapshot(digest: str) -> pb.Snapshot:
         url="http://r2.invalid/presigned")])
 
 
-def _cell_artifact(tmp_path: Path) -> Path:
-    """A real packed cell tarball, in the format this repository can WRITE.
+def _compiled_graph_artifact(tmp_path: Path) -> Path:
+    """A real packed compiled graph tarball, in the format this repository can WRITE.
 
-    pgw#1181 retargeted this from `compile_cache.pack` (the whole-cell
+    pgw#1181 retargeted this from `compile_cache.pack` (the whole-compiled graph
     `torch-inductor-cache` tarball, no writer since pgw#1178, deleted here)
-    onto the exported `aot-inductor` cell, through the same shared harness the
-    publish-path tests use. What the rows below need is a cell ON DISK that
+    onto the exported `aot-inductor` compiled graph, through the same shared harness the
+    publish-path tests use. What the rows below need is a compiled graph ON DISK that
     the executor's snapshot/selection plumbing carries; building it out of a
     format nothing writes made them fixtures constructing a shape production
     cannot produce (§4.34)."""
     from gen_worker import aot_serve
-    from harness.cell_meta import exported_cell_meta
+    from harness.compiled_graph_meta import exported_compiled_graph_meta
 
     work = tmp_path / "cap"
     work.mkdir(parents=True, exist_ok=True)
     (work / aot_serve.PACKAGE_NAME).write_bytes(b"\x00not-a-real-pt2")
     out = tmp_path / "minted"
     out.mkdir(exist_ok=True)
-    return aot_serve.pack(work, out / "cell.tar.gz", exported_cell_meta(family=FAMILY))
+    return aot_serve.pack(work, out / "compiled_graph.tar.gz", exported_compiled_graph_meta(family=FAMILY))
 
 
 def _harness(tmp_path: Path, monkeypatch, specs: List[EndpointSpec]):
@@ -168,7 +168,7 @@ def _harness(tmp_path: Path, monkeypatch, specs: List[EndpointSpec]):
         sent.append(msg)
 
     ex = Executor(specs, _send)
-    artifact = _cell_artifact(tmp_path)
+    artifact = _compiled_graph_artifact(tmp_path)
 
     async def _fake_download(ref: str, **kwargs: Any) -> Path:
         p = tmp_path / ref.replace("/", "_").replace(":", "_").replace("#", "_")
@@ -201,11 +201,11 @@ def _harness(tmp_path: Path, monkeypatch, specs: List[EndpointSpec]):
     return ex, sent, enables
 
 
-def _mint_enable(cell_ref: str, digest: str, artifact_path: Path):
+def _mint_enable(compiled_graph_ref: str, digest: str, artifact_path: Path):
     """pgw#904: an advertised identity now comes from the worker's OWN mint
-    (delivered-cell selection is deleted); stamp it the way the live fleet
+    (delivered-compiled graph selection is deleted); stamp it the way the live fleet
     policy does — an ArmOutcome carrying the finalized SelfMint."""
-    from gen_worker import fleet_cells
+    from gen_worker import fleet_compiled_graphs
 
     def _enable(pipe, cfg, cache_dir=None, artifact=None, publisher=None,
                 delegate=None, delivered_ref="", delivered_digest=""):
@@ -220,8 +220,8 @@ def _mint_enable(cell_ref: str, digest: str, artifact_path: Path):
             "originals": [],
             "regional_mods": [],
         })
-        return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
-            family=FAMILY, cell_key=cell_ref.rsplit("#", 1)[-1], ref=cell_ref,
+        return fleet_compiled_graphs.ArmOutcome(armed=True, self_mint=fleet_compiled_graphs.SelfMint(
+            family=FAMILY, compiled_graph_key=compiled_graph_ref.rsplit("#", 1)[-1], ref=compiled_graph_ref,
             snapshot_digest=digest, artifact=artifact_path))
 
     return _enable
@@ -246,10 +246,10 @@ def test_slot_only_desired_instance_warms_and_arms(tmp_path, monkeypatch) -> Non
     setup_calls: List[Tuple[str, str]] = []
     ex, sent, enables = _harness(tmp_path, monkeypatch,
                                  [_slot_only_spec(setup_calls)])
-    from gen_worker import fleet_cells as fleet_cells_mod
+    from gen_worker import fleet_compiled_graphs as fleet_compiled_graphs_mod
     monkeypatch.setattr(
-        fleet_cells_mod, "enable_compiled",
-        _mint_enable(CELL_REF, "bb" * 32, tmp_path / "cell.tar.gz"))
+        fleet_compiled_graphs_mod, "enable_compiled",
+        _mint_enable(COMPILED_GRAPH_REF, "bb" * 32, tmp_path / "compiled_graph.tar.gz"))
     ex.apply_model_resolutions(
         {AUTHORED_REF: (RESOLVED_REF, RESOLVED_CAST, "fp8-w8a8-dynamic+compiled")})
 
@@ -266,7 +266,7 @@ def test_slot_only_desired_instance_warms_and_arms(tmp_path, monkeypatch) -> Non
     pipeline_path, adapter_path = setup_calls[0]
     assert AUTHORED_REF.split("/")[-1] in pipeline_path
     (target,) = ex.compile_targets()
-    assert target.active_compile_ref == CELL_REF
+    assert target.active_compile_ref == COMPILED_GRAPH_REF
     assert "generate" in ex.available_functions()
     assert not _failed_model_events(sent)
 
@@ -294,7 +294,7 @@ def test_declared_space_hot_bindings_remap_through_picks(tmp_path, monkeypatch) 
         models=[pb.ModelBinding(slot="pipeline", ref=AUTHORED_REF)],
     )
     snapshots = {RESOLVED_REF: _snapshot("aa" * 32),
-                 CELL_REF: _snapshot("bb" * 32)}
+                 COMPILED_GRAPH_REF: _snapshot("bb" * 32)}
     asyncio.run(ex.ensure_desired_instance(desired, snapshots))
 
     assert len(setup_calls) == 1

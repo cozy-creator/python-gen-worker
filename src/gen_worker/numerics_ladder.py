@@ -17,7 +17,7 @@ exactly while the low-rank machinery around it does not:
 So this module owns the parts that are population-independent — the verdict
 ladder, the aggregate rule, the evidence formatting and the gate shape — and
 each caller brings its own :class:`Thresholds` and its own evaluator.
-:mod:`gen_worker.models.adapter_fidelity` is one caller; the compiled-cell
+:mod:`gen_worker.models.adapter_fidelity` is one caller; the compiled-compiled graph
 assembled-vs-eager population (whose calibrated defaults live below, moved
 here from the retired regional module by pgw#846) is the other.
 
@@ -53,10 +53,10 @@ _ORDER = {VERDICT_HEALTHY: 0, VERDICT_DEGRADED: 1, VERDICT_DESTROYED: 2}
 PHASE_DEGRADED = "degraded"
 PHASE_REFUSED = "refused"
 
-#: pgw#1141 (§4.31/§4.32) — an armed exported cell took no warm dispatch this
-#: boot, which is the NORMAL state of every adopted cell (the arm precedes
+#: pgw#1141 (§4.31/§4.32) — an armed exported compiled graph took no warm dispatch this
+#: boot, which is the NORMAL state of every adopted compiled graph (the arm precedes
 #: setup) and is no longer a verdict about it. Carried on this kind so one
-#: query (`?kind=cell_numerics`) still answers what happened to every cell that
+#: query (`?kind=compiled_graph_numerics`) still answers what happened to every compiled graph that
 #: armed on a pod, and emitted because an unannounced posture is
 #: indistinguishable from a gate that never ran.
 PHASE_ARMED_UNDISPATCHED = "armed_undispatched"
@@ -171,7 +171,7 @@ class Comparison:
 
     #: What was compared against (``"eager"``, the true adapter delta, ...).
     reference: str
-    #: What is on trial (a cell key, an adapter ref, ...).
+    #: What is on trial (a compiled graph key, an adapter ref, ...).
     subject: str
     thresholds: Thresholds
     rows: Tuple[RowStat, ...]
@@ -348,7 +348,7 @@ def gate(
 
     ``refuse`` builds the caller's OWN typed exception from the message and
     the comparison — this module refuses to own a shared error type, because
-    "this adapter cannot serve here" and "this cell must not arm" route
+    "this adapter cannot serve here" and "this compiled graph must not arm" route
     through completely different classifiers.
     """
     if comparison is None:
@@ -377,7 +377,7 @@ def gate(
 
 
 # ---------------------------------------------------------------------------
-# The compiled-cell (assembled-vs-eager) calibration — pgw#814's measured band
+# The compiled-compiled graph (assembled-vs-eager) calibration — pgw#814's measured band
 # ---------------------------------------------------------------------------
 # Moved here from the retired regional module (pgw#846): the calibration is
 # family-GENERAL — it reads `Compile.numerics_floor` / `numerics_warn`, which
@@ -385,7 +385,7 @@ def gate(
 # numerics gate is the mechanism that should have caught the regional serve
 # regression.
 
-#: Cosine floor for an ASSEMBLED-vs-EAGER comparison — below it the cell is
+#: Cosine floor for an ASSEMBLED-vs-EAGER comparison — below it the compiled graph is
 #: DESTROYED and refuses to arm.
 #:
 #: Derived from pgw#814's measured band on the production toolchain (torch
@@ -397,7 +397,7 @@ def gate(
 #:                                           T_img=4096 (0.9926 at 8160)
 #:   best configuration we REFUSE    0.9730  flux2 w8a8 ROWWISE whole-graph vs
 #:                                           eager — pgw#814's "do not adopt a
-#:                                           flux2 w8a8 cell until this
+#:                                           flux2 w8a8 compiled graph until this
 #:                                           closes", i.e. the artifact the
 #:                                           platform decided is not servable.
 #:
@@ -407,8 +407,8 @@ def gate(
 #: 0.99979, sdxl w8a8 whole-graph 0.99984.
 NUMERICS_FLOOR = 0.98
 
-#: Gray-band ceiling — at or above this the arm is silent, below it the cell
-#: arms and confesses ``cell_numerics phase=degraded``.
+#: Gray-band ceiling — at or above this the arm is silent, below it the compiled graph
+#: arms and confesses ``compiled_graph_numerics phase=degraded``.
 #:
 #: Every configuration anyone has called healthy measures 0.9998+ (bf16
 #: control 0.99979, sdxl w8a8 whole-graph 0.99984), so an artifact that has
@@ -459,8 +459,8 @@ def declared_thresholds(cfg: Any) -> Thresholds:
     first 300 commits reaching no gate at all (pgw#1150).
 
     ``cfg`` is duck-typed on purpose — it is a raw ``Compile`` on the author-CI
-    path and a ``registry.CompileCell`` on every fleet path, and both carry the
-    two fields (``CompileCell.from_declaration`` is what keeps that true).
+    path and a ``registry.CompileCompiledGraph`` on every fleet path, and both carry the
+    two fields (``CompileCompiledGraph.from_declaration`` is what keeps that true).
     """
     floor = getattr(cfg, "numerics_floor", None)
     warn = getattr(cfg, "numerics_warn", None)

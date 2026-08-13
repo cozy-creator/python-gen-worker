@@ -2,9 +2,9 @@
 
 §4.28's product claim is not about one process: *"download model + code ONCE,
 compile ONCE, and every subsequent RUN of that code reuses the same compiled
-cell."* The unit tests in ``test_aot_local_mint_pgw1096`` prove the store and
-the gate inside one interpreter, where `fleet_cells._FINALIZED` — the
-in-process arm-token -> cell index — is warm and could mask a store that does
+compiled graph."* The unit tests in ``test_aot_local_mint_pgw1096`` prove the store and
+the gate inside one interpreter, where `fleet_compiled_graphs._FINALIZED` — the
+in-process arm-token -> compiled graph index — is warm and could mask a store that does
 not actually work.
 
 This one proves the claim it is: TWO fresh OS processes, sharing nothing but a
@@ -14,7 +14,7 @@ or the digest record were wrong in any way that a warm process papers over,
 run 2 opens a `PendingSelfMint` and this test says so.
 
 WHAT IS REAL HERE: the store (real files, real digests, real atomic replace),
-the memo, `fleet_cells._arming_policy` — the actual production arming brain,
+the memo, `fleet_compiled_graphs._arming_policy` — the actual production arming brain,
 entered the way the executor enters it — the ordering (local check before the
 pending), and process death between the runs.
 
@@ -22,7 +22,7 @@ WHAT IS FAKED, and why: the COMPILE. Paul's standing rule (2026-08-10) is that
 no mint, compile or AOTI link runs on the shared dev box — those go to a pod.
 So the mint child is not spawned and `provision.arm_aot` is stubbed: this test
 is about the STORE and the REUSE DECISION, and it is honest about the fact that
-"a real AOTI cell arms on a real card" is a claim only a pod can make. That is
+"a real AOTI compiled graph arms on a real card" is a claim only a pod can make. That is
 the pod leg's job, and it is owed, not assumed.
 """
 
@@ -45,12 +45,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
-from gen_worker import fleet_cells, local_cell_store
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker import fleet_compiled_graphs, local_compiled_graph_store
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 
 MODE = sys.argv[1]
 KEY = "ek1-" + "c" * 56
-ARM = fleet_cells.ARM_SCHEME + "-" + "9" * 56
+ARM = fleet_compiled_graphs.ARM_SCHEME + "-" + "9" * 56
 FAMILY = "micro-diffusion"
 
 
@@ -78,15 +78,15 @@ class Arm:
 
 # --- the compile is FAKED; everything below it is production code ------------
 opened_mints = []
-fleet_cells.provision.arm_aot = (            # type: ignore[assignment]
+fleet_compiled_graphs.provision.arm_aot = (            # type: ignore[assignment]
     lambda *a, **k: AdoptOutcome.hit(KEY))
-fleet_cells.artifact_meta.try_read_metadata = (  # type: ignore[assignment]
-    lambda p: {"cell_key": KEY, "family": FAMILY})
-fleet_cells.arm_axis_divergence = lambda arm, meta, **_kw: ""   # type: ignore[assignment]
-fleet_cells.aot_serve.note_aot_key = lambda k: None      # type: ignore[assignment]
-fleet_cells.activity_mod.emit_event = lambda *a, **k: None  # type: ignore[assignment]
+fleet_compiled_graphs.artifact_meta.try_read_metadata = (  # type: ignore[assignment]
+    lambda p: {"compiled_graph_key": KEY, "family": FAMILY})
+fleet_compiled_graphs.arm_axis_divergence = lambda arm, meta, **_kw: ""   # type: ignore[assignment]
+fleet_compiled_graphs.aot_serve.note_aot_key = lambda k: None      # type: ignore[assignment]
+fleet_compiled_graphs.activity_mod.emit_event = lambda *a, **k: None  # type: ignore[assignment]
 
-_real_pending = fleet_cells.PendingSelfMint
+_real_pending = fleet_compiled_graphs.PendingSelfMint
 
 
 def _spy(*a: Any, **k: Any) -> Any:
@@ -94,19 +94,19 @@ def _spy(*a: Any, **k: Any) -> Any:
     return _real_pending(*a, **k)
 
 
-fleet_cells.PendingSelfMint = _spy           # type: ignore[assignment]
+fleet_compiled_graphs.PendingSelfMint = _spy           # type: ignore[assignment]
 
 if MODE == "mint":
-    # Stand in for the child's packed cell. On a pod this is a real .pt2
+    # Stand in for the child's packed compiled graph. On a pod this is a real .pt2
     # tarball out of a real AOTI link. The store itself does not care what the
-    # cell IS — but run 2 ARMS this cell, and since pgw#1098 the arm refuses
-    # `cell_envelope_unreadable` before any other gate, so the stand-in has to
+    # compiled graph IS — but run 2 ARMS this compiled graph, and since pgw#1098 the arm refuses
+    # `compiled_graph_envelope_unreadable` before any other gate, so the stand-in has to
     # carry a readable `metadata.json` exactly as the real thing does.
     art = Path(os.environ["PGW1096_ARTIFACT"])
     art.parent.mkdir(parents=True, exist_ok=True)
     _meta = json.dumps(
-        {"kind": "aot-inductor", "cell_key": KEY, "family": FAMILY}).encode()
-    _body = b"a-real-cell-would-be-here" * 40
+        {"kind": "aot-inductor", "compiled_graph_key": KEY, "family": FAMILY}).encode()
+    _body = b"a-real-compiled graph-would-be-here" * 40
     with tarfile.open(art, mode="w:gz") as _tar:
         _mi = tarfile.TarInfo("metadata.json")
         _mi.size = len(_meta)
@@ -114,8 +114,8 @@ if MODE == "mint":
         _bi = tarfile.TarInfo("payload.bin")
         _bi.size = len(_body)
         _tar.addfile(_bi, io.BytesIO(_body))
-    reason = fleet_cells.no_publish_sink_reason(None)
-    stored = local_cell_store.store(
+    reason = fleet_compiled_graphs.no_publish_sink_reason(None)
+    stored = local_compiled_graph_store.store(
         art, key=KEY, family=FAMILY, arm_token=ARM)
     print("RESULT " + json.dumps({
         "run": 1, "keep_reason": reason,
@@ -126,16 +126,16 @@ if MODE == "mint":
 else:
     # A COLD process: no `_FINALIZED`, no pending, nothing warm. The only
     # thing that exists is the directory run 1 wrote.
-    assert not fleet_cells._FINALIZED, "a fresh process must start with no index"
-    minted = fleet_cells.arm_from_local_store(
+    assert not fleet_compiled_graphs._FINALIZED, "a fresh process must start with no index"
+    minted = fleet_compiled_graphs.arm_from_local_store(
         Pipe(), Cfg(), None, 0, Arm(), FAMILY)
     print("RESULT " + json.dumps({
         "run": 2,
         "armed": minted is not None,
-        "cell_key": getattr(minted, "cell_key", ""),
+        "compiled_graph_key": getattr(minted, "compiled_graph_key", ""),
         "artifact": str(getattr(minted, "artifact", "")),
         "mints_opened": len(opened_mints),
-        "resident": [c.key for c in local_cell_store.stored_cells()],
+        "resident": [c.key for c in local_compiled_graph_store.stored_compiled_graphs()],
     }))
 '''
 
@@ -144,7 +144,7 @@ def _run(mode: str, store: Path, artifact: Path) -> dict:
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
         [str(REPO / "src"), str(REPO / "tests"), env.get("PYTHONPATH", "")])
-    env["GEN_WORKER_LOCAL_CELLS_DIR"] = str(store)
+    env["GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR"] = str(store)
     env["PGW1096_ARTIFACT"] = str(artifact)
     proc = subprocess.run(
         [sys.executable, "-c", _PROGRAM, mode],
@@ -160,8 +160,8 @@ def test_run_one_mints_and_keeps_run_two_reuses_with_no_mint(
     tmp_path: Path,
 ) -> None:
     """Paul's compile-once-run-forever, across process death, measured."""
-    store = tmp_path / "cozy-cells"
-    artifact = tmp_path / "mint" / "cell.tar.gz"
+    store = tmp_path / "cozy-compiled_graphs"
+    artifact = tmp_path / "mint" / "compiled_graph.tar.gz"
 
     one = _run("mint", store, artifact)
     assert one["stored"] is True
@@ -176,11 +176,11 @@ def test_run_one_mints_and_keeps_run_two_reuses_with_no_mint(
     artifact.unlink()
 
     two = _run("reuse", store, artifact)
-    assert two["armed"] is True, "the second run did not reuse the stored cell"
+    assert two["armed"] is True, "the second run did not reuse the stored compiled_graph"
     assert two["mints_opened"] == 0, (
         "the second run opened a mint — compile-once-run-forever is the whole "
         "product promise and this is what breaking it looks like")
-    assert two["cell_key"] == "ek1-" + "c" * 56
+    assert two["compiled_graph_key"] == "ek1-" + "c" * 56
     assert two["artifact"].startswith(str(store)), (
         "run 2 must serve the STORE's bytes, not a leftover from the mint")
     assert two["resident"] == ["ek1-" + "c" * 56]
@@ -200,11 +200,11 @@ def test_a_cold_run_with_an_EMPTY_store_mints_rather_than_inventing_a_hit(
 def test_a_corrupted_store_makes_the_cold_run_refuse_and_drop(
     tmp_path: Path,
 ) -> None:
-    """RED, across processes: run 1 keeps a cell, the bytes rot on disk, and
+    """RED, across processes: run 1 keeps a compiled graph, the bytes rot on disk, and
     the cold run refuses it, drops it and is left with an empty store — one
     honest re-mint, never a wrong arm."""
-    store = tmp_path / "cozy-cells"
-    artifact = tmp_path / "mint" / "cell.tar.gz"
+    store = tmp_path / "cozy-compiled_graphs"
+    artifact = tmp_path / "mint" / "compiled_graph.tar.gz"
     one = _run("mint", store, artifact)
     stored = Path(one["stored_at_path"])
 
@@ -213,5 +213,5 @@ def test_a_corrupted_store_makes_the_cold_run_refuse_and_drop(
     stored.write_bytes(bytes(rotted))
 
     two = _run("reuse", store, artifact)
-    assert two["armed"] is False, "a corrupted cell armed on a cold boot"
-    assert two["resident"] == [], "the refused cell was not dropped"
+    assert two["armed"] is False, "a corrupted compiled_graph armed on a cold boot"
+    assert two["resident"] == [], "the refused compiled_graph was not dropped"

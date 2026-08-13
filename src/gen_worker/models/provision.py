@@ -30,8 +30,8 @@ from typing import (
 )
 
 from .. import artifact_meta
-from .. import cell_key
-from ..cell_adopt import AdoptOutcome
+from .. import compiled_graph_key
+from ..compiled_graph_adopt import AdoptOutcome
 from ..component_vocab import denoiser_components
 from ..api.binding import ModelRef, wire_ref
 from ..config import Settings, current_or
@@ -274,20 +274,20 @@ def load_slot(
 
 
 def arm_route(mode: str) -> Optional[str]:
-    """The name of the arm that serves cells of ``mode``, or ``None``.
+    """The name of the arm that serves compiled graphs of ``mode``, or ``None``.
 
     ONE registry, asked by :func:`arm_aot` when it arms and by the mint
-    BEFORE it spends anything (``fleet_cells.mint_recipe``). pgw#827 is the
+    BEFORE it spends anything (``fleet_compiled_graphs.mint_recipe``). pgw#827 is the
     fourth defect in the "a gate that models the arm differently from the
     arm" class (pgw#816, #822, #825): the regional recipe minted 72 entries
     in 354 s of L4 and only then discovered that this runtime had no arm
-    that could adopt the kind of cell it had just built. "Can this runtime
-    adopt the kind of cell I am about to mint?" is answerable at
+    that could adopt the kind of compiled graph it had just built. "Can this runtime
+    adopt the kind of compiled graph I am about to mint?" is answerable at
     ``self_mint_started``, and it is answerable HERE, from the same table
     the arm dispatches on.
 
-    pgw#846: regional cells are RETIRED, so the whole-graph arm is the only
-    row. A cell whose metadata still says ``mode='regional'`` is declined BY
+    pgw#846: regional compiled graphs are RETIRED, so the whole-graph arm is the only
+    row. A compiled graph whose metadata still says ``mode='regional'`` is declined BY
     NAME (``arm_aot`` stays eager and says why) — never handed to the
     whole-graph arm, whose denoiser-scope bind table it cannot use (pgw#827).
     """
@@ -314,19 +314,19 @@ def arm_aot(
     ``verify_numerics`` (DESIGN-RULINGS §4.32, pgw#1141) runs the parity gate,
     and exactly ONE caller sets it: the pod that MINTED these bytes, before it
     publishes them. Adoption runs no quality gate at all — see
-    :func:`gate_cell_numerics` for why re-measuring an adopted cell was taxing
+    :func:`gate_compiled_graph_numerics` for why re-measuring an adopted compiled graph was taxing
     every adopter forever for an author's one-time mistake.
 
     pgw#805 extracted this from :func:`enable_compiled`'s kind dispatch: a
-    cell this pod MINTED ITSELF has to arm through exactly the same gates a
+    compiled graph this pod MINTED ITSELF has to arm through exactly the same gates a
     hub-delivered one does (that is the point of the delegated split — a
-    child-built cell EARNS adoption), but it must not re-enter
+    child-built compiled graph EARNS adoption), but it must not re-enter
     ``enable_compiled``, whose pgw#709 receipts gate would drop an artifact
     that by construction carries no hub signature yet.
 
-    pgw#721: an exported cell rides the branch-bearing lane too — LoRA
+    pgw#721: an exported compiled graph rides the branch-bearing lane too — LoRA
     adapters are lifted to graph INPUTS, so one artifact serves the whole
-    bucket. A lifted cell refuses an unlifted module
+    bucket. A lifted compiled graph refuses an unlifted module
     (``lifted_inputs_unbindable``), so for a bucket-bearing endpoint the
     lifted binding is installed on the artifact's target module NOW — after
     ``apply_lora_lane`` allocated the canonical branch containers, BEFORE
@@ -347,11 +347,11 @@ def arm_aot(
     lifted_install_error = ""
     mode = str((meta or {}).get("mode") or "")
     if arm_route(mode) is None:
-        # A cell whose mode this runtime has no arm for must decline BY NAME
+        # A compiled graph whose mode this runtime has no arm for must decline BY NAME
         # rather than be handed to whichever arm happens to be the default —
-        # pgw#827 was exactly that: a regional cell routed into the
+        # pgw#827 was exactly that: a regional compiled graph routed into the
         # whole-graph arm, which built ONE bind table at denoiser scope.
-        # Since pgw#846 retired regional, `mode='regional'` cells land here
+        # Since pgw#846 retired regional, `mode='regional'` compiled graphs land here
         # and stay eager, which is the correct retirement semantics.
         logger.warning(
             "aot arm: artifact declares mode=%r, which this runtime has no "
@@ -369,9 +369,9 @@ def arm_aot(
         # install and waste the arm).
         targets = [str(t) for t in ((meta or {}).get("targets") or ())]
         if not targets:
-            # pgw#1001: a packed multi-entry cell records its targets PER
+            # pgw#1001: a packed multi-entry compiled graph records its targets PER
             # ENTRY and carries no top-level `targets`/`module` (measured:
-            # both None on a real 5-entry lora64 cell). Without this the name
+            # both None on a real 5-entry lora64 compiled graph). Without this the name
             # resolved to "" and the lifted install was silently skipped.
             # pgw#1176: one artifact, one entry, one target.
             name = str(
@@ -404,7 +404,7 @@ def arm_aot(
                 f"{str((meta or {}).get('module') or '') or '<absent>'} "
                 f"targets={targets or '<absent>'}, branch-capable="
                 f"{sorted(branch_capable) or '<none>'}"
-                + ("; the cell envelope was unreadable" if meta is None else ""))
+                + ("; the compiled_graph envelope was unreadable" if meta is None else ""))
             logger.warning(
                 "aot arm: bucket=%d declared but no lifted target resolved "
                 "(%s); a lifted artifact will refuse at "
@@ -427,7 +427,7 @@ def arm_aot(
                     "lifted artifact will refuse at assert_lifted_contract",
                     module_name, exc)
     # pgw#1168: THE ADOPT'S DEVICE COST, MEASURED AT THE ONE SEAM EVERY ARM
-    # ROUTE PASSES. pgw#1164 measured this in `fleet_cells.adopt_delegated_mint`
+    # ROUTE PASSES. pgw#1164 measured this in `fleet_compiled_graphs.adopt_delegated_mint`
     # — the SELF-MINT adopt only — so the boot adopt, the local-store adopt and
     # the re-arm ran the identical `aot_serve.enable` -> `load_and_wrap` and
     # reported nothing. That is this program's most common defect shape (an
@@ -435,23 +435,23 @@ def arm_aot(
     # than a second call site there.
     #
     # The two terms are measured SEPARATELY because they answer different
-    # questions, and the split is what decides whether the CELL or the GATE is
+    # questions, and the split is what decides whether the COMPILED GRAPH or the GATE is
     # the problem (th#1825):
     #   load   — every loaded entry runner, which EVERY serving pod pays for the
-    #            life of the arm. This is the term that decides whether a cell
+    #            life of the arm. This is the term that decides whether a compiled graph
     #            fits on the fleet it was built for.
     #   verify — the §4.32 parity gate's two forwards, paid ONLY on the minting
     #            pod (`verify_numerics=True`), never by an adopter.
     # A boot adopt therefore reports `verify=0` by construction, and that row —
     # taken on the card the fleet actually serves on — is the empirical answer
-    # to "does this cell fit", where before there was only arithmetic.
+    # to "does this compiled graph fit", where before there was only arithmetic.
     _budget_device = mint_workers.device_of(pipe)
     _resident_before, _ = mint_workers.adopt_watermark(_budget_device)
     _load_bytes = 0
     _emitted = False
 
     def _emit_adopt_budget(verify_bytes: int, armed: bool) -> None:
-        """One `cell_adopt_budget` row per arm attempt, whatever the outcome.
+        """One `compiled_graph_adopt_budget` row per arm attempt, whatever the outcome.
 
         Emitted even for a REFUSED arm: the device high-water was paid either
         way, and a refusal is exactly when the number is most worth having.
@@ -464,7 +464,7 @@ def arm_aot(
         if total <= 0:
             return
         family = str((meta or {}).get("family") or getattr(cfg, "family", "") or "")
-        # The cell's OWN recorded lane.
+        # The compiled graph's OWN recorded lane.
         lane = str((meta or {}).get("weight_lane") or "")
         # pgw#1176: one artifact, one graph class — so this row is always
         # `entries=1`, and that is the point rather than a degenerate case.
@@ -472,7 +472,7 @@ def arm_aot(
         entries = 1 if (meta or {}).get("entry") else 0
         gib = 1 << 30
         activity_mod.emit_event(
-            "cell_adopt_budget",
+            "compiled_graph_adopt_budget",
             f"family={family} lane={lane or '(plain)'} entries={entries} "
             f"adopt_device_peak={total / gib:.3f}GiB "
             f"load={_load_bytes / gib:.3f}GiB "
@@ -480,7 +480,7 @@ def arm_aot(
             f"resident_before={_resident_before / gib:.3f}GiB "
             f"verified={bool(verify_numerics)} armed={bool(armed)} "
             f"basis=measured — `load` is what EVERY adopting pod pays and is "
-            f"the term that decides whether this cell fits its serving fleet; "
+            f"the term that decides whether this compiled_graph fits its serving fleet; "
             f"`verify` is the §4.32 gate and is paid only by the minting pod.",
             phase="measured",
         )
@@ -515,13 +515,13 @@ def arm_aot(
     if outcome.armed:
         # §4.32: quality is proven at MINT and in author CI, never at adoption.
         # An adopting pod materializes, arms and serves.
-        gate_ok = not verify_numerics or gate_cell_numerics(pipe, cfg, strict=True)
+        gate_ok = not verify_numerics or gate_compiled_graph_numerics(pipe, cfg, strict=True)
         _, _peak_after_verify = mint_workers.adopt_watermark(_budget_device)
         if gate_ok:
             _emit_adopt_budget(_peak_after_verify - _peak_after_load, True)
             return outcome
         _emit_adopt_budget(_peak_after_verify - _peak_after_load, False)
-        # A refused cell is UNARMED, not merely reported: the whole point is
+        # A refused compiled graph is UNARMED, not merely reported: the whole point is
         # that it must not serve. Staying eager is the ordinary miss policy
         # every other adopt gate uses, so the tenant keeps being served.
         #
@@ -530,20 +530,20 @@ def arm_aot(
         # ran, so a reader counting armed adoptions over-counted every numerics
         # refusal and a second closing row existed only to correct the first.
         # Nothing is announced until the arm is final, so the refusal is simply
-        # what this function returns; the numbers still ride `cell_numerics`.
+        # what this function returns; the numbers still ride `compiled_graph_numerics`.
         meta = aot_serve.armed_metadata(pipe)
         # pgw#1176: THE PARITY REFUSAL IS PER ENTRY. This used to `unwrap` the
         # whole pipeline, which was correct while the gate's subject was a
-        # 36-class cell and is wrong now: the probe measures ONE graph class
+        # 36-class compiled graph and is wrong now: the probe measures ONE graph class
         # against the eager callable it was traced from, so a divergence
         # condemns that class and says nothing about its siblings. The refused
         # entry de-arms sticky, its siblings keep serving compiled, and it is
         # not published.
-        entry = str((meta.get(cell_key.ENTRY_BLOCK_KEY) or {}).get("name") or "")
+        entry = str((meta.get(compiled_graph_key.ENTRY_BLOCK_KEY) or {}).get("name") or "")
         aot_serve.disarm_entry(pipe, entry, "numerics_refused")
         outcome = AdoptOutcome.miss(
             "numerics_refused",
-            f"family={meta.get('family')} key={meta.get('cell_key')} "
+            f"family={meta.get('family')} key={meta.get('compiled_graph_key')} "
             f"entry={entry}: this pod MINTED these bytes and they do not "
             f"reproduce the eager forward they were traced from — this CLASS "
             f"is not published and serves eager; sibling classes are "
@@ -561,8 +561,8 @@ def arm_aot(
     return outcome
 
 
-def gate_cell_numerics(pipe: Any, cfg: Any, *, strict: bool = False) -> bool:
-    """THE numerics gate (pgw#868): does this cell reproduce the eager forward
+def gate_compiled_graph_numerics(pipe: Any, cfg: Any, *, strict: bool = False) -> bool:
+    """THE numerics gate (pgw#868): does this compiled graph reproduce the eager forward
     it replaces? Returns False when it must not serve — and, on the only path
     that runs it, when it must not be PUBLISHED.
 
@@ -577,10 +577,10 @@ def gate_cell_numerics(pipe: Any, cfg: Any, *, strict: bool = False) -> bool:
 
     What makes adoption safe without re-measuring is CONSTRUCTION, not identity
     — a ck1 key is graph x envelope x sm x toolchain and carries NO checkpoint
-    hash, deliberately, so one cell serves every checkpoint of the
+    hash, deliberately, so one compiled graph serves every checkpoint of the
     architecture:
 
-    * the cell is compiled CODE; weights flow through it as data (call inputs
+    * the compiled graph is compiled CODE; weights flow through it as data (call inputs
       and arm-time-bound constants), so a mint-time parity proof proves the
       FUNCTION and transfers to any checkpoint that function accepts;
     * the one way that breaks — a weight VALUE baked into the artifact — is
@@ -591,13 +591,13 @@ def gate_cell_numerics(pipe: Any, cfg: Any, *, strict: bool = False) -> bool:
       no match at all. The graph axis protects there, not a checkpoint digest.
 
     ``strict`` is what the mint path passes, and §4.32 requires it: identical
-    or refuse, with no DEGRADED-publish band. A cell that lands in the gray
+    or refuse, with no DEGRADED-publish band. A compiled graph that lands in the gray
     band is one an ADOPTER can never re-check, so shipping it would export an
     unmeasured degradation to every pod that pulls it.
 
     Outcomes, all typed rows on the wire:
 
-    * HEALTHY -> `cell_numerics phase=checked`; the mint arms and publishes.
+    * HEALTHY -> `compiled_graph_numerics phase=checked`; the mint arms and publishes.
       The pass is announced deliberately: an unannounced pass is
       indistinguishable from a gate that never ran, which is this program's
       signature failure.
@@ -614,14 +614,14 @@ def gate_cell_numerics(pipe: Any, cfg: Any, *, strict: bool = False) -> bool:
 
     family = str(getattr(cfg, "family", "") or "")
     try:
-        report = numerics_probe.probe_cell(
+        report = numerics_probe.probe_compiled_graph(
             pipe, cfg, aot_serve.armed_metadata(pipe))
     except numerics_probe.ProbeUnavailable as exc:
         return _refuse_unmeasurable(family, exc.reason, str(exc))
     except Exception as exc:  # noqa: BLE001 — an unexplained probe is a refusal
         # Deliberately NOT best-effort. The pgw#848 announcement could swallow
         # anything because it refused nothing; a GATE that swallowed an error
-        # into an armed cell would be the exact hole this replaces.
+        # into an armed compiled graph would be the exact hole this replaces.
         return _refuse_unmeasurable(
             family, "probe_error", f"{type(exc).__name__}: {exc}")
     if not report.measured:
@@ -636,8 +636,8 @@ def gate_cell_numerics(pipe: Any, cfg: Any, *, strict: bool = False) -> bool:
     try:
         numerics_ladder.gate(
             comparison,
-            kind=activity_mod.KIND_CELL_NUMERICS,
-            refuse=lambda detail, worst_row: numerics_probe.CellNumericsRefused(
+            kind=activity_mod.KIND_COMPILED_GRAPH_NUMERICS,
+            refuse=lambda detail, worst_row: numerics_probe.CompiledGraphNumericsRefused(
                 detail, worst_row),
             context=report.context())
         if strict and comparison is not None and not comparison.healthy:
@@ -645,26 +645,26 @@ def gate_cell_numerics(pipe: Any, cfg: Any, *, strict: bool = False) -> bool:
             # `degraded` row above, so the confession is on the wire; what
             # changes here is that the bytes do not ship.
             logger.error(
-                "aot mint: REFUSING to publish %s — the cell it just compiled "
+                "aot mint: REFUSING to publish %s — the compiled_graph it just compiled "
                 "lands in the gray band (%s), and an adopter runs no gate that "
-                "could re-check it (§4.32)", family or "cell", comparison.verdict)
+                "could re-check it (§4.32)", family or "compiled_graph", comparison.verdict)
             return False
         if comparison is not None and comparison.healthy:
             activity_mod.emit_event(
-                activity_mod.KIND_CELL_NUMERICS,
+                activity_mod.KIND_COMPILED_GRAPH_NUMERICS,
                 f"CHECKED against eager on every packaged entry — "
                 f"{report.context()}",
                 phase="checked", duration_ms=report.elapsed_ms)
-    except numerics_probe.CellNumericsRefused as exc:
+    except numerics_probe.CompiledGraphNumericsRefused as exc:
         logger.error(
-            "aot arm: REFUSING to arm %s — the cell does not reproduce its "
-            "eager reference: %s", family or "cell", exc)
+            "aot arm: REFUSING to arm %s — the compiled_graph does not reproduce its "
+            "eager reference: %s", family or "compiled_graph", exc)
         return False
     except Exception as exc:  # noqa: BLE001 — a gate that errored is a refusal
         # Includes a raising activity sink, and the announcement is INSIDE the
         # try on purpose: an arm nobody could record is an arm we do not make.
         # A telemetry failure cannot be told apart from a logic failure here,
-        # and the two costs are not symmetric — refusing costs an un-armed cell
+        # and the two costs are not symmetric — refusing costs an un-armed compiled graph
         # (the ordinary miss policy), passing costs a silently-wrong one.
         return _refuse_unmeasurable(
             family, "gate_error",
@@ -673,22 +673,22 @@ def gate_cell_numerics(pipe: Any, cfg: Any, *, strict: bool = False) -> bool:
 
 
 def _refuse_unmeasurable(family: str, reason: str, detail: str) -> bool:
-    """A cell that could not be measured does not arm — and says which half.
+    """A compiled graph that could not be measured does not arm — and says which half.
 
-    Fail-closed by construction: the only way to reach an armed cell is
+    Fail-closed by construction: the only way to reach an armed compiled graph is
     through a comparison that exists. An exception swallowed into a `True`
     here would rebuild the exact hole pgw#848 CP12 refused to ship.
     """
 
     logger.error(
         "aot arm: REFUSING to arm %s — the numerics gate could not be run "
-        "(%s): %s", family or "cell", reason, detail)
+        "(%s): %s", family or "compiled_graph", reason, detail)
     try:
         activity_mod.emit_event(
-            activity_mod.KIND_CELL_NUMERICS,
+            activity_mod.KIND_COMPILED_GRAPH_NUMERICS,
             f"family={family} REFUSED TO ARM: the compiled-vs-eager "
             f"comparison could not be taken ({reason}). This is not a pass — "
-            f"an unmeasurable cell stays eager (pgw#868). {detail}",
+            f"an unmeasurable compiled_graph stays eager (pgw#868). {detail}",
             phase="unmeasurable")
     except Exception:  # noqa: BLE001 — the refusal stands even if the wire is down
         logger.debug("could not announce unmeasurable numerics", exc_info=True)
@@ -705,7 +705,7 @@ def enable_compiled(
     artifact and ALLOW_COLD lanes).
 
     ``Compile.lora_bucket`` (gw#561) puts the pipeline on the branch-bearing
-    graph family BEFORE arming, so only matching ``-lora<bucket>`` cells
+    graph family BEFORE arming, so only matching ``-lora<bucket>`` compiled graphs
     adopt. Staying eager rolls the branches back — canonical zeroed slots
     cost +21-32% eager (gw#547); the eager adapter path re-enables sparse
     placement per request."""
@@ -756,9 +756,9 @@ def enable_compiled(
     if armed:
         return AdoptOutcome.hit()
     # The inductor lane declines without a classified token of its own — "no
-    # delivered cell for this identity" is the whole answer. A prior typed
+    # delivered compiled graph for this identity" is the whole answer. A prior typed
     # refusal from the exported arm is the more specific one and survives.
-    return refused if refused is not None else AdoptOutcome.miss("no_cell")
+    return refused if refused is not None else AdoptOutcome.miss("no_compiled_graph")
 
 
 # ---------------------------------------------------------------------------
@@ -791,16 +791,16 @@ class _ArmingContext:
     # inferring them later from class attributes would be ambiguous.
     objects: list[tuple[Any, bool]]
     # gw#587: the scope owner's arming policy. The executor routes the fleet
-    # policy (delivered cell first, self-mint on miss) here so an endpoint's
+    # policy (delivered compiled graph first, self-mint on miss) here so an endpoint's
     # own arm_compile() call gets the SAME behavior as a worker-loaded slot;
     # None keeps the bare delivered-artifact policy (CLI / unit rigs). The
     # callable may return a bool or an object with `.armed`/`.self_mint`
-    # (fleet_cells.ArmOutcome) — provision cannot import fleet_cells (cycle).
+    # (fleet_compiled_graphs.ArmOutcome) — provision cannot import fleet_compiled_graphs (cycle).
     enable: Optional[Callable[[Any, Any, Optional[Path], Optional[Path]], Any]]
-    # id(pipe) -> self-mint identity (fleet_cells.SelfMint) for pipes the
-    # scope's policy armed from their OWN mint rather than a delivered cell.
+    # id(pipe) -> self-mint identity (fleet_compiled_graphs.SelfMint) for pipes the
+    # scope's policy armed from their OWN mint rather than a delivered compiled graph.
     self_mints: dict[int, Any]
-    # id(pipe) -> caught CellSelectionBugError (th#1031): the fleet policy
+    # id(pipe) -> caught CompiledGraphSelectionBugError (th#1031): the fleet policy
     # no longer raises this (it self-mints instead), so the executor reads
     # it here to still send the loud th#883 wire event after setup() returns.
     selection_bugs: dict[int, Any]
@@ -864,7 +864,7 @@ class ArmingScope:
 
     @property
     def selection_bugs(self) -> dict[int, Any]:
-        """``id(pipe) -> CellSelectionBugError`` caught (and recovered from
+        """``id(pipe) -> CompiledGraphSelectionBugError`` caught (and recovered from
         via self-mint) for scope pipes, th#1031."""
         return dict(self._selection_bugs)
 
@@ -913,7 +913,7 @@ def arm_compile(pipe: Any) -> bool:
 # ---------------------------------------------------------------------------
 # pgw#1104: the APPLIED-LANE report. `metrics.lane` used to be a pure function
 # of the binding, so a recipe that quantized in setup() served fp8 under a
-# bf16 label — and the lane id is a KEY (th#935 verdicts, compile cells,
+# bf16 label — and the lane id is a KEY (th#935 verdicts, compile compiled graphs,
 # pricing, the executed-lane proof). A static `handles=`-style declaration
 # cannot fix it: the recipe is runtime-gated (sm89 for w8a8, the compile
 # preflight), so a declaration would over-claim on the card that skips it.

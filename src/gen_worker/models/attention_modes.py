@@ -1,7 +1,7 @@
 """Attention-execution vocabulary — the THIRD axis (pgw#1043 §PRODUCTIZATION).
 
 ``JobMetrics.lane`` says ``fp8-w8a8-dynamic+compiled`` and ``serving_mode`` says
-``aot_cell``. Neither can say **which key blocks the attention actually read**,
+``aot_compiled_graph``. Neither can say **which key blocks the attention actually read**,
 and on a sparse-attention endpoint that is the single largest determinant of both
 latency and the take the render is. The three axes are independent by
 construction:
@@ -10,17 +10,17 @@ construction:
 axis             vocabulary                          who owns it
 ===============  ==================================  ==========================
 execution lane   ``<weights>-<act>[-<scale>]+<exec>``  the CHECKPOINT's numerics
-serving mode     ``eager | jit_cell | aot_cell``      the ARMED artifact
+serving mode     ``eager | jit_compiled_graph | aot_compiled_graph``      the ARMED artifact
 attention mode   ``dense | sparse-kNN``               the SELECTOR + its index
 ===============  ==================================  ==========================
 
 Why this is not a lane token. The lane grammar is a NUMERICS descriptor and its
-consumers — residency/VRAM planning, pricing, compile-cell identity,
+consumers — residency/VRAM planning, pricing, compile-compiled graph identity,
 ``ResolvePinned`` — all ask it *"how big are the weights and what arithmetic"*.
 Sparse attention changes neither operand format; it changes which blocks are
 read. Growing the closed two-repo lane table by a cross product for an axis none
 of those consumers use is exactly the mistake pgw#764/th#1293 declined to make
-when ``+compiled`` could not distinguish an AOT replay from a JIT cell: the
+when ``+compiled`` could not distinguish an AOT replay from a JIT compiled graph: the
 answer there was a SEPARATE typed axis, and it is the answer here.
 
 A mode token alone is also not enough, which is the second reason it cannot ride

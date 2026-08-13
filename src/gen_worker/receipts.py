@@ -1,13 +1,13 @@
-"""Hub-signed cell receipt verification (pgw#709, build-systems review R1/R2).
+"""Hub-signed compiled graph receipt verification (pgw#709, build-systems review R1/R2).
 
-A ``cell_store`` row (cell_key -> artifact) is a Nix *realisation*: fetch
+A ``compiled_graph_store`` row (compiled_graph_key -> artifact) is a Nix *realisation*: fetch
 verifies the BYTES against the hub's recorded digest, but nothing ever
 signed the RECORD binding the key to those bytes. Under "bucket is truth,
 DB is a rebuildable index" (th#659) that made bucket write access
-equivalent to arbitrary cell delivery after any index rebuild.
+equivalent to arbitrary compiled graph delivery after any index rebuild.
 
-The hub now signs a ``cell-receipt-v1`` compact JWS at publish-finalize
-binding: cell_key + owning endpoint + the publisher-trust rung + the snapshot
+The hub now signs a ``compiled graph-receipt-v1`` compact JWS at publish-finalize
+binding: compiled_graph_key + owning endpoint + the publisher-trust rung + the snapshot
 digest (the derivation binding Nix's fingerprint famously omits) + the
 packed tarball's ALGORITHM-TAGGED digest AND integral size (Bazel REv2:
 size is part of the digest). This module is the WORKER half: before arming any hub-delivered
@@ -15,10 +15,10 @@ artifact the worker fetches the receipt, verifies the signature against
 the hub's public artifact-signing JWKS, checks every binding against the
 local bytes, and re-checks the operator revocation list — R2's targeted
 recall, and since pgw#1034 the ONLY recall lever (the env_seal ``epoch``
-salt was too broad for a single bad cell and is gone).
+salt was too broad for a single bad compiled graph and is gone).
 
 Refusal semantics: a failed receipt DISCARDS the delivered artifact with a
-loud typed ``cell_receipt_refused`` activity event and falls through to
+loud typed ``compiled_graph_receipt_refused`` activity event and falls through to
 the ordinary miss policy (fleet workers self-mint their own replacement —
 their own bytes need no receipt; the copy they publish gets one from the
 th#910 gate). A receipt failure never kills serving.
@@ -29,7 +29,7 @@ dispatches on that tag. An untagged bare-hex digest is REFUSED rather than
 read as some assumed algorithm, and a receipt with no usable digest at all is
 REFUSED rather than compared against nothing — the empty compare is this
 migration's signature defect. The legacy bare-hex ``artifact.blake3`` arm is
-GONE with the v1 publish protocol that minted it: a cell it could describe
+GONE with the v1 publish protocol that minted it: a compiled graph it could describe
 can no longer be republished under v1 anyway, so a worker meeting one refuses
 it, self-mints, and publishes a replacement whose receipt is sha256-bound —
 the designed miss policy, not a new failure.
@@ -68,16 +68,16 @@ logger = logging.getLogger(__name__)
 # `publisher_org_id`, and they are LOAD-BEARING at the arm gate below. A v1
 # receipt must not be read as a v2 one with the trust fields missing, so the
 # version check refuses it outright rather than defaulting them.
-RECEIPT_VERSION = "cell-receipt-v2"
+RECEIPT_VERSION = "compiled_graph-receipt-v2"
 
 # Publisher tiers (th#1657). `platform` means the platform vouches for the
-# publishing org's endpoint code, so the cell is adoptable fleet-wide within its
+# publishing org's endpoint code, so the compiled graph is adoptable fleet-wide within its
 # family. Anything else — including an absent or unrecognised value — is `org`,
-# and an org-scoped cell is adoptable only by pods of the endpoint that minted
+# and an org-scoped compiled graph is adoptable only by pods of the endpoint that minted
 # it. There is deliberately no third value and no "unknown" branch: every
 # unparseable tier must land on the NARROWER rule.
-CELL_PUBLISHER_TIER_PLATFORM = "platform"
-CELL_PUBLISHER_TIER_ORG = "org"
+COMPILED_GRAPH_PUBLISHER_TIER_PLATFORM = "platform"
+COMPILED_GRAPH_PUBLISHER_TIER_ORG = "org"
 # The algorithm this worker can actually recompute from local bytes. A receipt
 # naming anything else is refused, never assumed.
 #
@@ -89,14 +89,14 @@ CELL_PUBLISHER_TIER_ORG = "org"
 # later is still a local change — it just is not pre-paid here.
 ARTIFACT_DIGEST_ALGORITHM = "sha256"
 JWKS_PATH = "/api/v1/artifacts/.well-known/jwks.json"
-RECEIPT_PATH = "/v1/worker/cells/receipt"
-REVOCATIONS_PATH = "/v1/worker/cells/revocations"
+RECEIPT_PATH = "/v1/worker/compiled_graphs/receipt"
+REVOCATIONS_PATH = "/v1/worker/compiled_graphs/revocations"
 
 # pgw#973 (§4.24): per-CALL socket budget on the three small control-plane
 # round trips this module makes (JWKS, receipt, revocations). Not a gw#666
 # kill — none of them can be "making progress" in any observable sense, and
 # expiry ends no work — but without it a hub that accepts a connection and
-# says nothing wedges the arm gate, which every cell adoption waits behind.
+# says nothing wedges the arm gate, which every compiled graph adoption waits behind.
 # Shorter than `callout`'s 60 s because these are constant-size answers,
 # not a child request the hub may legitimately take time to admit.
 _HTTP_TIMEOUT_S = 30
@@ -112,7 +112,7 @@ class ReceiptError(RuntimeError):
 
 @dataclass(frozen=True)
 class Receipt:
-    """Decoded, signature-verified cell receipt claims — the ones something
+    """Decoded, signature-verified compiled graph receipt claims — the ones something
     CHECKS.
 
     pgw#1034 dropped six that nothing did: ``axes``, ``publisher``,
@@ -122,7 +122,7 @@ class Receipt:
     simply not a promise anyone here relies on. Two notes worth keeping:
 
     * ``manifest_digest``/``fingerprint_digest`` are additive ``omitempty``
-      claims the hub hashes in (``api/cell_receipts.go``); the content they
+      claims the hub hashes in (``api/compiled_graph_receipts.go``); the content they
       cover is already bound by ``snapshot_digest``, and removing an additive
       claim does not move ``RECEIPT_VERSION``. The hub half is th#1699-#1704's.
     * ``issued_at_unix`` had NO freshness check anywhere, and adding one would
@@ -136,7 +136,7 @@ class Receipt:
 
     version: str
     family: str
-    cell_key: str
+    compiled_graph_key: str
     owning_endpoint_id: str
     # th#1657: the publisher-trust boundary, inside the signature.
     publisher_tier: str
@@ -209,19 +209,19 @@ def _normalize_publisher_tier(raw: object) -> str:
     an error eventually gets the branch wrong, and every wrong branch here ends
     in ``dlopen``.
     """
-    if str(raw or "").strip() == CELL_PUBLISHER_TIER_PLATFORM:
-        return CELL_PUBLISHER_TIER_PLATFORM
-    return CELL_PUBLISHER_TIER_ORG
+    if str(raw or "").strip() == COMPILED_GRAPH_PUBLISHER_TIER_PLATFORM:
+        return COMPILED_GRAPH_PUBLISHER_TIER_PLATFORM
+    return COMPILED_GRAPH_PUBLISHER_TIER_ORG
 
 
 def _self_viewer() -> "worker_identity.ViewerIdentity":
     """WHO THIS POD IS, from the one resolver that can answer (pgw#1122).
 
-    This used to decode ``cell_read_endpoint_id``/``cell_read_org_id`` out of
+    This used to decode ``compiled_graph_read_endpoint_id``/``compiled_graph_read_org_id`` out of
     ``cfg.worker_jwt()`` — *this process's* credential. The gate is armed at
     HelloAck inside the COMPUTE CHILD, which holds no credential by
     construction (pgw#763 delta 1), so both claims were ``""`` on every real
-    serving pod and every org-tier cell was refused ``publisher_untrusted``
+    serving pod and every org-tier compiled graph was refused ``publisher_untrusted``
     after a successful resolve and materialize. Measured on three pods,
     2026-08-11; the pod then failed its function, was reaped
     ``state_blocked_idle``, and a replacement was bought twice.
@@ -240,28 +240,28 @@ def needs_viewer_identity(receipt: Receipt) -> bool:
 
     One spelling, two readers: :func:`refuse_untrusted_publisher` opens with
     it, and the caller asks it BEFORE resolving an identity — a platform-tier
-    cell is adoptable by any pod, so demanding an identity to arm one would
-    turn a resolver outage into a refusal of the one cell class that never
+    compiled graph is adoptable by any pod, so demanding an identity to arm one would
+    turn a resolver outage into a refusal of the one compiled graph class that never
     needed a resolver.
     """
-    return receipt.publisher_tier != CELL_PUBLISHER_TIER_PLATFORM
+    return receipt.publisher_tier != COMPILED_GRAPH_PUBLISHER_TIER_PLATFORM
 
 
 def refuse_untrusted_publisher(
     receipt: Receipt, self_endpoint_id: str, self_org_id: str = "",
 ) -> None:
-    """Raise unless this pod may adopt ``receipt``'s cell (th#1657).
+    """Raise unless this pod may adopt ``receipt``'s compiled graph (th#1657).
 
-    THE RULE: a cell must have come from THIS endpoint, from THIS pod's OWN ORG,
+    THE RULE: a compiled graph must have come from THIS endpoint, from THIS pod's OWN ORG,
     or from a publisher the platform vouches for.
 
     Paul's ruling is literally endpoint-scoped (*"must have come from endpoint-A
     itself, or from a publisher that is us or a trusted party"*) and pgw#1008
     implemented exactly that — because the worker had no way to name its own
-    org. th#1680 stamps ``cell_read_org_id`` on the grant, and the ORG is the
+    org. th#1680 stamps ``compiled_graph_read_org_id`` on the grant, and the ORG is the
     rule the hub's listing has applied all along
-    (``authz.CellAdoptable``). Until now the two layers disagreed: the listing
-    showed an org its own cell from a sibling endpoint, and this function
+    (``authz.CompiledGraphAdoptable``). Until now the two layers disagreed: the listing
+    showed an org its own compiled graph from a sibling endpoint, and this function
     refused it, costing a wasted download plus a full cold mint and emitting a
     ``publisher_untrusted`` that reads like an attack when it is the platform
     disagreeing with itself.
@@ -269,15 +269,15 @@ def refuse_untrusted_publisher(
     THREAT: cross-tenant native-code execution. The artifact is a ``.so`` this
     process is about to ``dlopen``. Nothing else prevents it — the digest proves
     the bytes are the ones the hub signed, not that the hub meant them for US;
-    the cell key proves nothing at all, because the hub cannot verify
+    the compiled graph key proves nothing at all, because the hub cannot verify
     artifact-to-graph correspondence without recompiling; and the hub's own
     listing filter (th#1657 hub half) is the only thing standing between us and
-    another org's cell on the ONE path that goes through a listing. This runs on
+    another org's compiled graph on the ONE path that goes through a listing. This runs on
     every path, and it is the last check before the load.
 
     THE FIELD WAS ALREADY HERE. ``owning_endpoint_id`` has ridden the signed
     receipt since pgw#709 and was decoded into ``Receipt`` and then compared
-    against nothing — so a valid signature was read as "this cell is genuine"
+    against nothing — so a valid signature was read as "this compiled graph is genuine"
     and armed on whatever pod happened to fetch it. We were paying for the
     attestation and discarding the field that made it a trust decision.
     """
@@ -294,7 +294,7 @@ def refuse_untrusted_publisher(
         return
     # Same org (th#1680). BOTH sides must be non-empty: an empty-equals-empty
     # match is the vacuous-guard shape this module already refuses elsewhere —
-    # two cells neither of which can be attributed must not match each other.
+    # two compiled graphs neither of which can be attributed must not match each other.
     if owner_org and my_org and owner_org == my_org:
         return
 
@@ -306,11 +306,11 @@ def refuse_untrusted_publisher(
     if not mine and not my_org:
         raise ReceiptError(
             "publisher_untrusted",
-            "this pod cannot name its own endpoint or org (no cell_read_* claim "
-            "on the worker credential), so it may adopt platform-tier cells only")
+            "this pod cannot name its own endpoint or org (no compiled_graph_read_* claim "
+            "on the worker credential), so it may adopt platform-tier compiled_graphs only")
     raise ReceiptError(
         "publisher_untrusted",
-        f"cell was minted for endpoint {owner or '<unnamed>'} "
+        f"compiled_graph was minted for endpoint {owner or '<unnamed>'} "
         f"(org {owner_org or '<unnamed>'}) and this pod serves "
         f"{mine or '<unnamed>'} (org {my_org or '<unnamed>'})")
 
@@ -424,7 +424,7 @@ def verify_receipt_jws(jws: str, keys: Mapping[str, rsa.RSAPublicKey]) -> Receip
     return Receipt(
         version=version,
         family=str(payload.get("family") or ""),
-        cell_key=str(payload.get("cell_key") or ""),
+        compiled_graph_key=str(payload.get("compiled_graph_key") or ""),
         owning_endpoint_id=str(payload.get("owning_endpoint_id") or ""),
         publisher_tier=_normalize_publisher_tier(payload.get("publisher_tier")),
         publisher_org_id=str(payload.get("publisher_org_id") or ""),
@@ -483,20 +483,20 @@ def _kid_of(jws: str) -> str:
     return str(header.get("kid") or "").strip() if isinstance(header, dict) else ""
 
 
-def _fetch_receipt_jws(cfg: _Config, digest: str, cell_key: str) -> str:
+def _fetch_receipt_jws(cfg: _Config, digest: str, compiled_graph_key: str) -> str:
     """Fetch the signed receipt for one artifact.
 
     The lookup key is the ALGORITHM-TAGGED digest — never bare hex, which
     silently acquires whatever algorithm the reader assumed. There is no
     per-algorithm 404-and-retry chain and never was: a silent downgrade would
-    make "which digest armed this cell?" unanswerable, and th#715 says a 404
+    make "which digest armed this compiled graph?" unanswerable, and th#715 says a 404
     from a proxy is not a 404 from the hub.
 
     pgw#763 delta 1: parent-mediated when the split is on (the child holds no
     worker JWT); the identical GET otherwise.
     """
     params: Dict[str, Any] = {
-        "cell_key": cell_key,
+        "compiled_graph_key": compiled_graph_key,
         "artifact_digest": digest,
     }
     resp = broker.request(
@@ -510,7 +510,7 @@ def _fetch_receipt_jws(cfg: _Config, digest: str, cell_key: str) -> str:
     if resp.status_code == 404:
         raise ReceiptError(
             "receipt_not_found",
-            f"no hub receipt for {digest[:23]} key={cell_key}",
+            f"no hub receipt for {digest[:23]} key={compiled_graph_key}",
         )
     if resp.status_code != 200:
         raise ReceiptError("receipt_fetch_failed", f"{RECEIPT_PATH} -> {resp.status_code}")
@@ -535,7 +535,7 @@ def _fetch_revocations(cfg: _Config) -> Set[Tuple[str, str]]:
     if resp.status_code != 200:
         # Fail closed: an unreadable revocation list means the recall
         # channel is down — refusing costs one self-mint, trusting could
-        # arm a recalled cell.
+        # arm a recalled compiled graph.
         raise ReceiptError("revocations_unavailable", f"{REVOCATIONS_PATH} -> {resp.status_code}")
     try:
         body = resp.json()
@@ -544,7 +544,7 @@ def _fetch_revocations(cfg: _Config) -> Set[Tuple[str, str]]:
     out: Set[Tuple[str, str]] = set()
     for entry in body.get("revoked") or []:
         if isinstance(entry, dict):
-            key = str(entry.get("cell_key") or "").strip()
+            key = str(entry.get("compiled_graph_key") or "").strip()
             digest = str(entry.get("snapshot_digest") or "").strip()
             if key and digest:
                 out.add((key, digest))
@@ -579,7 +579,7 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
 
     Chain of trust: receipt signature (hub key via JWKS) -> local bytes
     (the receipt's OWN algorithm + integral size) -> embedded metadata
-    (inside the digested bytes) -> ``meta.cell_key == receipt.cell_key`` ->
+    (inside the digested bytes) -> ``meta.compiled_graph_key == receipt.compiled_graph_key`` ->
     **the PUBLISHER** (th#1657: platform tier, or this pod's own endpoint) ->
     the runtime's own computed key (enforced downstream by the th#883
     selection brain).
@@ -596,10 +596,10 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
 
     artifact = Path(artifact)
     meta = _embedded_meta(artifact)
-    meta_key = str(meta.get("cell_key") or "").strip()
+    meta_key = str(meta.get("compiled_graph_key") or "").strip()
     meta_family = str(meta.get("family") or "").strip()
     if not meta_key:
-        raise ReceiptError("artifact_unkeyed", f"{artifact.name} metadata has no cell_key")
+        raise ReceiptError("artifact_unkeyed", f"{artifact.name} metadata has no compiled_graph_key")
 
     local = artifact_digest(artifact)
     size = artifact.stat().st_size
@@ -619,10 +619,10 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
         raise ReceiptError(
             "receipt_size_mismatch",
             f"receipt={receipt.artifact_size_bytes} local={size}")
-    if receipt.cell_key != meta_key:
+    if receipt.compiled_graph_key != meta_key:
         raise ReceiptError(
             "receipt_key_mismatch",
-            f"receipt={receipt.cell_key} artifact={meta_key}")
+            f"receipt={receipt.compiled_graph_key} artifact={meta_key}")
     want_family = str(family or "").strip()
     if want_family and receipt.family != want_family:
         raise ReceiptError(
@@ -635,17 +635,17 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
     if not receipt.snapshot_digest:
         raise ReceiptError("receipt_unbound", "no snapshot_digest (derivation binding)")
 
-    if (receipt.cell_key, receipt.snapshot_digest) in _fetch_revocations(cfg):
+    if (receipt.compiled_graph_key, receipt.snapshot_digest) in _fetch_revocations(cfg):
         raise ReceiptError(
-            "cell_revoked",
-            f"key={receipt.cell_key} snapshot={receipt.snapshot_digest} is recalled")
+            "compiled_graph_revoked",
+            f"key={receipt.compiled_graph_key} snapshot={receipt.snapshot_digest} is recalled")
 
     # th#1657, LAST: who published this, and may we run it. Deliberately after
     # the signature — the tier is only meaningful once the claims are proven —
     # and deliberately before the return, because the caller's next act is to
-    # arm the cell and dlopen it.
+    # arm the compiled graph and dlopen it.
     if not needs_viewer_identity(receipt):
-        # A platform-tier cell is adoptable by every pod, so nothing here has
+        # A platform-tier compiled graph is adoptable by every pod, so nothing here has
         # to know who we are — and asking anyway would make a seam hiccup
         # refuse the one class that never needed an identity.
         refuse_untrusted_publisher(receipt, "", "")
@@ -654,7 +654,7 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
         viewer = _self_viewer()
     except worker_identity.IdentityUnavailable as exc:
         # pgw#1122: fail CLOSED, and say which failure this is. An unnamed pod
-        # may adopt platform-tier cells only — same outcome as before — but the
+        # may adopt platform-tier compiled graphs only — same outcome as before — but the
         # reason is now `identity_unavailable` (nobody could be asked) rather
         # than `publisher_untrusted` (we asked and the answer refuses). One is a
         # wiring defect on our side, the other is a trust decision; three pods'
@@ -662,7 +662,7 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
         raise ReceiptError(
             "identity_unavailable",
             f"this pod cannot be named by anything in reach ({exc}), so no "
-            f"org-tier cell can be shown to be adoptable here") from exc
+            f"org-tier compiled_graph can be shown to be adoptable here") from exc
     refuse_untrusted_publisher(receipt, viewer.endpoint_id, viewer.org_id)
 
     return receipt
@@ -674,7 +674,7 @@ def gate_delivered_artifact(artifact: Path, family: str) -> bool:
 
     Unconfigured (cozy-local, CLI, unit rigs): no-op True. Configured
     (fleet workers, armed at HelloAck): full verification; ANY failure
-    emits the typed ``cell_receipt_refused`` wire event and returns False —
+    emits the typed ``compiled_graph_receipt_refused`` wire event and returns False —
     the caller drops the delivered artifact and the ordinary miss policy
     (self-mint) takes over. Never raises; never kills serving.
     """
@@ -686,7 +686,7 @@ def gate_delivered_artifact(artifact: Path, family: str) -> bool:
         logger.error(
             "receipts: REFUSING delivered artifact %s (%s)", Path(artifact).name, exc)
         activity_mod.emit_event(
-            "cell_receipt_refused",
+            "compiled_graph_receipt_refused",
             f"family={family} artifact={Path(artifact).name}: {exc}",
             phase=exc.reason,
         )
@@ -696,7 +696,7 @@ def gate_delivered_artifact(artifact: Path, family: str) -> bool:
             "receipts: REFUSING delivered artifact %s (unexpected %s: %s)",
             Path(artifact).name, type(exc).__name__, exc)
         activity_mod.emit_event(
-            "cell_receipt_refused",
+            "compiled_graph_receipt_refused",
             f"family={family} artifact={Path(artifact).name}: "
             f"{type(exc).__name__}: {exc}",
             phase="internal_error",
@@ -704,14 +704,14 @@ def gate_delivered_artifact(artifact: Path, family: str) -> bool:
         return False
     logger.info(
         "receipts: verified %s (key=%s, kid-signed, snapshot=%s)",
-        Path(artifact).name, receipt.cell_key, receipt.snapshot_digest[:16])
+        Path(artifact).name, receipt.compiled_graph_key, receipt.snapshot_digest[:16])
     return True
 
 
 __all__ = [
     "ARTIFACT_DIGEST_ALGORITHM",
-    "CELL_PUBLISHER_TIER_ORG",
-    "CELL_PUBLISHER_TIER_PLATFORM",
+    "COMPILED_GRAPH_PUBLISHER_TIER_ORG",
+    "COMPILED_GRAPH_PUBLISHER_TIER_PLATFORM",
     "Receipt",
     "ReceiptError",
     "artifact_digest",

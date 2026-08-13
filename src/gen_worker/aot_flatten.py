@@ -77,7 +77,7 @@ class Leaf:
         This is the string the published contracts are keyed by — it rides
         each entry's ``range_digest``/``class_hash`` and therefore the
         ``graph`` axis — so it is fixed; pgw#994 adds the identity next to
-        it rather than renaming it on every published cell.
+        it rather than renaming it on every published compiled graph.
         """
         name = self.param
         for step in self.path:

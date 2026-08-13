@@ -1,19 +1,19 @@
-"""pgw#813 + pgw#815 — the two walls between the fleet and its first AOT cell.
+"""pgw#813 + pgw#815 — the two walls between the fleet and its first AOT compiled graph.
 
 **pgw#813** (measured, gen-worker 0.80.0, real L4, chaos, pod `149ku1h1pgjq7q`):
 
-    aot_cell_discovery  miss                     family=sdxl lane=w8a8-lora64
+    aot_compiled_graph_discovery  miss                     family=sdxl lane=w8a8-lora64
     self_mint_skipped   aot_requires_delegation  "out-of-process minting is
                         disabled and an AOTI export has no eager tier..."
     self_mint_started   dynamo                   ... armed an in-process capture
 
 Neither named cause was true on that pod — no env was set. The operative
-refusal was `fleet_cells.delegatable` reading `mandatory_serving(pipe)` as
+refusal was `fleet_compiled_graphs.delegatable` reading `mandatory_serving(pipe)` as
 "cannot serve eager". It cannot: `_Fp8ScaledLinear.forward` is a complete
 `torch._scaled_mm` forward, the fleet's cold-boot ladder measures w8a8 eager
 serving, and pgw#672/#673 already made mandatory lanes DEGRADE to eager loudly
 instead of raising. With the plain lane held on dynamo by #730, that left NO
-lane on which a serving pod could mint an AOT cell — which is why
+lane on which a serving pod could mint an AOT compiled graph — which is why
 `aot_mint_phases` has zero rows platform-wide.
 
 A second, independent blocker sat one layer up: `_eager_first_eligible`
@@ -23,7 +23,7 @@ mint failed the test and was discarded — pgw#784's out-of-process route could
 not run on ANY lane, quantized or not.
 
 **pgw#815** (same pod): a 24m22s mint walked `seal_publish -> finalize
-completed` and produced zero cells, zero receipts, no local arm, no
+completed` and produced zero compiled graphs, zero receipts, no local arm, no
 `self_mint_publish`, no abort, no error. Three of those are structural and are
 pinned here: no success event exists at any publish terminus, `publish_self_mint`
 and `withhold_self_mint_publish` both return BARE when nothing was packed, and
@@ -41,14 +41,14 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
-from gen_worker import compile_cache, fleet_cells, mint_delegate
+from gen_worker import compile_cache, fleet_compiled_graphs, mint_delegate
 from gen_worker.api.decorators import Compile, Dim, GraphClass, Input
 from gen_worker.api.export_contract import (
     register_export_declaration,
     reset_export_declarations,
 )
 from gen_worker import config as gw_config
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 
 FAMILY = "sdxl"
 
@@ -92,7 +92,7 @@ class _Publisher:
         self.release.wait(timeout=30)
         if self.fail is not None:
             raise self.fail
-        key = str(meta.get("cell_key") or "")
+        key = str(meta.get("compiled_graph_key") or "")
         self.store[key] = {
             "family": family,
             "bytes": Path(artifact).stat().st_size,
@@ -131,7 +131,7 @@ def _events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
               duration_ms: int = 0, **_kw) -> None:
         seen.append((kind, phase, detail))
 
-    monkeypatch.setattr(fleet_cells.activity_mod, "emit_event", _sink)
+    monkeypatch.setattr(fleet_compiled_graphs.activity_mod, "emit_event", _sink)
     monkeypatch.setattr(mint_delegate.activity_mod, "emit_event", _sink)
     return seen
 
@@ -143,7 +143,7 @@ def _phases(events: List[Tuple[str, str, str]], kind: str) -> List[str]:
 @pytest.fixture()
 def _w8a8_miss(monkeypatch: pytest.MonkeyPatch) -> Any:
     """The measured pod, reduced: a real w8a8 lane, a
-    resolvable compile target, CUDA + toolchain present, and no cell.
+    resolvable compile target, CUDA + toolchain present, and no compiled graph.
 
     `mandatory_serving` is deliberately NOT stubbed — the w8a8 weight-lane
     stamp really does classify this pipe as mandatory, and that is the whole
@@ -152,26 +152,26 @@ def _w8a8_miss(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.delenv("GEN_WORKER_EAGER_FIRST_BOOT", raising=False)
     gw_config.reload_for_test()
     monkeypatch.setattr(
-        fleet_cells.provision, "enable_compiled",
-        lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_cell"))
-    monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda p, c, **_kw: True)
-    monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
-    monkeypatch.setattr(fleet_cells.cc, "apply_lora_execution_lane", lambda p, b, **_kw: None)
-    monkeypatch.setattr(fleet_cells.cc, "drop_lora_execution_lane", lambda p: None)
-    monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
-    monkeypatch.setattr(fleet_cells, "_PENDING", {})
+        fleet_compiled_graphs.provision, "enable_compiled",
+        lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_compiled_graph"))
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "has_compile_target", lambda p, c, **_kw: True)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "toolchain_present", lambda: True)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "apply_lora_execution_lane", lambda p, b, **_kw: None)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "drop_lora_execution_lane", lambda p: None)
+    monkeypatch.setattr(fleet_compiled_graphs, "_cuda_ready", lambda: True)
+    monkeypatch.setattr(fleet_compiled_graphs, "_PENDING", {})
     monkeypatch.setattr(
-        fleet_cells, "arm_identity",
+        fleet_compiled_graphs, "arm_identity",
         lambda *a, **k: type("_A", (), {
             "token": "arm1-" + "a" * 56,
             "facts_dict": lambda self: {}})())
     monkeypatch.setattr(
-        fleet_cells.cc, "arm_jit_intake", lambda p, c, **_kw: None)
-    # THE lane: sdxl's mixed fp8 checkpoint stamps `w8a8-lora64` (pgw#686 cell
+        fleet_compiled_graphs.cc, "arm_jit_intake", lambda p, c, **_kw: None)
+    # THE lane: sdxl's mixed fp8 checkpoint stamps `w8a8-lora64` (pgw#686 compiled graph
     # identity), which is what `mandatory_serving` falls back to without hub
     # lane evidence — exactly the measured pod's state.
     monkeypatch.setattr(
-        fleet_cells.loading, "pipeline_weight_lane",
+        fleet_compiled_graphs.loading, "pipeline_weight_lane",
         lambda pipe: "w8a8-lora64")
     # The torch-VERSION floor for the lifted-LoRA fork is not what these tests
     # measure and torch is not importable on a CPU dev box.
@@ -182,7 +182,7 @@ def _w8a8_miss(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 
 def _arm(**kw: Any) -> Any:
-    return fleet_cells.enable_compiled(
+    return fleet_compiled_graphs.enable_compiled(
         _Pipe(), _Cfg(), publisher=_Publisher(), **kw)  # type: ignore[arg-type]
 
 
@@ -219,7 +219,7 @@ def test_the_w8a8_execution_lane_is_delegatable(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(
         loading_mod, "pipeline_weight_lane", lambda p: "w8a8-lora64")
-    assert fleet_cells.delegation_refusal(_Pipe(), _Cfg()) == ""
+    assert fleet_compiled_graphs.delegation_refusal(_Pipe(), _Cfg()) == ""
 
 
 def test_an_armed_non_eager_backend_still_refuses(
@@ -231,15 +231,15 @@ def test_an_armed_non_eager_backend_still_refuses(
 
     monkeypatch.setattr(aot_serve, "is_armed", lambda p: True)
     assert compile_cache.eager_tier_available(_Pipe()) is False
-    assert (fleet_cells.delegation_refusal(_Pipe(), _Cfg())
-            == fleet_cells.REFUSAL_NO_EAGER_TIER)
+    assert (fleet_compiled_graphs.delegation_refusal(_Pipe(), _Cfg())
+            == fleet_compiled_graphs.REFUSAL_NO_EAGER_TIER)
 
 
 def test_a_w8a8_miss_mints_AOT_and_not_dynamo(
     _w8a8_miss: None, _events: List[Tuple[str, str, str]],
 ) -> None:
     """THE issue. RED at HEAD: `self_mint_skipped aot_requires_delegation`
-    followed by a dynamo cell AOT discovery can never adopt."""
+    followed by a dynamo compiled graph AOT discovery can never adopt."""
     register_export_declaration(_declaration())
 
     outcome = _arm()
@@ -265,15 +265,15 @@ def test_delegation_declines_name_their_TRUE_cause(
 
     # pgw#1010: the OPERATOR arm of this test drove
     # `GEN_WORKER_MINT_IN_PROCESS=1`. The env and the shape it selected are
-    # deleted (in-process minting existed only to pack a dynamo cell), so the
+    # deleted (in-process minting existed only to pack a dynamo compiled graph), so the
     # caller-forced seam that replaces it is the one asserted here — the same
     # phase, reached the way a caller can still reach it.
     with pytest.raises(compile_cache.CompiledExecutionLaneUnavailableError):
-        # pgw#1010: this rig's lane is w8a8, which serves only from a cell — so
+        # pgw#1010: this rig's lane is w8a8, which serves only from a compiled graph — so
         # the decline is followed by the typed fail-closed rather than by a JIT
         # intake arm. The decline still NAMES ITS CAUSE first, which is the
         # pgw#813 claim under test.
-        fleet_cells.enable_compiled(
+        fleet_compiled_graphs.enable_compiled(
             _Pipe(), _Cfg(), publisher=_Publisher(), delegate=False)  # type: ignore[arg-type]
     assert "aot_mint_forced_in_process" in _phases(_events, "self_mint_skipped")
 
@@ -285,18 +285,18 @@ def test_delegation_declines_name_their_TRUE_cause(
     # refusal names its TRUE cause, which the operator arm above and the
     # pipeline arm below still exercise.
     _events.clear()
-    fleet_cells._PENDING.clear()
+    fleet_compiled_graphs._PENDING.clear()
 
     # pgw#846: `Compile.regional` is the dynamo/JIT per-block knob (ie#381)
     # and the AOT mint ignores it — regional EXPORT is retired, the recipe is
     # always whole-graph. A family that declares it must neither decline
     # delegation nor change the mint shape.
     _events.clear()
-    fleet_cells._PENDING.clear()
-    fleet_cells.enable_compiled(
+    fleet_compiled_graphs._PENDING.clear()
+    fleet_compiled_graphs.enable_compiled(
         _Pipe(), _Cfg(regional=True), publisher=_Publisher())  # type: ignore[arg-type]
     assert "aot_regional_targets" not in _phases(_events, "self_mint_skipped")
-    assert fleet_cells.delegation_refusal(_Pipe(), _Cfg(regional=True)) == ""
+    assert fleet_compiled_graphs.delegation_refusal(_Pipe(), _Cfg(regional=True)) == ""
 
 
 def test_mint_delegate_names_its_own_refusals(
@@ -361,10 +361,10 @@ def test_eager_first_admits_a_DELEGATED_pending_with_no_router(
     pipe = _Pipe()
     cfg = _Cfg()
     spec = type("_S", (), {
-        "cls": None, "compile_cell": lambda self: cfg, "models": {},
+        "cls": None, "compile_compiled_graph": lambda self: cfg, "models": {},
         "name": "generate",
     })()
-    pending = fleet_cells.PendingSelfMint(
+    pending = fleet_compiled_graphs.PendingSelfMint(
         family=FAMILY, arm_token="ek1-" + "a" * 56, ref="r", cfg=cfg,
         target=tmp_path / "c.tar.gz", mint_root=tmp_path, publisher=None, delegated=True,)
     inj = _Inj(compile_objects=[_Candidate(pipe)],
@@ -386,10 +386,10 @@ def test_eager_first_still_requires_a_router_for_an_IN_PROCESS_capture(
     pipe = _Pipe()
     cfg = _Cfg()
     spec = type("_S", (), {
-        "cls": None, "compile_cell": lambda self: cfg, "models": {},
+        "cls": None, "compile_compiled_graph": lambda self: cfg, "models": {},
         "name": "generate",
     })()
-    pending = fleet_cells.PendingSelfMint(
+    pending = fleet_compiled_graphs.PendingSelfMint(
         family=FAMILY, arm_token="ek1-" + "b" * 56, ref="r", cfg=cfg,
         target=tmp_path / "c.tar.gz", mint_root=tmp_path, publisher=None, delegated=False)
     inj = _Inj(compile_objects=[_Candidate(pipe)],
@@ -406,16 +406,16 @@ def test_eager_first_still_requires_a_router_for_an_IN_PROCESS_capture(
 def _finalized_pending(tmp_path: Path, publisher: Any) -> Any:
     """A pending that has been packed — a real file, a real key, real bytes."""
     key = "ek1-" + "c" * 56
-    target = tmp_path / "cell.tar.gz"
+    target = tmp_path / "compiled_graph.tar.gz"
     target.write_bytes(b"x" * 4096)
-    pending = fleet_cells.PendingSelfMint(
+    pending = fleet_compiled_graphs.PendingSelfMint(
         family=FAMILY, arm_token=key, ref=f"root/family-{FAMILY}#{key}",
         cfg=_Cfg(), target=target, mint_root=tmp_path / "root", publisher=publisher)
     pending.mint_root.mkdir(parents=True, exist_ok=True)
-    pending._state["minted"] = fleet_cells.SelfMint(
-        family=FAMILY, cell_key=key, ref=pending.ref,
+    pending._state["minted"] = fleet_compiled_graphs.SelfMint(
+        family=FAMILY, compiled_graph_key=key, ref=pending.ref,
         snapshot_digest="blake3:deadbeef", artifact=target)
-    pending._state["meta"] = {"cell_key": key, "family": FAMILY}
+    pending._state["meta"] = {"compiled_graph_key": key, "family": FAMILY}
     return pending
 
 
@@ -429,14 +429,14 @@ def test_a_SUCCESSFUL_publish_is_a_typed_event_and_reaches_the_store(
     publisher = _Publisher()
     pending = _finalized_pending(tmp_path, publisher)
 
-    fleet_cells.publish_self_mint(pending)
+    fleet_compiled_graphs.publish_self_mint(pending)
     _join_publishes()
 
-    assert pending.arm_token in publisher.store, "the cell never reached the store"
+    assert pending.arm_token in publisher.store, "the compiled_graph never reached the store"
     phases = _phases(_events, "self_mint_publish")
     assert "started" in phases, "an upload beginning must be on the wire"
     assert "published" in phases, "a successful publish must be on the wire"
-    assert fleet_cells.terminus_of(pending) == fleet_cells.TERMINUS_PUBLISHING
+    assert fleet_compiled_graphs.terminus_of(pending) == fleet_compiled_graphs.TERMINUS_PUBLISHING
 
 
 def test_a_publish_in_flight_is_an_observable_fact(
@@ -449,12 +449,12 @@ def test_a_publish_in_flight_is_an_observable_fact(
     publisher.release.clear()
     pending = _finalized_pending(tmp_path, publisher)
 
-    fleet_cells.publish_self_mint(pending)
+    fleet_compiled_graphs.publish_self_mint(pending)
     assert publisher.started.wait(timeout=10)
-    assert pending.arm_token in fleet_cells.publishes_in_flight()
+    assert pending.arm_token in fleet_compiled_graphs.publishes_in_flight()
     publisher.release.set()
     _join_publishes()
-    assert pending.arm_token not in fleet_cells.publishes_in_flight()
+    assert pending.arm_token not in fleet_compiled_graphs.publishes_in_flight()
 
 
 def test_a_publish_gate_with_nothing_packed_is_NAMED(
@@ -463,11 +463,11 @@ def test_a_publish_gate_with_nothing_packed_is_NAMED(
     """RED at HEAD: a bare `return`. The executor's publish gate runs only for
     pendings it believes it packed, so reaching it with nothing packed is a
     real defect and must not be a no-op."""
-    pending = fleet_cells.PendingSelfMint(
+    pending = fleet_compiled_graphs.PendingSelfMint(
         family=FAMILY, arm_token="ek1-" + "d" * 56, ref="r", cfg=_Cfg(),
         target=tmp_path / "c.tar.gz", mint_root=tmp_path / "root2", publisher=_Publisher())
 
-    fleet_cells.publish_self_mint(pending)
+    fleet_compiled_graphs.publish_self_mint(pending)
 
     assert "nothing_to_publish" in _phases(
         _events, "self_mint_publish_withheld")
@@ -476,15 +476,15 @@ def test_a_publish_gate_with_nothing_packed_is_NAMED(
 def test_a_withhold_with_nothing_packed_is_NAMED(
     tmp_path: Path, _events: List[Tuple[str, str, str]],
 ) -> None:
-    pending = fleet_cells.PendingSelfMint(
+    pending = fleet_compiled_graphs.PendingSelfMint(
         family=FAMILY, arm_token="ek1-" + "e" * 56, ref="r", cfg=_Cfg(),
         target=tmp_path / "c.tar.gz", mint_root=tmp_path / "root3", publisher=_Publisher())
 
-    fleet_cells.withhold_self_mint_publish(pending, "sibling never exercised")
+    fleet_compiled_graphs.withhold_self_mint_publish(pending, "sibling never exercised")
 
     assert "nothing_to_publish" in _phases(
         _events, "self_mint_publish_withheld")
-    assert fleet_cells.terminus_of(pending) == fleet_cells.TERMINUS_ABANDONED
+    assert fleet_compiled_graphs.terminus_of(pending) == fleet_compiled_graphs.TERMINUS_ABANDONED
 
 
 def test_a_failed_publish_still_names_the_key(
@@ -493,12 +493,12 @@ def test_a_failed_publish_still_names_the_key(
     publisher = _Publisher(fail=RuntimeError("hub 502"))
     pending = _finalized_pending(tmp_path, publisher)
 
-    fleet_cells.publish_self_mint(pending)
+    fleet_compiled_graphs.publish_self_mint(pending)
     _join_publishes()
 
     failures = [d for k, p, d in _events if k == "self_mint_publish_failed"]
     assert failures and pending.arm_token in failures[0]
-    assert pending.arm_token not in fleet_cells.publishes_in_flight()
+    assert pending.arm_token not in fleet_compiled_graphs.publishes_in_flight()
 
 
 def test_a_boot_that_resolves_NOTHING_confesses(
@@ -511,7 +511,7 @@ def test_a_boot_that_resolves_NOTHING_confesses(
     said nothing at all."""
     seen: List[Tuple[str, str, str]] = []
     monkeypatch.setattr(
-        fleet_cells.activity_mod, "emit_event",
+        fleet_compiled_graphs.activity_mod, "emit_event",
         lambda kind, detail, phase="", duration_ms=0, **_kw: seen.append(
             (kind, phase, detail)))
     import gen_worker.executor as executor_mod
@@ -523,7 +523,7 @@ def test_a_boot_that_resolves_NOTHING_confesses(
 
     ex = _executor(tmp_path)
     spec = type("_S", (), {"name": "generate"})()
-    pending = fleet_cells.PendingSelfMint(
+    pending = fleet_compiled_graphs.PendingSelfMint(
         family=FAMILY, arm_token="ek1-" + "f" * 56, ref="r", cfg=_Cfg(),
         target=tmp_path / "c.tar.gz", mint_root=tmp_path / "root4", publisher=_Publisher())
     pending.mint_root.mkdir(parents=True, exist_ok=True)
@@ -533,14 +533,14 @@ def test_a_boot_that_resolves_NOTHING_confesses(
     # the silence for the defect this test exists about...
     ex._assert_mint_termini(spec, [pending])  # type: ignore[arg-type]
     assert seen == []
-    assert fleet_cells.terminus_of(pending) == ""
+    assert fleet_compiled_graphs.terminus_of(pending) == ""
 
     # ...and the DRIVER's own sweep, which owns it, still confesses.
     ex._assert_mint_termini(
         spec, [pending], driver_owns_delegated=False)  # type: ignore[arg-type]
 
     assert ("self_mint_abort", "no_terminus") in [(k, p) for k, p, _ in seen]
-    assert fleet_cells.terminus_of(pending) == fleet_cells.TERMINUS_ABANDONED
+    assert fleet_compiled_graphs.terminus_of(pending) == fleet_compiled_graphs.TERMINUS_ABANDONED
 
 
 def test_a_resolved_mint_does_not_trip_the_assertion(
@@ -548,7 +548,7 @@ def test_a_resolved_mint_does_not_trip_the_assertion(
 ) -> None:
     publisher = _Publisher()
     pending = _finalized_pending(tmp_path, publisher)
-    fleet_cells.publish_self_mint(pending)
+    fleet_compiled_graphs.publish_self_mint(pending)
     _join_publishes()
 
     ex = _executor(tmp_path)
@@ -563,8 +563,8 @@ def _join_publishes(deadline_s: float = 30.0) -> None:
     """Wait on the publish threads themselves — never a fixed sleep."""
     end = time.monotonic() + deadline_s
     for t in threading.enumerate():
-        if t.name != "cell-publish":
+        if t.name != "compiled_graph-publish":
             continue
         t.join(timeout=max(0.0, end - time.monotonic()))
     assert not [t for t in threading.enumerate()
-                if t.name == "cell-publish" and t.is_alive()]
+                if t.name == "compiled_graph-publish" and t.is_alive()]

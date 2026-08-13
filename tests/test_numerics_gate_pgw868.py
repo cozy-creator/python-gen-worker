@@ -1,20 +1,20 @@
 """pgw#868 — THE NUMERICS GATE. Everything that runs without a card.
 
 The cross-cutting requirement of pgw#868: *everything this program built
-refuses a cell for being UNUSABLE; nothing refused one for being WRONG.*
+refuses a compiled graph for being UNUSABLE; nothing refused one for being WRONG.*
 
 The trap this file exists to keep shut, stated once: `numerics_ladder.gate()`
 opens `if comparison is None: return None`. Wiring the call without producing a
-measurement passes EVERY cell, always, while looking correct in the diff and in
+measurement passes EVERY compiled graph, always, while looking correct in the diff and in
 the call graph. So the tests that matter here are not "is `gate` called" — they
 are:
 
-* a cell BELOW its declared floor does not arm, and the pipeline is left eager;
-* a cell BETWEEN floor and warn arms *with the warning on the wire*;
-* a cell that cannot be MEASURED does not arm either — "nobody could ask" is
+* a compiled graph BELOW its declared floor does not arm, and the pipeline is left eager;
+* a compiled graph BETWEEN floor and warn arms *with the warning on the wire*;
+* a compiled graph that cannot be MEASURED does not arm either — "nobody could ask" is
   not "it passed";
 * and the verdict is bisectable to ONE named axis (one entry x one shape row x
-  one lane), because a whole-cell fail nobody can split is the artifact that
+  one lane), because a whole-compiled graph fail nobody can split is the artifact that
   produced three wrong confident diagnoses in this program.
 
 Everything below drives the REAL arm path — `provision.arm_aot` ->
@@ -24,7 +24,7 @@ mint's own input builder. The ONE substitution is `_load_package`: an AOTI
 `.so` needs a GPU, and it is the only piece deferred to the pod. The subject it
 returns is a CALIBRATED blend of the eager output at an exact cosine, which is
 what lets a test name the rung it is aiming at; the real numbers come from a
-pod, and no test here may be cited as evidence about a real cell's numerics.
+pod, and no test here may be cited as evidence about a real compiled graph's numerics.
 """
 
 from __future__ import annotations
@@ -38,12 +38,12 @@ from gen_worker import aot_serve as aot
 from gen_worker import numerics_probe
 from gen_worker.api.export_contract import reset_export_declarations
 
-# pgw#1152: the rig this file grew moved to `tests/harness/exported_cell.py`.
+# pgw#1152: the rig this file grew moved to `tests/harness/exported_compiled_graph.py`.
 # Three other modules already imported it from here as `rig868`, and the
 # adopt-path rig needs the same packed artifact — a shared vehicle belongs
 # where shared vehicles live. Nothing about it changed; the names below are
 # the same objects.
-from harness.exported_cell import (  # noqa: F401 — `declared`/`events` are fixtures
+from harness.exported_compiled_graph import (  # noqa: F401 — `declared`/`events` are fixtures
     FAMILY, FLOOR, ROWS, RUNTIME, TARGET, WARN,
     ProbeDenoiser, ProbePackage, ProbePipeline,
     arm, artifact, blend, declaration, declared, entry_name, events,
@@ -52,18 +52,18 @@ from harness.exported_cell import (  # noqa: F401 — `declared`/`events` are fi
 
 
 # ---------------------------------------------------------------------------
-# THE RED: a cell below its declared floor must not serve
+# THE RED: a compiled graph below its declared floor must not serve
 # ---------------------------------------------------------------------------
 
 
-def test_a_cell_below_its_declared_floor_REFUSES_TO_ARM(
+def test_a_compiled_graph_below_its_declared_floor_REFUSES_TO_ARM(
         tmp_path, monkeypatch, declared, events):
-    """The headline. Before this gate existed, this exact cell ARMED.
+    """The headline. Before this gate existed, this exact compiled graph ARMED.
 
     RED PROOF (recorded rather than asserted, because it is a property of the
-    absent call site): with the `gate_cell_numerics(...)` call removed from
+    absent call site): with the `gate_compiled_graph_numerics(...)` call removed from
     `provision.arm_aot`, this test fails on its first assertion — `arm_aot`
-    returns True and the 0.99-cosine cell serves every subsequent request.
+    returns True and the 0.99-cosine compiled graph serves every subsequent request.
     """
     packages = {entry_name(h, w): ProbePackage(cosine=0.99) for h, w in ROWS}
     pipeline, module, outcomes = arm(tmp_path, monkeypatch, declared, packages)
@@ -73,7 +73,7 @@ def test_a_cell_below_its_declared_floor_REFUSES_TO_ARM(
     # now a CONSEQUENCE of every entry refusing rather than a rule that one
     # refusal condemns the rest.
     assert [o.armed for o in outcomes] == [False, False], (
-        "a cell that lost 1% of the output's direction armed")
+        "a compiled_graph that lost 1% of the output's direction armed")
     assert aot.is_armed(pipeline) is False
     assert aot.armed_entries(pipeline) == {}
     assert isinstance(module.forward(torch.zeros(8, 8), torch.tensor(1.0)),
@@ -88,7 +88,7 @@ def test_a_cell_below_its_declared_floor_REFUSES_TO_ARM(
     assert "is not published" in outcomes[0].detail
 
     rows = numerics_rows(events)
-    assert rows, "a refused cell said nothing on the wire"
+    assert rows, "a refused compiled_graph said nothing on the wire"
     detail, phase = rows[-1]
     assert phase == "refused"
     # The verdict carries its inputs: the floor, its source, and the AXIS.
@@ -104,15 +104,15 @@ def test_the_gray_band_CONFESSES_AND_REFUSES_TO_PUBLISH(
     activity records — but since §4.32 it does not SHIP.
 
     pgw#1141 moved this gate to the minting pod and made it strict: identical
-    or refuse. A degraded cell is one an adopter can never re-check (adoption
+    or refuse. A degraded compiled graph is one an adopter can never re-check (adoption
     runs no quality gate at all), so publishing it would export an unmeasured
     degradation to every pod that pulls the key. Before that ruling this exact
-    cell armed and shipped."""
+    compiled graph armed and shipped."""
     packages = {entry_name(h, w): ProbePackage(cosine=0.997) for h, w in ROWS}
     pipeline, _module, outcomes = arm(tmp_path, monkeypatch, declared, packages)
 
     assert not any(o.armed for o in outcomes), (
-        "a gray-band cell was published to the fleet")
+        "a gray-band compiled_graph was published to the fleet")
     assert aot.is_armed(pipeline) is False
     rows = numerics_rows(events)
     # One row per ENTRY, each on its own single axis: the gate runs at the
@@ -123,7 +123,7 @@ def test_the_gray_band_CONFESSES_AND_REFUSES_TO_PUBLISH(
     assert "axes=1/1" in detail
 
 
-def test_a_faithful_cell_arms_AND_THE_PASS_IS_ANNOUNCED(
+def test_a_faithful_compiled_graph_arms_AND_THE_PASS_IS_ANNOUNCED(
         tmp_path, monkeypatch, declared, events):
     """A silent pass is indistinguishable from a gate that never ran, which is
     this program's signature failure. So the pass is a hub row too, carrying
@@ -147,19 +147,19 @@ def test_a_faithful_cell_arms_AND_THE_PASS_IS_ANNOUNCED(
 
 
 # ---------------------------------------------------------------------------
-# fail-closed: an unmeasurable cell is NOT a passing cell
+# fail-closed: an unmeasurable compiled graph is NOT a passing compiled graph
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("package,reason", [
-    (ProbePackage(raises="dlopen: undefined symbol"), "cell_forward_failed"),
+    (ProbePackage(raises="dlopen: undefined symbol"), "compiled_graph_forward_failed"),
     (ProbePackage(drop_output=True), "output_structure_differs"),
 ])
-def test_a_cell_that_cannot_be_MEASURED_does_not_arm(
+def test_a_compiled_graph_that_cannot_be_MEASURED_does_not_arm(
         tmp_path, monkeypatch, declared, events, package, reason):
     """"Nobody could ask" must never collapse into "it passed". Staying eager
     is the ordinary miss policy of every other adopt gate, so the cost of a
-    probe defect is an un-armed cell — never a silently degraded one."""
+    probe defect is an un-armed compiled graph — never a silently degraded one."""
     packages = {entry_name(h, w): package for h, w in ROWS}
     pipeline, _module, outcomes = arm(tmp_path, monkeypatch, declared, packages)
 
@@ -189,28 +189,28 @@ def test_an_undeclared_family_cannot_be_probed_AND_THEREFORE_CANNOT_ARM(
 def test_the_report_cannot_report_a_pass_it_did_not_take():
     """The structural guard against the trap, asserted on the type itself.
 
-    `CellNumerics.measured` is the single predicate the arm consults, and it
+    `CompiledGraphNumerics.measured` is the single predicate the arm consults, and it
     must be False for every shape of partial or absent evidence — an empty
     report, a report short of its own axis count, and a report whose axes
     errored. If this ever returns True for one of these, the gate is passing
-    cells nobody measured.
+    compiled graphs nobody measured.
 
     pgw#1176 KEPT this row and narrowed what it guards. The all-axes-of-the-
-    CELL rule is gone (one unmeasurable class must not condemn 35 measured
+    COMPILED GRAPH rule is gone (one unmeasurable class must not condemn 35 measured
     ones); "absent evidence is never a pass" is the part that was always the
     point, and it is what these three shapes assert.
     """
-    from gen_worker.numerics_probe import AxisVerdict, CellNumerics, ProbeAxis
+    from gen_worker.numerics_probe import AxisVerdict, CompiledGraphNumerics, ProbeAxis
 
     thresholds = numerics_probe.numerics_ladder.DEFAULT_THRESHOLDS
     axis = ProbeAxis(entry="e", target=TARGET)
-    empty = CellNumerics(FAMILY, "k", thresholds, "declared", (), 2)
+    empty = CompiledGraphNumerics(FAMILY, "k", thresholds, "declared", (), 2)
     assert empty.measured is False
     assert empty.comparison() is None
 
-    errored = CellNumerics(
+    errored = CompiledGraphNumerics(
         FAMILY, "k", thresholds, "declared",
-        (AxisVerdict(axis=axis, reason="cell_forward_failed"),), 1)
+        (AxisVerdict(axis=axis, reason="compiled_graph_forward_failed"),), 1)
     assert errored.measured is False
     assert errored.comparison() is None
 
@@ -258,7 +258,7 @@ def test_the_verdict_is_bisectable_to_ONE_named_axis(
 
 def test_an_axis_names_its_entry_row_execution_lane_and_seed_and_reproduces():
     """Every verdict carries its inputs. The seed is DERIVED from the axis, so
-    two rows of one cell are never fed the same latent and any reader can
+    two rows of one compiled graph are never fed the same latent and any reader can
     rebuild the exact feed."""
     from gen_worker.numerics_probe import ProbeAxis, axes_from_meta
 
@@ -281,7 +281,7 @@ def test_the_probe_does_not_disturb_the_serving_RNG(
         tmp_path, monkeypatch, declared, events):
     """pgw#784: the tenant keeps being served throughout an arm. A probe that
     advanced the global generator would change a paying request's output in
-    order to check a cell."""
+    order to check a compiled graph."""
     torch.manual_seed(4242)
     before = torch.get_rng_state().clone()
     packages = {entry_name(h, w): ProbePackage() for h, w in ROWS}
@@ -298,24 +298,24 @@ def test_the_probe_does_not_disturb_the_serving_RNG(
 def test_a_REAL_arm_reaches_the_gate(tmp_path, monkeypatch, declared, events):
     """The tests above would all still pass if `arm_aot` never called the gate
     and something else did. This one asserts the CALL SITE: drive the real
-    `provision.arm_aot` and require that the cell's own forward was invoked by
+    `provision.arm_aot` and require that the compiled graph's own forward was invoked by
     the probe — i.e. a measurement was actually taken on the arm path.
 
-    RED when `gate_cell_numerics(pipe, cfg)` is removed from `arm_aot`:
+    RED when `gate_compiled_graph_numerics(pipe, cfg)` is removed from `arm_aot`:
     `invocations` stays 0 and `armed` is True.
     """
     packages = {entry_name(h, w): ProbePackage() for h, w in ROWS}
     _pipeline, _module, outcomes = arm(tmp_path, monkeypatch, declared, packages)
     assert all(o.armed for o in outcomes)
     assert all(p.invocations == 1 for p in packages.values()), (
-        "a REAL arm did not run the cell against its eager reference: "
+        "a REAL arm did not run the compiled_graph against its eager reference: "
         f"{ {k: p.invocations for k, p in packages.items()} }")
-    assert numerics_rows(events), "a REAL arm emitted no cell_numerics row"
+    assert numerics_rows(events), "a REAL arm emitted no compiled_graph_numerics row"
 
 
 def test_the_gate_is_never_reached_without_a_comparison(monkeypatch):
     """The trap, asserted directly: `numerics_ladder.gate(None, ...)` returns
-    None and refuses nothing. So `gate_cell_numerics` must never call it with
+    None and refuses nothing. So `gate_compiled_graph_numerics` must never call it with
     a `None` comparison — every path to `gate()` goes through
     `report.measured`, and every other path refuses.
     """
@@ -327,8 +327,8 @@ def test_the_gate_is_never_reached_without_a_comparison(monkeypatch):
         numerics_ladder, "gate",
         lambda comparison, **kw: seen.append(comparison))
     monkeypatch.setattr(
-        numerics_probe, "probe_cell",
+        numerics_probe, "probe_compiled_graph",
         lambda *a, **k: (_ for _ in ()).throw(
             numerics_probe.ProbeUnavailable("not_armed", "nothing armed")))
-    assert provision.gate_cell_numerics(object(), declaration()) is False
+    assert provision.gate_compiled_graph_numerics(object(), declaration()) is False
     assert seen == [], "the ladder was consulted with no measurement to judge"

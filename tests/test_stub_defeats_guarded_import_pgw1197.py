@@ -215,7 +215,7 @@ def test_gen_workers_own_source_is_not_a_toolchain_axis_input() -> None:
     declaration, the loaded-native-lib manifest, dist-info RECORD hashes for
     torch/triton/nvidia-*, and triton's bundled CUDA tool binaries. **This
     wheel's own version is deliberately not among them**, so a pure
-    import-machinery fix cannot move the cell key.
+    import-machinery fix cannot move the compiled graph key.
 
     Measured for pgw#1197 on torch 2.13.0+cpu with triton installed (so every
     component is populated, not a comparison of empties): `toolchain_digest()`,
@@ -235,4 +235,4 @@ def test_gen_workers_own_source_is_not_a_toolchain_axis_input() -> None:
     ]
     assert not offenders, (
         f"{offenders} put this wheel's own source into the toolchain axis — "
-        "every patch release would then re-key every cell on the fleet")
+        "every patch release would then re-key every compiled_graph on the fleet")

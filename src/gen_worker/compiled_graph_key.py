@@ -4,7 +4,7 @@ ONE compatibility brain: the worker computes the exact key of one compiled
 GRAPH CLASS from that artifact's OWN recorded facts, with this module — and
 every consumer of identity uses the same code: the production mint
 (``aot_mint.mint``) stamps the key it actually produced, and the publish
-path (``fleet_cells._identity_axes``) recomputes the same key from the same
+path (``fleet_compiled_graphs._identity_axes``) recomputes the same key from the same
 facts before a byte moves.
 
 THE ATOM IS ONE GRAPH CLASS (pgw#1176, Paul-directed 2026-08-12). What used
@@ -13,7 +13,7 @@ adoption, durability, verification, arming and advertisement were the SAME
 unit; weight-free compile removed every reason for that unit to be big and
 the design never renegotiated. The unit of identity, storage, transfer,
 verification, arming and de-arming is now the **entry**: one graph class,
-compiled whole. "The cell" survives only as a derived, artifact-less
+compiled whole. "The compiled graph" survives only as a derived, artifact-less
 CONTRACT MANIFEST — the set of entry keys one declaration traces to. A
 manifest is a view; it is never downloaded, verified or armed, and
 :func:`manifest_digest` is a telemetry/coverage label, never identity.
@@ -43,7 +43,7 @@ honest granularity that test admits THREE axes and no more:
                   two keys. A residual collision (a witness-blind or hash-broken
                   entry) is still caught belt-and-braces: every entry records a
                   ``graph_witness`` top-level sibling and the adopt path refuses
-                  a cell whose witness is not the graph this pod traced
+                  a compiled graph whose witness is not the graph this pod traced
                   (``aot_identity.verify_graph_witness``).
     sm            compute capability (sm_89, ...) — the GPU architecture.
     toolchain     "the compiler stack AS WE CONFIGURE IT" (amendment 4):
@@ -98,7 +98,7 @@ Axes deliberately NOT in the key, each because it fails the axiom:
 * the MODEL LIBRARIES — ``diffusers`` / ``transformers`` / ``peft``
   (pgw#1050). They ran inside ``toolchain`` until 2026-08-11, and that was
   the axiom's other failure mode: an OVER-split. They are pure-python and
-  run at TRACE time only, so everything they can do to a cell arrives as
+  run at TRACE time only, so everything they can do to a compiled graph arrives as
   the traced computation — ops, literal args, tensor meta, symbolic ranges,
   the graph signature and both pytree specs, all of which the ``graph``
   axis hashes node-for-node since pgw#1031. The two channels that could
@@ -112,19 +112,19 @@ Axes deliberately NOT in the key, each because it fails the axiom:
   cannot change the artifact at all. Keeping them double-counted the first
   case and re-minted the whole fleet for the second.
 
-There is no pre-trace ("arm") cell key any more. The pgw#1033/#1042
+There is no pre-trace ("arm") compiled graph key any more. The pgw#1033/#1042
 two-digest-space design — a COMPUTED ``kind="inductor"`` key from declared
 facts beside the STAMPED ``aot-inductor`` key from traced facts — is
 retired with the ``contract`` axis that made it necessary: attempt 28 read
 the two as one diverging key, which is exactly the fused-axis failure
 pgw#1059 splits away. A mint obligation is named by
-``fleet_cells.arm_identity`` (NOT an entry key, never ek-prefixed), and the
+``fleet_compiled_graphs.arm_identity`` (NOT an entry key, never ek-prefixed), and the
 cozy-local store verdict compares recorded facts directly
-(``compile_cache.local_cell_mismatch``).
+(``compile_cache.local_compiled_graph_mismatch``).
 
 A wrong key can only produce a MISS (eager, then a background self-mint),
-never a refusal: any failure to arm a self-requested cell is by construction a
-selection-logic bug that must surface loudly (``cell_selection_bug``),
+never a refusal: any failure to arm a self-requested compiled graph is by construction a
+selection-logic bug that must surface loudly (``compiled_graph_selection_bug``),
 never a silent eager fallback.
 """
 
@@ -135,10 +135,10 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Mapping, Tuple
 
-# pgw#1176: ``ck1`` (the 36-entry CELL key) is REPLACED by ``ek1`` (one graph
+# pgw#1176: ``ck1`` (the 36-entry COMPILED GRAPH key) is REPLACED by ``ek1`` (one graph
 # class). This is a §1.34 third-category change — a name persisted as an
 # ADDRESS — so it is a COORDINATED FLEET RE-KEY, never a quiet rename: every
-# stored cell is orphaned by it, and the cut carries scheme + per-entry store
+# stored compiled graph is orphaned by it, and the cut carries scheme + per-entry store
 # schema + resolve/publish wire + pack format + the
 # ``Arm.graph_contract_digest`` proto change + the corpus purge together.
 # Priced today: the adoptable corpus is ONE toy family, so the re-key costs
@@ -158,7 +158,7 @@ _DIGEST_HEX = 56
 # one of these has no identity. Adding a name here is adding an axis, which
 # the axiom forbids unless the new fact provably alters the compiled
 # artifact AND cannot ride an existing axis's fact block
-# (tests/test_cell_key_pgw1059.py enforces the set).
+# (tests/test_compiled_graph_key_pgw1059.py enforces the set).
 _REQUIRED = ("graph", "sm", "toolchain")
 _OPTIONAL: tuple = ()
 
@@ -187,12 +187,12 @@ EXPORT_ENVELOPE_KEY = "declared_envelope"
 ENTRY_BLOCK_KEY = "entry"
 
 
-class CellKeyError(ValueError):
+class CompiledGraphKeyError(ValueError):
     """The artifact (or runtime) cannot state a required key axis."""
 
 
 @dataclass(frozen=True)
-class CellKey:
+class CompiledGraphKey:
     """A computed ENTRY identity: canonical axes + their digest.
 
     One instance = one compiled graph class. The name is kept (rather than
@@ -223,17 +223,17 @@ def is_key(value: str) -> bool:
     ``-`` + 56 lowercase hex.
 
     Scheme-AGNOSTIC, byte-for-byte the grammar tensorhub's
-    ``compilecache.IsCellKey`` must enforce after the pgw#1176 cut, and for
+    ``compilecache.IsCompiledGraphKey`` must enforce after the pgw#1176 cut, and for
     the same reason it gives (th#1183): pinning the current scheme here turns
-    every other-scheme entry into ``unreadable_cell_key``, which is both a
+    every other-scheme entry into ``unreadable_compiled_graph_key``, which is both a
     lie and a filter no axis justifies. An entry of an older scheme is
     admitted to the candidate list and then ruled on by the axes that
     actually decide whether this runtime can execute it — the identity axes
     and the ingress contract — not by the label on it.
 
     NOTE the ``ck`` prefix is NOT accepted. A ck1 key names a 36-entry
-    all-or-nothing cell, which is not a thing this runtime can arm at all; a
-    grammar that admitted both would let a cell ref reach a per-entry code
+    all-or-nothing compiled graph, which is not a thing this runtime can arm at all; a
+    grammar that admitted both would let a compiled graph ref reach a per-entry code
     path and fail late instead of at the comparison.
     """
     v = str(value or "")
@@ -269,15 +269,15 @@ def _refuse_key_shaped(where: str, name: str, value: str) -> None:
     letting it hash into a key nobody can restate.
     """
     if is_key(value):
-        raise CellKeyError(
+        raise CompiledGraphKeyError(
             f"{where}: {name}={value!r} is an ENTRY KEY where a fact digest "
             f"belongs. A key is the OUTPUT of this computation, never an "
             f"input to it — passing one here would hash an identity into "
             f"another identity and produce a key no artifact can restate.")
 
 
-def from_axes(axes: Mapping[str, str]) -> CellKey:
-    """Canonicalize an axes mapping into a :class:`CellKey`.
+def from_axes(axes: Mapping[str, str]) -> CompiledGraphKey:
+    """Canonicalize an axes mapping into a :class:`CompiledGraphKey`.
 
     Unknown axes are rejected TYPED — including every dropped axis name
     (``envelope`` since pgw#1176; ``contract``, ``env_seal``, ``kind``,
@@ -289,21 +289,21 @@ def from_axes(axes: Mapping[str, str]) -> CellKey:
     for name, value in axes.items():
         text = str(value or "").strip()
         if name not in _REQUIRED and name not in _OPTIONAL:
-            raise CellKeyError(
-                f"unknown cell-key axis {name!r}: the key is exactly "
+            raise CompiledGraphKeyError(
+                f"unknown compiled_graph-key axis {name!r}: the key is exactly "
                 f"{list(_REQUIRED)!r} — the membership axiom (pgw#1059 "
                 "amendment 6, Paul: \"don't key on parameters that don't "
                 "require us to recompile\") admits an axis only when the "
                 "fact provably alters the compiled artifact and cannot ride "
                 "an existing axis's fact block")
         if text:
-            _refuse_key_shaped("cell key axes", name, text)
+            _refuse_key_shaped("compiled_graph key axes", name, text)
             clean[name] = text
     missing = [name for name in _REQUIRED if not clean.get(name)]
     if missing:
-        raise CellKeyError(
-            f"cell key requires axes {missing!r} (got {sorted(clean)!r})")
-    return CellKey(axes=tuple(sorted(clean.items())))
+        raise CompiledGraphKeyError(
+            f"compiled_graph key requires axes {missing!r} (got {sorted(clean)!r})")
+    return CompiledGraphKey(axes=tuple(sorted(clean.items())))
 
 
 def facts_digest(facts: Mapping[str, Any]) -> str:
@@ -379,7 +379,7 @@ def toolchain_facts(block: Mapping[str, Any]) -> Dict[str, str]:
     (the publish recompute, the boot key, the arm handback, the wire
     identity) reads membership from here. Two ends that decide membership
     separately are two derivations of one axis, which is the failure
-    ``test_cell_key_pgw1059``'s fence exists to prevent.
+    ``test_compiled_graph_key_pgw1059``'s fence exists to prevent.
     """
     return {
         str(name): str(value) for name, value in block.items()
@@ -396,14 +396,14 @@ def toolchain_axis_digest(block: Mapping[str, Any]) -> str:
 #
 # THE ASYMMETRY, stated once, here, because both consumers below depend on it:
 #
-#   The CELL KEY is the computation and must not OVER-split (the membership
+#   The COMPILED GRAPH KEY is the computation and must not OVER-split (the membership
 #   axiom at the top of this module).  The ARM TOKEN and the boot-key memo are
 #   an OBLIGATION and a CACHE LOOKUP, and must not UNDER-split.  Over-splitting
 #   an obligation costs one re-mint; under-splitting one binds a pipeline to a
-#   cell nobody proved is its computation.
+#   compiled graph nobody proved is its computation.
 #
 # So the subject is deliberately NOT a key axis and must never become one: one
-# cell legally serves every checkpoint whose graph it is (weight VALUES are
+# compiled graph legally serves every checkpoint whose graph it is (weight VALUES are
 # never hashed — see graph_hash's module docstring), and keying on the
 # checkpoint would put every fine-tune in its own key space.  What the subject
 # does is stop two DIFFERENT checkpoints sharing one pending mint, one
@@ -455,7 +455,7 @@ def subject_digest(subjects: Iterable[SlotSubject]) -> str:
     return facts_digest(subject_facts(subs))
 
 
-def from_entry_metadata(meta: Mapping[str, Any]) -> CellKey:
+def from_entry_metadata(meta: Mapping[str, Any]) -> CompiledGraphKey:
     """The key an EXPORTED (``aot-inductor``) ENTRY's OWN recorded facts
     describe — THE single implementation of entry identity: ``aot_mint``
     stamps what this returns and the publish path recomputes it, so the axes
@@ -463,7 +463,7 @@ def from_entry_metadata(meta: Mapping[str, Any]) -> CellKey:
     minted from.
 
     Every axis is read from a recorded block, never from a probe and never
-    from the ``cell_key`` stamp. Raises :class:`CellKeyError` when a fact is
+    from the ``compiled_graph_key`` stamp. Raises :class:`CompiledGraphKeyError` when a fact is
     missing: an entry that cannot name an axis has no identity, and must not
     be published under a partial one.
 
@@ -475,30 +475,30 @@ def from_entry_metadata(meta: Mapping[str, Any]) -> CellKey:
 
     Pre-pgw#1176 artifacts fail here STRUCTURALLY: they record an ``entries``
     MAP and a ``combined_graph_hash`` rather than one ``entry`` block, so a
-    36-entry cell can never restate a per-entry identity. That is what makes
+    36-entry compiled graph can never restate a per-entry identity. That is what makes
     the ck1 corpus purge hygiene rather than a correctness precondition.
     """
     kind = str(meta.get("kind") or "")
     if kind != EXPORTED_KIND:
-        raise CellKeyError(
+        raise CompiledGraphKeyError(
             f"artifact kind {kind!r} has no entry-key identity: only exported "
             f"{EXPORTED_KIND!r} entries are keyed (pgw#1010/pgw#1059 — JIT is "
             "intake, local torch-inductor-cache artifacts compare facts via "
-            "compile_cache.local_cell_mismatch)")
+            "compile_cache.local_compiled_graph_mismatch)")
     sm = str(meta.get("sm") or "")
     if not sm:
-        raise CellKeyError(
+        raise CompiledGraphKeyError(
             "cannot state the compute capability (sm) of this runtime; an "
             "exported entry has no identity without it — mint on the target GPU")
     entry = meta.get(ENTRY_BLOCK_KEY)
     if not isinstance(entry, Mapping) or not entry:
-        raise CellKeyError(
+        raise CompiledGraphKeyError(
             f"artifact records no {ENTRY_BLOCK_KEY!r} block; the atom is ONE "
             "graph class (pgw#1176) and an artifact that cannot name its "
             "class has no identity")
     graph = str(entry.get("class_hash") or "")
     if not graph:
-        raise CellKeyError(
+        raise CompiledGraphKeyError(
             f"entry {str(entry.get('name') or '')!r} carries no class_hash; a "
             "class the key cannot name is a class a mismatch cannot name "
             "(pgw#716)")
@@ -506,7 +506,7 @@ def from_entry_metadata(meta: Mapping[str, Any]) -> CellKey:
         f"entry {str(entry.get('name') or '')!r}", "class_hash", graph)
     toolchain = meta.get("toolchain")
     if not isinstance(toolchain, dict) or not toolchain:
-        raise CellKeyError(
+        raise CompiledGraphKeyError(
             "artifact records no toolchain block; no recipe identity")
     return from_axes({
         "graph": graph,
@@ -549,8 +549,8 @@ __all__ = [
     "EXPORTED_KIND",
     "EXPORT_ENVELOPE_KEY",
     "ENTRY_BLOCK_KEY",
-    "CellKey",
-    "CellKeyError",
+    "CompiledGraphKey",
+    "CompiledGraphKeyError",
     "SlotSubject",
     "subject_digest",
     "subject_facts",

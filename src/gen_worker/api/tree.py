@@ -19,10 +19,10 @@ pool. The derived tree is published at BUILD time into the release manifest
 per-path policy (``pipeline`` open / ``pipeline.vae`` curated /
 ``pipeline.unet`` fixed — th#980/ie#524 vocabulary) and for component-level
 routing; pinning it at publish keeps diffusers version drift deterministic
-(the cell key already carries the diffusers version).
+(the compiled graph key already carries the diffusers version).
 
 Instance identity = root binding + override map: a swapped part changes
-identity, so the compile cell DERIVES facts like "this cell must not claim
+identity, so the compile compiled graph DERIVES facts like "this compiled graph must not claim
 ``vae.decode``" instead of relying on an author comment.
 
 pgw#667: a part's LOAD DTYPE is part of that identity too. The tree therefore

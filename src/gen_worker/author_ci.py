@@ -26,9 +26,9 @@ WHAT IT ASSEMBLES — every piece already ships; none of them were wired togethe
    torch/CUDA line has produced no evidence. Exits 90/91 in rigcheck's own
    vocabulary, so a wrapper script reads one exit table and not two.
 2. The ARM — the endpoint's own ``setup()`` mints (or adopts this machine's
-   cell) through the production path. The parity verdict is the MINT-PARENT
+   compiled graph) through the production path. The parity verdict is the MINT-PARENT
    GATE's (pgw#1141: ``adopt_delegated_mint`` -> ``arm_aot(verify_numerics=
-   True)`` -> ``provision.gate_cell_numerics``, strict), never a comparison
+   True)`` -> ``provision.gate_compiled_graph_numerics``, strict), never a comparison
    re-implemented here. A family with open ``Compile.blockers`` is a LEGAL
    state — ``blocked-by-declaration`` — and the run continues eager-only.
 3. SPEED, steady-vs-steady, ONE process, compiled arm first. The eager arm is
@@ -158,7 +158,7 @@ def resolve_bar(declaration: Any, record: Dict[str, Any]) -> Bar:
         raise HarnessError(f"[speed] min_speedup = {raw!r} is not a number")
     if float(raw) < 1.0:
         raise HarnessError(
-            f"[speed] min_speedup = {raw} is below 1.0 — a cell that is not "
+            f"[speed] min_speedup = {raw} is below 1.0 — a compiled_graph that is not "
             f"faster than eager has no reason to exist")
     return Bar(_metric(metric), float(raw), "author-ci.toml")
 
@@ -230,7 +230,7 @@ class Report:
     #: id, or the issue that owns the gap. Prose belongs in `arm_detail`.
     blocker: str
     arm_detail: str
-    cell_key: str
+    compiled_graph_key: str
     bar: Bar
     pod: str
     sm: str
@@ -250,7 +250,7 @@ class Report:
 
     @property
     def status(self) -> str:
-        """`never-run` when no cell served, else proven/failed on the legs.
+        """`never-run` when no compiled graph served, else proven/failed on the legs.
 
         A blocked family and a family whose mint refused are the same record
         state — nothing was measured against a compiled arm — and they differ
@@ -281,7 +281,7 @@ class Report:
             f'commit = "{_toml_str(self.commit)}"',
             f'pod = "{_toml_str(self.pod)}"',
             f'sm = "{_toml_str(self.sm)}"',
-            f'cell = "{_toml_str(self.cell_key)}"',
+            f'compiled_graph = "{_toml_str(self.compiled_graph_key)}"',
             f"n = {len(self.compiled.samples)}",
             f"cosine = {cosine if cosine is not None else 0.0:.6f}",
             f"eager_median_ms = {self.eager.median:.1f}",
@@ -477,7 +477,7 @@ class _Subject:
             selected=self.selected, return_loaded=True) or {}
 
     def armed_pipeline(self) -> Optional[Any]:
-        """The loaded slot currently serving a compiled cell, if any."""
+        """The loaded slot currently serving a compiled compiled graph, if any."""
         from . import aot_serve
 
         for obj in self._loaded.values():
@@ -505,9 +505,9 @@ def read_parity(subject: _Subject, declaration: Any,
                 minted: Optional[Any]) -> Parity:
     """The mint-parent gate's verdict — read, or (on an ADOPT) taken.
 
-    A cell this process MINTED was already gated strictly on the way to
+    A compiled graph this process MINTED was already gated strictly on the way to
     publication (pgw#1141), so its report (``minted``) is simply read back — an
-    armed cell that had failed that gate would not be armed. A cell that came
+    armed compiled graph that had failed that gate would not be armed. A compiled graph that came
     out of this machine's store was gated at ITS mint and adoption runs no
     quality gate (§4.32 item 3), so there is no verdict to read and this run
     takes one through the SAME function the mint uses. Never a comparison
@@ -521,16 +521,16 @@ def read_parity(subject: _Subject, declaration: Any,
         return Parity(False, None, "?", "nothing armed")
     report = minted
     if report is None:
-        passed = provision.gate_cell_numerics(pipe, declaration, strict=True)
+        passed = provision.gate_compiled_graph_numerics(pipe, declaration, strict=True)
         report = numerics_probe.last_report()
-        detail = "taken by this run through the mint's own gate (adopted cell)"
+        detail = "taken by this run through the mint's own gate (adopted compiled_graph)"
     else:
         passed = True
         detail = "the mint-parent gate's own verdict (pgw#1141)"
     if report is None:
         return Parity(False, None, "?",
                       "the gate ran and produced no report — refusing to call "
-                      "an unmeasurable cell healthy (pgw#868)")
+                      "an unmeasurable compiled_graph healthy (pgw#868)")
     comparison = report.comparison()
     return Parity(
         passed=bool(passed),
@@ -621,7 +621,7 @@ def run(args: argparse.Namespace) -> Tuple[int, Report]:
     parity: Optional[Parity] = None
     compiled: Optional[Leg] = None
     eager: Optional[Leg] = None
-    cell_key = ""
+    compiled_graph_key = ""
     try:
         if arm == ARM_BLOCKED:
             eager = measure_leg(subject, ARM_EAGER_ARM, bar.stage, n)
@@ -632,23 +632,23 @@ def run(args: argparse.Namespace) -> Tuple[int, Report]:
             # that runs setup(), and setup() is where the mint happens.
             # Identity, not presence: the gate's report is a process-wide
             # record, and reading a PREVIOUS run's would attribute somebody
-            # else's cosine to this cell.
+            # else's cosine to this compiled graph.
             before = numerics_probe.last_report()
             compiled = measure_leg(subject, ARM_COMPILED, bar.stage, n)
             pipe = subject.armed_pipeline()
             if pipe is None:
                 arm, compiled = ARM_EAGER, None
                 arm_detail = (
-                    "no cell armed on this pod, so there is nothing to "
+                    "no compiled_graph armed on this pod, so there is nothing to "
                     "compare — the reason is on the activity wire "
                     "(self_mint_skipped / self_mint_abort)")
             else:
-                cell_key = str(aot_serve.armed_metadata(pipe).get("cell_key")
+                compiled_graph_key = str(aot_serve.armed_metadata(pipe).get("compiled_graph_key")
                                or "")
                 fresh = numerics_probe.last_report()
                 minted = fresh if fresh is not before else None
                 arm = ARM_MINTED if minted is not None else ARM_ADOPTED
-                arm_detail = f"cell {cell_key or '?'}"
+                arm_detail = f"compiled_graph {compiled_graph_key or '?'}"
                 parity = read_parity(subject, declaration, minted)
             # pgw#1142 through its IN-PROCESS api: the author's pod may have
             # no hub, and the order is what makes this the SAME process, the
@@ -664,7 +664,7 @@ def run(args: argparse.Namespace) -> Tuple[int, Report]:
 
     report = Report(
         family=family, arm=arm, blocker=blocker, arm_detail=arm_detail,
-        cell_key=cell_key, bar=bar, pod=str(env.get("device") or ""),
+        compiled_graph_key=compiled_graph_key, bar=bar, pod=str(env.get("device") or ""),
         sm=_sm(env), commit=commit,
         date=datetime.datetime.now(datetime.timezone.utc).date().isoformat(),
         parity=parity, compiled=compiled, eager=eager)

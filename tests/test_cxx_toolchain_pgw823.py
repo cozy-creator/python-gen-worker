@@ -8,7 +8,7 @@ adapter-bearing graph class, reached the linker and refused —
     aot_compile failed: InductorError: InvalidCxxCompiler: No working C++
     compiler found in torch._inductor.config.cpp.cxx: (None, 'g++')
 
-    aot_mint_phases: status=refused total_s=336.58 — no cell produced
+    aot_mint_phases: status=refused total_s=336.58 — no compiled graph produced
 
 336 seconds of L4 time to learn something `shutil.which` answers instantly.
 The pre-flight guard that exists for exactly this (`toolchain_present`, gated
@@ -28,7 +28,7 @@ import types
 import pytest
 
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells
+from gen_worker import fleet_compiled_graphs
 
 
 # ---------------------------------------------------------------------------
@@ -110,13 +110,13 @@ def test_the_parent_no_longer_second_guesses_the_image(
     """The 336 s is bought back by the build gate, not by a pod-side branch.
     A pod that reaches this code is running an image whose build PROVED the
     toolchain, so the parent asks nothing and mints AOT."""
-    monkeypatch.setattr(fleet_cells.cc, "cxx_toolchain_present", lambda: False)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "cxx_toolchain_present", lambda: False)
     from gen_worker import aot_mint
 
     monkeypatch.setattr(
         aot_mint, "declaration_module_gaps", lambda *a, **k: [])
     monkeypatch.setattr(
-        fleet_cells, "aot_export_spec", lambda *a, **k: object())
+        fleet_compiled_graphs, "aot_export_spec", lambda *a, **k: object())
 
     import gen_worker.api.export_contract as ec
     from gen_worker.api.decorators import Compile
@@ -128,22 +128,22 @@ def test_the_parent_no_longer_second_guesses_the_image(
         classes=(GraphClass(dims={"B": 2}),),
         inputs=(Input("sample", shape=("B", 4), dtype="model"),),
         shape_strategy="static-rows", warm_changes_key=False)
-    # Patch the caller's binding too: fleet_cells imports the name at module
+    # Patch the caller's binding too: fleet_compiled_graphs imports the name at module
     # scope (pgw#976), so patching only export_contract leaves the real one bound.
     monkeypatch.setattr(ec, "export_declaration", lambda _f: decl)
-    monkeypatch.setattr(fleet_cells, "export_declaration", lambda _f: decl)
+    monkeypatch.setattr(fleet_compiled_graphs, "export_declaration", lambda _f: decl)
 
     events: list = []
     monkeypatch.setattr(
-        fleet_cells.activity_mod, "emit_event",
+        fleet_compiled_graphs.activity_mod, "emit_event",
         lambda kind, detail, **kw: events.append((kind, detail, kw)))
 
     cfg = types.SimpleNamespace(
         family="sdxl", lora_bucket=64, shapes=(), text_lens=(),
         guidance_scales=(), targets=("unet",), regional=False)
-    recipe = fleet_cells.mint_recipe(object(), cfg, delegate=True)
+    recipe = fleet_compiled_graphs.mint_recipe(object(), cfg, delegate=True)
 
-    assert recipe == fleet_cells.RECIPE_AOT
+    assert recipe == fleet_compiled_graphs.RECIPE_AOT
     assert [e for e in events if e[2].get("phase") == "no_cxx_toolchain"] == []
 
 

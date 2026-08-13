@@ -246,7 +246,7 @@ def test_the_pools_own_measurement_reaches_the_bank_over_the_real_relay(
 
     The pool has published ``peak_child_rss_bytes`` in its phase table since
     pgw#830 and the parent has relayed that table since pgw#842 — and nothing
-    ever read the field. This drives the REAL ``build_cell`` bookkeeping
+    ever read the field. This drives the REAL ``build_compiled_graph`` bookkeeping
     against a real ``MintOutcome`` and asserts the ask lands in the bank.
     """
     from gen_worker import mint_delegate, mint_process
@@ -267,7 +267,7 @@ def test_the_pools_own_measurement_reaches_the_bank_over_the_real_relay(
             status=mint_process.MINTED, elapsed_s=1.0, mint_phases=table))
 
     assert mint_workers.entry_peak_rss(fam, execution_lane) == 0
-    # The exact statement `build_cell` runs, against the real structures.
+    # The exact statement `build_compiled_graph` runs, against the real structures.
     pool_block = (outcome.report.mint_phases or {}).get("pool")
     mint_workers.record_entry_peak_rss(
         fam, execution_lane, int((pool_block or {}).get("peak_child_rss_bytes") or 0))
@@ -279,7 +279,7 @@ def test_the_pools_own_measurement_reaches_the_bank_over_the_real_relay(
     request = mint_process.MintRequest(
         function="f", modules=(), family=fam, arm_token="k", target="t",
         work_root="c", report="r",
-        cfg=mint_delegate.mint_process.CompileCellSpec(),
+        cfg=mint_delegate.mint_process.CompileCompiledGraphSpec(),
         entry_peak_rss_bytes=banked)
     assert request.entry_peak_rss_bytes == 6 * _GIB, (
         "a banked measurement that cannot cross the process boundary is a "

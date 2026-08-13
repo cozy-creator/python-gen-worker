@@ -416,7 +416,7 @@ def test_a_plain_call_TAKES_THE_PLAIN_BRANCH_at_serving_time() -> None:
     `model.forward` wholesale, so a plain call that worked the instant before
     the install raised the instant after it, and a branchless request falling
     back to eager on an ARMED pod hit it in production. Measured on the
-    pgw#997 rig; it is what refused a whole 5-entry lora cell as
+    pgw#997 rig; it is what refused a whole 5-entry lora compiled graph as
     `numerics_refused`.
 
     The invariant: **arming a bucket must not alter the semantics of calls

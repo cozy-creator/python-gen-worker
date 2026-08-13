@@ -68,16 +68,16 @@ KIND_WARMUP_SUMMARY = "warmup_summary"
 KIND_GUARD_MISS = "guard_miss"
 # pgw#756: the guard-closure classifier flagged guards it cannot tie to the
 # declared contract. ADVISORY — the mint completes and publishes; the rows
-# ride the cell's guard manifest. Countable so a real leak class surfaces as
+# ride the compiled graph's guard manifest. Countable so a real leak class surfaces as
 # a trend hub-side instead of as a fleet-wide mint refusal (pgw#691/#733).
 KIND_GUARD_LEAK = "guard_leak"
 # pgw#916: the AOT arm's counterpart of `guard_miss` — one tenant request
-# arrived at a graph class the armed cell does not cover, was NAMED at ingress
+# arrived at a graph class the armed compiled graph does not cover, was NAMED at ingress
 # and served eager. `guard_miss` is a dynamo concept (a torch guard fired), so
 # an AOT-armed pod produced no shape-gap fact at all and the hub could not
 # count AOT coverage holes the way it counts dynamo ones. `phase` carries the
 # ingress reason token (`no_entry_admits` / `entry_ambiguous`), `detail` names
-# the family, the target, the missing DECLARED CLASS and the cell.
+# the family, the target, the missing DECLARED CLASS and the compiled graph.
 KIND_SHAPE_GAP = "shape_gap"
 # pgw#760 (error-visibility doctrine): a fail-soft outcome that changes what
 # or how this worker SERVES — or that a hub decision depends on — must ride
@@ -89,7 +89,7 @@ KIND_SHAPE_GAP = "shape_gap"
 KIND_SERVE_DEGRADE = "serve_degrade"
 # pgw#1142 / §4.32 item 4: the OPERATOR's eager-only order changed state on this
 # worker. Two phases, both transitions and neither a degradation:
-# `eager_only_engaged` (compiled serving suppressed — armed cells stay armed and
+# `eager_only_engaged` (compiled serving suppressed — armed compiled graphs stay armed and
 # are not called) and `eager_only_released`. Deliberately its own kind rather
 # than a `serve_degrade` phase: every other member of that kind is something
 # that went wrong, and an operator exercising a supported control must not land
@@ -103,15 +103,15 @@ KIND_LORA_HYGIENE = "lora_hygiene"
 # the worst per-module rows, so a release shipping an adapter its own serving
 # dtype destroys is countable hub-side without the pod's stdout.
 KIND_LORA_FIDELITY = "lora_fidelity"
-# pgw#817: the ADOPTION numerics gate — a cell about to arm is run against the
+# pgw#817: the ADOPTION numerics gate — a compiled graph about to arm is run against the
 # eager forward it replaces and judged on the shared verdict ladder. Same two
 # phases and the same fail-closed shape as `lora_fidelity`, one population
-# down: `phase=refused` means the cell did NOT arm and this pod serves eager;
+# down: `phase=refused` means the compiled graph did NOT arm and this pod serves eager;
 # `phase=degraded` means it armed inside the gray band. pgw#814 measured a
 # real DEGRADED artifact (flux2 w8a8 whole-graph, cos 0.931-0.973 against
 # eager) that nothing in the worker would have noticed, which is why the
 # verdict has to reach the hub whether or not it refuses.
-KIND_CELL_NUMERICS = "cell_numerics"
+KIND_COMPILED_GRAPH_NUMERICS = "compiled_graph_numerics"
 # pgw#1036: modular-pipeline hydration provenance — one event per slot load,
 # detail lists component<-local_source pairs (the hydration guard's proof that
 # every weight came from OUR tree, bankable hub-side; phase=hydrated).
@@ -433,11 +433,11 @@ class Activity:
         _end(self)
 
 
-#: pgw#1176 / th#1839: cell identity travels as TYPED WIRE FIELDS.
+#: pgw#1176 / th#1839: compiled graph identity travels as TYPED WIRE FIELDS.
 #:
-#: ``ActivityUpdate.family`` / ``.cell_key`` / ``.graph_class`` (proto fields
+#: ``ActivityUpdate.family`` / ``.compiled_graph_key`` / ``.graph_class`` (proto fields
 #: 18-20) land in the hub's existing ``worker_activity_events`` columns. The
-#: prose form they replace was measured: ``detail LIKE 'ref=%#'||cell_key||'
+#: prose form they replace was measured: ``detail LIKE 'ref=%#'||compiled_graph_key||'
 #: %'`` matched one of three rows correctly, because four emitters spelled
 #: identity four ways. A fact that has to be regex-scraped out of a sentence
 #: cannot be indexed, cannot be grouped, and returns NULL the first time the
@@ -447,12 +447,12 @@ class Activity:
 #: byte-for-byte vendored copy of tensorhub's canonical one, gated on
 #: ``PROTO_DIGEST``, so the field could not be added here unilaterally. It is
 #: additive — old readers ignore all three — and an emitter that states none
-#: sends empty strings, which is the honest "this event is not about a cell".
+#: sends empty strings, which is the honest "this event is not about a compiled graph".
 
 
 def emit_event(
     kind: str, detail: str, phase: str = "", duration_ms: int = 0,
-    *, family: str = "", cell_key: str = "", graph_class: str = "",
+    *, family: str = "", compiled_graph_key: str = "", graph_class: str = "",
 ) -> None:
     """One self-contained COMPLETED ActivityUpdate — a countable typed
     EVENT (pgw#680 ``guard_miss``), not a running activity.
@@ -476,7 +476,7 @@ def emit_event(
         state=pb.ActivityState.ACTIVITY_STATE_COMPLETED,
         detail=detail[:2000],
         family=str(family or "")[:200],
-        cell_key=str(cell_key or "")[:200],
+        compiled_graph_key=str(compiled_graph_key or "")[:200],
         graph_class=str(graph_class or "")[:300],
         duration_ms=max(0, int(duration_ms)),
         updated_at_unix_ms=int(time.time() * 1000),

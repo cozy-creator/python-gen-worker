@@ -1,13 +1,13 @@
-"""th#1645 + pgw#987: the cell publish declare is CONTROL, and a 413 is final.
+"""th#1645 + pgw#987: the compiled graph publish declare is CONTROL, and a 413 is final.
 
-Two defects, one incident. On 2026-08-06 a fully-minted AOT cell — sealed,
+Two defects, one incident. On 2026-08-06 a fully-minted AOT compiled graph — sealed,
 key byte-identical across two cards — could not be published by any worker on
 any card:
 
-  * **th#1645.** The declare body carried the cell's ENTIRE envelope. On a real
-    published sdxl cell the `guard_manifest` block alone measured 13,092,487 of
+  * **th#1645.** The declare body carried the compiled graph's ENTIRE envelope. On a real
+    published sdxl compiled graph the `guard_manifest` block alone measured 13,092,487 of
     13,377,167 metadata bytes (98%) against a 69 MB artifact; at a ~200 MB AOT
-    cell the body crossed the hub's 32 MiB route cap and
+    compiled graph the body crossed the hub's 32 MiB route cap and
     `POST /api/v1/repos/:org/:name/publishes` answered **413 in 25 µs**, before
     reading a byte. The bytes themselves were never the problem — they go
     worker -> R2 over presigned PUTs and always did.
@@ -21,10 +21,10 @@ any card:
 Everything here is real: a real socket, a real body cap enforced on the
 declared `Content-Length` exactly as the hub's middleware does, a real
 ~200 MB artifact hashed and chunked by the real chunker and uploaded over real
-presigned PUTs by the real `CellPublisher.publish`. Nothing about the transport
+presigned PUTs by the real `CompiledGraphPublisher.publish`. Nothing about the transport
 is stubbed, because every property under test is a property of the IO.
 
-Run: pytest tests/test_cell_declare_bound_th1645_pgw987.py -q
+Run: pytest tests/test_compiled_graph_declare_bound_th1645_pgw987.py -q
 """
 
 from __future__ import annotations
@@ -43,26 +43,26 @@ import pytest
 # pgw#1181: `guard_closure.MANIFEST_KEY` went with `closure_manifest`, the
 # only writer of this block, when the `torch-inductor-cache` format was
 # deleted. The BLOCK NAME stays spelled out here because
-# `fleet_cells._UNBOUNDED_ENVELOPE_BLOCKS` still lists it as a literal:
+# `fleet_compiled_graphs._UNBOUNDED_ENVELOPE_BLOCKS` still lists it as a literal:
 # the control-plane cap is a defensive filter over whatever an envelope
 # carries, and what these rows prove — that an unbounded block is dropped
-# before the hub sees it, and that a 200 MB cell still publishes — is a
+# before the hub sees it, and that a 200 MB compiled graph still publishes — is a
 # property of the CAP, not of any one producer.
 GUARD_MANIFEST_BLOCK = "guard_manifest"
 
 
-from gen_worker import fleet_cells as fc
+from gen_worker import fleet_compiled_graphs as fc
 from gen_worker import http_origin
 from gen_worker.hubio.client import HubPublishError
 from gen_worker.models import chunk_upload as cu
-from harness.cell_meta import exported_cell_meta
+from harness.compiled_graph_meta import exported_compiled_graph_meta
 
 FAMILY = "sdxl"
 # pgw#1046: computed from `_meta()`'s identity blocks, never invented — the
 # publish path refuses a stamp its recorded axes do not describe.
-CELL_KEY = exported_cell_meta(
+COMPILED_GRAPH_KEY = exported_compiled_graph_meta(
     family=FAMILY, sku="rtx-4090", gen_worker="0.91.0",
-    weight_lane="w8a8", lora_bucket=64)["cell_key"]
+    weight_lane="w8a8", lora_bucket=64)["compiled_graph_key"]
 
 # The hub's group-wide default (internal/api/api.go: `maxRequestBodyMiddleware(32 << 20)`).
 HUB_BODY_CAP = 32 << 20
@@ -153,11 +153,11 @@ class _Hub(http.server.BaseHTTPRequestHandler):
             return
         body = self._body()
 
-        if path.endswith("/v1/worker/cells/publish-intent"):
+        if path.endswith("/v1/worker/compiled_graphs/publish-intent"):
             self._json(200, {"capability_token": "cap-token",
                              "repo": f"root/family-{body.get('family')}"})
             return
-        if path.endswith("/v1/worker/cells/publish-complete"):
+        if path.endswith("/v1/worker/compiled_graphs/publish-complete"):
             with srv.lock:
                 srv.completes.append(dict(body))
             self._json(200, {"recorded": True})
@@ -252,10 +252,10 @@ def _guard_manifest(graphs: int, rows: int) -> dict:
     """A guard manifest the size the real one is.
 
     Not padding: the shape is the real one (`graphs` -> per-graph guard rows),
-    scaled from the MEASURED block on a real published sdxl cell — checkpoint
+    scaled from the MEASURED block on a real published sdxl compiled graph — checkpoint
     sha256:926bc9f5…, 13,092,487 bytes of guard manifest against a 69,045,459
     byte artifact. The envelope grows with the artifact, so attempt
-    twenty-two's ~202.5 MB cell puts it near 38 MB, which is the number that
+    twenty-two's ~202.5 MB compiled graph puts it near 38 MB, which is the number that
     crossed the 32 MiB cap. That is what this reproduces.
     """
     return {
@@ -275,12 +275,12 @@ def _guard_manifest(graphs: int, rows: int) -> dict:
 
 
 def _meta() -> dict:
-    """A real cell envelope: the 34 keys a published sdxl cell carries, with
+    """A real compiled graph envelope: the 34 keys a published sdxl compiled graph carries, with
     the two unbounded blocks at their measured magnitudes."""
     # pgw#1046: the identity blocks are REAL (the publish path recomputes the
-    # key from them and refuses a cell that cannot state one); everything after
+    # key from them and refuses a compiled graph that cannot state one); everything after
     # them is the measured bulk this test exists to size.
-    meta = exported_cell_meta(
+    meta = exported_compiled_graph_meta(
         family=FAMILY, sku="rtx-4090", gen_worker="0.91.0",
         weight_lane="w8a8", lora_bucket=64)
     meta |= {
@@ -304,8 +304,8 @@ def _meta() -> dict:
 
 @pytest.fixture()
 def artifact(tmp_path: Path) -> Path:
-    """A REAL ~200 MB cell artifact — the size attempt twenty-two produced."""
-    out = tmp_path / f"{CELL_KEY}.tar.gz"
+    """A REAL ~200 MB compiled graph artifact — the size attempt twenty-two produced."""
+    out = tmp_path / f"{COMPILED_GRAPH_KEY}.tar.gz"
     # Every megabyte distinct. A repeating block would make all four 64 MiB
     # chunks hash the same, the CAS would dedup three of them, and the test
     # would silently prove a 68 MB upload instead of a 200 MB one.
@@ -320,8 +320,8 @@ def artifact(tmp_path: Path) -> Path:
     return out
 
 
-def _publisher(hub: _Server) -> fc.CellPublisher:
-    return fc.CellPublisher(
+def _publisher(hub: _Server) -> fc.CompiledGraphPublisher:
+    return fc.CompiledGraphPublisher(
         base_url=hub.base,
         worker_jwt=lambda: "worker-jwt",
         image_digest="sha256:" + "e" * 64,
@@ -337,7 +337,7 @@ def test_the_envelope_that_broke_the_hub_is_over_the_cap():
     """The premise, measured rather than asserted: the OLD declare body — the
     whole envelope, which is what shipped — really does exceed 32 MiB."""
     old_body = {k: v for k, v in _meta().items() if v is not None}
-    encoded = len(json.dumps({"mode": "replace", "files": [], "flavor": CELL_KEY,
+    encoded = len(json.dumps({"mode": "replace", "files": [], "flavor": COMPILED_GRAPH_KEY,
                               "metadata": old_body}).encode())
     assert encoded > HUB_BODY_CAP, (
         f"the fixture no longer reproduces the incident: {encoded} bytes is "
@@ -359,7 +359,7 @@ def test_control_plane_metadata_drops_only_the_unbounded_blocks():
         assert kept[key] == value, f"{key} was altered on the way to the declare"
 
     encoded = len(json.dumps(kept, sort_keys=True, default=str).encode())
-    assert encoded < fc.CELL_DECLARE_MAX_BYTES
+    assert encoded < fc.COMPILED_GRAPH_DECLARE_MAX_BYTES
     # And by two orders of magnitude under the hub's route cap, so the bound
     # that broke A1 is no longer anywhere near the traffic.
     assert encoded * 100 < HUB_BODY_CAP
@@ -372,17 +372,17 @@ def test_a_new_unbounded_block_is_refused_on_the_pod_and_named():
     meta = _meta()
     meta["autotune_log"] = {f"kernel_{i}": "x" * 512 for i in range(20_000)}
 
-    with pytest.raises(fc.CellPublishRefused) as excinfo:
+    with pytest.raises(fc.CompiledGraphPublishRefused) as excinfo:
         fc.control_plane_metadata(meta)
     assert "autotune_log" in str(excinfo.value)
     assert "th#1645" in str(excinfo.value)
     # Its own groupable token: a code defect must not land in the same bucket
     # as the hub's trust-tier and quota refusals.
-    assert excinfo.value.code == fc.CELL_DECLARE_OVERSIZE_CODE
-    assert fc._publish_failure_phase(excinfo.value) == "cell_declare_oversize"
+    assert excinfo.value.code == fc.COMPILED_GRAPH_DECLARE_OVERSIZE_CODE
+    assert fc._publish_failure_phase(excinfo.value) == "compiled_graph_declare_oversize"
 
 
-def test_a_real_200mb_cell_publishes_through_the_real_cap(hub, artifact, monkeypatch):
+def test_a_real_200mb_compiled_graph_publishes_through_the_real_cap(hub, artifact, monkeypatch):
     """THE proof: the exact artifact size and the exact envelope that produced
     32 × 413, now landing — declare accepted under the real cap, every chunk
     uploaded and digest-verified, publish-complete recorded ok."""
@@ -397,10 +397,10 @@ def test_a_real_200mb_cell_publishes_through_the_real_cap(hub, artifact, monkeyp
 
     # The declare was CONTROL-sized...
     assert len(hub.httpd.declares) == 1
-    assert hub.httpd.declare_lengths[0] < fc.CELL_DECLARE_MAX_BYTES
+    assert hub.httpd.declare_lengths[0] < fc.COMPILED_GRAPH_DECLARE_MAX_BYTES
     declared_meta = hub.httpd.declares[0]["metadata"]
     assert GUARD_MANIFEST_BLOCK not in declared_meta
-    assert declared_meta["cell_key"] == CELL_KEY
+    assert declared_meta["compiled_graph_key"] == COMPILED_GRAPH_KEY
 
     # ...and the DATA still moved, all of it, over presigned PUTs, every
     # object refused unless it hashed to the digest signed into its grant.
@@ -409,7 +409,7 @@ def test_a_real_200mb_cell_publishes_through_the_real_cap(hub, artifact, monkeyp
     assert len(hub.httpd.objects) == expected_chunks
 
     assert hub.httpd.completes[-1]["ok"] is True
-    assert hub.httpd.completes[-1]["cell_key"] == CELL_KEY
+    assert hub.httpd.completes[-1]["compiled_graph_key"] == COMPILED_GRAPH_KEY
 
 
 # --------------------------------------------------------------------------

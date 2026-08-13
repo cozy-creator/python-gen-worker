@@ -14,9 +14,9 @@ Either way, kernel configs are chosen by TIMING KERNELS ON THE CARD.
 
 Which makes concurrency a CORRECTNESS problem, not a speed one: two entries
 benchmarking at once measure each other's contention, pick worse configs, and
-bake them into the artifact. Nothing downstream can see it — the cell key
+bake them into the artifact. Nothing downstream can see it — the compiled graph key
 digests the traced graph, the sm, the toolchain and the env seal, none of
-which move when a kernel config changes. A slower cell would publish under
+which move when a kernel config changes. A slower compiled graph would publish under
 the same key as a good one. That is this codebase's worst failure class (a
 silent wrong answer), so the pool must not create it.
 
@@ -135,7 +135,7 @@ def install(path: Path) -> Optional[DeviceBenchmarkLock]:
     """Route every inductor GPU benchmark in THIS process through ``path``.
 
     Returns the lock, or ``None`` when the running torch has no such hook —
-    in which case the caller must NOT run a wide pool on a GPU cell, because
+    in which case the caller must NOT run a wide pool on a GPU compiled graph, because
     nothing would keep two entries from benchmarking at once. Never raises:
     a mint that died installing a safety interlock would be a worse outcome
     than a mint that reports it could not install one.

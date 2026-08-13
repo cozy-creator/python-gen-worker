@@ -1,7 +1,7 @@
 """The exported lane proves adoption its OWN way (pgw#735).
 
 `executor.py`'s adoption gates required an FX cache hit. That is the right proof
-for a dynamo cell — a hit means the delivered graph was reused rather than
+for a dynamo compiled graph — a hit means the delivered graph was reused rather than
 silently re-traced — but an EXPORTED artifact performs no FX lookup at all, so
 the gate could never pass and every `.pt2` adoption scored as a failure.
 
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from gen_worker import aot_serve, cell_key
+from gen_worker import aot_serve, compiled_graph_key
 
 
 class _Pipe:
@@ -77,24 +77,24 @@ def test_proven_since_requires_new_successful_calls_and_no_revocation():
     assert not aot_serve.proven_since(pipe, 7)
     assert not aot_serve.proven_since(pipe, 9)
     # An artifact that ran and then revoked (a B1/B2 refusal) has proven
-    # nothing — fail closed, exactly like a dynamo cell with zero hits.
+    # nothing — fail closed, exactly like a dynamo compiled graph with zero hits.
     _arm(pipe, calls=5, failed=True)
     assert aot_serve.execution_count(pipe) == 5
     assert not aot_serve.proven_since(pipe, 0)
 
 
-def test_exported_kind_cell_key_refusals_are_named():
-    """pgw#1059: only exported (`aot-inductor`) cells are keyed, and every
+def test_exported_kind_compiled_graph_key_refusals_are_named():
+    """pgw#1059: only exported (`aot-inductor`) compiled graphs are keyed, and every
     refusal names the missing fact instead of failing opaquely."""
     for kind in ("torch-inductor-cache", "an-unknown-kind", ""):
-        with pytest.raises(cell_key.CellKeyError) as unknown:
-            cell_key.from_entry_metadata({"kind": kind})
+        with pytest.raises(compiled_graph_key.CompiledGraphKeyError) as unknown:
+            compiled_graph_key.from_entry_metadata({"kind": kind})
         assert "no entry-key identity" in str(unknown.value)
 
-    with pytest.raises(cell_key.CellKeyError) as no_sm:
-        cell_key.from_entry_metadata({"kind": "aot-inductor"})
+    with pytest.raises(compiled_graph_key.CompiledGraphKeyError) as no_sm:
+        compiled_graph_key.from_entry_metadata({"kind": "aot-inductor"})
     assert "sm" in str(no_sm.value)
 
-    with pytest.raises(cell_key.CellKeyError) as no_entry:
-        cell_key.from_entry_metadata({"kind": "aot-inductor", "sm": "sm_89"})
+    with pytest.raises(compiled_graph_key.CompiledGraphKeyError) as no_entry:
+        compiled_graph_key.from_entry_metadata({"kind": "aot-inductor", "sm": "sm_89"})
     assert "entry" in str(no_entry.value)

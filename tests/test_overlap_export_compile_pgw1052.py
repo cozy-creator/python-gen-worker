@@ -16,7 +16,7 @@ What must hold, and is asserted here for real (real ``torch.export``, real
 * pgw#917's merge/refuse decision moves to ARRIVAL: a duplicate class row is
   aliased before any compile is spent on it, and a same-ingress
   different-identity collision refuses at row N (bounded waste, stated);
-* the overlapped mint and the serial mint produce the SAME cell key — the
+* the overlapped mint and the serial mint produce the SAME compiled graph key — the
   overlap is a PROCESS change under pgw#846's rule, byte-invisible in the
   artifact;
 * the phase books stay honest: ``export_all_s`` still exists, and the pool
@@ -181,7 +181,7 @@ def test_arrival_alias_merges_without_a_compile() -> None:
         keeper = canon.admit(_entry(f"unet/r{i}", h, w))
         assert keeper is first, (
             "an area-preserving sibling must alias onto the FIRST arrival — "
-            "compiling it buys nothing and makes the cell undispatchable")
+            "compiling it buys nothing and makes the compiled_graph undispatchable")
 
 
 def test_arrival_collision_refuses_naming_the_axis() -> None:
@@ -275,22 +275,22 @@ def _mint(tmp: Path, *, entry_workers: int = 0) -> aot_mint.MintResult:
     return aot_mint.mint(pipe, spec, tmp, entry_workers=entry_workers)
 
 
-def test_overlapped_and_serial_mints_share_one_cell_key(
+def test_overlapped_and_serial_mints_share_one_compiled_graph_key(
     tmp_path: Path, fake_sm: Dict[str, str], wide_pool: None,
 ) -> None:
     """pgw#846: the overlap is a process change. The serial path (a forced
-    K=1) and the overlapped pool path must stamp the SAME cell key — and the
+    K=1) and the overlapped pool path must stamp the SAME compiled graph key — and the
     overlapped result must carry the overlap's own books."""
     _declare()
     serial = _mint(tmp_path / "serial", entry_workers=1)
     overlapped = _mint(tmp_path / "overlapped")
 
-    # pgw#1176: a mint produces a KEY SET, so "same cell key" becomes "the
+    # pgw#1176: a mint produces a KEY SET, so "same compiled graph key" becomes "the
     # same classes, keyed identically" — which is the stronger claim the row
     # always meant. An overlapped mint that agreed on a combined digest while
     # one class differed would have passed the old assertion.
     assert serial.keys == overlapped.keys, (
-        "the overlapped mint re-keyed the cell — pgw#1052 must be "
+        "the overlapped mint re-keyed the compiled_graph — pgw#1052 must be "
         "byte-invisible in the artifact")
     assert overlapped.timings.get("entry_workers", 0) > 1, (
         "the overlapped mint never took the pool path on this box; the "

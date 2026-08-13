@@ -53,13 +53,13 @@ def test_armed_verdict_with_passing_self_checks_arms_both_axes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    kernel_path.pin("fused+packed", "cell verdict")
+    kernel_path.pin("fused+packed", "compiled_graph verdict")
     monkeypatch.setattr(nk, "_fused_linear_self_check", lambda: None)
     monkeypatch.setattr(nk, "_packed_modulation_self_check", lambda: None)
     assert nk.svdq_linear_execution_lane() == "fused"
     assert nk.svdq_modulation_execution_lane() == "packed"
-    assert "cell verdict" in nk.svdq_linear_execution_lane_reason()
-    assert "cell verdict" in nk.svdq_modulation_execution_lane_reason()
+    assert "compiled_graph verdict" in nk.svdq_linear_execution_lane_reason()
+    assert "compiled_graph verdict" in nk.svdq_modulation_execution_lane_reason()
 
 
 def test_the_axes_are_independent(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -68,7 +68,7 @@ def test_the_axes_are_independent(monkeypatch: pytest.MonkeyPatch) -> None:
     win or 19% of its step time, with no way to take both — so the verdict
     vocabulary has to be able to say `baseline+packed`, and B200's does."""
     monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    kernel_path.pin("baseline+packed", "cell verdict: B200 228 vs 350 ms")
+    kernel_path.pin("baseline+packed", "compiled_graph verdict: B200 228 vs 350 ms")
     monkeypatch.setattr(nk, "_packed_modulation_self_check", lambda: None)
     assert nk.svdq_linear_execution_lane() == "baseline"
     assert nk.svdq_modulation_execution_lane() == "packed"
@@ -77,13 +77,13 @@ def test_the_axes_are_independent(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_a_baseline_axis_never_runs_its_self_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An axis a cell puts on its degraded value is obeyed verbatim: no
+    """An axis a compiled graph puts on its degraded value is obeyed verbatim: no
     probe, no SM read, no compile."""
     def boom() -> str:
         raise AssertionError("the self-check must not run for a degraded axis")
 
     monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    kernel_path.pin("baseline+dense", "cell verdict: B200 measured 228 vs 350")
+    kernel_path.pin("baseline+dense", "compiled_graph verdict: B200 measured 228 vs 350")
     monkeypatch.setattr(nk, "_fused_linear_self_check", boom)
     monkeypatch.setattr(nk, "_packed_modulation_self_check", boom)
     assert nk.svdq_linear_execution_lane() == "baseline"
@@ -95,7 +95,7 @@ def test_a_failing_self_check_degrades_only_its_own_axis(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    kernel_path.pin("fused+packed", "cell verdict")
+    kernel_path.pin("fused+packed", "compiled_graph verdict")
     monkeypatch.setattr(nk, "_fused_linear_self_check", lambda: "no fp4 here")
     monkeypatch.setattr(nk, "_packed_modulation_self_check", lambda: None)
     assert nk.svdq_linear_execution_lane() == "baseline"
@@ -110,7 +110,7 @@ def test_self_check_raise_degrades_not_raises(
         raise RuntimeError("driver exploded")
 
     monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    kernel_path.pin("fused+packed", "cell verdict")
+    kernel_path.pin("fused+packed", "compiled_graph verdict")
     monkeypatch.setattr(nk, "_fused_linear_self_check", boom)
     assert nk.svdq_linear_execution_lane() == "baseline"
     assert "driver exploded" in nk.svdq_linear_execution_lane_reason()
@@ -151,7 +151,7 @@ def test_real_self_checks_on_this_host_degrade_cleanly(
     reason, never raise (on a Blackwell runner they instead arm — also
     fine)."""
     monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    kernel_path.pin("fused+packed", "cell verdict")
+    kernel_path.pin("fused+packed", "compiled_graph verdict")
     assert nk.svdq_linear_execution_lane() in ("baseline", "fused")
     assert nk.svdq_linear_execution_lane_reason()
     assert nk.svdq_modulation_execution_lane() in ("dense", "packed")

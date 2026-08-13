@@ -1,9 +1,9 @@
 """pgw#1058 — the artifact-identity gate on ADMISSION facts.
 
-Attempt 30 published the first-ever aot-inductor cell and every adopting pod
+Attempt 30 published the first-ever aot-inductor compiled graph and every adopting pod
 refused all 36 entries. The filed hypothesis was a lying label (entry says
 H_lat=80,W_lat=192, program specialized differently). Pulling the published
-cell apart off-pod ($0) FALSIFIED that: the labels and the packed manifest
+compiled graph apart off-pod ($0) FALSIFIED that: the labels and the packed manifest
 faithfully describe the program. The program itself was minted for a call
 class real traffic never presents — sdxl's declaration omitted `dtype` on its
 scalar `timestep` row and the SDK silently defaulted it to the MODULE's weight
@@ -18,11 +18,11 @@ Two defect classes die here:
 2. THE UNVERIFIED LABEL (the pgw#1058 acceptance as filed, one layer down
    from pgw#1042) — the declared manifest rows are now proven against the
    artifact's OWN generated `check_input_<i>` guards, at package time (a
-   divergent cell is never published) and at arm time (a corrupted one is
+   divergent compiled graph is never published) and at arm time (a corrupted one is
    never served), through ONE function: `aot_package.admission_drift`.
 
 The fixtures under tests/fixtures/pgw1058/ are extracted verbatim from the
-REAL published cell (cell_store `ck1-9ae7bbea…` → `sha256:82efc111…`, entry
+REAL published compiled graph (compiled_graph_store `ck1-9ae7bbea…` → `sha256:82efc111…`, entry
 `unet/adapter=false,cfg=false/B=1,H_lat=80,T_txt=77,W_lat=192`): its packed
 manifest rows and its wrapper's generated input checks. The tests below rule
 on the actual bytes the fleet refused.
@@ -133,11 +133,11 @@ def test_a_row_that_dodged_validation_is_refused_at_the_feed_builder():
 
 
 # ---------------------------------------------------------------------------
-# 2 — the published cell's bytes, ruled on directly
+# 2 — the published compiled graph's bytes, ruled on directly
 # ---------------------------------------------------------------------------
 
 
-def test_the_real_cells_guards_parse_and_state_the_defect():
+def test_the_real_compiled_graphs_guards_parse_and_state_the_defect():
     """The artifact's own generated checks, read from the published wrapper:
     sample really is bfloat16[1,4,80,192] — the LABEL WAS HONEST — and
     timestep really is bfloat16, the dtype no real scheduler ever presents."""
@@ -157,7 +157,7 @@ def test_the_labels_were_honest_the_filed_hypothesis_is_false():
     assert aot_package.input_guard_drift(_entry_meta()["inputs"], _guards()) == []
 
 
-def test_the_real_cell_refuses_the_real_warmup_call_on_timestep_dtype():
+def test_the_real_compiled_graph_refuses_the_real_warmup_call_on_timestep_dtype():
     """The $0 reproduction of the field failure: the serve path's own
     admission (`assert_ingress` on the packed contract) against the exact
     warmup class the adopt pod presented. The shape-matching entry's true
@@ -173,9 +173,9 @@ def test_the_real_cell_refuses_the_real_warmup_call_on_timestep_dtype():
     assert "timestep" in str(excinfo.value)
 
 
-def test_the_corrected_declaration_catches_the_real_cell_by_name():
+def test_the_corrected_declaration_catches_the_real_compiled_graph_by_name():
     """Under the fix, sdxl declares `timestep` float32 — and the gate run
-    against the PUBLISHED cell's own bytes now names the defect instead of
+    against the PUBLISHED compiled graph's own bytes now names the defect instead of
     36 opaque admission misses: the manifest a float32 mint would carry
     drifts from this artifact's bfloat16 guard."""
     rows = [dict(r) for r in _entry_meta()["inputs"]]

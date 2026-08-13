@@ -171,7 +171,7 @@ def observed_execution_lane(token: str, compiled: bool) -> ExecutionLane:
     must not touch this path: wan-2.2 served w8a8 weights EAGER on an H100
     (its self-mint declined for `insufficient_vram`) and the compiled-only
     coercion rewrote the honest `+eager` into `+compiled` — an over-claim on
-    the key that feeds pricing, verdicts, floors and cell identity, in the
+    the key that feeds pricing, verdicts, floors and compiled graph identity, in the
     flattering direction. The body stays table-validated (the weights half is
     still vocabulary); the execution axis is whatever actually happened."""
     body = _body_for_token(token)

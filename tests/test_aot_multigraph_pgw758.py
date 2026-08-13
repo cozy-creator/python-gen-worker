@@ -1,4 +1,4 @@
-"""pgw#758 — multi-graph cells: one .pt2 per (family x lane x contract),
+"""pgw#758 — multi-graph compiled graphs: one .pt2 per (family x lane x contract),
 every declared graph class a NAMED ENTRY.
 
 Paul's ruling: "generate and generate_turbo are separate functions, they
@@ -6,7 +6,7 @@ have separate graphs, but they are COMBINED TOGETHER INTO ONE FILE."
 
 The headline red test mints a two-class declared family (a cfg fork — the
 generate / generate-turbo shape) into ONE artifact and serves BOTH
-functions through the single loaded cell in one process. Real torch.export
+functions through the single loaded compiled graph in one process. Real torch.export
 + real AOTI compiles on CPU — no mocks on the packaging path, because the
 packaging path IS what this issue changes.
 """
@@ -26,7 +26,7 @@ torch = pytest.importorskip("torch")
 import torch.nn as nn  # noqa: E402
 
 from gen_worker import aot_declaration, aot_mint, aot_package, aot_serve  # noqa: E402
-from gen_worker import cell_key  # noqa: E402
+from gen_worker import compiled_graph_key  # noqa: E402
 from gen_worker import compile_cache  # noqa: E402
 from gen_worker.api.decorators import Compile  # noqa: E402
 from gen_worker.api.export_contract import (  # noqa: E402
@@ -94,7 +94,7 @@ def _mint(tmp_path: Path, pipe: Any = None) -> Tuple[Any, aot_mint.MintResult]:
 
 
 @pytest.fixture(scope="module")
-def minted_cell(tmp_path_factory, request) -> Dict[str, Any]:
+def minted_compiled_graph(tmp_path_factory, request) -> Dict[str, Any]:
     """ONE real mint shared by the read-only assertions (an AOTI compile
     costs ~10s/entry on CPU; the mutating tests mint their own)."""
     from _pytest.monkeypatch import MonkeyPatch
@@ -108,7 +108,7 @@ def minted_cell(tmp_path_factory, request) -> Dict[str, Any]:
         "cuda": full["cuda"]})
     reset_export_declarations()
     _declare()
-    tmp = tmp_path_factory.mktemp("cell758")
+    tmp = tmp_path_factory.mktemp("compiledgraph758")
     pipe, result = _mint(tmp)
     reset_export_declarations()
     return {"pipe": pipe, "result": result, "tmp": tmp}
@@ -121,7 +121,7 @@ def minted_cell(tmp_path_factory, request) -> Dict[str, Any]:
 
 def test_entry_names_derive_from_declaration_coordinates() -> None:
     decl = _declare()
-    plans = aot_declaration.cell_plans(decl)
+    plans = aot_declaration.compiled_graph_plans(decl)
     names = sorted(aot_declaration.plan_entry_name(p) for p in plans)
     assert names == ["unet/cfg=false/B=1", "unet/cfg=true/B=2"]
 
@@ -139,24 +139,24 @@ def test_dynamic_collapse_entry_omits_the_dims_segment() -> None:
 
 def test_the_manifest_digest_keeps_the_verbatim_ck6_formula() -> None:
     """pgw#1176 moved this arithmetic, not changed it: `combined_graph_hash`
-    became `cell_key.manifest_digest` — same bytes, demoted from IDENTITY to a
+    became `compiled_graph_key.manifest_digest` — same bytes, demoted from IDENTITY to a
     coverage label. The formula is a cross-repo wire fact (the hub folds
     compile-health rows under it), so the verbatim pin survives the move."""
     import hashlib
 
     hashes = ["bbb", "aaa", "ccc"]
     want = hashlib.sha256("\n".join(sorted(hashes)).encode()).hexdigest()[:16]
-    assert cell_key.manifest_digest(hashes) == want
+    assert compiled_graph_key.manifest_digest(hashes) == want
     # order-independent, content-sensitive
-    a = cell_key.manifest_digest(["x", "y"])
-    assert cell_key.manifest_digest(["y", "x"]) == a
-    assert cell_key.manifest_digest(["x", "z"]) != a
+    a = compiled_graph_key.manifest_digest(["x", "y"])
+    assert compiled_graph_key.manifest_digest(["y", "x"]) == a
+    assert compiled_graph_key.manifest_digest(["x", "z"]) != a
 
 
-def test_per_class_hashes_ride_metadata_and_name_the_class(minted_cell) -> None:
-    row = sorted(minted_cell["result"].entries, key=lambda r: r.entry)[0]
+def test_per_class_hashes_ride_metadata_and_name_the_class(minted_compiled_graph) -> None:
+    row = sorted(minted_compiled_graph["result"].entries, key=lambda r: r.entry)[0]
     meta = json.loads(json.dumps(row.metadata))
-    block = meta[cell_key.ENTRY_BLOCK_KEY]
+    block = meta[compiled_graph_key.ENTRY_BLOCK_KEY]
     assert block["class_hash"]
     block["class_hash"] = "f" * 16
     reason = aot_serve.verify(meta, family=FAMILY)
@@ -177,23 +177,23 @@ def test_range_digest_is_folded_per_class() -> None:
 
 
 # ---------------------------------------------------------------------------
-# The mint — one invocation, one cell, every declared class
+# The mint — one invocation, one compiled graph, every declared class
 # ---------------------------------------------------------------------------
 
 
 def test_one_mint_packages_EVERY_declared_class_AS_ITS_OWN_ARTIFACT(
-        minted_cell) -> None:
+        minted_compiled_graph) -> None:
     """pgw#1176: the mint still covers the whole declared class set — what
     changed is that each class is its OWN keyed, publishable, armable
-    artifact. `every declared class` survives as the assertion; `one cell`
+    artifact. `every declared class` survives as the assertion; `one compiled graph`
     does not, because that unit is what forbade incremental adoption.
     """
-    result = minted_cell["result"]
+    result = minted_compiled_graph["result"]
     assert sorted(r.entry for r in result.entries) == [
         "unet/cfg=false/B=1", "unet/cfg=true/B=2"]
     # Independently keyed — two classes, two identities, no shared unit.
     assert len({r.key for r in result.entries}) == 2
-    assert all(cell_key.is_key(r.key) for r in result.entries)
+    assert all(compiled_graph_key.is_key(r.key) for r in result.entries)
     # ...and ONE manifest label over the set, which is telemetry not identity.
     assert result.manifest
     assert all(r.metadata["manifest_digest"] == result.manifest
@@ -202,26 +202,26 @@ def test_one_mint_packages_EVERY_declared_class_AS_ITS_OWN_ARTIFACT(
         assert row.metadata["format"] == 3
         assert "entries" not in row.metadata
         with tarfile.open(row.artifact) as tar:
-            tar.extractall(minted_cell["tmp"] / f"x{i}", filter="data")
+            tar.extractall(minted_compiled_graph["tmp"] / f"x{i}", filter="data")
         names = aot_package.package_entry_names(
-            minted_cell["tmp"] / f"x{i}" / aot_serve.PACKAGE_NAME)
+            minted_compiled_graph["tmp"] / f"x{i}" / aot_serve.PACKAGE_NAME)
         assert list(names) == [row.entry], (
             "an entry artifact carries ONE named model")
 
 
-def test_package_gates_run_per_entry(minted_cell) -> None:
-    for i, row in enumerate(minted_cell["result"].entries):
+def test_package_gates_run_per_entry(minted_compiled_graph) -> None:
+    for i, row in enumerate(minted_compiled_graph["result"].entries):
         with tarfile.open(row.artifact) as tar:
-            tar.extractall(minted_cell["tmp"] / f"g{i}", filter="data")
-        package = minted_cell["tmp"] / f"g{i}" / aot_serve.PACKAGE_NAME
+            tar.extractall(minted_compiled_graph["tmp"] / f"g{i}", filter="data")
+        package = minted_compiled_graph["tmp"] / f"g{i}" / aot_serve.PACKAGE_NAME
         assert aot_package.code_only_violations(package, row.entry) == []
         assert aot_package.declared_constants(package, row.entry)
 
 
-def test_entry_scoped_reads_refuse_an_unknown_entry(minted_cell) -> None:
-    with tarfile.open(minted_cell["result"].entries[0].artifact) as tar:
-        tar.extractall(minted_cell["tmp"] / "u", filter="data")
-    package = minted_cell["tmp"] / "u" / aot_serve.PACKAGE_NAME
+def test_entry_scoped_reads_refuse_an_unknown_entry(minted_compiled_graph) -> None:
+    with tarfile.open(minted_compiled_graph["result"].entries[0].artifact) as tar:
+        tar.extractall(minted_compiled_graph["tmp"] / "u", filter="data")
+    package = minted_compiled_graph["tmp"] / "u" / aot_serve.PACKAGE_NAME
     with pytest.raises(aot_package.PackageIntrospectionError) as err:
         aot_package.declared_constants(package, "unet/cfg=true/B=99")
     assert "unet/cfg=true/B=99" in str(err.value)
@@ -381,8 +381,8 @@ def test_failed_declared_warm_is_a_named_refusal(tmp_path, fake_sm) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_mint_records_the_phase_table(minted_cell) -> None:
-    result = minted_cell["result"]
+def test_mint_records_the_phase_table(minted_compiled_graph) -> None:
+    result = minted_compiled_graph["result"]
     # The phase table is a property of the MINT, not of one artifact, so every
     # entry's metadata carries the same one — it is the run's record.
     table = result.entries[0].metadata["mint_phases"]
@@ -405,33 +405,33 @@ def test_mint_records_the_phase_table(minted_cell) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Serve — ONE loaded cell, every declared function
+# Serve — ONE loaded compiled graph, every declared function
 # ---------------------------------------------------------------------------
 
 
-def _armed(minted_cell) -> Any:
+def _armed(minted_compiled_graph) -> Any:
     """Arm EVERY minted entry onto one pipeline, one artifact at a time.
 
     pgw#1176: this is what accretion looks like from the outside — the second
     call joins the first's registry, the first's target pool and the first's
-    live wrap. The old shape (one `arm_entry` over a multi-entry cell) is
-    gone with the cell.
+    live wrap. The old shape (one `arm_entry` over a multi-entry compiled graph) is
+    gone with the compiled graph.
     """
-    pipe = minted_cell["pipe"]
+    pipe = minted_compiled_graph["pipe"]
     if not aot_serve.is_armed(pipe):
         cfg = types.SimpleNamespace(family=FAMILY, lora_bucket=0)
-        for row in minted_cell["result"].entries:
+        for row in minted_compiled_graph["result"].entries:
             aot_serve.arm_entry(
                 pipe, cfg, row.artifact,
-                cache_dir=minted_cell["tmp"] / "cache",
-                declared=[r.entry for r in minted_cell["result"].entries])
+                cache_dir=minted_compiled_graph["tmp"] / "cache",
+                declared=[r.entry for r in minted_compiled_graph["result"].entries])
     return pipe
 
 
-def test_one_resident_cell_serves_two_functions(minted_cell) -> None:
+def test_one_resident_compiled_graph_serves_two_functions(minted_compiled_graph) -> None:
     """THE pgw#758 red test: generate and generate-turbo — two different
     graph classes — served by a single loaded artifact in one process."""
-    pipe = _armed(minted_cell)
+    pipe = _armed(minted_compiled_graph)
     w, b = pipe.unet.lin.weight, pipe.unet.lin.bias
     before = aot_serve.execution_count(pipe)
     x2, x1 = torch.randn(2, 4), torch.randn(1, 4)
@@ -443,8 +443,8 @@ def test_one_resident_cell_serves_two_functions(minted_cell) -> None:
     assert aot_serve.is_armed(pipe)
 
 
-def test_off_contract_call_is_a_named_refusal_and_stays_armed(minted_cell) -> None:
-    pipe = _armed(minted_cell)
+def test_off_contract_call_is_a_named_refusal_and_stays_armed(minted_compiled_graph) -> None:
+    pipe = _armed(minted_compiled_graph)
     refusals = aot_serve.ingress_refusals(pipe)
     out = pipe.unet.forward(torch.randn(3, 4))  # no declared class admits B=3
     assert out is not None  # served eagerly
@@ -484,8 +484,8 @@ def test_dispatch_refuses_ambiguity_by_name() -> None:
     assert "unet/a" in str(err.value) and "unet/b" in str(err.value)
 
 
-def test_unwrap_restores_every_target(minted_cell) -> None:
-    pipe = _armed(minted_cell)
+def test_unwrap_restores_every_target(minted_compiled_graph) -> None:
+    pipe = _armed(minted_compiled_graph)
     eager = pipe.unet.__class__.forward
     assert aot_serve.unwrap(pipe)
     assert not aot_serve.is_armed(pipe)
@@ -502,10 +502,10 @@ def test_unwrap_restores_every_target(minted_cell) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_verify_names_a_malformed_entry(minted_cell) -> None:
-    row = sorted(minted_cell["result"].entries, key=lambda r: r.entry)[0]
+def test_verify_names_a_malformed_entry(minted_compiled_graph) -> None:
+    row = sorted(minted_compiled_graph["result"].entries, key=lambda r: r.entry)[0]
     meta = json.loads(json.dumps(row.metadata))
-    meta[cell_key.ENTRY_BLOCK_KEY]["inputs"] = []
+    meta[compiled_graph_key.ENTRY_BLOCK_KEY]["inputs"] = []
     reason = aot_serve.verify(meta, family=FAMILY)
     assert row.entry in reason
 
@@ -523,7 +523,7 @@ def test_literals_are_namespaced_per_entry() -> None:
 
 def test_entry_names_reserving_the_literal_separator_are_refused() -> None:
     with pytest.raises(ValueError, match="reserves"):
-        aot_serve.entry_from_meta({cell_key.ENTRY_BLOCK_KEY: {
+        aot_serve.entry_from_meta({compiled_graph_key.ENTRY_BLOCK_KEY: {
             "name": "unet::x", "target": "unet", "inputs": [
                 {"name": "s", "position": 0, "dtype": "float32", "shape": [1]}],
             "symbols": {}, "constants": []}})

@@ -27,7 +27,7 @@ tasks:
       pgw#978 — the whole mint machinery against a toy model: resolve ->
       MintSlot handoff -> child spawn -> load -> warmup_forward -> torch.export
       + AOTInductor -> seal -> publish to a local hub -> a SECOND process
-      adopting the cell. Seconds per iteration instead of the
+      adopting the compiled_graph. Seconds per iteration instead of the
       publish->build->buy loop. It is NOT a release gate — see docs/releasing.md.
     cmds:
       - nice -n 10 uv run python scripts/micro_mint_rig.py {{.CLI_ARGS}}
@@ -40,7 +40,7 @@ tasks:
       org-worker-shaped endpoint: 3 export entries (two fork arms + a second
       target), CONTAINER inputs with a plain input after them so every cycle
       re-proves pgw#993/pgw#994, deterministically GENERATED weights, and a
-      parity check that arms the adopted cell and compares every arm to eager.
+      parity check that arms the adopted compiled_graph and compares every arm to eager.
 
       This is the vehicle a mint-path change should be proven against;
       `task rig:mint` is the cheaper one-entry plumbing toy.
@@ -72,7 +72,7 @@ tasks:
     desc: |
       pgw#983 — one rig cycle on the REAL card. Builds/refreshes the isolated
       cu126 interpreter (see scripts/rig_gpu_env.sh: cu128 has no torch
-      2.13.0, cu126 does) and runs with --device cuda, so the cell carries a
+      2.13.0, cu126 does) and runs with --device cuda, so the compiled_graph carries a
       MEASURED sm_89 instead of a supplied one.
 
       The repo's own .venv and the cu130 pin are untouched; this is a second
@@ -180,7 +180,7 @@ tasks:
       - cmd: uv run python scripts/lint_config_reads.py
       - cmd: uv run python scripts/lint_settings_writers.py
       - cmd: uv run python scripts/lint_layout_declarations.py
-      - cmd: uv run python scripts/lint_cell_key_layout_fence.py
+      - cmd: uv run python scripts/lint_compiled_graph_key_layout_fence.py
       - cmd: uv run python scripts/check_registry_contract.py
       - cmd: uv run python scripts/lint_credential_identity.py
       - cmd: uv run python scripts/lint_arm_state_feeders.py

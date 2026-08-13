@@ -1,9 +1,9 @@
 """pgw#1148 / DESIGN-RULINGS §1.32(d): the flavor is dead as a WEIGHT ADDRESS,
-and alive as the COMPILE CELL fragment.
+and alive as the COMPILE COMPILED GRAPH fragment.
 
 Both halves are asserted here because the whole risk of this deletion is
 mixing them up: `grep -rn flavor src/` is a four-way homonym, and the compile
-cache's cell keys are `#`-shaped. The hub made exactly this split (th#1803
+cache's compiled graph keys are `#`-shaped. The hub made exactly this split (th#1803
 kept `release.ParseCanonicalRef`'s `#` tail for the cache and refuses the
 selector at its request surfaces with `flavor_selection_removed` /
 `binding_flavor_removed`, both 400); the SDK mirrors it client-side so a
@@ -24,7 +24,7 @@ from gen_worker.models.refs import (
     refuse_flavor_selector,
 )
 
-CELL_REF = "root/family-sdxl:cells#ek1-4f2a9b"
+COMPILED_GRAPH_REF = "root/family-sdxl:compiled_graphs#ek1-4f2a9b"
 
 
 # --------------------------------------------------------------------------
@@ -134,38 +134,38 @@ def test_the_hub_resolve_no_longer_sends_or_parses_a_flavor() -> None:
 
 
 # --------------------------------------------------------------------------
-# The half that must NOT move: compile cells are `#`-shaped
+# The half that must NOT move: compile compiled graphs are `#`-shaped
 # --------------------------------------------------------------------------
 
-def test_the_cell_fragment_still_parses() -> None:
-    th = parse_model_ref(CELL_REF).tensorhub
+def test_the_compiled_graph_fragment_still_parses() -> None:
+    th = parse_model_ref(COMPILED_GRAPH_REF).tensorhub
     assert th is not None
     assert (th.owner, th.repo, th.tag, th.flavor) == (
-        "root", "family-sdxl", "cells", "ek1-4f2a9b")
+        "root", "family-sdxl", "compiled_graphs", "ek1-4f2a9b")
 
 
-def test_parse_cell_ref_is_unchanged() -> None:
-    assert cc.parse_cell_ref(CELL_REF) == ("sdxl", "ek1-4f2a9b")
-    assert cc.family_from_ref(CELL_REF) == "sdxl"
+def test_parse_compiled_graph_ref_is_unchanged() -> None:
+    assert cc.parse_compiled_graph_ref(COMPILED_GRAPH_REF) == ("sdxl", "ek1-4f2a9b")
+    assert cc.family_from_ref(COMPILED_GRAPH_REF) == "sdxl"
 
 
-def test_a_cell_ref_round_trips_through_the_normal_form() -> None:
-    assert refs.normalize_model_ref(CELL_REF) == CELL_REF
+def test_a_compiled_graph_ref_round_trips_through_the_normal_form() -> None:
+    assert refs.normalize_model_ref(COMPILED_GRAPH_REF) == COMPILED_GRAPH_REF
 
 
-# pgw#1187 DELETED `test_the_trt_cell_predicate_still_reads_its_fragment` —
-# `trt_engine.is_engine_ref` went with TensorRT. The `#`-shaped CELL ref grammar
+# pgw#1187 DELETED `test_the_trt_compiled_graph_predicate_still_reads_its_fragment` —
+# `trt_engine.is_engine_ref` went with TensorRT. The `#`-shaped COMPILED GRAPH ref grammar
 # it also exercised is asserted by the three rows above, which is the durable
 # property; the predicate itself had no other reader.
 
 
 # pgw#1167 REMOVED `test_the_compile_cache_modules_are_byte_untouched_by_this_deletion`.
 #
-# It asserted that eight cell-KEY modules (`compile_cache`, `cell_key`,
-# `aot_mint`, `aot_serve`, `fleet_cells`, `local_cells`, `mint_budget` and the
+# It asserted that eight compiled graph-KEY modules (`compile_cache`, `compiled_graph_key`,
+# `aot_mint`, `aot_serve`, `fleet_compiled_graphs`, `local_compiled_graphs`, `mint_budget` and the
 # since-deleted `trt_engine`) were byte-identical to `origin/master` — by diffing the
 # WORKING TREE against the merge-base. On pgw#1148's own branch that proved
-# something real: THIS deletion did not touch a compile-cell module.
+# something real: THIS deletion did not touch a compile-compiled graph module.
 #
 # Merged, it stops meaning that and becomes a permanent FREEZE: every future
 # branch that edits any of those eight files fails it, for no reason connected
@@ -173,9 +173,9 @@ def test_a_cell_ref_round_trips_through_the_normal_form() -> None:
 # is merged and cannot touch anything again) and false for everyone else — it
 # went red on the very next lane to edit `aot_mint.py`, which was this one.
 #
-# The concern it encoded — "the GPU/compile-cell homonym is NOT this ruling's
+# The concern it encoded — "the GPU/compile-compiled graph homonym is NOT this ruling's
 # subject" — is already covered DURABLY and by CONTENT immediately above:
-# `test_the_cell_fragment_still_parses`, `test_parse_cell_ref_is_unchanged`
-# and `test_a_cell_ref_round_trips_through_the_normal_form` all keep working no
+# `test_the_compiled_graph_fragment_still_parses`, `test_parse_compiled_graph_ref_is_unchanged`
+# and `test_a_compiled_graph_ref_round_trips_through_the_normal_form` all keep working no
 # matter who edits those modules, which is what a fence should do. A diff
 # against master is a fact about a branch, not an invariant of the codebase.

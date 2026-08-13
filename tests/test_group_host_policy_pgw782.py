@@ -67,7 +67,7 @@ def _restore_process_state() -> Any:
 
     Measured cost: a leaked 4-group topology made
     `test_guard_miss_pgw680.py::test_tenant_guard_miss_end_to_end` fail 7 files
-    later with `in-process mint refused at groups=4` — `fleet_cells.py:1050`
+    later with `in-process mint refused at groups=4` — `fleet_compiled_graphs.py:1050`
     doing its job exactly right (pgw#777/DPA-8 forbids an in-process inductor
     capture on a multi-group worker) against state that belonged to this file.
     The victim passes alone and failed only in suite order, which is why it read

@@ -1,12 +1,12 @@
 """The AOT mint — export + AOTInductor-package a family's WHOLE declared
-class set as ONE multi-graph cell (pgw#704 GO, #723 mint path, #758 packaging).
+class set as ONE multi-graph compiled graph (pgw#704 GO, #723 mint path, #758 packaging).
 
     compose -> per declared class: torch.export.export -> aot_compile(code-only)
             -> per-entry gates -> package_aoti({entry: files}) -> pack -> publish
 
 Paul's ruling (pgw#758): "generate and generate_turbo are separate functions,
 they have separate graphs, but they are COMBINED TOGETHER INTO ONE FILE." One
-mint invocation produces one cell per (family x lane x contract) carrying every
+mint invocation produces one compiled graph per (family x lane x contract) carrying every
 declared graph class as a NAMED ENTRY — which removes the one-artifact-per-pod
 serving ceiling the pilot runbook accepted.
 
@@ -16,9 +16,8 @@ S1 / #723 S1: ONE source of truth, imported by both lanes, never re-declared)
 ``.pt2`` (per entry) and holds the B1 gate. ``lora_lifted`` owns the
 no-baked-adapter gate. This module drives PRODUCTION and nothing else.
 Deliberately NOT folded into ``compile_cache``:
-a compiled-lane backend is its own module riding the compile-cache rails
-(``trt_engine`` established the pattern before TensorRT was deleted in
-pgw#1187), and the dynamo mint stays live and
+a compiled-lane backend is its own module riding the compile-cache rails,
+and the dynamo mint stays live and
 fully-forced in parallel during rollout (#722: nothing retires before sdxl AOT
 is live in prod).
 
@@ -33,7 +32,7 @@ The refusal that used to live here (``lane_admitted`` / ``PARITY_LANES``, a
 one-member allowlist holding ``w8a8``) is deleted because it was a SECOND
 opinion about an already-resolved fact, and the two opinions composed into a
 total block: tensorhub's lane table makes ``fp8-w8a8-dynamic``
-compiled-only, so the hub withholds that lane from AUTO until a cell exists
+compiled-only, so the hub withholds that lane from AUTO until a compiled graph exists
 (th#1123/th#1127), and only a pod already serving the lane can mint one. The
 one lane the mint admitted was the one lane no pod could ever be on, and every
 lane a pod COULD be on (``bf16-w16a16``, ``fp8-w8a16``, ``svdq-*-w4a4``) was
@@ -43,12 +42,12 @@ families reached the mint gate on AUTO, on any card (pgw#850).
 
 The pgw#704 Q4 / #730 measurement is not discarded — it is a RANKING input to
 the lane/execution choice (``+compiled`` vs ``+eager``), which lives in the
-hub. A lane held on dynamo is simply never asked for a cell; if one IS asked
+hub. A lane held on dynamo is simply never asked for a compiled graph; if one IS asked
 for, the mint compiles it.
 
 Where minting runs (#724 REJECTED — Paul, 2026-07-28)
 -----------------------------------------------------
-Serving pods background-mint their own cells under the proven pgw#677
+Serving pods background-mint their own compiled graphs under the proven pgw#677
 eager-first machinery — "I'd rather keep that, rather than a whole complex
 separate compilation system; our compilation system would only ever just be
 running the endpoint code we have already anyway." There is no dedicated mint
@@ -73,7 +72,7 @@ The two gates that make an artifact publishable
 -----------------------------------------------
 **B1 code-only.** Compiled with ``package_constants_in_so=False``, then PROVEN
 so by ``aot_package.code_only_violations`` — two independent structural proofs,
-failing red and naming the tensors. See that module for why weights in a cell
+failing red and naming the tensors. See that module for why weights in a compiled graph
 would destroy the CAS distribution model.
 
 **No baked adapter.** ``lora_lifted.assert_no_baked_adapter`` runs at pack time
@@ -105,7 +104,7 @@ from typing import (
 from . import activity as activity_mod
 from . import (
     aot_compile_pool, aot_package,
-    aot_serve, aot_wrapper_split, boot_phases, cell_key, graph_hash,
+    aot_serve, aot_wrapper_split, boot_phases, compiled_graph_key, graph_hash,
     kernel_path)
 from .aot_contract import (  # re-exported: the declaration layer's vocabulary
     ADAPTER_FORK,
@@ -131,7 +130,7 @@ from .models import structure_only
 from . import compile_cache as cc
 from . import env_seal
 from . import config, worker_credential
-from .fleet_cells import CellPublisher
+from .fleet_compiled_graphs import CompiledGraphPublisher
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +140,7 @@ CODE_ONLY_CONFIGS: Dict[str, Any] = {
 }
 
 #: The inductor config that keeps every lifted weight BINDABLE. Not a knob
-#: either, and for the same reason B1 is not one — this is what makes one cell
+#: either, and for the same reason B1 is not one — this is what makes one compiled graph
 #: legally serve every fine-tune of a family (pgw#1097, pgw#857).
 #:
 #: Off (the torch default), ``GraphLowering.get_attr`` inlines a constant whose
@@ -172,8 +171,8 @@ CODE_ONLY_CONFIGS: Dict[str, Any] = {
 #: ``_FOLDED_CONST_*`` tensor per folded op at load — measured 106,496 bytes on
 #: a 1.1 MB micro decoder (permuted copies of its linear weights, ~10% of model
 #: size). **Unmeasured at sdxl scale and owed**; do not extrapolate the 10%,
-#: since which ops fold is graph-shaped. It buys the property that one cell may
-#: legally serve every fine-tune of a family, which is the whole cell economy.
+#: since which ops fold is graph-shaped. It buys the property that one compiled graph may
+#: legally serve every fine-tune of a family, which is the whole compiled graph economy.
 #:
 #: Weightless mints (pgw#1080) needed this same flag for a DIFFERENT reason —
 #: their values are fake — so the two motives now converge on one config and
@@ -770,8 +769,8 @@ def _pinning_guards(program: Any, declared_symbols: Sequence[Any]) -> List[str]:
 #: MEASURED): 32 -> 4 is FREE (-2% wall clock) and is the recommended
 #: default for background mints on serving pods — same speed, less CPU
 #: contention with live serving. NOT seal-relevant: compile_threads is
-#: outside cell identity per #757's re-key pre-verification, so this
-#: default (and a caller override) never re-keys a cell. A caller value
+#: outside compiled graph identity per #757's re-key pre-verification, so this
+#: default (and a caller override) never re-keys a compiled graph. A caller value
 #: wins; this is a default, not a clamp.
 MINT_COMPILE_THREADS = 4
 
@@ -783,7 +782,7 @@ def _entry_configs(
     packaging flags. ``CODE_ONLY_CONFIGS`` and ``CONSTANT_BINDING_CONFIGS``
     are applied LAST so no caller-supplied config can re-enable constant
     baking or weight inlining — B1 and the folding fence are fleet
-    correctness requirements, not defaults a caller may override. One cell's
+    correctness requirements, not defaults a caller may override. One compiled graph's
     entries ALL compile under this one dict (a per-entry config drift would
     be an identity fact nothing records), and the resolved dict is recorded
     in the mint-phase telemetry."""
@@ -797,14 +796,14 @@ def _entry_configs(
             "and the folding fence (pgw#1097) are not knobs", overridden)
     configs.update(non_negotiable)
     # Emit loose files for package_aoti to combine, instead of a per-entry
-    # archive: the multi-graph cell is ONE .pt2 (pgw#758).
+    # archive: the multi-graph compiled graph is ONE .pt2 (pgw#758).
     configs["aot_inductor.package"] = True
     # pgw#1080's weightless motive and pgw#1097's real-weight motive converge
     # on ONE config, so `weightless` no longer selects anything here. It stays
     # in the signature because callers pass it and because the two motives are
     # worth keeping distinct in the record: weightless mints must defer the
     # fold because the values they would bake are FAKE (micro decoder's
-    # `norm.weight`/`norm.bias` vanished; the adopted cell scored cosine 0.13);
+    # `norm.weight`/`norm.bias` vanished; the adopted compiled graph scored cosine 0.13);
     # real-weight mints must defer it because the values they would bake are
     # one CHECKPOINT'S, which no other fine-tune could rebind.
     del weightless
@@ -832,7 +831,7 @@ def compile_entry_files(
     statements before g++ sees it — same statements, same order, verified by
     reconstruction, declining unmodified on any wrapper shape it does not
     recognise. It changes no compiler, flag, inductor config or library, so
-    no cell is re-keyed.
+    no compiled graph is re-keyed.
     """
     from torch._inductor import aot_compile
 
@@ -874,17 +873,17 @@ def _entry_dir_name(entry: str) -> str:
     return hashlib.sha256(str(entry).encode("utf-8")).hexdigest()[:16]
 
 
-def package_cell(
+def package_compiled_graph(
     files_by_entry: Mapping[str, Sequence[Any]], package_path: Path,
 ) -> Path:
     """Combine every entry's compiled files into ONE ``.pt2`` of named
-    models (``data/aotinductor/<entry>/`` each) — the pgw#758 cell."""
+    models (``data/aotinductor/<entry>/`` each) — the pgw#758 compiled graph."""
     from torch._inductor.package import package_aoti
 
     package_path = Path(package_path)
     package_path.parent.mkdir(parents=True, exist_ok=True)
     if not files_by_entry:
-        raise MintRefused("cannot package a cell with no entries")
+        raise MintRefused("cannot package a compiled_graph with no entries")
     try:
         out = package_aoti(
             str(package_path),
@@ -896,7 +895,7 @@ def package_cell(
 
 
 # ---------------------------------------------------------------------------
-# Mint-phase telemetry (#757's instrument-first doctrine; recorded per cell)
+# Mint-phase telemetry (#757's instrument-first doctrine; recorded per compiled graph)
 # ---------------------------------------------------------------------------
 
 #: ``compilation_time_metrics`` keys summarized into named phases. Host C++
@@ -1009,12 +1008,12 @@ class MintedArtifact:
 class MintResult:
     """Every entry this mint packed, plus its telemetry.
 
-    pgw#1176: a mint no longer produces "a cell". It produces N independently
+    pgw#1176: a mint no longer produces "a compiled graph". It produces N independently
     keyed, independently publishable, independently armable artifacts and a
     derived MANIFEST digest. Nothing waits for the set to be complete —
     :attr:`entries` is whatever finished, which is what makes the mint's
     durability incremental (a crash costs the one in-flight entry, ~2 min,
-    never a 1 h 37 m cell) and what makes a partially compiled family useful.
+    never a 1 h 37 m compiled graph) and what makes a partially compiled family useful.
     """
 
     entries: Tuple[MintedArtifact, ...]
@@ -1044,7 +1043,7 @@ class _MintedEntry:
 def adapter_arm(fork: Sequence[Tuple[str, Any]]) -> Optional[bool]:
     """The pgw#790 adapter arm a fork coordinate states, or ``None`` when the
     coordinate does not carry one (a bucket-0 family, or a target that carries
-    no branch-capable module — wan's ``vae.decode`` in a bucket-128 cell)."""
+    no branch-capable module — wan's ``vae.decode`` in a bucket-128 compiled graph)."""
     value = dict(fork).get(ADAPTER_FORK, None)
     return None if value is None else bool(value)
 
@@ -1069,7 +1068,7 @@ def with_adapter_arm(plan: Any, arm: bool) -> Any:
 
 def _entry_spec(spec: ExportSpec, plan: Any, decl: Any) -> ExportSpec:
     """The per-entry :class:`ExportSpec` one mint plan derives from the
-    cell-level request."""
+    compiled graph-level request."""
 
     specialization = dict(spec.specialization)
     specialization.setdefault(
@@ -1088,7 +1087,7 @@ def _entry_spec(spec: ExportSpec, plan: Any, decl: Any) -> ExportSpec:
     )
     if adapter_arm(plan.fork) is False:
         # pgw#790's branchless class: no bucket, no lifted pair, nothing for
-        # the adapter gates to assert. The CELL still declares its bucket —
+        # the adapter gates to assert. The COMPILED GRAPH still declares its bucket —
         # the fork is what says this graph has no branch, and the specialization
         # block records both, so a reader can see which arm they are holding.
         espec = replace(espec, lora_bucket=0, lifted_inputs=(), lora_fqns=())
@@ -1118,7 +1117,7 @@ def _run_declared_warm(module: Any, args: Tuple[Any, ...], entry: str) -> float:
 
 
 #: pgw#1076: the short spelling of a floating-point dtype, matching the
-#: vocabulary the weight-lane labels already use (`bf16`, `fp8-…`) so one cell's
+#: vocabulary the weight-lane labels already use (`bf16`, `fp8-…`) so one compiled graph's
 #: `precision` reads the same whether it came from the lane or from this
 #: measurement.
 _PRECISION_LABELS: Dict[str, str] = {
@@ -1140,7 +1139,7 @@ def module_precision(module: Any) -> str:
     "an fp32 module with one bf16 norm buffer" and not "half and half". More
     than one float dtype is reported as ``mixed(a+b)``, dominant first — a
     mixture is a fact worth naming, and naming it is strictly better than
-    picking a winner and calling the cell that.
+    picking a winner and calling the compiled graph that.
 
     ``""`` when nothing is measurable (no tensors, no torch, a callable
     target that is not a module). An absent fact beats an invented one; that is
@@ -1175,7 +1174,7 @@ def module_precision(module: Any) -> str:
 
 
 def _measured_precision(pipeline: Any, rows: Sequence[Tuple[Any, Any]]) -> str:
-    """The cell-wide precision stamp, measured over the modules this mint will
+    """The compiled graph-wide precision stamp, measured over the modules this mint will
     actually trace (pgw#1076).
 
     Every distinct declared target contributes; disagreement between targets is
@@ -1222,7 +1221,7 @@ def _export_skippable(exc: BaseException) -> bool:
     * a RESOURCE shortfall (CUDA OOM, host memory) — it says nothing about the
       class, it says the pod is out of room, and the mint must abort so the
       parent can retry narrower. Skipping here would silently publish a partial
-      cell whose missing classes are an artifact of memory pressure and would
+      compiled graph whose missing classes are an artifact of memory pressure and would
       have exported fine on the retry.
     * a ``BaseException`` that is not an ``Exception`` (KeyboardInterrupt,
       SystemExit) — a shutdown is not a property of the graph.
@@ -1246,7 +1245,7 @@ def _export_skippable(exc: BaseException) -> bool:
     # failure this issue exists to remove, wearing a new hat:
     #
     #   * a declared WARM that blows up says the class cannot RUN — pgw#758
-    #     made that a named refusal deliberately, and a cell whose classes were
+    #     made that a named refusal deliberately, and a compiled graph whose classes were
     #     never warm-proven must not publish;
     #   * a MintRefused from our own gates (the folding fence, ingress
     #     admission, identity) is a CORRECTNESS verdict, and a correctness gate
@@ -1335,9 +1334,9 @@ def _export_entry(
                 f"entry {entry!r}: fork gate (pgw#739): " + "; ".join(gaps))
     module = owner if attr == "forward" else _CallableTarget(owner, attr)
 
-    # The LoRA bucket is a CELL-level request but a PER-TARGET fact: adapters
+    # The LoRA bucket is a COMPILED GRAPH-level request but a PER-TARGET fact: adapters
     # ride the branch-capable denoisers, never the VAE (wan's vae.decode
-    # entry is bucket-0 in the same cell as its bucket-128 transformer).
+    # entry is bucket-0 in the same compiled graph as its bucket-128 transformer).
     # Scoped by COMPOSED truth (lora_lifted.branch_targets), not vocabulary —
     # and a branch-capable target whose lifting was not installed still fails
     # the lifted-input gate by name, never silently mints bucket-0.
@@ -1530,7 +1529,7 @@ def bench_step(pipeline: Any, spec: ExportSpec) -> Callable[[], Any]:
 
     The dominant class is the declaration's FIRST target — the denoiser,
     which runs once per step while the VAE runs once per image — so "ms/step"
-    means what the pgw#862/#863 benchmark tables mean by it. A cell-level spec
+    means what the pgw#862/#863 benchmark tables mean by it. A compiled graph-level spec
     that names a target (the operator CLI path) overrides that. Its inputs are
     the family's OWN declared example feed (``aot_inputs.builder_for``), i.e.
     the same representative shape the mint is about to export against, not a
@@ -1548,7 +1547,7 @@ def bench_step(pipeline: Any, spec: ExportSpec) -> Callable[[], Any]:
         raise MintRefused(
             f"family {spec.family!r} has no export declaration — nothing to "
             f"benchmark a kernel lane against")
-    plans = list(_decl.cell_plans(decl))
+    plans = list(_decl.compiled_graph_plans(decl))
     if not plans:
         raise MintRefused(f"family {spec.family!r} declares no graph classes")
     want = str(spec.target or "") or str(decl.targets[0])
@@ -1579,10 +1578,10 @@ def adapter_arm_plans(
     """``[(plan, arm)]`` — every branch-capable target's plan forked into an
     adapter-bearing and a branchless graph class (pgw#790).
 
-    Scoped by COMPOSED truth, not vocabulary: a cell's non-branch targets
+    Scoped by COMPOSED truth, not vocabulary: a compiled graph's non-branch targets
     (wan's ``vae.decode``) fork into nothing, because there is no adapter for
     them to carry and a second identical graph would be pure mint bill. A
-    bucket-0 family forks into nothing either — its cell IS the branchless
+    bucket-0 family forks into nothing either — its compiled graph IS the branchless
     class already.
 
     Adapter-bearing rows come FIRST so the composed pipeline, which arrives
@@ -1640,7 +1639,7 @@ def declaration_module_gaps(
 
     gaps: List[str] = []
     try:
-        rows = adapter_arm_plans(_decl.cell_plans(decl), pipeline, spec)
+        rows = adapter_arm_plans(_decl.compiled_graph_plans(decl), pipeline, spec)
         branch_owners = {
             id(m) for m in lora_lifted.branch_targets(pipeline).values()}
     except MintRefused as exc:
@@ -1852,7 +1851,7 @@ def reconcile_latent_basis(pipeline: Any, spec: ExportSpec) -> str:
     pgw#1167. The class rows are derived by dividing declared PIXEL shapes by a
     latent divisor the author passes to ``derive.cfg_image_classes``. Nothing
     checked that divisor against the checkpoint, so a wrong one produced a
-    whole cell of correctly-shaped, permanently unusable artifacts — silent,
+    whole compiled graph of correctly-shaped, permanently unusable artifacts — silent,
     and paid for at full mint price.
 
     It is checked HERE because here is the first place both facts exist and the
@@ -1896,7 +1895,7 @@ def reconcile_latent_basis(pipeline: Any, spec: ExportSpec) -> str:
             f"latent_basis_mismatch: the declaration derived its graph classes "
             f"at a latent divisor of {declared}, and the composed pipeline's "
             f"vae divides by {observed}. Every declared latent extent is "
-            f"therefore wrong for THIS composition, and the cell would mint "
+            f"therefore wrong for THIS composition, and the compiled_graph would mint "
             f"correctly-shaped artifacts that serve nothing. This declaration "
             f"does not match this composition — check the `latent_scale=` "
             f"passed to the class deriver, and any component override that "
@@ -1917,7 +1916,7 @@ def mint(
     execution_lane_verdict: Optional[kernel_path.Verdict] = None,
     release_residents: bool = False,
 ) -> MintResult:
-    """:func:`_mint_cell`, with the phase table attached to EVERY terminus.
+    """:func:`_mint_compiled_graph`, with the phase table attached to EVERY terminus.
 
     ``release_residents`` (pgw#1053) is the CALLER's statement that it has no
     further use for ``pipeline`` after the last row exports — the mint then
@@ -1952,7 +1951,7 @@ def mint(
     # seal, so this is the only place ambient mutation can surface.
     env_seal.assert_seal_unchanged("aot_mint")
     # pgw#1167: before ANY export, while a wrong latent divisor still costs
-    # seconds instead of a whole cell of unusable artifacts.
+    # seconds instead of a whole compiled graph of unusable artifacts.
     reconcile_latent_basis(pipeline, spec)
     progress = MintProgress(
         inductor_configs=inductor_configs, on_progress=on_progress)
@@ -1978,7 +1977,7 @@ def mint(
 
         progress.on_progress = _beat
     try:
-        return _mint_cell(
+        return _mint_compiled_graph(
             pipeline, spec, out_dir,
             inductor_configs=inductor_configs,
             entry_workers=entry_workers,
@@ -2132,7 +2131,7 @@ def write_phase_snapshot(path: Path, progress: MintProgress) -> None:
     report, and every measurement it made dies with the process.
 
     That is not hypothetical: attempt sixteen compiled for **29 minutes** and
-    reported `status=abandoned total_s=1741.33 — no cell produced`. Zero
+    reported `status=abandoned total_s=1741.33 — no compiled graph produced`. Zero
     `entry:` rows. No `pool` row. K, its binding constraint, the per-entry
     timings and the peaks were all measured and all discarded, and the
     K-and-binding answer had to be re-bought with another pod.
@@ -2252,7 +2251,7 @@ class _ExportFootprint:
         }
 
 
-def _mint_cell(
+def _mint_compiled_graph(
     pipeline: Any,
     spec: ExportSpec,
     out_dir: Path,
@@ -2265,7 +2264,7 @@ def _mint_cell(
     progress: Optional[MintProgress] = None,
 ) -> MintResult:
     """Export + compile EVERY declared graph class and pack them as ONE
-    multi-graph cell (pgw#758).
+    multi-graph compiled graph (pgw#758).
 
     ``lane_verdict`` (pgw#947) is the MEASURED serving-kernel lane for this
     card, produced by the mint driver before the pipeline was loaded — only
@@ -2300,7 +2299,7 @@ def _mint_cell(
     if decl is None:
         raise MintRefused(
             f"family {spec.family!r} has no registered export declaration — "
-            f"a multi-graph cell derives its class set from the declaration "
+            f"a multi-graph compiled_graph derives its class set from the declaration "
             f"(pgw#739/#758); register one before minting")
     if decl.warm_changes_key is None:
         raise MintRefused(
@@ -2320,14 +2319,14 @@ def _mint_cell(
     t_mint = time.monotonic()
     progress.t_mint = t_mint
 
-    # pgw#846 (Paul's ruling): the exported cell is always WHOLE-GRAPH.
+    # pgw#846 (Paul's ruling): the exported compiled graph is always WHOLE-GRAPH.
     # Regional (block-class) export is retired for production — a
     # `Compile(regional=True)` declaration keeps its dynamo/JIT meaning
     # (ie#381, compile_cache) and the AOT mint ignores it.
-    rows = adapter_arm_plans(_decl.cell_plans(decl), pipeline, spec)
+    rows = adapter_arm_plans(_decl.compiled_graph_plans(decl), pipeline, spec)
     # pgw#1076: the `precision` stamp is a MEASUREMENT, and until here nobody
     # made it — `ExportSpec.precision` defaulted to "bf16", so a micro-conv
-    # cell with fp32 weights, fp32 inputs and an fp32 traced graph packaged
+    # compiled graph with fp32 weights, fp32 inputs and an fp32 traced graph packaged
     # `metadata.json precision: "bf16"` and every arm line printed
     # `precision=bf16`. A reader debugging a 1.2e-3 GPU parity delta reads
     # that as "the mint cast to bf16" and spends a cycle disproving it (the
@@ -2372,12 +2371,12 @@ def _mint_cell(
     parallel = width.workers > 1
     logger.info("aot-mint: entry compile width — %s", width.reason)
     if width.underwidth:
-        # pgw#842: a pool narrower than the cell could use is a COST, and it
+        # pgw#842: a pool narrower than the compiled graph could use is a COST, and it
         # is the mint's only multiplicative lever. Say so at WARNING with the
         # readings behind it — the same facts ride the `pool` event.
         logger.warning(
             "aot-mint: pgw#842 entry pool runs %d worker(s) narrower than "
-            "this cell could use (K=%d of %d), held by %s — inputs %s",
+            "this compiled_graph could use (K=%d of %d), held by %s — inputs %s",
             width.underwidth, width.workers,
             min(entry_count, width.ceiling), width.binding, width.facts())
     progress.width = width
@@ -2385,7 +2384,7 @@ def _mint_cell(
     minted = progress.minted
     #: pgw#1208: classes this mint could not export, each with the construct
     #: that refused. They are NOT packed and NOT published — they are recorded,
-    #: so a cell that covers 35 of 36 classes says which one it does not and
+    #: so a compiled graph that covers 35 of 36 classes says which one it does not and
     #: why, instead of the whole mint disappearing behind one refusal.
     skipped: List[Tuple[str, str]] = []
     # pgw#822: the adapter-BEARING classes are exported from the lifted
@@ -2462,7 +2461,7 @@ def _mint_cell(
                     # Fail-closed stays fail-closed AT THE ENTRY: this class
                     # proved nothing, so it is never packed and never
                     # published, and serving covers it eager by the same
-                    # mechanism that covers any shape outside a cell's declared
+                    # mechanism that covers any shape outside a compiled graph's declared
                     # envelope (pgw#844 — refused BY NAME, served eager, still
                     # armed). What changes is only the blast radius.
                     if not _export_skippable(exc):
@@ -2589,26 +2588,26 @@ def _mint_cell(
     else:
         for _entry in _rows_source():
             pass
-        # Asked of the EXPORTED programs: a cell whose entries cannot be told
+        # Asked of the EXPORTED programs: a compiled graph whose entries cannot be told
         # apart at dispatch must cost seconds to refuse, not a full compile
         # bill (the pgw#825 discipline, one gate over). A width-1 serial mint
         # has already compiled as it exported, so here it refuses late;
         # correct either way — the parallel path refuses at ARRIVAL
         # (pgw#1052), which is where it matters.
         minted, class_aliases = canonicalize_dispatch_classes(minted)
-    # pgw#1208: what this cell does NOT cover, and why. Recorded on the mint's
+    # pgw#1208: what this compiled graph does NOT cover, and why. Recorded on the mint's
     # own timings so it reaches the phase table (and therefore the hub) beside
-    # the classes that did export — a partial cell must be able to say which
+    # the classes that did export — a partial compiled graph must be able to say which
     # classes are missing, or "35 of 36" is indistinguishable from "36 of 36".
     #
-    # A cell with NO entries still refuses: `_pack` raises `cannot package a
-    # cell with no entries`, so "every class was skipped" fails closed on the
+    # A compiled graph with NO entries still refuses: `_pack` raises `cannot package a
+    # compiled graph with no entries`, so "every class was skipped" fails closed on the
     # path it already failed closed on rather than through a second check here.
     timings["skipped_entries"] = float(len(skipped))
     if skipped:
         logger.warning(
             "aot-mint: %d of %d declared class(es) could not be exported and "
-            "are absent from this cell: %s", len(skipped), len(rows),
+            "are absent from this compiled_graph: %s", len(skipped), len(rows),
             "; ".join(f"{n} ({d})" for n, d in skipped[:4]))
     timings["canonicalized_entries"] = float(
         sum(len(rows) for rows in class_aliases.values()))
@@ -2616,7 +2615,7 @@ def _mint_cell(
 
     # ── PACK PER ENTRY (pgw#1176) ──────────────────────────────────────────
     #
-    # One artifact per graph class, not one per cell. The multi-entry
+    # One artifact per graph class, not one per compiled graph. The multi-entry
     # `model.pt2` is DELETED: it made identity, adoption, durability,
     # verification and arming the same 36-entry unit, so a class that failed
     # anywhere destroyed the whole mint (th#1825 lost 1 h 37 m to a segfault on
@@ -2630,7 +2629,7 @@ def _mint_cell(
     # — ~23 minutes across 36 entries — so a child that compiles several
     # entries in sequence is strictly better and nothing here forbids it.
     # FAIL-CLOSED SURVIVES THE SPLIT, and pgw#1208's row is what caught that it
-    # nearly did not. `package_cell` used to raise "cannot package a cell with
+    # nearly did not. `package_compiled_graph` used to raise "cannot package a compiled graph with
     # no entries" because it was called ONCE with the whole set; moving it
     # inside the per-entry loop meant an all-skipped mint simply never entered
     # the loop and returned an EMPTY MintResult — a silent success reporting
@@ -2651,7 +2650,7 @@ def _mint_cell(
     for row in minted:
         entry_work = work / "entries" / _entry_dir_name(row.name)
         entry_work.mkdir(parents=True, exist_ok=True)
-        package = package_cell(
+        package = package_compiled_graph(
             {row.name: row.files}, entry_work / aot_serve.PACKAGE_NAME)
         packages[row.name] = package
         entry_blocks[row.name] = _gate_and_declare_entry(row, package)
@@ -2679,7 +2678,7 @@ def _mint_cell(
     # mint produced. Telemetry, never identity: nothing resolves it, nothing
     # downloads it, and the hub folds compile-health rows under
     # (manifest, sm, toolchain) with it.
-    manifest = cell_key.manifest_digest(
+    manifest = compiled_graph_key.manifest_digest(
         aot_serve.stamp_entry(
             name, block, strict=bool(spec.strict),
             lora_bucket=int(spec.lora_bucket or 0)).get("class_hash") or ""
@@ -2697,7 +2696,7 @@ def _mint_cell(
             meta = aot_serve.entry_metadata(
                 family=spec.family,
                 precision=spec.precision,
-                cell_key="",
+                compiled_graph_key="",
                 name=name,
                 entry=block,
                 strict_export=bool(spec.strict),
@@ -2722,7 +2721,7 @@ def _mint_cell(
             # across two mints.
             meta[kernel_path.META_KEY] = kernel_path.envelope_block(
                 execution_lane_verdict)
-        meta["cell_key"] = key = cell_identity(meta).digest
+        meta["compiled_graph_key"] = key = compiled_graph_identity(meta).digest
         artifact = aot_serve.pack(
             packages[name].parent, out_dir / f"{key}.tar.gz", meta)
         # The phase table rides the RESULT (and the published checkpoint
@@ -2789,7 +2788,7 @@ def _drive_pool(
         # pgw#848: refresh the ledger BEFORE the beat, so the snapshot the
         # beat writes carries this entry's numbers. A mint killed at entry 30
         # of 36 then leaves 30 entries' worth of measurement on disk instead
-        # of one bare "no cell produced" row.
+        # of one bare "no compiled graph produced" row.
         if progress is not None:
             progress.pool_ledger = _pool_facts(pool)
         if on_entry is not None:
@@ -2823,8 +2822,8 @@ def _fold_pool_results(
     """Fold the pool's results back onto the entries that will PACK.
 
     Every packed entry MUST have files — a pool that quietly returned fewer
-    entries than the cell declares would pack a short cell. Assembly is by
-    entry NAME: ``package_cell`` reads ``{row.name: row.files}`` in the order
+    entries than the compiled graph declares would pack a short compiled graph. Assembly is by
+    entry NAME: ``package_compiled_graph`` reads ``{row.name: row.files}`` in the order
     ``minted`` already holds (the declaration's order), so completion order is
     not observable in the artifact. An entry the drain-time pgw#917 pass
     merged away may have compiled files nobody folds; its work is the bounded
@@ -2835,7 +2834,7 @@ def _fold_pool_results(
         raise MintRefused(
             f"entry compile pool returned {len(by_entry)} of {len(minted)} "
             f"entries — missing {missing!r}. Packing the rest would ship a "
-            f"cell whose declared class set is a lie")
+            f"compiled_graph whose declared class set is a lie")
     for row in minted:
         row.files = list(by_entry[row.name])
         _fold_entry_timings(row, pool)
@@ -2851,7 +2850,7 @@ def _fold_entry_timings(
     :func:`_fold_pool_results` pass can both run over the same row.
 
     Measured in the child; folded here so the roll-up reads the same whether a
-    cell was minted serially or K-wide. pgw#842: the OVERLAYS travel too —
+    compiled graph was minted serially or K-wide. pgw#842: the OVERLAYS travel too —
     ``child_seal_s`` is a partition member and its SPLIT is an overlay, and the
     split is the whole answer to "what is the seal still costing" (pgw#832 cut
     the library hash to ~0.07 s measured; the child's ``import torch``, which
@@ -2901,14 +2900,14 @@ def _compile_entries_parallel(
 ) -> Dict[str, Any]:
     """pgw#809: fill every entry's ``files`` K-wide, out of process — the
     already-exported-list shape. The production mint overlaps export with the
-    pool instead (pgw#1052, in ``_mint_cell``); this survives as the driver
+    pool instead (pgw#1052, in ``_mint_compiled_graph``); this survives as the driver
     for a pre-exported entry set and returns the pool's own ledger (pgw#830)
     so it reaches the phase table.
     """
     # A SIBLING of work/, never inside it. pack() only copies a fixed member
     # set so debris there would be harmless today, but a pool workdir living
     # inside the directory that becomes the artifact is one refactor away from
-    # putting job files and stderr tails into a cell.
+    # putting job files and stderr tails into a compiled graph.
     pool = aot_compile_pool.EntryCompilePool(
         work.parent / "entry-pool", width=width,
         inductor_configs=inductor_configs)
@@ -2948,7 +2947,7 @@ def _device_peak_provenance() -> Dict[str, str]:
     the RSS bank by) and adds it when banking. A fact belongs to whoever knows
     it first-hand.
     """
-    from . import cell_key
+    from . import compiled_graph_key
     from . import compile_cache as cc
 
     try:
@@ -2956,7 +2955,7 @@ def _device_peak_provenance() -> Dict[str, str]:
     except Exception:  # noqa: BLE001 — telemetry never fails a mint
         runtime = {}
     try:
-        toolchain = cell_key.toolchain_axis_digest(dict(cc.toolchain_digest()))
+        toolchain = compiled_graph_key.toolchain_axis_digest(dict(cc.toolchain_digest()))
     except Exception:  # noqa: BLE001
         toolchain = ""
     try:
@@ -2965,12 +2964,12 @@ def _device_peak_provenance() -> Dict[str, str]:
         version = ""
     return {
         # Both namings of the card: the SKU a human reads and the arch the
-        # kernels were built for. A cell minted at the wrong arch is
+        # kernels were built for. A compiled graph minted at the wrong arch is
         # unadoptable, so a reading must never be shared across arches.
         "card": str(runtime.get("sku") or ""),
         "sm": str(runtime.get("sm") or ""),
-        # The SAME digest the cell key's toolchain axis uses, so a banked row
-        # and the cell it was measured for agree on what this toolchain is.
+        # The SAME digest the compiled graph key's toolchain axis uses, so a banked row
+        # and the compiled graph it was measured for agree on what this toolchain is.
         "toolchain": str(toolchain),
         "gen_worker": str(version),
         "phase": DEVICE_PEAK_PHASE,
@@ -2997,7 +2996,7 @@ def _pool_facts(pool: aot_compile_pool.EntryCompilePool) -> Dict[str, Any]:
         "peak_child_device_bytes": int(pool.peak_device_bytes),
         # pgw#1205: the same reading, PER GRAPH CLASS, with the conditions it
         # was taken under stated once beside it. `peak_child_device_bytes`
-        # above is the max across a whole cell — one number for 18 classes,
+        # above is the max across a whole compiled graph — one number for 18 classes,
         # which cannot answer the only question anyone asks of it. These rows
         # can, and they ride the SAME phase table, so the row the hub receives
         # and the row this machine banks are the same bytes rather than two
@@ -3030,7 +3029,7 @@ def _entry_ingress_declaration(
     """``(contract, representative calls, declaration meta)`` for one entry.
 
     The contract is built from ``aot_package.input_contract`` — the exact rows
-    the packed cell will carry — and read back through
+    the packed compiled graph will carry — and read back through
     :func:`aot_serve.contract_from_meta`, the serve path's OWN parser, so the
     gate cannot drift from what dispatch will actually do.
 
@@ -3143,7 +3142,7 @@ def canonicalize_dispatch_classes(
     :meth:`aot_serve.EntryDispatch.select` calls two entries admitting one
     call ``entry_ambiguous`` — "a declaration that cannot discriminate two
     graph classes by ingress, which is a defect to surface, never a coin to
-    flip". It is a per-REQUEST refusal, so a cell with a colliding declaration
+    flip". It is a per-REQUEST refusal, so a compiled graph with a colliding declaration
     arms, reports armed, and serves those coordinates 100 % eager: 4,200
     refused calls across gen-worker 0.89.0/0.90.0 on the standing stack, every
     single one ``entry_ambiguous``, zero of any other phase.
@@ -3191,10 +3190,10 @@ def canonicalize_dispatch_classes(
                 declared[row.name] = _entry_ingress_declaration(row)
             except (aot_package.PackageIntrospectionError, ValueError) as exc:
                 # An unreadable declaration is not "probably fine": it is a
-                # cell whose dispatchability nobody can prove.
+                # compiled graph whose dispatchability nobody can prove.
                 raise MintRefused(
                     f"entry {row.name!r}: dispatch-ambiguity gate cannot read "
-                    f"the declared ingress contract, so this cell cannot be "
+                    f"the declared ingress contract, so this compiled_graph cannot be "
                     f"shown to be dispatchable at all: {exc}") from exc
         # Union the mutual-admission relation into clusters. Asked through
         # `aot_serve.assert_ingress` itself, on the contract shape the pod
@@ -3250,7 +3249,7 @@ def canonicalize_dispatch_classes(
             "automatically; these cannot be, because the named axes say they "
             "are different artifacts. Fix the declaration so every entry's "
             "ingress contract is uniquely admitting, rather than compiling "
-            "and publishing a class the cell can never select")
+            "and publishing a class the compiled_graph can never select")
 
     if dropped:
         for keep, merged_rows in sorted(aliases.items()):
@@ -3311,11 +3310,11 @@ class _ArrivalCanon:
         try:
             contract, calls, meta = _entry_ingress_declaration(row)
         except (aot_package.PackageIntrospectionError, ValueError) as exc:
-            # An unreadable declaration is not "probably fine": it is a cell
+            # An unreadable declaration is not "probably fine": it is a compiled graph
             # whose dispatchability nobody can prove.
             raise MintRefused(
                 f"entry {row.name!r}: dispatch-ambiguity gate cannot read "
-                f"the declared ingress contract, so this cell cannot be "
+                f"the declared ingress contract, so this compiled_graph cannot be "
                 f"shown to be dispatchable at all: {exc}") from exc
         for kept_row, kept_contract, kept_calls, kept_meta in \
                 self._kept.get(group, ()):
@@ -3572,10 +3571,10 @@ def _gate_and_declare_entry(
     # pgw#1097, THE FOLDING FENCE. `CONSTANT_BINDING_CONFIGS` is what prevents
     # a weight's values from being compiled in; this is what PROVES it, per
     # entry, against the artifact's own table. Without the proof the setting is
-    # a hope: an inlining route torch adds tomorrow would ship a cell that
+    # a hope: an inlining route torch adds tomorrow would ship a compiled graph that
     # serves the minting checkpoint's tensor to every other fine-tune, and the
     # only thing to notice would be the adopt-side parity floor refusing that
-    # cell on every checkpoint but one — cell sharing dying quietly.
+    # compiled graph on every checkpoint but one — compiled graph sharing dying quietly.
     folded = aot_package.folded_weights(
         row.program, package, _state_dict_keys(row.owner), entry)
     if folded:
@@ -3647,7 +3646,7 @@ def declared_class_rows(pipeline: Any, spec: ExportSpec, decl: Any) -> List[Any]
     caller can enumerate this without a pipeline — and why the boot derivation
     shards by INDEX rather than by name.
     """
-    rows = adapter_arm_plans(_decl.cell_plans(decl), pipeline, spec)
+    rows = adapter_arm_plans(_decl.compiled_graph_plans(decl), pipeline, spec)
     rows.sort(key=lambda row: (
         row[1] is False, _decl.plan_entry_name(row[0])))
     return rows
@@ -3783,7 +3782,7 @@ def keying_block(
     The witness closes that at the key: two bodies key apart, a collision is a
     MISS (eager + mint). It stays a top-level field for the adopt backstop
     (``aot_identity.verify_graph_witness``, defense-in-depth), which refuses a
-    materialized cell whose recorded witness is not this pod's graph.
+    materialized compiled graph whose recorded witness is not this pod's graph.
     """
     inputs, symbols = aot_package.input_contract(program, flat_leaves)
     block: Dict[str, Any] = {
@@ -3803,15 +3802,15 @@ def keying_block(
         # more than one card, and inductor bakes that placement into the
         # artifact. Recorded — and keyed, in `aot_serve.class_hash` — ONLY
         # here, on the `excluded_inputs` precedent above: a single-device
-        # program states nothing, so no published cell's block moves and no
-        # published cell re-keys.
+        # program states nothing, so no published compiled graph's block moves and no
+        # published compiled graph re-keys.
         block["placement"] = list(placement)
     if adapter_arm(spec.fork) is False:
         # pgw#790: the NEGATIVE half of this class's contract. Without it the
         # branchless entry silently ADMITS an adapter-bearing call (a
         # name-keyed bind ignores inputs it does not declare), the dispatch
         # sees two admitting entries and refuses `entry_ambiguous` — and the
-        # cell serves the whole attach lane eagerly. Declared, so the refusal
+        # compiled graph serves the whole attach lane eagerly. Declared, so the refusal
         # is the right one and it names the input.
 
         block["excluded_inputs"] = list(lora_lifted.LIFTED_INPUT_NAMES)
@@ -3832,7 +3831,7 @@ def _mint_phase_table(
 
     pgw#809 adds the ``pool`` block: the K this mint ran at AND the budget
     that chose it. Without it a mint's wall clock is uninterpretable —
-    two mints of the same cell on two pods legitimately differ by 4x."""
+    two mints of the same compiled graph on two pods legitimately differ by 4x."""
     entries = {
         row.name: dict(row.timings) for row in minted}
     totals: Dict[str, float] = {
@@ -3929,7 +3928,7 @@ def _emit_pool_event(
     bought — the standing "no silent decisions" rule applied to the mint's
     only multiplicative lever.
 
-    Attempts ten and eleven compiled the same 72-entry sdxl cell for the same
+    Attempts ten and eleven compiled the same 72-entry sdxl compiled graph for the same
     seconds (1314.94 vs 1327.23) and took 347.94 s vs 554.78 s, because K was
     5 and then 3. Nothing hub-side recorded WHY: the width block existed in
     the phase table and was never emitted, and the pgw#830 pool ledger was
@@ -3954,7 +3953,7 @@ def _emit_pool_event(
         # Named in the FIRST line, so a narrow pool is legible without
         # parsing the dict: this is the number that cost attempt eleven 59 %.
         head += (
-            f" — the pool ran {under} worker(s) narrower than this cell could "
+            f" — the pool ran {under} worker(s) narrower than this compiled_graph could "
             f"use, held by {binding}")
     activity_mod.emit_event(
         MINT_PHASES_KIND, f"{head} pool={pool}",
@@ -3989,7 +3988,7 @@ def emit_phase_events(
         # pgw#825: the roll-up's PHASE is the mint's terminus. An aborted mint
         # measured real entries and must report them — under `aborted`, never
         # under `minted`, or a partial table would enter an AOT-vs-JIT
-        # comparison as if a cell came out.
+        # comparison as if a compiled graph came out.
         roll_up = terminus or str(table.get("terminus") or "") \
             or activity_mod.PHASE_MINTED
         activity_mod.emit_event(
@@ -4026,7 +4025,7 @@ def entry_graph_block(program: Any, spec: ExportSpec) -> Dict[str, Any]:
     pytree spec, and the python branches export FROZE at trace time.
     Constant BYTE SIZES are deliberately absent — they are a property of the
     resident weights, and a fine-tune of one family must keep sharing
-    cells, which is the premise of family-scoped cells.
+    compiled graphs, which is the premise of family-scoped compiled graphs.
 
     **v3 (pgw#1089): every fact here comes from the EXPORTED PROGRAM, never
     from the compiled package.** v2 read ``constant_fqns`` off the packaged
@@ -4056,7 +4055,7 @@ def entry_graph_block(program: Any, spec: ExportSpec) -> Dict[str, Any]:
 
     pgw#857: that exclusion is right for a WEIGHT and wrong for a LITERAL, and
     both were excluded. A weight is rebound from the resident ``state_dict``
-    at load, so two fine-tunes should share a cell. A literal ships INSIDE the
+    at load, so two fine-tunes should share a compiled graph. A literal ships INSIDE the
     artifact and is never rebound — *"nothing outside the artifact knows its
     value"* — so for a literal the VALUE IS THE ARTIFACT, and two checkpoints
     needing different literals were sharing a key. ``literal_values`` closes
@@ -4067,7 +4066,7 @@ def entry_graph_block(program: Any, spec: ExportSpec) -> Dict[str, Any]:
     (sdxl: measured zero across five real mints) produces a byte-identical
     block and does not re-key — the discipline ``range_digest`` already uses
     for ``excluded``, and for the same reason: a field that says "unchanged"
-    must not strand already-published cells."""
+    must not strand already-published compiled graphs."""
     block: Dict[str, Any] = {
         "v": 3,
         "constant_fqns": sorted(aot_package.program_constant_fqns(program)),
@@ -4082,11 +4081,11 @@ def entry_graph_block(program: Any, spec: ExportSpec) -> Dict[str, Any]:
 
 
 def shared_identity_blocks(spec: ExportSpec) -> Dict[str, Any]:
-    """The cell-level identity facts an exported cell must record.
+    """The compiled graph-level identity facts an exported compiled graph must record.
 
-    ``aot_serve.artifact_metadata`` takes ``cell_key`` as a STRING, so the
+    ``aot_serve.artifact_metadata`` takes ``compiled_graph_key`` as a STRING, so the
     envelope on its own would carry a stamp WITHOUT the axes the stamp
-    summarizes — and ``cell_key``'s standing discipline is that a key is always
+    summarizes — and ``compiled_graph_key``'s standing discipline is that a key is always
     recomputed FROM recorded facts, so a stamp can never disagree with them.
     These blocks are what make that recomputation possible for the new kind, and
     they ride the metadata additively (the envelope's parsers read named fields
@@ -4102,20 +4101,20 @@ def shared_identity_blocks(spec: ExportSpec) -> Dict[str, Any]:
         # v3 contract facts, which die in the same redefinition).
         "sm": str(cc.runtime_key().get("sm") or ""),
         # The seal dict stays RECORDED (the observable statement of the
-        # declaration this cell was minted under; its digest is a published
+        # declaration this compiled graph was minted under; its digest is a published
         # wire fact the hub's ArtifactIdentity requires) — but it is no
         # longer a key axis: the declaration + loaded-libs digests fold into
         # the `toolchain` block below (pgw#1059 amendment 4).
         env_seal.SEAL_KEY: env_seal.effective_seal(),
         "toolchain": dict(cc.toolchain_digest()),
         # pgw#1046/pgw#1059: the DECLARED ENVELOPE — the `envelope` axis's
-        # whole input, recorded so an exported cell can restate its own key
-        # from the artifact alone (`cell_key.from_exported_artifact_metadata`;
+        # whole input, recorded so an exported compiled graph can restate its own key
+        # from the artifact alone (`compiled_graph_key.from_exported_artifact_metadata`;
         # the publish path recomputes the same axes before a byte moves).
-        # Canonical form is `cell_key.envelope_facts`; the behavior-posture
+        # Canonical form is `compiled_graph_key.envelope_facts`; the behavior-posture
         # `overlay` slot (amendment 5) is absent because the overlay menu is
         # empty.
-        cell_key.EXPORT_ENVELOPE_KEY: {
+        compiled_graph_key.EXPORT_ENVELOPE_KEY: {
             "shapes": sorted([int(v) for v in row] for row in spec.shapes),
             "text_lens": sorted({int(v) for v in spec.text_lens}),
             "guidance": sorted(float(v) for v in spec.guidance_scales),
@@ -4162,12 +4161,12 @@ def _treespec_text(spec: Any) -> str:
         return repr(spec)
 
 
-def cell_identity(meta: Mapping[str, Any]) -> cell_key.CellKey:
+def compiled_graph_identity(meta: Mapping[str, Any]) -> compiled_graph_key.CompiledGraphKey:
     """The ``ek1`` key ONE entry artifact's OWN recorded facts describe.
 
-    The computation is :func:`cell_key.from_entry_metadata` — ONE
+    The computation is :func:`compiled_graph_key.from_entry_metadata` — ONE
     implementation, so the key the mint stamps and the axes the publish path
-    declares (``fleet_cells._identity_axes``) are the same object rather than
+    declares (``fleet_compiled_graphs._identity_axes``) are the same object rather than
     two derivations that can drift. Every input is a RECORDED block, which is
     what makes the recomputation possible off the artifact alone.
 
@@ -4176,8 +4175,8 @@ def cell_identity(meta: Mapping[str, Any]) -> cell_key.CellKey:
     publish refusal, not a fallback.
     """
     try:
-        return cell_key.from_entry_metadata(meta)
-    except cell_key.CellKeyError as exc:
+        return compiled_graph_key.from_entry_metadata(meta)
+    except compiled_graph_key.CompiledGraphKeyError as exc:
         raise MintRefused(str(exc)) from exc
 
 
@@ -4224,7 +4223,7 @@ def _write_literals(
     if missing:
         raise MintRefused(
             f"{len(missing)} declared literal constant(s) have no value in "
-            f"their exported program, e.g. {missing[:6]!r} — the cell could "
+            f"their exported program, e.g. {missing[:6]!r} — the compiled_graph could "
             f"never bind them and would segfault on first call (pgw#704 B1)")
     if not tensors:
         return
@@ -4279,7 +4278,7 @@ def flat_input_leaves(
     follow them. At serve time `bind_call_inputs` then binds the pipeline's
     `added_cond_kwargs` DICT to a declared tensor input (`input_not_tensor`)
     and cannot find `down_block_additional_residuals` at all
-    (`input_missing`) — every request refuses by name and the armed cell
+    (`input_missing`) — every request refuses by name and the armed compiled graph
     serves eager for life. That is the field symptom `bind_call_inputs`'
     own docstring records from pod ae2uc81yub0gyq; the nested-lookup patch
     treated the symptom, but a nested lookup cannot help when the NAMES it
@@ -4305,7 +4304,7 @@ def _specialization_facts(spec: ExportSpec) -> Dict[str, Any]:
     """The frozen-branch declaration, with the lane facts always present.
 
     The lane and bucket belong here as well as in the key axes: the
-    declaration is what a human reads off a rejected cell, and "which lane was
+    declaration is what a human reads off a rejected compiled graph, and "which lane was
     this traced under" is the first question.
     """
     facts: Dict[str, Any] = dict(spec.specialization)
@@ -4417,7 +4416,7 @@ class _CallableTarget:
 def publish_entry(
     row: MintedArtifact, publisher: Any, mint_duration_ms: int = 0,
 ) -> str:
-    """Publish ONE minted entry through a ``fleet_cells.CellPublisher``.
+    """Publish ONE minted entry through a ``fleet_compiled_graphs.CompiledGraphPublisher``.
 
     Receipts are the HUB's business: it adds them at publish-finalize (#709),
     so the producer's whole obligation is a keyed ``metadata.json`` inside the
@@ -4429,7 +4428,7 @@ def publish_entry(
     for a set; nothing is rolled back because a sibling failed.
     """
     if not row.key:
-        raise MintRefused("cannot publish an artifact with no cell_key")
+        raise MintRefused("cannot publish an artifact with no compiled_graph_key")
     family = str(row.metadata.get("family") or "")
     if not family:
         raise MintRefused("cannot publish an artifact with no family")
@@ -4444,11 +4443,11 @@ def publish(result: MintResult, publisher: Any) -> Dict[str, str]:
     a caller that wants best-effort per-entry publishing drives
     :func:`publish_entry` itself and decides what a partial set means. What
     changed under pgw#1176 is that a partial set is now a coherent outcome
-    rather than a broken cell.
+    rather than a broken compiled graph.
     """
     # th#1355: the mint pod already measured this (timings["total_s"]), so the
-    # cell's own cell_store row records what it cost to build instead of the
-    # cost living only in an activity event that carries no cell key.
+    # compiled graph's own compiled_graph_store row records what it cost to build instead of the
+    # cost living only in an activity event that carries no compiled graph key.
     mint_duration_ms = max(0, int(round(
         float(result.timings.get("total_s") or 0.0) * 1000)))
     return {
@@ -4463,12 +4462,12 @@ def publish(result: MintResult, publisher: Any) -> Dict[str, str]:
 
 
 def _load_spec(path: Path) -> Tuple[ExportSpec, Dict[str, Any]]:
-    """A cell-level :class:`ExportSpec` from a JSON mint request.
+    """A compiled graph-level :class:`ExportSpec` from a JSON mint request.
 
     The request is a file rather than a pile of flags because a mint request is
     a CONTRACT (lane, precision, provenance, frozen specialization) that wants
     review and version control, not 20 argv strings. It names a FAMILY, never
-    a target/fork/class coordinate: the cell covers the whole declared class
+    a target/fork/class coordinate: the compiled graph covers the whole declared class
     set (pgw#758), so a coordinate-shaped request is refused by name rather
     than silently minting a subset of the contract the key advertises.
     """
@@ -4479,7 +4478,7 @@ def _load_spec(path: Path) -> Tuple[ExportSpec, Dict[str, Any]]:
     if subset_fields:
         raise MintRefused(
             f"mint request {path} names {subset_fields!r} — a multi-graph "
-            f"cell covers the family's WHOLE declared class set (pgw#758); "
+            f"compiled_graph covers the family's WHOLE declared class set (pgw#758); "
             f"coordinates and dynamic rows derive from the declaration, "
             f"never from the request")
     spec = ExportSpec(
@@ -4508,7 +4507,7 @@ def _load_spec(path: Path) -> Tuple[ExportSpec, Dict[str, Any]]:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """``python -m gen_worker.aot_mint <request.json> --out <dir>`` — produce
-    one multi-graph cell (ops/testing entry point; production mints run in a
+    one multi-graph compiled graph (ops/testing entry point; production mints run in a
     serving pod's background under the pgw#677 eager-first machinery — #724
     was REJECTED, there is no dedicated mint fleet).
 
@@ -4519,7 +4518,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="gen_worker.aot_mint",
         description="Export + AOTI-package a family's declared class set "
-                    "as one multi-graph cell.")
+                    "as one multi-graph compiled_graph.")
     parser.add_argument("request", type=Path, help="mint request JSON")
     parser.add_argument("--out", type=Path, required=True,
                         help="output directory for the packed artifact")
@@ -4527,7 +4526,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="model path/ref to compose (default: the "
                              "request's source_ref)")
     parser.add_argument("--publish", action="store_true",
-                        help="publish through the fleet CellPublisher")
+                        help="publish through the fleet CompiledGraphPublisher")
     parser.add_argument("--require-toolchain", action="store_true",
                         default=True,
                         help="refuse without a C++ AOTI toolchain (default on)")
@@ -4541,7 +4540,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 3
     try:
         # pgw#739/#758: load the endpoint's declaration module (registers the
-        # family's export contract). The cell's class set, coordinates, and
+        # family's export contract). The compiled graph's class set, coordinates, and
         # dynamic contracts all derive from it — the request only ever names
         # the family and the lane facts.
         from . import aot_declaration
@@ -4611,10 +4610,10 @@ def compose_for_mint(
 
 
 def _publisher_from_settings() -> Any:
-    """A ``fleet_cells.CellPublisher`` for a mint pod.
+    """A ``fleet_compiled_graphs.CompiledGraphPublisher`` for a mint pod.
 
     A serving worker builds its publisher from the HelloAck ``file_base_url``
-    and its rotating JWT (``executor._cell_publisher``). A mint pod has no
+    and its rotating JWT (``executor._compiled_graph_publisher``). A mint pod has no
     orchestrator session, so the hub base comes from the injected tensorhub URL
     — the repo-commit API lives on the same combined-binary host — and the JWT
     from settings. Refuses by name when either is absent rather than attempting
@@ -4634,7 +4633,7 @@ def _publisher_from_settings() -> Any:
         # th#1423: this was `lambda: token`, a token CAPTURED at construction.
         # A mint runs for tens of minutes and the credential's TTL does not
         # pause for it — the publisher must read the freshest one at USE time,
-        # which is the whole reason `CellPublisher` takes a provider.
+        # which is the whole reason `CompiledGraphPublisher` takes a provider.
         return str(worker_credential.current()
                    or getattr(settings, "tensorhub_token", "") or "").strip()
 
@@ -4643,13 +4642,13 @@ def _publisher_from_settings() -> Any:
             "cannot publish: TENSORHUB_PUBLIC_URL/TENSORHUB_URL and "
             "WORKER_JWT/TENSORHUB_TOKEN must both be set on a mint pod (the "
             "artifact was produced and is on disk)")
-    publisher = CellPublisher(
+    publisher = CompiledGraphPublisher(
         base_url=base_url,
         worker_jwt=credential,
         image_digest=str(getattr(settings, "worker_image_digest", "") or ""),
     )
     if not publisher.enabled():
-        raise MintRefused("fleet CellPublisher is not enabled")
+        raise MintRefused("fleet CompiledGraphPublisher is not enabled")
     return publisher
 
 
@@ -4673,7 +4672,7 @@ __all__ = [
     "publish_entry",
     "autotune_posture",
     "bench_step",
-    "cell_identity",
+    "compiled_graph_identity",
     "compile_entry_files",
     "compose_for_mint",
     "declaration_module_gaps",
@@ -4692,6 +4691,6 @@ __all__ = [
     "lifted_input_gaps",
     "main",
     "mint",
-    "package_cell",
+    "package_compiled_graph",
     "publish",
 ]

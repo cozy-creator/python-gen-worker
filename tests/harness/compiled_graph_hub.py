@@ -1,6 +1,6 @@
-"""pgw#978: a LOCAL hub that speaks the real cell publish + discover wire.
+"""pgw#978: a LOCAL hub that speaks the real compiled graph publish + discover wire.
 
-Promoted out of ``test_cell_publish_v2_pgw807.py``'s ``_Hub``, which already
+Promoted out of ``test_compiled_graph_publish_v2_pgw807.py``'s ``_Hub``, which already
 implemented tensorhub's v2 publish contract exactly (including the R2 digest
 enforcement that makes the protocol worth having) — and extended with the half
 that test did not need: the DISCOVER side a second worker adopts through.
@@ -9,13 +9,13 @@ Why a double rather than a compose tensorhub: the rig's value is that a full
 machinery cycle costs seconds on a laptop. A stack with Postgres, MinIO and
 Vault costs minutes to boot and is a second thing that can be broken. What
 matters is that the WIRE is real — every route below is the one
-``fleet_cells.CellPublisher`` and the rig's exact-fetch adopter actually call, with the
+``fleet_compiled_graphs.CompiledGraphPublisher`` and the rig's exact-fetch adopter actually call, with the
 same status codes and the same envelope shapes, and the store really refuses
-bytes that do not hash to their digest. A cell published here and adopted here
+bytes that do not hash to their digest. A compiled graph published here and adopted here
 crossed the same seven HTTP calls it would cross in production.
 
 What this deliberately does NOT model: attestation, trust tiers, quota, and the
-hub-side stamping of ``cell_store`` from the token claim. Those are refusals the
+hub-side stamping of ``compiled_graph_store`` from the token claim. Those are refusals the
 hub owns; a double that invented its own version of them would be testing the
 double. Publish-intent here always grants.
 """
@@ -119,7 +119,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 for r in items]})
             return
 
-        # harness.rig_fetch.fetch_named_cell: GET /api/v1/repos/<repo>/resolve
+        # harness.rig_fetch.fetch_named_compiled_graph: GET /api/v1/repos/<repo>/resolve
         if path.endswith("/resolve"):
             repo = path.split("/api/v1/repos/", 1)[-1].rsplit("/resolve", 1)[0]
             want = (query.get("digest") or [""])[0]
@@ -144,7 +144,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         with srv.lock:  # type: ignore[attr-defined]
             srv.calls.append((path, body))  # type: ignore[attr-defined]
 
-        if path.endswith("/v1/worker/cells/publish-intent"):
+        if path.endswith("/v1/worker/compiled_graphs/publish-intent"):
             family = str(body.get("family") or "")
             with srv.lock:  # type: ignore[attr-defined]
                 srv.intents.append(dict(body))  # type: ignore[attr-defined]
@@ -152,7 +152,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                              "repo": f"root/family-{family}"})
             return
 
-        if path.endswith("/v1/worker/cells/publish-complete"):
+        if path.endswith("/v1/worker/compiled_graphs/publish-complete"):
             with slock(srv):
                 srv.completes.append(dict(body))  # type: ignore[attr-defined]
             self._json(200, {"recorded": True})
@@ -221,8 +221,8 @@ def slock(srv: Any) -> Any:
     return srv.lock
 
 
-class LocalCellHub:
-    """A running local hub. ``base`` is what a ``CellPublisher`` /
+class LocalCompiledGraphHub:
+    """A running local hub. ``base`` is what a ``CompiledGraphPublisher`` /
     the rig's fetch/publish legs take as their ``base_url``."""
 
     def __init__(self) -> None:
@@ -318,15 +318,15 @@ class LocalCellHub:
 
 
 @contextlib.contextmanager
-def local_cell_hub() -> Iterator[LocalCellHub]:
-    hub = LocalCellHub()
+def local_compiled_graph_hub() -> Iterator[LocalCompiledGraphHub]:
+    hub = LocalCompiledGraphHub()
     try:
         yield hub
     finally:
         hub.close()
 
 
-def dump_state(hub: LocalCellHub, path: Optional[Path] = None) -> dict:
+def dump_state(hub: LocalCompiledGraphHub, path: Optional[Path] = None) -> dict:
     """Everything the rig's driver reports about the hub leg."""
     state = {
         "base": hub.base,
@@ -344,4 +344,4 @@ def dump_state(hub: LocalCellHub, path: Optional[Path] = None) -> dict:
     return state
 
 
-__all__ = ["LocalCellHub", "dump_state", "local_cell_hub"]
+__all__ = ["LocalCompiledGraphHub", "dump_state", "local_compiled_graph_hub"]

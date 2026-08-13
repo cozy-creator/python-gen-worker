@@ -343,7 +343,7 @@ PRE_FIX_SHAPES = {
         "            if chunk:\n"
         "                f.write(chunk)\n"
     ),
-    "aot_cells whole-file branch": (
+    "aot_compiled_graphs whole-file branch": (
         "def fetch(dl, tmp, want_ref):\n"
         "    with open(tmp, 'wb') as f:\n"
         "        for chunk in dl.iter_content(1 << 20):\n"
@@ -410,7 +410,7 @@ def test_rule_2_fires_on_all_four_filed_sites_as_they_were():
     PRE_FIX = "d7881b40"
     sites = [
         "src/gen_worker/request_context/__init__.py",
-        "src/gen_worker/aot_cells.py",
+        "src/gen_worker/aot_compiled_graphs.py",
         "src/gen_worker/models/download.py",
         "src/gen_worker/request_context/_datasets.py",
     ]

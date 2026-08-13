@@ -143,7 +143,7 @@ def is_definite_hub_answer(resp: Any) -> bool:
     if 200 <= code < 400:
         return True
     if code in REQUEST_DETERMINED_STATUSES:
-        # pgw#987. The measured failure: the hub refused 32 cell publishes with
+        # pgw#987. The measured failure: the hub refused 32 compiled graph publishes with
         # `413 request_body_too_large` in 25 microseconds each, and this
         # function answered False every time — because gin's
         # `AbortWithStatusJSON` envelope carries a STRING `error` with no

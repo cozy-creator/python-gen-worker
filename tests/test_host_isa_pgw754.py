@@ -1,8 +1,8 @@
-"""pgw#754: host-CPU ISA portability of AOTI cells.
+"""pgw#754: host-CPU ISA portability of AOTI compiled graphs.
 
 Live incident (2026-07-28, machine hv220gc4f7vu): a worker arming a
-DISCOVERED aot-inductor cell died SIGILL (exit 132) inside
-``aoti_load_package`` — the cell's host wrapper ``.so`` was compiled
+DISCOVERED aot-inductor compiled graph died SIGILL (exit 132) inside
+``aoti_load_package`` — the compiled graph's host wrapper ``.so`` was compiled
 ``-march=native`` on an AVX-512 mint host (the shipped kernel.cpp embeds the
 compile command: ``-march=native ... -mavx512f -mavx512vnni``) and carries
 EVEX-encoded AVX-512F scalar instructions the serving host cannot decode.
@@ -12,14 +12,14 @@ Red-verified here through the REAL paths:
 * the boot clamp (``env_seal.establish`` -> ``host_isa.impose``) pins
   ``cpp.march``/``cpp.simdlen`` to the portable target, seal-visibly;
 * the mint's compile path (``aot_mint.compile_entry_files`` +
-  ``package_cell`` — the clamp is process-global inductor config, so it
-  binds every entry of a multi-graph cell identically) emits NO
+  ``package_compiled_graph`` — the clamp is process-global inductor config, so it
+  binds every entry of a multi-graph compiled graph identically) emits NO
   instruction above the target (objdump assertion on the produced ``.so``)
   and the package still loads via ``aoti_load_package`` — portable by
   construction;
 * an artifact whose requirement this host genuinely lacks (this box has no
   AVX-512) is refused BY NAME (``adopt_failed:host_isa_unsupported``)
-  before any dlopen — including legacy cells via the ``.pt2``'s own
+  before any dlopen — including legacy compiled graphs via the ``.pt2``'s own
   ``AOTI_CPU_ISA`` stamp — and never SIGILLs the worker.
 """
 
@@ -128,7 +128,7 @@ def test_clamped_compile_package_is_portable_and_loads(
 
     program = torch.export.export(_Glue(), (torch.randn(4, 8),))
     files = aot_mint.compile_entry_files(program, "model")
-    package = aot_mint.package_cell({"model": files}, tmp_path / "model.pt2")
+    package = aot_mint.package_compiled_graph({"model": files}, tmp_path / "model.pt2")
 
     with zipfile.ZipFile(package) as zf:
         so_names = [n for n in zf.namelist() if n.endswith(".so")]
@@ -158,7 +158,7 @@ def test_clamped_compile_package_is_portable_and_loads(
 
 def _artifact(tmp_path: Path, pt2_bytes: bytes) -> tuple[Path, dict]:
     meta = aot_serve.entry_metadata(
-        family="sdxl", precision="bf16", cell_key="",
+        family="sdxl", precision="bf16", compiled_graph_key="",
         name="unet/main", entry={
             "target": "unet",
             "inputs": [{
@@ -187,7 +187,7 @@ def test_stamped_requirement_refused_by_name(tmp_path: Path) -> None:
         "machine": "x86_64", "march": "", "simdlen": 0,
         "level": "x86-64-v4",
     }
-    artifact = aot_serve.pack(content, tmp_path / "cell.tar.gz", meta)
+    artifact = aot_serve.pack(content, tmp_path / "compiled_graph.tar.gz", meta)
     with pytest.raises(aot_serve.AdoptError) as exc_info:
         aot_serve.stage_artifact(artifact, "sdxl")
     assert exc_info.value.reason == "host_isa_unsupported"
@@ -196,7 +196,7 @@ def test_stamped_requirement_refused_by_name(tmp_path: Path) -> None:
 
 def test_discovery_filter_drops_stamped_requirement(tmp_path: Path) -> None:
     """The metadata-only check reaches ``aot_serve.verify`` — discovery
-    (aot_cells._candidates) skips unexecutable cells BEFORE downloading."""
+    (aot_compiled_graphs._candidates) skips unexecutable compiled graphs BEFORE downloading."""
     _requires_avx512()
     _, meta = _artifact(tmp_path, b"")
     meta["host_isa"] = {
@@ -207,12 +207,12 @@ def test_discovery_filter_drops_stamped_requirement(tmp_path: Path) -> None:
     assert "avx512f" in reason
 
 
-def test_an_unstamped_cell_is_refused_from_metadata_alone(
+def test_an_unstamped_compiled_graph_is_refused_from_metadata_alone(
     tmp_path: Path,
 ) -> None:
-    """pgw#950: a cell carrying no ``host_isa`` stamp used to be waved past
+    """pgw#950: a compiled graph carrying no ``host_isa`` stamp used to be waved past
     the metadata gate and sniffed at stage time from the ``.pt2``'s own
-    ``AOTI_CPU_ISA``. That sniff is gone. An unstamped cell states no
+    ``AOTI_CPU_ISA``. That sniff is gone. An unstamped compiled graph states no
     requirement, so it is refused where the metadata is read — BEFORE any
     download — and the miss policy re-mints one that does stamp.
     """

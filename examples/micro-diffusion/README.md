@@ -119,8 +119,8 @@ task rig:mint                       # pgw#978's original one-entry plumbing toy
 ```
 
 Legs: gates → weights → handoff → mint-child (a REAL spawned interpreter doing
-`torch.export` + AOTInductor) → publish (the real `CellPublisher` wire) →
-adopt+parity (a SECOND OS process discovering the cell, arming it, and
+`torch.export` + AOTInductor) → publish (the real `CompiledGraphPublisher` wire) →
+adopt+parity (a SECOND OS process discovering the compiled graph, arming it, and
 comparing every arm against eager).
 
 ---
@@ -136,7 +136,7 @@ Preconditions (all verified before step 1, none assumed):
 
 - `task inflight STACK=dev` clean, 0 pods live, `max_concurrent_boots` is 1
   fleet-wide so one `booting` row anywhere blocks this.
-- The hub's `platform_discretionary_budget` has headroom (a cell mint is
+- The hub's `platform_discretionary_budget` has headroom (a compiled graph mint is
   platform-paid work).
 - The wheel is a version that has completed a local `task rig:micro` cycle.
   A wheel nothing has proven locally is what this whole family exists to stop.
@@ -270,17 +270,17 @@ proof artifact, not a fleet pin.
 
 > ⚠️ **Pin at 0.111.0 (current), never below it on THIS family.** Below
 > 0.111.0 the reuse circle cannot close: pgw#1141 (`0dbf68e5`) deletes the setup
-> warmup barrier that DISARMED every boot-adopted cell — measured twice,
+> warmup barrier that DISARMED every boot-adopted compiled graph — measured twice,
 > identically, in POD PROOF #3 — and pgw#1132 (`8867baac`) arms the lifted
 > forward in the boot-key loop so a `lora_bucket`-bearing family can derive a key
 > at all. Below
 > 0.106.0 the boot-key derivation refuses outright: `models/structure_only`
 > imported `accelerate`, which this image deliberately does not ship, so no key
-> exists, no `/v1/worker/cells/resolve` is ever issued and the pod self-mints
+> exists, no `/v1/worker/compiled graphs/resolve` is ever issued and the pod self-mints
 > forever — measured on `ykwoaiqub6ktt3` and `3o09rf9ehnc4ym`, and it is what
 > silenced the first paid reuse-circle proof (pgw#1123). Older floors still
 > apply and are all below it: pgw#994 (`2165c2d5`, 0.93.4) for the container
-> input followed by a plain input — below it the cell mints and seals and then
+> input followed by a plain input — below it the compiled graph mints and seals and then
 > **refuses at ingress on its first served call**; 0.97.0 for pgw#1084's
 > four-axis `ck1`; 0.100.0 for the AOT re-key (pgw#1089/1090), the folding fence
 > (pgw#1097) and AOT-local mint (pgw#1096). Keep this pin on the SAME wheel the
@@ -319,8 +319,8 @@ can invoke. **ESTIMATE: seconds.**
 
 ### 4. Buy a SERVING pod
 
-**There is no mint-only pod class and no `POST /v1/admin/compile-cells` route.**
-DESIGN-RULINGS §4.28 retired both: a serving pod boots, tries to adopt a cell
+**There is no mint-only pod class and no `POST /v1/admin/compile-compiled graphs` route.**
+DESIGN-RULINGS §4.28 retired both: a serving pod boots, tries to adopt a compiled graph
 by its own derived `ck1` key, and self-mints in the BACKGROUND on a miss while
 it serves eager. Nothing has to be armed, un-parked or bought as forge.
 
@@ -350,7 +350,7 @@ behind it; watch for the mint-parent parity verdict and the publish.
 ```
 GET /v1/admin/mints?release=…
 GET /v1/admin/worker-activity-events?kind=aot_mint_phases&release=…
-GET /v1/admin/fleet-status | .compile_cells
+GET /v1/admin/fleet-status | .compile_compiled_graphs
 ```
 
 **ESTIMATE: 3-5 min pod-side**, decomposed rather than guessed:
@@ -361,25 +361,25 @@ GET /v1/admin/fleet-status | .compile_cells
 | weights download | minutes (6.9 GB) | **0 s** | generated into the image |
 | load + warm | ~1 min | seconds | 1.1 MB, 2 steps |
 | export + AOTI compile | ~90 min / 36 entries | ~2-3 min / 3 entries | 12x fewer entries, tiny graphs |
-| seal + publish | ~1 min | seconds | the cell is small |
+| seal + publish | ~1 min | seconds | the compiled graph is small |
 
 ### 7. Adopt
 
 Retire the minting pod, buy a SECOND one the same way, and drive the same
-request. It must boot cold and adopt the cell the first one published. Read the
+request. It must boot cold and adopt the compiled graph the first one published. Read the
 verdict off the pod's own typed rows, never off a log:
 
 ```
 GET /v1/admin/worker-activity-events?release=…&kind=boot_adopt
-GET /v1/admin/worker-activity-events?release=…&kind=cell_numerics
+GET /v1/admin/worker-activity-events?release=…&kind=compiled_graph_numerics
 GET /v1/admin/worker-activity-events?release=…&kind=serve_eager_posture
 GET /v1/admin/worker-activity-events?release=…&kind=serve_degrade
 ```
 
-GREEN is `boot_adopt=hit`, `cell_numerics=armed_undispatched`, `lane=…+compiled`
-/ `serving_mode=aot_cell`, and **no `serve_degrade` row at all**. A
+GREEN is `boot_adopt=hit`, `compiled_graph_numerics=armed_undispatched`, `lane=…+compiled`
+/ `serving_mode=aot_compiled_graph`, and **no `serve_degrade` row at all**. A
 `target_applicability_incomplete` or `armed_target_unresolved` row is pgw#1141b
-(POD PROOF #4) recurring — that boot adopted a cell and then threw it away.
+(POD PROOF #4) recurring — that boot adopted a compiled graph and then threw it away.
 
 Bank the eager arm on a pod that is NOT concurrently minting.
 

@@ -3,9 +3,9 @@
 Attempt 28's 36/36 sdxl mint published nothing, behind two defects this file
 pins:
 
-1. The child's returned cell carried a key the parent could not relate to its
+1. The child's returned compiled graph carried a key the parent could not relate to its
    own (`ck1-8f498f43…` opened, `ck1-886ffbcc…` returned). Since pgw#1059 the
-   obligation identity is not a key at all (`arm1-…`, `fleet_cells.ArmIdentity`)
+   obligation identity is not a key at all (`arm1-…`, `fleet_compiled_graphs.ArmIdentity`)
    — but every pre-trace FACT the two sides share must be byte-identical
    across the process boundary, and one measurably was not:
    `torch._inductor.aot_compile` mutates the global `aot_inductor.metadata`
@@ -17,7 +17,7 @@ pins:
 2. The artifact failed `update_constant_buffer_func_(... ) API call failed at
    model_container_runner.cpp:289` on the parent runtime. Reproduced locally
    byte-for-byte: the per-entry copying bind allocates the target's FULL
-   constant set once per entry, so a 36-entry sdxl cell demanded ~N x 2.6 GB
+   constant set once per entry, so a 36-entry sdxl compiled graph demanded ~N x 2.6 GB
    at arm and the failing cudaMalloc surfaced as that anonymous C++ error.
    Entries now bind BY REFERENCE against one marker-owned pool per target,
    and any residual AOTI failure is a typed `injection_failed` refusal
@@ -31,7 +31,7 @@ from typing import Any, Dict
 
 import pytest
 
-from gen_worker import aot_serve, cell_key, env_seal, fleet_cells
+from gen_worker import aot_serve, compiled_graph_key, env_seal, fleet_compiled_graphs
 
 
 def _seal_dict() -> Dict[str, Any]:
@@ -48,28 +48,28 @@ _DECLARED_ENVELOPE = {
     "shapes": [[64, 64]], "text_lens": [7], "guidance": [1.0]}
 
 
-def _arm_key(seal: Dict[str, Any], toolchain: Dict[str, Any]) -> fleet_cells.ArmIdentity:
-    return fleet_cells.ArmIdentity(facts=tuple(sorted({
+def _arm_key(seal: Dict[str, Any], toolchain: Dict[str, Any]) -> fleet_compiled_graphs.ArmIdentity:
+    return fleet_compiled_graphs.ArmIdentity(facts=tuple(sorted({
         "family": "micro-diffusion",
         "format": "2",
         "lane": "w8a8-lora64",
         "sm": "sm_89",
-        "envelope": cell_key.envelope_digest(_DECLARED_ENVELOPE),
+        "envelope": compiled_graph_key.envelope_digest(_DECLARED_ENVELOPE),
         "env_seal": env_seal.seal_digest(seal),
-        "toolchain": cell_key.facts_digest(toolchain),
+        "toolchain": compiled_graph_key.facts_digest(toolchain),
     }.items())))
 
 
 def _envelope(seal: Dict[str, Any], toolchain: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "cell_key": "ek1-" + "e" * 56,
+        "compiled_graph_key": "ek1-" + "e" * 56,
         "kind": "aot-inductor",
         "format": "2",
         "family": "micro-diffusion",
         "weight_lane": "w8a8",
         "lora_bucket": 64,
         "sm": "sm_89",
-        cell_key.EXPORT_ENVELOPE_KEY: dict(_DECLARED_ENVELOPE),
+        compiled_graph_key.EXPORT_ENVELOPE_KEY: dict(_DECLARED_ENVELOPE),
         env_seal.SEAL_KEY: dict(seal),
         "toolchain": dict(toolchain),
     }
@@ -80,7 +80,7 @@ TOOLCHAIN = {"libtorch.so": "cafe0123"}
 
 def test_shared_axes_agree_is_empty() -> None:
     seal = _seal_dict()
-    assert fleet_cells.arm_axis_divergence(
+    assert fleet_compiled_graphs.arm_axis_divergence(
         _arm_key(seal, TOOLCHAIN), _envelope(seal, TOOLCHAIN)) == ""
 
 
@@ -88,7 +88,7 @@ def test_env_seal_divergence_is_named() -> None:
     """The pod class: the child's recorded seal differs from the parent's."""
     parent_seal = _seal_dict()
     child_seal = dict(parent_seal, inductor="ffff999988887777")
-    got = fleet_cells.arm_axis_divergence(
+    got = fleet_compiled_graphs.arm_axis_divergence(
         _arm_key(parent_seal, TOOLCHAIN), _envelope(child_seal, TOOLCHAIN))
     assert got.startswith("env_seal: ")
     assert env_seal.seal_digest(child_seal) in got
@@ -105,7 +105,7 @@ def test_every_shared_axis_is_guarded(field: str, value: Any, axis: str) -> None
     seal = _seal_dict()
     meta = _envelope(seal, TOOLCHAIN)
     meta[field] = value
-    got = fleet_cells.arm_axis_divergence(_arm_key(seal, TOOLCHAIN), meta)
+    got = fleet_compiled_graphs.arm_axis_divergence(_arm_key(seal, TOOLCHAIN), meta)
     assert got.startswith(f"{axis}: "), got
 
 
@@ -124,19 +124,19 @@ def test_the_envelope_is_deliberately_NOT_compared_at_this_seam() -> None:
     a row it is the ruling, and it goes red if anyone puts the axis back
     without revisiting the reason."""
     seal = _seal_dict()
-    assert "envelope" not in fleet_cells.ARM_ENVIRONMENT_FACTS
+    assert "envelope" not in fleet_compiled_graphs.ARM_ENVIRONMENT_FACTS
 
     meta = _envelope(seal, TOOLCHAIN)
-    meta[cell_key.EXPORT_ENVELOPE_KEY] = {
+    meta[compiled_graph_key.EXPORT_ENVELOPE_KEY] = {
         "shapes": [[128, 128]], "text_lens": [7], "guidance": [1.0]}
-    assert fleet_cells.arm_axis_divergence(
+    assert fleet_compiled_graphs.arm_axis_divergence(
         _arm_key(seal, TOOLCHAIN), meta) == ""
 
 
 def test_adopt_refuses_typed_before_any_arm(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A diverging child cell must fail `key_axis_divergence` at the seam —
+    """A diverging child compiled graph must fail `key_axis_divergence` at the seam —
     never reach the arm, whose C++ error was the pod's whole diagnostic."""
     seal = _seal_dict()
     child_seal = dict(seal, inductor="ffff999988887777")
@@ -146,33 +146,33 @@ def test_adopt_refuses_typed_before_any_arm(
     from gen_worker.models import provision
 
     # pgw#1098: the adopt reads through `read_metadata` now — an envelope it
-    # CANNOT read is its own refusal (`cell_envelope_unreadable`) rather than
+    # CANNOT read is its own refusal (`compiled_graph_envelope_unreadable`) rather than
     # a `None` that flows on into a gate it silently disables. This test is
     # about the DIVERGENCE verdict, so it supplies a readable envelope.
     monkeypatch.setattr(
         artifact_meta, "read_metadata", lambda _p: dict(meta))
 
     def _no_arm(*_a: Any, **_k: Any) -> Any:
-        raise AssertionError("arm_aot must not run on a diverged cell")
+        raise AssertionError("arm_aot must not run on a diverged compiled_graph")
 
     monkeypatch.setattr(provision, "arm_aot", _no_arm)
 
     mint_root = tmp_path / "mint-root"
     mint_root.mkdir()
-    artifact = tmp_path / "cell.tar.gz"
-    artifact.write_bytes(b"not-a-real-cell")
+    artifact = tmp_path / "compiled_graph.tar.gz"
+    artifact.write_bytes(b"not-a-real-compiled_graph")
     arm = _arm_key(seal, TOOLCHAIN)
-    pending = fleet_cells.PendingSelfMint(
+    pending = fleet_compiled_graphs.PendingSelfMint(
         family="micro-diffusion", arm_token=arm.token,
         ref=f"x#{arm.token}", cfg=object(), target=tmp_path / "adopted.tar.gz",
         mint_root=mint_root, publisher=None, cache_dir=tmp_path / "cache",
         arm_key=arm)
 
-    assert fleet_cells.adopt_delegated_mint(object(), pending, [artifact]) is None
-    reason, detail = fleet_cells.adopt_refusal(pending)
+    assert fleet_compiled_graphs.adopt_delegated_mint(object(), pending, [artifact]) is None
+    reason, detail = fleet_compiled_graphs.adopt_refusal(pending)
     assert reason == "key_axis_divergence"
     assert "env_seal: " in detail
-    assert meta["cell_key"] in detail
+    assert meta["compiled_graph_key"] in detail
 
 
 def test_inductor_digest_ignores_aot_compile_metadata() -> None:

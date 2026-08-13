@@ -4,8 +4,8 @@ The measured failure, on the standing chaos stack (read-only SQL, 2026-08-03):
 ``worker_activity_events`` holds **24 ``aot_ingress_refused`` rows, every one
 ``phase='entry_ambiguous'``** — zero ``no_entry_admits``, zero anything else —
 summing to **4,200 refused calls** across gen-worker 0.89.0 and 0.90.0, against
-a cell that adopted and armed (``mode=regional entries=72 precision=
-w8a8-lora64``).  The cell armed, advertised, and served nothing.
+a compiled graph that adopted and armed (``mode=regional entries=72 precision=
+w8a8-lora64``).  The compiled graph armed, advertised, and served nothing.
 
 The mechanism is arithmetic, not a race.  112x144 = 144x112 = 168x96 = 96x168
 = 16,128: the four aspect rows of one megapixel bucket.  A block-level target
@@ -17,7 +17,7 @@ exactly how the fleet's shape rows are generated.
 
 So the entry key and the ingress contract must be the same object: rows that
 reduce to one contract over one target with byte-identical code are merged to
-one entry with the declared names kept as aliases (36 of that cell's 72
+one entry with the declared names kept as aliases (36 of that compiled graph's 72
 compiles bought nothing — the direct pgw#847 win), and a collision whose
 members are NOT the same artifact is refused by name and by differing axis.
 
@@ -36,7 +36,7 @@ torch = pytest.importorskip("torch")
 
 import torch.nn as nn  # noqa: E402
 
-from gen_worker import aot_flatten, aot_mint, cell_key  # noqa: E402
+from gen_worker import aot_flatten, aot_mint, compiled_graph_key  # noqa: E402
 
 FAMILY = "sdxl"
 DIM = 640
@@ -173,11 +173,11 @@ def test_a_same_contract_collision_with_different_compat_metadata_REFUSES():
     assert "'specialization'" in str(err.value)
 
 
-def test_a_merged_cell_declares_one_dispatchable_entry_and_keeps_the_names():
+def test_a_merged_compiled_graph_declares_one_dispatchable_entry_and_keeps_the_names():
     """End of the acceptance chain: what the envelope records.  The aliases
     ride the surviving entry, and they are NOT a ``class_hash`` fact — an
     alias declares no traffic the survivor's own contract does not already
-    declare, so an otherwise identical cell must not re-key."""
+    declare, so an otherwise identical compiled graph must not re-key."""
     from gen_worker import aot_serve
 
     minted = _the_live_declaration()
@@ -198,7 +198,7 @@ def test_a_merged_cell_declares_one_dispatchable_entry_and_keeps_the_names():
         "constants": [],
     }
     bare = aot_serve.entry_metadata(
-        family=FAMILY, precision="w8a8", cell_key="",
+        family=FAMILY, precision="w8a8", compiled_graph_key="",
         name=survivor.name, entry=dict(block))
     with_aliases = dict(block)
     with_aliases["aliases"] = [
@@ -207,15 +207,15 @@ def test_a_merged_cell_declares_one_dispatchable_entry_and_keeps_the_names():
         for row in sorted(aliases[survivor.name], key=lambda r: r.name)
     ]
     stamped = aot_serve.entry_metadata(
-        family=FAMILY, precision="w8a8", cell_key="",
+        family=FAMILY, precision="w8a8", compiled_graph_key="",
         name=survivor.name, entry=with_aliases)
 
     # pgw#1176: one artifact, one class — and the claim that mattered is
     # sharper per entry: recording the merged declared-class names must not
     # move THIS class's identity, which is now the key itself rather than a
     # digest over a collection.
-    assert stamped[cell_key.ENTRY_BLOCK_KEY]["class_hash"] == \
-        bare[cell_key.ENTRY_BLOCK_KEY]["class_hash"], (
+    assert stamped[compiled_graph_key.ENTRY_BLOCK_KEY]["class_hash"] == \
+        bare[compiled_graph_key.ENTRY_BLOCK_KEY]["class_hash"], (
             "recording the merged declared-class names must not re-key the "
             "entry")
-    assert len(stamped[cell_key.ENTRY_BLOCK_KEY]["aliases"]) == 3
+    assert len(stamped[compiled_graph_key.ENTRY_BLOCK_KEY]["aliases"]) == 3

@@ -321,7 +321,7 @@ class _RequestOutputStream:
         pgw#807: this rode the v1 (blake3) `/commits` route, which the hub
         froze and this SDK no longer speaks. It now goes over the chunked
         sha256 route (th#1303) through the same client `publish_flavors` and
-        the cell self-mint use — one save_checkpoint == one publish == one
+        the compiled graph self-mint use — one save_checkpoint == one publish == one
         finalized repo revision, and the repo is still auto-created
         server-side under the job's create_repo grant on first publish. A
         multi-GB adapter now retries a 64 MiB chunk instead of a whole shard,

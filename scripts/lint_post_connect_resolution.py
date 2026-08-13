@@ -84,7 +84,7 @@ WATCHED = frozenset({
 #: Modules that DEFINE the watched surface. A call inside its own definition
 #: module is an implementation detail, not a consumer reaching for a resolver.
 DEFINING_MODULES = frozenset({
-    "aot_cells.py",
+    "aot_compiled_graphs.py",
     "hub_client.py",
     "ladder.py",
     "execution_lanes.py",

@@ -36,7 +36,7 @@ TWO FIXES, AND THE SECOND IS THE MORE IMPORTANT
 
 Fail-closed stays fail-closed AT THE ENTRY: a skipped class is never packed and
 never published, and serving covers it eager by the same mechanism that covers
-any shape outside a cell's declared envelope (pgw#844). Only the blast radius
+any shape outside a compiled graph's declared envelope (pgw#844). Only the blast radius
 changed.
 """
 
@@ -154,7 +154,7 @@ def test_a_deterministic_refusal_skips_ONE_class_and_mints_the_rest(
     assert len(seen) == 2, "both classes must be ATTEMPTED — one refusing must not stop the loop"
     assert result.timings.get("skipped_entries") == 1.0
     # pgw#1176: a mint produces a SET of independently keyed entry artifacts,
-    # not one cell with an `entries` map — so the surviving class is a packed
+    # not one compiled graph with an `entries` map — so the surviving class is a packed
     # ARTIFACT rather than a member of a bundle. The claim is unchanged and
     # sharper: fail-closed is per ENTRY, and the refusing class simply has no
     # artifact.
@@ -199,7 +199,7 @@ def test_a_RESOURCE_shortfall_still_aborts_the_WHOLE_mint(
 
     An OOM says nothing about the graph class — it says the pod is out of room,
     and the mint must abort so the parent can retry narrower. Skipping here
-    would publish a cell whose missing classes are an artifact of memory
+    would publish a compiled graph whose missing classes are an artifact of memory
     pressure and would have exported fine on the retry.
     """
     _declare()
@@ -214,7 +214,7 @@ def test_a_RESOURCE_shortfall_still_aborts_the_WHOLE_mint(
 def test_every_class_skipped_still_REFUSES(
     tmp_path: Path, fake_sm: Dict[str, str], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A cell with no entries is not a partial cell, it is not a cell. It fails
+    """A compiled graph with no entries is not a partial compiled graph, it is not a compiled graph. It fails
     closed on the path it already failed closed on (`_pack`), rather than
     through a second check."""
     _declare()
@@ -239,7 +239,7 @@ def test_only_deterministic_local_failures_are_skippable() -> None:
         "a broken forward is not an unsupported construct")
     assert not aot_mint._export_skippable(
         aot_mint.MintRefused("mint-warm: the declared warm forward failed")), (
-        "pgw#758 made a warm failure a NAMED REFUSAL — a cell whose classes "
+        "pgw#758 made a warm failure a NAMED REFUSAL — a compiled_graph whose classes "
         "were never warm-proven must not publish")
     assert not aot_mint._export_skippable(
         aot_mint.MintRefused("folding fence: lifted weight absent")), (
@@ -364,10 +364,10 @@ def _drive_to_load(
     request = mp.MintRequest(
         function="composed-echo", modules=("harness.toy_endpoints",),
         family="sdxl", arm_token="arm1-abc",
-        target=str(tmp_path / "cell.tar.gz"),
+        target=str(tmp_path / "compiled_graph.tar.gz"),
         work_root=str(tmp_path / "capture"),
         report=str(tmp_path / mp.REPORT_NAME),
-        cfg=mp.CompileCellSpec(family="sdxl", shapes=((1024, 1024),),
+        cfg=mp.CompileCompiledGraphSpec(family="sdxl", shapes=((1024, 1024),),
                                targets=("unet",)),
         handler_proof="test: the parent proved it",
         slots={"pipeline": mp.MintSlot(
@@ -488,7 +488,7 @@ def test_the_mint_refuses_ONCE_before_export_naming_the_construct() -> None:
     request = mp.MintRequest(
         function="f", modules=(), family="sdxl", arm_token="a",
         target="t", work_root="w", report="r",
-        cfg=mp.CompileCellSpec(family="sdxl", targets=("unet",)))
+        cfg=mp.CompileCompiledGraphSpec(family="sdxl", targets=("unet",)))
 
     # A traceable pipeline passes silently.
     mint_child.assert_traceable_as_loaded(

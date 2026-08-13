@@ -2,7 +2,7 @@
 worker's.
 
 th#1299's tape, restated as the contract this file pins (WORKER-CONTRACTS §2):
-a compile-cell MISS must not put long-running GIL-holding Python on the loop
+a compile-compiled graph MISS must not put long-running GIL-holding Python on the loop
 that carries the 10s beat and eager serving. So the mint becomes a child
 process, and this file proves the SUPERVISOR half:
 
@@ -15,7 +15,7 @@ process, and this file proves the SUPERVISOR half:
   never a wall clock and never a frame the child prints — a busy child is never
   killed however long it takes, a silent one is killed quickly;
 * abandonment reaps the whole process GROUP (inductor forks its own compile
-  workers, and a mint that leaks them keeps billing for a cell nobody adopts).
+  workers, and a mint that leaks them keeps billing for a compiled graph nobody adopts).
 
 The liveness proof itself — beats never missed while a >2min mint runs — is
 ``test_mint_liveness_pgw784.py``.
@@ -45,10 +45,10 @@ def _request(tmp_path: Path, **over: Any) -> mp.MintRequest:
         modules=("harness.toy_endpoints",),
         family="sdxl",
         arm_token="arm1-deadbeef",
-        target=str(tmp_path / "cell.tar.gz"),
+        target=str(tmp_path / "compiled_graph.tar.gz"),
         work_root=str(tmp_path / "capture"),
         report=str(tmp_path / mp.REPORT_NAME),
-        cfg=mp.CompileCellSpec(family="sdxl", shapes=((1024, 1024),),
+        cfg=mp.CompileCompiledGraphSpec(family="sdxl", shapes=((1024, 1024),),
                                targets=("unet",)),
     )
     fields.update(over)
@@ -121,7 +121,7 @@ def test_a_stray_print_is_not_a_frame(tmp_path: Path) -> None:
 
 # ------------------------------------------------------------ happy path
 
-def test_a_minted_cell_comes_back_as_a_path_and_a_digest(tmp_path: Path) -> None:
+def test_a_minted_compiled_graph_comes_back_as_a_path_and_a_digest(tmp_path: Path) -> None:
     frames: list = []
     out = asyncio.run(_run(tmp_path, "minted", frames=frames))
     assert out.status == mp.MINTED and out.minted
@@ -129,14 +129,14 @@ def test_a_minted_cell_comes_back_as_a_path_and_a_digest(tmp_path: Path) -> None
     # artifacts it produced. This vehicle mints one class, and the unpack
     # asserts that arity rather than indexing past a set nobody checked.
     (only,) = out.artifacts
-    assert only == tmp_path / "cell.tar.gz"
-    assert only.read_bytes() == b"stub-cell-bytes"
+    assert only == tmp_path / "compiled_graph.tar.gz"
+    assert only.read_bytes() == b"stub-compiled_graph-bytes"
     # pgw#1176: the digest rides the ENTRY row, beside the key and the path —
     # a per-artifact fact belongs with its artifact, not on the report.
     assert out.report is not None
     ((_key, _path, digest),) = out.report.entries
     assert digest == "blake3:stub"
-    assert out.report.cell_key == "arm1-deadbeef"
+    assert out.report.compiled_graph_key == "arm1-deadbeef"
     assert not out.retryable
     assert "status=minted" in out.line()
 

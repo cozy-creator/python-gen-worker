@@ -2,7 +2,7 @@
 
 The load-bearing test in this file is the RANGE-COLLISION one: pgw#704 measured
 three sdxl exports differing ONLY in declared dynamic range collapsing to one
-node-only digest (``9dd33abbc7617d98``), which would let a worker adopt a cell
+node-only digest (``9dd33abbc7617d98``), which would let a worker adopt a compiled graph
 that refuses the envelope its key promised. Everything else here pins the
 properties ck6 exists for — same graph shares a key, weight values never key,
 different graph never shares.
@@ -126,7 +126,7 @@ def test_declared_range_must_not_collide_pgw704_s8():
 
 
 def test_declared_range_keys_the_dynamo_path_too_pgw702():
-    """The same defect for dynamo cells with declared dynamic dims — one
+    """The same defect for dynamo compiled graphs with declared dynamic dims — one
     canonicalizer, one fix."""
     digests = set()
     for hi in (16, 64):
@@ -149,7 +149,7 @@ def test_same_graph_different_recipe_shares_the_hash():
     torch.manual_seed(1)
     twin = _export(_TinyTwin())
     assert gh.graph_hash(one) == gh.graph_hash(twin), (
-        "two recipes that trace the same graph must share cells — that is the "
+        "two recipes that trace the same graph must share compiled_graphs — that is the "
         "advantage over recipe-digest identity")
 
 
@@ -211,7 +211,7 @@ def test_non_graph_is_refused_by_name():
 
 # --------------------------------------------------------------------------
 # (pgw#1030: the combined-hash tests moved out with the symbol — the live
-# formula and its coverage are `cell_key.manifest_digest`.)
+# formula and its coverage are `compiled_graph_key.manifest_digest`.)
 # --------------------------------------------------------------------------
 
 

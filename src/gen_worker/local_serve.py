@@ -1,14 +1,14 @@
 """pgw#1127 / §4.28 — the cozy-local serve entry: the fleet arming brain, no sink.
 
 DESIGN-RULINGS §4.28 (Paul, 2026-08-10): *"Untrusted hardware (community
-cloud, cozy-local) mints for ITSELF: local cell, local repo-CAS, reused
+cloud, cozy-local) mints for ITSELF: local compiled graph, local repo-CAS, reused
 across its own boots — never uploaded, never requested."*
 
-pgw#1096 built the store that clause needs (``local_cell_store``) and wired it
-into ``fleet_cells._arming_policy``, local-first, before any mint is opened.
+pgw#1096 built the store that clause needs (``local_compiled_graph_store``) and wired it
+into ``fleet_compiled_graphs._arming_policy``, local-first, before any mint is opened.
 It left ONE thing owed, and the omission made the whole build unreachable from
 the machine it was written for: ``cli/run.py`` still armed through
-``local_cells`` — the JIT path — so ``_arming_policy`` was never entered from
+``local_compiled_graphs`` — the JIT path — so ``_arming_policy`` was never entered from
 ``cozy serve`` and cozy-local got compile-once-run-forever on JIT only, on the
 recipe pgw#1086 wave 1 deletes.
 
@@ -19,9 +19,9 @@ WHAT IS STRUCTURAL HERE, and what merely happens to be true
 -----------------------------------------------------------
 ``publisher=None`` at one call site is a convention. What pins the property is
 that this module — the ONLY arming entry the local CLI has — contains no
-``CellPublisher`` construction, no publish call and no transport import at all,
+``CompiledGraphPublisher`` construction, no publish call and no transport import at all,
 and ``tests/test_local_serve_no_publisher_pgw1127.py`` reads that out of the
-source tree. The obligation's terminus is ``fleet_cells.keep_self_mint_local``,
+source tree. The obligation's terminus is ``fleet_compiled_graphs.keep_self_mint_local``,
 which takes no publisher and therefore cannot grow into one.
 
 WHAT THIS DOES NOT ADD
@@ -30,7 +30,7 @@ No mint code (the delegated ``mint_delegate`` -> ``mint_process`` ->
 ``mint_child`` chain is used unchanged, weight-free since pgw#1080), no second
 key scheme, no coordinator, no mint-request in any address form, no trust
 self-declaration, and no env behaviour switch. A cozy-local box learns it keeps
-its own cells from ``no_publish_sink_reason``'s ``no_publish_sink`` — a fact
+its own compiled graphs from ``no_publish_sink_reason``'s ``no_publish_sink`` — a fact
 the SINK, never a claim about itself.
 """
 
@@ -47,8 +47,8 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from . import activity as activity_mod
 from . import aot_compile_pool
 from . import compile_cache as cc
-from . import compile_posture, fleet_cells, handler_proof
-from . import local_cell_store, mint_delegate
+from . import compile_posture, fleet_compiled_graphs, handler_proof
+from . import local_compiled_graph_store, mint_delegate
 from .mint_process import MintFrame, MintSlot
 
 logger = logging.getLogger(__name__)
@@ -117,9 +117,9 @@ def enable_compiled(
     mint: Optional[LocalMintContext] = None,
     defer: Optional[List["DeferredMint"]] = None,
 ) -> bool:
-    """Arm ``pipe`` from this machine's own cells, minting one if it has none.
+    """Arm ``pipe`` from this machine's own compiled graphs, minting one if it has none.
 
-    The ordering is ``fleet_cells``' and is not restated here: delivered
+    The ordering is ``fleet_compiled_graphs``' and is not restated here: delivered
     artifact -> in-process ledgers -> **this machine's local store** ->
     delegated mint. On a local-store hit no network is touched and no mint is
     opened, which is the whole of compile-once-run-forever.
@@ -128,9 +128,9 @@ def enable_compiled(
     error: a machine with no CUDA, a family with no export declaration, or a
     mint that could not fit on the card all serve eager, exactly as they did
     before — except on a mandatory (w8a8/w4a4) lane, whose typed refusal
-    ``fleet_cells`` raises and this function deliberately does not catch.
+    ``fleet_compiled_graphs`` raises and this function deliberately does not catch.
     """
-    outcome = fleet_cells.enable_compiled(
+    outcome = fleet_compiled_graphs.enable_compiled(
         pipe, cfg, cache_dir,
         # §4.28, and the reason this module exists: user hardware is untrusted
         # tier by definition, so there is no sink to pass and never will be.
@@ -139,15 +139,15 @@ def enable_compiled(
     if outcome.armed:
         return True
     pending = outcome.self_mint
-    if not isinstance(pending, fleet_cells.PendingSelfMint):
+    if not isinstance(pending, fleet_compiled_graphs.PendingSelfMint):
         # An eager exit with a classified reason (`no_toolchain`, a declined
-        # family, a quarantined identity). `fleet_cells` already named it.
+        # family, a quarantined identity). `fleet_compiled_graphs` already named it.
         return False
     if mint is None or mint.incomplete:
         # A pending nobody can drive is the pgw#815 shape: an obligation with
         # no terminus. End it here rather than leaving the capture dir and the
         # ledger entry behind for a run that will never come.
-        fleet_cells.abandon_self_mint(pending)
+        fleet_compiled_graphs.abandon_self_mint(pending)
         logger.warning(
             "local-serve: %s opened a mint this process cannot drive (%s); "
             "serving eager", pending.family,
@@ -173,7 +173,7 @@ def run_deferred(
     price of one forward instead of a second copy of the model.
 
     A handler that does not run mints NOTHING and says so. That is the same
-    disposition the child had (`a cell must not seal for a handler that cannot
+    disposition the child had (`a compiled graph must not seal for a handler that cannot
     serve`), reached before a compile is paid for rather than after.
     """
     if not deferred:
@@ -188,7 +188,7 @@ def run_deferred(
             _say(
                 f"{owed.pending.family} is not compiled on this machine: the "
                 f"endpoint's own handler does not run ({exc}). Serving eager.")
-            fleet_cells.abandon_self_mint(owed.pending)
+            fleet_compiled_graphs.abandon_self_mint(owed.pending)
             continue
         _mint_here(owed.pipe, owed.pending, owed.mint)
 
@@ -226,7 +226,7 @@ def compile_notice(
         1, posture.cpu_budget_cores(
             vcpus, headroom=aot_compile_pool.SERVING_HEADROOM_CPUS))
     workers = posture.entry_ceiling(aot_compile_pool.MAX_ENTRY_WORKERS)
-    root = store_root if store_root is not None else local_cell_store.store_root()
+    root = store_root if store_root is not None else local_compiled_graph_store.store_root()
     reserve = posture.rss_reserve_bytes(
         aot_compile_pool.ENTRY_RSS_RESERVE_BYTES) // 1024**3
     return (
@@ -283,12 +283,12 @@ class _Progress:
 
 
 def _mint_here(
-    pipe: Any, pending: "fleet_cells.PendingSelfMint", mint: LocalMintContext,
+    pipe: Any, pending: "fleet_compiled_graphs.PendingSelfMint", mint: LocalMintContext,
 ) -> bool:
     """Run the delegated child mint on THIS machine and keep what it produces.
 
     Identical to the executor's ``_delegated_mint_run`` in everything that
-    decides correctness — same ``build_cell``, same child, same
+    decides correctness — same ``build_compiled_graph``, same child, same
     ``adopt_delegated_mint`` gate — and different in the three things a desktop
     does not have: there is no serving loop to keep beating (this call is the
     boot, and it blocks), there is nowhere to publish, so the obligation ends
@@ -301,24 +301,24 @@ def _mint_here(
     proof = handler_proof.provenance(mint.function)
     # §4.30 / pgw#1137: the ONE site in the tree that declares a user-machine
     # posture. It is stated here, not derived from `publisher is None` or from
-    # `local_cell_store.trust_class()` — both are facts about the SINK, and a
+    # `local_compiled_graph_store.trust_class()` — both are facts about the SINK, and a
     # community-cloud pod matches them while having no human on it.
     posture = compile_posture.USER_MACHINE
     _say(compile_notice(family, posture))
     watch = _Progress(family)
     with activity_mod.running(activity_mod.KIND_SELF_MINT_COMPILE) as act:
         try:
-            result = _drive(mint_delegate.build_cell(
+            result = _drive(mint_delegate.build_compiled_graph(
                 mint_delegate.MintTask(
                     pending=pending,
                     pipe=pipe,
                     function=mint.function,
                     modules=mint.modules,
                     slots=dict(mint.slots),
-                    # Cell IDENTITY's lane, the same probe the mint's own
+                    # Compiled graph IDENTITY's lane, the same probe the mint's own
                     # `stamp_lane` memoizes — so what this machine looks up on
                     # its next boot is what this mint stamps (pgw#686).
-                    weight_lane=cc.cell_base_execution_lane(pipe),
+                    weight_lane=cc.compiled_graph_base_execution_lane(pipe),
                     device=mint.device,
                     posture=posture,
                     handler_proof=proof,
@@ -331,25 +331,25 @@ def _mint_here(
     if result is not None and result.ok:
         _say(
             f"compiled {family} in {watch.elapsed()} — kept at "
-            f"{local_cell_store.store_root()}; later runs arm from it.")
+            f"{local_compiled_graph_store.store_root()}; later runs arm from it.")
     else:
         _say(
             f"{family} is not compiled on this machine ({watch.elapsed()} "
             f"spent); serving eager. Finished compile work, if any, is kept "
             f"for the next run.")
     if result is not None and result.ok:
-        # The cell is ALREADY in this machine's store — `adopt_delegated_mint`
+        # The compiled graph is ALREADY in this machine's store — `adopt_delegated_mint`
         # put it there before any publish could be attempted, which is what
         # makes a process killed here cost nothing (th#1643's SUNK case).
-        fleet_cells.keep_self_mint_local(pending)
+        fleet_compiled_graphs.keep_self_mint_local(pending)
         return True
-    if not fleet_cells.terminus_of(pending):
-        # pgw#815: every obligation ends somewhere nameable. `build_cell`
+    if not fleet_compiled_graphs.terminus_of(pending):
+        # pgw#815: every obligation ends somewhere nameable. `build_compiled_graph`
         # abandons its own failures; a DECLINED one (no room on the card) it
         # deliberately leaves open for a caller that might have another.
-        fleet_cells.abandon_self_mint(pending)
+        fleet_compiled_graphs.abandon_self_mint(pending)
     logger.info(
-        "local-serve: %s has no cell on this machine yet (%s); serving eager",
+        "local-serve: %s has no compiled_graph on this machine yet (%s); serving eager",
         pending.family,
         (result.detail or result.status) if result is not None else "mint failed")
     return False

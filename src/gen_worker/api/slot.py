@@ -154,9 +154,9 @@ class Slot(Generic[D]):
     fail-open defect wearing a new name.
 
     This lives on ``Slot`` and NOT on ``Compile``: ``Compile``'s fields feed
-    ``contract_axes()``, a cell-key input, and §1.33 point 5 is that
-    conversion is upstream of compute and invisible to cell identity. A
-    layout declaration there would either re-key every cell in the fleet or
+    ``contract_axes()``, a compiled graph-key input, and §1.33 point 5 is that
+    conversion is upstream of compute and invisible to compiled graph identity. A
+    layout declaration there would either re-key every compiled graph in the fleet or
     sit inside the key struct while deliberately not participating.
 
     ``optional`` is DERIVED, never passed: a slot is optional exactly when

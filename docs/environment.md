@@ -47,7 +47,7 @@ this page covers the worker itself.
 | `WORKER_ID` | `worker_id` | per-pod identity |
 | `ENDPOINT_LOCK_PATH` | `endpoint_lock_path` | discovery manifest path (baked default in images) |
 | `RUNPOD_POD_ID` | `runpod_pod_id` | set by the RunPod runtime |
-| `WORKER_IMAGE_DIGEST` | `worker_image_digest` | immutable provenance stamped by Tensorhub from the selected release image variant; also read raw by `compile_cache.py` to stamp `image_digest` into every compile cell |
+| `WORKER_IMAGE_DIGEST` | `worker_image_digest` | immutable provenance stamped by Tensorhub from the selected release image variant; also read raw by `compile_cache.py` to stamp `image_digest` into every compile compiled graph |
 | `WORKER_RELEASE_ID` | `worker_release_id` | release identity; re-exported into the compute child |
 | `WORKER_CONFIG_GENERATION` | `boot_config_generation` | boot-config generation, for detecting hub-injected config |
 | `WORKER_EXECUTION_TOPOLOGY` | — (raw, `topology.py`) | hub-delivered multi-GPU topology JSON (see [multi-gpu.md](multi-gpu.md)). Absent is legal and means one slot — so an unset value on a multi-GPU pod silently serves one card |
@@ -114,7 +114,7 @@ gen-worker stopped populating it — see the proto comment), and the
 
 The old `GEN_WORKER_COMPILE_CACHE`, `_CACHE_URL`, and `_ALLOW_COLD` knobs were
 removed. Serving receives immutable compile artifacts through Tensorhub;
-local-cell and producer tools use explicit library arguments. An inherited
+local-compiled graph and producer tools use explicit library arguments. An inherited
 environment can therefore never bypass scheduler selection or mandatory W8A8
 compile evidence.
 
@@ -161,7 +161,7 @@ compile evidence.
   the SSRF policy (`input_assets.py`).
 - `GEN_WORKER_SUPERVISOR` (`=0` disables the OOM-reporting supervisor fork),
   `GEN_WORKER_COMPUTE_UID` (privilege-drop target uid),
-  `GEN_WORKER_EAGER_FIRST_BOOT`, `GEN_WORKER_LOCAL_CELLS_DIR`,
+  `GEN_WORKER_EAGER_FIRST_BOOT`, `GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR`,
   `GEN_WORKER_NATIVE_KERNELS`, `GEN_WORKER_VIDEO_ENCODER`, `GEN_WORKER_AOT_*`,
   `GEN_WORKER_MINT_*`, `RUNPOD_PROVIDER` — further raw reads. **This list is no
   longer the source of truth**: `scripts/config_reads_allowlist.txt` is, and it

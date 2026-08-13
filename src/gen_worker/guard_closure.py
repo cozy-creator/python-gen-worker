@@ -3,7 +3,7 @@
 Dynamo's guard set for a compiled graph IS the exhaustive list of everything
 that graph depends on — so closure against the declared compile contract is
 machine-checkable. Three pieces, all SDK-generic (parameterized ONLY by the
-declared ``CompileCell`` contract — never per-endpoint or per-family code):
+declared ``CompileCompiledGraph`` contract — never per-endpoint or per-family code):
 
 1. **Extraction** (:func:`extract`): post-mint, walk every compiled graph's
    live guard tree. The robust torch 2.13 surface (probed on 2.13.0+cu130):
@@ -33,7 +33,7 @@ declared ``CompileCell`` contract — never per-endpoint or per-family code):
 
    **The classifier has NO VETO (pgw#756, Paul's ruling).** It protects
    against WASTED REUSE, not incorrectness: dynamo re-evaluates its own
-   guards on every call at the consumer, so a cell depending on unpinned
+   guards on every call at the consumer, so a compiled graph depending on unpinned
    state fails its guards THERE — and with pgw#680 fail-on-recompile armed
    that raises, serves eager, and reports the reason as a countable
    ``guard_miss``. A missed leak therefore degrades gracefully and loudly;
@@ -44,7 +44,7 @@ declared ``CompileCell`` contract — never per-endpoint or per-family code):
    :func:`closure_manifest` classifies, records, emits a typed
    ``guard_leak`` event, and CONTINUES the mint. Hard refusals survive only
    where a defect is PROVEN rather than inferred: zero compiled graphs
-   (nothing was compiled — the cell would be empty) and posture drift
+   (nothing was compiled — the compiled graph would be empty) and posture drift
    (:func:`assert_posture` — a measurement against exact canonical values).
 
    **Never rebuild this classifier.** torch's own ``guard_filter_fn`` /
@@ -72,12 +72,12 @@ declared ``CompileCell`` contract — never per-endpoint or per-family code):
    in guards; declared dynamism rides ``mark_dynamic``) — the ingress never
    rewrites scalar values.
 
-The full guard dump rides the cell as ``metadata.json``'s
+The full guard dump rides the compiled graph as ``metadata.json``'s
 ``guard_manifest`` block (deterministic: comments stripped, ASLR ids
-scrubbed, rows sorted) — every armed cell carries its complete dependency
+scrubbed, rows sorted) — every armed compiled graph carries its complete dependency
 manifest into CAS and the publish-intent metadata. The audit surface
 (:func:`audit_armed` for a live armed pipeline, :func:`consolidate` +
-``python -m gen_worker.guard_closure`` over N pods' cells/manifests) is the
+``python -m gen_worker.guard_closure`` over N pods' compiled graphs/manifests) is the
 N-cold-pod zero-miss closure check: exit 0 = closed and consistent, 2 =
 leaks, 3 = cross-pod divergence.
 
@@ -101,7 +101,7 @@ from . import torch_capability
 logger = logging.getLogger(__name__)
 
 # pgw#958 (§1.27(g)): restarted at 1 alongside KEY_SCHEME / SEAL_VERSION,
-# with the pre-existing cell corpus purged in the same cut. The manifest
+# with the pre-existing compiled graph corpus purged in the same cut. The manifest
 # shape is the one the old v3 reached (posture process-seal block, advisory
 # gate, "unproven" rows).
 MANIFEST_VERSION = 1
@@ -111,7 +111,7 @@ GATE_ADVISORY = "advisory"
 # Verdicts. LEAK and UNPROVEN are REPORTED, never fatal (pgw#756).
 LEAK = "LEAK"
 UNPROVEN = "unproven"                    # guards unreadable on this torch build
-RUNTIME_STATE = "runtime-state"          # ambient process state (cell-key runtime axes)
+RUNTIME_STATE = "runtime-state"          # ambient process state (compiled graph-key runtime axes)
 CODE_IDENTITY = "code-identity"          # G[...] roots (version/image axes)
 MODULE_STRUCTURE = "module-structure"    # L['self'] roots (family/graph/weight axes)
 CONTRACT_SHAPE = "contract-shape"        # input tensor shape/stride/dtype/device
@@ -205,7 +205,7 @@ class GuardBoundaryError(RuntimeError):
 
 class PostureError(GuardClosureError):
     """The process posture differs from the canonical serving posture or
-    from a cell's sealed posture (pgw#695). Named per fact — a posture
+    from a compiled graph's sealed posture (pgw#695). Named per fact — a posture
     drift refuses the mint/arm loudly instead of surfacing later as an
     undiagnosable ambient guard miss."""
 
@@ -239,7 +239,7 @@ class GraphGuards:
 
 @dataclass(frozen=True)
 class ClosureReport:
-    """The audit view for one armed pipeline / minted cell."""
+    """The audit view for one armed pipeline / minted compiled graph."""
 
     graphs: Tuple[GraphGuards, ...]
 
@@ -275,7 +275,7 @@ class ClosureReport:
         return dict(sorted(counts.items()))
 
     def manifest(self) -> Dict[str, Any]:
-        """Deterministic JSON manifest — the durable per-cell guard dump."""
+        """Deterministic JSON manifest — the durable per-compiled graph guard dump."""
         return {
             "v": MANIFEST_VERSION,
             "graphs": [
@@ -664,7 +664,7 @@ def classify(
     to the input managers (and SYMBOLIC_SHAPE_GUARD to synthetic tuple
     sources), never predictably to one root. Everything else dispatches on
     the source root: module- and global-rooted guards are covered by
-    construction (weights + code identity, pinned by the cell-key axes);
+    construction (weights + code identity, pinned by the compiled graph-key axes);
     input-rooted and ambient guards are the closed world — unknown types are
     LEAKS, never waved on.
     """
@@ -684,7 +684,7 @@ def classify(
         return CODE_IDENTITY, "gen_worker/diffusers/transformers/image versions"
     if root == "ambient":
         if guard_type in _AMBIENT_COVERED:
-            return RUNTIME_STATE, "process runtime state (cell-key runtime axes)"
+            return RUNTIME_STATE, "process runtime state (compiled_graph-key runtime axes)"
         if guard_type == "LAMBDA_GUARD":
             if ("init_ambient_guards" in expr
                     or "top_saved_tensors_hooks" in expr):
@@ -814,7 +814,7 @@ def establish_posture() -> Dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# The advisory closure audit (pgw#756: no veto) + armed-cell audit
+# The advisory closure audit (pgw#756: no veto) + armed-compiled graph audit
 # ---------------------------------------------------------------------------
 
 

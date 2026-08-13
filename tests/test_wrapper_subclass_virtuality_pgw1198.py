@@ -303,7 +303,7 @@ def test_revirtualizing_keeps_the_quantized_topology(
 ) -> None:
     """`virtualize` rebuilt every parameter as a plain tensor of its OUTER
     dtype, which turns a quantized weight into a bf16 one — so the export would
-    trace bf16 Linears for a pod that serves fp8: a cell for a graph the pod
+    trace bf16 Linears for a pod that serves fp8: a compiled graph for a graph the pod
     never executes, which is exactly what `_refuse_artifact_lanes` exists to
     prevent, arriving by the other door.
 

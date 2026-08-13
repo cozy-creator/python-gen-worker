@@ -17,7 +17,7 @@ torch = pytest.importorskip("torch")
 
 from gen_worker import compile_cache as cc
 from gen_worker import guard_closure as gc
-from gen_worker.registry import CompileCell
+from gen_worker.registry import CompileCompiledGraph
 
 
 def _env_seal() -> Any:
@@ -51,14 +51,14 @@ def _restore_global_matmul_flags() -> Iterator[None]:
     torch.backends.cudnn.benchmark = benchmark
 
 
-def _cfg(**overrides: Any) -> CompileCell:
+def _cfg(**overrides: Any) -> CompileCompiledGraph:
     base: Dict[str, Any] = dict(
         shapes=((64, 64),), targets=("transformer",), family="toyfam",
         regional=False, text_len=None, dynamic=(), lora_bucket=0,
         guidance_scales=(), text_lens=(),
     )
     base.update(overrides)
-    return CompileCell(**base)
+    return CompileCompiledGraph(**base)
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +75,7 @@ def test_pytest_process_posture_is_canonical() -> None:
 
 # pgw#1181 REMOVED 11 rows whose subject is the `torch-inductor-cache` format:
 # `assert_posture` and the two posture rows that round-tripped a seal through a
-# cell's metadata, the three `consolidate` rows, the cubin/PTX `pack`
+# compiled graph's metadata, the three `consolidate` rows, the cubin/PTX `pack`
 # completeness rows (3), `verify`'s sku and silent-axes rows (2), and the local
 # store's seal-drift verdict. The manifest they compared is written by
 # `closure_manifest`, the pack they exercised is `compile_cache.pack`, and both
@@ -166,11 +166,11 @@ def test_a_dtype_flip_in_one_submodule_moves_the_graph_signature() -> None:
     """The pgw#683 class: one submodule left in Half inside a bf16 tree.
 
     pgw#1181: `composition_fingerprint` and `contract_drift` were the
-    `torch-inductor-cache` cell's own adoption fence and are deleted with the
+    `torch-inductor-cache` compiled graph's own adoption fence and are deleted with the
     format. The FACT they rested on is `execution_contract`, which is alive and
     is folded into `ck1`'s contract axis — so on the surviving lane the drifted
     consumer does not get a named refusal, it gets a different key and never
-    resolves the cell at all. That is strictly stronger, and this row states
+    resolves the compiled graph at all. That is strictly stronger, and this row states
     the fact underneath it: the signature moves on the flip and does NOT move
     on a fine-tune of the same composition."""
     minted = _Pipe()
@@ -247,7 +247,7 @@ def _capture(tmp_path: Path, *, ptx: bool, cubin_arch: int = 0) -> Path:
 
 
 def test_fx_system_shim_normalizes_device_name(monkeypatch: Any) -> None:
-    """P0 (review 6.1, VERIFIED on a real B200 cell: system_info[device] =
+    """P0 (review 6.1, VERIFIED on a real B200 compiled graph: system_info[device] =
     {'name': 'NVIDIA B200'}): the inner FX key hashes the GPU MARKETING
     name, so cross-SKU same-sm adoption missed 100% inside torch's own
     lookup. The shim rewrites the name to the sm token with the hash
@@ -354,13 +354,13 @@ def test_pytorch_and_triton_namespaces_are_scrubbed(monkeypatch: Any) -> None:
 def test_the_seal_carries_no_operator_settable_recall_salt(
     monkeypatch: Any,
 ) -> None:
-    """pgw#1034 deleted the ``epoch`` fact (``COZY_CELL_EPOCH``).
+    """pgw#1034 deleted the ``epoch`` fact (``COZY_COMPILED_GRAPH_EPOCH``).
 
     A recall is a recorded operator intent with an actor and a reason; an env
     var on a pod is neither, which is why the config-reads allowlist ruled the
-    read a VIOLATION and named the hub's ``cell_revocations`` (th#1499) as the
+    read a VIOLATION and named the hub's ``compiled_graph_revocations`` (th#1499) as the
     real home. The seal is now unmovable from the process environment: the
-    ONLY way to disown a cell generation is a ``SEAL_VERSION`` bump in this
+    ONLY way to disown a compiled graph generation is a ``SEAL_VERSION`` bump in this
     file, which is a diff someone signs.
     """
     seal = _env_seal()
@@ -370,6 +370,6 @@ def test_the_seal_carries_no_operator_settable_recall_salt(
     assert not hasattr(seal, "EPOCH_ENV")
 
     baseline = seal.seal_digest(base)
-    monkeypatch.setenv("COZY_CELL_EPOCH", "1")
+    monkeypatch.setenv("COZY_COMPILED_GRAPH_EPOCH", "1")
     assert seal.seal_digest(seal.effective_seal()) == baseline
 

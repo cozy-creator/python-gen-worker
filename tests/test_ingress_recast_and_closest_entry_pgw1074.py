@@ -1,8 +1,8 @@
 """pgw#1074 — the sdxl CFG arm's `ingress_refused`, and the refusal that hid it.
 
-**The field observation** (pgw#868 A1 attempt 32, release `3a2a41bbb38b…`, cell
+**The field observation** (pgw#868 A1 attempt 32, release `3a2a41bbb38b…`, compiled graph
 `ck1-5f421149…`, adopt pod `vf3vwnun17vcwd`, 36/36 parity green): the turbo arm
-served FROM THE CELL; the base arm — same cell, an entry with exactly its dims —
+served FROM THE COMPILED GRAPH; the base arm — same compiled graph, an entry with exactly its dims —
 got `fallback_reason=ingress_refused`::
 
     aot_ingress_refused/no_entry_admits — family=sdxl target=unet:
@@ -29,7 +29,7 @@ boundary that knows the contract.
 **And the observability half.** The refusal said "36 tried" and then listed six,
 in iteration order — and the entry whose dims MATCHED was not among them, so its
 actual objection was unavailable and diagnosing it meant pulling the published
-cell apart. That is pgw#1058's lesson repeating in the diagnostics layer.
+compiled graph apart. That is pgw#1058's lesson repeating in the diagnostics layer.
 
 Real codepaths: a real `torch.export` + real AOTI compile on CPU, driven through
 the real `ArtifactRunner`/`EntryDispatch`, on the pgw#791 rig.
@@ -120,7 +120,7 @@ def sink(monkeypatch) -> List[Any]:
 def test_the_int64_sampler_class_is_served_by_the_float32_entry(
         package, sink) -> None:
     """THE FIELD DEFECT. `dpmpp_2m_karras`/`lcm`/`ddim` present int64; the
-    cell is specialized float32; the call must SERVE, not fall back."""
+    compiled graph is specialized float32; the call must SERVE, not fall back."""
     runner = _runner(package)
     sample = torch.randn(2, 8)
     with torch.no_grad():
@@ -181,9 +181,9 @@ def test_a_float32_call_is_untouched(package, sink) -> None:
 
 
 def test_pgw1058s_defect_is_still_caught_float32_call_bfloat16_entry() -> None:
-    """The attempt-30 cell: entries specialized bf16, every real call float32.
+    """The attempt-30 compiled graph: entries specialized bf16, every real call float32.
     float -> float is not a normalization and must stay a named refusal, or
-    this fix would have silently served the cell pgw#1058 exists to reject."""
+    this fix would have silently served the compiled graph pgw#1058 exists to reject."""
     contract = _contract(timestep_dtype="bfloat16")
     with pytest.raises(aot_serve.IngressContractError) as excinfo:
         aot_serve.assert_ingress(
@@ -249,7 +249,7 @@ _ASPECTS = ((80, 192), (96, 168), (104, 152), (112, 144), (128, 128),
 
 def _sdxl_entry(adapter: bool, cfg: bool, batch: int, h: int, w: int,
                 timestep_dtype: str) -> Tuple[str, Any]:
-    """One sdxl cell entry, labelled and shaped exactly as the field cell's
+    """One sdxl compiled graph entry, labelled and shaped exactly as the field compiled graph's
     36 are (`unet/adapter=…,cfg=…/B=…,H_lat=…,T_txt=77,W_lat=…`). The adapter
     fork is the pgw#790 one: the branchless class REFUSES the lifted pair, the
     branch-bearing one declares it."""
@@ -283,7 +283,7 @@ def _sdxl_entry(adapter: bool, cfg: bool, batch: int, h: int, w: int,
 
 
 def _sdxl_dispatch(timestep_dtype: str) -> aot_serve.EntryDispatch:
-    """The field cell: 36 entries = adapter{F,T} x cfg{F,T} x 9 aspect rungs,
+    """The field compiled graph: 36 entries = adapter{F,T} x cfg{F,T} x 9 aspect rungs,
     B pinned by the cfg fork (cfg=true is ONE batch-2 forward, ie#345)."""
     rows = []
     for adapter in (False, True):
@@ -354,8 +354,8 @@ def test_every_tried_entry_is_accounted_for_never_silently_dropped() -> None:
     assert sum(int(v) for _k, v in counted) == 35
 
 
-def test_the_field_cell_now_serves_the_cfg_arm_end_to_end() -> None:
-    """The whole issue, as one assertion: the SAME 36-entry cell, declared as
+def test_the_field_compiled_graph_now_serves_the_cfg_arm_end_to_end() -> None:
+    """The whole issue, as one assertion: the SAME 36-entry compiled graph, declared as
     ie#627 declares it (float32), dispatches the int64 CFG call to the entry
     that covers it."""
     dispatch = _sdxl_dispatch("float32")
@@ -364,7 +364,7 @@ def test_the_field_cell_now_serves_the_cfg_arm_end_to_end() -> None:
 
 
 def test_a_genuinely_uncovered_class_still_refuses() -> None:
-    """The dispatch is not weakened: an aspect the cell never minted is
+    """The dispatch is not weakened: an aspect the compiled graph never minted is
     refused by name, and the refusal reports a dim miss, not a dtype one."""
     dispatch = _sdxl_dispatch("float32")
     call = _cfg_call()

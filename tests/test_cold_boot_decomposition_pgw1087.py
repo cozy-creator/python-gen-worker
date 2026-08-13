@@ -73,7 +73,7 @@ def _one(rows: List[pb.BootPhase], phase: str) -> pb.BootPhase:
 #: be asking for a phase this boot shape structurally cannot have — the
 #: entrypoint shape is proven where an entrypoint actually runs
 #: (`tests_v2/test_boot.py::test_real_entrypoint_seals_dials_and_dumps_stacks`).
-#: It also has no CUDA, so the cell half is out of scope here and is covered by
+#: It also has no CUDA, so the compiled graph half is out of scope here and is covered by
 #: the local micro-mint rig legs.
 EXPECTED_SHAPE = boot_phases.SHAPE_EAGER
 
@@ -171,7 +171,7 @@ def test_every_declared_phase_of_this_shape_has_a_production_producer(
 ) -> None:
     """The pgw#924 rule, re-applied to the names pgw#1087 adds. A declared
     phase with no producer is a name every reader learns and the system can
-    never emit — which is how `cell_discover` survived pgw#924's own audit."""
+    never emit — which is how `compiled_graph_discover` survived pgw#924's own audit."""
     emitted = {r.phase for r in ladder if r.terminal}
     for phase in EXPECTED_SHAPE:
         assert phase in emitted, (

@@ -1,4 +1,4 @@
-"""pgw#790 — the adapter FORK: one cell, two graph classes, routed by the
+"""pgw#790 — the adapter FORK: one compiled graph, two graph classes, routed by the
 declared ingress contract.
 
 gw#627 gave every branch-capable leaf a canonical zeroed rank-bucket branch so
@@ -17,7 +17,7 @@ compute zeros. On the hub's own record (master stack `requests`, 2026-07-30)
 95% of sdxl denoiser forwards name no adapter.
 
 The fix is a fork, not a flag: a bucket-bearing family mints BOTH classes into
-the one cell, and the serve path routes per request. Real mint (torch.export +
+the one compiled graph, and the serve path routes per request. Real mint (torch.export +
 AOTI on CPU) and real serve — the packaging and dispatch paths are exactly
 what this issue changes, so neither is stood in for.
 """
@@ -42,7 +42,7 @@ from gen_worker import (  # noqa: E402
     aot_declaration,
     aot_mint,
     aot_serve,
-    cell_key,
+    compiled_graph_key,
     compile_cache,
 )
 from gen_worker.api.decorators import Compile  # noqa: E402
@@ -112,11 +112,11 @@ def _fresh_registry():
 
 
 @pytest.fixture(scope="module")
-def cell(tmp_path_factory, request) -> Dict[str, Any]:
+def compiled_graph(tmp_path_factory, request) -> Dict[str, Any]:
     """ONE real two-arm mint, shared (an AOTI compile costs ~10s per entry).
 
     pgw#1176: the mint yields TWO independently keyed artifacts rather than
-    one two-entry cell. ``by_entry`` indexes them by the class each one names,
+    one two-entry compiled graph. ``by_entry`` indexes them by the class each one names,
     which is the addressing every row below wants — an entry NAMES its class,
     and that is what makes a per-class refusal bisectable.
     """
@@ -126,7 +126,7 @@ def cell(tmp_path_factory, request) -> Dict[str, Any]:
     request.addfinalizer(mp.undo)
     _fake_sm(mp)
     _declare()
-    tmp = tmp_path_factory.mktemp("cell790")
+    tmp = tmp_path_factory.mktemp("compiledgraph790")
     pipe = _armed_pipe()
     result = aot_mint.mint(
         pipe, _spec(), tmp / "out")
@@ -141,15 +141,15 @@ LEAN = "unet/adapter=false/B=2"
 FAT = "unet/adapter=true/B=2"
 
 
-def _entry_block(cell: Dict[str, Any], name: str) -> Dict[str, Any]:
+def _entry_block(compiled_graph: Dict[str, Any], name: str) -> Dict[str, Any]:
     """One class's recorded entry block, off ITS OWN artifact's metadata.
 
     pgw#1176 replaced the ``entries`` MAP with one ``entry`` block per
     artifact, so a class is addressed by picking its artifact rather than by
     indexing a map that could silently be missing the key.
     """
-    row = cell["by_entry"][name]
-    block = dict(row.metadata[cell_key.ENTRY_BLOCK_KEY])
+    row = compiled_graph["by_entry"][name]
+    block = dict(row.metadata[compiled_graph_key.ENTRY_BLOCK_KEY])
     assert block["name"] == name, block.get("name")
     return block
 
@@ -163,7 +163,7 @@ def test_a_bucket_family_forks_every_branch_capable_target() -> None:
     decl = _declare()
     pipe = _armed_pipe()
     rows = aot_mint.adapter_arm_plans(
-        aot_declaration.cell_plans(decl), pipe, _spec())
+        aot_declaration.compiled_graph_plans(decl), pipe, _spec())
     names = [aot_declaration.plan_entry_name(p) for p, _arm in rows]
     assert names == ["unet/adapter=true/B=2", "unet/adapter=false/B=2"]
     # Adapter-bearing FIRST: the composed pipeline arrives lifted, so the
@@ -176,17 +176,17 @@ def test_a_bucket_zero_family_forks_into_nothing() -> None:
     pipe = types.SimpleNamespace(unet=TinyUNet().eval())
     spec = aot_mint.ExportSpec(family=FAMILY, target="")
     rows = aot_mint.adapter_arm_plans(
-        aot_declaration.cell_plans(decl), pipe, spec)
+        aot_declaration.compiled_graph_plans(decl), pipe, spec)
     assert [arm for _p, arm in rows] == [None]
     assert aot_declaration.plan_entry_name(rows[0][0]) == "unet/B=2"
 
 
 def test_a_target_with_no_branch_capable_module_does_not_fork() -> None:
-    """wan's ``vae.decode`` in a bucket-128 cell: there is no adapter for it
+    """wan's ``vae.decode`` in a bucket-128 compiled graph: there is no adapter for it
     to carry, so a second identical graph would be pure mint bill."""
     decl = _declare()
     pipe = _armed_pipe()
-    plans = aot_declaration.cell_plans(decl)
+    plans = aot_declaration.compiled_graph_plans(decl)
     plans = tuple(
         aot_declaration.replace(p, target="vae") for p in plans)  # type: ignore[attr-defined]
     pipe.vae = TinyUNet().eval()
@@ -211,24 +211,24 @@ def test_the_arm_is_a_fork_coordinate_and_lands_in_the_class_hash() -> None:
 
 
 # ---------------------------------------------------------------------------
-# The mint — two classes, one cell, contracts that discriminate
+# The mint — two classes, one compiled graph, contracts that discriminate
 # ---------------------------------------------------------------------------
 
 
-def test_one_mint_packages_both_arms(cell) -> None:
-    """pgw#1176: "one cell, two graph classes" became "one mint, two
+def test_one_mint_packages_both_arms(compiled_graph) -> None:
+    """pgw#1176: "one compiled graph, two graph classes" became "one mint, two
     independently keyed ARTIFACTS" — the fork is unchanged, what it packages
     into is not. Each artifact carries one class and is keyed by it, so the
     two must also be keyed DIFFERENTLY."""
-    result = cell["result"]
+    result = compiled_graph["result"]
     assert sorted(row.entry for row in result.entries) == [LEAN, FAT]
     assert len({row.key for row in result.entries}) == 2
     assert len({row.artifact for row in result.entries}) == 2
 
 
-def test_the_branchless_arm_has_no_adapter_inputs_and_says_so(cell) -> None:
-    lean = _entry_block(cell, LEAN)
-    fat = _entry_block(cell, FAT)
+def test_the_branchless_arm_has_no_adapter_inputs_and_says_so(compiled_graph) -> None:
+    lean = _entry_block(compiled_graph, LEAN)
+    fat = _entry_block(compiled_graph, FAT)
     lean_names = {row["name"] for row in lean["inputs"]}
     fat_names = {row["name"] for row in fat["inputs"]}
     assert set(lora_lifted.LIFTED_INPUT_NAMES) <= fat_names
@@ -239,11 +239,11 @@ def test_the_branchless_arm_has_no_adapter_inputs_and_says_so(cell) -> None:
     assert "excluded_inputs" not in fat
 
 
-def test_the_branchless_graph_actually_dropped_the_branch(cell) -> None:
+def test_the_branchless_graph_actually_dropped_the_branch(compiled_graph) -> None:
     """Not just the signature: the adapter must be gone from the traced
     program, or the fork bought nothing."""
-    lean = _entry_block(cell, LEAN)["graph"]
-    fat = _entry_block(cell, FAT)["graph"]
+    lean = _entry_block(compiled_graph, LEAN)["graph"]
+    fat = _entry_block(compiled_graph, FAT)["graph"]
     assert lean["lifted_inputs"] == []
     assert fat["lifted_inputs"] == sorted(lora_lifted.LIFTED_INPUT_NAMES)
     assert lean["specialization"]["fork.adapter"] is False
@@ -252,35 +252,35 @@ def test_the_branchless_graph_actually_dropped_the_branch(cell) -> None:
     assert fat["specialization"]["lora_bucket"] == BUCKET
 
 
-def test_the_pipeline_is_left_armed_after_the_branchless_exports(cell) -> None:
+def test_the_pipeline_is_left_armed_after_the_branchless_exports(compiled_graph) -> None:
     """The mint disarms the branch containers to trace the lean class; a
     pipeline left branchless would silently be a different graph family for
     everything that follows."""
-    unet = cell["pipe"].unet
+    unet = compiled_graph["pipe"].unet
     assert w8a8_lora.branch_bucket(unet) == BUCKET
     assert lora_lifted.lifted_binding(unet) is not None
 
 
 # ---------------------------------------------------------------------------
-# CELL IDENTITY — a declaration function, not a runtime one
+# COMPILED GRAPH IDENTITY — a declaration function, not a runtime one
 # ---------------------------------------------------------------------------
 
 
-def test_the_stamped_key_is_recomputable_from_the_recorded_facts(cell) -> None:
+def test_the_stamped_key_is_recomputable_from_the_recorded_facts(compiled_graph) -> None:
     """pgw#1176: recomputable PER ENTRY, off that entry's own artifact. The
     two classes must also recompute to two DIFFERENT keys, or the fork is not
     addressable and a serve path could fetch either for either."""
-    rows = cell["result"].entries
+    rows = compiled_graph["result"].entries
     assert len(rows) == 2
     for row in rows:
         meta = dict(row.metadata)
-        assert aot_mint.cell_identity(meta).digest == meta["cell_key"] == row.key
+        assert aot_mint.compiled_graph_identity(meta).digest == meta["compiled_graph_key"] == row.key
     assert len({row.key for row in rows}) == 2
 
 
 def test_identity_is_a_function_of_the_declaration_not_of_adapter_state(
         tmp_path, monkeypatch) -> None:
-    """The same declaration mints the same cell whether or not an adapter
+    """The same declaration mints the same compiled graph whether or not an adapter
     happens to be ACTIVE on the composed pipeline when the mint runs.
 
     This is the property Paul's rule protects: variability lives in tensor
@@ -346,7 +346,7 @@ def test_an_exclusion_free_contract_digests_exactly_as_before() -> None:
 
 
 @pytest.fixture
-def armed(cell, monkeypatch) -> Dict[str, Any]:
+def armed(compiled_graph, monkeypatch) -> Dict[str, Any]:
     """Both classes armed on a fresh pipeline through the real
     `aot_serve.arm_entry` — stage -> verify -> load -> bind -> register, ONE
     graph class per call.
@@ -361,10 +361,10 @@ def armed(cell, monkeypatch) -> Dict[str, Any]:
     pipe = _armed_pipe()
     cfg = types.SimpleNamespace(family=FAMILY)
     metas = {}
-    for row in cell["result"].entries:
+    for row in compiled_graph["result"].entries:
         metas[row.entry] = aot_serve.arm_entry(
             pipe, cfg, Path(row.artifact),
-            cache_dir=cell["tmp"] / "stage")
+            cache_dir=compiled_graph["tmp"] / "stage")
     assert set(metas) == {LEAN, FAT}
     # Both classes are SERVING — the rows below distinguish which one served,
     # so an arm that silently dropped one would make them pass for the wrong
@@ -438,13 +438,13 @@ def test_the_active_adapter_actually_changes_the_output(armed) -> None:
     assert aot_serve.served_entry_calls(pipe)["unet/adapter=false/B=2"] >= 2
 
 
-def test_without_the_exclusion_the_dispatch_cannot_discriminate(cell) -> None:
+def test_without_the_exclusion_the_dispatch_cannot_discriminate(compiled_graph) -> None:
     """RED for the negative declaration: strip ``excluded_inputs`` and an
     adapter-bearing call is admitted by BOTH classes, which the dispatch
     refuses as ``entry_ambiguous`` — i.e. the whole attach lane would fall
     back to eager."""
-    lean_block = json.loads(json.dumps(_entry_block(cell, LEAN)))
-    fat_block = json.loads(json.dumps(_entry_block(cell, FAT)))
+    lean_block = json.loads(json.dumps(_entry_block(compiled_graph, LEAN)))
+    fat_block = json.loads(json.dumps(_entry_block(compiled_graph, FAT)))
     lean = dict(lean_block)
     lean.pop("excluded_inputs")
     lean_contract = aot_serve.contract_from_meta(lean)
@@ -475,8 +475,8 @@ def test_without_the_exclusion_the_dispatch_cannot_discriminate(cell) -> None:
     assert good.select(call, {})[0] == "unet/adapter=false/B=2"
 
 
-def test_a_single_class_cell_still_receives_the_mandatory_pair() -> None:
-    """A cell with no branchless class declares the adapter pair MANDATORY;
+def test_a_single_class_compiled_graph_still_receives_the_mandatory_pair() -> None:
+    """A compiled graph with no branchless class declares the adapter pair MANDATORY;
     withholding it would refuse every request by name. The routing rule reads
     the declaration, so it does not."""
     module = TinyUNet().eval()

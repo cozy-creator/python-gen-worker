@@ -212,20 +212,20 @@ def micro_declaration(micro_tree: Path) -> None:
 
 def _job(micro_tree: Path, report: Path) -> Any:
     from gen_worker.api.binding import ModelRef
-    from gen_worker.mint_process import CompileCellSpec, MintSlot
+    from gen_worker.mint_process import CompileCompiledGraphSpec, MintSlot
     from gen_worker.registry import collect_endpoints
 
     specs = collect_endpoints(["harness.rig_runtime", "micro_diffusion.main"])
     spec = next(s for s in specs if s.name == "generate")
-    cell = spec.compile_cell()
-    cfg = CompileCellSpec(
+    compiled_graph = spec.compile_compiled_graph()
+    cfg = CompileCompiledGraphSpec(
         shapes=tuple(
-            tuple(int(v) for v in row) for row in (cell.shapes or ())),
-        targets=tuple(str(t) for t in (cell.targets or ())),
-        family=str(cell.family or ""),
-        lora_bucket=int(cell.lora_bucket or 0),
-        guidance_scales=tuple(float(v) for v in (cell.guidance_scales or ())),
-        text_lens=tuple(int(v) for v in (cell.text_lens or ())),
+            tuple(int(v) for v in row) for row in (compiled_graph.shapes or ())),
+        targets=tuple(str(t) for t in (compiled_graph.targets or ())),
+        family=str(compiled_graph.family or ""),
+        lora_bucket=int(compiled_graph.lora_bucket or 0),
+        guidance_scales=tuple(float(v) for v in (compiled_graph.guidance_scales or ())),
+        text_lens=tuple(int(v) for v in (compiled_graph.text_lens or ())),
     )
     return boot_key.TraceJob(
         function="generate",

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""svdq lane bench driver — ONE watched pod, cells run in sequence (pgw#865).
+"""svdq lane bench driver — ONE watched pod, compiled graphs run in sequence (pgw#865).
 
 Promoted from the one-shot te#137/pgw#862 drivers into the repeatable
 instrument pgw#865 owns, and generalised over the card so pgw#863's sm_100
 row is the same instrument as the banked sm_120 one.
 
-Cells (``--cells``, run in the order given):
+Compiled graphs (``--compiled graphs``, run in the order given):
 
   mat    materialize pod-side: Qwen-Image component tree (+ bf16 transformer
          when the bf16 arm is asked for) and the official nunchaku fp4_r128
@@ -19,10 +19,10 @@ Cells (``--cells``, run in the order given):
          base | native | nativec | bf16 (compiled variants suffixed c).
   met    LPIPS/PSNR over whatever e2e arms have been banked this run.
 
-Everything is banked off-pod after each cell, so a teardown at any point
+Everything is banked off-pod after each compiled graph, so a teardown at any point
 keeps the evidence. Teardown is REST DELETE + GET-404 + podguard record.
 
-  pod_run.py --gpu b200 --cells mat,corr,bb,bf,e:bf16,e:base,e:native,e:nativec,met
+  pod_run.py --gpu b200 --compiled graphs mat,corr,bb,bf,e:bf16,e:base,e:native,e:nativec,met
   pod_run.py --list / --terminate <id> / --pod <id> (attach to a live pod)
 """
 from __future__ import annotations
@@ -236,10 +236,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--gpu", default="b200", choices=sorted(CARDS))
     ap.add_argument("--family", default="t2i", choices=sorted(FAMILIES))
-    ap.add_argument("--cells", default="mat,corr,bb,bf,e:bf16,e:base,"
+    ap.add_argument("--compiled_graphs", default="mat,corr,bb,bf,e:bf16,e:base,"
                                        "e:native,e:nativec,met")
     ap.add_argument("--rows", default="",
-                    help="row-id subset for the e2e cells")
+                    help="row-id subset for the e2e compiled_graphs")
     ap.add_argument("--norm-rows", type=int, default=3)
     ap.add_argument("--norm-shape", default="1024x1024x30x4.0")
     ap.add_argument("--wall-min", type=float, default=300.0)
@@ -248,7 +248,7 @@ def main() -> int:
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--terminate", default="")
     ap.add_argument("--keep", action="store_true",
-                    help="skip teardown (a follow-on cell run will attach)")
+                    help="skip teardown (a follow-on compiled_graph run will attach)")
     args = ap.parse_args()
 
     api = dotenv(("RUNPOD_API_KEY",))["RUNPOD_API_KEY"]
@@ -266,8 +266,8 @@ def main() -> int:
         return 0
 
     fam = FAMILIES[args.family]
-    cells = [c.strip() for c in args.cells.split(",") if c.strip()]
-    e2e_arms = [c[2:] for c in cells if c.startswith("e:")]
+    compiled_graphs = [c.strip() for c in args.compiled_graphs.split(",") if c.strip()]
+    e2e_arms = [c[2:] for c in compiled_graphs if c.startswith("e:")]
     for a in e2e_arms:
         assert a in fam["arms"], (
             f"unknown arm {a} for family {args.family}; "
@@ -317,7 +317,7 @@ def main() -> int:
     (res / "pod.txt").write_text(f"{pod_id} {int(started)} {args.gpu}\n")
 
     manifest = {"pod": pod_id, "gpu": args.gpu, "family": args.family,
-                "image": IMAGE, "cells": cells, "started": started,
+                "image": IMAGE, "compiled_graphs": compiled_graphs, "started": started,
                 "results": {}}
 
     def bank():
@@ -411,16 +411,16 @@ def main() -> int:
 
         dropped: set = set()
 
-        for cell in cells:
-            if cell in dropped:
-                print(f"[skip] {cell} — dropped upstream", flush=True)
+        for compiled_graph in compiled_graphs:
+            if compiled_graph in dropped:
+                print(f"[skip] {compiled_graph} — dropped upstream", flush=True)
                 continue
-            print(f"\n===== CELL {cell} "
+            print(f"\n===== COMPILED_GRAPH {compiled_graph} "
                   f"(t+{(time.time() - started) / 60:.0f}min) =====",
                   flush=True)
             try:
 
-                if cell == "mat":
+                if compiled_graph == "mat":
                     flag = "--bf16" if want_bf16 else ""
                     if fam["mat_flag"]:
                         flag += " " + fam["mat_flag"]
@@ -500,28 +500,28 @@ def main() -> int:
                     continue
 
                 if not (ck and refs_tree):
-                    raise RuntimeError("mat must run before any other cell")
+                    raise RuntimeError("mat must run before any other compiled_graph")
 
-                if cell in ("corr", "bb", "bf"):
-                    mode = "correctness" if cell == "corr" else "bench"
-                    env_val = "1" if cell in ("corr", "bf") else "0"
+                if compiled_graph in ("corr", "bb", "bf"):
+                    mode = "correctness" if compiled_graph == "corr" else "bench"
+                    env_val = "1" if compiled_graph in ("corr", "bf") else "0"
                     ssh(ip, port,
                         f"setsid nohup env GEN_WORKER_NATIVE_KERNELS={env_val} "
                         f"python3 /root/bench_b0.py --ckpt {ck} "
-                        f"--out /root/b0_{cell} --mode {mode} "
-                        f"> /root/{cell}.log 2>&1 & echo started", 60)
-                    ok, tail = wait_for(ip, port, f"/root/{cell}.log",
-                                        "DONE", 45 * 60, 45, cell)
-                    (res / f"{cell}_log.txt").write_text(tail)
+                        f"--out /root/b0_{compiled_graph} --mode {mode} "
+                        f"> /root/{compiled_graph}.log 2>&1 & echo started", 60)
+                    ok, tail = wait_for(ip, port, f"/root/{compiled_graph}.log",
+                                        "DONE", 45 * 60, 45, compiled_graph)
+                    (res / f"{compiled_graph}_log.txt").write_text(tail)
                     sh(["scp", *SSH_OPTS, "-P", str(port), "-r",
-                        f"root@{ip}:/root/b0_{cell}", str(res) + "/"], 600)
-                    print(f"[{cell}] ok={ok}\n{tail[-1200:]}", flush=True)
-                    manifest["results"][cell] = "ok" if ok else "FAILED"
+                        f"root@{ip}:/root/b0_{compiled_graph}", str(res) + "/"], 600)
+                    print(f"[{compiled_graph}] ok={ok}\n{tail[-1200:]}", flush=True)
+                    manifest["results"][compiled_graph] = "ok" if ok else "FAILED"
                     bank()
                     continue
 
-                if cell.startswith("e:"):
-                    name = cell[2:]
+                if compiled_graph.startswith("e:"):
+                    name = compiled_graph[2:]
                     env_val, extra = ARMS[name]
                     rows = f"--rows {args.rows}" if args.rows else ""
                     rows += (f" --norm-rows {args.norm_rows} "
@@ -540,11 +540,11 @@ def main() -> int:
                     sh(["scp", *SSH_OPTS, "-P", str(port), "-r",
                         f"root@{ip}:/root/e2e/{name}", str(res) + "/"], 900)
                     print(f"[arm {name}] ok={ok}\n{tail[-1200:]}", flush=True)
-                    manifest["results"][cell] = "ok" if ok else "FAILED"
+                    manifest["results"][compiled_graph] = "ok" if ok else "FAILED"
                     bank()
                     continue
 
-                if cell == "met":
+                if compiled_graph == "met":
                     done = [a for a in e2e_arms
                             if manifest["results"].get(f"e:{a}") == "ok"]
                     if "bf16" not in done or len(done) < 2:
@@ -568,16 +568,16 @@ def main() -> int:
                     bank()
                     continue
 
-                raise RuntimeError(f"unknown cell {cell}")
+                raise RuntimeError(f"unknown compiled_graph {compiled_graph}")
 
             except Exception as exc:  # noqa: BLE001
-                # One cell's failure is one row missing from the table, not a
+                # One compiled graph's failure is one row missing from the table, not a
                 # lost pod. Only `mat` is load-bearing for everything after.
-                print(f"[{cell}] RAISED {type(exc).__name__}: {exc}",
+                print(f"[{compiled_graph}] RAISED {type(exc).__name__}: {exc}",
                       flush=True)
-                manifest["results"][cell] = f"RAISED {type(exc).__name__}"
+                manifest["results"][compiled_graph] = f"RAISED {type(exc).__name__}"
                 bank()
-                if cell == "mat":
+                if compiled_graph == "mat":
                     return 5
                 continue
         return 0

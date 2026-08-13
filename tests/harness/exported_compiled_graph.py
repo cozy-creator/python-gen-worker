@@ -1,11 +1,11 @@
-"""A REAL packed exported cell: real declaration, real envelope, real tensors.
+"""A REAL packed exported compiled graph: real declaration, real envelope, real tensors.
 
 Promoted out of ``test_numerics_gate_pgw868.py`` by pgw#1152, unchanged. It was
 already a harness in everything but location — three other modules imported it
 as ``rig868`` — and the adopt-path rig (:mod:`harness.adopt_rig`) needs the same
 artifact, so the shared thing now lives where shared things live.
 
-What is REAL here: the ``Compile`` declaration, the packed ``cell.tar.gz`` with
+What is REAL here: the ``Compile`` declaration, the packed ``compiled graph.tar.gz`` with
 its recorded entry blocks, the class/range digests, the constants manifest, and
 a genuine ``nn.Module`` whose eager output the compiled subject is compared
 against. The ONE substitution is :class:`ProbePackage`, which stands in for an
@@ -14,7 +14,7 @@ piece deferred to a pod. It reproduces the eager maths from the constants it was
 BOUND with, so the comparison is genuinely compiled-vs-eager on identical
 weights, then rotates the result to an exactly declared cosine.
 
-No number produced here may be cited as evidence about a real cell's numerics.
+No number produced here may be cited as evidence about a real compiled graph's numerics.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ import pytest
 import torch
 
 from gen_worker import aot_serve as aot
-from gen_worker import cell_key as cell_key_mod
+from gen_worker import compiled_graph_key as compiled_graph_key_mod
 from gen_worker.api.decorators import Compile
 from gen_worker.api.export_contract import (
     Dim, GraphClass, Input, register_export_declaration,
@@ -197,10 +197,10 @@ def metadata(
     """
     name = entry_name(*row)
     meta = aot.entry_metadata(
-        family=FAMILY, precision="w8a8", cell_key="",
+        family=FAMILY, precision="w8a8", compiled_graph_key="",
         name=name, entry=_entry(*row),
         strict_export=True, lora_bucket=0,
-        manifest_digest=cell_key_mod.manifest_digest(
+        manifest_digest=compiled_graph_key_mod.manifest_digest(
             _entry(h, w)["class_hash"] for h, w in rows),
     )
     meta.update(RUNTIME)
@@ -210,7 +210,7 @@ def metadata(
     meta["host_isa"] = {"machine": platform.machine(), "march": "",
                         "simdlen": 0, "level": ""}
     meta["toolchain"] = dict(TOOLCHAIN)
-    meta["cell_key"] = cell_key_mod.from_entry_metadata(meta).digest
+    meta["compiled_graph_key"] = compiled_graph_key_mod.from_entry_metadata(meta).digest
     return meta
 
 
@@ -224,12 +224,12 @@ def declared_names(rows: Tuple[Tuple[int, int], ...] = ROWS) -> Tuple[str, ...]:
 def artifact(tmp_path: Path, meta: Dict[str, Any] | None = None) -> Path:
     """Pack ONE entry artifact. Named after its key, as the mint names it."""
     meta = meta or metadata()
-    name = str((meta.get(cell_key_mod.ENTRY_BLOCK_KEY) or {}).get("name") or "")
+    name = str((meta.get(compiled_graph_key_mod.ENTRY_BLOCK_KEY) or {}).get("name") or "")
     work = tmp_path / "work" / hashlib.sha256(name.encode()).hexdigest()[:16]
     work.mkdir(parents=True, exist_ok=True)
     (work / aot.PACKAGE_NAME).write_bytes(b"\x00not-a-real-pt2")
     return aot.pack(
-        work, tmp_path / f"{meta.get('cell_key') or 'cell'}.tar.gz", meta)
+        work, tmp_path / f"{meta.get('compiled_graph_key') or 'compiled_graph'}.tar.gz", meta)
 
 
 @pytest.fixture
@@ -253,20 +253,20 @@ def events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
     return said
 
 
-def cell_cfg(decl: Any, **enrichments: Any) -> Any:
+def compiled_graph_cfg(decl: Any, **enrichments: Any) -> Any:
     """The object the FLEET hands the compile machinery, built its own way.
 
     pgw#1150 (second pass) / pgw#1152: **raw ``Compile`` never travels past the
-    registry** — every production path hands a ``CompileCell``, and it is built
-    by exactly one map, ``CompileCell.from_declaration``. A test that passes the
+    registry** — every production path hands a ``CompileCompiledGraph``, and it is built
+    by exactly one map, ``CompileCompiledGraph.from_declaration``. A test that passes the
     raw declaration is testing a TYPE no fleet path constructs, which is the
     third variant of this repo's fixture defect class: deleting the two
     ``numerics_floor=`` lines from ``registry.py`` left the old gate suite green
     because every one of its rows passed a shape production never passes.
     """
-    from gen_worker.registry import CompileCell
+    from gen_worker.registry import CompileCompiledGraph
 
-    return CompileCell.from_declaration(decl, **enrichments)
+    return CompileCompiledGraph.from_declaration(decl, **enrichments)
 
 
 class ArmOutcomes(tuple):
@@ -280,7 +280,7 @@ class ArmOutcomes(tuple):
 
     They are DELIBERATELY not what production reports. A pod reports
     per-entry serve state (`aot_serve.entry_states`) precisely because a
-    cell-level boolean can advertise more than it serves. Nothing here is
+    compiled graph-level boolean can advertise more than it serves. Nothing here is
     wired to production; index this to assert per class, which is what the
     per-entry rows do.
     """
@@ -330,7 +330,7 @@ def arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
     perturbs one artifact (a bad host_isa, a forged stamp) without having to
     rebuild the declaration.
 
-    ``cfg`` defaults to :func:`cell_cfg` — the ``CompileCell`` production
+    ``cfg`` defaults to :func:`compiled_graph_cfg` — the ``CompileCompiledGraph`` production
     builds. Pass one of :func:`harness.adopt_rig.production_cfgs`' values to
     parametrise a row over every production call site.
 
@@ -360,7 +360,7 @@ def arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
         if meta is not None and index == 0:
             block = meta
         outcomes.append(provision.arm_aot(
-            pipeline, cell_cfg(decl) if cfg is None else cfg,
+            pipeline, compiled_graph_cfg(decl) if cfg is None else cfg,
             tmp_path / "cache", artifact(tmp_path, block), 0,
             verify_numerics=verify_numerics,
             declared=declared_names(use_rows)))
@@ -371,4 +371,4 @@ def numerics_rows(said: List[Tuple[str, str, str]]) -> List[Tuple[str, str]]:
     import gen_worker.activity as activity_mod
 
     return [(detail, phase) for kind, detail, phase in said
-            if kind == activity_mod.KIND_CELL_NUMERICS]
+            if kind == activity_mod.KIND_COMPILED_GRAPH_NUMERICS]

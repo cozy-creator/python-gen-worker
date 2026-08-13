@@ -3,7 +3,7 @@
 ``runtime=RuntimeFormula("a + b*num_inference_steps + c*num_inference_steps*megapixels")``
 on ``@endpoint``: the author declares the SHAPE of compute time as a sum of
 terms, each a learned constant times an expression over payload field names.
-The platform learns the constants per physics cell; the worker evaluates the
+The platform learns the constants per physics compiled graph; the worker evaluates the
 term expressions on the executed payload and reports them on the observation
 back-channel (``JobMetrics.runtime_terms``).
 

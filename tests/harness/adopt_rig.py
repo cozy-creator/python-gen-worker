@@ -4,7 +4,7 @@ WHY THIS EXISTS (pgw#1152). Four of the six gates the reuse circle hit —
 pgw#1108, pgw#1122, pgw#1141, pgw#1141b — were ONE defect wearing different
 clothes: **the boot-adopt path structurally differs from the self-mint path**.
 It arms BEFORE setup, the compute child holds no JWT, and it is fed by
-``fleet_cells.arm_ordered`` rather than by the self-produced routes
+``fleet_compiled_graphs.arm_ordered`` rather than by the self-produced routes
 (``arm_from_local_store`` / ``adopt_delegated_mint``). Every one of those gates
 was written and validated against self-mint.
 
@@ -18,18 +18,18 @@ assertion can fail, not that your fixture resembles production.
 So: **a test may not construct anything production constructs differently.** No
 hand-registration, no stubbed accessor, no hand-set marker. Where a test needs
 to force an outcome it does so by REMOVING or BREAKING a real input — a hub that
-serves no receipt, a package whose entry raises, a cell whose subject really
+serves no receipt, a package whose entry raises, a compiled graph whose subject really
 diverges — never by supplying a fact.
 
 WHAT RUNS FOR REAL. The whole chain from the ordered arm to the target install::
 
     Executor.ensure_setup
       -> _injection_kwargs -> _enable_compiled with a real _ArmOrder(adopt=…)
-      -> fleet_cells.arm_ordered
+      -> fleet_compiled_graphs.arm_ordered
       -> the real receipt gate, against a real RSA-signed receipt from a real
             HTTP hub (harness.receipt_hub)
-      -> provision.arm_aot -> aot_serve.arm_entry on a real packed cell
-            (harness.exported_cell) whose ck1 key is restatable from its own
+      -> provision.arm_aot -> aot_serve.arm_entry on a real packed compiled graph
+            (harness.exported_compiled_graph) whose ck1 key is restatable from its own
             recorded facts
       -> the real boot warmup, the real per-object proof pass, the real
             _install_compile_targets and _assert_armed_targets_installed
@@ -72,7 +72,7 @@ import torch
 
 from gen_worker import (
     RequestContext, Resources, Slot, activity, aot_identity, aot_serve,
-    boot_adopt, boot_key, cell_key, cell_resolve, endpoint, env_seal, receipts,
+    boot_adopt, boot_key, compiled_graph_key, compiled_graph_resolve, endpoint, env_seal, receipts,
     worker_function,
 )
 from gen_worker import executor as ex_mod
@@ -82,8 +82,8 @@ from gen_worker.models.refs import normalize_model_ref
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs
 
-from harness import exported_cell as cell868
-from harness.exported_cell import (
+from harness import exported_compiled_graph as compiledgraph868
+from harness.exported_compiled_graph import (
     ROWS, RUNTIME, ProbeDenoiser, ProbePackage, ProbePipeline, declaration,
     entry_name,
 )
@@ -92,7 +92,7 @@ from harness.exported_cell import (
 #: viewer identity — the identity half is pgw#1122's and is fenced there.
 ORG = "11111111-2222-3333-4444-555555555555"
 
-FAMILY = cell868.FAMILY
+FAMILY = compiledgraph868.FAMILY
 MODEL_REF = "acme/micro-probe:prod"
 
 #: Everything the endpoint instance (constructed by the executor, not by the
@@ -111,7 +111,7 @@ class Out(msgspec.Struct):
 #: pgw#868's declaration with the one field an ``@endpoint`` lint requires that
 #: a bare ``provision.arm_aot`` rig never needed: the probe denoiser is
 #: unconditioned, so the text axis is explicitly absent (ie#544).
-CELL = msgspec.structs.replace(declaration(), text_len=0)
+COMPILED_GRAPH = msgspec.structs.replace(declaration(), text_len=0)
 
 
 class AdoptedPipeline(ProbePipeline):
@@ -130,7 +130,7 @@ class AdoptedPipeline(ProbePipeline):
 @endpoint(
     models={"pipeline": Slot(AdoptedPipeline)},
     resources=Resources(gpu=True),
-    compile=CELL,
+    compile=COMPILED_GRAPH,
 )
 class AdoptedFamily:
     """A CLASS-annotated slot, which is micro-diffusion's shape and the reason
@@ -143,11 +143,11 @@ class AdoptedFamily:
     @worker_function()
     def generate(self, ctx: RequestContext, p: GenIn) -> Out:
         """The pod's default shape: the boot warmup runs and its payload lands
-        on NO packaged entry of the adopted cell, so the artifact's own counter
+        on NO packaged entry of the adopted compiled graph, so the artifact's own counter
         does not move.
 
         With ``warm_dispatches`` the handler really calls the wrapped forward
-        at a DECLARED shape row — a genuine dispatch through the cell, which is
+        at a DECLARED shape row — a genuine dispatch through the compiled graph, which is
         what moves ``aot_serve.execution_count``. Nothing here writes a counter.
         """
         for _ in range(int(RIG.get("warm_dispatches", 0))):
@@ -157,47 +157,47 @@ class AdoptedFamily:
 
 
 # ---------------------------------------------------------------------------
-# the cell: a real packed artifact with a real, fully-stated identity
+# the compiled graph: a real packed artifact with a real, fully-stated identity
 # ---------------------------------------------------------------------------
 
 
-def cell_metadata() -> Dict[str, Any]:
-    """pgw#868's envelope plus the two identity blocks an ADOPTED cell must
-    carry: ``verify_declared_identity`` compares four axes and refuses a cell
+def compiled_graph_metadata() -> Dict[str, Any]:
+    """pgw#868's envelope plus the two identity blocks an ADOPTED compiled graph must
+    carry: ``verify_declared_identity`` compares four axes and refuses a compiled graph
     that is SILENT on any of them."""
-    meta = cell868.metadata()
+    meta = compiledgraph868.metadata()
     meta["toolchain"] = {"torch": RUNTIME["torch"], "cuda": RUNTIME["cuda"],
                          "triton": "3.6.0"}
     meta[env_seal.SEAL_KEY] = {"PYTHONHASHSEED": "0", "TORCH_COMPILE_DEBUG": ""}
-    meta[cell_key.EXPORT_ENVELOPE_KEY] = {
+    meta[compiled_graph_key.EXPORT_ENVELOPE_KEY] = {
         "shapes": [list(row) for row in ROWS], "text_len": 0,
         "shape_strategy": "static-rows",
     }
     # The REAL key, restated from the artifact's own recorded facts — the same
     # recomputation admission runs (pgw#1059), so nothing here is a stamp the
     # bytes cannot back up.
-    meta["cell_key"] = cell_key.from_entry_metadata(meta).digest
+    meta["compiled_graph_key"] = compiled_graph_key.from_entry_metadata(meta).digest
     return meta
 
 
-def resolved_cell(
+def resolved_compiled_graph(
     meta: Dict[str, Any], *, publisher_tier: str = "platform",
     publisher_org: str = ORG,
-) -> cell_resolve.ResolvedCell:
+) -> compiled_graph_resolve.ResolvedCompiledGraph:
     """The hub's answer, stating exactly the identity the mint stamped."""
     have = aot_identity.artifact_identity(meta)
-    return cell_resolve.ResolvedCell(
-        family=FAMILY, cell_key=have.cell_key,
-        cell_ref=f"root/family-{FAMILY}#{have.cell_key}",
+    return compiled_graph_resolve.ResolvedCompiledGraph(
+        family=FAMILY, compiled_graph_key=have.compiled_graph_key,
+        compiled_graph_ref=f"root/family-{FAMILY}#{have.compiled_graph_key}",
         checkpoint_id="", content_digest="sha256:" + "ab" * 32,
-        artifact_path="cell.tar.gz", size_bytes=0,
+        artifact_path="compiled_graph.tar.gz", size_bytes=0,
         publisher_org=publisher_org, publisher_tier=publisher_tier,
         graph_contract=have.graph_contract_digest,
         toolchain_digest=have.toolchain_digest,
         env_seal_digest=have.env_seal_digest,
         identity_axes={}, sm=RUNTIME["sm"], sku=RUNTIME["sku"], lane="",
         receipt="",
-        transport=cell_resolve.Transport(
+        transport=compiled_graph_resolve.Transport(
             snapshot_digest="blake3:" + "cd" * 32, files=()),
     )
 
@@ -210,22 +210,22 @@ def production_cfgs() -> Dict[str, Any]:
     deleting ``registry.py``'s two ``numerics_floor=`` lines left that suite
     green. Both entries below come from a real production call site:
 
-    * ``registry`` — ``EndpointSpec.compile_cell()``, what the executor hands
+    * ``registry`` — ``EndpointSpec.compile_compiled_graph()``, what the executor hands
       ``_enable_compiled`` on every serving pod;
     * ``cli`` — ``cli.run``'s §4.28 desktop arm, the other call site.
 
-    Both now route through ``CompileCell.from_declaration``, so a row
+    Both now route through ``CompileCompiledGraph.from_declaration``, so a row
     parametrised over this dict proves the map is genuinely one map. Use it
     wherever a gate takes a cfg::
 
         @pytest.mark.parametrize("cfg", production_cfgs().values(), ids=...)
     """
-    from gen_worker.registry import CompileCell
+    from gen_worker.registry import CompileCompiledGraph
 
     spec = next(s for s in extract_specs(AdoptedFamily) if s.name == "generate")
     return {
-        "registry": spec.compile_cell(),
-        "cli": CompileCell.from_declaration(CELL),
+        "registry": spec.compile_compiled_graph(),
+        "cli": CompileCompiledGraph.from_declaration(COMPILED_GRAPH),
     }
 
 
@@ -246,7 +246,7 @@ def _derived(digest: str) -> boot_key.DerivedKey:
 
 @dataclass
 class AdoptedBoot:
-    """One completed ``ensure_setup`` over a boot-adopted cell.
+    """One completed ``ensure_setup`` over a boot-adopted compiled graph.
 
     Every reader below asks PRODUCTION for the answer (``aot_serve.is_armed``,
     the class record's own compile targets, ``Executor._served_execution_lane``)
@@ -256,7 +256,7 @@ class AdoptedBoot:
     executor: Executor
     spec: Any
     pipeline: AdoptedPipeline
-    cell: cell_resolve.ResolvedCell
+    compiled_graph: compiled_graph_resolve.ResolvedCompiledGraph
     artifact: Path
     meta: Dict[str, Any]
     packages: Dict[str, ProbePackage]
@@ -280,8 +280,8 @@ class AdoptedBoot:
     def is_armed(self) -> bool:
         return aot_serve.is_armed(self.pipeline)
 
-    def holds_cell(self) -> bool:
-        return aot_serve.holds_exported_cell(self.pipeline)
+    def holds_compiled_graph(self) -> bool:
+        return aot_serve.holds_exported_compiled_graph(self.pipeline)
 
     def compile_target(self) -> Any:
         targets = self.record.compile_targets
@@ -312,10 +312,10 @@ class AdoptRig:
                         much (adoption runs no quality gate — §4.32 — so this
                         must NOT refuse; it is here so a test can prove that).
     ``package_raises``  the packaged entry really raises when dispatched, which
-                        is how a cell revokes itself for real.
+                        is how a compiled graph revokes itself for real.
     ``bind_oom_on``     that entry's constant bind really runs the card out of
                         device memory (pgw#1175) — the ONLY evidence a pod
-                        cannot hold a cell, now that the estimate that used to
+                        cannot hold a compiled graph, now that the estimate that used to
                         guess it is deleted.
     ``serve_receipt``   False = the hub answers 404 for these bytes, so the real
                         receipt gate refuses on a missing input.
@@ -439,7 +439,7 @@ class AdoptRig:
             mp.setattr(aot_serve, "arm_entry", _wrap_then_observe)
 
     def _install_boot_adopt(
-        self, cell: cell_resolve.ResolvedCell, artifact: Path,
+        self, compiled_graph: compiled_graph_resolve.ResolvedCompiledGraph, artifact: Path,
     ) -> None:
         """SEAM 1: the derive+resolve half, whose own coverage is pgw#1116's."""
 
@@ -456,9 +456,9 @@ class AdoptRig:
             """
             return (boot_adopt.report(boot_adopt.BootAdoptOutcome(
                 adoption=boot_adopt.BootAdoption(
-                    derived=_derived(cell.cell_key), cell=cell,
+                    derived=_derived(compiled_graph.compiled_graph_key), compiled_graph=compiled_graph,
                     artifact=artifact),
-                reason=boot_adopt.HIT, derived_key=cell.cell_key,
+                reason=boot_adopt.HIT, derived_key=compiled_graph.compiled_graph_key,
                 derive_ms=10_291, family=FAMILY, function="generate")),)
 
         self.monkeypatch.setattr(Executor, "_boot_adopt", _adopt)
@@ -471,16 +471,16 @@ class AdoptRig:
         self._install_event_spy()
         self._forget_keys()
 
-        meta = cell_metadata()
-        artifact = cell868.artifact(self.tmp_path, meta)
-        cell = resolved_cell(
+        meta = compiled_graph_metadata()
+        artifact = compiledgraph868.artifact(self.tmp_path, meta)
+        compiled_graph = resolved_compiled_graph(
             meta, publisher_tier=self.publisher_tier,
             publisher_org=self.publisher_org)
 
         if self.serve_receipt:
             # The hub countersigns these EXACT bytes.
             self.hub.serve_receipt_for(
-                artifact, cell_key=cell.cell_key, family=FAMILY,
+                artifact, compiled_graph_key=compiled_graph.compiled_graph_key, family=FAMILY,
                 publisher_tier=self.publisher_tier,
                 publisher_org_id=self.publisher_org,
                 owning_endpoint_id=self.owning_endpoint)
@@ -488,11 +488,11 @@ class AdoptRig:
 
         packages = self._packages()
         self._install_seams(packages)
-        self._install_boot_adopt(cell, artifact)
+        self._install_boot_adopt(compiled_graph, artifact)
 
         executor, spec = self._ensure_setup()
         return AdoptedBoot(
-            executor=executor, spec=spec, pipeline=RIG["pipe"], cell=cell,
+            executor=executor, spec=spec, pipeline=RIG["pipe"], compiled_graph=compiled_graph,
             artifact=artifact, meta=meta, packages=packages,
             events=self.events)
 

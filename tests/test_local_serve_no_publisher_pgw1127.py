@@ -2,22 +2,22 @@
 
 Two things are proven here, and they are different in kind.
 
-**Reachability** (the live defect). pgw#1096 built ``local_cell_store``, keyed it
-by ``ck1``, and wired it into ``fleet_cells._arming_policy`` local-first. It left
-``cli/run.py`` pointing at ``local_cells.enable_compiled`` — the JIT path — so
+**Reachability** (the live defect). pgw#1096 built ``local_compiled_graph_store``, keyed it
+by ``ck1``, and wired it into ``fleet_compiled_graphs._arming_policy`` local-first. It left
+``cli/run.py`` pointing at ``local_compiled_graphs.enable_compiled`` — the JIT path — so
 ``_arming_policy`` was never entered from ``cozy serve`` and the machine §4.28 was
 written about got none of it. RED before this issue on every test in section 1:
-the arming import in ``gen_worker.cli`` was ``..local_cells``, and
+the arming import in ``gen_worker.cli`` was ``..local_compiled_graphs``, and
 ``gen_worker.local_serve`` did not exist.
 
 **Never-publish, STRUCTURALLY** (§4.28's *"never uploaded"*). Before S1 that
 property held because the local CLI could not reach the publishing module at
-all. After S1 it runs ``fleet_cells``, which imports ``CellPublisher`` — so
+all. After S1 it runs ``fleet_compiled_graphs``, which imports ``CompiledGraphPublisher`` — so
 "cozy-local never publishes" would rest on one keyword argument at one call
 site. Section 2 is the fence that replaces the convention: the local serve entry
 names no publisher, constructs none, and reaches no publish call, read out of
 the source tree rather than asserted about a run. Each of those is RED-provable
-by deleting ``publisher=None`` or adding a ``CellPublisher(...)`` — which is the
+by deleting ``publisher=None`` or adding a ``CompiledGraphPublisher(...)`` — which is the
 only reason to prefer it to a mock.
 """
 
@@ -35,15 +35,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
-from gen_worker import fleet_cells, local_cell_store, local_serve, mint_delegate
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker import fleet_compiled_graphs, local_compiled_graph_store, local_serve, mint_delegate
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 from gen_worker.cli import run as cli_run
 from gen_worker.mint_process import MintSlot
 
 KEY_A = "ek1-" + "a" * 56
-ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * 56
+ARM_A = fleet_compiled_graphs.ARM_SCHEME + "-" + "1" * 56
 
-SRC = Path(fleet_cells.__file__).parent
+SRC = Path(fleet_compiled_graphs.__file__).parent
 
 #: The local serve ENTRY: every file a `cozy serve` / `cozy run` arm passes
 #: through on its way to the arming brain. The fence in section 2 reads all of
@@ -57,8 +57,8 @@ LOCAL_SERVE_ENTRY = (
 
 @pytest.fixture()
 def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    root = tmp_path / "cozy-cells"
-    monkeypatch.setenv(local_cell_store.ENV_STORE_DIR, str(root))
+    root = tmp_path / "cozy-compiled_graphs"
+    monkeypatch.setenv(local_compiled_graph_store.ENV_STORE_DIR, str(root))
     return root
 
 
@@ -86,12 +86,12 @@ class _Arm:
 
 
 def _armable_artifact(tmp_path: Path, *, key: str = KEY_A) -> Path:
-    """A cell with a READABLE envelope — `_arm_exported_cell` refuses an
+    """A compiled graph with a READABLE envelope — `_arm_exported_compiled_graph` refuses an
     unreadable one before every other gate (pgw#1098), local store included."""
-    p = tmp_path / "mint" / "cell.tar.gz"
+    p = tmp_path / "mint" / "compiled_graph.tar.gz"
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(
-        {"kind": "aot-inductor", "cell_key": key, "family": "micro-diffusion"}
+        {"kind": "aot-inductor", "compiled_graph_key": key, "family": "micro-diffusion"}
     ).encode()
     with tarfile.open(p, mode="w:gz") as tar:
         info = tarfile.TarInfo("metadata.json")
@@ -110,19 +110,19 @@ def machine(monkeypatch: pytest.MonkeyPatch) -> None:
     is stubbed, because a test that stubs the thing it is measuring proves the
     stub.
     """
-    monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
-    monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
+    monkeypatch.setattr(fleet_compiled_graphs, "_cuda_ready", lambda: True)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "toolchain_present", lambda: True)
     monkeypatch.setattr(
-        fleet_cells.cc, "has_compile_target", lambda pipe, cfg: True)
+        fleet_compiled_graphs.cc, "has_compile_target", lambda pipe, cfg: True)
     monkeypatch.setattr(
-        fleet_cells, "mint_recipe",
-        lambda pipe, cfg, **kw: fleet_cells.RECIPE_AOT)
+        fleet_compiled_graphs, "mint_recipe",
+        lambda pipe, cfg, **kw: fleet_compiled_graphs.RECIPE_AOT)
     monkeypatch.setattr(
-        fleet_cells, "arm_identity", lambda *a, **k: _Arm())
+        fleet_compiled_graphs, "arm_identity", lambda *a, **k: _Arm())
     monkeypatch.setattr(
-        fleet_cells.provision, "enable_compiled",
+        fleet_compiled_graphs.provision, "enable_compiled",
         lambda pipe, cfg, cache_dir=None, artifact=None: AdoptOutcome.miss(
-            "no_cell", "no artifact was delivered to this machine"))
+            "no_compiled_graph", "no artifact was delivered to this machine"))
 
 
 @pytest.fixture()
@@ -142,14 +142,14 @@ def armable(monkeypatch: pytest.MonkeyPatch) -> List[Path]:
         seen.append(Path(artifact))
         return AdoptOutcome.hit(KEY_A)
 
-    monkeypatch.setattr(fleet_cells.provision, "arm_aot", _arm)
+    monkeypatch.setattr(fleet_compiled_graphs.provision, "arm_aot", _arm)
     monkeypatch.setattr(
-        fleet_cells.artifact_meta, "read_metadata",
-        lambda p: {"cell_key": KEY_A, "family": "micro-diffusion"})
+        fleet_compiled_graphs.artifact_meta, "read_metadata",
+        lambda p: {"compiled_graph_key": KEY_A, "family": "micro-diffusion"})
     monkeypatch.setattr(
-        fleet_cells.artifact_meta, "try_read_metadata",
-        lambda p: {"cell_key": KEY_A, "family": "micro-diffusion"})
-    monkeypatch.setattr(fleet_cells, "arm_axis_divergence", lambda key, meta: "")
+        fleet_compiled_graphs.artifact_meta, "try_read_metadata",
+        lambda p: {"compiled_graph_key": KEY_A, "family": "micro-diffusion"})
+    monkeypatch.setattr(fleet_compiled_graphs, "arm_axis_divergence", lambda key, meta: "")
     return seen
 
 
@@ -188,7 +188,7 @@ def test_the_local_cli_arms_through_the_AOT_sink_and_never_the_JIT_one() -> None
     """§4.28's second clause, at the ONE call site that decides whether cozy-local
     has it at all.
 
-    RED before pgw#1127: this read ``..local_cells`` — the JIT path, which
+    RED before pgw#1127: this read ``..local_compiled_graphs`` — the JIT path, which
     imports ``compile_cache`` and nothing that mints AOT. ``_arming_policy``,
     and therefore the entire local store, was unreachable from ``cozy serve``.
     """
@@ -197,15 +197,15 @@ def test_the_local_cli_arms_through_the_AOT_sink_and_never_the_JIT_one() -> None
         "the local serve entry must arm through `local_serve` — the fleet "
         "arming brain with no sink — so a `cozy serve` miss consults THIS "
         "MACHINE's ck1 store before it mints anything")
-    assert "local_cells" not in imported, (
+    assert "local_compiled_graphs" not in imported, (
         "the JIT local-serve path is what pgw#1086 wave 1 deletes; arming "
         "through it is how cozy-local loses compiled serving outright")
 
 
-def test_nothing_under_the_cli_imports_the_JIT_local_cell_module() -> None:
+def test_nothing_under_the_cli_imports_the_JIT_local_compiled_graph_module() -> None:
     """Reachability has to be a property of the PACKAGE, not of one function.
 
-    A sibling module re-importing `local_cells` would restore the coupling this
+    A sibling module re-importing `local_compiled_graphs` would restore the coupling this
     issue exists to cut, and would put `cozy` back on pgw#1086 wave 1's
     critical path.
     """
@@ -213,11 +213,11 @@ def test_nothing_under_the_cli_imports_the_JIT_local_cell_module() -> None:
     for path in sorted((SRC / "cli").rglob("*.py")):
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and "local_cells" in (
+            if isinstance(node, ast.ImportFrom) and "local_compiled_graphs" in (
                     node.module or ""):
                 offenders.append(f"{path.name}:{node.lineno}")
             elif isinstance(node, ast.ImportFrom) and any(
-                    a.name == "local_cells" for a in node.names):
+                    a.name == "local_compiled_graphs" for a in node.names):
                 offenders.append(f"{path.name}:{node.lineno}")
     assert not offenders, f"cli still reaches the JIT local store: {offenders}"
 
@@ -234,39 +234,39 @@ def test_a_second_run_on_this_machine_arms_from_its_own_store_and_never_mints(
     delegated mint is wired to FAIL the test rather than to be counted.
 
     RED before pgw#1127: `gen_worker.local_serve` did not exist, and the entry
-    that did exist could not address a ck1-keyed cell at all.
+    that did exist could not address a ck1-keyed compiled graph at all.
     """
     monkeypatch.setattr(
-        mint_delegate, "build_cell",
-        lambda *a, **k: pytest.fail("a machine holding its own cell re-minted"))
-    local_cell_store.store(
+        mint_delegate, "build_compiled_graph",
+        lambda *a, **k: pytest.fail("a machine holding its own compiled_graph re-minted"))
+    local_compiled_graph_store.store(
         _armable_artifact(tmp_path), key=KEY_A, family="micro-diffusion",
         arm_token=ARM_A)
 
     armed = local_serve.enable_compiled(_Pipe(), _Cfg(), None, mint=_ctx())
 
     assert armed is True
-    assert armable and armable[0] == store / "aot-cells" / KEY_A / "cell.tar.gz"
+    assert armable and armable[0] == store / "aot-compiled_graphs" / KEY_A / "compiled_graph.tar.gz"
 
 
 def test_the_local_entry_hands_the_arming_brain_no_sink_at_all(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """§4.28 at the seam: ``publisher=None`` is what makes ``local_keep_reason``
-    answer ``no_publish_sink``, which is what makes the mint's own cell land in
+    answer ``no_publish_sink``, which is what makes the mint's own compiled graph land in
     this machine's store instead of being rmtree'd behind a failed publish."""
     seen: Dict[str, Any] = {}
 
     def _enable(pipe: Any, cfg: Any, cache_dir: Any = None, artifact: Any = None,
-                **kw: Any) -> fleet_cells.ArmOutcome:
+                **kw: Any) -> fleet_compiled_graphs.ArmOutcome:
         seen.update(kw)
-        return fleet_cells.ArmOutcome(armed=True)
+        return fleet_compiled_graphs.ArmOutcome(armed=True)
 
-    monkeypatch.setattr(fleet_cells, "enable_compiled", _enable)
+    monkeypatch.setattr(fleet_compiled_graphs, "enable_compiled", _enable)
     assert local_serve.enable_compiled(_Pipe(), _Cfg(), None, mint=_ctx())
     assert "publisher" in seen and seen["publisher"] is None
-    assert fleet_cells.no_publish_sink_reason(seen["publisher"]) == (
-        fleet_cells.KEEP_NO_PUBLISHER)
+    assert fleet_compiled_graphs.no_publish_sink_reason(seen["publisher"]) == (
+        fleet_compiled_graphs.KEEP_NO_PUBLISHER)
 
 
 # ---------------------------------------------------------------------------
@@ -278,12 +278,12 @@ def test_the_local_serve_entry_constructs_no_publisher(
 ) -> None:
     """The fence pgw#1127 §4 says is owed.
 
-    RED-provable in one edit: add ``CellPublisher(...)`` anywhere on the local
+    RED-provable in one edit: add ``CompiledGraphPublisher(...)`` anywhere on the local
     serve entry and this fails. That is the difference between a property and a
     habit — ``publisher=None`` at one call site is a habit, and after S1 the
     module the local CLI now runs is one that CAN publish.
     """
-    banned = {"CellPublisher", "publish_self_mint", "_publish_async",
+    banned = {"CompiledGraphPublisher", "publish_self_mint", "_publish_async",
               "publish_intent", "presign", "put_object", "upload"}
     offenders: List[str] = []
     for path in LOCAL_SERVE_ENTRY:
@@ -339,19 +339,19 @@ def test_the_obligation_ends_at_a_terminus_that_cannot_publish(
     indistinguishable forever.
     """
     monkeypatch.setattr(
-        fleet_cells, "publish_self_mint",
+        fleet_compiled_graphs, "publish_self_mint",
         lambda pending: pytest.fail("cozy-local reached the publish gate"))
-    pending = fleet_cells.PendingSelfMint(
+    pending = fleet_compiled_graphs.PendingSelfMint(
         family="micro-diffusion", arm_token=ARM_A, ref="repo#x", cfg=_Cfg(),
-        target=tmp_path / "cell.tar.gz", mint_root=tmp_path / "mint",
+        target=tmp_path / "compiled_graph.tar.gz", mint_root=tmp_path / "mint",
         publisher=None, cache_dir=None, arm_key=_Arm(),
     )
     (tmp_path / "mint").mkdir(exist_ok=True)
     pending._state["minted"] = object()
 
-    fleet_cells.keep_self_mint_local(pending)
+    fleet_compiled_graphs.keep_self_mint_local(pending)
 
-    assert fleet_cells.terminus_of(pending) == fleet_cells.TERMINUS_WITHHELD
+    assert fleet_compiled_graphs.terminus_of(pending) == fleet_compiled_graphs.TERMINUS_WITHHELD
     assert not (tmp_path / "mint").exists(), "the capture dir must be cleaned"
 
 
@@ -362,10 +362,10 @@ def test_a_pending_this_process_cannot_drive_is_ended_not_dropped(
     module cannot be handed to a child, and the obligation it would have
     discharged must not simply be forgotten."""
     monkeypatch.setattr(
-        mint_delegate, "build_cell",
+        mint_delegate, "build_compiled_graph",
         lambda *a, **k: pytest.fail("an undrivable pending spawned a child"))
     monkeypatch.setattr(
-        fleet_cells.provision, "arm_aot",
+        fleet_compiled_graphs.provision, "arm_aot",
         lambda *a, **k: pytest.fail("nothing is armed on a miss (pgw#784)"))
 
     armed = local_serve.enable_compiled(
@@ -373,31 +373,31 @@ def test_a_pending_this_process_cannot_drive_is_ended_not_dropped(
         mint=local_serve.mint_context(function="f", module="", slots={}))
 
     assert armed is False
-    pending = fleet_cells._PENDING.get(ARM_A)
-    assert pending is None or fleet_cells.terminus_of(pending)
+    pending = fleet_compiled_graphs._PENDING.get(ARM_A)
+    assert pending is None or fleet_compiled_graphs.terminus_of(pending)
 
 
-def test_storing_a_cell_imports_no_transport_at_all(tmp_path: Path) -> None:
+def test_storing_a_compiled_graph_imports_no_transport_at_all(tmp_path: Path) -> None:
     """§4.28's *"never uploaded"*, proven by ABSENCE in a real interpreter.
 
     The AST fence in ``test_aot_local_mint_pgw1096`` proves the module names no
-    transport. This proves the RUN does not: a cell enters the store in a fresh
+    transport. This proves the RUN does not: a compiled graph enters the store in a fresh
     process and no HTTP client, no CAS client and no upload module is resident
     afterwards. A store that reached transport lazily — the one shape an AST
     scan of the module cannot see — fails here.
     """
     root = tmp_path / "store"
-    artifact = tmp_path / "cell.tar.gz"
+    artifact = tmp_path / "compiled_graph.tar.gz"
     artifact.write_bytes(b"packed")
     program = f"""
 import os, sys
-os.environ["GEN_WORKER_LOCAL_CELLS_DIR"] = {str(root)!r}
-from gen_worker import local_cell_store
-cell = local_cell_store.store(
+os.environ["GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR"] = {str(root)!r}
+from gen_worker import local_compiled_graph_store
+compiled graph = local_compiled_graph_store.store(
     {str(artifact)!r}, key={KEY_A!r}, family="micro-diffusion",
     arm_token={ARM_A!r})
-assert cell is not None, "the store refused a well-formed cell"
-assert local_cell_store.lookup({KEY_A!r}) is not None
+assert compiled graph is not None, "the store refused a well-formed compiled graph"
+assert local_compiled_graph_store.lookup({KEY_A!r}) is not None
 banned = [
     m for m in sys.modules
     if m in ("httpx", "requests", "urllib3", "boto3", "aiohttp")
@@ -412,11 +412,11 @@ print(",".join(sorted(banned)))
     assert out.returncode == 0, out.stderr
     resident = out.stdout.strip()
     assert not resident, (
-        "storing a cell pulled transport into the process: " + resident)
+        "storing a compiled_graph pulled transport into the process: " + resident)
 
 
 def _store_artifact(tmp_path: Path) -> Path:
-    p = tmp_path / "cell.tar.gz"
+    p = tmp_path / "compiled_graph.tar.gz"
     p.write_bytes(b"packed")
     return p
 
@@ -492,7 +492,7 @@ def test_the_mint_child_path_never_opens_a_mint_of_its_own() -> None:
             assert "arm_compile" in kwargs, f"{module}: run_setup must be explicit"
             value = kwargs["arm_compile"]
             assert isinstance(value, ast.Constant) and value.value is False, (
-                f"{module}: a mint/trace child must never arm a cell under itself")
+                f"{module}: a mint/trace child must never arm a compiled_graph under itself")
             assert "selected" not in kwargs, (
                 f"{module}: a child must not be able to open a mint")
 
@@ -511,7 +511,7 @@ def test_the_cli_serve_path_names_the_function_so_it_can_mint() -> None:
     for call in calls:
         assert any(kw.arg == "selected" for kw in call.keywords), (
             "`cozy serve` must name the function it is arming, or it can "
-            "never mint the first cell")
+            "never mint the first compiled_graph")
 
 
 def test_run_setup_signature_carries_the_selected_function() -> None:

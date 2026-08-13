@@ -41,9 +41,9 @@ from gen_worker import (  # noqa: E402
     aot_declaration,
     aot_mint,
     aot_serve,
-    cell_key,
+    compiled_graph_key,
     compile_cache,
-    fleet_cells,
+    fleet_compiled_graphs,
 )
 from gen_worker.api.decorators import Compile  # noqa: E402
 from gen_worker.api.export_contract import (  # noqa: E402
@@ -168,7 +168,7 @@ def test_the_declared_feed_binds_once_the_execution_lane_is_armed() -> None:
 
 
 @pytest.fixture(scope="module")
-def cell(tmp_path_factory, request) -> Dict[str, Any]:
+def compiled_graph(tmp_path_factory, request) -> Dict[str, Any]:
     """ONE real two-arm mint (torch.export + AOTI) from a CONTAINER-ONLY
     pipeline — the state the child actually produced. At base this raises
     ``MintRefused: ... ['lora_a', 'lora_b'] are not parameters of 'forward'``
@@ -179,7 +179,7 @@ def cell(tmp_path_factory, request) -> Dict[str, Any]:
     request.addfinalizer(mp.undo)
     _fake_sm(mp)
     _declare()
-    tmp = tmp_path_factory.mktemp("cell822")
+    tmp = tmp_path_factory.mktemp("compiledgraph822")
     pipe = _container_only_pipe()
     result = aot_mint.mint(
         pipe, _spec(), tmp / "out")
@@ -197,28 +197,28 @@ LEAN = "unet/adapter=false/B=2"
 FAT = "unet/adapter=true/B=2"
 
 
-def _entry_block(cell: Dict[str, Any], name: str) -> Dict[str, Any]:
+def _entry_block(compiled_graph: Dict[str, Any], name: str) -> Dict[str, Any]:
     """One class's recorded entry block, off ITS OWN artifact's metadata."""
-    block = dict(cell["by_entry"][name].metadata[cell_key.ENTRY_BLOCK_KEY])
+    block = dict(compiled_graph["by_entry"][name].metadata[compiled_graph_key.ENTRY_BLOCK_KEY])
     assert block["name"] == name, block.get("name")
     return block
 
 
-def test_a_container_only_pipeline_mints_both_graph_classes(cell) -> None:
-    """pgw#1176: "both classes in one cell" became "both classes as two
+def test_a_container_only_pipeline_mints_both_graph_classes(compiled_graph) -> None:
+    """pgw#1176: "both classes in one compiled graph" became "both classes as two
     independently keyed artifacts" — the fork is unchanged, what it packages
     into is not."""
-    result = cell["result"]
+    result = compiled_graph["result"]
     assert sorted(row.entry for row in result.entries) == [LEAN, FAT]
     assert len({row.key for row in result.entries}) == 2
 
 
-def test_the_two_classes_were_prepared_DIFFERENTLY(cell) -> None:
+def test_the_two_classes_were_prepared_DIFFERENTLY(compiled_graph) -> None:
     """The pgw#790 fork survives the pgw#822 arm: the adapter-bearing class
     carries the lifted pair, the branchless one is exported from the PLAIN
     module and says so. A one-size wrapper would break this."""
-    fat = _entry_block(cell, FAT)
-    lean = _entry_block(cell, LEAN)
+    fat = _entry_block(compiled_graph, FAT)
+    lean = _entry_block(compiled_graph, LEAN)
     assert set(lora_lifted.LIFTED_INPUT_NAMES) <= {
         row["name"] for row in fat["inputs"]}
     assert not set(lora_lifted.LIFTED_INPUT_NAMES) & {
@@ -229,11 +229,11 @@ def test_the_two_classes_were_prepared_DIFFERENTLY(cell) -> None:
     assert lean["graph"]["lifted_inputs"] == []
 
 
-def test_the_pipeline_is_left_lifted_after_the_mint(cell) -> None:
+def test_the_pipeline_is_left_lifted_after_the_mint(compiled_graph) -> None:
     """The branchless exports disarm the pipeline; a mint that returned it
     branchless would leave the process serving a different graph family."""
-    assert lora_lifted.lifted_binding(cell["pipe"].unet) is not None
-    assert w8a8_lora.branch_bucket(cell["pipe"].unet) == BUCKET
+    assert lora_lifted.lifted_binding(compiled_graph["pipe"].unet) is not None
+    assert w8a8_lora.branch_bucket(compiled_graph["pipe"].unet) == BUCKET
 
 
 def test_an_unarmed_export_refuses_naming_the_ARM_not_the_declaration() -> None:
@@ -244,7 +244,7 @@ def test_an_unarmed_export_refuses_naming_the_ARM_not_the_declaration() -> None:
     decl = _declare()
     pipe = _container_only_pipe()
     plan, arm = aot_mint.adapter_arm_plans(
-        aot_declaration.cell_plans(decl), pipe, _spec())[0]
+        aot_declaration.compiled_graph_plans(decl), pipe, _spec())[0]
     assert arm is True
     with pytest.raises(aot_mint.MintRefused, match="carries no lifted forward"):
         aot_mint._export_entry(pipe, _spec(), plan, decl, compile_now=False)
@@ -312,11 +312,11 @@ def test_the_parent_declines_the_mint_by_name_instead_of_renting(monkeypatch) ->
 
     events: list = []
     monkeypatch.setattr(
-        fleet_cells.activity_mod, "emit_event",
+        fleet_compiled_graphs.activity_mod, "emit_event",
         lambda kind, detail, **kw: events.append((kind, detail, kw)))
 
-    recipe = fleet_cells.mint_recipe(pipe, cfg, delegate=True)
-    assert recipe == fleet_cells.RECIPE_DYNAMO
+    recipe = fleet_compiled_graphs.mint_recipe(pipe, cfg, delegate=True)
+    assert recipe == fleet_compiled_graphs.RECIPE_DYNAMO
     assert len(events) == 1
     kind, detail, kw = events[0]
     assert kind == "self_mint_skipped"

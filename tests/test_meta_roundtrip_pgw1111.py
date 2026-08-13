@@ -130,7 +130,7 @@ def test_a_FAKE_param_program_CANNOT_round_trip(tree: Path, tmp_path: Path) -> N
 
 def test_the_META_round_trip_preserves_the_GRAPH(tree: Path, tmp_path: Path) -> None:
     """Parallelism is time-only. A round-tripped program whose graph differed
-    from the serial one would publish a DIFFERENT artifact under the SAME cell
+    from the serial one would publish a DIFFERENT artifact under the SAME compiled graph
     key (the key digests the traced graph, sm, toolchain and env seal — none of
     which move here), which is this codebase's worst failure class."""
     program = _weightless_program(tree)
@@ -177,7 +177,7 @@ def test_a_meta_program_that_was_NOT_revirtualized_flips_the_INDUCTOR_CONFIG(
     ``weightless=fake_mode_of_program(program) is not None``. A program left on
     META answers None, so skipping the re-virtualization does not merely fail —
     it compiles the *weight-bearing* config for a weight-free graph and
-    publishes it under the weight-free cell key. Silent, and wrong.
+    publishes it under the weight-free compiled graph key. Silent, and wrong.
     """
     program = _weightless_program(tree)
     path = tmp_path / "meta.pt2"

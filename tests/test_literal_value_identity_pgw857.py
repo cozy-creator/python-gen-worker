@@ -1,13 +1,13 @@
-"""pgw#857: a cell's LITERAL constants are part of the artifact, so key them.
+"""pgw#857: a compiled graph's LITERAL constants are part of the artifact, so key them.
 
 THE BUG, in one sentence: the graph hash folded constant NAMES but never their
-VALUES, so two checkpoints that need different literals shared a cell key —
+VALUES, so two checkpoints that need different literals shared a compiled graph key —
 and a pod could adopt one built for the other. It arms, it serves, and it is
 wrong.
 
 WHY NAMES-ONLY WAS RIGHT FOR WEIGHTS AND WRONG FOR LITERALS. A weight is
 rebound from the resident ``state_dict`` at load, so two fine-tunes of one
-family SHOULD share a cell — keying weight values would break exactly the
+family SHOULD share a compiled graph — keying weight values would break exactly the
 property the exclusion exists to protect. A ``SOURCE_LITERAL`` constant is
 different in kind: it ships INSIDE the artifact and is never rebound
 (*"nothing outside the artifact knows its value"*, ``aot_serve``), so **for a
@@ -131,7 +131,7 @@ def test_GREEN_the_same_two_configs_now_separate() -> None:
 def test_an_identical_literal_still_keys_identically() -> None:
     """Separation must come from the VALUE, not from re-hashing noise: two
     programs with the same literal must still share a key, or every re-mint
-    would produce a new cell."""
+    would produce a new compiled graph."""
     a = _Program({"_tensor_constant0": _rope(256.0)}, lifted=["_tensor_constant0"])
     b = _Program({"_tensor_constant0": _rope(256.0)}, lifted=["_tensor_constant0"])
 
@@ -139,14 +139,14 @@ def test_an_identical_literal_still_keys_identically() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 2. THE EXCLUSION THIS MUST NOT BREAK — fine-tunes still share a cell
+# 2. THE EXCLUSION THIS MUST NOT BREAK — fine-tunes still share a compiled graph
 # ---------------------------------------------------------------------------
 
 
-def test_two_FINE_TUNES_of_one_family_still_share_a_cell() -> None:
+def test_two_FINE_TUNES_of_one_family_still_share_a_compiled_graph() -> None:
     """The property the names-only rule exists to protect, and the one a
     careless fix would destroy. Same architecture, DIFFERENT weight values —
-    they are rebound from state_dict at load, so the cell must be shared."""
+    they are rebound from state_dict at load, so the compiled graph must be shared."""
     base = _Program(
         {"unet.conv_in.weight": torch.ones(8), "unet.conv_in.bias": torch.zeros(4)},
         params=["unet.conv_in.weight"], buffers=["unet.conv_in.bias"])
@@ -158,9 +158,9 @@ def test_two_FINE_TUNES_of_one_family_still_share_a_cell() -> None:
     assert not torch.equal(base.constants["unet.conv_in.weight"],
                            tuned.constants["unet.conv_in.weight"])
     assert _key(base, with_fix=True) == _key(tuned, with_fix=True), (
-        "a fine-tune must still share its family's cell — weights are rebound "
+        "a fine-tune must still share its family's compiled_graph — weights are rebound "
         "from state_dict at load, and keying their values would break the "
-        "premise of family-scoped cells")
+        "premise of family-scoped compiled_graphs")
 
 
 def test_a_weight_is_never_digested_even_alongside_a_literal() -> None:
@@ -184,7 +184,7 @@ def test_a_weight_is_never_digested_even_alongside_a_literal() -> None:
 def test_a_program_with_NO_literals_produces_a_byte_identical_block() -> None:
     """sdxl's measured shape: ~2,420 constants, every one a dotted state_dict
     FQN, zero lifted literals. The field must be OMITTED — not empty-valued —
-    so the block serialises exactly as before and the cell key does not move.
+    so the block serialises exactly as before and the compiled graph key does not move.
 
     A forge lane is minting sdxl right now; an sdxl re-key would invalidate an
     in-flight pod.
@@ -210,7 +210,7 @@ def test_a_program_with_NO_literals_produces_a_byte_identical_block() -> None:
 
 
 def test_the_field_is_omitted_rather_than_emitted_empty() -> None:
-    """An empty-valued field would re-key every existing cell to say
+    """An empty-valued field would re-key every existing compiled graph to say
     'unchanged' — the mistake `range_digest`'s `excluded` already avoids."""
     empty = _Program({"w": torch.ones(2)}, params=["w"])
     assert "literal_values" not in _graph_block(empty, with_fix=True)

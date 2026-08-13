@@ -2,8 +2,8 @@
 compiled lane.
 
 MEASURED, attempt twelve (L4 pod `o0legpgj5olhic`, 2026-08-01, $0.04): the
-first cross-pod cell adopt in platform history armed all 72 entries of a
-regional sdxl cell, and then served 100 % eager.  A transformer block sees
+first cross-pod compiled graph adopt in platform history armed all 72 entries of a
+regional sdxl compiled graph, and then served 100 % eager.  A transformer block sees
 ``(B, H_lat*W_lat, C)`` — the token PRODUCT — while the entries are keyed on
 the latent H and W separately, so sdxl's nine aspect buckets collapse to four
 distinct token counts and eight of the nine admit more than one entry.  The
@@ -27,7 +27,7 @@ derived warm plan and ``ensure_setup`` for the boot):
    an AOT-armed pipeline carries no ``compile_cache`` ``failure_signal``
    marker at all.  Every AOT arm therefore answered "no runtime guard
    revocation signal" and had its ``active_compile_ref`` cleared — a compiled
-   AOT serve was structurally unreachable on the boot path even with a cell
+   AOT serve was structurally unreachable on the boot path even with a compiled graph
    that dispatches perfectly.
 
 ``boot_ended_uncompiled`` now means "nothing is dispatchable", never
@@ -65,14 +65,14 @@ from gen_worker.registry import extract_specs  # noqa: E402
 
 FAMILY = "sdxl"
 FLAVOR = "inductor-l4-torch2.13-w8a8"
-CELL_REF = f"root/family-{FAMILY}#{FLAVOR}"
-CELL_DIGEST = "blake3:" + "a" * 64
+COMPILED_GRAPH_REF = f"root/family-{FAMILY}#{FLAVOR}"
+COMPILED_GRAPH_DIGEST = "blake3:" + "a" * 64
 MODEL_DIGEST = "blake3:" + "c" * 64
 CHANNELS = 320
 TEXT_LEN = 77
 
 #: sdxl's nine declared aspect buckets, as LATENT extents (pixels // 8) —
-#: exactly the rows attempt eleven's cell was minted over.
+#: exactly the rows attempt eleven's compiled graph was minted over.
 SDXL_BUCKETS: Tuple[Tuple[int, int], ...] = (
     (128, 128),
     (152, 104), (104, 152),
@@ -186,7 +186,7 @@ def test_the_collapsed_declaration_dispatches_every_bucket_uniquely():
 
 
 # ---------------------------------------------------------------------------
-# 2. The boot: a partially dispatchable cell keeps the compiled lane
+# 2. The boot: a partially dispatchable compiled graph keeps the compiled lane
 # ---------------------------------------------------------------------------
 
 _LATENT = {"1:1": (128, 128), "16:9": (192, 80), "9:16": (80, 192)}
@@ -244,7 +244,7 @@ class _SdxlRegional:
 def _arm(pipe: _Pipe, *_args: Any) -> Any:
     """The compile-arm LEAF, faked exactly as far as the ``.pt2`` load: the
     dispatch, the wrap, the marker and the refusal path are real."""
-    from gen_worker import fleet_cells
+    from gen_worker import fleet_compiled_graphs
 
     meta = {"family": FAMILY, "sku": "l4", "torch": str(torch.__version__),
             "precision": "w8a8"}
@@ -264,28 +264,28 @@ def _arm(pipe: _Pipe, *_args: Any) -> Any:
             "module": pipe.unet, "attr": "forward",
             "state": module_marker.get("state", {})}},
     })
-    return fleet_cells.ArmOutcome(armed=True)
+    return fleet_compiled_graphs.ArmOutcome(armed=True)
 
 
-def _cell_snapshot(tmp_path: Path) -> Path:
-    """A real packed cell tarball, in the format this repository can WRITE.
+def _compiled_graph_snapshot(tmp_path: Path) -> Path:
+    """A real packed compiled graph tarball, in the format this repository can WRITE.
 
-    pgw#1181 retargeted this from `compile_cache.pack` (the whole-cell
+    pgw#1181 retargeted this from `compile_cache.pack` (the whole-compiled graph
     `torch-inductor-cache` tarball, no writer since pgw#1178, deleted here)
-    onto the exported `aot-inductor` cell, through the same shared harness the
-    publish-path tests use. What the rows below need is a cell ON DISK that
+    onto the exported `aot-inductor` compiled graph, through the same shared harness the
+    publish-path tests use. What the rows below need is a compiled graph ON DISK that
     the executor's snapshot/selection plumbing carries; building it out of a
     format nothing writes made them fixtures constructing a shape production
     cannot produce (§4.34)."""
     from gen_worker import aot_serve
-    from harness.cell_meta import exported_cell_meta
+    from harness.compiled_graph_meta import exported_compiled_graph_meta
 
     work = tmp_path / "cap"
     work.mkdir(parents=True, exist_ok=True)
     (work / aot_serve.PACKAGE_NAME).write_bytes(b"\x00not-a-real-pt2")
     out = tmp_path / "minted"
     out.mkdir(exist_ok=True)
-    return aot_serve.pack(work, out / "cell.tar.gz", exported_cell_meta(family=FAMILY))
+    return aot_serve.pack(work, out / "compiled_graph.tar.gz", exported_compiled_graph_meta(family=FAMILY))
 
 
 def _arm_dynamo(pipe: _Pipe, *_args: Any) -> Any:
@@ -297,7 +297,7 @@ def _arm_dynamo(pipe: _Pipe, *_args: Any) -> Any:
     """
     import threading
 
-    from gen_worker import fleet_cells
+    from gen_worker import fleet_compiled_graphs
 
     signal = {
         "callback": None, "lock": threading.Lock(),
@@ -317,7 +317,7 @@ def _arm_dynamo(pipe: _Pipe, *_args: Any) -> Any:
         return hidden
 
     unet.forward = wrapped
-    return fleet_cells.ArmOutcome(armed=True)
+    return fleet_compiled_graphs.ArmOutcome(armed=True)
 
 
 def _boot(
@@ -329,14 +329,14 @@ def _boot(
         lambda kind, detail, phase="", duration_ms=0, **_kw: events.append(
             (kind, phase, detail)))
     # pgw#1152: an `aot_serve.note_aot_key(FLAVOR)` stood here, with a comment
-    # arguing this process is "TOLD the flavor is an AOT cell exactly as a
+    # arguing this process is "TOLD the flavor is an AOT compiled graph exactly as a
     # Plan's `Arm.artifact` tells a pod". Production is told no such thing — it
     # LEARNS at the wrap (`arm_entry`, pgw#1141b), and the route that
     # believed the convention instead is what cost four pods. The line is
     # deleted rather than moved: `_arm` below publishes the pipeline-level
-    # marker `arm_entry` publishes, so `holds_exported_cell` answers the
+    # marker `arm_entry` publishes, so `holds_exported_compiled_graph` answers the
     # lane question off the OBJECT and the registry is not consulted at all.
-    artifact = _cell_snapshot(tmp_path)
+    artifact = _compiled_graph_snapshot(tmp_path)
     model_dir = tmp_path / "sdxl-model"
     model_dir.mkdir()
     specs = extract_specs(_SdxlRegional)
@@ -349,7 +349,7 @@ def _boot(
         return None
 
     async def _download(ref, **kwargs):
-        return artifact.parent if ref == CELL_REF else model_dir
+        return artifact.parent if ref == COMPILED_GRAPH_REF else model_dir
 
     ex = Executor(specs, _send)
     ex.store._cache_dir = tmp_path / "cas"
@@ -360,12 +360,12 @@ def _boot(
     monkeypatch.setattr(
         ex, "_enable_compiled", _arm if exported else _arm_dynamo)
 
-    # pgw#904: the cell is an exact ORDER (Arm.artifact), never a snapshot
+    # pgw#904: the compiled graph is an exact ORDER (Arm.artifact), never a snapshot
     # entry the worker scans for.
     arm_order = executor_mod._ArmOrder(
-        backend="aot_cell",
+        backend="aot_compiled_graph",
         selection=executor_mod._CompileArtifactSelection(
-            path=artifact, ref=CELL_REF, snapshot_digest=CELL_DIGEST))
+            path=artifact, ref=COMPILED_GRAPH_REF, snapshot_digest=COMPILED_GRAPH_DIGEST))
     asyncio.run(ex.ensure_setup(generate, {
         model_ref: pb.Snapshot(digest=MODEL_DIGEST),
     }, arm=arm_order))
@@ -378,7 +378,7 @@ def test_one_undispatchable_bucket_does_not_cost_the_boot_its_compiled_execution
     """THE pgw#844 assertion, on the real derived warm plan.
 
     Three declared aspect classes; two of them (192x80 / 80x192) share a token
-    count and are ``entry_ambiguous``, one (128x128) is unique.  The armed cell
+    count and are ``entry_ambiguous``, one (128x128) is unique.  The armed compiled graph
     must survive: the target keeps its active identity, the boot does not end
     uncompiled, and the two eager classes are NAMED rather than inferred from
     a healthy-looking silence.
@@ -386,10 +386,10 @@ def test_one_undispatchable_bucket_does_not_cost_the_boot_its_compiled_execution
     ex, generate, pipe, events = _boot(tmp_path, monkeypatch)
 
     (target,) = ex.compile_targets()
-    assert target.active_compile_ref == CELL_REF, (
+    assert target.active_compile_ref == COMPILED_GRAPH_REF, (
         "the armed, correct, unambiguous 1:1 entry must serve compiled even "
         "though two sibling buckets are undispatchable")
-    assert target.active_compile_snapshot_digest == CELL_DIGEST
+    assert target.active_compile_snapshot_digest == COMPILED_GRAPH_DIGEST
     assert list(target.function_names) == ["generate"]
     assert aot_serve.is_armed(pipe)
 
@@ -422,7 +422,7 @@ def test_the_exported_lane_boots_on_the_eager_warm_plan(
     past the first bought nothing but wall clock.
 
     RED on unmodified master: `the boot ran 3 full warm generates against an
-    ARMED exported cell (1 dispatched, 2 refused at ingress), want 1`.
+    ARMED exported compiled graph (1 dispatched, 2 refused at ingress), want 1`.
     """
     _ex, _generate, pipe, _events = _boot(tmp_path, monkeypatch)
 
@@ -430,7 +430,7 @@ def test_the_exported_lane_boots_on_the_eager_warm_plan(
     refused = aot_serve.ingress_refusals(pipe)
     assert dispatched + refused == 1, (
         f"the boot ran {dispatched + refused} full warm generates against an "
-        f"ARMED exported cell ({dispatched} dispatched, {refused} refused at "
+        f"ARMED exported compiled_graph ({dispatched} dispatched, {refused} refused at "
         f"ingress), want 1")
 
 
@@ -461,13 +461,13 @@ def test_an_ambiguous_request_is_charged_ingress_refused_not_counted_compiled(
         return ex._served_identity(generate, job)
 
     compiled = _served("1:1", "req-compiled")
-    assert compiled.serving_mode == serving_mode.MODE_AOT_CELL
-    assert compiled.served_cell_ref == CELL_REF
+    assert compiled.serving_mode == serving_mode.MODE_AOT_COMPILED_GRAPH
+    assert compiled.served_compiled_graph_ref == COMPILED_GRAPH_REF
     assert compiled.served_eager_fallback is False
     assert compiled.fallback_reason == ""
 
     refused = _served("16:9", "req-ambiguous")
-    assert refused.serving_mode == serving_mode.MODE_AOT_CELL
+    assert refused.serving_mode == serving_mode.MODE_AOT_COMPILED_GRAPH
     assert refused.served_eager_fallback is True
     assert refused.fallback_reason == serving_mode.FALLBACK_INGRESS_REFUSED
 

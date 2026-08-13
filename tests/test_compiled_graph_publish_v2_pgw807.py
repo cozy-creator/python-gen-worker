@@ -1,9 +1,9 @@
-"""pgw#807 item 3: the cell self-mint publisher ships over CHUNKED SHA-256.
+"""pgw#807 item 3: the compiled graph self-mint publisher ships over CHUNKED SHA-256.
 
-The frozen v1 (blake3) commit route answers a cell publish with
+The frozen v1 (blake3) commit route answers a compiled graph publish with
 410 ``unsupported_digest_algorithm``, which is where the first AOT mint in
 platform history died with a complete, self-adopt-verified artifact in hand.
-These drive the REAL :meth:`fleet_cells.CellPublisher.publish` — real sockets,
+These drive the REAL :meth:`fleet_compiled_graphs.CompiledGraphPublisher.publish` — real sockets,
 real multi-MB bytes, real chunk arithmetic, real threads — against a localhost
 server that implements tensorhub's v2 publish contract INCLUDING the property
 that makes it worth having: R2 refuses bytes that do not hash to the digest
@@ -11,12 +11,12 @@ signed into the presigned PUT. Nothing about the transport is stubbed, because
 every property under test (which route is taken, what a second publish
 uploads, what a corrupted chunk does) is a property of the IO.
 
-The hub-side halves that cannot run here — the th#1340 cell writes and the
+The hub-side halves that cannot run here — the th#1340 compiled graph writes and the
 receipt mint — are proven against a real tensorhub separately (see the issue's
 scratch-stack record); what is pinned here is the CLIENT contract that talks
 to them.
 
-Run: pytest tests/test_cell_publish_v2_pgw807.py -q
+Run: pytest tests/test_compiled_graph_publish_v2_pgw807.py -q
 """
 
 from __future__ import annotations
@@ -31,8 +31,8 @@ from pathlib import Path
 
 import pytest
 
-from gen_worker import aot_serve, cell_key, env_seal
-from gen_worker import fleet_cells as fc
+from gen_worker import aot_serve, compiled_graph_key, env_seal
+from gen_worker import fleet_compiled_graphs as fc
 from gen_worker import receipts
 from gen_worker.hubio.client import HubPublishError
 from gen_worker.models import chunk_upload as cu
@@ -111,11 +111,11 @@ class _Hub(http.server.BaseHTTPRequestHandler):
         with srv.lock:
             srv.calls.append((path, body))
 
-        if path.endswith("/v1/worker/cells/publish-intent"):
+        if path.endswith("/v1/worker/compiled_graphs/publish-intent"):
             self._json(200, {"capability_token": "cap-token",
                              "repo": f"root/family-{body.get('family')}"})
             return
-        if path.endswith("/v1/worker/cells/publish-complete"):
+        if path.endswith("/v1/worker/compiled_graphs/publish-complete"):
             self._json(200, {"recorded": True})
             return
         if path.endswith("/commits"):
@@ -214,7 +214,7 @@ def hub():
 
 @pytest.fixture()
 def artifact(tmp_path: Path) -> Path:
-    """A real cell tarball packed by the real packer: metadata.json inside the
+    """A real compiled graph tarball packed by the real packer: metadata.json inside the
     digested bytes, which is what the receipt gate reads back.
 
     pgw#1181: packed by `aot_serve.pack`, not `compile_cache.pack`. `META`
@@ -222,31 +222,31 @@ def artifact(tmp_path: Path) -> Path:
     thing here still writing the `torch-inductor-cache` envelope, whose
     producer died in pgw#1178 and whose format is deleted. Same bytes, same
     sizes (the chunked-upload and republish-identical rows depend on them),
-    written into the member set the exported cell actually has.
+    written into the member set the exported compiled graph actually has.
     """
     root = tmp_path / "capture"
     root.mkdir(parents=True, exist_ok=True)
     (root / aot_serve.PACKAGE_NAME).write_bytes(
         b"".join(_blob(20_000, i) for i in range(6)))
-    out = tmp_path / "cell.tar.gz"
+    out = tmp_path / "compiled_graph.tar.gz"
     aot_serve.pack(root, out, dict(META))
     return out
 
 
-# pgw#1046: a REAL exported-cell envelope, not the identity-less stub this
-# fixture used to carry. The publish path now recomputes the cell's key from
+# pgw#1046: a REAL exported-compiled graph envelope, not the identity-less stub this
+# fixture used to carry. The publish path now recomputes the compiled graph's key from
 # these blocks and refuses anything that cannot state one, so a stub here would
-# only prove that a cell the fleet can never arm still uploads.
+# only prove that a compiled graph the fleet can never arm still uploads.
 _CLASS_HASH = "a" * 16
 #: pgw#1176: the DECLARATION-wide coverage label, published as
 #: `graph_contract`. No longer a copy of the graph axis — `graph` is this
 #: entry's class hash (identity), this names the class set it belongs to.
-GRAPH_CONTRACT = cell_key.manifest_digest([_CLASS_HASH])
+GRAPH_CONTRACT = compiled_graph_key.manifest_digest([_CLASS_HASH])
 META = {
     "family": FAMILY, "sku": "l4", "sm": "89",
     "gen_worker": "0.87.0", "kind": "aot-inductor", "format": "pt2",
     "weight_lane": "w8a8", "lora_bucket": 64, "strict_export": True,
-    cell_key.ENTRY_BLOCK_KEY: {
+    compiled_graph_key.ENTRY_BLOCK_KEY: {
         "name": "unet/main",
         "target": "unet", "fork": [], "class_dims": [],
         "range_digest": "r1", "class_hash": _CLASS_HASH, "graph": {"v": 2},
@@ -255,15 +255,15 @@ META = {
     "env_seal": {"v": 1, "torch": "2.9.0"},
     "toolchain": {"torch": "2.9.0", "cuda": "12.8"},
 }
-CELL_KEY = cell_key.from_entry_metadata(META).digest
-META["cell_key"] = CELL_KEY
+COMPILED_GRAPH_KEY = compiled_graph_key.from_entry_metadata(META).digest
+META["compiled_graph_key"] = COMPILED_GRAPH_KEY
 
-#: The shape every cell in the corpus was published under before pgw#1046 —
+#: The shape every compiled graph in the corpus was published under before pgw#1046 —
 #: `_identity_axes`' six-axis FALLBACK, carrying neither identity digest. Kept
 #: as a fixture so the refusal below is pinned against the real historical row,
 #: not against an invented one.
 TODAYS_FALLBACK_META = {
-    "cell_key": "ek1-" + "b" * 56, "family": FAMILY, "sku": "l4", "sm": "89",
+    "compiled_graph_key": "ek1-" + "b" * 56, "family": FAMILY, "sku": "l4", "sm": "89",
     "gen_worker": "0.87.0", "kind": "aot-inductor", "format": "pt2",
     "compile_mode": "regional", "weight_lane": "w8a8", "lora_bucket": 64,
 }
@@ -274,8 +274,8 @@ def small_chunks(monkeypatch):
     monkeypatch.setattr(cu, "CAS_CHUNK_SIZE_BYTES", CHUNK)
 
 
-def _publisher(hub) -> fc.CellPublisher:
-    return fc.CellPublisher(base_url=hub.base, worker_jwt=lambda: "worker-jwt",
+def _publisher(hub) -> fc.CompiledGraphPublisher:
+    return fc.CompiledGraphPublisher(base_url=hub.base, worker_jwt=lambda: "worker-jwt",
                             image_digest="sha256:" + "1" * 64)
 
 
@@ -310,11 +310,11 @@ def test_publish_takes_the_v2_route_and_never_the_frozen_v1_one(
     assert len(f["chunks"]) > 1
     assert sorted(hub.httpd.puts) == sorted(c["digest"] for c in f["chunks"])
     assert decl["mode"] == "replace"
-    # pgw#1159: the cell key is the token's claim, never a body field.
+    # pgw#1159: the compiled graph key is the token's claim, never a body field.
     assert "flavor" not in decl
     assert "tags" not in decl and "default_flavor" not in decl
-    # th#1340: the cell identity is hub-derived and rides the token.
-    for forbidden in ("cell_publish", "cell_key", "family",
+    # th#1340: the compiled graph identity is hub-derived and rides the token.
+    for forbidden in ("compiled_graph_publish", "compiled_graph_key", "family",
                       "owning_endpoint_id", "axes"):
         assert forbidden not in decl
 
@@ -331,7 +331,7 @@ def test_publish_takes_the_v2_route_and_never_the_frozen_v1_one(
 def test_intent_carries_the_identity_axes_and_the_mint_cost(hub, artifact):
     _publisher(hub).publish(FAMILY, artifact, dict(META), mint_duration_ms=347_940)
     intent = next(b for p, b in hub.httpd.calls if p.endswith("publish-intent"))
-    assert intent["cell_key"] == CELL_KEY
+    assert intent["compiled_graph_key"] == COMPILED_GRAPH_KEY
     assert intent["axes"] == {"sku": "l4", "image_digest": "sha256:" + "1" * 64,
                               "gen_worker": "0.87.0"}
     assert intent["mint_duration_ms"] == 347_940
@@ -342,16 +342,16 @@ def test_intent_carries_the_identity_axes_and_the_mint_cost(hub, artifact):
     # pgw#711's artifact_digest/manifest_digest are gone: the hub's route
     # decodes no such fields, so sending them was a blake3 hash pass whose
     # result nothing read.
-    assert set(complete) == {"family", "cell_key", "checkpoint_id", "ok"}
+    assert set(complete) == {"family", "compiled_graph_key", "checkpoint_id", "ok"}
 
 
 # ---------------------------------------------------------------------------
-# pgw#1046 — what the hub needs to ARM the cell it just accepted
+# pgw#1046 — what the hub needs to ARM the compiled graph it just accepted
 #
 # th#1457's producer builds the worker's ExecutionSpec out of this exact map:
-# `ArtifactFromCellRecord` reads `toolchain`/`env_seal`, `ArmFromVerifiedCell`
+# `ArtifactFromCompiledGraphRecord` reads `toolchain`/`env_seal`, `ArmFromVerifiedCompiledGraph`
 # reads `graph_contract`, and pgw#904's landed consumer refuses an
-# ArtifactIdentity missing any of them. Before this, EVERY published cell fell
+# ArtifactIdentity missing any of them. Before this, EVERY published compiled graph fell
 # to a six-axis subset that carried none — so the whole corpus was structurally
 # unarmable, and it cost a mint per pod to find out.
 # ---------------------------------------------------------------------------
@@ -369,17 +369,17 @@ def test_publish_intent_states_the_full_arming_identity(hub, artifact):
     axes = intent["identity_axes"]
 
     # Derived from the recorded blocks, never from a second stamp.
-    assert axes["toolchain"] == cell_key.facts_digest(META["toolchain"])
+    assert axes["toolchain"] == compiled_graph_key.facts_digest(META["toolchain"])
     assert axes["env_seal"] == env_seal.seal_digest(META["env_seal"])
     assert axes[fc.GRAPH_CONTRACT_AXIS] == GRAPH_CONTRACT
 
-    # ...and the KEY axes hash to the key the cell is published under, so
-    # the hub's row and its flavor cannot describe two different cells. The
+    # ...and the KEY axes hash to the key the compiled graph is published under, so
+    # the hub's row and its flavor cannot describe two different compiled graphs. The
     # map also carries the wire facts (graph_contract, env_seal) and the
     # demoted store metadata (family, lane) — pgw#1059: neither is identity.
     ck = {k: v for k, v in axes.items()
           if k in ("graph", "sm", "toolchain")}
-    assert cell_key.from_axes(ck).digest == intent["cell_key"] == CELL_KEY
+    assert compiled_graph_key.from_axes(ck).digest == intent["compiled_graph_key"] == COMPILED_GRAPH_KEY
     assert set(axes) == {"graph", "sm", "toolchain",
                          fc.GRAPH_CONTRACT_AXIS, fc.ENV_SEAL_AXIS,
                          "family", "lane"}
@@ -402,33 +402,33 @@ def test_the_pre_fix_fallback_row_shape_can_no_longer_be_published(hub, artifact
     That hub-side test stays valid and must not be weakened: it guards the
     REFUSAL of a row shape that already exists in the store. This test guards
     the other end — that the worker can no longer create one."""
-    with pytest.raises(fc.CellPublishRefused) as exc:
+    with pytest.raises(fc.CompiledGraphPublishRefused) as exc:
         _publisher(hub).publish(FAMILY, artifact, dict(TODAYS_FALLBACK_META))
     assert "no computable identity" in str(exc.value)
     assert not hub.httpd.calls, "refused before the intent left the pod"
 
     # And the shape itself is unreachable: nothing in the publish path can
     # still emit an axis map without the two identity digests.
-    with pytest.raises(fc.CellPublishRefused):
+    with pytest.raises(fc.CompiledGraphPublishRefused):
         fc._identity_axes(FAMILY, dict(TODAYS_FALLBACK_META))
 
 
 def test_a_stamp_that_disagrees_with_the_recorded_axes_is_refused(hub, artifact):
-    """A cell whose `cell_key` does not describe its own blocks is a cell the
+    """A compiled graph whose `compiled_graph_key` does not describe its own blocks is a compiled graph the
     hub would index under one identity and the worker would fence on another."""
     forged = dict(META)
-    forged["cell_key"] = "ek1-" + "9" * 56
-    with pytest.raises(fc.CellPublishRefused, match="disagrees"):
+    forged["compiled_graph_key"] = "ek1-" + "9" * 56
+    with pytest.raises(fc.CompiledGraphPublishRefused, match="disagrees"):
         _publisher(hub).publish(FAMILY, artifact, forged)
     assert not hub.httpd.calls
 
 
-def test_a_cell_with_no_manifest_digest_PUBLISHES(hub, artifact):
+def test_a_compiled_graph_with_no_manifest_digest_PUBLISHES(hub, artifact):
     """DELIBERATELY INVERTED by pgw#1176 — read this before "fixing" it.
 
-    This row used to refuse a cell recording no `combined_graph_hash`, on the
+    This row used to refuse a compiled graph recording no `combined_graph_hash`, on the
     reasoning that pgw#903's pre-dlopen fence compares
-    `Arm.graph_contract_digest` against it and a cell without one can never
+    `Arm.graph_contract_digest` against it and a compiled graph without one can never
     pass. That reasoning held while `graph_contract` WAS the identity. It is
     now the declaration-wide MANIFEST digest — a coverage label — and an entry
     minted by a pod that has not folded its whole declaration is a complete,
@@ -444,14 +444,14 @@ def test_a_cell_with_no_manifest_digest_PUBLISHES(hub, artifact):
     assert hub.httpd.calls
 
 
-def test_a_cell_with_no_class_hash_is_refused(hub, artifact):
+def test_a_compiled_graph_with_no_class_hash_is_refused(hub, artifact):
     """The refusal that survives the inversion above: an entry that cannot
     state its own graph axis has no identity, so it would be stored under a
     flavor nothing can request."""
     hollow = dict(META)
-    hollow[cell_key.ENTRY_BLOCK_KEY] = {
-        **META[cell_key.ENTRY_BLOCK_KEY], "class_hash": ""}
-    with pytest.raises(fc.CellPublishRefused):
+    hollow[compiled_graph_key.ENTRY_BLOCK_KEY] = {
+        **META[compiled_graph_key.ENTRY_BLOCK_KEY], "class_hash": ""}
+    with pytest.raises(fc.CompiledGraphPublishRefused):
         _publisher(hub).publish(FAMILY, artifact, hollow)
     assert not hub.httpd.calls
 
@@ -462,7 +462,7 @@ def test_seam_authorizes_the_live_publish_payloads(hub, artifact):
     contract: drive the publisher, then authorize exactly what it sent."""
     _publisher(hub).publish(FAMILY, artifact, dict(META), mint_duration_ms=1)
     for path, body in hub.httpd.calls:
-        if "/v1/worker/cells/" not in path:
+        if "/v1/worker/compiled_graphs/" not in path:
             continue
         actions.authorize({"method": "POST", "path": path, "json": body})
 
@@ -519,7 +519,7 @@ def test_complete_over_missing_objects_is_a_typed_repudiation(hub, artifact,
 
 
 def test_receipt_reader_round_trips_a_sha256_bound_receipt(artifact, monkeypatch):
-    """The reader half of the flip: `sha256:<hex>` — the only thing a cell can
+    """The reader half of the flip: `sha256:<hex>` — the only thing a compiled graph can
     be bound to now — is the only digest computed, the only tag accepted, and
     an untagged or blake3-tagged claim is a typed refusal."""
     tagged = receipts.artifact_digest(artifact)
@@ -531,7 +531,7 @@ def test_receipt_reader_round_trips_a_sha256_bound_receipt(artifact, monkeypatch
         receipts.canonical_artifact_digest(tagged.split(":", 1)[1])
     assert exc.value.reason == "receipt_digest_untagged"
     # A blake3-bound receipt is now a REFUSAL, not a second supported arm:
-    # the protocol that minted it is gone and the cell it names must be
+    # the protocol that minted it is gone and the compiled graph it names must be
     # re-minted rather than armed on an algorithm this worker no longer trusts.
     with pytest.raises(receipts.ReceiptError) as exc:
         receipts.canonical_artifact_digest("blake3:" + "a" * 64)

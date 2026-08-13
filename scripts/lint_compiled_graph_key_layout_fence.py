@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""pgw#1143 (§1.33 point 5): CONVERSION IS UPSTREAM OF COMPUTE — no cell re-keys.
+"""pgw#1143 (§1.33 point 5): CONVERSION IS UPSTREAM OF COMPUTE — no compiled graph re-keys.
 
     Every byte the endpoint's loader/`setup()` observes is in one of the slot's
     DECLARED accepted layouts. Conversion completes strictly before
     materialization into the worker's model tree, and the endpoint has no code
     path that can observe the source layout, the conversion, or its provenance.
-    Therefore the traced graph, `Compile.contract_axes()`, the ck1 cell key and
-    the declared envelope are unchanged by any conversion, and no cell re-keys —
+    Therefore the traced graph, `Compile.contract_axes()`, the ck1 compiled graph key and
+    the declared envelope are unchanged by any conversion, and no compiled graph re-keys —
     ever.
 
 An invariant nobody can execute is a comment, so this script executes it. Two
 fences, both structural:
 
-**FENCE 1 — no cell-key axis reads the layout vocabulary.** The fenced module
-set is DERIVED, not hand-listed: any module that calls a cell-key axis producer
-(`cell_key.from_axes`, `envelope_digest`, `toolchain_axis_digest`,
-`facts_digest`, `from_entry_metadata`, or constructs `CellKey`) is
-in it, plus `cell_key` itself. A new module that starts computing a key joins
+**FENCE 1 — no compiled graph-key axis reads the layout vocabulary.** The fenced module
+set is DERIVED, not hand-listed: any module that calls a compiled graph-key axis producer
+(`compiled_graph_key.from_axes`, `envelope_digest`, `toolchain_axis_digest`,
+`facts_digest`, `from_entry_metadata`, or constructs `CompiledGraphKey`) is
+in it, plus `compiled_graph_key` itself. A new module that starts computing a key joins
 the fence automatically — the failure mode of a hand-maintained list is that the
 one file that violates the rule is the one nobody added.
 
@@ -41,7 +41,7 @@ also the shape a similarity heuristic arrives in.
 
 Run::
 
-    python scripts/lint_cell_key_layout_fence.py
+    python scripts/lint_compiled_graph_key_layout_fence.py
 """
 
 from __future__ import annotations
@@ -56,10 +56,10 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 REPO = Path(__file__).resolve().parents[1]
 SRC = REPO / "src" / "gen_worker"
 
-#: Calling one of these MAKES a module a cell-key axis producer. Narrow on
+#: Calling one of these MAKES a module a compiled graph-key axis producer. Narrow on
 #: purpose: `facts_digest` and `subject_digest` are generic canonical-digest
 #: helpers whose callers say so (`contract_facts`: "NOT a key-axis input";
-#: `subject_digest` names a MINT OBLIGATION, never a cell key), so probing on
+#: `subject_digest` names a MINT OBLIGATION, never a compiled graph key), so probing on
 #: them would fence modules that compute no key and make the gate noise.
 # pgw#1176, and this fence was SILENTLY WEAKENED until it was corrected:
 # it named `from_exported_artifact_metadata`, which no longer exists, so any
@@ -77,13 +77,13 @@ AXIS_PRODUCERS: Tuple[str, ...] = (
     "from_axes",
     "toolchain_axis_digest",
     "from_entry_metadata",
-    "CellKey",
+    "CompiledGraphKey",
 )
 
 #: Always fenced, whatever they call: they DEFINE the key or one of its
 #: THREE axis inputs (graph / sm / toolchain) — pgw#1176 evicted `envelope`.
 FENCE_SEED: Tuple[str, ...] = (
-    "cell_key.py",
+    "compiled_graph_key.py",
     "graph_hash.py",
     "env_seal.py",
     "host_isa.py",
@@ -162,7 +162,7 @@ def fenced_modules(root: Path = SRC) -> Dict[Path, str]:
     out: Dict[Path, str] = {}
     for path in _iter_modules(root):
         if path.name in FENCE_SEED and path.parent == root:
-            out[path] = "defines the cell key or one of its axis inputs"
+            out[path] = "defines the compiled_graph key or one of its axis inputs"
             continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -170,7 +170,7 @@ def fenced_modules(root: Path = SRC) -> Dict[Path, str]:
             continue
         hits = sorted(_called_names(tree) & set(AXIS_PRODUCERS))
         if hits:
-            out[path] = f"computes a cell-key axis ({', '.join(hits)})"
+            out[path] = f"computes a compiled_graph-key axis ({', '.join(hits)})"
     return out
 
 
@@ -263,7 +263,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("FAIL: the fence covers NO module — the axis-producer probe is "
               "stale, which makes this gate green for the wrong reason")
         return 1
-    print(f"fence 1: {len(fenced)} cell-key module(s)")
+    print(f"fence 1: {len(fenced)} compiled_graph-key module(s)")
     for path, why in sorted(fenced.items()):
         rel = path.relative_to(REPO) if path.is_relative_to(REPO) else path
         hits = _violations(path)
@@ -290,11 +290,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for line in failures:
             print(f"  - {line}")
         print(
-            "\nConversion is UPSTREAM of compute. If a cell-key axis needs to "
+            "\nConversion is UPSTREAM of compute. If a compiled_graph-key axis needs to "
             "know the layout, the conversion is happening too late — move it "
             "ahead of materialization instead of widening the key.")
         return 1
-    print("\n§1.33 point 5 fence holds: no cell re-keys on a conversion")
+    print("\n§1.33 point 5 fence holds: no compiled_graph re-keys on a conversion")
     return 0
 
 

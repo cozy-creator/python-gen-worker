@@ -9,15 +9,15 @@ cost a 17-minute `tests` job, for whichever lane happened to draw it.
 
 THE MECHANISM, measured rather than guessed:
 
-    [1] after first compile_cell : True
+    [1] after first compile_compiled_graph : True
     [2] after reset              : False
-    [3] after SECOND compile_cell: False     <- the flake
+    [3] after SECOND compile_compiled_graph: False     <- the flake
 
 `rig_vehicles`' declaration registration is an import SIDE EFFECT
 (`register_export_declaration` at module scope), so once the module sits in
 `sys.modules` every later import is a no-op. Dozens of test modules call
 `reset_export_declarations()` in their fixtures. Once both have happened in one
-xdist worker, `compile_cell()` still returns a cell — it just names a family
+xdist worker, `compile_compiled_graph()` still returns a compiled graph — it just names a family
 nothing has declared any more, and the failure surfaces later and elsewhere.
 Whether the two land in the same worker is a function of shard split, which is
 why adding five unrelated test rows to a PR could summon it.
@@ -50,36 +50,36 @@ PAIR = ("micro-pad32", "micro-pad32-branchy")
 @pytest.mark.parametrize("family", PAIR)
 def test_the_rig_re_registers_after_a_reset_wipes_the_registry(family: str) -> None:
     """RED before the fix at step [3]: the import is a `sys.modules` no-op, so
-    nothing re-registers and the cell names an undeclared family."""
+    nothing re-registers and the compiled graph names an undeclared family."""
     from harness import rig_vehicles
 
     veh = rig_vehicles.vehicle(family)
 
-    assert veh.compile_cell() is not None
+    assert veh.compile_compiled_graph() is not None
     assert export_declaration(family) is not None, "the first build must register"
 
     # Exactly what another test module's fixture does between two of ours.
     reset_export_declarations()
     assert export_declaration(family) is None, "the reset must really empty it"
 
-    cell = veh.compile_cell()
+    compiled_graph = veh.compile_compiled_graph()
     assert export_declaration(family) is not None, (
         "the rig must RE-register: an import that is a no-op cannot restore a "
-        "registration a reset removed, and the cell it returns would name a "
+        "registration a reset removed, and the compiled_graph it returns would name a "
         "family nothing has declared")
-    assert cell.family == family
+    assert compiled_graph.family == family
 
 
-def test_the_cell_still_carries_the_declared_contract_after_a_reload() -> None:
+def test_the_compiled_graph_still_carries_the_declared_contract_after_a_reload() -> None:
     """The heal must not quietly change what it builds — a reloaded module has
-    to produce a byte-identical cell, or the fix would trade a flake for a
-    silent identity drift (the declaration feeds the cell key)."""
+    to produce a byte-identical compiled graph, or the fix would trade a flake for a
+    silent identity drift (the declaration feeds the compiled graph key)."""
     from harness import rig_vehicles
 
     veh = rig_vehicles.vehicle("micro-pad32")
-    before = veh.compile_cell()
+    before = veh.compile_compiled_graph()
     reset_export_declarations()
-    after = veh.compile_cell()
+    after = veh.compile_compiled_graph()
 
     assert after.shapes == before.shapes
     assert after.text_len == before.text_len

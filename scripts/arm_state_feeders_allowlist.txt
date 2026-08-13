@@ -6,10 +6,10 @@
 # WHY THIS FILE EXISTS. `aot_serve._KNOWN_AOT_KEYS` decides which failure
 # detector applies to a serving object — the DYNAMO lane's cache-hit ledger,
 # which an AOTI artifact can never move, or §4.31's serve-first rule. pgw#1033
-# wrote its feeding rule as a CONVENTION ("whoever reads a cell_key off an
+# wrote its feeding rule as a CONVENTION ("whoever reads a compiled_graph_key off an
 # aot-inductor envelope registers it") with two feeders, BOTH self-produced
 # routes. `arm_ordered` — every hub Plan arm and every §4.27 boot-adopt — kept
-# nothing, so on a real pod (pgw#1141b, POD PROOF #4) a cell that resolved,
+# nothing, so on a real pod (pgw#1141b, POD PROOF #4) a compiled graph that resolved,
 # materialized and armed was scored on the dynamo ledger, disarmed, and the pod
 # served eager for life. That was the FOURTH gate in a row with the same shape:
 # a rule written against the self-mint path, and an adopt path that does not
@@ -22,11 +22,11 @@
 # THERE IS NO `CONVENTION` CLASSIFICATION, AND NO `RELAY`. A feeder called
 # because a docstring asked the caller to remember is the bug itself, twice
 # over. Move it to the seam, or delete it and ask the OBJECT
-# (`aot_serve.holds_exported_cell`, pgw#1141b).
+# (`aot_serve.holds_exported_compiled_graph`, pgw#1141b).
 #
 #   VERDICT     the site records a decision only this frame can know, and sits
 #               AT that decision. No seam can derive it: a proof pass concluding
-#               a cell served its own graph is not a fact about the wrap.
+#               a compiled graph served its own graph is not a fact about the wrap.
 #   OWNER       the module that owns the state writing it from its own primary
 #               write path.
 #   RECOGNIZER  TESTS ONLY, and the lint CHECKS the claim: the enclosing
@@ -36,16 +36,16 @@
 # ---------------------------------------------------------------------------
 # VERDICT — a decision, recorded where the decision is made.
 # ---------------------------------------------------------------------------
-src/gen_worker/executor.py::Executor._setup_locked_inner::compile_cache.record_cell_proven  VERDICT  the boot proof pass concluding this object served its OWN warmup graph (gw#587); no seam observes a proof
-src/gen_worker/executor.py::Executor._setup_locked_inner::compile_cache.record_cell_quarantined  VERDICT  the same pass concluding the opposite — pgw#672's churn-loop stop, written at the disarm
-src/gen_worker/executor.py::Executor._compile_guard_failed::compile_cache.record_cell_quarantined  VERDICT  a serve-time cell-attributable fault; the guard is the only frame that saw it
-src/gen_worker/executor.py::Executor._delegated_mint_run::compile_cache.record_cell_proven  VERDICT  the delegated mint's own finalize proof, same fact from the other producer
-src/gen_worker/fleet_cells.py::arm_from_local_store::local_cell_store.note_memo  VERDICT  §4.28's memo REWRITTEN FROM EVIDENCE — the cell just proved it arms under this arm token, which no wrap can know
+src/gen_worker/executor.py::Executor._setup_locked_inner::compile_cache.record_compiled_graph_proven  VERDICT  the boot proof pass concluding this object served its OWN warmup graph (gw#587); no seam observes a proof
+src/gen_worker/executor.py::Executor._setup_locked_inner::compile_cache.record_compiled_graph_quarantined  VERDICT  the same pass concluding the opposite — pgw#672's churn-loop stop, written at the disarm
+src/gen_worker/executor.py::Executor._compile_guard_failed::compile_cache.record_compiled_graph_quarantined  VERDICT  a serve-time compiled graph-attributable fault; the guard is the only frame that saw it
+src/gen_worker/executor.py::Executor._delegated_mint_run::compile_cache.record_compiled_graph_proven  VERDICT  the delegated mint's own finalize proof, same fact from the other producer
+src/gen_worker/fleet_compiled_graphs.py::arm_from_local_store::local_compiled_graph_store.note_memo  VERDICT  §4.28's memo REWRITTEN FROM EVIDENCE — the compiled graph just proved it arms under this arm token, which no wrap can know
 
 # ---------------------------------------------------------------------------
 # OWNER — the producer putting its own bytes in its own store.
 # ---------------------------------------------------------------------------
-src/gen_worker/fleet_cells.py::_stage_durable::local_cell_store.store  OWNER  pgw#1183/§1.5: this machine minted these bytes and this is the store's ONE write path — durable BEFORE the arm, so the write cannot sit at the arm seam by construction. The two rows this replaces were `adopt_delegated_mint` (gated on having no publish sink, the inversion §1.5 retires) and `_publish_async.run` (a salvage racing the `finally` that deleted the same bytes; both are gone)
+src/gen_worker/fleet_compiled_graphs.py::_stage_durable::local_compiled_graph_store.store  OWNER  pgw#1183/§1.5: this machine minted these bytes and this is the store's ONE write path — durable BEFORE the arm, so the write cannot sit at the arm seam by construction. The two rows this replaces were `adopt_delegated_mint` (gated on having no publish sink, the inversion §1.5 retires) and `_publish_async.run` (a salvage racing the `finally` that deleted the same bytes; both are gone)
 
 # ---------------------------------------------------------------------------
 # RECOGNIZER (tests) — the registry/classifier IS the subject. Each row's claim
@@ -53,8 +53,8 @@ src/gen_worker/fleet_cells.py::_stage_durable::local_cell_store.store  OWNER  pg
 # module. Anything that arms goes through tests/harness/adopt_rig.py.
 # ---------------------------------------------------------------------------
 tests/test_aot_serve_pgw721.py::test_an_aot_ref_is_recognized_only_by_a_REGISTERED_stamped_key::aot_serve.note_aot_key  RECOGNIZER  the recognizer's own unit row — pgw#1035's deleted label sniff, asserted directly on is_aot_ref
-tests/test_compile_proof_pgw637.py::test_proven_cell_registry_roundtrip::compile_cache.record_cell_proven  RECOGNIZER  the proven-cell registry's own roundtrip; no pipeline exists in this row
-tests/test_compile_proof_pgw637.py::test_inmemory_probe_reports_dynamo_truth_not_the_registry::compile_cache.record_cell_proven  RECOGNIZER  pgw#637's point exactly: the registry alone must NOT certify, and the row proves it by feeding it and getting False
+tests/test_compile_proof_pgw637.py::test_proven_compiled_graph_registry_roundtrip::compile_cache.record_compiled_graph_proven  RECOGNIZER  the proven-compiled graph registry's own roundtrip; no pipeline exists in this row
+tests/test_compile_proof_pgw637.py::test_inmemory_probe_reports_dynamo_truth_not_the_registry::compile_cache.record_compiled_graph_proven  RECOGNIZER  pgw#637's point exactly: the registry alone must NOT certify, and the row proves it by feeding it and getting False
 tests/test_eager_only_command_pgw1142.py::test_a_suppressed_request_is_not_reported_as_compiled::aot_serve.note_aot_key  RECOGNIZER  a serving_mode.resolve dimension row — a ref and a posture, no object and no arm
 tests/test_boot_phases_pgw764.py::test_serving_mode_distinguishes_aot_from_jit_from_eager::aot_serve.is_aot_ref  RECOGNIZER  classify_mode's discrimination asserted over bare refs; nothing is armed anywhere in the row
 

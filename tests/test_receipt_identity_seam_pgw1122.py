@@ -1,33 +1,33 @@
-"""pgw#1122: the cell RECEIPT TRUST GATE runs in the process that holds no
+"""pgw#1122: the compiled graph RECEIPT TRUST GATE runs in the process that holds no
 credential — so it must not answer "who am I?" by decoding one.
 
 MEASURED, three real pods, 2026-08-11 (RTX 4090, sm_89, gen-worker 0.104.0).
-All three derived ``ck1-f023c374…``, issued ``POST /v1/worker/cells/resolve``
-(hub GIN log: 3 calls, all 200), were answered with the cell + receipt,
+All three derived ``ck1-f023c374…``, issued ``POST /v1/worker/compiled graphs/resolve``
+(hub GIN log: 3 calls, all 200), were answered with the compiled graph + receipt,
 materialized it — and then failed identically::
 
     OrderedArmError: artifact_receipt_refused: publisher_untrusted:
-    this pod cannot name its own endpoint or org (no cell_read_* claim on the
-    worker credential), so it may adopt platform-tier cells only
+    this pod cannot name its own endpoint or org (no compiled_graph_read_* claim on the
+    worker credential), so it may adopt platform-tier compiled graphs only
 
-``receipts._self_endpoint_id``/``_self_org_id`` decoded ``cell_read_*`` out of
+``receipts._self_endpoint_id``/``_self_org_id`` decoded ``compiled_graph_read_*`` out of
 *this process's* worker JWT, and the gate is armed at ``lifecycle.py`` with
 ``executor.worker_jwt_provider`` — in the COMPUTE CHILD, whose
 ``current_worker_jwt`` is ``""`` by construction (``procsplit/child.py``,
 pgw#763 delta 1). Both viewer ids were therefore ``""`` on every split serving
-pod, so every ORG-tier cell was unadoptable, always. The blast radius was not a
+pod, so every ORG-tier compiled graph was unadoptable, always. The blast radius was not a
 wasted download: the hub logged ``worker_function_unavailable
-reason=compile_cell_failed``, the pod never served, the autoscaler reaped it
+reason=compile_compiled_graph_failed``, the pod never served, the autoscaler reaped it
 ``state_blocked_idle`` and bought a replacement — twice.
 
 This is byte-for-byte the pgw#1108 defect class one gate later. The rows below
 are therefore about the CLASS, not the call site:
 
 1. the real compute child, in a real split, names itself without holding a JWT;
-2. the receipt gate arms an org-tier cell from that child;
+2. the receipt gate arms an org-tier compiled graph from that child;
 3. "nobody can name us" is a DIFFERENT typed refusal from "we asked and the
    answer says no" — the conflation is what made this read like an attack;
-4. a refused arm on a cell this pod adopted BY ITS OWN KEY degrades to the
+4. a refused arm on a compiled graph this pod adopted BY ITS OWN KEY degrades to the
    ordinary boot instead of taking the function down;
 5. that degrade is a typed ``boot_adopt`` event, so the next occurrence is one
    query rather than three pods of archaeology;
@@ -55,9 +55,9 @@ import pytest
 from gen_worker import (
     activity as activity_mod,
     boot_adopt,
-    cell_adopt,
+    compiled_graph_adopt,
     executor as executor_mod,
-    fleet_cells,
+    fleet_compiled_graphs,
     receipts,
     worker_credential,
     worker_identity,
@@ -86,7 +86,7 @@ from test_receipts_pgw709 import (  # noqa: F401 — fixtures come with it
     worker_jwt_for,
 )
 
-#: The parent's credential, shaped exactly as `cellgrant.Stamp` writes it:
+#: The parent's credential, shaped exactly as `compiledgraphgrant.Stamp` writes it:
 #: the scheduler subject plus the two VIEWER claims the hub stamps from its OWN
 #: record of the release (th#1657/th#1680). Nothing here is invented — the
 #: fixture manufactures no field production does not set.
@@ -105,10 +105,10 @@ def stamped_worker_jwt(
         "sub": "w-parent",
         "release_id": "rel-1122",
         "cap_kind": "worker_capability",
-        "cell_read_endpoint_id": endpoint_id,
+        "compiled_graph_read_endpoint_id": endpoint_id,
     }
     if org_id:
-        claims["cell_read_org_id"] = org_id
+        claims["compiled_graph_read_org_id"] = org_id
     return (
         _b64(json.dumps({"alg": "HS256"}).encode())
         + "." + _b64(json.dumps(claims).encode())
@@ -179,7 +179,7 @@ def test_the_compute_child_names_itself_without_holding_a_credential(
     assert answer == f"endpoint={POD_ENDPOINT} org={POD_ORG}", (
         "a compute child could not name the endpoint/org it serves "
         f"({answer!r}) — the pgw#1122 gate reads exactly this and refuses "
-        "every org-tier cell when it comes back empty")
+        "every org-tier compiled_graph when it comes back empty")
 
 
 def test_the_relay_carries_the_claims_and_never_the_credential(
@@ -279,11 +279,11 @@ def _child_gate(stub: HubStub, parent: Optional[_FakeParent]) -> None:
     broker.install(parent)
 
 
-def test_the_child_arms_an_org_tier_cell_it_is_entitled_to(
+def test_the_child_arms_an_org_tier_compiled_graph_it_is_entitled_to(
     tmp_path: Path, hub: HubStub,  # noqa: F811
 ) -> None:
     """THE POD FAILURE, reproduced: a resolved, materialized, correctly-owned
-    org-tier cell reaching the arm gate in a process with no credential.
+    org-tier compiled graph reaching the arm gate in a process with no credential.
 
     On master this raises ``publisher_untrusted`` — on 3 of 3 real pods.
     """
@@ -300,7 +300,7 @@ def test_the_child_arms_an_org_tier_cell_it_is_entitled_to(
     assert receipts.gate_delivered_artifact(artifact, FAMILY) is True
     assert parent.asks.count(actions.ACTION_VIEWER_IDENTITY) == 1, (
         "identity does not change for the life of a pod; asking per arm puts a "
-        "seam round trip on every cell")
+        "seam round trip on every compiled_graph")
 
 
 def test_a_sibling_endpoint_in_the_same_org_arms_from_the_child(
@@ -319,7 +319,7 @@ def test_a_sibling_endpoint_in_the_same_org_arms_from_the_child(
         artifact, FAMILY).publisher_org_id == POD_ORG
 
 
-def test_another_orgs_cell_is_still_refused_from_the_child(
+def test_another_orgs_compiled_graph_is_still_refused_from_the_child(
     tmp_path: Path, hub: HubStub,  # noqa: F811
 ) -> None:
     """The threat is unchanged and this fix must not widen it: the artifact is
@@ -343,7 +343,7 @@ def test_no_identity_at_all_refuses_LOUDLY_and_by_its_own_name(
     over. It still fails CLOSED — but under its own name.
 
     ``identity_unavailable`` is a wiring defect on our side;
-    ``publisher_untrusted`` is a trust decision about somebody else's cell.
+    ``publisher_untrusted`` is a trust decision about somebody else's compiled graph.
     Master emitted the second for the first, which is why three pods' worth of
     evidence read like an attack on the platform by the platform.
     """
@@ -364,11 +364,11 @@ def test_no_identity_at_all_refuses_LOUDLY_and_by_its_own_name(
     assert ident.value.reason == "no_credential"
 
 
-def test_a_platform_tier_cell_still_arms_with_no_identity(
+def test_a_platform_tier_compiled_graph_still_arms_with_no_identity(
     tmp_path: Path, hub: HubStub,  # noqa: F811
 ) -> None:
     """The refusal must stay scoped to the org-tier decision it is about: a
-    platform-tier cell needs no viewer identity and never asks for one."""
+    platform-tier compiled graph needs no viewer identity and never asks for one."""
     artifact = make_artifact(tmp_path)
     hub.serve_receipt_for(
         artifact, owning_endpoint_id="", publisher_tier="platform",
@@ -382,7 +382,7 @@ def test_a_platform_tier_cell_still_arms_with_no_identity(
 def test_a_hub_that_stamped_no_claims_is_an_ANSWER_not_a_failure(
     tmp_path: Path, hub: HubStub,  # noqa: F811
 ) -> None:
-    """``cellgrant.Stamp`` omits both claims when the hub cannot resolve them,
+    """``compiledgraphgrant.Stamp`` omits both claims when the hub cannot resolve them,
     which legally narrows the pod to platform-tier. That is a resolved identity
     that names nothing — and it must not be reported as an unreachable one."""
     _child_gate(hub, _FakeParent("", ""))
@@ -399,8 +399,8 @@ def test_a_hub_that_stamped_no_claims_is_an_ANSWER_not_a_failure(
 
 
 # ===========================================================================
-# 3. BLAST RADIUS. A refused arm on a self-adopted cell costs a download, not
-#    a pod. Master: `worker_function_unavailable reason=compile_cell_failed`.
+# 3. BLAST RADIUS. A refused arm on a self-adopted compiled graph costs a download, not
+#    a pod. Master: `worker_function_unavailable reason=compile_compiled_graph_failed`.
 # ===========================================================================
 
 
@@ -446,18 +446,18 @@ class _Cfg:
 
 def _refusing_arm(monkeypatch: pytest.MonkeyPatch) -> None:
     def _raise(*a: Any, **k: Any) -> Any:
-        raise fleet_cells.OrderedArmError(
+        raise fleet_compiled_graphs.OrderedArmError(
             "artifact_receipt_refused",
             "publisher_untrusted: this pod cannot name its own endpoint or org")
 
-    monkeypatch.setattr(fleet_cells, "arm_ordered", _raise)
+    monkeypatch.setattr(fleet_compiled_graphs, "arm_ordered", _raise)
 
 
-def test_an_adopted_cell_that_will_not_arm_does_not_kill_the_function(
+def test_an_adopted_compiled_graph_that_will_not_arm_does_not_kill_the_function(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """THE COST. On master this ``OrderedArmError`` escaped setup, the hub
-    logged ``worker_function_unavailable reason=compile_cell_failed``, the pod
+    logged ``worker_function_unavailable reason=compile_compiled_graph_failed``, the pod
     never served, was reaped ``state_blocked_idle``, and a replacement was
     bought — three pods, twice.
 
@@ -467,19 +467,19 @@ def test_an_adopted_cell_that_will_not_arm_does_not_kill_the_function(
     events = _Events(monkeypatch)
     _refusing_arm(monkeypatch)
     monkeypatch.setattr(
-        fleet_cells, "enable_compiled",
-        lambda *a, **k: fleet_cells.ArmOutcome(armed=False))
+        fleet_compiled_graphs, "enable_compiled",
+        lambda *a, **k: fleet_compiled_graphs.ArmOutcome(armed=False))
     monkeypatch.setattr(
         executor_mod.compile_cache, "mandatory_serving", lambda pipe: False)
     ex = _executor(tmp_path)
     order = executor_mod._ArmOrder(
-        backend="aot_cell", publisher_org=POD_ORG, adopt=_hit())
+        backend="aot_compiled_graph", publisher_org=POD_ORG, adopt=_hit())
 
-    outcome = ex._enable_compiled(object(), _Cfg(), tmp_path / "cell.tar.gz",
+    outcome = ex._enable_compiled(object(), _Cfg(), tmp_path / "compiled_graph.tar.gz",
                                   None, order)
 
     assert outcome.armed is False
-    assert outcome.eager_reason == cell_adopt.EagerPhase.ADOPTED_CELL_REFUSED
+    assert outcome.eager_reason == compiled_graph_adopt.EagerPhase.ADOPTED_COMPILED_GRAPH_REFUSED
 
     # ...and it says so ON THE WIRE, under the kind that already carries the
     # rest of this journey, with the refusing gate named (pgw#1116's shape).
@@ -499,10 +499,10 @@ def test_a_HUB_ordered_arm_stays_terminal(
     _Events(monkeypatch)
     _refusing_arm(monkeypatch)
     ex = _executor(tmp_path)
-    order = executor_mod._ArmOrder(backend="aot_cell", publisher_org=POD_ORG)
+    order = executor_mod._ArmOrder(backend="aot_compiled_graph", publisher_org=POD_ORG)
 
-    with pytest.raises(fleet_cells.OrderedArmError) as exc:
-        ex._enable_compiled(object(), _Cfg(), tmp_path / "cell.tar.gz",
+    with pytest.raises(fleet_compiled_graphs.OrderedArmError) as exc:
+        ex._enable_compiled(object(), _Cfg(), tmp_path / "compiled_graph.tar.gz",
                             None, order)
     assert exc.value.reason == "artifact_receipt_refused"
 
@@ -510,7 +510,7 @@ def test_a_HUB_ordered_arm_stays_terminal(
 def test_a_mandatory_lane_still_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A w8a8/w4a4 lane serves ONLY from a cell (pgw#1010), so "boot as
+    """A w8a8/w4a4 lane serves ONLY from a compiled graph (pgw#1010), so "boot as
     yesterday" is not available: degrading there would serve numerics the
     release does not describe. Fail closed, named."""
     _Events(monkeypatch)
@@ -519,19 +519,19 @@ def test_a_mandatory_lane_still_fails_closed(
         executor_mod.compile_cache, "mandatory_serving", lambda pipe: True)
     ex = _executor(tmp_path)
     order = executor_mod._ArmOrder(
-        backend="aot_cell", publisher_org=POD_ORG, adopt=_hit())
+        backend="aot_compiled_graph", publisher_org=POD_ORG, adopt=_hit())
 
-    with pytest.raises(fleet_cells.OrderedArmError):
-        ex._enable_compiled(object(), _Cfg(), tmp_path / "cell.tar.gz",
+    with pytest.raises(fleet_compiled_graphs.OrderedArmError):
+        ex._enable_compiled(object(), _Cfg(), tmp_path / "compiled_graph.tar.gz",
                             None, order)
 
 
-def test_the_degrade_reruns_the_ordinary_policy_with_no_delivered_cell(
+def test_the_degrade_reruns_the_ordinary_policy_with_no_delivered_compiled_graph(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """"Boot as this pod booted yesterday" is a claim with a mechanism: the
     order is dropped and the FLEET policy runs with no artifact — bit for bit
-    the call this method makes on a boot-adopt MISS. The refused cell is not
+    the call this method makes on a boot-adopt MISS. The refused compiled graph is not
     handed back in, or the policy would retry the artifact that just refused.
     """
     _Events(monkeypatch)
@@ -544,14 +544,14 @@ def test_the_degrade_reruns_the_ordinary_policy_with_no_delivered_cell(
                 **kw: Any) -> Any:
         seen.append((artifact, kw.get("delivered_ref"),
                      kw.get("delivered_digest")))
-        return fleet_cells.ArmOutcome(armed=True)
+        return fleet_compiled_graphs.ArmOutcome(armed=True)
 
-    monkeypatch.setattr(fleet_cells, "enable_compiled", _policy)
+    monkeypatch.setattr(fleet_compiled_graphs, "enable_compiled", _policy)
     ex = _executor(tmp_path)
     order = executor_mod._ArmOrder(
-        backend="aot_cell", publisher_org=POD_ORG, adopt=_hit())
+        backend="aot_compiled_graph", publisher_org=POD_ORG, adopt=_hit())
 
-    outcome = ex._enable_compiled(object(), _Cfg(), tmp_path / "cell.tar.gz",
+    outcome = ex._enable_compiled(object(), _Cfg(), tmp_path / "compiled_graph.tar.gz",
                                   None, order)
 
     assert outcome.armed is True

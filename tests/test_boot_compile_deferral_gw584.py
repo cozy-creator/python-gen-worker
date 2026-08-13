@@ -4,8 +4,8 @@ The ie#501 run-17 churn: ``worker.py`` starts ``lifecycle.startup()`` and
 ``transport.run()`` concurrently, so boot-time ``ensure_setup`` could race
 ahead of HelloAck's ``apply_model_resolutions`` rebind and reach
 ``_fetch_compile_snapshot`` with bare authored refs and ``snapshots=None`` —
-a silent ``None`` (no cell selected) while materialization later followed the
-resolved w8a8 lane, fail-closing ``enable()`` generically. A compile cell,
+a silent ``None`` (no compiled graph selected) while materialization later followed the
+resolved w8a8 lane, fail-closing ``enable()`` generically. A compile compiled graph,
 exactly like a Slot pick (pgw#532), can only arrive via hub delivery, so boot
 must defer these functions the same way.
 
@@ -18,10 +18,10 @@ Covered here, over the REAL ``Lifecycle.startup()`` / ``Executor`` machinery
      failed. A ``Slot`` function's pgw#532 deferral holds.
   2. hub delivery (DesiredResidency-equivalent): after the HelloAck rebind,
      ``ensure_desired_instance`` with resolved w8a8 bindings + snapshots
-     selects the delivered Forge cell — selection and materialization derive
+     selects the delivered Forge compiled graph — selection and materialization derive
      from one resolved state.
-  3. a w8a8-resolved setup with NO cell in the snapshot map fails LOUD
-     (CompiledLaneUnavailableError naming the missing cell), never the
+  3. a w8a8-resolved setup with NO compiled graph in the snapshot map fails LOUD
+     (CompiledLaneUnavailableError naming the missing compiled graph), never the
      silent boot-path bail.
   4. the full w8a8 serve chain over deferral: desired-state warm mints the
      compile target, then a RunJob carrying ``required_compile`` for that
@@ -55,7 +55,7 @@ from gen_worker.lifecycle import Lifecycle
 from gen_worker.models import provision
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 
 
 @family("gw584-testfam")
@@ -103,8 +103,8 @@ AUTHORED_REF = "acme/qwen-image"
 #: the w8a8 lane below is stated the way production states it.
 RESOLVED_REF = AUTHORED_REF
 RESOLVED_LANE = "fp8-w8a8-dynamic+compiled"
-CELL_REF = f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9-w8a8"
-PLAIN_CELL_REF = f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9"
+COMPILED_GRAPH_REF = f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9-w8a8"
+PLAIN_COMPILED_GRAPH_REF = f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9"
 
 
 def _compile_spec(setup_calls: List[str]) -> EndpointSpec:
@@ -161,25 +161,25 @@ def _snapshot(digest: str) -> pb.Snapshot:
         url="http://r2.invalid/presigned")])
 
 
-def _cell_artifact(tmp_path: Path) -> Path:
-    """A real packed cell tarball, in the format this repository can WRITE.
+def _compiled_graph_artifact(tmp_path: Path) -> Path:
+    """A real packed compiled graph tarball, in the format this repository can WRITE.
 
-    pgw#1181 retargeted this from `compile_cache.pack` (the whole-cell
+    pgw#1181 retargeted this from `compile_cache.pack` (the whole-compiled graph
     `torch-inductor-cache` tarball, no writer since pgw#1178, deleted here)
-    onto the exported `aot-inductor` cell, through the same shared harness the
-    publish-path tests use. What the rows below need is a cell ON DISK that
+    onto the exported `aot-inductor` compiled graph, through the same shared harness the
+    publish-path tests use. What the rows below need is a compiled graph ON DISK that
     the executor's snapshot/selection plumbing carries; building it out of a
     format nothing writes made them fixtures constructing a shape production
     cannot produce (§4.34)."""
     from gen_worker import aot_serve
-    from harness.cell_meta import exported_cell_meta
+    from harness.compiled_graph_meta import exported_compiled_graph_meta
 
     work = tmp_path / "cap"
     work.mkdir(parents=True, exist_ok=True)
     (work / aot_serve.PACKAGE_NAME).write_bytes(b"\x00not-a-real-pt2")
     out = tmp_path / "minted"
     out.mkdir(exist_ok=True)
-    return aot_serve.pack(work, out / "cell.tar.gz", exported_cell_meta(family=FAMILY))
+    return aot_serve.pack(work, out / "compiled_graph.tar.gz", exported_compiled_graph_meta(family=FAMILY))
 
 
 def _harness(tmp_path: Path, monkeypatch, specs: List[EndpointSpec]):
@@ -192,7 +192,7 @@ def _harness(tmp_path: Path, monkeypatch, specs: List[EndpointSpec]):
         sent.append(msg)
 
     ex = Executor(specs, _send)
-    artifact = _cell_artifact(tmp_path)
+    artifact = _compiled_graph_artifact(tmp_path)
 
     async def _fake_download(ref: str, **kwargs: Any) -> Path:
         p = tmp_path / ref.replace("/", "_").replace(":", "_").replace("#", "_")
@@ -225,11 +225,11 @@ def _harness(tmp_path: Path, monkeypatch, specs: List[EndpointSpec]):
     return ex, sent, enables
 
 
-def _mint_enable(cell_ref: str, digest: str, artifact_path: Path):
+def _mint_enable(compiled_graph_ref: str, digest: str, artifact_path: Path):
     """pgw#904: an advertised identity now comes from the worker's OWN mint
-    (delivered-cell selection is deleted); stamp it the way the live fleet
+    (delivered-compiled graph selection is deleted); stamp it the way the live fleet
     policy does — an ArmOutcome carrying the finalized SelfMint."""
-    from gen_worker import fleet_cells
+    from gen_worker import fleet_compiled_graphs
 
     def _enable(pipe, cfg, cache_dir=None, artifact=None, publisher=None,
                 delegate=None, delivered_ref="", delivered_digest=""):
@@ -244,8 +244,8 @@ def _mint_enable(cell_ref: str, digest: str, artifact_path: Path):
             "originals": [],
             "regional_mods": [],
         })
-        return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
-            family=FAMILY, cell_key=cell_ref.rsplit("#", 1)[-1], ref=cell_ref,
+        return fleet_compiled_graphs.ArmOutcome(armed=True, self_mint=fleet_compiled_graphs.SelfMint(
+            family=FAMILY, compiled_graph_key=compiled_graph_ref.rsplit("#", 1)[-1], ref=compiled_graph_ref,
             snapshot_digest=digest, artifact=artifact_path))
 
     return _enable
@@ -308,11 +308,11 @@ def test_boot_defers_compile_declared_function(tmp_path, monkeypatch, caplog) ->
 
 
 # ---------------------------------------------------------------------------
-# 3. w8a8 without a delivered cell still fails LOUD when the arm is unproven
+# 3. w8a8 without a delivered compiled graph still fails LOUD when the arm is unproven
 # ---------------------------------------------------------------------------
 
 
-def test_w8a8_setup_without_cell_degrades_to_explicit_eager(
+def test_w8a8_setup_without_compiled_graph_degrades_to_explicit_eager(
     tmp_path, monkeypatch,
 ) -> None:
     """gw#587 moved the refusal to the proof gate; pgw#672 changed its
@@ -365,10 +365,10 @@ def test_fenced_runjob_serves_after_desired_warm(tmp_path, monkeypatch) -> None:
     setup_calls: List[str] = []
     ex, sent, _enables = _harness(tmp_path, monkeypatch,
                                   [_compile_spec(setup_calls)])
-    from gen_worker import fleet_cells as fleet_cells_mod
+    from gen_worker import fleet_compiled_graphs as fleet_compiled_graphs_mod
     monkeypatch.setattr(
-        fleet_cells_mod, "enable_compiled",
-        _mint_enable(CELL_REF, "bb" * 32, tmp_path / "cell.tar.gz"))
+        fleet_compiled_graphs_mod, "enable_compiled",
+        _mint_enable(COMPILED_GRAPH_REF, "bb" * 32, tmp_path / "compiled_graph.tar.gz"))
     _startup(ex)
     assert setup_calls == []  # boot deferred
     _apply_hello_ack(ex)
@@ -388,11 +388,11 @@ def test_fenced_runjob_serves_after_desired_warm(tmp_path, monkeypatch) -> None:
         input_payload=msgspec.msgpack.encode(_In(prompt="a cat")),
         models=[pb.ModelBinding(slot="pipeline", ref=RESOLVED_REF)],
         snapshots={RESOLVED_REF: _snapshot(held["pipeline"]),
-                   CELL_REF: _snapshot("bb" * 32)},
+                   COMPILED_GRAPH_REF: _snapshot("bb" * 32)},
         required_compile=pb.RequiredCompileExecution(
             target_incarnation_id=target.incarnation_id,
-            cell_ref=target.active_compile_ref,
-            cell_snapshot_digest=target.active_compile_snapshot_digest,
+            compiled_graph_ref=target.active_compile_ref,
+            compiled_graph_snapshot_digest=target.active_compile_snapshot_digest,
             contract_digest=target.contract_digest,
         ),
     )
@@ -435,10 +435,10 @@ def test_plain_execution_lane_runjob_cold_setup_after_deferral(tmp_path, monkeyp
     setup_calls: List[str] = []
     ex, sent, _enables = _harness(tmp_path, monkeypatch,
                                   [_plain_compile_spec(setup_calls)])
-    from gen_worker import fleet_cells as fleet_cells_mod
+    from gen_worker import fleet_compiled_graphs as fleet_compiled_graphs_mod
     monkeypatch.setattr(
-        fleet_cells_mod, "enable_compiled",
-        _mint_enable(PLAIN_CELL_REF, "bb" * 32, tmp_path / "cell.tar.gz"))
+        fleet_compiled_graphs_mod, "enable_compiled",
+        _mint_enable(PLAIN_COMPILED_GRAPH_REF, "bb" * 32, tmp_path / "compiled_graph.tar.gz"))
     _startup(ex)
     assert setup_calls == []  # boot deferred
 
@@ -452,7 +452,7 @@ def test_plain_execution_lane_runjob_cold_setup_after_deferral(tmp_path, monkeyp
     assert res.status == pb.JOB_STATUS_OK, res.safe_message
     assert len(setup_calls) == 1
     (target,) = ex.compile_targets()
-    assert target.active_compile_ref == PLAIN_CELL_REF
+    assert target.active_compile_ref == PLAIN_COMPILED_GRAPH_REF
 
 
 def test_conversion_kind_never_reports_loading(tmp_path, monkeypatch):

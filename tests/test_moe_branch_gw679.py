@@ -263,7 +263,7 @@ def test_lora_bucket_container_is_armed_on_both_experts() -> None:
     assert w8a8_lora.pipeline_branch_bucket(pipe) == 32
     # The lane STRING is unchanged by MoE support — how many experts a family
     # has is a property of the pipeline class, not of the graph family, so
-    # published cell keys keep their meaning.
+    # published compiled graph keys keep their meaning.
     assert pipe._cozy_weight_lane == "lora32"
 
     pipe._cozy_compile = object()

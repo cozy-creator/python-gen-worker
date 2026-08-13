@@ -1,7 +1,7 @@
 """pgw#1116: a boot-adopt refusal must NAME ITS GATE, on the wire.
 
 The measured defect (pgw#1108's POD PROOF, three real pods on 0.103.0):
-``/v1/worker/cells/resolve`` was called **zero** times, every pod self-minted,
+``/v1/worker/compiled graphs/resolve`` was called **zero** times, every pod self-minted,
 and nothing off-pod could say why — ``BootAdoptOutcome.reason``/``.detail``/
 ``.derived_key``/``.derive_ms`` had zero readers outside ``boot_adopt.py`` (the
 executor consumed only ``.adoption``), and the executor's own three pre-attempt
@@ -19,7 +19,7 @@ What is proved here:
    itself fails here rather than becoming the next silent one.
 3. **A pod that DERIVED a key and missed is distinguishable from a pod that
    never derived one** (the issue's regression box).
-4. **A boot with no local cell and a reachable hub actually issues the resolve
+4. **A boot with no local compiled graph and a reachable hub actually issues the resolve
    call** — driven end to end through the real ``Executor._boot_adopt``, the
    real ``boot_key.derive`` (three structure-only trace children, fake tensors,
    no compile anywhere) and a real HTTP hub, against ``examples/micro-diffusion``
@@ -42,7 +42,7 @@ from typing import Any, Dict, Iterator, List
 
 import pytest
 
-from gen_worker import activity, boot_adopt, boot_key, cell_resolve
+from gen_worker import activity, boot_adopt, boot_key, compiled_graph_resolve
 from gen_worker import executor as executor_mod
 
 
@@ -69,14 +69,14 @@ def _empty_local_store(
     monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
     """pgw#1127: the pre-derive gate asks whether ANYBODY could answer, and this
-    machine's own cell store is one of the two answerers. Pin it to an empty
+    machine's own compiled graph store is one of the two answerers. Pin it to an empty
     root so every row here reads a fact about the test rather than about
-    whatever `~/.cache/cozy/compile-cells` happens to hold on the box."""
-    from gen_worker import local_cell_store
+    whatever `~/.cache/cozy/compile-compiled graphs` happens to hold on the box."""
+    from gen_worker import local_compiled_graph_store
 
     monkeypatch.setenv(
-        local_cell_store.ENV_STORE_DIR,
-        str(tmp_path_factory.mktemp("empty-cells")))
+        local_compiled_graph_store.ENV_STORE_DIR,
+        str(tmp_path_factory.mktemp("empty-compiled_graphs")))
 
 
 @pytest.fixture
@@ -173,15 +173,15 @@ def test_the_vocabulary_names_the_gates_that_used_to_return_a_bare_none() -> Non
     """The three executor pre-attempt gates are the ones that produced NOTHING
     — not even a discarded reason. They are the reason one pod could not name
     its own refusal."""
-    # pgw#1127 replaced `no_hub` with `no_cell_source`: the gate now refuses
+    # pgw#1127 replaced `no_hub` with `no_compiled_graph_source`: the gate now refuses
     # only when BOTH answerers are absent (no hub AND an empty local store),
-    # because the derived ck1 key is `local_cell_store`'s own address.
+    # because the derived ck1 key is `local_compiled_graph_store`'s own address.
     for token in ("no_export_declaration", "declaration_unreadable",
-                  "no_cell_source"):
+                  "no_compiled_graph_source"):
         assert token in boot_adopt.GATE_REASONS
     assert "no_hub" not in boot_adopt.REASONS, (
         "a token nothing can emit is a query nobody can write — pgw#1127 "
-        "split it into `no_cell_source` (pre-derive, nobody at all) and "
+        "split it into `no_compiled_graph_source` (pre-derive, nobody at all) and "
         "`local_miss_no_hub` (derived, this machine does not hold it, and "
         "there is no hub either)")
 
@@ -205,7 +205,7 @@ class _Spec:
     module = "micro_diffusion.main"
     compile = _Cfg()
 
-    def compile_cell(self) -> _Cfg:
+    def compile_compiled_graph(self) -> _Cfg:
         return _Cfg()
 
 
@@ -239,7 +239,7 @@ def _executor(tmp_path: Path) -> Any:
         (
             "declaration_unreadable",
             lambda mp: mp.setattr(
-                executor_mod.aot_declaration, "cell_plans",
+                executor_mod.aot_declaration, "compiled_graph_plans",
                 _raise(ValueError("two mint plans share entry name"))),
             "share entry name",
         ),
@@ -252,7 +252,7 @@ def test_each_pre_attempt_gate_names_itself_on_the_wire(
     monkeypatch.setattr(
         executor_mod.aot_mint, "export_declaration", lambda f: object())
     monkeypatch.setattr(
-        executor_mod.aot_declaration, "cell_plans", lambda d: [object()])
+        executor_mod.aot_declaration, "compiled_graph_plans", lambda d: [object()])
     monkeypatch.setattr(
         executor_mod.boot_adopt, "attempt",
         _raise(AssertionError("attempt must not be reached past this gate")))
@@ -274,7 +274,7 @@ def test_each_pre_attempt_gate_names_itself_on_the_wire(
     assert expect in row.detail
 
 
-def test_no_cell_source_names_which_half_of_the_readiness_was_missing(
+def test_no_compiled_graph_source_names_which_half_of_the_readiness_was_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, events: List[Any],
 ) -> None:
     from gen_worker.procsplit import broker
@@ -282,7 +282,7 @@ def test_no_cell_source_names_which_half_of_the_readiness_was_missing(
     monkeypatch.setattr(
         executor_mod.aot_mint, "export_declaration", lambda f: object())
     monkeypatch.setattr(
-        executor_mod.aot_declaration, "cell_plans", lambda d: [object()])
+        executor_mod.aot_declaration, "compiled_graph_plans", lambda d: [object()])
     monkeypatch.setattr(broker, "_broker", None, raising=False)
 
     ex = _executor(tmp_path)
@@ -292,11 +292,11 @@ def test_no_cell_source_names_which_half_of_the_readiness_was_missing(
     (out,) = ex._boot_adopt(_Spec(), {})
     # pgw#1127: the same sentence, under the token that is now true — the
     # detail is what an operator greps, so it is deliberately unchanged.
-    assert out.reason == "no_cell_source"
+    assert out.reason == "no_compiled_graph_source"
     row = _one(events)
-    assert row.phase == "no_cell_source"
+    assert row.phase == "no_compiled_graph_source"
     assert "base_url=<unset>" in row.detail and "seam=down" in row.detail
-    assert "own cell store is empty" in row.detail
+    assert "own compiled_graph store is empty" in row.detail
 
 
 def test_the_gates_are_pairwise_distinguishable(
@@ -310,7 +310,7 @@ def test_the_gates_are_pairwise_distinguishable(
         lambda u: seen.append(u.phase) if u.kind == activity.KIND_BOOT_ADOPT
         else None, raising=False)
     monkeypatch.setattr(
-        executor_mod.aot_declaration, "cell_plans", lambda d: [object()])
+        executor_mod.aot_declaration, "compiled_graph_plans", lambda d: [object()])
 
     ex = _executor(tmp_path)
     monkeypatch.setattr(
@@ -319,11 +319,11 @@ def test_the_gates_are_pairwise_distinguishable(
     monkeypatch.setattr(
         executor_mod.aot_mint, "export_declaration", lambda f: object())
     monkeypatch.setattr(
-        executor_mod.aot_declaration, "cell_plans", _raise(ValueError("nope")))
+        executor_mod.aot_declaration, "compiled_graph_plans", _raise(ValueError("nope")))
     ex._boot_adopt(_Spec(), {})
     ex.file_base_url = ""
     monkeypatch.setattr(
-        executor_mod.aot_declaration, "cell_plans", lambda d: [object()])
+        executor_mod.aot_declaration, "compiled_graph_plans", lambda d: [object()])
     ex._boot_adopt(_Spec(), {})
 
     assert len(seen) == len(set(seen)) == 3, (
@@ -336,7 +336,7 @@ def test_the_gates_are_pairwise_distinguishable(
 
 
 def _derived(wall_ms: int = 1234) -> Any:
-    from gen_worker import cell_key as ck
+    from gen_worker import compiled_graph_key as ck
 
     return boot_key.DerivedKey(
         # pgw#1176: a boot derives a KEY SET. These declarations trace to one
@@ -350,10 +350,10 @@ def _derived(wall_ms: int = 1234) -> Any:
         wall_ms=wall_ms)
 
 
-class _Cell:
+class _CompiledGraph:
     publisher_org = "org-a"
     publisher_tier = "platform"
-    cell_ref = "root/family-micro-diffusion#" + KEY
+    compiled_graph_ref = "root/family-micro-diffusion#" + KEY
     content_digest = "sha256:" + "ab" * 32
 
 
@@ -370,9 +370,9 @@ def _attempt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **wires: Any) -> A
     if "derive" in wires:
         monkeypatch.setattr(boot_key, "derive", wires["derive"])
     if "resolve" in wires:
-        monkeypatch.setattr(cell_resolve, "resolve", wires["resolve"])
+        monkeypatch.setattr(compiled_graph_resolve, "resolve", wires["resolve"])
     if "materialize" in wires:
-        monkeypatch.setattr(cell_resolve, "materialize", wires["materialize"])
+        monkeypatch.setattr(compiled_graph_resolve, "materialize", wires["materialize"])
     return boot_adopt.attempt(
         function="generate", modules=("micro_diffusion.main",), cfg=_Cfg(),
         slots={}, declared_hint=3,
@@ -381,7 +381,7 @@ def _attempt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **wires: Any) -> A
 
 
 def _refuse_hub(code: str) -> Any:
-    return _raise(cell_resolve.CellResolveRefused(code, "the hub said so", status=409))
+    return _raise(compiled_graph_resolve.CompiledGraphResolveRefused(code, "the hub said so", status=409))
 
 
 @pytest.mark.parametrize(
@@ -398,9 +398,9 @@ def _refuse_hub(code: str) -> Any:
             "child_died", "trace child exited 1 without a report"))}),
         ("derive_failed", {"derive": _raise(MemoryError("no headroom"))}),
         # Step 2 — the ask. A typed hub refusal is NOT a miss.
-        ("cell_resolve_ambiguous",
+        ("compiled_graph_resolve_ambiguous",
          {"derive": lambda **_k: _derived(), "resolve": _refuse_hub(
-             "cell_resolve_ambiguous")}),
+             "compiled_graph_resolve_ambiguous")}),
         ("resolve_unreachable",
          {"derive": lambda **_k: _derived(),
           "resolve": _raise(OSError("connection reset"))}),
@@ -409,7 +409,7 @@ def _refuse_hub(code: str) -> Any:
         # Step 3 — materialize + the pgw#1031 witness floor.
         ("materialize_failed",
          {"derive": lambda **_k: _derived(),
-          "resolve": lambda *_a, **_k: _Cell(),
+          "resolve": lambda *_a, **_k: _CompiledGraph(),
           "materialize": _raise(RuntimeError("content_digest_mismatch"))}),
     ],
 )
@@ -459,7 +459,7 @@ def test_a_pod_that_derived_and_missed_is_not_a_pod_that_never_derived(
 
 
 # ---------------------------------------------------------------------------
-# 4. END TO END: a boot with no local cell and a reachable hub ASKS
+# 4. END TO END: a boot with no local compiled graph and a reachable hub ASKS
 # ---------------------------------------------------------------------------
 
 
@@ -473,7 +473,7 @@ class _ResolveHub(BaseHTTPRequestHandler):
         raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         body = json.loads(raw or b"{}")
         self.server.calls.append((self.path, body))  # type: ignore[attr-defined]
-        # th#1788: the live hub withholds every self-minted cell from a resolve,
+        # th#1788: the live hub withholds every self-minted compiled graph from a resolve,
         # so a MISS is what a correct worker gets today. The property under test
         # is that it ASKED.
         out = json.dumps({"found": False}).encode()
@@ -559,7 +559,7 @@ def test_a_cold_boot_with_a_reachable_hub_actually_issues_the_resolve(
     """THE end-to-end property, on the vehicle the three pods ran.
 
     Real ``Executor._boot_adopt`` -> real ``boot_key.derive`` (structure-only
-    trace children on fake tensors, no compile) -> real ``cell_resolve.resolve``
+    trace children on fake tensors, no compile) -> real ``compiled_graph_resolve.resolve``
     -> a real HTTP hub. What the pods' GIN log counted zero of is counted here,
     and the decision is READABLE afterwards, which is the half that was missing.
     """
@@ -592,12 +592,12 @@ def test_a_cold_boot_with_a_reachable_hub_actually_issues_the_resolve(
     # the terminus, which every class reaches identically here.
     out = ex._boot_adopt(spec, slots)[0]
 
-    resolves = [c for c in hub.calls if c[0] == cell_resolve.RESOLVE_PATH]
+    resolves = [c for c in hub.calls if c[0] == compiled_graph_resolve.RESOLVE_PATH]
     assert len(resolves) == 3, (
         "the worker did not ask the hub by its derived key — this is the pod "
         f"defect, reproduced off-pod. Hub saw: {hub.calls}")
     assert resolves[0][1] == {
-        "family": "micro-diffusion", "cell_key": out.derived_key}
+        "family": "micro-diffusion", "compiled_graph_key": out.derived_key}
     assert out.derived_key.startswith("ek1-")
     assert out.reason == "miss"
 
@@ -663,7 +663,7 @@ def test_the_same_boot_derives_a_key_with_accelerate_UNIMPORTABLE(
         f"`accelerate`: {out.detail}")
     assert out.reason == "miss", out.detail
     assert out.derived_key.startswith("ek1-")
-    resolves = [c for c in hub.calls if c[0] == cell_resolve.RESOLVE_PATH]
+    resolves = [c for c in hub.calls if c[0] == compiled_graph_resolve.RESOLVE_PATH]
     assert len(resolves) == 3, (
         "an image without `accelerate` must still ASK — this is the pgw#1123 "
         f"pod defect, reproduced off-pod. Hub saw: {hub.calls}")

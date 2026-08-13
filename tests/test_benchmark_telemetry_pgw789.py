@@ -8,7 +8,7 @@ BUILT BUT NEVER CONNECTED, each of which was measured absent on the live chaos
 stack before the fix:
 
 * ``serving_mode.py`` was imported by nothing but its own unit test, so
-  ``JobMetrics.serving_mode`` / ``served_cell_ref`` / ``sm`` / ``steps`` /
+  ``JobMetrics.serving_mode`` / ``served_compiled_graph_ref`` / ``sm`` / ``steps`` /
   ``width`` / ``height`` were never populated. Measured: 0 of 416
   ``request_state`` rows carried ``serving_mode``, so
   ``/v1/admin/request-latency`` could not separate AOT from JIT from eager over
@@ -83,12 +83,12 @@ def test_job_metrics_carry_the_serving_dimensions_on_the_wire() -> None:
 
     assert res.status == pb.JOB_STATUS_OK
     m = res.metrics
-    # This endpoint declares no compile cell, so the honest answer is eager —
+    # This endpoint declares no compile compiled graph, so the honest answer is eager —
     # and it must be the WORD "eager", not an empty string. "" is
     # indistinguishable from "a worker too old to report", which is exactly the
     # ambiguity that made the aggregate unusable.
     assert m.serving_mode == serving_mode.MODE_EAGER
-    assert m.served_cell_ref == ""
+    assert m.served_compiled_graph_ref == ""
     assert m.served_eager_fallback is False
     # pgw#824: and neither may the REASON be an empty string. "" here was the
     # same ambiguity one level down — it could not tell "this release declares

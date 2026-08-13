@@ -6,7 +6,7 @@ the 11.09 GiB ceiling. Then the worker's endpoint instances were torn down
 under the drain path and the mint was abandoned, and the ENTIRE phase table
 for those 29 minutes was one row::
 
-    status=abandoned total_s=1741.33 — no cell produced
+    status=abandoned total_s=1741.33 — no compiled graph produced
 
 **Zero `entry:` rows. No `pool` row.** K, its binding constraint, every
 per-entry timing and every peak were measured and thrown away, and the
@@ -34,7 +34,7 @@ import pytest
 
 from gen_worker import aot_compile_pool as pool
 from gen_worker import aot_mint, mint_delegate, mint_process
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 
 _GIB = 1 << 30
 
@@ -104,9 +104,9 @@ def test_an_abandoned_outcome_emits_the_rows_it_measured(
 
     request = mint_process.MintRequest(
         function="f", modules=(), family="sdxl", arm_token="k",
-        target=str(tmp_path / "cell.tar.gz"), work_root=str(tmp_path),
+        target=str(tmp_path / "compiled_graph.tar.gz"), work_root=str(tmp_path),
         report=str(tmp_path / "report.json"),
-        cfg=mint_process.CompileCellSpec(),
+        cfg=mint_process.CompileCompiledGraphSpec(),
         phases_snapshot=str(snapshot))
     recovered = mint_process._read_phase_snapshot(request.phases_snapshot)
     assert recovered, "the parent could not read what the child wrote"
@@ -328,7 +328,7 @@ def test_every_mint_beat_feeds_both_survivors(
     chaos worktree the source file is not a stable object, so a source-text
     assertion tests the file rather than the behaviour and can go red without
     the behaviour changing. Driven through the real `mint()` entrypoint
-    instead: `_mint_cell` is replaced with one that beats once and raises, so
+    instead: `_mint_compiled_graph` is replaced with one that beats once and raises, so
     the REAL beat wrapper `mint()` installs is what runs.
     """
     snapshot = tmp_path / mint_process.PHASES_SNAPSHOT_NAME
@@ -343,7 +343,7 @@ def test_every_mint_beat_feeds_both_survivors(
         progress.beat(aot_mint.PHASE_INDUCTOR_COMPILE, 1, 36, "unet/row=0")
         raise aot_mint.MintRefused("stop here — the beat is what is under test")
 
-    monkeypatch.setattr(aot_mint, "_mint_cell", _one_beat)
+    monkeypatch.setattr(aot_mint, "_mint_compiled_graph", _one_beat)
     with pytest.raises(aot_mint.MintRefused):
         aot_mint.mint(None, None, tmp_path / "out", phase_snapshot=snapshot)
 
@@ -477,13 +477,13 @@ def test_every_hub_dial_reads_ONE_refreshable_credential() -> None:
 
 def test_the_unchecked_announcement_is_gone_because_the_gate_landed(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    """CP12 shipped `cell_numerics phase=unchecked` — an arm that stated, on
+    """CP12 shipped `compiled_graph_numerics phase=unchecked` — an arm that stated, on
     the wire, that nobody had checked it. That was the right stopgap and the
     wrong end state, and pgw#868 replaced it with the measurement.
 
     Two things are pinned here so the stopgap cannot creep back:
 
-    * `_announce_unchecked_numerics` no longer exists. A cell that armed while
+    * `_announce_unchecked_numerics` no longer exists. A compiled graph that armed while
       announcing it was unchecked is exactly what the gate refuses now.
     * `arm_aot` FAILS CLOSED when there is nothing to measure. The old shape
       of this test drove `arm_aot` with a stub `enable` and asserted True;
@@ -515,9 +515,9 @@ def test_the_unchecked_announcement_is_gone_because_the_gate_landed(
     # this test is about is unchanged: an arm that could not be MEASURED is a
     # refusal, never a silent `unchecked` announcement.
     assert provision.arm_aot(
-        object(), cfg, None, Path("cell.pt2"), 0,
+        object(), cfg, None, Path("compiled_graph.pt2"), 0,
         verify_numerics=True).armed is False
-    rows = [(d, p) for k, d, p in said if k == activity_mod.KIND_CELL_NUMERICS]
+    rows = [(d, p) for k, d, p in said if k == activity_mod.KIND_COMPILED_GRAPH_NUMERICS]
     assert rows, "an arm that could not be measured said nothing"
     detail, phase = rows[-1]
     assert phase == "unmeasurable"

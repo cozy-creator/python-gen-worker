@@ -40,7 +40,7 @@ from typing import Any, List, Tuple
 import msgspec
 import pytest
 
-from gen_worker import Compile, MintBlocker, fleet_cells
+from gen_worker import Compile, MintBlocker, fleet_compiled_graphs
 from gen_worker import mint_child, mint_delegate
 from gen_worker import mint_process as mp
 from gen_worker import config as gw_config
@@ -51,8 +51,8 @@ from gen_worker.api.derive import (
 from gen_worker.api.export_contract import (
     DeclarationError, open_blockers, reset_export_declarations,
 )
-from gen_worker.cell_adopt import AdoptOutcome
-from gen_worker.registry import CompileCell
+from gen_worker.compiled_graph_adopt import AdoptOutcome
+from gen_worker.registry import CompileCompiledGraph
 
 from harness import blocked_endpoint_pgw1115 as blocked
 
@@ -124,7 +124,7 @@ def test_a_callable_is_not_a_blocker() -> None:
 
 
 def test_blockers_are_NOT_a_contract_axis_so_resolving_one_never_re_keys() -> None:
-    """A blocked family has no published cell to re-key, but a family that
+    """A blocked family has no published compiled graph to re-key, but a family that
     RESOLVES its last blocker must not find its first mint keyed differently
     from the declaration it was reviewed against."""
     assert contract_delta(blocked.BLOCKED_COMPILE, _clean()) == {}
@@ -270,23 +270,23 @@ def _miss(monkeypatch: pytest.MonkeyPatch) -> Any:
     pgw#853 fixture, which is the production shape of this decision)."""
     gw_config.reload_for_test()
     monkeypatch.setattr(
-        fleet_cells.provision, "enable_compiled",
-        lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_cell"))
-    monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda p, c, **_kw: True)
-    monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
-    monkeypatch.setattr(fleet_cells.cc, "apply_lora_execution_lane", lambda p, b, **_kw: None)
-    monkeypatch.setattr(fleet_cells.cc, "drop_lora_execution_lane", lambda p: None)
-    monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
-    monkeypatch.setattr(fleet_cells, "_PENDING", {})
+        fleet_compiled_graphs.provision, "enable_compiled",
+        lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_compiled_graph"))
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "has_compile_target", lambda p, c, **_kw: True)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "toolchain_present", lambda: True)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "apply_lora_execution_lane", lambda p, b, **_kw: None)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "drop_lora_execution_lane", lambda p: None)
+    monkeypatch.setattr(fleet_compiled_graphs, "_cuda_ready", lambda: True)
+    monkeypatch.setattr(fleet_compiled_graphs, "_PENDING", {})
     monkeypatch.setattr(
-        fleet_cells, "arm_identity",
+        fleet_compiled_graphs, "arm_identity",
         lambda *a, **k: type("_A", (), {
             "token": "arm1-" + "a" * 56,
             "facts_dict": lambda self: {}})())
-    monkeypatch.setattr(fleet_cells.cc, "mandatory_serving", lambda p: False)
-    monkeypatch.setattr(fleet_cells.cc, "arm_jit_intake", lambda p, c, **_kw: None)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "mandatory_serving", lambda p: False)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "arm_jit_intake", lambda p, c, **_kw: None)
     monkeypatch.setattr(
-        fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
+        fleet_compiled_graphs.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
     reset_export_declarations()
     yield
     reset_export_declarations()
@@ -297,7 +297,7 @@ def _miss(monkeypatch: pytest.MonkeyPatch) -> Any:
 def _events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
     seen: List[Tuple[str, str, str]] = []
     monkeypatch.setattr(
-        fleet_cells.activity_mod, "emit_event",
+        fleet_compiled_graphs.activity_mod, "emit_event",
         lambda kind, detail, phase="", duration_ms=0, **_kw: seen.append(
             (kind, phase, detail)))
     return seen
@@ -307,7 +307,7 @@ def _enable(decl: Compile, events: List[Tuple[str, str, str]]) -> Any:
     from gen_worker.api.export_contract import register_export_declaration
 
     register_export_declaration(decl, replace=True)
-    return fleet_cells.enable_compiled(
+    return fleet_compiled_graphs.enable_compiled(
         _Pipe(), _Cfg(), publisher=_Publisher(), delegate=True)  # type: ignore[arg-type]
 
 
@@ -361,11 +361,11 @@ def _blocked_request(tmp_path: Path) -> mp.MintRequest:
     tree.mkdir(parents=True, exist_ok=True)
     pending = SimpleNamespace(
         family=FAMILY, arm_token="ck1-blocked", recipe="aot",
-        cfg=CompileCell(shapes=((64, 64),), targets=("transformer",),
+        cfg=CompileCompiledGraph(shapes=((64, 64),), targets=("transformer",),
                         family=FAMILY, regional=False, text_len=128,
                         dynamic=(), lora_bucket=0, guidance_scales=(),
                         text_lens=()),
-        target=tmp_path / "cell.tar.gz", mint_root=tmp_path)
+        target=tmp_path / "compiled_graph.tar.gz", mint_root=tmp_path)
     task = mint_delegate.MintTask(
         pending=pending, pipe=object(), function="blocked-echo",
         modules=(HARNESS_MODULE,),

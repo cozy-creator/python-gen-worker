@@ -8,9 +8,9 @@ card (activation scale), and nobody was keeping that number: the instrumentation
 existed (`aot_compile_child._peak_device`, marked *"telemetry only"*) but the
 BANKING and the PROVENANCE died with `mint_budget.py`.
 
-WHY THE MACHINE AND NOT THE CELL MANIFEST — the argument that decided the shape
+WHY THE MACHINE AND NOT THE COMPILED GRAPH MANIFEST — the argument that decided the shape
 ------------------------------------------------------------------------------
-The manifest is written when a cell SEALS. **The mint that most needs measuring
+The manifest is written when a compiled graph SEALS. **The mint that most needs measuring
 is the one that OOMed and sealed nothing**, so a manifest-only bank has a writer
 that dies exactly when the interesting data exists. And the consumer is local:
 K is decided in the mint child, on this card, so a fleet table reachable only
@@ -133,7 +133,7 @@ def test_every_provenance_axis_SEPARATES_a_reading(axis: str, value: str) -> Non
 
 def test_graph_classes_do_not_share_a_row() -> None:
     """The whole reason this exists: `peak_child_device_bytes` was ONE number
-    for a whole cell — 18 classes on sdxl — which cannot answer "what does this
+    for a whole compiled graph — 18 classes on sdxl — which cannot answer "what does this
     class cost"."""
     mint_workers.record_entry_device_peak(_key("unet"), 5_000, 6_000)
     mint_workers.record_entry_device_peak(_key("vae.decode"), 100, 200)
@@ -171,7 +171,7 @@ def test_the_returned_rows_are_a_COPY() -> None:
 
 
 class _Outcome:
-    """The shape `build_cell` reads: a report on a terminus, a snapshot always."""
+    """The shape `build_compiled_graph` reads: a report on a terminus, a snapshot always."""
 
     def __init__(self, report: Any = None, partial: Any = None) -> None:
         self.report = report
@@ -184,8 +184,8 @@ class _Report:
 
 
 def test_a_FAILED_mint_leaves_a_bank_row() -> None:
-    """The deliverable, and the argument that chose this design over the cell
-    manifest: a mint that OOMs seals no cell and writes no manifest, and it is
+    """The deliverable, and the argument that chose this design over the compiled graph
+    manifest: a mint that OOMs seals no compiled graph and writes no manifest, and it is
     the attempt whose reading the next attempt most needs.
 
     The killed child writes no report at all — only the phase SNAPSHOT — so the
@@ -204,7 +204,7 @@ def test_a_FAILED_mint_leaves_a_bank_row() -> None:
 
 
 def test_a_mint_that_REACHED_a_terminus_banks_from_its_report() -> None:
-    """The other source. `build_cell` drains BOTH — the report when the child
+    """The other source. `build_compiled_graph` drains BOTH — the report when the child
     reached a terminus under its own power, the snapshot always — so neither
     kind of ending loses its measurement."""
     rows = {"unet": {"allocated_bytes": 1_500, "reserved_bytes": 2_500}}

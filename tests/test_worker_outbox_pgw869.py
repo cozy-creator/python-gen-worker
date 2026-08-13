@@ -150,7 +150,7 @@ def test_hub_killed_midactivity_replays_every_fact_exactly_once() -> None:
         during = [
             ("trace_graph", "26 evidence @ 0.99/s"),
             ("autotune", "per_entry_device_bytes=11881591040 basis=measured"),
-            ("publish", "cell ck1-aeed10f6 published"),
+            ("publish", "compiled_graph ck1-aeed10f6 published"),
         ]
         for phase, detail in during:
             activity_mod.emit_event(kind, detail, phase=phase)

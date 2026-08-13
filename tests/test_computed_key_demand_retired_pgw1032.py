@@ -3,9 +3,9 @@ producer since pgw#1010, so advertising it as deliverable demand advertised
 nothing.
 
 pgw#1059 finished the cut: the pre-trace "computed key" no longer EXISTS as
-a key at all. An obligation's identity is ``fleet_cells.arm_identity`` — an
-``arm1-``-prefixed token that ``cell_key.is_key`` rejects by SPELLING — and
-the only cell key there is is the STAMP ``aot_mint.cell_identity`` derives
+a key at all. An obligation's identity is ``fleet_compiled_graphs.arm_identity`` — an
+``arm1-``-prefixed token that ``compiled_graph_key.is_key`` rejects by SPELLING — and
+the only compiled graph key there is is the STAMP ``aot_mint.compiled_graph_identity`` derives
 from the artifact's own recorded facts (graph x envelope x sm x toolchain).
 The two spaces that pgw#1032/#1033 kept disjoint by a ``kind`` axis value
 are now disjoint by grammar, which no reader can miss.
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import pytest
 
-from gen_worker import aot_serve, cell_key, serving_mode
+from gen_worker import aot_serve, compiled_graph_key, serving_mode
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 FAMILY = "sdxl"
@@ -31,33 +31,33 @@ FAMILY = "sdxl"
 
 
 def test_an_arm_token_and_a_stamped_key_are_disjoint_by_grammar() -> None:
-    """pgw#1059: an obligation identity is not a cell key in any reader's
+    """pgw#1059: an obligation identity is not a compiled graph key in any reader's
     eyes — ``arm1-`` never passes ``is_key``, so every mechanism that keys
     a store of STAMPED keys structurally cannot consume one."""
-    from gen_worker import fleet_cells
+    from gen_worker import fleet_compiled_graphs
 
-    token = fleet_cells.ArmIdentity(facts=(("family", FAMILY),)).token
-    assert token.startswith(fleet_cells.ARM_SCHEME + "-")
-    assert not cell_key.is_key(token)
+    token = fleet_compiled_graphs.ArmIdentity(facts=(("family", FAMILY),)).token
+    assert token.startswith(fleet_compiled_graphs.ARM_SCHEME + "-")
+    assert not compiled_graph_key.is_key(token)
     assert aot_serve.ARTIFACT_KIND == "aot-inductor"
 
 
 def test_the_pre_trace_computed_key_no_longer_exists() -> None:
     """The producer of the computed key space is DELETED, not merely
-    unplugged: ``cell_key`` exposes no ``compute``/``from_artifact_metadata``
+    unplugged: ``compiled_graph_key`` exposes no ``compute``/``from_artifact_metadata``
     — the stamp derivation is the only key derivation there is."""
-    assert not hasattr(cell_key, "compute")
-    assert not hasattr(cell_key, "from_artifact_metadata")
-    assert not hasattr(cell_key, "stamp")
-    assert not hasattr(cell_key, "mismatch")
+    assert not hasattr(compiled_graph_key, "compute")
+    assert not hasattr(compiled_graph_key, "from_artifact_metadata")
+    assert not hasattr(compiled_graph_key, "stamp")
+    assert not hasattr(compiled_graph_key, "mismatch")
 
 
 def test_a_non_exported_kind_has_no_key_identity() -> None:
-    """The other direction of the same wall: only exported cells are keyed;
+    """The other direction of the same wall: only exported compiled graphs are keyed;
     a torch-inductor-cache artifact is refused by name."""
-    with pytest.raises(cell_key.CellKeyError, match="no entry-key identity"):
-        cell_key.from_entry_metadata(
-            {"kind": "torch-inductor-cache", "cell_key": "ek1-" + "b" * 56})
+    with pytest.raises(compiled_graph_key.CompiledGraphKeyError, match="no entry-key identity"):
+        compiled_graph_key.from_entry_metadata(
+            {"kind": "torch-inductor-cache", "compiled_graph_key": "ek1-" + "b" * 56})
 
 
 # ---------------------------------------------------------------------------
@@ -67,47 +67,47 @@ def test_a_non_exported_kind_has_no_key_identity() -> None:
 
 def test_a_compile_target_advertises_no_computed_key(monkeypatch) -> None:
     """RED before this issue: ``_refresh_compile_target`` computed a key and
-    stamped it on every target as ``requested_cell_key``. A target now states
+    stamped it on every target as ``requested_compiled_graph_key``. A target now states
     only what it IS serving."""
     from gen_worker import executor as executor_mod
 
     fields = {f.name for f in pb.CompileTarget.DESCRIPTOR.fields}
-    assert "requested_cell_key" in fields, (
+    assert "requested_compiled_graph_key" in fields, (
         "the wire field is retired by the th#1457/pgw#891 RunJob cut, not "
         "here — this test is about the PRODUCER")
     # ...and its axes twin is already gone: §4.28 / th#1751 W4 reserved 11,
     # because "forge mint parameters" was its only stated purpose.
-    assert "requested_cell_axes" not in fields
+    assert "requested_compiled_graph_axes" not in fields
 
-    assert not hasattr(executor_mod._CompileTargetRecord, "requested_cell_key")
-    assert not hasattr(executor_mod._CompileTargetRecord, "requested_cell_axes")
+    assert not hasattr(executor_mod._CompileTargetRecord, "requested_compiled_graph_key")
+    assert not hasattr(executor_mod._CompileTargetRecord, "requested_compiled_graph_axes")
 
 
-def test_the_executor_no_longer_produces_cell_lookups() -> None:
-    """``cell_lookups`` advertised SPECULATIVE computed keys — up to five base
+def test_the_executor_no_longer_produces_compiled_graph_lookups() -> None:
+    """``compiled_graph_lookups`` advertised SPECULATIVE computed keys — up to five base
     lanes per declared spec — into the same dead space. Its producer is gone;
     the wire field retires with the RunJob cut."""
     from gen_worker import executor as executor_mod
     from gen_worker import lifecycle as lifecycle_mod
     from gen_worker.procsplit import merge as merge_mod
 
-    assert not hasattr(executor_mod.Executor, "cell_lookups")
-    assert "cell_lookups" not in lifecycle_mod.__dict__.get("__source_marker__", "")
+    assert not hasattr(executor_mod.Executor, "compiled_graph_lookups")
+    assert "compiled_graph_lookups" not in lifecycle_mod.__dict__.get("__source_marker__", "")
     # The merge of G child deltas must not resurrect it either.
     merged = merge_mod.merge_state_deltas([
-        pb.StateDelta(cell_lookups=[pb.CellLookup(family="f", cell_key="ck1-a")]),
-        pb.StateDelta(cell_lookups=[pb.CellLookup(family="f", cell_key="ck1-b")]),
+        pb.StateDelta(compiled_graph_lookups=[pb.CompiledGraphLookup(family="f", compiled_graph_key="ck1-a")]),
+        pb.StateDelta(compiled_graph_lookups=[pb.CompiledGraphLookup(family="f", compiled_graph_key="ck1-b")]),
     ])
-    assert list(merged.cell_lookups) == []
+    assert list(merged.compiled_graph_lookups) == []
 
 
 def test_the_divergence_warning_is_gone_with_the_divergence() -> None:
-    """``_warn_cell_key_divergence`` compared the two spaces above and so fired
+    """``_warn_compiled_graph_key_divergence`` compared the two spaces above and so fired
     an ERROR on every healthy AOT boot (pgw#1033 silenced it as an interim and
     named this issue as the deleter)."""
     from gen_worker import executor as executor_mod
 
-    assert not hasattr(executor_mod.Executor, "_warn_cell_key_divergence")
+    assert not hasattr(executor_mod.Executor, "_warn_compiled_graph_key_divergence")
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +159,7 @@ def test_the_demand_echoing_build_entry_point_is_gone_entirely() -> None:
 
     pgw#1032 asserted the PARAMETER had left `compile_cache.build`'s signature.
     pgw#1035 then deleted `build` outright — the whole-pipeline dynamo mint had
-    no caller at all, and `aot_cells.discover` rejects the artifact kind it
+    no caller at all, and `aot_compiled_graphs.discover` rejects the artifact kind it
     produced. Absence of the function is the STRONGER form of the same claim
     (a parameter cannot come back to a function that does not exist), so this
     is the assertion that survives the merge of the two lanes.
@@ -185,11 +185,11 @@ def test_serving_tier_and_serving_mode_answer_DIFFERENT_questions(
     authority. They must NOT be, and this test pins why.
 
     ``serving_mode`` answers *what code ran this request*: a JIT-intake arm
-    compiles its own graphs, so ``jit_cell`` is the honest answer even though
+    compiles its own graphs, so ``jit_compiled_graph`` is the honest answer even though
     pgw#1010 left it naming no artifact. ``serving_tier`` answers *is this
-    worker serving from a CELL* — the hub reads it as ADOPTION evidence
-    (``WorkerServingCompiledTier`` -> ``WorkerAdoptedDeliveredCell``, th#1216),
-    so an intake pod reporting ``compiled`` would testify that the cell
+    worker serving from a COMPILED GRAPH* — the hub reads it as ADOPTION evidence
+    (``WorkerServingCompiledTier`` -> ``WorkerAdoptedDeliveredCompiledGraph``, th#1216),
+    so an intake pod reporting ``compiled`` would testify that the compiled graph
     exchange worked on a pod that adopted nothing. The divergence the issue
     called a defect is the design; `test_guard_miss_pgw680` and
     `test_eager_first_boot_pgw671` assert the same contract from the other
@@ -200,16 +200,16 @@ def test_serving_tier_and_serving_mode_answer_DIFFERENT_questions(
     monkeypatch.setattr(cc, "is_compile_armed", lambda p: p is pipe)
 
     # Same pod, same instant, two honest answers.
-    assert serving_mode.classify_mode("", pipe) == serving_mode.MODE_JIT_CELL
+    assert serving_mode.classify_mode("", pipe) == serving_mode.MODE_JIT_COMPILED_GRAPH
     assert cc.is_compile_armed(pipe) is True
-    # A cell ref IS what makes the tier compiled — nothing else.
+    # A compiled graph ref IS what makes the tier compiled — nothing else.
     assert serving_mode.classify_mode(
-        f"root/family-{FAMILY}#ek1-" + "b" * 56, None) == serving_mode.MODE_JIT_CELL
+        f"root/family-{FAMILY}#ek1-" + "b" * 56, None) == serving_mode.MODE_JIT_COMPILED_GRAPH
 
 
 def test_an_armed_target_still_advertises_the_identity_it_serves() -> None:
     """The surviving half: the ACTIVE (stamped) ref plus its snapshot digest.
-    This is what ``hubPublishedAdvertisedCell`` verifies against the hub's own
+    This is what ``hubPublishedAdvertisedCompiledGraph`` verifies against the hub's own
     store before W8A8 dispatch rides it — the load-bearing fence."""
     from gen_worker import executor as executor_mod
 
@@ -235,4 +235,4 @@ def test_an_armed_target_still_advertises_the_identity_it_serves() -> None:
     )
     assert wire.active_compile_ref == ref
     assert wire.active_compile_snapshot_digest == "sha256:aa"
-    assert not wire.requested_cell_key
+    assert not wire.requested_compiled_graph_key

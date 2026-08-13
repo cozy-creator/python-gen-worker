@@ -15,7 +15,7 @@ torch = pytest.importorskip("torch")
 
 from gen_worker import compile_cache as cc
 from gen_worker import env_seal
-from gen_worker.registry import CompileCell
+from gen_worker.registry import CompileCompiledGraph
 
 
 @pytest.fixture(autouse=True)
@@ -41,14 +41,14 @@ def _restore_global_matmul_flags() -> Iterator[None]:
     torch.backends.cudnn.benchmark = benchmark
 
 
-def _cfg(**overrides: Any) -> CompileCell:
+def _cfg(**overrides: Any) -> CompileCompiledGraph:
     base: Dict[str, Any] = dict(
         shapes=((64, 64),), targets=("transformer",), family="toyfam",
         regional=False, text_len=None, dynamic=(), lora_bucket=0,
         guidance_scales=(), text_lens=(),
     )
     base.update(overrides)
-    return CompileCell(**base)
+    return CompileCompiledGraph(**base)
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +141,7 @@ def test_loaded_libraries_come_from_the_real_loader_map() -> None:
     # digest diverges from the manifest is a substitution
     # `assert_seal_unchanged` refuses by name. pgw#1181 reads the manifest from
     # its producer: `compile_cache.artifact_metadata` embedded it in a
-    # `torch-inductor-cache` cell and is deleted with that format, while
+    # `torch-inductor-cache` compiled graph and is deleted with that format, while
     # `aot_mint` records this same call's output under the same key.
     manifest = dict(env_seal.frozen_library_digests())
     for base, digest in libs.items():
@@ -210,7 +210,7 @@ def test_mint_refuses_on_env_drift_naming_the_flag(tmp_path: Path) -> None:
     (fx_entry / "entry").write_bytes(b"fx")
 
     # pgw#1010: the seal this drove was `finish_fleet_mint`'s, which packed a
-    # DYNAMO cell and is deleted with that artifact class. The RULE is
+    # DYNAMO compiled graph and is deleted with that artifact class. The RULE is
     # unchanged and lives where every surviving mint reads it —
     # `env_seal.assert_seal_unchanged("mint")`, called by `mint_artifact` (the
     # local store's mint) and by `aot_mint` — so the drift is driven directly
@@ -221,7 +221,7 @@ def test_mint_refuses_on_env_drift_naming_the_flag(tmp_path: Path) -> None:
         torch.backends.cudnn.benchmark = True
         with pytest.raises(env_seal.EnvSealError, match="cudnn_benchmark"):
             env_seal.assert_seal_unchanged("mint")
-        assert not (tmp_path / "cell.tar.gz").exists()
+        assert not (tmp_path / "compiled_graph.tar.gz").exists()
     finally:
         torch.backends.cudnn.benchmark = before
         torch._dynamo.reset()
@@ -229,10 +229,10 @@ def test_mint_refuses_on_env_drift_naming_the_flag(tmp_path: Path) -> None:
 
 # pgw#1181 REMOVED `test_arm_names_env_seal_drift`. Its subject,
 # `compile_cache.artifact_drift`, compared a delivered
-# `torch-inductor-cache` cell's recorded env seal with the live one at ARM
+# `torch-inductor-cache` compiled graph's recorded env seal with the live one at ARM
 # time; the format has had no writer since pgw#1178 and is deleted. The
 # property is stronger on the surviving lane rather than absent: the seal is
-# an identity AXIS of the exported cell (`fleet_cells.ENV_SEAL_AXIS`, folded
-# into `ck1`), so a drifted seal yields a different key and the cell never
-# resolves at all — proven in `tests/test_cell_key_pgw1059.py`, whose
+# an identity AXIS of the exported compiled graph (`fleet_compiled_graphs.ENV_SEAL_AXIS`, folded
+# into `ck1`), so a drifted seal yields a different key and the compiled graph never
+# resolves at all — proven in `tests/test_compiled_graph_key_pgw1059.py`, whose
 # staleness matrix lists `env_seal` among the axes that re-key.

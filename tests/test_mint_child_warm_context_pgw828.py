@@ -28,7 +28,7 @@ a ``KeyError``. Nothing was missing from the wire: the child holds the SPEC,
 and warm-shape slot resolution (``run=None``) needs only the spec.
 
 With pgw#827 blocking the AOT route, this blocked the other one — between
-them no mint route on the platform could publish a cell.
+them no mint route on the platform could publish a compiled graph.
 
 The fix is one construction (``warmup.warm_context``) called by the executor's
 boot-warm path, the executor's background-mint seed, and the child. The

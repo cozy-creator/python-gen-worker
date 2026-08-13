@@ -5,25 +5,25 @@ pod:
 
 1. **Derive** the ``ck1`` key from code alone — ``boot_key.derive``, process-
    parallel structure-only traces, no weight resident anywhere.
-2. **Ask THIS MACHINE first** (pgw#1127 S2, §4.28) — ``local_cell_store.
+2. **Ask THIS MACHINE first** (pgw#1127 S2, §4.28) — ``local_compiled_graph_store.
    lookup(key)``. The derived key is the local store's own address, so an
-   offline machine holding the exact cell it needs answers here and no hub is
+   offline machine holding the exact compiled graph it needs answers here and no hub is
    asked at all. ONE key, TWO lookup routes, the same CAS.
-3. **Ask the hub** by that key — ``cell_resolve.resolve``, ONE artifact or a
+3. **Ask the hub** by that key — ``compiled_graph_resolve.resolve``, ONE artifact or a
    MISS, never a listing.
 4. **Materialize** a hit through the EXISTING delivery path and hand the
    caller an admission expectation, so the arm runs the gates the Plan path
    runs and not one gate fewer.
 
 Why the local step is BEFORE the hub and not beside it: §4.28 says *"local
-cell, local repo-CAS… never requested"*. A local-second ordering would ask for
+compiled graph, local repo-CAS… never requested"*. A local-second ordering would ask for
 what the machine already holds, and on a community-cloud pod that is a request
 the hub can only answer by shipping bytes back to the machine that minted them.
 
 Why the derivation now runs with NO hub, which it refused to do before: the old
 gate reasoned that *"deriving a key nobody will answer is pure boot latency"*.
 That is false on exactly the machines §4.28 is about. It survives in the
-honest form — :data:`GATE_REASONS`' ``no_cell_source``, which refuses only when
+honest form — :data:`GATE_REASONS`' ``no_compiled_graph_source``, which refuses only when
 BOTH answerers are absent (no hub AND an empty local store).
 
 A MISS returns ``None`` and that is a complete answer: the pod serves eager,
@@ -36,8 +36,8 @@ Because a refusal at any of the three steps must **degrade to the pre-existing
 behaviour and say why**, and there are eight distinct ways to fail:
 the family has no structure-only build, a trace child died, the hub refused
 typed, the hub answered a different key, the transport was unusable, the bytes
-failed their digest, the delivered cell would not state its metadata, and
-(pgw#1031) the cell's recorded graph witness is not the graph this pod traced.
+failed their digest, the delivered compiled graph would not state its metadata, and
+(pgw#1031) the compiled graph's recorded graph witness is not the graph this pod traced.
 Every one of them means "boot as we booted yesterday", and every one of them is
 a different sentence someone will need. Spreading that across an executor
 branch is how the reason ends up being `logger.debug`.
@@ -71,10 +71,10 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
 from . import (
-    activity, aot_identity, artifact_meta, boot_key, cell_resolve,
-    local_cell_store,
+    activity, aot_identity, artifact_meta, boot_key, compiled_graph_resolve,
+    local_compiled_graph_store,
 )
-from .mint_process import CompileCellSpec, MintSlot
+from .mint_process import CompileCompiledGraphSpec, MintSlot
 
 logger = logging.getLogger(__name__)
 
@@ -84,23 +84,23 @@ GATE_REASONS: Tuple[str, ...] = (
     # `aot_mint.export_declaration(family)` answered None: this family ships no
     # export declaration, so no key can name its class set.
     "no_export_declaration",
-    # The declaration exists but `aot_declaration.cell_plans` will not enumerate
+    # The declaration exists but `aot_declaration.compiled_graph_plans` will not enumerate
     # it (colliding entry names, no targets).
     "declaration_unreadable",
     # pgw#1127: NOBODY could answer this key — no hub (no HelloAck base URL
     # yet, or an embedded single-process worker with neither a local bearer nor
-    # a control seam, pgw#1108) AND this machine's own store holds no cell at
+    # a control seam, pgw#1108) AND this machine's own store holds no compiled graph at
     # all. Only then is deriving pure boot latency. This REPLACES `no_hub`,
     # which asked about one of the two answerers and refused on behalf of both:
     # on exactly the machines §4.28 is about, the derived ck1 key IS the local
     # store's address, so "nobody will answer" was false there.
-    "no_cell_source",
+    "no_compiled_graph_source",
     # The pod's topology forbids arming at all (pgw#775), so a compiled family
     # boots without asking. Correct, and previously indistinguishable from a
     # boot-adopt that asked and was refused.
     "eager_only",
     # pgw#1142 / §4.32 item 4: an OPERATOR ordered this worker eager-only, so
-    # the boot did not ask for a cell it is forbidden to call. Distinct from
+    # the boot did not ask for a compiled graph it is forbidden to call. Distinct from
     # `eager_only` above because that one is a property of the pod that no
     # command can lift, and this one is a decision that can be taken back —
     # the same pod, re-asked after the order is released, adopts normally.
@@ -113,10 +113,10 @@ GATE_REASONS: Tuple[str, ...] = (
 OPERATOR_EAGER_ONLY = "operator_eager_only"
 
 #: Step 1.5 (pgw#1127 S2) — THIS MACHINE's own store, addressed by the DERIVED
-#: key, before the hub is asked at all. §4.28: *"local cell, local repo-CAS,
+#: key, before the hub is asked at all. §4.28: *"local compiled graph, local repo-CAS,
 #: reused across its own boots — never uploaded, never requested."*
 LOCAL_REASONS: Tuple[str, ...] = (
-    # The machine holds this exact cell. No hub was asked, and on an offline
+    # The machine holds this exact compiled graph. No hub was asked, and on an offline
     # box no hub COULD be — which is the difference between fully-offline-
     # capable as a property and as an accident of the arm-token memo.
     "local_hit",
@@ -129,7 +129,7 @@ LOCAL_REASONS: Tuple[str, ...] = (
     # graphs this pod traced (the pgw#1031 floor, applied to route B). NOT a
     # drop: unlike the memo — which this machine's own mint wrote for this
     # exact arm token — a derived-key hit is an inference, so it refuses
-    # without destroying a cell some other pipe may legitimately own.
+    # without destroying a compiled graph some other pipe may legitimately own.
     "local_graph_witness_mismatch",
 )
 
@@ -144,7 +144,7 @@ DERIVE_REASONS: Tuple[str, ...] = (
     # this token existed they were the same word. `structure_unsupported` says
     # ONE FAMILY is stranded (permanent and correct on the quantized artifact
     # lanes); this says THIS IMAGE cannot meta-instantiate at all, so every
-    # family it serves derives no key, asks for no cell, and self-mints
+    # family it serves derives no key, asks for no compiled graph, and self-mints
     # forever — which is what two paid pods spent an evening looking like.
     "structure_capability_missing",
     "structure_not_honored", "no_declaration", "trace_refused", "empty_share",
@@ -159,7 +159,7 @@ DERIVE_REASONS: Tuple[str, ...] = (
 #: The hub's own typed refusal codes ride through verbatim, which is the point
 #: of them being typed.
 ASK_REASONS: Tuple[str, ...] = (
-    "invalid_request", "cell_resolve_key_mismatch", "resolve_unreachable",
+    "invalid_request", "compiled_graph_resolve_key_mismatch", "resolve_unreachable",
     "miss", "materialize_failed", "witness_unreadable",
     "graph_witness_mismatch", "hit",
     # pgw#1122 — the LAST terminus, and the one the journey previously ran off
@@ -169,7 +169,7 @@ ASK_REASONS: Tuple[str, ...] = (
     # then failed their function, and the event that promised to name the gate
     # named the gate BEFORE the one that refused.
     "arm_refused",
-) + tuple(cell_resolve.REFUSAL_CODES)
+) + tuple(compiled_graph_resolve.REFUSAL_CODES)
 
 #: The COMPLETE boot-adopt vocabulary. A path that can produce a token missing
 #: from here is a path that can be silent again, so
@@ -191,23 +191,23 @@ LOCAL_HIT = "local_hit"
 
 @dataclass(frozen=True)
 class BootAdoption:
-    """A cell this boot resolved by its OWN derived key, ready to arm."""
+    """A compiled graph this boot resolved by its OWN derived key, ready to arm."""
 
     derived: boot_key.DerivedKey
-    cell: cell_resolve.ResolvedCell
+    compiled_graph: compiled_graph_resolve.ResolvedCompiledGraph
     artifact: Path
 
     @property
     def expected(self) -> aot_identity.ExpectedIdentity:
-        return self.cell.expected_identity()
+        return self.compiled_graph.expected_identity()
 
     @property
     def ref(self) -> str:
-        return self.cell.cell_ref
+        return self.compiled_graph.compiled_graph_ref
 
     @property
     def snapshot_digest(self) -> str:
-        return self.cell.transport.snapshot_digest
+        return self.compiled_graph.transport.snapshot_digest
 
 
 @dataclass(frozen=True)
@@ -219,10 +219,10 @@ class BootAdoptOutcome:
     the countable token for why.
 
     ``local_key`` (pgw#1127) is the one exception to that second sentence, and
-    it is deliberately NOT an ``adoption``: a cell out of THIS MACHINE's own
+    it is deliberately NOT an ``adoption``: a compiled graph out of THIS MACHINE's own
     store carries no hub receipt and no publisher org, so it must not ride the
-    ``arm_ordered`` path a hub-resolved cell rides — it arms through
-    ``fleet_cells._arm_exported_cell``, the gate every cell this machine
+    ``arm_ordered`` path a hub-resolved compiled graph rides — it arms through
+    ``fleet_compiled_graphs._arm_exported_compiled_graph``, the gate every compiled graph this machine
     produced for itself passes. What the boot hands the arming brain is the
     ADDRESS, and the arming brain does the lookup on the same terms it does a
     memo lookup. Two routes, one CAS, one gate.
@@ -297,7 +297,7 @@ def refused(
 def arm_refused(
     outcome: BootAdoptOutcome, *, cause: str, detail: str,
 ) -> BootAdoptOutcome:
-    """The adopted cell would not ARM (pgw#1122) — degrade, don't die.
+    """The adopted compiled graph would not ARM (pgw#1122) — degrade, don't die.
 
     ``outcome`` is the ``hit`` this journey already reported, so the event
     carries the same family/function/key and joins to it on one query; ``cause``
@@ -307,9 +307,9 @@ def arm_refused(
     without a second lookup.
 
     Why this is a boot-adopt terminus and not the arm's business: nothing but
-    this pod named the cell. A Plan-ordered arm is terminal by design (pgw#904 —
+    this pod named the compiled graph. A Plan-ordered arm is terminal by design (pgw#904 —
     the hub named one exact artifact and a substitute would not be it), but a
-    cell this pod pulled by its OWN derived key has no order behind it, so its
+    compiled graph this pod pulled by its OWN derived key has no order behind it, so its
     refusal means "boot as this pod booted yesterday" like every other refusal
     in this module.
     """
@@ -317,7 +317,7 @@ def arm_refused(
         adoption=None,
         reason="arm_refused",
         detail=(
-            f"cause={cause}: {detail} — this pod resolved the cell by its own "
+            f"cause={cause}: {detail} — this pod resolved the compiled_graph by its own "
             f"derived key, so nothing ordered this arm; serving EAGER and "
             f"minting its own instead of failing the function"),
         derived_key=outcome.derived_key,
@@ -327,12 +327,12 @@ def arm_refused(
     ))
 
 
-def no_cell_source(hub_absent: str) -> bool:
+def no_compiled_graph_source(hub_absent: str) -> bool:
     """True when NOBODY could answer a derived key, so deriving is pure latency.
 
     The honest form of the gate pgw#1127 §1b found. The old one asked *"is
     there a hub"* and refused on behalf of both answerers; this asks whether
-    EITHER exists. ``stored_cells`` is a listdir with no digest recomputation
+    EITHER exists. ``stored_compiled_graphs`` is a listdir with no digest recomputation
     (pgw#1096), so the fleet path — whose store is always empty — pays exactly
     what the old early return paid, and the machines §4.28 is about stop being
     told there is nobody to ask when they are holding the answer.
@@ -340,7 +340,7 @@ def no_cell_source(hub_absent: str) -> bool:
     if not hub_absent:
         return False
     try:
-        return not local_cell_store.stored_cells()
+        return not local_compiled_graph_store.stored_compiled_graphs()
     except Exception:  # noqa: BLE001 — an unreadable store is an absent one
         logger.debug("boot-adopt: local store unreadable", exc_info=True)
         return True
@@ -351,10 +351,10 @@ def _local_answer(
 ) -> Optional[BootAdoptOutcome]:
     """This machine's own store, asked by the derived key. ``None`` = ask on.
 
-    A hit is NOT returned as an ``adoption``: a self-minted cell carries no hub
+    A hit is NOT returned as an ``adoption``: a self-minted compiled graph carries no hub
     receipt and no publisher org, so the ``arm_ordered`` path a hub-resolved
-    cell rides would refuse it ``receipt_gate_unconfigured``. What is returned
-    is the ADDRESS, on ``local_key``, for ``fleet_cells.arm_from_local_store``
+    compiled graph rides would refuse it ``receipt_gate_unconfigured``. What is returned
+    is the ADDRESS, on ``local_key``, for ``fleet_compiled_graphs.arm_from_local_store``
     to arm through the same gate a child's fresh mint passes.
 
     The pgw#1031 graph-witness floor applies here exactly as it does to a hub
@@ -365,15 +365,15 @@ def _local_answer(
     derived-key hit is an inference about which pipe owns the bytes.
     """
     try:
-        cell = local_cell_store.lookup(key)
+        compiled_graph = local_compiled_graph_store.lookup(key)
     except Exception as exc:  # noqa: BLE001 — a cache read is never fatal
         logger.debug("boot-adopt: local store lookup failed", exc_info=True)
         logger.warning("boot-adopt: local store unreadable (%s)", exc)
         return None
-    if cell is None:
+    if compiled_graph is None:
         return None
     try:
-        meta = artifact_meta.read_metadata(Path(cell.artifact))
+        meta = artifact_meta.read_metadata(Path(compiled_graph.artifact))
         mismatch = aot_identity.verify_graph_witness(
             meta, derived.graph_witnesses)
     except Exception as exc:  # noqa: BLE001 — unreadable IS unproven
@@ -383,7 +383,7 @@ def _local_answer(
             reason="local_graph_witness_mismatch",
             detail=(
                 f"this machine's own store holds {key} and its graphs are not "
-                f"this pod's graphs: {mismatch}. The cell is LEFT in place — a "
+                f"this pod's graphs: {mismatch}. The compiled_graph is LEFT in place — a "
                 f"derived-key hit is an inference, not the memo this machine "
                 f"wrote for its own arm — and this pod asks the hub instead"),
             derived_key=key, derive_ms=derived.wall_ms,
@@ -392,7 +392,7 @@ def _local_answer(
         reason="local_hit",
         detail=(
             f"THIS MACHINE minted {key} on an earlier boot and kept it "
-            f"({cell.bytes / 1e6:.1f} MB); it arms from disk with no mint, no "
+            f"({compiled_graph.bytes / 1e6:.1f} MB); it arms from disk with no mint, no "
             f"hub and no network (§4.28)"),
         derived_key=key, local_key=key, derive_ms=derived.wall_ms,
         family=family, function=fn))
@@ -421,9 +421,9 @@ def attempt(
     failure is a single-element tuple, because it is the one failure that is
     genuinely about the declaration rather than about a class.
 
-    ``declared_hint`` is ``len(aot_declaration.cell_plans(decl))`` — it sizes
+    ``declared_hint`` is ``len(aot_declaration.compiled_graph_plans(decl))`` — it sizes
     the trace pool and nothing else. ``envelope`` is
-    ``fleet_cells.declared_envelope_block(cfg)``, i.e. the same extraction the
+    ``fleet_compiled_graphs.declared_envelope_block(cfg)``, i.e. the same extraction the
     publish path recomputes the envelope axis from.
 
     ``hub_absent`` (pgw#1127) is the caller's own sentence for why there is
@@ -436,7 +436,7 @@ def attempt(
     """
     family = str(getattr(cfg, "family", "") or "")
     fn = str(function)
-    spec = CompileCellSpec(
+    spec = CompileCompiledGraphSpec(
         shapes=tuple(
             tuple(int(v) for v in row)
             for row in (getattr(cfg, "shapes", ()) or ())),
@@ -478,10 +478,10 @@ def attempt(
 
     # ── pgw#1176: a boot derives a KEY SET, and asks per key ──────────────
     #
-    # §4.27 ruled "THE cell key" (singular). It is a derived SET plus a
+    # §4.27 ruled "THE compiled graph key" (singular). It is a derived SET plus a
     # manifest now, and every property that ruling wanted survives
     # STRENGTHENED, because a PARTIAL result is useful: a pod that resolves 30
-    # of 36 keys arms 30 classes and compiles 6, where the cell key made that
+    # of 36 keys arms 30 classes and compiles 6, where the compiled graph key made that
     # same outcome a total miss and a full re-mint.
     #
     # One outcome PER CLASS, in sorted key order. There is deliberately no
@@ -490,8 +490,8 @@ def attempt(
     # that could lie.
     #
     # PHASE 2 slots the batch resolve in HERE: the loop below issues one
-    # `cell_resolve.resolve` per key, which is correct and is what the hub
-    # answers today; when the hub grows `POST /v1/worker/cells/resolve`
+    # `compiled_graph_resolve.resolve` per key, which is correct and is what the hub
+    # answers today; when the hub grows `POST /v1/worker/compiled graphs/resolve`
     # {family, keys[]} -> one signed answer per key, this becomes one call and
     # the per-key bodies consume its answers unchanged.
     keys = derived.keys
@@ -532,7 +532,7 @@ def _attempt_key(
 
     # ── §4.28 / pgw#1127: THIS MACHINE, before the wire ────────────────────
     # The derived key is the local store's own address. A machine that minted
-    # this cell on an earlier boot answers here, and the hub is not asked at
+    # this compiled graph on an earlier boot answers here, and the hub is not asked at
     # all — which is what "never requested" means and what makes an offline
     # box arm exactly as well as an online one. Costs one stat on the fleet
     # path, where the store is always empty.
@@ -541,7 +541,7 @@ def _attempt_key(
         return local
     if hub_absent:
         # Derived, asked this machine, and there is nobody else. A DIFFERENT
-        # fact from `no_cell_source` (which never derived) and from `miss`
+        # fact from `no_compiled_graph_source` (which never derived) and from `miss`
         # (which asked a hub): this one says the key exists and nothing here
         # holds it.
         return report(BootAdoptOutcome(
@@ -550,9 +550,9 @@ def _attempt_key(
             family=family, function=fn))
 
     try:
-        cell = cell_resolve.resolve(
+        compiled_graph = compiled_graph_resolve.resolve(
             family, key, base_url=base_url, bearer=bearer)
-    except cell_resolve.CellResolveRefused as exc:
+    except compiled_graph_resolve.CompiledGraphResolveRefused as exc:
         # A typed refusal is NOT a miss — treating it as one sends the pod to
         # a full cold mint believing the hub holds nothing, which is false and
         # expensive. It still degrades to the old boot; it is the SENTENCE
@@ -568,19 +568,19 @@ def _attempt_key(
             derived_key=key, derive_ms=derived.wall_ms,
             family=family, function=fn))
 
-    if cell is None:
+    if compiled_graph is None:
         # A pod that DERIVED a key and was told MISS is a different fact from a
         # pod that never derived one — `derived_key` is what tells them apart,
         # and it is on the event.
         return report(BootAdoptOutcome(
             reason="miss",
-            detail=f"the hub holds no entitled cell for {key}",
+            detail=f"the hub holds no entitled compiled_graph for {key}",
             derived_key=key, derive_ms=derived.wall_ms,
             family=family, function=fn))
 
     try:
-        artifact = cell_resolve.materialize(
-            cell, cache_dir=Path(cache_dir) if cache_dir else None,
+        artifact = compiled_graph_resolve.materialize(
+            compiled_graph, cache_dir=Path(cache_dir) if cache_dir else None,
             what=f"boot adopt of {key} (family {family})")
     except Exception as exc:  # noqa: BLE001
         logger.debug("boot-adopt: materialize failed", exc_info=True)
@@ -596,7 +596,7 @@ def _attempt_key(
     # keying block from 112- and 102-node graphs). Pull-by-key would hand this
     # pod the other endpoint's kernels, and only the arm-time numerics
     # tolerance would stand in the way. So the last thing checked before an
-    # adoption is returned is that the cell's compiled graphs ARE the graphs
+    # adoption is returned is that the compiled graph's compiled graphs ARE the graphs
     # this pod traced.
     try:
         # THE one bounded reader (pgw#1098): a second scan of the same
@@ -608,7 +608,7 @@ def _attempt_key(
         return report(BootAdoptOutcome(
             reason="witness_unreadable",
             detail=(
-                f"the materialized cell for {key} would not state its "
+                f"the materialized compiled_graph for {key} would not state its "
                 f"metadata ({type(exc).__name__}: {exc}), so its graphs cannot "
                 f"be shown to be this pod's graphs"),
             derived_key=key, derive_ms=derived.wall_ms,
@@ -619,16 +619,16 @@ def _attempt_key(
         return report(BootAdoptOutcome(
             reason="graph_witness_mismatch",
             detail=(
-                f"the key matched {cell.cell_ref} and the graph did not: "
+                f"the key matched {compiled_graph.compiled_graph_ref} and the graph did not: "
                 f"{mismatch}. This pod serves eager and mints its own."),
             derived_key=key, derive_ms=derived.wall_ms,
             family=family, function=fn))
 
     return report(BootAdoptOutcome(
-        adoption=BootAdoption(derived=derived, cell=cell, artifact=artifact),
+        adoption=BootAdoption(derived=derived, compiled_graph=compiled_graph, artifact=artifact),
         reason=HIT,
         detail=(
-            f"resolved to {cell.cell_ref} ({cell.publisher_tier} tier), "
+            f"resolved to {compiled_graph.compiled_graph_ref} ({compiled_graph.publisher_tier} tier), "
             f"materialized at {artifact} — arming with ZERO dispatches having "
             f"occurred"),
         derived_key=key, derive_ms=derived.wall_ms,
@@ -638,5 +638,5 @@ def _attempt_key(
 __all__ = [
     "ASK_REASONS", "BootAdoptOutcome", "BootAdoption", "DERIVE_REASONS",
     "GATE_REASONS", "HIT", "LOCAL_HIT", "LOCAL_REASONS", "REASONS",
-    "arm_refused", "attempt", "no_cell_source", "refused", "report",
+    "arm_refused", "attempt", "no_compiled_graph_source", "refused", "report",
 ]

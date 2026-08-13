@@ -41,7 +41,7 @@ from typing import Any, Dict, List, Tuple
 import msgspec
 import pytest
 
-from gen_worker import fleet_cells, mint_child, mint_delegate
+from gen_worker import fleet_compiled_graphs, mint_child, mint_delegate
 from gen_worker import mint_process as mp
 from gen_worker.api.binding import ModelRef, wire_ref
 from gen_worker.cli import run as cli_run
@@ -52,7 +52,7 @@ from gen_worker.models.cozy_snapshot import (
     snapshot_dir_key,
 )
 from gen_worker.pb import worker_scheduler_pb2 as pb
-from gen_worker.registry import CompileCell
+from gen_worker.registry import CompileCompiledGraph
 
 from harness.blob_host import BlobHost
 from harness.hub_double import hub_double, is_ready, is_result_for
@@ -242,10 +242,10 @@ def test_the_parent_hands_its_resolved_overrides_across_the_wire(
     boundary IS a file."""
     pending = SimpleNamespace(
         family="sdxl", arm_token="arm1-abc",
-        cfg=CompileCell(shapes=((1024, 1024),), targets=("unet",),
+        cfg=CompileCompiledGraph(shapes=((1024, 1024),), targets=("unet",),
                         family="sdxl", regional=False, text_len=77,
                         dynamic=(), lora_bucket=0, guidance_scales=(),
-                        text_lens=()), target=tmp_path / "cell.tar.gz",
+                        text_lens=()), target=tmp_path / "compiled_graph.tar.gz",
         mint_root=tmp_path, recipe="aot")
     resolved = mp.MintSlot(
         ref=ModelRef(source="tensorhub", path="harness/composed", tag="prod"),
@@ -305,10 +305,10 @@ def test_a_narrowed_tree_with_no_override_refuses_by_name(
     request = mp.MintRequest(
         function="composed-echo", modules=("harness.toy_endpoints",),
         family="sdxl", arm_token="arm1-abc",
-        target=str(tmp_path / "cell.tar.gz"),
+        target=str(tmp_path / "compiled_graph.tar.gz"),
         work_root=str(tmp_path / "capture"),
         report=str(tmp_path / mp.REPORT_NAME),
-        cfg=mp.CompileCellSpec(family="sdxl", shapes=((1024, 1024),),
+        cfg=mp.CompileCompiledGraphSpec(family="sdxl", shapes=((1024, 1024),),
                                targets=("unet",)),
         slots={"pipeline": mp.MintSlot(
             ref=ModelRef(source="tensorhub", path="harness/composed",
@@ -420,13 +420,13 @@ def _fake_card(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _task(tmp_path: Path) -> mint_delegate.MintTask:
-    pending = fleet_cells.PendingSelfMint(
+    pending = fleet_compiled_graphs.PendingSelfMint(
         family="sdxl", arm_token="ck1-abc", ref="root/family-sdxl#ek1-abc",
-        cfg=CompileCell(shapes=((1024, 1024),), targets=("unet",),
+        cfg=CompileCompiledGraph(shapes=((1024, 1024),), targets=("unet",),
                         family="sdxl", regional=False, text_len=77,
                         dynamic=(), lora_bucket=0, guidance_scales=(),
                         text_lens=()),
-        target=tmp_path / "cell.tar.gz", mint_root=tmp_path / "root", publisher=None, cache_dir=tmp_path,
+        target=tmp_path / "compiled_graph.tar.gz", mint_root=tmp_path / "root", publisher=None, cache_dir=tmp_path,
         delegated=True)
     return mint_delegate.MintTask(
         pending=pending, pipe=SimpleNamespace(), function="gen",
@@ -462,11 +462,11 @@ def test_a_classified_child_crash_is_not_retried(
         mint_delegate.activity_mod, "emit_event",
         lambda kind, detail, phase="", **kw: seen.append((kind, phase, detail)))
     monkeypatch.setattr(
-        fleet_cells.activity_mod, "emit_event",
+        fleet_compiled_graphs.activity_mod, "emit_event",
         lambda kind, detail, phase="", **kw: seen.append((kind, phase, detail)))
 
     monkeypatch.setenv("MINT_STUB_MODE", "failed")
-    result = asyncio.run(mint_delegate.build_cell(
+    result = asyncio.run(mint_delegate.build_compiled_graph(
         _task(tmp_path), act=_Act(), max_attempts=3))
     assert result.status == mint_delegate.FAILED
     assert result.attempts == 1, (
@@ -489,9 +489,9 @@ def test_an_unclassified_death_still_gets_its_retry(
     monkeypatch.setattr(
         mint_delegate.activity_mod, "emit_event", lambda *a, **k: None)
     monkeypatch.setattr(
-        fleet_cells.activity_mod, "emit_event", lambda *a, **k: None)
+        fleet_compiled_graphs.activity_mod, "emit_event", lambda *a, **k: None)
     monkeypatch.setenv("MINT_STUB_MODE", "crash")
-    result = asyncio.run(mint_delegate.build_cell(
+    result = asyncio.run(mint_delegate.build_compiled_graph(
         _task(tmp_path), act=_Act(), max_attempts=2))
     assert result.status == mint_delegate.FAILED
     assert result.attempts == 2

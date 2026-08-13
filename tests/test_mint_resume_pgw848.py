@@ -3,7 +3,7 @@
 The loss this closes, measured: a mint is ~74 min of serial export (2.06 and
 2.07 min/row across two independent pods, 36 sdxl entries) and then ~626 s of
 AOTI compile PER ENTRY. A crash at entry 30 of 36 used to discard ~5.2 h of
-paid compile, because ``build_cell`` hands every attempt a fresh ``child-<n>``
+paid compile, because ``build_compiled_graph`` hands every attempt a fresh ``child-<n>``
 workdir and the pool's inductor cache lives inside it.
 
 Everything here runs the REAL :class:`EntryCompilePool` — real
@@ -13,7 +13,7 @@ the bank has to survive with no ``finally`` and no ``atexit`` (which is exactly
 the shape a pod's OOM killer and a drain both take).
 
 The refusal tests are the ones that matter. A resume that trusts a path is a
-way to pack a stale artifact into a cell that then verifies, arms and is wrong
+way to pack a stale artifact into a compiled graph that then verifies, arms and is wrong
 — the worst failure pgw#846 leaves available — so a banked entry is re-admitted
 ONLY when its identity re-derives from the program THIS attempt exported.
 """
@@ -230,7 +230,7 @@ def test_without_a_bank_a_killed_mint_shares_nothing_with_the_next_attempt(
     """The loss, reproduced. This is the pre-fix behaviour, pinned.
 
     Attempt 1 finishes an entry and is killed. Attempt 2 — a fresh
-    ``child-<n>`` workdir, exactly as ``mint_delegate.build_cell`` builds one —
+    ``child-<n>`` workdir, exactly as ``mint_delegate.build_compiled_graph`` builds one —
     recompiles EVERY entry, including the finished one, and cannot even get an
     inductor cache hit because the cache lived inside the dead attempt's
     directory.
@@ -353,7 +353,7 @@ def test_a_tampered_banked_artifact_is_refused_and_recompiled(
     assert second.bank.outcomes[entry] == aot_resume.REFUSE_FILE_CONTENT
     assert entry in second.entry_seconds, (
         "the refusal must fall through to a real compile — a bank may cost a "
-        "mint time, never a cell")
+        "mint time, never a compiled_graph")
     assert out[entry], "the entry is served, from freshly compiled files"
     assert second.ledger.facts()["resume_refused"] == {
         aot_resume.REFUSE_FILE_CONTENT: 1}, (
@@ -369,7 +369,7 @@ def test_a_stale_entry_is_refused_by_a_re_derived_graph_hash(
     This is the pgw#846 failure the whole design exists to prevent. The name,
     the path, the file digests and every context axis all still match; the only
     thing that moved is the graph the entry is FOR. If the check were on the
-    path — or on a hash read back out of the artifact — this cell would pack a
+    path — or on a hash read back out of the artifact — this compiled graph would pack a
     stale compile, verify, arm, and be wrong.
     """
     from gen_worker import graph_hash as graph_hash_mod
@@ -412,7 +412,7 @@ def test_the_context_axes_are_fail_closed(tmp_path: Path) -> None:
 
     # The inductor configs are an axis too: they are compared WHOLE, including
     # ones pgw#757 measured as non-identity (`compile_threads`). Refusing too
-    # often costs a recompile; admitting too often costs a cell.
+    # often costs a recompile; admitting too often costs a compiled graph.
     reconfigured = aot_resume.open_bank(str(resume), inductor_configs={})
     assert reconfigured is not None
     assert reconfigured.admit(entry, program).reason == aot_resume.REFUSE_CONTEXT
@@ -461,17 +461,17 @@ def test_the_bank_outlives_an_abandoned_mint(
     """Abandonment is how a CRASHED mint ends, so the bank must not be under
     the thing abandonment deletes.
 
-    ``fleet_cells.abandon_self_mint`` rmtree's ``mint_root``. A bank sited
+    ``fleet_compiled_graphs.abandon_self_mint`` rmtree's ``mint_root``. A bank sited
     there would be destroyed on its way out of the one case it exists for —
     everything else here would recover ~5.2 h and the cleanup would delete it.
     Driven through the REAL abandon path, not an assertion about a path string.
     """
     from types import SimpleNamespace
 
-    from gen_worker import fleet_cells, local_cell_store, mint_delegate
+    from gen_worker import fleet_compiled_graphs, local_compiled_graph_store, mint_delegate
 
     monkeypatch.setenv(
-        local_cell_store.ENV_STORE_DIR, str(tmp_path / "store"))
+        local_compiled_graph_store.ENV_STORE_DIR, str(tmp_path / "store"))
     mint_root = tmp_path / "selfmint-abc"
     (mint_root / "capture").mkdir(parents=True)
     key = "ck1:sdxl:deadbeef"
@@ -499,11 +499,11 @@ def test_the_bank_outlives_an_abandoned_mint(
 
     bank.put(_name(0), graph_hash_mod.graph_hash(program), [str(loose)])
 
-    pending = fleet_cells.PendingSelfMint(
+    pending = fleet_compiled_graphs.PendingSelfMint(
         family="sdxl", arm_token=key, ref=f"repo#{key}",
-        cfg=SimpleNamespace(family="sdxl"), target=mint_root / "cell.tar.gz", mint_root=mint_root,
+        cfg=SimpleNamespace(family="sdxl"), target=mint_root / "compiled_graph.tar.gz", mint_root=mint_root,
         publisher=None)
-    fleet_cells.abandon_self_mint(pending)
+    fleet_compiled_graphs.abandon_self_mint(pending)
 
     assert not mint_root.exists(), (
         "the abandon path must still clean the mint tree up — this test would "
@@ -524,7 +524,7 @@ def test_the_resume_area_is_capacity_bounded(
 ) -> None:
     """A bank that survives every failure is a bank that grows without bound
     on an unhealthy pod, so the area is capped and swept oldest scope first."""
-    monkeypatch.setenv(local_cells_env(), str(tmp_path / "store"))
+    monkeypatch.setenv(local_compiled_graphs_env(), str(tmp_path / "store"))
     monkeypatch.setenv(aot_resume.ENV_MAX_BYTES, "4096")
     keep = aot_resume.bank_root("keep-me")
     for scope, size in (("old", 4096), ("older", 4096)):
@@ -540,10 +540,10 @@ def test_the_resume_area_is_capacity_bounded(
     assert not aot_resume.bank_root("old").exists()
 
 
-def local_cells_env() -> str:
-    from gen_worker import local_cell_store
+def local_compiled_graphs_env() -> str:
+    from gen_worker import local_compiled_graph_store
 
-    return local_cell_store.ENV_STORE_DIR
+    return local_compiled_graph_store.ENV_STORE_DIR
 
 
 def test_no_resume_root_means_no_bank_and_no_behaviour_change() -> None:

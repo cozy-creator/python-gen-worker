@@ -1,6 +1,6 @@
 {
   "name": "h3_speed",
-  "notes": "pgw#1011 acceleration matrix for MiniMax-H3, aimed at ie#612's measured fal bar (t2va 5s <=17.1s, 10s <=40.2s, 15s <=158.1s; i2va 5s <=20.8s; ref2va 10s <=104.0s). ORDER IS THE POINT: exact techniques first, then the cheap approximate ones, and every approximate arm is UNADOPTABLE until cozy-eval#8 returns an AUDIO verdict -- every published H3 quality number in the world is video-only, and a DBCache sweep drove audio SNR 20.67 -> 13.72 dB while SSIM still read 0.85. Speedups here are measured against arm 'base_50' on OUR card, never against a vendor's 8xB300 table. Cells are separate arms because fal's own curve is superlinear and the 5s cell is the hard one.",
+  "notes": "pgw#1011 acceleration matrix for MiniMax-H3, aimed at ie#612's measured fal bar (t2va 5s <=17.1s, 10s <=40.2s, 15s <=158.1s; i2va 5s <=20.8s; ref2va 10s <=104.0s). ORDER IS THE POINT: exact techniques first, then the cheap approximate ones, and every approximate arm is UNADOPTABLE until cozy-eval#8 returns an AUDIO verdict -- every published H3 quality number in the world is video-only, and a DBCache sweep drove audio SNR 20.67 -> 13.72 dB while SSIM still read 0.85. Speedups here are measured against arm 'base_50' on OUR card, never against a vendor's 8xB300 table. CompiledGraphs are separate arms because fal's own curve is superlinear and the 5s compiled_graph is the hard one.",
   "reps": 3,
   "warmup_reps": 1,
   "payload": {
@@ -131,29 +131,29 @@
       "settings": {"techniques": ["turbo_lora"], "turbo_lora_steps": 8}
     },
     {
-      "name": "cell_t2va_10s",
-      "tier": "cells",
+      "name": "compiled_graph_t2va_10s",
+      "tier": "compiled_graphs",
       "approximate": false,
       "expect": "fal median 80.3s, our target <=40.2s. Run with tier0's WINNING settings, not bare.",
       "payload": {"duration_s": 10}
     },
     {
-      "name": "cell_t2va_15s",
-      "tier": "cells",
+      "name": "compiled_graph_t2va_15s",
+      "tier": "compiled_graphs",
       "approximate": false,
-      "expect": "fal median 316.2s, our target <=158.1s -- the SOFT cell, because fal's own curve blows up here. THE BLOWUP IS NOT ATTENTION MATH: no compute model fits all three fal points (T(15s) measured 316s against 138s predicted from the 5s and 10s points), so it is a memory/serving cliff around n~92k tokens. MEMORY ENGINEERING BEATS SPARSITY on this cell -- measure peak activation VRAM here, not just wall time, and treat an offload/recompute change as the candidate fix. Any lane reporting 'we beat fal' using only this cell or ref2va has not.",
+      "expect": "fal median 316.2s, our target <=158.1s -- the SOFT compiled_graph, because fal's own curve blows up here. THE BLOWUP IS NOT ATTENTION MATH: no compute model fits all three fal points (T(15s) measured 316s against 138s predicted from the 5s and 10s points), so it is a memory/serving cliff around n~92k tokens. MEMORY ENGINEERING BEATS SPARSITY on this compiled_graph -- measure peak activation VRAM here, not just wall time, and treat an offload/recompute change as the candidate fix. Any lane reporting 'we beat fal' using only this compiled_graph or ref2va has not.",
       "payload": {"duration_s": 15}
     },
     {
-      "name": "cell_i2va_5s",
-      "tier": "cells",
+      "name": "compiled_graph_i2va_5s",
+      "tier": "compiled_graphs",
       "approximate": false,
       "expect": "fal median 41.5s, our target <=20.8s.",
       "payload": {"duration_s": 5, "mode": "i2va"}
     },
     {
-      "name": "cell_ref2va_10s",
-      "tier": "cells",
+      "name": "compiled_graph_ref2va_10s",
+      "tier": "compiled_graphs",
       "approximate": false,
       "expect": "fal median 208.1s, our target <=104.0s. fal is structurally weakest at ref2va; a separate checkpoint tree (transformer_ref) serves it, so its arms do not inherit the t2va lane's verdicts.",
       "payload": {"duration_s": 10, "mode": "ref2va", "reference_images": 3}

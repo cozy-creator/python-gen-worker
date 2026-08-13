@@ -13,7 +13,7 @@ WHAT IT HOLDS THE DERIVATION TO
 -------------------------------
 1. **The value may never move.** RECORD stores the same sha256 our digests
    truncate, so a derived seal must be BYTE-IDENTICAL to a hashed one. If it
-   were not, every published cell would strand.
+   were not, every published compiled graph would strand.
 2. **A claim is honoured only for the file it describes.** Size guard, and a
    staleness guard against the RECORD's own mtime.
 3. **Anything no RECORD covers is HASHED, never trusted** — that is what keeps
@@ -141,7 +141,7 @@ def _forbid_hashing(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_the_recorded_digest_is_the_hash_it_replaces(env: Path) -> None:
     """RECORD's urlsafe-b64 sha256, decoded to hex and truncated, IS
     `sha256(content).hexdigest()[:16]`. This is the whole premise: if it were
-    a different value the change would re-key every published cell."""
+    a different value the change would re-key every published compiled graph."""
     files = _install(env, "fakewheel", "1.0", _LIBS)
     for rel, content in _LIBS.items():
         st = files[rel].stat()

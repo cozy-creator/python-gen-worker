@@ -1,6 +1,6 @@
-"""pgw#1090 (DESIGN-RULINGS §4.29): ask the hub for a cell BY DERIVED KEY.
+"""pgw#1090 (DESIGN-RULINGS §4.29): ask the hub for a compiled graph BY DERIVED KEY.
 
-``POST /v1/worker/cells/resolve`` — the worker half of th#1750 (hub side merged
+``POST /v1/worker/compiled graphs/resolve`` — the worker half of th#1750 (hub side merged
 ``26275ff8``). The worker derives its key from code alone (§4.27 step 1,
 ``boot_key``) and asks the hub, which answers as the entitlement authority with
 ONE artifact or a MISS. Never a listing: pgw#904 deleted worker-side
@@ -9,12 +9,12 @@ would re-open it through a smaller aperture.
 
 The circularity this closes
 ---------------------------
-The hub's OTHER cell resolver only VERIFIES a cell the worker already armed
-(``hubVerifiedCompileTargetForCellLaneLocked``: *"the worker's advertisement is
+The hub's OTHER compiled graph resolver only VERIFIES a compiled graph the worker already armed
+(``hubVerifiedCompileTargetForCompiledGraphLaneLocked``: *"the worker's advertisement is
 what got us here"*). **A cold pod arms nothing, so it advertises nothing, so the
 hub names nothing, so it never adopts.** Boot-time adopt is what SEEDS the
 advertisement the dispatch-time resolver requires — which is why cross-pod
-adoption has been structurally impossible since 0.97.0 deleted ``aot_cells.py``.
+adoption has been structurally impossible since 0.97.0 deleted ``aot_compiled_graphs.py``.
 
 NEVER a second admission brain
 ------------------------------
@@ -28,8 +28,8 @@ answer's field set is not arbitrary; it is exactly ``ExpectedIdentity``'s five
 axes plus ``materialize_named_artifact``'s two arguments.
 
 **The receipt rides the answer deliberately, and must not be re-fetched.**
-``handleWorkerCellReceipt`` scopes by ENDPOINT while resolve scopes by ORG
-(§4.26), so a second fetch for the same cell could 403 what resolve just offered
+``handleWorkerCompiledGraphReceipt`` scopes by ENDPOINT while resolve scopes by ORG
+(§4.26), so a second fetch for the same compiled graph could 403 what resolve just offered
 — th#1680 exactly.
 
 A MISS is one shape
@@ -37,7 +37,7 @@ A MISS is one shape
 ``200 {"found": false}``, byte-identical whether the key is absent, scoped out
 or quarantined. That indistinguishability is the point: a distinguishable
 refusal is an existence oracle across tenants. Refusals (409/400/503) are TYPED
-and are NOT misses — a pod that read ``cell_resolve_incomplete`` as "no cell"
+and are NOT misses — a pod that read ``compiled_graph_resolve_incomplete`` as "no compiled graph"
 would go pay for a full cold mint believing the hub holds nothing, which is
 false and expensive.
 """
@@ -49,12 +49,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Mapping, Optional, Tuple
 
-from . import aot_identity, boot_phases, cell_key
+from . import aot_identity, boot_phases, compiled_graph_key
 from .procsplit import broker
 
 logger = logging.getLogger(__name__)
 
-RESOLVE_PATH = "/v1/worker/cells/resolve"
+RESOLVE_PATH = "/v1/worker/compiled_graphs/resolve"
 
 #: Mandatory (``scripts/lint_http_timeouts.py``). Generous relative to the
 #: hub's own 15 s transport resolve, because the answer is on the boot path and
@@ -64,31 +64,31 @@ RESOLVE_TIMEOUT_S = 30.0
 
 #: The hub's typed refusal codes. NOT misses — see the module docstring.
 REFUSAL_CODES = (
-    "cell_resolve_ambiguous",
-    "cell_resolve_incomplete",
-    "cell_resolve_transport_unavailable",
-    "cell_resolve_client_supplied_field",
+    "compiled_graph_resolve_ambiguous",
+    "compiled_graph_resolve_incomplete",
+    "compiled_graph_resolve_transport_unavailable",
+    "compiled_graph_resolve_client_supplied_field",
 )
 
 #: Every field an accepted answer must NAME, and why. An answer omitting one
 #: states an expectation nothing downstream can check — and the gate that
-#: would catch it sits AFTER the whole cell is downloaded.
-#: ``cell_resolve_incomplete`` is the hub's own code for this fact: the pod
+#: would catch it sits AFTER the whole compiled graph is downloaded.
+#: ``compiled_graph_resolve_incomplete`` is the hub's own code for this fact: the pod
 #: reaches the same verdict from the same evidence, so it reports it under the
 #: same name rather than inventing a second word for one condition.
 _REQUIRED: Tuple[Tuple[str, str], ...] = (
-    ("cell_key", "the admission expectation's identity axis"),
+    ("compiled_graph_key", "the admission expectation's identity axis"),
     ("toolchain_digest", "the admission expectation's toolchain axis"),
     ("env_seal_digest", "the admission expectation's environment axis"),
     ("graph_contract", "the admission expectation's graph axis"),
     ("publisher_org", "an artifact whose producer is unnamed is trusted by no "
                       "rule, and 'unknown publisher' is not a tier"),
-    ("cell_ref", "the address the bytes are fetched from"),
+    ("compiled_graph_ref", "the address the bytes are fetched from"),
     ("content_digest", "what the fetched bytes are verified against"),
 )
 
 
-class CellResolveRefused(RuntimeError):
+class CompiledGraphResolveRefused(RuntimeError):
     """The hub refused to answer, typed. Distinct from a MISS by construction."""
 
     def __init__(self, code: str, detail: str, *, status: int = 0) -> None:
@@ -130,12 +130,12 @@ class Transport:
 
 
 @dataclass(frozen=True)
-class ResolvedCell:
+class ResolvedCompiledGraph:
     """The hub's answer for one derived key — ONE artifact, fully stated."""
 
     family: str
-    cell_key: str
-    cell_ref: str
+    compiled_graph_key: str
+    compiled_graph_ref: str
     checkpoint_id: str
     content_digest: str
     artifact_path: str
@@ -189,12 +189,12 @@ def _transport_from(body: Mapping[str, Any]) -> Transport:
     )
 
 
-def _cell_from(body: Mapping[str, Any]) -> ResolvedCell:
+def _compiled_graph_from(body: Mapping[str, Any]) -> ResolvedCompiledGraph:
     axes = body.get("identity_axes") or {}
-    return ResolvedCell(
+    return ResolvedCompiledGraph(
         family=str(body.get("family") or ""),
-        cell_key=str(body.get("cell_key") or ""),
-        cell_ref=str(body.get("cell_ref") or ""),
+        compiled_graph_key=str(body.get("compiled_graph_key") or ""),
+        compiled_graph_ref=str(body.get("compiled_graph_ref") or ""),
         checkpoint_id=str(body.get("checkpoint_id") or ""),
         content_digest=str(body.get("content_digest") or ""),
         artifact_path=str(body.get("artifact_path") or ""),
@@ -219,35 +219,35 @@ def resolve(
     *,
     base_url: str = "",
     bearer: str = "",
-) -> Optional[ResolvedCell]:
-    """Ask the hub for the cell named by ``derived_key``. ``None`` is a MISS.
+) -> Optional[ResolvedCompiledGraph]:
+    """Ask the hub for the compiled graph named by ``derived_key``. ``None`` is a MISS.
 
-    Raises :class:`CellResolveRefused` on a typed refusal — which is NOT a
+    Raises :class:`CompiledGraphResolveRefused` on a typed refusal — which is NOT a
     miss and must not be treated as one by the caller. The body carries
-    ``family`` and ``cell_key`` and NOTHING else: every entitlement input is
+    ``family`` and ``compiled_graph_key`` and NOTHING else: every entitlement input is
     resolved from the live session hub-side, and a body naming one is a named
-    400 (``cell_resolve_client_supplied_field``). Sending an extra field would
+    400 (``compiled_graph_resolve_client_supplied_field``). Sending an extra field would
     not merely be ignored — it would refuse the whole boot.
     """
     key = str(derived_key or "").strip()
-    if not cell_key.is_key(key):
-        raise CellResolveRefused(
+    if not compiled_graph_key.is_key(key):
+        raise CompiledGraphResolveRefused(
             "invalid_request",
-            f"{key!r} is not a cell key; the resolve route addresses cells by "
+            f"{key!r} is not a compiled_graph key; the resolve route addresses compiled_graphs by "
             f"ck<scheme>-<56 hex> and by nothing else")
     fam = str(family or "").strip()
     if not fam:
-        raise CellResolveRefused(
-            "invalid_request", "resolve requires the cell's family namespace")
+        raise CompiledGraphResolveRefused(
+            "invalid_request", "resolve requires the compiled_graph's family namespace")
 
     with boot_phases.span(
-        boot_phases.PHASE_CELL_HUB_RTT, function="cells.resolve",
+        boot_phases.PHASE_COMPILED_GRAPH_HUB_RTT, function="compiled_graphs.resolve",
         artifact_key=key, ref=fam,
     ) if boot_phases.in_boot() else _null() as span:
         resp = broker.request(
             "POST", RESOLVE_PATH,
             base_url=base_url, bearer=bearer,
-            json={"family": fam, "cell_key": key},
+            json={"family": fam, "compiled_graph_key": key},
             timeout=RESOLVE_TIMEOUT_S,
         )
         try:
@@ -259,61 +259,61 @@ def resolve(
             detail = str((body or {}).get("message") or resp.text)[:400]
             if span is not None:
                 span.refused(code or f"http_{resp.status_code}", detail)
-            raise CellResolveRefused(
+            raise CompiledGraphResolveRefused(
                 code or f"http_{resp.status_code}", detail,
                 status=resp.status_code)
         if not bool((body or {}).get("found")):
             if span is not None:
                 span.classify("miss", f"key={key}")
-            logger.info("cell-resolve: MISS for %s (family=%s)", key, fam)
+            logger.info("compiled_graph-resolve: MISS for %s (family=%s)", key, fam)
             return None
-        cell = _cell_from(body)
+        compiled_graph = _compiled_graph_from(body)
         if span is not None:
             span.classify(
                 "hit",
-                f"key={key} tier={cell.publisher_tier} "
-                f"checkpoint={cell.checkpoint_id}")
-    if cell.cell_key != key:
+                f"key={key} tier={compiled_graph.publisher_tier} "
+                f"checkpoint={compiled_graph.checkpoint_id}")
+    if compiled_graph.compiled_graph_key != key:
         # The hub answered a DIFFERENT key than the one asked for. Never a
         # miss and never adoptable: the admission gate would refuse it anyway,
         # but refusing here names the seam that lied rather than the artifact
         # that arrived.
-        raise CellResolveRefused(
-            "cell_resolve_key_mismatch",
-            f"asked for {key}, the hub answered {cell.cell_key!r}")
-    missing = [(f, why) for f, why in _REQUIRED if not getattr(cell, f)]
+        raise CompiledGraphResolveRefused(
+            "compiled_graph_resolve_key_mismatch",
+            f"asked for {key}, the hub answered {compiled_graph.compiled_graph_key!r}")
+    missing = [(f, why) for f, why in _REQUIRED if not getattr(compiled_graph, f)]
     if missing:
         # Refused HERE rather than at the identity gate, which runs after
-        # `materialize` has already paid for the whole cell. The Plan route
+        # `materialize` has already paid for the whole compiled graph. The Plan route
         # cannot reach that gate incomplete; this one could.
-        raise CellResolveRefused(
-            "cell_resolve_incomplete",
+        raise CompiledGraphResolveRefused(
+            "compiled_graph_resolve_incomplete",
             "the answer names no " + "; no ".join(
                 f"{f} ({why})" for f, why in missing))
     logger.info(
-        "cell-resolve: HIT %s -> %s (%s tier, %d bytes)",
-        key, cell.cell_ref, cell.publisher_tier, cell.size_bytes)
-    return cell
+        "compiled_graph-resolve: HIT %s -> %s (%s tier, %d bytes)",
+        key, compiled_graph.compiled_graph_ref, compiled_graph.publisher_tier, compiled_graph.size_bytes)
+    return compiled_graph
 
 
 def materialize(
-    cell: ResolvedCell, *, cache_dir: Optional[Path], what: str = "",
+    compiled_graph: ResolvedCompiledGraph, *, cache_dir: Optional[Path], what: str = "",
 ) -> Path:
-    """Fetch the resolved cell's bytes through the EXISTING delivery path.
+    """Fetch the resolved compiled graph's bytes through the EXISTING delivery path.
 
     Deliberately a two-line function: everything it could have added —
-    digest verification, chunk assembly, the cache, the ``cell_fetch`` span —
+    digest verification, chunk assembly, the cache, the ``compiled_graph_fetch`` span —
     ``materialize_named_artifact`` already does, and a second downloader is a
     second place for "verified" to mean something slightly different.
     """
     from . import aot_delivery
 
     return aot_delivery.materialize_named_artifact(
-        cell.cell_ref,
-        cell.content_digest,
-        cell.transport,
+        compiled_graph.compiled_graph_ref,
+        compiled_graph.content_digest,
+        compiled_graph.transport,
         cache_dir=cache_dir,
-        what=what or f"boot adopt of {cell.cell_key}",
+        what=what or f"boot adopt of {compiled_graph.compiled_graph_key}",
     )
 
 
@@ -327,8 +327,8 @@ __all__ = [
     "REFUSAL_CODES",
     "RESOLVE_PATH",
     "RESOLVE_TIMEOUT_S",
-    "CellResolveRefused",
-    "ResolvedCell",
+    "CompiledGraphResolveRefused",
+    "ResolvedCompiledGraph",
     "Transport",
     "TransportChunk",
     "TransportFile",

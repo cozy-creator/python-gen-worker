@@ -244,10 +244,10 @@ def test_warmup_is_a_span_nested_inside_pipeline_load(ladder) -> None:
     )
 
 
-def test_a_warmup_row_says_whether_a_cell_was_armed(ladder) -> None:
+def test_a_warmup_row_says_whether_a_compiled_graph_was_armed(ladder) -> None:
     """"Warmup before arm" and "warmup after arm" must be separable ROWS —
     otherwise they are two code paths that happen to share a name and the
-    "what does a cell save" question stays unanswerable."""
+    "what does a compiled graph save" question stays unanswerable."""
     warms = _terminal(ladder, boot_phases.PHASE_WARMUP)
     assert warms
     for w in warms:
@@ -370,7 +370,7 @@ def test_nesting_survives_concurrent_tasks() -> None:
             inner = await asyncio.create_task(leaf(boot_phases.PHASE_WARMUP))
             outer_ordinal = outer.ordinal
         # ...and one started outside it does not.
-        detached = await asyncio.create_task(leaf(boot_phases.PHASE_CELL_FETCH))
+        detached = await asyncio.create_task(leaf(boot_phases.PHASE_COMPILED_GRAPH_FETCH))
         return outer_ordinal, inner, detached
 
     try:

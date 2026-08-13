@@ -20,7 +20,7 @@ Two consumers, ONE derivation (the pgw#1059 fence pattern):
 ``sha256=<urlsafe-b64 of the 32 raw bytes>``; decoding to hex and truncating
 to 16 chars reproduces ``hashlib.sha256(content).hexdigest()[:16]`` exactly.
 Proven over the whole 36-library manifest on this env (0 disagreements), which
-is what makes this a pure COST move: no seal value changes, no cell re-keys.
+is what makes this a pure COST move: no seal value changes, no compiled graph re-keys.
 
 **What RECORD trust is, precisely** (stated so the trade is ruled on, not
 buried — the honest scope of item (3) in this lane's brief):

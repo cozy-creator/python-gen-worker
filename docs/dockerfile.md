@@ -181,7 +181,7 @@ The obvious id is a constant — every org copies the same one off a page like
 this one — and a constant id is one mutable directory shared across tenant
 builds. Org A seeds a poisoned wheel into it; org B's build mounts the same id
 and installs it. That is build-time code injection across a tenant boundary:
-the same shape of trust failure as adopting a foreign compile cell, one layer
+the same shape of trust failure as adopting a foreign compile compiled graph, one layer
 down.
 
 Install uncached instead — `uv pip install --no-cache`. The ordinary layer

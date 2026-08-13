@@ -347,11 +347,11 @@ def test_transform_command_survives_an_unreadable_source(tmp_path: Path) -> None
 
 
 # ---------------------------------------------------------------------------
-# Identity: the transform must not re-key a single cell
+# Identity: the transform must not re-key a single compiled graph
 # ---------------------------------------------------------------------------
 
 
-def test_transform_is_outside_cell_identity() -> None:
+def test_transform_is_outside_compiled_graph_identity() -> None:
     """The seal covers inductor config, torch flags and libraries; the key
     also covers the static code closure. This module changes none of them,
     and is not itself reachable from the closure's entrypoints."""
@@ -395,7 +395,7 @@ def test_install_moves_no_seal_digest(monkeypatch) -> None:  # type: ignore[no-u
     """Installing the hook must leave every key axis where it was — a
     silent re-key is the one failure mode this transform must not have."""
     pytest.importorskip("torch")
-    from gen_worker import cell_key, env_seal
+    from gen_worker import compiled_graph_key, env_seal
 
     cpp_builder = pytest.importorskip("torch._inductor.cpp_builder")
 
@@ -405,7 +405,7 @@ def test_install_moves_no_seal_digest(monkeypatch) -> None:  # type: ignore[no-u
             env_seal.inductor_config_digest(),
             # loaded_libs is a live machine fact, not something install() can
             # move; everything else in the seal is compared exactly.
-            cell_key.facts_digest(
+            compiled_graph_key.facts_digest(
                 {k: v for k, v in seal.items() if k != "loaded_libs"}),
         )
 

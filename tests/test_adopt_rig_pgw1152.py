@@ -36,10 +36,10 @@ from typing import Any, Dict, List
 
 import pytest
 
-from gen_worker import activity, aot_serve, cell_adopt
+from gen_worker import activity, aot_serve, compiled_graph_adopt
 from gen_worker import executor as ex_mod
 
-from harness import exported_cell as cell868
+from harness import exported_compiled_graph as compiledgraph868
 from harness.adopt_rig import AdoptRig, production_cfgs, reintroduce
 # The REAL receipt gate: a real RSA key, a real JWKS/receipt HTTP hub.
 from harness.receipt_hub import HubStub, hub, pub_map, rsa_key  # noqa: F401
@@ -53,21 +53,21 @@ LINT = REPO / "scripts" / "lint_arm_state_feeders.py"
 # ===========================================================================
 
 
-def test_the_rig_serves_a_boot_adopted_cell_COMPILED(
+def test_the_rig_serves_a_boot_adopted_compiled_graph_COMPILED(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: HubStub,  # noqa: F811
 ) -> None:
-    """The control. With the tree as it stands, a boot-adopted cell that the
+    """The control. With the tree as it stands, a boot-adopted compiled graph that the
     warmup never dispatched through keeps its arm, gets its target, and serves
     compiled — §4.31 + §4.32 + pgw#1141b, end to end, off-pod."""
     boot = AdoptRig(tmp_path, monkeypatch, hub).boot()
 
     assert boot.adopted(), "the boot did not adopt at all"
     assert boot.is_armed() is True
-    assert boot.holds_cell() is True
+    assert boot.holds_compiled_graph() is True
     target = boot.compile_target()
     assert target is not None, "armed and still no installed compile target"
     assert "generate" in target.function_names
-    assert target.active_compile_ref == boot.cell.cell_ref
+    assert target.active_compile_ref == boot.compiled_graph.compiled_graph_ref
     assert boot.record.eager_posture == ""
     assert boot.serves_compiled()
     assert not boot.phases(activity.KIND_SERVE_DEGRADE)
@@ -99,15 +99,15 @@ def test_the_rig_RE_FINDS_pgw1141b_when_its_fix_is_deleted(
     postures = boot.phases("serve_eager_posture")
     assert "target_applicability_incomplete" in postures, (
         "the rig did NOT re-find pgw#1141b — with the fix deleted, a "
-        "boot-adopted cell must be scored on the dynamo ledger and disarmed")
-    assert cell_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value in postures
+        "boot-adopted compiled_graph must be scored on the dynamo ledger and disarmed")
+    assert compiled_graph_adopt.EagerPhase.ARMED_TARGET_UNRESOLVED.value in postures
     assert boot.phases(activity.KIND_SERVE_DEGRADE)
     assert boot.compile_target() is None
     assert not boot.serves_compiled()
 
     # …and the locus itself, named: the process armed these exact bytes and
-    # still did not recognize their ref as an exported cell.
-    assert not aot_serve.is_aot_ref(boot.cell.cell_ref)
+    # still did not recognize their ref as an exported compiled graph.
+    assert not aot_serve.is_aot_ref(boot.compiled_graph.compiled_graph_ref)
 
 
 def test_the_registration_is_what_the_re_find_turns_on(
@@ -117,15 +117,15 @@ def test_the_registration_is_what_the_re_find_turns_on(
     key) is enough to keep the arm, which is what makes the deletion above a
     bisection rather than a vibe."""
     boot = AdoptRig(tmp_path, monkeypatch, hub).boot()
-    assert aot_serve.is_aot_ref(boot.cell.cell_ref)
-    assert aot_serve.is_aot_ref(boot.cell.cell_ref, boot.cell.family)
+    assert aot_serve.is_aot_ref(boot.compiled_graph.compiled_graph_ref)
+    assert aot_serve.is_aot_ref(boot.compiled_graph.compiled_graph_ref, boot.compiled_graph.family)
 
     # The structural half: with the registry deliberately emptied AFTER the
     # wrap, the readers must still put this object on the exported lane.
     monkeypatch.setattr(aot_serve, "_KNOWN_AOT_KEYS", set())
-    assert not aot_serve.is_aot_ref(boot.cell.cell_ref)
-    assert aot_serve.holds_exported_cell(boot.pipeline) is True
-    assert ex_mod._exported_arm(boot.pipeline, boot.cell.cell_ref) is True
+    assert not aot_serve.is_aot_ref(boot.compiled_graph.compiled_graph_ref)
+    assert aot_serve.holds_exported_compiled_graph(boot.pipeline) is True
+    assert ex_mod._exported_arm(boot.pipeline, boot.compiled_graph.compiled_graph_ref) is True
 
 
 # ===========================================================================
@@ -145,20 +145,20 @@ def test_the_arm_receives_the_type_PRODUCTION_builds_not_a_declaration(
     handed ``provision.arm_aot`` on a real boot.
     """
     from gen_worker.api.decorators import Compile
-    from gen_worker.registry import CompileCell
+    from gen_worker.registry import CompileCompiledGraph
 
     boot = AdoptRig(tmp_path, monkeypatch, hub).boot()
 
-    assert isinstance(boot.armed_cfg, CompileCell), type(boot.armed_cfg)
+    assert isinstance(boot.armed_cfg, CompileCompiledGraph), type(boot.armed_cfg)
     assert not isinstance(boot.armed_cfg, Compile)
     # …and the declared band really reaches the gate through it (pgw#1150).
-    assert boot.armed_cfg.numerics_floor == cell868.FLOOR
-    assert boot.armed_cfg.numerics_warn == cell868.WARN
+    assert boot.armed_cfg.numerics_floor == compiledgraph868.FLOOR
+    assert boot.armed_cfg.numerics_warn == compiledgraph868.WARN
 
 
-def test_both_production_call_sites_build_the_SAME_cell_object() -> None:
+def test_both_production_call_sites_build_the_SAME_compiled_graph_object() -> None:
     """The one-constructor claim, asserted on the two real call sites rather
-    than on the constructor's own docstring. ``EndpointSpec.compile_cell()`` and
+    than on the constructor's own docstring. ``EndpointSpec.compile_compiled_graph()`` and
     ``cli.run``'s §4.28 desktop arm differ only in the four spec-scoped
     enrichments a raw declaration cannot know; every other field is a straight
     carry, and a field that reaches one and not the other silently judges a
@@ -172,7 +172,7 @@ def test_both_production_call_sites_build_the_SAME_cell_object() -> None:
         if field.name in enrichments:
             continue
         assert getattr(registry_cfg, field.name) == getattr(cli_cfg, field.name), (
-            f"{field.name} reaches one Compile->CompileCell map and not the "
+            f"{field.name} reaches one Compile->CompileCompiledGraph map and not the "
             "other — that is pgw#1150's cause, not its instance")
 
 
@@ -182,8 +182,8 @@ def test_the_declared_band_survives_EVERY_production_route(origin: str) -> None:
     over the convenient one. This is the pattern that would have caught
     pgw#1150 before it shipped."""
     cfg = production_cfgs()[origin]
-    assert cfg.numerics_floor == cell868.FLOOR
-    assert cfg.numerics_warn == cell868.WARN
+    assert cfg.numerics_floor == compiledgraph868.FLOOR
+    assert cfg.numerics_warn == compiledgraph868.WARN
 
 
 # ===========================================================================
@@ -191,15 +191,15 @@ def test_the_declared_band_survives_EVERY_production_route(origin: str) -> None:
 # ===========================================================================
 
 
-def test_a_cell_whose_ENTRY_RAISES_revokes_itself_and_installs_no_target(
+def test_a_compiled_graph_whose_ENTRY_RAISES_revokes_itself_and_installs_no_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: HubStub,  # noqa: F811
 ) -> None:
     """The de-arm still has teeth, forced the honest way: the packaged entry
     really raises when the arm dispatches through it, so the artifact revokes
     ITSELF. Nothing here sets ``failed`` by hand.
 
-    A fix that made a cell undisarmable would be worse than the bug — an object
-    whose every call runs eager must never advertise ``serving_mode=aot_cell``.
+    A fix that made a compiled graph undisarmable would be worse than the bug — an object
+    whose every call runs eager must never advertise ``serving_mode=aot_compiled_graph``.
     """
     boot = AdoptRig(
         tmp_path, monkeypatch, hub,
@@ -207,8 +207,8 @@ def test_a_cell_whose_ENTRY_RAISES_revokes_itself_and_installs_no_target(
     ).boot()
 
     assert boot.is_armed() is False
-    assert boot.holds_cell() is True, (
-        "a revoked cell stopped being recognizable as an exported one, which "
+    assert boot.holds_compiled_graph() is True, (
+        "a revoked compiled_graph stopped being recognizable as an exported one, which "
         "would route it back onto the dynamo lane's ledger")
     assert boot.compile_target() is None
     assert boot.record.eager_posture
@@ -219,13 +219,13 @@ def test_a_hub_that_serves_NO_RECEIPT_refuses_the_order(
 ) -> None:
     """Forcing by REMOVING an input, not by supplying one: the hub simply has
     no receipt for these bytes, so the real gate refuses on a 404 and the pod
-    serves eager rather than the cell it resolved."""
+    serves eager rather than the compiled graph it resolved."""
     boot = AdoptRig(tmp_path, monkeypatch, hub, serve_receipt=False).boot()
 
     assert boot.adopted()
     assert boot.is_armed() is False
-    assert boot.holds_cell() is False, (
-        "an unreceipted cell was wrapped onto the pipeline anyway")
+    assert boot.holds_compiled_graph() is False, (
+        "an unreceipted compiled_graph was wrapped onto the pipeline anyway")
     # pgw#1122: an ordered arm this pod ordered ITSELF degrades to eager rather
     # than failing the function, so the boot falls through to the ordinary
     # policy — a target is still registered (active-less, advertising the key
@@ -233,7 +233,7 @@ def test_a_hub_that_serves_NO_RECEIPT_refuses_the_order(
     target = boot.compile_target()
     assert target is not None
     assert target.active_compile_ref == "", (
-        "a refused cell is still advertised as the served artifact")
+        "a refused compiled_graph is still advertised as the served artifact")
     assert not boot.serves_compiled()
 
 
@@ -247,7 +247,7 @@ def test_a_WARM_DISPATCH_moves_the_artifacts_own_counter(
 
     assert boot.is_armed() is True
     assert aot_serve.execution_count(boot.pipeline) > 0, (
-        "the handler dispatched through the cell and its counter did not move")
+        "the handler dispatched through the compiled_graph and its counter did not move")
     served = [p.invocations for p in boot.packages.values()]
     assert sum(served) > 0, served
     assert boot.serves_compiled()
@@ -275,7 +275,7 @@ def _tree(root: Path, files: Dict[str, str]) -> None:
 SEAM = '''
 def arm_entry(pipeline, *a, **k):
     meta = {}
-    note_aot_key(str(meta.get("cell_key") or ""))
+    note_aot_key(str(meta.get("compiled_graph_key") or ""))
     return meta
 '''
 
@@ -299,10 +299,10 @@ def test_the_fence_goes_RED_on_a_production_feeder_off_the_seam(
     src, tests = tmp_path / "src", tmp_path / "tests"
     _tree(src, {
         "aot_serve.py": SEAM,
-        "fleet_cells.py": (
+        "fleet_compiled_graphs.py": (
             "from . import aot_serve\n\n\n"
             "def arm_ordered(pipe, order):\n"
-            "    aot_serve.note_aot_key(order.cell_key)\n"),
+            "    aot_serve.note_aot_key(order.compiled_graph_key)\n"),
     })
     tests.mkdir()
     allowlist = tmp_path / "allow.txt"
@@ -392,15 +392,15 @@ def test_there_is_no_CONVENTION_classification(tmp_path: Path) -> None:
     src, tests = tmp_path / "src", tmp_path / "tests"
     _tree(src, {
         "aot_serve.py": SEAM,
-        "fleet_cells.py": (
+        "fleet_compiled_graphs.py": (
             "from . import aot_serve\n\n\n"
             "def arm_ordered(pipe, order):\n"
-            "    aot_serve.note_aot_key(order.cell_key)\n"),
+            "    aot_serve.note_aot_key(order.compiled_graph_key)\n"),
     })
     tests.mkdir()
     allowlist = tmp_path / "allow.txt"
     allowlist.write_text(
-        "src/fleet_cells.py::arm_ordered::aot_serve.note_aot_key  "
+        "src/fleet_compiled_graphs.py::arm_ordered::aot_serve.note_aot_key  "
         "CONVENTION  whoever reads a key off an envelope registers it\n")
 
     got = _run_lint(src, tests, allowlist)
@@ -450,7 +450,7 @@ def test_the_rig_itself_registers_nothing(monkeypatch: pytest.MonkeyPatch) -> No
         == "note_aot_key"
     ]
     assert not calls, (
-        "the rig hand-registers a cell key — the exact fixture sin it exists "
+        "the rig hand-registers a compiled_graph key — the exact fixture sin it exists "
         f"to replace (line {[c.lineno for c in calls]})")
     # …and it touches the registry exactly once, to EMPTY it. Removing an
     # input is legal; supplying one is not.

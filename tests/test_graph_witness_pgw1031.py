@@ -1,4 +1,4 @@
-"""pgw#1031 — the cell key is the traced COMPUTATION, and two different
+"""pgw#1031 — the compiled graph key is the traced COMPUTATION, and two different
 computations behind one declaration now key APART (option a, Paul-ruled).
 
 The LIVE SIGHTING this file pins, measured 2026-08-10 during pgw#1079: the
@@ -19,7 +19,7 @@ The rows:
   INTERFACE half while the graph witnesses differ — AND the derived keys now
   differ. It is the RED→GREEN proof: pre-fix one key, post-fix two.
 * :func:`test_the_witness_backstops_a_residual_collision` runs the
-  defense-in-depth backstop over the same two traced blocks: even given a cell
+  defense-in-depth backstop over the same two traced blocks: even given a compiled graph
   built from one member's blocks, the matching pod admits and the colliding pod
   is REFUSED by a reason naming both digests. The witness stays as belt-and-
   braces beneath the now-sound key.
@@ -80,26 +80,26 @@ def _trace(
     only. pgw#1176: a declaration folds to a KEY SET, not one key."""
     from harness import rig_vehicles
 
-    from gen_worker import aot_mint, fleet_cells
+    from gen_worker import aot_mint, fleet_compiled_graphs
     from gen_worker.cli.run import run_setup
     from gen_worker.mint_child import pick_compile_target
     from gen_worker.registry import collect_endpoints
 
     veh = rig_vehicles.vehicle(vehicle_name)
-    cfg = veh.compile_cell()
+    cfg = veh.compile_compiled_graph()
     specs = collect_endpoints(list(veh.modules))
     chosen = next(s for s in specs if s.name == veh.function)
     loaded = run_setup(
         chosen.cls(), {"pipeline": str(tree)}, arm_compile=False,
         return_loaded=True) or {}
     _slot, pipeline = pick_compile_target(loaded, cfg)
-    export_spec = fleet_cells.aot_export_spec(pipeline, cfg)
+    export_spec = fleet_compiled_graphs.aot_export_spec(pipeline, cfg)
     decl = aot_mint.export_declaration(export_spec.family)
     blocks: Dict[str, Any] = {}
     for traced in aot_mint.trace_for_key(pipeline, export_spec, decl):
         blocks[traced.name] = traced.block
         traced.program = None  # the largest object here; nothing below reads it
-    envelope = fleet_cells.declared_envelope_block(cfg)
+    envelope = fleet_compiled_graphs.declared_envelope_block(cfg)
     entry_keys, _hashes, _manifest = boot_key.fold(
         blocks, family=export_spec.family, precision="", strict=True,
         lora_bucket=int(cfg.lora_bucket or 0), envelope=envelope)
@@ -168,40 +168,40 @@ def test_the_bodies_now_key_apart(traced_pair: Dict[str, Any]) -> None:
 def test_the_witness_backstops_a_residual_collision(
     traced_pair: Dict[str, Any],
 ) -> None:
-    """Defense-in-depth: given a cell built from one member's blocks, the
+    """Defense-in-depth: given a compiled graph built from one member's blocks, the
     matching pod adopts and the colliding pod is refused by name.
 
     The key now separates the two members (``test_the_bodies_now_key_apart``),
-    so pull-by-key never hands the wrong cell over in the first place. This
+    so pull-by-key never hands the wrong compiled graph over in the first place. This
     proves the backstop still holds beneath the sound key: were a witness-blind
-    cell ever handed over, the adopt path still refuses on the witness."""
+    compiled graph ever handed over, the adopt path still refuses on the witness."""
     fixed, branchy = traced_pair[PAIR[0]], traced_pair[PAIR[1]]
     # pgw#1176: ONE artifact, ONE class — so the witness backstop is asked
     # about the class this artifact carries, which is the only thing it could
     # ever honestly answer about.
     name = sorted(fixed["blocks"])[0]
-    cell = aot_serve.entry_metadata(
-        family=PAIR[0], precision="", cell_key=fixed["key"],
+    compiled_graph = aot_serve.entry_metadata(
+        family=PAIR[0], precision="", compiled_graph_key=fixed["key"],
         name=name, entry=fixed["blocks"][name],
         strict_export=True, lora_bucket=0)
 
     mine = {name: boot_key.graph_witnesses_of(fixed["blocks"])[name]}
     theirs = {name: boot_key.graph_witnesses_of(branchy["blocks"])[name]}
 
-    assert aot_identity.verify_graph_witness(cell, mine) == "", (
-        "the pod whose graph this cell WAS compiled from must admit it")
+    assert aot_identity.verify_graph_witness(compiled_graph, mine) == "", (
+        "the pod whose graph this compiled_graph WAS compiled from must admit it")
 
-    refusal = aot_identity.verify_graph_witness(cell, theirs)
+    refusal = aot_identity.verify_graph_witness(compiled_graph, theirs)
     assert refusal, "the colliding pod must be REFUSED, not admitted"
     assert "transformer" in refusal
     assert mine["transformer"] in refusal and theirs["transformer"] in refusal, (
         "a refusal that does not name BOTH digests cannot be acted on")
 
 
-def test_a_witnessless_cell_is_refused_not_skipped() -> None:
+def test_a_witnessless_compiled_graph_is_refused_not_skipped() -> None:
     """Fail-closed: silence is a refusal (``verify_declared_identity``'s rule).
 
-    A pre-pgw#1031 cell records no witness, so it cannot be shown to compute
+    A pre-pgw#1031 compiled graph records no witness, so it cannot be shown to compute
     this pod's graph — and 'cannot be shown to match' is what a refusal means.
     """
     meta = {"entry": {"name": "unet", "class_hash": "aa" * 8}}
@@ -223,12 +223,12 @@ def test_a_witnessless_cell_is_refused_not_skipped() -> None:
 
 
 def _meta(row: Dict[str, Any], family: str) -> Dict[str, Any]:
-    """One family's cell metadata, as the mint would stamp it."""
-    from gen_worker import cell_key as ck, compile_cache as cc, env_seal
+    """One family's compiled graph metadata, as the mint would stamp it."""
+    from gen_worker import compiled_graph_key as ck, compile_cache as cc, env_seal
 
     name = sorted(row["blocks"])[0]
     meta = aot_serve.entry_metadata(
-        family=family, precision="", cell_key=row["key"][name],
+        family=family, precision="", compiled_graph_key=row["key"][name],
         name=name, entry=row["blocks"][name],
         strict_export=True, lora_bucket=0)
     meta["kind"] = ck.EXPORTED_KIND
@@ -240,41 +240,41 @@ def _meta(row: Dict[str, Any], family: str) -> Dict[str, Any]:
 def test_the_key_now_separates_what_the_gates_could_not(
     traced_pair: Dict[str, Any],
 ) -> None:
-    """GREEN (was RED): the depth fix separates the two cells AT THE KEY.
+    """GREEN (was RED): the depth fix separates the two compiled graphs AT THE KEY.
 
-    Before pgw#1031 nothing that shipped separated these cells: pod
+    Before pgw#1031 nothing that shipped separated these compiled graphs: pod
     ``micro-pad32-branchy`` derived the SAME key as ``micro-pad32``, the hub
-    answered its pull with the wrong cell, and every admission gate agreed
+    answered its pull with the wrong compiled graph, and every admission gate agreed
     (``verify_declared_identity`` clean on all four axes, ``verify_contract``
     self-consistent) — only the arm-time numerics tolerance stood between that
     and wrong output. The fix folds the body into ``graph``, so:
 
     * the two members derive DIFFERENT keys — pull-by-key never even offers
-      cell A to pod B; the collision is a MISS, not a wrong hit;
-    * were the wrong cell forced across anyway, ``verify_declared_identity``
+      compiled graph A to pod B; the collision is a MISS, not a wrong hit;
+    * were the wrong compiled graph forced across anyway, ``verify_declared_identity``
       now REFUSES on the ``graph`` axis (this class's ``class_hash`` differs); and
     * the witness backstop still refuses beneath both.
     """
     fixed, branchy = traced_pair[PAIR[0]], traced_pair[PAIR[1]]
-    cell_a = _meta(fixed, PAIR[0])
+    compiled_graph_a = _meta(fixed, PAIR[0])
 
     # The expectation pod B states from its OWN traced facts and its OWN
-    # runtime — nothing borrowed from the cell it is about to be handed.
+    # runtime — nothing borrowed from the compiled graph it is about to be handed.
     expected_b = aot_identity.artifact_identity(_meta(branchy, PAIR[1]))
-    assert expected_b.cell_key != cell_a["cell_key"], (
-        "THE FIX: pod B must derive a different key from cell A's, so the hub "
+    assert expected_b.compiled_graph_key != compiled_graph_a["compiled_graph_key"], (
+        "THE FIX: pod B must derive a different key from compiled_graph A's, so the hub "
         "never answers B's pull with A. A red here means the key went body-"
         "blind — class_hash must fold graph_witness")
 
-    # Cell A is still self-consistent (its own stamp verifies)…
-    assert aot_serve.verify_contract(cell_a) == ""
+    # Compiled graph A is still self-consistent (its own stamp verifies)…
+    assert aot_serve.verify_contract(compiled_graph_a) == ""
     # …but the identity gate now REFUSES the cross, naming the graph axis.
-    refusal = aot_identity.verify_declared_identity(cell_a, expected_b)
-    assert refusal, "the identity gate must refuse the wrong cell post-fix"
+    refusal = aot_identity.verify_declared_identity(compiled_graph_a, expected_b)
+    assert refusal, "the identity gate must refuse the wrong compiled_graph post-fix"
 
     # …and the witness backstop refuses it too (defense-in-depth).
     assert aot_identity.verify_graph_witness(
-        cell_a, boot_key.graph_witnesses_of(branchy["blocks"]))
+        compiled_graph_a, boot_key.graph_witnesses_of(branchy["blocks"]))
 
 
 # ---------------------------------------------------------------------------
@@ -283,11 +283,11 @@ def test_the_key_now_separates_what_the_gates_could_not(
 
 
 def _artifact(tmp_path: Path, meta: Dict[str, Any]) -> Path:
-    """A cell whose only interesting member is its ``metadata.json``."""
+    """A compiled graph whose only interesting member is its ``metadata.json``."""
     import io
     import tarfile
 
-    path = tmp_path / "cell.tar.gz"
+    path = tmp_path / "compiled_graph.tar.gz"
     blob = json.dumps(meta).encode()
     with tarfile.open(path, mode="w:gz") as tar:
         info = tarfile.TarInfo(aot_serve.METADATA_NAME)
@@ -298,17 +298,17 @@ def _artifact(tmp_path: Path, meta: Dict[str, Any]) -> Path:
 
 def _attempt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
              derived: Any, artifact: Path) -> Any:
-    from gen_worker import boot_adopt, boot_key, cell_resolve
+    from gen_worker import boot_adopt, boot_key, compiled_graph_resolve
 
-    class _Cell:
+    class _CompiledGraph:
         publisher_org = "org-a"
-        cell_ref = "root/family-micro-pad32"
+        compiled_graph_ref = "root/family-micro-pad32"
         publisher_tier = "platform"
 
     monkeypatch.setattr(boot_key, "derive", lambda **_kw: derived)
-    monkeypatch.setattr(cell_resolve, "resolve", lambda *_a, **_k: _Cell())
+    monkeypatch.setattr(compiled_graph_resolve, "resolve", lambda *_a, **_k: _CompiledGraph())
     monkeypatch.setattr(
-        cell_resolve, "materialize", lambda *_a, **_k: artifact)
+        compiled_graph_resolve, "materialize", lambda *_a, **_k: artifact)
 
     class _Cfg:
         family = "micro-pad32"
@@ -341,7 +341,7 @@ def test_the_adopt_path_admits_the_pod_whose_graph_it_is(
     fixed = traced_pair[PAIR[0]]
     name = sorted(fixed["blocks"])[0]
     meta = aot_serve.entry_metadata(
-        family=PAIR[0], precision="", cell_key=fixed["key"][name],
+        family=PAIR[0], precision="", compiled_graph_key=fixed["key"][name],
         name=name, entry=fixed["blocks"][name],
         strict_export=True, lora_bucket=0)
     # pgw#1176: a boot returns ONE outcome per declared class; this fixture
@@ -356,7 +356,7 @@ def test_the_adopt_path_refuses_the_colliding_pod(
     traced_pair: Dict[str, Any], monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """THE backstop: a FORCED cross — pod B handed cell A — is refused, and it
+    """THE backstop: a FORCED cross — pod B handed compiled graph A — is refused, and it
     says which. Post-fix the keys differ, so pull-by-key never offers this cross
     on its own; the monkeypatched ``derive`` forces it to prove the backstop
     still refuses beneath the sound key. Without it this returns ``hit`` and the
@@ -369,7 +369,7 @@ def test_the_adopt_path_refuses_the_colliding_pod(
     # the fix: the shared class keys apart
     assert fixed["key"][name] != branchy["key"][name]
     meta = aot_serve.entry_metadata(
-        family=PAIR[0], precision="", cell_key=fixed["key"][name],
+        family=PAIR[0], precision="", compiled_graph_key=fixed["key"][name],
         name=name, entry=fixed["blocks"][name],
         strict_export=True, lora_bucket=0)
     (out,) = _attempt(

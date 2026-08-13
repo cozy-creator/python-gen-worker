@@ -193,13 +193,13 @@ def _fresh_learned_aot_keys():
 
 
 @pytest.fixture(autouse=True)
-def _fresh_cell_ledgers():
+def _fresh_compiled_graph_ledgers():
     from gen_worker import compile_cache as _cc
-    from gen_worker import fleet_cells as _fc
+    from gen_worker import fleet_compiled_graphs as _fc
 
     def _clear() -> None:
-        with _cc._PROVEN_CELLS_LOCK:
-            getattr(_cc, "_QUARANTINED_CELLS", set()).clear()
+        with _cc._PROVEN_COMPILED_GRAPHS_LOCK:
+            getattr(_cc, "_QUARANTINED_COMPILED_GRAPHS", set()).clear()
         with _fc._PENDING_LOCK:
             getattr(_fc, "_FINALIZED", {}).clear()
         _cc._DELIVERED_SEEDED = False

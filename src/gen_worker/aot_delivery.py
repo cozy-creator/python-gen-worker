@@ -39,7 +39,7 @@ _DOWNLOAD_TIMEOUT_S = 120
 
 
 class NamedArtifactUnavailable(RetryableError):
-    """The named cell's bytes could not be materialized AS NAMED."""
+    """The named compiled graph's bytes could not be materialized AS NAMED."""
 
     def __init__(self, reason: str, detail: str) -> None:
         self.reason = reason
@@ -47,7 +47,7 @@ class NamedArtifactUnavailable(RetryableError):
 
 
 def materialize_named_artifact(
-    cell_ref: str,
+    compiled_graph_ref: str,
     content_digest: str,
     presigned: Optional[Any],
     *,
@@ -61,24 +61,24 @@ def materialize_named_artifact(
     digest, so a re-dispatch of the same spec is a verify-and-return.
     ``what`` names the attempt + spec digest for every refusal.
     """
-    # pgw#1087: THE cell-download phase. `cell_fetch` has been a declared boot
+    # pgw#1087: THE compiled graph-download phase. `compiled_graph_fetch` has been a declared boot
     # phase since pgw#764 with NO producer anywhere in the tree — so "the adopt
     # leg took 6.2 min" could never be split into download vs admission, which
     # is the first question anyone asks about an adopt. This is the one place
-    # cell bytes move, so it is the one place the span belongs.
+    # compiled graph bytes move, so it is the one place the span belongs.
     with boot_phases.span(
-        boot_phases.PHASE_CELL_FETCH,
-        ref=cell_ref,
+        boot_phases.PHASE_COMPILED_GRAPH_FETCH,
+        ref=compiled_graph_ref,
         artifact_kind="aot-inductor",
         artifact_key=str(content_digest or ""),
     ) if boot_phases.in_boot() else contextlib.nullcontext() as fetch_span:
         return _materialize_named_artifact(
-            cell_ref, content_digest, presigned,
+            compiled_graph_ref, content_digest, presigned,
             cache_dir=cache_dir, what=what, span=fetch_span)
 
 
 def _materialize_named_artifact(
-    cell_ref: str,
+    compiled_graph_ref: str,
     content_digest: str,
     presigned: Optional[Any],
     *,
@@ -89,11 +89,11 @@ def _materialize_named_artifact(
     digest = str(content_digest or "").strip()
     if not digest:
         raise NamedArtifactUnavailable(
-            "artifact_unpinned", f"{what}: named cell {cell_ref!r} carries no "
+            "artifact_unpinned", f"{what}: named compiled_graph {compiled_graph_ref!r} carries no "
             "content digest")
     dest_dir = (
         Path(cache_dir) if cache_dir else Path.home() / ".cache" / "gen-worker"
-    ) / "aot-cells"
+    ) / "aot-compiled_graphs"
     dest = dest_dir / f"{digest.split(':', 1)[-1]}.tar.gz"
 
     if dest.is_file():
@@ -108,15 +108,15 @@ def _materialize_named_artifact(
             # A cache hit is a real and countable outcome of this phase, not a
             # zero-byte fetch: the verify pass still reads the whole tarball.
             if span is not None:
-                span.classify("cached", f"ref={cell_ref}")
+                span.classify("cached", f"ref={compiled_graph_ref}")
                 span.bytes_moved(dest.stat().st_size, boot_phases.SOURCE_LOCAL)
             return dest
 
     if presigned is None or not list(getattr(presigned, "files", ())):
         raise NamedArtifactUnavailable(
             "missing_content",
-            f"{what}: the grant carries no transport for the named cell "
-            f"{cell_ref!r} (content digest {digest})")
+            f"{what}: the grant carries no transport for the named compiled_graph "
+            f"{compiled_graph_ref!r} (content digest {digest})")
     files = list(presigned.files)
     entry = next(
         (f for f in files if str(f.path or "").endswith(".tar.gz")),
@@ -124,18 +124,18 @@ def _materialize_named_artifact(
     if entry is None:
         raise NamedArtifactUnavailable(
             "missing_content",
-            f"{what}: the grant's transport for {cell_ref!r} names no "
+            f"{what}: the grant's transport for {compiled_graph_ref!r} names no "
             "artifact tarball")
 
     declared_size = int(entry.size_bytes or 0)
     chunks = list(entry.chunks or ())
     if not chunks and declared_size <= 0:
-        # A cell artifact is compiled code fetched before serving; an entry
+        # A compiled graph artifact is compiled code fetched before serving; an entry
         # that cannot say how big it is cannot be sized against disk
         # (pgw#1013) — refuse rather than an unbounded write.
         raise NamedArtifactUnavailable(
             "missing_content",
-            f"{what}: transport for {cell_ref!r} declares no size_bytes")
+            f"{what}: transport for {compiled_graph_ref!r} declares no size_bytes")
 
     dest_dir.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(".part")
@@ -162,7 +162,7 @@ def _materialize_named_artifact(
                     got = copy_bounded(
                         dl.iter_content(1 << 20), f.write,
                         limit_bytes=declared_size,
-                        what=f"named cell artifact {cell_ref}")
+                        what=f"named compiled_graph artifact {compiled_graph_ref}")
             if got != declared_size:
                 raise ValueError(
                     f"truncated: transport declares {declared_size} bytes, "
@@ -176,11 +176,11 @@ def _materialize_named_artifact(
         raise NamedArtifactUnavailable(
             "content_digest_mismatch" if isinstance(exc, DigestMismatch)
             else "artifact_fetch_failed",
-            f"{what}: named cell {cell_ref!r} bytes refused against "
+            f"{what}: named compiled_graph {compiled_graph_ref!r} bytes refused against "
             f"{digest[:24]}…: {exc}") from exc
     tmp.replace(dest)
     if span is not None:
-        span.classify("fetched", f"ref={cell_ref} chunks={len(chunks)}")
+        span.classify("fetched", f"ref={compiled_graph_ref} chunks={len(chunks)}")
         span.bytes_moved(declared_size or dest.stat().st_size,
                          boot_phases.SOURCE_CAS)
     return dest

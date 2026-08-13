@@ -70,7 +70,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import msgspec
 
-from . import cell_key, compile_posture
+from . import compiled_graph_key, compile_posture
 from .api.binding import ModelRef, binding_wire_refs, wire_ref
 from .compile_posture import CompilePosture
 from .stall import SilenceWindow
@@ -154,7 +154,7 @@ class CompileCellSpec(msgspec.Struct, frozen=True, kw_only=True):
 
     pgw#1034 therefore dropped ``regional``/``text_len``/``dynamic``: they
     crossed the wire and no child consumer read them
-    (``fleet_cells.aot_export_spec`` and ``compile_cache.resolve_targets`` read
+    (``fleet_compiled_graphs.aot_export_spec`` and ``compile_cache.resolve_targets`` read
     family/targets/shapes/text_lens/guidance/bucket, and nothing else does).
     Any field added back must name the child code that reads it.
     """
@@ -215,7 +215,7 @@ class MintSlot(msgspec.Struct, frozen=True, kw_only=True):
 def slot_subjects(
     slots: Mapping[str, MintSlot],
     digests: Optional[Mapping[str, str]] = None,
-) -> Tuple[cell_key.SlotSubject, ...]:
+) -> Tuple[compiled_graph_key.SlotSubject, ...]:
     """The resolved SUBJECT of one arm or one boot trace (pgw#1113).
 
     THE single derivation, so the arm token, the local-store memo and the
@@ -227,7 +227,7 @@ def slot_subjects(
     """
     have = dict(digests or {})
     return tuple(
-        cell_key.SlotSubject(
+        compiled_graph_key.SlotSubject(
             slot=str(name),
             refs=tuple(binding_wire_refs(slot.ref)),
             snapshot_digest=str(have.get(str(name), "") or ""),
@@ -244,7 +244,7 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     family: str
     #: The parent's ArmIdentity token (``arm1-…``) — the obligation this
     #: child discharges. NOT a cell key (pgw#1059): the cell's key is
-    #: stamped by the mint itself and returned in ``MintReport.cell_key``.
+    #: stamped by the mint itself and returned in ``MintReport.compiled_graph_key``.
     arm_token: str
     target: str          # artifact the child writes (.tar.gz), atomically
     #: The child's work root (target, export tree, snapshots). The parent
@@ -328,7 +328,7 @@ class MintReport(msgspec.Struct, frozen=True, kw_only=True):
     entries: Tuple[Tuple[str, str, str], ...] = ()
     artifact: str = ""
     digest: str = ""
-    cell_key: str = ""
+    compiled_graph_key: str = ""
     detail: str = ""
     phase: str = ""
     #: Measured, so the NEXT mint's co-residency ask is a fact rather than

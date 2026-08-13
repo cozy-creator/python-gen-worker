@@ -133,7 +133,7 @@ def _publish_leg(dest: str, label: str, stage: str, facts: Mapping[str, Any]) ->
     the platform emitted ZERO `worker_activity_events` legs for its whole
     publish. "Declared 590 objects and is moving 37 GB" and "was refused
     before a byte left" were the same observation. Modelled on
-    ``fleet_cells._publish_leg``, which already does this correctly.
+    ``fleet_compiled_graphs._publish_leg``, which already does this correctly.
     """
     detail = " ".join(f"{k}={v}" for k, v in sorted(dict(facts).items()))
     _activity.emit_event(
@@ -188,7 +188,7 @@ def publish_flavors(
     results: list[CommitResult] = []
     for flavor in flavors:
         # th#1362 item 4: OUR producers never emit shards, and this is the
-        # last place a conversion / training-promote / cell-publish output can
+        # last place a conversion / training-promote / compiled graph-publish output can
         # be checked before it becomes somebody's checkpoint. It is NOT a
         # universal publish gate — a user's own sharded upload never reaches
         # this function; it goes to the hub's upload API and is accepted as

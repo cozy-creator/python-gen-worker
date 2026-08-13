@@ -13,7 +13,7 @@ Three families, one property each:
 
 * ``Fast`` — a healthy family: the compiled arm is ~3x, comfortably over the
   1.10 fleet bar. Its ``family`` is pgw#868's probe family so the real numerics
-  rig can arm a real cell under it.
+  rig can arm a real compiled graph under it.
 * ``Regressed`` — the compiled arm is SLOWER. A speedup below the declared bar
   is a recorded FAILURE, never a proof, and this is the family that proves it.
 * ``Blocked`` — two unresolved ``Compile.blockers``. A declared block is a
@@ -36,7 +36,7 @@ from gen_worker import serve_posture
 STAGE = "denoise"
 
 #: pgw#868's probe family and its declared band, so `test_numerics_gate_pgw868`
-#: can arm a REAL cell for this endpoint's declaration rather than a shape that
+#: can arm a REAL compiled graph for this endpoint's declaration rather than a shape that
 #: only looks like one.
 PROBE_FAMILY = "pgw868-probe"
 FLOOR, WARN = 0.995, 0.999

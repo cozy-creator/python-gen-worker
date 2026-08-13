@@ -583,7 +583,7 @@ def _mint_aot(
     Runs against the pipeline the child ALREADY loaded through the endpoint's
     own ``setup()``, so the exported graphs are the serving graphs.
     """
-    from . import aot_mint, aot_resume, fleet_cells
+    from . import aot_mint, aot_resume, fleet_compiled_graphs
 
     # pgw#848 item 5: install the cross-attempt resume bank before anything is
     # exported. Process-global rather than a parameter threaded through
@@ -596,7 +596,7 @@ def _mint_aot(
 
     frame(phase="trace_graph", note=f"export declaration for {cfg.family!r}")
     if spec is None:
-        spec = fleet_cells.aot_export_spec(pipe, cfg)
+        spec = fleet_compiled_graphs.aot_export_spec(pipe, cfg)
     out_dir = target.parent / "aot"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -753,7 +753,7 @@ def mint(request: MintRequest) -> MintReport:
 
     # pgw#1115: FAIL CLOSED on a declared mint blocker, here — after discovery
     # has registered the declaration and before one weight is read. The parent
-    # declines a blocked family in `fleet_cells.mint_recipe`, so a request that
+    # declines a blocked family in `fleet_compiled_graphs.mint_recipe`, so a request that
     # reaches a child came from somewhere else (an operator CLI, a delegated
     # request built against a stale declaration). Serving a blocked family
     # eagerly is the declared outcome; minting it is not available at all, and
@@ -777,7 +777,7 @@ def mint(request: MintRequest) -> MintReport:
         """One full endpoint load on the currently pinned kernel lane: the
         endpoint instance, its compile-target pipeline, and that pipeline's
         export spec."""
-        from . import fleet_cells
+        from . import fleet_compiled_graphs
         from .models import structure_only
         from .models.structure_only import (
             StructureCapabilityMissing, StructureNotHonored,
@@ -856,7 +856,7 @@ def mint(request: MintRequest) -> MintReport:
         assert_traceable_as_loaded(loaded_pipe, request)
         if cfg.lora_bucket:
             cc.apply_lora_execution_lane(loaded_pipe, cfg.lora_bucket)
-        return obj, loaded_pipe, fleet_cells.aot_export_spec(loaded_pipe, cfg)
+        return obj, loaded_pipe, fleet_compiled_graphs.aot_export_spec(loaded_pipe, cfg)
 
     # pgw#947: MEASURE the serving-kernel lane on this card before the cell is
     # exported, so the cell can carry the verdict instead of the fleet

@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-from gen_worker import cell_key as cell_key_mod
+from gen_worker import compiled_graph_key as compiled_graph_key_mod
 from gen_worker import activity, aot_serve
 
 #: The arm is INDUCED to take this long, and the floor asserted against it is a
@@ -129,15 +129,15 @@ def _meta(**over: Any) -> Dict[str, Any]:
     m: Dict[str, Any] = {
         "format": aot_serve.ARTIFACT_FORMAT, "kind": aot_serve.ARTIFACT_KIND,
         **RUNTIME, "family": FAMILY, "precision": "w8a8",
-        "cell_key": KEY, cell_key_mod.ENTRY_BLOCK_KEY: entry,
+        "compiled_graph_key": KEY, compiled_graph_key_mod.ENTRY_BLOCK_KEY: entry,
         "strict_export": True, "lora_bucket": 0,
         "package_constants_in_so": False,
         # pgw#1097: no weight BYTES in the .so (above) and no weight VALUES in
-        # its kernels (here). Both are declared axes; a cell silent on either
+        # its kernels (here). Both are declared axes; a compiled graph silent on either
         # is refused before a byte moves.
         "constant_folding_fenced": True,
         "source_ref": "", "source_digest": "",
-        # pgw#950: every mint stamps a host-ISA requirement, and a cell that
+        # pgw#950: every mint stamps a host-ISA requirement, and a compiled graph that
         # stamps none is refused rather than sniffed from the .pt2. Satisfiable
         # anywhere: this host's machine, no ISA level.
         "host_isa": {"machine": platform.machine(), "march": "", "simdlen": 0,
@@ -151,18 +151,18 @@ def _meta(**over: Any) -> Dict[str, Any]:
         "declared_envelope": {"shapes": [[1024, 1024]], "text_lens": [77],
                               "guidance": [7.5]},
     }
-    m["manifest_digest"] = cell_key_mod.manifest_digest(
+    m["manifest_digest"] = compiled_graph_key_mod.manifest_digest(
         [str((entry or {}).get("class_hash") or "")])
     m.update(over)
     try:
-        m["cell_key"] = cell_key_mod.from_entry_metadata(m).digest
-    except cell_key_mod.CellKeyError:
+        m["compiled_graph_key"] = compiled_graph_key_mod.from_entry_metadata(m).digest
+    except compiled_graph_key_mod.CompiledGraphKeyError:
         pass  # deliberately-malformed variants keep the placeholder stamp
     return m
 
 
 def _tar(tmp_path: Path, meta: Optional[Dict[str, Any]] = None,
-         name: str = "cell.tar.gz") -> Path:
+         name: str = "compiled_graph.tar.gz") -> Path:
     work = tmp_path / "work"
     work.mkdir(exist_ok=True)
     (work / aot_serve.PACKAGE_NAME).write_bytes(b"\x00not-a-real-pt2")
@@ -188,26 +188,26 @@ def stub_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_successful_arm_returns_an_armed_outcome_naming_the_cell(
+def test_successful_arm_returns_an_armed_outcome_naming_the_compiled_graph(
     tmp_path: Path, stub_runtime: None, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         aot_serve, "_load_package", lambda path, entry: FakePackage())
     out = aot_serve.enable(FakePipeline(), Cfg(), artifact=_tar(tmp_path))
     assert out.armed and out.reason == ""
-    assert _meta()["cell_key"] in out.identity and FAMILY in out.identity
+    assert _meta()["compiled_graph_key"] in out.identity and FAMILY in out.identity
 
 
 def test_key_mismatch_named_on_the_wire(
     tmp_path: Path, events: List[Any], stub_runtime: None,
 ) -> None:
     # pgw#765: an sm mismatch is the key mismatch; a SKU difference alone is
-    # adopted (same-sm cross-SKU cells are the point of the pgw#691 collapse).
+    # adopted (same-sm cross-SKU compiled graphs are the point of the pgw#691 collapse).
     art = _tar(tmp_path, _meta(sm="sm_80"))
     out = aot_serve.enable(FakePipeline(), Cfg(), artifact=art)
     assert not out.armed and out.reason == "key_mismatch"
-    # the refusal names the candidate cell (its own restated stamp)
-    assert _meta(sm="sm_80")["cell_key"] in out.detail
+    # the refusal names the candidate compiled graph (its own restated stamp)
+    assert _meta(sm="sm_80")["compiled_graph_key"] in out.detail
 
 
 def test_host_isa_unsupported_named_on_the_wire(

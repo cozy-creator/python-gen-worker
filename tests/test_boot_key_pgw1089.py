@@ -17,8 +17,8 @@ from typing import Any, Dict
 
 import pytest
 
-from gen_worker import aot_mint, aot_serve, boot_key, cell_key
-from gen_worker.mint_process import CompileCellSpec
+from gen_worker import aot_mint, aot_serve, boot_key, compiled_graph_key
+from gen_worker.mint_process import CompileCompiledGraphSpec
 
 
 # ---------------------------------------------------------------------------
@@ -100,13 +100,13 @@ def test_the_fold_is_the_mints_own_stamp_not_a_second_arithmetic() -> None:
     """``boot_key.fold`` and the mint's packaging path must agree BY SHARING
     CODE, not by two implementations happening to match.
 
-    Proven by building the artifact envelope the way ``_mint_cell`` does —
-    ``artifact_metadata`` + ``shared_identity_blocks`` + ``cell_identity`` —
+    Proven by building the artifact envelope the way ``_mint_compiled_graph`` does —
+    ``artifact_metadata`` + ``shared_identity_blocks`` + ``compiled_graph_identity`` —
     and asserting the boot fold returns that key. If the boot module ever
     grows its own ``class_hash``/``manifest_digest`` arithmetic, this row
     keeps passing while the tree gets the attempt-28 phantom back; the
     ``manifest_digest(`` derivation fence in
-    ``test_cell_key_pgw1059.py`` is what stops that, and this row is what
+    ``test_compiled_graph_key_pgw1059.py`` is what stops that, and this row is what
     proves the shared path is the one actually taken.
     """
     blocks = {"forward/x@64": _block(dim=64), "forward/x@128": _block(dim=128)}
@@ -118,16 +118,16 @@ def test_the_fold_is_the_mints_own_stamp_not_a_second_arithmetic() -> None:
     minted = {}
     for name, block in blocks.items():
         meta = aot_serve.entry_metadata(
-            family="tiny", precision="bf16", cell_key="",
+            family="tiny", precision="bf16", compiled_graph_key="",
             name=name, entry=dict(block), strict_export=True, lora_bucket=0)
         meta["toolchain"] = dict(cc.toolchain_digest())
         meta[env_seal.SEAL_KEY] = env_seal.effective_seal()
-        minted[name] = aot_mint.cell_identity(meta).digest
+        minted[name] = aot_mint.compiled_graph_identity(meta).digest
 
     entry_keys, class_hashes, manifest = _fold(blocks)
 
     assert entry_keys == minted
-    assert manifest == cell_key.manifest_digest(class_hashes.values())
+    assert manifest == compiled_graph_key.manifest_digest(class_hashes.values())
     assert set(class_hashes) == set(blocks)
     assert all(len(h) == 16 for h in class_hashes.values())
 
@@ -136,10 +136,10 @@ def test_every_key_is_an_ek1_key_over_exactly_three_axes() -> None:
     entry_keys, _hashes, _manifest = _fold({"a": _block()})
     (key,) = entry_keys.values()
     assert key.startswith("ek1-")
-    assert cell_key.is_key(key)
+    assert compiled_graph_key.is_key(key)
     # The axes are the key's, and `from_axes` is the only way to build one —
     # so the axis set is asserted where it is DEFINED rather than restated.
-    assert cell_key._REQUIRED == ("graph", "sm", "toolchain")
+    assert compiled_graph_key._REQUIRED == ("graph", "sm", "toolchain")
 
 
 # ---------------------------------------------------------------------------
@@ -328,12 +328,12 @@ def test_the_closure_digest_moves_on_code_and_on_declaration(
     in milliseconds, and folding them in here would make the memo miss on
     facts whose whole point is that they are cheap to restate.
     """
-    cfg = CompileCellSpec(
+    cfg = CompileCompiledGraphSpec(
         family="tiny", targets=("unet",), shapes=((1024, 1024),),
         text_lens=(77,), guidance_scales=(7.5,))
     base = boot_key.closure_digest("tiny", cfg)
 
-    wider = CompileCellSpec(
+    wider = CompileCompiledGraphSpec(
         family="tiny", targets=("unet",),
         shapes=((1024, 1024), (768, 768)),
         text_lens=(77,), guidance_scales=(7.5,))
@@ -350,7 +350,7 @@ def test_the_closure_digest_ignores_the_re_derived_axes(axis: str) -> None:
     """Stated as a property of the recorded facts rather than by monkeypatching
     a probe: the digest's inputs are enumerated in one dict, and neither the
     sm nor the toolchain is among them."""
-    cfg = CompileCellSpec(family="tiny", targets=("unet",))
+    cfg = CompileCompiledGraphSpec(family="tiny", targets=("unet",))
     # The digest is over a literal fact block; assert the axis names appear
     # nowhere in the source of that block.
     import inspect
@@ -416,7 +416,7 @@ def test_a_widened_envelope_MOVES_NOTHING() -> None:
     pretending the computation changed. That was the whole reason `envelope`
     was its own axis, and it is the disease: `envelope_facts` digests the
     UNION of the ladder across the whole declaration, so ONE added aspect
-    ratio re-keyed every class in the cell — 35 of sdxl's 36 trace
+    ratio re-keyed every class in the compiled_graph — 35 of sdxl's 36 trace
     byte-identically. Measured on unmodified master @ 4dfdcd60 for two
     byte-identical classes: ck1-c4c134db... -> ck1-48512ea3...
 
@@ -466,7 +466,7 @@ def test_the_child_runs_this_parents_own_code(tmp_path: Path) -> None:
 def test_a_child_that_produced_no_hashes_refuses_the_whole_derivation(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    """A partial class set is not a narrower key, it is a WRONG key: a cell's
+    """A partial class set is not a narrower key, it is a WRONG key: a compiled_graph's
     identity is its whole class set (pgw#716/#758). So one dead child refuses
     the derivation, and the pod mints the ordinary way."""
     monkeypatch.setattr(boot_key, "cpu_quota_cores", lambda: 2.0)
@@ -478,7 +478,7 @@ def test_a_child_that_produced_no_hashes_refuses_the_whole_derivation(
     with pytest.raises(boot_key.BootKeyUnavailable) as err:
         boot_key.derive(
             function="fn", modules=("m",), family="tiny",
-            cfg=CompileCellSpec(family="tiny", targets=("unet",)),
+            cfg=CompileCompiledGraphSpec(family="tiny", targets=("unet",)),
             slots={}, declared_hint=2, envelope=_ENVELOPE,
             work_root=tmp_path)
     assert err.value.reason == "structure_unsupported"
@@ -489,7 +489,7 @@ def test_a_declaration_with_no_classes_refuses(tmp_path: Path) -> None:
     with pytest.raises(boot_key.BootKeyUnavailable) as err:
         boot_key.derive(
             function="fn", modules=("m",), family="tiny",
-            cfg=CompileCellSpec(family="tiny"), slots={}, declared_hint=0,
+            cfg=CompileCompiledGraphSpec(family="tiny"), slots={}, declared_hint=0,
             envelope=_ENVELOPE, work_root=tmp_path)
     assert err.value.reason == "no_classes"
 
@@ -507,7 +507,7 @@ def test_a_child_running_drifted_source_refuses_rather_than_being_believed(
     with pytest.raises(boot_key.BootKeyUnavailable) as err:
         boot_key.derive(
             function="fn", modules=("m",), family="tiny",
-            cfg=CompileCellSpec(family="tiny", targets=("unet",)),
+            cfg=CompileCompiledGraphSpec(family="tiny", targets=("unet",)),
             slots={}, declared_hint=1, envelope=_ENVELOPE,
             work_root=tmp_path)
     assert err.value.reason == "code_drift"
@@ -527,7 +527,7 @@ def test_a_derivation_that_returns_an_incomplete_class_set_refuses(
     with pytest.raises(boot_key.BootKeyUnavailable) as err:
         boot_key.derive(
             function="fn", modules=("m",), family="tiny",
-            cfg=CompileCellSpec(family="tiny", targets=("unet",)),
+            cfg=CompileCompiledGraphSpec(family="tiny", targets=("unet",)),
             slots={}, declared_hint=2, envelope=_ENVELOPE,
             work_root=tmp_path)
     assert err.value.reason == "class_set_gap"
@@ -538,7 +538,7 @@ def test_children_that_enumerated_different_class_sets_refuse(
     tmp_path: Path, monkeypatch,
 ) -> None:
     """Two children that composed different pipelines traced two different
-    cells' graphs. The completeness proof is what catches it, and it consults
+    compiled_graphs' graphs. The completeness proof is what catches it, and it consults
     no parent-side guess to do so."""
     monkeypatch.setattr(boot_key, "cpu_quota_cores", lambda: 3.0)
     canon = json.dumps(_block(), sort_keys=True, separators=(",", ":"))
@@ -556,7 +556,7 @@ def test_children_that_enumerated_different_class_sets_refuse(
     with pytest.raises(boot_key.BootKeyUnavailable) as err:
         boot_key.derive(
             function="fn", modules=("m",), family="tiny",
-            cfg=CompileCellSpec(family="tiny", targets=("unet",)),
+            cfg=CompileCompiledGraphSpec(family="tiny", targets=("unet",)),
             slots={}, declared_hint=2, envelope=_ENVELOPE,
             work_root=tmp_path)
     assert err.value.reason == "class_set_disagreement"
@@ -587,7 +587,7 @@ def test_derive_end_to_end_with_stubbed_children_memoizes_and_hits(
     monkeypatch.setattr(boot_key, "_run_children", _children)
     kwargs: Dict[str, Any] = dict(
         function="fn", modules=("m",), family="tiny",
-        cfg=CompileCellSpec(family="tiny", targets=("unet",)),
+        cfg=CompileCompiledGraphSpec(family="tiny", targets=("unet",)),
         slots={}, declared_hint=2, envelope=_ENVELOPE,
         work_root=tmp_path, memo_dir=tmp_path)
 

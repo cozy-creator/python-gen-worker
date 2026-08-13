@@ -15,9 +15,9 @@ of residency or 19% of its step time, with no way to take both):
 not a derivable one — a custom op is opaque to inductor, so our fusion beats
 inductor's own on sm_120 and loses to it on sm_100 — and it used to live in
 hand-maintained SM tuples informed by ~$12 benchmark campaigns per card. It
-is now MEASURED at mint on the card the cell is being minted for, ranked by
+is now MEASURED at mint on the card the compiled graph is being minted for, ranked by
 fit-constrained speed (which prices the residency axis and the throughput
-axis in one comparison instead of hard-coding either), recorded into the cell
+axis in one comparison instead of hard-coding either), recorded into the compiled graph
 as ONE combined lane, and read back here: see ``gen_worker.kernel_lane``.
 This module's whole job is to project the pin onto its axis, prove that
 axis's kernels still self-check, and say loudly what it did.
@@ -30,8 +30,8 @@ Order of decision, PER AXIS, each step typed and never silent-wrong:
   env is on th#1445's elimination list and MUST NOT grow new meanings — it
   gates the ROLLOUT, it never picks a lane.
 - the recorded verdict: ``kernel_lane.pinned()``, set by the executor from
-  the delivered cell before ``setup()`` runs. No pin (eager boot, pre-pgw#947
-  cell, unreadable envelope) => the declared conservative default with the
+  the delivered compiled graph before ``setup()`` runs. No pin (eager boot, pre-pgw#947
+  compiled graph, unreadable envelope) => the declared conservative default with the
   typed reason that says which of those it was.
 - numerics self-check, per axis: an armed value still has to pass THIS
   axis's check on THIS box (fused: activation-quant BIT-IDENTITY vs the
@@ -92,9 +92,9 @@ def _cuda_gap() -> Optional[str]:
 
 
 def _fused_linear_self_check() -> Optional[str]:
-    """Numerics only. The SM is deliberately NOT consulted: a cell that names
+    """Numerics only. The SM is deliberately NOT consulted: a compiled graph that names
     the fused linear was minted on this compute capability (``sm`` is a
-    cell-key axis), so a capability question here would only re-derive what
+    compiled graph-key axis), so a capability question here would only re-derive what
     the verdict already proved by running."""
     gap = _cuda_gap()
     if gap is not None:
@@ -141,7 +141,7 @@ def _decide(
 
     execution_lane, execution_lane_reason = kernel_path.pinned()
     if execution_lane is None:
-        # Nothing pinned a lane for this load: no cell was delivered, or the
+        # Nothing pinned a lane for this load: no compiled graph was delivered, or the
         # executor never reached the adoption hook. The DECLARED default, and
         # it names itself — there is no SM allowlist left to fall back on.
         reason = (f"{kernel_path.REASON_ABSENT}: nothing recorded a measured "

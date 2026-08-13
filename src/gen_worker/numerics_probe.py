@@ -1,18 +1,18 @@
 """The thing that MEASURES (pgw#868 cross-cutting; pgw#848 CP12).
 
-Everything this program built refuses a cell for being UNUSABLE — wrong `sm`,
+Everything this program built refuses a compiled graph for being UNUSABLE — wrong `sm`,
 wrong torch, unbound constants, ingress outside the declared envelope. Nothing refused one
 for being WRONG. :mod:`gen_worker.numerics_ladder` has owned the verdict since
 pgw#817 and `Compile.numerics_floor` has declared the bar since pgw#812, but
-``compare_outputs`` had zero consumers: no code anywhere ran the armed cell and
+``compare_outputs`` had zero consumers: no code anywhere ran the armed compiled graph and
 the eager forward it replaces on the same inputs. So the gate could not be
 "wired" — ``gate()`` opens ``if comparison is None: return None``, and calling
-it with nothing to compare passes every cell, always, while looking correct in
+it with nothing to compare passes every compiled graph, always, while looking correct in
 the diff AND in the call graph.
 
 This module is that missing measurement, and it is built to ONE constraint
 first: **bisectability**. Three confident diagnoses in this program were wrong
-because two fuses were burning at once, so a whole-cell "fail" nobody can split
+because two fuses were burning at once, so a whole-compiled graph "fail" nobody can split
 is the artifact that produces the fourth. Every number here is taken against a
 single named :class:`ProbeAxis` — one packaged ENTRY, one shape ROW, one LANE,
 one recorded SEED — and every verdict carries the axis, the thresholds and
@@ -34,7 +34,7 @@ callables and a contract, never a pipeline.
 **Parity by construction.** The probe feed comes from
 :func:`gen_worker.aot_inputs.builder_for` — the mint's OWN input builder,
 driven by an :class:`~gen_worker.aot_contract.ExportSpec` reconstructed from
-the cell's own recorded entry coordinate. A probe that built its inputs some
+the compiled graph's own recorded entry coordinate. A probe that built its inputs some
 other way would be measuring a call the artifact was never traced for, which is
 the gw#391 / ie#381 bug in a third hat. It comes from ``aot_contract`` and not
 ``aot_mint`` for a measured reason — see :func:`build_feed`.
@@ -43,7 +43,7 @@ the gw#391 / ie#381 bug in a third hat. It comes from ``aot_contract`` and not
 raises :class:`ProbeUnavailable` with a named reason, and the arm treats it
 exactly like a refusal: stay eager, say why on the wire. Staying eager is the
 ordinary miss policy for every other adopt gate, so the cost of a probe bug is
-an un-armed cell — never a silently-degraded one.
+an un-armed compiled graph — never a silently-degraded one.
 """
 
 from __future__ import annotations
@@ -72,8 +72,8 @@ _ADAPTER_INPUTS = ("lora_a", "lora_b")
 class ProbeUnavailable(RuntimeError):
     """The measurement could not be TAKEN — never that it passed.
 
-    ``reason`` is the phase a refusal reports, so an unmeasurable cell is as
-    countable fleet-wide as a failing one. The distinction matters: "this cell
+    ``reason`` is the phase a refusal reports, so an unmeasurable compiled graph is as
+    countable fleet-wide as a failing one. The distinction matters: "this compiled graph
     reproduces eager to 0.9997" and "nobody could ask" are different facts, and
     collapsing them is how an absent gate becomes an invisible one.
     """
@@ -83,10 +83,10 @@ class ProbeUnavailable(RuntimeError):
         self.reason = str(reason)
 
 
-class CellNumericsRefused(RuntimeError):
-    """This cell does not reproduce the eager forward it replaces."""
+class CompiledGraphNumericsRefused(RuntimeError):
+    """This compiled graph does not reproduce the eager forward it replaces."""
 
-    reason = "cell_numerics_below_floor"
+    reason = "compiled_graph_numerics_below_floor"
 
     def __init__(self, detail: str, comparison: Optional[Comparison] = None) -> None:
         super().__init__(detail)
@@ -102,10 +102,10 @@ class CellNumericsRefused(RuntimeError):
 class ProbeAxis:
     """ONE named axis: one entry x one shape row x one lane.
 
-    Reconstructed from the cell's own ``metadata.entries`` block, so the axis
+    Reconstructed from the compiled graph's own ``metadata.entries`` block, so the axis
     names a coordinate the ARTIFACT declares rather than one the probe chose.
     :attr:`name` is stable across pods and processes, which is what makes a
-    verdict re-runnable by whoever reads it: ``probe_cell(..., only=name)``.
+    verdict re-runnable by whoever reads it: ``probe_compiled_graph(..., only=name)``.
     """
 
     entry: str
@@ -123,7 +123,7 @@ class ProbeAxis:
     def seed(self) -> int:
         """Deterministic per-axis RNG seed, derived from the axis itself.
 
-        Not a constant: two axes of one cell must not be fed the same random
+        Not a constant: two axes of one compiled graph must not be fed the same random
         latent, or a shape-independent bug looks like agreement. Not random
         either — a verdict nobody can reproduce is a verdict somebody
         re-litigates from a screenshot.
@@ -145,7 +145,7 @@ class ProbeAxis:
 
 
 def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
-    """Every probeable axis of one cell, read off its own metadata.
+    """Every probeable axis of one compiled graph, read off its own metadata.
 
     ONE axis, because pgw#1176 made one artifact one graph class: the mint
     parity gate runs per entry, at the moment that entry exists, against the
@@ -160,7 +160,7 @@ def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
     entry = aot_serve.entry_from_meta(dict(meta))
     entries = {str(entry.get("name") or ""): entry}
     execution_lane = str(meta.get("precision") or "")
-    cell_bucket = int(meta.get("lora_bucket") or 0)
+    compiled_graph_bucket = int(meta.get("lora_bucket") or 0)
     axes: List[ProbeAxis] = []
     for name in sorted(entries):
         block = entries[name]
@@ -170,7 +170,7 @@ def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
         # them. Feeding it the lifted pair would be refused at ingress, which
         # reads as an unmeasurable axis when it is really a probe that built
         # the wrong call. The contract discriminates; nothing here guesses.
-        bucket = cell_bucket if all(
+        bucket = compiled_graph_bucket if all(
             n in declared for n in _ADAPTER_INPUTS) else 0
         axes.append(ProbeAxis(
             entry=str(name),
@@ -184,7 +184,7 @@ def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
     if not axes:
         raise ProbeUnavailable(
             "no_probeable_axis",
-            "the cell packages no entry to compare against eager")
+            "the compiled_graph packages no entry to compare against eager")
     return tuple(axes)
 
 
@@ -197,7 +197,7 @@ class _EagerView:
     """The module as it was BEFORE the wrap, for signature purposes only.
 
     MEASURED the first time this probe ran end to end: the arm has already
-    swapped ``module.<attr>`` for the cell's dispatch by the time the gate
+    swapped ``module.<attr>`` for the compiled graph's dispatch by the time the gate
     runs, so ``aot_declaration._positionalize`` — which binds the declared feed
     to slots by reading ``inspect.signature`` of that attribute — sees the
     wrapper's ``(*args, **kwargs)`` and refuses every declared name as "not a
@@ -205,7 +205,7 @@ class _EagerView:
     TRACED against, which is the eager callable the wrap retained.
 
     A facade rather than a temporary restore: un-swapping a live module to run
-    a probe would hand the cell's traffic back to eager for the duration, on a
+    a probe would hand the compiled graph's traffic back to eager for the duration, on a
     pod that is concurrently serving (pgw#784). Everything except ``attr``
     delegates to the real module, so config, parameters, buffers and dtype all
     come off the thing actually being measured.
@@ -234,7 +234,7 @@ def build_feed(module: Any, family: str, axis: ProbeAxis) -> Tuple[Any, ...]:
     The RNG is forked, not reseeded: a serving pod's tenant traffic owns the
     global generator (pgw#784 — the tenant keeps being served throughout an
     arm), and a probe that shifted it would change a paying request's output
-    to check a cell.
+    to check a compiled graph.
     """
     import torch
 
@@ -250,7 +250,7 @@ def build_feed(module: Any, family: str, axis: ProbeAxis) -> Tuple[Any, ...]:
     # entrypoint, the closure walk is an AST walk that follows function-level
     # imports, and the closure memo records it on every artifact.
     # Importing the mint DRIVER here dragged `aot_wrapper_split` /
-    # `aot_run_impl_split` into cell identity, which both issues forbid: a
+    # `aot_run_impl_split` into compiled graph identity, which both issues forbid: a
     # compile-time transform must re-key nothing. The vocabulary now lives in a
     # leaf module and the driver stays out.
     spec = ExportSpec(
@@ -317,14 +317,14 @@ def measure_axis(
             "eager_forward_failed",
             f"{axis}: the EAGER reference forward raised "
             f"({type(exc).__name__}: {exc}) — with no reference there is "
-            f"nothing to compare the cell against") from exc
+            f"nothing to compare the compiled_graph against") from exc
     try:
         with torch.no_grad():
             subject = compiled(*args)
     except Exception as exc:  # noqa: BLE001
         raise ProbeUnavailable(
-            "cell_forward_failed",
-            f"{axis}: the ARMED CELL raised on its own declared feed "
+            "compiled_graph_forward_failed",
+            f"{axis}: the ARMED COMPILED_GRAPH raised on its own declared feed "
             f"({type(exc).__name__}: {exc})") from exc
     try:
         return numerics_ladder.compare_outputs(
@@ -362,11 +362,11 @@ class AxisVerdict:
 
 
 @dataclass(frozen=True)
-class CellNumerics:
-    """The whole cell's verdict, and every axis it is made of."""
+class CompiledGraphNumerics:
+    """The whole compiled graph's verdict, and every axis it is made of."""
 
     family: str
-    cell_key: str
+    compiled_graph_key: str
     thresholds: Thresholds
     threshold_source: str
     verdicts: Tuple[AxisVerdict, ...]
@@ -377,9 +377,9 @@ class CellNumerics:
     def measured(self) -> bool:
         """True only when every axis of THIS report produced a comparison.
 
-        pgw#1176 DELETED the all-axes-of-the-cell rule this used to state
-        ("partial coverage is not a pass; a cell arming on a subset of its own
-        graph classes is a silent subset of what the cell key advertises").
+        pgw#1176 DELETED the all-axes-of-the-compiled graph rule this used to state
+        ("partial coverage is not a pass; a compiled graph arming on a subset of its own
+        graph classes is a silent subset of what the compiled graph key advertises").
         That rule was the verification half of the wrong atom: it made one
         unmeasurable class condemn 35 measured ones. A report is now one graph
         class, so the predicate below says exactly what it always meant —
@@ -399,7 +399,7 @@ class CellNumerics:
         return tuple(v for v in self.verdicts if not v.measured)
 
     def worst(self) -> Optional[AxisVerdict]:
-        """The axis the whole-cell verdict is decided on — NAMED, always.
+        """The axis the whole-compiled graph verdict is decided on — NAMED, always.
 
         The gate judges the worst axis rather than a pooled number: pooling 36
         entries would let one destroyed graph class hide behind 35 intact ones,
@@ -419,7 +419,7 @@ class CellNumerics:
         """Everything a reader needs to re-run this verdict, in one line."""
         worst = self.worst()
         head = (
-            f"family={self.family} key={self.cell_key or '?'} "
+            f"family={self.family} key={self.compiled_graph_key or '?'} "
             f"axes={len(self.verdicts)}/{self.axes_total} "
             f"thresholds={self.thresholds} source={self.threshold_source} "
             f"took={self.elapsed_ms}ms")
@@ -429,20 +429,20 @@ class CellNumerics:
         return f"{head} | per-axis: {rows}"
 
 
-def probe_cell(
+def probe_compiled_graph(
     pipeline: Any,
     cfg: Any,
     meta: Mapping[str, Any],
     *,
     only: str = "",
-) -> CellNumerics:
+) -> CompiledGraphNumerics:
     """Measure an ARMED pipeline against the eager forward it replaced.
 
     ``only`` names one axis (``ProbeAxis.name``, i.e. the packaged entry name)
-    and is the bisection interface: a whole-cell refusal must be re-runnable
+    and is the bisection interface: a whole-compiled graph refusal must be re-runnable
     one axis at a time, from a hub row, without editing anything.
 
-    Raises :class:`ProbeUnavailable` when the cell cannot be probed at all —
+    Raises :class:`ProbeUnavailable` when the compiled graph cannot be probed at all —
     never returns a report that could be mistaken for a pass.
     """
 
@@ -459,7 +459,7 @@ def probe_cell(
         raise ProbeUnavailable(
             "not_armed",
             f"family={family}: the pipeline carries no armed AOT target, so "
-            f"there is no cell to compare against eager")
+            f"there is no compiled_graph to compare against eager")
     axes = axes_from_meta(meta)
     if only:
         axes = tuple(a for a in axes if a.name == only)
@@ -503,8 +503,8 @@ def probe_cell(
         verdicts.append(AxisVerdict(
             axis=axis, comparison=comparison,
             elapsed_ms=int((time.monotonic() - t0) * 1000)))
-    report = CellNumerics(
-        family=family, cell_key=str(meta.get("cell_key") or ""),
+    report = CompiledGraphNumerics(
+        family=family, compiled_graph_key=str(meta.get("compiled_graph_key") or ""),
         thresholds=thresholds, threshold_source=source,
         verdicts=tuple(verdicts), axes_total=len(axes),
         elapsed_ms=int((time.monotonic() - started) * 1000))
@@ -515,13 +515,13 @@ def probe_cell(
 
 
 _LAST_LOCK = threading.Lock()
-_LAST: Optional[CellNumerics] = None
+_LAST: Optional[CompiledGraphNumerics] = None
 
 
-def last_report() -> Optional[CellNumerics]:
-    """The most recent :func:`probe_cell` report in this process, or None.
+def last_report() -> Optional[CompiledGraphNumerics]:
+    """The most recent :func:`probe_compiled_graph` report in this process, or None.
 
-    The GATE (``provision.gate_cell_numerics``) answers yes/no and confesses
+    The GATE (``provision.gate_compiled_graph_numerics``) answers yes/no and confesses
     the numbers to the activity wire; a caller in the same process that needs
     the NUMBER — pgw#1150's author-CI harness, which has to write the measured
     cosine into an ``author-ci.toml`` ``[proof]`` block — would otherwise have
@@ -535,8 +535,8 @@ def last_report() -> Optional[CellNumerics]:
 
 __all__ = [
     "AxisVerdict",
-    "CellNumerics",
-    "CellNumericsRefused",
+    "CompiledGraphNumerics",
+    "CompiledGraphNumericsRefused",
     "ProbeAxis",
     "ProbeUnavailable",
     "axes_from_meta",
@@ -544,5 +544,5 @@ __all__ = [
     "eager_view",
     "last_report",
     "measure_axis",
-    "probe_cell",
+    "probe_compiled_graph",
 ]

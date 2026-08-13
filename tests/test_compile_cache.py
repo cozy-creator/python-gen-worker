@@ -13,7 +13,7 @@ from typing import Annotated
 
 from gen_worker import AxisClass, Compile, CompileAxis, DynamicDim, Resources, endpoint
 from gen_worker import compile_cache as cc
-from gen_worker.registry import CompileCell, collect_from_namespace
+from gen_worker.registry import CompileCompiledGraph, collect_from_namespace
 
 
 # ---------------------------------------------------------------------------
@@ -77,13 +77,13 @@ def test_compile_target_execution_lane_vocabulary_rejects_impossible_states(exec
 # the w8a8 identity gate over `verify`'s axis set (1).
 #
 # The format's last writer died with `mint_artifact` in pgw#1178 and the format
-# itself is deleted here, so every one of these builds a cell no pod can
+# itself is deleted here, so every one of these builds a compiled graph no pod can
 # produce and drives a transaction no pod can enter (§4.34: they die with
 # their subject, never ported). What each fenced survives on the exported
 # lane by CONSTRUCTION rather than by comparison — sm, the declared contract,
-# the env seal, the lane and the graph are all axes of `ck1`, so a cell that
+# the env seal, the lane and the graph are all axes of `ck1`, so a compiled graph that
 # disagrees has a different key and never resolves; see
-# `tests/test_cell_key_pgw1059.py`.
+# `tests/test_compiled_graph_key_pgw1059.py`.
 
 
 def test_execution_contract_uses_structure_not_checkpoint_values():
@@ -179,7 +179,7 @@ def test_execution_contract_digest_covers_every_runtime_graph_axis():
     base = cc.execution_contract_digest(_Pipe(fill=1.0), base_cfg)
 
     # Checkpoint values are deliberately excluded: compatible fine-tunes
-    # share a family cell.
+    # share a family compiled graph.
     assert cc.execution_contract_digest(_Pipe(fill=9.0), base_cfg) == base
     # Every consumer compatibility axis changes the fence identity.
     assert cc.execution_contract_digest(_Pipe(per_tensor=True), base_cfg) != base
@@ -410,9 +410,9 @@ def test_w8a8_enable_refusal_carries_exact_reason(tmp_path, monkeypatch):
     ONLY wire-visible diagnostic on a serve pod, so it must name the cause.
 
     pgw#1181 leaves it ONE cause. The key-mismatch and drift halves refused a
-    delivered `torch-inductor-cache` cell, and that format has no writer and
+    delivered `torch-inductor-cache` compiled graph, and that format has no writer and
     is deleted; a w8a8 pipeline that arms nothing now has exactly one reason —
-    no cell — and `enable` takes no artifact with which to have another."""
+    no compiled graph — and `enable` takes no artifact with which to have another."""
     pytest.importorskip("torch")
     pipe = _module_tree_pipe("Serving")
     pipe._cozy_weight_lane = "w8a8"
@@ -421,7 +421,7 @@ def test_w8a8_enable_refusal_carries_exact_reason(tmp_path, monkeypatch):
     with pytest.raises(cc.CompiledExecutionLaneUnavailableError) as exc:
         cc.enable(pipe, cfg)
     message = str(exc.value)
-    assert "no cell artifact delivered" in message
+    assert "no compiled_graph artifact delivered" in message
     assert "W8A8" in message
     assert "not a W8A8 production lane" in message
 
@@ -515,14 +515,14 @@ def test_compile_struct_video_shapes():
 
 
 def test_guidance_regimes_are_an_envelope_axis():
-    """SDK v2: warm guidance regimes live on the enriched CompileCell (from
+    """SDK v2: warm guidance regimes live on the enriched CompileCompiledGraph (from
     payload CompileAxis classes), and remain part of the declared envelope.
 
     pgw#1181 asserts that on the DECLARATION rather than on a
-    `torch-inductor-cache` cell's metadata: `declared_compile_facts` is the
+    `torch-inductor-cache` compiled graph's metadata: `declared_compile_facts` is the
     canonical form of the declared envelope, it is what the arm identity and
-    the cell key are both built from, and it outlived the format."""
-    cfg = CompileCell(
+    the compiled graph key are both built from, and it outlived the format."""
+    cfg = CompileCompiledGraph(
         shapes=((1024, 1024),), targets=("transformer",), family="sdxl",
         regional=False, text_len=0, dynamic=(), lora_bucket=0,
         guidance_scales=(5.0, 0.0),
@@ -568,13 +568,13 @@ def test_endpoint_compile_reaches_spec():
     assert len(specs) == 1
     assert specs[0].compile is not None
     assert specs[0].compile.shapes == ((768, 768),)
-    cell = specs[0].compile_cell()
-    assert cell is not None
-    assert cell.shapes == ((768, 768),)
-    assert cell.text_len == 0
+    compiled_graph = specs[0].compile_compiled_graph()
+    assert compiled_graph is not None
+    assert compiled_graph.shapes == ((768, 768),)
+    assert compiled_graph.text_len == 0
     # Warm guidance derives from the payload CompileAxis classes, in class
     # declaration order (Compile(guidance_scales=...) is deleted in v2).
-    assert cell.guidance_scales == (0.0, 5.0)  # class union, sorted (pgw#654)
+    assert compiled_graph.guidance_scales == (0.0, 5.0)  # class union, sorted (pgw#654)
 
     with pytest.raises(TypeError, match="compile="):
         @endpoint(compile="yes")  # type: ignore[arg-type]
@@ -613,7 +613,7 @@ def test_flavor_label_carries_weight_lane_gw534() -> None:
 def test_resolve_pipeline_class_gw586() -> None:
     """gw#586 call-path parity: a mint may name the SERVING pipeline class;
     unknown names refuse loudly — a silent generic fallback would trace the
-    wrong call path and publish a cell no serving lookup can hit."""
+    wrong call path and publish a compiled graph no serving lookup can hit."""
     from gen_worker.compile_cache import resolve_pipeline_class
 
     cls = resolve_pipeline_class("DiffusionPipeline")
@@ -629,7 +629,7 @@ def test_resolve_pipeline_class_gw586() -> None:
 
 
 # ---------------------------------------------------------------------------
-# gw#588: resident prep-mode drift (off <-> vae_only) converges to the cell
+# gw#588: resident prep-mode drift (off <-> vae_only) converges to the compiled graph
 # ---------------------------------------------------------------------------
 
 
@@ -642,11 +642,11 @@ def test_resolve_pipeline_class_gw586() -> None:
 
 # pgw#1181 REMOVED `test_reconcile_resident_mode_unit` with its subject.
 # `models.memory.reconcile_resident_mode` adjusted a live pipeline's offload
-# mode to match the `low_vram_mode` a DELIVERED `torch-inductor-cache` cell had
+# mode to match the `low_vram_mode` a DELIVERED `torch-inductor-cache` compiled graph had
 # recorded, and `compile_cache._reconcile_resident_mode` was its only caller.
 # The mode is still READ as a fact — `execution_contract_digest` folds it into
-# the contract — but nothing reconciles a pipeline to a cell's recorded mode,
-# because no cell records one.
+# the contract — but nothing reconciles a pipeline to a compiled graph's recorded mode,
+# because no compiled graph records one.
 
 
 def test_aot_autograd_cache_disabled_for_portability(monkeypatch, tmp_path):
@@ -736,9 +736,9 @@ def test_aot_autograd_cache_disabled_across_threads(monkeypatch, tmp_path):
 # pgw#1200 REMOVED the three `fx_key_forensics` rows and the two
 # `fx_cache_failure_report` rows that survived pgw#1181.
 #
-# `fx_key_forensics` diffed the CELL's recorded FxGraphHashDetails lines
+# `fx_key_forensics` diffed the COMPILED GRAPH's recorded FxGraphHashDetails lines
 # against the boot's; with the `torch-inductor-cache` format deleted there is
-# no cell side to diff, and `fx_cache_failure_report` was its only production
+# no compiled graph side to diff, and `fx_cache_failure_report` was its only production
 # caller — pgw#1181 kept all three alive by anchoring them here, which is the
 # reachability trap this rewrite exists to close. The helpers go with them.
 #
@@ -750,10 +750,10 @@ def test_aot_autograd_cache_disabled_across_threads(monkeypatch, tmp_path):
 
 # pgw#1181 REMOVED `test_fx_cache_failure_report_names_b2_samekey_resave`.
 # `samekey_resaves` counts entry files that a boot re-saved under a key the
-# CELL had already seeded, so it is undefined without a cell — and the cell
+# COMPILED GRAPH had already seeded, so it is undefined without a compiled graph — and the compiled graph
 # half of `fx_cache_failure_report` read FX entries out of a
 # `torch-inductor-cache` tarball, a format with no writer, deleted here. The
 # live-directory census the sibling row now fences is the half a pod can still
-# reach: what the executor hands this function is an exported cell, which
+# reach: what the executor hands this function is an exported compiled graph, which
 # carries no `inductor/` tree at all.
 

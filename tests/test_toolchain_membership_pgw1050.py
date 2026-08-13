@@ -5,10 +5,10 @@ The membership axiom (pgw#1059 amendment 6) has two failure modes and this
 file pins the expensive one. The key must not UNDER-split — that is the arm
 token's and the local-store verdict's problem, and both stay pessimistic. The
 key must also not OVER-split, and it did: ``diffusers``/``transformers``/
-``peft`` rode the ``toolchain`` axis while everything they can do to a cell
+``peft`` rode the ``toolchain`` axis while everything they can do to a compiled graph
 already arrives through the traced ``graph`` axis (pgw#1031 folded the
 node-level witness, so the axis is the COMPUTATION and not the ingress). Every
-model-library patch release therefore re-keyed every cell in the fleet for a
+model-library patch release therefore re-keyed every compiled graph in the fleet for a
 graph that had not moved.
 
 The two tests that matter are a matched pair, and neither is meaningful
@@ -27,14 +27,14 @@ from typing import Any, Dict
 
 import pytest
 
-from gen_worker import aot_identity, cell_key, compile_cache as cc, dist_records
+from gen_worker import aot_identity, compiled_graph_key, compile_cache as cc, dist_records
 
-from harness.cell_meta import exported_cell_meta
+from harness.compiled_graph_meta import exported_compiled_graph_meta
 
 #: A recorded ``toolchain`` block of the shape a real mint records: the
 #: compiler proper (content digests of the wheels' RECORDs + the bundled CUDA
 #: tool binaries), the settings declaration, the boot-frozen native manifest —
-#: and, on a pre-pgw#1050 cell, the three model libraries.
+#: and, on a pre-pgw#1050 compiled graph, the three model libraries.
 TOOLCHAIN: Dict[str, str] = {
     "settings_declaration": "5" * 16,
     "loaded_libs": "6" * 16,
@@ -66,9 +66,9 @@ def _bumped(component: str) -> Dict[str, str]:
 
 
 def _key(block: Dict[str, str]) -> str:
-    """The ck1 key of a cell whose graph, envelope and sm are held fixed and
+    """The ck1 key of a compiled graph whose graph, envelope and sm are held fixed and
     whose toolchain block is ``block``."""
-    return str(exported_cell_meta(toolchain=block)["cell_key"])
+    return str(exported_compiled_graph_meta(toolchain=block)["compiled_graph_key"])
 
 
 # ---------------------------------------------------------------------------
@@ -78,8 +78,8 @@ def _key(block: Dict[str, str]) -> str:
 
 @pytest.mark.parametrize("library", MODEL_LIBRARIES)
 def test_a_model_library_bump_does_not_rekey(library: str) -> None:
-    """Two cells identical in graph x envelope x sm, differing ONLY in a model
-    library's content, are ONE cell and must carry ONE key.
+    """Two compiled graphs identical in graph x envelope x sm, differing ONLY in a model
+    library's content, are ONE compiled graph and must carry ONE key.
 
     RED on `origin/master`: the axis folded the library's RECORD digest, so
     the bump moved the key and the whole fleet re-minted for a computation
@@ -89,7 +89,7 @@ def test_a_model_library_bump_does_not_rekey(library: str) -> None:
 
 
 @pytest.mark.parametrize("library", MODEL_LIBRARIES)
-def test_the_axis_ignores_the_library_even_when_a_cell_records_it(
+def test_the_axis_ignores_the_library_even_when_a_compiled_graph_records_it(
     library: str,
 ) -> None:
     """Membership is a property of the AXIS, not of whichever producer wrote
@@ -98,9 +98,9 @@ def test_the_axis_ignores_the_library_even_when_a_cell_records_it(
     without = {k: v for k, v in TOOLCHAIN.items() if k not in MODEL_LIBRARIES}
     with_one = dict(without)
     with_one[library] = TOOLCHAIN[library]
-    assert (cell_key.toolchain_axis_digest(with_one)
-            == cell_key.toolchain_axis_digest(without))
-    assert library not in cell_key.toolchain_facts(TOOLCHAIN)
+    assert (compiled_graph_key.toolchain_axis_digest(with_one)
+            == compiled_graph_key.toolchain_axis_digest(without))
+    assert library not in compiled_graph_key.toolchain_facts(TOOLCHAIN)
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +111,7 @@ def test_the_axis_ignores_the_library_even_when_a_cell_records_it(
 @pytest.mark.parametrize("component", COMPILER_COMPONENTS)
 def test_a_genuine_toolchain_bump_still_splits(component: str) -> None:
     """torch, triton, the CUDA runtime wheels, the bundled ptxas, the settings
-    declaration and the boot-frozen native manifest are the compiler. A cell is
+    declaration and the boot-frozen native manifest are the compiler. A compiled graph is
     a ``dlopen``-ed ELF linking torch's AOTI runtime: an ABI mismatch is a
     segfault or silent numerics, never slowness. Each of them moves the key."""
     assert _key(_bumped(component)) != _key(dict(TOOLCHAIN))
@@ -168,7 +168,7 @@ def test_producer_and_reader_agree_on_membership() -> None:
     """One axis, one membership: whatever the producer collects survives the
     reader's canonical form untouched."""
     collected = dict(cc.toolchain_digest())
-    assert cell_key.toolchain_facts(collected) == {
+    assert compiled_graph_key.toolchain_facts(collected) == {
         str(k): str(v) for k, v in collected.items()}
 
 
@@ -183,11 +183,11 @@ def test_the_published_toolchain_wire_fact_follows_the_key(
 ) -> None:
     """``ArtifactIdentity.toolchain_digest`` is compared fail-closed at adopt
     time. If it kept the old membership while the key narrowed, every adoption
-    of a correctly-keyed cell would refuse on an axis that is a consequence of
+    of a correctly-keyed compiled graph would refuse on an axis that is a consequence of
     the key — so it narrows with it."""
     def _wire(block: Dict[str, Any]) -> str:
         return aot_identity.artifact_identity(
-            exported_cell_meta(toolchain=block)).toolchain_digest
+            exported_compiled_graph_meta(toolchain=block)).toolchain_digest
 
     assert _wire(_bumped(library)) == _wire(dict(TOOLCHAIN))
     assert _wire(_bumped("torch")) != _wire(dict(TOOLCHAIN))

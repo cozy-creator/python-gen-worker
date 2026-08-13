@@ -5,8 +5,8 @@ Extracted from :mod:`gen_worker.aot_mint` (pgw#868) for one measured reason:
 digest of the static import-graph closure of the compile entrypoints — and
 that walk is an AST walk, so it follows function-level imports too.
 ``models.provision`` is one of those entrypoints, so anything the ARM reaches
-statically enters that recorded closure fleet-wide. (The closure left cell
-IDENTITY in pgw#990 — and the pre-trace cell key itself is gone since
+statically enters that recorded closure fleet-wide. (The closure left compiled graph
+IDENTITY in pgw#990 — and the pre-trace compiled graph key itself is gone since
 pgw#1059 — but the memo and the layering rule both stand.)
 
 The numerics gate (pgw#868) has to build a probe feed the way the MINT builds
@@ -63,7 +63,7 @@ class MintRefused(RuntimeError):
 #: majority's clothes.
 #:
 #: This is a FORK, not a flag: both classes are exported, compiled, keyed and
-#: shipped in the same cell (Paul: "worst case compile 2x more graphs, one with
+#: shipped in the same compiled graph (Paul: "worst case compile 2x more graphs, one with
 #: LoRAs and one without"), and the serve path picks between them by the
 #: DECLARED ingress contract. Nothing about a program varies with Python state
 #: — the arm is a mint coordinate that lands in the class hash, exactly like
@@ -121,12 +121,12 @@ class ExportSpec:
     target: str
     weight_lane: str = ""
     #: pgw#1076: EMPTY, not "bf16". This field is a MEASUREMENT — what the
-    #: traced modules actually compute in — and it is stamped into the cell's
+    #: traced modules actually compute in — and it is stamped into the compiled graph's
     #: `metadata.json` and printed on every arm line. Defaulting it made an
-    #: fp32 cell say `precision: bf16`, which cost a debugging cycle chasing a
+    #: fp32 compiled graph say `precision: bf16`, which cost a debugging cycle chasing a
     #: cast that never happened (the real cause was TF32 conv kernels). A
     #: caller that KNOWS the lane sets it; a caller that does not leaves it
-    #: absent and `aot_mint._mint_cell` derives it from the modules in hand.
+    #: absent and `aot_mint._mint_compiled_graph` derives it from the modules in hand.
     #: Unmeasurable stays "" — an absent fact beats a plausible wrong one.
     precision: str = ""
     lora_bucket: int = 0
@@ -139,7 +139,7 @@ class ExportSpec:
     #: pgw#739 declaration coordinate: the fork arm values and (for a
     #: static-rows family) the class row this artifact is minted at. Both
     #: KEY (a fork is a distinct graph class in #716's hash) — see
-    #: :func:`cell_identity`. Sorted (name, value) pairs.
+    #: :func:`compiled_graph_identity`. Sorted (name, value) pairs.
     fork: Tuple[Tuple[str, Any], ...] = ()
     class_dims: Tuple[Tuple[str, int], ...] = ()
     specialization: Dict[str, Any] = field(default_factory=dict)
@@ -151,7 +151,7 @@ class ExportSpec:
 
     def execution_lane_label(self) -> str:
         """This spec's lane label — ONE implementation, shared with the
-        cell-key axis it has to agree with (pgw#1040)."""
+        compiled graph-key axis it has to agree with (pgw#1040)."""
         return _execution_lane_label(self.weight_lane, self.lora_bucket)
 
 

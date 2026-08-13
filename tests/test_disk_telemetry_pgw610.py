@@ -166,7 +166,7 @@ def test_state_delta_never_blocks_event_loop_on_a_stalled_mount(
 ) -> None:
     """boothang revert-turns-red: the real 0.40.7 LTX shape. A provider
     VOLUME mount that stalls under statvfs() (network-backed fill-source
-    under load right after a self-mint's weight download + cell pack) must
+    under load right after a self-mint's weight download + compiled graph pack) must
     NEVER freeze the event loop. Before the fix, _state_delta() measured
     disk usage synchronously and inline — a stalled statvfs() there wedges
     every StateDelta/RunJob/drain signal for as long as the mount hangs.

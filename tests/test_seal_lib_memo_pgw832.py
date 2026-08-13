@@ -150,7 +150,7 @@ def test_any_detectable_mutation_forces_the_fallback_rehash(
 
     # Content changed, mtime moves with it: the triple mismatches, so the
     # child must rehash and see the NEW content — a stale digest here would
-    # be a corrupted cell key, the worst defect class in this program.
+    # be a corrupted compiled graph key, the worst defect class in this program.
     files["libtorch_fake.so"].write_bytes(b"MUTATED" * 512)
     _fresh_process(str(memo_path))
     with_memo = dict(env_seal.toolchain_library_digests())

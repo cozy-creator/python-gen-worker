@@ -19,7 +19,7 @@ What this file pins:
    stage name never the round trip, `>= 1.0`, and metric+bar as a PAIR
    (the hub's `Bar.Declared` is `metric != "" && min_speedup >= 1.0`);
 2. it is NOT a contract axis — declaring or raising a bar must never re-key a
-   cell — but it IS an OVERRIDE_FACT, so a migration cannot silently drop it;
+   compiled graph — but it IS an OVERRIDE_FACT, so a migration cannot silently drop it;
 3. discovery emits all three onto `fn["compile"]`, blockers as the OPEN ids
    only: the hub reads `len(blockers) > 0` as "the author refuses to mint", so
    a resolved id would park the family in `blocked-by-declaration` forever;
@@ -133,7 +133,7 @@ def test_the_bar_is_a_PAIR_and_half_of_one_is_refused(half: Dict[str, Any]) -> N
 # 2. not a contract axis; IS a must-survive override fact
 # ---------------------------------------------------------------------------
 
-def test_declaring_a_bar_NEVER_re_keys_a_cell() -> None:
+def test_declaring_a_bar_NEVER_re_keys_a_compiled_graph() -> None:
     bare = Compile(family="probe", shapes=((1024, 1024),))
     barred = Compile(family="probe", shapes=((1024, 1024),), **BAR)
     assert contract_delta(bare, barred) == {}

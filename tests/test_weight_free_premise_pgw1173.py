@@ -166,7 +166,7 @@ def test_a_virtualized_target_holds_zero_real_parameter_bytes() -> None:
 def test_real_buffers_on_a_virtual_target_are_NOT_a_breach() -> None:
     """A structure-only component's buffers stay real by construction — they
     are config-derived tables and a literal-bearing family ships them inside
-    the cell. Counting them would make the fence refuse every correct trace."""
+    the compiled graph. Counting them would make the fence refuse every correct trace."""
     target = nn.Linear(8, 8)
     target.register_buffer("rope", torch.ones(64, dtype=torch.bfloat16))
     # On the host: a buffer is REALLY moved by `virtualize`, so building this
@@ -378,20 +378,20 @@ def micro_declaration(micro_tree: Path) -> None:
 
 def _job(micro_tree: Path, report: Path, *, extra_targets: tuple = ()) -> Any:
     from gen_worker.api.binding import ModelRef
-    from gen_worker.mint_process import CompileCellSpec, MintSlot
+    from gen_worker.mint_process import CompileCompiledGraphSpec, MintSlot
     from gen_worker.registry import collect_endpoints
 
     specs = collect_endpoints(["harness.rig_runtime", "micro_diffusion.main"])
     spec = next(s for s in specs if s.name == "generate")
-    cell = spec.compile_cell()
-    cfg = CompileCellSpec(
+    compiled_graph = spec.compile_compiled_graph()
+    cfg = CompileCompiledGraphSpec(
         shapes=tuple(
-            tuple(int(v) for v in row) for row in (cell.shapes or ())),
-        targets=tuple(str(t) for t in (cell.targets or ())) + extra_targets,
-        family=str(cell.family or ""),
-        lora_bucket=int(cell.lora_bucket or 0),
-        guidance_scales=tuple(float(v) for v in (cell.guidance_scales or ())),
-        text_lens=tuple(int(v) for v in (cell.text_lens or ())),
+            tuple(int(v) for v in row) for row in (compiled_graph.shapes or ())),
+        targets=tuple(str(t) for t in (compiled_graph.targets or ())) + extra_targets,
+        family=str(compiled_graph.family or ""),
+        lora_bucket=int(compiled_graph.lora_bucket or 0),
+        guidance_scales=tuple(float(v) for v in (compiled_graph.guidance_scales or ())),
+        text_lens=tuple(int(v) for v in (compiled_graph.text_lens or ())),
     )
     return boot_key.TraceJob(
         function="generate",

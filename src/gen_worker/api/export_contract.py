@@ -156,7 +156,7 @@ class MintBlocker(msgspec.Struct, frozen=True):
 
     Blockers gate MINTING ONLY. A blocked family serves eagerly, exactly as it
     does today, and blockers are deliberately NOT a contract axis — resolving
-    one must not re-key a cell.
+    one must not re-key a compiled graph.
 
     When ``resolves_when`` is a MEASUREMENT (pgw#1134)
     -------------------------------------------------
@@ -609,7 +609,7 @@ class GraphClass(msgspec.Struct, frozen=True):
 
     ``targets`` scopes the row, exactly as it does on :class:`Input`,
     :class:`Arg` and :class:`Fork`; empty means every target (pgw#967). A
-    cell's targets are unrelated modules with unrelated call contracts —
+    compiled graph's targets are unrelated modules with unrelated call contracts —
     sdxl's UNet traces 9 aspect rows x 2 CFG arms, its VAE decoder traces
     the 9 aspect rows at batch 1 (CFG has collapsed by decode time), and its
     two text encoders trace ONE row each (77 tokens, batch 1, both
@@ -654,8 +654,8 @@ class GraphClass(msgspec.Struct, frozen=True):
         row: Dict[str, Any] = {"dims": dict(self.dims), "fork": dict(self.fork)}
         # pgw#846 discipline: an absent field is OMITTED, so every
         # declaration written before this vocabulary existed serialises
-        # byte-identically and no published cell re-keys on the SDK change
-        # alone (`Compile.contract_axes` feeds the cell key's contract
+        # byte-identically and no published compiled graph re-keys on the SDK change
+        # alone (`Compile.contract_axes` feeds the compiled graph key's contract
         # digest). A declaration that ADOPTS scoping re-keys, correctly: it
         # is a different class set.
         if self.targets:
@@ -675,10 +675,10 @@ class Input(msgspec.Struct, frozen=True):
     scalar timestep, ti2v's float32 per-token one) or the explicit word
     ``"model"`` — the resolved module's own dtype, stated on purpose. There
     is no default: an exported graph is dtype-specialized, so the ingress
-    dtype of every input is part of the class the cell claims to serve, and
+    dtype of every input is part of the class the compiled graph claims to serve, and
     an omitted dtype used to inherit the module's weight dtype SILENTLY —
     which is how sdxl's scalar timestep was minted bfloat16 while every real
-    scheduler presents float32, and a 36-entry cell admitted nothing it was
+    scheduler presents float32, and a 36-entry compiled graph admitted nothing it was
     published for. A guessed fact is not a declaration.
 
     There is NO args/kwargs choice to declare: all-positional example feeds
@@ -717,7 +717,7 @@ class Input(msgspec.Struct, frozen=True):
         if not dtype:
             raise DeclarationError(
                 f"Input {self.name!r} declares no dtype. The ingress dtype "
-                f"of every input is part of the graph class an exported cell "
+                f"of every input is part of the graph class an exported compiled_graph "
                 f"claims to serve, and it is a fact about the CALL (a "
                 f"scheduler's float32 timestep), not about the weights — so "
                 f"it cannot be inherited silently. Declare a torch dtype "

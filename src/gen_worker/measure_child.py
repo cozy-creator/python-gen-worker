@@ -4,7 +4,7 @@
 
 It runs the mint's own load and the mint's own export loop — optionally with
 the INDUCTOR compile — against ONE declared class set, records what the run
-cost on the card, and produces **nothing else**. No cell, no artifact, no
+cost on the card, and produces **nothing else**. No compiled graph, no artifact, no
 package, no hub call, no advertisement.
 
 What ``<request>.mint.json`` actually IS (pgw#1153)
@@ -95,7 +95,7 @@ The three properties that make this safe
 What it measures, and against what vocabulary
 ---------------------------------------------
 ``export_peak_device_bytes`` / ``export_peak_device_reserved_bytes`` are the
-mint's own names for the same two counters (``aot_mint._mint_cell``), read on
+mint's own names for the same two counters (``aot_mint._mint_compiled_graph``), read on
 the same allocator, so a number from this child and a number from a real mint
 are comparable without translation. The per-entry figure is the RUNNING
 high-water after that entry — the counter is reset once, before the first row,
@@ -120,7 +120,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import msgspec
 
 from . import activity
-from .mint_process import CompileCellSpec, MintSlot
+from .mint_process import CompileCompiledGraphSpec, MintSlot
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +150,7 @@ REASONS: Tuple[str, ...] = (
     # The endpoint's own `setup()` raised. Never re-classified here: a load
     # that fails under measurement fails under a mint too.
     "load_failed",
-    # The composed pipeline carries no target the cell names.
+    # The composed pipeline carries no target the compiled graph names.
     "no_compile_target",
     # The family ships no export declaration, so there is no class set to
     # measure.
@@ -184,7 +184,7 @@ class MeasureJob(msgspec.Struct, frozen=True, kw_only=True):
 
     function: str
     modules: Tuple[str, ...]
-    cfg: CompileCellSpec
+    cfg: CompileCompiledGraphSpec
     family: str = ""
     slots: Dict[str, MintSlot] = {}
     device: int = -1
@@ -213,7 +213,7 @@ class MeasureDocument(msgspec.Struct, frozen=True, kw_only=True):
     # The runtime envelope's input half.
     function: str = ""
     modules: Tuple[str, ...] = ()
-    cfg: Optional[CompileCellSpec] = None
+    cfg: Optional[CompileCompiledGraphSpec] = None
     slots: Dict[str, MintSlot] = {}
     device: int = -1
     execution_lane: str = ""
@@ -265,7 +265,7 @@ class EntryMeasurement(msgspec.Struct, frozen=True, kw_only=True):
 class MeasureReport(msgspec.Struct, frozen=True, kw_only=True):
     """The typed evidence a blocker's ``resolution=`` can cite.
 
-    It carries no artifact, no digest and no cell key, and it never will: this
+    It carries no artifact, no digest and no compiled graph key, and it never will: this
     is a measurement of a mint, not a mint.
     """
 
@@ -292,7 +292,7 @@ class MeasureReport(msgspec.Struct, frozen=True, kw_only=True):
     entries: Tuple[EntryMeasurement, ...] = ()
     declared_classes: int = 0
     #: The mint's own two names for the phase high-water, on the mint's own
-    #: counters (``aot_mint._mint_cell``), so these numbers are comparable
+    #: counters (``aot_mint._mint_compiled_graph``), so these numbers are comparable
     #: with a real mint's without translation.
     export_peak_device_bytes: int = 0
     export_peak_device_reserved_bytes: int = 0
@@ -375,10 +375,10 @@ def _discard(files: Sequence[str]) -> int:
 # ---------------------------------------------------------------------------
 
 
-def load_document(raw: bytes) -> Tuple[MeasureDocument, CompileCellSpec]:
+def load_document(raw: bytes) -> Tuple[MeasureDocument, CompileCompiledGraphSpec]:
     """Decode one request file into ``(document, flattened compile spec)``.
 
-    The committed payload IS a ``CompileCellSpec`` at top level, so the same
+    The committed payload IS a ``CompileCompiledGraphSpec`` at top level, so the same
     bytes are read twice against two structs rather than sniffed for a
     discriminator: msgspec drops what each struct does not declare, and a
     document that carries neither half decodes to two empty structs and is
@@ -389,7 +389,7 @@ def load_document(raw: bytes) -> Tuple[MeasureDocument, CompileCellSpec]:
     """
     return (
         msgspec.json.decode(raw, type=MeasureDocument),
-        msgspec.json.decode(raw, type=CompileCellSpec),
+        msgspec.json.decode(raw, type=CompileCompiledGraphSpec),
     )
 
 
@@ -418,7 +418,7 @@ def _slot_from_value(name: str, value: str, ref_text: str) -> MintSlot:
     refusal naming the flag that settles it, and a wrong guess would be a
     measurement of the wrong checkpoint.
 
-    Identity is deliberately weak on the path form. No cell key, digest or
+    Identity is deliberately weak on the path form. No compiled graph key, digest or
     artifact leaves this process (:class:`MeasureReport` carries none of the
     three), so a slot's ``ref`` exists only to satisfy ``ctx.slots``; it is the
     operator's when ``,ref=`` gives one and a slot-shaped placeholder when not.
@@ -476,8 +476,8 @@ def _declares(specs: Sequence[Any], family: str) -> bool:
 def _function_for_family(specs: Sequence[Any], family: str) -> str:
     """The endpoint function the payload's ``family`` names.
 
-    A committed payload names a FAMILY because that is what a cell is scoped to
-    (pgw#758: one mint -> one cell for the family's whole declared class set);
+    A committed payload names a FAMILY because that is what a compiled graph is scoped to
+    (pgw#758: one mint -> one compiled graph for the family's whole declared class set);
     it does not name a function, and it should not have to. Functions sharing a
     class are interchangeable here — ``select_specs`` pulls the whole sibling
     set from any of them — so ambiguity is only real when the candidates span
@@ -509,7 +509,7 @@ def _function_for_family(specs: Sequence[Any], family: str) -> str:
 
 
 def resolve_job(
-    doc: MeasureDocument, flat: CompileCellSpec, *,
+    doc: MeasureDocument, flat: CompileCompiledGraphSpec, *,
     function: str = "", slot_flags: Sequence[str] = (),
 ) -> MeasureJob:
     """Build the job the run needs from whichever document arrived.
@@ -632,7 +632,7 @@ def run(
     job: MeasureJob, report_path: Path, *, compile_entries: bool = True,
 ) -> int:
     """Measure this job's declared class set. Never raises, never publishes."""
-    from . import aot_declaration, aot_mint, compile_cache as cc, fleet_cells
+    from . import aot_declaration, aot_mint, compile_cache as cc, fleet_compiled_graphs
     from .cli.run import run_setup
     from .mint_child import (
         MintChildRefused, assert_slots_resolvable, bind_slots,
@@ -711,7 +711,7 @@ def run(
         # `boot_trace_child` arm the pipeline they hand the export. The LIFTED
         # half belongs to the loop that needs it (pgw#1132).
         cc.apply_lora_execution_lane(pipeline, int(cfg.lora_bucket))
-    spec = fleet_cells.aot_export_spec(pipeline, cfg)
+    spec = fleet_compiled_graphs.aot_export_spec(pipeline, cfg)
     virtual = structure_only.structure_only_components(pipeline)
     partial = msgspec.structs.replace(
         partial,

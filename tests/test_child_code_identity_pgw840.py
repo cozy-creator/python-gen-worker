@@ -13,7 +13,7 @@ venv, same interpreter — ``python -m gen_worker.aot_compile_child`` simply doe
 not mean "this gen_worker".
 
 Attribution is the symptom. The defect is that the process which compiles the
-files a cell publishes was chosen by ``sys.path``, while every gate runs in the
+files a compiled graph publishes was chosen by ``sys.path``, while every gate runs in the
 parent against the parent's program. So there are two assertions here: the
 child RESOLVES to the parent's code, and a child that did not is REFUSED by
 name rather than believed.
@@ -71,7 +71,7 @@ def test_the_child_resolves_the_parents_own_gen_worker(tmp_path: Path) -> None:
     assert resolved == Path(pool.PACKAGE_ROOT) / "gen_worker" / "__init__.py", (
         f"the entry child resolved gen_worker to {resolved} while the parent "
         f"runs from {pool.PACKAGE_ROOT}. That child compiles the loose files "
-        f"the cell publishes, and every gate runs in the parent against the "
+        f"the compiled_graph publishes, and every gate runs in the parent against the "
         f"parent's program — the assignment is only sound while both are the "
         f"same code (pgw#840)")
 

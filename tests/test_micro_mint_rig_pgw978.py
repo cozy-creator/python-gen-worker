@@ -112,7 +112,7 @@ def test_the_generated_checkpoint_stays_under_the_carve_out_ceiling(
     tree = build_checkpoint(tmp_path / "ckpt")
     size = checkpoint_bytes(tree)
     assert 0 < size < rig.MAX_WEIGHTS_BYTES
-    # Deterministic: two builds agree, which is what lets a cell key mean
+    # Deterministic: two builds agree, which is what lets a compiled graph key mean
     # anything across the two processes the rig runs.
     again = build_checkpoint(tmp_path / "ckpt2")
     assert checkpoint_bytes(again) == size
@@ -220,7 +220,7 @@ def test_the_full_machinery_cycle_runs_on_this_box(tmp_path: Path) -> None:
     # here would be asserting a phase this recipe does not have.
     assert float(phases.get("trace_graph", 0.0)) > 0.0
     assert float(phases.get("seal_publish", 0.0)) > 0.0
-    assert mint.facts["cell_key"], "the child sealed no cell key"
+    assert mint.facts["compiled_graph_key"], "the child sealed no compiled_graph key"
 
     publish = next(leg for leg in result.legs if leg.name == "publish")
     routes = publish.facts["routes"]
@@ -229,14 +229,14 @@ def test_the_full_machinery_cycle_runs_on_this_box(tmp_path: Path) -> None:
     assert any(r.endswith("/publishes") for r in routes)
     assert any(r.endswith("/complete") for r in routes)
     assert any(r.endswith("/publish-complete") for r in routes)
-    assert publish.facts["cas_bytes"] > 0, "no cell bytes reached the store"
+    assert publish.facts["cas_bytes"] > 0, "no compiled_graph bytes reached the store"
 
     adopt = next(leg for leg in result.legs if leg.name == "adopt")
     assert adopt.facts["pid"] != os.getpid(), (
         "the adopt must run in a SECOND process — in-process adoption proves "
-        "nothing about a cell crossing pods")
-    assert adopt.facts["cell_key"] == mint.facts["cell_key"], (
-        "the cell the second process adopted is not the cell the first minted")
+        "nothing about a compiled_graph crossing pods")
+    assert adopt.facts["compiled_graph_key"] == mint.facts["compiled_graph_key"], (
+        "the compiled_graph the second process adopted is not the compiled_graph the first minted")
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +244,7 @@ def test_the_full_machinery_cycle_runs_on_this_box(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_a_probe_pod_cannot_publish_a_cell(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_probe_pod_cannot_publish_a_compiled_graph(monkeypatch: pytest.MonkeyPatch) -> None:
     """A live-edit probe runs rsync'd code whose `gen_worker` version lies and
     whose `code_closure` no other pod can reproduce. Publishing from it would
     poison every pod that later adopts — so the refusal lives in the PARENT's
@@ -253,8 +253,8 @@ def test_a_probe_pod_cannot_publish_a_cell(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setenv("GEN_WORKER_PROBE", "1")
     monkeypatch.delenv("GEN_WORKER_PROBE_PUBLISH_ARMED", raising=False)
-    for path in ("/v1/worker/cells/publish-intent",
-                 "/v1/worker/cells/publish-complete"):
+    for path in ("/v1/worker/compiled_graphs/publish-intent",
+                 "/v1/worker/compiled_graphs/publish-complete"):
         with pytest.raises(actions.ActionRefused, match="disarmed"):
             actions.authorize({"method": "POST", "path": path, "json": {}})
     # Discovery is untouched: a probe must still be able to ADOPT.
@@ -273,10 +273,10 @@ def test_arming_a_probes_publish_is_explicit(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("GEN_WORKER_PROBE", "1")
     monkeypatch.setenv("GEN_WORKER_PROBE_PUBLISH_ARMED", "1")
     action, _q, _b = actions.authorize({
-        "method": "POST", "path": "/v1/worker/cells/publish-intent",
-        "json": {"family": "microrig", "cell_key": "ck5-" + "a" * 56,
+        "method": "POST", "path": "/v1/worker/compiled_graphs/publish-intent",
+        "json": {"family": "microrig", "compiled_graph_key": "ck5-" + "a" * 56,
                  "axes": {}, "identity_axes": {}, "mint_duration_ms": 1}})
-    assert action.name == "cells.publish_intent"
+    assert action.name == "compiled_graphs.publish_intent"
 
 
 def test_a_normal_pod_is_unaffected(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -287,7 +287,7 @@ def test_a_normal_pod_is_unaffected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GEN_WORKER_PROBE_PUBLISH_ARMED", raising=False)
     assert not actions.publish_disarmed()
     action, _q, _b = actions.authorize({
-        "method": "POST", "path": "/v1/worker/cells/publish-complete",
-        "json": {"family": "microrig", "cell_key": "ck5-" + "a" * 56,
+        "method": "POST", "path": "/v1/worker/compiled_graphs/publish-complete",
+        "json": {"family": "microrig", "compiled_graph_key": "ck5-" + "a" * 56,
                  "checkpoint_id": "sha256:" + "b" * 64, "ok": True}})
-    assert action.name == "cells.publish_complete"
+    assert action.name == "compiled_graphs.publish_complete"

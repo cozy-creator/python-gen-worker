@@ -1,6 +1,6 @@
 """pgw#1097 — THE FOLDING FENCE.
 
-One cell serves every fine-tune of a family because weights rebind BY NAME at
+One compiled graph serves every fine-tune of a family because weights rebind BY NAME at
 load (pgw#857). That is sound only while the compiled code holds no weight
 VALUE. With ``constant_folding_fenced`` off — torch's default, and what
 every real-weight mint ran under until this issue — ``GraphLowering.get_attr``
@@ -8,7 +8,7 @@ renders a constant's values straight into the kernel source when its SHAPE
 meets either rule: 0-dim (via ``.item()``), or ``len(shape) == 1 and
 shape[0] <= 8`` (``GraphLowering.can_inline_constant``). Such a weight then
 appears in NO table anyone could rebind, and every other fine-tune of the
-family adopts a cell carrying the minting checkpoint's tensor.
+family adopts a compiled graph carrying the minting checkpoint's tensor.
 
 MEASURED on torch 2.13.0+cu130 (pgw#1097, CPU):
 
@@ -93,7 +93,7 @@ def _wrapper_source(rows: Sequence[Mapping[str, object]]) -> str:
 
 
 def _package(tmp_path: Path, rows: Sequence[Mapping[str, object]]) -> Path:
-    out = tmp_path / "cell.pt2"
+    out = tmp_path / "compiled_graph.pt2"
     with zipfile.ZipFile(out, "w") as zf:
         zf.writestr(
             f"data/aotinductor/{ENTRY}/c{ENTRY}.wrapper.cpp",
@@ -209,13 +209,13 @@ def test_the_fence_does_not_use_always_keep_tensor_constants() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Cells minted BEFORE the fence
+# Compiled graphs minted BEFORE the fence
 # ---------------------------------------------------------------------------
 
 
 def _meta(**over: object) -> dict:
     meta = aot_serve.entry_metadata(
-        family="micro-diffusion", precision="bf16", cell_key="ck1-test",
+        family="micro-diffusion", precision="bf16", compiled_graph_key="ck1-test",
         name=ENTRY, entry={
             "target": "transformer", "fork": [], "class_dims": [],
             "inputs": [{"name": "latent", "position": 0, "dtype": "float32",
@@ -236,9 +236,9 @@ def test_a_fenced_mint_declares_it() -> None:
     assert "constant_folding_fenced" in aot_serve.DECLARED_AXES
 
 
-def test_a_pre_fence_cell_is_refused_before_a_byte_moves() -> None:
+def test_a_pre_fence_compiled_graph_is_refused_before_a_byte_moves() -> None:
     """The same shape of refusal ``package_constants_in_so`` already carries:
-    a cell minted without the fence may hold the minting checkpoint's copy of
+    a compiled graph minted without the fence may hold the minting checkpoint's copy of
     any inlined weight, so it is sound for exactly one fine-tune. Absent flag
     = a pre-fence mint."""
     stale = _meta()
@@ -247,7 +247,7 @@ def test_a_pre_fence_cell_is_refused_before_a_byte_moves() -> None:
     assert "folding fence" in reason and "pgw#1097" in reason
 
 
-def test_a_fenced_cell_passes_the_declared_gate() -> None:
+def test_a_fenced_compiled_graph_passes_the_declared_gate() -> None:
     assert aot_serve.verify_declared(_meta()) == ""
 
 
@@ -270,7 +270,7 @@ def _inlinable(shape: Iterable[int]) -> bool:
 
 
 def test_no_micro_family_weight_can_fold_which_is_why_pgw1073_passed() -> None:
-    """pgw#1073 scenario 6 proved two micro checkpoints share one cell with
+    """pgw#1073 scenario 6 proved two micro checkpoints share one compiled graph with
     exact parity. It could not have failed: no micro parameter is eligible for
     either inline rule. The property was true; it was not ENFORCED, and this
     test says so out loud so nobody reads that proof as covering the fence."""

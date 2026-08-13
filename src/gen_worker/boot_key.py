@@ -1,13 +1,13 @@
 """pgw#1089 (DESIGN-RULINGS §4.27 step 1): derive this worker's ``ek1`` entry
 key SET AT BOOT, from CODE ALONE, before a single weight byte is resident.
 
-pgw#1176: §4.27 said "THE cell key" (singular). It is a KEY SET plus a derived
+pgw#1176: §4.27 said "THE compiled graph key" (singular). It is a KEY SET plus a derived
 contract manifest now — one ``ek1`` per declared graph class. Every property
 the ruling wanted survives STRENGTHENED, because a partial resolve now helps:
 a pod that resolves 30 of 36 keys arms 30 classes and compiles 6, where the
-cell key made that same outcome a total miss and a full re-mint.
+compiled graph key made that same outcome a total miss and a full re-mint.
 
-Paul, §4.27 step 1, verbatim: *"**Immediately** on boot: derive the cell key on
+Paul, §4.27 step 1, verbatim: *"**Immediately** on boot: derive the compiled graph key on
 CPU from code alone — fake/meta-tensor traces, **as parallel as possible** ('to
 get the trace time down as low as possible'). No weights required, ever, for
 identity."* Target: **< 60 s, every time**, ~99 % of it the traces.
@@ -98,8 +98,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import msgspec
 
-from . import aot_serve, boot_phases, cell_key, compile_cache as cc, env_seal
-from .mint_process import CompileCellSpec, MintSlot, slot_subjects
+from . import aot_serve, boot_phases, compiled_graph_key, compile_cache as cc, env_seal
+from .mint_process import CompileCompiledGraphSpec, MintSlot, slot_subjects
 from .postmortem import cpu_quota_cores, effective_cpu_count
 
 logger = logging.getLogger(__name__)
@@ -145,7 +145,7 @@ CODE_DIGEST = _code_digest()
 
 
 class BootKeyUnavailable(RuntimeError):
-    """This boot cannot state a cell key from code alone, and says why.
+    """This boot cannot state a compiled graph key from code alone, and says why.
 
     Never a silent fallback: a pod that cannot derive its key adopts nothing
     and mints the old way, and the REASON is what tells us which family's
@@ -176,7 +176,7 @@ class TraceJob(msgspec.Struct, frozen=True, kw_only=True):
     function: str
     modules: Tuple[str, ...]
     family: str
-    cfg: CompileCellSpec
+    cfg: CompileCompiledGraphSpec
     slots: Dict[str, MintSlot] = {}
     #: This child's share of the declaration's row order, ``rows[i::K]``.
     #: Sharded by INDEX and not by name because the adapter fork is decided by
@@ -238,7 +238,7 @@ class DerivedKey:
     measurements that produced it.
 
     pgw#1176: ``entry_keys`` replaces the single ``key``. §4.27 ruled "THE
-    cell key" (singular); it is now a derived key SET plus a manifest, and
+    compiled graph key" (singular); it is now a derived key SET plus a manifest, and
     every property that ruling wanted survives strengthened, because a
     PARTIAL resolve now helps instead of falling back to a full re-mint.
     """
@@ -247,7 +247,7 @@ class DerivedKey:
     entry_keys: Mapping[str, str]
     #: entry name -> that class's 16-hex ``class_hash``. THE memoizable half.
     class_hashes: Mapping[str, str]
-    #: the declaration-wide coverage LABEL (``cell_key.manifest_digest``) —
+    #: the declaration-wide coverage LABEL (``compiled_graph_key.manifest_digest``) —
     #: telemetry, never identity, never an adoption unit.
     manifest: str
     workers: int
@@ -261,7 +261,7 @@ class DerivedKey:
     #: traced (``aot_mint.keying_block``'s ``graph_witness``). Since option a it
     #: is FOLDED into ``class_hash`` (so the key now separates two bodies behind
     #: one declaration) AND kept here for the adopt backstop, which compares it
-    #: against the cell's own record (defense-in-depth). Rides the keying
+    #: against the compiled graph's own record (defense-in-depth). Rides the keying
     #: blocks, so a memo hit carries it exactly as a cold trace does.
     graph_witnesses: Mapping[str, str] = field(default_factory=dict)
 
@@ -359,13 +359,13 @@ def trace_workers(classes: int, *, limit: int = 0) -> PoolWidth:
 #: input as well as the file header, so a stale row is unaddressable AND the
 #: file it lives in is discarded whole — two independent reasons it cannot be
 #: misread, which is what "typed invalidation" has to mean for a cache whose
-#: wrong answer is a wrong cell.
+#: wrong answer is a wrong compiled graph.
 MEMO_VERSION = 4
 MEMO_FILENAME = "boot-key-graphs.json"
 
 
 def closure_digest(
-    family: str, cfg: CompileCellSpec, *, function: str = "",
+    family: str, cfg: CompileCompiledGraphSpec, *, function: str = "",
     slots: Optional[Mapping[str, MintSlot]] = None,
 ) -> str:
     """The memo's key: what a per-class graph hash is a pure function OF.
@@ -405,7 +405,7 @@ def closure_digest(
             "guidance": sorted(float(v) for v in cfg.guidance_scales),
             "lora_bucket": int(cfg.lora_bucket or 0),
         },
-        "subject": cell_key.subject_facts(slot_subjects(dict(slots or {}))),
+        "subject": compiled_graph_key.subject_facts(slot_subjects(dict(slots or {}))),
     }
     blob = json.dumps(facts, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(blob).hexdigest()[:32]
@@ -540,7 +540,7 @@ def assert_memo_honest(
             disagreements.append(f"{name}: memo {had} != traced {want}")
         # pgw#1031: the memo now also answers the ADOPT-side witness, so a
         # memo whose class hash is right and whose witness is stale would
-        # admit a colliding cell on the very axis the witness exists to
+        # admit a colliding compiled graph on the very axis the witness exists to
         # separate. Checked here for the same reason the hash is.
         want_w = str((block or {}).get("graph_witness") or "")
         had_w = had_witnesses.get(str(name)) or ""
@@ -621,16 +621,16 @@ def fold(
     """``({entry: entry_key}, {entry: class_hash}, manifest_digest)`` for one
     declaration's class set — THE derived contract manifest (pgw#1176).
 
-    §4.27 asked for "THE cell key" (singular). This returns a KEY SET plus a
+    §4.27 asked for "THE compiled graph key" (singular). This returns a KEY SET plus a
     manifest, and everything §4.27 wanted survives strengthened: the <60 s
     target is unchanged (the traces are the same traces), the memo is
     unchanged (it holds graph blocks, never keys), and boot-time adoption
     gets STRICTLY better because a PARTIAL hit now helps — a pod that
-    resolves 30 of 36 keys arms 30 classes and compiles 6, where the cell key
+    resolves 30 of 36 keys arms 30 classes and compiles 6, where the compiled graph key
     made that outcome a total miss and a full re-mint.
 
     The fold is ``aot_serve.stamp_entry`` followed by
-    ``cell_key.from_entry_metadata`` — i.e. the mint's own stamp and the
+    ``compiled_graph_key.from_entry_metadata`` — i.e. the mint's own stamp and the
     publish path's own recomputation, reached through the identical
     functions. There is deliberately no ``class_hash`` arithmetic in this
     module: a second implementation of the fold is exactly the attempt-28
@@ -661,16 +661,16 @@ def fold(
                 str(name), dict(block), strict=bool(strict),
                 lora_bucket=int(lora_bucket or 0))
             class_hashes[str(name)] = str(stamped.get("class_hash") or "")
-            entry_keys[str(name)] = cell_key.from_entry_metadata({
+            entry_keys[str(name)] = compiled_graph_key.from_entry_metadata({
                 "kind": aot_serve.ARTIFACT_KIND,
                 **runtime,
-                cell_key.ENTRY_BLOCK_KEY: stamped,
+                compiled_graph_key.ENTRY_BLOCK_KEY: stamped,
                 "toolchain": toolchain,
                 env_seal.SEAL_KEY: seal,
             }).digest
         if span is not None:
             span.note(f"classes={len(blocks)}")
-    return entry_keys, class_hashes, cell_key.manifest_digest(
+    return entry_keys, class_hashes, compiled_graph_key.manifest_digest(
         class_hashes.values())
 
 
@@ -888,7 +888,7 @@ def derive(
     function: str,
     modules: Sequence[str],
     family: str,
-    cfg: CompileCellSpec,
+    cfg: CompileCompiledGraphSpec,
     slots: Mapping[str, MintSlot],
     declared_hint: int,
     envelope: Mapping[str, Any],
@@ -907,7 +907,7 @@ def derive(
     RULES on what the memo held — the verify posture, never the boot default.
 
     ``declared_hint`` is the parent's read of the declaration's class-row count
-    — ``len(aot_declaration.cell_plans(decl))``, which needs no pipeline. It
+    — ``len(aot_declaration.compiled_graph_plans(decl))``, which needs no pipeline. It
     sizes K and NOTHING else: the adapter fork can double it, and the true
     class set is whatever the children enumerate off their own composed
     pipelines. A hint that sizes a pool cannot move a key.
@@ -920,7 +920,7 @@ def derive(
     if int(declared_hint) <= 0:
         raise BootKeyUnavailable(
             "no_classes",
-            f"family {family!r} declares no graph classes; a cell with no "
+            f"family {family!r} declares no graph classes; a compiled_graph with no "
             f"class set has no identity (pgw#716/#758)")
 
     digest = closure_digest(family, cfg, function=function, slots=slots)
@@ -1014,7 +1014,7 @@ def derive(
             "class_set_disagreement",
             f"the trace children do not agree on how many classes this "
             f"declaration produces ({declared!r}) — they composed different "
-            f"pipelines, so their graphs are not one cell's graphs")
+            f"pipelines, so their graphs are not one compiled_graph's graphs")
     total = declared[0]
     duplicated = sum(len(r.blocks) for r in reports) - len(blocks)
     if len(blocks) != total or duplicated:

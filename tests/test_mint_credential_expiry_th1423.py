@@ -1,11 +1,11 @@
 """th#1423 pgw half: a mint that outlives its credential must SAY SO.
 
 Measured on the standing master stack: three `self_mint_publish_failed` events,
-all `/v1/worker/cells/publish-intent failed (401): invalid worker token` after a
+all `/v1/worker/compiled graphs/publish-intent failed (401): invalid worker token` after a
 28-minute inductor compile, at 32m30s past first activity against a 30m worker
 JWT TTL. Two worker-side defects made that unreadable:
 
-* `CellPublisher._post` raised a BARE `RuntimeError`, so `_publish_failure_phase`
+* `CompiledGraphPublisher._post` raised a BARE `RuntimeError`, so `_publish_failure_phase`
   had no `status`/`code` to group by and all three landed under the phase
   `RuntimeError` — indistinguishable from any other exception type on the wire;
 * `aot_mint._publisher_from_settings` built the publisher with
@@ -13,7 +13,7 @@ JWT TTL. Two worker-side defects made that unreadable:
   arriving during the mint could never be picked up.
 
 These drive the REAL publisher against a localhost server speaking tensorhub's
-real refusal envelope — real sockets, real threads, a real packed cell — because
+real refusal envelope — real sockets, real threads, a real packed compiled graph — because
 what is under test is what the worker does with a live 401, not a mock's idea of
 one. Every wait here is a `Thread.join()` on the publish thread itself: no
 sleeps, no durations (gw#666).
@@ -33,19 +33,19 @@ from pathlib import Path
 
 import pytest
 
-from gen_worker import fleet_cells as fc
+from gen_worker import fleet_compiled_graphs as fc
 from gen_worker.hubio.client import HubPublishError
-from harness.cell_meta import exported_cell_meta
+from harness.compiled_graph_meta import exported_compiled_graph_meta
 
 LAPSE_S = 150  # how far past `exp` the presented credential is, in the JWT
 FAMILY = "sdxl"
 
-# pgw#1046: a real exported-cell envelope. The publish path recomputes the key
-# from the recorded blocks and refuses a cell that cannot state one, so the
-# credential-lapse legs below have to ride a cell that could genuinely publish.
-META = exported_cell_meta(family=FAMILY, gen_worker="0.76.6",
+# pgw#1046: a real exported-compiled graph envelope. The publish path recomputes the key
+# from the recorded blocks and refuses a compiled graph that cannot state one, so the
+# credential-lapse legs below have to ride a compiled graph that could genuinely publish.
+META = exported_compiled_graph_meta(family=FAMILY, gen_worker="0.76.6",
                           weight_lane="w8a8", lora_bucket=64)
-CELL_KEY = META["cell_key"]
+COMPILED_GRAPH_KEY = META["compiled_graph_key"]
 
 
 def _jwt(*, lifetime_s: float) -> str:
@@ -127,7 +127,7 @@ def hub():
 def artifact(tmp_path: Path) -> Path:
     # pgw#1181: packed by the exported packer. `compile_cache.pack` wrote the
     # `torch-inductor-cache` envelope, whose producer died in pgw#1178 and
-    # whose format is deleted; what a pod publishes is an exported cell, and
+    # whose format is deleted; what a pod publishes is an exported compiled graph, and
     # what this file is about is the CREDENTIAL on the publish leg, not the
     # bytes underneath it.
     from gen_worker import aot_serve
@@ -135,14 +135,14 @@ def artifact(tmp_path: Path) -> Path:
     root = tmp_path / "capture"
     root.mkdir(parents=True, exist_ok=True)
     (root / aot_serve.PACKAGE_NAME).write_bytes(b"\x11" * 4096)
-    out = tmp_path / "mintdir" / "cell.tar.gz"
+    out = tmp_path / "mintdir" / "compiled_graph.tar.gz"
     out.parent.mkdir()
     aot_serve.pack(root, out, dict(META))
     return out
 
 
-def _publisher(hub, token: str) -> fc.CellPublisher:
-    return fc.CellPublisher(base_url=hub.base, worker_jwt=lambda: token,
+def _publisher(hub, token: str) -> fc.CompiledGraphPublisher:
+    return fc.CompiledGraphPublisher(base_url=hub.base, worker_jwt=lambda: token,
                             image_digest="sha256:" + "1" * 64)
 
 
@@ -161,7 +161,7 @@ def test_intent_401_carries_the_hubs_status_and_code(hub, artifact):
     assert exc.code == "unauthorized"
     assert fc._publish_failure_phase(exc) == "unauthorized"
     # The refusal was really spoken over the wire, by the credential we hold.
-    assert hub.httpd.seen == [("/v1/worker/cells/publish-intent", live)]
+    assert hub.httpd.seen == [("/v1/worker/compiled_graphs/publish-intent", live)]
 
 
 def test_an_expired_credential_is_named_as_such_not_as_a_generic_401(
@@ -231,7 +231,7 @@ def test_the_background_publish_reports_the_grouped_phase(hub, artifact,
 
     thread = fc._publish_async(
         _publisher(hub, _jwt(lifetime_s=-LAPSE_S)),
-        FAMILY, artifact, dict(META), cell_key_digest=CELL_KEY)
+        FAMILY, artifact, dict(META), compiled_graph_key_digest=COMPILED_GRAPH_KEY)
     thread.join()  # the publish thread itself is the bound — no clock
 
     assert ("self_mint_publish_failed", "worker_credential_expired") in seen

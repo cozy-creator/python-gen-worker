@@ -143,7 +143,7 @@ def _fresh_learned_aot_keys():
 
 @pytest.fixture(autouse=True)
 def _fresh_delivered_seed_flag():
-    """The gw#608 delivered-cell seed latch is process-lifetime in
+    """The gw#608 delivered-compiled graph seed latch is process-lifetime in
     production; tests seeding artifacts must not leak it into later
     self-mint tests."""
     from gen_worker import compile_cache as _cc
@@ -154,16 +154,16 @@ def _fresh_delivered_seed_flag():
 
 
 @pytest.fixture(autouse=True)
-def _fresh_cell_ledgers():
+def _fresh_compiled_graph_ledgers():
     """pgw#672 process ledgers (quarantined identities, in-process finalized
     mints) are process-lifetime in production; clear them between tests so a
     proof failure in one test cannot poison another's arm/selection."""
     from gen_worker import compile_cache as _cc
-    from gen_worker import fleet_cells as _fc
+    from gen_worker import fleet_compiled_graphs as _fc
 
     def _clear() -> None:
-        with _cc._PROVEN_CELLS_LOCK:
-            getattr(_cc, "_QUARANTINED_CELLS", set()).clear()
+        with _cc._PROVEN_COMPILED_GRAPHS_LOCK:
+            getattr(_cc, "_QUARANTINED_COMPILED_GRAPHS", set()).clear()
         with _fc._PENDING_LOCK:
             getattr(_fc, "_FINALIZED", {}).clear()
 
@@ -262,7 +262,7 @@ def _fresh_receipt_gate():
     flux cluster: `provision.enable_compiled` drops the refused artifact and
     falls through to the inductor lane, so a dispatch assertion sees
     ``{'cc': None}`` instead of the delivered artifact, and the executor-adopt
-    hit-counter tests lose their delivered cell. Those tests passed in
+    hit-counter tests lose their delivered compiled graph. Those tests passed in
     isolation and failed only after an earlier file armed the gate.
     """
     from gen_worker import receipts as _receipts
@@ -323,13 +323,13 @@ def _postmortem_paths_off_the_host(_postmortem_root):
 
 
 @pytest.fixture(autouse=True)
-def _isolated_local_cell_store(tmp_path_factory):
-    """pgw#1096: the local cell store defaults to ``~/.cache/cozy/compile-cells``.
+def _isolated_local_compiled_graph_store(tmp_path_factory):
+    """pgw#1096: the local compiled graph store defaults to ``~/.cache/cozy/compile-compiled graphs``.
 
     A suite that exercises the AOT self-mint now legitimately WRITES there —
-    `local_keep_reason` keeps a cell whenever no publisher was wired, which is
+    `local_keep_reason` keeps a compiled graph whenever no publisher was wired, which is
     every unit fixture in the tree. Redirect the root per test, so the suite
-    can never deposit fake cells in the developer's real store (or read one
+    can never deposit fake compiled graphs in the developer's real store (or read one
     left by a previous run and call it a hit). Also isolates
     ``aot_resume.bank_root``, which is sited under the same root.
 
@@ -347,13 +347,13 @@ def _isolated_local_cell_store(tmp_path_factory):
     Save and restore the variable by hand so this fixture adds no ordering
     edge to anything.
     """
-    prior = os.environ.get("GEN_WORKER_LOCAL_CELLS_DIR")
-    os.environ["GEN_WORKER_LOCAL_CELLS_DIR"] = str(
-        tmp_path_factory.mktemp("local-cell-store"))
+    prior = os.environ.get("GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR")
+    os.environ["GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR"] = str(
+        tmp_path_factory.mktemp("local-compiled_graph-store"))
     try:
         yield
     finally:
         if prior is None:
-            os.environ.pop("GEN_WORKER_LOCAL_CELLS_DIR", None)
+            os.environ.pop("GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR", None)
         else:
-            os.environ["GEN_WORKER_LOCAL_CELLS_DIR"] = prior
+            os.environ["GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR"] = prior

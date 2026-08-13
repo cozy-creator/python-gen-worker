@@ -32,7 +32,7 @@ from .models.tensor_layout_contract import LAYOUT_KEY_ANY_COMPONENT
 from .warmup import validate_class_warmup
 import dataclasses
 from .api.compile_axis import warm_guidance_values
-from .cell_key import facts_digest
+from .compiled_graph_key import facts_digest
 from .api.export_contract import (
     declares_export_contract, register_export_declaration, registered_entry,
 )
@@ -53,13 +53,13 @@ def _is_struct(t: Any) -> bool:
 
 
 @dataclass(frozen=True)
-class CompileCell:
-    """The complete compile-cell configuration one endpoint function
+class CompileCompiledGraph:
+    """The complete compile-compiled graph configuration one endpoint function
     declares (SDK v2): the ``Compile`` block enriched with the spec-level
     facts that shape the traced graph family — the decorator-level
     ``lora_bucket`` and the warm guidance representatives derived from the
     payload's ``CompileAxis`` classes. This is the object the compile
-    machinery (compile_cache / fleet_cells / local_cells / aot_serve)
+    machinery (compile_cache / fleet_compiled_graphs / local_compiled_graphs / aot_serve)
     consumes; raw ``Compile`` never travels past the registry."""
 
     shapes: Tuple[Tuple[int, ...], ...]
@@ -72,21 +72,21 @@ class CompileCell:
     dynamic: Tuple[DynamicDim, ...]
     lora_bucket: int
     # CLASS-scoped unions (pgw#654 / pgw#647 gap #1): every sibling
-    # function on one class shares one cell family, so the contract facts
+    # function on one class shares one compiled graph family, so the contract facts
     # digest the UNION across the class's functions — never one function's
-    # own view (per-function digests split the cell: turbo fails closed on
+    # own view (per-function digests split the compiled graph: turbo fails closed on
     # w8a8 lanes). Union is per CLASS only; sibling @endpoint classes keep
-    # their own contracts (two checkpoints = two instances = two cells).
+    # their own contracts (two checkpoints = two instances = two compiled graphs).
     guidance_scales: Tuple[float, ...]
     text_lens: Tuple[int, ...] = ()
     # pgw#1150: the family's DECLARED numerics band, carried through to the
     # gate. `numerics_ladder.declared_thresholds` has one caller
-    # (`numerics_probe.probe_cell`) and its `cfg` is always this object, so
+    # (`numerics_probe.probe_compiled_graph`) and its `cfg` is always this object, so
     # before these two fields existed `Compile(numerics_floor=…)` was read by
     # nobody: every gate on every path scored against the SDK default and
     # every `threshold_source` said `sdk-default`, sdxl's measured 0.995/0.999
     # (pgw#812/#814) included. Deliberately NOT in `contract_facts()` below —
-    # a numerics band is not a graph axis and must never move a cell key.
+    # a numerics band is not a graph axis and must never move a compiled graph key.
     numerics_floor: Optional[float] = None
     numerics_warn: Optional[float] = None
 
@@ -94,11 +94,11 @@ class CompileCell:
     def from_declaration(
         cls, cfg: Any, *, lora_bucket: int = 0, text_len: Optional[int] = None,
         guidance_scales: Tuple[float, ...] = (), text_lens: Tuple[int, ...] = (),
-    ) -> "CompileCell":
-        """THE ``Compile`` -> ``CompileCell`` map, in one place.
+    ) -> "CompileCompiledGraph":
+        """THE ``Compile`` -> ``CompileCompiledGraph`` map, in one place.
 
         Two call sites build this object — the registry's per-spec
-        :meth:`EndpointSpec.compile_cell` and the local CLI's §4.28 desktop arm
+        :meth:`EndpointSpec.compile_compiled_graph` and the local CLI's §4.28 desktop arm
         — and they differ only in the four enrichments above, which are
         spec-scoped facts the raw declaration cannot know. Everything else is a
         straight carry, so a field ADDED to ``Compile`` that one site copied and
@@ -128,7 +128,7 @@ class CompileCell:
 
     def contract_facts(self) -> Dict[str, Any]:
         """Canonical DECLARED compile-contract facts (pgw#647). Since
-        pgw#1059 this is NOT a key-axis input — the exported-cell key reads
+        pgw#1059 this is NOT a key-axis input — the exported-compiled graph key reads
         recorded artifact blocks only. Its one serialized consumer is the
         SDK v2 manifest's opaque ``shape_contract_digest`` (the wire field
         name is hub-consumed and deliberately unchanged; the digest value is
@@ -255,15 +255,15 @@ class EndpointSpec:
     def needs_gpu(self) -> bool:
         return bool(self.resources.gpu)
 
-    def compile_cell(self) -> Optional[CompileCell]:
-        """The enriched compile-cell configuration (SDK v2), or None for
+    def compile_compiled_graph(self) -> Optional[CompileCompiledGraph]:
+        """The enriched compile-compiled graph configuration (SDK v2), or None for
         uncompiled functions. This — never the raw ``Compile`` — is what the
         executor hands the compile machinery."""
         cfg = self.compile
         if cfg is None:
             return None
 
-        return CompileCell.from_declaration(
+        return CompileCompiledGraph.from_declaration(
             cfg,
             lora_bucket=int(self.lora_bucket or 0),
             text_len=self.text_len,
@@ -751,13 +751,13 @@ def extract_specs(obj: Any, *, walked_module: str = "") -> List[EndpointSpec]:
 
 def _apply_class_unions(specs: List[EndpointSpec]) -> List[EndpointSpec]:
     """pgw#654 / pgw#647 gap #1: sibling functions of ONE class share one
-    cell family, so the class's compile-contract warm facts are the UNION
+    compiled graph family, so the class's compile-contract warm facts are the UNION
     across its functions — the guidance warm set (a distilled sibling with
-    no guidance field contributes nothing yet consumes the same cell) and
+    no guidance field contributes nothing yet consumes the same compiled graph) and
     the per-lane text pins (gap #6: qwen t2i 512 / edit 1024 digest as one
     dual-pin contract). Scope is exactly one class — sibling @endpoint
     CLASSES keep divergent contracts by design (ernie's base/turbo are two
-    checkpoints, two instances, two cells). Compile-less classes pass
+    checkpoints, two instances, two compiled graphs). Compile-less classes pass
     through untouched."""
 
     compiled = [s for s in specs if s.compile is not None]
@@ -790,7 +790,7 @@ def register_declared_exports(specs: Sequence[EndpointSpec]) -> Tuple[str, ...]:
     concept (``aot_declaration.load_declaration``). A serving pod loads the
     endpoint and nothing else, so `aot_mint.mint` refused every family on
     "no registered export declaration" before it could export a single graph
-    — one half of why no serving pod has ever produced an AOT cell. The
+    — one half of why no serving pod has ever produced an AOT compiled graph. The
     declaration now travels with the endpoint that owns it, which is the
     end state `sdxl/aot/declaration.py`'s own docstring names ("the
     endpoint's SDK-bump lane folds these fields into the ``@endpoint

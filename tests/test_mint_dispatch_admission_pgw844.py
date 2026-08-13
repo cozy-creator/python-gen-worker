@@ -1,8 +1,8 @@
-"""pgw#844 part B — the MINT refuses a cell whose entries cannot be told
+"""pgw#844 part B — the MINT refuses a compiled graph whose entries cannot be told
 apart at the DISPATCH boundary, and it asks that question the way dispatch
 asks it: by ADMISSION, not by equality.
 
-Rewritten in WHOLE-GRAPH terms for pgw#846 (regional cells are retired).  The
+Rewritten in WHOLE-GRAPH terms for pgw#846 (regional compiled graphs are retired).  The
 failure class survives the retirement: ``EntryDispatch.select`` refuses
 ``entry_ambiguous`` — per REQUEST, served eager, no refusal at mint — whenever
 two entries of one dispatch group admit the same call.  Equality of contracts
@@ -15,7 +15,7 @@ Real ``torch.export`` programs, real ``aot_package.input_contract``, real
 ingress assertion; CPU, no AOTInductor compile, no GPU.  The 36-entry case
 mirrors the real sdxl whole-graph declaration (18 declared class rows x 2
 pgw#790 adapter arms) and MUST be admitted — that is the pgw#846 revert
-precondition (part B's gate must not refuse the whole-graph cell).
+precondition (part B's gate must not refuse the whole-graph compiled graph).
 """
 
 from __future__ import annotations
@@ -113,7 +113,7 @@ def _row_name(b: int, h: int, w: int, *, arm: bool, cfg: bool) -> str:
 def test_the_whole_graph_sdxl_shape_is_ADMITTED():
     """The pgw#846 revert precondition: 18 class rows (9 aspect buckets x 2
     CFG arms) x 2 adapter arms = 36 entries, every one a distinct
-    (B, H_lat, W_lat) ingress coordinate — the gate must admit the cell the
+    (B, H_lat, W_lat) ingress coordinate — the gate must admit the compiled graph the
     fleet is going back to."""
     minted = []
     for cfg, b in ((False, 1), (True, 2)):
@@ -130,7 +130,7 @@ def test_the_whole_graph_sdxl_shape_is_ADMITTED():
 def test_two_entries_of_one_dispatch_group_admitting_one_call_are_MERGED():
     """Two identical ingress coordinates in ONE (target, adapter arm) group.
 
-    Before pgw#917 this was a whole-cell refusal.  It is not a defect: the two
+    Before pgw#917 this was a whole-compiled graph refusal.  It is not a defect: the two
     rows produce one ingress contract over one target with byte-identical
     code, so they ARE one dispatchable class — the mint packages one entry and
     keeps the other declared name as an alias.  Refusal is reserved for a
@@ -183,7 +183,7 @@ def test_adapter_arms_partition_the_dispatch():
 
 
 def test_distinct_coordinates_stay_admitted():
-    """The gate must not refuse a healthy cell: distinct (H_lat, W_lat)
+    """The gate must not refuse a healthy compiled graph: distinct (H_lat, W_lat)
     coordinates — including a transposed aspect pair, whose token PRODUCTS
     collide but whose whole-graph ingress shapes do not — discriminate by
     ingress."""

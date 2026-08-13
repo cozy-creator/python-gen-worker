@@ -4,26 +4,26 @@ cannot make.
 `fx_cache_failure_report` classified a failed store-served warmup proof into
 three named classes, and the classification is what the caller reads:
 
-* ``fresh_keys>0``  => the boot computed DIFFERENT keys from the cell (B1),
+* ``fresh_keys>0``  => the boot computed DIFFERENT keys from the compiled graph (B1),
 * ``fresh_keys=0`` with same-key re-saves => the keys MATCHED and the miss is
   in torch's candidate-load path (B2),
-* ``cell_keys=0``  => the artifact was unreadable.
+* ``compiled_graph_keys=0``  => the artifact was unreadable.
 
-All three are differences measured against a CELL side that the function read
+All three are differences measured against a COMPILED GRAPH side that the function read
 out of a `torch-inductor-cache` tarball's `inductor/fxgraph/` tree. pgw#1178
 deleted that format's last writer and pgw#1181 deleted the format, so the tar
-walk can only ever yield nothing — and with an empty cell side the arithmetic
+walk can only ever yield nothing — and with an empty compiled graph side the arithmetic
 does not degrade gracefully, it INVERTS:
 
 * `fresh = live_keys - seeded_names` becomes EVERY live key, so `fresh_keys>0`
   fires on every boot that has any FX entry at all. The report names B1 —
   "the boot computed different keys" — always, whatever happened.
-* `samekey_resaves` is computed only for keys the cell seeded, so it is
+* `samekey_resaves` is computed only for keys the compiled graph seeded, so it is
   structurally 0 and B2 is unreportable.
-* `cell_keys=0`, the "unreadable artifact" class, is now the normal case.
+* `compiled_graph_keys=0`, the "unreadable artifact" class, is now the normal case.
 
 A diagnostic that always names one class is worse than no diagnostic: it is
-read as evidence. §4.35's amendment decides the disposition — the cell half
+read as evidence. §4.35's amendment decides the disposition — the compiled graph half
 cannot be switched ON (there is no format to read) and finishing it would mean
 resurrecting the format, so it is DELETED, and what remains is the live-cache
 census the dynamo lane can actually observe.
@@ -98,11 +98,11 @@ def test_the_report_never_raises_whatever_the_cache_dir_is(
     assert cc.fx_cache_failure_report()  # non-empty, no raise
 
 
-def test_the_cell_side_vocabulary_is_GONE_not_merely_empty() -> None:
+def test_the_compiled_graph_side_vocabulary_is_GONE_not_merely_empty() -> None:
     """The point of pgw#1200.
 
-    Every one of these tokens is a difference measured against a cell side that
-    no format can supply. Reporting them from an empty cell side does not read
+    Every one of these tokens is a difference measured against a compiled graph side that
+    no format can supply. Reporting them from an empty compiled graph side does not read
     as "no evidence", it reads as a verdict — `fresh_keys>0` names B1 on every
     boot with any FX entry, and `samekey_resaves=0` names "not B2" when B2 is
     simply unmeasurable. Absent evidence must not be dressed as a finding
@@ -111,11 +111,11 @@ def test_the_cell_side_vocabulary_is_GONE_not_merely_empty() -> None:
     import inspect
 
     report = cc.fx_cache_failure_report()
-    for token in ("cell_keys", "fresh_keys", "samekey_resave", "cell_guards",
-                  "cell_extern", "cell_unpickle", "cell_read",
-                  "live_cell_entry_unpickle", "divergence"):
+    for token in ("compiled_graph_keys", "fresh_keys", "samekey_resave", "compiled_graph_guards",
+                  "compiled_graph_extern", "compiled_graph_unpickle", "compiled_graph_read",
+                  "live_compiled_graph_entry_unpickle", "divergence"):
         assert token not in report, (
-            f"{token!r} is a cell-side fact and the cell side is deleted: "
+            f"{token!r} is a compiled_graph-side fact and the compiled_graph side is deleted: "
             f"{report}")
     # And the argument that fed them is gone, so no caller can reintroduce the
     # vocabulary by passing one.
@@ -123,8 +123,8 @@ def test_the_cell_side_vocabulary_is_GONE_not_merely_empty() -> None:
 
 
 def test_the_forensics_helpers_go_with_their_only_caller() -> None:
-    """`fx_key_forensics` compared the cell's recorded FxGraphHashDetails lines
-    with the boot's. With no cell side there is nothing to compare, and
+    """`fx_key_forensics` compared the compiled graph's recorded FxGraphHashDetails lines
+    with the boot's. With no compiled graph side there is nothing to compare, and
     `fx_cache_failure_report` was its only production caller — pgw#1178 kept
     all three alive by anchoring them here."""
     for gone in ("fx_key_forensics", "_fx_entry_lines", "_fx_components"):

@@ -285,7 +285,7 @@ def constant_names(package: Path, entry: str = "") -> Tuple[str, ...]:
 # ---------------------------------------------------------------------------
 #
 # TWO INDEPENDENT proofs, because this gate is all that stands between us and
-# silently duplicating multi-GiB weights into every cell in the fleet:
+# silently duplicating multi-GiB weights into every compiled graph in the fleet:
 #
 #   1. the rendered ``load_constants_from_blob`` literal — authoritative, the
 #      flag itself round-tripped through the artifact;
@@ -416,10 +416,10 @@ def literal_values_digest(program: Any) -> str:
     """Digest of the VALUES of every ``source=literal`` constant — ``""`` when
     there are none (pgw#857).
 
-    **Why values, and only for literals.** A cell's identity folds constant
+    **Why values, and only for literals.** A compiled graph's identity folds constant
     NAMES but deliberately not their bytes, because a weight is rebound from
     the resident ``state_dict`` at load — so two fine-tunes of one family
-    SHOULD share a cell, and keying weight values would break exactly that.
+    SHOULD share a compiled graph, and keying weight values would break exactly that.
     A LITERAL is different in kind: it ships inside the artifact and is never
     rebound, so **for a literal the value IS the artifact**. Two checkpoints
     that need different literals must not share a key, and before this they
@@ -452,7 +452,7 @@ def literal_values_digest(program: Any) -> str:
             raise ValueError(
                 f"literal constant {name!r} is declared by the exported "
                 f"program but carries no value — its bytes ship inside the "
-                f"cell, so an unreadable one cannot be keyed and must not be "
+                f"compiled_graph, so an unreadable one cannot be keyed and must not be "
                 f"published (pgw#857)")
         digest.update(name.encode("utf-8"))
         digest.update(b"\0")
@@ -519,7 +519,7 @@ def unbindable_program_constants(
     return [
         f"{len(missing)} constant(s) the exported program lifts from the "
         f"module's state_dict are absent from the resident module's bind "
-        f"table, e.g. {missing[:6]!r} — the compiled cell could never bind "
+        f"table, e.g. {missing[:6]!r} — the compiled compiled_graph could never bind "
         f"them, so the compile would be paid for an unpublishable entry"
     ]
 
@@ -600,16 +600,16 @@ def folded_weights(
     """Weights the program lifted that the artifact will NOT let anyone bind.
 
     THE folding fence (pgw#1097, pgw#1056's guard, enforcing pgw#857's
-    tensor-binding contract). One cell serves every fine-tune of a family
+    tensor-binding contract). One compiled graph serves every fine-tune of a family
     because weights rebind BY NAME at load — which is sound only while the
     compiled code holds no weight VALUE. Where a lifted weight is missing
     from the artifact's own constant table, its value is not missing: it was
     rendered into the kernel source, and it is the MINTING checkpoint's.
-    Every other fine-tune then adopts a cell carrying somebody else's tensor.
+    Every other fine-tune then adopts a compiled graph carrying somebody else's tensor.
 
     That failure is caught downstream by the adopt-side parity floor, so
-    nothing corrupt serves — but the cell is refused per checkpoint, which
-    turns fleet-wide cell sharing into a per-checkpoint compile without
+    nothing corrupt serves — but the compiled graph is refused per checkpoint, which
+    turns fleet-wide compiled graph sharing into a per-checkpoint compile without
     anything saying why. So it is refused HERE, once, on the mint pod.
 
     Mechanism, read off torch 2.13.0 and MEASURED (pgw#1097): with
@@ -634,7 +634,7 @@ def folded_weights(
     return [
         f"{len(folded)} weight(s) the exported program lifted are ABSENT from "
         f"the compiled artifact's constant table: {folded[:6]!r} — their "
-        f"values were compiled into the kernel, so this cell carries THIS "
+        f"values were compiled into the kernel, so this compiled_graph carries THIS "
         f"checkpoint's copy and no other fine-tune could rebind them "
         f"(pgw#1097 folding fence; pgw#857 tensor-binding contract)"
     ]
@@ -646,7 +646,7 @@ def unbindable_constants(
     """Declared state_dict-sourced constants no resident weight could bind.
 
     The mint-side mirror of ``aot_serve``'s bound gate. Catching it here means a
-    cell that could only ever fail to arm is never published — the fleet learns
+    compiled graph that could only ever fail to arm is never published — the fleet learns
     on the mint pod instead of by every serving pod refusing it one at a time.
     """
     available = set(state_dict_keys)
@@ -660,7 +660,7 @@ def unbindable_constants(
         return []
     return [
         f"{len(missing)} declared state_dict constant(s) are absent from the "
-        f"resident module's state_dict, e.g. {missing[:6]!r} — the cell could "
+        f"resident module's state_dict, e.g. {missing[:6]!r} — the compiled_graph could "
         f"never bind its constants and must not be published"
     ]
 
@@ -676,7 +676,7 @@ def unbindable_constants(
 # package-side reading of the ingress contract that cannot drift from the
 # artifact. `input_guard_drift` compares them against the declared manifest
 # rows, making the manifest a VERIFIED ECHO of the artifact rather than a
-# carried-alongside label (pgw#1058: attempt 30 published a cell whose every
+# carried-alongside label (pgw#1058: attempt 30 published a compiled graph whose every
 # entry was specialized on a dtype real traffic never presents; the label was
 # honest about the program, so only a reading of the artifact's own guards —
 # or a real call — can rule on what the program admits).
@@ -766,7 +766,7 @@ def input_guard_drift(
     guards from the artifact's own generated wrapper — two independent
     readings that must agree, the same doctrine as the constant manifest.
     Every reason names the input, the axis and both values. Callers turn a
-    non-empty list into a refusal — at package time so a divergent cell is
+    non-empty list into a refusal — at package time so a divergent compiled graph is
     never published, and at arm time so a corrupted one is never served.
     """
     rows = sorted(inputs_rows, key=lambda r: int(r.get("position", 0)))
@@ -821,7 +821,7 @@ def admission_drift(
     """:func:`input_guard_drift` against one named model of a ``.pt2``.
 
     ONE function, two call sites, per the pgw#1058 ruling: the mint's
-    package gate (a divergent cell is never published) and the arm's
+    package gate (a divergent compiled graph is never published) and the arm's
     per-entry verification (a corrupted one is never served) must be the
     same derivation, or the gate models the arm and drifts from it.
     """
@@ -898,9 +898,9 @@ def input_contract(
             # second half is the half that bites: a plain tensor sitting after
             # a container has a flat position its ARGUMENT does not have, and
             # a serve-side bind reading `position` would fetch the wrong one
-            # (measured — it is how pgw#994's `t` went missing). Every cell
+            # (measured — it is how pgw#994's `t` went missing). Every compiled graph
             # published before pgw#994 has no containers at all, so every row
-            # is derivable and no live artifact's metadata (or cell key) moves
+            # is derivable and no live artifact's metadata (or compiled graph key) moves
             # — see `aot_serve.range_digest`.
             row["param"] = leaf.param
             row["param_position"] = leaf.param_position

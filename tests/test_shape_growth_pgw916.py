@@ -6,7 +6,7 @@ pipeline carries a **dynamo** router, and an AOT-armed pipeline never has one
 so ``compile_cache.enable`` — the only thing that installs a router — is never
 reached).  Every one of the executor's three growth call sites is therefore a
 silent no-op on an AOT arm, the ``_shape_warm_republisher`` closure is built
-and discarded, and ``fleet_cells.republish_after_shape_warm`` has no reachable
+and discarded, and ``fleet_compiled_graphs.republish_after_shape_warm`` has no reachable
 caller.  Measured cost on the standing stack: **16 of 18 declared graph
 classes serve eager**, permanently, on every pod.
 
@@ -97,7 +97,7 @@ def test_an_aot_shape_gap_is_a_countable_typed_fact(events):
         arm=shape_growth.ARM_AOT, family="sdxl", target="unet",
         declared_class="unet/sample=bfloat16[2,4,112,144]",
         reason=shape_growth.REASON_UNCOVERED,
-        cell_key="ck1-0d945144")
+        compiled_graph_key="ck1-0d945144")
     assert shape_growth.report(gap) is True
     kinds = [(k, p) for k, p, _d in events]
     assert (activity_mod.KIND_SHAPE_GAP, "no_entry_admits") in kinds

@@ -232,9 +232,9 @@ def test_compile_with_dynamic_sequence_passes_and_batch_axis_supported():
             return _Out()
 
     (spec,) = extract_specs(Gen)
-    cell = spec.compile_cell()
-    assert cell is not None
-    facts = cell.contract_facts()
+    compiled_graph = spec.compile_compiled_graph()
+    assert compiled_graph is not None
+    facts = compiled_graph.contract_facts()
     assert facts["dynamic"] == [
         {"dim": "sequence", "min": 64, "max": 512},
         {"dim": "batch", "min": 2, "max": 16},
@@ -248,7 +248,7 @@ def test_dynamic_dim_min_must_respect_01_specialization():
 
 
 def test_contract_digest_changes_with_the_contract():
-    def cell(**kw):
+    def compiled_graph(**kw):
         @endpoint(compile=Compile(shapes=((1024, 1024),), family="v2fam", **kw))
         class Gen:
             def setup(self) -> None:
@@ -258,12 +258,12 @@ def test_contract_digest_changes_with_the_contract():
                 return _Out()
 
         (spec,) = extract_specs(Gen)
-        return spec.compile_cell().contract_digest()
+        return spec.compile_compiled_graph().contract_digest()
 
-    a = cell(text_len=77)
-    b = cell(text_len=512)
-    c = cell(text_len=0)
-    assert len({a, b, c}) == 3  # pre-fix and post-fix cells key differently
+    a = compiled_graph(text_len=77)
+    b = compiled_graph(text_len=512)
+    c = compiled_graph(text_len=0)
+    assert len({a, b, c}) == 3  # pre-fix and post-fix compiled graphs key differently
 
 
 # ---------------------------------------------------------------------------

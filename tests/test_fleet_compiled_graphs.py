@@ -2,14 +2,14 @@
 
 The mint itself needs a GPU + toolchain and is proven live (the gw#587 live
 proof, and the micro rig since pgw#978); these tests pin the POLICY around it:
-delivered cell first, a DELEGATED AOT mint on a miss (the live pipe untouched,
+delivered compiled graph first, a DELEGATED AOT mint on a miss (the live pipe untouched,
 serving eager, the obligation on the pending), publish best-effort and never
-load-bearing for serving, the cell_selection_bug receipt invariant untouched,
+load-bearing for serving, the compiled_graph_selection_bug receipt invariant untouched,
 and the typed quantized refusal only at genuine mint impossibilities.
 
 pgw#1010 re-aimed this module. What it used to cover — arm cold into a capture
-dir, pack the proven capture, publish the packed bytes — was the DYNAMO cell
-path, and a dynamo cell has no consumer (`aot_cells` adopts `aot-inductor`
+dir, pack the proven capture, publish the packed bytes — was the DYNAMO compiled graph
+path, and a dynamo compiled graph has no consumer (`aot_compiled_graphs` adopts `aot-inductor`
 only, by name), so it is deleted rather than kept. A miss on a family with no
 export declaration now serves JIT INTAKE and produces nothing; that half is
 covered by `test_dynamo_no_publish_pgw1010.py`.
@@ -30,11 +30,11 @@ from pathlib import Path
 import pytest
 
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells as fc
+from gen_worker import fleet_compiled_graphs as fc
 from gen_worker import guard_closure
 from gen_worker.models import provision
-from gen_worker.cell_adopt import AdoptOutcome
-from harness.cell_meta import exported_cell_meta
+from gen_worker.compiled_graph_adopt import AdoptOutcome
+from harness.compiled_graph_meta import exported_compiled_graph_meta
 
 
 class _Cfg:
@@ -78,12 +78,12 @@ def _mintable(monkeypatch, *, key=FAKE_KEY):
     """Route a MISS into the delegated AOT mint with no CUDA/toolchain."""
     monkeypatch.setattr(
         provision, "enable_compiled",
-        lambda *a, **k: AdoptOutcome.miss("no_cell"))
+        lambda *a, **k: AdoptOutcome.miss("no_compiled_graph"))
     monkeypatch.setattr(fc, "_cuda_ready", lambda: True)
     monkeypatch.setattr(cc, "toolchain_present", lambda: True)
     # pgw#1181: the pgw#681 gate that used to be simmed here is gone.
     # `guard_closure.closure_manifest` ran at the MINT, classified every
-    # compiled graph and wrote the result into the cell's metadata; it is
+    # compiled graph and wrote the result into the compiled graph's metadata; it is
     # deleted with the `torch-inductor-cache` format that carried it, so a rig
     # whose compiles never touch dynamo no longer has a gate to satisfy.
 
@@ -107,7 +107,7 @@ def _mintable(monkeypatch, *, key=FAKE_KEY):
 
 
 def _publisher(calls):
-    class _Pub(fc.CellPublisher):
+    class _Pub(fc.CompiledGraphPublisher):
         def publish(self, family, artifact, meta, mint_duration_ms=0):
             calls.append((family, Path(artifact), dict(meta), int(mint_duration_ms)))
             return "cp-1"
@@ -120,17 +120,17 @@ def _publisher(calls):
 # ---------------------------------------------------------------------------
 
 
-_ADOPT_META = {"cell_key": "ek1-" + "d" * 56, "family": "fam",
+_ADOPT_META = {"compiled_graph_key": "ek1-" + "d" * 56, "family": "fam",
                "kind": "aot-inductor"}
 
 
-def _real_cell(path: Path, meta: dict) -> Path:
+def _real_compiled_graph(path: Path, meta: dict) -> Path:
     """A tarball with a READABLE `metadata.json` at the root.
 
     pgw#1098: these helpers used to write raw bytes and patch the metadata
-    read. `adopt_delegated_mint` now refuses `cell_envelope_unreadable` before
+    read. `adopt_delegated_mint` now refuses `compiled_graph_envelope_unreadable` before
     the arm — unreadable is no longer the same thing as absent — so a test
-    about ADOPTION has to hand it a cell it can actually read.
+    about ADOPTION has to hand it a compiled graph it can actually read.
     """
     import io as _io
     import json as _json
@@ -147,9 +147,9 @@ def _real_cell(path: Path, meta: dict) -> Path:
 
 def _adopted(monkeypatch, pending):
     """Drive the pending to ADOPTED the way the delegated driver does: the
-    child wrote a cell, `arm_aot` accepted it, `adopt_delegated_mint` records
+    child wrote a compiled graph, `arm_aot` accepted it, `adopt_delegated_mint` records
     the identity. The arm itself is `provision`'s to prove (pgw#805)."""
-    child = _real_cell(pending.mint_root / "child-cell.tar.gz", _ADOPT_META)
+    child = _real_compiled_graph(pending.mint_root / "child-compiled_graph.tar.gz", _ADOPT_META)
     monkeypatch.setattr(
         provision, "arm_aot", lambda *a, **k: AdoptOutcome.hit())
     # pgw#1098: the pgw#1042 divergence gate now actually RUNS on these
@@ -162,7 +162,7 @@ def _adopted(monkeypatch, pending):
     return fc.adopt_delegated_mint(_Pipe(), pending, [child])
 
 
-def test_delivered_cell_hit_never_mints_or_publishes(monkeypatch, tmp_path):
+def test_delivered_compiled_graph_hit_never_mints_or_publishes(monkeypatch, tmp_path):
     calls: list = []
     monkeypatch.setattr(
         provision, "enable_compiled", lambda *a, **k: AdoptOutcome.hit())
@@ -175,15 +175,15 @@ def test_delivered_cell_hit_never_mints_or_publishes(monkeypatch, tmp_path):
     assert calls == []
 
 
-def test_cell_selection_bug_reports_and_self_mints(monkeypatch, tmp_path):
-    """th#1031: a self-requested, identity-verified cell that refuses to
+def test_compiled_graph_selection_bug_reports_and_self_mints(monkeypatch, tmp_path):
+    """th#1031: a self-requested, identity-verified compiled graph that refuses to
     arm is still a BUG — reported to the caller via ``ArmOutcome.
     selection_bug`` (unchanged wire visibility) — but no longer aborts
-    arming. cell_key has no graph-shape axis, so two structurally different
+    arming. compiled_graph_key has no graph-shape axis, so two structurally different
     graphs can legitimately collide on one key; a worker stuck retrying the
-    identical unusable cell forever is worse than a loud report + recovery.
+    identical unusable compiled graph forever is worse than a loud report + recovery.
     This call falls through to self-mint exactly like an ordinary miss."""
-    bug = cc.CellSelectionBugError("self-requested cell refused to arm")
+    bug = cc.CompiledGraphSelectionBugError("self-requested compiled_graph refused to arm")
 
     def _raise(*a, **k):
         raise bug
@@ -198,7 +198,7 @@ def test_cell_selection_bug_reports_and_self_mints(monkeypatch, tmp_path):
     assert outcome.selection_bug is bug
 
 
-def test_cell_selection_bug_still_fail_closed_when_mint_impossible(
+def test_compiled_graph_selection_bug_still_fail_closed_when_mint_impossible(
     monkeypatch, tmp_path,
 ):
     """A caught selection bug does not weaken the quantized-lane refusal at
@@ -206,7 +206,7 @@ def test_cell_selection_bug_still_fail_closed_when_mint_impossible(
     raises, chained from the selection bug so the report is never dropped."""
 
     def _raise(*a, **k):
-        raise cc.CellSelectionBugError("self-requested cell refused to arm")
+        raise cc.CompiledGraphSelectionBugError("self-requested compiled_graph refused to arm")
 
     monkeypatch.setattr(provision, "enable_compiled", _raise)
     monkeypatch.setattr(fc, "_cuda_ready", lambda: False)
@@ -219,7 +219,7 @@ def test_cell_selection_bug_still_fail_closed_when_mint_impossible(
     with pytest.raises(cc.CompiledExecutionLaneUnavailableError) as exc:
         fc.enable_compiled(
             _W8A8Pipe(), _Cfg(), tmp_path, None, publisher=_publisher([]))
-    assert isinstance(exc.value.__cause__, cc.CellSelectionBugError)
+    assert isinstance(exc.value.__cause__, cc.CompiledGraphSelectionBugError)
 
 
 def test_miss_opens_a_delegated_mint_without_packing_or_publishing(
@@ -227,7 +227,7 @@ def test_miss_opens_a_delegated_mint_without_packing_or_publishing(
 ):
     """A MISS hands the mint to a child and returns a PENDING — the live pipe
     is untouched, nothing is packed, nothing is published. Publishing before
-    the child's cell adopts reverts this test red."""
+    the child's compiled graph adopts reverts this test red."""
     calls: list = []
     _mintable(monkeypatch)
     # pgw#1178 deleted `compile_cache.mint_artifact`, the producer warm loop
@@ -244,16 +244,16 @@ def test_miss_opens_a_delegated_mint_without_packing_or_publishing(
     assert pending.arm_token == FAKE_KEY
     assert pending.ref == f"root/family-fam#{FAKE_KEY}"
     assert not pending.target.exists(), "nothing packed before the child runs"
-    assert calls == [], "nothing published before the cell adopts"
+    assert calls == [], "nothing published before the compiled_graph adopts"
 
 
 def test_adopt_publishes_exactly_the_bytes_that_armed(monkeypatch, tmp_path):
-    """The cell that ADOPTED is the cell that ships, and the advertised digest
+    """The compiled graph that ADOPTED is the compiled graph that ships, and the advertised digest
     is the digest of exactly those bytes (gw#587's direction (a), delegated)."""
     calls: list = []
     published = threading.Event()
 
-    class _Pub(fc.CellPublisher):
+    class _Pub(fc.CompiledGraphPublisher):
         def publish(self, family, artifact, meta, mint_duration_ms=0):
             calls.append((family, artifact.read_bytes(), dict(meta),
                           int(mint_duration_ms)))
@@ -271,14 +271,14 @@ def test_adopt_publishes_exactly_the_bytes_that_armed(monkeypatch, tmp_path):
     assert minted is not None
     assert calls == [], "adoption arms; only the coverage gate publishes"
     fc.publish_self_mint(pending)
-    assert minted.ref == f"root/family-fam#{minted.cell_key}"
+    assert minted.ref == f"root/family-fam#{minted.compiled_graph_key}"
     assert minted.snapshot_digest.startswith("sha256:")
     assert len(minted.snapshot_digest) == len("sha256:") + 64
     assert published.wait(5), "an adopted mint must attempt publish"
     (family, tar_bytes, meta, mint_duration_ms) = calls[0]
     assert family == "fam"
-    # th#1355: the mint cost travels with the publish, so "what did this cell
-    # cost to build" can be joined to the cell it describes.
+    # th#1355: the mint cost travels with the publish, so "what did this compiled graph
+    # cost to build" can be joined to the compiled graph it describes.
     assert mint_duration_ms >= 0
     from gen_worker.models.chunk_cas import sha256_file
 
@@ -296,7 +296,7 @@ def test_adopt_publishes_exactly_the_bytes_that_armed(monkeypatch, tmp_path):
     # lost with a FileNotFoundError whenever the publish path got there first.
     assert fc.adopt_delegated_mint(
         _Pipe(), pending,
-        [pending.mint_root / "child-cell.tar.gz"]) is minted
+        [pending.mint_root / "child-compiled_graph.tar.gz"]) is minted
     fc.publish_self_mint(pending)
     assert len(calls) == 1
 
@@ -318,7 +318,7 @@ def test_abandon_never_publishes(monkeypatch, tmp_path):
 
 def test_same_key_sibling_shares_the_pending_mint_root(monkeypatch, tmp_path):
     """Two pipes of one record computing the same key share ONE mint (the
-    union family cell); a second mint_root is never created."""
+    union family compiled graph); a second mint_root is never created."""
     _mintable(monkeypatch)
     first = fc.enable_compiled(_Pipe(), _Cfg(), tmp_path, None).self_mint
     second = fc.enable_compiled(_Pipe(), _Cfg(), tmp_path, None).self_mint
@@ -327,14 +327,14 @@ def test_same_key_sibling_shares_the_pending_mint_root(monkeypatch, tmp_path):
 
 
 def test_publish_failure_never_affects_serving(monkeypatch, tmp_path):
-    """The pipe that triggered the miss serves from its adopted cell even
+    """The pipe that triggered the miss serves from its adopted compiled graph even
     when the hub refuses the publish (untrusted tier / forged axis / quota)."""
     refused = threading.Event()
 
-    class _Pub(fc.CellPublisher):
+    class _Pub(fc.CompiledGraphPublisher):
         def publish(self, family, artifact, meta, mint_duration_ms=0):
             refused.set()
-            raise fc.CellPublishRefused("cell_publish_untrusted_tier: community_tier")
+            raise fc.CompiledGraphPublishRefused("compiled_graph_publish_untrusted_tier: community_tier")
 
     pub = _Pub(base_url="http://hub", worker_jwt=lambda: "jwt", image_digest="d")
     _mintable(monkeypatch)
@@ -346,7 +346,7 @@ def test_publish_failure_never_affects_serving(monkeypatch, tmp_path):
 
 
 def test_withheld_publish_never_ships_and_is_final(monkeypatch, tmp_path):
-    """gw#612: an incomplete family cell (a mandatory sibling not covered by
+    """gw#612: an incomplete family compiled graph (a mandatory sibling not covered by
     the mint) is never published — and once the publish is resolved
     (withheld), a later publish call is a no-op."""
     calls: list = []
@@ -371,7 +371,7 @@ def test_mint_impossible_keeps_quantized_typed_refusal(monkeypatch, tmp_path):
     typed fail-closed refusal — never a silent slow eager serve."""
     monkeypatch.setattr(
         provision, "enable_compiled",
-        lambda *a, **k: AdoptOutcome.miss("no_cell"))
+        lambda *a, **k: AdoptOutcome.miss("no_compiled_graph"))
     monkeypatch.setattr(fc, "_cuda_ready", lambda: False)
 
     plain = _Pipe()
@@ -402,10 +402,10 @@ class _FakeResp:
 
 def test_publisher_drives_intent_publish_v2_complete(monkeypatch, tmp_path):
     posts: list = []
-    # pgw#1046: a real exported-cell envelope — the publish path recomputes the
+    # pgw#1046: a real exported-compiled graph envelope — the publish path recomputes the
     # key from its blocks, so an invented one is refused before the intent.
-    meta = exported_cell_meta(sku="b200", gen_worker="0.39.0")
-    key = meta["cell_key"]
+    meta = exported_compiled_graph_meta(sku="b200", gen_worker="0.39.0")
+    key = meta["compiled_graph_key"]
 
     def _post(url, headers=None, json=None, timeout=None):
         posts.append((url, json))
@@ -413,7 +413,7 @@ def test_publisher_drives_intent_publish_v2_complete(monkeypatch, tmp_path):
             return _FakeResp(200, {
                 "capability_token": "cap-token",
                 "repo": "root/family-fam",
-                "cell_key": key,
+                "compiled_graph_key": key,
             })
         return _FakeResp(200, {"recorded": True})
 
@@ -429,7 +429,7 @@ def test_publisher_drives_intent_publish_v2_complete(monkeypatch, tmp_path):
 
         def commit(self, **kw):  # pragma: no cover - the frozen v1 route
             raise AssertionError(
-                "the cell publisher must never call the v1 (blake3) commit "
+                "the compiled_graph publisher must never call the v1 (blake3) commit "
                 "route: it is frozen hub-side and 410s (pgw#807 item 3)")
 
         def publish_v2(self, **kw):
@@ -457,41 +457,41 @@ def test_publisher_drives_intent_publish_v2_complete(monkeypatch, tmp_path):
         fc.activity_mod, "emit_event",
         lambda kind, detail, phase="", duration_ms=0, **_kw: events.append((kind, phase)))
 
-    artifact = tmp_path / "cell.tar.gz"
+    artifact = tmp_path / "compiled_graph.tar.gz"
     artifact.write_bytes(b"bytes")
-    pub = fc.CellPublisher(
+    pub = fc.CompiledGraphPublisher(
         base_url="http://hub", worker_jwt=lambda: "worker-jwt",
         image_digest="sha256:img")
     assert pub.publish("fam", artifact, meta) == "cp-42"
 
     intent_url, intent_body = posts[0]
-    assert intent_url.endswith("/v1/worker/cells/publish-intent")
+    assert intent_url.endswith("/v1/worker/compiled_graphs/publish-intent")
     # The claimed axes the hub will attest.
     assert intent_body["axes"] == {
         "sku": "b200", "image_digest": "sha256:img", "gen_worker": "0.39.0"}
-    assert intent_body["cell_key"] == key
+    assert intent_body["compiled_graph_key"] == key
 
     kind, kw = committed[0]
     assert kind == "client" and kw["token"] == "cap-token"
     kind, kw = committed[1]
-    assert kind == "publish_v2", "the cell publisher ships over chunked sha256"
+    assert kind == "publish_v2", "the compiled_graph publisher ships over chunked sha256"
     assert kw["destination_repo"] == "root/family-fam"
     assert kw["mode"] == "replace"
     assert "flavor" not in kw  # pgw#1159: dead hub-side, so it is not sent
-    assert "tags" not in kw  # a cell publish never binds tags
-    # th#1340 refuses a body that names the cell identity: it is hub-derived
+    assert "tags" not in kw  # a compiled graph publish never binds tags
+    # th#1340 refuses a body that names the compiled graph identity: it is hub-derived
     # and rides the capability token.
-    for forbidden in ("cell_publish", "cell_key", "family", "owning_endpoint_id",
+    for forbidden in ("compiled_graph_publish", "compiled_graph_key", "family", "owning_endpoint_id",
                       "axes", "default_flavor"):
         assert forbidden not in kw
 
     complete_url, complete_body = posts[-1]
-    assert complete_url.endswith("/v1/worker/cells/publish-complete")
+    assert complete_url.endswith("/v1/worker/compiled_graphs/publish-complete")
     assert complete_body["ok"] is True and complete_body["checkpoint_id"] == "cp-42"
     # pgw#711's artifact_digest/manifest_digest are gone: the hub's
-    # publish-complete route has no such fields (it decodes family, cell_key,
+    # publish-complete route has no such fields (it decodes family, compiled_graph_key,
     # checkpoint_id, ok, error) and the delta-1 seam refuses unlisted keys.
-    assert set(complete_body) == {"family", "cell_key", "checkpoint_id", "ok"}
+    assert set(complete_body) == {"family", "compiled_graph_key", "checkpoint_id", "ok"}
 
     # Every LEG of the publish is on the wire, not just its terminus.
     assert [p for k, p in events if k == "self_mint_publish"] == [
@@ -500,17 +500,17 @@ def test_publisher_drives_intent_publish_v2_complete(monkeypatch, tmp_path):
 
 def test_publisher_typed_refusal_is_terminal(monkeypatch, tmp_path):
     def _post(url, headers=None, json=None, timeout=None):
-        return _FakeResp(403, {"error": "cell_publish_forged_axis", "message": "axis=sku"})
+        return _FakeResp(403, {"error": "compiled_graph_publish_forged_axis", "message": "axis=sku"})
 
     import requests
 
     monkeypatch.setattr(requests, "post", _post)
-    artifact = tmp_path / "cell.tar.gz"
+    artifact = tmp_path / "compiled_graph.tar.gz"
     artifact.write_bytes(b"bytes")
-    pub = fc.CellPublisher(
+    pub = fc.CompiledGraphPublisher(
         base_url="http://hub", worker_jwt=lambda: "worker-jwt", image_digest="d")
-    with pytest.raises(fc.CellPublishRefused, match="cell_publish_forged_axis"):
-        pub.publish("fam", artifact, exported_cell_meta())
+    with pytest.raises(fc.CompiledGraphPublishRefused, match="compiled_graph_publish_forged_axis"):
+        pub.publish("fam", artifact, exported_compiled_graph_meta())
 
 
 def test_publisher_reports_commit_failure(monkeypatch, tmp_path):
@@ -539,12 +539,12 @@ def test_publisher_reports_commit_failure(monkeypatch, tmp_path):
     import gen_worker.hubio.client as hub_mod
 
     monkeypatch.setattr(hub_mod, "HubClient", _FakeHub)
-    artifact = tmp_path / "cell.tar.gz"
+    artifact = tmp_path / "compiled_graph.tar.gz"
     artifact.write_bytes(b"bytes")
-    pub = fc.CellPublisher(
+    pub = fc.CompiledGraphPublisher(
         base_url="http://hub", worker_jwt=lambda: "worker-jwt", image_digest="d")
     with pytest.raises(RuntimeError, match="upload exploded"):
-        pub.publish("fam", artifact, exported_cell_meta())
+        pub.publish("fam", artifact, exported_compiled_graph_meta())
     complete_url, complete_body = posts[-1]
     assert complete_url.endswith("/publish-complete")
     assert complete_body["ok"] is False and "upload exploded" in complete_body["error"]
@@ -576,17 +576,17 @@ def test_no_target_pipe_is_declined_before_anything_is_armed(tmp_path, monkeypat
         assert fc._PENDING == {}
 
 
-def test_a_seeded_delivered_cell_no_longer_blocks_a_later_mint(
+def test_a_seeded_delivered_compiled_graph_no_longer_blocks_a_later_mint(
     tmp_path, monkeypatch,
 ):
-    """gw#608's seeded-cell gate is DELETED (pgw#1010), and this is the test
+    """gw#608's seeded-compiled graph gate is DELETED (pgw#1010), and this is the test
     that says so deliberately rather than by silence.
 
     The gate existed only because an in-process capture moved the ONE global
     inductor cache dir away from the seeded entries. No capture, no move, no
-    hazard — so a sibling whose own cell is missing mints it instead of being
+    hazard — so a sibling whose own compiled graph is missing mints it instead of being
     eager for the rest of the pod's life because an unrelated slot got a
-    delivered cell first.
+    delivered compiled graph first.
     """
     _mintable(monkeypatch)
     seeded = tmp_path / "seeded-live"

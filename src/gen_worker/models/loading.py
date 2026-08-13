@@ -800,10 +800,10 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
 # `bf16_resident_fits` / BF16_RESIDENT_MARGIN_GB) is REMOVED, ruled by Paul on
 # pgw#772. The serving lane is deterministic per (release x declared config)
 # — never a function of the individual card's free VRAM. The probe made
-# `lane` the only GPU-dependent axis of the cell key: a 4090's ~1.5 GiB
+# `lane` the only GPU-dependent axis of the compiled graph key: a 4090's ~1.5 GiB
 # VRAM surplus over an L4 (same release/image/sm_89) flipped it to base lane
 # "", a lane NOTHING mints for, so the better card missed all 144 published
-# checkpoints INCLUDING its own same-SKU cell and served eager for life
+# checkpoints INCLUDING its own same-SKU compiled graph and served eager for life
 # (th#1198 CP-D, −21% request-level AOT win forfeited). The tax the upgrade
 # dodged is +1.9% for the structural storage lane (pgw#727 re-measure; the
 # +44-73% figure that justified it measured the retired HOOK form), so it
@@ -817,10 +817,10 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
 # lanes), "fp8-hooks" =
 # fp8 weights resident with a per-layer upcast (traced INTO the FX graphs).
 # The "fp8-hooks" spelling is the WIRE value — tensorhub maps it to `w8a16`
-# and cells key on it — and it is kept byte-identical across the pgw#727
+# and compiled graphs key on it — and it is kept byte-identical across the pgw#727
 # restructure (hooks -> module structure) on purpose. The restructure DOES
 # change the traced graph, and that shows up where it should: the module
-# types and hook counts in `compile_cache.execution_contract`, i.e. new cell
+# types and hook counts in `compile_cache.execution_contract`, i.e. new compiled graph
 # keys, no cross-lane adoption.
 _WEIGHT_LANE_ATTR = "_cozy_weight_lane"
 
@@ -835,7 +835,7 @@ _WEIGHT_LANE_ATTR = "_cozy_weight_lane"
 #:
 #: ``"bf16-resident"`` is deliberately absent: :func:`pipeline_weight_lane`
 #: folds it to ``""`` (it traces identically to plain bf16), so it is never a
-#: distinct cell-identity lane. Bucketed LoRA lanes
+#: distinct compiled graph-identity lane. Bucketed LoRA lanes
 #: (``w8a8_lora.lora_execution_lane``) are these bases with a rank suffix and are
 #: decomposed by ``compile_cache.execution_lane_bucket``, so the BASE set is complete.
 STAMPABLE_BASE_EXECUTION_LANES: Tuple[str, ...] = (

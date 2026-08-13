@@ -1,4 +1,4 @@
-"""The shared verdict ladder and the compiled-cell (assembled-vs-eager)
+"""The shared verdict ladder and the compiled-compiled graph (assembled-vs-eager)
 calibration — the family-general survivors of the pgw#846 regional
 retirement, moved here from the deleted regional test scenarios.
 
@@ -57,7 +57,7 @@ def test_the_ladder_calls_every_MEASURED_configuration_correctly() -> None:
     RED-VERIFY, in line: pgw#800's ADAPTER thresholds (0.80 / 0.99) — which
     pgw#814 explicitly warns must not be inherited — call the flux2 w8a8
     whole-graph artifact DEGRADED and would have SERVED it. pgw#814's own
-    ruling on that artifact is 'do not adopt a flux2 w8a8 cell until this
+    ruling on that artifact is 'do not adopt a flux2 w8a8 compiled graph until this
     closes'."""
     from gen_worker.models import adapter_fidelity
 

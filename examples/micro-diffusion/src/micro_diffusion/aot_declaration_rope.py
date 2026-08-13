@@ -23,7 +23,7 @@ LATENT_ROWS = (32, 48)
 VAE_SCALE = 8
 PIXEL_ROWS = tuple((n * VAE_SCALE, n * VAE_SCALE) for n in LATENT_ROWS)
 #: Token-shaped like the base family: the dynamic extent stays LINEAR in one
-#: symbol (pgw#998), so the only new facts in this cell are the ops.
+#: symbol (pgw#998), so the only new facts in this compiled graph are the ops.
 TOKEN_ROWS = tuple(n * n for n in LATENT_ROWS)
 COND_LEN = 16
 ARITY = 1

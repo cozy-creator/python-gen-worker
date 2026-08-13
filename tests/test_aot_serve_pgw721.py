@@ -23,15 +23,15 @@ from pathlib import Path
 import pytest
 
 from gen_worker import aot_serve as aot
-from gen_worker import cell_key as cell_key_mod
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker import compiled_graph_key as compiled_graph_key_mod
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 
 FAMILY = "sdxl-base"
 RUNTIME = {"sku": "l4", "sm": "sm_89", "torch": "2.13.0+cu130",
            "cuda": "13.0"}
 
 #: pgw#950: every mint stamps a host-ISA requirement (``artifact_metadata``
-#: calls ``host_isa.stamp()`` unconditionally), and a cell that stamps none is
+#: calls ``host_isa.stamp()`` unconditionally), and a compiled graph that stamps none is
 #: now refused rather than sniffed from the .pt2's own AOTI_CPU_ISA. This is
 #: the satisfiable-anywhere block: this host's machine, no ISA level.
 HOST_ISA = {"machine": platform.machine(), "march": "", "simdlen": 0,
@@ -128,8 +128,8 @@ class Cfg:
     regional = False
 
 
-#: The single entry name every fixture cell carries (format 2: one entry is
-#: simply the N=1 case of a multi-graph cell).
+#: The single entry name every fixture compiled graph carries (format 2: one entry is
+#: simply the N=1 case of a multi-graph compiled graph).
 ENTRY = "unet/g"
 
 
@@ -167,8 +167,8 @@ def _meta(**over):
     m = {
         "format": aot.ARTIFACT_FORMAT, "kind": aot.ARTIFACT_KIND, **RUNTIME,
         "family": FAMILY, "precision": "w8a8",
-        "cell_key": "deadbeef", cell_key_mod.ENTRY_BLOCK_KEY: entry,
-        "manifest_digest": cell_key_mod.manifest_digest(
+        "compiled_graph_key": "deadbeef", compiled_graph_key_mod.ENTRY_BLOCK_KEY: entry,
+        "manifest_digest": compiled_graph_key_mod.manifest_digest(
             [str((entry or {}).get("class_hash") or "")]),
         "strict_export": True, "lora_bucket": 0,
         "package_constants_in_so": False,
@@ -184,12 +184,12 @@ def _meta(**over):
 
 def _contract(meta=None):
     return aot.contract_from_meta(
-        (meta or _meta())[cell_key_mod.ENTRY_BLOCK_KEY])
+        (meta or _meta())[compiled_graph_key_mod.ENTRY_BLOCK_KEY])
 
 
 def _specs(meta=None):
     return aot.constants_from_meta(
-        (meta or _meta())[cell_key_mod.ENTRY_BLOCK_KEY])
+        (meta or _meta())[compiled_graph_key_mod.ENTRY_BLOCK_KEY])
 
 
 def _runner(package=None, meta=None):
@@ -206,7 +206,7 @@ def _in_range_call(h=128, w=128):
     )
 
 
-def _tar(tmp_path: Path, meta=None, literals=False, name="cell.tar.gz") -> Path:
+def _tar(tmp_path: Path, meta=None, literals=False, name="compiled_graph.tar.gz") -> Path:
     work = tmp_path / "work"
     work.mkdir(exist_ok=True)
     (work / aot.PACKAGE_NAME).write_bytes(b"\x00not-a-real-pt2")
@@ -478,7 +478,7 @@ def test_swap_serves_out_of_contract_requests_eagerly_and_stays_armed():
         "targets": {"unet": {
             "module": module, "attr": "forward",
             "state": getattr(module, "_cozy_aot")["state"]}},
-        "entries": {ENTRY: {"key": meta["cell_key"], "target": "unet"}},
+        "entries": {ENTRY: {"key": meta["compiled_graph_key"], "target": "unet"}},
     })
 
     # in-contract: the artifact serves
@@ -521,7 +521,7 @@ def test_swap_falls_permanently_eager_and_revokes_proof_on_artifact_error():
         "targets": {"unet": {
             "module": module, "attr": "forward",
             "state": getattr(module, "_cozy_aot")["state"]}},
-        "entries": {ENTRY: {"key": meta["cell_key"], "target": "unet"}},
+        "entries": {ENTRY: {"key": meta["compiled_graph_key"], "target": "unet"}},
     })
     seen: list[str] = []
     assert aot.set_guard_failure_callback(pipeline, seen.append) is True
@@ -558,7 +558,7 @@ def test_an_aot_ref_is_recognized_only_by_a_REGISTERED_stamped_key():
     `aot_serve.flavor_label`, which had no callers — so `is_aot_ref`'s
     `startswith("aot-")` branch could only match a string this codebase no
     longer writes. What is left is the rule pgw#1033 stated: whoever reads a
-    `cell_key` off an `aot-inductor` envelope registers it.
+    `compiled_graph_key` off an `aot-inductor` envelope registers it.
     """
     # File-unique, and UNREGISTERED afterwards. `_KNOWN_AOT_KEYS` is
     # process-global, so a key left registered is a claim every later test in
@@ -573,7 +573,7 @@ def test_an_aot_ref_is_recognized_only_by_a_REGISTERED_stamped_key():
         # The retired label form is NOT a shortcut back in.
         assert aot.is_aot_ref(f"root/family-{FAMILY}#aot-l4-torch2.13-w8a8") is False
         assert aot.is_aot_ref(f"root/family-{FAMILY}#fp8-w8a8") is False
-        # A dynamo cache ref must not be mistaken for an exported cell (pgw#735:
+        # A dynamo cache ref must not be mistaken for an exported compiled graph (pgw#735:
         # it would then be scored by FX hits).
         assert aot.is_aot_ref(
             f"root/family-{FAMILY}#ek1-0123456789abcdef") is False
@@ -583,7 +583,7 @@ def test_an_aot_ref_is_recognized_only_by_a_REGISTERED_stamped_key():
 
 
 def test_verify_refuses_baked_weights(stub_runtime):
-    """A weights-baked .pt2 would duplicate GiB per cell and break the CAS
+    """A weights-baked .pt2 would duplicate GiB per compiled graph and break the CAS
     distribution model — refused outright, not warned about."""
     assert aot.verify(_meta()) == ""
     for bad in (True, None):
@@ -599,7 +599,7 @@ def test_verify_is_abi_exact(stub_runtime):
     assert "torch" in aot.verify(_meta(torch="2.12.0+cu130"))
     assert "sm" in aot.verify(_meta(sm="sm_80"))
     assert "cuda" in aot.verify(_meta(cuda="12.8"))
-    # pgw#765: the GPU MODEL is not an axis — an h100-minted cell would be
+    # pgw#765: the GPU MODEL is not an axis — an h100-minted compiled graph would be
     # refused on sm_90-vs-sm_89, never on the marketing name.
     assert aot.verify(_meta(sku="h100-80gb-hbm3")) == ""
     assert "kind" in aot.verify(_meta(kind="an-unknown-kind"))
@@ -616,10 +616,10 @@ def test_verify_rejects_malformed_contract(stub_runtime):
 
 def test_verify_rejects_tampered_range_digest(stub_runtime):
     meta = aot.entry_metadata(
-        family=FAMILY, precision="w8a8", cell_key="k",
+        family=FAMILY, precision="w8a8", compiled_graph_key="k",
         name=ENTRY, entry=_entry_arg())
     assert aot.verify(meta) == ""
-    meta[cell_key_mod.ENTRY_BLOCK_KEY]["symbols"]["h"] = [64, 4096]
+    meta[compiled_graph_key_mod.ENTRY_BLOCK_KEY]["symbols"]["h"] = [64, 4096]
     reason = aot.verify(meta)
     assert "range_digest" in reason and ENTRY in reason
 
@@ -639,18 +639,18 @@ def test_entry_metadata_validates_at_mint():
     """A malformed contract must fail on the pod, not on a paid request."""
     with pytest.raises(ValueError, match="no declared range"):
         aot.entry_metadata(
-            family=FAMILY, precision="w8a8", cell_key="k",
+            family=FAMILY, precision="w8a8", compiled_graph_key="k",
             name=ENTRY, entry=_entry_arg(symbols={"h": [64, 160]}))
     with pytest.raises(ValueError, match="unknown source"):
         aot.entry_metadata(
-            family=FAMILY, precision="w8a8", cell_key="k", name=ENTRY,
+            family=FAMILY, precision="w8a8", compiled_graph_key="k", name=ENTRY,
             entry=_entry_arg(
                 constants=[{"fqn": "a", "source": "guess", "shape": []}]))
     meta = aot.entry_metadata(
-        family=FAMILY, precision="w8a8", cell_key="k",
+        family=FAMILY, precision="w8a8", compiled_graph_key="k",
         name=ENTRY, entry=_entry_arg())
     assert meta["package_constants_in_so"] is False
-    entry = meta[cell_key_mod.ENTRY_BLOCK_KEY]
+    entry = meta[compiled_graph_key_mod.ENTRY_BLOCK_KEY]
     assert entry["name"] == ENTRY
     assert entry["range_digest"] == aot.range_digest(entry)
     assert entry["class_hash"] == aot.class_hash(
@@ -669,7 +669,7 @@ def test_pack_unpack_roundtrip_is_deterministic(tmp_path):
     meta = aot.unpack(a, tmp_path / "out")
     assert meta["kind"] == aot.ARTIFACT_KIND
     assert (tmp_path / "out" / aot.PACKAGE_NAME).read_bytes() == b"\x00not-a-real-pt2"
-    assert aot.unpack_metadata(a)["cell_key"] == "deadbeef"
+    assert aot.unpack_metadata(a)["compiled_graph_key"] == "deadbeef"
 
 
 def test_unpack_refuses_incomplete_or_foreign_members(tmp_path):
@@ -760,8 +760,8 @@ def test_enable_stays_eager_on_any_miss(tmp_path, monkeypatch, stub_runtime):
 
 
 def test_provision_dispatches_aot_kind_and_reports_a_hit(tmp_path, monkeypatch, stub_runtime):
-    """A .pt2 cell must flow through the SAME hit path as a dynamo cell:
-    provision.enable_compiled returning True IS the HIT that fleet_cells
+    """A .pt2 compiled graph must flow through the SAME hit path as a dynamo compiled graph:
+    provision.enable_compiled returning True IS the HIT that fleet_compiled_graphs
     treats as a genuine match (no self-mint, no executor change)."""
     from gen_worker import compile_cache as cc
     from gen_worker.models import provision
@@ -779,7 +779,7 @@ def test_provision_dispatches_aot_kind_and_reports_a_hit(tmp_path, monkeypatch, 
     # DISPATCH; its own behaviour, and the fact that `arm_aot` reaches it at
     # all, are proven in tests/test_numerics_gate_pgw868.py against a real
     # packed artifact and real tensors.
-    monkeypatch.setattr(provision, "gate_cell_numerics", lambda *a, **k: True)
+    monkeypatch.setattr(provision, "gate_compiled_graph_numerics", lambda *a, **k: True)
     module = FakeModule()
     pipeline = FakePipeline(module)
     assert provision.enable_compiled(
@@ -1005,7 +1005,7 @@ def test_assert_lifted_contract_agrees_both_ways():
     assert excinfo.value.reason == "lifted_inputs_unbindable"
 
 
-def test_enable_refuses_a_lifted_module_against_a_branchless_cell(
+def test_enable_refuses_a_lifted_module_against_a_branchless_compiled_graph(
         tmp_path, monkeypatch, stub_runtime):
     """The mismatch is caught at ARM time, by name, not at first call."""
     monkeypatch.setattr(aot, "_load_package", lambda p, e="model": FakePackage())
@@ -1019,7 +1019,7 @@ def test_enable_refuses_a_lifted_module_against_a_branchless_cell(
     assert module.forward == original
 
 
-def test_enable_arms_a_lifted_module_against_a_lifted_cell(
+def test_enable_arms_a_lifted_module_against_a_lifted_compiled_graph(
         tmp_path, monkeypatch, stub_runtime):
     package = FakePackage()
     monkeypatch.setattr(aot, "_load_package", lambda p, e="model": package)

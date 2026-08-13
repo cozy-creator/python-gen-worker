@@ -7,7 +7,7 @@ with it — `dict(type(L['self']).__mro__[1].__dict__)` for a base-class
 `type(L['self']._modules['x']).__dict__['forward'].__defaults__` for a submodule
 whose forward has a default argument. Those fell through to the "other" root,
 which LEAKS *before* the type dispatch that already covers them — so every
-self-mint on every family was refused at pack and no cell was ever published.
+self-mint on every family was refused at pack and no compiled graph was ever published.
 
 The 26 existing tapes stayed green because their fixtures are plain modules with
 plain attributes and no default args. The last test here is the net that was
@@ -144,9 +144,9 @@ class _Unet(_Base):
 
 
 def _cfg():
-    from gen_worker.registry import CompileCell
+    from gen_worker.registry import CompileCompiledGraph
 
-    return CompileCell(
+    return CompileCompiledGraph(
         shapes=((64, 64),), targets=("unet",), family="sdxl", regional=False,
         text_len=77, dynamic=(), lora_bucket=0, guidance_scales=(5.0,),
         text_lens=())

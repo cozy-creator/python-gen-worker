@@ -50,7 +50,7 @@ from gen_worker import mint_child, mint_delegate
 from gen_worker import mint_process as mp
 from gen_worker.api.binding import ModelRef
 from gen_worker.api.errors import IllegalCombination, ValidationError
-from gen_worker.registry import CompileCell
+from gen_worker.registry import CompileCompiledGraph
 
 pytest.importorskip("torch")
 
@@ -72,7 +72,7 @@ def checkpoint(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def _request(checkpoint: Path, workdir: Path, *, bucket: int) -> mp.MintRequest:
     """The real parent chain, round-tripped through the file the child decodes.
 
-    ``CompileCell`` is built directly, exactly as the rig's vehicle builds it:
+    ``CompileCompiledGraph`` is built directly, exactly as the rig's vehicle builds it:
     the ``@endpoint`` decorator screens ``lora_bucket`` at decoration time
     (``decorators.py``), so a bad bucket can only arrive from a path that is
     not the decorator — an operator mint request, or a rig vehicle. That is
@@ -81,13 +81,13 @@ def _request(checkpoint: Path, workdir: Path, *, bucket: int) -> mp.MintRequest:
     from harness import tiny_diffusion_endpoint as ep
 
     workdir.mkdir(parents=True, exist_ok=True)
-    cfg = CompileCell(
+    cfg = CompileCompiledGraph(
         shapes=(ep.PIXEL_SHAPE,), targets=("unet",), family=ep.FAMILY,
         regional=False, text_len=ep.TEXT_LEN, dynamic=(), lora_bucket=bucket,
         guidance_scales=(), text_lens=())
     pending = SimpleNamespace(
         family=ep.FAMILY, arm_token="arm1-pgw1075", cfg=cfg,
-        target=workdir / "cell.tar.gz", mint_root=workdir)
+        target=workdir / "compiled_graph.tar.gz", mint_root=workdir)
     task = mint_delegate.MintTask(
         pending=pending, pipe=None, function=FUNCTION,
         modules=(ENDPOINT_MODULE,),

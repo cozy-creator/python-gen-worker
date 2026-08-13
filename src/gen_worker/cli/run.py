@@ -107,7 +107,7 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
     p.add_argument(
         "--eager-only", dest="eager_only", action="store_true",
         help=(
-            "Serve EAGER ONLY: never arm a compiled cell and never mint one "
+            "Serve EAGER ONLY: never arm a compiled compiled_graph and never mint one "
             "(DESIGN-RULINGS §4.32). One invocation is where a cold machine "
             "would otherwise spend minutes minting."
         ),
@@ -573,13 +573,13 @@ def run_setup(
 
     ``arm_compile=False`` loads the slots WITHOUT arming any compiled path
     (pgw#784): the mint child drives its own cold arm + capture and must not
-    have a cell armed under it. ``return_loaded=True`` returns the loaded slot
+    have a compiled graph armed under it. ``return_loaded=True`` returns the loaded slot
     objects so a caller can reach the pipeline it just built.
 
     ``selected`` (pgw#1127) is the routable function these slots belong to. It
     is what makes ``arm_compile=True`` able to MINT: a delegated child
     rediscovers the endpoint from its declaring module and re-resolves the
-    parent's slots, so without it this path can only adopt a cell that already
+    parent's slots, so without it this path can only adopt a compiled graph that already
     exists. Absent, the arm is adopt-only and says so.
 
     ``place=False`` (pgw#1124) loads the slots without running the worker's
@@ -811,7 +811,7 @@ def _structure_device(device: str) -> str:
 
     Faithful device is the whole point (pgw#1080): AOTInductor codegens for
     the device the traced tensors report, so a structure built as "cpu" on a
-    CUDA pod would compile a CPU cell. Fake tensors allocate nothing, so
+    CUDA pod would compile a CPU compiled graph. Fake tensors allocate nothing, so
     claiming the card costs nothing.
     """
     want = (device or "").strip().lower()
@@ -892,18 +892,18 @@ def _load_injected_model(
             sl.obj, injected, requested=structure_only, slot=slot)
     compile_cfg = getattr(decl, "compile", None) if decl is not None else None
     if compile_cfg is not None:
-        # SDK v2: the compile machinery consumes the enriched CompileCell
+        # SDK v2: the compile machinery consumes the enriched CompileCompiledGraph
         # (decorator-level lora_bucket + declared shape contract), never the
         # raw Compile. Warm guidance stays empty locally — the local mint
         # and its verify both compute from this same object, so the store
         # is self-consistent.
-        from ..registry import CompileCell
+        from ..registry import CompileCompiledGraph
 
         # ONE constructor with the registry's path (pgw#1150): a must-survive
         # field this site forgot to copy — the declared numerics band was
-        # exactly that — silently judges every locally minted cell at a default
+        # exactly that — silently judges every locally minted compiled graph at a default
         # nobody chose.
-        compile_cfg = CompileCell.from_declaration(
+        compile_cfg = CompileCompiledGraph.from_declaration(
             compile_cfg, lora_bucket=int(getattr(decl, "lora_bucket", 0) or 0))
     if (
         arm_compile
@@ -914,11 +914,11 @@ def _load_injected_model(
         from ..models.cache_paths import tensorhub_cas_dir
 
         # §4.28 / pgw#1127: the ONE arming brain, with NO sink. Delivered
-        # artifact, then THIS MACHINE's own ck1-keyed cell store, then a
+        # artifact, then THIS MACHINE's own ck1-keyed compiled graph store, then a
         # delegated AOT mint whose result lands in that store — so the second
         # run of this endpoint on this machine arms from disk with no mint, no
         # hub and no network. Before pgw#1127 this line called
-        # `local_cells.enable_compiled`, the JIT path, which meant the store
+        # `local_compiled_graphs.enable_compiled`, the JIT path, which meant the store
         # pgw#1096 built for exactly this machine was unreachable from it and
         # pgw#1086 wave 1's deletion of that module would have taken compiled
         # serving off cozy-local outright.

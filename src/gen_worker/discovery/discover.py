@@ -847,7 +847,7 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         if es.env:
             fn["env"] = list(es.env)
         # th#1051: declared compute-time formula — the hub learns the
-        # constants per physics cell; the source string is the contract.
+        # constants per physics compiled graph; the source string is the contract.
         if es.runtime_formula is not None:
             fn["runtime_formula"] = es.runtime_formula.source
         if slots_block:
@@ -856,8 +856,8 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             fn["delta_type"] = _type_id(es.delta_type)
             fn["delta_schema_sha256"] = delta_sha
             fn["delta_output_schema"] = delta_schema
-        ccell = es.compile_cell()
-        if es.compile is not None and ccell is not None:
+        ccompiledgraph = es.compile_compiled_graph()
+        if es.compile is not None and ccompiledgraph is not None:
             # Hub keys family-cache lookups off this block (th#569).
             fn["compile"] = {
                 "family": es.compile.family,
@@ -865,34 +865,34 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
                 "targets": list(es.compile.targets),
             }
             # SDK v2 shape contract: the declared text axis and dynamic
-            # ranges ride to the hub's cell producer, and the contract
-            # digest is the ck2 cell-key axis (pgw#647).
-            if ccell.text_len is not None:
+            # ranges ride to the hub's compiled graph producer, and the contract
+            # digest is the ck2 compiled graph-key axis (pgw#647).
+            if ccompiledgraph.text_len is not None:
                 # THIS function's effective pin (a @worker_function
                 # text_len= override wins over the class Compile's).
-                fn["compile"]["text_len"] = int(ccell.text_len)
-            if ccell.contract_text_lens():
+                fn["compile"]["text_len"] = int(ccompiledgraph.text_len)
+            if ccompiledgraph.contract_text_lens():
                 # pgw#654 gap #6: the CLASS's per-lane pin union — what the
-                # shared cell contract digests (dual-pin classes describe
+                # shared compiled graph contract digests (dual-pin classes describe
                 # both lanes).
                 fn["compile"]["text_lens"] = [
-                    int(v) for v in ccell.contract_text_lens()
+                    int(v) for v in ccompiledgraph.contract_text_lens()
                 ]
             if es.compile.dynamic:
                 fn["compile"]["dynamic"] = [
                     {"dim": d.dim, "min": d.min, "max": d.max}
                     for d in es.compile.dynamic
                 ]
-            if ccell.guidance_scales:
+            if ccompiledgraph.guidance_scales:
                 # Warm representatives derived from the payload's
                 # CompileAxis classes (the v2 replacement for the deleted
                 # Compile(guidance_scales=...) decorator tuple).
-                fn["compile"]["guidance_scales"] = list(ccell.guidance_scales)
-            fn["compile"]["shape_contract_digest"] = ccell.contract_digest()
+                fn["compile"]["guidance_scales"] = list(ccompiledgraph.guidance_scales)
+            fn["compile"]["shape_contract_digest"] = ccompiledgraph.contract_digest()
             # ie#381: the primary binding's weight-storage lane (gw#389 fp8
-            # layerwise casting) rides along so the hub's cell producer
+            # layerwise casting) rides along so the hub's compiled graph producer
             # builds from an identically-loaded pipeline — the cast hooks
-            # are traced INTO the FX graphs; a bf16-built cell for an
+            # are traced INTO the FX graphs; a bf16-built compiled graph for an
             # fp8-served model misses on every request.
             primary = next(iter(es.models.values()), None)
             storage = str(getattr(primary, "storage_dtype", "") or "")
@@ -901,7 +901,7 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             if getattr(es.compile, "regional", False):
                 fn["compile"]["regional"] = True
             # gw#561: dynamic-LoRA endpoints trace the branch-bearing graph
-            # family; the hub's producer must build `-lora<bucket>` cells.
+            # family; the hub's producer must build `-lora<bucket>` compiled graphs.
             # SDK v2: declared at the decorator (`@endpoint(lora_bucket=)`).
             if es.lora_bucket:
                 fn["compile"]["lora_bucket"] = int(es.lora_bucket)

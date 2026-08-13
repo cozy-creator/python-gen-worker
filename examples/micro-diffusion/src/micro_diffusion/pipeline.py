@@ -107,7 +107,7 @@ class MicroPipeline:
     def device(self) -> torch.device:
         return next(self.transformer.parameters()).device
 
-    def unpatchify(self, cells: torch.Tensor, grid: int) -> torch.Tensor:
+    def unpatchify(self, compiled_graphs: torch.Tensor, grid: int) -> torch.Tensor:
         """``(N, T, 3*s*s) -> (N, 3, grid*s, grid*s)``.
 
         In the PIPELINE, not in the decoder: the compiled targets take token
@@ -116,8 +116,8 @@ class MicroPipeline:
         division flux and qwen make.
         """
         scale = self.config.vae_scale
-        batch = cells.shape[0]
-        out = cells.reshape(batch, grid, grid, scale, scale, 3)
+        batch = compiled_graphs.shape[0]
+        out = compiled_graphs.reshape(batch, grid, grid, scale, scale, 3)
         out = out.permute(0, 5, 1, 3, 2, 4)
         return out.reshape(batch, 3, grid * scale, grid * scale)
 
@@ -150,8 +150,8 @@ class MicroPipeline:
                 step = eps
             x = [x[j] - step[j] / max(1, steps) for j in range(len(x))]
         with torch.no_grad():
-            cells = self.decoder(x[-1][None, ...])
-        return self.unpatchify(cells, grid)
+            compiled_graphs = self.decoder(x[-1][None, ...])
+        return self.unpatchify(compiled_graphs, grid)
 
 
 __all__ = ["MicroConfig", "MicroConvPipeline", "MicroEscapePipeline",

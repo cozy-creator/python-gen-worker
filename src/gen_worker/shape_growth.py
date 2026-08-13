@@ -10,12 +10,12 @@ as ``arm_aot`` succeeds and stamps ``aot_serve._MARKER_ATTR`` instead.  So on
 every AOT arm the executor's three growth call sites are no-ops, the
 ``_shape_warm_republisher`` closure is constructed and discarded, and
 and pgw#1010 deleted the republish backend outright (a grown JIT cache is
-this pod's, and its cell had no consumer).
+this pod's, and its compiled graph had no consumer).
 
-What that costs: a declared class outside the armed cell's envelope stays
+What that costs: a declared class outside the armed compiled graph's envelope stays
 eager for the life of the pod, every pod, forever.  Under dynamo it would be
 routed eager once, warmed in one background thread and republished so the fleet
-never pays it again — but the ratified reuse strategy is *AOT cells only, JIT
+never pays it again — but the ratified reuse strategy is *AOT compiled graphs only, JIT
 demotes to intake mode*, with pgw#731 deleting the very apparatus the growth
 system lives inside.  "It heals on the JIT path" is therefore not an answer.
 
@@ -30,7 +30,7 @@ NAME — is the same fact, measured on the traffic that actually asks for it.
 What this module owns
 ---------------------
 * the **vocabulary**: a shape gap is a named DECLARED CLASS outside the armed
-  cell's ENVELOPE — the declared serving region, not a dynamo input signature —
+  compiled graph's ENVELOPE — the declared serving region, not a dynamo input signature —
   so it is arm-agnostic by construction;
 * the **countable fact**: :data:`activity.KIND_SHAPE_GAP`, the AOT counterpart
   of pgw#680's ``guard_miss``, so the hub can count coverage holes on either
@@ -63,7 +63,7 @@ from . import activity as activity_mod
 
 logger = logging.getLogger(__name__)
 
-#: The execution arms a cell can be served on (pgw#891/th#1408 vocabulary).
+#: The execution arms a compiled graph can be served on (pgw#891/th#1408 vocabulary).
 #: The arm selects the COMPILER, never whether growth happens at all.
 ARM_AOT = "aot"
 ARM_DYNAMO = "dynamo"
@@ -90,7 +90,7 @@ class TurnGateBusy(Exception):
 
 @dataclass(frozen=True)
 class ShapeGap:
-    """One request that arrived at a graph class the armed cell does not
+    """One request that arrived at a graph class the armed compiled graph does not
     serve.
 
     ``declared_class`` is the point of the type: pgw#622's healing keyed on a
@@ -106,7 +106,7 @@ class ShapeGap:
     declared_class: str
     reason: str
     detail: str = ""
-    cell_key: str = ""
+    compiled_graph_key: str = ""
 
     @property
     def key(self) -> Tuple[str, str, str]:
@@ -163,7 +163,7 @@ LEDGER = GrowthLedger()
 def report(gap: ShapeGap) -> bool:
     """Record the gap and emit the countable fact. True on first sighting.
 
-    Never raises: an armed cell serving one request eager must not be turned
+    Never raises: an armed compiled graph serving one request eager must not be turned
     into a failed request by its own telemetry.
     """
     try:
@@ -177,8 +177,8 @@ def report(gap: ShapeGap) -> bool:
         activity_mod.emit_event(
             activity_mod.KIND_SHAPE_GAP,
             f"arm={gap.arm} family={gap.family} target={gap.target} "
-            f"cell={gap.cell_key or '<none>'} class={gap.declared_class}: "
-            f"request out of declared envelope: the armed cell does not cover "
+            f"compiled_graph={gap.compiled_graph_key or '<none>'} class={gap.declared_class}: "
+            f"request out of declared envelope: the armed compiled_graph does not cover "
             f"this graph class, so the request is served EAGER and named at "
             f"ingress"
             + (f" — {gap.detail}" if gap.detail else ""),

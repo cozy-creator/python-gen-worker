@@ -2,7 +2,7 @@
 
 A mint is ~74 min of serial export (MEASURED: 2.06 and 2.07 min/row across two
 independent pods, 36 sdxl entries) followed by ~626 s of AOTI compile PER
-ENTRY. Today a crash at entry 30 of 36 discards all of it: ``build_cell``
+ENTRY. Today a crash at entry 30 of 36 discards all of it: ``build_compiled_graph``
 gives every attempt a fresh ``child-<n>`` workdir, the pool's inductor cache
 lives inside it, and ``abandon_self_mint`` rmtree's the mint root. Attempt 2
 shares nothing with attempt 1 — not the compiled files, not even a cache hit.
@@ -15,7 +15,7 @@ The safety property, which everything else here is subordinate to
 -----------------------------------------------------------------
 **A finished entry is admissible only because its identity re-derives, never
 because a file exists at a path.** Under pgw#846 a path-trusted resume is a
-way to pack a stale artifact into a cell that then verifies, arms, and is
+way to pack a stale artifact into a compiled graph that then verifies, arms, and is
 wrong — the worst failure this program has available. So:
 
 * the ``graph_hash`` compared at admission is recomputed from the ExportedProgram
@@ -23,7 +23,7 @@ wrong — the worst failure this program has available. So:
   bank cannot vouch for itself;
 * every banked file's sha256 is recomputed and compared, so a truncated,
   half-written or edited artifact refuses;
-* the identity axes that key the cell (``sm``, toolchain, env seal, the
+* the identity axes that key the compiled graph (``sm``, toolchain, env seal, the
   parent/child code digest, the inductor configs the compile ran under) must
   all match, and an axis this runtime cannot ASK about refuses rather than
   admits — "unknown" and "none" are recorded as different values, because
@@ -45,7 +45,7 @@ the ~6.4 h a 36-entry sdxl mint spends at K=1.
 Threat model: staleness, corruption and skew (a stale bank from an earlier
 declaration, a half-written file, a toolchain that moved under us). NOT a local
 adversary with write access to the mint root — anyone who can rewrite both the
-ledger and the artifact consistently can equally replace the finished cell.
+ledger and the artifact consistently can equally replace the finished compiled graph.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
-from . import local_cell_store
+from . import local_compiled_graph_store
 from . import graph_hash as graph_hash_mod
 
 logger = logging.getLogger(__name__)
@@ -79,7 +79,7 @@ CACHE_DIR = "inductor-cache"
 
 #: Typed refusal reasons. Every one of these means "recompile this entry",
 #: never "fail the mint" — a bank is an optimization and must never be able to
-#: cost a cell. They are counted onto the pool ledger so a bank that never
+#: cost a compiled graph. They are counted onto the pool ledger so a bank that never
 #: admits anything is VISIBLE rather than merely slow.
 MISS = "cold"                      # nothing banked for this entry
 REFUSE_FORMAT = "bank_format"      # ledger from another BANK_V / unreadable
@@ -91,14 +91,14 @@ REFUSE_FILE_MISSING = "file_missing"
 REFUSE_FILE_CONTENT = "file_content"   # size or sha256 moved under us
 
 #: Where banks live: a WORKER-LOCAL, persistent directory, deliberately NOT
-#: under the mint's own root. `fleet_cells.abandon_self_mint` rmtree's
+#: under the mint's own root. `fleet_compiled_graphs.abandon_self_mint` rmtree's
 #: `mint_root`, and abandonment is exactly what a crashed mint ends in — a bank
 #: under that root would be deleted on its way out of the one case it exists
-#: for. Sited beside the worker's own local cell store because that is already
+#: for. Sited beside the worker's own local compiled graph store because that is already
 #: the pod's compile-scratch neighbourhood, and NOT in the CAS (`cache_dir`),
 #: which `disk_gc` owns and sweeps by reference index. pgw#1096 moved the root
-#: accessor from `local_cells` (which pgw#1086 wave 1 deletes as a JIT
-#: artifact) to `local_cell_store` — same env, same default, same directory, so
+#: accessor from `local_compiled_graphs` (which pgw#1086 wave 1 deletes as a JIT
+#: artifact) to `local_compiled_graph_store` — same env, same default, same directory, so
 #: no bank is orphaned by the move.
 RESUME_DIRNAME = ".mint-resume"
 
@@ -117,8 +117,8 @@ _ROOT: Optional[str] = None
 def bank_root(scope: str) -> Path:
     """The bank directory for one mint SCOPE, outside the mint's own root.
 
-    ``scope`` is the pending's ``cell_key``. For an AOT pending that is a
-    CAPTURE HANDLE, not the published cell's key (a real AOT key folds the
+    ``scope`` is the pending's ``compiled_graph_key``. For an AOT pending that is a
+    CAPTURE HANDLE, not the published compiled graph's key (a real AOT key folds the
     combined graph hash and is unknowable until the export finishes) — which is
     exactly right here: this is a SCOPE, and identity is the per-entry check
     that runs inside it. A colliding scope cannot admit anything wrong; it can
@@ -128,7 +128,7 @@ def bank_root(scope: str) -> Path:
     safe = "".join(
         c if (c.isalnum() or c in "._-") else "_" for c in str(scope))[:48]
     digest = hashlib.sha256(str(scope).encode()).hexdigest()[:12]
-    return local_cell_store.store_root() / RESUME_DIRNAME / f"{safe or 'scope'}-{digest}"
+    return local_compiled_graph_store.store_root() / RESUME_DIRNAME / f"{safe or 'scope'}-{digest}"
 
 
 def _dir_bytes(path: Path) -> int:
@@ -179,7 +179,7 @@ def sweep(keep: Path, *, max_bytes: Optional[int] = None) -> int:
     scopes are removed OLDEST FIRST until the total fits. An actively-running
     mint's bank is the newest thing in the area (every banked entry touches
     it), so the loser is an abandoned mint nobody came back for — and the cost
-    of getting that wrong is one recompile, never a wrong cell.
+    of getting that wrong is one recompile, never a wrong compiled graph.
 
     pgw#973: the sort was `reverse=True` and the loop consumed it from the
     head, i.e. it evicted the NEWEST abandoned scope first — the exact
@@ -218,7 +218,7 @@ def sweep(keep: Path, *, max_bytes: Optional[int] = None) -> int:
 
 
 def discard(scope: str) -> None:
-    """Drop one scope's bank. Called when the cell it was recovering has been
+    """Drop one scope's bank. Called when the compiled graph it was recovering has been
     ADOPTED — at that terminus the bank has no further job, and holding it is
     the only way this area grows without bound on a healthy pod."""
     try:
@@ -268,7 +268,7 @@ UNSTATED = "?"
 def context_facts(inductor_configs: Optional[Mapping[str, Any]] = None) -> Dict[str, str]:
     """The non-graph identity axes an admitted entry must match.
 
-    Deliberately the SAME axes ``aot_mint.cell_identity`` keys a cell on
+    Deliberately the SAME axes ``aot_mint.compiled_graph_identity`` keys a compiled graph on
     (``sm``, ``toolchain``, ``env_seal``) plus the two that are specific to who
     produced the loose files: the pool's parent/child contract digest (pgw#840
     — a child from another tree compiled the files the parent then packed) and
@@ -276,7 +276,7 @@ def context_facts(inductor_configs: Optional[Mapping[str, Any]] = None) -> Dict[
 
     The configs are compared WHOLE, including keys pgw#757 measured as
     non-identity (``compile_threads``). That is deliberate: refusing too often
-    costs one recompile, admitting too often costs a cell. It is also free in
+    costs one recompile, admitting too often costs a compiled graph. It is also free in
     practice — ``MINT_COMPILE_THREADS`` is a constant, so a re-sized K
     (pgw#842) does not move this axis and a narrower retry keeps its bank.
     """
@@ -295,8 +295,8 @@ def context_facts(inductor_configs: Optional[Mapping[str, Any]] = None) -> Dict[
         from . import compile_cache as cc
 
         # "" is legitimate: a box with no CUDA device truthfully has no `sm`,
-        # and a cell banked on a GPU pod carries one — so the two never match
-        # by accident. `cell_identity` separately REFUSES to key a cell with no
+        # and a compiled graph banked on a GPU pod carries one — so the two never match
+        # by accident. `compiled_graph_identity` separately REFUSES to key a compiled graph with no
         # sm, which is where that requirement belongs.
         facts["sm"] = str(cc.runtime_key().get("sm") or "")
     except Exception:  # noqa: BLE001

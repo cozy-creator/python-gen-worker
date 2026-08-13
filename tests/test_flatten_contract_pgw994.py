@@ -253,7 +253,7 @@ def test_the_serve_side_name_spelling_is_unchanged() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. NO LIVE CELL IS RE-KEYED
+# 4. NO LIVE COMPILED GRAPH IS RE-KEYED
 # ---------------------------------------------------------------------------
 
 
@@ -280,7 +280,7 @@ def test_a_trivial_identity_does_not_move_the_range_digest() -> None:
 def test_a_container_identity_DOES_move_the_range_digest() -> None:
     """The other direction, because it is the reason the field is keyed at
     all: two classes taking the same tensors in different argument structures
-    are different graphs and must not share a cell key."""
+    are different graphs and must not share a compiled graph key."""
     flat = [{"name": "x.0", "position": 0, "dtype": "bfloat16",
              "shape": [4, "s0"], "optional": False}]
     carried = [dict(flat[0], param="x", param_position=0, path=[0])]

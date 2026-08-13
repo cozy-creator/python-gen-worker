@@ -8,11 +8,11 @@
 #
 # WHY cu126 AND NOT cu128. The cu128 index has NO torch 2.13.0 — it stops at
 # 2.11.0. `torch` is one of the axes `aot_serve.verify_declared` checks
-# STRICTLY, so a cu128 venv would mint cells two minor versions off the fleet:
+# STRICTLY, so a cu128 venv would mint compiled graphs two minor versions off the fleet:
 # further away, not closer. cu126 carries 2.13.0, and CUDA minor-version
 # compatibility runs a cu126 build on a 12.8 driver. Only the `cuda` axis
 # differs from the fleet (12.6 vs 13.0), and that is stated wherever a
-# GPU-minted cell is reported.
+# GPU-minted compiled graph is reported.
 #
 # WHAT IT DOES NOT DO: no driver change, no system package, nothing outside
 # the venv. The repo's own `.venv` is untouched and stays the default.

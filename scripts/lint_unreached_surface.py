@@ -764,7 +764,7 @@ def run(scope_all: bool, want_params: bool, explain: bool) -> List[Finding]:
 #
 # "A declared fact with no consequence" is a DIFFERENT SHAPE and the
 # reachability scan above is blind to it: a per-family flag that is validated,
-# keyed into the cell identity and recorded into the spec has three or more
+# keyed into the compiled graph identity and recorded into the spec has three or more
 # production readers and a perfectly healthy call-site count, while nothing
 # performs the EFFECT it exists to cause. Used everywhere except the one place
 # it must act, and strictly harder to see than an unused function, because
@@ -781,7 +781,7 @@ def run(scope_all: bool, want_params: bool, explain: bool) -> List[Finding]:
 #
 # So classify each read of a declared field by what the reading site DOES with
 # it. A field whose every read is validate / key / record is INERT: the fleet
-# has been told a fact, has hashed it into the cell identity, and has written it
+# has been told a fact, has hashed it into the compiled graph identity, and has written it
 # into metadata, and no behaviour anywhere differs because of it.
 #
 # The heuristic is stated so it can be argued with: a read is an ACT when it

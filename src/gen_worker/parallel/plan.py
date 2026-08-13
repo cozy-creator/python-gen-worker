@@ -67,7 +67,7 @@ class GroupPlan:
     # Compile arm/disarm must be collective: a group where rank 0 armed and
     # rank 1 fell back to eager runs two different graphs.
     compile_armed: bool = False
-    compile_cell_key: str = ""
+    compile_compiled_graph_key: str = ""
     # The exact resident LoRA set, ordered. Attach/detach is a COLLECTIVE
     # decision (SEQPAR-DESIGN §5.3): sharded attention operates on
     # activations, LoRA on weights, so a rank that attaches while another

@@ -25,10 +25,10 @@ import pytest
 import torch
 
 from gen_worker import aot_serve as aot
-from gen_worker import cell_key
+from gen_worker import compiled_graph_key
 
-from harness import exported_cell as rig
-from harness.exported_cell import declared  # noqa: F401 — fixture
+from harness import exported_compiled_graph as rig
+from harness.exported_compiled_graph import declared  # noqa: F401 — fixture
 
 
 TOOLCHAIN = {"torch": "abc123", "triton": "def456", "ptxas": "0f0f0f"}
@@ -37,12 +37,12 @@ TOOLCHAIN = {"torch": "abc123", "triton": "def456", "ptxas": "0f0f0f"}
 def entry_meta(h: int, w: int, **over: Any) -> Dict[str, Any]:
     """One format-3 entry artifact's metadata, built the mint's own way."""
     meta = aot.entry_metadata(
-        family=rig.FAMILY, precision="w8a8", cell_key="",
+        family=rig.FAMILY, precision="w8a8", compiled_graph_key="",
         name=rig.entry_name(h, w), entry=rig._entry(h, w),
         strict_export=True, lora_bucket=0, **over)
     meta.update(rig.RUNTIME)
     meta["toolchain"] = dict(TOOLCHAIN)
-    meta["cell_key"] = cell_key.from_entry_metadata(meta).digest
+    meta["compiled_graph_key"] = compiled_graph_key.from_entry_metadata(meta).digest
     return meta
 
 
@@ -52,7 +52,7 @@ def entry_meta(h: int, w: int, **over: Any) -> Dict[str, Any]:
 def test_widening_the_ladder_does_not_rekey_unchanged_classes() -> None:
     """The measured disease, closed. ``envelope_facts`` digests the UNION of
     the ladder across the bundle, so on master adding ONE aspect ratio moved
-    the key of every class in the cell — 35 of sdxl's 36 trace identically.
+    the key of every class in the compiled graph — 35 of sdxl's 36 trace identically.
     Per entry, the shape facts that affect tracing are inside ``class_hash``,
     so an author who widens the ladder adds NEW keys and moves none.
     """
@@ -64,18 +64,18 @@ def test_widening_the_ladder_does_not_rekey_unchanged_classes() -> None:
              for h, w in rig.ROWS + ((32, 32),))}
 
     assert set(wide) - set(narrow) == {rig.entry_name(32, 32)}
-    moved = [n for n in narrow if narrow[n]["cell_key"] != wide[n]["cell_key"]]
+    moved = [n for n in narrow if narrow[n]["compiled_graph_key"] != wide[n]["compiled_graph_key"]]
     assert not moved, f"widening the ladder re-keyed {moved!r}"
     # And the new class is genuinely new, not a relabel of an old one.
-    assert wide[rig.entry_name(32, 32)]["cell_key"] not in {
-        m["cell_key"] for m in narrow.values()}
+    assert wide[rig.entry_name(32, 32)]["compiled_graph_key"] not in {
+        m["compiled_graph_key"] for m in narrow.values()}
 
 
 def test_the_envelope_is_not_a_key_axis() -> None:
     """Stated as a refusal, not only as an absence: a caller still shipping
     the dropped axis must fail here rather than silently widening the key."""
-    with pytest.raises(cell_key.CellKeyError) as exc:
-        cell_key.from_axes({
+    with pytest.raises(compiled_graph_key.CompiledGraphKeyError) as exc:
+        compiled_graph_key.from_axes({
             "graph": "a" * 16, "envelope": "b" * 16, "sm": "sm_89",
             "toolchain": "c" * 16})
     assert "envelope" in str(exc.value)
@@ -87,17 +87,17 @@ def test_the_manifest_digest_is_a_label_not_an_identity() -> None:
     ``(manifest_digest, sm, toolchain)`` — so it must be sm- and
     toolchain-FREE, or that tuple is degenerate."""
     hashes = ["ff" * 8, "aa" * 8]
-    assert cell_key.manifest_digest(hashes) == \
-        cell_key.manifest_digest(reversed(hashes))
-    assert not cell_key.is_key(cell_key.manifest_digest(hashes)), (
+    assert compiled_graph_key.manifest_digest(hashes) == \
+        compiled_graph_key.manifest_digest(reversed(hashes))
+    assert not compiled_graph_key.is_key(compiled_graph_key.manifest_digest(hashes)), (
         "a manifest digest must never have entry-key shape — nothing may "
         "resolve, download, verify or arm it")
 
 
 def test_a_ck1_key_is_not_an_entry_key() -> None:
     """The re-key, enforced at the grammar. A ck1 key names a 36-entry
-    all-or-nothing cell, which this runtime cannot arm at all; admitting it
-    would let a cell ref reach a per-entry path and fail late.
+    all-or-nothing compiled graph, which this runtime cannot arm at all; admitting it
+    would let a compiled graph ref reach a per-entry path and fail late.
 
     THE FIFTH SWEEP ERROR, and it landed in the atom's own proof: a blanket
     ``ck1-`` -> ``ek1-`` fixture sweep rewrote the REFUSAL line here, leaving
@@ -111,11 +111,11 @@ def test_a_ck1_key_is_not_an_entry_key() -> None:
     and the exception here is the one line that must keep naming the OLD
     scheme. Fixed, and annotated so the next sweep leaves it alone.
     """
-    assert cell_key.KEY_SCHEME == "ek1"
+    assert compiled_graph_key.KEY_SCHEME == "ek1"
     # fence-symbol-exempt: `ck1` is the SUPERSEDED scheme and naming it is the
     # whole assertion — a sweep that renames this line deletes the invariant.
-    assert not cell_key.is_key("ck1-" + "0" * 56)
-    assert cell_key.is_key("ek1-" + "0" * 56)
+    assert not compiled_graph_key.is_key("ck1-" + "0" * 56)
+    assert compiled_graph_key.is_key("ek1-" + "0" * 56)
     # The refusal is about the PREFIX, not the length: a well-formed ck1 key
     # of exactly the right shape is still refused, which is what makes an
     # orphaned ref fail at the comparison rather than late.
@@ -129,43 +129,43 @@ def test_one_artifact_carries_exactly_one_graph(tmp_path: Path) -> None:
     meta = entry_meta(*rig.ROWS[0])
     assert meta["format"] == 3
     assert aot.verify_contract(meta) == ""
-    entry = meta[cell_key.ENTRY_BLOCK_KEY]
+    entry = meta[compiled_graph_key.ENTRY_BLOCK_KEY]
     assert entry["name"] == rig.entry_name(*rig.ROWS[0])
     assert "entries" not in meta and "combined_graph_hash" not in meta
 
     work = tmp_path / "work"
     work.mkdir()
     (work / aot.PACKAGE_NAME).write_bytes(b"\x00not-a-real-pt2")
-    packed = aot.pack(work, tmp_path / f"{meta['cell_key']}.tar.gz", meta)
+    packed = aot.pack(work, tmp_path / f"{meta['compiled_graph_key']}.tar.gz", meta)
     back, block = aot._unpack(packed, tmp_path / "out")
     assert block["class_hash"] == entry["class_hash"]
-    assert cell_key.from_entry_metadata(back).digest == meta["cell_key"]
+    assert compiled_graph_key.from_entry_metadata(back).digest == meta["compiled_graph_key"]
 
 
 def test_a_forged_key_stamp_is_refused_on_the_staged_bytes() -> None:
     meta = entry_meta(*rig.ROWS[0])
-    meta["cell_key"] = "ek1-" + "0" * 56
+    meta["compiled_graph_key"] = "ek1-" + "0" * 56
     reason = aot.verify_contract(meta)
     assert "!=" in reason and "recorded facts describe" in reason
 
 
-def test_a_format_2_cell_cannot_restate_a_per_entry_identity() -> None:
+def test_a_format_2_compiled_graph_cannot_restate_a_per_entry_identity() -> None:
     """Why the ck1 corpus purge is hygiene rather than a correctness
-    precondition: a 36-entry cell records an ``entries`` MAP, so the
+    precondition: a 36-entry compiled graph records an ``entries`` MAP, so the
     recomputation raises rather than matching."""
     legacy = {
         "format": 2, "kind": aot.ARTIFACT_KIND, **rig.RUNTIME,
-        "family": rig.FAMILY, "cell_key": "ek1-" + "0" * 56,
+        "family": rig.FAMILY, "compiled_graph_key": "ek1-" + "0" * 56,
         "entries": {rig.entry_name(h, w): rig._entry(h, w)
                     for h, w in rig.ROWS},
         "combined_graph_hash": "0" * 16,
-        cell_key.EXPORT_ENVELOPE_KEY: {"shapes": [list(r) for r in rig.ROWS]},
+        compiled_graph_key.EXPORT_ENVELOPE_KEY: {"shapes": [list(r) for r in rig.ROWS]},
         "toolchain": dict(TOOLCHAIN),
         "host_isa": {"machine": platform.machine(), "march": "",
                      "simdlen": 0, "level": ""},
     }
-    with pytest.raises(cell_key.CellKeyError) as exc:
-        cell_key.from_entry_metadata(legacy)
+    with pytest.raises(compiled_graph_key.CompiledGraphKeyError) as exc:
+        compiled_graph_key.from_entry_metadata(legacy)
     assert "entry" in str(exc.value)
 
 
@@ -197,9 +197,9 @@ def _arm(
         work = tmp_path / f"work{i}"
         work.mkdir()
         (work / aot.PACKAGE_NAME).write_bytes(b"\x00not-a-real-pt2")
-        artifact = aot.pack(work, tmp_path / f"cell{i}.tar.gz", meta)
+        artifact = aot.pack(work, tmp_path / f"compiled_graph{i}.tar.gz", meta)
         outcomes.append(aot.enable(
-            pipeline, rig.cell_cfg(rig.declaration()), tmp_path / "cache",
+            pipeline, rig.compiled_graph_cfg(rig.declaration()), tmp_path / "cache",
             artifact, declared=tuple(declared_names)))
     del provision  # the arm route is exercised through `enable` directly
     return pipeline, module, outcomes
@@ -209,8 +209,8 @@ def test_a_failing_entry_does_not_un_arm_its_siblings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: Any,
 ) -> None:
     """THE RED, closed. On master ``arm_entry`` bound every entry before
-    any wrap — "a cell that cannot arm one of its graph classes arms none of
-    them" — so one unbindable class cost the whole cell and the pod served
+    any wrap — "a compiled graph that cannot arm one of its graph classes arms none of
+    them" — so one unbindable class cost the whole compiled graph and the pod served
     fully eager. An entry is one graph, so it arms whole or not at all, and a
     sibling's failure is not its business.
     """

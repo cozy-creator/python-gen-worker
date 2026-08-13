@@ -29,9 +29,9 @@ from pathlib import Path
 
 import pytest
 
-from gen_worker import aot_serve, cell_key, fleet_cells
+from gen_worker import aot_serve, compiled_graph_key, fleet_compiled_graphs
 
-from harness.cell_meta import exported_cell_meta
+from harness.compiled_graph_meta import exported_compiled_graph_meta
 
 SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "gen_worker"
 
@@ -55,16 +55,16 @@ def test_membership_axiom_the_key_is_exactly_three_axes():
     digests the UNION of the ladder across the whole declaration, which is a
     property of the collection and not of any computation.
     """
-    assert cell_key._REQUIRED == ("graph", "sm", "toolchain")
-    assert cell_key._OPTIONAL == ()
+    assert compiled_graph_key._REQUIRED == ("graph", "sm", "toolchain")
+    assert compiled_graph_key._OPTIONAL == ()
 
 
 def test_adding_an_axis_refuses_with_the_axiom_named():
     axes = {
         "graph": "g" * 16, "sm": "sm_89", "toolchain": "t" * 16, "sku": "l4",
     }
-    with pytest.raises(cell_key.CellKeyError) as exc:
-        cell_key.from_axes(axes)
+    with pytest.raises(compiled_graph_key.CompiledGraphKeyError) as exc:
+        compiled_graph_key.from_axes(axes)
     assert "membership axiom" in str(exc.value)
     assert "pgw#1059" in str(exc.value)
 
@@ -79,13 +79,13 @@ def test_every_dropped_axis_is_a_typed_refusal(stale):
         "graph": "g" * 16, "sm": "sm_89",
         "toolchain": "t" * 16, stale: "anything",
     }
-    with pytest.raises(cell_key.CellKeyError, match="unknown cell-key axis"):
-        cell_key.from_axes(axes)
+    with pytest.raises(compiled_graph_key.CompiledGraphKeyError, match="unknown compiled_graph-key axis"):
+        compiled_graph_key.from_axes(axes)
 
 
 def test_missing_axis_is_a_typed_refusal():
-    with pytest.raises(cell_key.CellKeyError, match="requires axes"):
-        cell_key.from_axes({"graph": "g" * 16, "sm": "sm_89"})
+    with pytest.raises(compiled_graph_key.CompiledGraphKeyError, match="requires axes"):
+        compiled_graph_key.from_axes({"graph": "g" * 16, "sm": "sm_89"})
 
 
 # ---------------------------------------------------------------------------
@@ -96,17 +96,17 @@ def test_missing_axis_is_a_typed_refusal():
 #: (module-relative path, count-limit-free) pairs. Everything else in
 #: src/gen_worker must READ the stamped value instead of re-deriving it.
 #: Extending an allowlist is a conscious act reviewed against the module
-#: docstrings of cell_key/aot_serve — never a drive-by.
+#: docstrings of compiled_graph_key/aot_serve — never a drive-by.
 _DERIVATION_ALLOWLIST = {
     # the declaration-wide coverage LABEL (pgw#1176: demoted from identity,
     # so the fence is about ONE arithmetic, not one identity).
     "manifest_digest(": {
-        "cell_key.py",    # def
+        "compiled_graph_key.py",    # def
         "aot_mint.py",    # the mint's label over the class set it produced
         "boot_key.py",    # the boot fold's label over the classes it traced
         # CONSCIOUS EXTENSION (pgw#1176), and it is a NAME COLLISION rather
         # than a second derivation: `guard_closure.manifest_digest` digests a
-        # GUARD CLOSURE's manifest and has nothing to do with cell identity.
+        # GUARD CLOSURE's manifest and has nothing to do with compiled graph identity.
         # The fence greps a bare string, so an unrelated same-named function
         # reads as a violation. Listed rather than silenced, so the next
         # reader sees it was checked.
@@ -114,13 +114,13 @@ _DERIVATION_ALLOWLIST = {
     },
     # the exported-ENTRY key: mint stamp, publish recompute, admission proof.
     "from_entry_metadata(": {
-        "cell_key.py",    # def
-        "aot_mint.py",    # cell_identity (the stamp)
-        "fleet_cells.py",  # _recomputed_key (the publish recompute)
+        "compiled_graph_key.py",    # def
+        "aot_mint.py",    # compiled_graph_identity (the stamp)
+        "fleet_compiled_graphs.py",  # _recomputed_key (the publish recompute)
         "aot_serve.py",   # verify_contract (the admission proof)
         # pgw#1089 (§4.27 step 1): the BOOT-side derivation. Added
         # consciously, and it is the reason the fence is an allowlist rather
-        # than a ban: the boot key must be THE cell key, so the fourth site
+        # than a ban: the boot key must be THE compiled graph key, so the fourth site
         # had to be this function and not a fourth arithmetic. `boot_key.fold`
         # assembles the mint's own entry blocks, stamps them through
         # `aot_serve.artifact_metadata` (which is where `combined_graph_hash`
@@ -133,8 +133,8 @@ _DERIVATION_ALLOWLIST = {
     },
     # the declared-envelope digest.
     "envelope_digest(": {
-        "cell_key.py",    # def (+ envelope_facts)
-        "fleet_cells.py",  # arm_identity + arm_axis_divergence (same derivation
+        "compiled_graph_key.py",    # def (+ envelope_facts)
+        "fleet_compiled_graphs.py",  # arm_identity + arm_axis_divergence (same derivation
                            # both sides of the handback seam — the pgw#1042 check)
     },
     # the toolchain-axis digest, i.e. its MEMBERSHIP (pgw#1050). The producer
@@ -143,8 +143,8 @@ _DERIVATION_ALLOWLIST = {
     # restates the axis from a recorded block must come through it or the
     # two ends can disagree about membership.
     "toolchain_axis_digest(": {
-        "cell_key.py",     # def (+ toolchain_facts)
-        "fleet_cells.py",  # arm_identity + arm_axis_divergence
+        "compiled_graph_key.py",     # def (+ toolchain_facts)
+        "fleet_compiled_graphs.py",  # arm_identity + arm_axis_divergence
         "aot_identity.py",  # artifact_identity (the wire fact)
         # pgw#1205: the device-peak census's provenance. Added CONSCIOUSLY,
         # which is what this fence's own message offers as the alternative to
@@ -154,13 +154,13 @@ _DERIVATION_ALLOWLIST = {
         #
         # It is the right call rather than merely the available one. A banked
         # reading says "this graph class cost this much under THIS toolchain",
-        # and the only useful meaning of "this toolchain" is the one the CELL
+        # and the only useful meaning of "this toolchain" is the one the COMPILED GRAPH
         # uses — same membership, same digest. A second notion computed
-        # locally would drift from the cell's exactly where it matters (the
+        # locally would drift from the compiled graph's exactly where it matters (the
         # header above: "the two ends can disagree about membership"), and the
         # bank would then be keyed on a toolchain nothing else recognises.
         #
-        # It derives NO KEY: nothing compares this value against a cell key,
+        # It derives NO KEY: nothing compares this value against a compiled graph key,
         # an arm key or a boot key. It is a bank axis, and the bank sizes
         # nothing (`test_device_peak_bank_pgw1205` fences that structurally).
         "aot_mint.py",
@@ -202,7 +202,7 @@ def test_single_derivation_fence(needle):
         f"second derivation of {needle!r} found at {offenders!r} — the "
         f"membership axiom's one-derivation rule (pgw#1059) allows only "
         f"{sorted(allowed)!r}; read the stamped value instead, or extend the "
-        f"allowlist consciously in tests/test_cell_key_pgw1059.py")
+        f"allowlist consciously in tests/test_compiled_graph_key_pgw1059.py")
 
 
 def test_single_derivation_fence_is_red_provable(tmp_path):
@@ -242,9 +242,9 @@ def _old_schema_digest(meta: dict) -> str:
         # of this helper is to reconstruct a key the tree can no longer
         # produce. It read an `entries` MAP and a `declared_envelope`; an
         # entry artifact records neither, which is itself the structural
-        # reason an orphaned cell can never be re-derived.
+        # reason an orphaned compiled graph can never be re-derived.
         "targets": [str(
-            (meta.get(cell_key.ENTRY_BLOCK_KEY) or {}).get("target") or "")],
+            (meta.get(compiled_graph_key.ENTRY_BLOCK_KEY) or {}).get("target") or "")],
         "shapes": [[1024, 1024]],
         "text_lens": [77],
         "guidance": [7.5],
@@ -281,15 +281,15 @@ def test_old_and_new_keys_cannot_collide():
     NAME SETS, so equal digests would require a SHA-256 collision. This is
     the verification the purge note rests on: old dev-stack rows are
     unreachable by new derivations, so the purge is hygiene."""
-    meta = exported_cell_meta()
-    new_key = cell_key.from_entry_metadata(meta).digest
+    meta = exported_compiled_graph_meta()
+    new_key = compiled_graph_key.from_entry_metadata(meta).digest
     old_key = _old_schema_digest(meta)
     assert old_key != new_key
     # pgw#1176 makes this STRUCTURAL rather than a collision argument: a ck1
-    # key does not even parse as an entry key, so an orphaned cell ref cannot
+    # key does not even parse as an entry key, so an orphaned compiled graph ref cannot
     # reach a per-entry code path and fail late — it fails at the comparison.
-    assert not cell_key.is_key(old_key)
-    assert cell_key.is_key(new_key)
+    assert not compiled_graph_key.is_key(old_key)
+    assert compiled_graph_key.is_key(new_key)
 
 
 def _admissible_meta() -> dict:
@@ -297,7 +297,7 @@ def _admissible_meta() -> dict:
     producer (``aot_serve.entry_metadata``), identity blocks recorded, key
     stamped from the recorded facts."""
     meta = aot_serve.entry_metadata(
-        family="fam", precision="bf16", cell_key="", name="unet/main",
+        family="fam", precision="bf16", compiled_graph_key="", name="unet/main",
         entry={
             "target": "unet",
             "fork": [],
@@ -315,38 +315,38 @@ def _admissible_meta() -> dict:
         "toolchain": {"torch": "x" * 16, "settings_declaration": "d" * 16,
                       "loaded_libs": "l" * 16},
     })
-    meta["cell_key"] = cell_key.from_entry_metadata(meta).digest
+    meta["compiled_graph_key"] = compiled_graph_key.from_entry_metadata(meta).digest
     return meta
 
 
 def test_pre_redefinition_artifact_is_structurally_refused():
     """An artifact recording the OLD blocks (an ``entries`` MAP and a
-    ``combined_graph_hash``, the 36-entry-cell era) cannot restate a
+    ``combined_graph_hash``, the 36-entry-compiled graph era) cannot restate a
     per-entry identity: the key derivation refuses typed, and admission
     (``verify_contract``) turns the unrestatable stamp into a named refusal
     before anything can arm. That is what makes the ck1 corpus purge hygiene
     rather than a correctness precondition."""
     meta = _admissible_meta()
     old = dict(meta)
-    entry = old.pop(cell_key.ENTRY_BLOCK_KEY)
+    entry = old.pop(compiled_graph_key.ENTRY_BLOCK_KEY)
     old["entries"] = {entry["name"]: entry}
     # fence-symbol-exempt: the pre-atom artifact shape, on purpose — this
-    # row proves a format-2 cell cannot restate a per-entry identity.
+    # row proves a format-2 compiled graph cannot restate a per-entry identity.
     old["combined_graph_hash"] = "0" * 16
     old["format"] = 2
-    with pytest.raises(cell_key.CellKeyError, match="entry"):
-        cell_key.from_entry_metadata(old)
+    with pytest.raises(compiled_graph_key.CompiledGraphKeyError, match="entry"):
+        compiled_graph_key.from_entry_metadata(old)
     # its (old-formula) stamp is present but unrestatable => admission refuses.
     # An ek-shaped stamp, because a ck1 stamp is not an identity CLAIM to this
     # runtime at all — `is_key` refuses it, so it never reaches the restate.
-    old["cell_key"] = "ek1-" + "5" * 56
+    old["compiled_graph_key"] = "ek1-" + "5" * 56
     reason = aot_serve.verify_contract(old)
     assert "malformed declared contract" in reason or "not restatable" in reason
 
 
 def test_forged_stamp_is_refused_at_admission():
     meta = _admissible_meta()
-    meta["cell_key"] = "ek1-" + "0" * 56
+    meta["compiled_graph_key"] = "ek1-" + "0" * 56
     reason = aot_serve.verify_contract(meta)
     assert "recorded facts describe" in reason
 
@@ -361,18 +361,18 @@ def test_true_stamp_passes_admission():
 
 
 def test_envelope_facts_canonicalize():
-    a = cell_key.envelope_facts({
+    a = compiled_graph_key.envelope_facts({
         "shapes": [[1024, 768], [768, 1024]],
         "text_lens": [77, 77, 248],
         "guidance": [7.5, 1.0],
     })
-    b = cell_key.envelope_facts({
+    b = compiled_graph_key.envelope_facts({
         "shapes": [[768, 1024], [1024, 768]],
         "text_lens": [248, 77],
         "guidance": [1.0, 7.5],
     })
     assert a == b
-    assert cell_key.envelope_digest(a) == cell_key.envelope_digest(b)
+    assert compiled_graph_key.envelope_digest(a) == compiled_graph_key.envelope_digest(b)
 
 
 def test_overlay_slot_empty_is_absent_and_nonempty_keys():
@@ -381,13 +381,13 @@ def test_overlay_slot_empty_is_absent_and_nonempty_keys():
     not enter the canonical form (a field that says "unchanged" must never
     re-key the fleet)."""
     base = {"shapes": [[64, 64]], "text_lens": [7], "guidance": [1.0]}
-    assert "overlay" not in cell_key.envelope_facts(base)
-    assert "overlay" not in cell_key.envelope_facts({**base, "overlay": {}})
-    with_overlay = cell_key.envelope_facts(
+    assert "overlay" not in compiled_graph_key.envelope_facts(base)
+    assert "overlay" not in compiled_graph_key.envelope_facts({**base, "overlay": {}})
+    with_overlay = compiled_graph_key.envelope_facts(
         {**base, "overlay": {"tf32": "off"}})
     assert with_overlay["overlay"] == {"tf32": "off"}
-    assert (cell_key.envelope_digest({**base, "overlay": {"tf32": "off"}})
-            != cell_key.envelope_digest(base))
+    assert (compiled_graph_key.envelope_digest({**base, "overlay": {"tf32": "off"}})
+            != compiled_graph_key.envelope_digest(base))
 
 
 def test_only_the_graph_rekeys_and_the_envelope_no_longer_can():
@@ -406,25 +406,25 @@ def test_only_the_graph_rekeys_and_the_envelope_no_longer_can():
     graph — re-keys through that class's own hash, which is the honest
     channel, rather than through a union digest that punishes its siblings.
     """
-    meta = exported_cell_meta()
-    key = cell_key.from_entry_metadata(meta).digest
+    meta = exported_compiled_graph_meta()
+    key = compiled_graph_key.from_entry_metadata(meta).digest
 
     # The envelope is not an input to identity at all any more: there is no
     # `declared_envelope` on an entry artifact, and adding one changes nothing.
     wider = dict(meta)
-    wider[cell_key.EXPORT_ENVELOPE_KEY] = {
+    wider[compiled_graph_key.EXPORT_ENVELOPE_KEY] = {
         "shapes": [[1024, 1024], [768, 768]],
         "text_lens": [77], "guidance": [7.5]}
-    assert cell_key.from_entry_metadata(wider).digest == key
+    assert compiled_graph_key.from_entry_metadata(wider).digest == key
 
     other_graph = dict(meta)
-    other_graph[cell_key.ENTRY_BLOCK_KEY] = {
-        **meta[cell_key.ENTRY_BLOCK_KEY], "class_hash": "b" * 16}
-    assert cell_key.from_entry_metadata(other_graph).digest != key
+    other_graph[compiled_graph_key.ENTRY_BLOCK_KEY] = {
+        **meta[compiled_graph_key.ENTRY_BLOCK_KEY], "class_hash": "b" * 16}
+    assert compiled_graph_key.from_entry_metadata(other_graph).digest != key
 
 
 # ---------------------------------------------------------------------------
-# 5. The arm token is NOT a cell key
+# 5. The arm token is NOT a compiled graph key
 # ---------------------------------------------------------------------------
 
 
@@ -437,23 +437,23 @@ class _Cfg:
 
 def test_arm_token_never_passes_is_key(monkeypatch):
     monkeypatch.setattr(
-        fleet_cells.cc, "runtime_key",
+        fleet_compiled_graphs.cc, "runtime_key",
         lambda: {"sm": "sm_89", "sku": "l4", "torch": "t", "triton": "",
                  "cuda": "", "image_digest": ""})
     monkeypatch.setattr(
-        fleet_cells.cc, "toolchain_digest", lambda: (("torch", "x" * 16),))
-    identity = fleet_cells.arm_identity("fam", "", 0, _Cfg())
+        fleet_compiled_graphs.cc, "toolchain_digest", lambda: (("torch", "x" * 16),))
+    identity = fleet_compiled_graphs.arm_identity("fam", "", 0, _Cfg())
     token = identity.token
     # pgw#1113: the scheme digit is the token's FACT SET, and the fact set
     # gained the compile SUBJECT — so the prefix moved with it, which is what
     # makes a predecessor memo row unaddressable rather than misreadable.
-    assert token.startswith(fleet_cells.ARM_SCHEME + "-")
+    assert token.startswith(fleet_compiled_graphs.ARM_SCHEME + "-")
     assert not token.startswith("ck")
-    assert not cell_key.is_key(token)
+    assert not compiled_graph_key.is_key(token)
     # the compared facts are exactly the pre-trace set — graph is absent, and
     # so is `envelope`: pgw#1176 dropped it from ARM_ENVIRONMENT_FACTS because
     # a per-entry artifact records no declared envelope, so comparing it would
     # refuse every child handback by construction.
-    assert set(identity.facts_dict()) == set(fleet_cells.ARM_FACTS)
-    assert "envelope" not in fleet_cells.ARM_FACTS
+    assert set(identity.facts_dict()) == set(fleet_compiled_graphs.ARM_FACTS)
+    assert "envelope" not in fleet_compiled_graphs.ARM_FACTS
     assert "graph" not in identity.facts_dict()

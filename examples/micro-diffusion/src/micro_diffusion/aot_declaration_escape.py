@@ -1,7 +1,7 @@
 """The pgw#1062 declaration: the escape-hatch graph, one entry.
 
 Deliberately the smallest declaration that still puts every author-defined-op
-surface inside a minted cell: ONE target, fork-free, batch fixed, two token
+surface inside a minted compiled graph: ONE target, fork-free, batch fixed, two token
 rows collapsing under ``dynamic-collapse`` into a single entry. The variable
 under test is the OPS in the graph — a custom op with a fake kernel, a
 ``triton_op`` kernel, a raw ``@triton.jit`` call — not entry count, so
@@ -24,7 +24,7 @@ LATENT_ROWS = (32, 48)
 VAE_SCALE = 8
 PIXEL_ROWS = tuple((n * VAE_SCALE, n * VAE_SCALE) for n in LATENT_ROWS)
 #: Token-shaped like the base family: the dynamic extent stays LINEAR in one
-#: symbol (pgw#998), so the only new facts in this cell are the ops.
+#: symbol (pgw#998), so the only new facts in this compiled graph are the ops.
 TOKEN_ROWS = tuple(n * n for n in LATENT_ROWS)
 COND_LEN = 16
 ARITY = 1

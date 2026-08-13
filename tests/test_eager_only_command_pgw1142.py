@@ -8,16 +8,16 @@ rather than serve compiled."*
 Four properties, and every one of them is a separate way the feature can be
 built wrong:
 
-1. **It suppresses.** Nothing arms, nothing mints, and an already-armed cell is
+1. **It suppresses.** Nothing arms, nothing mints, and an already-armed compiled graph is
    not called.
 2. **It is REVERSIBLE.** Releasing it resumes compiled serving on the next
    request with no re-arm — which is only true if the suppression is read at
    the CALL rather than by unwrapping the artifact.
 3. **It is DISTINCT from §4.31's sticky de-arm.** Same eager posture, two
-   triggers: releasing an operator order must not resurrect a cell that
+   triggers: releasing an operator order must not resurrect a compiled graph that
    de-armed itself for cause, and their tokens must never collide.
 4. **It is legible.** A suppressed worker's request rows say
-   ``operator_eager_only`` — not ``aot_cell`` (the cell is still armed, and
+   ``operator_eager_only`` — not ``aot_compiled_graph`` (the compiled graph is still armed, and
    naive classification reads exactly that), and not any of the tokens that
    mean something failed.
 """
@@ -36,11 +36,11 @@ from gen_worker import activity
 from gen_worker import aot_serve
 from gen_worker import boot_adopt
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells
+from gen_worker import fleet_compiled_graphs
 from gen_worker import lifecycle as lifecycle_mod
 from gen_worker import serve_posture
 from gen_worker import serving_mode
-from gen_worker.cell_adopt import EagerPhase
+from gen_worker.compiled_graph_adopt import EagerPhase
 from gen_worker.cli import serve as serve_cli
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
@@ -123,8 +123,8 @@ META: Dict[str, Any] = {
     "family": "sdxl-base", "precision": "w8a8", "sku": "l4", "sm": "sm_89",
     "torch": "2.13.0+cu130", "cuda": "13.0",
     # pgw#1176: this is now an ENTRY key and rides the marker's `entries` row,
-    # so it is spelled in the grammar `cell_key.is_key` actually admits.
-    "cell_key": "ek1-" + "d" * 56,
+    # so it is spelled in the grammar `compiled_graph_key.is_key` actually admits.
+    "compiled_graph_key": "ek1-" + "d" * 56,
     "lora_bucket": 0,
 }
 
@@ -168,13 +168,13 @@ def _armed_module() -> tuple[FakeModule, FakePackage, FakePipeline]:
             "module": module, "attr": "forward",
             "state": getattr(module, "_cozy_aot")["state"]}},
         "entries": {ENTRY_NAME: {
-            "key": META["cell_key"], "target": "unet",
+            "key": META["compiled_graph_key"], "target": "unet",
             "class_hash": "", "manifest_digest": ""}},
         "bound_constants": {"pools": {}, "literals": {}},
     })
     # The fixture's own claim, checked once here rather than in five rows: this
     # pipeline really is serving the class it says it is.
-    assert aot_serve.armed_entries(pipeline) == {ENTRY_NAME: META["cell_key"]}
+    assert aot_serve.armed_entries(pipeline) == {ENTRY_NAME: META["compiled_graph_key"]}
     return module, package, pipeline
 
 
@@ -272,24 +272,24 @@ def test_the_fleet_policy_is_not_even_entered(
     def _explode(*_a: Any, **_k: Any) -> Any:
         raise AssertionError("the arming policy ran under an eager-only order")
 
-    monkeypatch.setattr(fleet_cells, "_arming_policy", _explode)
+    monkeypatch.setattr(fleet_compiled_graphs, "_arming_policy", _explode)
     serve_posture.apply_command(True, actor="paul")
-    outcome = fleet_cells.enable_compiled(FakePipeline(FakeModule()), Cfg())
+    outcome = fleet_compiled_graphs.enable_compiled(FakePipeline(FakeModule()), Cfg())
     assert outcome.armed is False
     assert outcome.eager_reason == EagerPhase.OPERATOR_EAGER_ONLY
 
 
 def test_an_ordered_aot_arm_is_obeyed_as_eager_not_refused() -> None:
-    """The hub named an exact cell; the operator said eager.
+    """The hub named an exact compiled graph; the operator said eager.
 
     The operator wins, and the shape of winning matters: `OrderedArmError`
     would fail the attempt typed and take the function down, which is the
     opposite of "serve eager instead".
     """
     serve_posture.apply_command(True, actor="paul", reason="broken")
-    outcome = fleet_cells.arm_ordered(
+    outcome = fleet_compiled_graphs.arm_ordered(
         FakePipeline(FakeModule()), Cfg(), None,
-        backend="aot_cell", artifact=Path("/nonexistent/cell.pt2"),
+        backend="aot_compiled_graph", artifact=Path("/nonexistent/compiled_graph.pt2"),
         delivered_ref="root/family-sdxl-base#ek1-abc",
         delivered_digest="sha256:abc", expected=None, publisher_org="root")
     assert outcome.armed is False
@@ -301,7 +301,7 @@ def test_an_ordered_aot_arm_is_obeyed_as_eager_not_refused() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_an_armed_cell_serves_eager_under_the_order_and_stays_armed() -> None:
+def test_an_armed_compiled_graph_serves_eager_under_the_order_and_stays_armed() -> None:
     module, package, pipeline = _armed_module()
 
     assert module.forward(*_call()) == "ARTIFACT_OUTPUT"
@@ -336,13 +336,13 @@ def test_releasing_the_order_resumes_compiled_serving_with_no_rearm() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_releasing_the_order_does_not_resurrect_a_de_armed_cell() -> None:
+def test_releasing_the_order_does_not_resurrect_a_de_armed_compiled_graph() -> None:
     """De-arm is EVIDENCE; the order is POLICY. Policy does not overrule it."""
     module, package, pipeline = _armed_module()
     package.raises = True
 
-    # §4.31: a cell-attributable failure serves this request eager and de-arms
-    # the cell, sticky for the boot.
+    # §4.31: a compiled graph-attributable failure serves this request eager and de-arms
+    # the compiled graph, sticky for the boot.
     assert module.forward(*_call()) == "EAGER_OUTPUT"
     assert getattr(module, "_cozy_aot")["state"]["failed"] is True
 
@@ -374,12 +374,12 @@ def test_the_two_triggers_report_different_reasons() -> None:
 def test_a_suppressed_request_is_not_reported_as_compiled() -> None:
     ref = "root/family-sdxl-base#ek1-abc"
     # The noted key must be the key the ref NAMES — `is_aot_ref` recognises an
-    # AOT cell by exactly that match, so a `ck1`-stamped note against an `ek1`
-    # ref resolves `jit_cell` and this row would assert the suppression
+    # AOT compiled graph by exactly that match, so a `ck1`-stamped note against an `ek1`
+    # ref resolves `jit_compiled_graph` and this row would assert the suppression
     # vocabulary on the wrong serving mode.
     aot_serve.note_aot_key("ek1-abc")
     armed = serving_mode.resolve(active_compile_ref=ref, sm="89")
-    assert armed.serving_mode == serving_mode.MODE_AOT_CELL
+    assert armed.serving_mode == serving_mode.MODE_AOT_COMPILED_GRAPH
 
     serve_posture.apply_command(True, actor="paul", reason="broken")
     suppressed = serving_mode.resolve(active_compile_ref=ref, sm="89")
@@ -388,9 +388,9 @@ def test_a_suppressed_request_is_not_reported_as_compiled() -> None:
     # Not a FALLBACK: nothing fell back, so the compiled-vs-eager comparison
     # keeps its meaning.
     assert suppressed.served_eager_fallback is False
-    # The cell is still named — an operator has to be able to see WHICH cell
+    # The compiled graph is still named — an operator has to be able to see WHICH compiled graph
     # is standing by.
-    assert suppressed.served_cell_ref == ref
+    assert suppressed.served_compiled_graph_ref == ref
 
 
 def test_a_real_guard_miss_still_reports_itself() -> None:
@@ -410,7 +410,7 @@ def test_the_scheduler_command_applies_in_both_directions() -> None:
     """The real `Lifecycle.on_message` branch, over a real protobuf.
 
     Bound to a bare namespace on purpose: the branch must not depend on worker
-    state, because a worker holding a broken cell is exactly the worker whose
+    state, because a worker holding a broken compiled graph is exactly the worker whose
     state may be unhealthy.
     """
     handler = lifecycle_mod.Lifecycle.on_message.__get__(
@@ -418,7 +418,7 @@ def test_the_scheduler_command_applies_in_both_directions() -> None:
 
     asyncio.run(handler(pb.SchedulerMessage(
         serve_posture=pb.ServePosture(
-            eager_only=True, actor="admin:paul", reason="ie#657 cells crash"))))
+            eager_only=True, actor="admin:paul", reason="ie#657 compiled_graphs crash"))))
     assert serve_posture.eager_only() is True
     assert serve_posture.order().actor == "admin:paul"
 

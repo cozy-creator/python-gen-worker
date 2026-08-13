@@ -2,7 +2,7 @@
 
 **pgw#939 (supply chain).** `if expected { compare }` — so an absent expected
 value ADMITS. The artifact in every case is bytes that will subsequently be
-safetensors-loaded or armed as a compiled cell, and `DESIGN-RULINGS.md` §1.22
+safetensors-loaded or armed as a compiled compiled graph, and `DESIGN-RULINGS.md` §1.22
 decides all of them the same way: missing evidence is an integrity verdict,
 not a disabled check.
 
@@ -24,12 +24,12 @@ from typing import Any, Dict
 
 import pytest
 
-from gen_worker import aot_serve, cell_key  # noqa: E402
+from gen_worker import aot_serve, compiled_graph_key  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
 # pgw#939 §3-4 — aot_serve.verify guarded three identity axes on "a stamp is
-# present". A stampless cell was a wrong cache HIT, not a miss.
+# present". A stampless compiled graph was a wrong cache HIT, not a miss.
 # ---------------------------------------------------------------------------
 
 
@@ -61,13 +61,13 @@ def _entry_block() -> Dict[str, Any]:
 def _minted(family: str = "sdxl") -> Dict[str, Any]:
     """A real, fully-stamped artifact envelope from the ONE producer."""
     return aot_serve.entry_metadata(
-        family=family, precision="bf16", cell_key="",
+        family=family, precision="bf16", compiled_graph_key="",
         name="unet", entry=_entry_block(),
         strict_export=True, lora_bucket=0,
     )
 
 
-def test_a_correctly_stamped_cell_still_verifies() -> None:
+def test_a_correctly_stamped_compiled_graph_still_verifies() -> None:
     """The control. Without it a green result below could mean the whole
     envelope stopped verifying for an unrelated reason."""
     meta = _minted()
@@ -77,7 +77,7 @@ def test_a_correctly_stamped_cell_still_verifies() -> None:
 
 def test_an_unstamped_family_is_refused_by_name() -> None:
     """`if family and want_fam and want_fam != family` — the middle clause
-    made an unstamped cell match EVERY family it was offered to, on the axis
+    made an unstamped compiled graph match EVERY family it was offered to, on the axis
     that decides which pipeline the `.so` is dlopen'd into."""
     meta = _minted()
     meta["family"] = ""
@@ -101,7 +101,7 @@ def test_no_family_asked_means_no_family_refused() -> None:
 
 def test_an_unstamped_range_digest_is_refused_by_name() -> None:
     meta = _minted()
-    meta[cell_key.ENTRY_BLOCK_KEY].pop("range_digest")
+    meta[compiled_graph_key.ENTRY_BLOCK_KEY].pop("range_digest")
     reason = aot_serve.verify_contract(meta)
     assert reason == "entry 'unet': no range_digest stamped", reason
 
@@ -121,7 +121,7 @@ def test_class_hash_absence_was_already_correct_and_stays_so() -> None:
     """`:665-666` proves the author knew the right form; the other axis is
     brought to IT, not the reverse."""
     meta = _minted()
-    meta[cell_key.ENTRY_BLOCK_KEY]["class_hash"] = ""
+    meta[compiled_graph_key.ENTRY_BLOCK_KEY]["class_hash"] = ""
     assert aot_serve.verify_contract(meta) == "entry 'unet': no class_hash stamped"
 
 
@@ -133,14 +133,14 @@ def test_class_hash_absence_was_already_correct_and_stays_so() -> None:
 # pgw#1181 REMOVED the four `_ptx_jit_gaps` rows (pgw#939 site 2: an unreadable
 # cubin must be a GAP, not a skip). The gate they cover ran inside
 # `compile_cache.pack`, over the inductor/triton capture a
-# `torch-inductor-cache` cell was built from — a completeness check on kernels
+# `torch-inductor-cache` compiled graph was built from — a completeness check on kernels
 # packed into that artifact. The format has had no writer since pgw#1178 and is
 # deleted here, so there is no capture to walk and no pack to refuse.
 #
 # The pgw#939 PRINCIPLE this file exists for is untouched and the other 19 rows
 # still assert it on live sites: absent evidence is an integrity verdict, never
 # a disabled check. On the exported lane the same principle is enforced by the
-# key — a cell that cannot state an axis has no identity and never resolves.
+# key — a compiled graph that cannot state an axis has no identity and never resolves.
 
 
 # ---------------------------------------------------------------------------

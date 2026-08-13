@@ -35,19 +35,19 @@ import pytest
 import torch
 
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells, mint_delegate, mint_workers
+from gen_worker import fleet_compiled_graphs, mint_delegate, mint_workers
 from gen_worker import mint_process as mp
 from gen_worker.api.binding import ModelRef
 from gen_worker.api.decorators import DynamicDim
-from gen_worker.registry import CompileCell
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker.registry import CompileCompiledGraph
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 
 GIB = 1 << 30
 STUB_MODULE = "harness.mint_child_stub"
 
 
-def _cfg() -> CompileCell:
-    return CompileCell(
+def _cfg() -> CompileCompiledGraph:
+    return CompileCompiledGraph(
         shapes=((1024, 1024), (832, 1216)),
         targets=("unet",),
         family="sdxl",
@@ -94,27 +94,27 @@ def test_the_delegated_arm_never_touches_the_live_pipeline(
     # pgw#1010: WHICH recipe a miss runs has its own coverage; a test box
     # registers no export declarations, so state the answer this test is about.
     monkeypatch.setattr(
-        fleet_cells, "mint_recipe", lambda *a, **k: fleet_cells.RECIPE_AOT)
+        fleet_compiled_graphs, "mint_recipe", lambda *a, **k: fleet_compiled_graphs.RECIPE_AOT)
     monkeypatch.setattr(
-        fleet_cells.provision, "enable_compiled",
-        lambda *a, **k: AdoptOutcome.miss("no_cell"))
+        fleet_compiled_graphs.provision, "enable_compiled",
+        lambda *a, **k: AdoptOutcome.miss("no_compiled_graph"))
     monkeypatch.setattr(cc, "has_compile_target", lambda *a, **k: True)
     monkeypatch.setattr(cc, "mandatory_serving", lambda pipe: False)
     monkeypatch.setattr(cc, "apply_lora_execution_lane", lambda pipe, bucket, **_kw: True)
     monkeypatch.setattr(cc, "drop_lora_execution_lane", lambda pipe: True)
     monkeypatch.setattr(
-        fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "fp8")
-    monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
+        fleet_compiled_graphs.loading, "pipeline_weight_lane", lambda pipe: "fp8")
+    monkeypatch.setattr(fleet_compiled_graphs, "_cuda_ready", lambda: True)
     monkeypatch.setattr(cc, "toolchain_present", lambda: True)
     # No CUDA on this box, so the real sm axis is unavailable; the key itself
     # is not what this test is about.
     monkeypatch.setattr(
-        fleet_cells, "arm_identity",
+        fleet_compiled_graphs, "arm_identity",
         lambda *a, **k: SimpleNamespace(
             token="arm1-test", facts_dict=lambda: {}))
 
     prior = dict(os.environ)
-    outcome = fleet_cells.enable_compiled(
+    outcome = fleet_compiled_graphs.enable_compiled(
         SimpleNamespace(), _cfg(), tmp_path, None, None, delegate=True)
 
     assert armed == [], "a delegated mint must not arm the serving pipeline"
@@ -134,10 +134,10 @@ def test_the_delegated_arm_never_touches_the_live_pipeline(
 
 def test_the_wire_form_preserves_the_declared_export_exactly() -> None:
     """The load-bearing check: the ``ExportSpec`` the CHILD derives from the
-    wire form must equal the one the parent's own ``CompileCell`` derives.
+    wire form must equal the one the parent's own ``CompileCompiledGraph`` derives.
 
     That — not ``contract_facts()`` — is what the wire owes. The child's single
-    consumer of the cfg is ``fleet_cells.aot_export_spec`` (plus
+    consumer of the cfg is ``fleet_compiled_graphs.aot_export_spec`` (plus
     ``resolve_targets``, which reads ``targets``), and a dropped union or a
     lost shape row silently exports a different declaration than the parent
     asked for. pgw#1034 also asserts the converse: a field with no child reader
@@ -147,8 +147,8 @@ def test_the_wire_form_preserves_the_declared_export_exactly() -> None:
     wire = mint_delegate.cfg_spec(parent)
     pipe = SimpleNamespace()
 
-    assert (fleet_cells.aot_export_spec(pipe, wire)
-            == fleet_cells.aot_export_spec(pipe, parent))
+    assert (fleet_compiled_graphs.aot_export_spec(pipe, wire)
+            == fleet_compiled_graphs.aot_export_spec(pipe, parent))
     assert cc.resolve_targets(pipe, wire) == cc.resolve_targets(pipe, parent)
 
     # No child reads these, so they do not ride (pgw#1034).
@@ -164,7 +164,7 @@ def test_the_request_carries_the_execution_lane_and_the_effective_config(
     parent's own proof then misses."""
     pending = SimpleNamespace(
         family="sdxl", arm_token="ck1-abc", cfg=_cfg(),
-        target=tmp_path / "cell.tar.gz", mint_root=tmp_path)
+        target=tmp_path / "compiled_graph.tar.gz", mint_root=tmp_path)
     task = mint_delegate.MintTask(
         pending=pending, pipe=object(), function="gen",
         modules=("app",), slots={"pipeline": mp.MintSlot(
@@ -185,10 +185,10 @@ def test_the_request_carries_the_execution_lane_and_the_effective_config(
 # --------------------------------------------------- 3. failure inversion
 
 def _task(tmp_path: Path, **over: Any) -> mint_delegate.MintTask:
-    pending = fleet_cells.PendingSelfMint(
+    pending = fleet_compiled_graphs.PendingSelfMint(
         family="sdxl", arm_token="ck1-abc",
         ref="root/family-sdxl#ek1-abc", cfg=_cfg(),
-        target=tmp_path / "cell.tar.gz",
+        target=tmp_path / "compiled_graph.tar.gz",
         mint_root=tmp_path / "root", publisher=None, cache_dir=tmp_path)
     fields: Dict[str, Any] = dict(
         pending=pending, pipe=SimpleNamespace(), function="gen",
@@ -217,12 +217,12 @@ def _events(monkeypatch: pytest.MonkeyPatch) -> List[tuple]:
         mint_delegate.activity_mod, "emit_event",
         lambda kind, detail, phase="", **_kw: seen.append((kind, phase, detail)))
     monkeypatch.setattr(
-        fleet_cells.activity_mod, "emit_event",
+        fleet_compiled_graphs.activity_mod, "emit_event",
         lambda kind, detail, phase="", **_kw: seen.append((kind, phase, detail)))
     return seen
 
 
-def test_a_minted_child_is_adopted_through_the_delivered_cell_path(
+def test_a_minted_child_is_adopted_through_the_delivered_compiled_graph_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("MINT_STUB_MODE", "minted")
@@ -235,16 +235,16 @@ def test_a_minted_child_is_adopted_through_the_delivered_cell_path(
         # production does not make.
         rows = [Path(a) for a in artifacts]
         adopted.extend(rows)
-        return fleet_cells.SelfMint(
-            family="sdxl", cell_key="ek1-abc", ref="r#k",
+        return fleet_compiled_graphs.SelfMint(
+            family="sdxl", compiled_graph_key="ek1-abc", ref="r#k",
             snapshot_digest="blake3:x", artifact=rows[0])
 
-    monkeypatch.setattr(fleet_cells, "adopt_delegated_mint", _adopt)
+    monkeypatch.setattr(fleet_compiled_graphs, "adopt_delegated_mint", _adopt)
     act = _Act()
-    result = asyncio.run(mint_delegate.build_cell(_task(tmp_path), act=act))
+    result = asyncio.run(mint_delegate.build_compiled_graph(_task(tmp_path), act=act))
     assert result.status == mint_delegate.ADOPTED and result.ok
     assert result.attempts == 1
-    assert adopted and adopted[0].read_bytes() == b"stub-cell-bytes"
+    assert adopted and adopted[0].read_bytes() == b"stub-compiled_graph-bytes"
     # No new protocol: the child's phases land on the SAME activity the hub
     # already reads for its minting classification.
     assert "load" in act.phases and "seal_publish" in act.phases
@@ -258,7 +258,7 @@ def test_a_dead_mint_process_is_a_failed_mint_not_a_dead_worker(
     monkeypatch.setenv("MINT_STUB_MODE", "sigkill")
     _fake_card(monkeypatch, total_gib=80, resident_gib=6)
     seen = _events(monkeypatch)
-    result = asyncio.run(mint_delegate.build_cell(
+    result = asyncio.run(mint_delegate.build_compiled_graph(
         _task(tmp_path), act=_Act(), max_attempts=1))
     assert result.status == mint_delegate.FAILED
     assert not result.ok and result.attempts == 1
@@ -277,7 +277,7 @@ def test_a_named_refusal_is_never_retried(
     monkeypatch.setenv("MINT_STUB_MODE", "refused")
     _fake_card(monkeypatch, total_gib=80, resident_gib=6)
     _events(monkeypatch)
-    result = asyncio.run(mint_delegate.build_cell(
+    result = asyncio.run(mint_delegate.build_compiled_graph(
         _task(tmp_path), act=_Act(), max_attempts=3))
     assert result.status == mint_delegate.FAILED
     assert result.attempts == 1, "a refusal must not consume the retry budget"
@@ -291,7 +291,7 @@ def test_a_resource_shortfall_gets_exactly_one_more_attempt(
     monkeypatch.setenv("MINT_STUB_MODE", "resource")
     _fake_card(monkeypatch, total_gib=80, resident_gib=6)
     _events(monkeypatch)
-    result = asyncio.run(mint_delegate.build_cell(
+    result = asyncio.run(mint_delegate.build_compiled_graph(
         _task(tmp_path), act=_Act(), max_attempts=2))
     assert result.status == mint_delegate.FAILED
     assert result.attempts == 2
@@ -309,7 +309,7 @@ def test_abandonment_is_not_a_failure(
 
     async def _go() -> mint_delegate.DelegatedResult:
         stop = asyncio.Event()
-        task = asyncio.ensure_future(mint_delegate.build_cell(
+        task = asyncio.ensure_future(mint_delegate.build_compiled_graph(
             _task(tmp_path), act=_Act(), abandon=stop))
         await asyncio.sleep(1.0)
         stop.set()
@@ -326,7 +326,7 @@ def test_a_mint_spawns_a_child_with_no_pre_flight_verdict(
     """§4.33 / pgw#1175: THE ATTEMPT IS THE BUDGET.
 
     A `mint_budget.co_residency` gate used to stand at the top of
-    `build_cell` and return DECLINED without spawning anything — on a `need`
+    `build_compiled_graph` and return DECLINED without spawning anything — on a `need`
     whose leading term was `allocated`, the PARENT's resident weights, already
     excluded from the `free_bytes` it was compared against. This card is the
     wan-2.2 shape verbatim (80 GiB total, 54 GiB resident) and the mint now
@@ -337,11 +337,11 @@ def test_a_mint_spawns_a_child_with_no_pre_flight_verdict(
     monkeypatch.setenv("MINT_STUB_MODE", "minted")
     _fake_card(monkeypatch, total_gib=80, resident_gib=54)
     monkeypatch.setattr(
-        fleet_cells, "adopt_delegated_mint",
-        lambda pipe, pending, artifacts: fleet_cells.SelfMint(
-            family="sdxl", cell_key="k", ref="r", snapshot_digest="d",
+        fleet_compiled_graphs, "adopt_delegated_mint",
+        lambda pipe, pending, artifacts: fleet_compiled_graphs.SelfMint(
+            family="sdxl", compiled_graph_key="k", ref="r", snapshot_digest="d",
             artifact=Path(list(artifacts)[0])))
-    result = asyncio.run(mint_delegate.build_cell(
+    result = asyncio.run(mint_delegate.build_compiled_graph(
         _task(tmp_path, weight_lane="w8a8"), act=_Act()))
     assert result.status == mint_delegate.ADOPTED, (
         "a 54-GiB-resident pod refused to even TRY — that is the retracted "
@@ -422,7 +422,7 @@ def test_delegation_is_unconditional_and_has_no_kill_switch(
 ) -> None:
     """pgw#1010: the in-process shape is DELETED, not disabled.
 
-    It existed only to capture and pack a dynamo cell, so
+    It existed only to capture and pack a dynamo compiled graph, so
     ``GEN_WORKER_MINT_IN_PROCESS`` selected a state this worker can no longer
     be in — and pgw#995 named that env the last deletable behaviour switch,
     blocked only on the ten test sites that forced the shape. Setting it must

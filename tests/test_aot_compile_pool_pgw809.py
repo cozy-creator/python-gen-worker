@@ -12,7 +12,7 @@ be, so it is a table.
 What the failure scenario is really testing is the thing that makes a pool
 dangerous: 18 children, one dies, and the other 17 plus every ``cc1plus``
 they spawned have to go with it. A leak there is a serving pod that keeps
-burning CPU against a cell nobody will ever adopt — so the assertion is a
+burning CPU against a compiled graph nobody will ever adopt — so the assertion is a
 PROCESS SWEEP of the real process table, not a mocked call count.
 """
 
@@ -86,7 +86,7 @@ def _descendants(pid: int) -> List[int]:
 # ---------------------------------------------------------------------------
 
 
-def test_pool_mints_a_multi_entry_cell(tmp_path: Path) -> None:
+def test_pool_mints_a_multi_entry_compiled_graph(tmp_path: Path) -> None:
     """Four entries, K=2, through the real children and into one ``.pt2``.
 
     Asserts, in one run: every entry comes back; the loose files exist and
@@ -115,7 +115,7 @@ def test_pool_mints_a_multi_entry_cell(tmp_path: Path) -> None:
 
     assert set(out) == {name for name, _ in entries}
     assert list(out) == sorted(out), (
-        "the cell must assemble by entry NAME; a dict ordered by completion "
+        "the compiled_graph must assemble by entry NAME; a dict ordered by completion "
         "makes the artifact depend on which child finished first")
     for name, files in out.items():
         assert files, f"entry {name!r} came back with no files"
@@ -140,7 +140,7 @@ def test_pool_mints_a_multi_entry_cell(tmp_path: Path) -> None:
     staged = list((tmp_path / "pool").rglob("program.pt2"))
     assert not staged, f"staged programs left on disk: {staged}"
 
-    package = package_aoti(str(tmp_path / "cell.pt2"), dict(out))
+    package = package_aoti(str(tmp_path / "compiled_graph.pt2"), dict(out))
     assert Path(package).exists() and Path(package).stat().st_size > 0
 
 
@@ -279,7 +279,7 @@ _ROOMY = dict(vcpus=64, available_bytes=512 * 1024**3, device_lock=True)
         ("host-RAM-bound", dict(available_bytes=10 * 1024**3), 2),
         # Never wider than there are entries to compile.
         ("3 entries", dict(entries=3), 3),
-        # A single-entry cell never pays for a pool.
+        # A single-entry compiled graph never pays for a pool.
         ("1 entry", dict(entries=1), 1),
         # pgw#1175: a MEASURED per-entry RSS narrower than the 3 GiB default
         # buys width — the one per-entry footprint that still divides.
@@ -310,13 +310,13 @@ def test_an_unreadable_host_does_not_license_a_wide_pool() -> None:
     assert width.binding == "host-memory", width.reason
 
 
-def test_without_the_gpu_benchmark_lock_a_gpu_cell_stays_serial() -> None:
+def test_without_the_gpu_benchmark_lock_a_gpu_compiled_graph_stays_serial() -> None:
     """The pool's safety interlock, as a WIDTH decision.
 
     An AOTI compile picks kernel configs by timing them on the card. Two
     entries timing at once measure each other's contention and bake the loser
-    into an artifact whose cell key does not move — a silently slower cell
-    under a good cell's identity. If torch cannot serialize those timings, the
+    into an artifact whose compiled graph key does not move — a silently slower compiled graph
+    under a good compiled graph's identity. If torch cannot serialize those timings, the
     only safe width is 1.
     """
     kwargs = dict(_ROOMY)
@@ -331,7 +331,7 @@ def test_without_the_gpu_benchmark_lock_a_gpu_cell_stays_serial() -> None:
         assert pool.entry_workers(18, **kwargs).workers == 1  # type: ignore[arg-type]
         assert "benchmark" in pool.entry_workers(
             18, **kwargs).reason                              # type: ignore[arg-type]
-        # ... and a card-less (CPU) cell is not held back by it: there is no
+        # ... and a card-less (CPU) compiled graph is not held back by it: there is no
         # device to benchmark on and nothing to perturb.
         pool._has_card = lambda: False
         assert pool.entry_workers(
@@ -350,7 +350,7 @@ def test_the_cap_narrows_and_never_widens() -> None:
 
 def test_the_width_and_its_inputs_ride_the_telemetry() -> None:
     """pgw#809 constraint 6: a mint's wall clock is uninterpretable without
-    the K it ran at — two mints of the same cell legitimately differ 4x."""
+    the K it ran at — two mints of the same compiled graph legitimately differ 4x."""
     facts = pool.entry_workers(18, **_ROOMY).facts()      # type: ignore[arg-type]
     assert facts["entry_workers"] >= 1
     for key in ("entries", "vcpus", "cpu_workers", "mem_workers",
@@ -466,7 +466,7 @@ def test_the_autotune_posture_the_mint_actually_compiles_under() -> None:
 
 
 def test_parallelism_is_not_sealed(tmp_path: Path) -> None:
-    """pgw#757 established ``compile_threads`` as outside cell identity; the
+    """pgw#757 established ``compile_threads`` as outside compiled graph identity; the
     same argument covers K, and the digest check is how it is VERIFIED rather
     than argued. The pool changes WHEN entries compile, never what."""
     from gen_worker import env_seal
@@ -483,4 +483,4 @@ def test_parallelism_is_not_sealed(tmp_path: Path) -> None:
     assert env["TORCHINDUCTOR_CACHE_DIR"] == str(tmp_path / "cache")
     assert env_seal.inductor_config_digest() == base, (
         "the shared inductor cache dir is a LOCATION, not a recipe; if it "
-        "reached the seal, every pod would key its own cells")
+        "reached the seal, every pod would key its own compiled_graphs")

@@ -4,7 +4,7 @@ A rig measures a rig. When the rig's torch/CUDA line drifts off the fleet's, its
 verdict is about software nobody runs — and it reads as a verdict about
 production. pgw#1081 §R2 closed SageAttention-2 as "not integrable" from a pod on
 ``torch 2.9.1+cu129`` while every deployed endpoint had been on ``2.13.0+cu130``
-since 2026-07-13. That was the second occurrence (the B200 re-cell was the first),
+since 2026-07-13. That was the second occurrence (the B200 re-compiled graph was the first),
 so the rule stops being remembered and becomes mechanical: **every rig calls
 :func:`assert_fleet_line` as its first act, and a rig that has not asserted the
 fleet line has produced no evidence.**

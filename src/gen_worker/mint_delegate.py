@@ -19,7 +19,7 @@ struct make that testable without standing up an executor.
 
 What the caller still owns
 --------------------------
-* deciding a mint is owed (``fleet_cells.enable_compiled(..., delegate=True)``);
+* deciding a mint is owed (``fleet_compiled_graphs.enable_compiled(..., delegate=True)``);
 * the ``self_mint_compile`` Activity — this function only calls ``phase()`` on
   it, so the hub's minting classification and "serving (optimizing in
   background)" messaging keep working with no protocol change;
@@ -60,7 +60,7 @@ def delegation_refusal() -> str:
     """"" when this WORKER may mint out of process, else the typed reason.
 
     Always "" today: nothing worker-wide can refuse delegation any more. The
-    seam survives because the PIPELINE half (``fleet_cells.delegation_refusal``
+    seam survives because the PIPELINE half (``fleet_compiled_graphs.delegation_refusal``
     — an armed non-eager backend with no eager tier to serve from) is a real
     per-pipe refusal, and both halves must reach ``mint_recipe`` as one typed
     reason rather than as an either/or sentence (pgw#813).
@@ -77,7 +77,7 @@ class MintTask:
     crosses the process boundary.
     """
 
-    pending: Any                      # fleet_cells.PendingSelfMint (delegated)
+    pending: Any                      # fleet_compiled_graphs.PendingSelfMint (delegated)
     pipe: Any
     function: str
     modules: Tuple[str, ...]
@@ -114,7 +114,7 @@ class DelegatedResult:
 
     status: str
     detail: str = ""
-    minted: Optional[Any] = None      # fleet_cells.SelfMint
+    minted: Optional[Any] = None      # fleet_compiled_graphs.SelfMint
     attempts: int = 0
     #: pgw#999: the CLASSIFIED reason the child's cell did not adopt, carried
     #: up so the executor's decline names the same token the abort event did.
@@ -176,7 +176,7 @@ def build_request(
         # the attempt but the PENDING — `abandon_self_mint` rmtree's
         # `mint_root`, and abandonment is how a crashed mint ends, so a bank
         # sited there would be deleted on its way out of the one case it
-        # exists for. Keyed by the pending's `cell_key` as a SCOPE (identity is
+        # exists for. Keyed by the pending's `compiled_graph_key` as a SCOPE (identity is
         # the per-entry re-derivation inside it), so a mint child restarted in
         # place on the same pod — or a whole new pending for the same cell on a
         # later boot — finds the same bank.
@@ -356,7 +356,7 @@ async def build_cell(
 ) -> DelegatedResult:
     """Build and adopt one cell in a child process. Never raises for a mint
     failure — the worker must never die with its mint."""
-    from . import fleet_cells
+    from . import fleet_compiled_graphs
 
     pending = task.pending
     device = (
@@ -434,7 +434,7 @@ async def build_cell(
             # pgw#1176: the child produced one artifact per graph class; the
             # adopt arms, gates and stores each, and a class that refuses
             # costs itself.
-            minted = fleet_cells.adopt_delegated_mint(
+            minted = fleet_compiled_graphs.adopt_delegated_mint(
                 task.pipe, pending, outcome.artifacts)
             if minted is not None:
                 # pgw#848 item 5: the ONE terminus where the bank's job is
@@ -450,7 +450,7 @@ async def build_cell(
             #
             # pgw#999: it also RECORDED why, and this is where that used to
             # die. The sentence below was the whole of what the wire got.
-            reason, why = fleet_cells.adopt_refusal(pending)
+            reason, why = fleet_compiled_graphs.adopt_refusal(pending)
             return DelegatedResult(
                 status=FAILED, attempts=attempts, reason=reason,
                 detail=(
@@ -461,14 +461,14 @@ async def build_cell(
 
         _emit_abort(outcome, family, pending.arm_token, attempts)
         if not (outcome.retryable and attempts < max(1, max_attempts)):
-            fleet_cells.abandon_self_mint(pending)
+            fleet_compiled_graphs.abandon_self_mint(pending)
             return DelegatedResult(
                 status=FAILED, detail=outcome.detail, attempts=attempts)
         logger.info(
             "mint-delegate: retrying the mint for %s (attempt %d/%d) after a "
             "%s outcome", family, attempts + 1, max_attempts, outcome.status)
 
-    fleet_cells.abandon_self_mint(pending)
+    fleet_compiled_graphs.abandon_self_mint(pending)
     return DelegatedResult(
         status=FAILED, detail=last, attempts=attempts)
 

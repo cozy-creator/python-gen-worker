@@ -217,7 +217,7 @@ def sequence_rank_main(spec: RankSpec, channel: FollowerChannel) -> None:  # pra
         gemm_mode=w8a8_gemm_mode(pipe) or plan.gemm_mode,
         degraded_plan=plan.degraded_plan,
         compile_armed=plan.compile_armed,
-        compile_cell_key=plan.compile_cell_key,
+        compile_compiled_graph_key=plan.compile_compiled_graph_key,
         loras=plan.loras,
         sp_degree=spec.world_size,
     )

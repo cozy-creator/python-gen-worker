@@ -29,7 +29,7 @@ torch = pytest.importorskip("torch")
 
 from gen_worker import compile_cache as cc
 from gen_worker import env_seal
-from gen_worker.registry import CompileCell
+from gen_worker.registry import CompileCompiledGraph
 
 _RT = {
     "sku": "l4", "sm": "sm_89", "cuda": "13.0", "cuda_driver": "580.126.16",
@@ -98,8 +98,8 @@ def _phase(
     monkeypatch.setattr(env_seal, "_LIB_SNAPSHOT", None)
 
 
-def _cfg() -> CompileCell:
-    return CompileCell(
+def _cfg() -> CompileCompiledGraph:
+    return CompileCompiledGraph(
         shapes=((1024, 1024), (832, 1216)), targets=("unet",), family="sdxl",
         regional=False, text_len=77, dynamic=(), lora_bucket=64,
         guidance_scales=(0.0, 5.0), text_lens=(77,),
@@ -115,18 +115,18 @@ def test_cold_obligation_facts_equal_warm_facts(
     of the DISK-shipped environment, never of load phase — otherwise the
     parent's obligation and the child's recorded facts diverge at the
     handback seam (`arm_axis_divergence`) on every cold boot."""
-    from gen_worker import fleet_cells
+    from gen_worker import fleet_compiled_graphs
 
     cfg = _cfg()
 
     # Cold phase — the obligation identity the arming policy computes.
     _phase(monkeypatch, tmp_path, "cold", _COLD_LIBS)
-    cold = fleet_cells.arm_identity("sdxl", "w8a8", 64, cfg)
+    cold = fleet_compiled_graphs.arm_identity("sdxl", "w8a8", 64, cfg)
     cold_seal = env_seal.seal_digest(env_seal.effective_seal())
 
     # Warm phase, fresh snapshot — the facts a compile-warm mint records.
     _phase(monkeypatch, tmp_path, "warm", _COLD_LIBS + _WARM_EXTRA)
-    warm = fleet_cells.arm_identity("sdxl", "w8a8", 64, cfg)
+    warm = fleet_compiled_graphs.arm_identity("sdxl", "w8a8", 64, cfg)
     warm_seal = env_seal.seal_digest(env_seal.effective_seal())
 
     assert cold_seal == warm_seal, (
@@ -149,9 +149,9 @@ def test_artifact_manifest_records_disk_identity(
     _phase(monkeypatch, tmp_path, "warm", _COLD_LIBS + _WARM_EXTRA)
     # pgw#1181: read the manifest from its PRODUCER, `env_seal`, rather than
     # from `compile_cache.artifact_metadata`, which embedded it in a
-    # `torch-inductor-cache` cell and is deleted with that format. `aot_mint`
+    # `torch-inductor-cache` compiled graph and is deleted with that format. `aot_mint`
     # records the same call's output under the same `loaded_libs` key, so the
-    # fact under test is the fact the live cell carries.
+    # fact under test is the fact the live compiled graph carries.
     from gen_worker import env_seal
 
     libs = dict(env_seal.frozen_library_digests())

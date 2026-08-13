@@ -1,6 +1,6 @@
 """pgw#842: the entry pool's width must be EXPLAINABLE and MONOTONE.
 
-Two real L4 mints of the same 72-entry sdxl regional cell, back to back, are
+Two real L4 mints of the same 72-entry sdxl regional compiled graph, back to back, are
 the specimen this file is written against:
 
     attempt ten  (0.86.0, 16 vcpu / 62 GB): K=5, compile_s 1314.94, wall 347.94
@@ -302,7 +302,7 @@ def test_a_real_pools_width_and_ledger_land_hub_side(tmp_path: Path) -> None:
 
 def test_a_narrow_pool_says_so_in_the_first_line() -> None:
     """The standing rule: no silent decisions. A pool held below what the
-    cell could use names the shortfall and its cause up front — attempt
+    compiled graph could use names the shortfall and its cause up front — attempt
     eleven's 59 % was invisible precisely because nothing did."""
     width = pool.entry_workers(
         72, vcpus=21, available_bytes=13 * _GIB, device_lock=True)

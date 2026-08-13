@@ -2190,7 +2190,7 @@ class ParentControl:
 
         The compute child holds no credential by construction, so it cannot
         decode its own identity; the receipt trust gate that tried refused
-        every org-tier cell on every real serving pod. The parent holds the
+        every org-tier compiled graph on every real serving pod. The parent holds the
         credential and answers from it, exactly as it does for the resolve and
         the publish. Nothing in the request is read: the child names no field
         here, so it cannot ask to be somebody else.

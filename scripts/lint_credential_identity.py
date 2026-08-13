@@ -11,9 +11,9 @@ looks like a decision while it does it. Measured twice, on the same seam, one
 gate apart:
 
 * **pgw#1108** — boot-adopt read "do I hold a bearer?" as "is there a hub to
-  ask?": ``/v1/worker/cells/resolve`` was called ZERO times on three real pods.
-* **pgw#1122** — the cell receipt trust gate decoded the viewer claims out of
-  this process's own JWT: every org-tier cell refused ``publisher_untrusted``
+  ask?": ``/v1/worker/compiled graphs/resolve`` was called ZERO times on three real pods.
+* **pgw#1122** — the compiled graph receipt trust gate decoded the viewer claims out of
+  this process's own JWT: every org-tier compiled graph refused ``publisher_untrusted``
   after a successful resolve, the function went down, three pods were reaped
   ``state_blocked_idle`` and two replacements were bought.
 

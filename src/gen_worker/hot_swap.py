@@ -7,7 +7,7 @@ novel signature to the EAGER original immediately and warm the compiled
 callable concurrently in one background thread with a zero-filled dummy
 batch of the same signature (same weights in VRAM); a successful warm
 atomically marks the signature warm so later calls take the compiled path.
-The executor's ``on_warmed`` hook republishes the grown cell so the fleet
+The executor's ``on_warmed`` hook republishes the grown compiled graph so the fleet
 never compiles that (shape, GPU, lane) again.
 
 Sequential (today's compile-then-serve) is kept when: concurrency is not
@@ -255,7 +255,7 @@ class Router:
         # pgw#677 reopen: seeds that could NOT enqueue their background
         # compile (vocabulary overflow / dummy failure). A nonzero count
         # means the mint's capture would be incomplete — the driver aborts
-        # loudly instead of finalizing/publishing a partial cell.
+        # loudly instead of finalizing/publishing a partial compiled graph.
         self.seed_dropped = 0
         # pgw#677: executor-provided background-turn factory. When set,
         # every warm job for this router executes inside a turn, and
@@ -720,11 +720,11 @@ def _run_warm_compile(job: _WarmJob) -> None:
             callback()
         except Exception as exc:
             logger.warning("hot-swap: on_warmed callback failed", exc_info=True)
-            # pgw#760: on_warmed republishes the grown cell — a swallowed
+            # pgw#760: on_warmed republishes the grown compiled graph — a swallowed
             # failure means the fleet re-compiles this shape forever.
             activity_mod.emit_event(
                 activity_mod.KIND_SERVE_DEGRADE,
-                f"target={job.label}: on_warmed (cell republish) callback "
+                f"target={job.label}: on_warmed (compiled_graph republish) callback "
                 f"failed: {type(exc).__name__}: {exc}",
                 phase="republish_failed",
             )

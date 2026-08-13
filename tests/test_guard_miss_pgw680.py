@@ -15,7 +15,7 @@ Doctrine under test:
      keep compiling; the stance cannot leak into them by construction.
   2. CATCH — the guard wrappers catch dynamo's ``RecompileError``, serve
      THIS request eager immediately, and record the mismatch loudly: the
-     verbatim guard-failure reason, the shape/axis identity, the cell key,
+     verbatim guard-failure reason, the shape/axis identity, the compiled graph key,
      the request id — as a typed ``guard_miss`` activity event the hub can
      count per (release, SKU, guard-reason).
   3. HEAL — the exact input class is recompiled through the existing
@@ -55,9 +55,9 @@ from torch._dynamo import exc as dexc
 
 import gen_worker.executor as executor_mod
 from gen_worker import Compile, activity as activity_mod
-from gen_worker import cell_key as cell_key_mod
+from gen_worker import compiled_graph_key as compiled_graph_key_mod
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells, hot_swap
+from gen_worker import fleet_compiled_graphs, hot_swap
 from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.executor import Executor
 from gen_worker.models import provision
@@ -340,22 +340,22 @@ def _clean_registries() -> Any:
     # compiles would serve (or guard-miss) another's. Fresh guard state per
     # test.
     torch._dynamo.reset()
-    with cc._PROVEN_CELLS_LOCK:
-        cc._PROVEN_CELLS.clear()
-        cc._QUARANTINED_CELLS.clear()
-    with fleet_cells._PENDING_LOCK:
-        fleet_cells._PENDING.clear()
+    with cc._PROVEN_COMPILED_GRAPHS_LOCK:
+        cc._PROVEN_COMPILED_GRAPHS.clear()
+        cc._QUARANTINED_COMPILED_GRAPHS.clear()
+    with fleet_compiled_graphs._PENDING_LOCK:
+        fleet_compiled_graphs._PENDING.clear()
     for pipe in list(cc._armed_pipelines()):
         cc._armed_pipelines().discard(pipe)
     sink_before = activity_mod._sink
     yield
     with activity_mod._lock:
         activity_mod._sink = sink_before
-    with cc._PROVEN_CELLS_LOCK:
-        cc._PROVEN_CELLS.clear()
-        cc._QUARANTINED_CELLS.clear()
-    with fleet_cells._PENDING_LOCK:
-        fleet_cells._PENDING.clear()
+    with cc._PROVEN_COMPILED_GRAPHS_LOCK:
+        cc._PROVEN_COMPILED_GRAPHS.clear()
+        cc._QUARANTINED_COMPILED_GRAPHS.clear()
+    with fleet_compiled_graphs._PENDING_LOCK:
+        fleet_compiled_graphs._PENDING.clear()
     for pipe in list(cc._armed_pipelines()):
         cc._armed_pipelines().discard(pipe)
 
@@ -513,7 +513,7 @@ class _Rig:
         def _load_slot(*args: Any, **kwargs: Any) -> Any:
             pipe = _Pipe()
             # pgw#1010: a PLAIN lane. A mandatory (w8a8/w4a4) lane serves only
-            # from a cell — the dispatch fence pins every request to an active
+            # from a compiled graph — the dispatch fence pins every request to an active
             # compile incarnation — so a family with no export declaration
             # fails closed there instead of arming JIT intake. The doctrine
             # this rig exercises is the intake compile itself, which is a plain
@@ -522,17 +522,17 @@ class _Rig:
             return provision.SlotLoad(obj=pipe, is_pipeline=True)
 
         def _mandatory_miss(*a: Any, **k: Any) -> bool:
-            raise cc.CompiledExecutionLaneUnavailableError("no delivered cell")
+            raise cc.CompiledExecutionLaneUnavailableError("no delivered compiled_graph")
 
         monkeypatch.setattr(executor_mod, "ensure_local", _download)
         monkeypatch.setattr(provision, "load_slot", _load_slot)
         monkeypatch.setattr(provision, "enable_compiled", _mandatory_miss)
-        monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
+        monkeypatch.setattr(fleet_compiled_graphs, "_cuda_ready", lambda: True)
         monkeypatch.setattr(cc, "toolchain_present", lambda: True)
         monkeypatch.setattr(cc, "apply", _sim_apply_factory(self.sim))
         monkeypatch.setattr(
             cc, "inductor_counters", lambda: dict(self.sim.counters))
-        monkeypatch.setattr(fleet_cells, "arm_identity", _fake_arm_identity)
+        monkeypatch.setattr(fleet_compiled_graphs, "arm_identity", _fake_arm_identity)
         monkeypatch.setattr(cc, "reset_target_code", lambda pipeline: 0)
         # The sim never enters dynamo, so dynamo's cumulative compile clock
         # never moves. Stub it: what is under test is that the executor READS
@@ -554,7 +554,7 @@ class _Rig:
         monkeypatch.setattr(
             self.ex, "_enable_compiled",
             lambda p, cfg, artifact, delivered=None, arm=None, boot_local_key="":
-                fleet_cells.enable_compiled(
+                fleet_compiled_graphs.enable_compiled(
                     p, cfg, self.ex.store._cache_dir, artifact,
                     publisher=None))
 
@@ -588,15 +588,15 @@ def _run_job(rig: _Rig, spec: EndpointSpec, request_id: str) -> pb.RunJob:
         snapshots={model_ref: pb.Snapshot(digest=MODEL_DIGEST)},
     )
     if target.active_compile_ref:
-        # The th#910 dispatch fence pins a request to the CELL the worker
+        # The th#910 dispatch fence pins a request to the COMPILED GRAPH the worker
         # advertised. pgw#1010: an intake target advertises none — there is no
-        # artifact to fence on — so a hub that sent one would be naming a cell
+        # artifact to fence on — so a hub that sent one would be naming a compiled graph
         # this pod never claimed, and the worker's own
         # `required_compile_invalid` refusal is the correct answer to that.
         job.required_compile.CopyFrom(pb.RequiredCompileExecution(
             target_incarnation_id=target.incarnation_id,
-            cell_ref=target.active_compile_ref,
-            cell_snapshot_digest=target.active_compile_snapshot_digest,
+            compiled_graph_ref=target.active_compile_ref,
+            compiled_graph_snapshot_digest=target.active_compile_snapshot_digest,
             contract_digest=target.contract_digest,
         ))
     return job
@@ -609,7 +609,7 @@ def test_tenant_guard_miss_end_to_end(
 
     boot (mint window) compiles inline with the serve window OFF ->
     request 1 guard-misses under the stance -> completes OK served eager,
-    guard_miss activity event on the wire (reason class in phase; cell,
+    guard_miss activity event on the wire (reason class in phase; compiled graph,
     request id, verbatim reason in detail), heal scheduled -> request 2 of
     the same shape serves COMPILED. The compiled identity is never revoked
     and nothing is disabled."""
@@ -619,17 +619,17 @@ def test_tenant_guard_miss_end_to_end(
 
     rig.boot(spec)
     # pgw#1010: JIT intake serves COMPILED CODE and names no artifact, so the
-    # platform tier — which means "serving from a cell" — is eager, and the
+    # platform tier — which means "serving from a compiled graph" — is eager, and the
     # target advertises active-less. The per-request axis is where the
-    # compiled-ness of an intake pod is stated (`serving_mode=jit_cell`).
+    # compiled-ness of an intake pod is stated (`serving_mode=jit_compiled_graph`).
     assert rig.ex.serving_tiers()["generate"] == "eager"
     # Mint-window contract: every boot compile ran with the window OFF.
     assert rig.sim.compiles, "boot must have compiled"
     assert rig.sim.window_seen and not any(rig.sim.window_seen), (
         "the serve window leaked into a mint/warm window")
     (target,) = rig.ex.compile_targets()
-    cell_ref = target.active_compile_ref
-    assert cell_ref == "", "an intake arm has no cell to advertise"
+    compiled_graph_ref = target.active_compile_ref
+    assert compiled_graph_ref == "", "an intake arm has no compiled_graph to advertise"
     # pgw#1010 / th#1322: and the compile it just paid for is a NUMBER on the
     # wire. The emitter used to be the mint parent's, and the mint no longer
     # runs JIT — so this boot is the only place an AOT-vs-JIT cost comparison
@@ -665,13 +665,13 @@ def test_tenant_guard_miss_end_to_end(
     ev = events[0]
     assert ev.state == pb.ActivityState.ACTIVITY_STATE_COMPLETED
     assert "stride mismatch" in ev.phase
-    assert cell_ref in ev.detail
+    assert compiled_graph_ref in ev.detail
     assert "request=r-guard-miss" in ev.detail
     assert "stride mismatch at index 1" in ev.detail
     assert "heal=healing" in ev.detail
 
     # Nothing was revoked, degraded, or disabled — the lane is healthy.
-    assert target.active_compile_ref == cell_ref
+    assert target.active_compile_ref == compiled_graph_ref
     assert rig.ex.serving_tiers()["generate"] == "eager"
     assert rig.ex.unavailable == {}
 

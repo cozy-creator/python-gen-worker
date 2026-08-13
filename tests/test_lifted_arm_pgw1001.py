@@ -1,4 +1,4 @@
-"""pgw#1001 — a bucket-bearing cell can be adopted by the runtime that minted it.
+"""pgw#1001 — a bucket-bearing compiled graph can be adopted by the runtime that minted it.
 
 Three defects, each of which ALONE made that impossible, each RED at HEAD.
 Found in ~20 s a cycle on the pgw#997 micro family's `micro-lora` vehicle,
@@ -26,9 +26,9 @@ import pytest
 import torch
 from torch import nn
 
-from gen_worker import cell_key
+from gen_worker import compiled_graph_key
 from gen_worker import compile_cache as cc
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 from gen_worker.models import lora_lifted, provision
 
 BUCKET = 64
@@ -78,14 +78,14 @@ def _meta_with_entry_only() -> Dict[str, Any]:
     """The shape a REAL packed entry artifact has: ONE entry block naming its
     own target, and NO top-level `targets`/`module` at all.
 
-    Measured on a real 5-entry lora64 cell: `meta["targets"] is None` and
+    Measured on a real 5-entry lora64 compiled graph: `meta["targets"] is None` and
     `meta["module"] is None`, every entry `target='transformer'`. pgw#1176
     kept the ABSENCE — which is what defect 1 is about — and removed the MAP:
     one artifact, one entry, one target.
     """
     return {
         "lora_bucket": BUCKET,
-        cell_key.ENTRY_BLOCK_KEY: {
+        compiled_graph_key.ENTRY_BLOCK_KEY: {
             "name": "transformer/adapter=true,cfg=true",
             "target": "transformer",
         },
@@ -103,7 +103,7 @@ def armed(monkeypatch: pytest.MonkeyPatch) -> List[Any]:
     monkeypatch.setattr(provision, "arm_route", lambda mode: object())
     monkeypatch.setattr(
         aot_serve, "enable", lambda *a, **k: AdoptOutcome.hit("armed"))
-    monkeypatch.setattr(provision, "gate_cell_numerics", lambda p, c: True)
+    monkeypatch.setattr(provision, "gate_compiled_graph_numerics", lambda p, c: True)
     return []
 
 
@@ -116,7 +116,7 @@ def test_the_lifted_target_is_resolved_from_the_per_entry_targets(
     armed: List[Any], tmp_path: Path,
 ) -> None:
     """RED at HEAD: `targets` came only from `meta["targets"]`, which a packed
-    cell does not carry, so `module_name` was "" and the install was SILENTLY
+    compiled graph does not carry, so `module_name` was "" and the install was SILENTLY
     SKIPPED — leaving `aot_serve.enable` to refuse the artifact it had just
     been handed with `lifted_inputs_unbindable`.
 
@@ -131,8 +131,8 @@ def test_the_lifted_target_is_resolved_from_the_per_entry_targets(
     """
     pipe = _Pipe()
     cc.apply_lora_execution_lane(pipe, BUCKET)
-    artifact = tmp_path / "cell.tar.gz"
-    artifact.write_bytes(b"cell")
+    artifact = tmp_path / "compiled_graph.tar.gz"
+    artifact.write_bytes(b"compiled_graph")
 
     outcome = provision.arm_aot(pipe, _Cfg(), None, artifact, BUCKET)
 

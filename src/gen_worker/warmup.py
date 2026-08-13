@@ -35,7 +35,7 @@ Derivation per handler:
    it usually means the field should be an axis).
 
 The graph SET unifies per class via the class-level axis union (pgw#647
-gap #1's fix): the cell CONTRACT digests the union, and the forge traces
+gap #1's fix): the compiled graph CONTRACT digests the union, and the forge traces
 each graph once. Warm RUNS at boot deliberately stay PER FUNCTION — every
 alias proves itself causally through its own handler (a sibling's run
 must never certify an alias whose code path was not exercised; pgw#637's
@@ -634,7 +634,7 @@ def select_runs(
 
     - ``tracing=True`` (a compile artifact is armed or minting): the FULL
       plan — every graph class must trace into the capture / prove against
-      the cell.
+      the compiled graph.
     - ``tracing=False`` (eager lane — nothing armed, nothing minting): one
       run per (function, guidance class), collapsed to a single shape
       representative (:func:`_shape_rank`). Eager warm cost is allocator-
@@ -650,7 +650,7 @@ def select_runs(
       READY (and, on compiled lanes, provides the calls>0 the pgw#637
       in-memory/cache-hit proof needs). The caller passes ``executed``
       non-empty only when inheritance is sound (same contract, proven
-      cells, no pending mint).
+      compiled graphs, no pending mint).
     """
     runs = list(jobs)
     if not runs:
@@ -775,7 +775,7 @@ def validate_at_decoration(cls: type, decl: EndpointDecl) -> None:
 
 
 def _refuse_compile_nowarmup(cls: type, decl: EndpointDecl) -> None:
-    """th#959: ``compile=`` + ``NoWarmup`` is a contradiction — compile cells
+    """th#959: ``compile=`` + ``NoWarmup`` is a contradiction — compile compiled graphs
     are minted and proven by warmup execution, so a NoWarmup class can never
     arm one. Live, the combination struck a release broken in 3 pods. A
     custom ``warmup()`` method resolves it (proof runs through that)."""
@@ -787,7 +787,7 @@ def _refuse_compile_nowarmup(cls: type, decl: EndpointDecl) -> None:
         raise TypeError(
             f"@endpoint class {cls.__name__!r}: compile= with "
             f"warmup=NoWarmup({decl.warmup.reason!r}) can never mint or "
-            "prove a compile cell (proof runs through warmup execution — "
+            "prove a compile compiled_graph (proof runs through warmup execution — "
             "th#959). Drop compile=, define a custom warmup() method, or "
             "make a handler warmable (warm= overrides, pgw#654)."
         )
@@ -936,7 +936,7 @@ def warm_context(
     16.45 s (pgw#816's fix holding) and then died in the endpoint's own warm
     job at ``ctx.slots["pipeline"]`` with ``KeyError: 'pipeline'`` — so the
     dynamo route published nothing, exactly as the AOT route published
-    nothing, and no mint route on the platform could produce a cell.
+    nothing, and no mint route on the platform could produce a compiled graph.
 
     That is the same shape as pgw#816 one stage later, and the same shape as
     pgw#816/#822/#825/#827: two constructions of one thing, free to drift.

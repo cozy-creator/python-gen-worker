@@ -1,35 +1,35 @@
 """pgw#1127 S2 — the boot asks THIS MACHINE before it asks the hub, and can ask nobody.
 
-DESIGN-RULINGS §4.28: *"Untrusted hardware mints for ITSELF: local cell, local
+DESIGN-RULINGS §4.28: *"Untrusted hardware mints for ITSELF: local compiled graph, local
 repo-CAS, reused across its own boots — **never uploaded, never requested**."*
 
 THE DEFECT. ``executor._boot_adopt`` returned ``no_hub`` **before deriving the
 key**, on the premise that *"deriving a key nobody will answer is pure boot
 latency"*. That premise is false on exactly the machines §4.28 is about: the
-derived ``ck1`` key IS ``local_cell_store``'s own address, so an offline box
-holding the exact cell it needs was told there was nobody to ask.
-``boot_adopt.py`` imported ``cell_resolve`` and not ``local_cell_store``; step 2
+derived ``ck1`` key IS ``local_compiled_graph_store``'s own address, so an offline box
+holding the exact compiled graph it needs was told there was nobody to ask.
+``boot_adopt.py`` imported ``compiled_graph_resolve`` and not ``local_compiled_graph_store``; step 2
 of §4.27 was hub-or-nothing.
 
 Reuse still happened — through ``arm_from_local_store``'s arm-token memo — so
 "fully offline-capable" was TRUE BY ACCIDENT of a shortcut rather than by
 design. The sequence is now **derive -> local ``lookup(key)`` -> hub
 ``resolve(key)``**, and ``no_hub`` is demoted from a pre-derive gate to two
-honest termini: ``no_cell_source`` (nobody at all, so the derive is skipped) and
+honest termini: ``no_compiled_graph_source`` (nobody at all, so the derive is skipped) and
 ``local_miss_no_hub`` (derived, this machine does not hold it, no hub either).
 
 THE STRONGEST ARGUMENT, and the row that measures it:
 ``test_an_arm_scheme_bump_costs_a_TRACE_and_not_a_MINT``. ``sweep_superseded_
-memos`` deletes the shortcut and leaves the CELLS under their own ``ck1`` keys.
+memos`` deletes the shortcut and leaves the COMPILED GRAPHS under their own ``ck1`` keys.
 Before S2 that cost one full MINT per family per machine — on a cozy-local box,
 the user's product promise briefly breaking. After S2 the boot addresses the CAS
-directly, finds the cell the memo used to name, and rewrites the shortcut from
+directly, finds the compiled graph the memo used to name, and rewrites the shortcut from
 the proven arm. **The next key/scheme bump costs a TRACE instead of a MINT.**
 
 RED before this issue: every row here. `_boot_adopt` refused pre-derive with no
-hub; `local_cell_store` had no reader at boot at all; `boot_local_key` did not
+hub; `local_compiled_graph_store` had no reader at boot at all; `boot_local_key` did not
 exist as a route into the store; and `local_hit`/`local_miss_no_hub`/
-`no_cell_source` were not in the pgw#1116 vocabulary, so a fence that reads
+`no_compiled_graph_source` were not in the pgw#1116 vocabulary, so a fence that reads
 refusal sites out of the tree would have failed on them.
 """
 
@@ -45,19 +45,19 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from gen_worker import (
-    activity, boot_adopt, boot_key, cell_resolve, fleet_cells, local_cell_store,
+    activity, boot_adopt, boot_key, compiled_graph_resolve, fleet_compiled_graphs, local_compiled_graph_store,
 )
 from gen_worker import executor as executor_mod
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 
-# pgw#1176: `ek1`, because `local_cell_store.store` refuses anything that is
-# not an entry key and a `ck1`-keyed cell is orphaned by the re-key. These
+# pgw#1176: `ek1`, because `local_compiled_graph_store.store` refuses anything that is
+# not an entry key and a `ck1`-keyed compiled graph is orphaned by the re-key. These
 # fixtures stored under `ck1-` and the store silently declined them, so
-# `no_cell_source` short-circuited a machine that WAS holding cells — the §1.34
+# `no_compiled_graph_source` short-circuited a machine that WAS holding compiled graphs — the §1.34
 # orphaning the re-key predicts, surfacing exactly where it should.
 KEY_A = "ek1-" + "a" * 56
 KEY_B = "ek1-" + "b" * 56
-ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * 56
+ARM_A = fleet_compiled_graphs.ARM_SCHEME + "-" + "1" * 56
 
 
 # ---------------------------------------------------------------------------
@@ -67,8 +67,8 @@ ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * 56
 
 @pytest.fixture()
 def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    root = tmp_path / "cozy-cells"
-    monkeypatch.setenv(local_cell_store.ENV_STORE_DIR, str(root))
+    root = tmp_path / "cozy-compiled_graphs"
+    monkeypatch.setenv(local_compiled_graph_store.ENV_STORE_DIR, str(root))
     return root
 
 
@@ -87,7 +87,7 @@ def _adopt_events(seen: List[Any]) -> List[Any]:
 def no_wire(monkeypatch: pytest.MonkeyPatch) -> List[Any]:
     """The never-request fence, at the SOCKET.
 
-    Not "``cell_resolve.resolve`` was not called" — that is a claim about one
+    Not "``compiled_graph_resolve.resolve`` was not called" — that is a claim about one
     function, and the property §4.28 states is about the machine. Any attempt to
     open any connection, by any layer, records itself and fails.
     """
@@ -109,18 +109,18 @@ def no_wire(monkeypatch: pytest.MonkeyPatch) -> List[Any]:
 
 
 #: The graphs this pod "traced". Real values in the pgw#1031 sense: the boot's
-#: witnesses and the cell's recorded ones are compared entry by entry, and the
-#: floor is fail-closed in both directions (a silent cell is a refusal too).
+#: witnesses and the compiled graph's recorded ones are compared entry by entry, and the
+#: floor is fail-closed in both directions (a silent compiled graph is a refusal too).
 WITNESSES = {"transformer": "9f" * 8}
 
 
-def _cell(
-    tmp_path: Path, *, key: str = KEY_A, name: str = "cell",
+def _compiled_graph(
+    tmp_path: Path, *, key: str = KEY_A, name: str = "compiled_graph",
     witnesses: Optional[Dict[str, str]] = None,
 ) -> Path:
     """An ENTRY artifact with a READABLE envelope AND a recorded graph witness.
 
-    `_arm_exported_cell` and the boot's own pgw#1031 floor both read the packed
+    `_arm_exported_compiled_graph` and the boot's own pgw#1031 floor both read the packed
     metadata, and an entry that records no witness is refused — correctly — so a
     fixture without one could only ever test the refusal.
 
@@ -134,10 +134,10 @@ def _cell(
         raise AssertionError(
             f"an entry artifact carries ONE graph class; got {sorted(rows)!r}")
     (entry, digest), = rows.items()
-    p = tmp_path / name / "cell.tar.gz"
+    p = tmp_path / name / "compiled_graph.tar.gz"
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps({
-        "kind": "aot-inductor", "cell_key": key, "family": "micro-diffusion",
+        "kind": "aot-inductor", "compiled_graph_key": key, "family": "micro-diffusion",
         "entry": {"name": entry, "graph_witness": digest},
     }).encode()
     with tarfile.open(p, mode="w:gz") as tar:
@@ -161,7 +161,7 @@ class _Spec:
     module = "micro_diffusion.main"
     compile = _Cfg()
 
-    def compile_cell(self) -> _Cfg:
+    def compile_compiled_graph(self) -> _Cfg:
         return _Cfg()
 
 
@@ -190,11 +190,11 @@ def _executor(tmp_path: Path) -> Any:
 
 
 def _derived(witnesses: Optional[Dict[str, str]] = None) -> Any:
-    """A REAL ``DerivedKey`` — the key is built by ``cell_key.from_axes`` over
+    """A REAL ``DerivedKey`` — the key is built by ``compiled_graph_key.from_axes`` over
     real axes, so the address the boot hands the store is the address the store
     is addressed by everywhere else. Only the TRACE is stood in for (there is no
     card on a CI runner, and `sm` is a key axis)."""
-    from gen_worker import cell_key as ck
+    from gen_worker import compiled_graph_key as ck
 
     return boot_key.DerivedKey(
         entry_keys={"a": ck.from_axes({
@@ -207,7 +207,7 @@ def _derived(witnesses: Optional[Dict[str, str]] = None) -> Any:
 
 
 #: The key that derivation actually produces — what the local store must be
-#: addressed by for a boot to find its own cell.
+#: addressed by for a boot to find its own compiled graph.
 #:
 #: pgw#1176: a boot derives a key SET. This declaration traces to one class, so
 #: the set has one member; a caller that wants "the address" takes it from
@@ -222,7 +222,7 @@ def declared(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         executor_mod.aot_mint, "export_declaration", lambda f: object())
     monkeypatch.setattr(
-        executor_mod.aot_declaration, "cell_plans", lambda d: [object()])
+        executor_mod.aot_declaration, "compiled_graph_plans", lambda d: [object()])
     from gen_worker.procsplit import broker
 
     monkeypatch.setattr(broker, "_broker", None, raising=False)
@@ -253,12 +253,12 @@ def test_an_empty_store_and_no_hub_still_skips_the_derivation(
     # indexing past a set nobody checked.
     (out,) = _executor(tmp_path)._boot_adopt(_Spec(), {})
 
-    assert out.reason == "no_cell_source"
+    assert out.reason == "no_compiled_graph_source"
     assert not out.derived_key
-    assert [u.phase for u in _adopt_events(events)] == ["no_cell_source"]
+    assert [u.phase for u in _adopt_events(events)] == ["no_compiled_graph_source"]
 
 
-def test_a_machine_holding_cells_DERIVES_even_with_no_hub_at_all(
+def test_a_machine_holding_compiled_graphs_DERIVES_even_with_no_hub_at_all(
     store: Path, tmp_path: Path, declared: None, events: List[Any],
     no_wire: List[Any], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -267,8 +267,8 @@ def test_a_machine_holding_cells_DERIVES_even_with_no_hub_at_all(
     RED before pgw#1127: `_boot_adopt` returned `no_hub` here without deriving,
     so the one address that could have been answered was never computed.
     """
-    local_cell_store.store(
-        _cell(tmp_path), key=KEY_B, family="other", arm_token=ARM_A)
+    local_compiled_graph_store.store(
+        _compiled_graph(tmp_path), key=KEY_B, family="other", arm_token=ARM_A)
     monkeypatch.setattr(boot_key, "derive", lambda **kw: _derived())
 
     # pgw#1176: a boot returns ONE outcome per declared graph class. This
@@ -300,8 +300,8 @@ def test_a_populated_store_and_an_unreachable_hub_makes_zero_http_attempts(
     "no base_url" would make the old gate accidentally right. The boot derives,
     its own store answers, and no connection is attempted by any layer.
     """
-    local_cell_store.store(
-        _cell(tmp_path, key=KEY_DERIVED), key=KEY_DERIVED,
+    local_compiled_graph_store.store(
+        _compiled_graph(tmp_path, key=KEY_DERIVED), key=KEY_DERIVED,
         family="micro-diffusion", arm_token=ARM_A)
     monkeypatch.setattr(boot_key, "derive", lambda **kw: _derived())
 
@@ -327,13 +327,13 @@ def test_the_local_store_is_asked_BEFORE_a_perfectly_reachable_hub(
     """Ordering is the promise, not availability. A local-SECOND design would
     request what the machine already holds — and on a community-cloud pod that
     is the hub shipping back bytes the pod itself minted."""
-    local_cell_store.store(
-        _cell(tmp_path, key=KEY_DERIVED), key=KEY_DERIVED,
+    local_compiled_graph_store.store(
+        _compiled_graph(tmp_path, key=KEY_DERIVED), key=KEY_DERIVED,
         family="micro-diffusion", arm_token=ARM_A)
     monkeypatch.setattr(boot_key, "derive", lambda **kw: _derived())
     monkeypatch.setattr(
-        cell_resolve, "resolve",
-        lambda *a, **k: pytest.fail("the hub was asked for a resident cell"))
+        compiled_graph_resolve, "resolve",
+        lambda *a, **k: pytest.fail("the hub was asked for a resident compiled_graph"))
 
     ex = _executor(tmp_path)
     ex.file_base_url = "http://hub.local"
@@ -345,13 +345,13 @@ def test_the_local_store_is_asked_BEFORE_a_perfectly_reachable_hub(
 def test_a_local_hit_carries_an_ADDRESS_and_never_an_adoption(
     store: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A self-minted cell has no hub receipt and no publisher org, so riding the
-    ``arm_ordered`` path a hub-resolved cell rides would refuse it
+    """A self-minted compiled graph has no hub receipt and no publisher org, so riding the
+    ``arm_ordered`` path a hub-resolved compiled graph rides would refuse it
     ``receipt_gate_unconfigured``. The boot hands over the ADDRESS instead, and
-    ``fleet_cells._arm_exported_cell`` — the gate a child's own mint passes —
+    ``fleet_compiled_graphs._arm_exported_compiled_graph`` — the gate a child's own mint passes —
     decides."""
-    local_cell_store.store(
-        _cell(tmp_path, key=KEY_DERIVED), key=KEY_DERIVED,
+    local_compiled_graph_store.store(
+        _compiled_graph(tmp_path, key=KEY_DERIVED), key=KEY_DERIVED,
         family="micro-diffusion", arm_token=ARM_A)
     monkeypatch.setattr(boot_key, "derive", lambda **kw: _derived())
 
@@ -362,7 +362,7 @@ def test_a_local_hit_carries_an_ADDRESS_and_never_an_adoption(
 
     assert out.reason == boot_adopt.LOCAL_HIT
     assert out.adoption is None and not out.adopted, (
-        "a local cell must not become an `_ArmOrder`: the receipt gate would "
+        "a local compiled_graph must not become an `_ArmOrder`: the receipt gate would "
         "refuse it, and pgw#1122's degrade would spend a whole arm learning it")
     assert out.local_key == KEY_DERIVED
 
@@ -372,7 +372,7 @@ def test_a_local_hit_carries_an_ADDRESS_and_never_an_adoption(
 # ---------------------------------------------------------------------------
 
 
-def test_a_local_cell_whose_graphs_are_not_this_pods_graphs_is_refused(
+def test_a_local_compiled_graph_whose_graphs_are_not_this_pods_graphs_is_refused(
     store: Path, tmp_path: Path, events: List[Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -380,11 +380,11 @@ def test_a_local_cell_whose_graphs_are_not_this_pods_graphs_is_refused(
     match can share one key while their bodies differ (`micro-pad32` vs
     `micro-pad32-branchy`, measured 2026-08-10). Pull-by-key would hand this pod
     the other endpoint's kernels — locally exactly as much as from the hub."""
-    local_cell_store.store(
-        _cell(tmp_path, key=KEY_DERIVED), key=KEY_DERIVED,
+    local_compiled_graph_store.store(
+        _compiled_graph(tmp_path, key=KEY_DERIVED), key=KEY_DERIVED,
         family="micro-diffusion", arm_token=ARM_A)
     # A REAL disagreement, judged by the real `aot_identity.verify_graph_
-    # witness`: the cell records `WITNESSES`, this pod traced something else.
+    # witness`: the compiled graph records `WITNESSES`, this pod traced something else.
     # Nothing here is stubbed, so the row cannot pass by agreeing with a stub.
     monkeypatch.setattr(
         boot_key, "derive", lambda **kw: _derived({"transformer": "aa" * 8}))
@@ -396,9 +396,9 @@ def test_a_local_cell_whose_graphs_are_not_this_pods_graphs_is_refused(
 
     assert out.reason == "local_graph_witness_mismatch"
     assert not out.local_key
-    assert local_cell_store.lookup(KEY_DERIVED) is not None, (
+    assert local_compiled_graph_store.lookup(KEY_DERIVED) is not None, (
         "a derived-key hit is an INFERENCE about which pipe owns the bytes; "
-        "dropping the cell to punish a wrong guess turns one honest re-mint "
+        "dropping the compiled_graph to punish a wrong guess turns one honest re-mint "
         "into two, and the memo route already covers the stale case")
     assert _adopt_events(events)[-1].phase == "local_graph_witness_mismatch"
 
@@ -424,11 +424,11 @@ def armable(monkeypatch: pytest.MonkeyPatch) -> List[Path]:
         seen.append(Path(artifact))
         return AdoptOutcome.hit(KEY_A)
 
-    monkeypatch.setattr(fleet_cells.provision, "arm_aot", _arm)
+    monkeypatch.setattr(fleet_compiled_graphs.provision, "arm_aot", _arm)
     monkeypatch.setattr(
-        fleet_cells.artifact_meta, "read_metadata",
-        lambda p: {"cell_key": KEY_A, "family": "micro-diffusion"})
-    monkeypatch.setattr(fleet_cells, "arm_axis_divergence", lambda key, meta: "")
+        fleet_compiled_graphs.artifact_meta, "read_metadata",
+        lambda p: {"compiled_graph_key": KEY_A, "family": "micro-diffusion"})
+    monkeypatch.setattr(fleet_compiled_graphs, "arm_axis_divergence", lambda key, meta: "")
     return seen
 
 
@@ -439,36 +439,36 @@ def test_an_arm_scheme_bump_costs_a_TRACE_and_not_a_MINT(
     """pgw#1127 §5 item 2 — the strongest argument for S2, measured.
 
     `sweep_superseded_memos` deletes every shortcut written under a superseded
-    arm-token scheme and leaves the CELLS under their own `ck1` keys ("an
+    arm-token scheme and leaves the COMPILED GRAPHS under their own `ck1` keys ("an
     arm-token change re-derives the shortcut, never the identity"). Before S2
     the swept memo WAS the only address, so the machine paid a full mint. After
-    S2 the boot-derived key still names the cell.
+    S2 the boot-derived key still names the compiled graph.
 
     On a cozy-local box that is the difference between a user upgrading
     gen-worker and their next run being instant, and their next run paying a
-    40-minute compile for a cell already on their disk.
+    40-minute compile for a compiled graph already on their disk.
     """
-    local_cell_store.store(
-        _cell(tmp_path), key=KEY_A, family="micro-diffusion", arm_token=ARM_A)
+    local_compiled_graph_store.store(
+        _compiled_graph(tmp_path), key=KEY_A, family="micro-diffusion", arm_token=ARM_A)
     # The upgrade: every memo written under the previous scheme is swept.
-    removed = local_cell_store.sweep_superseded_memos("arm99")
+    removed = local_compiled_graph_store.sweep_superseded_memos("arm99")
     assert removed == 1
-    assert local_cell_store.lookup_for_arm(ARM_A) is None, "memo not swept"
-    assert local_cell_store.lookup(KEY_A) is not None, "the CELL must survive"
+    assert local_compiled_graph_store.lookup_for_arm(ARM_A) is None, "memo not swept"
+    assert local_compiled_graph_store.lookup(KEY_A) is not None, "the COMPILED_GRAPH must survive"
 
     # WITHOUT the derived key this is a miss, and a miss is a mint.
-    assert fleet_cells.arm_from_local_store(
+    assert fleet_compiled_graphs.arm_from_local_store(
         _Pipe(), _Cfg(), None, 0, _Arm(), "micro-diffusion") is None
 
-    # WITH it, the same cell arms — and the shortcut is rewritten from the
+    # WITH it, the same compiled graph arms — and the shortcut is rewritten from the
     # proven arm, so the boot after this one is a memo hit again.
-    minted = fleet_cells.arm_from_local_store(
+    minted = fleet_compiled_graphs.arm_from_local_store(
         _Pipe(), _Cfg(), None, 0, _Arm(), "micro-diffusion",
         boot_local_key=KEY_A)
 
-    assert minted is not None and minted.cell_key == KEY_A
-    assert armable and armable[-1] == local_cell_store.cell_dir(KEY_A) / "cell.tar.gz"
-    repaired = local_cell_store.lookup_for_arm(ARM_A)
+    assert minted is not None and minted.compiled_graph_key == KEY_A
+    assert armable and armable[-1] == local_compiled_graph_store.compiled_graph_dir(KEY_A) / "compiled_graph.tar.gz"
+    repaired = local_compiled_graph_store.lookup_for_arm(ARM_A)
     assert repaired is not None and repaired.key == KEY_A, (
         "the memo must be repaired from the proven arm — otherwise every boot "
         "after a scheme bump pays the trace again")
@@ -480,25 +480,25 @@ def test_the_boot_key_route_refuses_WITHOUT_dropping_and_the_memo_route_drops(
     """Two routes, two different things a refusal is allowed to do.
 
     The memo was written by this machine's own mint for this exact arm token,
-    so a cell that will not arm under it is stale — drop it, one honest
-    re-mint. A boot-key hit is an inference; destroying another pipe's cell to
+    so a compiled graph that will not arm under it is stale — drop it, one honest
+    re-mint. A boot-key hit is an inference; destroying another pipe's compiled graph to
     punish a wrong guess costs two.
     """
     monkeypatch.setattr(
-        fleet_cells, "_arm_exported_cell",
+        fleet_compiled_graphs, "_arm_exported_compiled_graph",
         lambda *a, **k: (False, None, ("key_axis_divergence", "sm")))
 
-    local_cell_store.store(
-        _cell(tmp_path), key=KEY_A, family="micro-diffusion", arm_token="")
-    assert fleet_cells.arm_from_local_store(
+    local_compiled_graph_store.store(
+        _compiled_graph(tmp_path), key=KEY_A, family="micro-diffusion", arm_token="")
+    assert fleet_compiled_graphs.arm_from_local_store(
         _Pipe(), _Cfg(), None, 0, _Arm(), "micro-diffusion",
         boot_local_key=KEY_A) is None
-    assert local_cell_store.lookup(KEY_A) is not None, "route B must not drop"
+    assert local_compiled_graph_store.lookup(KEY_A) is not None, "route B must not drop"
 
-    local_cell_store.note_memo(ARM_A, KEY_A)
-    assert fleet_cells.arm_from_local_store(
+    local_compiled_graph_store.note_memo(ARM_A, KEY_A)
+    assert fleet_compiled_graphs.arm_from_local_store(
         _Pipe(), _Cfg(), None, 0, _Arm(), "micro-diffusion") is None
-    assert local_cell_store.lookup(KEY_A) is None, "route A must drop a stale cell"
+    assert local_compiled_graph_store.lookup(KEY_A) is None, "route A must drop a stale compiled_graph"
 
 
 # ---------------------------------------------------------------------------
@@ -509,27 +509,27 @@ def test_the_boot_key_route_refuses_WITHOUT_dropping_and_the_memo_route_drops(
 def test_the_boot_derived_key_is_threaded_to_the_arming_brain(
     store: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A boot that finds its own cell and then cannot say so is the same boot
+    """A boot that finds its own compiled graph and then cannot say so is the same boot
     that mints. The address is an explicit parameter the whole way down —
     `enable_compiled` -> `_arming_policy` -> `arm_from_local_store` — so it is
     greppable rather than ambient."""
     seen: Dict[str, Any] = {}
     monkeypatch.setattr(
-        fleet_cells, "arm_from_local_store",
+        fleet_compiled_graphs, "arm_from_local_store",
         lambda *a, **k: seen.update(k) or None)
-    monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
-    monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
+    monkeypatch.setattr(fleet_compiled_graphs, "_cuda_ready", lambda: True)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "toolchain_present", lambda: True)
     monkeypatch.setattr(
-        fleet_cells.cc, "has_compile_target", lambda pipe, cfg: True)
+        fleet_compiled_graphs.cc, "has_compile_target", lambda pipe, cfg: True)
     monkeypatch.setattr(
-        fleet_cells, "mint_recipe",
-        lambda pipe, cfg, **kw: fleet_cells.RECIPE_AOT)
-    monkeypatch.setattr(fleet_cells, "arm_identity", lambda *a, **k: _Arm())
+        fleet_compiled_graphs, "mint_recipe",
+        lambda pipe, cfg, **kw: fleet_compiled_graphs.RECIPE_AOT)
+    monkeypatch.setattr(fleet_compiled_graphs, "arm_identity", lambda *a, **k: _Arm())
     monkeypatch.setattr(
-        fleet_cells.provision, "enable_compiled",
-        lambda *a, **k: AdoptOutcome.miss("no_cell", "nothing delivered"))
+        fleet_compiled_graphs.provision, "enable_compiled",
+        lambda *a, **k: AdoptOutcome.miss("no_compiled_graph", "nothing delivered"))
 
-    fleet_cells.enable_compiled(
+    fleet_compiled_graphs.enable_compiled(
         _Pipe(), _Cfg(), None, publisher=None, boot_local_key=KEY_A)
 
     assert seen.get("boot_local_key") == KEY_A
@@ -549,7 +549,7 @@ def test_every_new_terminus_is_in_the_typed_vocabulary() -> None:
                   "local_graph_witness_mismatch"):
         assert token in boot_adopt.LOCAL_REASONS
         assert token in boot_adopt.REASONS
-    assert "no_cell_source" in boot_adopt.GATE_REASONS
+    assert "no_compiled_graph_source" in boot_adopt.GATE_REASONS
     assert "no_hub" not in boot_adopt.REASONS, (
         "the token that refused on behalf of two answerers is DELETED, not "
         "aliased — pre-launch hardcut")
@@ -565,16 +565,16 @@ def test_each_new_terminus_emits_exactly_one_typed_event(
     ex = _executor(tmp_path)
 
     ex._boot_adopt(_Spec(), {})                       # empty store, no hub
-    local_cell_store.store(
-        _cell(tmp_path, name="b"), key=KEY_B, family="other", arm_token="")
+    local_compiled_graph_store.store(
+        _compiled_graph(tmp_path, name="b"), key=KEY_B, family="other", arm_token="")
     ex._boot_adopt(_Spec(), {})                       # stored, but not this key
-    local_cell_store.store(
-        _cell(tmp_path, key=KEY_DERIVED), key=KEY_DERIVED,
+    local_compiled_graph_store.store(
+        _compiled_graph(tmp_path, key=KEY_DERIVED), key=KEY_DERIVED,
         family="micro-diffusion", arm_token=ARM_A)
     ex._boot_adopt(_Spec(), {})                       # this machine holds it
 
     phases = [u.phase for u in _adopt_events(events)]
-    assert phases == ["no_cell_source", "local_miss_no_hub", "local_hit"], (
+    assert phases == ["no_compiled_graph_source", "local_miss_no_hub", "local_hit"], (
         f"three different facts must read as three different phases: {phases}")
 
 
@@ -588,21 +588,21 @@ def test_a_key_that_missed_locally_is_distinguishable_from_one_never_derived(
     ex = _executor(tmp_path)
 
     (never,) = ex._boot_adopt(_Spec(), {})
-    local_cell_store.store(
-        _cell(tmp_path, name="b"), key=KEY_B, family="other", arm_token="")
+    local_compiled_graph_store.store(
+        _compiled_graph(tmp_path, name="b"), key=KEY_B, family="other", arm_token="")
     (missed,) = ex._boot_adopt(_Spec(), {})
 
-    assert never.reason == "no_cell_source" and not never.derived_key
+    assert never.reason == "no_compiled_graph_source" and not never.derived_key
     assert missed.reason == "local_miss_no_hub"
     assert missed.derived_key == KEY_DERIVED
     details = {u.phase: u.detail for u in _adopt_events(events)}
-    assert "key=-" in details["no_cell_source"]
+    assert "key=-" in details["no_compiled_graph_source"]
     assert f"key={KEY_DERIVED}" in details["local_miss_no_hub"]
 
 
 def test_boot_adopt_reads_the_local_store_and_says_so_in_its_imports() -> None:
     """The one-line summary of the defect: ``boot_adopt`` imported
-    ``cell_resolve`` and not ``local_cell_store``, so step 2 of §4.27 was
+    ``compiled_graph_resolve`` and not ``local_compiled_graph_store``, so step 2 of §4.27 was
     hub-or-nothing. RED before: this import did not exist."""
     import ast
 
@@ -612,5 +612,5 @@ def test_boot_adopt_reads_the_local_store_and_says_so_in_its_imports() -> None:
         for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
         for alias in node.names
     }
-    assert {"local_cell_store", "cell_resolve"} <= imported, (
+    assert {"local_compiled_graph_store", "compiled_graph_resolve"} <= imported, (
         "one key, two lookup routes — the boot must be able to address BOTH")

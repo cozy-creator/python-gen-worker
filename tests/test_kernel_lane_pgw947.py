@@ -1,5 +1,5 @@
 """pgw#947 — the mint MEASURES which serving-kernel lane wins on the target
-card, records the verdict into the cell, and serving adopts it.
+card, records the verdict into the compiled graph, and serving adopts it.
 
 Integration-style over mocks: the tests drive the REAL selection rule, the
 REAL envelope/evidence round-trip, and the REAL adoption path (a packed tar
@@ -230,13 +230,13 @@ def test_envelope_is_discrete_and_evidence_round_trips() -> None:
 def _packed(tmp_path: Path, meta: dict) -> Path:
     body = tmp_path / "metadata.json"
     body.write_text(json.dumps(meta))
-    artifact = tmp_path / "cell.tar.gz"
+    artifact = tmp_path / "compiled_graph.tar.gz"
     with tarfile.open(artifact, "w:gz") as tar:
         tar.add(body, arcname="metadata.json")
     return artifact
 
 
-def test_serving_adopts_the_execution_lane_the_cell_names(
+def test_serving_adopts_the_execution_lane_the_compiled_graph_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _on_card(monkeypatch, 32 * GB, "NVIDIA RTX 5090", "sm_120")
@@ -253,19 +253,19 @@ def test_serving_adopts_the_execution_lane_the_cell_names(
     assert kl.REASON_ADOPTED in reason
 
 
-def test_cell_without_a_verdict_is_the_default_with_a_typed_reason(
+def test_compiled_graph_without_a_verdict_is_the_default_with_a_typed_reason(
     tmp_path: Path,
 ) -> None:
-    """(d) A pre-pgw#947 cell records nothing. That is the declared default
+    """(d) A pre-pgw#947 compiled graph records nothing. That is the declared default
     and it SAYS which case it was — never a silent fall-through."""
     artifact = _packed(tmp_path, {"kind": "aot-inductor"})
     assert kl.adopt_from_artifact(artifact) == kl.DEFAULT_EXECUTION_LANE
     assert kl.REASON_ABSENT in kl.pinned()[1]
 
 
-def test_no_cell_at_all_is_the_default_with_its_own_reason() -> None:
+def test_no_compiled_graph_at_all_is_the_default_with_its_own_reason() -> None:
     assert kl.adopt(None) == kl.DEFAULT_EXECUTION_LANE
-    assert kl.REASON_NO_CELL in kl.pinned()[1]
+    assert kl.REASON_NO_COMPILED_GRAPH in kl.pinned()[1]
 
 
 def test_unreadable_artifact_degrades_and_names_the_failure(
@@ -304,7 +304,7 @@ def test_verdict_survives_the_real_pack_unpack_round_trip(
     content.mkdir()
     (content / aot_serve.PACKAGE_NAME).write_bytes(b"stub")
     artifact = aot_serve.pack(
-        content, tmp_path / "cell.tar.gz",
+        content, tmp_path / "compiled_graph.tar.gz",
         {"kind": "aot-inductor", kl.META_KEY: kl.envelope_block(verdict)})
 
     meta = aot_serve.unpack_metadata(artifact)
@@ -314,8 +314,8 @@ def test_verdict_survives_the_real_pack_unpack_round_trip(
 
 # --- the same SM, a different card -----------------------------------------
 #
-# Cell keys are keyed on SM and the lane is deliberately NOT a key axis, so a
-# 96 GB RTX PRO 6000 and a 32 GB RTX 5090 are ONE cell key. Paul: "we cannot
+# Compiled graph keys are keyed on SM and the lane is deliberately NOT a key axis, so a
+# 96 GB RTX PRO 6000 and a 32 GB RTX 5090 are ONE compiled graph key. Paul: "we cannot
 # guarantee that two separate GPUs with the same sm_x capability will both
 # want to use the same set of kernels." Serving therefore re-applies the FIT
 # half of the rule against its own detected total instead of obeying the
@@ -328,7 +328,7 @@ _SMALL = _m("fused+packed", 1240.0, 20.0)
 
 
 def _minted_on_the_big_card(**extra) -> dict:
-    """A cell as the 96 GB card would have packed it."""
+    """A compiled graph as the 96 GB card would have packed it."""
     verdict = kl.select(
         [_BIG, _SMALL], device_total_bytes=96 * GB,
         device_name="NVIDIA RTX PRO 6000", sm="sm_120")
@@ -342,7 +342,7 @@ def test_a_verdict_from_a_bigger_card_of_the_same_sm_is_refit_locally(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """THE gap this closes. The 96 GB card measured `baseline+dense` fastest
-    and recorded it. The 32 GB 5090 shares the cell key and would have pinned
+    and recorded it. The 32 GB 5090 shares the compiled graph key and would have pinned
     a lane whose measured peak cannot fit its card — an OOM, or a silent
     slide into CPU-offload degraded mode, because the kernels' self-checks
     are CORRECTNESS checks and know nothing about memory.
@@ -364,7 +364,7 @@ def test_a_verdict_from_a_bigger_card_of_the_same_sm_is_refit_locally(
 def test_the_fast_path_is_unchanged_when_the_recorded_winner_fits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Same cell, adopted on a card that CAN hold the recorded winner: the
+    """Same compiled graph, adopted on a card that CAN hold the recorded winner: the
     verdict is obeyed exactly as before, and nothing calls itself a re-fit."""
     _on_card(monkeypatch, 96 * GB, "NVIDIA RTX PRO 6000", "sm_120")
     assert kl.adopt(_minted_on_the_big_card()) == "baseline+dense"
@@ -439,10 +439,10 @@ def test_full_evidence_reruns_the_whole_rule_against_this_device(
     assert "1150.0" in reason and "1240.0" in reason
 
 
-def test_a_cell_with_no_recorded_peaks_is_adopted_but_marked_unverified(
+def test_a_compiled_graph_with_no_recorded_peaks_is_adopted_but_marked_unverified(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """DECIDED: a cell that records no per-candidate peaks (a verdict minted
+    """DECIDED: a compiled graph that records no per-candidate peaks (a verdict minted
     before the fit block existed, or a `sole_candidate` verdict that measured
     nothing) is ADOPTED, not dropped — and it says the fit is unverified
     across cards.
@@ -455,7 +455,7 @@ def test_a_cell_with_no_recorded_peaks_is_adopted_but_marked_unverified(
     minted from here on carries its peaks."""
     _on_card(monkeypatch, 32 * GB, "NVIDIA RTX 5090", "sm_120")
     meta = _minted_on_the_big_card()
-    meta[kl.META_KEY].pop("fit")  # a pre-fit-block pgw#947 cell
+    meta[kl.META_KEY].pop("fit")  # a pre-fit-block pgw#947 compiled graph
 
     assert kl.adopt(meta) == "baseline+dense"
     reason = kl.pinned()[1]
@@ -542,7 +542,7 @@ def test_the_fallback_order_is_the_ranking_and_the_winner_leads_it() -> None:
 def test_the_refit_never_pins_a_execution_lane_this_worker_cannot_implement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A cell from a newer worker may record candidates this one has no
+    """A compiled graph from a newer worker may record candidates this one has no
     vocabulary for. They are dropped from the re-fit rather than pinned, and
     `pin()` would refuse them anyway."""
     _on_card(monkeypatch, 32 * GB, "NVIDIA RTX 5090", "sm_120")

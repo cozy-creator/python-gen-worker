@@ -13,7 +13,7 @@ The EXECUTION axis was left derived, and it erred in the FLATTERING direction:
 `_served_execution_lane` ran the lane table's PLANNING coercion — the
 `fp8-w8a8-dynamic` body is compiled-only because eager w8a8 is UNMEASURED, not
 because it cannot happen — over an observed eager posture, and rewrote the
-fact. The lane id feeds pricing, quant verdicts, serving floors and cell
+fact. The lane id feeds pricing, quant verdicts, serving floors and compiled graph
 identity, so an over-claim there is the worst direction available.
 
 REVERT-TURNS-RED: `test_an_eager_worker_reports_an_eager_lane_on_the_wire`
@@ -53,7 +53,7 @@ def _run(request_id: str, **run_job: object) -> "pb.JobResult":
 
 
 def test_an_eager_worker_reports_an_eager_lane_on_the_wire() -> None:
-    """THE red test. A worker with no compiled cell must not report one."""
+    """THE red test. A worker with no compiled compiled graph must not report one."""
     res = _run("r-ie655-eager")
     assert res.status == pb.JOB_STATUS_OK, res.safe_message
     m = res.metrics

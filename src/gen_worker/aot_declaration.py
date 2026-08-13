@@ -173,7 +173,7 @@ def derived_dynamic(
 def effective_shape_strategy(decl: Compile) -> str:
     """The declared per-family shape strategy (#730 ratified).
 
-    One population per family since pgw#846 retired regional cells: the
+    One population per family since pgw#846 retired regional compiled graphs: the
     whole-graph ``shape_strategy`` is the only strategy there is.
     """
     return str(decl.shape_strategy or "")
@@ -256,7 +256,7 @@ def entry_name(
     class_dims: Tuple[Tuple[str, int], ...] = (),
 ) -> str:
     """The deterministic NAMED-ENTRY label of one graph class inside a
-    multi-graph cell (pgw#758, Paul's ruling: separate graphs per function,
+    multi-graph compiled graph (pgw#758, Paul's ruling: separate graphs per function,
     combined into one file).
 
     ``<target>/<fork k=v,...>/<dims k=v,...>`` with empty segments omitted;
@@ -286,14 +286,14 @@ def plan_entry_name(plan: MintPlan) -> str:
     return entry_name(plan.target, fork, dims)
 
 
-def cell_plans(decl: Compile) -> Tuple[MintPlan, ...]:
+def compiled_graph_plans(decl: Compile) -> Tuple[MintPlan, ...]:
     """EVERY mint plan of one family's declaration, across ALL declared
-    targets — the whole class set one cell packages (pgw#758). Refuses a
+    targets — the whole class set one compiled graph packages (pgw#758). Refuses a
     declaration whose plans would collide on an entry name (two classes one
     label could not be told apart by a refusal)."""
     if not decl.targets:
         raise MintRefused(
-            f"family {decl.family!r} declares no targets — a cell with no "
+            f"family {decl.family!r} declares no targets — a compiled_graph with no "
             f"functions has nothing to package")
     plans: List[MintPlan] = []
     for target in decl.targets:
@@ -786,7 +786,7 @@ def load_declaration(request: Mapping[str, Any], request_path: Optional[Path] = 
 __all__ = [
     "MintPlan",
     "call_signature",
-    "cell_plans",
+    "compiled_graph_plans",
     "declared_inputs",
     "derived_dynamic",
     "dim_hull",

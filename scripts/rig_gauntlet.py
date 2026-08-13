@@ -8,11 +8,11 @@ under a minute, in ONE command.
 
 Each variant is a FULL production cycle — resolve, handoff, real child spawn,
 `torch.export` + AOTInductor, seal, publish over the real wire, and a SECOND
-process fetching the exact named cell, arming and comparing every arm against eager. Not a smoke
+process fetching the exact named compiled graph, arming and comparing every arm against eager. Not a smoke
 test: the same machinery a pod runs, at ~15-60 s instead of ~95 minutes.
 
 WHY A TABLE AND NOT A PASS/FAIL. Some variants exist to demonstrate a REFUSAL
-(a bucket-bearing cell offered to a plain-lane parent must be rejected). Those
+(a bucket-bearing compiled graph offered to a plain-lane parent must be rejected). Those
 are not failures, so each variant declares the outcome it EXPECTS and the
 gauntlet reports agreement. A variant that flips in EITHER direction is news:
 an expected-red going green means someone fixed something and did not say so.
@@ -133,7 +133,7 @@ def run_one(
 def _why(facts: Dict[str, Any], leg: Dict[str, Any]) -> str:
     """The CLASSIFIED reason a leg failed, never a slice of raw stderr.
 
-    A table cell wide enough for a stack trace tail is a table cell that says
+    A table compiled graph wide enough for a stack trace tail is a table compiled graph that says
     nothing; the whole point of pgw#999 was that these refusals carry a class.
     """
     if facts.get("arm_reason"):
@@ -242,7 +242,7 @@ def main(argv: Optional[List[str]] = None) -> int:
           f"torch={env0.get('torch', '?')}")
     print(f"covers={env0.get('covers', '?')}")
     if any(r.get("synthetic_sm") for r in rows):
-        print("⚠ synthetic `sm` supplied on at least one variant — those cells "
+        print("⚠ synthetic `sm` supplied on at least one variant — those compiled_graphs "
               "are PLUMBING artifacts and must not reach a shared namespace.")
     print("⚠ parity is the SDK's cosine ladder plus this rig's max|delta|; the "
           "GATE is cosine-based, so it is a directional-degradation "

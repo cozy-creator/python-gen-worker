@@ -67,21 +67,21 @@ LADDERS: Dict[str, Tuple[str, ...]] = {
         "gen_worker.executor.Executor._background_mint",
         "gen_worker.executor.Executor._background_mint_run",
         "gen_worker.executor.Executor._delegated_mint_run",
-        "gen_worker.mint_delegate.build_cell",
+        "gen_worker.mint_delegate.build_compiled_graph",
         "gen_worker.mint_process.run_mint",
     ),
     "arm": (
         "gen_worker.executor.Executor._enable_compiled",
-        "gen_worker.fleet_cells.enable_compiled",
+        "gen_worker.fleet_compiled_graphs.enable_compiled",
         "gen_worker.models.provision.enable_compiled",
         "gen_worker.models.provision.arm_aot",
         "gen_worker.aot_serve.enable",
     ),
     "publish": (
         "gen_worker.executor.Executor._delegated_mint_run",
-        "gen_worker.fleet_cells.adopt_delegated_mint",
-        "gen_worker.fleet_cells.publish_self_mint",
-        "gen_worker.executor.Executor._advertise_minted_cells",
+        "gen_worker.fleet_compiled_graphs.adopt_delegated_mint",
+        "gen_worker.fleet_compiled_graphs.publish_self_mint",
+        "gen_worker.executor.Executor._advertise_minted_compiled_graphs",
     ),
 }
 
@@ -103,7 +103,7 @@ UNCOVERED: Dict[str, Tuple[str, str, str]] = {
     "arm": (
         "gen_worker.executor.Executor._enable_compiled",
         "Nothing enters at Executor._enable_compiled from a booted worker. "
-        "fleet_cells.enable_compiled has ~29 direct callers in tests and "
+        "fleet_compiled_graphs.enable_compiled has ~29 direct callers in tests and "
         "aot_serve.enable has 2, all below the executor. The one file that "
         "tried to instrument the arm end to end, "
         "test_boot_phases_arm_pgw764.py, declares itself STAGED AND NOT "
@@ -119,11 +119,11 @@ UNCOVERED: Dict[str, Tuple[str, str, str]] = {
     ),
     "publish": (
         "gen_worker.executor.Executor._delegated_mint_run",
-        "CellPublisher.publish has a genuinely real test "
-        "(test_cell_publish_v2_pgw807: real sockets, real multi-MB bytes, real "
+        "CompiledGraphPublisher.publish has a genuinely real test "
+        "(test_compiled_graph_publish_v2_pgw807: real sockets, real multi-MB bytes, real "
         "chunked sha256) but it enters at the publisher. Nothing drives "
         "_delegated_mint_run -> adopt_delegated_mint -> publish_self_mint -> "
-        "_advertise_minted_cells as one chain, and _advertise_minted_cells is "
+        "_advertise_minted_compiled_graphs as one chain, and _advertise_minted_compiled_graphs is "
         "where active_compile_ref / active_self_mint become visible to the hub."
         " Blocked behind the mint ladder: publish has no input until a mint "
         "front-door test exists.",
@@ -207,7 +207,7 @@ def test_serve_ladder_is_driven_from_the_wire() -> None:
 
 def test_the_instrument_sees_a_unit_level_test() -> None:
     """The red arm. Call ``aot_serve.enable`` the way ~29 files call
-    ``fleet_cells.enable_compiled`` today — straight from the test, with no
+    ``fleet_compiled_graphs.enable_compiled`` today — straight from the test, with no
     executor above it — and the ladder must report the chain broken and the
     call attributed to the TEST, not to production.
 

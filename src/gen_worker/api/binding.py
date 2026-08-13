@@ -131,7 +131,7 @@ class ModelRef(msgspec.Struct, frozen=True):
             )
         # §1.32(d)/th#1803: THE FLAVOR SYSTEM IS DEAD. A `#` in ANY binding
         # path is a weight selector and refuses typed here, at the site the
-        # author wrote — never as a hub 400 three layers away. Cell refs are
+        # author wrote — never as a hub 400 three layers away. Compiled graph refs are
         # not bindings and never reach this constructor.
         refuse_flavor_selector(self.path, where=f"{self.source} binding")
         if self.source == "tensorhub":

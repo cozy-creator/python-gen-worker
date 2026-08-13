@@ -2,7 +2,7 @@
 
 The number this deletes
 -----------------------
-The sdxl w8a8-lora64 mint of 2026-08-06 (cell
+The sdxl w8a8-lora64 mint of 2026-08-06 (compiled graph
 ``ck5-a53e02a7885f9312fb1fa7df…``, L40S, gen-worker 0.93.1, pod
 ``wz4g1ya8a4khne``) reported this phase table, and the hub stored it verbatim::
 
@@ -92,7 +92,7 @@ JIT_PARTITION_KEYS: Dict[str, Tuple[str, ...]] = {
     # generated module out and waiting for the kernels it names. This is where
     # a JIT compile's time actually is (63 % of the probe above).
     "kernel_compile_s": ("PyCodeCache.load_by_key_path",),
-    # Kept so a cell minted through an AOT-shaped inline call is not silently
+    # Kept so a compiled graph minted through an AOT-shaped inline call is not silently
     # unattributed; zero on the ordinary JIT path, which is itself a fact.
     "host_compile_s": ("AotCodeCompiler.compile",),
 }

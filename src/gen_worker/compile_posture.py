@@ -20,8 +20,8 @@ The fact is *"a person is sitting at this machine"*, and no process can measure
 it. Three plausible-looking proxies exist in this tree and every one of them is
 a DIFFERENT question:
 
-* ``local_cell_store.trust_class() == "untrusted"`` — the HUB's verdict on
-  whether this hardware may publish a cell. A rented community-cloud pod is
+* ``local_compiled_graph_store.trust_class() == "untrusted"`` — the HUB's verdict on
+  whether this hardware may publish a compiled graph. A rented community-cloud pod is
   untrusted and has no human on it; being polite there would slow work we are
   paying for by the second. Trust is not tenancy.
 * ``publisher is None`` at ``local_serve``'s call site — a fact about the SINK.

@@ -3,26 +3,26 @@
 
 The shipped #735 executor proof scored EXPORTED arms inside a loop gated on
 ``proves_inductor`` — it ran only when SOME dynamo selection coexisted. A
-worker whose ONLY arm is an adopted AOT cell (the prod flip shape: F1
+worker whose ONLY arm is an adopted AOT compiled graph (the prod flip shape: F1
 adopts, the delivered dynamo artifact is skipped) skipped the boot proof
 entirely and stayed armed UNPROVEN: an artifact that never executed — or
 executed and revoked — kept advertising itself. Same fail-closed rule as
 the dynamo lane, through the REAL executor setup path (fakes only at the
 download + arming boundaries):
 
-  1. an exercised pure-AOT arm is PROVEN — stays armed, cell recorded
+  1. an exercised pure-AOT arm is PROVEN — stays armed, compiled graph recorded
      proven in-process (the pgw#637 registry);
   2. an unexercised pure-AOT arm KEEPS SERVING and banks no proof;
   3. the same on the MANDATORY (w8a8) lane does not kill the boot.
 
 **Rows 2 and 3 were the opposite assertion until pgw#1141** (Paul's ruling,
 2026-08-11): an unexercised arm was unwrapped, quarantined and dropped. That
-barrier is deleted — an ADOPTED cell arms before setup, so nothing has
+barrier is deleted — an ADOPTED compiled graph arms before setup, so nothing has
 dispatched through it by construction, and two real pods threw away artifacts
 they had just verified at `cos=1.00000` because of it. The fail-closed property
 this file was written to defend now lives where it belongs: the pgw#868
-numerics gate refuses a cell that does not reproduce eager, and a
-cell-attributable failure at SERVE time revokes the arm in-request. What an
+numerics gate refuses a compiled graph that does not reproduce eager, and a
+compiled graph-attributable failure at SERVE time revokes the arm in-request. What an
 absent measurement still decides is the PUBLISH — which is what rows 2 and 3
 now pin.
 """
@@ -37,7 +37,7 @@ import msgspec
 import pytest
 
 import gen_worker
-from gen_worker import aot_serve, compile_cache, fleet_cells
+from gen_worker import aot_serve, compile_cache, fleet_compiled_graphs
 from gen_worker.api.decorators import Compile
 from gen_worker import RequestContext, Resources, Slot, endpoint, worker_function
 from gen_worker.executor import Executor
@@ -110,12 +110,12 @@ class AotFamily:
 
 
 def _fake_arm(key: str, ref: str):
-    """A fleet policy standing in for F1: arm an exported cell on the unet
+    """A fleet policy standing in for F1: arm an exported compiled graph on the unet
     and return the adopted identity — the executor path from ArmOutcome to
     the boot proof is the code under test and runs REAL."""
 
     def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any,
-                publisher: Any = None) -> "fleet_cells.ArmOutcome":
+                publisher: Any = None) -> "fleet_compiled_graphs.ArmOutcome":
         unet = pipe.unet
         # pgw#1176: production wraps a REGISTRY; `is_armed` reads it.
         _runner = aot_serve.ArtifactRunner(
@@ -144,13 +144,13 @@ def _fake_arm(key: str, ref: str):
         # production arm route ever called, which is why these rows were green
         # while the pod served eager (pgw#1141b). It is DELETED, not moved: the
         # marker set above is what `arm_entry` publishes, so
-        # `holds_exported_cell` answers the lane question off the OBJECT.
+        # `holds_exported_compiled_graph` answers the lane question off the OBJECT.
         # A fixture that needs a REAL boot-adopt drives tests/harness/adopt_rig.py.
-        adopted = fleet_cells.SelfMint(
-            family=FAMILY, cell_key=key, ref=ref,
+        adopted = fleet_compiled_graphs.SelfMint(
+            family=FAMILY, compiled_graph_key=key, ref=ref,
             snapshot_digest="blake3:" + "ab" * 32,
-            artifact=Path(cache_dir or ".") / "cell.tar")
-        return fleet_cells.ArmOutcome(armed=True, self_mint=adopted)
+            artifact=Path(cache_dir or ".") / "compiled_graph.tar")
+        return fleet_compiled_graphs.ArmOutcome(armed=True, self_mint=adopted)
 
     return _enable
 
@@ -212,7 +212,7 @@ def _rig(monkeypatch: pytest.MonkeyPatch, *, seed: str, exercise: bool,
         RIG["weight_lane"] = weight_lane
     key = "ek1-" + (seed * 56)[:56]
     ref = f"root/family-{FAMILY}#{key}"
-    monkeypatch.setattr(fleet_cells, "enable_compiled", _fake_arm(key, ref))
+    monkeypatch.setattr(fleet_compiled_graphs, "enable_compiled", _fake_arm(key, ref))
     return key, ref
 
 
@@ -227,15 +227,15 @@ def test_exercised_pure_aot_arm_is_proven_at_boot(
     assert aot_serve.execution_count(pipe) > 0
     # The gap: with no dynamo selection coexisting, the proof loop never
     # ran, so an honestly-exercised arm was never RECORDED proven.
-    assert compile_cache.cell_proven_in_process(ref)
-    assert not compile_cache.cell_quarantined_in_process(ref)
+    assert compile_cache.compiled_graph_proven_in_process(ref)
+    assert not compile_cache.compiled_graph_quarantined_in_process(ref)
 
 
 def test_unexercised_pure_aot_arm_keeps_serving_and_banks_no_proof(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """pgw#1141: absence of a dispatch is not a verdict about the artifact.
-    The arm stands and the first real request is the proof; the cell is not
+    The arm stands and the first real request is the proof; the compiled graph is not
     recorded proven, which is what the publish gate reads."""
     _key, ref = _rig(monkeypatch, seed="b", exercise=False)
     ex = _executor(tmp_path, monkeypatch)
@@ -243,8 +243,8 @@ def test_unexercised_pure_aot_arm_keeps_serving_and_banks_no_proof(
     pipe = RIG["pipe"]
     assert aot_serve.is_armed(pipe)
     assert getattr(pipe.unet, aot_serve._MARKER_ATTR, None) is not None
-    assert not compile_cache.cell_quarantined_in_process(ref)
-    assert not compile_cache.cell_proven_in_process(ref)
+    assert not compile_cache.compiled_graph_quarantined_in_process(ref)
+    assert not compile_cache.compiled_graph_proven_in_process(ref)
 
 
 def test_mandatory_execution_lane_without_a_dispatch_does_not_kill_the_boot(
@@ -256,4 +256,4 @@ def test_mandatory_execution_lane_without_a_dispatch_does_not_kill_the_boot(
     _boot(ex)  # pgw#672: never a load failure
     pipe = RIG["pipe"]
     assert aot_serve.is_armed(pipe)
-    assert not compile_cache.cell_proven_in_process(ref)
+    assert not compile_cache.compiled_graph_proven_in_process(ref)

@@ -44,7 +44,7 @@ SRC="$REPO/src/gen_worker"
 say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
 
 # --- 1. Refuse a pod that is not marked a probe ------------------------------
-# GEN_WORKER_PROBE is what disarms cell publish in the parent's action
+# GEN_WORKER_PROBE is what disarms compiled graph publish in the parent's action
 # allowlist (procsplit/actions.py). Syncing onto a pod without it would put
 # unreleased code on a worker whose mints can still reach the shared family
 # namespace — the exact poisoning pgw#980 exists to make impossible. The check
@@ -59,7 +59,7 @@ if ! ssh $TARGET "tr '\0' '\n' < /proc/$PARENT_PID/environ | grep -qx 'GEN_WORKE
   cat >&2 <<'EOF'
 REFUSED: this pod is not marked a live-edit probe.
 
-Its worker was not started with GEN_WORKER_PROBE=1, so the parent's cell-publish
+Its worker was not started with GEN_WORKER_PROBE=1, so the parent's compiled_graph-publish
 disarm (pgw#980) is not in force and a mint from rsync'd code could reach the
 shared family namespace. Bring the pod up with:
 

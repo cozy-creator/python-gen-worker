@@ -1,27 +1,27 @@
-"""gw#581/th#883 (redefined by pgw#1059): the ONE worker-owned cell-key
-brain + the local-cell verdict invariants.
+"""gw#581/th#883 (redefined by pgw#1059): the ONE worker-owned compiled graph-key
+brain + the local-compiled graph verdict invariants.
 
 Outcome-level: a key is deterministic and axis-sensitive on exactly the
 four ck1 axes; the local (torch-inductor-cache) store verdict compares
-recorded facts with the producer's own derivations; a SELF-VERIFIED cell
-that fails to arm surfaces as cell_selection_bug (never a silent eager
-fallback); foreign cells keep the compatibility-miss policy.
+recorded facts with the producer's own derivations; a SELF-VERIFIED compiled graph
+that fails to arm surfaces as compiled_graph_selection_bug (never a silent eager
+fallback); foreign compiled graphs keep the compatibility-miss policy.
 
 The redefinition's own invariants (membership axiom, one-derivation fence,
 old/new non-collision, envelope canonicalization) live in
-``tests/test_cell_key_pgw1059.py``.
+``tests/test_compiled_graph_key_pgw1059.py``.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from gen_worker import cell_key as ck
+from gen_worker import compiled_graph_key as ck
 from gen_worker import compile_cache as cc
 
 
 class _ContractCfg:
-    """Duck-typed declared-compile-contract source (registry.CompileCell)."""
+    """Duck-typed declared-compile-contract source (registry.CompileCompiledGraph)."""
 
     def __init__(
         self, *, shapes=((768, 768),), targets=("transformer",), text_len=0,
@@ -68,13 +68,13 @@ def test_key_deterministic_and_axis_sensitive():
 
 
 def test_unknown_and_missing_axes_refuse():
-    with pytest.raises(ck.CellKeyError):
+    with pytest.raises(ck.CompiledGraphKeyError):
         ck.from_axes(dict(_AXES, cuda_driver="13020"))  # host lottery axis
-    with pytest.raises(ck.CellKeyError):
+    with pytest.raises(ck.CompiledGraphKeyError):
         ck.from_axes(dict(_AXES, sku="b200"))  # observability, never identity
-    with pytest.raises(ck.CellKeyError):
+    with pytest.raises(ck.CompiledGraphKeyError):
         ck.from_axes(dict(_AXES, torch="2.13.0"))  # version axes are gone
-    with pytest.raises(ck.CellKeyError):
+    with pytest.raises(ck.CompiledGraphKeyError):
         ck.from_axes({k: v for k, v in _AXES.items() if k != "toolchain"})
 
 
@@ -85,7 +85,7 @@ def test_key_scheme_ek1_foreign_keys_are_key_shaped_but_distinct():
     pre-redefinition corpus instead of minting ck2.
 
     Shape stays scheme-AGNOSTIC, byte-identical to tensorhub's
-    `compilecache.IsCellKey` (th#1183): a foreign-scheme token IS
+    `compilecache.IsCompiledGraphKey` (th#1183): a foreign-scheme token IS
     key-shaped; it simply names no artifact this runtime computes.
     """
     key = ck.from_axes(_AXES).digest
@@ -102,7 +102,7 @@ def test_key_scheme_ek1_foreign_keys_are_key_shaped_but_distinct():
 def test_execution_lane_canonicalization():
     """fp8-hooks and w8a16 are one lane label; buckets fold into it. The
     lane is store metadata + discovery scoping since pgw#1059 — the
-    one-derivation rule stands so a cell is scoped under the same spelling
+    one-derivation rule stands so a compiled graph is scoped under the same spelling
     it was stamped with."""
     assert (cc.execution_lane_label("fp8-hooks")
             == cc.execution_lane_label("w8a16"))
@@ -111,25 +111,25 @@ def test_execution_lane_canonicalization():
     assert cc.execution_lane_label("w8a8") != cc.execution_lane_label("")
 
 
-# pgw#1181 REMOVED the six local-cell-verdict rows:
-# `test_local_cell_has_no_key_stamp`, `test_local_verdict_ignores_sku_and_pins_sm`,
+# pgw#1181 REMOVED the six local-compiled graph-verdict rows:
+# `test_local_compiled_graph_has_no_key_stamp`, `test_local_verdict_ignores_sku_and_pins_sm`,
 # `test_declared_contract_fences_newer_contract`,
 # `test_self_requested_drift_is_selection_bug`,
 # `test_self_requested_no_target_is_selection_bug` and
-# `test_foreign_cell_drift_stays_eager`.
+# `test_foreign_compiled_graph_drift_stays_eager`.
 #
 # Their subject is the `torch-inductor-cache` store verdict —
-# `compile_cache.local_cell_mismatch` over `artifact_metadata`, and the
-# `cell_selection_bug` a self-requested cell of that format raised when it then
+# `compile_cache.local_compiled_graph_mismatch` over `artifact_metadata`, and the
+# `compiled_graph_selection_bug` a self-requested compiled graph of that format raised when it then
 # refused to arm. The format has had no writer since pgw#1178 deleted
 # `mint_artifact`, and pgw#1181 deleted the format: there is no local kind, no
-# verdict to render on one, and `enable` no longer takes a cell to reject.
+# verdict to render on one, and `enable` no longer takes a compiled graph to reject.
 #
 # Every property they fenced survives on the exported lane BY CONSTRUCTION
 # rather than by comparison, which is the point of a content-addressed key:
 # sm, the declared contract, the env seal and the lane are all axes of `ek1`
 # or fold into one (pgw#1176),
 # so an entry that disagrees on any of them has a different key and never
-# resolves. `tests/test_cell_key_pgw1059.py` is where that is stated, with the
+# resolves. `tests/test_compiled_graph_key_pgw1059.py` is where that is stated, with the
 # staleness matrix naming each axis. What is left here is the key itself —
 # determinism, axis sensitivity, the ek1 scheme, and lane canonicalization.

@@ -3,7 +3,7 @@
 Normal form — the ONE canonical string for a model ref (grammar th#597 C5,
 shared vectors ``tests/testdata/ref_grammar_vectors.json``):
 
-    tensorhub:  owner/repo[:tag][@sha256:<hex>|@blake3:<hex>][#<cell-fragment>]
+    tensorhub:  owner/repo[:tag][@sha256:<hex>|@blake3:<hex>][#<compiled graph-fragment>]
     hf:         owner/repo[@revision]
 
 The tag is ELIDED when it equals ``prod`` (the grammar default) and stamped
@@ -24,10 +24,10 @@ specific checkpoint is addressed by ``owner/repo@sha256:…``. A weight ref
 carrying `#` is refused by :func:`refuse_flavor_selector` — the client-side
 twin of the hub's ``flavor_selection_removed`` 400.
 
-The `#` tail SURVIVES IN THE GRAMMAR for one reason only: COMPILE CELL refs
-are `#`-shaped (``root/family-<f>:cells#ck1-…``), exactly as tensorhub's own
+The `#` tail SURVIVES IN THE GRAMMAR for one reason only: COMPILE COMPILED GRAPH refs
+are `#`-shaped (``root/family-<f>:compiled graphs#ck1-…``), exactly as tensorhub's own
 ``release.ParseCanonicalRef`` still parses them. That retirement is a
-separate item on both sides; ``TensorhubRef.flavor`` is that cell fragment
+separate item on both sides; ``TensorhubRef.flavor`` is that compiled graph fragment
 and has no other reader.
 """
 
@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from typing import NewType, Optional
 
 # th#597 C5: `#` fragment charset [a-z0-9][a-z0-9._-]{0,63} (matches
-# tensorhub's validation.IsValidFlavorToken). Cell fragments only — see the
+# tensorhub's validation.IsValidFlavorToken). Compiled graph fragments only — see the
 # module docstring.
 _TENSORHUB_FRAGMENT_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 
@@ -69,7 +69,7 @@ def _flavor_removed_message(ref: str) -> str:
 def refuse_flavor_selector(ref: str, *, where: str = "") -> None:
     """Refuse a WEIGHT ref that carries a `#` selector (§1.32(d)).
 
-    THE weight-path chokepoint. Cell refs do not pass through here — the
+    THE weight-path chokepoint. Compiled graph refs do not pass through here — the
     compile cache parses its own `#`-shaped keys, which is the only reason
     the tail survives in the grammar at all.
     """
@@ -110,17 +110,17 @@ class TensorhubRef:
     repo: str
     tag: str = DEFAULT_REF_TAG
     digest: Optional[str] = None  # snapshot digest, including algorithm prefix (e.g. "blake3:<hex>")
-    #: The `#` tail. A COMPILE CELL fragment (``root/family-<f>:cells#ck1-…``)
+    #: The `#` tail. A COMPILE COMPILED GRAPH fragment (``root/family-<f>:compiled graphs#ck1-…``)
     #: and nothing else — never a weight selector (§1.32(d)). Weight paths
     #: call :func:`refuse_flavor_selector`; the compile cache is the one
-    #: reader (``compile_cache.parse_cell_ref``).
+    #: reader (``compile_cache.parse_compiled_graph_ref``).
     flavor: Optional[str] = None
 
     def repo_id(self) -> str:
         return f"{self.owner}/{self.repo}"
 
     def canonical(self) -> "WireRef":
-        """Normal form: ``owner/repo[:tag][@digest][#cell-fragment]``; the tag is
+        """Normal form: ``owner/repo[:tag][@digest][#compiled graph-fragment]``; the tag is
         elided when it is ``prod`` (the grammar default) and stamped verbatim
         otherwise, including ``latest``. Tensorhub is the default provider so
         no prefix is emitted; consumers track provider separately."""
@@ -269,7 +269,7 @@ def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
             if not flavor_part:
                 raise ValueError("tensorhub ref fragment is empty")
             # th#597 C5: ONE fragment token per ref, charset
-            # [a-z0-9][a-z0-9._-]{0,63} — `#a#b` is invalid (cells encode
+            # [a-z0-9][a-z0-9._-]{0,63} — `#a#b` is invalid (compiled graphs encode
             # conjunction inside one token). Shared grammar vectors:
             # tests/testdata/ref_grammar_vectors.json (byte-identical copy in
             # tensorhub internal/orchestrator/release/testdata/, whose Go

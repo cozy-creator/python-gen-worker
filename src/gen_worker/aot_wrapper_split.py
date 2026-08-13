@@ -22,7 +22,7 @@ Why a mint-path transform and not an inductor config: torch 2.13 exposes no
 knob for constants emission or per-function optimization, and the only
 config that moves this cost (``compile_wrapper_opt_level='O0'``) is DEAD —
 pgw#793 measured it at +1.7% per forward, which exceeds AOT's whole 1.4%
-serving margin, and it also re-keys every cell. This transform re-keys
+serving margin, and it also re-keys every compiled graph. This transform re-keys
 nothing (see :func:`install`).
 
 FAIL-CLOSED BY CONSTRUCTION. The transform only ever fires when it can
@@ -50,7 +50,7 @@ from . import aot_run_impl_split as runimpl
 logger = logging.getLogger(__name__)
 
 #: Typed activity event kind for the transform's outcome. One event per
-#: wrapper compile (18 per sdxl cell), each naming applied/declined and why.
+#: wrapper compile (18 per sdxl compiled graph), each naming applied/declined and why.
 EVENT = "aot_wrapper_split"
 
 #: Statements per generated helper. 250 is pgw#793's measured chunk; the
@@ -456,7 +456,7 @@ def _retarget(argv: Sequence[str], src_at: int, obj_at: int,
 def _partial_link(argv: Sequence[str], objects: Sequence[Path], target: Path) -> str:
     """``ld -r`` the part objects into the ONE object torch's link step
     expects. Driven through the same compiler binary torch chose, so the
-    toolchain stays exactly the one the cell seal names."""
+    toolchain stays exactly the one the compiled graph seal names."""
     return shlex.join([argv[0], "-r", "-nostdlib", "-o", str(target),
                        *(str(o) for o in objects)])
 
@@ -544,7 +544,7 @@ def install() -> bool:
     ``env_seal.effective_seal()`` and therefore the ``env_seal`` key axis
     are untouched. This module is imported only from the mint path, which
     is outside ``compile_cache.static_code_closure``'s entrypoints, so the
-    ``code_closure`` axis is untouched too. No cell is re-keyed. (Both
+    ``code_closure`` axis is untouched too. No compiled graph is re-keyed. (Both
     facts are asserted by tests/test_aot_wrapper_split_pgw793.py.)
 
     Returns True when installed, False when already installed.

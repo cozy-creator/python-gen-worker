@@ -4,7 +4,7 @@ Cold-boot time is the number the hub prices every capacity buy against and the
 number every "why was TTFR five minutes" investigation has had to hand-derive
 from log archaeology. The hub can already see the boot from OUTSIDE — pod
 create -> worker hello -> first assignment — but those bounds say nothing about
-which of weights fetch, cell fetch, cell load or warmup owns the seconds
+which of weights fetch, compiled graph fetch, compiled graph load or warmup owns the seconds
 INSIDE. Only the worker knows that, and today it dies with the pod.
 
 This module is the boot-time analogue of :mod:`gen_worker.stage_timing` (the
@@ -67,8 +67,8 @@ logger = logging.getLogger(__name__)
 # pgw#924: EXACTLY eight values, and every one of them has a production
 # producer on the shipping path. The previous vocabulary declared seventeen;
 # eight of those (`process_start`, `env_seal`, `manifest_load`,
-# `cache_preflight`, `cuda_probe`, `cell_load`, `first_request`, and — as a
-# phase — `cell_arm`) were constructed only by unit tests, and
+# `cache_preflight`, `cuda_probe`, `compiled_graph_load`, `first_request`, and — as a
+# phase — `compiled_graph_arm`) were constructed only by unit tests, and
 # `warmup_iteration` was wired to a body that never ran. A declared phase with
 # no producer is not "coverage we have not gotten to": every reader of the
 # ladder saw a name that could only ever report nothing, which is a default
@@ -82,7 +82,7 @@ PHASE_WEIGHTS_FETCH = "weights_fetch"
 PHASE_PIPELINE_LOAD = "pipeline_load"
 #: pgw#797: the warmup forwards, split OUT of `pipeline_load` and nested under
 #: it, so `pipeline_load` becomes weights->VRAM by subtraction and "what does a
-#: cell save on warmup" is a column instead of an estimate.
+#: compiled graph save on warmup" is a column instead of an estimate.
 #:
 #: pgw#924: emitted ONLY when warm work actually runs. It used to bracket the
 #: warm call unconditionally, and on the shipping path — where most setup slots
@@ -90,11 +90,11 @@ PHASE_PIPELINE_LOAD = "pipeline_load"
 #: A skipped warmup now emits no row, because "nobody warmed" and "warming was
 #: free" are different answers and only one of them was ever true.
 PHASE_WARMUP = "warmup"
-PHASE_CELL_FETCH = "cell_fetch"
-#: pgw#923/#924: the arm of ONE delivered or discovered cell. Its duration is
+PHASE_COMPILED_GRAPH_FETCH = "compiled_graph_fetch"
+#: pgw#923/#924: the arm of ONE delivered or discovered compiled graph. Its duration is
 #: the same quantity the hub stores as the adoption's `duration_ms`, measured
 #: once, in the one place that does the arming.
-PHASE_CELL_ARM = "cell_arm"
+PHASE_COMPILED_GRAPH_ARM = "compiled_graph_arm"
 PHASE_FIRST_REQUEST_SERVABLE = "first_request_servable"
 
 # --- pgw#1087: the per-COMPONENT decomposition -----------------------------
@@ -133,15 +133,15 @@ PHASE_DECLARATION_COMPOSE = "declaration_compose"
 PHASE_TRACE_FOR_KEY = "trace_for_key"
 #: Per-class hashing + the fold into `combined_graph_hash`.
 PHASE_KEY_FOLD = "key_fold"
-#: One worker->hub cell control-plane round trip (publish-intent /
+#: One worker->hub compiled graph control-plane round trip (publish-intent /
 #: publish-complete). `function` names the leg. NOTE: there is no worker-side
 #: key LOOKUP to time — pgw#904 made the hub resolve the arm and pgw#1032
-#: deleted `StateDelta.cell_lookups` — so this is the whole of the hub RTT the
-#: cell path actually pays on a boot.
-PHASE_CELL_HUB_RTT = "cell_hub_rtt"
-#: Staging + contract verification of a downloaded cell, before the first
+#: deleted `StateDelta.compiled_graph_lookups` — so this is the whole of the hub RTT the
+#: compiled graph path actually pays on a boot.
+PHASE_COMPILED_GRAPH_HUB_RTT = "compiled_graph_hub_rtt"
+#: Staging + contract verification of a downloaded compiled graph, before the first
 #: dlopen. The first half of admission.
-PHASE_CELL_VERIFY = "cell_verify"
+PHASE_COMPILED_GRAPH_VERIFY = "compiled_graph_verify"
 #: ONE entry's admission: contract parse, constant bind, ingress-assertion
 #: arming and the admission-drift parity check against the artifact's own
 #: generated guards. The second half of admission, and the per-entry parity
@@ -150,9 +150,9 @@ PHASE_ENTRY_ADMIT = "entry_admit"
 #: CUMULATIVE. The first instant this worker could have served a request at
 #: all, compiled or not — the first of the two user-visible timestamps.
 PHASE_EAGER_READY = "eager_ready"
-#: CUMULATIVE. The instant a compiled cell became the served path. The second
+#: CUMULATIVE. The instant a compiled compiled graph became the served path. The second
 #: user-visible timestamp, and the only honest measure of how long a pod serves
-#: eager before its cell arrives. May land AFTER the boot closes, which is
+#: eager before its compiled graph arrives. May land AFTER the boot closes, which is
 #: exactly the fact worth having.
 PHASE_COMPILED_SWAP = "compiled_swap"
 
@@ -175,14 +175,14 @@ CUMULATIVE_PHASES = frozenset({
 # stage_timing's GPU_BUSY/SMALL_GPU/GPU_IDLE intent at boot scale.
 CLASS_FETCH = "fetch"      # network / disk bytes
 CLASS_COMPILE = "compile"  # inductor / AOT compile
-CLASS_LOAD = "load"        # weights -> VRAM, cell load+arm
+CLASS_LOAD = "load"        # weights -> VRAM, compiled graph load+arm
 CLASS_SETUP = "setup"      # probes, seals, manifests, handshake
 
 _CLASS_BY_PHASE: Dict[str, str] = {
     PHASE_HELLO: CLASS_SETUP,
     PHASE_WEIGHTS_FETCH: CLASS_FETCH,
-    PHASE_CELL_FETCH: CLASS_FETCH,
-    PHASE_CELL_ARM: CLASS_LOAD,
+    PHASE_COMPILED_GRAPH_FETCH: CLASS_FETCH,
+    PHASE_COMPILED_GRAPH_ARM: CLASS_LOAD,
     PHASE_PIPELINE_LOAD: CLASS_LOAD,
     # pgw#797: an UNARMED warm pays the compile; an ARMED one pays only the
     # call. The default is the expensive reading; `span(..., klass=)` overrides
@@ -197,8 +197,8 @@ _CLASS_BY_PHASE: Dict[str, str] = {
     PHASE_DECLARATION_COMPOSE: CLASS_SETUP,
     PHASE_TRACE_FOR_KEY: CLASS_COMPILE,
     PHASE_KEY_FOLD: CLASS_SETUP,
-    PHASE_CELL_HUB_RTT: CLASS_SETUP,
-    PHASE_CELL_VERIFY: CLASS_LOAD,
+    PHASE_COMPILED_GRAPH_HUB_RTT: CLASS_SETUP,
+    PHASE_COMPILED_GRAPH_VERIFY: CLASS_LOAD,
     PHASE_ENTRY_ADMIT: CLASS_LOAD,
     PHASE_EAGER_READY: CLASS_SETUP,
     PHASE_COMPILED_SWAP: CLASS_SETUP,
@@ -208,7 +208,7 @@ _CLASS_BY_PHASE: Dict[str, str] = {
 #: declaration and the production producers are the SAME set — the property
 #: that failed here, silently, for seventeen names.
 #:
-#: pgw#1087 removed `cell_discover`. It was declared by pgw#924 as one of the
+#: pgw#1087 removed `compiled_graph_discover`. It was declared by pgw#924 as one of the
 #: "eight the shipping path PRODUCES", and it never had a producer: pgw#904
 #: replaced worker-side fetch-and-filter discovery with a hub-RESOLVED
 #: `Arm.artifact`, so there is nothing left to discover. Grep confirms it
@@ -438,7 +438,7 @@ class BootSpan:
     def classify(self, reason: str, detail: str = "") -> None:
         """Attach the countable reason token WITHOUT calling this a refusal.
 
-        pgw#1087: `memo hit` / `memo miss` and `cell cached` / `cell fetched`
+        pgw#1087: `memo hit` / `memo miss` and `compiled graph cached` / `compiled graph fetched`
         are the two branches of a SUCCESSFUL phase, and both are the fact worth
         counting. Before this the only way to put a token on a row was
         :meth:`refused`, which sets ``outcome=refused`` — so a hub-side count of
@@ -745,7 +745,7 @@ def mark(
         # pgw#1087: every cumulative milestone is remembered, not just the
         # servable one. `eager_ready` and `compiled_swap` are the two
         # user-visible timestamps and the interval between them is how long a
-        # pod served eager while its cell arrived — a subtraction nobody could
+        # pod served eager while its compiled graph arrived — a subtraction nobody could
         # do while only one milestone was retained.
         with _lock:
             _milestone_ms.setdefault(phase, duration_ms)
@@ -992,7 +992,7 @@ def reconciliation(
         if phase in milestones:
             out["milestone." + phase + "_ms"] = milestones[phase]
     if PHASE_EAGER_READY in milestones and PHASE_COMPILED_SWAP in milestones:
-        # The interval a pod served EAGER while its cell was being made or
+        # The interval a pod served EAGER while its compiled graph was being made or
         # fetched. The single number the compiled-serving campaign is about.
         out["eager_serving_ms"] = max(
             0, milestones[PHASE_COMPILED_SWAP] - milestones[PHASE_EAGER_READY])
@@ -1131,18 +1131,18 @@ SHAPE_EAGER: frozenset = frozenset({
 SHAPE_ENTRYPOINT: frozenset = SHAPE_EAGER | frozenset({
     PHASE_ENV_ESTABLISH, PHASE_LIB_MEMO,
 })
-#: A boot that ADOPTED a cell the hub named: no trace, no fold — it pays a
+#: A boot that ADOPTED a compiled graph the hub named: no trace, no fold — it pays a
 #: download and an admission instead.
 SHAPE_ADOPT: frozenset = SHAPE_ENTRYPOINT | frozenset({
-    PHASE_CELL_FETCH, PHASE_CELL_VERIFY, PHASE_ENTRY_ADMIT, PHASE_CELL_ARM,
+    PHASE_COMPILED_GRAPH_FETCH, PHASE_COMPILED_GRAPH_VERIFY, PHASE_ENTRY_ADMIT, PHASE_COMPILED_GRAPH_ARM,
     PHASE_COMPILED_SWAP,
 })
-#: A boot that MINTED its own cell: declaration, per-class trace, fold, the
+#: A boot that MINTED its own compiled graph: declaration, per-class trace, fold, the
 #: publish round trips, then the same admission as an adopt.
 SHAPE_SELF_MINT: frozenset = SHAPE_ADOPT | frozenset({
     PHASE_DECLARATION_COMPOSE, PHASE_TRACE_FOR_KEY, PHASE_KEY_FOLD,
-    PHASE_CELL_HUB_RTT,
-}) - frozenset({PHASE_CELL_FETCH})
+    PHASE_COMPILED_GRAPH_HUB_RTT,
+}) - frozenset({PHASE_COMPILED_GRAPH_FETCH})
 
 #: A boot whose phases explain less of the wall than this is not decomposed.
 #: pgw#1087's acceptance: "the phases sum to within ~5% of wall".
@@ -1284,8 +1284,8 @@ __all__ = [
     "PHASE_WEIGHTS_FETCH",
     "PHASE_PIPELINE_LOAD",
     "PHASE_WARMUP",
-    "PHASE_CELL_FETCH",
-    "PHASE_CELL_ARM",
+    "PHASE_COMPILED_GRAPH_FETCH",
+    "PHASE_COMPILED_GRAPH_ARM",
     "PHASE_FIRST_REQUEST_SERVABLE",
     "PHASE_SDK_READY",
     "PHASE_COMPONENT_FETCH",
@@ -1294,8 +1294,8 @@ __all__ = [
     "PHASE_DECLARATION_COMPOSE",
     "PHASE_TRACE_FOR_KEY",
     "PHASE_KEY_FOLD",
-    "PHASE_CELL_HUB_RTT",
-    "PHASE_CELL_VERIFY",
+    "PHASE_COMPILED_GRAPH_HUB_RTT",
+    "PHASE_COMPILED_GRAPH_VERIFY",
     "PHASE_ENTRY_ADMIT",
     "PHASE_EAGER_READY",
     "PHASE_COMPILED_SWAP",

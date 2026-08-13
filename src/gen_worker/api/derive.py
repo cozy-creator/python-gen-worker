@@ -21,7 +21,7 @@ so they run anywhere including this box:
    the collapse-onto-the-decorator and the gate below apply.
 
 2. :func:`contract_delta` / :func:`assert_faithful` — the MIGRATION SAFETY
-   GATE. ``Compile.contract_axes()`` is exactly what feeds the cell key's
+   GATE. ``Compile.contract_axes()`` is exactly what feeds the compiled graph key's
    contract digest (pgw#647), so two declarations with an identical
    ``contract_axes()`` produce an identical contract digest and — the traced
    graph being a pure function of the same declaration under fixed model code
@@ -58,7 +58,7 @@ __all__ = [
 ]
 
 #: The sdxl/z-image regime table: CFG on traces ONE batch-2 forward, turbo /
-#: no-CFG pins the batch-1 graph. Each arm is its own graph class of one cell
+#: no-CFG pins the batch-1 graph. Each arm is its own graph class of one compiled graph
 #: (ie#345, gw#627). ``(fork_value, traced_batch)`` — the two families that
 #: batch CFG into a single forward share this exact pair.
 CFG_BATCH_REGIMES: Tuple[Tuple[bool, int], ...] = ((True, 2), (False, 1))
@@ -75,7 +75,7 @@ class DerivedClasses(Tuple[GraphClass, ...]):
 
     So this is TRANSPORT, not storage: nothing downstream reads it, and it
     deliberately does not persist on the declaration. The alternative — a
-    cell-wide scalar stamped onto every row and read back off `rows[0]` — is
+    compiled graph-wide scalar stamped onto every row and read back off `rows[0]` — is
     the shape that produced a P0 filed on a false premise, because a label
     written beside a thing cannot be told from a label describing it, and it
     silently answers a question nothing asks (what if two rows disagree?).
@@ -145,7 +145,7 @@ def cfg_image_classes(
 # ---------------------------------------------------------------------------
 
 class DeclarationMismatch(AssertionError):
-    """A migrated declaration's cell-key contract differs from the standing
+    """A migrated declaration's compiled graph-key contract differs from the standing
     one — deleting the standing file would re-key or drop a fact. STOP."""
 
 
@@ -157,7 +157,7 @@ def _canonical(value: Any) -> str:
 
 
 def contract_delta(standing: Compile, migrated: Compile) -> Dict[str, Tuple[Any, Any]]:
-    """``{axis: (standing_value, migrated_value)}`` for every cell-key contract
+    """``{axis: (standing_value, migrated_value)}`` for every compiled graph-key contract
     axis the two declarations disagree on; ``{}`` iff identical.
 
     ``{}`` is the migration's green light: identical ``contract_axes()`` ⟹
@@ -298,7 +298,7 @@ def assert_faithful(
     standing: Compile, migrated: Compile, *, family: str = "",
 ) -> None:
     """Raise :class:`DeclarationMismatch` unless the migrated declaration's
-    cell-key contract is byte-identical to the standing one. The reusable
+    compiled graph-key contract is byte-identical to the standing one. The reusable
     per-family migration gate: run it in the endpoint's test with the standing
     ``aot_declaration`` Compile and the new decorator's ``compile`` BEFORE the
     file is deleted.
@@ -317,7 +317,7 @@ def assert_faithful(
             f"question(s) the standing one refuses on (pgw#1115)")
     if cdelta:
         lines.append(
-            f"  cell-key contract re-keys ({len(cdelta)} axis(es) differ):")
+            f"  compiled_graph-key contract re-keys ({len(cdelta)} axis(es) differ):")
         for axis, (av, bv) in cdelta.items():
             lines.append(f"    - {axis}: standing={av!r} migrated={bv!r}")
     if odelta:

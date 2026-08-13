@@ -1,5 +1,5 @@
 """pgw#1132 — the BOOT-KEY derivation owns its own branch arm, or no
-``lora_bucket`` family can ever ask for its cell.
+``lora_bucket`` family can ever ask for its compiled graph.
 
 pgw#822 at the mint: the child armed the branch CONTAINERS
 (``compile_cache.apply_lora_execution_lane``) and handed ``torch.export`` the

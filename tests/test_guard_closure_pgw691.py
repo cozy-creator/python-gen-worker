@@ -31,7 +31,7 @@ torch = pytest.importorskip("torch")
 
 from gen_worker import compile_cache as cc
 from gen_worker import guard_closure as gc
-from gen_worker.registry import CompileCell
+from gen_worker.registry import CompileCompiledGraph
 
 
 @pytest.fixture(autouse=True)
@@ -41,14 +41,14 @@ def _fresh_dynamo() -> Iterator[None]:
     torch._dynamo.reset()
 
 
-def _cfg(**overrides: Any) -> CompileCell:
+def _cfg(**overrides: Any) -> CompileCompiledGraph:
     base: Dict[str, Any] = dict(
         shapes=((64, 64),), targets=("unet",), family="sdxl",
         regional=False, text_len=77, dynamic=(), lora_bucket=0,
         guidance_scales=(5.0,), text_lens=(),
     )
     base.update(overrides)
-    return CompileCell(**base)
+    return CompileCompiledGraph(**base)
 
 
 def _arm_marker(pipe: Any, module: Any, fn: Any) -> None:

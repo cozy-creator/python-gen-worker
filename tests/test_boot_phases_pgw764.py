@@ -12,7 +12,7 @@ The acceptance this file encodes:
   report its own tail and silently drop the expensive part.
 * A REFUSED ARM appears with its classified reason: a real ``AdoptError``
   survives as ``outcome=refused reason=<token>`` — not as a failure, because
-  the worker declined that cell deliberately and goes on serving eager. (The
+  the worker declined that compiled graph deliberately and goes on serving eager. (The
   end-to-end assertion through ``aot_serve.enable`` itself lives in
   ``test_boot_phases_arm_pgw764.py``, which is held out of the commit while a
   sibling lane holds uncommitted WIP in ``aot_serve.py`` — see tracker
@@ -52,7 +52,7 @@ def _phases(rows: List[pb.BootPhase]) -> List[str]:
 
 
 def test_boot_rows_are_ordered_and_carry_one_boot_id() -> None:
-    with boot_phases.span(boot_phases.PHASE_CELL_VERIFY):
+    with boot_phases.span(boot_phases.PHASE_COMPILED_GRAPH_VERIFY):
         pass
     boot_phases.mark(boot_phases.PHASE_HELLO, since_process_start=True)
     with boot_phases.span(boot_phases.PHASE_WEIGHTS_FETCH, ref="repo/sdxl") as fetch:
@@ -60,7 +60,7 @@ def test_boot_rows_are_ordered_and_carry_one_boot_id() -> None:
 
     rows = boot_phases.recorded_rows()
     assert _phases(rows) == [
-        boot_phases.PHASE_CELL_VERIFY,
+        boot_phases.PHASE_COMPILED_GRAPH_VERIFY,
         boot_phases.PHASE_HELLO,
         boot_phases.PHASE_WEIGHTS_FETCH,
     ]
@@ -94,7 +94,7 @@ def test_a_span_opens_a_row_and_closes_the_same_ordinal() -> None:
 def test_rows_recorded_before_the_sink_exists_are_flushed_on_bind() -> None:
     """The boot window IS the no-sink window. Everything before bind must
     arrive, in order, once the stream comes up."""
-    boot_phases.mark(boot_phases.PHASE_CELL_VERIFY)
+    boot_phases.mark(boot_phases.PHASE_COMPILED_GRAPH_VERIFY)
     with boot_phases.span(boot_phases.PHASE_WEIGHTS_FETCH, ref="repo/a"):
         pass
 
@@ -121,7 +121,7 @@ def test_rows_recorded_before_the_sink_exists_are_flushed_on_bind() -> None:
     assert all(m.WhichOneof("msg") == "boot_phase" for m in sent)
     shipped = [m.boot_phase for m in sent]
     # The pre-bind rows were flushed, and the post-bind row followed them.
-    assert boot_phases.PHASE_CELL_VERIFY in _phases(shipped)
+    assert boot_phases.PHASE_COMPILED_GRAPH_VERIFY in _phases(shipped)
     assert boot_phases.PHASE_WEIGHTS_FETCH in _phases(shipped)
     assert _phases(shipped)[-1] == boot_phases.PHASE_FIRST_REQUEST_SERVABLE
 
@@ -158,10 +158,10 @@ def test_a_typed_refusal_is_recorded_as_refused_not_failed() -> None:
     after the fact: it decides whether this pod serves compiled or spends
     another 20 minutes minting. It must survive as ``refused`` with the
     CLASSIFIED reason — not as ``failed``, because the worker declined this
-    cell deliberately and goes on serving eager."""
-    exc = AdoptError("key_mismatch", "cell was minted for sm_90, host is sm_89")
+    compiled graph deliberately and goes on serving eager."""
+    exc = AdoptError("key_mismatch", "compiled_graph was minted for sm_90, host is sm_89")
     with boot_phases.span(
-        boot_phases.PHASE_CELL_ARM,
+        boot_phases.PHASE_COMPILED_GRAPH_ARM,
         artifact_kind=aot_serve.ARTIFACT_KIND,
         artifact_key="ck1_deadbeef",
     ) as arm:
@@ -170,7 +170,7 @@ def test_a_typed_refusal_is_recorded_as_refused_not_failed() -> None:
         arm.refused(str(exc.reason), f"key=ck1_deadbeef: {type(exc).__name__}: {exc}")
 
     row = [r for r in boot_phases.recorded_rows()
-           if r.terminal and r.phase == boot_phases.PHASE_CELL_ARM][0]
+           if r.terminal and r.phase == boot_phases.PHASE_COMPILED_GRAPH_ARM][0]
     assert row.outcome == boot_phases.OUTCOME_REFUSED
     assert row.outcome != boot_phases.OUTCOME_FAILED
     assert row.reason == "key_mismatch"
@@ -185,7 +185,7 @@ def test_a_cumulative_milestone_is_not_summed_as_a_phase() -> None:
     already account for. Summing both double-counts the entire boot — and any
     hub-side SUM(duration_ms) would inherit the error, which is why
     `cumulative` is a wire field and not an SDK-local detail."""
-    with boot_phases.span(boot_phases.PHASE_CELL_VERIFY):
+    with boot_phases.span(boot_phases.PHASE_COMPILED_GRAPH_VERIFY):
         pass
     boot_phases.mark(boot_phases.PHASE_HELLO, since_process_start=True)
     boot_phases.mark(boot_phases.PHASE_FIRST_REQUEST_SERVABLE,
@@ -194,7 +194,7 @@ def test_a_cumulative_milestone_is_not_summed_as_a_phase() -> None:
     rows = {r.phase: r for r in boot_phases.recorded_rows() if r.terminal}
     assert rows[boot_phases.PHASE_HELLO].cumulative is True
     assert rows[boot_phases.PHASE_FIRST_REQUEST_SERVABLE].cumulative is True
-    assert rows[boot_phases.PHASE_CELL_VERIFY].cumulative is False
+    assert rows[boot_phases.PHASE_COMPILED_GRAPH_VERIFY].cumulative is False
 
     recon = boot_phases.reconciliation()
     # measured_ms counts the env_seal span only; the two milestones are the
@@ -234,13 +234,13 @@ def test_serving_mode_distinguishes_aot_from_jit_from_eager(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert serving_mode.classify_mode("") == serving_mode.MODE_EAGER
-    # Both cell kinds set active_compile_ref, so the ref alone cannot be
+    # Both compiled graph kinds set active_compile_ref, so the ref alone cannot be
     # pattern-matched — aot_serve owns the discrimination.
     monkeypatch.setattr(aot_serve, "is_aot_ref", lambda ref: ref.endswith("aot"))
     assert serving_mode.classify_mode("root/family-sdxl#ck1aot") == \
-        serving_mode.MODE_AOT_CELL
+        serving_mode.MODE_AOT_COMPILED_GRAPH
     assert serving_mode.classify_mode("root/family-sdxl#ck1jit") == \
-        serving_mode.MODE_JIT_CELL
+        serving_mode.MODE_JIT_COMPILED_GRAPH
 
 
 def test_a_guard_miss_request_is_not_counted_as_compiled() -> None:

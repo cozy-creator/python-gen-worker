@@ -39,7 +39,7 @@ settings):
   different key. The per-call serving window is covered by dynamo's
   GlobalStateGuard + the pgw#680 guard-miss doctrine.
 
-The seal dict rides cell metadata verbatim (``artifact_metadata``). Since
+The seal dict rides compiled graph metadata verbatim (``artifact_metadata``). Since
 pgw#1059 (amendment 4) it is NOT a key axis: the declaration digest and the
 loaded-libs digest fold into the ``toolchain`` axis instead
 (``compile_cache.toolchain_digest`` — "the compiler as we configure it"),
@@ -70,7 +70,7 @@ import importlib.util
 logger = logging.getLogger(__name__)
 
 # pgw#958 (§1.27(g)): restarted at 1 alongside KEY_SCHEME, with the
-# pre-existing cell corpus purged in the same cut — v1..v6 minted real cells
+# pre-existing compiled graph corpus purged in the same cut — v1..v6 minted real compiled graphs
 # and re-issuing 1 is only honest once none of them survive. The seal dict
 # carries every sealed fact accumulated through the old v6 (
 # hash-seed + loaded-library digests, driver libs excluded, on-disk toolchain
@@ -78,29 +78,29 @@ logger = logging.getLogger(__name__)
 # version only — never the key-axis set.
 #
 # pgw#1034 bumped 1 -> 2 by DELETING the `epoch` fact. RE-KEY COST, stated per
-# §1.27(g): every cell minted under seal v1 stops matching and is re-minted
+# §1.27(g): every compiled graph minted under seal v1 stops matching and is re-minted
 # once, per (family, lane, sm). That is the whole cost — `epoch` had no
 # producer anywhere in the fleet, so it read "0" on every pod that ever
 # existed and the fact it removed discriminated nothing.
 #
-# It was `COZY_CELL_EPOCH`, an operator-settable recall salt.
+# It was `COZY_COMPILED_GRAPH_EPOCH`, an operator-settable recall salt.
 # `scripts/config_reads_allowlist.txt` already ruled it a VIOLATION: bumping it
 # is a fleet-wide recall, and a recall is a recorded operator intent with an
 # actor and a reason, which an env var on a pod is not. The hub's
-# `cell_revocations` (th#1499) is where a recall lives.
+# `compiled_graph_revocations` (th#1499) is where a recall lives.
 #
 # pgw#1042 bumped 2 -> 3 by EXCLUDING torch's compile-injected
 # `aot_inductor.metadata` from the inductor fact (see _PORTABLE_VOLATILE).
-# RE-KEY COST: zero — no cell has ever been published under v2.
+# RE-KEY COST: zero — no compiled graph has ever been published under v2.
 #
 # pgw#1049 bumped 3 -> 4: the seal derives from settings_authority's
 # DECLARATION, not from read-back — the `inductor` fact becomes the declared
 # codegen clamp instead of a save_config_portable() digest, `posture`/`config`
 # become the declared tables, and the declared env (incl. the imposed
 # PYTHONHASHSEED=0, executing the pgw#1034 HUMAN_MUST_DO decision) is sealed.
-# RE-KEY COST, stated per §1.27(g): every cell minted under seal v3 stops
+# RE-KEY COST, stated per §1.27(g): every compiled graph minted under seal v3 stops
 # matching and is re-minted once, per (family, lane, sm). MEASURED
-# 2026-08-09: the published corpus is ONE `cell_receipts` row fleet-wide
+# 2026-08-09: the published corpus is ONE `compiled_graph_receipts` row fleet-wide
 # (e2e-dev stack; a `ck5-…` key from before the pgw#958 scheme reset, so it
 # matches no ck1 runtime under ANY seal version) plus A1's in-flight mint —
 # zero live matches stranded, the cheapest re-key this fleet will ever have.
@@ -207,10 +207,10 @@ _PORTABLE_VOLATILE = ("aot_inductor.metadata",)
 
 def inductor_config_digest() -> str:
     """Digest of torch's PORTABLE inductor config — the codegen surface a
-    cell's kernels were minted under (machine-specific entries excluded by
+    compiled graph's kernels were minted under (machine-specific entries excluded by
     torch itself, torch's own compile-side-effect entries excluded here:
     pgw#1042). ``"absent"`` on a torchless worker (pgw#788) — a declared
-    fact, so the seal digest stays meaningful for CPU cells."""
+    fact, so the seal digest stays meaningful for CPU compiled graphs."""
     if not torch_capability.present():
         return torch_capability.ABSENT
     import torch._inductor.config as inductor_config
@@ -238,7 +238,7 @@ _LIB_BASENAME_PREFIXES = (
 # USERSPACE TOOLCHAIN libs only. The driver's userspace half (libcuda.so.*,
 # libnvidia-*, libcudadebugger) is mounted from the HOST at pod start —
 # it varies per machine and driver rollout, invisible to the image digest,
-# and sealing it fractures cell keys per driver cohort (pgw#745:
+# and sealing it fractures compiled graph keys per driver cohort (pgw#745:
 # libcuda.so.580.126.16 vs .580.159.04 split an L4 fleet; every worker
 # kept self-minting). The driver stays a recorded-only metadata axis
 # (`cuda_driver`); compiled kernels are driver-portable within a major.
@@ -633,7 +633,7 @@ def declaration_digest() -> str:
 
 def effective_seal() -> Dict[str, Any]:
     """The seal dict — a digest of the DECLARATION (pgw#1049), recorded
-    verbatim in cell metadata. Its settings facts come from
+    verbatim in compiled graph metadata. Its settings facts come from
     ``settings_authority.declaration()``; ambient mutation cannot move them
     (it trips :func:`assert_seal_unchanged` instead). The one measured fact
     is ``loaded_libs`` (:func:`loaded_libs_digest`).
@@ -641,7 +641,7 @@ def effective_seal() -> Dict[str, Any]:
     pgw#1059 amendment 4: the seal is NO LONGER a key axis. Its declaration
     and loaded-libs digests fold into the ``toolchain`` axis
     (``compile_cache.toolchain_digest``); this dict stays RECORDED on every
-    artifact (the observable statement of the declaration a cell was minted
+    artifact (the observable statement of the declaration a compiled graph was minted
     under), and its digest stays on the published identity-axis map because
     the hub's ``ArtifactIdentity.env_seal_digest`` requires it (a wire fact,
     like ``graph_contract``)."""

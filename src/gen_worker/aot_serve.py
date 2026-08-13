@@ -4,7 +4,7 @@ consumer on the compile-cache rails (gw#384 / th#569 / #390).
 ``compile_cache`` serves the dynamo lane (a JIT warmed from seeded FX
 entries); this module serves ``torch.export`` ->
 ``aoti_compile_and_package`` artifacts. Same trust model, storage,
-delivery, and arming seam — cells live as flavors
+delivery, and arming seam — compiled graphs live as flavors
 of ``root/family-<family>``::
 
     root/family-<f>#aot-<sku>-torch<maj.min>-<precision>
@@ -13,7 +13,7 @@ Artifact = deterministic ``.tar.gz`` (the receipts gate reads
 ``metadata.json`` straight out of the digested bytes)::
 
     metadata.json           kind/format, runtime key (sm, torch, cuda + sku),
-                            family, cell_key, and the ENTRY block — the ONE
+                            family, compiled_graph_key, and the ENTRY block — the ONE
                             NAMED GRAPH CLASS this artifact carries, with
                             its target, fork/class-dim coordinate, INPUT
                             CONTRACT, SYMBOL RANGES, declared CONSTANT
@@ -31,8 +31,8 @@ the same 36-entry unit. That unit is what forbade the incremental
 compile-and-adopt Paul asked for, forced ~32 GiB of all-runners-resident
 arming, and destroyed a 1 h 37 m mint when the 36th entry segfaulted.
 
-Format 3 is one entry per artifact. What used to be "a cell" is a derived
-CONTRACT MANIFEST (``cell_key.manifest_digest``) — a view, never a thing you
+Format 3 is one entry per artifact. What used to be "a compiled graph" is a derived
+CONTRACT MANIFEST (``compiled_graph_key.manifest_digest``) — a view, never a thing you
 download, verify or arm. Entries accrete: each arms whole or not at all, and
 an entry IS one graph, so that is atomic by nature. Serve-side dispatch is
 unchanged in kind — it was already built at the right granularity: the call
@@ -40,12 +40,12 @@ routes to the entry whose DECLARED ingress contract admits it, zero
 admitting entries is a named refusal (eager service), and more than one is
 ``entry_ambiguous``. What changed is that :class:`EntryDispatch` is a
 REGISTRY entries join as they arm, not a frozen tuple built from a complete
-cell. Every pgw#704 gate (B1 constants-bound, B2 ingress) holds PER ENTRY —
+compiled graph. Every pgw#704 gate (B1 constants-bound, B2 ingress) holds PER ENTRY —
 the unbound-entry segfault was re-measured per named model on the pin.
 
-**Truthfulness is structural.** The pod never claims "cell X armed"; it
+**Truthfulness is structural.** The pod never claims "compiled graph X armed"; it
 reports per-entry serve state. There is no unit left that CAN advertise more
-than it serves, so the old all-or-nothing invariant ("a cell that cannot arm
+than it serves, so the old all-or-nothing invariant ("a compiled graph that cannot arm
 one of its graph classes arms none of them") is not weakened — it is
 vacuous.
 
@@ -53,9 +53,9 @@ Why the artifact is code-only, and what that costs
 --------------------------------------------------
 ``aot_inductor.package_constants_in_so`` defaults ``True``, which BAKES the
 weights into the ``.so`` — measured at 4.79 GiB (plain) / 2.73 GiB (w8a8)
-per cell. That would duplicate model weights into every cell and destroy
-the CAS / th#883 distribution model the whole cell system rests on, so
-cells are minted with the flag ``False`` and weights bind at load from the
+per compiled graph. That would duplicate model weights into every compiled graph and destroy
+the CAS / th#883 distribution model the whole compiled graph system rests on, so
+compiled graphs are minted with the flag ``False`` and weights bind at load from the
 resident (CAS-provisioned) module. This is a correctness requirement for
 the fleet, not an optimization, and the same decision the LoRA hot-swap
 needs.
@@ -73,7 +73,7 @@ is SILENTLY ACCEPTED — measured, 2048x2048 through an artifact declaring
 ``max=160`` latent units. That is a silent-failure path, which the
 no-silent-failure rule forbids, so the range is asserted at OUR ingress
 (:func:`assert_ingress`) where the refusal is NAMED and composes with the
-cell contract, instead of depending on an upstream opt-in export pass.
+compiled graph contract, instead of depending on an upstream opt-in export pass.
 
 Torch is imported inside functions (never at module scope) — the whole
 compile stack keeps ``import gen_worker`` off the torch/pb import graph.
@@ -104,9 +104,9 @@ from . import aot_flatten
 from . import aot_identity
 from . import artifact_meta
 from . import boot_phases
-from . import cell_key as cell_key_mod
+from . import compiled_graph_key as compiled_graph_key_mod
 from . import host_isa
-from .cell_adopt import AdoptOutcome
+from .compiled_graph_adopt import AdoptOutcome
 from . import serve_posture
 from . import shape_growth
 from .compile_cache import (
@@ -114,7 +114,7 @@ from .compile_cache import (
     CompiledExecutionLaneUnavailableError,
     _clean_tarinfo,
     _resolve_target,
-    parse_cell_ref,
+    parse_compiled_graph_ref,
     sku_slug,
 )
 from .models import lora_lifted
@@ -147,7 +147,7 @@ RECAST_EVENT = "aot_input_recast"
 AOTI_ALIGNMENT = 16
 #: Format 3 = ONE graph class per artifact (pgw#1176): the metadata carries
 #: one ``entry`` block instead of an ``entries`` map. Formats 1 and 2 are
-#: RETIRED — a format-2 cell cannot restate a per-entry identity, so the ck1
+#: RETIRED — a format-2 compiled graph cannot restate a per-entry identity, so the ck1
 #: corpus is purged in the coordinated re-key rather than migrated.
 ARTIFACT_FORMAT = 3
 #: Separator between the entry name and the constant FQN in
@@ -179,8 +179,8 @@ SOURCE_COMPUTED = "computed"
 #: ``sm`` is the GPU identity: AOTInductor itself keys on
 #: ``AOTI_COMPUTE_CAPABILITY`` — capability, never the marketing name
 #: (``codecache.get_device_information``). ``sku`` is deliberately ABSENT:
-#: Paul's ruling ("AOT cells are locked into the sm_x version, not the actual
-#: GPU"), the pgw#691 collapse that removed it from cell identity on
+#: Paul's ruling ("AOT compiled graphs are locked into the sm_x version, not the actual
+#: GPU"), the pgw#691 collapse that removed it from compiled graph identity on
 #: byte-identical evidence, and the pgw#754 ISA clamp that made the host half
 #: portable. It stays in metadata for observability — never as a refusal.
 IDENTITY_AXES: Tuple[str, ...] = ("sm", "torch", "cuda")
@@ -256,25 +256,25 @@ def runtime_key() -> Dict[str, str]:
     return key
 
 
-# Stamped cell keys this process LEARNED name aot-inductor artifacts
-# (pgw#722 F1 discovery). Published AOT cells ride the same key space as
-# their store flavor — indistinguishable from a dynamo cell's flavor by
+# Stamped compiled graph keys this process LEARNED name aot-inductor artifacts
+# (pgw#722 F1 discovery). Published AOT compiled graphs ride the same key space as
+# their store flavor — indistinguishable from a dynamo compiled graph's flavor by
 # string shape alone — so every reader of a stamped envelope registers the
 # key it learned here and :func:`is_aot_ref` consults the set. Without this
 # the executor's kind dispatch (#734/#735) would score an armed ``.pt2`` by
 # FX cache hits and disprove every honest adoption.
 #
-# THE RULE (pgw#1033): whoever reads a ``cell_key`` off an ``aot-inductor``
+# THE RULE (pgw#1033): whoever reads a ``compiled_graph_key`` off an ``aot-inductor``
 # envelope registers it. There are two such readers on the serving path —
-# the delivered/named-cell arm and
-# ``fleet_cells.adopt_delegated_mint`` (this pod's OWN mint). Only the first
-# registered, so a self-minted cell — the one artifact this process is
+# the delivered/named-compiled graph arm and
+# ``fleet_compiled_graphs.adopt_delegated_mint`` (this pod's OWN mint). Only the first
+# registered, so a self-minted compiled graph — the one artifact this process is
 # certain is exported — was the one ref ``is_aot_ref`` did not recognize.
 #
 # pgw#1141b: that rule was a CONVENTION, and the ORDERED arm route — the one
 # §4.27 boot-adopt and every hub Plan take — never kept it. `arm_ordered`
 # verifies the receipt and calls `provision.arm_aot` directly, so a
-# boot-adopted cell wrapped itself onto a live pipeline while `is_aot_ref`
+# boot-adopted compiled graph wrapped itself onto a live pipeline while `is_aot_ref`
 # still answered False for its ref, and every reader asking "is this the
 # exported lane?" scored it on the DYNAMO lane's cache-hit ledger, which no
 # AOTI artifact can move. Measured on a real pod (0.111.0, POD PROOF #4):
@@ -287,9 +287,9 @@ _KNOWN_AOT_KEYS: set[str] = set()
 _KNOWN_AOT_KEYS_LOCK = threading.Lock()
 
 
-def note_aot_key(cell_key: str) -> None:
-    """Record that ``cell_key`` (a stamped cell-key digest) is an AOT cell."""
-    key = str(cell_key or "").strip()
+def note_aot_key(compiled_graph_key: str) -> None:
+    """Record that ``compiled_graph_key`` (a stamped compiled graph-key digest) is an AOT compiled graph."""
+    key = str(compiled_graph_key or "").strip()
     if not key:
         return
     with _KNOWN_AOT_KEYS_LOCK:
@@ -297,16 +297,16 @@ def note_aot_key(cell_key: str) -> None:
 
 
 def is_aot_ref(ref: str, family: str = "") -> bool:
-    """True when ``ref`` names an AOTI cell (optionally of one family).
+    """True when ``ref`` names an AOTI compiled graph (optionally of one family).
 
-    ONE recognizer: the stamped cell keys this process learned via
+    ONE recognizer: the stamped compiled graph keys this process learned via
     :func:`note_aot_key`. pgw#1035 deleted the second, a
     ``flavor.startswith("aot-")`` label sniff — the only producer of that label
-    form was ``aot_serve.flavor_label``, which had no caller and is gone. A cell
+    form was ``aot_serve.flavor_label``, which had no caller and is gone. A compiled graph
     ref carries a stamped KEY, so a label branch could only ever have matched a
     string this codebase no longer writes.
     """
-    fam, flavor = parse_cell_ref(ref)
+    fam, flavor = parse_compiled_graph_ref(ref)
     if not fam or (family and fam != family):
         return False
     with _KNOWN_AOT_KEYS_LOCK:
@@ -378,7 +378,7 @@ class ArtifactContract:
     #: ``ep.range_constraints``.
     symbols: Mapping[str, Tuple[int, int]]
     #: Inputs this graph class REFUSES to be given (pgw#790). The positive
-    #: contract says what a graph takes; a multi-class cell also needs the
+    #: contract says what a graph takes; a multi-class compiled graph also needs the
     #: negative one, because "input absent" is what discriminates a
     #: BRANCHLESS class from a branch-bearing one whose extra inputs a
     #: name-keyed bind would simply ignore. Without it both classes admit an
@@ -533,7 +533,7 @@ def range_digest(meta: Mapping[str, Any]) -> str:
     differing only in declared range produced the identical node-only
     digest. A node-only ``graph_hashes`` therefore collides artifacts whose
     declared envelopes differ. Folding THIS digest into the per-class hash
-    closes it. Exposed here (not in ``cell_key``) because this module owns
+    closes it. Exposed here (not in ``compiled_graph_key``) because this module owns
     the contract's canonical form.
     """
     contract = contract_from_meta(meta)
@@ -551,7 +551,7 @@ def range_digest(meta: Mapping[str, Any]) -> str:
             # part of the declared envelope (two classes that take the same
             # tensors in different argument structures are different graphs),
             # but it is keyed only when it is not the trivial identity. Every
-            # row published before pgw#994 is trivial, so no live cell is
+            # row published before pgw#994 is trivial, so no live compiled graph is
             # re-keyed by this field existing.
             row["param"] = s.call_param
             row["param_position"] = s.call_position
@@ -569,7 +569,7 @@ def range_digest(meta: Mapping[str, Any]) -> str:
     # classes that differ only in what they REFUSE declare different envelopes,
     # so the digest must see it or the collision this function exists to
     # close reopens for adapter forks. Keyed only when non-empty: a contract
-    # that excludes nothing is the contract every already-published cell
+    # that excludes nothing is the contract every already-published compiled graph
     # declares, and re-keying the fleet's 144 live checkpoints to add a field
     # that says "unchanged" would strand every one of them.
     if contract.excluded:
@@ -604,7 +604,7 @@ def class_hash(
     backstop (``aot_identity.verify_graph_witness``) — defense-in-depth. The
     fold is tolerant of a missing witness (folds ``""``) so a pre-witness
     entry is body-blind rather than unhashable; production entries always
-    carry it (``keying_block``), and such stale cells are refused by the
+    carry it (``keying_block``), and such stale compiled graphs are refused by the
     envelope/structure gates and the witness backstop regardless.
 
     ``placement`` (pgw#1113) folds in only when the entry states MORE THAN ONE
@@ -629,7 +629,7 @@ def class_hash(
         # the canonical graph form scrubs the device INDEX by deliberate
         # design (`graph_hash._render_scalar`) so it cannot ride `graph`.
         # Keyed only when non-trivial — the `excluded` / `param` / `overlay`
-        # precedent — because a single-device placement is what every cell the
+        # precedent — because a single-device placement is what every compiled graph the
         # fleet has published states, and a field that says "unchanged" would
         # strand all of them. No `v` bump for the same reason: the fact is
         # absent from every existing entry and its absence must stay the
@@ -688,7 +688,7 @@ def entry_from_meta(meta: Mapping[str, Any]) -> Dict[str, Any]:
     pgw#1176: the plural ``entries_from_meta`` is GONE with the multi-entry
     artifact. A caller that wants several entries holds several artifacts.
     """
-    raw = meta.get(cell_key_mod.ENTRY_BLOCK_KEY)
+    raw = meta.get(compiled_graph_key_mod.ENTRY_BLOCK_KEY)
     if not isinstance(raw, Mapping) or not raw:
         raise ValueError("metadata declares no entry block")
     label = str(raw.get("name") or "").strip()
@@ -712,7 +712,7 @@ def entry_metadata(
     *,
     family: str,
     precision: str,
-    cell_key: str,
+    compiled_graph_key: str,
     name: str,
     entry: Mapping[str, Any],
     strict_export: bool = True,
@@ -728,7 +728,7 @@ def entry_metadata(
     cannot drift into two interpretations of the same bytes.
 
     ``manifest_digest`` is the declaration-wide coverage LABEL
-    (``cell_key.manifest_digest``) — telemetry only, never identity. It is
+    (``compiled_graph_key.manifest_digest``) — telemetry only, never identity. It is
     optional precisely because it is not identity: an entry minted by a pod
     that has not folded its whole declaration is still a complete, keyable,
     armable artifact.
@@ -742,17 +742,17 @@ def entry_metadata(
         **runtime_key(),
         "family": str(family or ""),
         "precision": str(precision or ""),
-        "cell_key": str(cell_key or ""),
-        cell_key_mod.ENTRY_BLOCK_KEY: stamped,
+        "compiled_graph_key": str(compiled_graph_key or ""),
+        compiled_graph_key_mod.ENTRY_BLOCK_KEY: stamped,
         "manifest_digest": str(manifest_digest or ""),
         "strict_export": bool(strict_export),
         "lora_bucket": int(lora_bucket or 0),
         "package_constants_in_so": False,
         # pgw#1097: the folding fence, DECLARED. `package_constants_in_so`
-        # says no weight BYTES ship inside the cell; this says no weight
+        # says no weight BYTES ship inside the compiled graph; this says no weight
         # VALUES were compiled into its kernels either. Both are what make
-        # one cell legally serve every fine-tune of a family, and both are
-        # refused pre-download when absent — a cell minted before the fence
+        # one compiled graph legally serve every fine-tune of a family, and both are
+        # refused pre-download when absent — a compiled graph minted before the fence
         # may carry its minting checkpoint's copy of any 0-dim or <=8-element
         # weight, which is exactly the tensor a fine-tune changes.
         "constant_folding_fenced": True,
@@ -768,18 +768,18 @@ def entry_metadata(
     return meta
 
 
-#: The metadata keys :func:`verify_declared` rules on — every axis a cell's
+#: The metadata keys :func:`verify_declared` rules on — every axis a compiled graph's
 #: publish DECLARE carries, and therefore everything discovery may refuse a
-#: cell for before it has downloaded a byte.
+#: compiled graph for before it has downloaded a byte.
 #:
-#: pgw#988: this set and ``fleet_cells.control_plane_metadata`` are two halves
+#: pgw#988: this set and ``fleet_compiled_graphs.control_plane_metadata`` are two halves
 #: of ONE contract, and they used to be two independent computations of it.
 #: th#1645 moved ``entries`` out of the declare (correctly — it is unbounded in
 #: the model and the declare is control-plane) while the pre-download filter
-#: still demanded it, so every AOT cell published for the next day was rejected
-#: as ``malformed declared contract`` by every pod, and a pod that finds no cell
+#: still demanded it, so every AOT compiled graph published for the next day was rejected
+#: as ``malformed declared contract`` by every pod, and a pod that finds no compiled graph
 #: mints its own — the fleet paid a full compile per cold boot and the symptom
-#: presented as cost, not as an error. ``fleet_cells`` now asserts at import
+#: presented as cost, not as an error. ``fleet_compiled_graphs`` now asserts at import
 #: that nothing it strips appears here.
 DECLARED_AXES: Tuple[str, ...] = (
     "format", "kind", "package_constants_in_so",
@@ -789,20 +789,20 @@ DECLARED_AXES: Tuple[str, ...] = (
 
 
 def verify_declared(meta: Dict[str, Any], *, family: str = "") -> str:
-    """'' when a cell's DECLARE matches this runtime, else the reason.
+    """'' when a compiled graph's DECLARE matches this runtime, else the reason.
 
     The pre-download half of :func:`verify`: exactly the axes a bounded
     control-plane declare carries (:data:`DECLARED_AXES`). Discovery rules on
-    this against the hub listing row, so an unloadable cell costs no bytes.
+    this against the hub listing row, so an unloadable compiled graph costs no bytes.
 
     An AOTI ``.pt2`` is a ``dlopen``-ed ELF built against one exact torch
     C++ ABI on one compute capability — the FULL torch version must match,
     not maj.min, or the load either fails obscurely or is undefined.
 
     Fail-closed on every REAL axis (:data:`IDENTITY_AXES` + host ISA), each of
-    them STRICTLY — an axis a cell is silent on is refused by name, never
-    skipped. Never on ``sku`` (pgw#765): a cell minted on an l4
-    and a cell minted on an rtx-4090 are the same sm_89 compiled code, and
+    them STRICTLY — an axis a compiled graph is silent on is refused by name, never
+    skipped. Never on ``sku`` (pgw#765): a compiled graph minted on an l4
+    and a compiled graph minted on an rtx-4090 are the same sm_89 compiled code, and
     refusing the cross-SKU adoption discards the whole point of the pgw#691
     collapse, the FX inner-key shim, and the pgw#754 ISA clamp. The JIT lane
     (``compile_cache.verify``) carried the identical hard sku pin and shed it
@@ -813,13 +813,13 @@ def verify_declared(meta: Dict[str, Any], *, family: str = "") -> str:
     if str(meta.get("kind") or "") != ARTIFACT_KIND:
         return f"kind {meta.get('kind')!r} != {ARTIFACT_KIND}"
     # A weights-baked artifact is refused OUTRIGHT, never merely warned
-    # about: it would duplicate multi-GiB weights per cell and break the CAS
+    # about: it would duplicate multi-GiB weights per compiled graph and break the CAS
     # distribution model (pgw#704 B1). Absent flag = a pre-contract mint.
     if meta.get("package_constants_in_so") is not False:
         return (
             "artifact was minted with package_constants_in_so != False "
-            "(weights baked into the .so; breaks the CAS cell model)")
-    # pgw#1097: the same shape of refusal, one layer in. A cell minted before
+            "(weights baked into the .so; breaks the CAS compiled_graph model)")
+    # pgw#1097: the same shape of refusal, one layer in. A compiled graph minted before
     # the folding fence carries the minting checkpoint's values for any 0-dim
     # or <=8-element weight inductor inlined, so it is sound for exactly one
     # fine-tune and silently wrong for the rest. Absent flag = a pre-fence
@@ -841,11 +841,11 @@ def verify_declared(meta: Dict[str, Any], *, family: str = "") -> str:
         return isa_reason
     want_fam = str(meta.get("family") or "")
     # pgw#939: STRICTLY, like every axis above it and like this function's own
-    # docstring already promised. `want_fam and ...` meant an UNSTAMPED cell
+    # docstring already promised. `want_fam and ...` meant an UNSTAMPED compiled graph
     # matched every family it was ever offered to — a wrong cache HIT, not a
     # miss, on the axis that decides which pipeline the .so is dlopen'd into.
     # The mint stamps this from one place (`artifact_metadata`), so a silent
-    # cell is a malformed one; when no caller names a family nothing changes.
+    # compiled graph is a malformed one; when no caller names a family nothing changes.
     if family and want_fam != family:
         return f"family {want_fam!r} != {family!r}"
     return ""
@@ -899,26 +899,26 @@ def verify_contract(
     # artifact's OWN recorded facts describe — the same recomputation the
     # mint stamped and the publish path corroborated, now proven at ADMISSION
     # on the staged bytes. Two consequences, both deliberate: a forged /
-    # hand-edited stamp is refused by name, and a PRE-ATOM cell is refused
+    # hand-edited stamp is refused by name, and a PRE-ATOM compiled graph is refused
     # STRUCTURALLY (its metadata records an `entries` MAP and a
     # `combined_graph_hash`, no per-entry identity, so the recomputation
     # raises rather than matching) — which is what makes the ck1 corpus purge
     # hygiene rather than a correctness precondition.
     # Gated on key SHAPE: an ek-shaped stamp is an identity claim and must
     # restate; a non-key stamp (focused fixtures, torn metadata) is not a
-    # claim — and it can never match a hub row either (`IsCellKey` gates the
+    # claim — and it can never match a hub row either (`IsCompiledGraphKey` gates the
     # store flavor), so nothing downstream can mistake it for identity.
-    stamped_key = str(meta.get("cell_key") or "")
-    if stamped_key and cell_key_mod.is_key(stamped_key):
+    stamped_key = str(meta.get("compiled_graph_key") or "")
+    if stamped_key and compiled_graph_key_mod.is_key(stamped_key):
         try:
-            recomputed = cell_key_mod.from_entry_metadata(meta)
-        except cell_key_mod.CellKeyError as exc:
+            recomputed = compiled_graph_key_mod.from_entry_metadata(meta)
+        except compiled_graph_key_mod.CompiledGraphKeyError as exc:
             return (
-                f"stamped cell_key {stamped_key} is not restatable from the "
+                f"stamped compiled_graph_key {stamped_key} is not restatable from the "
                 f"artifact's own recorded facts ({exc})")
         if recomputed.digest != stamped_key:
             return (
-                f"stamped cell_key {stamped_key} != the key the artifact's "
+                f"stamped compiled_graph_key {stamped_key} != the key the artifact's "
                 f"recorded facts describe ({recomputed.digest})")
     return ""
 
@@ -942,7 +942,7 @@ def verify(
             or verify_contract(meta, entry=entry))
 
 
-#: :func:`host_isa_reason`'s refusal for a cell that stamped no requirement.
+#: :func:`host_isa_reason`'s refusal for a compiled graph that stamped no requirement.
 NO_HOST_ISA_STAMP = "no_host_isa_stamp"
 
 
@@ -954,7 +954,7 @@ def host_isa_reason(meta: Mapping[str, Any]) -> str:
     An artifact carrying NO stamp is refused here: its true
     ISA need is undiscoverable from metadata, an AVX-512-built ``.pt2``
     SIGILLs (exit 132 inside ``aoti_load_package``) on a host without it, and
-    the miss policy for a refused cell is a self-mint that stamps one.
+    the miss policy for a refused compiled graph is a self-mint that stamps one.
     """
     block = meta.get("host_isa")
     if not isinstance(block, Mapping):
@@ -997,7 +997,7 @@ def verify_package_compute_capability(package: Path) -> str:
 
     The second tier that lets :func:`verify` stop refusing on ``sku``
     without loosening the axis that actually matters (pgw#765). It rules on
-    the one case metadata cannot: a cell whose ``sm`` stamp disagrees with
+    the one case metadata cannot: a compiled graph whose ``sm`` stamp disagrees with
     its own bytes. A
     cubin built for another arch has no PTX fallback (pgw#698 packs cubins
     only), so without this the refusal would be a raw CUDA load error
@@ -1113,15 +1113,14 @@ def _unpack(
     return meta, entry
 
 
-#: Read the packed envelope without unpacking the cell.
+#: Read the packed envelope without unpacking the compiled graph.
 #:
 #: pgw#1035: no serving-path caller since ``is_aot_artifact`` (its only one)
 #: was deleted, and DELIBERATELY KEPT — this is the AOT lane's own reader of its
 #: own envelope, and the pgw#699 double-mint byte-compare proof drives it over
-#: real minted tarballs. It once had a byte-identical twin in
-#: ``trt_engine.unpack_metadata``, and the dedup was deferred to a "TRT
-#: ratification" that never came — TensorRT was deleted outright in pgw#1187,
-#: so this is now the AOT lane's sole reader of its own envelope.
+#: real minted tarballs. It is the AOT lane's SOLE reader of its own envelope;
+#: the twin it was once deduped against no longer exists (th#1890 swept the
+#: dead lane's name out — the history is in pgw#1187).
 #:
 #: pgw#1040 collapsed the OTHER seven envelope readers into
 #: :func:`artifact_meta.read_metadata` and left this one alone ON PURPOSE,
@@ -1138,7 +1137,7 @@ def unpack_metadata(artifact: Path) -> Dict[str, Any]:
 
     pgw#1098: DELEGATES to ``artifact_meta``, which calls itself "the ONE
     reader" and was not. This function kept its own unbounded scan, so the
-    two disagreed about the same bytes: on row 7's sdxl cell the bounded
+    two disagreed about the same bytes: on row 7's sdxl compiled graph the bounded
     reader refused the envelope and this one read it fine, which is what made
     the failure asymmetric and invisible — ``arm_aot`` got ``meta=None`` and
     silently skipped the lifted-binding install, then ``enable`` (reaching
@@ -1195,7 +1194,7 @@ def stage_artifact(
         # pgw#903: "can this runtime execute it" is answered above; this
         # answers "is it the artifact the spec named", which nothing asked
         # before there was an immutable spec to ask against. Its own reason
-        # class: a runnable cell that is the WRONG cell is a different bug,
+        # class: a runnable compiled graph that is the WRONG compiled graph is a different bug,
         # a different owner and a different fix from an unrunnable one.
         if expected is not None:
             mismatch = aot_identity.verify_declared_identity(meta, expected)
@@ -1388,9 +1387,9 @@ def recast_gap(spec: InputContract, value: Any) -> str:
     ``euler``/``euler_a``/``euler_trailing``/``heun``/``flow_euler`` present
     **float32**; ``ddim``/``ddim_trailing``/``ddpm``/``deis``/``dpmpp_2m*``/
     ``lcm``/``unipc`` present **int64** (``set_timesteps`` ends in
-    ``.to(dtype=torch.int64)``). sdxl's cell was minted float32 (ie#627, and
+    ``.to(dtype=torch.int64)``). sdxl's compiled graph was minted float32 (ie#627, and
     correct — it is what the graph is specialized on), so its turbo arm
-    (``euler_trailing``) served from the cell and its base arm, on an int64
+    (``euler_trailing``) served from the compiled graph and its base arm, on an int64
     sampler, was refused ``no_entry_admits`` by an entry that covered it in
     every other respect. No single declared dtype can be right for a family
     whose sampler is per-request VIEW state, and the sampler is deliberately
@@ -1419,7 +1418,7 @@ def alignment_gap(value: Any) -> str:
     ``TORCH_WARN`` — i.e. on the worker's stderr, which hub-spawned pods do
     not expose. Measured on an RTX 4090 (WARM-INFERENCE-MATRIX §2c): the
     request residual over 28x(per-forward) is 196 ms for the armed AOT
-    artifact against 77 ms for the equivalent dynamo cell, and diffusers'
+    artifact against 77 ms for the equivalent dynamo compiled graph, and diffusers'
     ``timesteps[i]`` scalar view is the offending input. So the check the
     serve path never performed cost more than the artifact kind was worth.
     """
@@ -1605,7 +1604,7 @@ def ingress_report(
     from this same walk, never a second rule — every ADMISSION decision takes
     it (an admitted call has no misses, so the two are identical there), and
     the exhaustive walk is paid only on the refusal path, which is already
-    falling back to eager. A 36-entry cell is asked this per denoise step.
+    falling back to eager. A 36-entry compiled graph is asked this per denoise step.
 
     Misses are collected in declaration order, per input in
     dtype -> rank -> dims order, which is the order the raising check used
@@ -1765,7 +1764,7 @@ def resident_constants(module: Any) -> Dict[str, Any]:
 
     ONE definition, used by the mint's bindability gate and by both arm
     sites, because a gate that models the arm differently from the arm is
-    the pgw#816/#822 class: it either refuses a cell that would have served
+    the pgw#816/#822 class: it either refuses a compiled graph that would have served
     or admits one that cannot.
 
     Binding is by FQN and :func:`resolve_constants` reads only the DECLARED
@@ -1813,7 +1812,7 @@ def resolve_constants(
             # AOTInductor's own const-fold pass produces this one AFTER the
             # bound constants land; handing it a value would be handing it a
             # value it is about to overwrite, and demanding one would refuse a
-            # cell that is complete (pgw#1080).
+            # compiled graph that is complete (pgw#1080).
             continue
         table = state_dict if spec.source == SOURCE_STATE_DICT else literals
         if spec.fqn not in table:
@@ -1867,7 +1866,7 @@ def target_constant_pool(
 
     ``into`` is the marker-owned pool an earlier entry already built for this
     target. Entries JOIN a target's pool as they arm — the pool is not a
-    frozen product of a complete cell — and an FQN already present is left
+    frozen product of a complete compiled graph — and an FQN already present is left
     alone, so N entries of one target cost ONE pool whatever their number and
     whatever ORDER they arrive in.
 
@@ -1879,7 +1878,7 @@ def target_constant_pool(
     — in direct contradiction of §4.33 step 4 ("the compiled entries bind
     constants BY REFERENCE against the resident weights; there is no second
     copy of the model"). Its stated justification, "a post-arm resident
-    mutation cannot silently change an armed cell", is BACKWARDS: eager sees
+    mutation cannot silently change an armed compiled graph", is BACKWARDS: eager sees
     such a mutation immediately, so it is the un-mutated compiled entry that
     would silently diverge from the pipeline it serves.
 
@@ -1960,7 +1959,7 @@ class ArtifactRunner:
     realigned: Dict[str, int] = field(default_factory=dict)
     aligner: FeedAligner = field(default_factory=FeedAligner)
     #: Set by :func:`load_and_wrap` so the typed realignment event can name
-    #: the cell it belongs to.
+    #: the compiled graph it belongs to.
     family: str = ""
 
     def declared_fqns(self) -> Tuple[str, ...]:
@@ -1984,8 +1983,8 @@ class ArtifactRunner:
         ``user_managed=True`` binds BY REFERENCE (pgw#812 D3): the artifact
         keeps pointers to the caller's tensors instead of copying them into
         its own constant buffer. A copying bind is one duplicate of the
-        weights PER RUNNER — and pgw#758's multi-graph cells bind every
-        entry up front, so an N-entry cell paid N duplicates and OOM'd the
+        weights PER RUNNER — and pgw#758's multi-graph compiled graphs bind every
+        entry up front, so an N-entry compiled graph paid N duplicates and OOM'd the
         sdxl arm (pgw#1042). The whole-graph arm therefore binds by
         reference against ONE marker-owned pool per target
         (:func:`target_constant_pool`). The caller that passes True is
@@ -2006,7 +2005,7 @@ class ArtifactRunner:
         # above; this makes torch refuse rather than leave a hole.
         #
         # MEASURED (pgw#721 S8 first light, L4/torch 2.9.1+cu128): this HOLDS
-        # on a real sdxl w8a8 cell — 2,422 constants, all state_dict-sourced,
+        # on a real sdxl w8a8 compiled graph — 2,422 constants, all state_dict-sourced,
         # declared and package sets identical, strict update accepted.
         #
         # FOLDING CAVEAT CLOSED (pgw#723 residuals, torch 2.13.0+cu130 — the
@@ -2014,7 +2013,7 @@ class ArtifactRunner:
         # artifact. AOTInductor folds ONLY under
         # ``aot_inductor.use_runtime_constant_folding=True`` (default never
         # folds — measured on 3 constant-expression module shapes AND the
-        # real sdxl cell), and when it does, the ``_FOLDED_CONST_*`` entries
+        # real sdxl compiled graph), and when it does, the ``_FOLDED_CONST_*`` entries
         # (``from_folded=True``) are EXEMPT from the full-update check and
         # RECOMPUTED from the freshly bound originals (mutate-arm proven:
         # binding values 3x off compile time tracks eager bit-exactly). So
@@ -2145,7 +2144,7 @@ def no_entry_detail(
 
     The refusal this replaces said "36 tried" and then listed six in iteration
     order — and the one entry whose dims matched the call was not among them,
-    so diagnosing a live refusal meant pulling the published cell apart off-pod
+    so diagnosing a live refusal meant pulling the published compiled graph apart off-pod
     to find out what the covering entry actually objected to. A refusal that
     hides the one relevant miss is the pgw#1058 lesson repeating one layer up,
     in the diagnostics.
@@ -2201,7 +2200,7 @@ class EntryDispatch:
     classes by ingress, which is a defect to surface, never a coin to flip.
 
     pgw#1176: entries JOIN as they arm and LEAVE when they de-arm. The tuple
-    that used to be built once, from a complete cell, was the arming half of
+    that used to be built once, from a complete compiled graph, was the arming half of
     the wrong atom. A registry has a further property the tuple could not:
     a subset is a legitimate STEADY STATE, not merely a stage on the way to
     coverage. pgw#1177 measured why that matters — ~0.75 GiB of device memory
@@ -2248,8 +2247,8 @@ class EntryDispatch:
     def remove(self, name: str, reason: str) -> bool:
         """De-arm ONE entry, sticky for the boot. True when it was armed.
 
-        This is the whole replacement for the old cell-wide revoke: a
-        cell-attributable failure in one graph class costs that class, and
+        This is the whole replacement for the old compiled graph-wide revoke: a
+        compiled graph-attributable failure in one graph class costs that class, and
         every sibling keeps serving compiled.
         """
         label = str(name)
@@ -2374,7 +2373,7 @@ class EntryDispatch:
         """True when some packaged entry REFUSES every one of ``names``.
 
         The adapter-free routing question, asked of the declaration rather
-        than of a flag: is there a class in this cell that serves calls
+        than of a flag: is there a class in this compiled graph that serves calls
         WITHOUT these inputs? (pgw#790)
         """
         wanted = set(str(n) for n in names)
@@ -2458,7 +2457,7 @@ def adapter_call_kwargs(
 
     pgw#790's routing rule, in one place. The two differ in exactly one case:
     the denoiser carries a lifted adapter, NO adapter is currently active, and
-    the cell packages a class that REFUSES the adapter inputs. Then the
+    the compiled graph packages a class that REFUSES the adapter inputs. Then the
     artifact call omits the pair so the BRANCHLESS class admits it, while the
     eager fallback still receives it — ``bind_views`` refuses a ``None`` half
     by name, so the eager path needs the pair exactly as much as a
@@ -2498,7 +2497,7 @@ def assert_lifted_contract(module: Any, contract: ArtifactContract) -> None:
     wanted = set(lora_lifted.LIFTED_INPUT_NAMES)
     lifted = lora_lifted.lifted_binding(module) is not None
     if lifted and wanted <= set(contract.excluded):
-        # pgw#790: the BRANCHLESS arm of an adapter-forked cell. It says so
+        # pgw#790: the BRANCHLESS arm of an adapter-forked compiled graph. It says so
         # explicitly — the adapter inputs are refused, not forgotten — so the
         # dispatch can never route adapter-bearing traffic to it and "the
         # branch was traced away" is impossible to reach silently.
@@ -2526,7 +2525,7 @@ def wrap_module(
     target: str = "",
     eager_forward: Optional[Callable[..., Any]] = None,
 ) -> None:
-    """Swap ``module.<attr>`` for the cell's dispatch behind a fail-soft
+    """Swap ``module.<attr>`` for the compiled graph's dispatch behind a fail-soft
     guard.
 
     The first artifact ERROR
@@ -2567,7 +2566,7 @@ def wrap_module(
     }
 
     def _de_arm(reason: str, detail: str) -> None:
-        """§4.31 PER ENTRY (pgw#1176): a cell-attributable failure de-arms the
+        """§4.31 PER ENTRY (pgw#1176): a compiled graph-attributable failure de-arms the
         GRAPH CLASS that produced it, sticky for the boot, and every sibling
         keeps serving compiled. The target's compiled lane is revoked only
         when the registry empties — that is the moment, and the only moment,
@@ -2582,7 +2581,7 @@ def wrap_module(
                 f"target={label}: {detail}",
                 phase=reason,
                 family=str(meta.get("family") or ""),
-                cell_key=str(meta.get("cell_key") or ""),
+                compiled_graph_key=str(meta.get("compiled_graph_key") or ""),
                 graph_class=name,
             )
             siblings = tuple(getattr(runner, "runners", ()) or ())
@@ -2602,7 +2601,7 @@ def wrap_module(
         # the LoRA lane may install/remove lifting independently of arming,
         # and a stale capture would either starve the graph of a mandatory
         # input or feed one to a forward that no longer takes it.
-        # pgw#790: an adapter-FREE call omits the pair when the cell packages
+        # pgw#790: an adapter-FREE call omits the pair when the compiled graph packages
         # a branchless class, so the dispatch routes it to the graph that does
         # not spend 32-45% of its compiled forward on arithmetic over zeros.
         # The eager fallback always receives it.
@@ -2619,7 +2618,7 @@ def wrap_module(
             #
             # Ordered BEFORE the `failed` check only for cost; the two are
             # independent and stay independent — releasing the order never
-            # resurrects a cell de-armed for cause (§4.31), because that
+            # resurrects a compiled graph de-armed for cause (§4.31), because that
             # de-arm is evidence and this is policy.
             return original(*args, **eager_kwargs)
         if state["failed"]:
@@ -2656,7 +2655,7 @@ def wrap_module(
                 # not reached it. Submitting a shape gap here would ask the
                 # growth path to add a class the declaration already carries.
                 return original(*args, **eager_kwargs)
-            # pgw#916: the refusal is also a SHAPE GAP — the armed cell does
+            # pgw#916: the refusal is also a SHAPE GAP — the armed compiled graph does
             # not cover this declared class, and on the AOT arm nothing was
             # ever going to grow it (hot_swap.enable returns False without a
             # dynamo router, so the executor's three growth call sites are
@@ -2669,7 +2668,7 @@ def wrap_module(
                 declared_class=ingress_class_name(label, args, kwargs),
                 reason=exc.reason,
                 detail=str(exc)[:400],
-                cell_key=str(meta.get("cell_key") or ""),
+                compiled_graph_key=str(meta.get("compiled_graph_key") or ""),
             ))
             return original(*args, **eager_kwargs)
         except ConstantsUnboundError as exc:
@@ -2690,16 +2689,16 @@ def wrap_module(
             if is_cuda_oom(exc):
                 # pgw#1141: ATTRIBUTION. The serve-first doctrine makes the
                 # first real request the proof, so what that request blames
-                # decides whether a good cell survives — and allocator
+                # decides whether a good compiled graph survives — and allocator
                 # exhaustion is a fact about the CARD at this instant (a
                 # sibling load, a concurrent rotation), not about the artifact.
-                # Condemning the cell for it would retire a correct one on the
+                # Condemning the compiled graph for it would retire a correct one on the
                 # first busy moment and re-mint it on the replacement pod.
                 # Serve THIS request eager, stay armed, say so.
                 logger.warning(
                     "aot-serve: %s hit CUDA OOM (%s); serving this request "
                     "eager, artifact stays armed — allocator pressure is not "
-                    "the cell's fault", label, exc)
+                    "the compiled_graph's fault", label, exc)
                 activity_mod.emit_event(
                     "aot_serve_oom",
                     f"family={meta.get('family')} target={label}: "
@@ -2751,10 +2750,10 @@ def report_ingress_refusal(state: Dict[str, Any], reason: str, detail: str) -> N
     The refusal already rides ``aot_ingress_refused`` as a countable typed
     event, but that event names no REQUEST — so the request row that was
     served eager by an armed compiled lane still reported
-    ``serving_mode=aot_cell, fallback_reason=""``, i.e. an eager latency
+    ``serving_mode=aot_compiled_graph, fallback_reason=""``, i.e. an eager latency
     sample counted as compiled. That is the exact contamination
     :mod:`serving_mode` exists to prevent, and arming a partially
-    dispatchable cell (which pgw#844 now does) is what makes it common.
+    dispatchable compiled graph (which pgw#844 now does) is what makes it common.
 
     Never raises: telemetry must not be able to un-serve a request that the
     eager fallback is about to answer correctly.
@@ -2790,7 +2789,7 @@ def _target_owner(pipeline: Any, target: str) -> Tuple[Any, str]:
     as a plain attribute, so ``vae.decoder`` resolved to
     ``(pipeline.vae, "decoder")`` and the arm would have replaced a
     SUBMODULE with a wrapped function, while the mint resolved the same
-    string to the decoder's ``forward`` and exported that. A cell whose
+    string to the decoder's ``forward`` and exported that. A compiled graph whose
     entries are traced from one callable and armed onto another is the
     silent-wrongness class every gate in this stack exists to prevent, and
     nothing would have caught it: ``vae.decode`` (a bound method) is the
@@ -2829,7 +2828,7 @@ def _entry_admission_drift(
 
 #: The classified refusal a bind that ran out of device memory produces. Same
 #: token the two deleted `mint_budget.adopt_headroom` gates used, so every
-#: downstream reader (the `cell_adopt_declined` event, `fleet_cells`' abort
+#: downstream reader (the `compiled_graph_adopt_declined` event, `fleet_compiled_graphs`' abort
 #: classification, the hub's phase column) keeps its vocabulary — what changed
 #: is that it is now emitted on EVIDENCE rather than on an estimate.
 ADOPT_OOM_REASON = "insufficient_adopt_vram"
@@ -2839,7 +2838,7 @@ ADOPT_OOM_REASON = "insufficient_adopt_vram"
 def _bind_headroom(what: str, armed: int, declared: int) -> Iterator[None]:
     """Turn a CUDA OOM inside one bind into a typed adopt refusal (pgw#1175).
 
-    §4.33 step 4 loads the cell into the LIVE pipeline and keeps it or rejects
+    §4.33 step 4 loads the compiled graph into the LIVE pipeline and keeps it or rejects
     it. Rejection has to be survivable, and the ONLY honest evidence that a
     card cannot hold the runners is a card that says so. This is the whole
     replacement for the deleted headroom estimate: no number is computed, the
@@ -2848,14 +2847,14 @@ def _bind_headroom(what: str, armed: int, declared: int) -> Iterator[None]:
     It is deliberately narrow. A CUDA OOM and nothing else — every other
     exception keeps its own classification, because "the artifact is broken"
     and "this pod is full" are different verdicts and only one of them says
-    anything about the cell. It also runs strictly BEFORE the first live
+    anything about the compiled graph. It also runs strictly BEFORE the first live
     mutation (:func:`wrap_module` is called after every entry binds), so a
     refusal leaves the pipeline exactly as eager as it found it.
 
     pgw#1176 CHANGED WHAT THE POSITION MEANS, and the change is the whole
     forensic point. It used to be ``(index+1 of total)`` — where in a
     bind-all-then-wrap sequence the OOM landed — which measured "how far
-    through the cell did we get" and was the only handle th#1825 had. Under
+    through the compiled graph did we get" and was the only handle th#1825 had. Under
     the atom that sequence does not exist: each class binds alone, so the
     index is always 1 of 1 and says nothing. What distinguishes "one class too
     big" from "wholly unadoptable" NOW is **how many siblings are already
@@ -2868,8 +2867,8 @@ def _bind_headroom(what: str, armed: int, declared: int) -> Iterator[None]:
     every ``RuntimeError`` out of ``load_constants`` as
     ``ConstantsUnboundError("injection_failed")`` — a CONTRACT verdict — and
     ``torch.OutOfMemoryError`` is a ``RuntimeError``. So the exact failure this
-    guard exists for arrives already re-labelled as the cell's fault, which is
-    how "this pod is full" would have retired a correct cell. The cause is what
+    guard exists for arrives already re-labelled as the compiled graph's fault, which is
+    how "this pod is full" would have retired a correct compiled graph. The cause is what
     decides.
     """
     try:
@@ -2906,7 +2905,7 @@ def _marker(pipeline: Any) -> Dict[str, Any]:
     """The pipeline's arm marker, created empty on first use.
 
     pgw#1176: the marker is the pod's per-entry serve-state record, not a
-    snapshot of one cell. It carries the wrapped targets, the by-reference
+    snapshot of one compiled graph. It carries the wrapped targets, the by-reference
     constant pools that must outlive their runners, the literal tables, and
     one row per entry ever armed on this object.
     """
@@ -2936,9 +2935,9 @@ def arm_entry(
 
     THE ATOM (pgw#1176). What this replaces — ``load_and_wrap``'s
     stage-verify-load-EVERY-entry-then-bind-ALL-then-wrap shape — carried the
-    invariant "a cell that cannot arm one of its graph classes arms none of
+    invariant "a compiled graph that cannot arm one of its graph classes arms none of
     them, because a partially served contract would be a silent subset of
-    what the cell key advertises". That invariant was locally correct and
+    what the compiled graph key advertises". That invariant was locally correct and
     globally the disease: it was a faithful guard on the premise that the
     advertising unit is a 36-class set. Shrink the unit to one graph and
     nothing is left that CAN lie — an entry arms whole or not at all, and an
@@ -2948,7 +2947,7 @@ def arm_entry(
 
     * an entry that cannot arm costs THAT class. Its siblings keep serving
       compiled, and the pod reports per-entry serve state rather than a
-      cell-level claim;
+      compiled graph-level claim;
     * coverage ACCRETES. A second call arms a second class into the same
       registry, the same target pool and the same live wrap. There is no
       "complete" state and nothing waits for one;
@@ -2983,10 +2982,10 @@ def arm_entry(
     the pod serves eager. The attempt is the measurement.
 
     **The atom makes that refusal cheaper and more honest than it could be
-    under the cell.** A bind OOM here costs exactly ONE graph class: its
+    under the compiled graph.** A bind OOM here costs exactly ONE graph class: its
     siblings stay armed and keep serving compiled, and the refused class is
     retried by nobody and condemned by nothing — another pod, or this one with
-    less resident, may bind it fine. Under the 36-entry cell the same OOM
+    less resident, may bind it fine. Under the 36-entry compiled graph the same OOM
     discarded every class.
 
     Raises :class:`AdoptError` with a classified reason on any failure, and
@@ -2994,11 +2993,11 @@ def arm_entry(
     """
     family = str(getattr(cfg, "family", "") or "")
     # pgw#1087: admission splits in two and the halves have different owners.
-    # `cell_verify` is unpack + identity + contract verification on inert
+    # `compiled_graph_verify` is unpack + identity + contract verification on inert
     # bytes (disk + hashing); `entry_admit` below is dlopen, constant bind and
     # ingress-assertion arming (device).
     with boot_phases.span(
-        boot_phases.PHASE_CELL_VERIFY, ref=family,
+        boot_phases.PHASE_COMPILED_GRAPH_VERIFY, ref=family,
         artifact_kind="aot-inductor",
     ) if boot_phases.in_boot() else contextlib.nullcontext():
         staged = stage_artifact(
@@ -3053,7 +3052,7 @@ def arm_entry(
         pools = marker["bound_constants"]["pools"]
         pool = pools.setdefault(target, {})
         # pgw#1175, carried: the pool grows by reference, so an OOM here is a
-        # CARD fact and gets the card's own verdict rather than the cell's.
+        # CARD fact and gets the card's own verdict rather than the compiled graph's.
         _armed_here = len(dispatch.runners)
         _declared_here = len(dispatch.declared) or (_armed_here + 1)
         with _bind_headroom(
@@ -3070,7 +3069,7 @@ def arm_entry(
             # walks the CAUSE CHAIN, which is load-bearing: `bind` re-labels
             # every RuntimeError out of `load_constants` as a CONTRACT
             # verdict, and `torch.OutOfMemoryError` IS a RuntimeError — so a
-            # full card would otherwise condemn a correct cell, and a contract
+            # full card would otherwise condemn a correct compiled graph, and a contract
             # verdict is the kind that quarantines a key (th#1819). Capacity
             # is never a contract verdict.
             with _bind_headroom(
@@ -3111,18 +3110,18 @@ def arm_entry(
         # re-reading a tarball. Per-entry facts live in `entries`.
         marker["meta"] = meta
         marker["entries"][name] = {
-            "key": str(meta.get("cell_key") or ""),
+            "key": str(meta.get("compiled_graph_key") or ""),
             "target": target,
             "class_hash": str(block.get("class_hash") or ""),
             "manifest_digest": str(meta.get("manifest_digest") or ""),
         }
         # pgw#1141b: THE registration, at the one seam every arm route passes.
-        note_aot_key(str(meta.get("cell_key") or ""))
+        note_aot_key(str(meta.get("compiled_graph_key") or ""))
         logger.info(
             "aot-serve: armed entry %s on target %s in %.1fs (%d declared "
             "constants, key=%s); %d entr%s now armed on this pipeline",
             name, target, time.monotonic() - t0, len(constants),
-            meta.get("cell_key"), len(marker["entries"]),
+            meta.get("compiled_graph_key"), len(marker["entries"]),
             "y" if len(marker["entries"]) == 1 else "ies")
         return meta
     finally:
@@ -3133,7 +3132,7 @@ def disarm_entry(pipeline: Any, name: str, reason: str) -> bool:
     """De-arm ONE graph class, sticky for the boot. True when it was armed.
 
     The per-entry half of §4.31, reachable from outside a serve call: the
-    mint's parity gate refuses an entry here rather than un-arming a cell,
+    mint's parity gate refuses an entry here rather than un-arming a compiled graph,
     and an LRU eviction of a cold container is the same operation.
     """
     marker = getattr(pipeline, _MARKER_ATTR, None)
@@ -3158,7 +3157,7 @@ def disarm_entry(pipeline: Any, name: str, reason: str) -> bool:
 def entry_states(pipeline: Any) -> Dict[str, Dict[str, Any]]:
     """Per-entry SERVE STATE — what this pod actually serves, per graph class.
 
-    pgw#1176 §1.4: the pod never claims "cell X armed". It reports, per entry,
+    pgw#1176 §1.4: the pod never claims "compiled graph X armed". It reports, per entry,
     ``armed`` / ``de_armed(reason)`` / ``pending`` — so there is no unit left
     that can advertise more than it serves. This is the record the per-entry
     hub events (§1.7) are built from.
@@ -3181,12 +3180,12 @@ def entry_states(pipeline: Any) -> Dict[str, Dict[str, Any]]:
 
 def _adopt_identity(artifact: Path) -> str:
     """Best-effort ``family=… key=…`` from the artifact's own metadata for
-    the typed adopt event — a refusal must name the candidate cell even when
+    the typed adopt event — a refusal must name the candidate compiled graph even when
     the refusal itself is a metadata problem."""
     meta = artifact_meta.try_read_metadata(artifact)
     if meta is None:
         return f"artifact={artifact.name}"
-    return f"family={meta.get('family')} key={meta.get('cell_key')}"
+    return f"family={meta.get('family')} key={meta.get('compiled_graph_key')}"
 
 
 def enable(
@@ -3202,7 +3201,7 @@ def enable(
 
     Falsy (staying eager) on ANY miss — the caller's ordinary miss policy
     (fleet self-mint / eager / typed refusal) takes over. Truthy IS the HIT:
-    ``fleet_cells`` treats it as a genuine match and
+    ``fleet_compiled_graphs`` treats it as a genuine match and
     skips the self-mint.
 
     pgw#1176: a miss here is a miss for ONE graph class. Nothing about it
@@ -3228,7 +3227,7 @@ def enable(
             reason, exc)
         return AdoptOutcome.miss(
             reason, f"{identity}: {type(exc).__name__}: {exc}", identity)
-    entry = dict(meta.get(cell_key_mod.ENTRY_BLOCK_KEY) or {})
+    entry = dict(meta.get(compiled_graph_key_mod.ENTRY_BLOCK_KEY) or {})
     armed = len(armed_entries(pipeline))
     logger.info(
         "aot-serve: armed %s entry %s (sku=%s torch=%s precision=%s, "
@@ -3236,7 +3235,7 @@ def enable(
         meta.get("family"), entry.get("name"),
         meta.get("sku"), meta.get("torch"), meta.get("precision"), armed)
     return AdoptOutcome.hit(
-        f"family={meta.get('family')} key={meta.get('cell_key')} "
+        f"family={meta.get('family')} key={meta.get('compiled_graph_key')} "
         f"entry={entry.get('name')} armed={armed} sku={meta.get('sku')} "
         f"torch={meta.get('torch')} precision={meta.get('precision')}")
 
@@ -3315,7 +3314,7 @@ def served_entry_calls(pipeline: Any) -> Dict[str, int]:
     """``entry -> served calls`` across every wrapped target (pgw#790).
 
     Which GRAPH CLASS served, not just that something did: an adapter-forked
-    cell is only doing its job when adapter-free traffic lands on the
+    compiled graph is only doing its job when adapter-free traffic lands on the
     branchless entry.
     """
     out: Dict[str, int] = {}
@@ -3346,9 +3345,9 @@ def armed_targets(pipeline: Any) -> Dict[str, Dict[str, Any]]:
     """Every wrapped target of an armed pipeline, keyed by target name.
 
     Each row carries ``module``, ``attr`` and the wrap ``state`` — whose
-    ``original`` is the EAGER callable the cell replaced and whose ``runner``
+    ``original`` is the EAGER callable the compiled graph replaced and whose ``runner``
     is that target's :class:`EntryDispatch`. The pgw#868 numerics probe needs
-    exactly those two to run the cell and its own reference on one feed, and a
+    exactly those two to run the compiled graph and its own reference on one feed, and a
     private marker read from another module would be a second interpretation
     of this one's format. ``{}`` when nothing is armed.
     """
@@ -3362,7 +3361,7 @@ def armed_targets(pipeline: Any) -> Dict[str, Dict[str, Any]]:
 def armed_metadata(pipeline: Any) -> Dict[str, Any]:
     """The metadata the ARM itself used, off the live marker.
 
-    The authority for anything asked about an armed cell: a caller that
+    The authority for anything asked about an armed compiled graph: a caller that
     re-unpacked the artifact could be reading a different file than the one
     :func:`load_and_wrap` staged, verified and bound.
     """
@@ -3374,7 +3373,7 @@ def armed_metadata(pipeline: Any) -> Dict[str, Any]:
 def armed_entries(pipeline: Any) -> Dict[str, str]:
     """``entry name -> entry key`` for every graph class ARMED right now.
 
-    pgw#1176: this — not a cell-level boolean — is what the pod may claim. A
+    pgw#1176: this — not a compiled graph-level boolean — is what the pod may claim. A
     subset is a legitimate steady state, so "how many, and which" is the only
     honest answer to "what does this pod serve compiled".
     """
@@ -3394,7 +3393,7 @@ def is_armed(pipeline: Any) -> bool:
     """Whether this pipeline is serving ANY compiled graph class right now.
 
     pgw#1176 DELETED the every-target rule ("one revoked target means the
-    cell no longer serves the contract its key advertises"). That rule was
+    compiled graph no longer serves the contract its key advertises"). That rule was
     the arming half of the wrong atom: a key that advertised 36 classes made
     partial service a lie, so the guard was locally correct — and it is what
     forbade the incremental compile-and-adopt this design exists to deliver.
@@ -3410,8 +3409,8 @@ def is_armed(pipeline: Any) -> bool:
     return bool(armed_entries(pipeline))
 
 
-def holds_exported_cell(pipeline: Any) -> bool:
-    """Whether an AOTI cell is WRAPPED onto this object — armed or revoked.
+def holds_exported_compiled_graph(pipeline: Any) -> bool:
+    """Whether an AOTI compiled graph is WRAPPED onto this object — armed or revoked.
 
     pgw#1141b: the LANE question, asked of the object instead of a ref string.
     "Is this the exported lane?" decides which failure detector applies — the
@@ -3421,9 +3420,9 @@ def holds_exported_cell(pipeline: Any) -> bool:
     depend on whether some earlier caller had announced the key to this
     process; the wrap is the fact itself.
 
-    Distinct from :func:`is_armed` on purpose: a cell whose guard revoked it
+    Distinct from :func:`is_armed` on purpose: a compiled graph whose guard revoked it
     still HOLDS this pipeline's eager originals, and the install path has to
-    tell "revoked exported cell" (never advertise it) apart from "no cell here
+    tell "revoked exported compiled graph" (never advertise it) apart from "no compiled graph here
     at all" (an ordinary dynamo/eager object).
     """
     return bool(_marker_states(pipeline))
@@ -3508,7 +3507,7 @@ __all__ = [
     "disarm_entry",
     "execution_count",
     "proven_since",
-    "holds_exported_cell",
+    "holds_exported_compiled_graph",
     "host_isa_reason",
     "NO_HOST_ISA_STAMP",
     "ingress_class_name",

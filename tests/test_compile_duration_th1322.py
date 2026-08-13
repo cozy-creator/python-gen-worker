@@ -28,7 +28,7 @@ What is real here
   imported by nothing but its own test.
 
 pgw#1010 moved the JIT half of this contract without weakening it. The mint
-child no longer runs a JIT recipe (a dynamo cell had no consumer), so
+child no longer runs a JIT recipe (a dynamo compiled graph had no consumer), so
 `mint_delegate._emit_jit_compile` is deleted; the JIT compile that still
 happens — and still has to be comparable against an AOT mint — is the INTAKE
 compile on a serving pod, emitted by the executor's proof window through the

@@ -45,14 +45,14 @@ def _report(request: MintRequest, report: MintReport) -> None:
 def _mint(request: MintRequest) -> None:
     target = Path(request.target)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(b"stub-cell-bytes")
+    target.write_bytes(b"stub-compiled_graph-bytes")
     _report(request, MintReport(
         status="minted",
         # pgw#1176: a mint reports its ENTRY SET. A double that
         # names one artifact models a product the child no
         # longer makes, and `mint_process` reads `entries`.
         entries=((str(request.arm_token), str(target), "blake3:stub"),),
-        cell_key=request.arm_token, phase="finalize",
+        compiled_graph_key=request.arm_token, phase="finalize",
         peak_vram_bytes=int(os.environ.get("MINT_STUB_PEAK", "0") or 0),
         detail="stub mint"))
 

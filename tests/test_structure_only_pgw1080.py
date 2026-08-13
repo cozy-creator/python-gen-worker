@@ -55,7 +55,7 @@ def test_a_compile_target_is_built_from_config_and_holds_no_weights(
 
 def test_the_structure_claims_the_TARGET_device_not_meta(tree: Path) -> None:
     """AOTInductor codegens for the device the traced tensors report, so a
-    structure that claimed ``meta`` would compile a cell for no card at all —
+    structure that claimed ``meta`` would compile a compiled graph for no card at all —
     and a meta parameter cannot even be exported beside a real input
     (measured: ``Tensor device mismatch … cpu and meta``)."""
     module, _facts = so.build_component(tree, "transformer", device="cpu")
@@ -64,11 +64,11 @@ def test_the_structure_claims_the_TARGET_device_not_meta(tree: Path) -> None:
 
 
 def test_buffers_stay_REAL_because_literals_ship_from_them(tree: Path) -> None:
-    """A config-derived table is what a literal-bearing cell packs. Faking it
+    """A config-derived table is what a literal-bearing compiled graph packs. Faking it
     would make ``aot_package.literal_constants`` unpackable — and keeping it
     real is also the folding fence: a literal derived from a PARAMETER stays
     fake and fails loudly instead of baking one checkpoint into a shared
-    cell."""
+    compiled graph."""
     module, facts = so.build_component(tree, "transformer", device="cpu")
     buffers = dict(module.named_buffers())
     assert buffers, "the micro denoiser registers a rope/frequency table"

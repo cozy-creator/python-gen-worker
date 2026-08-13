@@ -1,6 +1,6 @@
 """The ONE adoption vocabulary (pgw#923).
 
-Adopting a pre-built compiled cell — hub-delivered or catalog-discovered — used
+Adopting a pre-built compiled compiled graph — hub-delivered or catalog-discovered — used
 to be described twice. The typed description rode ``ModelEvent{ADOPTED}``
 (``duration_ms``, ``cache_hits``, ``cache_misses``, ``warmup_s``), which the hub
 persists as ``worker_activity_events.kind='compile_cache_adopt'`` with two
@@ -9,8 +9,8 @@ free-text ``aot_adopt`` activity event that put ``family=… key=… sku=…`` i
 prose and no numbers anywhere.
 
 Only the free-text one was ever reachable from the path adoptions actually take
-(arming at boot, through ``fleet_cells`` — historically called "boot attach",
-which names WHEN the cell is armed, never a hub push); the typed one was
+(arming at boot, through ``fleet_compiled_graphs`` — historically called "boot attach",
+which names WHEN the compiled graph is armed, never a hub push); the typed one was
 reachable only from the
 hub-commanded ``ADOPT_COMPILE_CACHE`` operation, which no stack has ever
 dispatched. So the measured lane had zero rows on both live stacks while every
@@ -18,13 +18,13 @@ real adoption landed at ``duration_ms=0``, and the percentile endpoint
 aggregated a population with no members.
 
 pgw#1032 finished the argument: ``ADOPT_COMPILE_CACHE`` is GONE on both sides.
-Its hub-side push was keyed off the COMPUTED (``kind="inductor"``) cell key,
-and since pgw#1010 nothing mints into that key space — every publishable cell
-is STAMPED ``aot-inductor`` — so the push could never have selected a cell.
+Its hub-side push was keyed off the COMPUTED (``kind="inductor"``) compiled graph key,
+and since pgw#1010 nothing mints into that key space — every publishable compiled graph
+is STAMPED ``aot-inductor`` — so the push could never have selected a compiled graph.
 
 **Nothing is DELIVERED to a pod any more.** th#1702 also deletes the hub's
 snapshot attach (HelloAck and RunJob both). pgw#904 then deleted worker-side
-fetch-and-filter discovery too: the hub RESOLVES the exact cell and names it
+fetch-and-filter discovery too: the hub RESOLVES the exact compiled graph and names it
 in ``Arm.artifact``; the worker materializes only that identity and feeds it
 through the same gates. That is the only adoption there is. (pgw#904
 replaces the listing with a hub-RESOLVED ``Arm.artifact`` — still a pull, not
@@ -42,7 +42,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-__all__ = ["AdoptOutcome", "CellAdoption", "EagerPhase"]
+__all__ = ["AdoptOutcome", "CompiledGraphAdoption", "EagerPhase"]
 
 
 class EagerPhase(StrEnum):
@@ -70,7 +70,7 @@ class EagerPhase(StrEnum):
 
     #: The mint-impossibility exits, each a distinct `_fail_closed` cause.
     #: pgw#1010 retired three of the original nine with the in-process
-    #: capture that produced them — ``delivered_cell_seeded``,
+    #: capture that produced them — ``delivered_compiled_graph_seeded``,
     #: ``capture_conflict`` and ``multi_group_in_process`` all named hazards
     #: of moving the process-global inductor cache dir, and nothing moves it
     #: any more; ``capture_arm_failed`` became ``jit_arm_failed``, which is
@@ -83,16 +83,16 @@ class EagerPhase(StrEnum):
     KEY_COMPUTATION_FAILED = "key_computation_failed"
     JIT_ARM_FAILED = "jit_arm_failed"
     #: pgw#1010: a mandatory (w8a8/w4a4) lane on a family that declares no
-    #: export. The lane serves only from a cell, the only cell is an AOT cell,
+    #: export. The lane serves only from a compiled graph, the only compiled graph is an AOT compiled graph,
     #: and nothing can mint one here — so the pod fails closed instead of
     #: compiling a JIT intake arm no request may be dispatched to.
-    MANDATORY_LANE_NEEDS_A_CELL = "mandatory_lane_needs_a_cell"
+    MANDATORY_LANE_NEEDS_A_COMPILED_GRAPH = "mandatory_lane_needs_a_compiled_graph"
 
     #: The tenth eager exit: it declines BEFORE `_fail_closed` (a quarantined
     #: identity must not be re-minted) and was the one that only logged.
-    CELL_QUARANTINED = "cell_quarantined"
+    COMPILED_GRAPH_QUARANTINED = "compiled_graph_quarantined"
 
-    #: Eager with an END — a delegated mint child is building the cell.
+    #: Eager with an END — a delegated mint child is building the compiled graph.
     MINT_IN_PROGRESS = "mint_in_progress"
 
     #: pgw#904: the hub's ExecutionSpec named ``eager_only`` for this arm.
@@ -156,7 +156,7 @@ class EagerPhase(StrEnum):
     #: never ran, so not one of the per-candidate omission tokens could fire.
     NO_COMPILE_CANDIDATES = "no_compile_candidates"
 
-    #: pgw#1122: the pod resolved a cell BY ITS OWN DERIVED KEY (§4.27
+    #: pgw#1122: the pod resolved a compiled graph BY ITS OWN DERIVED KEY (§4.27
     #: boot-adopt), materialized it, and the arm refused — a receipt gate, a
     #: publisher check, an identity this pod cannot establish. Nothing named
     #: this arm but the pod itself, so there is no order to obey and no reason
@@ -164,14 +164,14 @@ class EagerPhase(StrEnum):
     #: exactly the boot every pod did before boot-adopt existed. Measured cost
     #: of the alternative: `worker_function_unavailable`, three pods reaped
     #: `state_blocked_idle`, two replacements bought.
-    ADOPTED_CELL_REFUSED = "adopted_cell_refused"
+    ADOPTED_COMPILED_GRAPH_REFUSED = "adopted_compiled_graph_refused"
 
     #: pgw#1142 / §4.32 item 4: an OPERATOR ordered this worker to serve eager
     #: only, over the scheduler's control channel or the cozy-local CLI. It is
     #: neither a defect nor a degradation — it is the answer, and it is
     #: reversible — so it must never be counted with the failure classes above
     #: or with `hub_ordered_eager` (which is one PLAN's backend, not a standing
-    #: order about this pod). A worker holding this token has cells it could be
+    #: order about this pod). A worker holding this token has compiled graphs it could be
     #: serving from, still armed, deliberately not called.
     OPERATOR_EAGER_ONLY = "operator_eager_only"
 
@@ -185,15 +185,15 @@ class EagerPhase(StrEnum):
 class AdoptOutcome:
     """The result of arming ONE candidate artifact on ONE pipeline.
 
-    Truthy exactly when the cell armed, so the many ``if enable_compiled(...)``
+    Truthy exactly when the compiled graph armed, so the many ``if enable_compiled(...)``
     call sites read unchanged while the classified refusal — previously
     reachable only as the ``phase`` of a free-text event — becomes a value the
     caller can act on and put on the wire.
 
     ``reason`` is the short, stable, countable token (an ``AdoptError.reason``,
-    a lane-gate refusal, ``no_cell``); ``detail`` is the human sentence.
+    a lane-gate refusal, ``no_compiled_graph``); ``detail`` is the human sentence.
     ``identity`` carries ``family=… key=…`` when the candidate's own metadata
-    could be read — a refusal must still name the cell it refused, including
+    could be read — a refusal must still name the compiled graph it refused, including
     when the refusal IS a metadata problem.
     """
 
@@ -215,12 +215,12 @@ class AdoptOutcome:
 
 
 @dataclass(frozen=True)
-class CellAdoption:
+class CompiledGraphAdoption:
     """One adoption ATTEMPT, measured, with the identity the hub fences on.
 
     ``arm_ms`` is the wall time of the arm itself — load, bind, wrap, gate —
     and is the same quantity the hub stores as the adoption's ``duration_ms``.
-    The warmup half is deliberately absent: a cell is armed during injection
+    The warmup half is deliberately absent: a compiled graph is armed during injection
     and warmed later, by the setup warmup, so the two numbers are known at two
     different instants and the executor joins them (pgw#1032: an arm-time
     acquisition is the only adoption there is, so this is the only shape).
@@ -244,4 +244,4 @@ class CellAdoption:
     #: attempt would otherwise have no way to state, so it can still be
     #: reported instead of dropped.
     entry: str = ""
-    cell_key: str = ""
+    compiled_graph_key: str = ""

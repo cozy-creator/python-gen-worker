@@ -39,7 +39,7 @@ Measured on torch 2.13.0, not assumed (four variants, cardless rig):
   exactly the property this slice exists for.
 * buffers stay REAL, on the device. They are pure functions of config (rope
   tables, sinusoidal features) and they are KB-to-MB scale, and they are what
-  a literal-bearing family ships INSIDE the cell: a fake buffer would make
+  a literal-bearing family ships INSIDE the compiled graph: a fake buffer would make
   ``aot_package.literal_constants`` unpackable. Keeping them real also arms the
   folding fence — a literal derived from a PARAMETER is fake and fails loudly,
   and a value-dependent fold over a rebindable weight is precisely what
@@ -128,7 +128,7 @@ class StructureCapabilityMissing(StructureOnlyUnsupported):
             f"impossible in THIS PROCESS, for every family it serves: "
             f"{self.lacks}. Missing capability: {self.capability}. This is an "
             f"IMAGE defect, not an authoring one — no boot key can be derived "
-            f"here, so this pod can never ask the hub for a cell and will "
+            f"here, so this pod can never ask the hub for a compiled_graph and will "
             f"self-mint on every boot"
             + (f" (tree: {self.tree})" if self.tree else "")
         )
@@ -255,7 +255,7 @@ def _refuse_artifact_lanes(root: Path, component: str, cls: Any) -> None:
     """The quantized lanes build their denoiser from an ARTIFACT's own weight
     table (which linears are quantized, at what scales). That table is a
     property of the bytes, not of the config, so a structure-only build would
-    trace ``nn.Linear`` where serving runs ``Fp8ScaledLinear`` — a cell for a
+    trace ``nn.Linear`` where serving runs ``Fp8ScaledLinear`` — a compiled graph for a
     graph the pod never executes. Refuse by name instead."""
     from .svdq import detect_svdq_artifact
     from .w4a4 import detect_w4a4_artifact
@@ -367,7 +367,7 @@ def _torch_dtype(root: Path, component: str, dtype: str) -> Any:
     """The compute dtype this component would have loaded at.
 
     Same resolution ``loading.load_component`` uses, because a structure whose
-    precision differs from serving's is a different graph and a different cell.
+    precision differs from serving's is a different graph and a different compiled graph.
     """
     from ..families.facts import component_dtype_for_class
     from .loading import (
@@ -399,7 +399,7 @@ def _wrapper_parts(tensor: Any) -> Optional[Tuple[List[str], Any]]:
     (torchao's ``Float8Tensor``: fake ``qdata`` + fake ``scale``, outer dtype
     bf16), and both directions of the mint's fake↔real swap have to rebuild
     the SUBCLASS rather than a plain tensor of the outer dtype. Flattening one
-    to bf16 traces bf16 Linears for a pod that serves fp8 — a cell for a graph
+    to bf16 traces bf16 Linears for a pod that serves fp8 — a compiled graph for a graph
     the pod never executes, which is the defect ``_refuse_artifact_lanes``
     exists to prevent, arriving by the other door (pgw#1198).
     """
@@ -483,7 +483,7 @@ def _freeze_placement(module: Any) -> None:
     ``RuntimeError: _apply(): Couldn't swap Linear.weight`` (measured on the
     RTX 4070 rig, first GPU cycle). Silently declining the move is the honest
     behaviour here, because a move that DID happen would re-key the graph the
-    cell is being minted for.
+    compiled graph is being minted for.
     """
     import types
 
@@ -622,7 +622,7 @@ def weight_free_breaches(
 
     BUFFERS ARE NOT COUNTED. A structure-only component's buffers stay real by
     construction — they are config-derived tables and a literal-bearing family
-    ships them inside the cell (see this module's header). Parameters are the
+    ships them inside the compiled graph (see this module's header). Parameters are the
     checkpoint, and the checkpoint is the thing that must not be here.
     """
     import torch
@@ -845,7 +845,7 @@ def under(mode: Optional[Any]) -> Iterator[None]:
 # real device, both read off the program's example inputs (which are fake in
 # that mode already, exactly as a real-weight program's are). aot_compile then
 # sees params and inputs sharing ONE fake mode — its precondition — and the
-# graph is byte-identical to the serial path, so the cell key does not move.
+# graph is byte-identical to the serial path, so the compiled graph key does not move.
 
 
 def _program_tensor_tables(program: Any) -> Iterator[Tuple[Any, str, Any]]:
@@ -863,7 +863,7 @@ def to_meta_for_save(program: Any) -> int:
     """Re-cast a weight-free program's FAKE params/constants to META, in place.
 
     Only fake tensors move; real buffers (config-derived tables, the literals a
-    family ships inside the cell) stay real and serialize as they always have.
+    family ships inside the compiled graph) stay real and serialize as they always have.
     Returns the number of tensors converted — 0 means this was not a weight-free
     program and nothing changed. The example inputs are left untouched: they are
     fake on a real device and torch.export already serialises them as metadata

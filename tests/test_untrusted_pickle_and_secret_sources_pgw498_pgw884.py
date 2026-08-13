@@ -182,7 +182,7 @@ def test_there_is_exactly_one_pickle_reader_in_the_tree() -> None:
     and silently unsafe under `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD`.
 
     `torch.export.load` is deliberately out of scope: an AOTI `.pt2` is
-    admitted through the cell-key identity gate and the org/endpoint trust
+    admitted through the compiled graph-key identity gate and the org/endpoint trust
     model (§4.26), not through this lane's tenant-repo assumption.
     """
     src_root = Path(writer.__file__).resolve().parent.parent

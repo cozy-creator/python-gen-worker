@@ -42,7 +42,7 @@ import pytest
 from gen_worker import Compile, Dim, GraphClass, Input
 from gen_worker.aot_contract import DynamicDim, ExportSpec
 from gen_worker.aot_declaration import (
-    cell_plans, container_arities, declared_inputs,
+    compiled_graph_plans, container_arities, declared_inputs,
 )
 from gen_worker.aot_mint import (
     declared_range_gaps, dynamic_shapes_spec, exported_input_names,
@@ -312,7 +312,7 @@ def _export(arity: int) -> Tuple[Any, Sequence[DynamicDim], Dict[str, int]]:
                       weight_lane="", precision="bf16")
     module = _ListModule()
     args, kwargs = declared_inputs(module, spec, decl)
-    (plan,) = cell_plans(decl)
+    (plan,) = compiled_graph_plans(decl)
     arities = container_arities(decl, spec, module)
     program = torch.export.export(
         module, tuple(args), dict(kwargs), strict=True,

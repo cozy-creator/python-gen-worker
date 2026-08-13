@@ -190,7 +190,7 @@ def generate(n: int, rng: random.Random) -> list[str]:
     out: list[str] = []
     # Exhaustive small cross-product first: every legal-shaped payload whose
     # two th#1375 spellings are written in every combination of present /
-    # absent / zero / disagreeing. That cell is where the rename hole lived.
+    # absent / zero / disagreeing. That compiled graph is where the rename hole lived.
     for gc, d, legacy_d in itertools.product([0, 1, 2, 4], [None, 0, 1, 2], [None, 0, 1, 2]):
         obj: dict[str, Any] = {KEY_GPU_COUNT: gc}
         if d is not None:

@@ -313,7 +313,7 @@ def test_perfect_versions_unusable_card_is_refused(tmp_path, monkeypatch) -> Non
     _authority(tmp_path, monkeypatch)
     monkeypatch.setattr(rigcheck, "resolve_environment", _on_line_env)
     with pytest.raises(rigcheck.CudaUnusable) as caught:
-        rigcheck.assert_fleet_line("recell", start=tmp_path)
+        rigcheck.assert_fleet_line("recompiledgraph", start=tmp_path)
     message = str(caught.value)
     assert "this HOST cannot run it" in message
     assert "driver_too_old" in message
@@ -329,7 +329,7 @@ def test_the_host_refusal_is_still_a_fleet_line_mismatch(tmp_path, monkeypatch) 
     _authority(tmp_path, monkeypatch)
     monkeypatch.setattr(rigcheck, "resolve_environment", _on_line_env)
     with pytest.raises(rigcheck.FleetLineMismatch):
-        rigcheck.assert_fleet_line("recell", start=tmp_path)
+        rigcheck.assert_fleet_line("recompiledgraph", start=tmp_path)
 
 
 def test_a_usable_card_on_the_line_passes(tmp_path, monkeypatch, capsys) -> None:
@@ -340,7 +340,7 @@ def test_a_usable_card_on_the_line_passes(tmp_path, monkeypatch, capsys) -> None
         lambda: _on_line_env(cuda_usable=True, cuda_unusable_reason=None,
                              cuda_unusable_class=None),
     )
-    env = rigcheck.assert_fleet_line("recell", start=tmp_path)
+    env = rigcheck.assert_fleet_line("recompiledgraph", start=tmp_path)
     assert env["cuda_usable"] is True
     assert "yes (real allocation)" in capsys.readouterr().err
 
@@ -353,7 +353,7 @@ def test_a_cardless_host_is_not_a_host_failure(tmp_path, monkeypatch) -> None:
         "resolve_environment",
         lambda: _on_line_env(driver=None, cuda_usable=False),
     )
-    rigcheck.assert_fleet_line("recell", start=tmp_path)
+    rigcheck.assert_fleet_line("recompiledgraph", start=tmp_path)
 
 
 def test_wheel_mismatch_stays_a_plain_mismatch(tmp_path, monkeypatch) -> None:
@@ -364,7 +364,7 @@ def test_wheel_mismatch_stays_a_plain_mismatch(tmp_path, monkeypatch) -> None:
         lambda: _on_line_env(torch="2.9.1+cu129", cuda="12.9", cuda_usable=True),
     )
     with pytest.raises(rigcheck.FleetLineMismatch) as caught:
-        rigcheck.assert_fleet_line("recell", start=tmp_path)
+        rigcheck.assert_fleet_line("recompiledgraph", start=tmp_path)
     assert not isinstance(caught.value, rigcheck.CudaUnusable)
 
 

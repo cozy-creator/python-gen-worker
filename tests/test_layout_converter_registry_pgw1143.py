@@ -1,5 +1,5 @@
 """pgw#1143 step 4 + 7 (§1.33): the layout converter registry, and the fence
-that keeps conversion out of cell identity.
+that keeps conversion out of compiled graph identity.
 
 What is proven here, in the order the ruling puts it:
 
@@ -14,7 +14,7 @@ What is proven here, in the order the ruling puts it:
    its order become a preference;
 5. the derived-artifact identity is stable across PROCESSES, which is the whole
    basis of convert-once-into-the-CAS;
-6. **no cell re-keys**: no cell-key axis can read the layout vocabulary
+6. **no compiled graph re-keys**: no compiled graph-key axis can read the layout vocabulary
    (structural, via the shipped gate) and a slot's demand does not move the
    compile contract (behavioural, through `extract_specs`).
 
@@ -457,7 +457,7 @@ def test_the_relation_holds_no_handle_literal() -> None:
     compatibility RELATION never does. Enforced by the shipped gate, asserted
     here so the invariant has a test and not only a script."""
     proc = subprocess.run(
-        [sys.executable, str(REPO / "scripts" / "lint_cell_key_layout_fence.py")],
+        [sys.executable, str(REPO / "scripts" / "lint_compiled_graph_key_layout_fence.py")],
         capture_output=True, text=True, timeout=180)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "no contract-handle literal in the relation" in proc.stdout
@@ -583,26 +583,26 @@ def test_a_version_bump_moves_the_identity(tmp_path: Path) -> None:
 
 def _fence_module():
     spec = importlib.util.spec_from_file_location(
-        "_fence", REPO / "scripts" / "lint_cell_key_layout_fence.py")
+        "_fence", REPO / "scripts" / "lint_compiled_graph_key_layout_fence.py")
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-def test_the_fence_covers_every_module_that_computes_a_cell_key() -> None:
+def test_the_fence_covers_every_module_that_computes_a_compiled_graph_key() -> None:
     """The fenced set is DERIVED from who calls an axis producer, not
     hand-listed — the failure mode of a hand-maintained list is that the one
     file which violates the rule is the one nobody added."""
     fenced = {p.name for p in _fence_module().fenced_modules()}
-    assert {"cell_key.py", "fleet_cells.py", "boot_key.py", "aot_mint.py",
+    assert {"compiled_graph_key.py", "fleet_compiled_graphs.py", "boot_key.py", "aot_mint.py",
             "aot_serve.py", "compile_cache.py"} <= fenced
 
 
 def _run_fence(*argv: str) -> subprocess.CompletedProcess:
     """The gate exactly as CI runs it: the script, through its own `main()`."""
     return subprocess.run(
-        [sys.executable, str(REPO / "scripts" / "lint_cell_key_layout_fence.py"),
+        [sys.executable, str(REPO / "scripts" / "lint_compiled_graph_key_layout_fence.py"),
          *argv],
         capture_output=True, text=True, timeout=180)
 
@@ -619,7 +619,7 @@ def test_the_fence_fires_on_a_key_axis_that_reads_the_layout(
     against a tree that violates the fence, and a disconnected detector fails
     here.
     """
-    (tmp_path / "cell_key.py").write_text(textwrap.dedent(
+    (tmp_path / "compiled_graph_key.py").write_text(textwrap.dedent(
         """
         from gen_worker.convert.layout_converters import LayoutId
 
@@ -639,7 +639,7 @@ def test_the_fence_fires_on_a_key_axis_that_reads_the_layout(
 def test_the_fence_fires_on_a_deferred_import_too(tmp_path: Path) -> None:
     """A string handed to `import_module` is the obvious way around an import
     check, so it is checked as a string."""
-    (tmp_path / "cell_key.py").write_text(textwrap.dedent(
+    (tmp_path / "compiled_graph_key.py").write_text(textwrap.dedent(
         """
         import importlib
 
@@ -658,9 +658,9 @@ def test_the_fence_does_not_fire_on_prose(tmp_path: Path) -> None:
     """Docstrings are excluded on purpose: a vocabulary gate that reds on the
     word appearing in an explanation teaches lanes to stop explaining
     themselves, and has already cost this repo a lane-day."""
-    (tmp_path / "cell_key.py").write_text(textwrap.dedent(
+    (tmp_path / "compiled_graph_key.py").write_text(textwrap.dedent(
         '''
-        """The cell key. Deliberately blind to Slot.layouts and to any
+        """The compiled_graph key. Deliberately blind to Slot.layouts and to any
         LayoutId or conversion chain — see classify_layout for why."""
 
 
@@ -674,10 +674,10 @@ def test_the_fence_does_not_fire_on_prose(tmp_path: Path) -> None:
 
 def test_the_shipped_tree_passes_the_fence() -> None:
     proc = subprocess.run(
-        [sys.executable, str(REPO / "scripts" / "lint_cell_key_layout_fence.py")],
+        [sys.executable, str(REPO / "scripts" / "lint_compiled_graph_key_layout_fence.py")],
         capture_output=True, text=True, timeout=180)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "no cell re-keys on a conversion" in proc.stdout
+    assert "no compiled_graph re-keys on a conversion" in proc.stdout
 
 
 # ── the behavioural half of point 5: a demand does not move the contract ─────
@@ -748,7 +748,7 @@ def _spec_for(slot: Slot):
 
 def test_declaring_a_layout_demand_does_not_move_the_compile_contract() -> None:
     """§1.33 point 5, behaviourally: the demand is upstream of compute, so
-    adding it to a slot must not move ANY cell-key input. The compile contract
+    adding it to a slot must not move ANY compiled graph-key input. The compile contract
     digest is what an endpoint's declaration actually reaches, and this goes RED
     the moment someone folds `layouts` into `contract_facts()` — which is the
     placement §1.33 point 5 rules out and the reason the demand lives on `Slot`

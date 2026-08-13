@@ -13,7 +13,7 @@ What is asserted here:
 * the mint-child release is a code-only PROJECTION: weights go to meta,
   literals keep their bytes, and every identity fact the parent-side gates
   read (FQN sets, graph hash, literal digest) is unchanged — so no gate is
-  dropped and the cell key cannot move (pgw#846);
+  dropped and the compiled graph key cannot move (pgw#846);
 * a full mint with ``release_residents=True`` still packs, still keys
   identically, and provably released the pipeline;
 * the pool REGRANTS K when the residents come back — through the same
@@ -202,7 +202,7 @@ def test_full_mint_with_release_packs_and_keys_identically(
     released = aot_mint.mint(
         surrendered, spec, tmp_path / "released", release_residents=True)
 
-    # pgw#1176: a mint produces N independently keyed artifacts, not "a cell",
+    # pgw#1176: a mint produces N independently keyed artifacts, not "a compiled graph",
     # so the pgw#846 claim is now per ENTRY. The declaration above traces two
     # graph classes; the length assert is what stops an empty `entries` from
     # making the comparison below pass vacuously.
@@ -258,7 +258,7 @@ def test_the_parent_never_parks_its_eager_pipeline_any_more() -> None:
     eager pipeline stays resident and hot (Paul ruling 2).
 
     RED before this change: `mint_delegate.maybe_park_eager` existed and
-    `build_cell` called it before the first budget probe.
+    `build_compiled_graph` called it before the first budget probe.
     """
     for gone in ("ParkedEager", "maybe_park_eager", "restore_eager_pipeline",
                  "_eager_modules"):

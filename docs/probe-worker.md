@@ -12,7 +12,7 @@ Tier by tier, cheapest first:
 | Tier | Cost per iteration | Covers |
 |---|---|---|
 | `task rig:mint` (pgw#978) | seconds, free | resolve, handoff, spawn, load, warm, export, compile, seal, publish, adopt — on a toy model, ONE export entry |
-| `task rig:micro` (pgw#997) | ~15 s, free | all of the above on a REAL org-worker package — 3 entries, two fork arms, a second target, container inputs, a derived dynamic range, plus a PARITY check that arms the adopted cell and compares every arm to eager |
+| `task rig:micro` (pgw#997) | ~15 s, free | all of the above on a REAL org-worker package — 3 entries, two fork arms, a second target, container inputs, a derived dynamic range, plus a PARITY check that arms the adopted compiled graph and compares every arm to eager |
 | experimental image (pgw#979) | one image build | the real image, the real deps, a real pod, a real family |
 | **probe pod (this doc)** | seconds, on a pod you already hold | everything above, on real weights and a real card, iterating |
 
@@ -27,7 +27,7 @@ One environment variable, required, and the sync script refuses a pod without
 it:
 
 ```bash
-GEN_WORKER_PROBE=1      # marks the pod a probe; DISARMS cell publish
+GEN_WORKER_PROBE=1      # marks the pod a probe; DISARMS compiled graph publish
 ```
 
 There is no longer a mode that keeps the hub from dispatching to a probe:
@@ -35,8 +35,8 @@ There is no longer a mode that keeps the hub from dispatching to a probe:
 against a release nothing is routing traffic to.
 
 `GEN_WORKER_PROBE=1` is not advisory. It is read by the **control parent**, in
-`procsplit/actions.py`, and it removes `cells.publish_intent` /
-`cells.publish_complete` from the set of hub calls the parent will make on the
+`procsplit/actions.py`, and it removes `compiled graphs.publish_intent` /
+`compiled graphs.publish_complete` from the set of hub calls the parent will make on the
 compute child's behalf. The compute child holds no credential and can reach the
 hub only through that allowlist, so **nothing you rsync into the child can
 re-arm publishing.** That is the guarantee: it is structural, not procedural.
@@ -45,8 +45,8 @@ Why it matters: a probe runs code that is, by construction, not any released
 version and not any built image. Its mints are stamped with a `gen_worker`
 version read from dist-info — which rsync does not move, so it *lies* — and a
 `code_closure` metadata memo no other pod can reproduce (pgw#990 took the
-closure out of the key; the honesty problem is unchanged). A cell published
-from a probe into the shared family namespace is a cell that every later pod
+closure out of the key; the honesty problem is unchanged). A compiled graph published
+from a probe into the shared family namespace is a compiled graph that every later pod
 may adopt and none can explain.
 
 Arming it is a second, separate decision:
@@ -112,7 +112,7 @@ than letting you chase a change that never loaded.
 One more consequence worth knowing: the `code_closure` memo is `lru_cache`d
 over source content, so within a live process your swap does not move the
 recorded closure — after the respawn it does. (Since pgw#990/pgw#1059 the
-closure is a memo, never identity: a code edit changes the cell key only
+closure is a memo, never identity: a code edit changes the compiled graph key only
 through the traced graph.)
 
 ## Terminating

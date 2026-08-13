@@ -12,7 +12,7 @@ phase table was ``{'load': 4.4, 'trace_graph': 8.1, 'seal_publish': 0.9,
 called. So a green AOT mint proved the family's graphs export and said nothing
 about whether the forward those graphs serve can run. pgw#969's crash
 (``ctx.slots["pipeline"]``, 0.0 s into ``warmup_forward``, twice on L40S pods)
-is *unreachable* on that recipe: it would have sealed and published a cell for
+is *unreachable* on that recipe: it would have sealed and published a compiled graph for
 an endpoint whose first real request dies.
 
 **pgw#985 — a deterministic arm decline was a crash.** On the same box, the
@@ -58,7 +58,7 @@ from gen_worker import compile_cache as cc
 from gen_worker import mint_child, mint_delegate
 from gen_worker import mint_process as mp
 from gen_worker.api.binding import ModelRef
-from gen_worker.registry import CompileCell
+from gen_worker.registry import CompileCompiledGraph
 
 torch = pytest.importorskip("torch")
 
@@ -179,13 +179,13 @@ def _request(
     from harness import tiny_diffusion_endpoint as ep
 
     workdir.mkdir(parents=True, exist_ok=True)
-    cfg = CompileCell(
+    cfg = CompileCompiledGraph(
         shapes=(ep.PIXEL_SHAPE,), targets=targets, family=ep.FAMILY,
         regional=False, text_len=ep.TEXT_LEN, dynamic=(), lora_bucket=0,
         guidance_scales=(), text_lens=())
     pending = SimpleNamespace(
         family=ep.FAMILY, arm_token="arm1-recipe-parity", cfg=cfg,
-        target=workdir / "cell.tar.gz", mint_root=workdir)
+        target=workdir / "compiled_graph.tar.gz", mint_root=workdir)
     task = mint_delegate.MintTask(
         pending=pending, pipe=None, function=FUNCTION,
         modules=(ENDPOINT_MODULE,),
@@ -277,7 +277,7 @@ def aot_without_the_export(
 
     The export + AOTInductor compile is the rig's job (and a LOCAL-ONLY row);
     what is under test here is the ORDER — whether the endpoint's own forward
-    has run by the time a cell can be sealed.
+    has run by the time a compiled graph can be sealed.
     """
     from harness import tiny_diffusion_endpoint as ep
 
@@ -292,7 +292,7 @@ def aot_without_the_export(
     def _stub(request: Any, pipe: Any, cfg: Any, target: Path, **kwargs: Any):
         exported.append({"family": cfg.family, "target": target})
         return mp.MintReport(
-            status="minted", artifact=str(target), cell_key=request.arm_token,
+            status="minted", artifact=str(target), compiled_graph_key=request.arm_token,
             phase="finalize", phases=mint_child._close_phases())
 
     monkeypatch.setattr(mint_child, "_mint_aot", _stub)
@@ -325,7 +325,7 @@ def test_an_aot_mint_cannot_seal_for_a_handler_that_cannot_run(
     """pgw#969's crash class, made reachable on the recipe it was invisible on.
 
     RED at HEAD: this minted. ``torch.export`` does not care that the handler
-    raises, so the cell sealed, published, and every pod that adopted it hit
+    raises, so the compiled graph sealed, published, and every pod that adopted it hit
     the ValueError on its first real request instead.
     """
     from harness import tiny_diffusion_endpoint as ep

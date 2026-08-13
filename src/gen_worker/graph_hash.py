@@ -2,7 +2,7 @@
 
 **What this digest is USED for (pgw#1031, Paul-ruled option a):** it is the
 pgw#917 same-class comparator, the per-entry ``graph_witness`` recorded on
-every cell by ``aot_mint.keying_block``, AND — since pgw#1031 — a folded input
+every compiled graph by ``aot_mint.keying_block``, AND — since pgw#1031 — a folded input
 to the key. ``aot_serve.class_hash`` (facts v3) folds ``graph_witness`` so the
 ``graph`` axis (``combined_graph_hash`` over ``class_hash``) is the traced
 COMPUTATION, not merely the traced ingress: two different computations behind
@@ -14,10 +14,10 @@ any residual witness-blind collision (defense-in-depth).
 
 Paul's ruling: "I'd rather key on the graph that is changed, not hash on code
 changes... look at some code and be like 'oh this is graph-ABC' and that is the
-key exactly." So cell identity is the digest of the TRACED graph, and the axes
+key exactly." So compiled graph identity is the digest of the TRACED graph, and the axes
 that used to stand in for it (``family``, ``lane``, ``mode``, ``contract``,
 ``code_closure``) dissolve into it: a fine-tune that traces the same graph
-SHARES cells, and a quant-lane rewrite is a different graph by construction
+SHARES compiled graphs, and a quant-lane rewrite is a different graph by construction
 (measured, pgw#704 S8: one unchanged UNet topology traces to 5,464 / 6,950 /
 23,619 / 35,507 nodes across four lanes — ``lane`` is a LABEL for the graph, not
 information on top of it).
@@ -34,10 +34,10 @@ the sdxl UNet exported three times differing ONLY in declared dynamic range
 (``9dd33abbc7617d98``) for all three. The ranges live in
 ``ExportedProgram.range_constraints`` — a field BESIDE the graph, not in its
 nodes — so a node-only hash collides artifacts whose declared ENVELOPES differ:
-adopt the ``[96,128]`` cell against a ``[64,160]`` key and 1024x1024 requests are
+adopt the ``[96,128]`` compiled graph against a ``[64,160]`` key and 1024x1024 requests are
 refused by an artifact whose key promised to serve them. Symbolic ranges are the
 OPPOSITE of the non-semantic noise scrubbed below, and they are equally a defect
-for dynamo cells with declared dynamic dims (pgw#702), not only for ``.pt2``.
+for dynamo compiled graphs with declared dynamic dims (pgw#702), not only for ``.pt2``.
 
 What is SCRUBBED (non-semantic noise, the guard-manifest discipline):
 
@@ -70,7 +70,7 @@ import hashlib
 from typing import Any, Dict, Iterable, List, Tuple
 
 # Canonical-form version. A change to the scrub rules or the line grammar is a
-# key-space change: bump it, and cells minted under the old form age out by key.
+# key-space change: bump it, and compiled graphs minted under the old form age out by key.
 CANONICAL_FORM = 1
 
 # Line prefixes. The canonical form is line-structured so a mismatch can be
@@ -276,7 +276,7 @@ def _render_bound(bound: Any) -> str:
 
 def _shape_env_ranges(graph: Any) -> Any:
     """The dynamo-side equivalent of ``ExportedProgram.range_constraints``:
-    the ShapeEnv reachable from any symbolic dim in the graph. A dynamo cell
+    the ShapeEnv reachable from any symbolic dim in the graph. A dynamo compiled graph
     with declared dynamic dims has exactly the same collision (pgw#702)."""
     import torch
 
@@ -362,15 +362,15 @@ def device_placement(obj: Any) -> Tuple[str, ...]:
     the pgw#819 remedy). The canonical form scrubs the device INDEX by design
     (``_render_scalar``, *"cuda:1 -> cuda"*) and that stays: a graph is the
     same graph wherever it runs, and un-scrubbing it would re-key every
-    published cell to record a fact all of them state trivially.
+    published compiled graph to record a fact all of them state trivially.
 
     What was missing is the OTHER half of that sentence — a model whose own
     device map splits its modules across ``cuda:0``/``cuda:1`` has inductor
     bake that placement into the compiled artifact, and pgw#819 measured that
-    such a cell publishes under a key byte-identical to the single-GPU one, in
+    such a compiled graph publishes under a key byte-identical to the single-GPU one, in
     both directions. So the placement is observed here, recorded on the keying
     block, and folded into ``aot_serve.class_hash`` ONLY when it is
-    non-trivial (more than one distinct device). Every cell the fleet has
+    non-trivial (more than one distinct device). Every compiled graph the fleet has
     published is single-device, so every one of them keeps its key.
 
     Returns sorted distinct ``"<type>:<index>"`` strings ("cuda:0"), or ``()``
@@ -420,7 +420,7 @@ def digest_lines(lines: Iterable[str]) -> str:
 
 # pgw#1030: `combined_graph_hash` was deleted — it was a byte-identical,
 # zero-caller duplicate of `aot_serve.combined_graph_hash`, which is the live
-# formula the stamped cell identity actually folds.
+# formula the stamped compiled graph identity actually folds.
 
 
 __all__ = [

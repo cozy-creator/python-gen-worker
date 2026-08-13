@@ -2,19 +2,19 @@
 """pgw#1176 — THE GUARDS ARE GUARDED. Every symbol a fence NAMES must exist.
 
 A fence names symbols in string literals: the arm-state feeder list, the
-cell-key derivation allowlist, the layout fence's ``AXIS_PRODUCERS``. When one
+compiled graph-key derivation allowlist, the layout fence's ``AXIS_PRODUCERS``. When one
 of those symbols is renamed or deleted, the fence keeps running, keeps exiting
 0, and **guards nothing**. It does not go red. Nothing anywhere says so.
 
 MEASURED, in one migration (pgw#1176), three instances of the class and one of
 them was exactly this:
 
-* ``lint_cell_key_layout_fence.py`` listed ``from_exported_artifact_metadata``
+* ``lint_compiled_graph_key_layout_fence.py`` listed ``from_exported_artifact_metadata``
   in ``AXIS_PRODUCERS`` after that symbol was deleted. A module computing an
   entry key through the real producer was no longer detected as an axis
   producer at all — and the gate exited 0 the whole time. **No amount of
   running things finds that**, because nothing was failing;
-* ``test_cell_key_pgw1059``'s one-derivation fence guarded
+* ``test_compiled_graph_key_pgw1059``'s one-derivation fence guarded
   ``combined_graph_hash(`` and ``from_exported_artifact_metadata(``, both
   deleted in the same change, so it guarded nothing and would have passed
   vacuously forever;
@@ -95,16 +95,16 @@ SRC = ROOT / "src" / "gen_worker"
 #: refuse, naming the symbols it refuses about.
 FENCES: Tuple[str, ...] = (
     "scripts/lint_fence_symbols.py",
-    "scripts/lint_cell_key_layout_fence.py",
+    "scripts/lint_compiled_graph_key_layout_fence.py",
     "scripts/lint_arm_state_feeders.py",
     "scripts/lint_unreached_surface.py",
-    "tests/test_cell_key_pgw1059.py",
+    "tests/test_compiled_graph_key_pgw1059.py",
 )
 
 #: Only literals that LOOK like this repo's identity/arm vocabulary are
 #: candidates. Without this every English word in a docstring is a symbol.
 VOCABULARY = re.compile(
-    r"cell|entry|entries|graph|arm|mint|artifact|key|manifest|adopt|axis|axes")
+    r"compiled_graph|entry|entries|graph|arm|mint|artifact|key|manifest|adopt|axis|axes")
 
 #: `"name"` or `"name("` — the two shapes a fence names a symbol in.
 LITERAL = re.compile(r'"([a-zA-Z_][a-zA-Z0-9_]{3,})\(?"')

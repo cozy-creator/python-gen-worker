@@ -54,7 +54,7 @@ from gen_worker import (
     worker_function,
 )
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells, hot_swap, mint_delegate
+from gen_worker import fleet_compiled_graphs, hot_swap, mint_delegate
 from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.executor import Executor, ModelStore
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -90,17 +90,17 @@ class _Pipe:
 
 @pytest.fixture(autouse=True)
 def _clean_process_registries() -> Any:
-    with cc._PROVEN_CELLS_LOCK:
-        cc._PROVEN_CELLS.clear()
-    with fleet_cells._PENDING_LOCK:
-        fleet_cells._PENDING.clear()
+    with cc._PROVEN_COMPILED_GRAPHS_LOCK:
+        cc._PROVEN_COMPILED_GRAPHS.clear()
+    with fleet_compiled_graphs._PENDING_LOCK:
+        fleet_compiled_graphs._PENDING.clear()
     for pipe in list(cc._armed_pipelines()):
         cc._armed_pipelines().discard(pipe)
     yield
-    with cc._PROVEN_CELLS_LOCK:
-        cc._PROVEN_CELLS.clear()
-    with fleet_cells._PENDING_LOCK:
-        fleet_cells._PENDING.clear()
+    with cc._PROVEN_COMPILED_GRAPHS_LOCK:
+        cc._PROVEN_COMPILED_GRAPHS.clear()
+    with fleet_compiled_graphs._PENDING_LOCK:
+        fleet_compiled_graphs._PENDING.clear()
     for pipe in list(cc._armed_pipelines()):
         cc._armed_pipelines().discard(pipe)
 
@@ -192,18 +192,18 @@ class _Harness:
 
         monkeypatch.setattr(executor_mod, "ensure_local", _fake_ensure_local)
         monkeypatch.setattr(
-            fleet_cells, "enable_compiled", self._fake_enable_compiled)
+            fleet_compiled_graphs, "enable_compiled", self._fake_enable_compiled)
         # pgw#1010: every mint is a CHILD mint now (the in-process capture only
-        # ever built a dynamo cell). This harness has no child process, so the
+        # ever built a dynamo compiled graph). This harness has no child process, so the
         # child's OUTCOME is stubbed — what it is testing is the serving side
         # around it: eager-first, the tenant never starving, the router, and
         # the wire. The compile the harness performs is the one its own
         # `compiled` wrapper does, on the boot/warm thread, exactly as before.
         monkeypatch.setattr(
-            mint_delegate, "build_cell", self._fake_build_cell)
+            mint_delegate, "build_compiled_graph", self._fake_build_compiled_graph)
         # pgw#1181: the pgw#681 mint gate this simmed is deleted.
         # `guard_closure.closure_manifest` classified every compiled graph at
-        # the MINT and wrote the result into the cell's metadata; it went with
+        # the MINT and wrote the result into the compiled graph's metadata; it went with
         # the `torch-inductor-cache` format that carried it, so a rig whose
         # compiles never touch dynamo has no gate left to satisfy.
         self.ex = Executor(self.specs, _send, store=store)
@@ -211,33 +211,33 @@ class _Harness:
             ref = wire_ref(self.spec.models["model"])
             self.ex._model_resolutions = {ref: (ref, "", hub_execution_lane)}
 
-    async def _fake_build_cell(self, task: Any, **kwargs: Any) -> Any:
+    async def _fake_build_compiled_graph(self, task: Any, **kwargs: Any) -> Any:
         """The child, minus the process: it adopts the pending it was given."""
         pending = task.pending
-        minted = fleet_cells.SelfMint(
-            family=pending.family, cell_key=pending.arm_token,
+        minted = fleet_compiled_graphs.SelfMint(
+            family=pending.family, compiled_graph_key=pending.arm_token,
             ref=pending.ref, snapshot_digest="sha256:" + "b" * 64,
             artifact=pending.target)
         pending._state["minted"] = minted
         pending.target.parent.mkdir(parents=True, exist_ok=True)
-        pending.target.write_bytes(b"stub-cell")
+        pending.target.write_bytes(b"stub-compiled_graph")
         return mint_delegate.DelegatedResult(
             status=mint_delegate.ADOPTED, minted=minted, attempts=1)
 
     def _fake_enable_compiled(
         self, pipe: Any, cfg: Any, cache_dir: Any = None,
         artifact: Any = None, publisher: Any = None,
-    ) -> fleet_cells.ArmOutcome:
+    ) -> fleet_compiled_graphs.ArmOutcome:
         mint_root = self.tmp_path / f"mint-{id(pipe)}"
         # pgw#1010: OUTSIDE mint_root. The publish gate rmtree's mint_root when
         # a mint resolves with no sink, and this rig's simulated compile writes
         # its "graphs" long after that.
         capture = self.tmp_path / f"capture-{id(pipe)}"
         (capture / "inductor" / "fxgraph").mkdir(parents=True, exist_ok=True)
-        pending = fleet_cells.PendingSelfMint(
+        pending = fleet_compiled_graphs.PendingSelfMint(
             family=FAMILY, arm_token="ek1-" + "a" * 56,
             ref=f"{cc.system_repo(FAMILY)}#ek1-{'a' * 56}",
-            cfg=cfg, target=mint_root / "cell.tar.gz", mint_root=mint_root,
+            cfg=cfg, target=mint_root / "compiled_graph.tar.gz", mint_root=mint_root,
             publisher=None, cache_dir=cache_dir,
         )
         original = pipe.transformer.forward
@@ -287,7 +287,7 @@ class _Harness:
         pipe.transformer.forward = cc._guarded(
             original, compiled, "transformer", failure_signal=signal)
         cc._armed_pipelines().add(pipe)
-        return fleet_cells.ArmOutcome(armed=True, self_mint=pending)
+        return fleet_compiled_graphs.ArmOutcome(armed=True, self_mint=pending)
 
     async def boot(self) -> Any:
         return await self.ex.ensure_setup(self.spec, {
@@ -349,7 +349,7 @@ class _Harness:
 def test_w8a8_stamp_with_hub_execution_lane_boots_eager_first(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The exact live shape: pipe stamped ``w8a8-lora64`` (cell identity),
+    """The exact live shape: pipe stamped ``w8a8-lora64`` (compiled graph identity),
     hub resolution lane ``fp8-w8a16+eager`` (serveability). RED on 0.70.0:
     the weight-lane prefix classified this boot mandatory-quantized, the
     setup ran the FOREGROUND compile-then-serve mint (rec.background_mint
@@ -392,7 +392,7 @@ def test_a_true_mandatory_lane_mints_in_a_child_and_is_fenced_meanwhile(
     eager tier is the untouched pipeline), and pgw#1010 removed the in-process
     shape entirely — so a mandatory lane mints in a child like every other
     lane. What protects the tenant is not a foreground proof any more, it is
-    the dispatch fence: no cell, no active compile incarnation, no dispatch.
+    the dispatch fence: no compiled graph, no active compile incarnation, no dispatch.
     """
     h = _Harness(
         tmp_path, monkeypatch,
@@ -415,7 +415,7 @@ def test_w8a8_stamp_without_execution_lane_evidence_stays_foreground(
 ) -> None:
     """No hub lane evidence: the weight-lane stamp remains the fail-closed
     fallback for SERVING — but, since pgw#813/pgw#1010, not for the mint shape:
-    the cell is built in a child either way, because that is the only shape
+    the compiled graph is built in a child either way, because that is the only shape
     there is."""
     h = _Harness(
         tmp_path, monkeypatch,
@@ -488,10 +488,10 @@ def test_compile_steal_is_announced_on_the_wire(
 
 # pgw#1010: `test_pack_or_closure_refusal_reaches_the_wire` and
 # `test_oom_truncated_plan_never_finalizes_partial_capture` stood here. Both
-# assert a PACK — of an in-process inductor capture, into a dynamo cell — and
+# assert a PACK — of an in-process inductor capture, into a dynamo compiled graph — and
 # both go with it. The surviving half of "a refusal reaches the wire" is the
 # child's typed abort (`test_mint_abort_classification_th1299.py`) and the
-# publish/withhold gate (`test_fleet_cells.py`), which the test between them
+# publish/withhold gate (`test_fleet_compiled_graphs.py`), which the test between them
 # still exercises here.
 
 
@@ -513,14 +513,14 @@ def test_withhold_and_no_sink_reach_the_wire(tmp_path: Path) -> None:
         activity_mod.bind_sink(_send, loop)
         mint_root = tmp_path / "m"
         (mint_root / "capture").mkdir(parents=True)
-        pending = fleet_cells.PendingSelfMint(
+        pending = fleet_compiled_graphs.PendingSelfMint(
             family=FAMILY, arm_token="ek1-" + "b" * 56,
             ref=f"{cc.system_repo(FAMILY)}#ek1-{'b' * 56}",
-            cfg=None, target=mint_root / "cell.tar.gz", mint_root=mint_root,
+            cfg=None, target=mint_root / "compiled_graph.tar.gz", mint_root=mint_root,
             publisher=None, cache_dir=None,
         )
         pending._state["minted"] = object()
-        fleet_cells.withhold_self_mint_publish(
+        fleet_compiled_graphs.withhold_self_mint_publish(
             pending, "2/3 capture-sharing objects never proved")
         loop.run_until_complete(asyncio.sleep(0.05))
         events = [
@@ -533,15 +533,15 @@ def test_withhold_and_no_sink_reach_the_wire(tmp_path: Path) -> None:
         # no-sink door
         mint_root2 = tmp_path / "m2"
         (mint_root2 / "capture").mkdir(parents=True)
-        pending2 = fleet_cells.PendingSelfMint(
+        pending2 = fleet_compiled_graphs.PendingSelfMint(
             family=FAMILY, arm_token="ek1-" + "c" * 56,
             ref=f"{cc.system_repo(FAMILY)}#ek1-{'c' * 56}",
-            cfg=None, target=mint_root2 / "cell.tar.gz", mint_root=mint_root2,
+            cfg=None, target=mint_root2 / "compiled_graph.tar.gz", mint_root=mint_root2,
             publisher=None, cache_dir=None,
         )
         pending2._state["minted"] = object()
         pending2._state["meta"] = {}
-        fleet_cells.publish_self_mint(pending2)
+        fleet_compiled_graphs.publish_self_mint(pending2)
         loop.run_until_complete(asyncio.sleep(0.05))
         no_sink = [
             m.activity_update for m in sent

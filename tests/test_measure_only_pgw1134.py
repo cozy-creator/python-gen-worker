@@ -52,7 +52,7 @@ import pytest
 
 from gen_worker import activity, aot_mint, boot_trace_child, boot_key
 from gen_worker import measure_child, mint_child
-from gen_worker.mint_process import CompileCellSpec, MintRequest, MintSlot
+from gen_worker.mint_process import CompileCompiledGraphSpec, MintRequest, MintSlot
 
 REPO = Path(__file__).resolve().parent.parent
 MICRO_SRC = REPO / "examples" / "micro-diffusion" / "src"
@@ -127,19 +127,19 @@ def blocked_declaration(micro_src: None) -> Iterator[None]:
         ec.register_export_declaration(decl.DECLARATION, replace=True)
 
 
-def _cfg() -> CompileCellSpec:
+def _cfg() -> CompileCompiledGraphSpec:
     from gen_worker.registry import collect_endpoints
 
     specs = collect_endpoints(["harness.rig_runtime", "micro_diffusion.main_w8a8"])
     spec = next(s for s in specs if s.name == "generate-w8a8")
-    cell = spec.compile_cell()
-    return CompileCellSpec(
-        shapes=tuple(tuple(int(v) for v in row) for row in (cell.shapes or ())),
-        targets=tuple(str(t) for t in (cell.targets or ())),
-        family=str(cell.family or ""),
-        lora_bucket=int(cell.lora_bucket or 0),
-        guidance_scales=tuple(float(v) for v in (cell.guidance_scales or ())),
-        text_lens=tuple(int(v) for v in (cell.text_lens or ())),
+    compiled_graph = spec.compile_compiled_graph()
+    return CompileCompiledGraphSpec(
+        shapes=tuple(tuple(int(v) for v in row) for row in (compiled_graph.shapes or ())),
+        targets=tuple(str(t) for t in (compiled_graph.targets or ())),
+        family=str(compiled_graph.family or ""),
+        lora_bucket=int(compiled_graph.lora_bucket or 0),
+        guidance_scales=tuple(float(v) for v in (compiled_graph.guidance_scales or ())),
+        text_lens=tuple(int(v) for v in (compiled_graph.text_lens or ())),
     )
 
 
@@ -322,14 +322,14 @@ def test_a_full_mint_request_decodes_with_its_destinations_dropped(
 ) -> None:
     """The fence, exercised rather than asserted: a REAL MintRequest, encoded
     and decoded as the operator's file, arrives carrying no destination."""
-    cfg = CompileCellSpec(family=FAMILY, targets=("transformer",))
+    cfg = CompileCompiledGraphSpec(family=FAMILY, targets=("transformer",))
     request = MintRequest(
         function="generate-w8a8", modules=("micro_diffusion.main_w8a8",), family=FAMILY,
-        arm_token="arm1-deadbeef", target=str(tmp_path / "cell.tar.gz"),
+        arm_token="arm1-deadbeef", target=str(tmp_path / "compiled_graph.tar.gz"),
         work_root=str(tmp_path / "work"), report=str(tmp_path / "mint.json"),
         resume=str(tmp_path / "bank"), cfg=cfg)
     raw = msgspec.json.encode(request)
-    assert b"cell.tar.gz" in raw
+    assert b"compiled_graph.tar.gz" in raw
 
     job = msgspec.json.decode(raw, type=measure_child.MeasureJob)
 
@@ -340,13 +340,13 @@ def test_a_full_mint_request_decodes_with_its_destinations_dropped(
 
 def test_the_report_type_carries_no_artifact_identity() -> None:
     """A measurement that could name an artifact is one field away from being
-    mistaken for one. ``MeasureReport`` has no path, no digest, no cell key —
+    mistaken for one. ``MeasureReport`` has no path, no digest, no compiled graph key —
     and the mint's own report has all three, which is what makes the absence
     deliberate rather than accidental."""
     from gen_worker.mint_process import MintReport
 
     fields = set(measure_child.MeasureReport.__struct_fields__)
-    forbidden = {"artifact", "digest", "cell_key", "cell_ref", "content_digest"}
+    forbidden = {"artifact", "digest", "compiled_graph_key", "compiled_graph_ref", "content_digest"}
     assert fields.isdisjoint(forbidden)
     assert forbidden & set(MintReport.__struct_fields__), (
         "the mint report must still carry what this one refuses to, or the "
@@ -355,15 +355,15 @@ def test_the_report_type_carries_no_artifact_identity() -> None:
 
 PUBLISH_SURFACE = (
     # (module attribute path, why it publishes)
-    ("fleet_cells", "publish_self_mint"),
-    ("local_cell_store", "store"),
+    ("fleet_compiled_graphs", "publish_self_mint"),
+    ("local_compiled_graph_store", "store"),
     ("aot_serve", "artifact_metadata"),
     ("aot_mint", "mint_targets"),
     ("aot_package", "pack"),
     ("mint_child", "mint"),
     ("mint_process", "run_mint"),
     ("aot_delivery", "materialize_named_artifact"),
-    ("cell_resolve", "materialize"),
+    ("compiled_graph_resolve", "materialize"),
 )
 
 

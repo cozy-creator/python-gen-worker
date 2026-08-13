@@ -34,7 +34,7 @@ from typing import Any, List
 import pytest
 
 import gen_worker.executor as executor_mod
-from gen_worker import fleet_cells, mint_delegate, mint_workers
+from gen_worker import fleet_compiled_graphs, mint_delegate, mint_workers
 from gen_worker.api.binding import ModelRef
 from gen_worker import mint_process as mp
 from gen_worker.executor import (
@@ -47,8 +47,8 @@ from gen_worker.executor import (
     _delegated_pendings,
     _mint_modules,
 )
-from gen_worker.registry import CompileCell, extract_specs
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker.registry import CompileCompiledGraph, extract_specs
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 
 GIB = 1 << 30
 STUB_MODULE = "harness.mint_child_stub"
@@ -65,8 +65,8 @@ class _Pipe:
     pass
 
 
-def _cfg() -> CompileCell:
-    return CompileCell(
+def _cfg() -> CompileCompiledGraph:
+    return CompileCompiledGraph(
         shapes=((1024, 1024),), targets=("unet",), family="sdxl",
         regional=False, text_len=77, dynamic=(), lora_bucket=0,
         guidance_scales=(), text_lens=())
@@ -82,9 +82,9 @@ def _stub_child(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _pending(tmp_path: Path) -> Any:
-    return fleet_cells.PendingSelfMint(
+    return fleet_compiled_graphs.PendingSelfMint(
         family="sdxl", arm_token="ck1-abc", ref="root/family-sdxl#ek1-abc",
-        cfg=_cfg(), target=tmp_path / "cell.tar.gz",
+        cfg=_cfg(), target=tmp_path / "compiled_graph.tar.gz",
         mint_root=tmp_path / "root", publisher=None, cache_dir=tmp_path)
 
 
@@ -96,7 +96,7 @@ def test_a_delegated_pending_is_recorded_even_though_nothing_is_armed() -> None:
     `_delegated_pendings` is what the executor now asks instead of trusting
     `armed`. A delegated arm reports armed=False *truthfully* — the live pipe
     carries no wrappers and serves eager — so a gate keyed on `armed` drops the
-    obligation and the cell is never minted at all.
+    obligation and the compiled graph is never minted at all.
     """
     delegated = SimpleNamespace(delegated=True)
     plain = SimpleNamespace()          # a finalized SelfMint has no such field
@@ -112,22 +112,22 @@ def test_the_arm_returns_armed_false_with_a_delegated_pending(
     """Restating it from the other side, so the two halves cannot drift: the
     arming brain really does hand back armed=False plus an obligation."""
     monkeypatch.setattr(
-        fleet_cells.provision, "enable_compiled",
-        lambda *a, **k: AdoptOutcome.miss("no_cell"))
-    monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda *a, **k: True)
-    monkeypatch.setattr(fleet_cells.cc, "mandatory_serving", lambda pipe: False)
-    monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
-    monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
+        fleet_compiled_graphs.provision, "enable_compiled",
+        lambda *a, **k: AdoptOutcome.miss("no_compiled_graph"))
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "has_compile_target", lambda *a, **k: True)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "mandatory_serving", lambda pipe: False)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "toolchain_present", lambda: True)
+    monkeypatch.setattr(fleet_compiled_graphs, "_cuda_ready", lambda: True)
     monkeypatch.setattr(
-        fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "fp8")
+        fleet_compiled_graphs.loading, "pipeline_weight_lane", lambda pipe: "fp8")
     monkeypatch.setattr(
-        fleet_cells, "arm_identity",
+        fleet_compiled_graphs, "arm_identity",
         lambda *a, **k: SimpleNamespace(
             token="arm1-wired", facts_dict=lambda: {}))
     monkeypatch.setattr(
-        fleet_cells, "mint_recipe", lambda *a, **k: fleet_cells.RECIPE_AOT)
+        fleet_compiled_graphs, "mint_recipe", lambda *a, **k: fleet_compiled_graphs.RECIPE_AOT)
 
-    outcome = fleet_cells.enable_compiled(_Pipe(), _cfg(), tmp_path)
+    outcome = fleet_compiled_graphs.enable_compiled(_Pipe(), _cfg(), tmp_path)
     assert not outcome.armed
     assert _delegated_pendings({1: outcome.self_mint})
 
@@ -145,7 +145,7 @@ def test_delegation_is_the_policy_not_a_caller_argument(
     """
     import inspect
 
-    params = inspect.signature(fleet_cells.enable_compiled).parameters
+    params = inspect.signature(fleet_compiled_graphs.enable_compiled).parameters
     assert params["delegate"].default is None, (
         "delegate must default to None = 'ask the policy', never to a value a "
         "caller is expected to supply")
@@ -204,7 +204,7 @@ def _wired(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, pipes: int = 1,
 ) -> tuple:
     """An executor + record + delegated _BackgroundMint over ``pipes`` objects
-    that SHARE one pending (the qwen edit shape: two lanes, one family cell)."""
+    that SHARE one pending (the qwen edit shape: two lanes, one family compiled graph)."""
     ex = _executor(tmp_path)
     spec = SimpleNamespace(
         name="gen", module="harness.toy_endpoints", lora_bucket=0,
@@ -242,14 +242,14 @@ def test_the_delegated_route_mints_in_a_child_adopts_and_advertises(
         # production does not make — and `Path(a_tuple)` is how that surfaces.
         rows = [Path(a) for a in artifacts]
         adopted.extend(rows)
-        return fleet_cells.SelfMint(
-            family="sdxl", cell_key="ek1-abc",
+        return fleet_compiled_graphs.SelfMint(
+            family="sdxl", compiled_graph_key="ek1-abc",
             ref="root/family-sdxl#ek1-abc", snapshot_digest="blake3:aa",
             artifact=rows[0])
 
-    monkeypatch.setattr(fleet_cells, "adopt_delegated_mint", _adopt)
+    monkeypatch.setattr(fleet_compiled_graphs, "adopt_delegated_mint", _adopt)
     monkeypatch.setattr(
-        fleet_cells, "publish_self_mint", lambda p: published.append(p))
+        fleet_compiled_graphs, "publish_self_mint", lambda p: published.append(p))
     ex, rec, bg, pending, (pipe,) = _wired(tmp_path, monkeypatch)
     monkeypatch.setattr(ex, "_refresh_compile_target", lambda t: None)
     monkeypatch.setattr(ex, "_bind_compile_guard", lambda r, t: True)
@@ -258,9 +258,9 @@ def test_the_delegated_route_mints_in_a_child_adopts_and_advertises(
     asyncio.run(ex._delegated_mint_run(rec, bg, act))
 
     # A real child produced real bytes, and they were adopted through the
-    # delivered-cell path rather than trusted.
-    assert adopted and adopted[0].read_bytes() == b"stub-cell-bytes"
-    # gw#612: every sharer is covered, so the cell ships.
+    # delivered-compiled graph path rather than trusted.
+    assert adopted and adopted[0].read_bytes() == b"stub-compiled_graph-bytes"
+    # gw#612: every sharer is covered, so the compiled graph ships.
     assert published == [pending]
     # Phase 4, shared with the in-process route: the target now advertises the
     # worker's OWN key (th#910's self-attested fence).
@@ -271,40 +271,40 @@ def test_the_delegated_route_mints_in_a_child_adopts_and_advertises(
     assert "finalize" in act.phases
 
 
-def test_shared_holders_mint_one_cell_between_them(
+def test_shared_holders_mint_one_compiled_graph_between_them(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Two pipes, one pending, ONE child — and only the ARMED pipe advertises.
 
     pgw#1113 flips the second half of this assertion. One child is still the
-    point and still holds: a per-pipe child would compile the same cell twice
-    on one card. But `build_cell` is handed ONE pipeline and
-    `adopt_delegated_mint` installs the cell on that ONE pipeline, so the
+    point and still holds: a per-pipe child would compile the same compiled graph twice
+    on one card. But `build_compiled_graph` is handed ONE pipeline and
+    `adopt_delegated_mint` installs the compiled graph on that ONE pipeline, so the
     sibling target never had those bytes — advertising a compiled ref for it
     was a claim about what it serves that was false at the moment it was made,
     and only `_bind_compile_guard`'s incidental `False` ("advertising eager")
     kept it off the wire.
     """
     spawns: List[Any] = []
-    real = mint_delegate.build_cell
+    real = mint_delegate.build_compiled_graph
 
     async def _counting(task: Any, **kw: Any) -> Any:
         spawns.append(task)
         return await real(task, **kw)
 
-    monkeypatch.setattr(mint_delegate, "build_cell", _counting)
+    monkeypatch.setattr(mint_delegate, "build_compiled_graph", _counting)
     monkeypatch.setattr(
-        fleet_cells, "adopt_delegated_mint",
-        lambda pipe, pending, artifacts: fleet_cells.SelfMint(
-            family="sdxl", cell_key="k", ref="r", snapshot_digest="d",
+        fleet_compiled_graphs, "adopt_delegated_mint",
+        lambda pipe, pending, artifacts: fleet_compiled_graphs.SelfMint(
+            family="sdxl", compiled_graph_key="k", ref="r", snapshot_digest="d",
             artifact=Path(list(artifacts)[0])))
-    monkeypatch.setattr(fleet_cells, "publish_self_mint", lambda p: None)
+    monkeypatch.setattr(fleet_compiled_graphs, "publish_self_mint", lambda p: None)
     ex, rec, bg, _pending, objs = _wired(tmp_path, monkeypatch, pipes=2)
     monkeypatch.setattr(ex, "_refresh_compile_target", lambda t: None)
     monkeypatch.setattr(ex, "_bind_compile_guard", lambda r, t: True)
 
     asyncio.run(ex._delegated_mint_run(rec, bg, _Act()))
-    assert len(spawns) == 1, "one shared cell must mean one child process"
+    assert len(spawns) == 1, "one shared compiled_graph must mean one child process"
     armed_pipe = spawns[0].pipe
     advertised = {
         name: t.active_compile_ref for name, t in rec.compile_targets.items()}
@@ -314,7 +314,7 @@ def test_shared_holders_mint_one_cell_between_them(
     assert [
         ref for name, ref in advertised.items()
         if rec.compile_targets[name].pipeline is not armed_pipe] == [""], (
-        "a pipe the mint never armed must advertise nothing: the cell was "
+        "a pipe the mint never armed must advertise nothing: the compiled_graph was "
         "installed on one pipeline and only that pipeline serves it")
 
 
@@ -368,7 +368,7 @@ def test_the_mint_driver_has_exactly_one_route_and_it_is_the_child(
 
     The branch this test used to police (`_background_mint_run` -> delegated vs
     seed/drain/prove/pack in the serving process, th#1299) is gone because the
-    in-process half is deleted — it only ever built a dynamo cell. The
+    in-process half is deleted — it only ever built a dynamo compiled graph. The
     invariant survives as a stronger one: the driver reaches the child, and
     `_warmup_plan` — the first thing the in-process route did — is not
     reachable from it at all.

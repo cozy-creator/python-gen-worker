@@ -527,9 +527,9 @@ def test_the_real_sdxl_wrapper(parts: int, monkeypatch: pytest.MonkeyPatch) -> N
 # ---------------------------------------------------------------------------
 
 def test_the_split_is_outside_the_static_code_closure() -> None:
-    """The cell key is traced-graph x sm x toolchain x env_seal, plus the
+    """The compiled graph key is traced-graph x sm x toolchain x env_seal, plus the
     static code closure. Neither this module nor its driver is reachable
-    from the closure's entrypoints, so no cell is re-keyed by their
+    from the closure's entrypoints, so no compiled graph is re-keyed by their
     existence."""
     from gen_worker import compile_cache
 
@@ -545,7 +545,7 @@ def test_all_three_seal_digests_are_unmoved(monkeypatch: pytest.MonkeyPatch) -> 
     INVOCATION, not a compiler or a flag, which is why it cannot."""
     pytest.importorskip("torch")
     from gen_worker import aot_wrapper_split as ws
-    from gen_worker import cell_key, compile_cache, env_seal
+    from gen_worker import compiled_graph_key, compile_cache, env_seal
 
     cpp_builder = pytest.importorskip("torch._inductor.cpp_builder")
 
@@ -554,9 +554,9 @@ def test_all_three_seal_digests_are_unmoved(monkeypatch: pytest.MonkeyPatch) -> 
         return (
             env_seal.inductor_config_digest(),
             # loaded_libs is a live machine fact no install() can move.
-            cell_key.facts_digest(
+            compiled_graph_key.facts_digest(
                 {k: v for k, v in seal.items() if k != "loaded_libs"}),
-            cell_key.facts_digest(dict(compile_cache.toolchain_digest())),
+            compiled_graph_key.facts_digest(dict(compile_cache.toolchain_digest())),
         )
 
     before = digests()

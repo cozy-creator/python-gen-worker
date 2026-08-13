@@ -1,4 +1,4 @@
-"""The ONE reader of the ``metadata.json`` packed at the root of a cell tarball.
+"""The ONE reader of the ``metadata.json`` packed at the root of a compiled graph tarball.
 
 Every artifact kind this worker handles — AOT (``aot_serve``) and
 inductor-cache (``compile_cache``) — packs its envelope as a
@@ -12,7 +12,7 @@ modules that must not import the compile stack:
 
 * ``receipts`` verifies a delivered artifact before anything imports torch;
 * ``guard_closure`` sits inside the ``env_seal -> guard_closure -> compile_cache
-  -> registry -> cell_key -> env_seal`` cycle, so its own metadata read had to be
+  -> registry -> compiled_graph_key -> env_seal`` cycle, so its own metadata read had to be
   a function-local import.
 
 Callers keep their own refusal vocabulary (``AdoptError``, ``ReceiptError``, a
@@ -40,17 +40,17 @@ METADATA_NAME = "metadata.json"
 #: header cannot yield a larger ``.read()``.
 #:
 #: pgw#1098 — WHY THIS IS NOT SIZED OFF THE DECLARE BOUND, as it was. The
-#: original derivation was "4x ``fleet_cells.CELL_DECLARE_MAX_BYTES``", which
+#: original derivation was "4x ``fleet_compiled_graphs.COMPILED_GRAPH_DECLARE_MAX_BYTES``", which
 #: sizes an ARTIFACT-plane read off the CONTROL-plane bound. Those are
 #: deliberately different planes: ``_UNBOUNDED_ENVELOPE_BLOCKS``
 #: (``entries``/``guard_manifest``/``composition``/``weight_contract``) are
 #: STRIPPED from the declare precisely because they "belong in the artifact,
 #: not in the declare" — so this member is by design the place the unbounded
 #: blocks live, and bounding it at the declare's scale refuses the shape the
-#: design demands. Measured, in this tree: a real published sdxl cell's
+#: design demands. Measured, in this tree: a real published sdxl compiled graph's
 #: metadata is 13,377,167 bytes on a 69 MB artifact (see
-#: ``fleet_cells._UNBOUNDED_ENVELOPE_BLOCKS``), and it grows with the
-#: artifact — row 7's 36-entry AOT cell was ~141 MB and its envelope did not
+#: ``fleet_compiled_graphs._UNBOUNDED_ENVELOPE_BLOCKS``), and it grows with the
+#: artifact — row 7's 36-entry AOT compiled graph was ~141 MB and its envelope did not
 #: fit 16 MiB, so a 92-minute mint was discarded.
 #:
 #: This is a MEMORY-SAFETY bound and nothing else: what a pod can decode into
@@ -58,11 +58,11 @@ METADATA_NAME = "metadata.json"
 #: legitimate envelope may be — the artifact's own digest is that.
 #:
 #: THE NUMBER, and its honest margin: 64 MiB is ~4.8x the largest envelope
-#: anyone has measured (the 13,377,167-byte sdxl cell above). Row 7's own
+#: anyone has measured (the 13,377,167-byte sdxl compiled graph above). Row 7's own
 #: envelope was never measured — all that is known is that it exceeded 16 MiB
 #: — so this is a margin, not a fit. That is acceptable now only because
-#: exceeding it is no longer silent: `fleet_cells.adopt_delegated_mint`
-#: refuses `cell_envelope_unreadable` naming this constant and the byte count,
+#: exceeding it is no longer silent: `fleet_compiled_graphs.adopt_delegated_mint`
+#: refuses `compiled_graph_envelope_unreadable` naming this constant and the byte count,
 #: so the next envelope that outgrows it costs one typed event, not a
 #: 92-minute mint. Raise it on that evidence; do not raise it on a guess.
 MAX_METADATA_BYTES = 64 << 20
@@ -73,7 +73,7 @@ class ArtifactMetadataError(ValueError):
 
 
 def read_metadata(artifact: Union[str, Path]) -> Dict[str, Any]:
-    """The packed envelope of ``artifact``, WITHOUT unpacking the cell.
+    """The packed envelope of ``artifact``, WITHOUT unpacking the compiled graph.
 
     Reads the one member and stops — kind sniffing and every metadata-only
     gate (host ISA, runtime key, store verdict) run off this, so none of them

@@ -45,7 +45,7 @@ import msgspec
 import pytest
 
 from gen_worker import measure_child
-from gen_worker.mint_process import CompileCellSpec, MintRequest
+from gen_worker.mint_process import CompileCompiledGraphSpec, MintRequest
 
 REPO = Path(__file__).resolve().parent.parent
 MICRO_SRC = REPO / "examples" / "micro-diffusion" / "src"
@@ -155,15 +155,15 @@ def test_a_runtime_mint_request_still_decodes_through_the_same_door(
 ) -> None:
     """The OTHER real artifact — a mint work root's ``request.json`` — has to
     keep working, and through the SAME decoder. Two decoders is the defect."""
-    cfg = CompileCellSpec(family=FAMILY, targets=("transformer",))
+    cfg = CompileCompiledGraphSpec(family=FAMILY, targets=("transformer",))
     request = MintRequest(
         function="generate-w8a8", modules=("micro_diffusion.main_w8a8",),
         family=FAMILY, arm_token="arm1-deadbeef",
-        target=str(tmp_path / "cell.tar.gz"), work_root=str(tmp_path / "work"),
+        target=str(tmp_path / "compiled_graph.tar.gz"), work_root=str(tmp_path / "work"),
         report=str(tmp_path / "mint.json"), resume=str(tmp_path / "bank"),
         cfg=cfg)
     raw = msgspec.json.encode(request)
-    assert b"cell.tar.gz" in raw
+    assert b"compiled_graph.tar.gz" in raw
 
     doc, _flat = measure_child.load_document(raw)
 

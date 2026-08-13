@@ -3,14 +3,14 @@
 ``python -m gen_worker.aot_compile_child <job.json>``
 
 Run by :class:`aot_compile_pool.EntryCompilePool` K-wide while the mint child
-(pgw#784) goes on exporting the rest of the cell's entries and the serving
+(pgw#784) goes on exporting the rest of the compiled graph's entries and the serving
 process goes on serving eager. The boundary is a file for the same reason
 pgw#784's is: a mint that fails on entry 13 of 18 leaves the job behind and
 the compile is reproducible by hand, on the same box, without the pipeline.
 
 What it does NOT do is as important as what it does. It does not load the
 endpoint, does not touch the hub, does not warm anything and does not decide
-anything about the cell. It loads ONE exported program, calls the SAME
+anything about the compiled graph. It loads ONE exported program, calls the SAME
 ``aot_mint.compile_entry_files`` the serial path calls, and reports where the
 loose files landed. Every gate — code-only, bindability, constant-set drift,
 declared range — stays in the parent, running against the parent's own
@@ -148,7 +148,7 @@ def load_program(job: EntryJob) -> Any:
     plus the two repairs the round trip needs before anything reads a shape.
 
     A named function because both repairs are silent when skipped — the
-    artifact still builds, under the same cell key, and is wrong. A test can
+    artifact still builds, under the same compiled graph key, and is wrong. A test can
     reach this without an inductor compile; the compile itself cannot be a
     cheap test.
     """
@@ -189,7 +189,7 @@ def run(job: EntryJob) -> int:
     ledger = aot_compile_spans.SpanLedger()
     report_path = Path(job.report)
     # Before anything expensive: if the mint child dies, this compile dies
-    # with it. A serving pod must never be left burning CPU on a cell nobody
+    # with it. A serving pod must never be left burning CPU on a compiled graph nobody
     # is waiting for any more.
     arm_parent_death_signal()
     # The seal is the parent's — re-established, not re-derived, because this
@@ -207,7 +207,7 @@ def run(job: EntryJob) -> int:
     # Before ANY compile touches the card: every inductor GPU benchmark in
     # this process goes through the pool-wide lock, so K concurrent entries
     # cannot time kernels against each other and bake contention-chosen
-    # configs into a cell whose key would not move (pgw#809).
+    # configs into a compiled graph whose key would not move (pgw#809).
     with ledger.span("child_devlock_s"):
         if job.device_lock:
             aot_device_lock.install(Path(job.device_lock))

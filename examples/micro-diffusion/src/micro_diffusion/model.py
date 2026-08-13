@@ -17,7 +17,7 @@ Deliberate structural choices, each with a reason the mint can read:
   flattening) and pgw#994 (serve-side binding) both live on that seam.
 * **The rope table is a registered buffer** (pgw#857): a plain attribute is
   lifted by ``torch.export`` as an anonymous ``_tensor_constant`` literal
-  whose bytes then ship inside every compiled cell instead of staying a
+  whose bytes then ship inside every compiled compiled graph instead of staying a
   deduplicated weight.
 """
 
@@ -76,7 +76,7 @@ class _TimestepEmbedding(nn.Module):
         half = hidden // 2
         # pgw#857: a table, not a learned parameter, and therefore a BUFFER.
         # As a plain attribute torch.export would lift it as a literal and its
-        # bytes would ship inside the cell.
+        # bytes would ship inside the compiled graph.
         self.register_buffer(
             "freqs",
             torch.exp(-torch.arange(half, dtype=torch.float32)
@@ -198,10 +198,10 @@ class MicroDenoiser(nn.Module):
 
 
 class MicroDecoder(nn.Module):
-    """The compile target ``decoder``: latent tokens -> pixel CELLS.
+    """The compile target ``decoder``: latent tokens -> pixel COMPILED GRAPHS.
 
-    ``(N, T, C) -> (N, T, 3 * scale * scale)``: one ``scale x scale`` RGB cell
-    per latent token. The pixel-shuffle that turns those cells into an image
+    ``(N, T, C) -> (N, T, 3 * scale * scale)``: one ``scale x scale`` RGB compiled graph
+    per latent token. The pixel-shuffle that turns those compiled graphs into an image
     is the pipeline's job, not this module's — the same division real
     pipelines make, where the transformer never sees the image layout.
 

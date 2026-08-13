@@ -1,14 +1,14 @@
-"""pgw#1098 — an UNREADABLE cell envelope must refuse by name, not vanish.
+"""pgw#1098 — an UNREADABLE compiled graph envelope must refuse by name, not vanish.
 
 Row 7 (2026-08-10, sdxl on L40S): 36/36 entries compiled in 92 minutes, then
 nothing was published. The wire said `lifted_inputs_unbindable` — a LoRA
 contract refusal — and the mint-goal driver correctly retired the pod on the
-resulting `forge_terminal no_cell`. $1.584 for no cell.
+resulting `forge_terminal no_compiled_graph`. $1.584 for no compiled graph.
 
 The LoRA contract was never the problem. `artifact_meta.MAX_METADATA_BYTES`
 (16 MiB, landed in the same release) refused to READ the 36-entry envelope;
 `try_read_metadata` turned that refusal into `None`; and `None` then read as
-"this cell states no facts" at two consecutive call sites, each of which
+"this compiled graph states no facts" at two consecutive call sites, each of which
 silently skipped the work it owed:
 
   1. `adopt_delegated_mint` skipped the pgw#1042 key-axis divergence check;
@@ -19,7 +19,7 @@ silently skipped the work it owed:
 reader — then found the artifact declaring `lora_a`/`lora_b` against an
 unlifted module and refused. The gate that noticed got named; the read that
 failed did not. The only trace of the real cause on the wire was the word
-`unreadable` in one event's `cell_key=` field.
+`unreadable` in one event's `compiled_graph_key=` field.
 
 Each test below is RED on the pre-fix tree for its own reason.
 """
@@ -35,10 +35,10 @@ from typing import Any, Dict
 import pytest
 
 from gen_worker import artifact_meta
-from gen_worker.cell_adopt import AdoptOutcome
+from gen_worker.compiled_graph_adopt import AdoptOutcome
 
 
-def _cell(path: Path, meta: Dict[str, Any], *, pad_to: int = 0) -> Path:
+def _compiled_graph(path: Path, meta: Dict[str, Any], *, pad_to: int = 0) -> Path:
     """A tarball carrying `metadata.json` at the root, optionally padded so the
     member's DECLARED size crosses a bound. The padding is a real JSON field —
     an under-declaring header is a different threat and is already bounded."""
@@ -61,14 +61,14 @@ def _cell(path: Path, meta: Dict[str, Any], *, pad_to: int = 0) -> Path:
 #: and a `ck1` key. This fixture's job is to reproduce a REAL artifact from the
 #: row 7 incident so the metadata SIZE bound is measured against bytes that
 #: actually existed. Migrating it to a one-entry `ek1` envelope would shrink
-#: the very thing under test — a 36-entry cell is what made the envelope
+#: the very thing under test — a 36-entry compiled graph is what made the envelope
 #: exceed 16 MiB — and would assert the bound against a shape that never
 #: overflowed it.
 _ROW7_META: Dict[str, Any] = {
     "format": 2,
     "kind": "aot-inductor",
     "family": "sdxl",
-    "cell_key": "ck1-" + "a" * 56,
+    "compiled_graph_key": "ck1-" + "a" * 56,
     "lora_bucket": 64,
     "entries": {
         "unet/adapter=true,cfg=true/B=2,H_lat=128,T_txt=77,W_lat=128": {
@@ -86,18 +86,18 @@ _ROW7_META: Dict[str, Any] = {
 def test_a_36_entry_sdxl_scale_envelope_is_readable(tmp_path: Path) -> None:
     """RED pre-fix: 16 MiB refused row 7's envelope.
 
-    The size is not invented. `fleet_cells._UNBOUNDED_ENVELOPE_BLOCKS` records
-    a MEASURED sdxl cell whose metadata is 13,377,167 bytes on a 69 MB
+    The size is not invented. `fleet_compiled_graphs._UNBOUNDED_ENVELOPE_BLOCKS` records
+    a MEASURED sdxl compiled graph whose metadata is 13,377,167 bytes on a 69 MB
     artifact, and states that it grows with the artifact. Row 7's artifact was
     ~141 MB with 36 AOT entries carrying per-class contracts and constant
     manifests, so its envelope sits above 16 MiB — which is why a 20 MiB
     envelope is the honest regression vehicle here.
     """
-    artifact = _cell(tmp_path / "cell.tar.gz", _ROW7_META, pad_to=20 << 20)
+    artifact = _compiled_graph(tmp_path / "compiled_graph.tar.gz", _ROW7_META, pad_to=20 << 20)
 
     meta = artifact_meta.read_metadata(artifact)
 
-    assert meta["cell_key"] == _ROW7_META["cell_key"]
+    assert meta["compiled_graph_key"] == _ROW7_META["compiled_graph_key"]
     assert meta["entries"]["unet/adapter=true,cfg=true/B=2,H_lat=128,"
                            "T_txt=77,W_lat=128"]["target"] == "unet"
 
@@ -105,11 +105,11 @@ def test_a_36_entry_sdxl_scale_envelope_is_readable(tmp_path: Path) -> None:
 def test_the_bound_is_a_memory_bound_not_the_declare_bound() -> None:
     """The derivation, pinned. `_UNBOUNDED_ENVELOPE_BLOCKS` are STRIPPED from
     the declare precisely because they belong in the artifact — so sizing the
-    artifact-plane read off `CELL_DECLARE_MAX_BYTES` refuses the shape the
+    artifact-plane read off `COMPILED_GRAPH_DECLARE_MAX_BYTES` refuses the shape the
     design requires. Any future edit that re-couples them fails here."""
-    from gen_worker import fleet_cells
+    from gen_worker import fleet_compiled_graphs
 
-    assert artifact_meta.MAX_METADATA_BYTES >= 16 * fleet_cells.CELL_DECLARE_MAX_BYTES
+    assert artifact_meta.MAX_METADATA_BYTES >= 16 * fleet_compiled_graphs.COMPILED_GRAPH_DECLARE_MAX_BYTES
     # Still bounded, and still well under a decompression bomb's scale:
     # pgw#1013's OOM threat is real and must not be reopened.
     assert artifact_meta.MAX_METADATA_BYTES < (128 << 20)
@@ -119,7 +119,7 @@ def test_an_oversized_envelope_still_refuses_before_decompressing(
     tmp_path: Path,
 ) -> None:
     """The threat pgw#1013 closed stays closed, and names its bound."""
-    artifact = _cell(
+    artifact = _compiled_graph(
         tmp_path / "huge.tar.gz", _ROW7_META,
         pad_to=artifact_meta.MAX_METADATA_BYTES + (1 << 20))
 
@@ -136,17 +136,17 @@ def test_an_oversized_envelope_still_refuses_before_decompressing(
 
 def test_both_envelope_readers_agree_on_the_same_member(tmp_path: Path) -> None:
     """RED pre-fix: `aot_serve.unpack_metadata` kept its own UNBOUNDED scan, so
-    on row 7's cell the bounded reader refused and this one succeeded. That
+    on row 7's compiled graph the bounded reader refused and this one succeeded. That
     disagreement is the whole mechanism — `arm_aot` got `None` and skipped its
     install while `enable`, reading through this function, saw a lifted
     artifact and refused it."""
     from gen_worker import aot_serve
 
-    artifact = _cell(tmp_path / "cell.tar.gz", _ROW7_META, pad_to=20 << 20)
+    artifact = _compiled_graph(tmp_path / "compiled_graph.tar.gz", _ROW7_META, pad_to=20 << 20)
 
     assert aot_serve.unpack_metadata(artifact) == artifact_meta.read_metadata(artifact)
 
-    over = _cell(
+    over = _compiled_graph(
         tmp_path / "over.tar.gz", _ROW7_META,
         pad_to=artifact_meta.MAX_METADATA_BYTES + (1 << 20))
     # Both refuse, and neither answers "there are no facts here".
@@ -193,7 +193,7 @@ def test_arm_aot_refuses_a_declared_bucket_it_cannot_resolve_a_target_for(
             "artifact declares lifted adapter input(s) ['lora_a', 'lora_b'] "
             "but the module has no lifted binding to supply them"))
 
-    artifact = tmp_path / "cell.tar.gz"
+    artifact = tmp_path / "compiled_graph.tar.gz"
     artifact.write_bytes(b"not a tarball")   # => metadata unreadable, meta=None
 
     outcome = provision.arm_aot(_Pipe(), _Cfg(), None, artifact, 64, None)
@@ -215,33 +215,33 @@ def test_adopt_delegated_mint_refuses_an_unreadable_envelope_by_name(
 
     The refusal must (a) be its own class, (b) come BEFORE any arm, and
     (c) carry the reader's own message, so the next reader of this event knows
-    a bound refused an envelope rather than that a cell was malformed."""
-    from gen_worker import fleet_cells
+    a bound refused an envelope rather than that a compiled graph was malformed."""
+    from gen_worker import fleet_compiled_graphs
 
     armed_calls: list = []
     monkeypatch.setattr(
-        fleet_cells.provision, "arm_aot",
+        fleet_compiled_graphs.provision, "arm_aot",
         lambda *a, **k: armed_calls.append(a) or AdoptOutcome.miss("x", "y"))
 
     target = tmp_path / "adopted.tar.gz"
     mint_root = tmp_path / "mint-root"
     mint_root.mkdir()
-    produced = tmp_path / "cell.tar.gz"
+    produced = tmp_path / "compiled_graph.tar.gz"
     # Over the bound: readable bytes, refused envelope. The distinction the
     # pre-fix tree could not express.
-    _cell(produced, _ROW7_META,
+    _compiled_graph(produced, _ROW7_META,
           pad_to=artifact_meta.MAX_METADATA_BYTES + (1 << 20))
 
-    pending = fleet_cells.PendingSelfMint(
+    pending = fleet_compiled_graphs.PendingSelfMint(
         family="sdxl", arm_token="arm1-" + "b" * 40,
         ref="repo#arm1", cfg=_Cfg(), target=target, mint_root=mint_root,
         publisher=None, cache_dir=tmp_path / "cache", arm_key=None)
 
-    minted = fleet_cells.adopt_delegated_mint(object(), pending, [produced])
+    minted = fleet_compiled_graphs.adopt_delegated_mint(object(), pending, [produced])
 
     assert minted is None
-    reason, why = fleet_cells.adopt_refusal(pending)
-    assert reason == "cell_envelope_unreadable"
+    reason, why = fleet_compiled_graphs.adopt_refusal(pending)
+    assert reason == "compiled_graph_envelope_unreadable"
     assert artifact_meta.METADATA_NAME in why
     # (b): refused BEFORE the arm, so no gate downstream of the read can be
     # blamed for a fact it was never given.

@@ -17,7 +17,7 @@ composition: ``load_from_pretrained`` -> ``place_pipeline``. (It used to say
 "mirrors ``compile_cache.build``"; that whole-pipeline dynamo mint had no caller
 and pgw#1035 deleted it — the requirement it named is unchanged.) That is a
 parity requirement, not tidiness — the placement/low-VRAM flags are traced
-INTO the graph, so a cell composed differently from the serving path is a cell
+INTO the graph, so a compiled graph composed differently from the serving path is a compiled graph
 the serving path can never use (gw#391, ie#381 are both that bug).
 
 The ONE deliberate divergence is the LoRA lane: the dynamo mint stops at

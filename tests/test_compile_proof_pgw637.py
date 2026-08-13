@@ -1,9 +1,9 @@
 """pgw#637: dynamo's in-memory code cache is a legitimate serving surface.
 
-Cell keys are checkpoint-free by design, so the 2nd checkpoint of an
+Compiled graph keys are checkpoint-free by design, so the 2nd checkpoint of an
 already-minted family serves its warmup from dynamo's in-memory compiled
 code with ZERO FX/AOT counter movement (torch 2.13, inlined nn-modules).
-The finalize proof must credit that surface when the cell was already
+The finalize proof must credit that surface when the compiled graph was already
 proven in-process, and the disproof cleanup must never fire the global
 ``torch._dynamo.reset()`` while a healthy sibling's compiled code is live.
 """
@@ -20,27 +20,27 @@ from gen_worker import compile_cache as cc
 
 @pytest.fixture(autouse=True)
 def _clean_process_registries() -> Iterator[None]:
-    with cc._PROVEN_CELLS_LOCK:
-        cc._PROVEN_CELLS.clear()
+    with cc._PROVEN_COMPILED_GRAPHS_LOCK:
+        cc._PROVEN_COMPILED_GRAPHS.clear()
     armed = cc._armed_pipelines()
     for pipe in list(armed):
         armed.discard(pipe)
     yield
-    with cc._PROVEN_CELLS_LOCK:
-        cc._PROVEN_CELLS.clear()
+    with cc._PROVEN_COMPILED_GRAPHS_LOCK:
+        cc._PROVEN_COMPILED_GRAPHS.clear()
     for pipe in list(armed):
         armed.discard(pipe)
 
 
-def test_proven_cell_registry_roundtrip() -> None:
-    ref = "cozy-fleet/cells/sdxl-rtx-4090-w8a8:abc123"
-    assert cc.cell_proven_in_process(ref) is False
-    cc.record_cell_proven(ref)
-    assert cc.cell_proven_in_process(ref) is True
+def test_proven_compiled_graph_registry_roundtrip() -> None:
+    ref = "cozy-fleet/compiled_graphs/sdxl-rtx-4090-w8a8:abc123"
+    assert cc.compiled_graph_proven_in_process(ref) is False
+    cc.record_compiled_graph_proven(ref)
+    assert cc.compiled_graph_proven_in_process(ref) is True
     # Whitespace/empty never register.
-    cc.record_cell_proven("")
-    cc.record_cell_proven("   ")
-    assert cc.cell_proven_in_process("") is False
+    cc.record_compiled_graph_proven("")
+    cc.record_compiled_graph_proven("   ")
+    assert cc.compiled_graph_proven_in_process("") is False
 
 
 class _Mod:
@@ -79,13 +79,13 @@ def _armed_pipe() -> _Pipe:
 
 
 def test_inmemory_probe_reports_dynamo_truth_not_the_registry() -> None:
-    """The in-memory credit needs DIRECT dynamo evidence — the proven-cell
+    """The in-memory credit needs DIRECT dynamo evidence — the proven-compiled graph
     registry alone would let one object's hit certify another's silence
     (gw#603/gw#611). Nothing here is compiled, so the probe says no."""
     pytest.importorskip("torch")
     assert cc.has_inmemory_compiled_code(object()) is False
     pipe = _armed_pipe()
-    cc.record_cell_proven("cozy-fleet/cells/whatever:abc")
+    cc.record_compiled_graph_proven("cozy-fleet/compiled_graphs/whatever:abc")
     assert cc.has_inmemory_compiled_code(pipe) is False
 
 

@@ -143,7 +143,7 @@ def test_the_retired_wire_words_are_gone_from_the_contract() -> None:
     """
     assert "worker_mode" not in {
         f.name for f in pb.WorkerResources.DESCRIPTOR.fields}
-    assert "requested_cell_axes" not in {
+    assert "requested_compiled_graph_axes" not in {
         f.name for f in pb.CompileTarget.DESCRIPTOR.fields}
     # ...and no lane may reclaim the numbers or the names (§1.27(f): a
     # within-major retirement reserves BOTH). The python descriptor does not
@@ -153,7 +153,7 @@ def test_the_retired_wire_words_are_gone_from_the_contract() -> None:
     ).read_text()
     assert "reserved 12;" in contract and 'reserved "worker_mode";' in contract
     assert "reserved 11;" in contract
-    assert 'reserved "requested_cell_axes";' in contract
+    assert 'reserved "requested_compiled_graph_axes";' in contract
 
 
 def _append_unknown_string(wire: bytearray, field_no: int, value: bytes) -> None:
@@ -169,7 +169,7 @@ def test_a_wheel_that_still_sends_the_retired_fields_is_not_refused() -> None:
     """THE FLEET-SAFETY CLAIM, proved rather than asserted in a PR body.
 
     Wheels <= 0.112.0 SEND `worker_mode` (field 12), and a 0.94-vintage one
-    sends `requested_cell_axes` (field 11). proto3 has no strict mode: an
+    sends `requested_compiled_graph_axes` (field 11). proto3 has no strict mode: an
     unknown field is skipped at decode and every KNOWN field parses normally,
     so a peer on the new contract reads an old worker's message exactly as
     before. This is why the hub half of the cut is safe to land while the fleet
@@ -190,14 +190,14 @@ def test_a_wheel_that_still_sends_the_retired_fields_is_not_refused() -> None:
 
     # Same for the CompileTarget half: field 11 was a map, whose entries are
     # also length-delimited, so a single entry is the honest shape to feed it.
-    target = pb.CompileTarget(family="sdxl", requested_cell_key="ck1-abc")
+    target = pb.CompileTarget(family="sdxl", requested_compiled_graph_key="ck1-abc")
     twire = bytearray(target.SerializeToString())
     _append_unknown_string(twire, 11, b"\n\x03sku\x12\x04L40S")
 
     got = pb.CompileTarget()
     assert got.ParseFromString(bytes(twire)) == len(twire)
-    assert got.family == "sdxl" and got.requested_cell_key == "ck1-abc"
-    assert not hasattr(got, "requested_cell_axes")
+    assert got.family == "sdxl" and got.requested_compiled_graph_key == "ck1-abc"
+    assert not hasattr(got, "requested_compiled_graph_axes")
 
 
 def _assigned_field_names(func: object) -> set:

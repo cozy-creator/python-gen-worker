@@ -24,8 +24,8 @@ from typing import Any, List, Tuple
 
 import pytest
 
-from gen_worker import activity, executor, fleet_cells, serving_mode
-from gen_worker.cell_adopt import EagerPhase
+from gen_worker import activity, executor, fleet_compiled_graphs, serving_mode
+from gen_worker.compiled_graph_adopt import EagerPhase
 
 
 @pytest.fixture()
@@ -44,10 +44,10 @@ def _rows(events: List[Any], kind: str) -> List[Tuple[str, str]]:
 # ---------------------------------------------------------------------------
 
 
-def test_eager_with_no_cell_reports_a_reason_not_an_empty_string() -> None:
+def test_eager_with_no_compiled_graph_reports_a_reason_not_an_empty_string() -> None:
     """RED before pgw#824: `serving_mode=eager, fallback_reason=""`.
 
-    All four pre-existing fallback classes presuppose an ARMED cell, so the
+    All four pre-existing fallback classes presuppose an ARMED compiled graph, so the
     commonest eager case — nothing armed at all — had no vocabulary and
     reported the empty string. "" could not distinguish a release that declares
     no compile target from a pod still minting from a pod that declined for
@@ -79,7 +79,7 @@ def test_a_per_request_fallback_outranks_the_posture() -> None:
 
 
 def test_the_posture_never_overwrites_a_compiled_serve() -> None:
-    """A posture leaking onto a cell-served request would be a WRONG dimension,
+    """A posture leaking onto a compiled graph-served request would be a WRONG dimension,
     which is worse than a coarse one (the pgw#764 rule)."""
     served = serving_mode.resolve(
         active_compile_ref="root/family-sdxl#deadbeef",
@@ -108,11 +108,11 @@ def test_fail_closed_names_the_cause_instead_of_one_shared_constant(
     causes hub-side meant substring-matching a sentence — the th#1250 lesson
     (kind-only coalescing erases the reason) one level down.
     """
-    monkeypatch.setattr(fleet_cells.cc, "mandatory_serving", lambda pipe: False)
+    monkeypatch.setattr(fleet_compiled_graphs.cc, "mandatory_serving", lambda pipe: False)
     monkeypatch.setattr(
-        fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "")
+        fleet_compiled_graphs.loading, "pipeline_weight_lane", lambda pipe: "")
 
-    outcome = fleet_cells._fail_closed(
+    outcome = fleet_compiled_graphs._fail_closed(
         _Pipe(), "no C compiler for the self-mint",
         phase=EagerPhase.NO_TOOLCHAIN)
 
@@ -127,7 +127,7 @@ def test_fail_closed_names_the_cause_instead_of_one_shared_constant(
 
 #: The eager exits pgw#824 gave a classified cause, named as MEMBERS.
 #:
-#: pgw#1010 retired three (``delivered_cell_seeded``, ``capture_conflict``,
+#: pgw#1010 retired three (``delivered_compiled_graph_seeded``, ``capture_conflict``,
 #: ``multi_group_in_process``) with the in-process capture whose process-global
 #: cache-dir move was the only reason they existed, and renamed
 #: ``capture_arm_failed`` to ``jit_arm_failed`` — the arm it measures is the
@@ -151,19 +151,19 @@ _DECLINE_PHASES = (
     EagerPhase.NO_COMPILE_TARGET,
     EagerPhase.KEY_COMPUTATION_FAILED,
     EagerPhase.JIT_ARM_FAILED,
-    EagerPhase.MANDATORY_LANE_NEEDS_A_CELL,
+    EagerPhase.MANDATORY_LANE_NEEDS_A_COMPILED_GRAPH,
 )
 
 
 def _phase_uses(member: EagerPhase) -> int:
     """How many exits in the arming module pass ``member`` as their phase.
 
-    Scans the whole ``fleet_cells`` module, not one function: WHICH function
+    Scans the whole ``fleet_compiled_graphs`` module, not one function: WHICH function
     holds the policy is an implementation detail that has already changed once,
     and an audit that fails when a helper is extracted is an audit that gets
     re-pointed rather than read.
     """
-    src = inspect.getsource(fleet_cells)
+    src = inspect.getsource(fleet_compiled_graphs)
     return len(re.findall(rf"phase=EagerPhase\.{member.name}\b", src))
 
 
@@ -192,8 +192,8 @@ def test_the_eager_phase_values_are_a_wire_contract() -> None:
         "NO_COMPILE_TARGET": "no_compile_target",
         "KEY_COMPUTATION_FAILED": "key_computation_failed",
         "JIT_ARM_FAILED": "jit_arm_failed",
-        "MANDATORY_LANE_NEEDS_A_CELL": "mandatory_lane_needs_a_cell",
-        "CELL_QUARANTINED": "cell_quarantined",
+        "MANDATORY_LANE_NEEDS_A_COMPILED_GRAPH": "mandatory_lane_needs_a_compiled_graph",
+        "COMPILED_GRAPH_QUARANTINED": "compiled_graph_quarantined",
         "MINT_IN_PROGRESS": "mint_in_progress",
         # pgw#904: the hub's ExecutionSpec ordered eager — the arm obeyed.
         "HUB_ORDERED_EAGER": "hub_ordered_eager",
@@ -213,7 +213,7 @@ def test_the_eager_phase_values_are_a_wire_contract() -> None:
         # named. Before them, a regional target that degraded on its first
         # call recorded NOTHING (the guard-failure path returns early for a
         # JIT intake arm, which names no artifact) and the pod served eager
-        # for its whole life reporting `serving_mode=jit_cell`.
+        # for its whole life reporting `serving_mode=jit_compiled_graph`.
         "GRAPH_BREAK": "graph_break",
         "DECLARED_RANGE_EXCEEDED": "declared_range_exceeded",
         # pgw#1093: the three tokens that separate TWO defects the wire could
@@ -228,12 +228,12 @@ def test_the_eager_phase_values_are_a_wire_contract() -> None:
         "COMPILED_DEGRADED": "compiled_degraded",
         "ARMED_TARGET_UNRESOLVED": "armed_target_unresolved",
         "NO_COMPILE_CANDIDATES": "no_compile_candidates",
-        # pgw#1122: a cell this pod resolved BY ITS OWN derived key (§4.27
+        # pgw#1122: a compiled graph this pod resolved BY ITS OWN derived key (§4.27
         # boot-adopt) would not arm. Nothing ordered it, so the pod boots as it
         # booted yesterday — where before this token the refusal escaped setup
-        # as `worker_function_unavailable reason=compile_cell_failed` and the
+        # as `worker_function_unavailable reason=compile_compiled_graph_failed` and the
         # pod was reaped and replaced (three pods, 2026-08-11).
-        "ADOPTED_CELL_REFUSED": "adopted_cell_refused",
+        "ADOPTED_COMPILED_GRAPH_REFUSED": "adopted_compiled_graph_refused",
         # pgw#1142 / §4.32 item 4: an OPERATOR ordered this worker eager-only.
         # The only member of this vocabulary that is a reversible DECISION
         # rather than a condition, and the reason it needs its own value:
@@ -286,13 +286,13 @@ def test_the_posture_tokens_are_the_enum_and_not_a_second_spelling() -> None:
     assert "EagerPhase.BOOT_ENDED_UNCOMPILED" in src
 
 
-def test_a_quarantined_cell_is_a_typed_event_not_a_log_line() -> None:
+def test_a_quarantined_compiled_graph_is_a_typed_event_not_a_log_line() -> None:
     """RED before pgw#824. This was the ONE eager exit in the arming policy
     that returned before `_fail_closed` and only `logger.error`'d. A pod that
-    quarantines its own cell serves eager for the rest of its life — the state
+    quarantines its own compiled graph serves eager for the rest of its life — the state
     the hub most needs named, and the one it could not see.
     """
-    assert _phase_uses(EagerPhase.CELL_QUARANTINED) == 1, (
+    assert _phase_uses(EagerPhase.COMPILED_GRAPH_QUARANTINED) == 1, (
         "the quarantine exit must emit a typed event")
 
 
@@ -301,7 +301,7 @@ def test_a_quarantined_cell_is_a_typed_event_not_a_log_line() -> None:
 #
 # Driven through a REAL mint (torch.export + AOTI pack, CPU, no GPU and no
 # stand-in), because what broke on this branch was the wiring between `mint`
-# and `_mint_cell`, not the callback's shape.
+# and `_mint_compiled_graph`, not the callback's shape.
 # ---------------------------------------------------------------------------
 
 _FAMILY = "tiny824"
@@ -365,7 +365,7 @@ def test_a_multi_entry_mint_reports_every_entry_before_it_runs(
     A REAL mint — real `torch.export`, real AOTI pack, CPU, no stand-in — over
     a two-class declaration, because the callback contract on its own is not
     the thing that broke. pgw#825 split the monolithic `mint()` into
-    `mint` / `_attach_partial_phases` / `_mint_cell` while this parameter was
+    `mint` / `_attach_partial_phases` / `_mint_compiled_graph` while this parameter was
     on a branch; the two merged textually clean and the beat was left calling
     a name its function no longer had (`NameError: on_progress`, 16 failed / 6
     errored). Only a test that drives the real `mint()` end to end can catch
@@ -457,7 +457,7 @@ def test_the_mint_progress_tokens_are_the_hubs_own_phase_vocabulary() -> None:
 
 def test_the_entry_compile_pool_reports_each_entry_as_it_lands() -> None:
     """The pool loop is the longest wire-silent stretch of a mint (an 18-entry
-    sdxl cell spends the bulk of its wall clock there) and reported nothing
+    sdxl compiled graph spends the bulk of its wall clock there) and reported nothing
     between "compiling" and "packed"."""
     import inspect
 
@@ -498,7 +498,7 @@ def test_the_delegated_mint_actually_passes_the_evidence_callback() -> None:
 
     from gen_worker import mint_delegate
 
-    src = inspect.getsource(mint_delegate.build_cell)
+    src = inspect.getsource(mint_delegate.build_compiled_graph)
     assert "on_evidence=_on_evidence(act)" in src
 # ---------------------------------------------------------------------------
 # Invariant 1 — the two high-severity finds: both corrupt DECISIONS, not just
@@ -612,8 +612,8 @@ def test_an_unparseable_destination_repo_confesses_once() -> None:
 def test_an_eager_request_on_a_compile_declaring_release_names_its_reason() -> None:
     """RED before pgw#824: `fallback_reason=""` on every one of these rows.
 
-    This endpoint DECLARES a compile cell, so `no_compile_declared` cannot be
-    the answer — the worker genuinely wanted a cell and did not get one. The
+    This endpoint DECLARES a compile compiled graph, so `no_compile_declared` cannot be
+    the answer — the worker genuinely wanted a compiled graph and did not get one. The
     arming brain classified why (there is no CUDA device on a CI host, so
     `_fail_closed(phase="no_cuda")`), and the whole point of the issue is that
     the classification survives all the way to the request row instead of dying
@@ -680,7 +680,7 @@ def test_an_eager_request_on_a_compile_declaring_release_names_its_reason() -> N
     assert m.fallback_reason != serving_mode.POSTURE_NO_COMPILE_DECLARED
     # nothing fell back -- there was nothing to fall back FROM
     assert m.served_eager_fallback is False
-    assert m.served_cell_ref == ""
+    assert m.served_compiled_graph_ref == ""
 
 
 # ---------------------------------------------------------------------------

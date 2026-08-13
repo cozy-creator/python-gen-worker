@@ -16,7 +16,7 @@ residual" was answered by inference: the split was never on the wire.
 
 pgw#848 had already written the rule this violates, for the ledger, one line
 away: *"A mint killed at entry 30 of 36 then leaves 30 entries' worth of
-measurement on disk instead of one bare 'no cell produced' row."* The fold is
+measurement on disk instead of one bare 'no compiled graph produced' row."* The fold is
 now per entry, at the same `_tick` that banks the ledger, so an entry's numbers
 are durable the moment the entry finishes.
 """
@@ -191,7 +191,7 @@ def test_a_completed_mint_carries_every_entrys_partition() -> None:
 
 def test_the_fold_is_idempotent_across_the_per_entry_and_final_passes() -> None:
     """`_fold_pool_results` still runs at the end (it assembles `files` and
-    raises the short-cell refusal). Folding twice must not double anything —
+    raises the short-compiled graph refusal). Folding twice must not double anything —
     the timings are assignments, never accumulations."""
     pool, rows, by_entry = _drive(["a", "b"])
     assert by_entry is not None

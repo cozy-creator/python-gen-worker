@@ -93,7 +93,7 @@ class _Task:
         self.task: Any = None
         self.watch: Any = None
 
-    def build_cell(self, task: Any, **kw: Any) -> Any:
+    def build_compiled_graph(self, task: Any, **kw: Any) -> Any:
         self.task = task
         self.watch = kw.get("watch")
 
@@ -133,13 +133,13 @@ def test_the_local_serve_entry_DECLARES_the_user_machine_posture(
     mint child sized its pool from a fleet policy on a desktop.
     """
     cap = _Task()
-    monkeypatch.setattr(mint_delegate, "build_cell", cap.build_cell)
+    monkeypatch.setattr(mint_delegate, "build_compiled_graph", cap.build_compiled_graph)
     monkeypatch.setattr(local_serve, "_drive", lambda coro: None)
     monkeypatch.setattr(
-        local_serve.cc, "cell_base_execution_lane", lambda pipe: "bf16")
+        local_serve.cc, "compiled_graph_base_execution_lane", lambda pipe: "bf16")
     monkeypatch.setattr(local_serve, "_say", lambda line: None)
     monkeypatch.setattr(
-        local_serve.fleet_cells, "terminus_of", lambda p: "already-ended")
+        local_serve.fleet_compiled_graphs, "terminus_of", lambda p: "already-ended")
 
     ctx = local_serve.mint_context(
         function="generate", module="micro_diffusion.endpoint",
@@ -158,8 +158,8 @@ def test_the_posture_is_not_derived_from_the_sink_or_from_the_trust_class(
     """The three near-miss proxies, fenced.
 
     pgw#1127 §2's own warning is *"two derivations of one fact"*. Trust
-    (``local_cell_store.trust_class()``) answers whether the HUB will accept a
-    cell from this hardware; ``publisher is None`` answers whether a sink was
+    (``local_compiled_graph_store.trust_class()``) answers whether the HUB will accept a
+    compiled graph from this hardware; ``publisher is None`` answers whether a sink was
     wired. A community-cloud pod satisfies both and is rented by the second
     with nobody on it — being polite there would slow work we are paying for.
     """
@@ -172,8 +172,8 @@ def test_the_posture_is_not_derived_from_the_sink_or_from_the_trust_class(
     } | {
         node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
     } | set(_module_names(SRC / "compile_posture.py"))
-    for proxy in ("trust_class", "local_cell_store", "CellPublisher",
-                  "worker_goals", "publisher", "fleet_cells"):
+    for proxy in ("trust_class", "local_compiled_graph_store", "CompiledGraphPublisher",
+                  "worker_goals", "publisher", "fleet_compiled_graphs"):
         assert proxy not in used, (
             f"compile_posture must not derive the posture from {proxy!r} — "
             f"it is a different question with a different authority")
@@ -193,7 +193,7 @@ def test_no_environment_variable_can_switch_politeness() -> None:
     assert not reads, (
         "the posture must not be readable from the environment: an ambient "
         "toggle can be flipped by a stray shell export and cannot be reasoned "
-        "about from the request that produced a cell")
+        "about from the request that produced a compiled_graph")
     assert "os" not in {
         alias.name
         for node in ast.walk(tree) if isinstance(node, ast.Import)
@@ -236,7 +236,7 @@ def test_a_fleet_mint_declares_nothing_and_gets_the_fleet_posture() -> None:
     assert MintRequest(
         function="f", modules=(), family="x", arm_token="", target="",
         work_root="", report="",
-        cfg=mint_process.CompileCellSpec()).posture == FLEET
+        cfg=mint_process.CompileCompiledGraphSpec()).posture == FLEET
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +330,7 @@ def _drive_child_posture(
     request = MintRequest(
         function="generate", modules=("m",), family="micro-diffusion",
         arm_token="arm2-x", target="/tmp/c.tar.gz", work_root="/tmp",
-        report="/tmp/r.json", cfg=mint_process.CompileCellSpec(),
+        report="/tmp/r.json", cfg=mint_process.CompileCompiledGraphSpec(),
         posture=posture)
     mint_child._install_posture(request)
     return nice, armed
@@ -377,7 +377,7 @@ def test_a_kernel_that_refuses_the_nice_leaves_a_RUDE_mint_not_a_DEAD_one(
     request = MintRequest(
         function="generate", modules=("m",), family="f", arm_token="",
         target="", work_root="", report="",
-        cfg=mint_process.CompileCellSpec(), posture=USER_MACHINE)
+        cfg=mint_process.CompileCompiledGraphSpec(), posture=USER_MACHINE)
     mint_child._install_posture(request)   # must not raise
     assert compile_posture.current() == USER_MACHINE
 
@@ -480,7 +480,7 @@ def _fleet_width(
         (18, 8, 32, 0),      # a modest serving pod
         (36, 64, 200, 0),    # a fat H100 pod
         (36, 128, 500, 0),   # the widest real pod
-        (18, 16, 64, 0),     # a CPU-only cell (no card at all)
+        (18, 16, 64, 0),     # a CPU-only compiled graph (no card at all)
         (36, 64, 200, 3),    # an operator-forced narrow pool
         (4, 4, 8, 0),        # a small pod where RAM binds
     ])
@@ -541,10 +541,10 @@ def test_the_user_is_told_what_the_compile_COSTS_before_it_starts() -> None:
         quota_cores=-1.0)
     said = local_serve.compile_notice(
         "micro-diffusion", USER_MACHINE, cpu=facts,
-        store_root=Path("/home/u/.cache/cozy/compile-cells"))
+        store_root=Path("/home/u/.cache/cozy/compile-compiled_graphs"))
     assert "micro-diffusion" in said
     assert "ONCE" in said, "the user must know this is not every run"
-    assert "/home/u/.cache/cozy/compile-cells" in said, (
+    assert "/home/u/.cache/cozy/compile-compiled_graphs" in said, (
         "where the result goes is what makes the promise checkable")
     assert "nice 19" in said and "32 cores" in said, (
         "what it is taking, in the units of the machine it is taking it from")
@@ -678,10 +678,10 @@ def test_the_politeness_wiring_adds_no_transport_to_the_local_serve_entry(
 ) -> None:
     """pgw#1127 §4's fence, re-asserted against THIS issue's imports: the local
     serve entry gained ``aot_compile_pool``, ``compile_posture`` and
-    ``local_cell_store``, and none of them may drag a publisher in."""
+    ``local_compiled_graph_store``, and none of them may drag a publisher in."""
     names = _module_names(SRC / "local_serve.py")
     assert "compile_posture" in names and "aot_compile_pool" in names
-    for banned in ("cell_publish", "cas_client", "httpx", "requests",
+    for banned in ("compiled_graph_publish", "cas_client", "httpx", "requests",
                    "aiohttp"):
         assert banned not in names
 

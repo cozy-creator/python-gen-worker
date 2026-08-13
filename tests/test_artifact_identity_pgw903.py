@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from gen_worker import aot_identity, aot_serve, cell_key, env_seal
+from gen_worker import aot_identity, aot_serve, compiled_graph_key, env_seal
 from gen_worker.aot_identity import ExpectedIdentity
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
@@ -49,7 +49,7 @@ def _meta(**over: Any) -> dict[str, Any]:
         "format": aot_serve.ARTIFACT_FORMAT,
         "kind": aot_serve.ARTIFACT_KIND,
         "family": "micro",
-        "cell_key": "aot-inductor:k1",
+        "compiled_graph_key": "aot-inductor:k1",
         "manifest_digest": "gc_01",
         "entry": {"name": "unet", **dict(_ENTRIES["unet"])},
         env_seal.SEAL_KEY: dict(_SEAL),
@@ -62,8 +62,8 @@ def _meta(**over: Any) -> dict[str, Any]:
 
 def _expected(**over: Any) -> ExpectedIdentity:
     base: dict[str, Any] = {
-        "cell_key": "aot-inductor:k1",
-        "toolchain_digest": cell_key.facts_digest(_TOOLCHAIN),
+        "compiled_graph_key": "aot-inductor:k1",
+        "toolchain_digest": compiled_graph_key.facts_digest(_TOOLCHAIN),
         "env_seal_digest": env_seal.seal_digest(_SEAL),
         "graph_contract_digest": "gc_01",
         "publisher_org": "cozy",
@@ -76,10 +76,10 @@ def _expected(**over: Any) -> ExpectedIdentity:
 
 
 def test_identity_is_recomputed_from_the_recorded_facts_not_a_stamp() -> None:
-    """``cell_key``'s standing discipline: a digest is derived from the facts it
+    """``compiled_graph_key``'s standing discipline: a digest is derived from the facts it
     summarizes, so a stamp can never silently disagree with them."""
     have = aot_identity.artifact_identity(_meta())
-    assert have.toolchain_digest == cell_key.facts_digest(_TOOLCHAIN)
+    assert have.toolchain_digest == compiled_graph_key.facts_digest(_TOOLCHAIN)
     assert have.env_seal_digest == env_seal.seal_digest(_SEAL)
     assert have.graph_contract_digest == "gc_01"
     # An artifact cannot attest to its own publisher; that claim is the
@@ -97,7 +97,7 @@ def test_a_matching_identity_passes() -> None:
 @pytest.mark.parametrize(
     "axis,mutated",
     [
-        ("cell_key", {"cell_key": "aot-inductor:OTHER"}),
+        ("compiled_graph_key", {"compiled_graph_key": "aot-inductor:OTHER"}),
         ("toolchain_digest", {"toolchain_digest": "0" * 16}),
         ("env_seal_digest", {"env_seal_digest": "0" * 16}),
         ("graph_contract_digest", {"graph_contract_digest": "gc_02"}),
@@ -114,7 +114,7 @@ def test_one_mutated_fact_refuses_and_names_itself(axis: str, mutated: Any) -> N
 @pytest.mark.parametrize(
     "axis,dropped",
     [
-        ("cell_key", "cell_key"),
+        ("compiled_graph_key", "compiled_graph_key"),
         ("toolchain_digest", "toolchain"),
         ("env_seal_digest", env_seal.SEAL_KEY),
         ("graph_contract_digest", "manifest_digest"),
@@ -123,7 +123,7 @@ def test_one_mutated_fact_refuses_and_names_itself(axis: str, mutated: Any) -> N
 def test_an_artifact_silent_on_an_axis_refuses_rather_than_skipping(
     axis: str, dropped: str,
 ) -> None:
-    """Fail-closed: a cell that cannot state its own toolchain cannot be shown
+    """Fail-closed: a compiled graph that cannot state its own toolchain cannot be shown
     to match the toolchain the spec named, and 'cannot be shown to match' is
     what a refusal means. A skipped axis is a pass nobody proved."""
     meta = _meta()
@@ -137,15 +137,15 @@ def test_an_expectation_naming_no_value_is_never_a_pass() -> None:
     """An unverifiable expectation must not read as verified. Every naming
     source refuses an artifact missing any of these, so reaching this means a
     hand-built expectation — and it still refuses."""
-    reason = aot_identity.verify_declared_identity(_meta(), _expected(cell_key=""))
-    assert reason == "cell_key: the spec named no expected value"
+    reason = aot_identity.verify_declared_identity(_meta(), _expected(compiled_graph_key=""))
+    assert reason == "compiled_graph_key: the spec named no expected value"
 
 
 def test_the_closure_axis_is_absent_rather_than_invented() -> None:
     """pgw#903 asks for closure identity and the landed schema carries no
     comparable one: `EndpointRelease.code_closure_id` is the hub's release
     identifier, while the artifact records a {path: digest} map. Equating them
-    on the strength of two similar names would refuse every healthy cell in the
+    on the strength of two similar names would refuse every healthy compiled graph in the
     fleet, so the axis is OWED, not faked.
 
     This test exists to stop a later reader from 'finishing' it: closing the
@@ -162,7 +162,7 @@ def test_the_closure_axis_is_absent_rather_than_invented() -> None:
 
 def test_identity_is_never_confirmed_by_comparing_bytes() -> None:
     """§4.25/§4.26 + pgw#1006: two mints of one key legitimately differ, so a
-    byte comparison would refuse healthy cells and prove nothing about
+    byte comparison would refuse healthy compiled graphs and prove nothing about
     unhealthy ones. The module must not reach for artifact bytes at all."""
     src = Path(aot_identity.__file__).read_text()
     for banned in ("read_bytes", "sha256_file", "hashlib", "open(", "Path("):
@@ -172,27 +172,27 @@ def test_identity_is_never_confirmed_by_comparing_bytes() -> None:
 # --- projection from the hub-named artifact -------------------------------------
 
 
-def _named(backend: int = pb.STEADY_BACKEND_AOT_CELL) -> Any:
-    """The hub's ArtifactIdentity — the thing that NAMES a cell on the wire.
+def _named(backend: int = pb.STEADY_BACKEND_AOT_COMPILED_GRAPH) -> Any:
+    """The hub's ArtifactIdentity — the thing that NAMES a compiled graph on the wire.
 
     pgw#1206 D deleted the Plan head, so the expectation is built by the one
     surviving map (``ExpectedIdentity.named_by``) from the source that names
     an artifact. An ``eager_only`` arm names none, which the caller must read
     as a complete answer rather than a gap.
     """
-    if backend != pb.STEADY_BACKEND_AOT_CELL:
+    if backend != pb.STEADY_BACKEND_AOT_COMPILED_GRAPH:
         return None
     return pb.ArtifactIdentity(
-        cell_ref="cozy/cells-micro#k1",
+        compiled_graph_ref="cozy/compiled_graphs-micro#k1",
         content_digest="sha256:" + "c" * 64,
-        cell_key="aot-inductor:k1",
+        compiled_graph_key="aot-inductor:k1",
         publisher_org="cozy",
-        toolchain_digest=cell_key.facts_digest(_TOOLCHAIN),
+        toolchain_digest=compiled_graph_key.facts_digest(_TOOLCHAIN),
         env_seal_digest=env_seal.seal_digest(_SEAL),
     )
 
 
-def _named_expectation(backend: int = pb.STEADY_BACKEND_AOT_CELL) -> Any:
+def _named_expectation(backend: int = pb.STEADY_BACKEND_AOT_COMPILED_GRAPH) -> Any:
     named = _named(backend)
     if named is None:
         return None
@@ -224,7 +224,7 @@ def _artifact(tmp_path: Path, meta: dict[str, Any]) -> Path:
     payload.mkdir()
     (payload / "metadata.json").write_text(json.dumps(meta))
     (payload / aot_serve.PACKAGE_NAME).write_bytes(b"not-a-real-package")
-    out = tmp_path / "cell.tar.gz"
+    out = tmp_path / "compiled_graph.tar.gz"
     with tarfile.open(out, "w:gz") as tar:
         for item in sorted(payload.iterdir()):
             tar.add(item, arcname=item.name)
@@ -251,9 +251,9 @@ def test_stage_artifact_refuses_a_wrong_identity_before_any_load(
     with pytest.raises(aot_serve.AdoptError) as exc:
         aot_serve.stage_artifact(
             path, "micro", cache_dir=tmp_path / "cache",
-            expected=_expected(cell_key="aot-inductor:SOMETHING-ELSE"))
+            expected=_expected(compiled_graph_key="aot-inductor:SOMETHING-ELSE"))
     assert exc.value.reason == "expected_identity_mismatch"
-    assert "cell_key: expected" in str(exc.value)
+    assert "compiled_graph_key: expected" in str(exc.value)
     # Nothing downstream of the identity gate ran.
     assert loaded == []
 
@@ -272,7 +272,7 @@ def test_stage_artifact_with_a_matching_identity_reaches_the_load_gates(
     staged = aot_serve.stage_artifact(
         path, "micro", cache_dir=tmp_path / "cache", expected=_expected())
     try:
-        assert staged.metadata["cell_key"] == "aot-inductor:k1"
+        assert staged.metadata["compiled_graph_key"] == "aot-inductor:k1"
         assert len(reached) == 1
     finally:
         staged.close()
@@ -283,7 +283,7 @@ def test_no_expectation_leaves_the_legacy_path_byte_identical(
 ) -> None:
     """Until the cutover, RunJob dispatches carry no immutable spec. Absent an
     expectation the gate must not invent one — a default expectation would
-    refuse every cell the fleet serves today."""
+    refuse every compiled graph the fleet serves today."""
     monkeypatch.setattr(aot_serve, "verify", lambda meta, **kw: "")
     monkeypatch.setattr(aot_serve, "host_isa_reason", lambda meta: "")
     monkeypatch.setattr(
@@ -294,7 +294,7 @@ def test_no_expectation_leaves_the_legacy_path_byte_identical(
     staged = aot_serve.stage_artifact(
         _artifact(tmp_path, meta), "micro", cache_dir=tmp_path / "cache")
     try:
-        assert staged.metadata["cell_key"] == "aot-inductor:k1"
+        assert staged.metadata["compiled_graph_key"] == "aot-inductor:k1"
     finally:
         staged.close()
 
@@ -325,7 +325,7 @@ def test_an_internally_corrupt_artifact_keeps_its_own_distinct_refusal(
 def test_every_identity_axis_is_either_compared_here_or_named_elsewhere() -> None:
     """The accounting is enforced at import (`aot_identity` refuses to load
     otherwise), so this row states the invariant rather than re-deriving it: an
-    axis on the identity that nothing verifies is how a cell gets armed on an
+    axis on the identity that nothing verifies is how a compiled graph gets armed on an
     unchecked claim."""
     accounted = (set(aot_identity._COMPARED_AXES)
                  | set(aot_identity._VERIFIED_ELSEWHERE))
@@ -346,7 +346,7 @@ def test_each_axis_verified_elsewhere_names_a_gate_that_really_reads_it() -> Non
     `receipts.refuse_untrusted_publisher`, whose body does mention
     `publisher_org` while asking a different question (is this producer trusted
     AT ALL, rather than is it the one the spec NAMED). It takes no
-    `publisher_org` parameter, so it fails this row; `fleet_cells.arm_ordered`,
+    `publisher_org` parameter, so it fails this row; `fleet_compiled_graphs.arm_ordered`,
     which compares the named org to the signed receipt's `publisher_org_id`
     fail-closed on silence (§4.26), takes one and passes.
     """
