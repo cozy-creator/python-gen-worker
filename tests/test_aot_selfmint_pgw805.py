@@ -441,7 +441,11 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
     from gen_worker import mint_child
 
     target = tmp_path / "cell.tar.gz"
-    packed = tmp_path / "aot" / "ck1-abc.tar.gz"
+    # pgw#1176: a `ck1` key names a 36-entry all-or-nothing cell, which this
+    # runtime cannot arm at all — `cell_key.is_key` refuses the prefix
+    # deliberately, so a fixture keyed that way tests a shape nothing produces.
+    key = "ek1-" + "a" * 56
+    packed = tmp_path / "aot" / f"{key}.tar.gz"
     seen: Dict[str, Any] = {}
 
     def _fake_mint(pipe: Any, spec: Any, out_dir: Path, **kw: Any) -> Any:
@@ -450,10 +454,14 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
         seen["lifted"] = spec.lifted_inputs
         packed.parent.mkdir(parents=True, exist_ok=True)
         packed.write_bytes(b"packed-cell")
+        # pgw#1176: a mint returns N independently keyed entry artifacts plus a
+        # manifest digest, never "a cell". This declaration traces one class.
         return aot_mint.MintResult(
-            artifact=packed,
-            metadata={"cell_key": "ck1-abc", "entries": {"unet/cfg": {}},
-                      "mint_phases": {"totals": {"total_s": 1.0}}},
+            entries=(aot_mint.MintedArtifact(
+                key=key, entry="unet/cfg", artifact=packed,
+                metadata={"cell_key": key,
+                          "mint_phases": {"totals": {"total_s": 1.0}}}),),
+            manifest="c0ffee0000000000",
             timings={"total_s": 1.0})
 
     monkeypatch.setattr(aot_mint, "mint", _fake_mint)
@@ -473,9 +481,16 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
         started=0.0, sha256_file=lambda p: "deadbeef")
 
     assert report.status == "minted"
-    assert report.cell_key == "ck1-abc"
+    # pgw#1176: the child moves EVERY entry it packed into the parent's
+    # directory, one file per graph class NAMED BY ITS OWN `ek1` key — so the
+    # parent addresses each by identity rather than by position, and `target`
+    # names the directory rather than the single file it used to be. The
+    # one-element unpack asserts this declaration's arity.
+    (moved_key, moved_path, _sha), = report.entries
+    assert moved_key == key
+    assert Path(moved_path) == target.parent / f"{key}.tar.gz"
+    assert Path(moved_path).read_bytes() == b"packed-cell"
     assert report.mint_phases == {"totals": {"total_s": 1.0}}
-    assert target.read_bytes() == b"packed-cell"
     # The spec the exporter got describes the LIVE pipeline, not a re-compose.
     assert seen == {"family": FAMILY, "lane": "w8a8",
                     "lifted": ("lora_a", "lora_b")}

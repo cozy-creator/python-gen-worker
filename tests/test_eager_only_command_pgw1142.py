@@ -121,11 +121,18 @@ class Cfg:
 META: Dict[str, Any] = {
     "format": aot_serve.ARTIFACT_FORMAT, "kind": aot_serve.ARTIFACT_KIND,
     "family": "sdxl-base", "precision": "w8a8", "sku": "l4", "sm": "sm_89",
-    "torch": "2.13.0+cu130", "cuda": "13.0", "cell_key": "deadbeef",
+    "torch": "2.13.0+cu130", "cuda": "13.0",
+    # pgw#1176: this is now an ENTRY key and rides the marker's `entries` row,
+    # so it is spelled in the grammar `cell_key.is_key` actually admits.
+    "cell_key": "ek1-" + "d" * 56,
     "lora_bucket": 0,
 }
 
+#: The ONE graph class this fixture arms. An entry NAMES its class (pgw#1176).
+ENTRY_NAME = "unet/g"
+
 ENTRY = {
+    "name": ENTRY_NAME,
     "target": "unet", "fork": [], "class_dims": [],
     "inputs": [{"name": "sample", "position": 0, "dtype": "bfloat16",
                 "shape": [2, 4, "h", "w"]}],
@@ -137,19 +144,37 @@ ENTRY = {
 
 
 def _armed_module() -> tuple[FakeModule, FakePackage, FakePipeline]:
-    """A module wrapped by the real ``aot_serve`` swap, artifact armed."""
+    """A module wrapped by the real ``aot_serve`` swap, ONE entry armed.
+
+    pgw#1176: the PIPELINE marker carries ``targets`` + ``entries`` — the shape
+    :func:`aot_serve.arm_entry` writes. It used to be a bare ``state``, which
+    no production path has ever written on a pipeline and which
+    ``armed_entries`` does not recognise, so leaving it would have made
+    ``is_armed`` answer False on a pipeline this fixture calls armed.
+    """
     module, package = FakeModule(), FakePackage()
     pipeline = FakePipeline(module)
     runner = aot_serve.ArtifactRunner(
         package=package,
         contract=aot_serve.contract_from_meta(ENTRY),
         constants=aot_serve.constants_from_meta(ENTRY),
-        module_name="unet", entry="unet/g")
+        module_name="unet", entry=ENTRY_NAME)
     runner.bind(module.state_dict(), {})
-    aot_serve.wrap_module(module, runner, META)
+    dispatch = aot_serve.EntryDispatch(((ENTRY_NAME, runner),))
+    aot_serve.wrap_module(module, dispatch, META, target="unet")
     setattr(pipeline, "_cozy_aot", {
-        "meta": META, "module": module,
-        "state": getattr(module, "_cozy_aot")["state"]})
+        "meta": META,
+        "targets": {"unet": {
+            "module": module, "attr": "forward",
+            "state": getattr(module, "_cozy_aot")["state"]}},
+        "entries": {ENTRY_NAME: {
+            "key": META["cell_key"], "target": "unet",
+            "class_hash": "", "manifest_digest": ""}},
+        "bound_constants": {"pools": {}, "literals": {}},
+    })
+    # The fixture's own claim, checked once here rather than in five rows: this
+    # pipeline really is serving the class it says it is.
+    assert aot_serve.armed_entries(pipeline) == {ENTRY_NAME: META["cell_key"]}
     return module, package, pipeline
 
 
@@ -348,7 +373,11 @@ def test_the_two_triggers_report_different_reasons() -> None:
 
 def test_a_suppressed_request_is_not_reported_as_compiled() -> None:
     ref = "root/family-sdxl-base#ek1-abc"
-    aot_serve.note_aot_key("ck1-abc")
+    # The noted key must be the key the ref NAMES — `is_aot_ref` recognises an
+    # AOT cell by exactly that match, so a `ck1`-stamped note against an `ek1`
+    # ref resolves `jit_cell` and this row would assert the suppression
+    # vocabulary on the wrong serving mode.
+    aot_serve.note_aot_key("ek1-abc")
     armed = serving_mode.resolve(active_compile_ref=ref, sm="89")
     assert armed.serving_mode == serving_mode.MODE_AOT_CELL
 

@@ -100,9 +100,6 @@ def test_env_seal_divergence_is_named() -> None:
     ("family", "other-family", "family"),
     ("lora_bucket", 0, "lane"),
     ("format", "1", "format"),
-    (cell_key.EXPORT_ENVELOPE_KEY,
-     {"shapes": [[128, 128]], "text_lens": [7], "guidance": [1.0]},
-     "envelope"),
 ])
 def test_every_shared_axis_is_guarded(field: str, value: Any, axis: str) -> None:
     seal = _seal_dict()
@@ -110,6 +107,30 @@ def test_every_shared_axis_is_guarded(field: str, value: Any, axis: str) -> None
     meta[field] = value
     got = fleet_cells.arm_axis_divergence(_arm_key(seal, TOOLCHAIN), meta)
     assert got.startswith(f"{axis}: "), got
+
+
+def test_the_envelope_is_deliberately_NOT_compared_at_this_seam() -> None:
+    """INVERTED by pgw#1176, and stated rather than merely dropped (pgw#939:
+    absence is a verdict, never a skipped check).
+
+    This used to be a sixth `test_every_shared_axis_is_guarded` case asserting
+    a diverging `EXPORT_ENVELOPE_KEY` is refused `envelope: ...`. `envelope`
+    left `ARM_ENVIRONMENT_FACTS` with the key: a per-entry artifact records no
+    declared envelope — that is a manifest fact about the whole declaration,
+    not about one graph class — so comparing it here would test a value the
+    child can no longer state, and refuse every handback by construction.
+
+    Left as a silent parametrize deletion this would read as an oversight; as
+    a row it is the ruling, and it goes red if anyone puts the axis back
+    without revisiting the reason."""
+    seal = _seal_dict()
+    assert "envelope" not in fleet_cells.ARM_ENVIRONMENT_FACTS
+
+    meta = _envelope(seal, TOOLCHAIN)
+    meta[cell_key.EXPORT_ENVELOPE_KEY] = {
+        "shapes": [[128, 128]], "text_lens": [7], "guidance": [1.0]}
+    assert fleet_cells.arm_axis_divergence(
+        _arm_key(seal, TOOLCHAIN), meta) == ""
 
 
 def test_adopt_refuses_typed_before_any_arm(
@@ -220,9 +241,19 @@ def test_cpp_bind_failure_is_typed_injection_failed() -> None:
     assert not runner.bound
 
 
-def test_target_constant_pool_is_one_clone_per_fqn() -> None:
-    """N entries share ONE owned copy — the N x constants VRAM demand that
-    OOM'd the 36-entry sdxl arm must not be reconstructible."""
+def test_target_constant_pool_is_one_REFERENCE_per_fqn() -> None:
+    """N entries share ONE pool slot per FQN — the N x constants VRAM demand
+    that OOM'd the 36-entry sdxl arm must not be reconstructible.
+
+    INVERTED by pgw#1177. This row asserted `pool["w"] is not resident`
+    ("owned, not aliased", pgw#812 D3). That clone was the ONLY copy in the
+    system — one full duplicate of the target's weights held for the life of
+    the arm, ~5.1 GiB on sdxl's single `unet` target — in direct contradiction
+    of §4.33 step 4, *"the compiled entries bind constants BY REFERENCE
+    against the resident weights; there is no second copy of the model"*. The
+    dedup this row actually guards is unchanged; only the ownership claim
+    inverted.
+    """
     torch = pytest.importorskip("torch")
     spec = aot_serve.ConstantSpec(
         fqn="w", source=aot_serve.SOURCE_STATE_DICT,
@@ -234,5 +265,24 @@ def test_target_constant_pool_is_one_clone_per_fqn() -> None:
     pool = aot_serve.target_constant_pool(
         [(spec, lit), (spec,), (spec,)], {"w": resident})
     assert set(pool) == {"w"}  # literals ride their own payload
-    assert pool["w"] is not resident  # owned, not aliased (pgw#812 D3)
+    assert pool["w"] is resident  # BY REFERENCE — no second copy (§4.33 §4)
+
+
+def test_a_NON_contiguous_resident_is_the_one_thing_still_copied() -> None:
+    """The surviving guard from the inversion above. Dropping the blanket
+    clone kept exactly one thing it also did: an AOTI container binds a RAW
+    POINTER, so a non-contiguous resident cannot be bound by reference and is
+    copied individually — priced per tensor rather than by cloning the whole
+    pool for its sake. Without this row the inversion would read as "nothing
+    is ever copied", which would be a segfault precondition."""
+    torch = pytest.importorskip("torch")
+    spec = aot_serve.ConstantSpec(
+        fqn="w", source=aot_serve.SOURCE_STATE_DICT,
+        dtype="torch.float32", shape=(4,))
+    resident = torch.arange(8, dtype=torch.float32)[::2]
+    assert not resident.is_contiguous()
+
+    pool = aot_serve.target_constant_pool([(spec,)], {"w": resident})
+    assert pool["w"] is not resident
+    assert pool["w"].is_contiguous()
     assert torch.equal(pool["w"], resident)
