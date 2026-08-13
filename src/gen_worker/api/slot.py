@@ -307,6 +307,14 @@ def _apply_lora_overrides(
 def _finish_resolved(
     name: str,
     ref: ModelRef,
+    # pgw#1202: NOT `D`, and not `Optional[D]` either. `ResolvedSlot.__init__`
+    # declares `defaults: D` (bound to GenerationDefaults) but `resolve_slot`
+    # passes None on the no-schema path below, and nothing in the tree guards
+    # `.defaults is None`. So the declared type already disagrees with runtime;
+    # this helper cannot honestly promise `ResolvedSlot[D]` until that is
+    # settled, and settling it is an API decision about what an endpoint author
+    # is handed, not a typing sweep. The PUBLIC `resolve_slot` below is still
+    # `-> ResolvedSlot[D]`, which is where the propagation is worth having.
     defaults: Any,
     *,
     objective: str,
@@ -375,7 +383,7 @@ def resolve_slot(
     distilled_status: str = "",
     allowed_objectives: Optional[Sequence[str]] = None,
     allowed_distilled: Optional[bool] = None,
-) -> "ResolvedSlot[Any]":
+) -> "ResolvedSlot[D]":
     """SDK v2 resolution chain: decode the catalog-resolved recipe
     (``raw_metadata_json``) against the handler's DERIVED config schema
     (``defaults_cls``, from ``ctx: RequestContext[D]``), then apply per-lora

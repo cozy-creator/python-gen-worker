@@ -78,7 +78,7 @@ C = TypeVar("C", bound="RequestContext[Any]")
 
 def stub_slots(
     slots: Mapping[str, Tuple[ModelRef, GenerationDefaults]],
-) -> Dict[str, "ResolvedSlot[Any]"]:
+) -> Dict[str, "ResolvedSlot[GenerationDefaults]"]:
     """``{slot_name: (ref, defaults)}`` -> ``{slot_name: ResolvedSlot}`` —
     the same shape ``ctx.slots`` hands a handler in production, built
     directly instead of via the repo-metadata resolution chain."""

@@ -49,13 +49,13 @@ from .export_contract import (
     validate_contract, validate_speed_bar,
 )
 from .formula import RuntimeFormula
-from .slot import OBJECTIVES, TASKS, Slot
+from .slot import OBJECTIVES, TASKS, D, Slot
 from ..models import execution_lanes as lanespec
 from ..runtimes.server import ServerHandle
 from .tree import is_introspectable
 
 T = TypeVar("T")
-SlotLike = Union[Binding, "Slot[Any]"]
+SlotLike = Union[Binding, "Slot[D]"]
 
 KINDS = ("inference", "training", "dataset", "conversion", "eval")
 
@@ -1350,7 +1350,9 @@ def _reject_producer_generator(owner: str, fn: Callable[..., Any], kind: str) ->
         )
 
 
-def _split_slot_like(key: str, v: "SlotLike") -> Tuple[Optional[Binding], Optional[Slot[Any]]]:
+def _split_slot_like(
+    key: str, v: "SlotLike[D]",
+) -> Tuple[Optional[Binding], Optional[Slot[D]]]:
     """One ``models={}``/``model=`` value -> ``(binding_or_None, slot_or_None)``.
 
     A ``Slot`` contributes its ``default_checkpoint`` (if any) to the plain
@@ -1369,8 +1371,8 @@ def _split_slot_like(key: str, v: "SlotLike") -> Tuple[Optional[Binding], Option
 
 
 def _normalize_models(
-    model: Optional["SlotLike"], models: Optional[Mapping[str, "SlotLike"]]
-) -> Tuple[Dict[str, Binding], Dict[str, Slot[Any]]]:
+    model: Optional["SlotLike[D]"], models: Optional[Mapping[str, "SlotLike[D]"]]
+) -> Tuple[Dict[str, Binding], Dict[str, Slot[D]]]:
     if model is not None and models is not None:
         raise ValueError("@endpoint: pass model= OR models=, not both")
     if model is not None:
@@ -1378,7 +1380,7 @@ def _normalize_models(
         # setup()/handler parameter name at class validation time.
         binding, slot = _split_slot_like("", model)
         out_models: Dict[str, Binding] = {"": binding} if binding is not None else {}
-        out_slots: Dict[str, Slot[Any]] = {"": slot} if slot is not None else {}
+        out_slots: Dict[str, Slot[D]] = {"": slot} if slot is not None else {}
         return out_models, out_slots
     out_models = {}
     out_slots = {}
@@ -1436,9 +1438,9 @@ def _is_server_handle_param(p: inspect.Parameter) -> bool:
 def _resolve_single_slot(
     cls: type,
     models: Dict[str, Binding],
-    slots: Dict[str, Slot[Any]],
+    slots: Dict[str, Slot[D]],
     handlers: list[tuple[str, Callable[..., Any]]],
-) -> Tuple[Dict[str, Binding], Dict[str, Slot[Any]]]:
+) -> Tuple[Dict[str, Binding], Dict[str, Slot[D]]]:
     """Resolve the ``model=`` shorthand's slot name from setup()/handler
     params. Exactly one of ``models``/``slots`` holds the ``""`` key (a bare
     binding or a Slot, never both — ``_normalize_models`` is the only
@@ -1789,8 +1791,8 @@ def endpoint(target: T) -> T: ...  # bare @endpoint on a class/function
 def endpoint(
     *,
     kind: str = ...,
-    model: Optional[SlotLike] = ...,
-    models: Optional[Mapping[str, SlotLike]] = ...,
+    model: Optional["SlotLike[Any]"] = ...,
+    models: Optional[Mapping[str, "SlotLike[Any]"]] = ...,
     resources: Optional[Resources] = ...,
     runtime: Union[str, RuntimeFormula, Mapping[str, RuntimeFormula], None] = ...,
     name: Optional[str] = ...,
@@ -1809,8 +1811,8 @@ def endpoint(
     target: Optional[T] = None,
     *,
     kind: str = "inference",
-    model: Optional[SlotLike] = None,
-    models: Optional[Mapping[str, SlotLike]] = None,
+    model: Optional["SlotLike[Any]"] = None,
+    models: Optional[Mapping[str, "SlotLike[Any]"]] = None,
     resources: Optional[Resources] = None,
     runtime: Union[str, RuntimeFormula, Mapping[str, RuntimeFormula], None] = None,
     name: Optional[str] = None,
