@@ -11,15 +11,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
-import tempfile
 import time
 import urllib.parse
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..api.errors import AuthError, SnapshotBuildFailedError
-from ..bounded_stream import copy_bounded, free_space_bound
+from ..bounded_stream import free_space_bound
 from ..hubio.fetch import fetch_once
 from ..stall import SilenceWindow
 import requests
