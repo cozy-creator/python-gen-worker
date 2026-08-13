@@ -487,7 +487,7 @@ def test_an_adopted_cell_that_will_not_arm_does_not_kill_the_function(
     detail = events.detail(activity_mod.KIND_BOOT_ADOPT, "arm_refused")
     assert "cause=artifact_receipt_refused" in detail
     assert "publisher_untrusted" in detail
-    assert f"family={FAMILY}" in detail and "key=ck1-" in detail
+    assert f"family={FAMILY}" in detail and "key=ek1-" in detail
 
 
 def test_a_HUB_ordered_arm_stays_terminal(
