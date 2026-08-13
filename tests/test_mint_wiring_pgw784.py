@@ -236,12 +236,16 @@ def test_the_delegated_route_mints_in_a_child_adopts_and_advertises(
     adopted: List[Path] = []
     published: List[Any] = []
 
-    def _adopt(pipe: Any, pending: Any, artifact: Path) -> Any:
-        adopted.append(Path(artifact))
+    def _adopt(pipe: Any, pending: Any, artifacts: Any) -> Any:
+        # pgw#1176: the adopt takes the SET the child produced, one artifact
+        # per graph class. A double taking a single Path models a call
+        # production does not make — and `Path(a_tuple)` is how that surfaces.
+        rows = [Path(a) for a in artifacts]
+        adopted.extend(rows)
         return fleet_cells.SelfMint(
-            family="sdxl", cell_key="ck1-abc",
+            family="sdxl", cell_key="ek1-abc",
             ref="root/family-sdxl#ek1-abc", snapshot_digest="blake3:aa",
-            artifact=Path(artifact))
+            artifact=rows[0])
 
     monkeypatch.setattr(fleet_cells, "adopt_delegated_mint", _adopt)
     monkeypatch.setattr(
@@ -291,9 +295,9 @@ def test_shared_holders_mint_one_cell_between_them(
     monkeypatch.setattr(mint_delegate, "build_cell", _counting)
     monkeypatch.setattr(
         fleet_cells, "adopt_delegated_mint",
-        lambda pipe, pending, artifact: fleet_cells.SelfMint(
+        lambda pipe, pending, artifacts: fleet_cells.SelfMint(
             family="sdxl", cell_key="k", ref="r", snapshot_digest="d",
-            artifact=Path(artifact)))
+            artifact=Path(list(artifacts)[0])))
     monkeypatch.setattr(fleet_cells, "publish_self_mint", lambda p: None)
     ex, rec, bg, _pending, objs = _wired(tmp_path, monkeypatch, pipes=2)
     monkeypatch.setattr(ex, "_refresh_compile_target", lambda t: None)
