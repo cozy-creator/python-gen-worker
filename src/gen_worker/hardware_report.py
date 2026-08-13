@@ -131,7 +131,7 @@ def _identity_from_settings(settings: Settings) -> Tuple[str, str]:
     token = worker_credential.current()
     if token:
         try:
-            from .request_context import _decode_unverified_jwt_claims
+            from .request_context._helpers import _decode_unverified_jwt_claims
 
             claims = _decode_unverified_jwt_claims(token)
             if not worker_id:
