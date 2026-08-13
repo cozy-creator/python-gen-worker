@@ -33,10 +33,87 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 
+class CellHubServer(http.server.ThreadingHTTPServer):
+    """The hub's state, DECLARED — and the reason this module is checkable.
+
+    Every field below used to be assigned onto a stock ``ThreadingHTTPServer``
+    after construction, which no checker can see. The handler's thirty reads
+    were each ``# type: ignore[attr-defined]`` and the module carried
+    ``ignore_errors`` on top, so a typo in any of them was an AttributeError
+    raised inside a request thread — the double failing in a way that looks
+    like the system under test failing.
+    """
+
+    def __init__(self, handler: type[http.server.BaseHTTPRequestHandler]) -> None:
+        super().__init__(("127.0.0.1", 0), handler)
+        self.lock = threading.Lock()
+        self.objects: Dict[str, bytes] = {}
+        #: publish_id -> (declared digest->size, the publish plan body)
+        self.sessions: Dict[str, Tuple[Dict[str, int], Dict[str, Any]]] = {}
+        self.calls: List[Tuple[str, Any]] = []
+        self.intents: List[Dict[str, Any]] = []
+        self.completes: List[Dict[str, Any]] = []
+        self.checkpoints: List[Dict[str, Any]] = []
+        self._seq = 0
+
+    @property
+    def base(self) -> str:
+        host, port = self.server_address[:2]
+        # `server_address` is a union over address families; only the AF_INET
+        # arm is reachable here, but bytes is spellable so it is decoded rather
+        # than interpolated as `b'127.0.0.1'`.
+        return f"http://{host.decode() if isinstance(host, bytes) else host}:{port}"
+
+    def record_checkpoint(self, repo: str, plan: Dict[str, Any]) -> str:
+        """Turn a completed publish into a listable checkpoint.
+
+        This is the join the discover side reads, and it is the ONE place the
+        double has to model hub bookkeeping: the manifest a ``resolve`` returns
+        has to describe the very objects the publish landed, or an adopting
+        worker downloads bytes that hash to nothing.
+        """
+        files = []
+        for f in plan.get("files") or []:
+            digest = str(f.get("digest") or "")
+            chunks = f.get("chunks") or []
+            entry: Dict[str, Any] = {
+                "path": str(f.get("path") or ""),
+                "size_bytes": int(f.get("size_bytes") or 0),
+                "sha256": digest.split(":", 1)[-1] if digest else "",
+                "digest": digest,
+            }
+            if chunks:
+                entry["chunks"] = [
+                    {"sha256": c["digest"], "len": int(c["len"]),
+                     "url": f"{self.base}/cas/{c['digest']}"}
+                    for c in chunks
+                ]
+                entry["chunk_size_bytes"] = int(chunks[0]["len"])
+            else:
+                entry["url"] = f"{self.base}/cas/{digest.split(':', 1)[-1]}"
+            files.append(entry)
+        self._seq += 1
+        checkpoint_id = "sha256:" + hashlib.sha256(
+            f"{repo}/{plan.get('flavor')}/{self._seq}".encode()).hexdigest()
+        row = {
+            "repo": repo,
+            "checkpoint_id": checkpoint_id,
+            "updated_at": f"2026-08-06T00:00:{self._seq:02d}Z",
+            "metadata": dict(plan.get("metadata") or {}),
+            "files": files,
+        }
+        with self.lock:
+            self.checkpoints.append(row)
+        return checkpoint_id
+
+
 class _Handler(http.server.BaseHTTPRequestHandler):
     """tensorhub's v2 publish contract + the checkpoint/resolve read surface."""
 
     protocol_version = "HTTP/1.1"
+    #: Narrowed from `BaseServer`: this handler is only ever mounted on the
+    #: server above, and every route below reads that server's state.
+    server: CellHubServer
 
     def log_message(self, *_a: Any) -> None:
         pass
@@ -79,8 +156,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if hashlib.sha256(body).hexdigest() != digest:
             self._json(400, {"error": {"code": "digest_mismatch"}})
             return
-        with srv.lock:  # type: ignore[attr-defined]
-            srv.objects["sha256:" + digest] = body  # type: ignore[attr-defined]
+        with srv.lock:
+            srv.objects["sha256:" + digest] = body
         self.send_response(200)
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -91,13 +168,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         srv = self.server
         parsed = urllib.parse.urlparse(self.path)
         path, query = parsed.path, urllib.parse.parse_qs(parsed.query)
-        with srv.lock:  # type: ignore[attr-defined]
-            srv.calls.append((path, dict(query)))  # type: ignore[attr-defined]
+        with srv.lock:
+            srv.calls.append((path, dict(query)))
 
         if path.startswith("/cas/"):
             digest = "sha256:" + path.rsplit("/", 1)[-1]
-            with srv.lock:  # type: ignore[attr-defined]
-                blob = srv.objects.get(digest)  # type: ignore[attr-defined]
+            with srv.lock:
+                blob = srv.objects.get(digest)
             if blob is None:
                 self._json(404, {"error": {"code": "not_found"}})
                 return
@@ -107,9 +184,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         # catalog read surface: GET /api/v1/repos/<repo>/checkpoints
         if path.endswith("/checkpoints"):
             repo = path.split("/api/v1/repos/", 1)[-1].rsplit("/checkpoints", 1)[0]
-            with srv.lock:  # type: ignore[attr-defined]
+            with srv.lock:
                 items = [
-                    dict(row) for row in srv.checkpoints  # type: ignore[attr-defined]
+                    dict(row) for row in srv.checkpoints
                     if row["repo"] == repo
                 ]
             self._json(200, {"items": [
@@ -123,9 +200,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if path.endswith("/resolve"):
             repo = path.split("/api/v1/repos/", 1)[-1].rsplit("/resolve", 1)[0]
             want = (query.get("digest") or [""])[0]
-            with srv.lock:  # type: ignore[attr-defined]
+            with srv.lock:
                 row = next(
-                    (r for r in srv.checkpoints  # type: ignore[attr-defined]
+                    (r for r in srv.checkpoints
                      if r["repo"] == repo and r["checkpoint_id"] == want), None)
             if row is None:
                 self._json(404, {"error": {"code": "not_found"}})
@@ -141,20 +218,20 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         srv = self.server
         path = urllib.parse.urlparse(self.path).path
         body = self._body()
-        with srv.lock:  # type: ignore[attr-defined]
-            srv.calls.append((path, body))  # type: ignore[attr-defined]
+        with srv.lock:
+            srv.calls.append((path, body))
 
         if path.endswith("/v1/worker/cells/publish-intent"):
             family = str(body.get("family") or "")
-            with srv.lock:  # type: ignore[attr-defined]
-                srv.intents.append(dict(body))  # type: ignore[attr-defined]
+            with srv.lock:
+                srv.intents.append(dict(body))
             self._json(200, {"capability_token": "local-rig-cap",
                              "repo": f"root/family-{family}"})
             return
 
         if path.endswith("/v1/worker/cells/publish-complete"):
-            with slock(srv):
-                srv.completes.append(dict(body))  # type: ignore[attr-defined]
+            with srv.lock:
+                srv.completes.append(dict(body))
             self._json(200, {"recorded": True})
             return
 
@@ -167,14 +244,14 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 if not f.get("chunks"):
                     declared[f["digest"]] = int(f["size_bytes"])
             need, have = [], []
-            with slock(srv):
+            with srv.lock:
                 for digest, size in declared.items():
-                    if digest in srv.objects:  # type: ignore[attr-defined]
+                    if digest in srv.objects:
                         have.append(digest)
                     else:
                         need.append(self._grant(srv, digest, size))
                 pid = str(uuid.uuid4())
-                srv.sessions[pid] = (declared, dict(body))  # type: ignore[attr-defined]
+                srv.sessions[pid] = (declared, dict(body))
             self._json(201, {"publish_id": pid, "have": have, "need": need,
                              "distinct_objects": len(declared),
                              "resident_objects": len(have)})
@@ -182,11 +259,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
         if path.endswith("/grants"):
             pid = path.split("/publishes/")[1].split("/")[0]
-            with slock(srv):
-                declared = (srv.sessions.get(pid) or ({}, {}))[0]  # type: ignore[attr-defined]
+            with srv.lock:
+                declared = (srv.sessions.get(pid) or ({}, {}))[0]
                 need = [
                     self._grant(srv, d, s) for d, s in declared.items()
-                    if d not in srv.objects  # type: ignore[attr-defined]
+                    if d not in srv.objects
                 ]
             self._json(200, {"need": need, "have": []})
             return
@@ -194,31 +271,27 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if path.endswith("/complete"):
             pid = path.split("/publishes/")[1].split("/")[0]
             repo = path.split("/api/v1/repos/", 1)[-1].split("/publishes/")[0]
-            with slock(srv):
-                declared, plan = srv.sessions.get(pid) or ({}, {})  # type: ignore[attr-defined]
+            with srv.lock:
+                declared, plan = srv.sessions.get(pid) or ({}, {})
                 missing = [d for d in declared
-                           if d not in srv.objects]  # type: ignore[attr-defined]
+                           if d not in srv.objects]
             if missing:
                 self._json(409, {"status": {
                     "stage": "repudiated", "terminal": True,
                     "failure": {"code": "objects_missing", "retryable": False,
                                 "message": f"{len(missing)} object(s) never landed"}}})
                 return
-            checkpoint_id = srv.record_checkpoint(repo, plan)  # type: ignore[attr-defined]
+            checkpoint_id = srv.record_checkpoint(repo, plan)
             self._json(200, {"checkpoint": {"checkpoint_id": checkpoint_id}})
             return
 
         self._json(404, {"error": {"code": "not_found"}})
 
     @staticmethod
-    def _grant(srv: Any, digest: str, size: int) -> dict:
+    def _grant(srv: CellHubServer, digest: str, size: int) -> dict:
         return {"digest": digest, "size_bytes": size,
                 "put_url": f"{srv.base}/cas/{digest.split(':', 1)[1]}",
                 "headers": {"x-amz-checksum-sha256": digest}}
-
-
-def slock(srv: Any) -> Any:
-    return srv.lock
 
 
 class LocalCellHub:
@@ -226,91 +299,37 @@ class LocalCellHub:
     the rig's fetch/publish legs take as their ``base_url``."""
 
     def __init__(self) -> None:
-        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-        self.httpd.lock = threading.Lock()  # type: ignore[attr-defined]
-        self.httpd.objects = {}  # type: ignore[attr-defined]
-        self.httpd.sessions = {}  # type: ignore[attr-defined]
-        self.httpd.calls = []  # type: ignore[attr-defined]
-        self.httpd.intents = []  # type: ignore[attr-defined]
-        self.httpd.completes = []  # type: ignore[attr-defined]
-        self.httpd.checkpoints = []  # type: ignore[attr-defined]
-        self.httpd.base = self.base  # type: ignore[attr-defined]
-        self.httpd.record_checkpoint = self._record_checkpoint  # type: ignore[attr-defined]
-        self._seq = 0
+        self.httpd = CellHubServer(_Handler)
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
 
     # -- state a test reads --------------------------------------------------
 
     @property
     def base(self) -> str:
-        host, port = self.httpd.server_address[:2]
-        return f"http://{host}:{port}"
+        return self.httpd.base
 
     @property
     def intents(self) -> List[dict]:
-        return list(self.httpd.intents)  # type: ignore[attr-defined]
+        return list(self.httpd.intents)
 
     @property
     def completes(self) -> List[dict]:
-        return list(self.httpd.completes)  # type: ignore[attr-defined]
+        return list(self.httpd.completes)
 
     @property
     def checkpoints(self) -> List[dict]:
-        return list(self.httpd.checkpoints)  # type: ignore[attr-defined]
+        return list(self.httpd.checkpoints)
 
     @property
     def calls(self) -> List[Tuple[str, Any]]:
-        return list(self.httpd.calls)  # type: ignore[attr-defined]
+        return list(self.httpd.calls)
 
     def routes(self) -> List[str]:
         return [p for p, _ in self.calls]
 
-    # -- the publish -> discover join ---------------------------------------
-
-    def _record_checkpoint(self, repo: str, plan: dict) -> str:
-        """Turn a completed publish into a listable checkpoint.
-
-        This is the join the discover side reads, and it is the ONE place the
-        double has to model hub bookkeeping: the manifest a ``resolve`` returns
-        has to describe the very objects the publish landed, or an adopting
-        worker downloads bytes that hash to nothing.
-        """
-        files = []
-        for f in plan.get("files") or []:
-            digest = str(f.get("digest") or "")
-            chunks = f.get("chunks") or []
-            entry: Dict[str, Any] = {
-                "path": str(f.get("path") or ""),
-                "size_bytes": int(f.get("size_bytes") or 0),
-                "sha256": digest.split(":", 1)[-1] if digest else "",
-                "digest": digest,
-            }
-            if chunks:
-                entry["chunks"] = [
-                    {"sha256": c["digest"], "len": int(c["len"]),
-                     "url": f"{self.base}/cas/{c['digest']}"}
-                    for c in chunks
-                ]
-                entry["chunk_size_bytes"] = int(chunks[0]["len"])
-            else:
-                entry["url"] = f"{self.base}/cas/{digest.split(':', 1)[-1]}"
-            files.append(entry)
-        self._seq += 1
-        checkpoint_id = "sha256:" + hashlib.sha256(
-            f"{repo}/{plan.get('flavor')}/{self._seq}".encode()).hexdigest()
-        row = {
-            "repo": repo,
-            "checkpoint_id": checkpoint_id,
-            "updated_at": f"2026-08-06T00:00:{self._seq:02d}Z",
-            "metadata": dict(plan.get("metadata") or {}),
-            "files": files,
-        }
-        with self.httpd.lock:  # type: ignore[attr-defined]
-            self.httpd.checkpoints.append(row)  # type: ignore[attr-defined]
-        return checkpoint_id
 
     def artifact_bytes(self) -> int:
-        return sum(len(v) for v in self.httpd.objects.values())  # type: ignore[attr-defined]
+        return sum(len(v) for v in self.httpd.objects.values())
 
     def close(self) -> None:
         self.httpd.shutdown()
