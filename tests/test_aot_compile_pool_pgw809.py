@@ -134,7 +134,7 @@ def test_pool_mints_a_multi_compiled_graph_compiled_graph(tmp_path: Path) -> Non
         f"pool never reached its own width: saw {box.peak_concurrency} "
         f"concurrent children, K={width.workers}")
     assert box.peak_rss_bytes > 0, (
-        "per-compiled_graph peak RSS is what bounds K by memory; an unmeasured peak "
+        "per-compiled-graph peak RSS is what bounds K by memory; an unmeasured peak "
         "makes the width policy a guess")
 
     staged = list((tmp_path / "pool").rglob("program.pt2"))

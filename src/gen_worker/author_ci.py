@@ -477,7 +477,7 @@ class _Subject:
             selected=self.selected, return_loaded=True) or {}
 
     def armed_pipeline(self) -> Optional[Any]:
-        """The loaded slot currently serving a compiled compiled graph, if any."""
+        """The loaded slot currently serving a compiled graph, if any."""
         from . import aot_serve
 
         for obj in self._loaded.values():

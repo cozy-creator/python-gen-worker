@@ -290,7 +290,7 @@ def from_axes(axes: Mapping[str, str]) -> CompiledGraphKey:
         text = str(value or "").strip()
         if name not in _REQUIRED and name not in _OPTIONAL:
             raise CompiledGraphKeyError(
-                f"unknown compiled_graph-key axis {name!r}: the key is exactly "
+                f"unknown compiled-graph-key axis {name!r}: the key is exactly "
                 f"{list(_REQUIRED)!r} — the membership axiom (pgw#1059 "
                 "amendment 6, Paul: \"don't key on parameters that don't "
                 "require us to recompile\") admits an axis only when the "
@@ -481,7 +481,7 @@ def from_compiled_graph_metadata(meta: Mapping[str, Any]) -> CompiledGraphKey:
     kind = str(meta.get("kind") or "")
     if kind != EXPORTED_KIND:
         raise CompiledGraphKeyError(
-            f"artifact kind {kind!r} has no compiled_graph-key identity: only exported "
+            f"artifact kind {kind!r} has no compiled-graph-key identity: only exported "
             f"{EXPORTED_KIND!r} compiled graphs are keyed (pgw#1010/pgw#1059 — JIT is "
             "intake, local torch-inductor-cache artifacts compare facts via "
             "compile_cache.local_compiled_graph_mismatch)")

@@ -57,7 +57,7 @@ LOCAL_SERVE_COMPILED_GRAPH = (
 
 @pytest.fixture()
 def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    root = tmp_path / "cozy-compiled_graphs"
+    root = tmp_path / "cozy-compiled-graphs"
     monkeypatch.setenv(local_compiled_graph_store.ENV_STORE_DIR, str(root))
     return root
 
@@ -246,7 +246,7 @@ def test_a_second_run_on_this_machine_arms_from_its_own_store_and_never_mints(
     armed = local_serve.enable_compiled(_Pipe(), _Cfg(), None, mint=_ctx())
 
     assert armed is True
-    assert armable and armable[0] == store / "aot-compiled_graphs" / KEY_A / "compiled_graph.tar.gz"
+    assert armable and armable[0] == store / "aot-compiled-graphs" / KEY_A / "compiled_graph.tar.gz"
 
 
 def test_the_local_compiled_graph_hands_the_arming_brain_no_sink_at_all(

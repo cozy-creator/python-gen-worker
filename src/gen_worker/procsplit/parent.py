@@ -2588,7 +2588,7 @@ class ParentControl:
 
 
 def run_parent() -> int:
-    """Production compiled graph (called from entrypoint BEFORE any heavy import)."""
+    """Production entry (called from entrypoint BEFORE any heavy import)."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",

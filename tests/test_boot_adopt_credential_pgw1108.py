@@ -62,7 +62,7 @@ def wired(monkeypatch, tmp_path):
     from gen_worker import local_compiled_graph_store
 
     monkeypatch.setenv(
-        local_compiled_graph_store.ENV_STORE_DIR, str(tmp_path / "empty-compiled_graphs"))
+        local_compiled_graph_store.ENV_STORE_DIR, str(tmp_path / "empty-compiled-graphs"))
 
     def _attempt(**kw: Any) -> Any:
         calls.append(kw)

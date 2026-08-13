@@ -251,7 +251,7 @@ def test_publish_complete_carries_only_what_the_hub_decodes(
 
     monkeypatch.setattr(hub_mod, "HubClient", _FakeHub)
     artifact = tmp_path / "compiled_graph.tar.gz"
-    artifact.write_bytes(b"compiled_graph-bytes")
+    artifact.write_bytes(b"compiled-graph-bytes")
     pub = fc.CompiledGraphPublisher(
         base_url="http://hub", worker_jwt=lambda: "jwt", image_digest="")
     assert pub.publish(FAMILY, artifact, meta) == "cp-1"

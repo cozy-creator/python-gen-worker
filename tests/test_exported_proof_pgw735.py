@@ -89,7 +89,7 @@ def test_exported_kind_compiled_graph_key_refusals_are_named():
     for kind in ("torch-inductor-cache", "an-unknown-kind", ""):
         with pytest.raises(compiled_graph_key.CompiledGraphKeyError) as unknown:
             compiled_graph_key.from_compiled_graph_metadata({"kind": kind})
-        assert "no compiled_graph-key identity" in str(unknown.value)
+        assert "no compiled-graph-key identity" in str(unknown.value)
 
     with pytest.raises(compiled_graph_key.CompiledGraphKeyError) as no_sm:
         compiled_graph_key.from_compiled_graph_metadata({"kind": "aot-inductor"})

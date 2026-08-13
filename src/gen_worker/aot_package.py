@@ -519,7 +519,7 @@ def unbindable_program_constants(
     return [
         f"{len(missing)} constant(s) the exported program lifts from the "
         f"module's state_dict are absent from the resident module's bind "
-        f"table, e.g. {missing[:6]!r} — the compiled compiled graph could never bind "
+        f"table, e.g. {missing[:6]!r} — the compiled graph could never bind "
         f"them, so the compile would be paid for an unpublishable compiled_graph"
     ]
 

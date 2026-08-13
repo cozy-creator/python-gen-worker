@@ -166,7 +166,7 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
     p.add_argument(
         "--eager-only", dest="eager_only", action="store_true",
         help=(
-            "Serve EAGER ONLY: never arm a compiled compiled graph and never mint one "
+            "Serve EAGER ONLY: never arm a compiled graph and never mint one "
             "(DESIGN-RULINGS §4.32). For a broken compile, or a machine whose "
             "owner does not want minutes of it spent compiling. Reversible "
             "while the serve runs — send {\"posture\":{\"eager_only\":false}} "

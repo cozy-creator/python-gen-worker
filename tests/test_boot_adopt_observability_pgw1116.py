@@ -76,7 +76,7 @@ def _empty_local_store(
 
     monkeypatch.setenv(
         local_compiled_graph_store.ENV_STORE_DIR,
-        str(tmp_path_factory.mktemp("empty-compiled_graphs")))
+        str(tmp_path_factory.mktemp("empty-compiled-graphs")))
 
 
 @pytest.fixture

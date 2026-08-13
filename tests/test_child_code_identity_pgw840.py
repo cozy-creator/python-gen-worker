@@ -88,7 +88,7 @@ from pathlib import Path
 
 job = json.loads(Path(sys.argv[-1]).read_bytes())
 loose = Path(job["report"]).parent / "fake.wrapper.cpp"
-loose.write_text("// as far as the parent can tell, a compiled compiled graph\\n")
+loose.write_text("// as far as the parent can tell, a compiled graph\\n")
 Path(job["report"]).write_text(json.dumps({{
     "compiled graph": job["compiled graph"], "status": "compiled", "files": [str(loose)],
     "detail": "1 loose file(s)", "elapsed_s": 0.01, "peak_rss_bytes": 1,

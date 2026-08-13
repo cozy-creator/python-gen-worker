@@ -432,15 +432,15 @@ def test_the_position_is_recorded_even_with_no_sink_and_a_raising_one() -> None:
     from gen_worker import aot_mint
 
     quiet = aot_mint.MintProgress()
-    quiet.beat(aot_mint.PHASE_TRACE_GRAPH, 3, 18, "compiled_graph-c")
+    quiet.beat(aot_mint.PHASE_TRACE_GRAPH, 3, 18, "compiled-graph-c")
     assert quiet.at == {
-        "phase": "trace_graph", "step": 3, "total": 18, "note": "compiled_graph-c"}
+        "phase": "trace_graph", "step": 3, "total": 18, "note": "compiled-graph-c"}
 
     def _explode(*_: Any) -> None:
         raise RuntimeError("the sink is not the mint")
 
     loud = aot_mint.MintProgress(on_progress=_explode)
-    loud.beat(aot_mint.PHASE_INDUCTOR_COMPILE, 12, 18, "compiled_graph-l")
+    loud.beat(aot_mint.PHASE_INDUCTOR_COMPILE, 12, 18, "compiled-graph-l")
     assert loud.at["step"] == 12
 
 

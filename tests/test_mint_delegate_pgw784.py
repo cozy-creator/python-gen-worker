@@ -244,7 +244,7 @@ def test_a_minted_child_is_adopted_through_the_delivered_compiled_graph_path(
     result = asyncio.run(mint_delegate.build_compiled_graph(_task(tmp_path), act=act))
     assert result.status == mint_delegate.ADOPTED and result.ok
     assert result.attempts == 1
-    assert adopted and adopted[0].read_bytes() == b"stub-compiled_graph-bytes"
+    assert adopted and adopted[0].read_bytes() == b"stub-compiled-graph-bytes"
     # No new protocol: the child's phases land on the SAME activity the hub
     # already reads for its minting classification.
     assert "load" in act.phases and "seal_publish" in act.phases

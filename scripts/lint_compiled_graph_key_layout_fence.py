@@ -170,7 +170,7 @@ def fenced_modules(root: Path = SRC) -> Dict[Path, str]:
             continue
         hits = sorted(_called_names(tree) & set(AXIS_PRODUCERS))
         if hits:
-            out[path] = f"computes a compiled_graph-key axis ({', '.join(hits)})"
+            out[path] = f"computes a compiled-graph-key axis ({', '.join(hits)})"
     return out
 
 
@@ -263,7 +263,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("FAIL: the fence covers NO module — the axis-producer probe is "
               "stale, which makes this gate green for the wrong reason")
         return 1
-    print(f"fence 1: {len(fenced)} compiled_graph-key module(s)")
+    print(f"fence 1: {len(fenced)} compiled-graph-key module(s)")
     for path, why in sorted(fenced.items()):
         rel = path.relative_to(REPO) if path.is_relative_to(REPO) else path
         hits = _violations(path)
@@ -290,7 +290,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for line in failures:
             print(f"  - {line}")
         print(
-            "\nConversion is UPSTREAM of compute. If a compiled_graph-key axis needs to "
+            "\nConversion is UPSTREAM of compute. If a compiled-graph-key axis needs to "
             "know the layout, the conversion is happening too late — move it "
             "ahead of materialization instead of widening the key.")
         return 1

@@ -203,7 +203,7 @@ def test_the_graph_is_conv_free(declaration) -> None:
 
 def test_the_frequency_table_is_a_buffer_not_a_plain_attribute() -> None:
     """pgw#857: a plain attribute is lifted as a graph LITERAL and its bytes
-    ship inside every compiled compiled graph."""
+    ship inside every compiled graph."""
     embed = MicroDenoiser(MicroConfig()).time_embed
     assert "freqs" in dict(embed.named_buffers())
     assert "freqs" not in embed.__dict__

@@ -1,6 +1,6 @@
 """The ONE adoption vocabulary (pgw#923).
 
-Adopting a pre-built compiled compiled graph — hub-delivered or catalog-discovered — used
+Adopting a pre-built compiled graph — hub-delivered or catalog-discovered — used
 to be described twice. The typed description rode ``ModelEvent{ADOPTED}``
 (``duration_ms``, ``cache_hits``, ``cache_misses``, ``warmup_s``), which the hub
 persists as ``worker_activity_events.kind='compile_cache_adopt'`` with two

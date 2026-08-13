@@ -265,7 +265,7 @@ def resolve(
         if not bool((body or {}).get("found")):
             if span is not None:
                 span.classify("miss", f"key={key}")
-            logger.info("compiled_graph-resolve: MISS for %s (family=%s)", key, fam)
+            logger.info("compiled-graph-resolve: MISS for %s (family=%s)", key, fam)
             return None
         compiled_graph = _compiled_graph_from(body)
         if span is not None:
@@ -291,7 +291,7 @@ def resolve(
             "the answer names no " + "; no ".join(
                 f"{f} ({why})" for f, why in missing))
     logger.info(
-        "compiled_graph-resolve: HIT %s -> %s (%s tier, %d bytes)",
+        "compiled-graph-resolve: HIT %s -> %s (%s tier, %d bytes)",
         key, compiled_graph.compiled_graph_ref, compiled_graph.publisher_tier, compiled_graph.size_bytes)
     return compiled_graph
 

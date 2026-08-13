@@ -146,7 +146,7 @@ def _driver(tmp_path: Path, name: str, *, count: int, resume_dir: str) -> Path:
     cfg = tmp_path / f"{name}.json"
     cfg.write_text(json.dumps({
         "landed": str(tmp_path / f"{name}-landed.jsonl"),
-        "workdir": str(tmp_path / name / "compiled_graph-pool"),
+        "workdir": str(tmp_path / name / "compiled-graph-pool"),
         "summary": str(tmp_path / f"{name}-summary.json"),
         "resume": resume_dir,
         "count": count,
@@ -195,7 +195,7 @@ def _run_until_killed(
 
     try:
         await_count(
-            lambda: len(_landed(cfg)), kill_after, what="compiled compiled_graphs",
+            lambda: len(_landed(cfg)), kill_after, what="compiled_graphs",
             cadence=Cadence(floor_s=300.0), gone=gone, poll_s=0.25)
     finally:
         try:
@@ -315,7 +315,7 @@ def _bank_one(tmp_path: Path, index: int = 0) -> Tuple[Path, str, Any]:
     """Compile one compiled graph for real and bank it. Returns (root, compiled graph, program)."""
     resume = tmp_path / "resume"
     compiled_graph, program = _name(index), _program(index)
-    box = _pool_with_root(tmp_path / "first" / "compiled_graph-pool", 1, str(resume))
+    box = _pool_with_root(tmp_path / "first" / "compiled-graph-pool", 1, str(resume))
     box.compile([(compiled_graph, program)])
     assert box.bank is not None and box.bank.banked_bytes > 0
     return resume, compiled_graph, program
@@ -345,7 +345,7 @@ def test_a_tampered_banked_artifact_is_refused_and_recompiled(
         "the tamper must not change the SIZE — otherwise this test proves "
         "only that a size check works, and the sha256 is never exercised")
 
-    second = _pool_with_root(tmp_path / "second" / "compiled_graph-pool", 1, str(resume))
+    second = _pool_with_root(tmp_path / "second" / "compiled-graph-pool", 1, str(resume))
     out = second.compile([(compiled_graph, program)])
 
     assert second.bank is not None
@@ -380,7 +380,7 @@ def test_a_stale_compiled_graph_is_refused_by_a_re_derived_graph_hash(
         original), (
         "the two programs must genuinely differ, or this test cannot fail")
 
-    second = _pool_with_root(tmp_path / "second" / "compiled_graph-pool", 1, str(resume))
+    second = _pool_with_root(tmp_path / "second" / "compiled-graph-pool", 1, str(resume))
     out = second.compile([(compiled_graph, other)])
 
     assert second.bank is not None

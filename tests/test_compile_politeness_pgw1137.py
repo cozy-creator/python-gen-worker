@@ -541,10 +541,10 @@ def test_the_user_is_told_what_the_compile_COSTS_before_it_starts() -> None:
         quota_cores=-1.0)
     said = local_serve.compile_notice(
         "micro-diffusion", USER_MACHINE, cpu=facts,
-        store_root=Path("/home/u/.cache/cozy/compile-compiled_graphs"))
+        store_root=Path("/home/u/.cache/cozy/compiled-graphs"))
     assert "micro-diffusion" in said
     assert "ONCE" in said, "the user must know this is not every run"
-    assert "/home/u/.cache/cozy/compile-compiled_graphs" in said, (
+    assert "/home/u/.cache/cozy/compiled-graphs" in said, (
         "where the result goes is what makes the promise checkable")
     assert "nice 19" in said and "32 cores" in said, (
         "what it is taking, in the units of the machine it is taking it from")
@@ -553,7 +553,7 @@ def test_the_user_is_told_what_the_compile_COSTS_before_it_starts() -> None:
 
 def test_progress_reaches_the_user_WHILE_the_compile_runs() -> None:
     """A cadence, not a burst: the frames arrive at wildly different rates (one
-    per export, one per compiled compiled graph, then silence through a single long link
+    per export, one per compiled graph, then silence through a single long link
     step) and a user watching a machine they can no longer type on needs a
     steady "still working" line."""
     clock = [0.0]

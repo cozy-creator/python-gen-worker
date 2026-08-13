@@ -563,8 +563,8 @@ def _join_publishes(deadline_s: float = 30.0) -> None:
     """Wait on the publish threads themselves — never a fixed sleep."""
     end = time.monotonic() + deadline_s
     for t in threading.enumerate():
-        if t.name != "compiled_graph-publish":
+        if t.name != "compiled-graph-publish":
             continue
         t.join(timeout=max(0.0, end - time.monotonic()))
     assert not [t for t in threading.enumerate()
-                if t.name == "compiled_graph-publish" and t.is_alive()]
+                if t.name == "compiled-graph-publish" and t.is_alive()]

@@ -334,7 +334,7 @@ class Admission:
 
 @dataclass
 class CompiledGraphBank:
-    """Compiled compiled graphs banked under a root that outlives one mint attempt."""
+    """Compiled graphs banked under a root that outlives one mint attempt."""
 
     root: Path
     context: Dict[str, str] = field(default_factory=dict)

@@ -130,7 +130,7 @@ def test_a_minted_compiled_graph_comes_back_as_a_path_and_a_digest(tmp_path: Pat
     # asserts that arity rather than indexing past a set nobody checked.
     (only,) = out.artifacts
     assert only == tmp_path / "compiled_graph.tar.gz"
-    assert only.read_bytes() == b"stub-compiled_graph-bytes"
+    assert only.read_bytes() == b"stub-compiled-graph-bytes"
     # pgw#1176: the digest rides the COMPILED_GRAPH row, beside the key and the path —
     # a per-artifact fact belongs with its artifact, not on the report.
     assert out.report is not None

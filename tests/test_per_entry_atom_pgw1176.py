@@ -90,7 +90,7 @@ def test_the_manifest_digest_is_a_label_not_an_identity() -> None:
     assert compiled_graph_key.manifest_digest(hashes) == \
         compiled_graph_key.manifest_digest(reversed(hashes))
     assert not compiled_graph_key.is_key(compiled_graph_key.manifest_digest(hashes)), (
-        "a manifest digest must never have compiled_graph-key shape — nothing may "
+        "a manifest digest must never have compiled-graph-key shape — nothing may "
         "resolve, download, verify or arm it")
 
 

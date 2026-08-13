@@ -349,7 +349,7 @@ def _isolated_local_compiled_graph_store(tmp_path_factory):
     """
     prior = os.environ.get("GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR")
     os.environ["GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR"] = str(
-        tmp_path_factory.mktemp("local-compiled_graph-store"))
+        tmp_path_factory.mktemp("local-compiled-graph-store"))
     try:
         yield
     finally:

@@ -4,7 +4,7 @@ DESIGN-RULINGS §4.28 (Paul, 2026-08-10): *"Untrusted hardware (community
 cloud, cozy-local) mints for ITSELF: local compiled graph, local repo-CAS, reused
 across its own boots — never uploaded, never requested."* And the UX
 elaboration: *"download model + code ONCE, compile ONCE, and every
-subsequent run of that code reuses the same compiled compiled graph — same ck1 key
+subsequent run of that code reuses the same compiled graph — same ck1 key
 derivation, same memo shortcut, fully offline-capable."*
 
 ONE IDENTITY, TWO STORES. A compiled graph stored here is addressed by exactly the
@@ -121,7 +121,7 @@ def _sha256_file(path: Path) -> str:
 #: cross-repo contract: changing either goes dark on that CLI.
 ENV_STORE_DIR = "GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR"
 
-COMPILED_GRAPHS_DIRNAME = "aot-compiled_graphs"
+COMPILED_GRAPHS_DIRNAME = "aot-compiled-graphs"
 MEMO_DIRNAME = ".memo"
 ARTIFACT_NAME = "compiled_graph.tar.gz"
 RECORD_NAME = "record.json"
@@ -179,7 +179,7 @@ def store_root() -> Path:
     env = os.environ.get(ENV_STORE_DIR, "").strip()
     if env:
         return Path(env).expanduser()
-    return Path.home() / ".cache" / "cozy" / "compile-compiled_graphs"
+    return Path.home() / ".cache" / "cozy" / "compiled-graphs"
 
 
 def compiled_graphs_root(root: Optional[Path] = None) -> Path:
@@ -292,13 +292,13 @@ def store(
                 memo_path(arm_token, root),
                 {"compiled_graph_key": key, "noted_at": record.stored_at})
         logger.info(
-            "local-compiled_graph-store: stored %s (%s, %.1f MB) — this machine reuses "
+            "local-compiled-graph-store: stored %s (%s, %.1f MB) — this machine reuses "
             "it on every later boot with the same key, offline",
             key, record.family, record.bytes / 1e6)
         return record
     except Exception as exc:  # noqa: BLE001 — a cache miss must never be fatal
         logger.warning(
-            "local-compiled_graph-store: could not store %s (%s); this boot serves "
+            "local-compiled-graph-store: could not store %s (%s); this boot serves "
             "compiled anyway and the next one re-mints", key, exc)
         return None
 
@@ -348,7 +348,7 @@ def mark(
         _write_json_atomic(target_dir / RECORD_NAME, record)
     except OSError as exc:
         logger.warning(
-            "local-compiled_graph-store: could not re-record %s (%s)", key, exc)
+            "local-compiled-graph-store: could not re-record %s (%s)", key, exc)
         return False
     return True
 
@@ -383,11 +383,11 @@ def lookup(key: str, root: Optional[Path] = None) -> Optional[LocalCompiledGraph
     try:
         have = "sha256:" + _sha256_file(artifact)
     except OSError as exc:
-        logger.warning("local-compiled_graph-store: %s is unreadable (%s)", key, exc)
+        logger.warning("local-compiled-graph-store: %s is unreadable (%s)", key, exc)
         return None
     if not want or have != want:
         logger.error(
-            "local-compiled_graph-store: DROPPING %s — the stored bytes digest %s, the "
+            "local-compiled-graph-store: DROPPING %s — the stored bytes digest %s, the "
             "record states %s; a compiled graph that cannot vouch for its own content "
             "is never armed", key, have, want or "nothing")
         drop(key, root)
@@ -420,7 +420,7 @@ def note_memo(
         return True
     except Exception as exc:  # noqa: BLE001 — a shortcut is never load-bearing
         logger.debug(
-            "local-compiled_graph-store: could not memo %s -> %s (%s)",
+            "local-compiled-graph-store: could not memo %s -> %s (%s)",
             arm_token, key, exc)
         return False
 
@@ -454,11 +454,11 @@ def sweep_superseded_memos(
             compiled_graph.unlink()
             removed += 1
         except OSError:
-            logger.debug("local-compiled_graph-store: could not drop %s", compiled_graph,
+            logger.debug("local-compiled-graph-store: could not drop %s", compiled_graph,
                          exc_info=True)
     if removed:
         logger.info(
-            "local-compiled_graph-store: dropped %d memo compiled_graph/compiled_graphs written under a "
+            "local-compiled-graph-store: dropped %d memo compiled_graph/compiled_graphs written under a "
             "superseded arm-token schema (current %s) — this machine re-mints "
             "each affected family ONCE and memoizes the answer again",
             removed, prefix.rstrip("-"))
@@ -570,11 +570,11 @@ def note_refusal(code: str, detail: str = "", root: Optional[Path] = None) -> bo
         })
     except OSError as exc:
         logger.warning(
-            "local-compiled_graph-store: could not record the hub's untrusted-tier "
+            "local-compiled-graph-store: could not record the hub's untrusted-tier "
             "verdict (%s); this machine will re-learn it next boot", exc)
         return False
     logger.warning(
-        "local-compiled_graph-store: the hub asserts this hardware may not publish "
+        "local-compiled-graph-store: the hub asserts this hardware may not publish "
         "(%s) — compiled graphs minted here are kept LOCALLY and reused on every later "
         "boot of this machine; nothing is uploaded and nothing is requested "
         "(§4.28)", UNTRUSTED_REFUSAL_CODE)

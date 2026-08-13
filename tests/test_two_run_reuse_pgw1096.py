@@ -160,7 +160,7 @@ def test_run_one_mints_and_keeps_run_two_reuses_with_no_mint(
     tmp_path: Path,
 ) -> None:
     """Paul's compile-once-run-forever, across process death, measured."""
-    store = tmp_path / "cozy-compiled_graphs"
+    store = tmp_path / "cozy-compiled-graphs"
     artifact = tmp_path / "mint" / "compiled_graph.tar.gz"
 
     one = _run("mint", store, artifact)
@@ -203,7 +203,7 @@ def test_a_corrupted_store_makes_the_cold_run_refuse_and_drop(
     """RED, across processes: run 1 keeps a compiled graph, the bytes rot on disk, and
     the cold run refuses it, drops it and is left with an empty store — one
     honest re-mint, never a wrong arm."""
-    store = tmp_path / "cozy-compiled_graphs"
+    store = tmp_path / "cozy-compiled-graphs"
     artifact = tmp_path / "mint" / "compiled_graph.tar.gz"
     one = _run("mint", store, artifact)
     stored = Path(one["stored_at_path"])

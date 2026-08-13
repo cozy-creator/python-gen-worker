@@ -453,7 +453,7 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
         seen["lane"] = spec.weight_lane
         seen["lifted"] = spec.lifted_inputs
         packed.parent.mkdir(parents=True, exist_ok=True)
-        packed.write_bytes(b"packed-compiled_graph")
+        packed.write_bytes(b"packed-compiled-graph")
         # pgw#1176: a mint returns N independently keyed compiled graph artifacts plus a
         # manifest digest, never "a compiled graph". This declaration traces one class.
         return aot_mint.MintResult(
@@ -489,7 +489,7 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
     (moved_key, moved_path, _sha), = report.compiled_graphs
     assert moved_key == key
     assert Path(moved_path) == target.parent / f"{key}.tar.gz"
-    assert Path(moved_path).read_bytes() == b"packed-compiled_graph"
+    assert Path(moved_path).read_bytes() == b"packed-compiled-graph"
     assert report.mint_phases == {"totals": {"total_s": 1.0}}
     # The spec the exporter got describes the LIVE pipeline, not a re-compose.
     assert seen == {"family": FAMILY, "lane": "w8a8",

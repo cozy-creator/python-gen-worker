@@ -149,7 +149,7 @@ def _adopted(monkeypatch, pending):
     """Drive the pending to ADOPTED the way the delegated driver does: the
     child wrote a compiled graph, `arm_aot` accepted it, `adopt_delegated_mint` records
     the identity. The arm itself is `provision`'s to prove (pgw#805)."""
-    child = _real_compiled_graph(pending.mint_root / "child-compiled_graph.tar.gz", _ADOPT_META)
+    child = _real_compiled_graph(pending.mint_root / "child-compiled-graph.tar.gz", _ADOPT_META)
     monkeypatch.setattr(
         provision, "arm_aot", lambda *a, **k: AdoptOutcome.hit())
     # pgw#1098: the pgw#1042 divergence gate now actually RUNS on these
@@ -296,7 +296,7 @@ def test_adopt_publishes_exactly_the_bytes_that_armed(monkeypatch, tmp_path):
     # lost with a FileNotFoundError whenever the publish path got there first.
     assert fc.adopt_delegated_mint(
         _Pipe(), pending,
-        [pending.mint_root / "child-compiled_graph.tar.gz"]) is minted
+        [pending.mint_root / "child-compiled-graph.tar.gz"]) is minted
     fc.publish_self_mint(pending)
     assert len(calls) == 1
 

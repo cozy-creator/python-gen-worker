@@ -55,7 +55,7 @@ def test_the_pre_trace_computed_key_no_longer_exists() -> None:
 def test_a_non_exported_kind_has_no_key_identity() -> None:
     """The other direction of the same wall: only exported compiled graphs are keyed;
     a torch-inductor-cache artifact is refused by name."""
-    with pytest.raises(compiled_graph_key.CompiledGraphKeyError, match="no compiled_graph-key identity"):
+    with pytest.raises(compiled_graph_key.CompiledGraphKeyError, match="no compiled-graph-key identity"):
         compiled_graph_key.from_compiled_graph_metadata(
             {"kind": "torch-inductor-cache", "compiled_graph_key": "ek1-" + "b" * 56})
 

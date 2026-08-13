@@ -1,7 +1,7 @@
 """ie#655 harness endpoint: a serve-time recipe on a worker that never compiles.
 
 wan-2.2's shape, minus the GPU: `setup()` quantizes the weights and REPORTS
-the applied body (pgw#1104), and nothing arms a compiled compiled graph — so the honest
+the applied body (pgw#1104), and nothing arms a compiled graph — so the honest
 lane is `fp8-w8a8-dynamic+eager` and the honest serving mode is `eager`. Its
 own file so no sibling lane's uncommitted `toy_endpoints.py` is disturbed.
 """

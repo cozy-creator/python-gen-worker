@@ -58,7 +58,7 @@ def sign_receipt(
     kid: str = KID,
     alg: str = "RS256",
 ) -> str:
-    header = {"alg": alg, "kid": kid, "typ": "compiled_graph-receipt-v1+jws"}
+    header = {"alg": alg, "kid": kid, "typ": "compiled-graph-receipt-v1+jws"}
     signing_input = (
         _b64url(json.dumps(header).encode()) + "." + _b64url(json.dumps(claims).encode())
     )
@@ -88,7 +88,7 @@ def make_claims(
     else:
         artifact["digest"] = artifact_digest
     claims: Dict[str, Any] = {
-        "crv": "compiled_graph-receipt-v2",
+        "crv": "compiled-graph-receipt-v2",
         "family": FAMILY,
         "compiled_graph_key": COMPILED_GRAPH_KEY,
         "axes": {"sku": "rtx-4090", "image_digest": "sha256:feed", "gen_worker": "0.75.1"},
@@ -125,7 +125,7 @@ def make_artifact(tmp_path: Path, *, compiled_graph_key: str = COMPILED_GRAPH_KE
         ti = tarfile.TarInfo("metadata.json")
         ti.size = len(raw)
         tar.addfile(ti, io.BytesIO(raw))
-        payload = b"fake-inductor-compiled_graph" * 64
+        payload = b"fake-inductor-compiled-graph" * 64
         ti = tarfile.TarInfo("inductor/aa/compiled_graph.py")
         ti.size = len(payload)
         tar.addfile(ti, io.BytesIO(payload))

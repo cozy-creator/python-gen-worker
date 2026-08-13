@@ -79,7 +79,7 @@ def test_every_dropped_axis_is_a_typed_refusal(stale):
         "graph": "g" * 16, "sm": "sm_89",
         "toolchain": "t" * 16, stale: "anything",
     }
-    with pytest.raises(compiled_graph_key.CompiledGraphKeyError, match="unknown compiled_graph-key axis"):
+    with pytest.raises(compiled_graph_key.CompiledGraphKeyError, match="unknown compiled-graph-key axis"):
         compiled_graph_key.from_axes(axes)
 
 

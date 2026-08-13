@@ -68,7 +68,7 @@ logger = logging.getLogger(__name__)
 # `publisher_org_id`, and they are LOAD-BEARING at the arm gate below. A v1
 # receipt must not be read as a v2 one with the trust fields missing, so the
 # version check refuses it outright rather than defaulting them.
-RECEIPT_VERSION = "compiled_graph-receipt-v2"
+RECEIPT_VERSION = "compiled-graph-receipt-v2"
 
 # Publisher tiers (th#1657). `platform` means the platform vouches for the
 # publishing org's endpoint code, so the compiled graph is adoptable fleet-wide within its

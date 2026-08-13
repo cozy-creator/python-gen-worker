@@ -1293,7 +1293,7 @@ def _emit_compiled_graph_export_unsupported(
             phase=PHASE_TRACE_GRAPH,
         )
     except Exception:  # noqa: BLE001 — telemetry never fails a mint
-        logger.debug("aot-mint: compiled_graph-skip event dropped", exc_info=True)
+        logger.debug("aot-mint: compiled-graph-skip event dropped", exc_info=True)
 
 
 def _export_compiled_graph(
@@ -2524,7 +2524,7 @@ def _mint_compiled_graph(
         pool = aot_compile_pool.CompiledGraphCompilePool(
             # A SIBLING of work/, never inside it — see the note on
             # `_compile_compiled_graphs_parallel`.
-            work.parent / "compiled_graph-pool", width=width,
+            work.parent / "compiled-graph-pool", width=width,
             inductor_configs=inductor_configs)
         t_pool = time.monotonic()
 
@@ -2909,7 +2909,7 @@ def _compile_compiled_graphs_parallel(
     # inside the directory that becomes the artifact is one refactor away from
     # putting job files and stderr tails into a compiled graph.
     pool = aot_compile_pool.CompiledGraphCompilePool(
-        work.parent / "compiled_graph-pool", width=width,
+        work.parent / "compiled-graph-pool", width=width,
         inductor_configs=inductor_configs)
     t0 = time.monotonic()
     by_compiled_graph = _drive_pool(

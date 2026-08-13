@@ -83,7 +83,7 @@ class TestVerifyReceiptJWS:
         assert exc.value.reason == "receipt_signature_invalid"
 
     def test_wrong_version_refused(self, rsa_key: rsa.RSAPrivateKey, pub_map: Dict[str, rsa.RSAPublicKey]) -> None:
-        jws = sign_receipt(rsa_key, make_claims("sha256:" + SHA_HEX, 4096, crv="compiled_graph-receipt-v1"))
+        jws = sign_receipt(rsa_key, make_claims("sha256:" + SHA_HEX, 4096, crv="compiled-graph-receipt-v1"))
         with pytest.raises(receipts.ReceiptError) as exc:
             receipts.verify_receipt_jws(jws, pub_map)
         assert exc.value.reason == "receipt_version_unsupported"
@@ -480,7 +480,7 @@ class TestPublisherTrustTh1657:
         `omitempty` collapse §4.24 point 4 names, and here it would silently
         delete the boundary."""
         artifact = make_artifact(tmp_path)
-        hub.serve_receipt_for(artifact, crv="compiled_graph-receipt-v1")
+        hub.serve_receipt_for(artifact, crv="compiled-graph-receipt-v1")
         _configure(hub, endpoint_id=SELF_ENDPOINT)
 
         with pytest.raises(receipts.ReceiptError) as excinfo:
@@ -663,4 +663,4 @@ class TestOrgWideningTh1680:
         change is additive on the GRANT and touches no wire constant. If this
         assertion ever needs updating, the change is a COUPLED hub+fleet cut and
         must say so in its own body."""
-        assert receipts.RECEIPT_VERSION == "compiled_graph-receipt-v2"
+        assert receipts.RECEIPT_VERSION == "compiled-graph-receipt-v2"

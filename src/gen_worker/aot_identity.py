@@ -48,7 +48,7 @@ from . import compiled_graph_key, env_seal
 
 
 class NamesAnArtifact(Protocol):
-    """A source that NAMES one compiled compiled graph, by the axes it already carries.
+    """A source that NAMES one compiled graph, by the axes it already carries.
 
     ``compiled_graph_resolve.ResolvedCompiledGraph`` (the hub answered a pull by derived key) is
     the source today; the Protocol stays because the map must not learn a
@@ -287,7 +287,7 @@ def verify_graph_witness(
     missing = sorted(set(witnesses) - set(recorded))
     if extra or missing:
         return (
-            f"graph witness class set differs (compiled_graph-only {extra[:3]!r}, "
+            f"graph witness class set differs (compiled-graph-only {extra[:3]!r}, "
             f"traced-only {missing[:3]!r}): the compiled graph was compiled from a "
             f"different class set than this pod traced")
     for name in sorted(recorded):

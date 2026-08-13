@@ -246,7 +246,7 @@ class _Progress:
     """Renders the child's frames onto the user's terminal, throttled.
 
     Deliberately a throttle on TIME and not on frame count: the frames arrive
-    at wildly different rates (one per export, one per compiled compiled graph, then
+    at wildly different rates (one per export, one per compiled graph, then
     silence through a single long link step), and a user watching a machine
     they can no longer type on needs a steady "still working" cadence, not a
     burst followed by nothing.

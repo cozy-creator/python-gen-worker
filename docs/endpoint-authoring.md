@@ -71,7 +71,7 @@ never calls `.to("cuda")`, `enable_model_cpu_offload()`, or `empty_cache()`.
 
 ## The tensor-binding contract: `register_buffer`, never a plain attribute (pgw#857)
 
-A compiled compiled graph rebinds tensors **by name** at load, which is what lets one compiled graph
+A compiled graph rebinds tensors **by name** at load, which is what lets one compiled graph
 serve every fine-tune of a family. That only holds if every tensor your model
 needs is reachable through `state_dict()`. **The tensor-binding contract**
 (formerly "weight-binding") is that rule — the artifact's LINKING rule for
@@ -129,7 +129,7 @@ wrong test to carry away.
 **Why it matters beyond tidiness.** A tensor outside `state_dict` is not a
 weight the CAS delivers and rebinds at load. `torch.export` lifts it as an
 anonymous `_tensor_constant{N}` **literal**, and a literal's bytes ship *inside*
-the compiled compiled graph — so it becomes part of the artifact rather than part of the
+the compiled graph — so it becomes part of the artifact rather than part of the
 checkpoint. Two checkpoints of your family that differ only in the config that
 derives that table then need *different* compiled graphs. The compiled graph key handles this
 correctly today (pgw#857 folds literal VALUES into the identity), so nothing

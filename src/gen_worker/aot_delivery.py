@@ -93,7 +93,7 @@ def _materialize_named_artifact(
             "content digest")
     dest_dir = (
         Path(cache_dir) if cache_dir else Path.home() / ".cache" / "gen-worker"
-    ) / "aot-compiled_graphs"
+    ) / "aot-compiled-graphs"
     dest = dest_dir / f"{digest.split(':', 1)[-1]}.tar.gz"
 
     if dest.is_file():

@@ -317,7 +317,7 @@ def assert_faithful(
             f"question(s) the standing one refuses on (pgw#1115)")
     if cdelta:
         lines.append(
-            f"  compiled_graph-key contract re-keys ({len(cdelta)} axis(es) differ):")
+            f"  compiled-graph-key contract re-keys ({len(cdelta)} axis(es) differ):")
         for axis, (av, bv) in cdelta.items():
             lines.append(f"    - {axis}: standing={av!r} migrated={bv!r}")
     if odelta:

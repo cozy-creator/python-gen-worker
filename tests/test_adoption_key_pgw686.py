@@ -191,7 +191,7 @@ def test_burst_divergence_reproduced_execution_lane_only(burst_runtime: None) ->
     # rather than late inside a per-compiled graph code path.
     for old in (CK2_PUBLISHED, CK2_REQUESTED_PLAIN, CK2_REQUESTED_FP8_HOOKS):
         assert not ck.is_key(old)
-    with pytest.raises(ck.CompiledGraphKeyError, match="has no compiled_graph-key identity"):
+    with pytest.raises(ck.CompiledGraphKeyError, match="has no compiled-graph-key identity"):
         ck.from_compiled_graph_metadata(_BURST_META)
 
 

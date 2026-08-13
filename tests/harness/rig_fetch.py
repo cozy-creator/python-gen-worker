@@ -29,7 +29,7 @@ def fetch_named_compiled_graph(
     files = (resp.json() or {}).get("files") or []
     compiled_graph: Any = next(
         f for f in files if str(f.get("path") or "").endswith(".tar.gz"))
-    dest_dir = Path(cache_dir) / "aot-compiled_graphs"
+    dest_dir = Path(cache_dir) / "aot-compiled-graphs"
     dest_dir.mkdir(parents=True, exist_ok=True)
     raw = requests.get(str(compiled_graph["url"]), timeout=120).content
     want = str(compiled_graph.get("digest") or "")

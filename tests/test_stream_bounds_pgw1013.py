@@ -497,7 +497,7 @@ def test_civitai_sizeless_stream_is_still_bounded(rig: _Rig, tmp_path: Path) -> 
 # AOT compiled graph artifacts
 # ---------------------------------------------------------------------------
 
-ARTIFACT = b"compiled_graph-tarball-bytes" * 64
+ARTIFACT = b"compiled-graph-tarball-bytes" * 64
 ARTIFACT_DIGEST = "sha256:" + hashlib.sha256(ARTIFACT).hexdigest()
 
 
@@ -551,24 +551,24 @@ def test_compiled_graph_artifact_without_size_bytes_is_a_typed_miss(rig: _Rig, t
     ignored it. An compiled graph that cannot say how big it is now costs the pilot lane
     a miss rather than an unbounded fetch — a compiled graph miss self-mints, so failing
     closed here is free."""
-    url = _serve(rig, "/compiled_graph-nosize.tar.gz", ARTIFACT)
-    compiled_graph = {"path": "compiled_graph-nosize.tar.gz", "url": url, "digest": ARTIFACT_DIGEST}
+    url = _serve(rig, "/compiled-graph-nosize.tar.gz", ARTIFACT)
+    compiled_graph = {"path": "compiled-graph-nosize.tar.gz", "url": url, "digest": ARTIFACT_DIGEST}
     assert _fetch_compiled_graph(rig, tmp_path, compiled_graph, ARTIFACT_DIGEST) is None
-    assert _served(rig, "/compiled_graph-nosize.tar.gz") == 0, "no bytes fetched at all"
+    assert _served(rig, "/compiled-graph-nosize.tar.gz") == 0, "no bytes fetched at all"
 
 
 def test_compiled_graph_artifact_oversized_stream_is_abandoned_mid_transfer(
     rig: _Rig, tmp_path: Path
 ) -> None:
-    url = _serve(rig, "/compiled_graph-big.tar.gz", b"\0" * BODY_BYTES)
-    compiled_graph = {"path": "compiled_graph-big.tar.gz", "url": url,
+    url = _serve(rig, "/compiled-graph-big.tar.gz", b"\0" * BODY_BYTES)
+    compiled_graph = {"path": "compiled-graph-big.tar.gz", "url": url,
              "digest": ARTIFACT_DIGEST, "size_bytes": DECLARED_BYTES}
 
     assert _fetch_compiled_graph(rig, tmp_path, compiled_graph, ARTIFACT_DIGEST) is None
-    _aborted_early(rig, "/compiled_graph-big.tar.gz")
+    _aborted_early(rig, "/compiled-graph-big.tar.gz")
     hexname = ARTIFACT_DIGEST.split(":", 1)[-1]
-    assert not (tmp_path / "aot-compiled_graphs" / f"{hexname}.tar.gz").exists()
-    assert not (tmp_path / "aot-compiled_graphs" / f"{hexname}.part").exists()
+    assert not (tmp_path / "aot-compiled-graphs" / f"{hexname}.tar.gz").exists()
+    assert not (tmp_path / "aot-compiled-graphs" / f"{hexname}.part").exists()
 
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@
 Paul, 2026-08-10: *"Untrusted hardware (community cloud, cozy-local) mints for
 ITSELF: local compiled graph, local repo-CAS, reused across its own boots — never
 uploaded, never requested… download model + code ONCE, compile ONCE, and every
-subsequent run of that code reuses the same compiled compiled graph."*
+subsequent run of that code reuses the same compiled graph."*
 
 What was RED before this issue, on every one of these:
 
@@ -44,12 +44,12 @@ ARM_B = fleet_compiled_graphs.ARM_SCHEME + "-" + "2" * 56
 @pytest.fixture()
 def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """The store root, relocated by its env — a PATH knob, never a behavior one."""
-    root = tmp_path / "cozy-compiled_graphs"
+    root = tmp_path / "cozy-compiled-graphs"
     monkeypatch.setenv(local_compiled_graph_store.ENV_STORE_DIR, str(root))
     return root
 
 
-def _artifact(tmp_path: Path, body: bytes = b"packed-compiled_graph-bytes") -> Path:
+def _artifact(tmp_path: Path, body: bytes = b"packed-compiled-graph-bytes") -> Path:
     """Opaque bytes. The STORE does not care what a compiled graph is — these tests are
     about addressing, digests and rot, and they assert the bytes round-trip
     unchanged, so this deliberately stays raw."""
@@ -102,8 +102,8 @@ def test_a_compiled_graph_is_addressed_by_the_same_ck1_key_the_hub_store_uses(
 
     assert compiled_graph is not None
     assert compiled_graph.key == KEY_A and compiled_graph_key.is_key(compiled_graph.key)
-    assert compiled_graph.artifact == store / "aot-compiled_graphs" / KEY_A / "compiled_graph.tar.gz"
-    assert compiled_graph.artifact.read_bytes() == b"packed-compiled_graph-bytes"
+    assert compiled_graph.artifact == store / "aot-compiled-graphs" / KEY_A / "compiled_graph.tar.gz"
+    assert compiled_graph.artifact.read_bytes() == b"packed-compiled-graph-bytes"
 
     found = local_compiled_graph_store.lookup(KEY_A)
     assert found is not None and found.content_digest == compiled_graph.content_digest
@@ -127,7 +127,7 @@ def test_a_record_written_but_never_filled_is_absent_not_short(
     """The record is written LAST (aot_resume's rule): a crash mid-store leaves
     a directory the next lookup treats as absent, never as a short compiled graph."""
     local_compiled_graph_store.store(_artifact(tmp_path), key=KEY_A, family="f")
-    (store / "aot-compiled_graphs" / KEY_A / local_compiled_graph_store.RECORD_NAME).unlink()
+    (store / "aot-compiled-graphs" / KEY_A / local_compiled_graph_store.RECORD_NAME).unlink()
     assert local_compiled_graph_store.lookup(KEY_A) is None
 
 
@@ -151,7 +151,7 @@ def test_corrupting_a_stored_compiled_graph_refuses_admission_and_drops_it(
         _artifact(tmp_path), key=KEY_A, family="f", arm_token=ARM_A)
     assert compiled_graph is not None and local_compiled_graph_store.lookup(KEY_A) is not None
 
-    compiled_graph.artifact.write_bytes(b"packed-compiled_graph-byteZ")  # same length, one bit
+    compiled_graph.artifact.write_bytes(b"packed-compiled-graph-byteZ")  # same length, one bit
 
     assert local_compiled_graph_store.lookup(KEY_A) is None, "a corrupted compiled_graph armed"
     assert not local_compiled_graph_store.compiled_graph_dir(KEY_A).exists(), (
@@ -188,7 +188,7 @@ def test_a_moved_toolchain_is_an_HONEST_re_mint_and_leaves_the_old_compiled_grap
     under its own key, because a user who rolls torch back must not have to
     recompile what they already compiled."""
     local_compiled_graph_store.store(
-        _artifact(tmp_path, b"compiled_graph-under-torch-A"), key=KEY_A, family="f",
+        _artifact(tmp_path, b"compiled-graph-under-torch-A"), key=KEY_A, family="f",
         arm_token=ARM_A)
 
     # The upgrade: a different toolchain digest => a different arm token.
@@ -196,12 +196,12 @@ def test_a_moved_toolchain_is_an_HONEST_re_mint_and_leaves_the_old_compiled_grap
         "an upgraded toolchain must not adopt the old toolchain's compiled_graph")
 
     local_compiled_graph_store.store(
-        _artifact(tmp_path, b"compiled_graph-under-torch-B"), key=KEY_B, family="f",
+        _artifact(tmp_path, b"compiled-graph-under-torch-B"), key=KEY_B, family="f",
         arm_token=ARM_B)
 
     assert {c.key for c in local_compiled_graph_store.stored_compiled_graphs()} == {KEY_A, KEY_B}
     old = local_compiled_graph_store.lookup(KEY_A)
-    assert old is not None and old.artifact.read_bytes() == b"compiled_graph-under-torch-A"
+    assert old is not None and old.artifact.read_bytes() == b"compiled-graph-under-torch-A"
 
 
 def test_a_stale_memo_costs_one_re_mint_and_never_a_wrong_compiled_graph(
@@ -212,7 +212,7 @@ def test_a_stale_memo_costs_one_re_mint_and_never_a_wrong_compiled_graph(
     local_compiled_graph_store.drop(KEY_A)
     assert local_compiled_graph_store.lookup_for_arm(ARM_A) is None
 
-    (store / "aot-compiled_graphs" / local_compiled_graph_store.MEMO_DIRNAME / f"{ARM_A}.json"
+    (store / "aot-compiled-graphs" / local_compiled_graph_store.MEMO_DIRNAME / f"{ARM_A}.json"
      ).write_text(json.dumps({"compiled_graph_key": "not-a-key"}))
     assert local_compiled_graph_store.lookup_for_arm(ARM_A) is None
 
@@ -418,7 +418,7 @@ def test_a_second_boot_arms_from_this_machines_own_store_with_no_mint(
     assert minted is not None
     assert minted.compiled_graph_key == KEY_A
     assert minted.ref.endswith("#" + KEY_A)
-    assert armable == [store / "aot-compiled_graphs" / KEY_A / "compiled_graph.tar.gz"], (
+    assert armable == [store / "aot-compiled-graphs" / KEY_A / "compiled_graph.tar.gz"], (
         "the arm must be handed the STORE's bytes, not a copy nobody hashed")
     assert fleet_compiled_graphs._FINALIZED[ARM_A] is minted, (
         "a sibling pipe of the same record must re-arm these bytes in-process")
@@ -546,7 +546,7 @@ def test_an_untrusted_refusal_keeps_the_compiled_graph_instead_of_discarding_it(
     refusal still teaches the machine its trust class, and it does not disturb
     the durable copy.
     """
-    artifact = _artifact(tmp_path, b"packed-compiled_graph-bytes")
+    artifact = _artifact(tmp_path, b"packed-compiled-graph-bytes")
     monkeypatch.setattr(fleet_compiled_graphs.activity_mod, "emit_event",
                         lambda *a, **k: None)
     monkeypatch.setattr(fleet_compiled_graphs, "_note_durable", lambda *a, **k: None)
@@ -570,7 +570,7 @@ def test_an_untrusted_refusal_keeps_the_compiled_graph_instead_of_discarding_it(
     assert local_compiled_graph_store.trust_class() == local_compiled_graph_store.TRUST_UNTRUSTED
     kept = local_compiled_graph_store.lookup_for_arm(ARM_A)
     assert kept is not None and kept.key == KEY_A
-    assert kept.artifact.read_bytes() == b"packed-compiled_graph-bytes"
+    assert kept.artifact.read_bytes() == b"packed-compiled-graph-bytes"
     # And the obligation is CLOSED, not left owed: a hub that says "never"
     # must not be re-asked on every boot forever.
     assert kept.sink == local_compiled_graph_store.SINK_REFUSED

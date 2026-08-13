@@ -268,7 +268,7 @@ BEHAVIOUR_GATES: Dict[Tuple[str, str], str] = {
         "BOOTSTRAP. Pre-fork supervisor predicate, runs before the process "
         "compiled_graph. Same identity-not-policy reasoning.",
     ("src/gen_worker/supervisor.py", "GEN_WORKER_SUPERVISED"):
-        "BOOTSTRAP. Pre-fork re-compiled_graph guard; without it the supervisor forks "
+        "BOOTSTRAP. Pre-fork re-entry guard; without it the supervisor forks "
         "itself forever.",
     ("src/gen_worker/models/memory.py", "GEN_WORKER_FORBID_CPU_OFFLOAD"):
         "TRIPWIRE at the real placement boundary. Read as env rather than "

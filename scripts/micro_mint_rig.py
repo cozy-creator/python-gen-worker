@@ -741,7 +741,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="discard the scratch root first")
     parser.add_argument(
         "--vehicle", default=os.environ.get("PGW997_VEHICLE", DEFAULT_VEHICLE),
-        help="WHAT to mint: 'tiny' (pgw#978's one-compiled_graph plumbing toy) or "
+        help="WHAT to mint: 'tiny' (pgw#978's one-compiled-graph plumbing toy) or "
              "'micro' (pgw#997's org-worker-shaped examples/micro-diffusion — "
              "3 compiled_graphs, container inputs, generated weights)")
     parser.add_argument(
@@ -750,7 +750,7 @@ def main(argv: Optional[List[str]] = None) -> int:
              "(declarations x compiled_graphs) instead of this process's environment; "
              "ambient values are stripped and withholdings are reported")
     parser.add_argument(
-        "--hub-env-compiled_graph", action="append", default=[], metavar="NAME=VALUE",
+        "--hub-env-compiled-graph", action="append", default=[], metavar="NAME=VALUE",
         help="an endpoint_env_compiled_graphs row the operator has set; repeatable. "
              "Only names the release DECLARES are delivered.")
     args = parser.parse_args(list(argv) if argv is not None else None)
@@ -765,7 +765,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         for raw in args.hub_env_compiled_graph:
             name, sep, value = str(raw).partition("=")
             if not sep:
-                parser.error(f"--hub-env-compiled_graph expects NAME=VALUE, got {raw!r}")
+                parser.error(f"--hub-env-compiled-graph expects NAME=VALUE, got {raw!r}")
             compiled_graphs[name.strip()] = value
         result = run_cycle(root, stage=args.stage, force_load=args.force_load,
                            device=args.device, vehicle=args.vehicle,

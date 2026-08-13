@@ -150,7 +150,7 @@ PHASE_COMPILED_GRAPH_ADMIT = "compiled_graph_admit"
 #: CUMULATIVE. The first instant this worker could have served a request at
 #: all, compiled or not — the first of the two user-visible timestamps.
 PHASE_EAGER_READY = "eager_ready"
-#: CUMULATIVE. The instant a compiled compiled graph became the served path. The second
+#: CUMULATIVE. The instant a compiled graph became the served path. The second
 #: user-visible timestamp, and the only honest measure of how long a pod serves
 #: eager before its compiled graph arrives. May land AFTER the boot closes, which is
 #: exactly the fact worth having.

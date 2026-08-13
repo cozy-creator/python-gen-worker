@@ -684,7 +684,7 @@ def classify(
         return CODE_IDENTITY, "gen_worker/diffusers/transformers/image versions"
     if root == "ambient":
         if guard_type in _AMBIENT_COVERED:
-            return RUNTIME_STATE, "process runtime state (compiled_graph-key runtime axes)"
+            return RUNTIME_STATE, "process runtime state (compiled-graph-key runtime axes)"
         if guard_type == "LAMBDA_GUARD":
             if ("init_ambient_guards" in expr
                     or "top_saved_tensors_hooks" in expr):

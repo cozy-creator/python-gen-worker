@@ -2,7 +2,7 @@
 
 **pgw#939 (supply chain).** `if expected { compare }` — so an absent expected
 value ADMITS. The artifact in every case is bytes that will subsequently be
-safetensors-loaded or armed as a compiled compiled graph, and `DESIGN-RULINGS.md` §1.22
+safetensors-loaded or armed as a compiled graph, and `DESIGN-RULINGS.md` §1.22
 decides all of them the same way: missing evidence is an integrity verdict,
 not a disabled check.
 

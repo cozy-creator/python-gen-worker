@@ -183,7 +183,7 @@ def _named(backend: int = pb.STEADY_BACKEND_AOT_COMPILED_GRAPH) -> Any:
     if backend != pb.STEADY_BACKEND_AOT_COMPILED_GRAPH:
         return None
     return pb.ArtifactIdentity(
-        compiled_graph_ref="cozy/compiled_graphs-micro#k1",
+        compiled_graph_ref="cozy/compiled-graphs-micro#k1",
         content_digest="sha256:" + "c" * 64,
         compiled_graph_key="aot-inductor:k1",
         publisher_org="cozy",

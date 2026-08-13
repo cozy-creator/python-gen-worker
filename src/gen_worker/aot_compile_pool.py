@@ -1282,7 +1282,7 @@ class CompiledGraphCompilePool:
                     on_compiled_graph(name, len(done), _known_total())
                 except Exception:  # noqa: BLE001 — telemetry never fails a mint
                     logger.debug(
-                        "compiled_graph-pool progress callback failed", exc_info=True)
+                        "compiled-graph-pool progress callback failed", exc_info=True)
 
         # pgw#830: exact idle accounting. Every wall second is multiplied by
         # the number of FREE worker slots at that moment and charged to
@@ -1432,7 +1432,7 @@ class CompiledGraphCompilePool:
                     on_compiled_graph(name, len(done), total)
                 except Exception:  # noqa: BLE001 — telemetry never fails a mint
                     logger.debug(
-                        "compiled_graph-pool progress callback failed", exc_info=True)
+                        "compiled-graph-pool progress callback failed", exc_info=True)
         self._refresh_resume_facts()
         if self.bank.resumed:
             logger.info(

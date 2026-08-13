@@ -259,7 +259,7 @@ def test_the_delegated_route_mints_in_a_child_adopts_and_advertises(
 
     # A real child produced real bytes, and they were adopted through the
     # delivered-compiled graph path rather than trusted.
-    assert adopted and adopted[0].read_bytes() == b"stub-compiled_graph-bytes"
+    assert adopted and adopted[0].read_bytes() == b"stub-compiled-graph-bytes"
     # gw#612: every sharer is covered, so the compiled graph ships.
     assert published == [pending]
     # Phase 4, shared with the in-process route: the target now advertises the

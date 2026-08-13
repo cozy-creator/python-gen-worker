@@ -115,7 +115,7 @@ def test_the_compiled_graph_side_vocabulary_is_GONE_not_merely_empty() -> None:
                   "compiled_graph_extern", "compiled_graph_unpickle", "compiled_graph_read",
                   "live_compiled_graph_compiled_graph_unpickle", "divergence"):
         assert token not in report, (
-            f"{token!r} is a compiled_graph-side fact and the compiled_graph side is deleted: "
+            f"{token!r} is a compiled-graph-side fact and the compiled_graph side is deleted: "
             f"{report}")
     # And the argument that fed them is gone, so no caller can reintroduce the
     # vocabulary by passing one.

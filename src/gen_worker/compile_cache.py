@@ -230,7 +230,7 @@ def has_inmemory_compiled_code(pipeline: Any) -> bool:
             return bool(eval_frame._debug_get_cache_compiled_graph_list(code))
         except Exception:
             logger.warning(
-                "compile-cache: dynamo cache-compiled_graph probe failed for %s — "
+                "compile-cache: dynamo cache-compiled-graph probe failed for %s — "
                 "counted as NOT compiled", getattr(fn, "__qualname__", fn),
                 exc_info=True)
             return False
@@ -2261,7 +2261,7 @@ def _guarded_regional(
         Regional blocks have no separable eager callable — the compiled
         impls live ON the blocks — so the guard-miss eager serve runs the
         original with dynamo disabled for this thread/call: existing
-        compiled compiled graphs are bypassed, nothing recompiles, block state is
+        compiled graphs are bypassed, nothing recompiles, block state is
         untouched (verified on torch 2.13: ``config.disable`` is the same
         thread-local ContextVar surface as the stance)."""
         try:

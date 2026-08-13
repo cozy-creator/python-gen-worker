@@ -734,7 +734,7 @@ def test_self_mint_boot_serves_compiled_after_own_warmup_proof(
     mint_digest = "blake3:" + "e" * 64
     mint_artifact = tmp_path / "selfmint" / "compiled_graph.tar.gz"
     mint_artifact.parent.mkdir()
-    mint_artifact.write_bytes(b"compiled_graph-bytes")
+    mint_artifact.write_bytes(b"compiled-graph-bytes")
     sent = []
 
     async def _send(msg):
@@ -821,7 +821,7 @@ def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
     mint_key = "ek1-" + "f" * 56
     mint_artifact = tmp_path / "selfmint" / "compiled_graph.tar.gz"
     mint_artifact.parent.mkdir()
-    mint_artifact.write_bytes(b"compiled_graph-bytes")
+    mint_artifact.write_bytes(b"compiled-graph-bytes")
 
     async def _send(_msg):
         return None

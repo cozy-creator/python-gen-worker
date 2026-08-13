@@ -17,7 +17,7 @@ Deliberate structural choices, each with a reason the mint can read:
   flattening) and pgw#994 (serve-side binding) both live on that seam.
 * **The rope table is a registered buffer** (pgw#857): a plain attribute is
   lifted by ``torch.export`` as an anonymous ``_tensor_constant`` literal
-  whose bytes then ship inside every compiled compiled graph instead of staying a
+  whose bytes then ship inside every compiled graph instead of staying a
   deduplicated weight.
 """
 

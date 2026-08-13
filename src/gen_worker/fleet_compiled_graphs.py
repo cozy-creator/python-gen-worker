@@ -237,7 +237,7 @@ def stamp_arm_subject(
         setattr(pipe, ARM_SUBJECT_ATTR,
                 tuple(sorted(known.values(), key=lambda s: s.slot)))
     except Exception:  # noqa: BLE001 — a stamp is never worth a failed boot
-        logger.debug("fleet-compiled_graphs: pipeline refused the arm subject stamp",
+        logger.debug("fleet-compiled-graphs: pipeline refused the arm subject stamp",
                      exc_info=True)
 
 
@@ -812,7 +812,7 @@ class CompiledGraphPublisher:
             timeout=_COMPLETE_TIMEOUT_S,
         )
         logger.info(
-            "fleet-compiled_graphs: published %s#%s (checkpoint %s, %.1f MB, "
+            "fleet-compiled-graphs: published %s#%s (checkpoint %s, %.1f MB, "
             "%d uploaded / %d resident)",
             family, key, checkpoint_id, artifact.stat().st_size / 1e6,
             result.uploaded, result.deduped)
@@ -1046,7 +1046,7 @@ def _publish_async(
             checkpoint_id = publisher.publish(
                 family, artifact, meta, mint_duration_ms)
         except CompiledGraphPublishRefused as exc:
-            logger.warning("fleet-compiled_graphs: publish refused (hub decision): %s", exc)
+            logger.warning("fleet-compiled-graphs: publish refused (hub decision): %s", exc)
             # pgw#1096/§4.28: the hub has just ASSERTED this hardware's trust
             # class. Learn it — the worker never declares its own, the hub is
             # the only authority. pgw#1183 deleted the SALVAGE that stood here
@@ -1071,7 +1071,7 @@ def _publish_async(
             # The bytes are durable, the record stays `pending`, and this
             # machine's next boot re-attempts the upload from them.
             logger.warning(
-                "fleet-compiled_graphs: publish failed; the compiled graph stays durable in this "
+                "fleet-compiled-graphs: publish failed; the compiled graph stays durable in this "
                 "machine's local CAS and the upload is retried next boot",
                 exc_info=True)
             activity_mod.emit_event(
@@ -1102,7 +1102,7 @@ def _publish_async(
     # it". Each publish call is bounded by the transport's own request
     # timeouts, so a graceful exit finishes the transfer instead of abandoning
     # it — and a hard kill costs a retry, not the compiled graph.
-    t = threading.Thread(target=run, name="compiled_graph-publish", daemon=False)
+    t = threading.Thread(target=run, name="compiled-graph-publish", daemon=False)
     t.start()
     return t
 
@@ -1144,7 +1144,7 @@ def resume_owed_publishes(
             arm_token=compiled_graph.arm_token))
     if threads:
         logger.info(
-            "fleet-compiled_graphs: re-attempting %d owed compiled graph upload(s) from this "
+            "fleet-compiled-graphs: re-attempting %d owed compiled graph upload(s) from this "
             "machine's local CAS — each survived the process that minted it",
             len(threads))
     return threads
@@ -1286,7 +1286,7 @@ def enable_compiled(
         # would open a self-mint whose child re-derives the refusal minutes and
         # a full compile later. The order is answered where it costs nothing,
         # and it is answered with a token, not a bare False.
-        logger.info("fleet-compiled_graphs: %s", serve_posture.block())
+        logger.info("fleet-compiled-graphs: %s", serve_posture.block())
         return ArmOutcome(
             armed=False, eager_reason=EagerPhase.OPERATOR_EAGER_ONLY)
     adoptions: List[CompiledGraphAdoption] = []
@@ -1529,14 +1529,14 @@ def _arming_policy(
         # reported loudly (the caller sends the wire event), but no longer
         # fatal: fall through and self-mint a compiled graph this runtime can prove.
         logger.warning(
-            "fleet-compiled_graphs: compiled_graph_selection_bug (%s); self-minting instead of "
+            "fleet-compiled-graphs: compiled_graph_selection_bug (%s); self-minting instead of "
             "retrying the same unusable compiled_graph", exc)
         selection_bug = exc
     except cc.CompiledExecutionLaneUnavailableError:
         # Mandatory (w8a8/w4a4) miss: production used to fail closed here.
         # The whole point of self-mint is that this worker can produce the
         # compiled graph itself.
-        logger.info("fleet-compiled_graphs: no delivered compiled graph for mandatory lane; self-minting")
+        logger.info("fleet-compiled-graphs: no delivered compiled graph for mandatory lane; self-minting")
 
     if not family:
         return _fail_closed(
@@ -1565,7 +1565,7 @@ def _arming_policy(
         pipe_refusal = delegation_refusal(pipe, cfg)
         if pipe_refusal:
             logger.info(
-                "fleet-compiled_graphs: %s cannot mint out of process (%s) — no AOT "
+                "fleet-compiled-graphs: %s cannot mint out of process (%s) — no AOT "
                 "mint is possible on this pipe (pgw#784)", family, pipe_refusal)
             delegate = False
             delegate_refusal = pipe_refusal
@@ -1615,14 +1615,14 @@ def _arming_policy(
         try:
             cc.arm_jit_intake(pipe, cfg)
         except Exception as exc:  # noqa: BLE001 — arm failure => miss policy
-            logger.warning("fleet-compiled_graphs: JIT intake arm failed (%s)", exc)
+            logger.warning("fleet-compiled-graphs: JIT intake arm failed (%s)", exc)
             if bucket:
                 cc.drop_lora_execution_lane(pipe)
             return _fail_closed(
                 pipe, f"jit intake arm failed: {exc}", selection_bug,
                 phase=EagerPhase.JIT_ARM_FAILED)
         logger.info(
-            "fleet-compiled_graphs: JIT intake armed for %s (lane=%s) — this pod "
+            "fleet-compiled-graphs: JIT intake armed for %s (lane=%s) — this pod "
             "compiles its own graphs and serves them for its own life; no "
             "compiled graph is minted, keyed or published (pgw#1010)",
             family, loading.pipeline_weight_lane(pipe) or "plain")
@@ -1642,7 +1642,7 @@ def _arming_policy(
             subject=pipeline_arm_subject(pipe))
         key = arm_key.token
     except Exception as exc:  # noqa: BLE001 — obligation facts must be statable
-        logger.warning("fleet-compiled_graphs: self-mint identity computation failed (%s)", exc)
+        logger.warning("fleet-compiled-graphs: self-mint identity computation failed (%s)", exc)
         if bucket:
             cc.drop_lora_execution_lane(pipe)
         return _fail_closed(
@@ -1677,7 +1677,7 @@ def _arming_policy(
         # DEGRADE (explicit eager, mandatory lanes included): a broken
         # optimization must never kill a serving worker.
         logger.error(
-            "fleet-compiled_graphs: declining self-mint for %s key=%s (quarantined "
+            "fleet-compiled-graphs: declining self-mint for %s key=%s (quarantined "
             "ref=%s) — this identity was quarantined by a failed proof in "
             "this process; serving eager (pgw#672)",
             family, key, quarantined_ref)
@@ -1721,17 +1721,17 @@ def _arming_policy(
                 Path(finalized_prior.artifact), arm_key)
             if not armed_ready:
                 logger.warning(
-                    "fleet-compiled_graphs: the in-process finalized compiled graph for key=%s "
+                    "fleet-compiled-graphs: the in-process finalized compiled graph for key=%s "
                     "did not re-arm (%s%s); falling through to a fresh mint",
                     key, refusal[0], f": {refusal[1]}" if refusal[1] else "")
         except Exception as exc:  # noqa: BLE001 — fall back to a fresh mint
             logger.warning(
-                "fleet-compiled_graphs: re-arm from the in-process finalized compiled_graph "
+                "fleet-compiled-graphs: re-arm from the in-process finalized compiled_graph "
                 "failed (%s); falling through to a fresh mint", exc)
             armed_ready = False
         if armed_ready:
             logger.info(
-                "fleet-compiled_graphs: re-armed %s from this process's finalized "
+                "fleet-compiled-graphs: re-armed %s from this process's finalized "
                 "compiled_graph (key=%s) — no second mint (pgw#672)", family, key)
             return ArmOutcome(
                 armed=True, self_mint=finalized_prior,
@@ -1785,7 +1785,7 @@ def _arming_policy(
     with _PENDING_LOCK:
         _PENDING.setdefault(key, pending)
     logger.info(
-        "fleet-compiled_graphs: DELEGATED %s self-mint for %s (key=%s) — a child "
+        "fleet-compiled-graphs: DELEGATED %s self-mint for %s (key=%s) — a child "
         "process builds the compiled graph while this process serves eager "
         "(pgw#784/#805)", recipe, family, key)
     activity_mod.emit_event(
@@ -1796,7 +1796,7 @@ def _arming_policy(
         # diverging key.
         f"family={family} recipe={recipe} arm_key={key} "
         f"lane={loading.pipeline_weight_lane(pipe) or 'plain'}: a "
-        f"compile-compiled_graph miss opened a delegated mint; this worker serves "
+        f"compile-compiled-graph miss opened a delegated mint; this worker serves "
         f"eager throughout",
         phase=recipe,
     )
@@ -1998,12 +1998,12 @@ def _arm_exported_compiled_graph(
         # th#883: a compiled graph whose axes describe exactly this runtime refused to
         # arm. Loud — a bug in the one selection brain, not a compat miss.
         logger.error(
-            "fleet-compiled_graphs: compiled_graph_selection_bug arming a self-produced compiled_graph "
+            "fleet-compiled-graphs: compiled_graph_selection_bug arming a self-produced compiled_graph "
             "(%s): %s", artifact, exc)
         refusal = ("compiled_graph_selection_bug", str(exc))
     except Exception as exc:  # noqa: BLE001 — adoption failure => eager
         logger.warning(
-            "fleet-compiled_graphs: self-produced compiled_graph %s did not adopt (%s)",
+            "fleet-compiled-graphs: self-produced compiled_graph %s did not adopt (%s)",
             artifact, exc)
         # An `AdoptError` already carries the token; anything else is named by
         # its type rather than flattened into one word nobody can count.
@@ -2034,7 +2034,7 @@ def _sweep_superseded_memos_once() -> None:
     try:
         local_compiled_graph_store.sweep_superseded_memos(ARM_SCHEME)
     except Exception:  # noqa: BLE001 — a cache sweep is never fatal
-        logger.debug("fleet-compiled_graphs: memo sweep failed", exc_info=True)
+        logger.debug("fleet-compiled-graphs: memo sweep failed", exc_info=True)
 
 
 #: pgw#1127: how this machine ADDRESSED the compiled graph it armed. Two routes into one
@@ -2086,7 +2086,7 @@ def arm_from_local_store(
             route = ROUTE_BOOT_KEY
             local = local_compiled_graph_store.lookup(boot_local_key)
     except Exception as exc:  # noqa: BLE001 — a cache read must never be fatal
-        logger.warning("fleet-compiled_graphs: local compiled graph store unreadable (%s)", exc)
+        logger.warning("fleet-compiled-graphs: local compiled graph store unreadable (%s)", exc)
         return None
     if local is None:
         return None
@@ -2095,7 +2095,7 @@ def arm_from_local_store(
     if not armed:
         dropped = route == ROUTE_MEMO
         logger.warning(
-            "fleet-compiled_graphs: the local store's compiled graph for %s (key=%s, route=%s) did "
+            "fleet-compiled-graphs: the local store's compiled graph for %s (key=%s, route=%s) did "
             "not arm (%s%s); %s and minting", family, local.key, route, reason,
             f": {detail}" if detail else "",
             "dropping it" if dropped else "leaving it in place")
@@ -2140,7 +2140,7 @@ def arm_from_local_store(
         # same record must re-arm these bytes rather than pay a second lookup.
         _FINALIZED[arm_key.token] = minted
     logger.info(
-        "fleet-compiled_graphs: armed %s from THIS MACHINE's local compiled graph store "
+        "fleet-compiled-graphs: armed %s from THIS MACHINE's local compiled graph store "
         "(key=%s, %.1f MB, route=%s) — no mint, no hub, no network (§4.28)",
         family, key, local.bytes / 1e6, route)
     activity_mod.emit_event(
@@ -2355,7 +2355,7 @@ def adopt_delegated_mint(
     key, first_artifact, meta = adopted[0]
     if refusals:
         logger.warning(
-            "fleet-compiled_graphs: %d of %d minted classes did not adopt (%s); the "
+            "fleet-compiled-graphs: %d of %d minted classes did not adopt (%s); the "
             "rest are armed and will publish", len(refusals), len(rows),
             ", ".join(f"{n}:{r}" for n, r, _d in refusals[:4]))
     # §1.5 + pgw#1176: the DURABLE copy is each compiled graph's address from here on.
@@ -2406,7 +2406,7 @@ def adopt_delegated_mint(
         # this process paid a second full export.
         _FINALIZED[pending.arm_token] = minted
     logger.info(
-        "fleet-compiled_graphs: DELEGATED mint adopted for %s (key=%s, %.1f MB) — the "
+        "fleet-compiled-graphs: DELEGATED mint adopted for %s (key=%s, %.1f MB) — the "
         "worker served eager throughout and now serves compiled",
         pending.family, key, artifact_path.stat().st_size / 1e6)
     return minted
@@ -2569,7 +2569,7 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
         # whole point is that a machine with no sink by design is not a
         # machine that lost its sink by accident.
         logger.warning(
-            "fleet-compiled_graphs: SELF_MINT_WITHOUT_PUBLISH_SINK family=%s — compiled_graph "
+            "fleet-compiled-graphs: SELF_MINT_WITHOUT_PUBLISH_SINK family=%s — compiled_graph "
             "stays local to this pod; the fleet store gains nothing",
             pending.family)
         activity_mod.emit_event(
@@ -2620,7 +2620,7 @@ def keep_self_mint_local(pending: "PendingSelfMint") -> None:
         shutil.rmtree(pending.mint_root, ignore_errors=True)
         return
     logger.info(
-        "fleet-compiled_graphs: %s stays on THIS MACHINE (key=%s) — it has no publish "
+        "fleet-compiled-graphs: %s stays on THIS MACHINE (key=%s) — it has no publish "
         "sink by design, and its own store is where every later run finds it "
         "(§4.28)", pending.family, pending.arm_token)
     activity_mod.emit_event(
@@ -2666,7 +2666,7 @@ def withhold_self_mint_publish(pending: "PendingSelfMint", reason: str) -> None:
         return
     state["publish_resolved"] = True
     logger.error(
-        "fleet-compiled_graphs: SELF_MINT_PUBLISH_WITHHELD family=%s key=%s — %s; "
+        "fleet-compiled-graphs: SELF_MINT_PUBLISH_WITHHELD family=%s key=%s — %s; "
         "compiled graph stays local to this pod",
         pending.family, pending.arm_token, reason)
     # pgw#677 reopen: the withhold decision is hub-relevant truth (the mint
@@ -2783,7 +2783,7 @@ def mint_recipe(
     family = str(getattr(cfg, "family", "") or "")
 
     def _decline(reason: str, detail: str) -> str:
-        logger.info("fleet-compiled_graphs: AOT mint declined (%s): %s", reason, detail)
+        logger.info("fleet-compiled-graphs: AOT mint declined (%s): %s", reason, detail)
         if emit:
             activity_mod.emit_event(
                 "self_mint_skipped",
@@ -2983,7 +2983,7 @@ def _fail_closed(
     # is eager because there is no C toolchain" meant substring-matching a
     # sentence. It is the same token the request row's ``fallback_reason``
     # carries, so the two join.
-    logger.info("fleet-compiled_graphs: serving eager (%s)", reason)
+    logger.info("fleet-compiled-graphs: serving eager (%s)", reason)
     activity_mod.emit_event(
         "self_mint_skipped",
         f"lane={execution_lane or 'plain'}: no compiled graph and no mint — {reason}; this "

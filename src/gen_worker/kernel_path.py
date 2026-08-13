@@ -957,7 +957,7 @@ def adopt(meta: Optional[Mapping[str, Any]], *, source: str = "") -> str:
     """
     if meta is None:
         execution_lane, reason = DEFAULT_EXECUTION_LANE, (
-            f"{REASON_NO_COMPILED_GRAPH}: no compiled compiled graph delivered for this load; "
+            f"{REASON_NO_COMPILED_GRAPH}: no compiled graph delivered for this load; "
             f"serving the declared default {DEFAULT_EXECUTION_LANE!r}")
     else:
         execution_lane, reason = execution_lane_from_metadata(meta)

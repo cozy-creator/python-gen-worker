@@ -1875,11 +1875,11 @@ def target_constant_pool(
     user_managed=True)`` makes no copy of its own, so that clone was **the
     only copy in the system**: one full duplicate of the target's weights,
     held for the life of the arm — ~5.1 GiB on sdxl's single ``unet`` target
-    — in direct contradiction of §4.33 step 4 ("the compiled compiled graphs bind
+    — in direct contradiction of §4.33 step 4 ("the compiled graphs bind
     constants BY REFERENCE against the resident weights; there is no second
     copy of the model"). Its stated justification, "a post-arm resident
     mutation cannot silently change an armed compiled graph", is BACKWARDS: eager sees
-    such a mutation immediately, so it is the un-mutated compiled compiled graph that
+    such a mutation immediately, so it is the un-mutated compiled graph that
     would silently diverge from the pipeline it serves.
 
     What the clone ALSO did, and what therefore survives explicitly: it

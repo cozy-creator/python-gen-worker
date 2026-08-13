@@ -38,7 +38,7 @@ ARM_A = fleet_compiled_graphs.ARM_SCHEME + "-" + "1" * 56
 
 @pytest.fixture()
 def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    root = tmp_path / "cozy-compiled_graphs"
+    root = tmp_path / "cozy-compiled-graphs"
     monkeypatch.setenv(local_compiled_graph_store.ENV_STORE_DIR, str(root))
     return root
 

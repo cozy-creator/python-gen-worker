@@ -160,7 +160,7 @@ def test_adopt_refuses_typed_before_any_arm(
     mint_root = tmp_path / "mint-root"
     mint_root.mkdir()
     artifact = tmp_path / "compiled_graph.tar.gz"
-    artifact.write_bytes(b"not-a-real-compiled_graph")
+    artifact.write_bytes(b"not-a-real-compiled-graph")
     arm = _arm_key(seal, TOOLCHAIN)
     pending = fleet_compiled_graphs.PendingSelfMint(
         family="micro-diffusion", arm_token=arm.token,
@@ -249,7 +249,7 @@ def test_target_constant_pool_is_one_REFERENCE_per_fqn() -> None:
     ("owned, not aliased", pgw#812 D3). That clone was the ONLY copy in the
     system — one full duplicate of the target's weights held for the life of
     the arm, ~5.1 GiB on sdxl's single `unet` target — in direct contradiction
-    of §4.33 step 4, *"the compiled compiled graphs bind constants BY REFERENCE
+    of §4.33 step 4, *"the compiled graphs bind constants BY REFERENCE
     against the resident weights; there is no second copy of the model"*. The
     dedup this row actually guards is unchanged; only the ownership claim
     inverted.

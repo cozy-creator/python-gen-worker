@@ -45,7 +45,7 @@ def _report(request: MintRequest, report: MintReport) -> None:
 def _mint(request: MintRequest) -> None:
     target = Path(request.target)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(b"stub-compiled_graph-bytes")
+    target.write_bytes(b"stub-compiled-graph-bytes")
     _report(request, MintReport(
         status="minted",
         # pgw#1176: a mint reports its COMPILED_GRAPH SET. A double that

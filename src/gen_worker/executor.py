@@ -7656,7 +7656,7 @@ class Executor:
                         f"{spec.name}: the exported compiled graph on slots "
                         f"{sorted(candidate.slots)} took no warm dispatch — "
                         f"{reason}. It STAYS ARMED and serves; a "
-                        f"compiled_graph-attributable failure revokes it in-request",
+                        f"compiled-graph-attributable failure revokes it in-request",
                         phase=numerics_ladder.PHASE_ARMED_UNDISPATCHED,
                     )
 
@@ -7841,7 +7841,7 @@ class Executor:
                         logger.warning(
                             "compile object (slots=%s) armed with no warm "
                             "dispatch (calls=0); it SERVES, and a "
-                            "compiled_graph-attributable failure revokes it in-request "
+                            "compiled-graph-attributable failure revokes it in-request "
                             "(pgw#1141)", sorted(candidate.slots))
                         _confess_arm_without_dispatch(candidate)
                         # NOTE the publish is NOT withheld here any more. §4.32

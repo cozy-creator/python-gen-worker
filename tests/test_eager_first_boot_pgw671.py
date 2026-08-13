@@ -208,7 +208,7 @@ class _Harness:
             artifact=pending.target)
         pending._state["minted"] = minted
         pending.target.parent.mkdir(parents=True, exist_ok=True)
-        pending.target.write_bytes(b"stub-compiled_graph")
+        pending.target.write_bytes(b"stub-compiled-graph")
         return mint_delegate.DelegatedResult(
             status=mint_delegate.ADOPTED, minted=minted, attempts=1)
 

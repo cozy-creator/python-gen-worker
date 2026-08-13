@@ -53,7 +53,7 @@ def _run(request_id: str, **run_job: object) -> "pb.JobResult":
 
 
 def test_an_eager_worker_reports_an_eager_lane_on_the_wire() -> None:
-    """THE red test. A worker with no compiled compiled graph must not report one."""
+    """THE red test. A worker with no compiled graph must not report one."""
     res = _run("r-ie655-eager")
     assert res.status == pb.JOB_STATUS_OK, res.safe_message
     m = res.metrics

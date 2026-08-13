@@ -8,7 +8,7 @@ prewarm, th#912 slot-default seeding, #567 compile-compiled graph reload — was
 with ``ValidationError("must bind exactly []")``, swallowed by
 ``_reconcile_pass`` as one pod-local warning. Zero events, zero VRAM, no
 retry signal: the th#868 w8a8 fence never opened (qwen H100 rigs, sdxl
-ie529.r2, ltx B200 all deadlocked) and precompiled compiled graphs never armed
+ie529.r2, ltx B200 all deadlocked) and precompiled graphs never armed
 fleet-wide.
 
 Pinned here:

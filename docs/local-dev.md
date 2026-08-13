@@ -259,7 +259,7 @@ uses):
   consume the parent shell's stdin.
 
   **Turning compiled serving off** (DESIGN-RULINGS §4.32 item 4). Start with
-  `--eager-only` and the serve arms no compiled compiled graph and mints none — for a
+  `--eager-only` and the serve arms no compiled graph and mints none — for a
   compiled graph that turns out to be broken, or simply to skip a mint you do not want
   to spend your machine's minutes on. On an already-running serve, send the
   posture control frame; it is reversible, and the reverse costs nothing
