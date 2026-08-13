@@ -296,6 +296,40 @@ BEHAVIOUR_GATES: Dict[Tuple[str, str], str] = {
         "reaching a pod. Carries no behaviour of its own — its only outcome is "
         "a loud refusal.",
 
+    # ---------------------------------------------------------------------
+    # th#1887: found by the discriminated-locals pass, which is new. All four
+    # were INVISIBLE to the syntactic pass and sat misfiled as STANDALONE ("a
+    # CLI that loads no app config") in the allowlist, while living in serving
+    # hot-path modules. They are registered here rather than deleted because
+    # deletion needs one fact this box cannot produce: whether any published
+    # release DECLARES the variable in `endpoint_env_entries`. That is not
+    # hypothetical — GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF above is declared by
+    # five live SDXL releases, so "nothing sets it" is a hub query, not an
+    # assumption. Deleting a declared switch is exactly the
+    # GEN_WORKER_PREFER_AOT failure this whole gate exists to prevent.
+    # ---------------------------------------------------------------------
+    ("src/gen_worker/models/native_kernels.py", "GEN_WORKER_NATIVE_KERNELS"):
+        "th#1887 DELETION TARGET, pending a declaration check. Tri-state "
+        "rollout gate (unset/on/off) for the native-kernel path; unset means "
+        "the automatic choice, so deletion should be a no-op for every pod "
+        "that does not declare it. Threat while it lives: a dormant rollout "
+        "switch nobody re-tests, dark exactly like PREFER_AOT was.",
+    ("src/gen_worker/models/svdq.py", "GEN_WORKER_SVDQ_ENGINE"):
+        "th#1887 DELETION TARGET, pending a declaration check. Self-described "
+        "in-code as an 'operational kill-switch' that PINS the svdq engine for "
+        "the process; empty (the default) means choose per artifact and host. "
+        "Threat while it lives: a pinned engine outliving the incident it was "
+        "pinned for, silently serving a stale path on every later boot.",
+    ("src/gen_worker/video_encode.py", "GEN_WORKER_VIDEO_ENCODER"):
+        "th#1887 DELETION TARGET, pending a declaration check. Selects the "
+        "video encoder: 'auto' probes NVENC, 'x264' skips the probe entirely. "
+        "Threat while it lives: a pod pinned to x264 keeps encoding on CPU "
+        "after its GPU encoder starts working, and nothing reports the gap.",
+    ("src/gen_worker/parallel/group.py", "NCCL_NVLS_ENABLE"):
+        "READ-ONLY WARNING PREDICATE, same class as lifecycle.py above. Reads "
+        "the pre-imposition value only to decide whether to warn that the "
+        "settings authority overrode an ambient NCCL setting. Selects a log "
+        "line, never a code path — NOT a deletion target.",
 }
 
 #: Predicate-shaped function names: a `return <env read>` inside one of these is
@@ -303,24 +337,169 @@ BEHAVIOUR_GATES: Dict[Tuple[str, str], str] = {
 _PREDICATE_SUFFIXES = ("enabled", "disabled", "_on", "_off", "armed", "forced")
 
 
+#: Calls that only NORMALIZE a scalar without changing where it came from.
+#: Peeling these is what lets the taint pass see `str(os.environ.get(X) or
+#: "auto").strip().lower()` as a read, while refusing to peel `Path(...)`,
+#: `json.loads(...)` or a dict literal — which is the entire reason the pass
+#: does not drown in value config.
+_SCALAR_CASTS = ("str", "int", "float", "bool")
+_SCALAR_METHODS = ("strip", "lower", "upper", "lstrip", "rstrip", "casefold")
+
+#: Comparison operators that DISCRIMINATE a value against known alternatives.
+#: Truthiness (`if raw:`) is deliberately excluded: that is the dominant shape
+#: of genuine value config (`if not cache_dir: cache_dir = default`).
+_DISCRIMINATORS = (ast.Eq, ast.NotEq, ast.In, ast.NotIn)
+
+
+def _peel_scalar(node: ast.AST) -> ast.AST:
+    """Strip scalar-normalizing wrappers until the underlying expression shows.
+
+    Closed set on purpose. Anything not listed — `Path(...)`, `json.loads`,
+    arithmetic, a dict/list literal — is NOT peeled, so a read wrapped in it is
+    not treated as a gate. That single restriction is what keeps
+    TORCHINDUCTOR_CACHE_DIR and PYTHONHASHSEED out of the results.
+    """
+    while True:
+        if isinstance(node, ast.Call):
+            fn = node.func
+            if (isinstance(fn, ast.Name) and fn.id in _SCALAR_CASTS
+                    and len(node.args) == 1):
+                node = node.args[0]
+                continue
+            if (isinstance(fn, ast.Attribute) and fn.attr in _SCALAR_METHODS):
+                node = fn.value
+                continue
+        # `os.environ.get(X) or "auto"` — the default-value idiom.
+        if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or) and node.values:
+            node = node.values[0]
+            continue
+        return node
+
+
+def _env_read_name(node: ast.AST, consts: Dict[str, str]) -> str | None:
+    """The env var name iff `node` ITSELF is an env read — never a nested one.
+
+    Root-only on purpose. Probing a whole subtree instead would treat
+    `Path(os.environ.get(X) or "")` and `{"seed": os.environ.get(X)}` as reads
+    bound to a local, which is how a directory path and a hash seed end up
+    accused of being behaviour gates. The read must survive peeling as the
+    WHOLE right-hand side.
+    """
+    probe = EnvVisitor()
+    probe.consts = dict(consts)
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            base = func.value
+            if ((isinstance(base, ast.Attribute) and base.attr == "environ")
+                    or (isinstance(base, ast.Name) and base.id == "environ")
+                    or (isinstance(base, ast.Name) and base.id == "os"
+                        and func.attr == "getenv")):
+                return probe._name(node.args[0] if node.args else None)
+        return None
+    if isinstance(node, ast.Subscript):
+        value = node.value
+        if ((isinstance(value, ast.Attribute) and value.attr == "environ")
+                or (isinstance(value, ast.Name) and value.id == "environ")):
+            return probe._name(node.slice)
+    return None
+
+
+def _literal_collections(tree: ast.AST) -> Set[str]:
+    """Module-level names bound to a collection of literals (svdq's SVDQ_ENGINES)."""
+    found: Set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target, value = node.targets[0], node.value
+        if (isinstance(target, ast.Name)
+                and isinstance(value, (ast.Tuple, ast.List, ast.Set))
+                and value.elts
+                and all(isinstance(e, ast.Constant) for e in value.elts)):
+            found.add(target.id)
+    return found
+
+
+def _is_literal_alternatives(node: ast.AST, collections: Set[str]) -> bool:
+    """True when `node` is a set of known alternatives to discriminate against."""
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, (str, int, bool)) or node.value is None
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return bool(node.elts) and all(isinstance(e, ast.Constant) for e in node.elts)
+    # A module-level collection of literals, e.g. svdq.py's SVDQ_ENGINES.
+    return isinstance(node, ast.Name) and node.id in collections
+
+
 class BehaviourVisitor(ast.NodeVisitor):
     """Env reads whose value reaches a CONDITIONAL rather than a value slot.
 
-    Deliberately syntactic and conservative. It cannot follow a read through a
-    variable into an `if` three functions away, and it does not try — a gate
-    that pretends to completeness it does not have is worse than one whose
-    reach is stated. What it DOES catch is every shape the four switches
-    deleted by pgw#995 were written in, which is the shape this defect keeps
-    being written in.
+    Deliberately syntactic and conservative. What it catches is stated, and so
+    is what it does not — a gate that pretends to completeness it does not have
+    is worse than one whose reach is stated.
+
+    TWO passes, because one was not enough:
+
+    1. `_scan_conditions` — the read sits syntactically inside an `if`/`while`/
+       ternary/`assert` test, a comprehension guard, or the `return` of a
+       predicate-shaped function. Every switch deleted by pgw#995 was this
+       shape.
+
+    2. `_scan_discriminated_locals` (th#1887) — the read is assigned to a local
+       and that local is then discriminated against known alternatives
+       (`==`/`!=`/`in`/`not in`, or a `match` subject). This shape was
+       STRUCTURALLY INVISIBLE to pass 1, and three real gates were hiding in
+       it: GEN_WORKER_NATIVE_KERNELS, GEN_WORKER_SVDQ_ENGINE and
+       GEN_WORKER_VIDEO_ENCODER, all misfiled as STANDALONE. A registry that
+       cannot see a whole gate SHAPE is a guard that cannot fire, which is
+       worse than the three gates it missed.
+
+    Still out of reach, stated honestly: a read stored in a module-level
+    constant and branched on elsewhere; a read passed as a call argument to a
+    callee that branches; `BoolOp` short-circuit used as control flow; a read
+    hidden in a collection and reached by lookup.
     """
 
     def __init__(self) -> None:
         self.hits: List[Tuple[int, str]] = []
 
-    def _collect(self, node: ast.AST) -> None:
-        sub = EnvVisitor()
-        sub.visit(node)
-        self.hits.extend(sub.hits)
+    def _scan_discriminated_locals(
+        self, tree: ast.AST, consts: Dict[str, str], collections: Set[str]
+    ) -> None:
+        """Pass 2: read -> local -> discriminated against known alternatives."""
+        for scope in ast.walk(tree):
+            if not isinstance(scope, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            # Locals bound to a (scalar-normalized) env read, ROOT-ONLY: the
+            # read must be the whole right-hand side once wrappers are peeled.
+            tainted: Dict[str, Tuple[int, str]] = {}
+            for node in ast.walk(scope):
+                targets: List[ast.expr] = []
+                if isinstance(node, ast.Assign):
+                    targets = node.targets
+                elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                    targets = [node.target]
+                if len(targets) != 1 or not isinstance(targets[0], ast.Name):
+                    continue
+                if node.value is None:
+                    continue
+                peeled = _peel_scalar(node.value)
+                name = _env_read_name(peeled, consts)
+                if name is not None:
+                    tainted[targets[0].id] = (peeled.lineno, name)
+            if not tainted:
+                continue
+            for node in ast.walk(scope):
+                local = ""
+                if isinstance(node, ast.Compare) and isinstance(node.ops[0], _DISCRIMINATORS):
+                    left, right = node.left, node.comparators[0]
+                    if isinstance(left, ast.Name) and _is_literal_alternatives(right, collections):
+                        local = left.id
+                    elif isinstance(right, ast.Name) and _is_literal_alternatives(left, collections):
+                        local = right.id
+                elif isinstance(node, ast.Match) and isinstance(node.subject, ast.Name):
+                    local = node.subject.id
+                if local in tainted:
+                    self.hits.append(tainted.pop(local))
 
     def _scan_conditions(self, tree: ast.AST, consts: Dict[str, str]) -> None:
         for node in ast.walk(tree):
@@ -361,6 +540,8 @@ def scan_behaviour() -> Dict[Tuple[str, str], int]:
         consts.load_consts(tree)
         visitor = BehaviourVisitor()
         visitor._scan_conditions(tree, consts.consts)
+        visitor._scan_discriminated_locals(
+            tree, consts.consts, _literal_collections(tree))
         rel = str(path.relative_to(REPO))
         for lineno, name in visitor.hits:
             sites.setdefault((rel, name or UNRESOLVED), lineno)
