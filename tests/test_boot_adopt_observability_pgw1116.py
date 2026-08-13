@@ -91,10 +91,28 @@ def _adopt_events(seen: List[Any]) -> List[Any]:
 
 
 def _one(seen: List[Any]) -> Any:
+    """The boot-adopt event, when the decision is one per CLASS.
+
+    pgw#1176: the rule this helper enforces was "EXACTLY one typed event per
+    boot-adopt decision", and it is UNCHANGED — what changed is what a
+    decision is about. A boot derives a KEY SET and decides per class, so a
+    3-class declaration emits three events, one per class, each carrying its
+    own key. That is the anti-silence property pgw#1116 exists for, applied at
+    the granularity the atom made real: a pod that resolved 30 of 36 keys must
+    say so 36 times, not once.
+
+    Every row must still reach the SAME terminus here — these fixtures fail
+    identically for all classes — so a divergence between them is a defect
+    this assertion catches.
+    """
     rows = _adopt_events(seen)
-    assert len(rows) == 1, (
-        "a boot-adopt decision must emit EXACTLY one typed event — got "
+    assert rows, (
+        "a boot-adopt decision emitted NO typed event — got "
         f"{[(u.kind, u.phase) for u in seen]}")
+    phases = {u.phase for u in rows}
+    assert len(phases) == 1, (
+        "the classes of one declaration reached DIFFERENT boot-adopt termini "
+        f"in a fixture that fails identically for all of them: {phases}")
     return rows[0]
 
 
@@ -240,7 +258,7 @@ def test_each_pre_attempt_gate_names_itself_on_the_wire(
         _raise(AssertionError("attempt must not be reached past this gate")))
     wire(monkeypatch)
 
-    out = _executor(tmp_path)._boot_adopt(_Spec(), {})
+    (out,) = _executor(tmp_path)._boot_adopt(_Spec(), {})
 
     assert out is not None, (
         "a gate that returns a bare None carries no reason, no family and no "
@@ -271,7 +289,7 @@ def test_no_cell_source_names_which_half_of_the_readiness_was_missing(
     ex.file_base_url = ""
     ex.worker_jwt_provider = lambda: ""
 
-    out = ex._boot_adopt(_Spec(), {})
+    (out,) = ex._boot_adopt(_Spec(), {})
     # pgw#1127: the same sentence, under the token that is now true — the
     # detail is what an operator greps, so it is deliberately unchanged.
     assert out.reason == "no_cell_source"
@@ -321,10 +339,13 @@ def _derived(wall_ms: int = 1234) -> Any:
     from gen_worker import cell_key as ck
 
     return boot_key.DerivedKey(
-        key=ck.from_axes({
-            "graph": "c0ffee0000000000", "envelope": "e" * 16,
-            "sm": "sm_89", "toolchain": "t" * 16}),
-        class_hashes={"a": "0" * 16}, combined="c0ffee0000000000",
+        # pgw#1176: a boot derives a KEY SET. These declarations trace to one
+        # class, so the set has one member and callers take it from `keys`.
+        entry_keys={"a": ck.from_axes({
+            "graph": "c0ffee0000000000",
+            "sm": "sm_89", "toolchain": "t" * 16}).digest},
+        class_hashes={"a": "c0ffee0000000000"},
+        manifest=ck.manifest_digest(["c0ffee0000000000"]),
         workers=2, width_reason="test", traced=1, memo="miss",
         wall_ms=wall_ms)
 
@@ -337,6 +358,15 @@ class _Cell:
 
 
 def _attempt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **wires: Any) -> Any:
+    """The FIRST of the per-class outcomes a boot returns (pgw#1176).
+
+    This declaration traces THREE classes, so `attempt` answers three times —
+    one per key, which is the point of the key set. These rows are about the
+    TERMINUS vocabulary (which reason, which event), and every class reaches
+    the same terminus here because the wires under test fail identically for
+    all of them. Rows that care about per-class divergence index the tuple;
+    `test_the_verdict_is_bisectable_to_ONE_named_axis` is the one that does.
+    """
     if "derive" in wires:
         monkeypatch.setattr(boot_key, "derive", wires["derive"])
     if "resolve" in wires:
@@ -347,7 +377,7 @@ def _attempt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **wires: Any) -> A
         function="generate", modules=("micro_diffusion.main",), cfg=_Cfg(),
         slots={}, declared_hint=3,
         envelope={"shapes": [[64, 64]], "text_lens": [8], "guidance": []},
-        work_root=tmp_path)
+        work_root=tmp_path)[0]
 
 
 def _refuse_hub(code: str) -> Any:
@@ -422,7 +452,7 @@ def test_a_pod_that_derived_and_missed_is_not_a_pod_that_never_derived(
     never = _one(events)
 
     assert missed.phase == "miss" and never.phase == "no_export_declaration"
-    assert "key=ck1-" in missed.detail, (
+    assert "key=ek1-" in missed.detail, (
         "a MISS must carry the key that missed — it is the whole difference "
         "between 'the hub holds nothing for me' and 'I never asked'")
     assert "key=-" in never.detail
@@ -558,10 +588,12 @@ def test_a_cold_boot_with_a_reachable_hub_actually_issues_the_resolve(
                      tag="prod"),
         path=str(micro_tree))}
 
-    out = ex._boot_adopt(spec, slots)
+    # pgw#1176: three declared classes, three outcomes; this row is about
+    # the terminus, which every class reaches identically here.
+    out = ex._boot_adopt(spec, slots)[0]
 
     resolves = [c for c in hub.calls if c[0] == cell_resolve.RESOLVE_PATH]
-    assert len(resolves) == 1, (
+    assert len(resolves) == 3, (
         "the worker did not ask the hub by its derived key — this is the pod "
         f"defect, reproduced off-pod. Hub saw: {hub.calls}")
     assert resolves[0][1] == {
@@ -622,7 +654,9 @@ def test_the_same_boot_derives_a_key_with_accelerate_UNIMPORTABLE(
                      tag="prod"),
         path=str(micro_tree))}
 
-    out = ex._boot_adopt(spec, slots)
+    # pgw#1176: three declared classes, three outcomes; this row is about
+    # the terminus, which every class reaches identically here.
+    out = ex._boot_adopt(spec, slots)[0]
 
     assert out.reason != "structure_unsupported", (
         "the trace children still cannot build a structure without "
@@ -630,7 +664,7 @@ def test_the_same_boot_derives_a_key_with_accelerate_UNIMPORTABLE(
     assert out.reason == "miss", out.detail
     assert out.derived_key.startswith("ek1-")
     resolves = [c for c in hub.calls if c[0] == cell_resolve.RESOLVE_PATH]
-    assert len(resolves) == 1, (
+    assert len(resolves) == 3, (
         "an image without `accelerate` must still ASK — this is the pgw#1123 "
         f"pod defect, reproduced off-pod. Hub saw: {hub.calls}")
     assert _one(events).phase == "miss"
