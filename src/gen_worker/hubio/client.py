@@ -176,25 +176,17 @@ def _retry_after_s(resp: requests.Response) -> Optional[float]:
 
 
 def _error_code_of(resp: requests.Response) -> str:
-    """Best-effort extraction of the structured `error.code` field
-    (docs/api-conventions.md: `{"error": {"code": ..., ...}}`); "" if the
-    body isn't that shape."""
-    try:
-        body = resp.json() if resp.text else {}
-    except Exception:
-        return ""
-    if not isinstance(body, dict):
-        return ""
-    err = body.get("error")
-    if isinstance(err, dict):
-        return str(err.get("code") or "")
-    # pgw#987: the publish envelope (`publishError.body()`) and gin's
-    # `AbortWithStatusJSON` both emit the code as a STRING. Dropping it left
-    # `_publish_failure_phase` with only `http_413` to group 32 identical
-    # refusals by, when the hub had named the fault exactly.
-    if isinstance(err, str) and err.strip():
-        return err.strip()
-    return ""
+    """The hub's `error.code`, or "" when the body isn't an envelope.
+
+    pgw#987: the publish envelope (`publishError.body()`) and gin's
+    `AbortWithStatusJSON` both emit the code as a STRING alongside a sibling
+    `message`. Dropping it left `_publish_failure_phase` with only `http_413`
+    to group 32 identical refusals by, when the hub had named the fault
+    exactly. pgw#1229 moved both shapes into the one parser.
+    """
+    from ..hub_error import hub_error_of
+
+    return hub_error_of(resp).code
 
 
 # pgw#738/#743: how long _send_with_retries tolerates hearing nothing

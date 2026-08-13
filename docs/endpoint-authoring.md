@@ -781,6 +781,29 @@ Raise `ValidationError` (bad input, don't retry), `RetryableError`,
 `CanceledError`, or `FatalError`. Anything else is reported as an internal
 error.
 
+### Talking to the hub: never `raise_for_status()` (pgw#1229)
+
+The hub answers a refusal with a code and, usually, a sentence naming the
+correct surface. `requests`' `raise_for_status()` renders only
+`"403 Client Error: Forbidden for url: ..."`, and that string is what lands in
+`request_state.error_message_safe` — measured, on two production invokes whose
+403 body had spelled out the remedy in English.
+
+Use the SDK wrapper instead:
+
+```python
+from gen_worker import HubApiError, raise_for_hub_error
+
+resp = requests.post(url, headers=..., json=..., timeout=60)
+raise_for_hub_error(resp, what="presign input assets")
+```
+
+It raises `HubApiError` carrying `code`, `message`, `request_id` and
+`status_code`, with a one-line `str()` that the worker copies verbatim onto the
+wire. A non-2xx that is not the hub's envelope came from a proxy in front of it
+and is classified RETRYABLE; the hub's own refusals are not retried. This is for
+calls to OUR hub only — a third-party host has no envelope to parse.
+
 ## The output-integrity floor (pgw#1094)
 
 `ctx.save_image`, `io.write_image` and `io.write_video` look at the PIXELS

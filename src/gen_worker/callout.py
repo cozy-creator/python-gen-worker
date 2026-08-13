@@ -29,6 +29,7 @@ from .api.errors import (
     ChildRequestCanceledError,
     ChildRequestFailedError,
 )
+from .hub_error import parse_hub_error
 
 _REFUSAL_CODES = frozenset(
     {
@@ -55,17 +56,12 @@ _HTTP_TIMEOUT_S = 60.0
 
 
 def _parse_error_body(text: str) -> tuple[str, str]:
-    """Best-effort (code, message) from a platform error response body."""
-    try:
-        doc = json.loads(text or "{}")
-    except ValueError:
-        return "", (text or "")[:256]
-    err = doc.get("error")
-    if isinstance(err, dict):
-        return str(err.get("code") or ""), str(err.get("message") or "")
-    if isinstance(err, str):
-        return "", err[:256]
-    return "", (text or "")[:256]
+    """Best-effort (code, message) from a platform error response body.
+
+    pgw#1229: one parser for the hub envelope, in ``hub_error``.
+    """
+    err = parse_hub_error(text)
+    return err.code, err.message
 
 
 class CalloutClient:

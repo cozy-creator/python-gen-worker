@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..api.errors import AuthError, SnapshotBuildFailedError
 from ..bounded_stream import free_space_bound
+from ..hub_error import hub_error_of
 from ..hubio.fetch import fetch_once
 from ..stall import SilenceWindow
 import requests
@@ -70,7 +71,10 @@ def lookup_dataset_id(base: str, token: str, tenant: str, name: str) -> str:
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(url, headers=headers, timeout=30)
     if resp.status_code in (401, 403):
-        raise AuthError(f"dataset lookup unauthorized ({resp.status_code})")
+        raise AuthError(
+            f"dataset lookup unauthorized ({resp.status_code}): "
+            f"{hub_error_of(resp).detail() or resp.text[:200]}"
+        )
     if resp.status_code == 404:
         raise DatasetRefNotFound(f"no such tenant dataset list: tenant={tenant}")
     if resp.status_code < 200 or resp.status_code >= 300:
@@ -199,7 +203,10 @@ def fetch_materialize_manifest(
             continue
 
         if resp.status_code in (401, 403):
-            raise AuthError(f"dataset materialize unauthorized ({resp.status_code})")
+            raise AuthError(
+                f"dataset materialize unauthorized ({resp.status_code}): "
+                f"{hub_error_of(resp).detail() or resp.text[:200]}"
+            )
 
         if resp.status_code == 202:
             # A definite answer: the build is live hub-side.

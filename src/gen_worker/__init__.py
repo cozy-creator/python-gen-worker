@@ -83,6 +83,7 @@ from .api.errors import (
     ValidationError,
     WorkerError,
 )
+from .hub_error import HubApiError, HubError, parse_hub_error, raise_for_hub_error
 from .callout import ChildRequest
 from .api.progress import diffusers_step_callback
 from .api.streaming import (
@@ -207,6 +208,11 @@ __all__ = [
     "ResourceError",
     "SnapshotBuildFailedError",
     "WorkerError",
+    # pgw#1229: the hub's typed error envelope, for any endpoint HTTP call.
+    "HubApiError",
+    "HubError",
+    "parse_hub_error",
+    "raise_for_hub_error",
     # th#826 call-out primitive (ctx.call_endpoint / ctx.workflow_checkpoint).
     "ChildRequest",
     "ChildCallError",
