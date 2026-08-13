@@ -778,6 +778,29 @@ def mint(request: MintRequest) -> MintReport:
             got = run_setup(
                 obj, dict(paths), arm_compile=False,
                 return_loaded=True, component_paths=overrides,
+                # pgw#1208: NO SERVING PLACEMENT on the weight-free path. The
+                # pgw#1124 seam, and the same argument one door over: the
+                # placement ladder is for a pipeline that will run a forward,
+                # and this one never will — it exports and nothing else. Since
+                # pgw#1199 the child runs no warm proof either, so the last
+                # reason to place it is gone.
+                #
+                # This is not a tuning choice, it is the whole of the sdxl
+                # A4000 failure. The ladder engaged diffusers GROUP OFFLOADING
+                # (the card had a resident serving parent on it), which
+                # installs hooks whose `ModuleGroup.onload_` is decorated
+                # `@torch.compiler.disable` — and `torch.export(strict=True)`
+                # refuses to inline a disabled function, fatally and
+                # deterministically:
+                #
+                #   Unsupported: Skip inlining `torch.compiler.disable()`d
+                #   function <function ModuleGroup.onload_>
+                #
+                # Measured, same wheel (0.113.2), same entry
+                # (`unet/adapter=true,cfg=true/B=2,H_lat=80,T_txt=77,W_lat=192`):
+                # 91.07 s export on an A4500, `Unsupported` on an A4000. The
+                # hooks are not stripped here — they are never installed.
+                place=False,
                 structure_only=structure_targets) or {}
         except StructureNotHonored as exc:
             # pgw#1080 z-image tail: the target WAS built weight-free and the
@@ -806,6 +829,11 @@ def mint(request: MintRequest) -> MintReport:
             frame(phase="load", note=(
                 f"structure-only {structure_only.refusal_token(exc)}: {exc}"))
             obj = spec.cls()
+            # The REAL-WEIGHT fallback keeps its placement, deliberately:
+            # structure-only was refused for this family, so this process
+            # holds the checkpoint AND runs the pgw#984 warm proof — a real
+            # forward, which needs a placed pipeline. Only the path that
+            # exports and never executes may skip the ladder.
             got = run_setup(
                 obj, dict(paths), arm_compile=False,
                 return_loaded=True, component_paths=overrides) or {}
