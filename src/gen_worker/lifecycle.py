@@ -1198,7 +1198,7 @@ class Lifecycle:
         """Gate functions, prefetch worker-fetchable models with retry/backoff,
         set up endpoints, advance phases. Never raises: failures gate
         individual functions, not the process."""
-        # The beat starts BEFORE any boot work so a hang anywhere in setup is
+        # the beat starts BEFORE any boot work so a hang anywhere in setup is
         # still covered — the task shares this event loop, so it beats iff the
         # loop is servicing tasks.
         if self._heartbeat_task is None:

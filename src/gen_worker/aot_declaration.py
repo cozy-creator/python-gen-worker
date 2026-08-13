@@ -309,7 +309,7 @@ def select_plan(
     """The mint plan for one requested coordinate, refused by name when the
     coordinate is not declared — reading only declared facts, never family
     knowledge."""
-    # The adapter arm is an SDK-synthesized coordinate — the endpoint never
+    # the adapter arm is an SDK-synthesized coordinate — the endpoint never
     # declared it, so it can never select a DECLARED plan. Stripped here rather
     # than at each call site because every reader of a spec's fork goes through
     # this function.

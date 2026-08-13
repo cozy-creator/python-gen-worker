@@ -352,7 +352,7 @@ def presigned_upload_file(
             commit body's `provenance` object (worker-addable stamp fields),
             not through this seam.
     """
-    # Two scopes, deliberately different (see the module docstring): the R2
+    # two scopes, deliberately different (see the module docstring): the R2
     # PUT pool lives exactly as long as this save and then closes, while the
     # hub control-plane session is process-scoped and survives it.
     #

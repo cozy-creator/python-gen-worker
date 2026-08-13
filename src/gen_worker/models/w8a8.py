@@ -49,7 +49,7 @@ W8A8_FLAVOR = "fp8-w8a8"
 # torch._scaled_mm needs fp8 tensor cores (sm_89 Ada +) and 16-aligned dims.
 W8A8_MIN_SM = 89
 # torch's fast ROWWISE-scaled kernels are CUTLASS sm_90+; sm_89 runs rowwise
-# On a ~half-rate fallback and takes the pertensor branch instead.
+# on a ~half-rate fallback and takes the pertensor branch instead.
 W8A8_ROWWISE_MIN_SM = 90
 _FP8_MAX = 448.0
 _DIM_ALIGN = 16

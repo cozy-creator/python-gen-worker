@@ -404,7 +404,7 @@ def _hub_sign_claim(remote: _RemoteSigner, alg: str, claim: bytes) -> bytes:
     never the media. Any refusal raises, so the request fails instead of
     shipping an asset with a missing or bogus manifest.
     """
-    # Under the process split this callback runs in the compute child, which
+    # under the process split this callback runs in the compute child, which
     # holds no worker JWT — so the ASK is a parent-side IPC action. The child
     # sends a hash (the COSE to-be-signed octets) and gets a signature back;
     # the credential that authorizes the oracle, like the key behind it, is

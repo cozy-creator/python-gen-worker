@@ -731,7 +731,7 @@ class RequestContext(Generic[D]):
 
     def _require_repo_job_scope_for_tensors(self, ref: str) -> None:
         """
-        For training/conversion checkpoints, remote tensor uploads must be job-scoped
+        for training/conversion checkpoints, remote tensor uploads must be job-scoped
         repo-cas writes. This prevents silent fallback to user-files/media uploads.
         """
         kind = self._tensor_upload_execution_kind()

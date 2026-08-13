@@ -49,7 +49,7 @@ IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 
 
 # ==========================================================================
-# The outer half: get root, honestly, without a pod
+# the outer half: get root, honestly, without a pod
 # ==========================================================================
 
 
@@ -179,7 +179,7 @@ def test_privilege_isolation_rows_under_a_real_root_parent():
 
 
 # ==========================================================================
-# The rows themselves — root parent, unprivileged compute child.
+# the rows themselves — root parent, unprivileged compute child.
 #
 # Skipped rather than absent when not root: the run says out loud that the
 # boundary was NOT measured here, instead of a green tick that means nothing.
@@ -495,7 +495,7 @@ def test_the_parent_can_still_signal_and_reap_the_dropped_child(dropped):
     assert proc is not None and proc.returncode is None
     pid = proc.pid
     # NO `assert time.monotonic() - started < 120.0` here, and
-    #  No single read after `close()` either — returning from `close()`
+    #  no single read after `close()` either — returning from `close()`
     # is not proof the reap completed. The property is that the parent exited
     # and the child was reaped, so wait on THAT advancing; a hang fails by never
     # reaping, which is the actual defect.

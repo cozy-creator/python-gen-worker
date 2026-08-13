@@ -41,7 +41,7 @@ Fixture / helper interface
     by default they point at ``tests_v2.catalog``.
 
 ``torchless`` (fixture)
-    In-process torch absence: blocks ``import torch`` via a meta-path finder
+    in-process torch absence: blocks ``import torch`` via a meta-path finder
     and strips cached torch modules for the duration (pgw#788 shape).
 
 From the old harness (import directly; they are part of this interface):

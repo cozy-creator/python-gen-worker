@@ -566,7 +566,7 @@ def _commit(root: Path, override: str) -> str:
 
 def run(args: argparse.Namespace) -> Tuple[int, Report]:
     """The whole checklist. Returns ``(exit code, report)``."""
-    # The fleet line is asserted before the endpoint's own code is imported,
+    # the fleet line is asserted before the endpoint's own code is imported,
     # let alone loaded: a rig off the line has produced no evidence, so there
     # is nothing to gain by getting further first.
     root = (Path.cwd().resolve() if args.module

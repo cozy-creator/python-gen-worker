@@ -46,7 +46,7 @@ from harness.hub_double import hub_double
 
 # The private `activity._sink` restore this file used to carry is now
 # `tests/conftest.py::_fresh_report_sinks` — one authority for the whole suite,
-# Not one file remembering.
+# not one file remembering.
 
 
 def _reconnect_events(msgs: List[pb.WorkerMessage], phase: str) -> List[pb.ActivityUpdate]:

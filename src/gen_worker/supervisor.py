@@ -193,7 +193,7 @@ def supervise(
     Called before the worker's heavy imports so the parent stays tiny — the
     kernel's OOM killer picks the fat child, leaving the reporter alive.
     """
-    # The signal mask survives fork AND exec, so whoever launched this process
+    # the signal mask survives fork AND exec, so whoever launched this process
     # decides whether the drain contract is deliverable at all. Take it back —
     # on every path, including the un-supervised one.
     _mask(signal.SIG_UNBLOCK, _CONTRACT_SIGNALS)

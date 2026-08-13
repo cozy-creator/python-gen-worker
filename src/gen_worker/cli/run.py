@@ -830,7 +830,7 @@ def _load_injected_model(
     and injected through ``from_pretrained(components=...)`` — the same seam
     and the same loader the executor's setup uses, so a composition assembled
     here is the composition assembled there."""
-    # The override trees are part of the slot's identity: two loads of the
+    # the override trees are part of the slot's identity: two loads of the
     # same base path with different overrides are different pipelines.
     key = (
         str(annotation),

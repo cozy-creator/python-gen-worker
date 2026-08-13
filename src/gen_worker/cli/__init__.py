@@ -68,7 +68,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     without spawning a subprocess. The console_script wrapper turns the
     returned int into the process exit code via ``sys.exit(main())``.
     """
-    # The bootstrap-owned load for the STANDALONE CLI process entry — one load
+    # the bootstrap-owned load for the STANDALONE CLI process entry — one load
     # PER PROCESS ENTRY, and this is the third (after `entrypoint._run_main`
     # and `procsplit.parent.run_parent`). Without it the `models/` helpers fall
     # back to their zero-value standalone defaults and a `gen-worker run`

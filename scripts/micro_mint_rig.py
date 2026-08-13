@@ -675,7 +675,7 @@ def _adopt_in_subprocess(
                 # A MISS is not a crash, and its reason lives in the typed
                 # `aot-cells` events on stderr. Carrying it out is the whole
                 # difference between "no cell" and "twelve cells, all rejected
-                # On one axis".
+                # on one axis".
                 out["miss_log"] = _adopt_miss_log(proc.stderr)
             return out
     return {"ok": False,

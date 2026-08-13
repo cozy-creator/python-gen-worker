@@ -223,7 +223,7 @@ def write_image(
     is typed ``ImageAsset`` don't have to round-trip through
     ``msgspec.to_builtins``.
     """
-    # The encode+upload tail runs slotless so it overlaps the next
+    # the encode+upload tail runs slotless so it overlaps the next
     # request's denoise, the same terminal handoff write_video performs. The
     # release is TERMINAL and once-only — safe here because this call is the
     # handler's last GPU-relevant act, which is why it is not applied to

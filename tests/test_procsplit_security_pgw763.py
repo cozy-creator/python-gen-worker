@@ -733,7 +733,7 @@ def test_capability_policy_passes_a_job_with_no_grant():
 
 
 # ==========================================================================
-# The allowlist itself — unit rows, because the table IS the policy
+# the allowlist itself — unit rows, because the table IS the policy
 # ==========================================================================
 
 

@@ -1077,7 +1077,7 @@ class Transport:
         )
         if pod:
             # The hub owns the actuator for a pod. Say so once per verdict so
-            # The silence is attributable off-pod.
+            # the silence is attributable off-pod.
             if not repeated:
                 self._report_auth_verdict_deferred(cred, details, pod)
             return False

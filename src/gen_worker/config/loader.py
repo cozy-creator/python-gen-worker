@@ -34,7 +34,7 @@ _ENV_TO_FIELD: Dict[str, str] = {
     "ORCHESTRATOR_PUBLIC_ADDR": "orchestrator_public_addr",
     "WORKER_ID": "worker_id",
     # The ENV name is hub-injected and fixed; the FIELD is renamed
-    #  So no call site can read it as the live credential.
+    #  so no call site can read it as the live credential.
     "WORKER_JWT": "bootstrap_worker_jwt",
     "WORKER_RELEASE_ID": "worker_release_id",
     "ENDPOINT_LOCK_PATH": "endpoint_lock_path",
