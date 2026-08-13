@@ -41,7 +41,7 @@ from gen_worker.cli import run as cli_run
 from gen_worker.child_contract import MintSlot
 
 KEY_A = "cg-key-v1-" + "a" * 56
-ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * 56
+ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * fleet_cells.ARM_DIGEST_HEX
 
 SRC = Path(fleet_cells.__file__).parent
 

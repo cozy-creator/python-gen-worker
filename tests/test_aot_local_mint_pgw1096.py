@@ -37,8 +37,8 @@ KEY_A = "cg-key-v1-" + "a" * 56
 KEY_B = "cg-key-v1-" + "b" * 56
 # pgw#1113: spelled in the CURRENT token scheme — a predecessor-scheme memo
 # is swept by `fleet_cells._sweep_superseded_memos_once`, which is the point.
-ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * 56
-ARM_B = fleet_cells.ARM_SCHEME + "-" + "2" * 56
+ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * fleet_cells.ARM_DIGEST_HEX
+ARM_B = fleet_cells.ARM_SCHEME + "-" + "2" * fleet_cells.ARM_DIGEST_HEX
 
 
 @pytest.fixture()

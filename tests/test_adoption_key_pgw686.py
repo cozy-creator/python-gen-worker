@@ -184,13 +184,13 @@ def test_burst_divergence_reproduced_execution_lane_only(burst_runtime: None) ->
     # torch-inductor-cache artifact has no key identity at all any more
     # (pgw#1059), so an old key can only MISS.
     #
-    # pgw#1176 SHARPENS the miss and this row records the change: a `ck` key
-    # is no longer merely key-SHAPED-but-dead. It names a 36-entry
-    # all-or-nothing cell this runtime cannot arm at all, so it does not
-    # parse — which is what makes an orphaned ref fail at the comparison
-    # rather than late inside a per-entry code path.
+    # th#1897 puts the miss back where it can be decided by one repo: a `ck`
+    # key IS key-shaped — the shared grammar refuses shape, never scheme, so a
+    # newer fleet's key stays addressable by an older hub — and it names
+    # nothing, because no current derivation restates its axes. The orphan
+    # misses at the comparison, not at the parse.
     for old in (CK2_PUBLISHED, CK2_REQUESTED_PLAIN, CK2_REQUESTED_FP8_HOOKS):
-        assert not ck.is_key(old)
+        assert ck.is_key(old)
     with pytest.raises(ck.CellKeyError, match="has no entry-key identity"):
         ck.from_entry_metadata(_BURST_META)
 

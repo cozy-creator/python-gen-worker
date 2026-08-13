@@ -57,7 +57,7 @@ from gen_worker.cell_adopt import AdoptOutcome
 # orphaning the re-key predicts, surfacing exactly where it should.
 KEY_A = "cg-key-v1-" + "a" * 56
 KEY_B = "cg-key-v1-" + "b" * 56
-ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * 56
+ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * fleet_cells.ARM_DIGEST_HEX
 
 
 # ---------------------------------------------------------------------------

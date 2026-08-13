@@ -33,7 +33,7 @@ from gen_worker import fleet_cells, local_cell_store
 from gen_worker.cell_adopt import AdoptOutcome
 
 KEY_A = "cg-key-v1-" + "a" * 56
-ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * 56
+ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * fleet_cells.ARM_DIGEST_HEX
 
 
 @pytest.fixture()
