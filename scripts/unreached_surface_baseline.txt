@@ -208,7 +208,7 @@ gen_worker.guard_closure.manifest_digest()
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # pgw#1182 — THE SCOPE IS NOW THE WHOLE PACKAGE, and this list grew from 14 to
-# 113 because of it. Nothing below was newly written; it was always there and the
+# 107 because of it. Nothing below was newly written; it was always there and the
 # fence was pointed at one seventh of the tree.
 #
 # Read the count as the SIZE OF THE QUESTION, not a backlog of confirmed dead
@@ -229,9 +229,33 @@ gen_worker.guard_closure.manifest_digest()
 # A line leaves this file only one of those three ways. `--explain` shows why
 # anything absent was cleared.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# pgw#1192 — TYPES are enumerated now, and the cross-repo check follows package
+# RE-EXPORTS. Both were blind spots and both were found the same way: by
+# checking, not by reasoning. A symbol sweep over functions alone let a dead
+# type survive a whole deletion pass on a sibling lane (only the compiler caught
+# it), and requiring the DEFINING module path let nine live consumers sit in
+# this file marked dead — `training-endpoints` imports
+# `from gen_worker.convert import Dataset` against a class defined in
+# `gen_worker.convert.dataset`.
+#
+# Entries are `module.Symbol` for a type and `module.symbol()` for a callable.
+# ---------------------------------------------------------------------------
 
+gen_worker.aot_compile_spans.dark_fraction()
+gen_worker.aot_inputs.inputs_for()
+gen_worker.aot_inputs.latent_dims()
+gen_worker.aot_package.package_entry_names()
+gen_worker.aot_serve.EntryDispatch.refusal_counts()
+gen_worker.aot_serve.realigned_inputs()
+gen_worker.aot_serve.served_entry_calls()
 gen_worker.boot_key.assert_memo_honest()
 gen_worker.boot_key.prop_economy()
+gen_worker.boot_phases.BootSpan.skipped()
+gen_worker.boot_phases.servable_ms()
+gen_worker.compile_cache.artifact_metadata()
+gen_worker.compile_cache.pack()
+gen_worker.compile_cache.seed_artifact()
 gen_worker.component_vocab.ComponentVocabulary.role_of()
 gen_worker.component_vocab.declare_components()
 gen_worker.component_vocab.reset_component_vocabulary()
@@ -239,11 +263,9 @@ gen_worker.config.loader.unrecognised_owned_env()
 gen_worker.config.process.current()
 gen_worker.convert.base_model_families.declare_foreign_family_map()
 gen_worker.convert.base_model_families.reset_foreign_family_maps()
-gen_worker.convert.calibration.resolve_calibration_action()
 gen_worker.convert.dataset.Dataset.as_dataloader()
 gen_worker.convert.dataset.Dataset.is_prompt_corpus()
 gen_worker.convert.dataset.Dataset.iter_rows()
-gen_worker.convert.dataset.write_jsonl_shard()
 gen_worker.convert.layout_converters.ConversionIO.set_metadata()
 gen_worker.convert.layout_converters.classify_layout()
 gen_worker.convert.layout_converters.conversion_provenance()
@@ -254,7 +276,6 @@ gen_worker.convert.layout_converters.registered_layout_productions()
 gen_worker.convert.layout_converters.reset_layout_conversions()
 gen_worker.convert.layout_converters.run_layout_conversion()
 gen_worker.convert.loaded_component.LoadedComponent.save_to()
-gen_worker.convert.publish.publish_flavors()
 gen_worker.convert.registry.load_declaration_module()
 gen_worker.convert.registry.register_layout()
 gen_worker.convert.registry.register_repackage_family()
@@ -263,16 +284,14 @@ gen_worker.convert.source.Source.as_hf_model()
 gen_worker.convert.source.Source.iter_hf_components()
 gen_worker.convert.source.Source.tokenizer()
 gen_worker.convert.source.Source.weights_size_bytes()
-gen_worker.convert.svdq.build_svdq_flavor_tree()
-gen_worker.convert.svdq.fetch_svdq_checkpoint()
 gen_worker.convert.writer.fp8_te_components()
 gen_worker.convert.writer.streaming_cast_snapshot()
-gen_worker.convert.writer.streaming_fp8_snapshot()
 gen_worker.convert.writer.streaming_w8a8_snapshot()
-gen_worker.convert.writer.verify_w8a8_snapshot()
 gen_worker.discovery.validation.validate_endpoint()
 gen_worker.families.base.family_registry()
 gen_worker.geometry.FamilyGeometry.assert_declared()
+gen_worker.guard_closure.closure_manifest()
+gen_worker.guard_closure.manifest_digest()
 gen_worker.input_assets.inputs_dir_for_request()
 gen_worker.io.exists()
 gen_worker.io.read_audio()
@@ -311,8 +330,10 @@ gen_worker.plan.Plan.snapshot_digests()
 gen_worker.plan.PlanLedger.forget()
 gen_worker.procsplit.group.GroupPlan.child()
 gen_worker.progress.reset()
+gen_worker.progress.tracking
 gen_worker.runtimes.llama.chat_deltas()
 gen_worker.runtimes.llama.completion_deltas()
+gen_worker.shape_growth.Debounce
 gen_worker.shape_growth.GrowthLedger.counts()
 gen_worker.shape_growth.GrowthLedger.seen()
 gen_worker.shape_growth.register_backend()
