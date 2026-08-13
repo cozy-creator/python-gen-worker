@@ -604,6 +604,8 @@ def _workspace() -> Path:
 
 
 WORKSPACE = _workspace()
+# fence-symbol-exempt: "manifests" here is a PATH COMPONENT, not a symbol —
+# the documented false-positive shape of scripts/lint_fence_symbols.py.
 PRICING = WORKSPACE / "e2e" / "manifests" / "pricing.yaml"
 
 

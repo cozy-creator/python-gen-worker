@@ -57,7 +57,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Optional, Protocol, Tuple
+from typing import Dict, Tuple
 
 from . import activity as activity_mod
 

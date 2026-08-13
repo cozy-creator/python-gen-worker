@@ -45,7 +45,6 @@ from typing import Any, Callable, Iterator, Sequence
 
 from .api.errors import RetryableError, ValidationError
 from .request_context._helpers import _infer_mime_type, _url_is_blocked
-from io import BytesIO
 
 __all__ = [
     "DEFAULT_MAX_BYTES",
