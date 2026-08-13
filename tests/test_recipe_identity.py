@@ -102,23 +102,25 @@ def test_cg_key_v1_axes_are_the_recipe(pinned_runtime: None,
     bumped = dict(meta, gen_worker="99.0.0", torch="9.9.9",
                   image_digest="sha256:other")
     assert ck.from_entry_metadata(bumped).digest == key.digest
-    # pgw#1213: the grammar is scheme-PINNED, superseding pgw#990's
-    # scheme-agnostic reading. Agnosticism existed so an entry of an OLDER
-    # scheme would be ruled on by its axes rather than its label; `cg-key-v1`
-    # is the first scheme any published artifact is addressed by, so there is
-    # no such corpus, and a foreign scheme now names a digest over axes this
-    # runtime cannot restate.
+    # Foreign schemes can never collide with a current key; they stay
+    # key-SHAPED (pgw#990, restored by th#1897 — is_key mirrors tensorhub's
+    # scheme-agnostic IsCompiledGraphKey) and are ruled on by axes, not by
+    # their label.
     for dead in ("ek1-", "ek2-", "cg-key-v2-"):
-        assert not ck.is_key(dead + "a" * 56)
+        assert ck.is_key(dead + "a" * 56)
         assert key.digest != dead + "a" * 56
-    # pgw#1176: a ``ck`` key is NOT merely a foreign scheme — it names a
-    # 36-entry all-or-nothing cell this runtime cannot arm at all, so it does
-    # not even parse. That is what makes an orphaned ref fail at the
-    # comparison rather than late, inside a per-entry code path.
+    # pgw#1176: a ``ck`` key names a 36-entry all-or-nothing cell this runtime
+    # cannot arm at all, so an orphaned ref must fail at the
+    # comparison rather than late, inside a per-entry code path — and th#1897
+    # moves WHERE that is enforced: the shared grammar refuses shape, never
+    # scheme, so a ck1 token parses and then names nothing this runtime can
+    # restate. The miss is on the axes, which is the only place either repo
+    # can decide it alone.
     # fence-symbol-exempt: `ck1` is the SUPERSEDED scheme and naming it IS the
     # assertion — the sixth instance of a blanket rename eating the one line
     # whose job is to name the old vocabulary. Do not sweep this.
-    assert not ck.is_key("ck1-" + "a" * 56)
+    assert ck.is_key("ck1-" + "a" * 56)
+    assert key.digest != "ck1-" + "a" * 56
     # Version-string axes are rejected outright.
     with pytest.raises(ck.CellKeyError):
         ck.from_axes(dict(axes, torch="2.13.0"))

@@ -121,10 +121,9 @@ class SelfMint:
     artifact: Path
 
 
-#: The mint-obligation identity prefix. DELIBERATELY not ``ck``-shaped: an
-#: arm token must never pass ``cell_key.is_key`` / the hub's
-#: ``compilecache.IsCellKey``, because it is NOT a cell key — see
-#: :class:`ArmIdentity`.
+#: The mint-obligation identity prefix. An arm token must never pass
+#: ``cell_key.is_key`` / the hub's ``compilecache.IsCompiledGraphKey``,
+#: because it is NOT a compiled-graph key — see :class:`ArmIdentity`.
 #:
 #: The digit is the token's FACT-SET SCHEMA, and it is the memo-invalidation
 #: mechanism (pgw#1113): ``arm2`` states the compile SUBJECT, ``arm1`` did
@@ -133,6 +132,16 @@ class SelfMint:
 #: than misreadable, and :func:`arm_from_local_store` sweeps the predecessor
 #: files once per process instead of leaving them to accumulate silently.
 ARM_SCHEME = "arm2"
+
+#: th#1897/pgw#1213: disjointness from the key space is carried by the DIGEST
+#: WIDTH, not by the prefix. The shared grammar is scheme-AGNOSTIC — it refuses
+#: shape, never scheme (th#1183), so that hub and fleet can ship in different
+#: windows — which means ``arm2-`` buys no separation at all: any
+#: fragment-charset scheme followed by 56 hex IS a key to both validators. A
+#: 64-hex tail is not, on either side, for the same reason and by the same
+#: rule. The width change also re-derives every token, which is the same
+#: memo invalidation the schema digit performs.
+ARM_DIGEST_HEX = 64
 
 
 @dataclass(frozen=True)
@@ -168,7 +177,7 @@ class ArmIdentity:
             ensure_ascii=True,
         )
         digest = hashlib.sha256(canonical.encode()).hexdigest()
-        return f"{ARM_SCHEME}-{digest[:56]}"
+        return f"{ARM_SCHEME}-{digest[:ARM_DIGEST_HEX]}"
 
 
 #: The ENVIRONMENT half of an :class:`ArmIdentity` — the facts a delegated

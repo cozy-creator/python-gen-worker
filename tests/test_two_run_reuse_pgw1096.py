@@ -50,7 +50,7 @@ from gen_worker.cell_adopt import AdoptOutcome
 
 MODE = sys.argv[1]
 KEY = "cg-key-v1-" + "c" * 56
-ARM = fleet_cells.ARM_SCHEME + "-" + "9" * 56
+ARM = fleet_cells.ARM_SCHEME + "-" + "9" * fleet_cells.ARM_DIGEST_HEX
 FAMILY = "micro-diffusion"
 
 

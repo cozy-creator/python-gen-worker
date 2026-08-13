@@ -285,11 +285,14 @@ def test_old_and_new_keys_cannot_collide():
     new_key = cell_key.from_entry_metadata(meta).digest
     old_key = _old_schema_digest(meta)
     assert old_key != new_key
-    # pgw#1176 makes this STRUCTURAL rather than a collision argument: a ck1
-    # key does not even parse as an entry key, so an orphaned cell ref cannot
-    # reach a per-entry code path and fail late — it fails at the comparison.
-    assert not cell_key.is_key(old_key)
+    # th#1897 puts it back on the COLLISION argument, which is the only one
+    # either repo can make alone: the shared grammar refuses shape, never
+    # scheme (th#1183), so both tokens are key-SHAPED and the old one simply
+    # names nothing — its digest was computed over axes no current derivation
+    # can restate, so an orphaned ref misses at the comparison.
+    assert cell_key.is_key(old_key)
     assert cell_key.is_key(new_key)
+    assert old_key != new_key
 
 
 def _admissible_meta() -> dict:
@@ -449,7 +452,12 @@ def test_arm_token_never_passes_is_key(monkeypatch):
     # makes a predecessor memo row unaddressable rather than misreadable.
     assert token.startswith(fleet_cells.ARM_SCHEME + "-")
     assert not token.startswith("ck")
+    # th#1897/pgw#1213: disjointness is carried by the DIGEST WIDTH now, not by
+    # the prefix. The shared grammar is scheme-agnostic, so `arm2-` buys no
+    # separation at all — any scheme followed by 56 hex is a key to BOTH
+    # validators. A 64-hex tail is not, on either side.
     assert not cell_key.is_key(token)
+    assert len(token.split("-", 1)[1]) == fleet_cells.ARM_DIGEST_HEX != 56
     # the compared facts are exactly the pre-trace set — graph is absent, and
     # so is `envelope`: pgw#1176 dropped it from ARM_ENVIRONMENT_FACTS because
     # a per-entry artifact records no declared envelope, so comparing it would

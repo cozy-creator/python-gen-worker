@@ -120,7 +120,7 @@ class _Cfg:
 
 class _Pending:
     family = "micro-diffusion"
-    arm_token = "arm2-" + "1" * 56
+    arm_token = "arm2-" + "1" * 64
     mint_root = "/tmp/pgw1137-does-not-exist"
     cfg = _Cfg()
 

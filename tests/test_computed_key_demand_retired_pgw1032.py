@@ -32,13 +32,19 @@ FAMILY = "sdxl"
 
 def test_an_arm_token_and_a_stamped_key_are_disjoint_by_grammar() -> None:
     """pgw#1059: an obligation identity is not a cell key in any reader's
-    eyes — ``arm1-`` never passes ``is_key``, so every mechanism that keys
-    a store of STAMPED keys structurally cannot consume one."""
+    eyes — it never passes ``is_key``, so every mechanism that keys a store of
+    STAMPED keys structurally cannot consume one.
+
+    th#1897/pgw#1213 moved WHAT carries that: the shared grammar refuses shape
+    and never scheme, so the prefix separates nothing and the DIGEST WIDTH
+    does. 64 hex is not 56 hex, on both sides of the wire.
+    """
     from gen_worker import fleet_cells
 
     token = fleet_cells.ArmIdentity(facts=(("family", FAMILY),)).token
     assert token.startswith(fleet_cells.ARM_SCHEME + "-")
     assert not cell_key.is_key(token)
+    assert fleet_cells.ARM_DIGEST_HEX != 56
     assert aot_serve.ARTIFACT_KIND == "aot-inductor"
 
 

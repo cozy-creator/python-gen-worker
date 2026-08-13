@@ -307,6 +307,23 @@ jobs:
       - name: pgw#740 guard - registry contract
         run: uv run python scripts/check_registry_contract.py
 
+      # GATING (th#1897/pgw#1213): the shared grammar corpora are pinned to the
+      # digest BOTH repos commit, so a one-sided hand-edit of
+      # compiled_graph_key_vectors.json or ref_grammar_vectors.json is red
+      # HERE — offline, in the tree where it happened.
+      #
+      # This is LAYER 1 of the cross-repo fence and it is the half that belongs
+      # in this repo. Layer 2 is scripts/grammar-vector-drift.sh, committed
+      # verbatim beside it but RUN FROM TENSORHUB: it fetches the peer's copy
+      # over raw.githubusercontent, this repo is public and tensorhub is not,
+      # and the reverse fetch does not exist. That asymmetry is the same one
+      # the proto and worker-constant gates have, and it gives the same law —
+      # PGW LANDS FIRST. Running the script here would compare this repo to
+      # itself, which is not a gate. It is exercised offline (both green and
+      # red) by tests/test_key_grammar_vectors_th1897.py.
+      - name: th#1897 gate - the shared grammar corpora match their digest
+        run: uv run python scripts/check_grammar_corpus_digest.py
+
       # GATING (pgw#1122): the compute child holds no worker credential BY
       # CONSTRUCTION, so a gate that reads one to answer "who am I?" or "is
       # there a hub?" refuses on every real serving pod (pgw#1108, then

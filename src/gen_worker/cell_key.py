@@ -136,6 +136,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Mapping, Tuple
 
+from gen_worker.refgrammar import MAX_FRAGMENT_LEN
+
 # pgw#1176: ``ck1`` (the 36-entry CELL key) is REPLACED by the per-entry key
 # below (one graph class). This is a §1.34 third-category change — a name persisted as an
 # ADDRESS — so it is a COORDINATED FLEET RE-KEY, never a quiet rename: every
@@ -157,9 +159,16 @@ from typing import Any, Dict, Iterable, Mapping, Tuple
 KEY_SCHEME = "cg-key-v1"
 _PREFIX = KEY_SCHEME + "-"
 # The key doubles as the store flavor token, whose shared grammar (th#597 C5:
-# [a-z0-9][a-z0-9._-]{0,63}, Go+Py identical) caps tokens at 64 chars. 56 hex
-# chars of SHA-256 (224 bits) + the 10-char ``cg-key-v1-`` prefix is 66, so
-# th#1897 carries the matching cap widening on both halves of that grammar.
+# [a-z0-9][a-z0-9._-]*) caps a token at MAX_FRAGMENT_LEN. 56 hex chars of
+# SHA-256 (224 bits) + the 10-char ``cg-key-v1-`` prefix is 66, which is why
+# th#1897 moved that cap from 64 to 96.
+#
+# BOTH SIDES ARE AT 96: tensorhub's `refgrammar.MaxFragmentLen` and
+# `gen_worker.refgrammar.MAX_FRAGMENT_LEN`. "Go+Py identical" used to be an
+# assertion in this comment and nothing else, which is exactly how the two
+# halves drifted — the parity is enforced now, by the 96/97 boundary vectors
+# in both vendored corpora and by scripts/grammar-vector-drift.sh, which
+# compares the peer's bytes to ours.
 _DIGEST_HEX = 56
 
 # THE three axes, all required — see THE MEMBERSHIP AXIOM in the module
@@ -227,40 +236,46 @@ class CellKey:
         return _PREFIX + h[:_DIGEST_HEX]
 
 
-#: pgw#1213: the digest is FIXED-WIDTH and terminal, so it is matched from the
-#: RIGHT and everything before it is the scheme. The scheme token contains
-#: hyphens (``cg-key-v1``), which is exactly why no reader may split a key on
-#: ``-`` or slice a fixed number of leading characters off one.
-_DIGEST_RE = re.compile(r"-(?P<digest>[0-9a-f]{%d})$" % _DIGEST_HEX)
+#: THE compiled-graph key grammar: a fragment-charset scheme, ``-``, then the
+#: fixed-width lowercase-hex digest, anchored to the end. ``\Z`` and not ``$``
+#: — ``$`` also matches before a trailing newline, and a key with a newline in
+#: it is not a key. Bounded by :data:`MAX_FRAGMENT_LEN` separately, because the
+#: length is the ref grammar's rule and the shape is this one's.
+_KEY_RE = re.compile(r"[a-z0-9][a-z0-9._-]*-[0-9a-f]{%d}\Z" % _DIGEST_HEX)
 
 
 def is_key(value: str) -> bool:
-    """True when ``value`` is a key of THIS scheme: ``cg-key-v1`` + ``-`` +
-    56 lowercase hex.
+    """True when ``value`` is a compiled-graph key: ``<scheme>-<56 lowercase
+    hex>``, whole token at most :data:`MAX_FRAGMENT_LEN` bytes of the ref
+    fragment charset.
 
-    This grammar must remain byte-for-byte what tensorhub's hub-side
-    validator (``compilecache.IsCellKey``) enforces — th#1897 lands the Go
-    half together with a cross-repo vector fence, so the two halves are
-    compared against one shared vector file rather than by inspection. A
-    divergence here is a divergence in what the fleet considers addressable.
+    THE CONTRACT, not a local opinion: this must answer identically to
+    tensorhub's ``compilecache.IsCompiledGraphKey`` on every vector in
+    ``tests/testdata/compiled_graph_key_vectors.json``, which is vendored
+    byte-identically in both repos and fenced by
+    ``scripts/grammar-vector-drift.sh``. th#1897 exists because there was no
+    such file: both implementations were internally consistent, they disagreed
+    about ``cg-key-v1``, and neither CI could see it — the disagreement was
+    observable only on a GPU pod, 45 minutes into a compile, at the publish
+    gate. Change this function and you are changing the corpus, in both repos,
+    in one window.
 
-    Scheme-PINNED (pgw#1213, superseding the scheme-agnostic reading of
-    th#1183): `cg-key-v1` is the first scheme any published artifact was ever
-    addressed by, so there is no older corpus for agnosticism to admit, and a
-    grammar that accepts unknown schemes accepts tokens whose digest was
-    computed over axes this runtime cannot restate.
+    THE DIGEST IS THE SUFFIX, so **never split, partition or scan for the
+    first** ``-``: the scheme may contain hyphens (``cg-key-v1``) and may even
+    contain a hex run (the corpus carries that regression vector). The scheme
+    is whatever precedes the anchored digest.
 
-    NOTE ``ck1``/``ek1`` are NOT accepted. A ck1 key names a 36-entry
-    all-or-nothing cell, which is not a thing this runtime can arm at all; an
-    ek1 key never addressed anything. A grammar that admitted either would
-    let such a ref reach a per-entry code path and fail late instead of at
-    the comparison.
+    Scheme-AGNOSTIC (th#1183): the grammar refuses SHAPE, never scheme. A key
+    of a newer fleet's scheme is admitted to the candidate list and then ruled
+    on by the axes that actually decide whether this runtime can execute it —
+    the identity axes and the ingress contract — not by the label on it. This
+    is the half of the contract that lets hub and fleet ship in different
+    windows at all.
     """
     v = str(value or "")
-    m = _DIGEST_RE.search(v)
-    if m is None:
+    if len(v) > MAX_FRAGMENT_LEN:
         return False
-    return v[:m.start()] == KEY_SCHEME
+    return _KEY_RE.match(v) is not None
 
 
 def _refuse_key_shaped(where: str, name: str, value: str) -> None:

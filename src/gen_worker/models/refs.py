@@ -37,20 +37,20 @@ import re
 from dataclasses import dataclass
 from typing import NewType, Optional
 
-# th#597 C5: `#` fragment charset [a-z0-9][a-z0-9._-]{0,126} (matches
-# tensorhub's validation.IsValidFlavorToken). Cell fragments only — see the
-# module docstring.
+from gen_worker.refgrammar import MAX_FRAGMENT_LEN as _MAX_FRAGMENT_LEN
+
+# th#597 C5: `#` fragment charset [a-z0-9][a-z0-9._-]*, bounded by
+# MAX_FRAGMENT_LEN (matches tensorhub's validation.IsValidFlavorToken). Cell
+# fragments only — see the module docstring.
 #
-# pgw#1213 widened the cap from 64 to 127. The fragment IS where an entry key
-# travels (`aot_serve.parse_cell_ref` -> `cell_key.is_key`), and the
-# `cg-key-v1` scheme makes a key 66 chars — under the old cap the very
-# identity this grammar exists to carry did not parse, which surfaced as
-# `is_aot_ref` returning False for a cell the process had just armed. The cap
-# is shared with tensorhub's Go half and th#1897 carries the identical
-# widening there; the conformance vectors in
-# tests/testdata/ref_grammar_vectors.json pin no length case, so both parsers
-# stay green on every vector while that lands.
-MAX_FRAGMENT_LEN = 127
+# th#1897/pgw#1213: the bound is 96, MIRRORING tensorhub's
+# internal/refgrammar.MaxFragmentLen byte-for-byte. It lives in
+# gen_worker.refgrammar for the same reason Go puts it in a leaf package —
+# the ref parser and the compiled-graph key grammar both need it and neither
+# may import the other. The boundary is pinned by vectors at 96 and 97 in BOTH
+# vendored corpora, so a one-sided change to this number fails a gate rather
+# than surfacing 45 minutes into a mint.
+MAX_FRAGMENT_LEN = _MAX_FRAGMENT_LEN
 _TENSORHUB_FRAGMENT_RE = re.compile(
     r"[a-z0-9][a-z0-9._-]{0,%d}" % (MAX_FRAGMENT_LEN - 1)
 )

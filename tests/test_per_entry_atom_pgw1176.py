@@ -94,35 +94,34 @@ def test_the_manifest_digest_is_a_label_not_an_identity() -> None:
         "resolve, download, verify or arm it")
 
 
-def test_a_ck1_key_is_not_an_entry_key() -> None:
-    """The re-key, enforced at the grammar. A ck1 key names a 36-entry
-    all-or-nothing cell, which this runtime cannot arm at all; admitting it
-    would let a cell ref reach a per-entry path and fail late.
+def test_a_ck1_key_is_key_shaped_and_still_names_nothing() -> None:
+    """The re-key, enforced where it is actually enforceable — the AXES.
 
-    THE FIFTH SWEEP ERROR, and it landed in the atom's own proof: a blanket
-    ``ck1-`` -> ``cg-key-v1-`` fixture sweep rewrote the REFUSAL line here, leaving
-    a contradictory pair one character apart —
-    ``assert not is_key("cg-key-v1-…")`` beside ``assert is_key("cg-key-v1-…")``. The row
-    went red, which is the only reason it surfaced, and while it was red the
-    ck1-refusal invariant had NO passing guard in this file at all.
+    th#1897 SUPERSEDES the grammar-level reading this row used to carry
+    (``assert not is_key("ck1-…")``). The compiled-graph key grammar is the
+    shared contract with tensorhub's ``IsCompiledGraphKey`` and it is
+    scheme-AGNOSTIC on purpose (th#1183): it refuses SHAPE, never scheme, so
+    that a newer fleet's key stays addressable by an older hub and the two can
+    ship in different windows. The corpus both repos vendor states it
+    outright — ``ck1-<56 hex>`` is ``valid: true``, noted as "the scheme the 3
+    purged micro-diffusion rows carried".
 
-    It is the exact class this branch's handover brief documents: **a
-    mechanical sweep neuters the file whose purpose is to be an exception**,
-    and the exception here is the one line that must keep naming the OLD
-    scheme. Fixed, and annotated so the next sweep leaves it alone.
+    So a ck1 token parses, and then names nothing: no artifact of that scheme
+    survives the purge, and its digest was computed over axes this runtime
+    cannot restate, so it misses at the comparison. The orphan fails there,
+    which is the property this row was always about — the grammar was only
+    ever a convenient place to state it, and it is the wrong place because it
+    is not this repo's to decide alone.
     """
     assert cell_key.KEY_SCHEME == "cg-key-v1"
     # fence-symbol-exempt: `ck1` is the SUPERSEDED scheme and naming it is the
     # whole assertion — a sweep that renames this line deletes the invariant.
-    assert not cell_key.is_key("ck1-" + "0" * 56)
+    assert cell_key.is_key("ck1-" + "0" * 56)
     assert cell_key.is_key("cg-key-v1-" + "0" * 56)
-    # The refusal is about the SCHEME, not the digest: the ck1 token above
-    # carries a digest of exactly the admitted width and is still refused,
-    # which is what makes an orphaned ref fail at the comparison rather than
-    # late. pgw#1213 made the two spellings different LENGTHS (`cg-key-v1` is
-    # longer than `ck1`), so length can no longer stand in for that claim —
-    # state it on the digest, which is the part the grammar actually fixes.
-    assert len("ck1-" + "0" * 56) - len("ck1-") == 56
+    # And it is not a key this runtime can ever mint, which is the miss.
+    assert not cell_key.from_axes(
+        {"graph": "0" * 16, "sm": "sm_100", "toolchain": "0" * 16}
+    ).digest.startswith("ck1-")
 
 
 # --- 2. ARTIFACT -----------------------------------------------------------

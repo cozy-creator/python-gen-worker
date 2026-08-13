@@ -84,29 +84,37 @@ def test_the_deriver_and_the_validator_agree_on_cg_key_v1():
     THE row that can go red on a scheme change: the deriver writes the
     scheme through `_PREFIX` and the validator reads it through the
     right-anchored digest match, so a change to one that is not made in the
-    other fails here rather than at a resolve nobody watches. The grammar is
-    also what tensorhub's `compilecache.IsCellKey` must enforce byte-for-byte
-    (th#1897 lands the Go half + the cross-repo vector fence).
+    other fails here rather than at a resolve nobody watches.
+
+    The grammar itself is the CROSS-REPO contract with tensorhub's
+    `compilecache.IsCompiledGraphKey`; its rows live in
+    `tests/test_key_grammar_vectors_th1897.py`, against the corpus both repos
+    vendor.
     """
     key = ck.from_axes(_AXES).digest
     assert key.startswith("cg-key-v1-")
     assert ck.is_key(key) is True
 
 
-def test_only_cg_key_v1_is_a_key():
-    """Scheme-PINNED (pgw#1213, superseding th#1183's agnostic reading):
-    `cg-key-v1` is the first scheme any artifact was addressed by, so there
-    is no older corpus for agnosticism to admit. The scheme token contains
-    hyphens, so the grammar is matched from the RIGHT — never split on `-`.
+def test_the_grammar_refuses_shape_never_scheme():
+    """th#1183, restored (th#1897): pgw#1213's first pass hard-cut `is_key` to
+    `cg-key-v1` only, and the shared corpus refuses that reading — a pinned
+    scheme means a newer fleet's key stops being addressable by an older hub,
+    so the two can never again ship in different windows. A foreign scheme is
+    admitted here and ruled on by AXES, which is where it actually misses.
+
+    SHAPE is what is refused, and the digest is the SUFFIX — never split on
+    `-`, because the scheme carries hyphens itself.
     """
-    assert not ck.is_key("ek1-" + "a" * 56)           # the pre-cut spelling
-    assert not ck.is_key("ck1-" + "a" * 56)           # the 36-entry cell key
-    assert not ck.is_key("cg-key-v2-" + "a" * 56)     # foreign scheme
-    assert not ck.is_key("key-v1-" + "a" * 56)        # a SUFFIX of the scheme
+    for foreign in ("ek1-", "ck1-", "cg-key-v2-", "a-", "cg.key_v1-"):
+        assert ck.is_key(foreign + "a" * 56), foreign
+        assert ck.from_axes(_AXES).digest != foreign + "a" * 56
     assert not ck.is_key("cg-key-v1-" + "a" * 55)     # digest too short
     assert not ck.is_key("cg-key-v1-" + "a" * 57)     # digest too long
     assert not ck.is_key("cg-key-v1-" + "A" * 56)     # uppercase hex
     assert not ck.is_key("cg-key-v1" + "a" * 56)      # no separator
+    assert not ck.is_key("-" + "a" * 56)              # empty scheme
+    assert not ck.is_key("cg-key-v1-" + "a" * 56 + "\n")  # \Z, not $
     assert not ck.is_key("")
 
 

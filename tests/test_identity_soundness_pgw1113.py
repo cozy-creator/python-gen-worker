@@ -317,7 +317,7 @@ def test_the_arm_token_scheme_is_its_fact_set(tmp_path: Path) -> None:
     memo_dir = local_cell_store.cells_root(tmp_path) / local_cell_store.MEMO_DIRNAME
     memo_dir.mkdir(parents=True)
     stale = memo_dir / ("arm1-" + "a" * 56 + ".json")
-    current = memo_dir / (fleet_cells.ARM_SCHEME + "-" + "b" * 56 + ".json")
+    current = memo_dir / (fleet_cells.ARM_SCHEME + "-" + "b" * fleet_cells.ARM_DIGEST_HEX + ".json")
     for entry in (stale, current):
         entry.write_text(json.dumps({"cell_key": "cg-key-v1-" + "c" * 56}))
 
