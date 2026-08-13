@@ -7769,23 +7769,22 @@ class Executor:
                         f"cache_hits={hits}, cache_misses={misses}, "
                         f"compile_seconds={compile_seconds:.1f}{per_object})"
                     )
-                    # gw#608 FX-key forensics: this boot's recompiles already
-                    # saved their entries (with embedded FxGraphHashDetails
-                    # lines) into the live cache dir. The report ALWAYS
-                    # carries the cache-state counts — fresh_keys>0 names the
-                    # diverging key component (B1); fresh_keys=0 with
-                    # same-key re-saves proves the keys MATCH and the miss is
-                    # in torch's candidate-load path (B2), with the sibling
-                    # guards/extern-libs diff and load probes naming the
-                    # failing step. Store-served boots only (a minting boot
-                    # has no seeded cell to diverge from).
-                    # pgw#722 finding 2: FX forensics describe the dynamo
-                    # lane only — a pure-exported disproof would report the
-                    # SKIPPED delivered artifact's cache state, pure noise.
+                    # gw#608 FX-cache census: this boot's recompiles already
+                    # saved their entries into the live cache dir, so the
+                    # report says how many keys exist and what extern-libs key
+                    # this process presents.
+                    # pgw#1200 removed the CELL side and the B1/B2
+                    # classification with it — every class was a difference
+                    # against FX entries read from a `torch-inductor-cache`
+                    # tarball, and that format has no writer and is deleted, so
+                    # B1 was being named on every boot. The report no longer
+                    # takes the artifact; passing one carried no information.
+                    # pgw#722 finding 2 still scopes the CALL: FX state
+                    # describes the dynamo lane only, which `proves_inductor`
+                    # is what says.
                     if proves_inductor and compile_selection is not None:
                         try:
-                            forensics = compile_cache.fx_cache_failure_report(
-                                compile_selection.path)
+                            forensics = compile_cache.fx_cache_failure_report()
                         except Exception:
                             forensics = ""
                             logger.debug(
@@ -7917,8 +7916,7 @@ class Executor:
                         # partial-recompile shape too.
                         logger.error(
                             "compile-cache: FX-key forensics: %s",
-                            compile_cache.fx_cache_failure_report(
-                                compile_selection.path))
+                            compile_cache.fx_cache_failure_report())
                     except Exception:
                         logger.debug(
                             "fx-key forensics unavailable", exc_info=True)
