@@ -138,8 +138,10 @@ def test_graph_classes_do_not_share_a_row() -> None:
     mint_workers.record_entry_device_peak(_key("unet"), 5_000, 6_000)
     mint_workers.record_entry_device_peak(_key("vae.decode"), 100, 200)
 
-    assert mint_workers.entry_device_peak(_key("unet")).reserved_bytes == 6_000
-    assert mint_workers.entry_device_peak(_key("vae.decode")).reserved_bytes == 200
+    unet = mint_workers.entry_device_peak(_key("unet"))
+    vae = mint_workers.entry_device_peak(_key("vae.decode"))
+    assert unet is not None and unet.reserved_bytes == 6_000
+    assert vae is not None and vae.reserved_bytes == 200
 
 
 def test_a_row_with_no_subject_is_refused() -> None:
