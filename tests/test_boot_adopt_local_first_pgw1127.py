@@ -50,13 +50,13 @@ from gen_worker import (
 from gen_worker import executor as executor_mod
 from gen_worker.cell_adopt import AdoptOutcome
 
-# pgw#1176: `ek1`, because `local_cell_store.store` refuses anything that is
+# pgw#1176: `cg-key-v1`, because `local_cell_store.store` refuses anything that is
 # not an entry key and a `ck1`-keyed cell is orphaned by the re-key. These
 # fixtures stored under `ck1-` and the store silently declined them, so
 # `no_cell_source` short-circuited a machine that WAS holding cells — the §1.34
 # orphaning the re-key predicts, surfacing exactly where it should.
-KEY_A = "ek1-" + "a" * 56
-KEY_B = "ek1-" + "b" * 56
+KEY_A = "cg-key-v1-" + "a" * 56
+KEY_B = "cg-key-v1-" + "b" * 56
 ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * 56
 
 

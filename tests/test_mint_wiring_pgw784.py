@@ -83,7 +83,7 @@ def _stub_child(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _pending(tmp_path: Path) -> Any:
     return fleet_cells.PendingSelfMint(
-        family="sdxl", arm_token="ck1-abc", ref="root/family-sdxl#ek1-abc",
+        family="sdxl", arm_token="ck1-abc", ref="root/family-sdxl#cg-key-v1-abc",
         cfg=_cfg(), target=tmp_path / "cell.tar.gz",
         mint_root=tmp_path / "root", publisher=None, cache_dir=tmp_path)
 
@@ -243,8 +243,8 @@ def test_the_delegated_route_mints_in_a_child_adopts_and_advertises(
         rows = [Path(a) for a in artifacts]
         adopted.extend(rows)
         return fleet_cells.SelfMint(
-            family="sdxl", cell_key="ek1-abc",
-            ref="root/family-sdxl#ek1-abc", snapshot_digest="blake3:aa",
+            family="sdxl", cell_key="cg-key-v1-abc",
+            ref="root/family-sdxl#cg-key-v1-abc", snapshot_digest="blake3:aa",
             artifact=rows[0])
 
     monkeypatch.setattr(fleet_cells, "adopt_delegated_mint", _adopt)
@@ -265,7 +265,7 @@ def test_the_delegated_route_mints_in_a_child_adopts_and_advertises(
     # Phase 4, shared with the in-process route: the target now advertises the
     # worker's OWN key (th#910's self-attested fence).
     target = rec.compile_targets["t0"]
-    assert target.active_compile_ref == "root/family-sdxl#ek1-abc"
+    assert target.active_compile_ref == "root/family-sdxl#cg-key-v1-abc"
     assert target.active_compile_snapshot_digest == "blake3:aa"
     assert target.active_self_mint is True
     assert "finalize" in act.phases

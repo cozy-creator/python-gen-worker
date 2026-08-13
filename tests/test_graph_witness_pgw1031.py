@@ -76,7 +76,7 @@ def _gpu_runtime() -> Any:
 def _trace(
     vehicle_name: str, tree: Path,
 ) -> Tuple[Dict[str, Any], Any, Dict[str, Any]]:
-    """``({entry: keying block}, {entry: ek1 key}, declared envelope)`` — trace
+    """``({entry: keying block}, {entry: cg-key-v1 key}, declared envelope)`` — trace
     only. pgw#1176: a declaration folds to a KEY SET, not one key."""
     from harness import rig_vehicles
 

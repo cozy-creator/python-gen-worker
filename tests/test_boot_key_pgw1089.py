@@ -132,10 +132,10 @@ def test_the_fold_is_the_mints_own_stamp_not_a_second_arithmetic() -> None:
     assert all(len(h) == 16 for h in class_hashes.values())
 
 
-def test_every_key_is_an_ek1_key_over_exactly_three_axes() -> None:
+def test_every_key_is_a_cg_key_v1_key_over_exactly_three_axes() -> None:
     entry_keys, _hashes, _manifest = _fold({"a": _block()})
     (key,) = entry_keys.values()
-    assert key.startswith("ek1-")
+    assert key.startswith("cg-key-v1-")
     assert cell_key.is_key(key)
     # The axes are the key's, and `from_axes` is the only way to build one —
     # so the axis set is asserted where it is DEFINED rather than restated.
@@ -264,7 +264,7 @@ def test_the_memo_never_holds_the_folded_key(tmp_path: Path) -> None:
     blob = json.dumps(doc)
     for key in entry_keys.values():
         assert key not in blob
-    assert "ek1-" not in blob
+    assert "cg-key-v1-" not in blob
     assert set(doc["closures"][digest]["blocks"]) == {"a", "b"}
     # And not the axes that must re-derive every boot, either.
     for axis in ("envelope", "toolchain", "sm_89"):
@@ -596,7 +596,7 @@ def test_derive_end_to_end_with_stubbed_children_memoizes_and_hits(
     assert first.traced == 2
     assert first.nodes == {"a": 41, "b": 41}
     assert len(first.keys) == 2
-    assert all(k.startswith("ek1-") for k in first.keys)
+    assert all(k.startswith("cg-key-v1-") for k in first.keys)
 
     # A HIT MUST NOT TRACE. Any child spawn now is a hard failure.
     def _never(jobs, python=""):

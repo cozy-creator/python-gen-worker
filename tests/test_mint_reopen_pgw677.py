@@ -235,8 +235,8 @@ class _Harness:
         capture = self.tmp_path / f"capture-{id(pipe)}"
         (capture / "inductor" / "fxgraph").mkdir(parents=True, exist_ok=True)
         pending = fleet_cells.PendingSelfMint(
-            family=FAMILY, arm_token="ek1-" + "a" * 56,
-            ref=f"{cc.system_repo(FAMILY)}#ek1-{'a' * 56}",
+            family=FAMILY, arm_token="cg-key-v1-" + "a" * 56,
+            ref=f"{cc.system_repo(FAMILY)}#cg-key-v1-{'a' * 56}",
             cfg=cfg, target=mint_root / "cell.tar.gz", mint_root=mint_root,
             publisher=None, cache_dir=cache_dir,
         )
@@ -514,8 +514,8 @@ def test_withhold_and_no_sink_reach_the_wire(tmp_path: Path) -> None:
         mint_root = tmp_path / "m"
         (mint_root / "capture").mkdir(parents=True)
         pending = fleet_cells.PendingSelfMint(
-            family=FAMILY, arm_token="ek1-" + "b" * 56,
-            ref=f"{cc.system_repo(FAMILY)}#ek1-{'b' * 56}",
+            family=FAMILY, arm_token="cg-key-v1-" + "b" * 56,
+            ref=f"{cc.system_repo(FAMILY)}#cg-key-v1-{'b' * 56}",
             cfg=None, target=mint_root / "cell.tar.gz", mint_root=mint_root,
             publisher=None, cache_dir=None,
         )
@@ -534,8 +534,8 @@ def test_withhold_and_no_sink_reach_the_wire(tmp_path: Path) -> None:
         mint_root2 = tmp_path / "m2"
         (mint_root2 / "capture").mkdir(parents=True)
         pending2 = fleet_cells.PendingSelfMint(
-            family=FAMILY, arm_token="ek1-" + "c" * 56,
-            ref=f"{cc.system_repo(FAMILY)}#ek1-{'c' * 56}",
+            family=FAMILY, arm_token="cg-key-v1-" + "c" * 56,
+            ref=f"{cc.system_repo(FAMILY)}#cg-key-v1-{'c' * 56}",
             cfg=None, target=mint_root2 / "cell.tar.gz", mint_root=mint_root2,
             publisher=None, cache_dir=None,
         )

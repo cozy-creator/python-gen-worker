@@ -562,9 +562,9 @@ def test_an_aot_ref_is_recognized_only_by_a_REGISTERED_stamped_key():
     """
     # File-unique, and UNREGISTERED afterwards. `_KNOWN_AOT_KEYS` is
     # process-global, so a key left registered is a claim every later test in
-    # this worker inherits — `"ek1-" + "b" * 56` is a shared literal in four
+    # this worker inherits — `"cg-key-v1-" + "b" * 56` is a shared literal in four
     # other files and would have been exactly that landmine.
-    key = "ek1-" + "d721" + "f" * 52
+    key = "cg-key-v1-" + "d721" + "f" * 52
     try:
         assert aot.is_aot_ref(f"root/family-{FAMILY}#{key}") is False
         aot.note_aot_key(key)
@@ -576,7 +576,7 @@ def test_an_aot_ref_is_recognized_only_by_a_REGISTERED_stamped_key():
         # A dynamo cache ref must not be mistaken for an exported cell (pgw#735:
         # it would then be scored by FX hits).
         assert aot.is_aot_ref(
-            f"root/family-{FAMILY}#ek1-0123456789abcdef") is False
+            f"root/family-{FAMILY}#cg-key-v1-0123456789abcdef") is False
     finally:
         with aot._KNOWN_AOT_KEYS_LOCK:
             aot._KNOWN_AOT_KEYS.discard(key)

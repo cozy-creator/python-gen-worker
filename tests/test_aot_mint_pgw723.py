@@ -1044,11 +1044,11 @@ def test_cell_identity_refuses_an_artifact_with_no_sm(
         aot_mint.cell_identity(meta)
 
 
-def test_key_scheme_is_ek1_and_the_axes_are_the_three(
+def test_key_scheme_is_cg_key_v1_and_the_axes_are_the_three(
     _gpu_runtime: None, packages: Dict[str, Path],
 ) -> None:
     """pgw#1176: the exported ENTRY keys on exactly graph x sm x toolchain
-    under the ek1 scheme — `kind` is a metadata fact the compat gates read,
+    under the cg-key-v1 scheme — `kind` is a metadata fact the compat gates read,
     never an axis, and `envelope` is a manifest fact for the same reason."""
     spec = _spec()
     meta = _meta_for(_export_lifted(), packages["code_only"], spec)
@@ -1058,7 +1058,7 @@ def test_key_scheme_is_ek1_and_the_axes_are_the_three(
     assert (key.axes_dict()["graph"]
             == meta[cell_key.ENTRY_BLOCK_KEY]["class_hash"])
     assert key.digest.startswith(cell_key.KEY_SCHEME + "-")
-    assert cell_key.KEY_SCHEME == "ek1"
+    assert cell_key.KEY_SCHEME == "cg-key-v1"
     assert cell_key.is_key(key.digest)
 
 

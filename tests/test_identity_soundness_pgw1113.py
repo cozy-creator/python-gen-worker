@@ -320,7 +320,7 @@ def test_the_arm_token_scheme_is_its_fact_set(tmp_path: Path) -> None:
     stale = memo_dir / ("arm1-" + "a" * 56 + ".json")
     current = memo_dir / (fleet_cells.ARM_SCHEME + "-" + "b" * 56 + ".json")
     for entry in (stale, current):
-        entry.write_text(json.dumps({"cell_key": "ek1-" + "c" * 56}))
+        entry.write_text(json.dumps({"cell_key": "cg-key-v1-" + "c" * 56}))
 
     dropped = local_cell_store.sweep_superseded_memos(
         fleet_cells.ARM_SCHEME, tmp_path)

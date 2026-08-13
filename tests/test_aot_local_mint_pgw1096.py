@@ -33,8 +33,8 @@ import pytest
 from gen_worker import aot_resume, cell_key, fleet_cells, local_cell_store
 from gen_worker.cell_adopt import AdoptOutcome
 
-KEY_A = "ek1-" + "a" * 56
-KEY_B = "ek1-" + "b" * 56
+KEY_A = "cg-key-v1-" + "a" * 56
+KEY_B = "cg-key-v1-" + "b" * 56
 # pgw#1113: spelled in the CURRENT token scheme — a predecessor-scheme memo
 # is swept by `fleet_cells._sweep_superseded_memos_once`, which is the point.
 ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * 56

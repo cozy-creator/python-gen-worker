@@ -62,7 +62,7 @@ def _arm_key(seal: Dict[str, Any], toolchain: Dict[str, Any]) -> fleet_cells.Arm
 
 def _envelope(seal: Dict[str, Any], toolchain: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "cell_key": "ek1-" + "e" * 56,
+        "cell_key": "cg-key-v1-" + "e" * 56,
         "kind": "aot-inductor",
         "format": "2",
         "family": "micro-diffusion",

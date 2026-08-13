@@ -187,7 +187,7 @@ def test_the_request_carries_the_execution_lane_and_the_effective_config(
 def _task(tmp_path: Path, **over: Any) -> mint_delegate.MintTask:
     pending = fleet_cells.PendingSelfMint(
         family="sdxl", arm_token="ck1-abc",
-        ref="root/family-sdxl#ek1-abc", cfg=_cfg(),
+        ref="root/family-sdxl#cg-key-v1-abc", cfg=_cfg(),
         target=tmp_path / "cell.tar.gz",
         mint_root=tmp_path / "root", publisher=None, cache_dir=tmp_path)
     fields: Dict[str, Any] = dict(
@@ -236,7 +236,7 @@ def test_a_minted_child_is_adopted_through_the_delivered_cell_path(
         rows = [Path(a) for a in artifacts]
         adopted.extend(rows)
         return fleet_cells.SelfMint(
-            family="sdxl", cell_key="ek1-abc", ref="r#k",
+            family="sdxl", cell_key="cg-key-v1-abc", ref="r#k",
             snapshot_digest="blake3:x", artifact=rows[0])
 
     monkeypatch.setattr(fleet_cells, "adopt_delegated_mint", _adopt)

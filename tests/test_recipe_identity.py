@@ -89,11 +89,11 @@ def test_static_closure_reaches_the_composition_code() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_ek1_axes_are_the_recipe(pinned_runtime: None,
+def test_cg_key_v1_axes_are_the_recipe(pinned_runtime: None,
                                  monkeypatch: pytest.MonkeyPatch) -> None:
     meta = exported_cell_meta()
     key = ck.from_entry_metadata(meta)
-    assert key.digest.startswith("ek1-")
+    assert key.digest.startswith("cg-key-v1-")
     axes = key.axes_dict()
     assert set(axes) == {"graph", "sm", "toolchain"}
     # Version strings and image identity are GONE from the key: a
@@ -198,7 +198,7 @@ def test_marked_cell_never_republishes(monkeypatch: pytest.MonkeyPatch,
     artifact.write_bytes(b"bytes")
     pub = fc.CellPublisher(
         base_url="http://hub", worker_jwt=lambda: "jwt", image_digest="")
-    meta = {"cell_key": "ek1-" + "a" * 56, fc.ADOPTION_MARK: ["foreign"]}
+    meta = {"cell_key": "cg-key-v1-" + "a" * 56, fc.ADOPTION_MARK: ["foreign"]}
     with pytest.raises(fc.CellPublishRefused, match="pgw#712"):
         pub.publish(FAMILY, artifact, meta)
 

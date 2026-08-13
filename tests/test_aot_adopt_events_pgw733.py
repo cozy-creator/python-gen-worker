@@ -38,7 +38,7 @@ from gen_worker import activity, aot_serve
 FAMILY = "sdxl"
 RUNTIME = {"sku": "l4", "sm": "sm_89", "torch": "2.13.0+cu130",
            "cuda": "13.0"}
-KEY = "ek1-" + "a" * 56
+KEY = "cg-key-v1-" + "a" * 56
 
 INPUTS = [
     {"name": "sample", "position": 0, "dtype": "bfloat16",

@@ -42,7 +42,7 @@ SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "gen_worker"
 
 
 def test_membership_axiom_the_key_is_exactly_three_axes():
-    """The ek1 key contains exactly {graph, sm, toolchain}.
+    """The cg-key-v1 key contains exactly {graph, sm, toolchain}.
 
     If this test is failing because you added an axis: STOP. The membership
     axiom (pgw#1059 amendment 6, Paul 2026-08-09) admits an axis only when
@@ -270,7 +270,7 @@ def _old_schema_digest(meta: dict) -> str:
     canonical = json.dumps(
         axes, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     # STAYS "ck1-": this helper deliberately reconstructs the OLD scheme, and
-    # a blanket ck1->ek1 rename would have made it reconstruct the new one and
+    # a blanket ck1->cg-key-v1 rename would have made it reconstruct the new one and
     # assert nothing.
     return "ck1-" + hashlib.sha256(canonical.encode()).hexdigest()[:56]
 
@@ -339,14 +339,14 @@ def test_pre_redefinition_artifact_is_structurally_refused():
     # its (old-formula) stamp is present but unrestatable => admission refuses.
     # An ek-shaped stamp, because a ck1 stamp is not an identity CLAIM to this
     # runtime at all — `is_key` refuses it, so it never reaches the restate.
-    old["cell_key"] = "ek1-" + "5" * 56
+    old["cell_key"] = "cg-key-v1-" + "5" * 56
     reason = aot_serve.verify_contract(old)
     assert "malformed declared contract" in reason or "not restatable" in reason
 
 
 def test_forged_stamp_is_refused_at_admission():
     meta = _admissible_meta()
-    meta["cell_key"] = "ek1-" + "0" * 56
+    meta["cell_key"] = "cg-key-v1-" + "0" * 56
     reason = aot_serve.verify_contract(meta)
     assert "recorded facts describe" in reason
 

@@ -646,7 +646,7 @@ def _mint_aot(
     # pgw#1176: the child moves EVERY entry it packed into the parent's
     # directory, one file per graph class, and reports the set. `target` names
     # the directory the parent watches; the per-entry file names are the
-    # entries' own `ek1` keys, so the parent addresses each by identity rather
+    # entries' own `cg-key-v1` keys, so the parent addresses each by identity rather
     # than by position.
     target.parent.mkdir(parents=True, exist_ok=True)
     moved: List[Tuple[str, str, str]] = []

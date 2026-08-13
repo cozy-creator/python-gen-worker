@@ -100,9 +100,9 @@ def test_a_ck1_key_is_not_an_entry_key() -> None:
     would let a cell ref reach a per-entry path and fail late.
 
     THE FIFTH SWEEP ERROR, and it landed in the atom's own proof: a blanket
-    ``ck1-`` -> ``ek1-`` fixture sweep rewrote the REFUSAL line here, leaving
+    ``ck1-`` -> ``cg-key-v1-`` fixture sweep rewrote the REFUSAL line here, leaving
     a contradictory pair one character apart —
-    ``assert not is_key("ek1-…")`` beside ``assert is_key("ek1-…")``. The row
+    ``assert not is_key("cg-key-v1-…")`` beside ``assert is_key("cg-key-v1-…")``. The row
     went red, which is the only reason it surfaced, and while it was red the
     ck1-refusal invariant had NO passing guard in this file at all.
 
@@ -111,15 +111,18 @@ def test_a_ck1_key_is_not_an_entry_key() -> None:
     and the exception here is the one line that must keep naming the OLD
     scheme. Fixed, and annotated so the next sweep leaves it alone.
     """
-    assert cell_key.KEY_SCHEME == "ek1"
+    assert cell_key.KEY_SCHEME == "cg-key-v1"
     # fence-symbol-exempt: `ck1` is the SUPERSEDED scheme and naming it is the
     # whole assertion — a sweep that renames this line deletes the invariant.
     assert not cell_key.is_key("ck1-" + "0" * 56)
-    assert cell_key.is_key("ek1-" + "0" * 56)
-    # The refusal is about the PREFIX, not the length: a well-formed ck1 key
-    # of exactly the right shape is still refused, which is what makes an
-    # orphaned ref fail at the comparison rather than late.
-    assert len("ck1-" + "0" * 56) == len("ek1-" + "0" * 56)
+    assert cell_key.is_key("cg-key-v1-" + "0" * 56)
+    # The refusal is about the SCHEME, not the digest: the ck1 token above
+    # carries a digest of exactly the admitted width and is still refused,
+    # which is what makes an orphaned ref fail at the comparison rather than
+    # late. pgw#1213 made the two spellings different LENGTHS (`cg-key-v1` is
+    # longer than `ck1`), so length can no longer stand in for that claim —
+    # state it on the digest, which is the part the grammar actually fixes.
+    assert len("ck1-" + "0" * 56) - len("ck1-") == 56
 
 
 # --- 2. ARTIFACT -----------------------------------------------------------
@@ -144,7 +147,7 @@ def test_one_artifact_carries_exactly_one_graph(tmp_path: Path) -> None:
 
 def test_a_forged_key_stamp_is_refused_on_the_staged_bytes() -> None:
     meta = entry_meta(*rig.ROWS[0])
-    meta["cell_key"] = "ek1-" + "0" * 56
+    meta["cell_key"] = "cg-key-v1-" + "0" * 56
     reason = aot.verify_contract(meta)
     assert "!=" in reason and "recorded facts describe" in reason
 
@@ -155,7 +158,7 @@ def test_a_format_2_cell_cannot_restate_a_per_entry_identity() -> None:
     recomputation raises rather than matching."""
     legacy = {
         "format": 2, "kind": aot.ARTIFACT_KIND, **rig.RUNTIME,
-        "family": rig.FAMILY, "cell_key": "ek1-" + "0" * 56,
+        "family": rig.FAMILY, "cell_key": "cg-key-v1-" + "0" * 56,
         "entries": {rig.entry_name(h, w): rig._entry(h, w)
                     for h, w in rig.ROWS},
         "combined_graph_hash": "0" * 16,

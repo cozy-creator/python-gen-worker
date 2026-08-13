@@ -78,25 +78,36 @@ def test_unknown_and_missing_axes_refuse():
         ck.from_axes({k: v for k, v in _AXES.items() if k != "toolchain"})
 
 
-def test_key_scheme_ek1_foreign_keys_are_key_shaped_but_distinct():
-    """pgw#958 (§1.27(g)) + pgw#1059 amendment 1: ck1 is the only scheme
-    this runtime mints — the redefinition kept the number (Paul: "stick
-    with version-1 for now since we're still pre-launch") and PURGES the
-    pre-redefinition corpus instead of minting ck2.
+def test_the_deriver_and_the_validator_agree_on_cg_key_v1():
+    """pgw#1213: `is_key` admits exactly what `from_axes(...).digest` mints.
 
-    Shape stays scheme-AGNOSTIC, byte-identical to tensorhub's
-    `compilecache.IsCellKey` (th#1183): a foreign-scheme token IS
-    key-shaped; it simply names no artifact this runtime computes.
+    THE row that can go red on a scheme change: the deriver writes the
+    scheme through `_PREFIX` and the validator reads it through the
+    right-anchored digest match, so a change to one that is not made in the
+    other fails here rather than at a resolve nobody watches. The grammar is
+    also what tensorhub's `compilecache.IsCellKey` must enforce byte-for-byte
+    (th#1897 lands the Go half + the cross-repo vector fence).
     """
     key = ck.from_axes(_AXES).digest
-    assert key.startswith("ek1-")
-    for dead in ("ek2-", "ek3-", "ek4-", "ek5-", "ek6-"):
-        token = dead + "a" * 56
-        assert ck.is_key(token), "a foreign-scheme token is still key-SHAPED"
-        assert token != key
-    assert not ck.is_key("ck-" + "a" * 56)      # no scheme digits
-    assert not ck.is_key("ek1-" + "a" * 55)     # wrong digest width
-    assert not ck.is_key("ek1-" + "A" * 56)     # uppercase hex
+    assert key.startswith("cg-key-v1-")
+    assert ck.is_key(key) is True
+
+
+def test_only_cg_key_v1_is_a_key():
+    """Scheme-PINNED (pgw#1213, superseding th#1183's agnostic reading):
+    `cg-key-v1` is the first scheme any artifact was addressed by, so there
+    is no older corpus for agnosticism to admit. The scheme token contains
+    hyphens, so the grammar is matched from the RIGHT — never split on `-`.
+    """
+    assert not ck.is_key("ek1-" + "a" * 56)           # the pre-cut spelling
+    assert not ck.is_key("ck1-" + "a" * 56)           # the 36-entry cell key
+    assert not ck.is_key("cg-key-v2-" + "a" * 56)     # foreign scheme
+    assert not ck.is_key("key-v1-" + "a" * 56)        # a SUFFIX of the scheme
+    assert not ck.is_key("cg-key-v1-" + "a" * 55)     # digest too short
+    assert not ck.is_key("cg-key-v1-" + "a" * 57)     # digest too long
+    assert not ck.is_key("cg-key-v1-" + "A" * 56)     # uppercase hex
+    assert not ck.is_key("cg-key-v1" + "a" * 56)      # no separator
+    assert not ck.is_key("")
 
 
 def test_execution_lane_canonicalization():
@@ -127,9 +138,9 @@ def test_execution_lane_canonicalization():
 #
 # Every property they fenced survives on the exported lane BY CONSTRUCTION
 # rather than by comparison, which is the point of a content-addressed key:
-# sm, the declared contract, the env seal and the lane are all axes of `ek1`
+# sm, the declared contract, the env seal and the lane are all axes of `cg-key-v1`
 # or fold into one (pgw#1176),
 # so an entry that disagrees on any of them has a different key and never
 # resolves. `tests/test_cell_key_pgw1059.py` is where that is stated, with the
 # staleness matrix naming each axis. What is left here is the key itself —
-# determinism, axis sensitivity, the ek1 scheme, and lane canonicalization.
+# determinism, axis sensitivity, the cg-key-v1 scheme, and lane canonicalization.

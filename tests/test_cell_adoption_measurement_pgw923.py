@@ -31,7 +31,7 @@ from gen_worker.cell_adopt import AdoptOutcome, CellAdoption
 from gen_worker.executor import Executor, _InjectionResult
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
-REF = "root/family-sdxl#ek1-" + "b" * 56
+REF = "root/family-sdxl#cg-key-v1-" + "b" * 56
 DIGEST = "blake3:" + "c" * 64
 
 #: The arm is INDUCED to take this long, and the floor asserted against it is a

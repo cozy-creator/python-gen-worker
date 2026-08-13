@@ -869,7 +869,7 @@ def _entry_dir_name(entry: str) -> str:
     Entry names carry ``/``, ``=`` and ``,`` (``denoiser/h=16,w=16``), so they
     are not path components. The digest keeps two entries apart without
     inventing a second naming scheme anyone has to keep in sync — nothing
-    reads this name back; the ARTIFACT is addressed by its ``ek1`` key.
+    reads this name back; the ARTIFACT is addressed by its ``cg-key-v1`` key.
     """
     return hashlib.sha256(str(entry).encode("utf-8")).hexdigest()[:16]
 
@@ -4163,7 +4163,7 @@ def _treespec_text(spec: Any) -> str:
 
 
 def cell_identity(meta: Mapping[str, Any]) -> cell_key.CellKey:
-    """The ``ek1`` key ONE entry artifact's OWN recorded facts describe.
+    """The ``cg-key-v1`` key ONE entry artifact's OWN recorded facts describe.
 
     The computation is :func:`cell_key.from_entry_metadata` — ONE
     implementation, so the key the mint stamps and the axes the publish path

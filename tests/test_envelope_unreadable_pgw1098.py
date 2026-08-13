@@ -60,7 +60,7 @@ def _cell(path: Path, meta: Dict[str, Any], *, pad_to: int = 0) -> Path:
 #: DELIBERATELY PRE-pgw#1176, and left that way: `format: 2`, an `entries` MAP
 #: and a `ck1` key. This fixture's job is to reproduce a REAL artifact from the
 #: row 7 incident so the metadata SIZE bound is measured against bytes that
-#: actually existed. Migrating it to a one-entry `ek1` envelope would shrink
+#: actually existed. Migrating it to a one-entry `cg-key-v1` envelope would shrink
 #: the very thing under test — a 36-entry cell is what made the envelope
 #: exceed 16 MiB — and would assert the bound against a shape that never
 #: overflowed it.

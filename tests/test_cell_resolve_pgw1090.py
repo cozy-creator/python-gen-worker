@@ -16,8 +16,8 @@ from gen_worker import aot_identity, cell_key as ck, cell_resolve, env_seal
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.procsplit import actions as actions_mod
 
-KEY = "ek1-" + "ab" * 28
-OTHER_KEY = "ek1-" + "cd" * 28
+KEY = "cg-key-v1-" + "ab" * 28
+OTHER_KEY = "cg-key-v1-" + "cd" * 28
 
 
 class _Resp:
@@ -429,7 +429,7 @@ def test_a_hub_refusal_degrades_but_keeps_its_own_token(
         derive=lambda **_kw: _derived(), resolve=_refuse)
     assert not out.adopted
     assert out.reason == "cell_resolve_ambiguous"
-    assert out.derived_key.startswith("ek1-")
+    assert out.derived_key.startswith("cg-key-v1-")
     assert out.derive_ms == 1234
 
 
@@ -439,7 +439,7 @@ def test_a_miss_degrades_as_miss_not_as_a_failure(monkeypatch, tmp_path) -> None
         derive=lambda **_kw: _derived(), resolve=lambda *_a, **_k: None)
     assert not out.adopted
     assert out.reason == "miss"
-    assert out.derived_key.startswith("ek1-")
+    assert out.derived_key.startswith("cg-key-v1-")
 
 
 def test_a_failed_materialize_degrades_and_is_never_fatal(

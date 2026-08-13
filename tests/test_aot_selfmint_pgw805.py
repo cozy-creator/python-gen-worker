@@ -444,7 +444,7 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
     # pgw#1176: a `ck1` key names a 36-entry all-or-nothing cell, which this
     # runtime cannot arm at all — `cell_key.is_key` refuses the prefix
     # deliberately, so a fixture keyed that way tests a shape nothing produces.
-    key = "ek1-" + "a" * 56
+    key = "cg-key-v1-" + "a" * 56
     packed = tmp_path / "aot" / f"{key}.tar.gz"
     seen: Dict[str, Any] = {}
 
@@ -482,7 +482,7 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
 
     assert report.status == "minted"
     # pgw#1176: the child moves EVERY entry it packed into the parent's
-    # directory, one file per graph class NAMED BY ITS OWN `ek1` key — so the
+    # directory, one file per graph class NAMED BY ITS OWN `cg-key-v1` key — so the
     # parent addresses each by identity rather than by position, and `target`
     # names the directory rather than the single file it used to be. The
     # one-element unpack asserts this declaration's arity.
@@ -569,7 +569,7 @@ def test_a_self_minted_aot_cell_arms_through_the_aot_gates(
         _info.size = len(_payload)
         _tar.addfile(_info, _io.BytesIO(_payload))
     pending = fleet_cells.PendingSelfMint(
-        family=FAMILY, arm_token="ck1-handle", ref="root/family-sdxl#ek1-handle",
+        family=FAMILY, arm_token="ck1-handle", ref="root/family-sdxl#cg-key-v1-handle",
         cfg=_Cfg(), target=artifact,
         mint_root=tmp_path, publisher=None)
 

@@ -903,7 +903,7 @@ def _identity_axes(family: str, meta: dict) -> Dict[str, str]:
     So this FAILS CLOSED (pgw#1046): a mint that cannot name an axis raises
     :class:`CellPublishRefused` here, before a byte moves.
 
-    Contents (pgw#1176): the three ek1 key axes (``graph``, ``sm``,
+    Contents (pgw#1176): the three cg-key-v1 key axes (``graph``, ``sm``,
     ``toolchain``) verbatim, plus the wire facts the hub requires by name
     (``graph_contract`` — the DECLARATION-wide manifest digest, which is what
     the hub folds compile-health coverage under; ``env_seal``) and the demoted

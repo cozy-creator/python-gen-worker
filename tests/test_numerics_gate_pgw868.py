@@ -141,7 +141,7 @@ def test_a_faithful_cell_arms_AND_THE_PASS_IS_ANNOUNCED(
     # each naming its own class and carrying its own key.
     for (detail, _phase), (h, w) in zip(rows, ROWS):
         assert "axes=1/1" in detail
-        assert f"family={FAMILY}" in detail and "key=ek1-" in detail
+        assert f"family={FAMILY}" in detail and "key=cg-key-v1-" in detail
         assert entry_name(h, w) in detail
         assert "cos=1.00000" in detail
 

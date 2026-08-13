@@ -62,7 +62,7 @@ class _Pipe:
         self.transformer = _Denoiser()
 
 
-FAKE_KEY = "ek1-" + "a" * 56
+FAKE_KEY = "cg-key-v1-" + "a" * 56
 
 
 @pytest.fixture(autouse=True)
@@ -120,7 +120,7 @@ def _publisher(calls):
 # ---------------------------------------------------------------------------
 
 
-_ADOPT_META = {"cell_key": "ek1-" + "d" * 56, "family": "fam",
+_ADOPT_META = {"cell_key": "cg-key-v1-" + "d" * 56, "family": "fam",
                "kind": "aot-inductor"}
 
 

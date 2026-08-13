@@ -132,11 +132,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Mapping, Tuple
 
-# pgw#1176: ``ck1`` (the 36-entry CELL key) is REPLACED by ``ek1`` (one graph
-# class). This is a §1.34 third-category change — a name persisted as an
+# pgw#1176: ``ck1`` (the 36-entry CELL key) is REPLACED by the per-entry key
+# below (one graph class). This is a §1.34 third-category change — a name persisted as an
 # ADDRESS — so it is a COORDINATED FLEET RE-KEY, never a quiet rename: every
 # stored cell is orphaned by it, and the cut carries scheme + per-entry store
 # schema + resolve/publish wire + pack format + the
@@ -144,13 +145,21 @@ from typing import Any, Dict, Iterable, Mapping, Tuple
 # Priced today: the adoptable corpus is ONE toy family, so the re-key costs
 # one re-mint of a 3-class toy — effectively free, and never this cheap
 # again. The scheme-prefix machinery STAYS: post-launch, the identical change
-# would be ek2 with strand-by-name. New identity FACTS ride the content
-# digests (toolchain entries), never new axes and never a new scheme number.
-KEY_SCHEME = "ek1"
+# would be a new scheme token with strand-by-name. New identity FACTS ride the
+# content digests (toolchain entries), never new axes and never a new scheme.
+#
+# pgw#1213: the scheme token is ``cg-key-v1`` (Paul, final). It landed before
+# the ``v0.114.0`` tag existed and before anything published, so no artifact
+# was ever addressed by ``ek1`` — the 0.114.0 wheel ships ``cg-key-v1``. The
+# token CONTAINS hyphens, so no reader may split a key on ``-``: the grammar
+# is scheme + ``-`` + the fixed-width hex digest, matched from the RIGHT
+# (``is_key``).
+KEY_SCHEME = "cg-key-v1"
 _PREFIX = KEY_SCHEME + "-"
-# The key digest doubles as the store flavor token, whose shared grammar
-# (th#597 C5: [a-z0-9][a-z0-9._-]{0,63}, Go+Py identical) caps tokens at 64
-# chars: 56 hex chars of SHA-256 (224 bits) keeps the whole key at 60.
+# The key doubles as the store flavor token, whose shared grammar (th#597 C5:
+# [a-z0-9][a-z0-9._-]{0,63}, Go+Py identical) caps tokens at 64 chars. 56 hex
+# chars of SHA-256 (224 bits) + the 10-char ``cg-key-v1-`` prefix is 66, so
+# th#1897 carries the matching cap widening on both halves of that grammar.
 _DIGEST_HEX = 56
 
 # THE three axes, all required — see THE MEMBERSHIP AXIOM in the module
@@ -218,44 +227,46 @@ class CellKey:
         return _PREFIX + h[:_DIGEST_HEX]
 
 
+#: pgw#1213: the digest is FIXED-WIDTH and terminal, so it is matched from the
+#: RIGHT and everything before it is the scheme. The scheme token contains
+#: hyphens (``cg-key-v1``), which is exactly why no reader may split a key on
+#: ``-`` or slice a fixed number of leading characters off one.
+_DIGEST_RE = re.compile(r"-(?P<digest>[0-9a-f]{%d})$" % _DIGEST_HEX)
+
+
 def is_key(value: str) -> bool:
-    """True when ``value`` has entry-key SHAPE: ``ek`` + 1-2 scheme digits +
-    ``-`` + 56 lowercase hex.
+    """True when ``value`` is a key of THIS scheme: ``cg-key-v1`` + ``-`` +
+    56 lowercase hex.
 
-    Scheme-AGNOSTIC, byte-for-byte the grammar tensorhub's
-    ``compilecache.IsCellKey`` must enforce after the pgw#1176 cut, and for
-    the same reason it gives (th#1183): pinning the current scheme here turns
-    every other-scheme entry into ``unreadable_cell_key``, which is both a
-    lie and a filter no axis justifies. An entry of an older scheme is
-    admitted to the candidate list and then ruled on by the axes that
-    actually decide whether this runtime can execute it — the identity axes
-    and the ingress contract — not by the label on it.
+    This grammar must remain byte-for-byte what tensorhub's hub-side
+    validator (``compilecache.IsCellKey``) enforces — th#1897 lands the Go
+    half together with a cross-repo vector fence, so the two halves are
+    compared against one shared vector file rather than by inspection. A
+    divergence here is a divergence in what the fleet considers addressable.
 
-    NOTE the ``ck`` prefix is NOT accepted. A ck1 key names a 36-entry
-    all-or-nothing cell, which is not a thing this runtime can arm at all; a
-    grammar that admitted both would let a cell ref reach a per-entry code
-    path and fail late instead of at the comparison.
+    Scheme-PINNED (pgw#1213, superseding the scheme-agnostic reading of
+    th#1183): `cg-key-v1` is the first scheme any published artifact was ever
+    addressed by, so there is no older corpus for agnosticism to admit, and a
+    grammar that accepts unknown schemes accepts tokens whose digest was
+    computed over axes this runtime cannot restate.
+
+    NOTE ``ck1``/``ek1`` are NOT accepted. A ck1 key names a 36-entry
+    all-or-nothing cell, which is not a thing this runtime can arm at all; an
+    ek1 key never addressed anything. A grammar that admitted either would
+    let such a ref reach a per-entry code path and fail late instead of at
+    the comparison.
     """
     v = str(value or "")
-    rest = v[2:] if v.startswith("ek") else ""
-    if not rest:
+    m = _DIGEST_RE.search(v)
+    if m is None:
         return False
-    digits = 0
-    while digits < len(rest) and rest[digits].isdigit():
-        digits += 1
-    if not 1 <= digits <= 2 or digits >= len(rest) or rest[digits] != "-":
-        return False
-    hexpart = rest[digits + 1:]
-    return (
-        len(hexpart) == _DIGEST_HEX
-        and all(c in "0123456789abcdef" for c in hexpart)
-    )
+    return v[:m.start()] == KEY_SCHEME
 
 
 def _refuse_key_shaped(where: str, name: str, value: str) -> None:
     """A KEY where a DIGEST belongs is a category error, not a bad value.
 
-    pgw#1176: `ck1-`/`ek1-` and the 16-hex fact digests are all `str`, so
+    pgw#1176: `cg-key-v1-` keys and the 16-hex fact digests are all `str`, so
     nothing in the type system distinguishes them — that is the honest reason
     a whole class of confusion type-checks cleanly. An opaque `NewType` cannot
     close it either at the places that matter: `is_key` is a BOUNDARY
