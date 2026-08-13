@@ -42,6 +42,7 @@ from typing import (
     List,
     Mapping,
     Optional,
+    Set,
     Sequence,
     Tuple,
     Union,
@@ -824,9 +825,9 @@ class Arg(msgspec.Struct, frozen=True):
 
 def _carrier_names(
     inputs: Tuple[Input, ...], args: Tuple[Arg, ...], targets: Sequence[str],
-) -> set:
+) -> Set[str]:
     """Every name a dim may be carried by, for the given target scope."""
-    names: set = set()
+    names: Set[str] = set()
     for target in targets:
         for inp in inputs:
             if not inp.targets or target in inp.targets:
@@ -843,7 +844,7 @@ def dims_for_targets(
     inputs: Tuple[Input, ...],
     args: Tuple[Arg, ...],
     targets: Sequence[str],
-) -> set:
+) -> Set[str]:
     """The dim NAMES a target-scoped graph class must state (pgw#967).
 
     A dim belongs to a target when one of its ``carried_by`` bindings names
@@ -858,7 +859,7 @@ def dims_for_targets(
     if not targets or not inputs:
         return all_names
     known = _carrier_names(inputs, args, targets)
-    scoped: set = set()
+    scoped: Set[str] = set()
     for d in dims:
         for bound, _axis in d.carried_by:
             if bound in known or bound.split(".", 1)[0] in known:
@@ -867,7 +868,7 @@ def dims_for_targets(
     return scoped
 
 
-def forks_for_targets(forks: Tuple[Fork, ...], targets: Sequence[str]) -> set:
+def forks_for_targets(forks: Tuple[Fork, ...], targets: Sequence[str]) -> Set[str]:
     """The fork NAMES a target-scoped graph class must state (pgw#967)."""
     if not targets:
         return {f.name for f in forks}
@@ -933,7 +934,7 @@ def validate_contract(compile_decl: Any) -> None:
 
     served_by_fork = {f.name: set(f.served) for f in forks}
     unserved_by_fork = {f.name: set(f.unserved) for f in forks}
-    seen: set = set()
+    seen: Set[GraphClass] = set()
     for i, cls in enumerate(classes):
         if cls in seen:
             raise DeclarationError(f"Compile.classes repeats row #{i}: {cls.as_row()!r}")
@@ -1001,7 +1002,7 @@ def validate_contract(compile_decl: Any) -> None:
     # shapes instead of its classes has nothing that could cover an arm, and
     # forks are legal there (they still key the graph) — so an empty class set
     # is silence, not a missing class.
-    covered: Dict[str, set] = {f.name: set() for f in forks}
+    covered: Dict[str, Set[str]] = {f.name: set() for f in forks}
     for cls in classes:
         for name, value in cls.fork:
             if name in covered:

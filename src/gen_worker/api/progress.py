@@ -26,7 +26,7 @@ _FULL_WINDOW: Window = (0.0, 1.0)
 
 
 def diffusers_step_callback(
-    ctx: "RequestContext",
+    ctx: "RequestContext[Any]",
     num_inference_steps: int,
     *,
     stage: Optional[str] = "denoise",

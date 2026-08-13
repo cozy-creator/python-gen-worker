@@ -73,7 +73,7 @@ if TYPE_CHECKING:  # heavy optional deps — imported only for signature fidelit
     import torch
     from PIL import Image
 
-C = TypeVar("C", bound=RequestContext)
+C = TypeVar("C", bound="RequestContext[Any]")
 
 
 def stub_slots(

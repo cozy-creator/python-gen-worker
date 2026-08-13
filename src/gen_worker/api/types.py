@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import IO, Literal, Optional
+from typing import IO, Any, Dict, Literal, Optional
 
 import msgspec
 
@@ -226,7 +226,7 @@ class SourceRepo(msgspec.Struct):
 
     ref: str
     checkpoint_id: Optional[str] = None
-    attributes: dict = msgspec.field(default_factory=dict)
+    attributes: Dict[str, Any] = msgspec.field(default_factory=dict)
 
 
 class DatasetRef(msgspec.Struct):
@@ -251,7 +251,7 @@ class DatasetRef(msgspec.Struct):
 
     ref: str
     checkpoint_id: Optional[str] = None
-    attributes: dict = msgspec.field(default_factory=dict)
+    attributes: Dict[str, Any] = msgspec.field(default_factory=dict)
     split: str = "train"
 
 
@@ -269,6 +269,6 @@ class OutputSpec(msgspec.Struct):
     are rejected at commit time. See tensorhub ``docs/variant_attributes.md``.
     """
 
-    attributes: dict = msgspec.field(default_factory=dict)
+    attributes: Dict[str, Any] = msgspec.field(default_factory=dict)
 
 

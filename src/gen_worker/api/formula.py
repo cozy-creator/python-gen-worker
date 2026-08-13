@@ -162,7 +162,7 @@ class RuntimeFormula:
             raise ValueError(
                 f"{owner}: runtime= formula needs a msgspec.Struct payload ({exc})"
             ) from exc
-        defaults_fields: set = set()
+        defaults_fields: Set[str] = set()
         if defaults_type is not None:
             try:
                 defaults_fields = {
