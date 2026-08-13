@@ -2615,6 +2615,62 @@ def _mint_cell(
     timings["entry_workers"] = float(width.workers)
 
     # ── PACK PER ENTRY (pgw#1176) ──────────────────────────────────────────
+    # Lifted to `pack_graph_classes` (pgw#1215) so the compile child can pack
+    # its own share. Ordering, refusals and timings keys are unchanged.
+    return pack_graph_classes(
+        minted,
+        spec=spec,
+        work=work,
+        out_dir=out_dir,
+        class_aliases=class_aliases,
+        timings=timings,
+        t_mint=t_mint,
+        inductor_configs=inductor_configs,
+        width=width,
+        pool_ledger=progress.pool_ledger,
+        execution_lane_verdict=execution_lane_verdict,
+        progress=progress,
+    )
+
+
+
+def pack_graph_classes(
+    minted: Sequence["_MintedEntry"],
+    *,
+    spec: ExportSpec,
+    work: Path,
+    out_dir: Path,
+    class_aliases: Mapping[str, Sequence[Any]],
+    timings: Dict[str, Any],
+    t_mint: float,
+    inductor_configs: Optional[Mapping[str, Any]] = None,
+    width: Optional[aot_compile_pool.PoolWidth] = None,
+    pool_ledger: Optional[Mapping[str, Any]] = None,
+    execution_lane_verdict: Optional[kernel_path.Verdict] = None,
+    progress: Optional["MintProgress"] = None,
+) -> MintResult:
+    """Pack every compiled graph class into its own artifact — the mint's tail.
+
+    Lifted out of :func:`_mint_cell` UNCHANGED (pgw#1215, th#1834 Phase 3 step
+    2a). It moves because the process-layer rewrite has to call it from the
+    COMPILE CHILD: once a child traces and compiles its own share in one
+    address space it holds the ``_MintedEntry`` rows and must turn them into
+    artifacts itself. Left inline, the child would have to re-implement
+    packaging — and two packagers is exactly the divergence per-graph-class
+    identity exists to rule out.
+
+    It takes ``_MintedEntry`` rows because that is already what
+    :func:`_export_entry` returns and what :func:`trace_for_key` builds
+    internally. The seam is not invented here; the two halves have always
+    spoken this type, which is why the extraction is a move and not a design.
+
+    Byte-identical to the inline version: same order, same refusals, the same
+    ``timings`` keys written at the same points, the same phase event.
+    ``progress`` is optional only so a caller with no beat can pack; every
+    other argument is required because the artifact's identity depends on it.
+    """
+    progress = MintProgress() if progress is None else progress
+    # ── PACK PER ENTRY (pgw#1176) ──────────────────────────────────────────
     #
     # One artifact per graph class, not one per cell. The multi-entry
     # `model.pt2` is DELETED: it made identity, adoption, durability,
@@ -2687,7 +2743,7 @@ def _mint_cell(
     timings["declare_s"] = round(time.monotonic() - t0, 2)
     timings["total_s"] = round(time.monotonic() - t_mint, 2)
     phase_table = _mint_phase_table(
-        minted, timings, inductor_configs, width, progress.pool_ledger)
+        minted, timings, inductor_configs, width, pool_ledger)
     _emit_phase_event(spec, phase_table)
 
     t0 = time.monotonic()
@@ -2750,7 +2806,6 @@ def _mint_cell(
     )
     return MintResult(
         entries=tuple(packed), manifest=manifest, timings=timings)
-
 
 
 def _drive_pool(
