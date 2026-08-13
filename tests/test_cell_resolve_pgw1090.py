@@ -423,10 +423,13 @@ def _derived(digest: str = KEY) -> Any:
     from gen_worker import boot_key, cell_key as ck
 
     return boot_key.DerivedKey(
-        key=ck.from_axes({
-            "graph": "c0ffee0000000000", "envelope": "e" * 16,
-            "sm": "sm_89", "toolchain": "t" * 16}),
-        class_hashes={"a": "0" * 16}, combined="c0ffee0000000000",
+        # pgw#1176: a boot derives a KEY SET. These declarations trace to one
+        # class, so the set has one member and callers take it from `keys`.
+        entry_keys={"a": ck.from_axes({
+            "graph": "c0ffee0000000000",
+            "sm": "sm_89", "toolchain": "t" * 16}).digest},
+        class_hashes={"a": "c0ffee0000000000"},
+        manifest=ck.manifest_digest(["c0ffee0000000000"]),
         workers=2, width_reason="test", traced=1, memo="miss", wall_ms=1234)
 
 

@@ -231,8 +231,10 @@ def production_cfgs() -> Dict[str, Any]:
 
 def _derived(digest: str) -> boot_key.DerivedKey:
     return boot_key.DerivedKey(
-        key=cell_key.CellKey(axes=(("adopted", digest),)),
-        class_hashes={}, combined="", workers=1, width_reason="rig",
+        # pgw#1176: the rig's derived manifest — one entry key per declared
+        # class. `digest` stands in for the traced graph, as it always did.
+        entry_keys={"rig": "ek1-" + (digest * 56)[:56]},
+        class_hashes={}, manifest="", workers=1, width_reason="rig",
         traced=len(ROWS), memo="miss", wall_ms=10_291,
     )
 

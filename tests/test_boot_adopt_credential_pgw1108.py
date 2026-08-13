@@ -89,7 +89,7 @@ def wired(monkeypatch, tmp_path):
 
 
 def _run_boot_adopt(ex: Any) -> Any:
-    return ex._boot_adopt(_Spec(), {})
+    return ex._boot_adopt(_Spec(), {})[0]
 
 
 def test_split_child_with_seam_up_resolves_though_it_holds_no_jwt(wired):
