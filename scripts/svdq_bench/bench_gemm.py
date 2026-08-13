@@ -15,8 +15,8 @@ Measures, per shape, with no checkpoint and no model:
   bf16          plain bf16 mm (the roofline everything is judged against)
   cublas        the shipped hybrid: quant + _scaled_mm + fused epilogue
   triton        the fused alternative: quant + dot_scaled GEMM w/ lora epilogue
-plus the quant kernel alone at several warp counts, because _WARPS_BY_SM's
-sm_100 entry (4) was never swept on real sm_100 silicon.
+plus the quant kernel alone at several warp counts, so _WARPS_BY_SM's entry for
+this card is swept on real silicon rather than assumed.
 
   bench_gemm.py --out DIR
 """

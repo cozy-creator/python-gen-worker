@@ -244,7 +244,7 @@ def _hf_classification_inputs(
             side["config_json"] = None
 
     if "config.json" not in paths and "model_index.json" not in paths:
-        # no root marker at all. A standalone component published
+        # No root marker at all. A standalone component published
         # under the pipeline key it overrides (PrunaAI/PrunaVAED's
         # vae/config.json) is only recognizable from the SUBFOLDER's config —
         # fetch every candidate's (tiny) config so the classifier can re-root

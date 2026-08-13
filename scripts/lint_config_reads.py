@@ -214,7 +214,7 @@ def load_allowlist() -> Tuple[Dict[Tuple[str, str], str], List[str]]:
 
 
 # ---------------------------------------------------------------------------
-# the BEHAVIOUR axis
+# The BEHAVIOUR axis
 # ---------------------------------------------------------------------------
 #
 # The six classifications above answer WHERE a read happens relative to the

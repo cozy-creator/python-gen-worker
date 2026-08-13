@@ -381,7 +381,7 @@ def read_memo(
             parsed = json.loads(canon)
         except (TypeError, ValueError):
             # One unreadable block invalidates the WHOLE entry: a partial class
-            # set is not a narrower key, it is a wrong one.
+            # Set is not a narrower key, it is a wrong one.
             return {}
         if not isinstance(parsed, dict):
             return {}

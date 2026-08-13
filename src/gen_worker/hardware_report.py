@@ -124,7 +124,7 @@ def _identity_from_settings(settings: Settings) -> Tuple[str, str]:
     claims, mirroring Lifecycle's own identity resolution (lifecycle.py)."""
     worker_id = (settings.worker_id or "").strip()
     release_id = ""
-    # the CURRENT credential, never the frozen boot one. This dial
+    # The CURRENT credential, never the frozen boot one. This dial
     # opens its own Connect, so past T+30 min a stale token here is a fresh
     # `worker_token_expired` on every report — three of which wedge the pod.
     token = worker_credential.current()
@@ -201,7 +201,7 @@ async def _report_async(settings: Settings, report: HardwareReport) -> bool:
     if not target:
         return False
     worker_id, release_id = _identity_from_settings(settings)
-    # the CURRENT credential, never the frozen boot one. This dial
+    # The CURRENT credential, never the frozen boot one. This dial
     # opens its own Connect, so past T+30 min a stale token here is a fresh
     # `worker_token_expired` on every report — three of which wedge the pod.
     token = worker_credential.current()

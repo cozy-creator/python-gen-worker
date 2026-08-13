@@ -1,14 +1,12 @@
 """Kernel-accounted evidence that another process is doing real work.
 
-The producer every progress-keyed bound over a LOCAL child is built from
-a monotonic number that rises while a process tree burns CPU
-or moves bytes, and stops rising the moment it wedges. It needs no cooperation
-from the process being watched, which is what makes it usable against a
-follower that has no protocol of its own between spawn and ready.
+The producer every progress-keyed bound over a LOCAL child is built from: a
+monotonic number that rises while a process tree burns CPU or moves bytes, and
+stops rising the moment it wedges. It needs no cooperation from the process
+being watched, which is what makes it usable against a follower that has no
+protocol of its own between spawn and ready.
 
-One implementation, because the two callers had drifted into being one:
-``procsplit.parent`` grew this to watch a compute child and
-``parallel.group`` needed exactly it to replace two flat wall clocks.
+ONE implementation, shared by ``procsplit.parent`` and ``parallel.group``.
 """
 
 from __future__ import annotations

@@ -816,7 +816,7 @@ def under(mode: Optional[Any]) -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
-# the META round-trip that lets a weight-free program cross the
+# The META round-trip that lets a weight-free program cross the
 # entry-compile pool's process boundary
 # ---------------------------------------------------------------------------
 #

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""pgw#862 B0 pod cell — fused svdq lane vs baseline on one sm_120 card.
+"""Pod cell — fused svdq lane vs baseline on one sm_120 card.
 
 Modes (each its own process; the lane decision is per-process):
   correctness: baseline model + fused twins on REAL captured activations —

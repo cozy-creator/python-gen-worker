@@ -381,7 +381,7 @@ class SendQueue:
         # (request_id, attempt) -> JobResult WorkerMessage, until written to a
         # live stream. Survives reconnects; drives Hello.in_flight.
         self._pending_results: dict[Tuple[str, int], pb.WorkerMessage] = {}
-        # set when this stream's sender must end. It ends only once
+        # Set when this stream's sender must end. It ends only once
         # nothing is left to write, so quiescing never drops a queued message.
         self._quiescing = False
 
@@ -1077,7 +1077,7 @@ class Transport:
         )
         if pod:
             # The hub owns the actuator for a pod. Say so once per verdict so
-            # the silence is attributable off-pod.
+            # The silence is attributable off-pod.
             if not repeated:
                 self._report_auth_verdict_deferred(cred, details, pod)
             return False

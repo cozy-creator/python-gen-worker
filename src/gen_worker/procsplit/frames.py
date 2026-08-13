@@ -48,7 +48,7 @@ T_WORKER_MSG = 21    # pb.WorkerMessage bytes
 T_PREPEND = 22       # msgpack [pb.WorkerMessage bytes, ...]
 T_FLUSH_REQ = 23     # msgpack {"timeout": float | None}
 T_WATCHDOG = 24      # msgpack {}  (event-loop liveness: the loop is turning)
-# which activity is open, written by a THREAD over a dedicated pipe so
+# Which activity is open, written by a THREAD over a dedicated pipe so
 # a starved event loop cannot silence it. Evidence is NOT carried here — the
 # parent measures the child's CPU/IO itself, because a GIL-starved thread
 # cannot be the decider of its own process's liveness.
