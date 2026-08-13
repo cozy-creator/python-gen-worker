@@ -839,6 +839,7 @@ def mint(request: MintRequest) -> MintReport:
                 return_loaded=True, component_paths=overrides) or {}
         _slot, loaded_pipe = pick_compile_target(got, cfg)
         frame(phase="load", note=f"compile target on slot {_slot!r}")
+        assert_traceable_as_loaded(loaded_pipe, request)
         if cfg.lora_bucket:
             cc.apply_lora_execution_lane(loaded_pipe, cfg.lora_bucket)
         return obj, loaded_pipe, fleet_cells.aot_export_spec(loaded_pipe, cfg)
@@ -914,6 +915,49 @@ def mint(request: MintRequest) -> MintReport:
         request, pipe, cfg, target, started=started,
         sha256_file=sha256_file, execution_lane_verdict=verdict, spec=aot_spec,
         footprint=footprint)
+
+
+def assert_traceable_as_loaded(pipeline: Any, request: MintRequest) -> None:
+    """Refuse ONCE, before any export, when this pipeline cannot be traced.
+
+    pgw#1208 (a). The weight-free path never places and so never acquires these
+    hooks; this is for the REAL-WEIGHT fallback, which loads a checkpoint into
+    this process and runs the serving placement ladder over it. On a card too
+    small to hold it resident the ladder engages diffusers group offloading,
+    whose `ModuleGroup.onload_` is `@torch.compiler.disable`d — and every one of
+    the family's declared graph classes then refuses `Unsupported: Skip inlining
+    …` for the same reason.
+
+    Without this, pgw#1208's per-entry skip would do exactly what it is supposed
+    to do and dutifully skip all 36: thirty-six typed refusals and an hour of
+    wall clock to say once what was knowable before the first export began. The
+    per-entry skip is for a class that is individually unexportable. This is the
+    whole PIPELINE being untraceable as loaded, which is a different fact and
+    gets its own sentence.
+
+    Cost is already covered by the attempt-is-the-budget rule (§4.33); what this
+    buys is LEGIBILITY — a pod that cannot mint says why, once, in a countable
+    typed refusal, instead of emitting a refusal per class and publishing
+    nothing.
+
+    No placement logic and no card arithmetic: it asks the object in front of it
+    whether it carries disabled work, so it stays true for any future source of
+    such hooks rather than only for the offload rung that produced the first.
+    """
+    from .models import traceability
+
+    reason = traceability.untraceable_reason(pipeline)
+    if not reason:
+        return
+    raise MintChildRefused(
+        f"mint_requires_resident_parent: {mint_identity(request)} loaded real "
+        f"weights and this card could not hold them resident, so the placement "
+        f"ladder installed offload hooks — and {reason}. `torch.export` refuses "
+        f"a `torch.compiler.disable`d function rather than tracing around it, "
+        f"so EVERY declared graph class would refuse identically. Refused once, "
+        f"before the first export, instead of once per class. This pod can "
+        f"serve this family eager; it cannot mint it — mint it where the "
+        f"pipeline fits resident.")
 
 
 def assert_handler_proven(request: MintRequest) -> None:

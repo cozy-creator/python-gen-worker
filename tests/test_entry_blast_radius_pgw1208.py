@@ -414,3 +414,106 @@ def test_the_REAL_WEIGHT_fallback_keeps_its_placement(
     for call in fallback:
         assert call.get("place", True) is not False, (
             "the real-weight fallback lost its placement — it runs a forward")
+
+
+# ---------------------------------------------------------------------------
+# (a) The pipeline that cannot be traced AS LOADED refuses ONCE, before export
+# ---------------------------------------------------------------------------
+
+
+def _offloaded() -> Any:
+    """A pipeline carrying REAL diffusers group offloading. No mock: the whole
+    point is that the marker is torch's and the hooks are diffusers'."""
+    from diffusers.hooks.group_offloading import apply_group_offloading
+
+    class Blocks(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.layers = nn.ModuleList([nn.Linear(8, 8) for _ in range(4)])
+
+        def forward(self, x: Any) -> Any:
+            for layer in self.layers:
+                x = layer(x)
+            return x
+
+    unet = Blocks()
+    apply_group_offloading(
+        unet, onload_device=torch.device("cpu"),
+        offload_device=torch.device("cpu"),
+        offload_type="block_level", num_blocks_per_group=1)
+    return types.SimpleNamespace(unet=unet)
+
+
+def test_a_clean_pipeline_is_traceable() -> None:
+    from gen_worker.models import traceability
+
+    assert traceability.untraceable_hooks(
+        types.SimpleNamespace(unet=TinyUNet())) == ()
+    assert traceability.untraceable_reason(
+        types.SimpleNamespace(unet=TinyUNet())) == ""
+
+
+def test_real_group_offloading_is_detected_and_the_function_is_NAMED() -> None:
+    """The pod's exact construct, found through the real diffusers path.
+
+    `ModuleGroup.onload_` is `@torch.compiler.disable`d, and the hook that
+    reaches it is registered in diffusers' own `_diffusers_hook` registry — not
+    in torch's `_forward_pre_hooks` — so a walk that only knew torch's dicts
+    would have seen nothing at all on the one case this exists for.
+    """
+    pytest.importorskip("diffusers")
+    from gen_worker.models import traceability
+
+    hits = traceability.untraceable_hooks(_offloaded())
+
+    assert hits, "real group offloading was not detected"
+    assert all(fn == "ModuleGroup.onload_" for _p, _w, fn in hits), (
+        f"the disabled callable must be NAMED, got {sorted({f for _p,_w,f in hits})}")
+    assert all("group_offloading" in where for _p, where, _f in hits)
+
+
+def test_the_mint_refuses_ONCE_before_export_naming_the_construct() -> None:
+    """(a). Without it, pgw#1208's per-entry skip would dutifully skip all 36
+    classes and publish nothing — thirty-six typed refusals and an hour of wall
+    clock to say once what was knowable before the first export began."""
+    pytest.importorskip("diffusers")
+    from gen_worker import mint_child
+    from gen_worker import mint_process as mp
+
+    request = mp.MintRequest(
+        function="f", modules=(), family="sdxl", arm_token="a",
+        target="t", work_root="w", report="r",
+        cfg=mp.CompileCellSpec(family="sdxl", targets=("unet",)))
+
+    # A traceable pipeline passes silently.
+    mint_child.assert_traceable_as_loaded(
+        types.SimpleNamespace(unet=TinyUNet()), request)
+
+    with pytest.raises(mint_child.MintChildRefused) as caught:
+        mint_child.assert_traceable_as_loaded(_offloaded(), request)
+
+    said = str(caught.value)
+    assert "mint_requires_resident_parent" in said, "the refusal must be TYPED"
+    assert "ModuleGroup.onload_" in said, "and must name the construct"
+    assert "serve this family eager" in said, (
+        "and must say what this pod CAN still do — a refusal that does not is "
+        "read as the pod being broken")
+
+
+def test_the_check_is_on_the_REAL_WEIGHT_path_only() -> None:
+    """Scope, fenced. The weight-free child never places (pgw#1208 fix 1), so
+    it never acquires these hooks and must not pay a walk over every module of
+    every component on the path that is already correct."""
+    import inspect
+
+    from gen_worker import mint_child
+
+    source = inspect.getsource(mint_child)
+    # The call sits after `pick_compile_target`, which both paths reach — but
+    # the weight-free load cannot produce hooks, so this is a no-op there by
+    # construction rather than by a second branch. What must NOT happen is the
+    # check being skipped on the fallback.
+    assert "assert_traceable_as_loaded(loaded_pipe, request)" in source
+    assert source.index("assert_traceable_as_loaded(loaded_pipe") > \
+        source.index("place=False"), (
+        "the traceability check must run after the load, not before it")
