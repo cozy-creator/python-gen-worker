@@ -11,10 +11,13 @@ NEITHER a cap NOR any verification, on the path its own public wrapper
 
 WHAT THESE TESTS ASSERT, and why it is not just "an error is raised". An error
 after the fact is exactly what the old code produced for three of the four
-sites. So every refusal below is checked for WHEN it happened: the rig servers
-count the bytes they managed to push, and an oversized transfer must be
-abandoned after roughly its declared size — not after the whole 32 MiB body.
-That difference is the entire issue.
+sites. So every refusal below is checked for WHEN it happened — and since
+pgw#1204 that is observed as an ORDERING rather than as a byte count: the rig
+records whether it wrote a body to its LAST byte with the client still reading.
+An in-loop bound kills the connection mid-write, so the server never finishes;
+a post-loop check reads all 32 MiB, so it does. That difference is the entire
+issue, and it is a fact about order — unlike "how many bytes got out before the
+abort", which is a fact about the runner's scheduler and flaked five cuts.
 
 No mocks: every case runs a real `requests` client against a real
 `ThreadingHTTPServer` over a real socket, through the shipping download
@@ -33,6 +36,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, NamedTuple, Optional
 
 import pytest
+import requests
 from blake3 import blake3
 
 from gen_worker.bounded_stream import StreamTooLarge, copy_bounded, free_space_bound
@@ -56,26 +60,27 @@ DECLARED_BYTES = 1 << 20
 # `materialize_blob` is the exception and gets its own shape: its declaration
 # IS the transport length, so the only way past it is a `Content-Encoding` that
 # expands — see the gzip-bomb case.
-#: How far past its declared size a transfer may get before we call it
-#: "checked after the loop". Generous on purpose — kernel socket buffers on
-#: both ends carry bytes the client never asked for — but two orders of
-#: magnitude below the full body, which is what the old code wrote.
-ABORT_SLACK = 8 << 20
-
-
 # ---------------------------------------------------------------------------
 # Rig
 # ---------------------------------------------------------------------------
 
 class _Rig(http.server.ThreadingHTTPServer):
-    """Serves scripted bodies and records how many bytes each response got
-    onto the socket before the client hung up."""
+    """Serves scripted bodies and records, per path, whether the response was
+    written to COMPLETION before the client hung up.
+
+    ``finished`` is the ordering observation this file turns on (pgw#1204).
+    ``served`` is kept as a DIAGNOSTIC — it makes a failure message concrete —
+    and no assertion reads it, because how many bytes a server got onto the
+    wire before an abort is a fact about the runner's scheduler, not about the
+    code under test.
+    """
 
     daemon_threads = True
     allow_reuse_address = True
 
     routes: Dict[str, "_Route"]
     served: Dict[str, int]
+    finished: Dict[str, bool]
     lock: threading.Lock
 
 
@@ -125,6 +130,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             )
         self.end_headers()
         sent = 0
+        done = False
         block = 64 << 10
         try:
             for off in range(0, len(payload), block):
@@ -136,12 +142,20 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 sent += len(piece)
             if chunked:
                 self.wfile.write(b"0\r\n\r\n")
+            # Reached only when every byte went out and the client was still
+            # reading. THIS is the ordering fact: the client's check cannot
+            # have run inside the loop, because the loop ran to the end.
+            done = True
         except (BrokenPipeError, ConnectionResetError):
             # The client refused mid-transfer. That is the assertion.
             self.close_connection = True
         finally:
             with srv.lock:
                 srv.served[path] = max(srv.served.get(path, 0), sent)
+                # Sticky: a client that completed the body even ONCE read all
+                # of it, whatever a retry did afterwards. Sticky in the
+                # direction that makes `_aborted_early` fire, never hide.
+                srv.finished[path] = srv.finished.get(path, False) or done
 
 
 @pytest.fixture()
@@ -149,6 +163,7 @@ def rig() -> Iterator[_Rig]:
     srv = _Rig(("127.0.0.1", 0), _Handler)
     srv.routes = {}
     srv.served = {}
+    srv.finished = {}
     srv.lock = threading.Lock()
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
@@ -181,12 +196,40 @@ def _served(rig: _Rig, path: str) -> int:
         return rig.served.get(path, 0)
 
 
+def _finished(rig: _Rig, path: str) -> bool:
+    """Whether the server wrote this body to its LAST byte with the client
+    still reading."""
+    with rig.lock:
+        return rig.finished.get(path, False)
+
+
 def _aborted_early(rig: _Rig, path: str) -> None:
-    """The refusal happened DURING the transfer, not after it."""
-    got = _served(rig, path)
-    assert got < ABORT_SLACK, (
-        f"{path}: the server pushed {got} bytes of a {BODY_BYTES}-byte body — "
-        "the check ran after the loop, not inside it"
+    """The refusal happened DURING the transfer, not after it.
+
+    OBSERVED AS AN ORDERING, NOT AS A BYTE COUNT (pgw#1204). This predicate
+    used to assert `served < 8 MiB` against a 32 MiB body — a threshold, on a
+    quantity nothing in the code under test controls. How far a server gets
+    before an abort lands is decided by the runner's scheduler and by kernel
+    socket buffers on both ends, so the assertion converted CI timing into a
+    boolean and flaked: it billed five cuts, twice at ~8.7 MiB against the 8
+    MiB line, and each time the same tree passed on rerun.
+
+    The real property was always ordinal — *did the client's check run inside
+    the loop or after it?* — and the server can answer it exactly: if the
+    client aborted mid-transfer, the write loop died on a broken pipe and
+    never reached its last byte. If the check ran after the loop, the client
+    read all 32 MiB and the server completed. That is a fact about ORDER, it
+    is the same on a loaded runner as on an idle one, and there is no
+    threshold to tune.
+
+    The byte count survives in the MESSAGE, where a number belongs.
+    """
+    assert not _finished(rig, path), (
+        f"{path}: the server wrote the whole {BODY_BYTES}-byte body and the "
+        f"client read all of it ({_served(rig, path)} bytes counted), so the "
+        f"size check ran AFTER the download loop, not inside it — which is "
+        f"pgw#1013's defect exactly: by then the bytes are on disk, the disk "
+        f"may be full, and the pod may be gone"
     )
 
 
@@ -526,3 +569,58 @@ def test_cell_artifact_oversized_stream_is_abandoned_mid_transfer(
     hexname = ARTIFACT_DIGEST.split(":", 1)[-1]
     assert not (tmp_path / "aot-cells" / f"{hexname}.tar.gz").exists()
     assert not (tmp_path / "aot-cells" / f"{hexname}.part").exists()
+
+
+# ---------------------------------------------------------------------------
+# pgw#1204: the SEVERANCE check — `_aborted_early` must still be able to fail
+# ---------------------------------------------------------------------------
+
+
+def test_the_ordering_predicate_FIRES_on_a_post_loop_check(
+    rig: _Rig, tmp_path: Path
+) -> None:
+    """A guard that cannot fire is worse than no guard, and rewriting one is
+    exactly when that gets introduced.
+
+    So: reproduce pgw#1013's ACTUAL defect — read the whole body, then compare
+    sizes — against the same rig, and prove `_aborted_early` calls it. This is
+    the row that would have caught a rewrite that made the predicate vacuous,
+    and it is why the threshold could be deleted rather than merely widened
+    (widening a flaky threshold buys silence, not a signal).
+    """
+    url = _serve(rig, "/post-loop", b"\0" * BODY_BYTES)
+    dest = tmp_path / "post-loop.bin"
+
+    # The four sites pgw#1013 fixed, in miniature: the whole body lands, and
+    # only then is its size compared against what the manifest declared.
+    with requests.get(url, stream=True, timeout=30) as resp:
+        resp.raise_for_status()
+        written = 0
+        with dest.open("wb") as fh:
+            for chunk in resp.iter_content(1 << 16):
+                written += len(chunk)
+                fh.write(chunk)
+    assert written > DECLARED_BYTES, "the rig must have handed over the excess"
+
+    # The server ran to its last byte, so the check cannot have been in-loop.
+    assert _finished(rig, "/post-loop")
+    with pytest.raises(AssertionError, match="ran AFTER the download loop"):
+        _aborted_early(rig, "/post-loop")
+
+
+def test_the_ordering_predicate_PASSES_on_a_real_in_loop_bound(
+    rig: _Rig, tmp_path: Path
+) -> None:
+    """The other side of severance: the shipping bounded copy, on the same
+    rig, must satisfy the predicate — so a green row means "the bound held",
+    not "the predicate cannot fire"."""
+    url = _serve(rig, "/in-loop", b"\0" * BODY_BYTES)
+    dest = tmp_path / "in-loop.bin"
+
+    with pytest.raises(StreamTooLarge):
+        _download_url_streamed(
+            url, dest, expected_digest=SHARD_DIGEST,
+            expected_size=DECLARED_BYTES)
+
+    assert not _finished(rig, "/in-loop")
+    _aborted_early(rig, "/in-loop")
