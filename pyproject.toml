@@ -129,21 +129,217 @@ include = ["src/gen_worker", "README.md", "pyproject.toml"]
 [tool.mypy]
 python_version = "3.12"
 ignore_missing_imports = true
-warn_unused_ignores = true
-warn_redundant_casts = true
 warn_unused_configs = true
-no_implicit_optional = true
-disallow_untyped_defs = true
+# pgw#1202: the tree is STRICT BY DEFAULT. A new module is born strict; the only
+# way to be exempt is to be named in a burn-down list below. Those lists shrink
+# and never grow — adding a name is how this gate stops meaning anything, so a
+# new name needs the same justification as deleting a test.
+#
+# Measured at adoption: 413 --strict errors in 101 of 266 modules, so 165 modules
+# were ALREADY strict-clean and are locked here. Everything --strict implies
+# beyond the four flags relaxed below — check_untyped_defs, disallow_incomplete_defs,
+# strict_equality, extra_checks, disallow_subclassing_any, no_implicit_optional,
+# warn_unused_ignores, warn_redundant_casts — cost ZERO errors and is simply on.
+#
+# A name here that no longer matches a module prints "unused section(s)" and
+# exits 0 (verified), so a lane deleting a module leaves a prune breadcrumb
+# rather than a red check for whoever merges next.
+strict = true
 
+# Generated protobuf modules: no source of ours to fix.
 [[tool.mypy.overrides]]
 module = ["gen_worker.pb.*"]
 ignore_errors = true
 
 # Modules moved verbatim from the old gen_worker.conversion carry that
 # package's untyped-defs exemption (was cozy_convert's [tool.mypy] config).
+# Their BODIES are now checked (strict's check_untyped_defs) and are clean.
 [[tool.mypy.overrides]]
 module = ["gen_worker.convert.*"]
 disallow_untyped_defs = false
+
+# --- burn-down: disallow_any_generics (285 errors, 69 modules) ---
+# bare `dict`/`list`/`tuple`/`Callable` — every one is an untracked Any leak.
+[[tool.mypy.overrides]]
+module = [
+  "gen_worker.aot_compile_child",
+  "gen_worker.aot_compile_pool",
+  "gen_worker.aot_declaration",
+  "gen_worker.aot_mint",
+  "gen_worker.aot_serve",
+  "gen_worker.api.decorators",
+  "gen_worker.api.derive",
+  "gen_worker.api.export_contract",
+  "gen_worker.api.formula",
+  "gen_worker.api.progress",
+  "gen_worker.api.types",
+  "gen_worker.boot_key",
+  "gen_worker.boot_phases",
+  "gen_worker.cell_key",
+  "gen_worker.cli.invoke",
+  "gen_worker.cli.local_context",
+  "gen_worker.cli.prefetch",
+  "gen_worker.compile_cache",
+  "gen_worker.compile_posture",
+  "gen_worker.convert._hf_load",
+  "gen_worker.convert.component",
+  "gen_worker.convert.dataset",
+  "gen_worker.convert.hub",
+  "gen_worker.convert.produced",
+  "gen_worker.convert.publish_journal",
+  "gen_worker.convert.source",
+  "gen_worker.convert.writer",
+  "gen_worker.discovery.discover",
+  "gen_worker.discovery.execution_lanes",
+  "gen_worker.entrypoint",
+  "gen_worker.executor",
+  "gen_worker.fleet_cells",
+  "gen_worker.graph_hash",
+  "gen_worker.guard_closure",
+  "gen_worker.host_move_guard",
+  "gen_worker.hot_swap",
+  "gen_worker.input_assets",
+  "gen_worker.lifecycle",
+  "gen_worker.models.chunk_upload",
+  "gen_worker.models.cozy_snapshot",
+  "gen_worker.models.disk_gc",
+  "gen_worker.models.loading",
+  "gen_worker.models.residency",
+  "gen_worker.models.staging",
+  "gen_worker.models.svdq",
+  "gen_worker.models.svdq_native",
+  "gen_worker.models.w4a4",
+  "gen_worker.models.w8a8",
+  "gen_worker.parallel.cp",
+  "gen_worker.parallel.group",
+  "gen_worker.parallel.runtime",
+  "gen_worker.preload",
+  "gen_worker.procsplit.actions",
+  "gen_worker.procsplit.broker",
+  "gen_worker.procsplit.child",
+  "gen_worker.procsplit.parent",
+  "gen_worker.registry",
+  "gen_worker.request_context",
+  "gen_worker.request_context._stream",
+  "gen_worker.runtimes.server",
+  "gen_worker.sparse_attention",
+  "gen_worker.stage_timing",
+  "gen_worker.supervisor",
+  "gen_worker.testing",
+  "gen_worker.topology",
+  "gen_worker.transport",
+  "gen_worker.utils.lora",
+  "gen_worker.view",
+  "gen_worker.warmup",
+]
+disallow_any_generics = false
+
+# --- burn-down: warn_return_any (48 errors, 26 modules) ---
+# a function declares a real return type and returns an Any.
+[[tool.mypy.overrides]]
+module = [
+  "gen_worker.activity",
+  "gen_worker.api.binding",
+  "gen_worker.benchmarks.engine_matrix",
+  "gen_worker.cli.invoke",
+  "gen_worker.compile_cache",
+  "gen_worker.convert.dataset",
+  "gen_worker.convert.repackage",
+  "gen_worker.convert.source",
+  "gen_worker.executor",
+  "gen_worker.families.base",
+  "gen_worker.fleet_cells",
+  "gen_worker.intent_registry",
+  "gen_worker.io",
+  "gen_worker.lifecycle",
+  "gen_worker.measure_child",
+  "gen_worker.models.download",
+  "gen_worker.models.loading",
+  "gen_worker.models.nvfp4_quant",
+  "gen_worker.models.w4a4",
+  "gen_worker.models.w8a8",
+  "gen_worker.procsplit.parent",
+  "gen_worker.request_context",
+  "gen_worker.rigboot",
+  "gen_worker.runtimes.llama",
+  "gen_worker.testing",
+  "gen_worker.transport",
+]
+warn_return_any = false
+
+# --- burn-down: disallow_untyped_calls (37 errors, 20 modules) ---
+# typed code calls an untyped function, laundering Any across the seam.
+[[tool.mypy.overrides]]
+module = [
+  "gen_worker.boot_trace_child",
+  "gen_worker.convert.clone",
+  "gen_worker.convert.convert",
+  "gen_worker.convert.source",
+  "gen_worker.hardware_report",
+  "gen_worker.host_canary",
+  "gen_worker.hot_swap",
+  "gen_worker.kernel_path",
+  "gen_worker.media_transfer",
+  "gen_worker.models.fp8_storage",
+  "gen_worker.models.loading",
+  "gen_worker.models.native_kernels",
+  "gen_worker.models.staging",
+  "gen_worker.models.svdq_fused",
+  "gen_worker.models.w4a4",
+  "gen_worker.models.w8a8",
+  "gen_worker.models.w8a8_lora",
+  "gen_worker.parallel.cp",
+  "gen_worker.rigcheck",
+  "gen_worker.transport",
+]
+disallow_untyped_calls = false
+
+# --- burn-down: disallow_untyped_decorators (9 errors, 3 modules) ---
+# Triton/torch JIT kernel decorators; upstream is untyped.
+[[tool.mypy.overrides]]
+module = [
+  "gen_worker.models.nvfp4_quant",
+  "gen_worker.models.svdq_awq_packed",
+  "gen_worker.models.svdq_fused",
+]
+disallow_untyped_decorators = false
+
+# --- burn-down: implicit_reexport, OUR modules (8) ---
+# Keyed on the EXPORTING module, not the importer. Each name means some other
+# module reaches a symbol through this one instead of through the module that
+# owns it (e.g. gen_worker.request_context._decode_unverified_jwt_claims read
+# from three importers). Closed by importing from the owner, not by an ignore.
+[[tool.mypy.overrides]]
+module = [
+  "gen_worker.aot_mint",
+  "gen_worker.cuda_root",
+  "gen_worker.fleet_cells",
+  "gen_worker.hot_swap",
+  "gen_worker.models.chunk_upload",
+  "gen_worker.models.cozy_snapshot",
+  "gen_worker.models.lora_lifted",
+  "gen_worker.request_context",
+]
+implicit_reexport = true
+
+# --- NOT a burn-down: third-party stub export gaps (9) ---
+# These upstream packages ship stubs whose __all__ omits attributes that are
+# part of their real public surface. Nothing in this repo can fix that, and
+# silencing it per-callsite with `# type: ignore` would be churn that hides the
+# next genuine one. Revisit only when an upstream stub is corrected.
+[[tool.mypy.overrides]]
+module = [
+  "diffusers.hooks",
+  "diffusers.loaders.single_file",
+  "diffusers.quantizers",
+  "huggingface_hub.utils",
+  "torch._dynamo",
+  "torch._inductor.codecache",
+  "torch._inductor.package",
+  "torch.distributed",
+  "torch.multiprocessing",
+]
+implicit_reexport = true
 
 [tool.ruff]
 line-length = 100
