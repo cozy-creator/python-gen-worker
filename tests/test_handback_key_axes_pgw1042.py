@@ -51,7 +51,7 @@ _DECLARED_ENVELOPE = {
 def _arm_key(seal: Dict[str, Any], toolchain: Dict[str, Any]) -> fleet_cells.ArmIdentity:
     return fleet_cells.ArmIdentity(facts=tuple(sorted({
         "family": "micro-diffusion",
-        "format": "2",
+        "format": str(aot_serve.ARTIFACT_FORMAT),
         "lane": "w8a8-lora64",
         "sm": "sm_89",
         "envelope": cell_key.envelope_digest(_DECLARED_ENVELOPE),
@@ -64,7 +64,7 @@ def _envelope(seal: Dict[str, Any], toolchain: Dict[str, Any]) -> Dict[str, Any]
     return {
         "cell_key": "cg-key-v1-" + "e" * 56,
         "kind": "aot-inductor",
-        "format": "2",
+        "format": str(aot_serve.ARTIFACT_FORMAT),
         "family": "micro-diffusion",
         "weight_lane": "w8a8",
         "lora_bucket": 64,

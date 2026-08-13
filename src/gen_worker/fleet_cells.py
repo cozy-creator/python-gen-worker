@@ -308,7 +308,15 @@ def arm_identity(
         cfg, lora_bucket_override=int(lora_bucket or 0))
     facts = {
         "family": str(family or ""),
-        "format": str(cc.ARTIFACT_FORMAT),
+        # THE producer's constant, read from the module that WRITES the value
+        # this is compared against (`aot_serve.entry_metadata` stamps
+        # `meta["format"]` from the same symbol). pgw#1230: this said
+        # `cc.ARTIFACT_FORMAT`, a DIFFERENT fact that merely shared the name —
+        # the torch-inductor-cache producer format (gw#391), which has been 2
+        # since 2026 and has nothing to do with the cell metadata schema. The
+        # two agreed by coincidence until pgw#1176 moved the real one to 3, and
+        # from that commit every freshly minted cell failed to arm.
+        "format": str(aot_serve.ARTIFACT_FORMAT),
         "lane": cc.execution_lane_label(
             str(weight_lane or ""), int(lora_bucket or 0)),
         "sm": sm,
