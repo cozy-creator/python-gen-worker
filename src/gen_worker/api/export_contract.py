@@ -1218,39 +1218,6 @@ def export_declaration(family: str) -> Optional[Any]:
         return _declared.get(str(family or "").strip())
 
 
-def weak_arms(decl: Any) -> Tuple[Any, ...]:
-    """Forks whose unserved arm is closed by a VALUE rather than by absent code.
-
-    i.e. the arms that are ONE payload field or ONE recipe number away from
-    serving a graph class the declaration says is never traced. Under AOT
-    that is a hard refusal (a minted cell has no entry for it); under dynamo
-    it is a guard miss that merely looks like an unexplained slowdown.
-
-    This function is the point of :data:`FORK_REASONS`. The same question was
-    answered once, by hand, across three repos and two vendored pipelines, and
-    the answer was three forks — a day of work that nobody would repeat. It is
-    now a call.
-    """
-    return tuple(f for f in getattr(decl, "forks", ()) if getattr(f, "weak", False))
-
-
-def weak_arms_by_family() -> Dict[str, Tuple[Any, ...]]:
-    """:func:`weak_arms` across every registered family, for a fleet sweep.
-
-    A BLOCKED family still answers (pgw#1107): its refusal is data on the
-    declaration, not an exception thrown by reading it, so a fleet query no
-    longer has to choose between skipping the family and falling over.
-    """
-    out: Dict[str, Tuple[Any, ...]] = {}
-    for family in registered_export_families():
-        decl = export_declaration(family)
-        if decl is None:
-            continue
-        arms = weak_arms(decl)
-        if arms:
-            out[family] = arms
-    return out
-
 
 def registered_entry(family: str) -> Optional[Any]:
     """The registry entry as stored — a ``Compile`` or ``None``.
@@ -1384,6 +1351,4 @@ __all__ = [
     "speed_bar",
     "validate_contract",
     "validate_speed_bar",
-    "weak_arms",
-    "weak_arms_by_family",
 ]

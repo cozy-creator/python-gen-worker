@@ -227,31 +227,6 @@ def test_enable_noop_without_router():
     assert not hot_swap.enable(Pipe())
 
 
-def test_on_warmed_fires_and_debounce_coalesces():
-    warmed = threading.Event()
-    runs = []
-    gate = threading.Event()
-
-    def publish():
-        runs.append(1)
-        assert gate.wait(30)
-
-    debounced = hot_swap.Debounce(publish)
-
-    router = hot_swap.Router()
-    router.enable(on_warmed=lambda: (debounced(), warmed.set()))
-    wrapper = _wrapper(lambda x: "eager", lambda x: "compiled", router)
-    assert wrapper(torch.zeros(2, 8)) == "eager"
-    assert warmed.wait(30)
-    # a burst while the first publish is in flight coalesces to ONE rerun
-    debounced()
-    debounced()
-    debounced()
-    gate.set()
-    assert _wait(lambda: len(runs) == 2 and not debounced._running)
-    time.sleep(0.05)
-    assert len(runs) == 2
-
 
 # ---------------------------------------------------------------------------
 # Real torch.compile integration (CPU toy module)

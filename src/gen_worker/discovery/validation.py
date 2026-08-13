@@ -13,12 +13,6 @@ except Exception:  # pragma: no cover
 from .names import slugify_name
 
 
-@dataclass(frozen=True)
-class EndpointValidationResult:
-    ok: bool
-    errors: tuple[str, ...] = ()
-    warnings: tuple[str, ...] = ()
-
 
 @dataclass(frozen=True)
 class EndpointLockValidationResult:
@@ -171,64 +165,3 @@ def _normalize_endpoint_name(raw: str) -> str:
     return name
 
 
-def validate_endpoint(root: str | Path, *, require_uv_lock: bool = False) -> EndpointValidationResult:
-    """
-    Validate a published endpoint directory.
-
-    Requirements:
-    - `Dockerfile` must exist
-    - `pyproject.toml` must exist with `[tool.gen_worker].main = "pkg.module"`
-    - `[project].name` must exist in `pyproject.toml` (normalized for URL-safe endpoint paths)
-    - `requirements.txt` must not exist
-
-    Optionally:
-    - require `uv.lock` if `require_uv_lock=True`
-    """
-    root_path = Path(root).expanduser().resolve()
-
-    errors: list[str] = []
-    warnings: list[str] = []
-
-    if not (root_path / "Dockerfile").exists():
-        errors.append("missing Dockerfile")
-
-    pyproject = root_path / "pyproject.toml"
-    if not pyproject.exists():
-        errors.append("missing pyproject.toml")
-
-    if (root_path / "requirements.txt").exists():
-        errors.append("requirements.txt is not supported; use pyproject.toml/uv.lock")
-
-    if require_uv_lock and not (root_path / "uv.lock").exists():
-        errors.append("missing uv.lock (required)")
-    elif not (root_path / "uv.lock").exists():
-        warnings.append("uv.lock not found (recommended for reproducible builds)")
-
-    if tomllib is None:
-        warnings.append("tomllib is unavailable; cannot validate pyproject.toml")
-        return EndpointValidationResult(ok=not errors, errors=tuple(errors), warnings=tuple(warnings))
-
-    # Validate pyproject.toml.
-    if not pyproject.exists():
-        return EndpointValidationResult(ok=not errors, errors=tuple(errors), warnings=tuple(warnings))
-
-    try:
-        data: dict[str, Any] = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    except Exception as exc:
-        errors.append(f"failed to parse pyproject.toml: {exc}")
-        return EndpointValidationResult(ok=False, errors=tuple(errors), warnings=tuple(warnings))
-
-    tool = data.get("tool")
-    gw = tool.get("gen_worker") if isinstance(tool, dict) else None
-    main = gw.get("main") if isinstance(gw, dict) else None
-    if not isinstance(main, str) or main.strip() == "":
-        errors.append("missing [tool.gen_worker].main in pyproject.toml")
-
-    project = data.get("project")
-    pyproject_name = project.get("name") if isinstance(project, dict) else None
-    if not isinstance(pyproject_name, str) or pyproject_name.strip() == "":
-        errors.append("missing [project].name in pyproject.toml")
-    elif _normalize_endpoint_name(pyproject_name) == "":
-        errors.append("invalid [project].name in pyproject.toml")
-
-    return EndpointValidationResult(ok=not errors, errors=tuple(errors), warnings=tuple(warnings))
