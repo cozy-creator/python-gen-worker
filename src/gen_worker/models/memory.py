@@ -637,12 +637,16 @@ def device_mismatches(obj: Any, device: str) -> List[tuple[str, str, str]]:
     on every boot-trace child of two live families. Such a component is
     skipped whole: its fake parameters allocate nothing and its real buffers
     are part of the graph being traced, so MOVING them would be the defect.
-    A fake tensor is exempt wherever it is found, for the same reason. A META
-    tensor is exempt only inside a structure-only component — elsewhere it is
-    an unmaterialized load, which :func:`meta_tensors` exists to report."""
+    A fake tensor is exempt wherever it is found, for the same reason — and so
+    is a wrapper SUBCLASS over fake data (pgw#1198), which is what a
+    ``setup()``-time quantizer leaves behind and which an ``isinstance``
+    against ``FakeTensor`` cannot see. A META tensor is exempt only inside a
+    structure-only component — elsewhere it is an unmaterialized load, which
+    :func:`meta_tensors` exists to report."""
     try:
         import torch
-        from torch._subclasses.fake_tensor import FakeTensor
+
+        from ..meta_instantiation import is_virtual
 
         target = torch.device(device).type
     except Exception:
@@ -660,7 +664,14 @@ def device_mismatches(obj: Any, device: str) -> List[tuple[str, str, str]]:
         except Exception:
             continue
         for tname, t in named:
-            if not isinstance(t, torch.Tensor) or isinstance(t, FakeTensor):
+            if not isinstance(t, torch.Tensor):
+                continue
+            # Allocates nothing => not misplaced. Asked of the STORAGE, so a
+            # wrapper subclass over fake data answers like the fake it wraps
+            # (pgw#1198). A META tensor is the one virtual thing this walk must
+            # still report: outside a structure-only component it is an
+            # unmaterialized load, which `meta_tensors` reads out of here.
+            if t.device.type != "meta" and is_virtual(t):
                 continue
             if t.device.type != target:
                 out.append((cname, tname, str(t.device)))
@@ -718,7 +729,8 @@ def _sum_tensor_bytes(objs: Iterable[Any], *, cuda_only: bool) -> int:
     two questions, and virtuality answers them differently.
     """
     import torch
-    from torch._subclasses.fake_tensor import FakeTensor
+
+    from ..meta_instantiation import is_virtual
 
     total = 0
     #: ``("ptr", data_ptr)`` for a tensor with storage — shared storages are
@@ -735,7 +747,10 @@ def _sum_tensor_bytes(objs: Iterable[Any], *, cuda_only: bool) -> int:
             for t in tensors:
                 if not isinstance(t, torch.Tensor):
                     continue
-                virtual = isinstance(t, FakeTensor)
+                # pgw#1198: asked of the STORAGE. A `setup()`-time quantizer
+                # leaves a wrapper subclass over fake data, which is a
+                # FakeTensor to nobody and occupies the card to nothing.
+                virtual = t.device.type != "meta" and is_virtual(t)
                 if cuda_only and (virtual or t.device.type != "cuda"):
                     continue
                 key: tuple[str, int]

@@ -929,6 +929,9 @@ def mint(request: MintRequest) -> MintReport:
     device_label = _device_label(request)
     if virtual_modules:
         _reset_peak()
+        _assert_proof_affordable(
+            [module for _name, module in virtual_modules],
+            device=device_label, request=request)
         randomized = sum(
             structure_only.materialize_random(module, device=device_label)
             for _name, module in virtual_modules)
@@ -992,6 +995,57 @@ def mint(request: MintRequest) -> MintReport:
         request, pipe, cfg, target, started=started,
         sha256_file=sha256_file, execution_lane_verdict=verdict, spec=aot_spec,
         footprint=footprint)
+
+
+def _assert_proof_affordable(
+    modules: List[Any], *, device: str, request: MintRequest,
+) -> None:
+    """Refuse the pgw#984 warm proof when the card cannot hold its values.
+
+    **This is a MEASUREMENT, not a budget** (§4.33's standing rule). The left
+    side is the exact byte count :func:`structure_only.materialize_random` is
+    about to allocate — the same walk over the same tensors — and the right
+    side is ``torch.cuda.mem_get_info()`` read now. No constant, no margin, no
+    learned floor: it can only refuse a case that was going to fail anyway,
+    and it stays silent on every case that fits.
+
+    What it buys is the sentence. On pod ``729431an6ugbvq`` (H100-80, wan-2.2)
+    the proof needed 56.2 GB of a card whose serving parent already held 63.68
+    GiB; the child died on ``CUDA out of memory. Tried to allocate 50.00 MiB``
+    recorded under ``phase=load``, because the ``warmup_forward`` frame is
+    emitted only after ``materialize_random`` RETURNS. Two paid attempts said
+    "resource" and named neither the quantity nor the phase.
+
+    The refusal is the finding, not a workaround for it: an in-child
+    does-it-run proof is weight-scale by construction and §4.33 steps 4-5 put
+    verification on the resident parent instead. See pgw#1199.
+    """
+    from .models import structure_only
+
+    try:
+        import torch
+
+        if not str(device).startswith("cuda") or not torch.cuda.is_available():
+            return
+        free, total = torch.cuda.mem_get_info()
+    except Exception:  # noqa: BLE001 — unmeasured is NO EVIDENCE, never a veto
+        return
+    need = structure_only.proof_cost_bytes(modules)
+    if need <= int(free):
+        return
+    gib = float(2 ** 30)
+    raise MintChildRefused(
+        f"the pgw#984 warm proof cannot run for {mint_identity(request)}: it "
+        f"materialises REAL random values for every virtual parameter, which "
+        f"is {need / gib:.2f} GiB here, and this card has {int(free) / gib:.2f} "
+        f"GiB free of {int(total) / gib:.2f} GiB — the serving parent holds "
+        f"the rest, resident and eager. Measured before allocating rather "
+        f"than met as a CUDA OOM. This is pgw#1199: a mint's cost is one FULL "
+        f"checkpoint at compute dtype in the CHILD, concurrently with the "
+        f"parent's copy, so §4.33's ~8 GiB holds for sdxl-sized families and "
+        f"not for this one. The proof belongs on the resident parent "
+        f"(§4.33 steps 4-5), which already holds these weights and pays for "
+        f"them once")
 
 
 def _device_label(request: MintRequest) -> str:

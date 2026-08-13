@@ -400,6 +400,56 @@ def _torch_dtype(root: Path, component: str, dtype: str) -> Any:
     return None
 
 
+def _wrapper_parts(tensor: Any) -> Optional[Tuple[List[str], Any]]:
+    """``(inner attribute names, context)`` when ``tensor`` is a traceable
+    wrapper subclass — torch's own contract for seeing inside one.
+
+    A ``setup()``-time quantizer leaves these behind on a virtual structure
+    (torchao's ``Float8Tensor``: fake ``qdata`` + fake ``scale``, outer dtype
+    bf16), and both directions of the mint's fake↔real swap have to rebuild
+    the SUBCLASS rather than a plain tensor of the outer dtype. Flattening one
+    to bf16 traces bf16 Linears for a pod that serves fp8 — a cell for a graph
+    the pod never executes, which is the defect ``_refuse_artifact_lanes``
+    exists to prevent, arriving by the other door (pgw#1198).
+    """
+    try:
+        from torch.utils._python_dispatch import is_traceable_wrapper_subclass
+
+        if not is_traceable_wrapper_subclass(tensor):
+            return None
+        names, ctx = tensor.__tensor_flatten__()
+    except Exception:  # noqa: BLE001 — an unwalkable object is not a subclass
+        return None
+    return ([str(n) for n in names], ctx) if names else None
+
+
+def _rebuild_wrapper(tensor: Any, inner: Dict[str, Any]) -> Any:
+    parts = _wrapper_parts(tensor)
+    ctx = parts[1] if parts is not None else None
+    return type(tensor).__tensor_unflatten__(
+        inner, ctx, tuple(tensor.shape), tuple(tensor.stride()))
+
+
+def _fake_like(tensor: Any, *, dtype: Any = None) -> Any:
+    """A zero-storage twin of ``tensor``. Call inside the fake mode + device.
+
+    ``dtype`` casts a plain floating-point tensor to the composition's compute
+    precision; a wrapper subclass is rebuilt from fake inner tensors and is
+    NEVER cast — its outer dtype already IS the compute precision and its
+    payload's dtype is the quantization.
+    """
+    import torch
+
+    parts = _wrapper_parts(tensor)
+    if parts is not None:
+        names, _ctx = parts
+        return _rebuild_wrapper(tensor, {
+            name: _fake_like(getattr(tensor, name)) for name in names})
+    want = dtype if (dtype is not None
+                     and tensor.is_floating_point()) else tensor.dtype
+    return torch.empty(tuple(tensor.shape), dtype=want)
+
+
 def virtualize(module: Any, *, device: str = "", dtype: Any = None) -> Any:
     """Parameters → fake tensors on ``device``; buffers → real, on ``device``.
 
@@ -418,11 +468,8 @@ def virtualize(module: Any, *, device: str = "", dtype: Any = None) -> Any:
             for name, param in list(sub._parameters.items()):
                 if param is None:
                     continue
-                want = dtype if (dtype is not None
-                                 and param.is_floating_point()) else param.dtype
                 sub._parameters[name] = nn.Parameter(
-                    torch.empty(tuple(param.shape), dtype=want),
-                    requires_grad=False)
+                    _fake_like(param, dtype=dtype), requires_grad=False)
     for sub in module.modules():
         for name, buf in list(sub._buffers.items()):
             if buf is None:
@@ -961,20 +1008,69 @@ def materialize_random(module: Any, *, device: str = "") -> int:
         for name, param in list(sub._parameters.items()):
             if param is None:
                 continue
-            real = torch.empty(tuple(param.shape), dtype=param.dtype,
-                               device=dev)
-            if param.is_floating_point() and real.dtype in (
-                    torch.float16, torch.bfloat16, torch.float32,
-                    torch.float64):
-                real.normal_(0.0, RANDOM_STD, generator=generator)
-            else:
-                # fp8 and integer parameters have no `normal_`; a defined
-                # value beats an undefined one, and NaN/overflow would make
-                # every downstream cosine undefined (pgw#1056's guard).
-                real.zero_()
+            real, bytes_ = _real_like(param, device=dev, generator=generator)
             sub._parameters[name] = nn.Parameter(real, requires_grad=False)
-            total += int(real.numel()) * int(real.element_size())
+            total += bytes_
     return total
+
+
+def _real_like(tensor: Any, *, device: str, generator: Any) -> Tuple[Any, int]:
+    """``(a REAL twin of ``tensor``, the bytes it allocated)``.
+
+    A wrapper subclass is rebuilt AS a subclass over real inner tensors
+    (pgw#1198): flattening one to its outer dtype would both cost twice the
+    bytes (bf16 where the payload is fp8) and hand the export a graph the pod
+    does not serve.
+    """
+    import torch
+
+    parts = _wrapper_parts(tensor)
+    if parts is not None:
+        names, _ctx = parts
+        inner: Dict[str, Any] = {}
+        bytes_ = 0
+        for name in names:
+            held, held_bytes = _real_like(
+                getattr(tensor, name), device=device, generator=generator)
+            inner[name] = held
+            bytes_ += held_bytes
+        return _rebuild_wrapper(tensor, inner), bytes_
+    real = torch.empty(tuple(tensor.shape), dtype=tensor.dtype, device=device)
+    if real.dtype in (torch.float16, torch.bfloat16, torch.float32,
+                      torch.float64):
+        real.normal_(0.0, RANDOM_STD, generator=generator)
+    else:
+        # fp8 and integer parameters have no `normal_`; a defined value beats
+        # an undefined one, and NaN/overflow would make every downstream
+        # cosine undefined (pgw#1056's guard).
+        real.zero_()
+    return real, int(real.numel()) * int(real.element_size())
+
+
+def proof_cost_bytes(modules: Any) -> int:
+    """Exactly what :func:`materialize_random` will allocate on the device.
+
+    Not an estimate — the same walk, summing the same tensors, so the mint can
+    compare it against MEASURED free VRAM before it allocates instead of
+    meeting the answer as an anonymous CUDA OOM (pgw#1199). A wrapper subclass
+    counts its PAYLOAD, which is the thing that gets allocated, not its
+    high-precision outer view.
+    """
+    total = 0
+    for module in modules:
+        for sub in module.modules():
+            for param in sub._parameters.values():
+                if param is not None:
+                    total += _payload_bytes(param)
+    return total
+
+
+def _payload_bytes(tensor: Any) -> int:
+    parts = _wrapper_parts(tensor)
+    if parts is None:
+        return int(tensor.numel()) * int(tensor.element_size())
+    names, _ctx = parts
+    return sum(_payload_bytes(getattr(tensor, name)) for name in names)
 
 
 def stray_real_tensors(module: Any) -> Tuple[Tuple[str, Any], ...]:
@@ -1049,6 +1145,7 @@ __all__ = [
     "materialize_random",
     "modules_of",
     "program_shape_env",
+    "proof_cost_bytes",
     "refusal_token",
     "restore_virtual",
     "revirtualize_from_meta",
