@@ -2627,6 +2627,14 @@ class _ArmOrder:
     expected: Optional["aot_identity.ExpectedIdentity"] = None
     publisher_org: str = ""
     adopt: Optional["boot_adopt.BootAdoptOutcome"] = None
+    #: pgw#1176: the OTHER entries this boot resolved. A boot derives a key SET
+    #: and coverage ACCRETES, so several hits are the expected shape — each is
+    #: armed into the same registry, the same target pool and the same live
+    #: wrap after the first. A failure on one of these is a per-entry degrade
+    #: (that class serves eager), never terminal: the first arm already proved
+    #: the pod can serve compiled.
+    extra: Tuple[Tuple[Path, Optional["aot_identity.ExpectedIdentity"], str],
+                 ...] = ()
 
     @classmethod
     def for_artifact(
@@ -2638,6 +2646,9 @@ class _ArmOrder:
         expected: Optional["aot_identity.ExpectedIdentity"],
         publisher_org: str,
         adopt: Optional["boot_adopt.BootAdoptOutcome"] = None,
+        extra: Tuple[
+            Tuple[Path, Optional["aot_identity.ExpectedIdentity"], str], ...
+        ] = (),
     ) -> "_ArmOrder":
         """THE artifact -> arming-order map, in one place (pgw#1152).
 
@@ -2660,6 +2671,7 @@ class _ArmOrder:
             expected=expected,
             publisher_org=publisher_org,
             adopt=adopt,
+            extra=extra,
         )
 
 
@@ -6998,8 +7010,23 @@ class Executor:
         # gate at the end of both.
         boot_local_key = ""
         if arm is None and spec.compile is not None and not eager_only:
-            adopt = await asyncio.to_thread(
+            adopts = await asyncio.to_thread(
                 self._boot_adopt, spec, resolved_slots)
+            # pgw#1176: the boot resolves ONE outcome per declared graph class.
+            # Coverage accretes, so several hits are the expected shape and
+            # each is armed on its own.
+            #
+            # UNFINISHED, AND LOUD RATHER THAN SILENT (owner: pgw#1176; expiry:
+            # before this branch opens a PR). This call site still builds ONE
+            # `_ArmOrder`, so only the first hit is armed here. The remaining
+            # hits are NOT dropped quietly — they are named on the wire below,
+            # and the fix is to carry them on the order so `_enable_compiled`
+            # arms each into the same registry after the pipeline is up, which
+            # is what `aot_serve.arm_entry` already supports. A silent subset
+            # here would be the exact defect this whole change deletes.
+            resolved = [o for o in adopts if o.adoption is not None]
+            adopt = resolved[0] if resolved else (
+                adopts[0] if adopts else boot_adopt.BootAdoptOutcome())
             boot_local_key = adopt.local_key
             if adopt.adoption is not None:
                 got = adopt.adoption
@@ -7010,7 +7037,15 @@ class Executor:
                     expected=got.expected,
                     publisher_org=got.cell.publisher_org,
                     # pgw#1122: this order is the POD's, not the hub's.
-                    adopt=adopt)
+                    adopt=adopt,
+                    # pgw#1176: every OTHER class this boot resolved, armed
+                    # into the same registry after this one.
+                    extra=tuple(
+                        (got_other.artifact, got_other.expected,
+                         got_other.cell.publisher_org)
+                        for got_other in (
+                            o.adoption for o in resolved[1:]
+                            if o.adoption is not None)))
                 compile_selection = arm.selection
         elif arm is None and spec.compile is not None:
             # pgw#1116: a compiled family that boots WITHOUT asking is a fact
@@ -9980,7 +10015,7 @@ class Executor:
 
     def _boot_adopt(
         self, spec: EndpointSpec, slots: Dict[str, MintSlot],
-    ) -> "boot_adopt.BootAdoptOutcome":
+    ) -> "Tuple[boot_adopt.BootAdoptOutcome, ...]":
         """§4.27 steps 1-3 for one boot, off the event loop.
 
         ALWAYS an outcome, never ``None`` (pgw#1116). The three gates below
@@ -10003,19 +10038,19 @@ class Executor:
         # `Compile.blockers` and the mint gate reads it.
         decl = aot_mint.export_declaration(family)
         if decl is None:
-            return boot_adopt.refused(
+            return (boot_adopt.refused(
                 "no_export_declaration",
                 f"family {family!r} has no registered export declaration, so "
                 f"this boot cannot state the class set a cell key names",
-                family=family, function=fn)
+                family=family, function=fn),)
         try:
             declared_hint = len(list(aot_declaration.cell_plans(decl)))
         except Exception as exc:  # noqa: BLE001 — never fatal
-            return boot_adopt.refused(
+            return (boot_adopt.refused(
                 "declaration_unreadable",
                 f"family {family!r} has a declaration this boot cannot "
                 f"enumerate: {type(exc).__name__}: {exc}",
-                family=family, function=fn)
+                family=family, function=fn),)
         base_url = str(self.file_base_url or "")
         bearer = str(self.worker_jwt_provider() or "")
         # pgw#1108: the credential lives in the PARENT under the split (pgw#783),
@@ -10043,10 +10078,10 @@ class Executor:
         # answerers are absent — and `attempt` decides the rest, after the
         # local store has been asked.
         if boot_adopt.no_cell_source(hub_absent):
-            return boot_adopt.refused(
+            return (boot_adopt.refused(
                 "no_cell_source",
                 f"{hub_absent}, and this machine's own cell store is empty",
-                family=family, function=fn)
+                family=family, function=fn),)
         work_root = Path(
             self.store._cache_dir or Path.home() / ".cache" / "gen-worker"
         ) / "boot-key" / (spec.name or "endpoint")
@@ -10112,7 +10147,7 @@ class Executor:
 
         if arm is not None:
             try:
-                return fleet_cells.arm_ordered(
+                outcome = fleet_cells.arm_ordered(
                     pipe, cfg, self.store._cache_dir,
                     backend=arm.backend,
                     artifact=artifact,
@@ -10122,6 +10157,34 @@ class Executor:
                     expected=arm.expected,
                     publisher_org=arm.publisher_org,
                 )
+                # pgw#1176: THE ACCRETION LOOP. Every other class this boot
+                # resolved arms into the SAME registry, target pool and live
+                # wrap. A failure here costs that class and nothing else —
+                # the pod is already serving compiled, so degrading one entry
+                # to eager is the design's normal state, not a fallback.
+                for extra_path, extra_expected, extra_org in arm.extra:
+                    try:
+                        fleet_cells.arm_ordered(
+                            pipe, cfg, self.store._cache_dir,
+                            backend=arm.backend, artifact=extra_path,
+                            delivered_ref="", delivered_digest="",
+                            expected=extra_expected,
+                            publisher_org=extra_org,
+                        )
+                    except Exception as extra_exc:  # noqa: BLE001
+                        activity_mod.emit_event(
+                            "aot_entry_arm_failed",
+                            f"a sibling entry of an armed cell would not arm "
+                            f"({type(extra_exc).__name__}: {extra_exc}); that "
+                            f"CLASS serves eager and every armed sibling keeps "
+                            f"serving compiled",
+                            phase=str(getattr(extra_exc, "reason", "")
+                                      or "arm_failed"),
+                            family=str(getattr(cfg, "family", "") or ""),
+                            cell_key=str(
+                                getattr(extra_expected, "cell_key", "") or ""),
+                        )
+                return outcome
             except fleet_cells.OrderedArmError as exc:
                 # pgw#1122: a HUB-ordered arm stays terminal (pgw#904 — the hub
                 # named one exact artifact and a substitute would not be it).
@@ -10265,9 +10328,32 @@ class Executor:
         warmup_s = round(max(0, self._boot_warm_ms) / 1000.0, 3)
         for adoption in inj.adoptions:
             if not adoption.ref:
-                # An arm with no candidate identity is not an adoption anyone
-                # can attribute; recording it would add a row that answers
-                # nothing. (The hub applies the same rule from its side.)
+                # pgw#1176: THIS DROP INVERTED AND IS NOW A REPORT.
+                #
+                # Under ck1 it was sound: one cell, one ref, and no ref meant
+                # there was nothing anyone could attribute. Under a resolved
+                # KEY SET it swallows the commonest per-entry outcome there
+                # is — an entry that MISSED has no artifact ref BY
+                # CONSTRUCTION, so a pod resolving 30 of 36 keys would have
+                # reported the 30 and silently discarded the six that are the
+                # actual news. That is exactly how `compile_cache_adopt` went
+                # three readers and zero writers for five days.
+                #
+                # `ModelEvent` is keyed by ref and genuinely cannot carry
+                # this, so the miss goes out on the channel that CAN: the
+                # typed activity event, whose family/cell_key/graph_class
+                # fields (proto 18-20) land in the hub's own columns.
+                activity_mod.emit_event(
+                    "aot_entry_missed",
+                    f"this pod derived the key and nothing entitled answered "
+                    f"it ({adoption.reason or 'no_cell'}"
+                    f"{': ' + adoption.detail if adoption.detail else ''}); "
+                    f"the class serves EAGER and is queued to compile",
+                    phase=adoption.reason or "no_cell",
+                    family=str(getattr(inj, "family", "") or ""),
+                    cell_key=adoption.cell_key,
+                    graph_class=adoption.entry,
+                )
                 continue
             calls, hits, misses = proof_by_obj.get(adoption.pipeline_id, (0, 0, 0))
             if adoption.armed:

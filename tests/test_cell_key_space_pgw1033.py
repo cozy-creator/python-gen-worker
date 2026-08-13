@@ -54,7 +54,7 @@ FAMILY = "sdxl"
 ARM_KEY = "arm1-" + "a" * 56
 #: What the child's envelope is STAMPED with — the cell identity, unknowable
 #: until the export finishes. A different digest, always.
-STAMPED_KEY = "ck1-" + "b" * 56
+STAMPED_KEY = "ek1-" + "b" * 56
 
 
 class _Pipe:
@@ -107,7 +107,7 @@ def _clean_declarations() -> Any:
 def _events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
     seen: List[Tuple[str, str, str]] = []
 
-    def _sink(kind: str, detail: str, phase: str = "", duration_ms: int = 0) -> None:
+    def _sink(kind: str, detail: str, phase: str = "", duration_ms: int = 0, **_kw) -> None:
         seen.append((kind, phase, detail))
 
     monkeypatch.setattr(fleet_cells.activity_mod, "emit_event", _sink)
@@ -122,11 +122,11 @@ def _miss(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
         lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_cell"))
-    monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda p, c: True)
+    monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda p, c, **_kw: True)
     monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
     monkeypatch.setattr(fleet_cells.cc, "mandatory_serving", lambda p: False)
     monkeypatch.setattr(
-        fleet_cells.cc, "apply_lora_execution_lane", lambda p, b: None)
+        fleet_cells.cc, "apply_lora_execution_lane", lambda p, b, **_kw: None)
     monkeypatch.setattr(
         fleet_cells.cc, "drop_lora_execution_lane", lambda p: None)
     monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
@@ -178,8 +178,8 @@ def _adopt(
     # The pgw#1042 divergence gate now genuinely runs on this fixture (it was
     # silently skipped while `meta` was `None`). Its verdict is
     # `test_handback_key_axes_pgw1042`'s subject, not this file's.
-    monkeypatch.setattr(fleet_cells, "arm_axis_divergence", lambda a, m: "")
-    return fleet_cells.adopt_delegated_mint(_Pipe(), pending, pending.target)
+    monkeypatch.setattr(fleet_cells, "arm_axis_divergence", lambda a, m, **_kw: "")
+    return fleet_cells.adopt_delegated_mint(_Pipe(), pending, [pending.target])
 
 
 # ---------------------------------------------------------------------------
@@ -301,7 +301,7 @@ def test_an_ARM_TOKEN_is_never_classified_as_an_exported_ref(
     pgw#1152 moved the other half out. ``note_aot_key`` used to be called by
     this finalize — one of pgw#1033's two SELF-PRODUCED feeders, and the
     convention the ordered/boot-adopt arm did not keep (pgw#1141b, measured on
-    a pod). Registration is now a property of ``aot_serve.load_and_wrap``, so
+    a pod). Registration is now a property of ``aot_serve.arm_entry``, so
     "an exported cell's ref is recognized" is a fact about the WRAP and is
     asserted where a real wrap happens:
     ``test_adopted_arm_lane_pgw1141b::test_the_ordered_arm_teaches_the_recognizer_its_key``.
@@ -348,7 +348,7 @@ def test_an_owed_mint_advertises_no_artifact_identity(
         "pgw#1010 deleted the recipe axis; a guard that reads one is dead")
 
     delivered = executor._CompileArtifactSelection(
-        path=Path("/dev/null"), ref=f"root/family-{FAMILY}#ck1-" + "c" * 56,
+        path=Path("/dev/null"), ref=f"root/family-{FAMILY}#ek1-" + "c" * 56,
         snapshot_digest="sha256:c", self_mint=False)
 
     assert executor._selection_for(None, pending) is None

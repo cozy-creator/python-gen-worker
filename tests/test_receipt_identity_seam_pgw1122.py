@@ -411,7 +411,7 @@ class _Events:
         self.rows: List[Tuple[str, str, str]] = []
         monkeypatch.setattr(
             activity_mod, "emit_event",
-            lambda kind, detail, phase="", duration_ms=0: self.rows.append(
+            lambda kind, detail, phase="", duration_ms=0, **_kw: self.rows.append(
                 (kind, phase, detail)))
 
     def phases(self, kind: str) -> List[str]:
@@ -426,7 +426,7 @@ def _hit(family: str = FAMILY, function: str = "generate") -> Any:
     executor now carries onto the arm order."""
     return boot_adopt.BootAdoptOutcome(
         adoption=None, reason=boot_adopt.HIT,
-        derived_key="ck1-" + "f0" * 28, derive_ms=10_895,
+        derived_key="ek1-" + "f0" * 28, derive_ms=10_895,
         family=family, function=function)
 
 
@@ -487,7 +487,7 @@ def test_an_adopted_cell_that_will_not_arm_does_not_kill_the_function(
     detail = events.detail(activity_mod.KIND_BOOT_ADOPT, "arm_refused")
     assert "cause=artifact_receipt_refused" in detail
     assert "publisher_untrusted" in detail
-    assert f"family={FAMILY}" in detail and "key=ck1-" in detail
+    assert f"family={FAMILY}" in detail and "key=ek1-" in detail
 
 
 def test_a_HUB_ordered_arm_stays_terminal(

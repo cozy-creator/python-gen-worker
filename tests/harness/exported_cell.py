@@ -19,6 +19,7 @@ No number produced here may be cited as evidence about a real cell's numerics.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import platform
 from pathlib import Path
@@ -28,6 +29,7 @@ import pytest
 import torch
 
 from gen_worker import aot_serve as aot
+from gen_worker import cell_key as cell_key_mod
 from gen_worker.api.decorators import Compile
 from gen_worker.api.export_contract import (
     Dim, GraphClass, Input, register_export_declaration,
@@ -174,30 +176,60 @@ def _entry(h: int, w: int) -> Dict[str, Any]:
     return block
 
 
-def metadata(rows: Tuple[Tuple[int, int], ...] = ROWS) -> Dict[str, Any]:
-    entries = {entry_name(h, w): _entry(h, w) for h, w in rows}
-    meta = {
-        "format": aot.ARTIFACT_FORMAT, "kind": aot.ARTIFACT_KIND, **RUNTIME,
-        "family": FAMILY, "precision": "w8a8", "cell_key": "cell868",
-        "entries": entries, "strict_export": True, "lora_bucket": 0,
-        "package_constants_in_so": False, "constant_folding_fenced": True,
-        "source_ref": "", "source_digest": "",
-        # pgw#950: every mint stamps a host-ISA requirement, and a cell that
-        # stamps none is refused rather than sniffed from the .pt2. Satisfiable
-        # anywhere: this host's machine, no ISA level.
-        "host_isa": {"machine": platform.machine(), "march": "", "simdlen": 0,
-                     "level": ""},
-    }
-    meta["combined_graph_hash"] = aot.combined_graph_hash(
-        b["class_hash"] for b in entries.values())
+#: The toolchain block every entry of this declaration shares. Recorded because
+#: the ``toolchain`` axis is REQUIRED (pgw#1176): an entry that cannot state it
+#: has no identity, so a fixture that omitted it would be un-keyable and could
+#: never be published, resolved or armed — a shape production cannot produce.
+TOOLCHAIN = {"torch": "2.13.0+cu130-record", "triton": "3.6.0-record"}
+
+
+def metadata(
+    row: Tuple[int, int] = ROWS[0],
+    rows: Tuple[Tuple[int, int], ...] = ROWS,
+) -> Dict[str, Any]:
+    """ONE entry artifact's metadata (format 3, pgw#1176).
+
+    ``row`` is the class this artifact carries; ``rows`` is only the
+    declaration it belongs to, and reaches the metadata solely through the
+    ``manifest_digest`` coverage label — never through identity. Widening
+    ``rows`` therefore leaves every existing entry's key untouched, which is
+    the property pgw#1176 exists for.
+    """
+    name = entry_name(*row)
+    meta = aot.entry_metadata(
+        family=FAMILY, precision="w8a8", cell_key="",
+        name=name, entry=_entry(*row),
+        strict_export=True, lora_bucket=0,
+        manifest_digest=cell_key_mod.manifest_digest(
+            _entry(h, w)["class_hash"] for h, w in rows),
+    )
+    meta.update(RUNTIME)
+    # pgw#950: every mint stamps a host-ISA requirement, and an entry that
+    # stamps none is refused rather than sniffed from the .pt2. Satisfiable
+    # anywhere: this host's machine, no ISA level.
+    meta["host_isa"] = {"machine": platform.machine(), "march": "",
+                        "simdlen": 0, "level": ""}
+    meta["toolchain"] = dict(TOOLCHAIN)
+    meta["cell_key"] = cell_key_mod.from_entry_metadata(meta).digest
     return meta
 
 
+def declared_names(rows: Tuple[Tuple[int, int], ...] = ROWS) -> Tuple[str, ...]:
+    """Every class name this declaration traces to — what a pod hands the
+    dispatch so an unarmed class reads as ``pending compile`` rather than as a
+    shape gap."""
+    return tuple(entry_name(h, w) for h, w in rows)
+
+
 def artifact(tmp_path: Path, meta: Dict[str, Any] | None = None) -> Path:
-    work = tmp_path / "work"
-    work.mkdir(exist_ok=True)
+    """Pack ONE entry artifact. Named after its key, as the mint names it."""
+    meta = meta or metadata()
+    name = str((meta.get(cell_key_mod.ENTRY_BLOCK_KEY) or {}).get("name") or "")
+    work = tmp_path / "work" / hashlib.sha256(name.encode()).hexdigest()[:16]
+    work.mkdir(parents=True, exist_ok=True)
     (work / aot.PACKAGE_NAME).write_bytes(b"\x00not-a-real-pt2")
-    return aot.pack(work, tmp_path / "cell.tar.gz", meta or metadata())
+    return aot.pack(
+        work, tmp_path / f"{meta.get('cell_key') or 'cell'}.tar.gz", meta)
 
 
 @pytest.fixture
@@ -237,12 +269,66 @@ def cell_cfg(decl: Any, **enrichments: Any) -> Any:
     return CompileCell.from_declaration(decl, **enrichments)
 
 
+class ArmOutcomes(tuple):
+    """One :class:`AdoptOutcome` PER GRAPH CLASS, in ``rows`` order.
+
+    pgw#1176: the arm is per entry, so there is no single verdict — and a
+    plain tuple is what this should be. The two aggregate properties below
+    exist because the tests that use them are asking a question the aggregate
+    genuinely answers: *"did this whole DECLARATION arm?"*, which is a
+    property of a test's fixture, not a claim a pod makes about itself.
+
+    They are DELIBERATELY not what production reports. A pod reports
+    per-entry serve state (`aot_serve.entry_states`) precisely because a
+    cell-level boolean can advertise more than it serves. Nothing here is
+    wired to production; index this to assert per class, which is what the
+    per-entry rows do.
+    """
+
+    @property
+    def armed(self) -> bool:
+        """True only when EVERY class of this declaration armed."""
+        # len(), never bool() — __bool__ delegates here, so bool(self)
+        # would recurse.
+        return len(self) > 0 and all(o.armed for o in self)
+
+    @property
+    def reason(self) -> str:
+        """The first refusal's classified reason, or ""."""
+        return next((o.reason for o in self if not o.armed), "")
+
+    @property
+    def detail(self) -> str:
+        return next((o.detail for o in self if not o.armed), "")
+
+    @property
+    def identity(self) -> str:
+        return self[0].identity if self else ""
+
+    def __bool__(self) -> bool:
+        return self.armed
+
+
 def arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
         packages: Dict[str, ProbePackage],
         meta: Dict[str, Any] | None = None,
         verify_numerics: bool = True,
-        cfg: Any = None) -> Tuple[Any, Any, Any]:
-    """Drive the REAL arm path and return ``(pipeline, module, outcome)``.
+        cfg: Any = None,
+        rows: Tuple[Tuple[int, int], ...] | None = None,
+        ) -> Tuple[Any, Any, Any]:
+    """Drive the REAL arm path over EVERY class in ``rows`` and return
+    ``(pipeline, module, outcomes)``.
+
+    pgw#1176: ``outcomes`` is one :class:`AdoptOutcome` PER GRAPH CLASS, in
+    ``rows`` order, because the arm is per entry — one artifact, one class,
+    one verdict. A caller that wants "did the whole declaration arm" asks
+    ``all(outcomes)``; a caller that wants "did THIS class arm" indexes it.
+    There is no combined verdict, deliberately: the object that could report
+    one was the wrong atom.
+
+    ``meta`` overrides the metadata of the FIRST row only — it is how a test
+    perturbs one artifact (a bad host_isa, a forged stamp) without having to
+    rebuild the declaration.
 
     ``cfg`` defaults to :func:`cell_cfg` — the ``CompileCell`` production
     builds. Pass one of :func:`harness.adopt_rig.production_cfgs`' values to
@@ -267,11 +353,18 @@ def arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
         aot, "_load_package", lambda path, entry="model": packages[entry])
     module = ProbeDenoiser()
     pipeline = ProbePipeline(module)
-    outcome = provision.arm_aot(
-        pipeline, cell_cfg(decl) if cfg is None else cfg,
-        tmp_path / "cache", artifact(tmp_path, meta), 0,
-        verify_numerics=verify_numerics)
-    return pipeline, module, outcome
+    use_rows = ROWS if rows is None else rows
+    outcomes: List[Any] = []
+    for index, row in enumerate(use_rows):
+        block = metadata(row, use_rows)
+        if meta is not None and index == 0:
+            block = meta
+        outcomes.append(provision.arm_aot(
+            pipeline, cell_cfg(decl) if cfg is None else cfg,
+            tmp_path / "cache", artifact(tmp_path, block), 0,
+            verify_numerics=verify_numerics,
+            declared=declared_names(use_rows)))
+    return pipeline, module, ArmOutcomes(outcomes)
 
 
 def numerics_rows(said: List[Tuple[str, str, str]]) -> List[Tuple[str, str]]:

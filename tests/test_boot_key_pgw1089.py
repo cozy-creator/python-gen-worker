@@ -75,6 +75,16 @@ def _block(target: str = "unet", *, dim: int = 64, fqns: Any = None) -> Dict[str
 _ENVELOPE = {"shapes": [[1024, 1024]], "text_lens": [77], "guidance": [7.5]}
 
 
+def _stamped(blocks: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """The blocks as the mint stamps them — pgw#1176: one call per class,
+    through `stamp_entry`, which is the mint's own function."""
+    return {
+        name: aot_serve.stamp_entry(
+            name, dict(block), strict=True, lora_bucket=0)
+        for name, block in blocks.items()
+    }
+
+
 def _fold(blocks: Dict[str, Dict[str, Any]]):
     return boot_key.fold(
         blocks, family="tiny", precision="bf16", strict=True,
@@ -93,39 +103,43 @@ def test_the_fold_is_the_mints_own_stamp_not_a_second_arithmetic() -> None:
     Proven by building the artifact envelope the way ``_mint_cell`` does —
     ``artifact_metadata`` + ``shared_identity_blocks`` + ``cell_identity`` —
     and asserting the boot fold returns that key. If the boot module ever
-    grows its own ``class_hash``/``combined_graph_hash`` arithmetic, this row
+    grows its own ``class_hash``/``manifest_digest`` arithmetic, this row
     keeps passing while the tree gets the attempt-28 phantom back; the
-    ``combined_graph_hash(`` derivation fence in
+    ``manifest_digest(`` derivation fence in
     ``test_cell_key_pgw1059.py`` is what stops that, and this row is what
     proves the shared path is the one actually taken.
     """
     blocks = {"forward/x@64": _block(dim=64), "forward/x@128": _block(dim=128)}
-
-    meta = aot_serve.artifact_metadata(
-        family="tiny", precision="bf16", cell_key="",
-        entries={k: dict(v) for k, v in blocks.items()},
-        strict_export=True, lora_bucket=0)
-    meta[cell_key.EXPORT_ENVELOPE_KEY] = dict(_ENVELOPE)
     from gen_worker import compile_cache as cc, env_seal
 
-    meta["toolchain"] = dict(cc.toolchain_digest())
-    meta[env_seal.SEAL_KEY] = env_seal.effective_seal()
-    minted = aot_mint.cell_identity(meta)
+    # pgw#1176: the mint packs ONE artifact per class, so the comparison is
+    # per class too — and it is stronger for it. A single combined key could
+    # agree while an individual class's hash disagreed underneath it.
+    minted = {}
+    for name, block in blocks.items():
+        meta = aot_serve.entry_metadata(
+            family="tiny", precision="bf16", cell_key="",
+            name=name, entry=dict(block), strict_export=True, lora_bucket=0)
+        meta["toolchain"] = dict(cc.toolchain_digest())
+        meta[env_seal.SEAL_KEY] = env_seal.effective_seal()
+        minted[name] = aot_mint.cell_identity(meta).digest
 
-    key, class_hashes, combined = _fold(blocks)
+    entry_keys, class_hashes, manifest = _fold(blocks)
 
-    assert key.digest == minted.digest
-    assert key.axes_dict() == minted.axes_dict()
-    assert combined == meta["combined_graph_hash"]
+    assert entry_keys == minted
+    assert manifest == cell_key.manifest_digest(class_hashes.values())
     assert set(class_hashes) == set(blocks)
     assert all(len(h) == 16 for h in class_hashes.values())
 
 
-def test_the_key_is_a_ck1_key_over_exactly_four_axes() -> None:
-    key, _hashes, _combined = _fold({"a": _block()})
-    assert key.digest.startswith("ck1-")
-    assert cell_key.is_key(key.digest)
-    assert sorted(key.axes_dict()) == ["envelope", "graph", "sm", "toolchain"]
+def test_every_key_is_an_ek1_key_over_exactly_three_axes() -> None:
+    entry_keys, _hashes, _manifest = _fold({"a": _block()})
+    (key,) = entry_keys.values()
+    assert key.startswith("ek1-")
+    assert cell_key.is_key(key)
+    # The axes are the key's, and `from_axes` is the only way to build one —
+    # so the axis set is asserted where it is DEFINED rather than restated.
+    assert cell_key._REQUIRED == ("graph", "sm", "toolchain")
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +153,7 @@ def test_class_order_and_assignment_do_not_move_the_key() -> None:
     Two independent orderings are exercised: the ORDER the blocks arrive in
     (children finish in whatever order they finish) and the SHARE each child
     is assigned. Both are structurally incapable of moving the key —
-    ``combined_graph_hash`` sorts by hash and the fold takes a dict — and
+    ``manifest_digest`` sorts by hash and the fold takes a dict — and
     "structurally incapable" is exactly the claim that must be pinned, because
     the compile pool's equivalent discipline (assembly by entry NAME, never by
     completion) had to be stated to be kept.
@@ -150,7 +164,7 @@ def test_class_order_and_assignment_do_not_move_the_key() -> None:
     forward, _h1, _c1 = _fold(blocks)
     reversed_arrival, _h2, _c2 = _fold(
         {n: blocks[n] for n in reversed(names)})
-    assert forward.digest == reversed_arrival.digest
+    assert forward == reversed_arrival
 
     # And the sharding itself: whatever K is, the shares partition the rows
     # exactly once each — the property `rows[i::K]` has and a hand-rolled
@@ -243,13 +257,14 @@ def test_the_memo_never_holds_the_folded_key(tmp_path: Path) -> None:
     """
     digest = "closure0123"
     blocks = {"a": _block(), "b": _block(dim=128)}
-    key, _hashes, _combined = _fold(blocks)
+    entry_keys, _hashes, _combined = _fold(blocks)
     assert boot_key.write_memo(tmp_path, digest, blocks)
 
     doc = json.loads((tmp_path / boot_key.MEMO_FILENAME).read_text())
     blob = json.dumps(doc)
-    assert key.digest not in blob
-    assert "ck1-" not in blob
+    for key in entry_keys.values():
+        assert key not in blob
+    assert "ek1-" not in blob
     assert set(doc["closures"][digest]["blocks"]) == {"a", "b"}
     # And not the axes that must re-derive every boot, either.
     for axis in ("envelope", "toolchain", "sm_89"):
@@ -358,10 +373,7 @@ def test_a_dishonest_memo_is_caught_at_mint_and_invalidated(
     boot_key.write_memo(tmp_path, digest, blocks)
 
     # A mint whose traced class hashes AGREE: silence.
-    minted = aot_serve.artifact_metadata(
-        family="tiny", precision="bf16", cell_key="",
-        entries={k: dict(v) for k, v in blocks.items()},
-        strict_export=True, lora_bucket=0)["entries"]
+    minted = _stamped(blocks)
     assert boot_key.assert_memo_honest(tmp_path, digest, minted) == ""
     assert boot_key.read_memo(tmp_path, digest) == blocks
 
@@ -378,9 +390,7 @@ def test_a_memo_covering_a_different_class_set_is_dishonest(
 ) -> None:
     digest = "closureA"
     boot_key.write_memo(tmp_path, digest, {"a": _block(), "b": _block(dim=128)})
-    minted = aot_serve.artifact_metadata(
-        family="tiny", precision="bf16", cell_key="",
-        entries={"a": _block()}, strict_export=True, lora_bucket=0)["entries"]
+    minted = _stamped({"a": _block()})
     reason = boot_key.assert_memo_honest(tmp_path, digest, minted)
     assert "class set differs" in reason
     assert boot_key.read_memo(tmp_path, digest) == {}
@@ -389,9 +399,7 @@ def test_a_memo_covering_a_different_class_set_is_dishonest(
 def test_no_memo_for_this_closure_is_silence_not_a_complaint(
     tmp_path: Path,
 ) -> None:
-    minted = aot_serve.artifact_metadata(
-        family="tiny", precision="bf16", cell_key="",
-        entries={"a": _block()}, strict_export=True, lora_bucket=0)["entries"]
+    minted = _stamped({"a": _block()})
     assert boot_key.assert_memo_honest(tmp_path, "never-written", minted) == ""
 
 
@@ -400,27 +408,40 @@ def test_no_memo_for_this_closure_is_silence_not_a_complaint(
 # ---------------------------------------------------------------------------
 
 
-def test_a_widened_envelope_moves_the_key_and_not_the_graph_axis() -> None:
-    """The author widening served traffic must re-key WITHOUT pretending the
-    computation changed — which is the whole reason `envelope` is its own
-    axis."""
+def test_a_widened_envelope_MOVES_NOTHING() -> None:
+    """DELIBERATELY INVERTED by pgw#1176 — read this before "fixing" it.
+
+    This row used to assert that widening the declared envelope re-keys, on
+    the reasoning that the author widening served traffic must re-key without
+    pretending the computation changed. That was the whole reason `envelope`
+    was its own axis, and it is the disease: `envelope_facts` digests the
+    UNION of the ladder across the whole declaration, so ONE added aspect
+    ratio re-keyed every class in the cell — 35 of sdxl's 36 trace
+    byte-identically. Measured on unmodified master @ 4dfdcd60 for two
+    byte-identical classes: ck1-c4c134db... -> ck1-48512ea3...
+
+    A widening now ADDS keys and moves none. The one real edge is honest
+    under the split rather than lost by it: widening a DYNAMIC dim's range
+    genuinely changes the traced graph, and it re-keys through THAT class's
+    own `class_hash` (via `range_digest` / `class_dims`) — the honest
+    channel — instead of through a union digest that punishes its siblings.
+    `test_a_different_traced_graph_moves_the_graph_axis` below is that half,
+    and it is untouched.
+    """
     blocks = {"a": _block()}
-    narrow, _h, combined = _fold(blocks)
-    wide, _h2, combined2 = boot_key.fold(
+    narrow, _h, manifest = _fold(blocks)
+    wide, _h2, manifest2 = boot_key.fold(
         blocks, family="tiny", precision="bf16", strict=True, lora_bucket=0,
         envelope={"shapes": [[1024, 1024], [768, 768]],
                   "text_lens": [77], "guidance": [7.5]})
-    assert wide.digest != narrow.digest
-    assert combined2 == combined
-    assert wide.axes_dict()["graph"] == narrow.axes_dict()["graph"]
-    assert wide.axes_dict()["envelope"] != narrow.axes_dict()["envelope"]
+    assert wide == narrow
+    assert manifest2 == manifest
 
 
-def test_a_different_traced_graph_moves_the_graph_axis() -> None:
+def test_a_different_traced_graph_moves_the_key() -> None:
     a, _h, _c = _fold({"e": _block(fqns=["w.weight"])})
     b, _h2, _c2 = _fold({"e": _block(fqns=["w.weight", "w.bias"])})
-    assert a.axes_dict()["graph"] != b.axes_dict()["graph"]
-    assert a.axes_dict()["envelope"] == b.axes_dict()["envelope"]
+    assert a["e"] != b["e"]
 
 
 # ---------------------------------------------------------------------------
@@ -574,7 +595,8 @@ def test_derive_end_to_end_with_stubbed_children_memoizes_and_hits(
     assert first.memo == "miss"
     assert first.traced == 2
     assert first.nodes == {"a": 41, "b": 41}
-    assert first.digest.startswith("ck1-")
+    assert len(first.keys) == 2
+    assert all(k.startswith("ek1-") for k in first.keys)
 
     # A HIT MUST NOT TRACE. Any child spawn now is a hard failure.
     def _never(jobs, python=""):
@@ -585,7 +607,7 @@ def test_derive_end_to_end_with_stubbed_children_memoizes_and_hits(
     monkeypatch.setattr(boot_key, "_run_children", _never)
     second = boot_key.derive(**kwargs)
     assert second.memo == "hit"
-    assert second.digest == first.digest
+    assert second.keys == first.keys
     assert second.traced == 0
     assert second.workers == 0
     assert "no trace child" in second.width_reason
@@ -594,7 +616,7 @@ def test_derive_end_to_end_with_stubbed_children_memoizes_and_hits(
     monkeypatch.setattr(boot_key, "_run_children", _children)
     verified = boot_key.derive(**kwargs, trust_memo=False)
     assert verified.memo == "verified"
-    assert verified.digest == first.digest
+    assert verified.keys == first.keys
 
     # Poison it, and the FRESH trace must win and say so.
     closure = boot_key.closure_digest("tiny", kwargs["cfg"], function="fn")
@@ -602,7 +624,7 @@ def test_derive_end_to_end_with_stubbed_children_memoizes_and_hits(
     boot_key.write_memo(tmp_path, closure, poisoned_blocks)
     caught = boot_key.derive(**kwargs, trust_memo=False)
     assert caught.memo == "invalidated"
-    assert caught.digest == first.digest
+    assert caught.keys == first.keys
 
 
 # ---------------------------------------------------------------------------

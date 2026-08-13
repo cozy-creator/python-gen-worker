@@ -147,12 +147,18 @@ class ProbeAxis:
 def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
     """Every probeable axis of one cell, read off its own metadata.
 
-    One axis per PACKAGED ENTRY: a multi-graph cell's classes are separate
-    artifacts sharing a file (pgw#758), and a verdict that averaged them could
-    not name the class that parted from eager.
+    ONE axis, because pgw#1176 made one artifact one graph class: the mint
+    parity gate runs per entry, at the moment that entry exists, against the
+    eager callable it was traced from — never "after all 36". That is what
+    makes §4.33's ~8 GiB true by construction: exactly ONE compiled runner is
+    resident beside the already-resident weights while the probe runs.
+
+    The signature stays a TUPLE so every caller's shape is unchanged; what
+    changed is that its length is now one by construction rather than by luck.
     """
 
-    entries = aot_serve.entries_from_meta(dict(meta))
+    entry = aot_serve.entry_from_meta(dict(meta))
+    entries = {str(entry.get("name") or ""): entry}
     execution_lane = str(meta.get("precision") or "")
     cell_bucket = int(meta.get("lora_bucket") or 0)
     axes: List[ProbeAxis] = []
@@ -369,11 +375,20 @@ class CellNumerics:
 
     @property
     def measured(self) -> bool:
-        """True only when EVERY declared axis produced a comparison.
+        """True only when every axis of THIS report produced a comparison.
 
-        Partial coverage is not a pass. A cell arming on a subset of its own
-        graph classes is precisely the "silent subset of what the cell key
-        advertises" that ``load_and_wrap`` refuses at bind time.
+        pgw#1176 DELETED the all-axes-of-the-cell rule this used to state
+        ("partial coverage is not a pass; a cell arming on a subset of its own
+        graph classes is a silent subset of what the cell key advertises").
+        That rule was the verification half of the wrong atom: it made one
+        unmeasurable class condemn 35 measured ones. A report is now one graph
+        class, so the predicate below says exactly what it always meant —
+        absent evidence is never a pass — without a collection to be partial
+        about.
+
+        Both remaining clauses are load-bearing and stay: a report short of
+        its own axis count has lost a verdict somewhere, and an errored axis
+        is not a measured one.
         """
         return (bool(self.verdicts)
                 and len(self.verdicts) == self.axes_total

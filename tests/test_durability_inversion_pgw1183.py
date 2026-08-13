@@ -32,7 +32,7 @@ import pytest
 from gen_worker import fleet_cells, local_cell_store
 from gen_worker.cell_adopt import AdoptOutcome
 
-KEY_A = "ck1-" + "a" * 56
+KEY_A = "ek1-" + "a" * 56
 ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * 56
 
 
@@ -116,7 +116,7 @@ def quiet(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str]]:
     monkeypatch.setattr(fleet_cells, "_note_durable", lambda *a, **k: None)
     monkeypatch.setattr(fleet_cells.aot_serve, "note_aot_key", lambda k: None)
     monkeypatch.setattr(fleet_cells, "arm_axis_divergence",
-                        lambda arm, meta: "")
+                        lambda arm, meta, **_kw: "")
     monkeypatch.setattr(fleet_cells, "_FINALIZED", {})
     return events
 
@@ -157,7 +157,7 @@ def test_a_trusted_pod_writes_the_cell_to_local_cas(
     pending = _pending(tmp_path, sink)
     art = _artifact(tmp_path)
 
-    assert fleet_cells.adopt_delegated_mint(_Pipe(), pending, art) is not None
+    assert fleet_cells.adopt_delegated_mint(_Pipe(), pending, [art]) is not None
 
     kept = local_cell_store.lookup(KEY_A)
     assert kept is not None, (
@@ -179,7 +179,7 @@ def test_the_cas_copy_exists_BEFORE_the_arm_runs(
     seen: List[str] = []
     _arming(monkeypatch, ok=True, observed=seen)
     fleet_cells.adopt_delegated_mint(
-        _Pipe(), _pending(tmp_path, _Sink()), _artifact(tmp_path))
+        _Pipe(), _pending(tmp_path, _Sink()), [_artifact(tmp_path)])
     assert seen == [local_cell_store.VERDICT_UNVERIFIED], (
         "the arm ran before the artifact was durable")
     assert local_cell_store.lookup(KEY_A) is not None, (
@@ -195,7 +195,7 @@ def test_an_arm_refusal_QUARANTINES_the_bytes_instead_of_deleting_them(
     could explain the refusal was destroyed by the code reporting it."""
     _arming(monkeypatch, ok=False)
     assert fleet_cells.adopt_delegated_mint(
-        _Pipe(), _pending(tmp_path, _Sink()), _artifact(tmp_path)) is None
+        _Pipe(), _pending(tmp_path, _Sink()), [_artifact(tmp_path)]) is None
 
     assert local_cell_store.lookup(KEY_A) is None, (
         "a cell that failed its arm must never be armable from the store")
@@ -290,7 +290,7 @@ def test_a_cell_with_no_sink_by_design_owes_no_publish(
     must not accumulate an upload obligation nothing will ever discharge."""
     _arming(monkeypatch, ok=True)
     fleet_cells.adopt_delegated_mint(
-        _Pipe(), _pending(tmp_path, None), _artifact(tmp_path))
+        _Pipe(), _pending(tmp_path, None), [_artifact(tmp_path)])
     kept = local_cell_store.lookup(KEY_A)
     assert kept is not None
     assert kept.sink == local_cell_store.SINK_NONE
@@ -312,7 +312,7 @@ def test_no_terminus_deletes_a_cell_the_store_does_not_hold(
     the destruction bug rebuilt."""
     _arming(monkeypatch, ok=True)
     pending = _pending(tmp_path, _Sink())
-    fleet_cells.adopt_delegated_mint(_Pipe(), pending, _artifact(tmp_path))
+    fleet_cells.adopt_delegated_mint(_Pipe(), pending, [_artifact(tmp_path)])
     fleet_cells.publish_self_mint(pending)
 
     kept = local_cell_store.lookup(KEY_A)

@@ -13,28 +13,41 @@ Artifact = deterministic ``.tar.gz`` (the receipts gate reads
 ``metadata.json`` straight out of the digested bytes)::
 
     metadata.json           kind/format, runtime key (sm, torch, cuda + sku),
-                            family, cell_key, and the ENTRIES map — one
-                            block per NAMED GRAPH CLASS carrying its
-                            target, fork/class-dim coordinate, INPUT
+                            family, cell_key, and the ENTRY block — the ONE
+                            NAMED GRAPH CLASS this artifact carries, with
+                            its target, fork/class-dim coordinate, INPUT
                             CONTRACT, SYMBOL RANGES, declared CONSTANT
-                            manifest, and per-class hash
-    model.pt2               ONE AOTI package holding every entry as a
-                            named model (``data/aotinductor/<entry>/``) —
-                            CODE ONLY
+                            manifest, and class hash
+    model.pt2               ONE AOTI package holding that entry as its named
+                            model (``data/aotinductor/<entry>/``) — CODE ONLY
     constants.safetensors   optional: non-weight lifted constants, keys
                             namespaced ``<entry>::<fqn>``
 
-Format 2 — multi-graph cells (pgw#758, Paul's ruling)
------------------------------------------------------
-"generate and generate_turbo are separate functions, they have separate
-graphs, but they are COMBINED TOGETHER INTO ONE FILE." One cell per
-(family x lane x contract) carries EVERY declared graph class as a named
-entry; one resident artifact serves them all. Serve-side dispatch selects
-the entry whose DECLARED ingress contract admits the call — zero admitting
-entries is a named refusal (eager service), and more than one is
-``entry_ambiguous``: a declaration defect made visible, never a guess.
-Every pgw#704 gate (B1 constants-bound, B2 ingress) holds PER ENTRY —
+Format 3 — the atom is ONE GRAPH CLASS (pgw#1176, Paul-directed)
+----------------------------------------------------------------
+Format 2 packed EVERY declared class into one artifact under one key, and
+made identity, adoption, durability, verification, arming and advertisement
+the same 36-entry unit. That unit is what forbade the incremental
+compile-and-adopt Paul asked for, forced ~32 GiB of all-runners-resident
+arming, and destroyed a 1 h 37 m mint when the 36th entry segfaulted.
+
+Format 3 is one entry per artifact. What used to be "a cell" is a derived
+CONTRACT MANIFEST (``cell_key.manifest_digest``) — a view, never a thing you
+download, verify or arm. Entries accrete: each arms whole or not at all, and
+an entry IS one graph, so that is atomic by nature. Serve-side dispatch is
+unchanged in kind — it was already built at the right granularity: the call
+routes to the entry whose DECLARED ingress contract admits it, zero
+admitting entries is a named refusal (eager service), and more than one is
+``entry_ambiguous``. What changed is that :class:`EntryDispatch` is a
+REGISTRY entries join as they arm, not a frozen tuple built from a complete
+cell. Every pgw#704 gate (B1 constants-bound, B2 ingress) holds PER ENTRY —
 the unbound-entry segfault was re-measured per named model on the pin.
+
+**Truthfulness is structural.** The pod never claims "cell X armed"; it
+reports per-entry serve state. There is no unit left that CAN advertise more
+than it serves, so the old all-or-nothing invariant ("a cell that cannot arm
+one of its graph classes arms none of them") is not weakened — it is
+vacuous.
 
 Why the artifact is code-only, and what that costs
 --------------------------------------------------
@@ -132,10 +145,11 @@ RECAST_EVENT = "aot_input_recast"
 #: ``timesteps[i]``, a scalar VIEW at an odd element offset — makes the
 #: runner clone it per call. Not a knob: it is the compiler's constant.
 AOTI_ALIGNMENT = 16
-#: Format 2 = multi-graph cells (pgw#758): the envelope carries an
-#: ``entries`` map instead of one flat contract. Format-1 cells are RETIRED
-#: (exact identity: a recipe change strands old cells, which is fine).
-ARTIFACT_FORMAT = 2
+#: Format 3 = ONE graph class per artifact (pgw#1176): the metadata carries
+#: one ``entry`` block instead of an ``entries`` map. Formats 1 and 2 are
+#: RETIRED — a format-2 cell cannot restate a per-entry identity, so the ck1
+#: corpus is purged in the coordinated re-key rather than migrated.
+ARTIFACT_FORMAT = 3
 #: Separator between the entry name and the constant FQN in
 #: ``constants.safetensors`` keys. Entry names never contain it (targets are
 #: dotted identifiers; coordinate values are ints/bools/identifiers).
@@ -625,80 +639,103 @@ def class_hash(
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
-def combined_graph_hash(hashes: Iterable[str]) -> str:
-    """The combined hash, VERBATIM per pgw#716: the first 16 hex chars
-    of the sha256 over the newline-joined SORTED per-class hash values
-    (sorted by the hash string itself, single ``\\n`` joins, no trailing
-    newline, UTF-8 bytes)."""
-    joined = "\n".join(sorted(str(h) for h in hashes))
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+def stamp_entry(
+    name: str, block: Mapping[str, Any], *, strict: bool, lora_bucket: int,
+) -> Dict[str, Any]:
+    """One validated + stamped ENTRY block: ``name`` folded in, contract and
+    constants parsed, ``range_digest`` and ``class_hash`` stamped.
+
+    THE one place a class hash is stamped, so the mint's stamp, the boot
+    key's fold and the admission recomputation are the same computation.
+    Raises :class:`ValueError` naming the entry — a malformed contract must
+    fail at MINT, on the pod, not at serve time on a paying request.
+    """
+    label = str(name or "").strip()
+    if not label:
+        raise ValueError("entry block carries no name")
+    if LITERAL_SEP in label:
+        raise ValueError(
+            f"entry name {label!r} contains {LITERAL_SEP!r}, which the "
+            f"literal namespace reserves")
+    if not isinstance(block, Mapping):
+        raise ValueError(f"entry {label!r} is not an object")
+    if not str(block.get("target") or "").strip():
+        raise ValueError(f"entry {label!r} declares no target")
+    # Deep copy: the stamped block must not alias the caller's nested
+    # containers (a later caller-side mutation would silently rewrite the
+    # recorded contract).
+    row = copy.deepcopy(dict(block))
+    row["name"] = label
+    try:
+        contract_from_meta(row)
+        constants_from_meta(row)
+    except ValueError as exc:
+        raise ValueError(f"entry {label!r}: {exc}") from exc
+    row["range_digest"] = range_digest(row)
+    row["class_hash"] = class_hash(
+        row, strict=bool(strict), lora_bucket=int(lora_bucket or 0))
+    return row
 
 
-def entries_from_meta(meta: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """The validated ``entries`` map of a format-2 artifact.
+def entry_from_meta(meta: Mapping[str, Any]) -> Dict[str, Any]:
+    """The validated ``entry`` block of a format-3 artifact.
 
-    Every entry block must parse as a full contract (inputs, symbols,
-    constants) and carry a target — an entry the dispatch cannot route or
+    The block must parse as a full contract (inputs, symbols, constants),
+    carry a target and carry a name — an entry the dispatch cannot route or
     assert is B2 with extra steps. Raises :class:`ValueError` naming the
-    entry."""
-    raw = meta.get("entries")
+    entry.
+
+    pgw#1176: the plural ``entries_from_meta`` is GONE with the multi-entry
+    artifact. A caller that wants several entries holds several artifacts.
+    """
+    raw = meta.get(cell_key_mod.ENTRY_BLOCK_KEY)
     if not isinstance(raw, Mapping) or not raw:
-        raise ValueError("metadata declares no entries map")
-    out: Dict[str, Dict[str, Any]] = {}
-    for name, block in raw.items():
-        label = str(name or "").strip()
-        if not label:
-            raise ValueError("entries map carries an unnamed entry")
-        if not isinstance(block, Mapping):
-            raise ValueError(f"entry {label!r} is not an object")
-        if LITERAL_SEP in label:
-            raise ValueError(
-                f"entry name {label!r} contains {LITERAL_SEP!r}, which the "
-                f"literal namespace reserves")
-        if not str(block.get("target") or "").strip():
-            raise ValueError(f"entry {label!r} declares no target")
-        try:
-            contract_from_meta(block)
-            constants_from_meta(block)
-        except ValueError as exc:
-            raise ValueError(f"entry {label!r}: {exc}") from exc
-        out[label] = dict(block)
-    return out
+        raise ValueError("metadata declares no entry block")
+    label = str(raw.get("name") or "").strip()
+    if not label:
+        raise ValueError("entry block carries no name")
+    if LITERAL_SEP in label:
+        raise ValueError(
+            f"entry name {label!r} contains {LITERAL_SEP!r}, which the "
+            f"literal namespace reserves")
+    if not str(raw.get("target") or "").strip():
+        raise ValueError(f"entry {label!r} declares no target")
+    try:
+        contract_from_meta(raw)
+        constants_from_meta(raw)
+    except ValueError as exc:
+        raise ValueError(f"entry {label!r}: {exc}") from exc
+    return dict(raw)
 
 
-def artifact_metadata(
+def entry_metadata(
     *,
     family: str,
     precision: str,
     cell_key: str,
-    entries: Mapping[str, Mapping[str, Any]],
+    name: str,
+    entry: Mapping[str, Any],
     strict_export: bool = True,
     lora_bucket: int = 0,
     source_ref: str = "",
     source_digest: str = "",
+    manifest_digest: str = "",
 ) -> Dict[str, Any]:
-    """Build one multi-graph artifact's ``metadata.json`` (format 2).
+    """Build ONE entry artifact's ``metadata.json`` (format 3).
 
-    THE single source of truth for the envelope: the mint lane calls this
-    rather than hand-rolling a dict, so producer and consumer cannot drift
-    into two interpretations of the same bytes. Each entry block carries
-    ``target``/``fork``/``class_dims``/``inputs``/``symbols``/``constants``
-    (+ ``graph``); this function validates every one, stamps its
-    ``range_digest`` and ``class_hash``, and stamps the
-    ``combined_graph_hash`` over the sorted per-class hashes. A malformed
-    contract must fail at MINT, on the pod, not at serve time on a paying
-    request.
+    THE single source of truth for the artifact-metadata envelope: the mint
+    lane calls this rather than hand-rolling a dict, so producer and consumer
+    cannot drift into two interpretations of the same bytes.
+
+    ``manifest_digest`` is the declaration-wide coverage LABEL
+    (``cell_key.manifest_digest``) — telemetry only, never identity. It is
+    optional precisely because it is not identity: an entry minted by a pod
+    that has not folded its whole declaration is still a complete, keyable,
+    armable artifact.
     """
-    stamped: Dict[str, Dict[str, Any]] = {}
-    for name, block in entries.items():
-        # Deep copy: the stamped envelope must not alias the caller's nested
-        # containers (a later caller-side mutation would silently rewrite the
-        # recorded contract).
-        row = copy.deepcopy(dict(block))
-        row["range_digest"] = range_digest(row)
-        row["class_hash"] = class_hash(
-            row, strict=bool(strict_export), lora_bucket=int(lora_bucket or 0))
-        stamped[str(name)] = row
+    stamped = stamp_entry(
+        name, entry, strict=bool(strict_export),
+        lora_bucket=int(lora_bucket or 0))
     meta: Dict[str, Any] = {
         "format": ARTIFACT_FORMAT,
         "kind": ARTIFACT_KIND,
@@ -706,7 +743,8 @@ def artifact_metadata(
         "family": str(family or ""),
         "precision": str(precision or ""),
         "cell_key": str(cell_key or ""),
-        "entries": stamped,
+        cell_key_mod.ENTRY_BLOCK_KEY: stamped,
+        "manifest_digest": str(manifest_digest or ""),
         "strict_export": bool(strict_export),
         "lora_bucket": int(lora_bucket or 0),
         "package_constants_in_so": False,
@@ -726,9 +764,7 @@ def artifact_metadata(
         # first and SIGILL second.
         "host_isa": host_isa.stamp(),
     }
-    entries_from_meta(meta)
-    meta["combined_graph_hash"] = combined_graph_hash(
-        row["class_hash"] for row in stamped.values())
+    entry_from_meta(meta)
     return meta
 
 
@@ -818,71 +854,64 @@ def verify_declared(meta: Dict[str, Any], *, family: str = "") -> str:
 def verify_contract(
     meta: Dict[str, Any],
     *,
-    entries: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    entry: Optional[Mapping[str, Any]] = None,
 ) -> str:
-    """'' when the artifact's ``entries`` contract is self-consistent, else
+    """'' when the artifact's ``entry`` contract is self-consistent, else
     the reason.
 
-    The post-download half of :func:`verify`. ``entries`` is unbounded in the
-    size of the model and rides INSIDE the artifact — :func:`unpack` reads it
-    off ``metadata.json``, which is where ``aot_serve`` has always served it
-    from. It is verified HERE, on the staged bytes, and never against a
-    control-plane declare that is not required to carry it (pgw#988).
+    The post-download half of :func:`verify`. The contract rides INSIDE the
+    artifact — :func:`unpack` reads it off ``metadata.json``, which is where
+    ``aot_serve`` has always served it from. It is verified HERE, on the
+    staged bytes, and never against a control-plane declare that is not
+    required to carry it (pgw#988).
 
-    ``entries`` is the already-validated map from :func:`_unpack` when the arm
-    path has one (pgw#1040 — same pure parse, threaded rather than repeated);
-    ``None`` parses it here, which is what a caller holding only a metadata
-    dict does.
+    ``entry`` is the already-validated block from :func:`_unpack` when the
+    arm path has one (pgw#1040 — same pure parse, threaded rather than
+    repeated); ``None`` parses it here, which is what a caller holding only a
+    metadata dict does.
     """
-    if entries is None:
+    if entry is None:
         try:
-            entries = entries_from_meta(meta)
+            entry = entry_from_meta(meta)
         except ValueError as exc:
             return f"malformed declared contract: {exc}"
     strict = bool(meta.get("strict_export", True))
     bucket = int(meta.get("lora_bucket") or 0)
-    hashes: List[str] = []
-    for name, block in entries.items():
-        # pgw#939: absence is a verdict, not a skipped check. `class_hash`
-        # below was already written this way and is the model the other two
-        # axes are brought to — `compile_cache.verify` is strict on every
-        # IDENTITY_AXES field for the same reason, and `compile_cache.py`
-        # names this exact `if want and want != have` shape as JAX PR #27814's
-        # one documented wrong-cache-hit.
-        stamped = str(block.get("range_digest") or "")
-        if not stamped:
-            return f"entry {name!r}: no range_digest stamped"
-        if stamped != range_digest(block):
-            return f"entry {name!r}: range_digest does not match its contract"
-        stamped_hash = str(block.get("class_hash") or "")
-        if not stamped_hash:
-            return f"entry {name!r}: no class_hash stamped"
-        if stamped_hash != class_hash(block, strict=strict, lora_bucket=bucket):
-            # The receipts principle (pgw#716): a hash mismatch NAMES the class.
-            return f"entry {name!r}: class_hash does not match its recorded facts"
-        hashes.append(stamped_hash)
-    stamped_combined = str(meta.get("combined_graph_hash") or "")
-    if not stamped_combined:
-        return "no combined_graph_hash stamped"
-    if stamped_combined != combined_graph_hash(hashes):
-        return "combined_graph_hash does not match the per-entry class hashes"
-    # pgw#1059: the stamped key must be exactly the key the artifact's OWN
-    # recorded facts describe — the same recomputation the mint stamped and
-    # the publish path corroborated, now proven at ADMISSION on the staged
-    # bytes. Two consequences, both deliberate: a forged/hand-edited stamp is
-    # refused by name, and a PRE-REDEFINITION cell is refused STRUCTURALLY
-    # (its metadata records the old axis set — `declared_traffic`, no
-    # four-axis identity — so the recomputation raises rather than matching),
-    # which is what makes the dev-corpus purge hygiene rather than a
-    # correctness precondition.
-    # Gated on key SHAPE: a ck-shaped stamp is an identity claim and must
+    name = str(entry.get("name") or "")
+    # pgw#939: absence is a verdict, not a skipped check. `class_hash` below
+    # was already written this way and is the model the other axis is brought
+    # to — `compile_cache.verify` is strict on every IDENTITY_AXES field for
+    # the same reason, and `compile_cache.py` names this exact
+    # `if want and want != have` shape as JAX PR #27814's one documented
+    # wrong-cache-hit.
+    stamped = str(entry.get("range_digest") or "")
+    if not stamped:
+        return f"entry {name!r}: no range_digest stamped"
+    if stamped != range_digest(entry):
+        return f"entry {name!r}: range_digest does not match its contract"
+    stamped_hash = str(entry.get("class_hash") or "")
+    if not stamped_hash:
+        return f"entry {name!r}: no class_hash stamped"
+    if stamped_hash != class_hash(entry, strict=strict, lora_bucket=bucket):
+        # The receipts principle (pgw#716): a hash mismatch NAMES the class.
+        return f"entry {name!r}: class_hash does not match its recorded facts"
+    # pgw#1059/pgw#1176: the stamped key must be exactly the key the
+    # artifact's OWN recorded facts describe — the same recomputation the
+    # mint stamped and the publish path corroborated, now proven at ADMISSION
+    # on the staged bytes. Two consequences, both deliberate: a forged /
+    # hand-edited stamp is refused by name, and a PRE-ATOM cell is refused
+    # STRUCTURALLY (its metadata records an `entries` MAP and a
+    # `combined_graph_hash`, no per-entry identity, so the recomputation
+    # raises rather than matching) — which is what makes the ck1 corpus purge
+    # hygiene rather than a correctness precondition.
+    # Gated on key SHAPE: an ek-shaped stamp is an identity claim and must
     # restate; a non-key stamp (focused fixtures, torn metadata) is not a
     # claim — and it can never match a hub row either (`IsCellKey` gates the
     # store flavor), so nothing downstream can mistake it for identity.
     stamped_key = str(meta.get("cell_key") or "")
     if stamped_key and cell_key_mod.is_key(stamped_key):
         try:
-            recomputed = cell_key_mod.from_exported_artifact_metadata(meta)
+            recomputed = cell_key_mod.from_entry_metadata(meta)
         except cell_key_mod.CellKeyError as exc:
             return (
                 f"stamped cell_key {stamped_key} is not restatable from the "
@@ -898,19 +927,19 @@ def verify(
     meta: Dict[str, Any],
     *,
     family: str = "",
-    entries: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    entry: Optional[Mapping[str, Any]] = None,
 ) -> str:
-    """'' when a cell's FULL metadata matches this runtime, else the reason.
+    """'' when an entry's FULL metadata matches this runtime, else the reason.
 
     Both halves, for callers holding an artifact's own ``metadata.json``
     (:func:`stage_artifact`). Discovery, which holds only a declare, calls
     :func:`verify_declared` and reaches this one after the fetch.
 
-    ``entries`` threads the already-validated map through to
+    ``entry`` threads the already-validated block through to
     :func:`verify_contract` (pgw#1040).
     """
     return (verify_declared(meta, family=family)
-            or verify_contract(meta, entries=entries))
+            or verify_contract(meta, entry=entry))
 
 
 #: :func:`host_isa_reason`'s refusal for a cell that stamped no requirement.
@@ -1035,15 +1064,15 @@ def unpack(artifact: Path, dest_root: Path) -> Dict[str, Any]:
 
 def _unpack(
     artifact: Path, dest_root: Path,
-) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
-    """:func:`unpack`, also handing back the ``entries`` map it had to parse.
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """:func:`unpack`, also handing back the ``entry`` block it had to parse.
 
-    pgw#1040: one arm used to run :func:`entries_from_meta` three times over
-    the same bytes — here for the literal-payload check, again in
-    :func:`verify_contract`, and a third time in :func:`load_and_wrap` — and
-    each pass re-parses every entry's full contract and constant table. The
-    parse is the same pure function of the same dict every time, so the arm
-    path threads ONE result from here instead.
+    pgw#1040: one arm used to run the entry parse three times over the same
+    bytes — here for the literal-payload check, again in
+    :func:`verify_contract`, and a third time in the arm — and each pass
+    re-parses the entry's full contract and constant table. The parse is the
+    same pure function of the same dict every time, so the arm path threads
+    ONE result from here instead.
     """
     dest_root = Path(dest_root)
     dest_root.mkdir(parents=True, exist_ok=True)
@@ -1072,16 +1101,16 @@ def _unpack(
         raise ValueError(f"{ARTIFACT_KIND} artifact {artifact} has no {METADATA_NAME}")
     # A literal-sourced constant with no payload member would only be
     # discovered at bind time, mid-arm. Name it (and its entry) here.
-    entries = entries_from_meta(meta)
+    entry = entry_from_meta(meta)
+    name = str(entry.get("name") or "")
     literals = [
         f"{name}{LITERAL_SEP}{s.fqn}"
-        for name, block in entries.items()
-        for s in constants_from_meta(block) if s.source == SOURCE_LITERAL]
+        for s in constants_from_meta(entry) if s.source == SOURCE_LITERAL]
     if literals and LITERALS_NAME not in seen:
         raise ValueError(
             f"{ARTIFACT_KIND} artifact {artifact} declares literal constants "
             f"{sorted(literals)[:4]!r} but carries no {LITERALS_NAME}")
-    return meta, entries
+    return meta, entry
 
 
 #: Read the packed envelope without unpacking the cell.
@@ -1122,9 +1151,9 @@ def unpack_metadata(artifact: Path) -> Dict[str, Any]:
 @dataclass
 class _StagedAotArtifact:
     metadata: Dict[str, Any]
-    #: The validated ``entries`` map of :attr:`metadata`, parsed ONCE while
+    #: The validated ``entry`` block of :attr:`metadata`, parsed ONCE while
     #: staging (pgw#1040) and threaded to every consumer in the arm.
-    entries: Dict[str, Dict[str, Any]]
+    entry: Dict[str, Any]
     root: Path
     temporary: "tempfile.TemporaryDirectory[str]"
 
@@ -1154,13 +1183,13 @@ def stage_artifact(
     temporary = tempfile.TemporaryDirectory(prefix="aot-stage-", dir=base)
     root = Path(temporary.name)
     try:
-        meta, entries = _unpack(Path(artifact), root)
+        meta, entry = _unpack(Path(artifact), root)
         # pgw#754: rule on host-CPU executability FIRST and by name — the
         # one failure mode that must never reach dlopen.
         isa_reason = host_isa_reason(meta)
         if isa_reason:
             raise AdoptError("host_isa_unsupported", isa_reason)
-        reason = verify(meta, family=family, entries=entries)
+        reason = verify(meta, family=family, entry=entry)
         if reason:
             raise AdoptError("key_mismatch", reason)
         # pgw#903: "can this runtime execute it" is answered above; this
@@ -1179,7 +1208,7 @@ def stage_artifact(
         sm_reason = verify_package_compute_capability(root / PACKAGE_NAME)
         if sm_reason:
             raise AdoptError("sm_mismatch", sm_reason)
-        return _StagedAotArtifact(meta, entries, root, temporary)
+        return _StagedAotArtifact(meta, entry, root, temporary)
     except AdoptError:
         temporary.cleanup()
         raise
@@ -1823,29 +1852,44 @@ def _device_memory_line() -> str:
         return "device=unknown"
 
 
+#: :func:`target_constant_pool`'s refusal for a resident tensor an AOTI
+#: container cannot take a raw pointer to.
+NONCONTIGUOUS_CONSTANT = "constant_noncontiguous"
+
+
 def target_constant_pool(
     entry_constants: Iterable[Sequence[ConstantSpec]],
     state_dict: Mapping[str, Any],
+    into: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """ONE owned device copy of a target's state_dict-sourced constants,
-    shared by every entry that binds against it (pgw#1042).
+    """The target's state_dict-sourced constants, BY REFERENCE, accreted into
+    ``into`` (pgw#1042, pgw#1176, pgw#1177).
 
-    pgw#812 D3 priced the whole-graph copying bind at "one duplicate of the
-    weights" — true per RUNNER, and pgw#758's multi-graph cells silently made
-    it one duplicate per ENTRY: `load_and_wrap` binds every entry before any
-    wrap, so an N-entry cell demanded N x the target's constants in device
-    memory at arm time. On sdxl w8a8-lora64 (36 entries, ~GBs per UNet entry)
-    that is more VRAM than the card has, and the failing cudaMalloc surfaced
-    as the anonymous `model_container_runner.cpp:289` API failure that killed
-    the pgw#868 A1 publish twice.
+    ``into`` is the marker-owned pool an earlier entry already built for this
+    target. Entries JOIN a target's pool as they arm — the pool is not a
+    frozen product of a complete cell — and an FQN already present is left
+    alone, so N entries of one target cost ONE pool whatever their number and
+    whatever ORDER they arrive in.
 
-    The pool restores D3's stated cost: entries bind BY REFERENCE
-    (``user_managed=True``) against clones owned by the arm marker, so the
-    artifact still never aliases resident weights (a post-arm resident
-    mutation cannot silently change an armed cell) and the whole cell costs
-    ONE duplicate per target, whatever its entry count.
+    **THE CLONE IS GONE (pgw#1177, measured).** This function used to hand
+    back ``value.detach().clone()`` per FQN. ``update_constant_buffer(...,
+    user_managed=True)`` makes no copy of its own, so that clone was **the
+    only copy in the system**: one full duplicate of the target's weights,
+    held for the life of the arm — ~5.1 GiB on sdxl's single ``unet`` target
+    — in direct contradiction of §4.33 step 4 ("the compiled entries bind
+    constants BY REFERENCE against the resident weights; there is no second
+    copy of the model"). Its stated justification, "a post-arm resident
+    mutation cannot silently change an armed cell", is BACKWARDS: eager sees
+    such a mutation immediately, so it is the un-mutated compiled entry that
+    would silently diverge from the pipeline it serves.
+
+    What the clone ALSO did, and what therefore survives explicitly: it
+    normalised CONTIGUITY. An AOTI container takes a raw pointer, so a
+    non-contiguous resident tensor cannot be bound by reference. Those are
+    cloned individually (the exception, priced per tensor) rather than the
+    whole pool being cloned for their sake.
     """
-    out: Dict[str, Any] = {}
+    out: Dict[str, Any] = {} if into is None else into
     for specs in entry_constants:
         for spec in specs:
             if spec.source != SOURCE_STATE_DICT or spec.fqn in out:
@@ -1854,9 +1898,12 @@ def target_constant_pool(
             if value is None:
                 continue  # resolve_constants names the miss, typed, per entry
             try:
-                out[spec.fqn] = value.detach().clone()
+                contiguous = bool(value.is_contiguous())
             except Exception:  # noqa: BLE001 — duck-typed rigs hand non-tensors
                 out[spec.fqn] = value
+                continue
+            # The exception, and only the exception, is copied.
+            out[spec.fqn] = value if contiguous else value.detach().contiguous()
     return out
 
 
@@ -2144,38 +2191,85 @@ def no_entry_detail(
 
 @dataclass
 class EntryDispatch:
-    """Every named entry of one cell that serves ONE target, behind one
-    call site (pgw#758).
+    """The REGISTRY of armed entries serving ONE target, behind one call site
+    (pgw#758, re-based per entry by pgw#1176).
 
     Dispatch is the declared contract itself: the call routes to the entry
     whose ingress contract ADMITS it. No admitting entry is a named
     per-request refusal (the caller serves eagerly); more than one is
     ``entry_ambiguous`` — the declaration failed to discriminate two graph
     classes by ingress, which is a defect to surface, never a coin to flip.
+
+    pgw#1176: entries JOIN as they arm and LEAVE when they de-arm. The tuple
+    that used to be built once, from a complete cell, was the arming half of
+    the wrong atom. A registry has a further property the tuple could not:
+    a subset is a legitimate STEADY STATE, not merely a stage on the way to
+    coverage. pgw#1177 measured why that matters — ~0.75 GiB of device memory
+    per resident AOTI container — so a pod that arms its hot classes and
+    leaves cold ones eager holds a handful of containers rather than 36, on
+    purpose and permanently.
+
+    ``declared`` is every class name this pod's DECLARATION traces to,
+    whether armed yet or not. It is what lets a miss distinguish "declared,
+    pending compile" (silent eager, count the hotness) from "undeclared
+    shape" (a real shape-growth report).
     """
 
-    runners: Tuple[Tuple[str, ArtifactRunner], ...]
+    runners: Tuple[Tuple[str, ArtifactRunner], ...] = ()
+    declared: Tuple[str, ...] = ()
+    #: entry name -> the reason it left. A de-armed entry is REMEMBERED, not
+    #: forgotten: §4.31's de-arm is sticky for the boot, and a re-arm of a
+    #: class that failed for cause would be the thing that rule forbids.
+    de_armed: Dict[str, str] = field(default_factory=dict)
+    #: The entry :meth:`select` last routed to — the only way the fail-soft
+    #: wrapper one frame up can name the graph class that raised.
+    last_selected: str = ""
+    #: Calls served by entries that have since DE-ARMED. Banked rather than
+    #: discarded: those executions happened, and `execution_count` is the
+    #: adoption proof's evidence — dropping them when a sibling de-arms would
+    #: make a pod that served 5,000 compiled requests and then lost one class
+    #: read as a pod that never served compiled at all.
+    retired_calls: int = 0
 
-    def bind(
-        self, state_dict: Mapping[str, Any],
-        literals: Mapping[str, Mapping[str, Any]],
-        *, user_managed: bool = False,
-    ) -> None:
-        """Bind EVERY entry of this dispatch from one resident table.
+    def add(self, name: str, runner: ArtifactRunner) -> None:
+        """Register one armed entry. Replaces an entry of the same name (a
+        re-arm), and refuses one this dispatch de-armed for cause."""
+        label = str(name)
+        if label in self.de_armed:
+            raise AdoptError(
+                "entry_de_armed",
+                f"entry {label!r} was de-armed this boot "
+                f"({self.de_armed[label]}); §4.31's de-arm is sticky, so it "
+                f"must not be re-armed without a new process")
+        rows = [(n, r) for n, r in self.runners if n != label]
+        rows.append((label, runner))
+        self.runners = tuple(sorted(rows, key=lambda row: row[0]))
 
-        ``literals`` is keyed by ENTRY NAME (the shape
-        :func:`split_literals` produces), because the literal payload is a
-        property of a graph class, not of the module the class serves.
+    def remove(self, name: str, reason: str) -> bool:
+        """De-arm ONE entry, sticky for the boot. True when it was armed.
 
-        This exists so the regional arm binds through the same code the
-        whole-graph arm does: pgw#827 was one bind table built at the wrong
-        SCOPE, and the fix must not introduce a second bind implementation
-        that can drift from this one.
+        This is the whole replacement for the old cell-wide revoke: a
+        cell-attributable failure in one graph class costs that class, and
+        every sibling keeps serving compiled.
         """
-        for name, runner in self.runners:
-            runner.bind(
-                state_dict, dict(literals.get(name, {}) or {}),
-                user_managed=user_managed)
+        label = str(name)
+        before = len(self.runners)
+        self.retired_calls += sum(
+            int(r.calls) for n, r in self.runners if n == label)
+        self.runners = tuple(
+            (n, r) for n, r in self.runners if n != label)
+        self.de_armed[label] = str(reason or "unstated")
+        return len(self.runners) != before
+
+    @property
+    def pending(self) -> Tuple[str, ...]:
+        """Declared classes that are neither armed nor de-armed — the ones a
+        background compile has not reached yet. Serving them eager is
+        correct, expected, and not a defect."""
+        armed = {n for n, _r in self.runners}
+        return tuple(
+            n for n in self.declared
+            if n not in armed and n not in self.de_armed)
 
     def assert_ready(self) -> None:
         """B1 for every entry — an unbound one is a segfault, not a miss."""
@@ -2220,6 +2314,20 @@ class EntryDispatch:
                 (miss_distance(rep), name, rep) for name, rep in (
                     (name, ingress_report(runner.contract, args, kwargs)[0])
                     for name, runner in missed)]
+            pending = self.pending
+            if pending:
+                # pgw#1176: under accretion the commonest reason nothing
+                # admits a call is that its class has not been compiled YET.
+                # That is not a shape gap and must not be reported as one —
+                # the growth path would submit a class the declaration
+                # already contains.
+                raise IngressContractError(
+                    "entry_pending_compile",
+                    f"no ARMED entry admits this call ({len(self.runners)} "
+                    f"armed, {len(pending)} declared classes still pending "
+                    f"compile) — served EAGER while the background compile "
+                    f"reaches them: {list(pending)[:4]!r}. "
+                    + no_entry_detail(len(self.runners), ranked))
             raise IngressContractError(
                 "no_entry_admits", no_entry_detail(len(self.runners), ranked))
         if len(admitted) > 1:
@@ -2232,12 +2340,17 @@ class EntryDispatch:
         return admitted[0]
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        _name, runner = self.select(args, kwargs)
+        name, runner = self.select(args, kwargs)
+        # Recorded BEFORE the call so a raising entry can be de-armed BY NAME
+        # (§4.31 per entry): the wrapper catches the exception a frame up and
+        # has no other way to know which of N graph classes produced it.
+        self.last_selected = name
         return runner(*args, **kwargs)
 
     @property
     def calls(self) -> int:
-        return sum(runner.calls for _n, runner in self.runners)
+        return int(self.retired_calls) + sum(
+            runner.calls for _n, runner in self.runners)
 
     def refusal_counts(self) -> Dict[str, int]:
         out: Dict[str, int] = {}
@@ -2453,6 +2566,35 @@ def wrap_module(
         "runner": runner,
     }
 
+    def _de_arm(reason: str, detail: str) -> None:
+        """§4.31 PER ENTRY (pgw#1176): a cell-attributable failure de-arms the
+        GRAPH CLASS that produced it, sticky for the boot, and every sibling
+        keeps serving compiled. The target's compiled lane is revoked only
+        when the registry empties — that is the moment, and the only moment,
+        at which this target genuinely stopped serving compiled.
+        """
+        name = str(getattr(runner, "last_selected", "") or "")
+        remove = getattr(runner, "remove", None)
+        if name and callable(remove):
+            remove(name, reason)
+            activity_mod.emit_event(
+                "aot_entry_de_armed",
+                f"target={label}: {detail}",
+                phase=reason,
+                family=str(meta.get("family") or ""),
+                cell_key=str(meta.get("cell_key") or ""),
+                graph_class=name,
+            )
+            siblings = tuple(getattr(runner, "runners", ()) or ())
+            if siblings:  # siblings still serve
+                logger.warning(
+                    "aot-serve: %s de-armed entry %s (%s); %d sibling "
+                    "entr%s still armed", label, name, reason, len(siblings),
+                    "y" if len(siblings) == 1 else "ies")
+                return
+        state["failed"] = True
+        _revoke(state, detail)
+
     def aot_forward(*args: Any, **kwargs: Any) -> Any:
         if state["revocation_error"]:
             raise CompiledExecutionLaneUnavailableError(state["revocation_error"])
@@ -2509,6 +2651,11 @@ def wrap_module(
                 phase=exc.reason,
             )
             report_ingress_refusal(state, exc.reason, str(exc))
+            if exc.reason == "entry_pending_compile":
+                # pgw#1176: the class IS declared; the background compile has
+                # not reached it. Submitting a shape gap here would ask the
+                # growth path to add a class the declaration already carries.
+                return original(*args, **eager_kwargs)
             # pgw#916: the refusal is also a SHAPE GAP — the armed cell does
             # not cover this declared class, and on the AOT arm nothing was
             # ever going to grow it (hot_swap.enable returns False without a
@@ -2527,8 +2674,8 @@ def wrap_module(
             return original(*args, **eager_kwargs)
         except ConstantsUnboundError as exc:
             # Reaching here means the arm order was violated. The gate did
-            # its job (no segfault); the lane is structurally unusable.
-            state["failed"] = True
+            # its job (no segfault); THIS graph class is structurally
+            # unusable.
             logger.error(
                 "aot-serve: %s invoked with unbound constants (%s); eager for "
                 "the rest of this process", label, exc)
@@ -2537,7 +2684,7 @@ def wrap_module(
                 f"family={meta.get('family')} target={label}: {exc}",
                 phase=exc.reason,
             )
-            _revoke(state, f"constants unbound: {exc}")
+            _de_arm(exc.reason, f"constants unbound: {exc}")
             return original(*args, **eager_kwargs)
         except Exception as exc:  # noqa: BLE001 — ANY artifact problem => eager
             if is_cuda_oom(exc):
@@ -2560,14 +2707,15 @@ def wrap_module(
                     phase="cuda_oom",
                 )
                 return original(*args, **eager_kwargs)
-            state["failed"] = True
+            entry_name = str(getattr(runner, "last_selected", "") or "")
             detail = (
-                f"AOTI artifact {label} failed: "
-                f"{type(exc).__name__}: {exc}")
-            _revoke(state, detail)
+                f"AOTI artifact {label}"
+                + (f" entry {entry_name}" if entry_name else "")
+                + f" failed: {type(exc).__name__}: {exc}")
+            _de_arm("artifact_failed", detail)
             logger.warning(
-                "aot-serve: %s failed (%s: %s); eager for the rest of this "
-                "process", label, type(exc).__name__, exc)
+                "aot-serve: %s failed (%s: %s)", label,
+                type(exc).__name__, exc)
             return original(*args, **eager_kwargs)
 
     def _counted_forward(*args: Any, **kwargs: Any) -> Any:
@@ -2688,7 +2836,7 @@ ADOPT_OOM_REASON = "insufficient_adopt_vram"
 
 
 @contextlib.contextmanager
-def _bind_headroom(what: str, index: int, total: int) -> Iterator[None]:
+def _bind_headroom(what: str, armed: int, declared: int) -> Iterator[None]:
     """Turn a CUDA OOM inside one bind into a typed adopt refusal (pgw#1175).
 
     §4.33 step 4 loads the cell into the LIVE pipeline and keeps it or rejects
@@ -2703,6 +2851,18 @@ def _bind_headroom(what: str, index: int, total: int) -> Iterator[None]:
     anything about the cell. It also runs strictly BEFORE the first live
     mutation (:func:`wrap_module` is called after every entry binds), so a
     refusal leaves the pipeline exactly as eager as it found it.
+
+    pgw#1176 CHANGED WHAT THE POSITION MEANS, and the change is the whole
+    forensic point. It used to be ``(index+1 of total)`` — where in a
+    bind-all-then-wrap sequence the OOM landed — which measured "how far
+    through the cell did we get" and was the only handle th#1825 had. Under
+    the atom that sequence does not exist: each class binds alone, so the
+    index is always 1 of 1 and says nothing. What distinguishes "one class too
+    big" from "wholly unadoptable" NOW is **how many siblings are already
+    armed and still serving**, so that is what the refusal carries. The
+    question the old number answered is answered better, because the armed
+    count is a fact about what the pod is currently doing rather than about a
+    loop it happened to be in.
 
     THE CHAIN IS WALKED, not just the top frame. ``ArtifactRunner.bind`` wraps
     every ``RuntimeError`` out of ``load_constants`` as
@@ -2721,11 +2881,12 @@ def _bind_headroom(what: str, index: int, total: int) -> Iterator[None]:
         flush_memory()
         raise AdoptError(
             ADOPT_OOM_REASON,
-            f"{what} ({index + 1} of {total}) ran out of device memory while "
-            f"binding ({type(oom).__name__}: {oom}) — this pod cannot hold the "
-            f"cell beside what it is already serving, so it serves EAGER and "
-            f"stays up. Nothing is armed. The cell is not condemned: another "
-            f"pod, or this one with less resident, may bind it fine",
+            f"{what} ({armed} of {declared} already armed) ran out of device "
+            f"memory while binding ({type(oom).__name__}: {oom}) — this pod "
+            f"cannot hold THIS CLASS beside what it is already serving. It "
+            f"serves eager; the {armed} class(es) already armed keep serving "
+            f"COMPILED. Neither the class nor the declaration is condemned: "
+            f"another pod, or this one with less resident, may bind it fine",
         ) from exc
 
 
@@ -2741,45 +2902,101 @@ def _oom_in_chain(exc: BaseException) -> Optional[BaseException]:
     return None
 
 
-def load_and_wrap(
+def _marker(pipeline: Any) -> Dict[str, Any]:
+    """The pipeline's arm marker, created empty on first use.
+
+    pgw#1176: the marker is the pod's per-entry serve-state record, not a
+    snapshot of one cell. It carries the wrapped targets, the by-reference
+    constant pools that must outlive their runners, the literal tables, and
+    one row per entry ever armed on this object.
+    """
+    marker = getattr(pipeline, _MARKER_ATTR, None)
+    if not isinstance(marker, dict):
+        marker = {
+            "meta": {}, "targets": {},
+            "bound_constants": {"pools": {}, "literals": {}},
+            "entries": {},
+        }
+        setattr(pipeline, _MARKER_ATTR, marker)
+    return marker
+
+
+def _dispatch_for(marker: Dict[str, Any], target: str) -> Optional[EntryDispatch]:
+    row = (marker.get("targets") or {}).get(target) or {}
+    runner = (row.get("state") or {}).get("runner")
+    return runner if isinstance(runner, EntryDispatch) else None
+
+
+def arm_entry(
     pipeline: Any, cfg: Any, artifact: Path, cache_dir: Optional[Path] = None,
     *, expected: "Optional[aot_identity.ExpectedIdentity]" = None,
+    declared: Sequence[str] = (),
 ) -> Dict[str, Any]:
-    """Stage + verify + load EVERY named entry + BIND all constants, then
-    perform the live wraps (pgw#758: one resident artifact serves every
-    declared class, across every declared target).
+    """Stage + verify + load + BIND + register ONE compiled graph class.
 
-    Raises :class:`AdoptError` with a classified reason on any failure, and
-    never publishes extracted files into a shared live cache. ALL entries
-    bind before ANY wrap: a cell that cannot arm one of its graph classes
-    arms none of them — a partially served contract would be a silent
-    subset of what the cell key advertises.
+    THE ATOM (pgw#1176). What this replaces — ``load_and_wrap``'s
+    stage-verify-load-EVERY-entry-then-bind-ALL-then-wrap shape — carried the
+    invariant "a cell that cannot arm one of its graph classes arms none of
+    them, because a partially served contract would be a silent subset of
+    what the cell key advertises". That invariant was locally correct and
+    globally the disease: it was a faithful guard on the premise that the
+    advertising unit is a 36-class set. Shrink the unit to one graph and
+    nothing is left that CAN lie — an entry arms whole or not at all, and an
+    entry is one graph, so that is atomic by nature.
+
+    Consequences that fall out rather than being engineered:
+
+    * an entry that cannot arm costs THAT class. Its siblings keep serving
+      compiled, and the pod reports per-entry serve state rather than a
+      cell-level claim;
+    * coverage ACCRETES. A second call arms a second class into the same
+      registry, the same target pool and the same live wrap. There is no
+      "complete" state and nothing waits for one;
+    * a deliberate, permanent SUBSET is a legitimate steady state — which
+      pgw#1177 measured the reason for: ~0.75 GiB of device memory per
+      resident AOTI container, so a pod that arms its hot classes and leaves
+      the cold ones eager holds a handful of containers instead of 36;
+    * verification costs ONE runner beside the already-resident weights,
+      which is §4.33's ~8 GiB achieved by construction rather than by budget.
+
+    ``declared`` is every class name this pod's declaration traces to. It
+    feeds :attr:`EntryDispatch.declared`, so a call that no ARMED entry
+    admits can say "pending compile" instead of reporting a shape gap for a
+    class the declaration already contains.
 
     ``expected`` (pgw#903) is checked inside :func:`stage_artifact`, i.e.
-    strictly before the first ``_load_package`` — the identity question must be
-    settled while the artifact is still inert bytes.
+    strictly before ``_load_package`` — the identity question must be settled
+    while the artifact is still inert bytes.
 
-    §4.33 / pgw#1175: THE DEVICE COST OF THIS FUNCTION IS ATTEMPTED, NEVER
-    PREDICTED. Two estimates used to stand in front of it — one in
-    ``fleet_cells.adopt_delegated_mint``, one at the ``provision.arm_aot``
-    seam — both ``mint_budget.adopt_headroom``, both pricing the arm at twice
-    an "activation" that was a quarter of the RESIDENT SET whenever no forward
-    had run, and both compared against a free figure those weights were already
-    outside of. The function's own docstring conceded it could not refuse the
-    failure it was written for. What refuses now is the bind: every entry's
-    ``_load_package`` + ``bind`` runs inside a CUDA-OOM guard, so a card that
-    genuinely cannot hold the runners returns a typed
-    ``insufficient_adopt_vram`` refusal NAMING the entry that did not fit —
-    before the first live mutation, so the pipeline is untouched and the pod
-    serves eager. The attempt is the measurement.
+    §4.33 / pgw#1175, CARRIED THROUGH THE ATOM AND IMPROVED BY IT: THE DEVICE
+    COST OF THIS FUNCTION IS ATTEMPTED, NEVER PREDICTED. Two estimates used to
+    stand in front of it — both ``mint_budget.adopt_headroom``, both pricing
+    the arm at twice an "activation" that was a quarter of the RESIDENT SET
+    whenever no forward had run, and both compared against a free figure those
+    weights were already outside of. The function's own docstring conceded it
+    could not refuse the failure it was written for, while stickily refusing
+    cards that were fine (it pinned two real mints at 11.09 GiB on cards with
+    21.48 GiB free). What refuses now is the bind: ``_load_package`` + ``bind``
+    run inside a CUDA-OOM guard, so a card that genuinely cannot hold the
+    runner returns a typed ``insufficient_adopt_vram`` refusal NAMING the
+    entry — before the first live mutation, so the pipeline is untouched and
+    the pod serves eager. The attempt is the measurement.
+
+    **The atom makes that refusal cheaper and more honest than it could be
+    under the cell.** A bind OOM here costs exactly ONE graph class: its
+    siblings stay armed and keep serving compiled, and the refused class is
+    retried by nobody and condemned by nothing — another pod, or this one with
+    less resident, may bind it fine. Under the 36-entry cell the same OOM
+    discarded every class.
+
+    Raises :class:`AdoptError` with a classified reason on any failure, and
+    never publishes extracted files into a shared live cache.
     """
     family = str(getattr(cfg, "family", "") or "")
     # pgw#1087: admission splits in two and the halves have different owners.
-    # `cell_verify` is unpack + identity + contract verification on inert bytes
-    # (disk + hashing); `entry_admit` below is per-ENTRY dlopen, constant bind
-    # and ingress-assertion arming (device). Both were inside one `cell_arm`
-    # row, so an adopt that spent four minutes hashing a tarball and one
-    # second binding read identically to the reverse.
+    # `cell_verify` is unpack + identity + contract verification on inert
+    # bytes (disk + hashing); `entry_admit` below is dlopen, constant bind and
+    # ingress-assertion arming (device).
     with boot_phases.span(
         boot_phases.PHASE_CELL_VERIFY, ref=family,
         artifact_kind="aot-inductor",
@@ -2788,155 +3005,178 @@ def load_and_wrap(
             Path(artifact), family, cache_dir=cache_dir, expected=expected)
     try:
         meta = staged.metadata
-        # pgw#1040: parsed and validated once, while staging.
-        entries = staged.entries
+        block = staged.entry  # parsed and validated once, while staging
+        name = str(block.get("name") or "")
+        target = str(block.get("target") or "")
+        module, attr = _target_owner(pipeline, target)
 
-        # Group the entries by target and resolve every owner module first —
-        # an unresolvable target must refuse before any package is dlopen'd.
-        groups: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
-        for name in sorted(entries):
-            block = entries[name]
-            groups.setdefault(str(block.get("target") or ""), []).append(
-                (name, block))
-        owners: Dict[str, Tuple[Any, str]] = {
-            target: _target_owner(pipeline, target) for target in groups}
-
-        # Re-arm: a previous wrap's eager originals must be preserved per
-        # target, or unwrap after a re-arm restores a wrapped callable.
-        eager_originals: Dict[str, Callable[..., Any]] = {}
-        old_marker = getattr(pipeline, _MARKER_ATTR, None)
-        if old_marker is not None:
-            old_targets = old_marker.get("targets") or {}
-            for target, row in old_targets.items():
-                old_state = row.get("state") or {}
-                original = old_state.get("original")
-                if row.get("module") is not owners.get(target, (None,))[0] \
-                        or not callable(original):
-                    raise AdoptError(
-                        "old_marker_invalid",
-                        f"existing AOT marker does not retain target "
-                        f"{target!r}'s eager callable")
-                eager_originals[target] = original
+        marker = _marker(pipeline)
+        dispatch = _dispatch_for(marker, target)
+        first_for_target = dispatch is None
+        if dispatch is None:
+            dispatch = EntryDispatch(declared=tuple(str(d) for d in declared))
+        elif declared:
+            dispatch.declared = tuple(str(d) for d in declared)
 
         t0 = time.monotonic()
-        literals_by_entry: Dict[str, Dict[str, Any]] = {}
+        literals: Dict[str, Any] = {}
         literals_path = staged.root / LITERALS_NAME
         if literals_path.exists():
-            first_module = next(iter(owners.values()))[0]
-            device = str(getattr(first_module, "device", "cuda"))
+            device = str(getattr(module, "device", "cuda"))
             try:
-                literals_by_entry = split_literals(
-                    _load_literals(literals_path, device))
+                literals = split_literals(
+                    _load_literals(literals_path, device)).get(name, {})
             except ValueError as exc:
                 raise AdoptError("contract_invalid", str(exc)) from exc
 
-        # Load + bind EVERY entry before the first live mutation.
-        #
-        # pgw#1042: entries bind BY REFERENCE against ONE owned pool per
-        # target (see target_constant_pool) — the per-entry copying bind
-        # multiplied the target's constants by its entry count and OOM'd the
-        # sdxl w8a8-lora64 arm on a 48 GB card. The pools (and the literal
-        # tensors) are stored on the marker below: user_managed containers
-        # hold raw pointers, so the bound values must outlive the runners.
-        dispatches: Dict[str, EntryDispatch] = {}
-        pools: Dict[str, Dict[str, Any]] = {}
-        total_constants = 0
-        for target, rows in groups.items():
-            module, _attr = owners[target]
-            state_dict = resident_constants(module)
-            parsed: List[Tuple[str, Any, Tuple[ConstantSpec, ...]]] = []
-            for name, block in rows:
-                try:
-                    contract = contract_from_meta(block)
-                    constants = constants_from_meta(block)
-                    # pgw#725: the lifted-adapter signature must match the
-                    # module's actual lifted state, per entry.
-                    assert_lifted_contract(module, contract)
-                except ValueError as exc:
-                    raise AdoptError(
-                        "contract_invalid", f"entry {name!r}: {exc}") from exc
-                # pgw#1058: the admission contract this dispatch will enforce
-                # must BE the one the artifact's own generated guards enforce
-                # — the same derivation the mint's package gate ran, re-run
-                # where the bytes arrive, so a label that drifted (or was
-                # corrupted) between publish and adopt is a named refusal
-                # here and never an opaque per-call admission miss.
-                _entry_admission_drift(
-                    staged.root / PACKAGE_NAME, name,
-                    list(block.get("inputs") or []))
-                parsed.append((name, contract, constants))
-            with _bind_headroom(f"target {target!r}", 0, len(parsed)):
-                pool = target_constant_pool(
-                    (constants for _n, _c, constants in parsed), state_dict)
-            pools[target] = pool
-            runners: List[Tuple[str, ArtifactRunner]] = []
-            for index, (name, contract, constants) in enumerate(parsed):
-                # pgw#1087: ONE entry's admission — dlopen + bind. Per entry
-                # because that is the axis a 36-class cell varies on, and a
-                # roll-up cannot tell a uniformly slow admission from one
-                # pathological entry.
-                with boot_phases.span(
-                    boot_phases.PHASE_ENTRY_ADMIT, ref=family, function=name,
-                    artifact_kind="aot-inductor",
-                ) if boot_phases.in_boot() else contextlib.nullcontext() as sp:
-                    with _bind_headroom(f"entry {name!r}", index, len(parsed)):
-                        package = _load_package(
-                            staged.root / PACKAGE_NAME, name)
-                        runner = ArtifactRunner(
-                            package=package, contract=contract,
-                            constants=constants,
-                            module_name=target, entry=name, family=family)
-                        try:
-                            runner.bind(pool, literals_by_entry.get(name, {}),
-                                        user_managed=True)
-                        except ConstantsUnboundError as exc:
-                            raise AdoptError(
-                                f"constants_{exc.reason}",
-                                f"entry {name!r}: {exc}") from exc
-                    if sp is not None:
-                        sp.note(f"target={target} constants={len(constants)}")
-                total_constants += len(constants)
-                runners.append((name, runner))
-            dispatches[target] = EntryDispatch(tuple(runners))
+        try:
+            contract = contract_from_meta(block)
+            constants = constants_from_meta(block)
+            # pgw#725: the lifted-adapter signature must match the module's
+            # actual lifted state.
+            assert_lifted_contract(module, contract)
+        except ValueError as exc:
+            raise AdoptError(
+                "contract_invalid", f"entry {name!r}: {exc}") from exc
+        # pgw#1058: the admission contract this dispatch will enforce must BE
+        # the one the artifact's own generated guards enforce — the same
+        # derivation the mint's package gate ran, re-run where the bytes
+        # arrive, so a label that drifted between publish and adopt is a named
+        # refusal here and never an opaque per-call admission miss.
+        _entry_admission_drift(
+            staged.root / PACKAGE_NAME, name, list(block.get("inputs") or []))
 
-        # First live mutation. Everything above is proven for EVERY entry:
-        # complete artifact, matching runtime key, resolved targets, loaded
-        # named models, constant tables proven bound against the manifests.
-        target_rows: Dict[str, Dict[str, Any]] = {}
-        for target, dispatch in dispatches.items():
-            module, attr = owners[target]
+        # The target's by-reference pool, ACCRETED (pgw#1176/pgw#1177): this
+        # entry's state-dict constants join whatever earlier entries already
+        # registered. The pool rides the marker because user_managed binds
+        # hold raw pointers, so the bound values must outlive the runners.
+        pools = marker["bound_constants"]["pools"]
+        pool = pools.setdefault(target, {})
+        # pgw#1175, carried: the pool grows by reference, so an OOM here is a
+        # CARD fact and gets the card's own verdict rather than the cell's.
+        _armed_here = len(dispatch.runners)
+        _declared_here = len(dispatch.declared) or (_armed_here + 1)
+        with _bind_headroom(
+                f"target {target!r} pool", _armed_here, _declared_here):
+            target_constant_pool(
+                [constants], resident_constants(module), into=pool)
+
+        with boot_phases.span(
+            boot_phases.PHASE_ENTRY_ADMIT, ref=family, function=name,
+            artifact_kind="aot-inductor",
+        ) if boot_phases.in_boot() else contextlib.nullcontext() as sp:
+            # pgw#1175 + pgw#1176: THE ATTEMPT IS THE MEASUREMENT, and under
+            # the atom it costs exactly one graph class. `_bind_headroom`
+            # walks the CAUSE CHAIN, which is load-bearing: `bind` re-labels
+            # every RuntimeError out of `load_constants` as a CONTRACT
+            # verdict, and `torch.OutOfMemoryError` IS a RuntimeError — so a
+            # full card would otherwise condemn a correct cell, and a contract
+            # verdict is the kind that quarantines a key (th#1819). Capacity
+            # is never a contract verdict.
+            with _bind_headroom(
+                    f"entry {name!r}", _armed_here, _declared_here):
+                package = _load_package(staged.root / PACKAGE_NAME, name)
+                runner = ArtifactRunner(
+                    package=package, contract=contract, constants=constants,
+                    module_name=target, entry=name, family=family)
+                try:
+                    runner.bind(pool, literals, user_managed=True)
+                except ConstantsUnboundError as exc:
+                    raise AdoptError(
+                        f"constants_{exc.reason}",
+                        f"entry {name!r}: {exc}") from exc
+            if sp is not None:
+                sp.note(f"target={target} constants={len(constants)}")
+
+        # FIRST LIVE MUTATION, and it is exactly one entry wide. Everything
+        # above is proven for THIS entry: complete artifact, matching runtime
+        # key, restated key, resolved target, loaded named model, constant
+        # table proven bound against its manifest.
+        dispatch.add(name, runner)
+        marker["bound_constants"]["literals"][name] = literals
+        if first_for_target:
             wrap_module(
                 module, dispatch, meta, attr=attr, target=target,
-                eager_forward=eager_originals.get(target))
+                eager_forward=None)
             module_marker = getattr(module, _MARKER_ATTR, {})
-            target_rows[target] = {
+            marker["targets"][target] = {
                 "module": module,
                 "attr": attr,
                 "state": module_marker.get("state", {}),
             }
-        # `bound_constants` is LIFETIME, not bookkeeping (pgw#1042): every
-        # runner bound user_managed, so the containers hold raw pointers into
-        # these pools and literal tensors. They live exactly as long as the
-        # arm — unwrap drops the marker and the device memory with it.
-        setattr(pipeline, _MARKER_ATTR, {
-            "meta": meta, "targets": target_rows,
-            "bound_constants": {
-                "pools": pools, "literals": literals_by_entry},
-        })
+        # `meta` on the marker is the DECLARE half every entry of this
+        # pipeline shares by construction (`verify_declared` refuses any
+        # artifact whose sm/torch/cuda/family disagree), kept so callers that
+        # ask the live object what it is armed with get an answer without
+        # re-reading a tarball. Per-entry facts live in `entries`.
+        marker["meta"] = meta
+        marker["entries"][name] = {
+            "key": str(meta.get("cell_key") or ""),
+            "target": target,
+            "class_hash": str(block.get("class_hash") or ""),
+            "manifest_digest": str(meta.get("manifest_digest") or ""),
+        }
         # pgw#1141b: THE registration, at the one seam every arm route passes.
-        # An exported cell is now live on this object, so its key names an
-        # aot-inductor artifact as a matter of fact rather than of whether the
-        # caller remembered to say so.
         note_aot_key(str(meta.get("cell_key") or ""))
         logger.info(
-            "aot-serve: loaded+bound %d entr%s across %d target(s) in %.1fs "
-            "(%d declared constants, combined_graph_hash=%s)",
-            len(entries), "y" if len(entries) == 1 else "ies", len(groups),
-            time.monotonic() - t0, total_constants,
-            meta.get("combined_graph_hash"))
+            "aot-serve: armed entry %s on target %s in %.1fs (%d declared "
+            "constants, key=%s); %d entr%s now armed on this pipeline",
+            name, target, time.monotonic() - t0, len(constants),
+            meta.get("cell_key"), len(marker["entries"]),
+            "y" if len(marker["entries"]) == 1 else "ies")
         return meta
     finally:
         staged.close()
+
+
+def disarm_entry(pipeline: Any, name: str, reason: str) -> bool:
+    """De-arm ONE graph class, sticky for the boot. True when it was armed.
+
+    The per-entry half of §4.31, reachable from outside a serve call: the
+    mint's parity gate refuses an entry here rather than un-arming a cell,
+    and an LRU eviction of a cold container is the same operation.
+    """
+    marker = getattr(pipeline, _MARKER_ATTR, None)
+    if not isinstance(marker, dict):
+        return False
+    dropped = False
+    for target, row in dict(marker.get("targets") or {}).items():
+        dispatch = _dispatch_for(marker, target)
+        if dispatch is None or str(name) not in dict(dispatch.runners):
+            continue
+        dropped = dispatch.remove(str(name), str(reason)) or dropped
+        if not dispatch.runners:
+            # The target no longer serves anything compiled. Restore its eager
+            # callable rather than leaving a wrapper that only ever falls back.
+            state = row.get("state") or {}
+            state["failed"] = True
+    marker.get("entries", {}).pop(str(name), None)
+    marker["bound_constants"]["literals"].pop(str(name), None)
+    return dropped
+
+
+def entry_states(pipeline: Any) -> Dict[str, Dict[str, Any]]:
+    """Per-entry SERVE STATE — what this pod actually serves, per graph class.
+
+    pgw#1176 §1.4: the pod never claims "cell X armed". It reports, per entry,
+    ``armed`` / ``de_armed(reason)`` / ``pending`` — so there is no unit left
+    that can advertise more than it serves. This is the record the per-entry
+    hub events (§1.7) are built from.
+    """
+    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for target in (marker.get("targets") or {}):
+        dispatch = _dispatch_for(marker, target)
+        if dispatch is None:
+            continue
+        for name, runner in dispatch.runners:
+            out[name] = {
+                "state": "armed", "target": target, "calls": int(runner.calls)}
+        for name, why in dispatch.de_armed.items():
+            out[name] = {"state": "de_armed", "target": target, "reason": why}
+        for name in dispatch.pending:
+            out[name] = {"state": "pending", "target": target}
+    return out
 
 
 def _adopt_identity(artifact: Path) -> str:
@@ -2956,13 +3196,17 @@ def enable(
     artifact: Optional[Path] = None,
     *,
     expected: "Optional[aot_identity.ExpectedIdentity]" = None,
+    declared: Sequence[str] = (),
 ) -> AdoptOutcome:
-    """Consumer entry point: verify + load + bind + swap an AOTI artifact.
+    """Consumer entry point: verify + load + bind + register ONE entry.
 
     Falsy (staying eager) on ANY miss — the caller's ordinary miss policy
     (fleet self-mint / eager / typed refusal) takes over. Truthy IS the HIT:
     ``fleet_cells`` treats it as a genuine match and
     skips the self-mint.
+
+    pgw#1176: a miss here is a miss for ONE graph class. Nothing about it
+    un-arms a sibling, and the caller's retry/mint policy is per class too.
 
     pgw#923: the outcome is RETURNED rather than narrated. The classified
     refusal reason used to leave this function only as the ``phase`` of a
@@ -2973,35 +3217,49 @@ def enable(
     if artifact is None:
         return AdoptOutcome.miss("no_artifact")
     try:
-        meta = load_and_wrap(
+        meta = arm_entry(
             pipeline, cfg, Path(artifact), cache_dir=cache_dir,
-            expected=expected)
+            expected=expected, declared=declared)
     except Exception as exc:
         reason = str(getattr(exc, "reason", "") or "") or type(exc).__name__
         identity = _adopt_identity(Path(artifact))
         logger.warning(
-            "aot-serve: artifact unusable (%s: %s); staying eager",
+            "aot-serve: entry unusable (%s: %s); this class serves eager",
             reason, exc)
         return AdoptOutcome.miss(
             reason, f"{identity}: {type(exc).__name__}: {exc}", identity)
+    entry = dict(meta.get(cell_key_mod.ENTRY_BLOCK_KEY) or {})
+    armed = len(armed_entries(pipeline))
     logger.info(
-        "aot-serve: armed %s [%d entr%s] (sku=%s torch=%s precision=%s, "
-        "constants bound from resident weights)",
-        meta.get("family"), len(meta.get("entries") or {}),
-        "y" if len(meta.get("entries") or {}) == 1 else "ies",
-        meta.get("sku"), meta.get("torch"), meta.get("precision"))
+        "aot-serve: armed %s entry %s (sku=%s torch=%s precision=%s, "
+        "constants bound BY REFERENCE from resident weights); %d armed",
+        meta.get("family"), entry.get("name"),
+        meta.get("sku"), meta.get("torch"), meta.get("precision"), armed)
     return AdoptOutcome.hit(
         f"family={meta.get('family')} key={meta.get('cell_key')} "
-        f"entries={len(meta.get('entries') or {})} sku={meta.get('sku')} "
+        f"entry={entry.get('name')} armed={armed} sku={meta.get('sku')} "
         f"torch={meta.get('torch')} precision={meta.get('precision')}")
 
 
-def _marker_states(pipeline: Any) -> List[Dict[str, Any]]:
-    """Every wrapped target's state dict on a pipeline marker (format-2
-    multi-target markers plus the legacy single-``state`` shape tests use)."""
-    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
+def _marker_states(subject: Any) -> List[Dict[str, Any]]:
+    """Every wrapped target's state dict on a marker — PIPELINE or MODULE.
+
+    pgw#1176, CORRECTED. I first deleted the single-``state`` branch here as
+    "a legacy shape only tests build". That was half right and the wrong
+    half: a bare ``state`` on a PIPELINE is indeed a shape nothing produces
+    (and no fixture builds one any more), but this function is also called
+    with a MODULE, and a bare ``state`` is exactly what :func:`wrap_module`
+    writes there — on every arm, in production. Deleting it made
+    `execution_count(module)` answer 0 for a module that had served.
+
+    So the branch is not legacy and stays; what it reads is named. The two
+    markers are different objects and always were: :func:`wrap_module` writes
+    ``state`` on the MODULE it swapped, :func:`arm_entry` writes ``targets``
+    on the PIPELINE that owns it.
+    """
+    marker = getattr(subject, _MARKER_ATTR, None) or {}
     rows = marker.get("targets")
-    if isinstance(rows, dict) and rows:
+    if isinstance(rows, dict):
         return [row.get("state") or {} for row in rows.values()]
     state = marker.get("state")
     return [state] if isinstance(state, dict) and state else []
@@ -3113,12 +3371,43 @@ def armed_metadata(pipeline: Any) -> Dict[str, Any]:
     return dict(meta) if isinstance(meta, dict) else {}
 
 
+def armed_entries(pipeline: Any) -> Dict[str, str]:
+    """``entry name -> entry key`` for every graph class ARMED right now.
+
+    pgw#1176: this — not a cell-level boolean — is what the pod may claim. A
+    subset is a legitimate steady state, so "how many, and which" is the only
+    honest answer to "what does this pod serve compiled".
+    """
+    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
+    rows = dict(marker.get("entries") or {})
+    out: Dict[str, str] = {}
+    for target in (marker.get("targets") or {}):
+        dispatch = _dispatch_for(marker, target)
+        if dispatch is None:
+            continue
+        for name, _runner in dispatch.runners:
+            out[name] = str((rows.get(name) or {}).get("key") or "")
+    return out
+
+
 def is_armed(pipeline: Any) -> bool:
-    """Whether the AOTI cell is currently serving this pipeline — EVERY
-    wrapped target must still be live: one revoked target means the cell no
-    longer serves the contract its key advertises."""
-    states = _marker_states(pipeline)
-    return bool(states) and not any(s.get("failed", False) for s in states)
+    """Whether this pipeline is serving ANY compiled graph class right now.
+
+    pgw#1176 DELETED the every-target rule ("one revoked target means the
+    cell no longer serves the contract its key advertises"). That rule was
+    the arming half of the wrong atom: a key that advertised 36 classes made
+    partial service a lie, so the guard was locally correct — and it is what
+    forbade the incremental compile-and-adopt this design exists to deliver.
+    A key now advertises ONE class, an entry arms whole or not at all, and a
+    de-armed entry costs itself. Mixed compiled/eager service is not a
+    degraded state; it is the design's normal one, and it is numerically as
+    proven as full coverage because every armed entry passed the same mint
+    parity gate against the same eager reference.
+
+    Ask :func:`armed_entries` / :func:`entry_states` when you need to know
+    WHAT is served rather than WHETHER anything is.
+    """
+    return bool(armed_entries(pipeline))
 
 
 def holds_exported_cell(pipeline: Any) -> bool:
@@ -3154,16 +3443,12 @@ def unwrap(pipeline: Any) -> bool:
     """Restore every wrapped target's eager callable — rotation/eviction
     and the unproven-adoption rollback both go through here."""
     marker = getattr(pipeline, _MARKER_ATTR, None) or {}
-    rows: List[Dict[str, Any]] = []
+    # pgw#1176: one shape, the one `arm_entry` writes. The `module`/`state`
+    # fallback that stood here read a pipeline marker no production path
+    # produces — see :func:`_marker_states`.
     targets = marker.get("targets")
-    if isinstance(targets, dict) and targets:
-        rows = list(targets.values())
-    elif marker.get("module") is not None:
-        rows = [{
-            "module": marker.get("module"),
-            "attr": (marker.get("state") or {}).get("attr", "forward"),
-            "state": marker.get("state") or {},
-        }]
+    rows: List[Dict[str, Any]] = (
+        list(targets.values()) if isinstance(targets, dict) else [])
     restored = False
     for row in rows:
         module = row.get("module")
@@ -3207,17 +3492,20 @@ __all__ = [
     "SOURCE_STATE_DICT",
     "armed_metadata",
     "armed_targets",
-    "artifact_metadata",
+    "arm_entry",
+    "armed_entries",
     "assert_bindable",
     "assert_lifted_contract",
     "assert_ingress",
     "bind_call_inputs",
     "class_hash",
-    "combined_graph_hash",
     "constants_from_meta",
     "contract_from_meta",
     "enable",
-    "entries_from_meta",
+    "entry_from_meta",
+    "entry_metadata",
+    "entry_states",
+    "disarm_entry",
     "execution_count",
     "proven_since",
     "holds_exported_cell",
@@ -3228,7 +3516,6 @@ __all__ = [
     "is_aot_ref",
     "is_armed",
     "lifted_call_kwargs",
-    "load_and_wrap",
     "marshal_positional",
     "note_aot_key",
     "pack",

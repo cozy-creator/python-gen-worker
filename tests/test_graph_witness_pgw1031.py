@@ -76,7 +76,8 @@ def _gpu_runtime() -> Any:
 def _trace(
     vehicle_name: str, tree: Path,
 ) -> Tuple[Dict[str, Any], Any, Dict[str, Any]]:
-    """``({entry: keying block}, ck1 key, declared envelope)`` — trace only."""
+    """``({entry: keying block}, {entry: ek1 key}, declared envelope)`` — trace
+    only. pgw#1176: a declaration folds to a KEY SET, not one key."""
     from harness import rig_vehicles
 
     from gen_worker import aot_mint, fleet_cells
@@ -99,10 +100,10 @@ def _trace(
         blocks[traced.name] = traced.block
         traced.program = None  # the largest object here; nothing below reads it
     envelope = fleet_cells.declared_envelope_block(cfg)
-    key, _hashes, _combined = boot_key.fold(
+    entry_keys, _hashes, _manifest = boot_key.fold(
         blocks, family=export_spec.family, precision="", strict=True,
         lora_bucket=int(cfg.lora_bucket or 0), envelope=envelope)
-    return blocks, key, envelope
+    return blocks, entry_keys, envelope
 
 
 @pytest.fixture(scope="module")
@@ -151,7 +152,14 @@ def test_the_bodies_now_key_apart(traced_pair: Dict[str, Any]) -> None:
         "the pair no longer differs in its computation")
 
     # …and THE FIX: the key now sees the body, so the members key apart.
-    assert fixed["key"].digest != branchy["key"].digest, (
+    # pgw#1176: the claim is now per GRAPH CLASS, which is what it always
+    # meant — the two declarations trace the same class names with different
+    # bodies, so every shared class must key apart. Asserting it per class is
+    # strictly stronger than asserting it once over a combined digest, which
+    # could have hidden one colliding class behind another that differed.
+    shared = sorted(set(fixed["key"]) & set(branchy["key"]))
+    assert shared, "the pair no longer shares a class name; the axis is untested"
+    assert all(fixed["key"][n] != branchy["key"][n] for n in shared), (
         "THE FIX (pgw#1031 option a): identical ingress, different bodies must "
         "derive DIFFERENT keys. A red here means the graph axis went body-blind "
         "again — class_hash must fold graph_witness")
@@ -168,12 +176,17 @@ def test_the_witness_backstops_a_residual_collision(
     proves the backstop still holds beneath the sound key: were a witness-blind
     cell ever handed over, the adopt path still refuses on the witness."""
     fixed, branchy = traced_pair[PAIR[0]], traced_pair[PAIR[1]]
-    cell = aot_serve.artifact_metadata(
-        family=PAIR[0], precision="", cell_key=fixed["key"].digest,
-        entries=fixed["blocks"], strict_export=True, lora_bucket=0)
+    # pgw#1176: ONE artifact, ONE class — so the witness backstop is asked
+    # about the class this artifact carries, which is the only thing it could
+    # ever honestly answer about.
+    name = sorted(fixed["blocks"])[0]
+    cell = aot_serve.entry_metadata(
+        family=PAIR[0], precision="", cell_key=fixed["key"],
+        name=name, entry=fixed["blocks"][name],
+        strict_export=True, lora_bucket=0)
 
-    mine = boot_key.graph_witnesses_of(fixed["blocks"])
-    theirs = boot_key.graph_witnesses_of(branchy["blocks"])
+    mine = {name: boot_key.graph_witnesses_of(fixed["blocks"])[name]}
+    theirs = {name: boot_key.graph_witnesses_of(branchy["blocks"])[name]}
 
     assert aot_identity.verify_graph_witness(cell, mine) == "", (
         "the pod whose graph this cell WAS compiled from must admit it")
@@ -191,34 +204,34 @@ def test_a_witnessless_cell_is_refused_not_skipped() -> None:
     A pre-pgw#1031 cell records no witness, so it cannot be shown to compute
     this pod's graph — and 'cannot be shown to match' is what a refusal means.
     """
-    meta = {"entries": {"unet": {"class_hash": "aa" * 8}}}
+    meta = {"entry": {"name": "unet", "class_hash": "aa" * 8}}
     reason = aot_identity.verify_graph_witness(meta, {"unet": "d" * 16})
     assert "graph_witness" in reason and "unet" in reason
 
     assert aot_identity.verify_graph_witness(
-        {"entries": {"unet": {"graph_witness": "d" * 16}}}, {})
+        {"entry": {"name": "unet", "graph_witness": "d" * 16}}, {})
     assert aot_identity.verify_graph_witness(
         {}, {"unet": "d" * 16})
 
 
-def test_a_differing_class_set_is_refused() -> None:
-    """A partial agreement is not a narrower match, it is an unproven one."""
-    meta = {"entries": {
-        "unet": {"graph_witness": "a" * 16},
-        "vae": {"graph_witness": "b" * 16}}}
-    reason = aot_identity.verify_graph_witness(meta, {"unet": "a" * 16})
-    assert "class set differs" in reason and "vae" in reason
+# pgw#1176 DELETED `test_a_differing_class_set_is_refused`. Its subject was a
+# CLASS SET on one artifact ("a partial agreement is not a narrower match, it
+# is an unproven one") — and one artifact carries one class now, so the set it
+# guarded cannot exist. Porting it would have preserved the collection in the
+# suite after removing it from the code. What survives is the row above: an
+# entry that records no witness is refused, never skipped.
 
 
 def _meta(row: Dict[str, Any], family: str) -> Dict[str, Any]:
     """One family's cell metadata, as the mint would stamp it."""
     from gen_worker import cell_key as ck, compile_cache as cc, env_seal
 
-    meta = aot_serve.artifact_metadata(
-        family=family, precision="", cell_key=row["key"].digest,
-        entries=row["blocks"], strict_export=True, lora_bucket=0)
+    name = sorted(row["blocks"])[0]
+    meta = aot_serve.entry_metadata(
+        family=family, precision="", cell_key=row["key"][name],
+        name=name, entry=row["blocks"][name],
+        strict_export=True, lora_bucket=0)
     meta["kind"] = ck.EXPORTED_KIND
-    meta[ck.EXPORT_ENVELOPE_KEY] = dict(row["envelope"])
     meta["toolchain"] = dict(cc.toolchain_digest())
     meta[env_seal.SEAL_KEY] = env_seal.effective_seal()
     return meta
@@ -239,7 +252,7 @@ def test_the_key_now_separates_what_the_gates_could_not(
     * the two members derive DIFFERENT keys — pull-by-key never even offers
       cell A to pod B; the collision is a MISS, not a wrong hit;
     * were the wrong cell forced across anyway, ``verify_declared_identity``
-      now REFUSES on the ``graph`` axis (``combined_graph_hash`` differs); and
+      now REFUSES on the ``graph`` axis (this class's ``class_hash`` differs); and
     * the witness backstop still refuses beneath both.
     """
     fixed, branchy = traced_pair[PAIR[0]], traced_pair[PAIR[1]]
@@ -315,7 +328,7 @@ def _derived_key(traced: Dict[str, Any], family: str) -> Any:
     """A ``DerivedKey`` carrying one family's real traced witnesses."""
     blocks = traced[family]["blocks"]
     return boot_key.DerivedKey(
-        key=traced[family]["key"], class_hashes={}, combined="",
+        entry_keys=dict(traced[family]["key"]), class_hashes={}, manifest="",
         workers=1, width_reason="pgw#1031 fixture", traced=len(blocks),
         memo="miss", wall_ms=1,
         graph_witnesses=boot_key.graph_witnesses_of(blocks))
@@ -326,10 +339,14 @@ def test_the_adopt_path_admits_the_pod_whose_graph_it_is(
     tmp_path: Path,
 ) -> None:
     fixed = traced_pair[PAIR[0]]
-    meta = aot_serve.artifact_metadata(
-        family=PAIR[0], precision="", cell_key=fixed["key"].digest,
-        entries=fixed["blocks"], strict_export=True, lora_bucket=0)
-    out = _attempt(
+    name = sorted(fixed["blocks"])[0]
+    meta = aot_serve.entry_metadata(
+        family=PAIR[0], precision="", cell_key=fixed["key"][name],
+        name=name, entry=fixed["blocks"][name],
+        strict_export=True, lora_bucket=0)
+    # pgw#1176: a boot returns ONE outcome per declared class; this fixture
+    # traces one, so the unpack ASSERTS that arity.
+    (out,) = _attempt(
         monkeypatch, tmp_path, _derived_key(traced_pair, PAIR[0]),
         _artifact(tmp_path, meta))
     assert out.adopted and out.reason == "hit"
@@ -348,11 +365,14 @@ def test_the_adopt_path_refuses_the_colliding_pod(
     served output.
     """
     fixed, branchy = traced_pair[PAIR[0]], traced_pair[PAIR[1]]
-    assert fixed["key"].digest != branchy["key"].digest  # the fix: keys differ
-    meta = aot_serve.artifact_metadata(
-        family=PAIR[0], precision="", cell_key=fixed["key"].digest,
-        entries=fixed["blocks"], strict_export=True, lora_bucket=0)
-    out = _attempt(
+    name = sorted(fixed["blocks"])[0]
+    # the fix: the shared class keys apart
+    assert fixed["key"][name] != branchy["key"][name]
+    meta = aot_serve.entry_metadata(
+        family=PAIR[0], precision="", cell_key=fixed["key"][name],
+        name=name, entry=fixed["blocks"][name],
+        strict_export=True, lora_bucket=0)
+    (out,) = _attempt(
         monkeypatch, tmp_path, _derived_key(traced_pair, PAIR[1]),
         _artifact(tmp_path, meta))
     assert not out.adopted

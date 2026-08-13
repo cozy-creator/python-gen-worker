@@ -62,7 +62,7 @@ import pytest
 import gen_worker
 import gen_worker.executor as ex_mod
 from gen_worker import RequestContext, Resources, Slot, endpoint, worker_function
-from gen_worker import activity, aot_serve, cell_adopt, compile_cache, fleet_cells
+from gen_worker import activity, aot_serve, cell_adopt, cell_key, compile_cache, fleet_cells
 from gen_worker import numerics_ladder
 from gen_worker.api.decorators import Compile
 from gen_worker.executor import Executor
@@ -101,8 +101,12 @@ def test_the_MINTING_pod_proves_its_own_bytes_before_they_ship(
     assert outcome.armed is True
     assert aot_serve.is_armed(pipeline) is True
     rows = [(p, d) for k, d, p in events if k == activity.KIND_CELL_NUMERICS]
-    assert [p for p, _d in rows] == ["checked"], rows
-    assert "axes=2/2" in rows[0][1]
+    # pgw#1176: ONE row per graph class — the gate runs at the moment that
+    # entry exists, never "after all N" (DESIGN-RULINGS 4.32).
+    assert [p for p, _d in rows] == ["checked", "checked"], rows
+    # pgw#1176: ONE axis per artifact, so the report is 1/1 twice, never
+    # 2/2 once. A report over a collection is what the atom removed.
+    assert "axes=1/1" in rows[0][1]
 
 
 def test_the_MINT_gate_is_strict_a_gray_band_cell_does_not_ship(
@@ -117,10 +121,14 @@ def test_the_MINT_gate_is_strict_a_gray_band_cell_does_not_ship(
     assert outcome.armed is False, "a gray-band cell was published to the fleet"
     assert aot_serve.is_armed(pipeline) is False
     assert outcome.reason == "numerics_refused"
-    assert "nothing is published" in outcome.detail
+    # pgw#1176: the refusal is per CLASS, so it says "is not published" of
+    # that class rather than "nothing is published" of a bundle.
+    assert "is not published" in outcome.detail
     # It still CONFESSES — a fleet-wide rate is only countable from rows.
+    # pgw#1176: one gate row PER GRAPH CLASS — this declaration has two,
+    # so the vocabulary repeats rather than aggregating.
     assert [p for k, _d, p in events
-            if k == activity.KIND_CELL_NUMERICS] == ["degraded"]
+            if k == activity.KIND_CELL_NUMERICS] == ["degraded", "degraded"]
 
 
 def test_the_MINT_gate_refuses_a_cell_below_its_floor(
@@ -134,8 +142,10 @@ def test_the_MINT_gate_refuses_a_cell_below_its_floor(
 
     assert outcome.armed is False
     assert aot_serve.is_armed(pipeline) is False
+    # pgw#1176: one gate row PER GRAPH CLASS — this declaration has two,
+    # so the vocabulary repeats rather than aggregating.
     assert [p for k, _d, p in events
-            if k == activity.KIND_CELL_NUMERICS] == ["refused"]
+            if k == activity.KIND_CELL_NUMERICS] == ["refused", "refused"]
 
 
 def _pending(tmp_path: Path, decl: Any, publisher: Any = None):
@@ -157,7 +167,7 @@ def _delegated_mint(tmp_path, monkeypatch, decl, packages, events):
     monkeypatch.setattr(aot, "runtime_key", lambda: dict(rig868.RUNTIME))
     monkeypatch.setattr(aot, "_entry_admission_drift", lambda *a, **k: None)
     monkeypatch.setattr(aot, "_load_package", lambda path, entry="model": packages[entry])
-    monkeypatch.setattr(fleet_cells, "arm_axis_divergence", lambda a, m: "")
+    monkeypatch.setattr(fleet_cells, "arm_axis_divergence", lambda a, m, **_kw: "")
     monkeypatch.setattr(fleet_cells.activity_mod, "emit_event",
                         lambda kind, detail="", **kw: events.append(
                             (kind, detail, str(kw.get("phase", "")))))
@@ -166,7 +176,7 @@ def _delegated_mint(tmp_path, monkeypatch, decl, packages, events):
     pending.target.write_bytes(Path(built).read_bytes())
     module = rig868.ProbeDenoiser()
     pipeline = rig868.ProbePipeline(module)
-    return fleet_cells.adopt_delegated_mint(pipeline, pending, pending.target)
+    return fleet_cells.adopt_delegated_mint(pipeline, pending, [pending.target])
 
 
 def test_a_DIVERGENT_cell_is_not_published_by_the_pod_that_minted_it(
@@ -208,7 +218,16 @@ def test_a_FAITHFUL_cell_passes_the_mint_gate_and_is_publishable(
     minted = _delegated_mint(tmp_path, monkeypatch, declared, packages, events)
 
     assert minted is not None, "a faithful cell was refused by the mint gate"
-    assert minted.cell_key == "cell868"
+    # pgw#1176: the key is COMPUTED from the artifact's own recorded facts, not
+    # a fixture placeholder. `"cell868"` was a stand-in from when the harness
+    # stamped a literal; asserting it now would assert that the mint FAILED to
+    # key its own product.
+    assert cell_key.is_key(minted.cell_key), minted.cell_key
+    # pgw#1176: ONE gate row here, and the count is load-bearing rather than
+    # incidental — the DELEGATED mint adopts a single entry artifact, so one
+    # class is gated. (My own "one row per class" sweep over-applied to this
+    # row and expected two; the rows that DO see two arm two artifacts. A
+    # blanket edit is a sweep, and sweeps damage the case that is different.)
     assert [p for k, _d, p in events
             if k == activity.KIND_CELL_NUMERICS] == ["checked"]
 
@@ -311,7 +330,15 @@ class AdoptedFamily:
         if RIG.get("dispatch"):
             marker = getattr(self.pipe, aot_serve._MARKER_ATTR, None)
             if marker is not None:
-                marker["state"]["successful_calls"] += 1
+                # pgw#1176: `execution_count` sums the RUNNERS' own calls, so a
+                # dispatch that only bumped the state counter moved a number
+                # production does not read. Move the artifact's own.
+                for row in (marker.get("targets") or {}).values():
+                    runner = (row.get("state") or {}).get("runner")
+                    for _name, art in getattr(runner, "runners", ()) or ():
+                        art.calls += 1
+                    break
+                marker["state"] = marker.get("state") or {}
         return Out()
 
 
@@ -329,19 +356,48 @@ def _fake_adopt_arm(key: str, ref: str, *, revoke: bool = False):
     def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any,
                 publisher: Any = None, **_kw: Any) -> "fleet_cells.ArmOutcome":
         unet = pipe.unet
+        # pgw#1176: production's `arm_entry` puts an `EntryDispatch` REGISTRY
+        # in `state["runner"]`, and `is_armed`/`armed_entries` read it — a
+        # boolean was deleted precisely because it can claim more than the pod
+        # serves. A double that sets the marker but no registry models a
+        # pipeline production cannot produce, and every `is_armed` assertion
+        # against it is testing a shape that does not exist.
+        _runner = aot_serve.ArtifactRunner(
+            package=None,
+            contract=aot_serve.ArtifactContract(inputs=(), symbols={}),
+            constants=(), module_name="unet", entry="unet/main")
+        _runner.calls = PROBE_CALLS
+        _dispatch = aot_serve.EntryDispatch(declared=("unet/main",))
+        _dispatch.add("unet/main", _runner)
         state = {"successful_calls": PROBE_CALLS, "failed": False,
-                 "original": unet.forward}
-        marker = {"module": unet, "state": state, "meta": {"cell_key": key}}
-        setattr(unet, aot_serve._MARKER_ATTR, marker)
-        setattr(pipe, aot_serve._MARKER_ATTR, marker)
+                 "original": unet.forward, "runner": _dispatch}
+        # pgw#1176: the two markers are DIFFERENT SHAPES in production and
+        # this rig now models that honestly. `wrap_module` writes a bare
+        # `state` on the MODULE; `arm_entry` writes `targets` (+ `entries`) on
+        # the PIPELINE. Sharing one dict between them was what kept a
+        # `_marker_states` fallback alive for a shape nothing produces.
+        setattr(unet, aot_serve._MARKER_ATTR, {
+            "meta": {"cell_key": key}, "state": state})
+        setattr(pipe, aot_serve._MARKER_ATTR, {
+            "meta": {"cell_key": key},
+            "targets": {"unet": {
+                "module": unet, "attr": "forward", "state": state}},
+            "entries": {"unet/main": {"key": key, "target": "unet"}},
+        })
+        marker = getattr(pipe, aot_serve._MARKER_ATTR)
         # pgw#1152: an `aot_serve.note_aot_key(key)` stood here — the ONE line no
         # production arm route ever called, which is why these rows were green
         # while the pod served eager (pgw#1141b). It is DELETED, not moved: the
-        # marker set above is what `load_and_wrap` publishes, so
+        # marker set above is what `arm_entry` publishes, so
         # `holds_exported_cell` answers the lane question off the OBJECT.
         # A fixture that needs a REAL boot-adopt drives tests/harness/adopt_rig.py.
         if revoke:
+            # pgw#1176: revoking is DE-ARMING. `is_armed` asks the registry,
+            # so a flag left the runner armed and the pipeline claiming
+            # compiled service it was not giving — the exact lie a cell-level
+            # boolean makes possible.
             state["failed"] = True
+            _dispatch.remove("unet/main", "revoked by the rig")
         adopted = fleet_cells.SelfMint(
             family=FAMILY, cell_key=key, ref=ref,
             snapshot_digest="blake3:" + "ab" * 32,
@@ -355,7 +411,7 @@ def _rig(monkeypatch: pytest.MonkeyPatch, *, seed: str,
          revoke: bool = False, dispatch: bool = False) -> Tuple[str, str]:
     RIG.clear()
     RIG["dispatch"] = dispatch
-    key = "ck1-" + (seed * 56)[:56]
+    key = "ek1-" + (seed * 56)[:56]
     ref = f"root/family-{FAMILY}#{key}"
     monkeypatch.setattr(
         fleet_cells, "enable_compiled",

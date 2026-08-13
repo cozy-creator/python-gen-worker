@@ -24,9 +24,13 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import (
+    TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional, Sequence,
+    Tuple,
+)
 
 from .. import artifact_meta
+from .. import cell_key
 from ..cell_adopt import AdoptOutcome
 from ..component_vocab import denoiser_components
 from ..api.binding import ModelRef, wire_ref
@@ -310,9 +314,15 @@ def arm_aot(
     bucket: int, meta: Optional[Dict[str, Any]] = None,
     *, expected: "Optional[ExpectedIdentity]" = None,
     verify_numerics: bool = False,
+    declared: Sequence[str] = (),
 ) -> AdoptOutcome:
-    """Arm ONE exported ``.pt2`` cell on ``pipe``. The whole AOT arm, in one
+    """Arm ONE exported ``.pt2`` ENTRY on ``pipe``. The whole AOT arm, in one
     place, for every source of such an artifact.
+
+    pgw#1176: the unit is one graph class. ``declared`` is every class name
+    this pod's declaration traces to, threaded to the dispatch so a call no
+    ARMED entry admits reads as "declared, pending compile" (silent eager)
+    rather than as an undeclared shape.
 
     ``verify_numerics`` (DESIGN-RULINGS §4.32, pgw#1141) runs the parity gate,
     and exactly ONE caller sets it: the pod that MINTED these bytes, before it
@@ -376,12 +386,10 @@ def arm_aot(
             # ENTRY and carries no top-level `targets`/`module` (measured:
             # both None on a real 5-entry lora64 cell). Without this the name
             # resolved to "" and the lifted install was silently skipped.
-            seen: List[str] = []
-            for entry in ((meta or {}).get("entries") or {}).values():
-                name = str((entry or {}).get("target") or "").strip()
-                if name and name not in seen:
-                    seen.append(name)
-            targets = seen
+            # pgw#1176: one artifact, one entry, one target.
+            name = str(
+                ((meta or {}).get("entry") or {}).get("target") or "").strip()
+            targets = [name] if name else []
         # ...and among them the BRANCH-CAPABLE one: `decoder` sorts first
         # among entry names, and a lifted forward on a module with no branch
         # container fails by name. `branch_targets` is the authority.
@@ -471,7 +479,10 @@ def arm_aot(
         family = str((meta or {}).get("family") or getattr(cfg, "family", "") or "")
         # The cell's OWN recorded lane.
         lane = str((meta or {}).get("weight_lane") or "")
-        entries = len((meta or {}).get("entries") or {})
+        # pgw#1176: one artifact, one graph class — so this row is always
+        # `entries=1`, and that is the point rather than a degenerate case.
+        # pgw#1175: it MEASURES and sizes nothing; no bank reads it.
+        entries = 1 if (meta or {}).get("entry") else 0
         gib = 1 << 30
         activity_mod.emit_event(
             "cell_adopt_budget",
@@ -495,10 +506,14 @@ def arm_aot(
     # "CANNOT refuse a card that merely cannot hold 36 runners", i.e. it could
     # not refuse the failure it was written for (th#1825) and could refuse
     # cards that were fine. The honest gate is the bind itself:
-    # `aot_serve.load_and_wrap` attempts each entry and returns a typed
+    # `aot_serve.arm_entry` attempts THIS entry and returns a typed
     # `insufficient_adopt_vram` miss on a real device OOM, before any live
     # mutation, and this pod serves eager exactly as it did — on evidence.
-    outcome = aot_serve.enable(pipe, cfg, cache_dir, artifact, expected=expected)
+    #
+    # pgw#1176 makes that refusal cheaper still: the attempt is ONE graph
+    # class, so a card that cannot hold it costs that class and no other.
+    outcome = aot_serve.enable(
+        pipe, cfg, cache_dir, artifact, expected=expected, declared=declared)
     _, _peak_after_load = mint_workers.adopt_watermark(_budget_device)
     _load_bytes = max(0, _peak_after_load - _resident_before)
     if not outcome.armed and lifted_install_error:
@@ -530,13 +545,23 @@ def arm_aot(
         # Nothing is announced until the arm is final, so the refusal is simply
         # what this function returns; the numbers still ride `cell_numerics`.
         meta = aot_serve.armed_metadata(pipe)
-        aot_serve.unwrap(pipe)
+        # pgw#1176: THE PARITY REFUSAL IS PER ENTRY. This used to `unwrap` the
+        # whole pipeline, which was correct while the gate's subject was a
+        # 36-class cell and is wrong now: the probe measures ONE graph class
+        # against the eager callable it was traced from, so a divergence
+        # condemns that class and says nothing about its siblings. The refused
+        # entry de-arms sticky, its siblings keep serving compiled, and it is
+        # not published.
+        entry = str((meta.get(cell_key.ENTRY_BLOCK_KEY) or {}).get("name") or "")
+        aot_serve.disarm_entry(pipe, entry, "numerics_refused")
         outcome = AdoptOutcome.miss(
             "numerics_refused",
-            f"family={meta.get('family')} key={meta.get('cell_key')}: this pod "
-            f"MINTED these bytes and they do not reproduce the eager forward "
-            f"they were traced from — nothing is published and this pod serves "
-            f"eager (pgw#868, §4.32)",
+            f"family={meta.get('family')} key={meta.get('cell_key')} "
+            f"entry={entry}: this pod MINTED these bytes and they do not "
+            f"reproduce the eager forward they were traced from — this CLASS "
+            f"is not published and serves eager; sibling classes are "
+            f"unaffected (pgw#868, §4.32). Serve state now: "
+            f"{aot_serve.entry_states(pipe)}",
             outcome.identity)
     # An arm that never reached the gate (refused at `enable`) still paid the
     # load, so it still reports — `_emit_adopt_budget` dedupes, so the armed

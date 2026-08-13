@@ -15,7 +15,7 @@ fences, both structural:
 **FENCE 1 — no cell-key axis reads the layout vocabulary.** The fenced module
 set is DERIVED, not hand-listed: any module that calls a cell-key axis producer
 (`cell_key.from_axes`, `envelope_digest`, `toolchain_axis_digest`,
-`facts_digest`, `from_exported_artifact_metadata`, or constructs `CellKey`) is
+`facts_digest`, `from_entry_metadata`, or constructs `CellKey`) is
 in it, plus `cell_key` itself. A new module that starts computing a key joins
 the fence automatically — the failure mode of a hand-maintained list is that the
 one file that violates the rule is the one nobody added.
@@ -61,16 +61,27 @@ SRC = REPO / "src" / "gen_worker"
 #: helpers whose callers say so (`contract_facts`: "NOT a key-axis input";
 #: `subject_digest` names a MINT OBLIGATION, never a cell key), so probing on
 #: them would fence modules that compute no key and make the gate noise.
+# pgw#1176, and this fence was SILENTLY WEAKENED until it was corrected:
+# it named `from_exported_artifact_metadata`, which no longer exists, so any
+# module computing an entry key through the real producer was no longer
+# detected as an axis producer at all. The gate still exited 0 — a fence that
+# names a deleted symbol guards nothing and passes vacuously forever, which is
+# the same shape as the pgw#1059 derivation fence and the `_old_schema_digest`
+# rename. After ANY rename, re-read every fence and ask what symbol it names
+# NOW.
+#
+# `envelope_digest` also LEAVES this list: the envelope is a MANIFEST fact
+# since pgw#1176, not a key axis, so fencing on it would fence modules that
+# compute no key — exactly the noise the comment above says to avoid.
 AXIS_PRODUCERS: Tuple[str, ...] = (
     "from_axes",
-    "envelope_digest",
     "toolchain_axis_digest",
-    "from_exported_artifact_metadata",
+    "from_entry_metadata",
     "CellKey",
 )
 
-#: Always fenced, whatever they call: they DEFINE the key or one of its four
-#: axis inputs (graph / envelope / sm / toolchain).
+#: Always fenced, whatever they call: they DEFINE the key or one of its
+#: THREE axis inputs (graph / sm / toolchain) — pgw#1176 evicted `envelope`.
 FENCE_SEED: Tuple[str, ...] = (
     "cell_key.py",
     "graph_hash.py",

@@ -429,10 +429,13 @@ async def build_cell(
             return DelegatedResult(
                 status=ABANDONED, detail=outcome.detail, attempts=attempts)
 
-        if outcome.minted and outcome.artifact is not None:
+        if outcome.minted and outcome.artifacts:
             act.phase(activity_mod.PHASE_SEAL_PUBLISH)
+            # pgw#1176: the child produced one artifact per graph class; the
+            # adopt arms, gates and stores each, and a class that refuses
+            # costs itself.
             minted = fleet_cells.adopt_delegated_mint(
-                task.pipe, pending, outcome.artifact)
+                task.pipe, pending, outcome.artifacts)
             if minted is not None:
                 # pgw#848 item 5: the ONE terminus where the bank's job is
                 # finished. It survives every failure (that is the point) and
