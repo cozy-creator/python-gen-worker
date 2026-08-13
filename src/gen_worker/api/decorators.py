@@ -425,9 +425,6 @@ class NoWarmup(msgspec.Struct, frozen=True):
         msgspec.structs.force_setattr(self, "reason", reason)
 
 
-WarmupDecl = NoWarmup
-
-
 def _validate_warmup_decl(owner: str, warmup: Optional[NoWarmup]) -> Optional[NoWarmup]:
     if warmup is None or isinstance(warmup, NoWarmup):
         return warmup
