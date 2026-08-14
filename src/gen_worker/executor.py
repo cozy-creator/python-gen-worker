@@ -33,6 +33,7 @@ from . import aot_declaration, aot_mint
 from . import boot_adopt
 from . import boot_phases as boot_mod
 from . import cell_adopt
+from . import receipts
 from . import dispatch
 from . import handler_proof
 from .procsplit import broker as procsplit_broker
@@ -819,7 +820,7 @@ class _ArmOrder:
     backend: str
     selection: Optional["_CompileArtifactSelection"] = None
     compiled_graph_key: str = ""
-    receipt: str = ""
+    receipt: Optional[receipts.Receipt] = None
     adopt: Optional["boot_adopt.BootAdoptOutcome"] = None
     #: pgw#1176: the OTHER entries this boot resolved. A boot derives a key SET
     #: and coverage ACCRETES, so several hits are the expected shape — each is
@@ -827,7 +828,7 @@ class _ArmOrder:
     #: wrap after the first. A failure on one of these is a per-entry degrade
     #: (that class serves eager), never terminal: the first arm already proved
     #: the pod can serve compiled.
-    extra: Tuple[Tuple[Path, str, str], ...] = ()
+    extra: Tuple[Tuple[Path, str, receipts.Receipt], ...] = ()
 
     @classmethod
     def for_artifact(
@@ -837,9 +838,9 @@ class _ArmOrder:
         ref: str,
         snapshot_digest: str,
         compiled_graph_key: str,
-        receipt: str,
+        receipt: receipts.Receipt,
         adopt: Optional["boot_adopt.BootAdoptOutcome"] = None,
-        extra: Tuple[Tuple[Path, str, str], ...] = (),
+        extra: Tuple[Tuple[Path, str, receipts.Receipt], ...] = (),
     ) -> "_ArmOrder":
         """THE artifact -> arming-order map, in one place (pgw#1152).
 

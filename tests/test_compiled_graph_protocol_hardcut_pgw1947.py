@@ -37,7 +37,7 @@ def test_resolve_and_publish_speak_compiled_graph_key_only() -> None:
         "/v1/worker/compiled-graphs/resolve"
     assert "STATUS_AMBIGUOUS" not in cell_resolve.__all__
     assert not hasattr(cell_resolve, "STATUS_AMBIGUOUS")
-    assert dataclasses.fields(cell_resolve.ResolvedCell)[1].name == \
+    assert dataclasses.fields(cell_resolve.ResolvedCompiledGraph)[1].name == \
         "compiled_graph_key"
     assert fleet_cells.PublishEntry(key, {}).wire() == {
         "compiled_graph_key": key,

@@ -29,7 +29,7 @@ from hashrepo import (
     download,
 )
 
-from . import boot_phases, compiled_graph_store
+from . import boot_phases, compiled_graph_store, receipts
 from .api.errors import RetryableError
 from .models.cache_paths import open_worker_cas
 
@@ -50,6 +50,7 @@ def materialize_named_artifact(
     content_digest: str,
     presigned: Optional[Any],
     *,
+    receipt: receipts.Receipt,
     cache_dir: Optional[Path],
     what: str,
 ) -> Path:
@@ -72,7 +73,7 @@ def materialize_named_artifact(
     ) if boot_phases.in_boot() else contextlib.nullcontext() as fetch_span:
         return _materialize_named_artifact(
             compiled_graph_key, family, cell_ref, content_digest, presigned,
-            cache_dir=cache_dir, what=what, span=fetch_span)
+            receipt=receipt, cache_dir=cache_dir, what=what, span=fetch_span)
 
 
 def _materialize_named_artifact(
@@ -82,6 +83,7 @@ def _materialize_named_artifact(
     content_digest: str,
     presigned: Optional[Any],
     *,
+    receipt: receipts.Receipt,
     cache_dir: Optional[Path],
     what: str,
     span: Optional["boot_phases.BootSpan"] = None,
@@ -109,6 +111,12 @@ def _materialize_named_artifact(
             if span is not None:
                 span.classify("cached", f"ref={cell_ref}")
                 span.bytes_moved(dest.stat().st_size, boot_phases.SOURCE_LOCAL)
+            try:
+                receipts.verify_delivered_artifact(dest, family, receipt)
+            except receipts.ReceiptError as exc:
+                raise NamedArtifactUnavailable(
+                    "artifact_receipt_refused", f"{exc.reason}: {exc}"
+                ) from exc
             stored = compiled_graph_store.store(
                 dest,
                 key=compiled_graph_key,
@@ -188,6 +196,12 @@ def _materialize_named_artifact(
         span.classify("fetched", f"ref={cell_ref} chunks={len(remote_chunks)}")
         span.bytes_moved(declared_size or dest.stat().st_size,
                          boot_phases.SOURCE_CAS)
+    try:
+        receipts.verify_delivered_artifact(dest, family, receipt)
+    except receipts.ReceiptError as exc:
+        raise NamedArtifactUnavailable(
+            "artifact_receipt_refused", f"{exc.reason}: {exc}"
+        ) from exc
     stored = compiled_graph_store.store(
         dest,
         key=compiled_graph_key,

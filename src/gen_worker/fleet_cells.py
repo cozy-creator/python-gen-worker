@@ -63,14 +63,15 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from torch_compiled_graphs import CompiledGraphKey, IdentityError, is_compiled_graph_key
+from torch_compiled_graphs.identity import from_artifact_metadata
 
 from . import activity as activity_mod
 from . import (
     aot_serve,
-    artifact_meta,
     cell_key,
     env_seal,
     compiled_graph_store,
+    receipts,
     serve_posture,
 )
 from . import boot_phases as boot_mod
@@ -790,8 +791,7 @@ class CellPublisher:
     # -- publish ------------------------------------------------------------
 
     def publish_intent(
-        self, family: str, entries: Sequence[PublishEntry], *, sku: str,
-        gen_worker: str,
+        self, family: str, entries: Sequence[PublishEntry],
     ) -> PublishIntentBatch:
         """Ask the hub to admit a WHOLE MINT'S entries, one token each.
 
@@ -854,6 +854,7 @@ class CellPublisher:
         if lapse:
             _publish_leg(family, asked[0].compiled_graph_key,
                          "credential_expired", {"past_exp_s": int(lapse)})
+        runtime = cc.runtime_key()
         body = self._post(
             PUBLISH_INTENT_PATH,
             {
@@ -861,9 +862,9 @@ class CellPublisher:
                 # The three HUB-ATTESTED axes (pgw#709), checked against the
                 # hub's own records before any token is minted.
                 "axes": {
-                    "sku": str(sku or ""),
+                    "sku": str(runtime.get("sku") or ""),
                     "image_digest": self.image_digest,
-                    "gen_worker": str(gen_worker or ""),
+                    "gen_worker": cc.gen_worker_version(),
                 },
                 "entries": [e.wire() for e in asked],
             },
@@ -936,9 +937,8 @@ class CellPublisher:
         mint at once — :func:`aot_mint.publish` — asks for every token in one
         round trip.
         """
-        entry, sku, gen_worker = intent_entry(family, meta, mint_duration_ms)
-        batch = self.publish_intent(
-            family, [entry], sku=sku, gen_worker=gen_worker)
+        entry = intent_entry(meta, mint_duration_ms)
+        batch = self.publish_intent(family, [entry])
         return self.publish_granted(
             family, artifact, meta, batch.grants[0], repo=batch.repo)
 
@@ -1023,13 +1023,12 @@ class CellPublisher:
 
 
 def intent_entry(
-    family: str, meta: dict, mint_duration_ms: int = 0,
-) -> Tuple[PublishEntry, str, str]:
-    """One artifact's metadata -> its entry plus the two pod axes it declares.
+    meta: Mapping[str, Any], mint_duration_ms: int = 0,
+) -> PublishEntry:
+    """One closed TCG metadata object to its exact publish entry.
 
-    The pod axes come back separately because they are BATCH-level on the wire:
-    ``sku`` and ``gen_worker`` describe the pod, so a caller batching a whole
-    mint reads them once and the hub attests them once.
+    Pod axes come from the live worker in :meth:`CellPublisher.publish_intent`;
+    they never enter TCG's closed artifact metadata or its worker sidecar.
     """
     # pgw#712 (kept under the exact-identity ruling as defense-in-depth): a
     # cell whose metadata carries a foreign adoption provenance must never
@@ -1043,17 +1042,11 @@ def intent_entry(
         raise CellPublishRefused(
             f"cell carries adoption provenance {mark!r}; republishing "
             "it is fenced (pgw#712)")
-    key = str(meta.get("cell_key") or "").strip()
-    if not key:
-        key = _recomputed_key(meta).digest
-    return (
-        PublishEntry(
-            compiled_graph_key=key,
-            identity_axes=_identity_axes(family, meta),
-            mint_duration_ms=max(0, int(mint_duration_ms or 0)),
-        ),
-        str(meta.get("sku") or ""),
-        str(meta.get("gen_worker") or ""),
+    identity = _compiled_graph_identity(meta)
+    return PublishEntry(
+        compiled_graph_key=identity.value,
+        identity_axes=identity.as_dict(),
+        mint_duration_ms=max(0, int(mint_duration_ms or 0)),
     )
 
 
@@ -1092,95 +1085,19 @@ def _publish_failure_phase(exc: BaseException) -> str:
     return type(exc).__name__
 
 
-#: pgw#1046: the published entry carrying the artifact's
-#: ``combined_graph_hash`` — the value pgw#903's pre-dlopen fence compares
-#: against ``Arm.graph_contract_digest``, and the key tensorhub's producer
-#: reads (``runattempt.ArmFromVerifiedCell``, `axisGraphContract`). Since
-#: pgw#1059 its value IS the ``graph`` key axis; the hub-consumed entry NAME
-#: is deliberately unchanged (a wire rename needs a paired tensorhub change).
-GRAPH_CONTRACT_AXIS = "graph_contract"
-
-#: pgw#1059: the published NON-KEY entry carrying the artifact's env-seal
-#: digest. The seal left the key (amendment 4 — its declaration folds into
-#: the ``toolchain`` axis), but the hub's ``ArtifactFromCellRecord`` reads
-#: this entry to build ``ArtifactIdentity.env_seal_digest``, which pgw#904's
-#: consumer requires — so it rides the map as a wire fact, exactly like
-#: ``graph_contract``.
-ENV_SEAL_AXIS = "env_seal"
-
-
-def _recomputed_key(meta: Mapping[str, Any]) -> cell_key.CellKey:
-    """The key this cell's OWN recorded facts describe.
-
-    One derivation for the whole publish path, so the key a cell is
-    published UNDER and the axes it is published WITH can never come from
-    two different derivations of its metadata. Only exported
-    (``aot-inductor``) cells have identity (pgw#1010/pgw#1059) — any other
-    kind is refused here by the derivation itself.
-    """
+def _compiled_graph_identity(meta: Mapping[str, Any]) -> CompiledGraphKey:
+    """Return the one TCG-derived identity stamped by this artifact."""
     try:
-        return cell_key.from_entry_metadata(meta)
-    except cell_key.CellKeyError as exc:
+        identity = from_artifact_metadata(meta)
+    except IdentityError as exc:
         raise CellPublishRefused(
-            f"cell states no computable identity ({exc}); publishing it under "
-            "partial axes would produce a row the fleet cannot arm from "
-            "(pgw#1046)") from exc
-
-
-def _identity_axes(family: str, meta: dict) -> Dict[str, str]:
-    """The identity map the hub records for this cell, RECOMPUTED from the
-    artifact's own facts.
-
-    This is not inventory. th#1457's producer builds the worker's
-    ``ExecutionSpec`` out of exactly this map: ``ArtifactFromCellRecord`` reads
-    ``toolchain`` and ``env_seal`` from it, ``ArmFromVerifiedCell`` reads
-    ``graph_contract``, and pgw#904's landed consumer REFUSES an
-    ``ArtifactIdentity`` missing any of them. A row published without them is a
-    cell the fleet can never arm.
-
-    So this FAILS CLOSED (pgw#1046): a mint that cannot name an axis raises
-    :class:`CellPublishRefused` here, before a byte moves.
-
-    Contents (pgw#1176): the three cg-key-v1 key axes (``graph``, ``sm``,
-    ``toolchain``) verbatim, plus the wire facts the hub requires by name
-    (``graph_contract`` — the DECLARATION-wide manifest digest, which is what
-    the hub folds compile-health coverage under; ``env_seal``) and the demoted
-    store metadata (``family``, ``lane`` — discovery scoping and row
-    self-description, never identity).
-
-    ``graph_contract`` and ``graph`` are no longer the same value, and that is
-    the point: ``graph`` is THIS entry's class hash (identity), while
-    ``graph_contract`` names the class SET this entry belongs to (coverage).
-    Fusing them is what made adding one aspect ratio re-mint 35 unchanged
-    classes.
-    """
-    key = _recomputed_key(meta)
-    stamped = str(meta.get("cell_key") or "").strip()
-    if stamped and stamped != key.digest:
+            f"compiled graph states no TCG identity ({exc})") from exc
+    stamped = str(meta.get("compiled_graph_key") or "").strip()
+    if stamped != identity.value:
         raise CellPublishRefused(
-            f"cell_key stamp {stamped} disagrees with the key its recorded "
-            f"axes describe ({key.digest}); refusing to publish an identity "
-            "the artifact does not corroborate")
-    axes = {k: str(v) for k, v in key.axes_dict().items()}
-    # The manifest label — telemetry/coverage, never identity. Empty is
-    # HONEST for an entry minted by a pod that has not folded its whole
-    # declaration, so it is not a publish refusal.
-    axes[GRAPH_CONTRACT_AXIS] = str(meta.get("manifest_digest") or "").strip()
-    seal = meta.get(env_seal.SEAL_KEY)
-    if not isinstance(seal, dict) or not seal:
-        # The seal left the KEY (pgw#1059 amendment 4) but not the wire: the
-        # hub's ArtifactFromCellRecord requires the entry, and a row without
-        # it is a cell the fleet can never arm — same fail-closed rule as
-        # the axes above.
-        raise CellPublishRefused(
-            "cell records no env_seal block; the hub's ArtifactIdentity "
-            "requires its digest (pgw#903/pgw#1046)")
-    axes[ENV_SEAL_AXIS] = env_seal.seal_digest(seal)
-    axes["family"] = str(meta.get("family") or family or "")
-    axes["lane"] = cc.execution_lane_label(
-        str(meta.get("weight_lane") or ""),
-        int(meta.get("lora_bucket") or 0))
-    return axes
+            f"compiled_graph_key stamp {stamped!r} disagrees with the key "
+            f"TCG derives from its recorded axes ({identity.value})")
+    return identity
 
 
 #: pgw#815: publishes currently in flight, keyed by cell key. A self-mint
@@ -1260,7 +1177,7 @@ def _publish_async(
     leaves the record ``pending`` for :func:`resume_owed_publishes` to
     re-attempt on the next boot. The pod no longer has to survive anything.
     """
-    key = cell_key_digest or str(meta.get("cell_key") or "")
+    key = cell_key_digest or str(meta.get("compiled_graph_key") or "")
     try:
         size_mb = artifact.stat().st_size / 1e6
     except OSError:
@@ -1347,7 +1264,7 @@ def _publish_async(
 
 def _mark_publish(key: str, state: str) -> None:
     """Record an upload's outcome beside the bytes it uploaded (pgw#1183)."""
-    if cell_key.is_key(key):
+    if is_compiled_graph_key(key):
         compiled_graph_store.mark(key, sink=state)
 
 
@@ -1375,7 +1292,14 @@ def resume_owed_publishes(
         # too. A key whose upload is already running is owed nothing more.
         if cell.compiled_graph_key in in_flight:
             continue
-        meta = artifact_meta.try_read_metadata(cell.artifact) or {}
+        graph = compiled_graph_store.describe(cell.compiled_graph_key)
+        if graph is None:
+            logger.warning(
+                "fleet-cells: owed graph %s no longer resolves through TCG",
+                cell.compiled_graph_key,
+            )
+            continue
+        meta = dict(graph.metadata)
         threads.append(_publish_async(
             publisher, cell.family or str(meta.get("family") or ""),
             cell.artifact, dict(meta),
@@ -1564,14 +1488,15 @@ def arm_ordered(
     delivered_ref: str,
     delivered_digest: str,
     compiled_graph_key: str,
-    receipt: str,
+    receipt: Optional[receipts.Receipt],
 ) -> ArmOutcome:
     """Obey one Plan's ``Arm`` (pgw#904) — the fleet POLICY does not run.
 
     ``aot_cell`` arms exactly the pre-materialized ``artifact``. The delivery
-    path has already verified its content digest and imported it through TCG's
-    admission gate. The embedded hub receipt is verified here and must name
-    the same compiled-graph key. ``dynamo`` arms JIT intake; ``eager_only``
+    path has already verified the embedded receipt before download, bound the
+    downloaded bytes to that typed receipt, and imported them through TCG's
+    admission gate. This seam accepts only that verified object and requires
+    its exact compiled-graph key. ``dynamo`` arms JIT intake; ``eager_only``
     arms nothing, by order.
     """
     if serve_posture.eager_only():
@@ -1625,19 +1550,12 @@ def arm_ordered(
             "an aot_cell arm reached arming with no materialized artifact "
             "or without its compiled-graph key and embedded receipt")
 
-    # Deferred: receipts pulls +151 modules onto the `import gen_worker` path.
-    from . import receipts
-
-    family = str(getattr(cfg, "family", "") or "")
-    if not receipts.configured():
-        raise OrderedArmError(
-            "receipt_gate_unconfigured",
-            "an ordered cell arm requires the hub receipt gate; this process "
-            "has no hub wiring to verify the publisher against")
     try:
-        verified_receipt = receipts.verify_delivered_artifact(
-            Path(artifact), family, receipt,
-        )
+        if not isinstance(receipt, receipts.Receipt):
+            raise receipts.ReceiptError(
+                "receipt_unverified", "ordered arm requires a verified Receipt"
+            )
+        verified_receipt = receipt
     except receipts.ReceiptError as exc:
         raise OrderedArmError(
             "artifact_receipt_refused", f"{exc.reason}: {exc}") from exc

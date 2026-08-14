@@ -1023,6 +1023,7 @@ class MintResult:
     entries: Tuple[MintedArtifact, ...]
     manifest: str
     timings: Dict[str, float]
+    family: str = ""
 
     @property
     def keys(self) -> Tuple[str, ...]:
@@ -2745,7 +2746,8 @@ def pack_graph_classes(
         timings,
     )
     return MintResult(
-        entries=tuple(packed), manifest=manifest, timings=timings)
+        entries=tuple(packed), manifest=manifest, timings=timings,
+        family=spec.family)
 
 
 def fold_held_graph_classes(
@@ -2780,7 +2782,8 @@ def fold_held_graph_classes(
         {n: b for n, b in blocks.items() if n not in absorbed}, spec)
     return MintResult(
         entries=tuple(survivors), manifest=manifest,
-        timings={"total_s": 0.0, "held_classes": float(len(held))})
+        timings={"total_s": 0.0, "held_classes": float(len(held))},
+        family=spec.family)
 
 
 def mint_graph_classes(
@@ -2994,7 +2997,8 @@ def mint_graph_classes(
         sum(pool.entry_seconds.values()), pool.peak_rss_bytes / 1024**3,
         manifest)
     return MintResult(
-        entries=tuple(entries), manifest=manifest, timings=timings)
+        entries=tuple(entries), manifest=manifest, timings=timings,
+        family=spec.family)
 
 
 #: The mint window `entry_device_peaks` measures. Named on the row rather than
@@ -4654,31 +4658,17 @@ def publish(result: MintResult, publisher: Any) -> Dict[str, str]:
     # cost living only in an activity event that carries no cell key.
     mint_duration_ms = max(0, int(round(
         float(result.timings.get("total_s") or 0.0) * 1000)))
-    family = ""
+    family = str(result.family or "").strip()
+    if not family:
+        raise MintRefused("cannot publish a compiled graph without a family")
     entries = []
-    sku = gen_worker = ""
     for row in rows:
         if not row.key:
-            raise MintRefused("cannot publish an artifact with no cell_key")
-        row_family = str(row.metadata.get("family") or "")
-        if not row_family:
-            raise MintRefused("cannot publish an artifact with no family")
-        if family and row_family != family:
-            # The family is the batch's namespace and the hub attests it once.
-            # A mint spanning two would have to be two intents, and silently
-            # publishing the second under the first's declaration is how a row
-            # lands in a namespace nobody asked for.
             raise MintRefused(
-                f"this mint's entries name two families ({family!r} and "
-                f"{row_family!r}); one intent declares one family")
-        family = row_family
-        entry, row_sku, row_gen_worker = fleet_cells.intent_entry(
-            family, dict(row.metadata), mint_duration_ms)
-        sku = sku or row_sku
-        gen_worker = gen_worker or row_gen_worker
-        entries.append(entry)
-    batch = publisher.publish_intent(
-        family, entries, sku=sku, gen_worker=gen_worker)
+                "cannot publish an artifact with no compiled_graph_key")
+        entries.append(fleet_cells.intent_entry(
+            dict(row.metadata), mint_duration_ms))
+    batch = publisher.publish_intent(family, entries)
     return {
         row.key: str(publisher.publish_granted(
             family, row.artifact, dict(row.metadata),

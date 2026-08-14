@@ -87,7 +87,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from torch_compiled_graphs import is_compiled_graph_key
 
-from . import boot_phases
+from . import boot_phases, receipts
 from .procsplit import broker
 
 logger = logging.getLogger(__name__)
@@ -212,7 +212,7 @@ class ResolvedCompiledGraph:
     compiled_graph_key: str
     compiled_graph_ref: str
     content_digest: str
-    receipt: str
+    receipt: receipts.Receipt
     transport: Transport
 
 
@@ -271,14 +271,49 @@ def _transport_from(body: Mapping[str, Any]) -> Transport:
     )
 
 
-def _compiled_graph_from(body: Mapping[str, Any]) -> ResolvedCompiledGraph:
+def _artifact_file(transport: Transport) -> TransportFile:
+    """Return the one transported compiled-graph envelope."""
+
+    tarballs = tuple(row for row in transport.files if row.path.endswith(".tar.gz"))
+    if len(tarballs) == 1:
+        return tarballs[0]
+    if len(transport.files) == 1:
+        return transport.files[0]
+    raise receipts.ReceiptError(
+        "receipt_artifact_transport_invalid",
+        "resolve transport must name exactly one compiled-graph artifact",
+    )
+
+
+def _compiled_graph_from(
+    body: Mapping[str, Any], family: str,
+) -> ResolvedCompiledGraph:
+    family = str(family or "").strip()
+    compiled_graph_key = str(body.get("compiled_graph_key") or "")
+    content_digest = str(body.get("content_digest") or "")
+    transport = _transport_from(body)
+    artifact = _artifact_file(transport)
+    if artifact.digest != content_digest:
+        raise receipts.ReceiptError(
+            "receipt_artifact_digest_mismatch",
+            f"transport={artifact.digest!r} answer={content_digest!r}",
+        )
+    verified = receipts.verify_receipt(
+        str(body.get("receipt") or ""),
+        family=family,
+        compiled_graph_key=compiled_graph_key,
+        snapshot_digest=transport.snapshot_digest,
+        artifact_path=artifact.path,
+        artifact_digest=artifact.digest,
+        artifact_size_bytes=artifact.size_bytes,
+    )
     return ResolvedCompiledGraph(
-        family=str(body.get("family") or ""),
-        compiled_graph_key=str(body.get("compiled_graph_key") or ""),
+        family=family,
+        compiled_graph_key=compiled_graph_key,
         compiled_graph_ref=str(body.get("compiled_graph_ref") or ""),
-        content_digest=str(body.get("content_digest") or ""),
-        receipt=str(body.get("receipt") or ""),
-        transport=_transport_from(body),
+        content_digest=content_digest,
+        receipt=verified,
+        transport=transport,
     )
 
 
@@ -355,11 +390,10 @@ def _answer_from(
             f"(found={raw.get('found')!r}), which this worker cannot act on; "
             f"reading it as a miss would send this pod to a full cold mint "
             f"over a fact it did not understand")
-    compiled_graph = _compiled_graph_from(raw)
     missing = [
         (field, why)
         for field, why in _REQUIRED
-        if not getattr(compiled_graph, field)
+        if not raw.get(field)
     ]
     if missing:
         # PER ANSWER, not per batch. Refused HERE rather than at the identity
@@ -372,6 +406,17 @@ def _answer_from(
             refusal_code="compiled_graph_resolve_incomplete",
             detail="the answer names no " + "; no ".join(
                 f"{f} ({why})" for f, why in missing))
+    try:
+        compiled_graph = _compiled_graph_from(raw, family)
+    except receipts.ReceiptError as exc:
+        # Receipt/transport bindings belong to this answer, never the batch.
+        # Refuse it before any artifact byte moves; its siblings remain useful.
+        return ResolveAnswer(
+            compiled_graph_key=key,
+            status=STATUS_INCOMPLETE,
+            refusal_code="compiled_graph_resolve_incomplete",
+            detail=f"{exc.reason}: {exc}",
+        )
     logger.info(
         "compiled-graph-resolve: HIT %s -> %s",
         key, compiled_graph.compiled_graph_ref)
@@ -478,7 +523,7 @@ def _answers_of(
             f"positional and a batch that does not answer every key is "
             f"indistinguishable from one truncated in transit")
     out: List[ResolveAnswer] = []
-    receipts: Dict[str, str] = {}
+    receipt_owners: Dict[str, str] = {}
     for i, key in enumerate(asked):
         row = rows[i]
         if not isinstance(row, Mapping):
@@ -496,7 +541,8 @@ def _answers_of(
                 f"would arm every class with a sibling's kernels")
         answer = _answer_from(row, key, str(raw.get("family") or ""))
         if answer.compiled_graph is not None:
-            seen_for = receipts.get(answer.compiled_graph.receipt)
+            receipt_jws = str(row.get("receipt") or "")
+            seen_for = receipt_owners.get(receipt_jws)
             if seen_for is not None:
                 # One receipt covering two answers is a batch-level signature
                 # wearing a per-answer field name: the receipt is the hub's
@@ -508,7 +554,7 @@ def _answers_of(
                     f"{key} and {seen_for} were answered with the SAME "
                     f"receipt; a receipt signs one compiled graph, and reusing "
                     f"it makes the collection the unit of trust")
-            receipts[answer.compiled_graph.receipt] = key
+            receipt_owners[receipt_jws] = key
         out.append(answer)
     return tuple(out)
 
@@ -534,6 +580,7 @@ def materialize(
         compiled_graph.compiled_graph_ref,
         compiled_graph.content_digest,
         compiled_graph.transport,
+        receipt=compiled_graph.receipt,
         cache_dir=cache_dir,
         what=what or f"boot adopt of {compiled_graph.compiled_graph_key}",
     )

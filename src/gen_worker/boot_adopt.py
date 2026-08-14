@@ -74,7 +74,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import (
-    activity, boot_key, cell_resolve, compiled_graph_store,
+    activity, boot_key, cell_resolve, compiled_graph_store, receipts,
 )
 from .child_contract import CompileSpec, MintSlot
 
@@ -201,7 +201,7 @@ class BootAdoption:
         return self.compiled_graph.transport.snapshot_digest
 
     @property
-    def receipt(self) -> str:
+    def receipt(self) -> receipts.Receipt:
         return self.compiled_graph.receipt
 
 
