@@ -21,23 +21,30 @@ thread pool here is not slower, it is WRONG, and it fails nondeterministically
 — the worst shape. So the unit of parallelism is an OS process, which is also
 what pgw#784 already established for the mint itself.
 
-The handoff, and its cost
--------------------------
-A child cannot inherit the exported program (``fork`` is banned after CUDA
-init, pgw#784), so it arrives on disk: ``torch.export.save`` in the parent,
-``torch.export.load`` in the child. Two facts make that affordable:
+The handoff — and why there is no longer a program in it (pgw#1215/pgw#1216)
+---------------------------------------------------------------------------
+There used to be one. A child cannot inherit an exported program (``fork`` is
+banned after CUDA init, pgw#784), so it arrived on disk: ``torch.export.save``
+in the parent, ``torch.export.load`` in the child. That pair was defended as
+affordable — byte-exact, and off the critical path because saves overlap
+compiles. **The defence priced the wrong half.** The child's ``load`` is not
+overlapped with anything: it is the first 36.04 s (median, P0-E §5c) of every
+child's serial life, ~22 min of a 36-class sdxl mint.
 
-* **It is byte-exact.** A compile after the roundtrip produces a
-  ``wrapper.cpp`` byte-identical to the in-process compile, and lands under
-  the SAME inductor cache hash — the cache key is the graph, not the process.
-* **It is off the critical path.** Only the FIRST save is serial; every later
-  save overlaps a child that is already compiling, and a save (~16 s at 2.5 GB)
-  is 4 % of a compile (~420 s). The parent is never the bottleneck.
+So the program does not cross. The child receives the SHARE — which declared
+graph classes are its — plus the four facts it needs to build the weight-free
+pipeline itself (``function``, ``modules``, ``slots``, ``cfg``, exactly what
+``boot_key.TraceJob`` carries), traces its rows with
+``aot_mint.trace_for_key(compile_now=True)``, and packs each one with
+``aot_mint.pack_graph_classes``. One address space from trace to artifact.
 
-The parent keeps its own in-memory program regardless — every package-side
-gate (``program_package_drift``, ``eliminated_constants``, ``input_contract``)
-runs against the parent's real program and the child's package, so a child
-that diverged is caught by gates that already exist, named by entry.
+The gates travel with the program, because they always ran beside it: every
+package-side gate (``program_package_drift``, ``eliminated_constants``,
+``input_contract``) is inside ``pack_graph_classes``, so it now runs in the
+child, against the program the child itself traced. That is strictly tighter
+than the old split — the parent used to gate ITS program against the CHILD's
+package, which could only ever catch divergence, and divergence is exactly
+what stops being possible when there is one program.
 
 What this does NOT change
 -------------------------
@@ -59,15 +66,13 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
-    Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional,
-    Sequence, Tuple)
+    Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple)
 
 import msgspec
 
-from . import aot_shape_hints
-
 from . import aot_compile_spans, aot_device_lock, aot_resume, env_seal
-from . import compile_posture
+from . import compile_posture, kernel_path
+from .child_contract import CompileSpec, MintSlot
 from .compile_posture import (
     USER_MACHINE_RSS_RESERVE_BYTES, CompilePosture)
 from .postmortem import cpu_quota_cores
@@ -207,12 +212,6 @@ ENTRY_RSS_RESERVE_BYTES = 4 * 1024**3
 #: Banked per (family, lane) once measured (``mint_workers.compiled_graph_peak_rss``).
 #: pgw#1175: this is now the ONLY per-entry footprint K divides by.
 DEFAULT_ENTRY_PEAK_RSS_BYTES = 3 * 1024**3
-
-#: Programs staged AHEAD of the running set. The export loop hands the pool
-#: every entry at once; staging them all would put ~46 GB of exported programs
-#: on disk for an 18-entry sdxl cell. One spare per pool is enough to keep a
-#: freed slot from waiting on a multi-GB write.
-INFLIGHT_PROGRAM_SLACK = 1
 
 _KILL_GRACE_S = 10.0
 _POLL_S = 0.25
@@ -625,32 +624,90 @@ def entry_workers(
 
 
 class EntryJob(msgspec.Struct, frozen=True, kw_only=True):
-    """One entry's compile, as a file a human can re-run by hand."""
+    """One compile child's SHARE of a mint, as a file a human can re-run.
 
-    entry: str
-    program: str
-    report: str
+    pgw#1215 (th#1834 Phase 3 step 2b) turned this struct inside out. It used
+    to name ONE already-exported graph class and the file its
+    ``ExportedProgram`` had been ``torch.export.save``d to; the child
+    ``torch.export.load``ed it back, at a **36.04 s median** (pgw#1216, P0-E
+    §5c) — ~22 min of a 36-class sdxl mint spent deserializing what another
+    process in the same pod had just serialized.
+
+    So the program does not cross at all any more. This names what the child
+    needs to BUILD the weight-free pipeline itself (``function`` / ``modules``
+    / ``slots`` / ``cfg`` — the same four ``boot_key.TraceJob`` carries, and
+    for the same reason) plus WHICH declared graph classes are its share.
+    The child then traces, compiles and packs them in ONE address space.
+
+    Three fields died with the round trip and are not coming back, because the
+    thing they repaired is not happening: ``program`` (the staged file),
+    ``symbol_values`` and ``symbol_labels`` (pgw#998 — the ShapeEnv values
+    ``torch.export``'s save/load loses). See ``aot_compile_spans`` for the
+    matching hole in the span partition.
+    """
+
+    #: WHAT to build. Identical for every child of one mint — the pool copies
+    #: the caller's template and stamps only the share/location fields below.
+    function: str = ""
+    modules: Tuple[str, ...] = ()
+    cfg: CompileSpec = msgspec.field(default_factory=CompileSpec)
+    slots: Dict[str, MintSlot] = {}
+    #: pgw#947's measured serving-kernel lane, stamped into every artifact this
+    #: child packs. The parent measures it (only the loader can swap the
+    #: linears) and the child cannot re-derive it, so it crosses.
+    execution_lane: Optional[kernel_path.Verdict] = None
+
+    #: WHICH classes. ``rows[i::K]`` over ``aot_mint.declared_class_rows`` —
+    #: by INDEX and never by name, because the adapter fork is decided by the
+    #: COMPOSED pipeline and no parent can enumerate the names to hand out.
+    share: str = ""
+    share_index: int = 0
+    share_count: int = 1
+
+    #: WHERE. ``out_dir`` receives the packed artifacts, ``work`` the
+    #: packaging scratch, ``report`` this child's one report file.
+    out_dir: str = ""
+    work: str = ""
+    report: str = ""
     inductor_configs: Dict[str, Any] = {}
     cache_dir: str = ""
     device_lock: str = ""
-    #: pgw#998: the tracing process's ShapeEnv symbol values. `torch.export`'s
-    #: round trip rebuilds `var_to_val` keyed by size EXPRESSIONS, so a
-    #: derived symbol (`multiple_of` -> `2*s18`) leaves every extent that is
-    #: not literally one of those keys — a matmul M that multiplies two of
-    #: them — unrealizable, and inductor dies with `('unexpected None!',
-    #: 512*s18*s57)`. The parent is the only process that knows these, so it
-    #: sends them rather than letting the child infer them.
-    symbol_values: Dict[str, int] = {}
-    #: pgw#998: `{symbol: the dim name the AUTHOR wrote}`. Debug surfaces do
-    #: not survive serialization, so a child that has to refuse can only say
-    #: `512*s18*s57` unless the parent tells it these.
-    symbol_labels: Dict[str, str] = {}
+
+
+class PackedGraphClass(msgspec.Struct, frozen=True, kw_only=True):
+    """One graph class the child traced, compiled AND packed (pgw#1215).
+
+    The child hands back an ARTIFACT, not loose inductor files: it holds the
+    ``_MintedEntry`` row in its own address space, so it is the only process
+    that can run ``aot_mint.pack_graph_classes`` over it. ``metadata`` is
+    canonical JSON rather than a decoded map for the reason
+    ``boot_key.TraceReport.blocks`` is: the parent hands it straight on, and a
+    re-encode on either side is a place for two canonicalizations to disagree
+    about the thing being hashed.
+    """
+
+    name: str
+    key: str = ""
+    artifact: str = ""
+    metadata: str = ""
+    #: This class's own ``export_s`` / ``compile_s`` and inductor phase split,
+    #: straight off ``_export_entry``'s timings. Per CLASS, because a share is
+    #: several classes and one number for the share answers nothing.
+    spans: Dict[str, float] = {}
 
 
 class EntryReport(msgspec.Struct, frozen=True, kw_only=True):
     entry: str
     status: str = ""
-    files: List[str] = []
+    #: pgw#1215: what this child produced, one row per graph class. Replaces
+    #: the loose-file list — the files never leave the child now.
+    classes: List[PackedGraphClass] = []
+    #: How many classes the WHOLE declaration produced on this child's
+    #: pipeline. Every child reports it, all must agree, and the union of the
+    #: shares must be exactly that many — which proves the class set is whole
+    #: without the parent ever enumerating it (``boot_key``'s rule, same
+    #: sharding).
+    declared_classes: int = 0
     detail: str = ""
     elapsed_s: float = 0.0
     peak_rss_bytes: int = 0
@@ -671,7 +728,8 @@ class EntryReport(msgspec.Struct, frozen=True, kw_only=True):
     #: only the inside of `aot_compile`, while the recorded `compile_s` is the
     #: parent's Popen-to-reap wall. Everything between those two definitions
     #: (interpreter boot, `import torch`, the seal, the device-lock install,
-    #: `torch.export.load` of the staged program) was the dark 44 %.
+    #: and — until pgw#1215 deleted it — `torch.export.load` of the staged
+    #: program) was the dark 44 %.
     spans: Dict[str, float] = {}
     #: Named, and deliberately NOT summed with `spans`: these nest inside
     #: partition members (triton keys inside codegen/host compile; a device
@@ -737,7 +795,6 @@ class _Running:
     entry: str
     proc: subprocess.Popen
     job: EntryJob
-    program_path: Path
     started: float
     stderr_path: Path
     #: pgw#848: THIS entry's own high-water, sampled while it lives. The
@@ -1043,11 +1100,20 @@ def _peak_rss_bytes(proc: subprocess.Popen) -> int:
 
 
 class EntryCompilePool:
-    """Compile N exported programs K-wide, out of process.
+    """Trace, compile and pack a family's declared graph classes K-wide, out
+    of process.
 
     Not a general executor: it exists to hold pgw#809's three invariants —
-    entry-named failure, group-wide sibling teardown, and assembly by entry
+    named failure, group-wide sibling teardown, and assembly by graph-class
     NAME rather than completion order.
+
+    pgw#1215 changed what a child IS. It used to receive one already-exported
+    ``ExportedProgram`` on disk; it now receives a SHARE of the declaration
+    (``rows[i::K]``) and builds its own weight-free pipeline, so the process
+    that traces a graph class is the process that compiles and packs it. The
+    parent therefore stages nothing, holds no program, and produces nothing
+    the children consume — which is why there is no producer iterator here any
+    more: K children are dispatched once, and the loop only supervises.
     """
 
     def __init__(
@@ -1067,17 +1133,19 @@ class EntryCompilePool:
         self._emitted_width_facts: Optional[Dict[str, Any]] = None
         self._emit_width("construction")
         self.inductor_configs = dict(inductor_configs or {})
-        # pgw#848 item 5: the crash-only half. `bank` is None whenever the
-        # process was not given a stable root (`aot_resume.set_root`, the one
-        # production wiring — pgw#1030 deleted the redundant `resume_dir`
-        # param), and then this class behaves exactly as it did before — no
-        # admission pass, no hashing, no copies.
+        # pgw#848 item 5, NARROWED by pgw#1215 to the one half that survives
+        # the keystone: the bank is opened for its CACHE DIRECTORY and its
+        # ledger row, never for file admission any more. Admission was
+        # `bank.admit(entry, program)` — it re-derived the graph hash from the
+        # ExportedProgram THIS attempt exported, and the parent no longer
+        # exports anything, so the identity it compared against cannot be
+        # computed here. What survives is strictly the better half: the
+        # inductor cache stays scoped to the MINT rather than the attempt, so
+        # a killed mint's next attempt still hits torch's own FX graph cache.
+        # ⚠️ OWED (step 3/4): re-home file-level resume at the graph-class
+        # artifact, which is where pgw#1176 already made durability live.
         self.bank = aot_resume.open_bank(
             inductor_configs=self.inductor_configs)
-        #: entry -> the graph hash re-derived at admission, so `_collect` can
-        #: bank the finished files under an identity the parent computed from
-        #: the program it exported (never one read back from an artifact).
-        self._entry_graph: Dict[str, str] = {}
         # The inductor cache follows the bank when there is one. A per-attempt
         # cache dir is why a killed mint got not even a cache hit on retry;
         # inductor's key is the graph, not the process (measured — see this
@@ -1123,65 +1191,66 @@ class EntryCompilePool:
         self.oom_basis = ""
         self.entry_seconds: Dict[str, float] = {}
         self.entry_phases: Dict[str, Dict[str, float]] = {}
-        # pgw#830: parent-side per-entry spans (staging + spawn) and the
-        # pool-level idle split. Kept separate from `entry_phases` because
-        # they are NOT inside `compile_s`: staging happens in the parent while
-        # other children run, so summing it into the compile total would
-        # invent seconds nobody spent compiling.
+        #: share -> how many graph classes the WHOLE declaration produced on
+        #: that child's pipeline. The evidence `_assert_shares_whole` reads.
+        self.entry_declared: Dict[str, int] = {}
+        #: pgw#1215: graph class -> that class's OWN `export_s`/`compile_s`
+        #: and inductor phase split, as the child measured them. The pool's
+        #: other tables are per SHARE, and a share is several classes — the
+        #: only granularity anybody asks about a compile is the class.
+        self.class_spans: Dict[str, Dict[str, float]] = {}
+        # pgw#830: parent-side per-share spans (writing the job + spawn) and
+        # the pool-level idle split. Kept separate from `entry_phases` because
+        # they are NOT inside `compile_s`: they happen in the parent while
+        # other children run, so summing them into the compile total would
+        # invent seconds nobody spent compiling. Since pgw#1215 the "stage"
+        # is a few hundred bytes of JSON rather than a multi-GB
+        # `torch.export.save`, and it is still measured — a cost that stops
+        # being measured is a cost nobody can prove went away.
         self.entry_stage_seconds: Dict[str, float] = {}
-        #: pgw#1111: how many entries crossed the process boundary as META
-        #: (a weight-free mint). A pool that ran a structure-only cell and
-        #: reports 0 here staged real weights and the round-trip never fired.
-        self.meta_staged_entries = 0
         self.entry_spawn_seconds: Dict[str, float] = {}
         self.entry_overlays: Dict[str, Dict[str, float]] = {}
         self.entry_metrics_raw: Dict[str, Dict[str, float]] = {}
         self.ledger = PoolLedger(
             workers=int(width.workers), workers_initial=int(width.workers))
 
-    # -- staging ----------------------------------------------------------
+    # -- dispatch ---------------------------------------------------------
 
-    def _stage(self, entry: str, program: Any, index: int) -> Tuple[EntryJob, Path]:
-        import torch
+    def _stage(self, template: EntryJob, index: int, count: int) -> Tuple[EntryJob, Path]:
+        """Write ONE child's job file: the caller's recipe plus this share.
 
-        from .models import structure_only
-
-        slot = self.workdir / f"entry-{index:03d}"
+        pgw#1215: what this used to do was ``torch.export.save`` a multi-GB
+        ExportedProgram (~16 s at 2.5 GB) so a child could ``torch.export.load``
+        it back at a 36.04 s median. Both halves are gone. The share is named
+        by INDEX into ``aot_mint.declared_class_rows``' order, never by class
+        NAME, because the adapter fork is decided by the COMPOSED pipeline and
+        no parent can enumerate the names to hand out — the same rule
+        ``boot_key`` shards by.
+        """
+        share = f"share-{index:03d}"
+        slot = self.workdir / share
         slot.mkdir(parents=True, exist_ok=True)
-        program_path = slot / "program.pt2"
         t0 = time.monotonic()
-        # pgw#1111: a weight-free program's params are FAKE, and a fake tensor
-        # has no storage to serialize — the child died deserializing it, which
-        # is why every structure-only mint ran SERIALLY. META tensors carry the
-        # same shape/dtype and DO serialize, so the save crosses the process
-        # boundary on metadata and `aot_compile_child` re-virtualizes
-        # META -> FAKE inside the load's own mode. Real-weight programs are
-        # untouched (the cast moves nothing and the context is a no-op).
-        with structure_only.as_meta_for_save(program) as meta_params:
-            torch.export.save(program, program_path)
-        if meta_params:
-            self.meta_staged_entries += 1
-        self.entry_stage_seconds[entry] = round(time.monotonic() - t0, 3)
-        self.ledger.stage_total_s = round(
-            self.ledger.stage_total_s + self.entry_stage_seconds[entry], 3)
-        logger.info(
-            "aot-pool: staged %r (%.1f MB) in %.1fs",
-            entry, program_path.stat().st_size / 1e6, time.monotonic() - t0)
-        job = EntryJob(
-            entry=entry,
-            program=str(program_path),
+        job = msgspec.structs.replace(
+            template,
+            share=share,
+            share_index=index,
+            share_count=count,
+            out_dir=str(template.out_dir or (self.workdir / "artifacts")),
+            work=str(slot / "work"),
             report=str(slot / ENTRY_REPORT_NAME),
             inductor_configs=dict(self.inductor_configs),
             cache_dir=self.cache_dir,
             device_lock=str(self.device_lock_path),
-            symbol_values=aot_shape_hints.symbol_values(program),
-            symbol_labels=aot_shape_hints.symbol_labels(program),
         )
         job_path = slot / "job.json"
         job_path.write_bytes(msgspec.json.encode(job))
+        self.entry_stage_seconds[share] = round(time.monotonic() - t0, 3)
+        self.ledger.stage_total_s = round(
+            self.ledger.stage_total_s + self.entry_stage_seconds[share], 3)
         return job, job_path
 
-    def _spawn(self, job: EntryJob, job_path: Path, program_path: Path) -> _Running:
+    def _spawn(self, job: EntryJob, job_path: Path) -> _Running:
         stderr_path = job_path.parent / "stderr.log"
         handle = stderr_path.open("wb")
         t0 = time.monotonic()
@@ -1196,90 +1265,61 @@ class EntryCompilePool:
         finally:
             handle.close()
         started, spawn_epoch = time.monotonic(), time.time()
-        self.entry_spawn_seconds[job.entry] = round(started - t0, 3)
+        self.entry_spawn_seconds[job.share] = round(started - t0, 3)
         self.ledger.spawn_total_s = round(
             self.ledger.spawn_total_s + (started - t0), 3)
-        logger.info("aot-pool: entry %r -> pid %s", job.entry, proc.pid)
+        logger.info(
+            "aot-pool: %s (rows[%d::%d]) -> pid %s",
+            job.share, job.share_index, job.share_count, proc.pid)
         return _Running(
-            entry=job.entry, proc=proc, job=job, program_path=program_path,
+            entry=job.share, proc=proc, job=job,
             started=started, stderr_path=stderr_path, spawn_epoch=spawn_epoch)
 
     # -- the run ----------------------------------------------------------
 
     def compile(
-        self, entries: Iterable[Tuple[str, Any]],
-        *, on_entry: Optional[Callable[[str, int, int], None]] = None,
-        expected_total: int = 0,
-    ) -> Dict[str, List[str]]:
-        """``[(entry, ExportedProgram)] -> {entry: [file, ...]}``.
+        self, template: EntryJob,
+        *, on_share: Optional[Callable[[str, int, int], None]] = None,
+    ) -> Dict[str, PackedGraphClass]:
+        """Dispatch this mint's declared classes K-wide and collect what the
+        children packed. ``{graph class name: PackedGraphClass}``.
 
-        Raises :class:`EntryCompileFailed` naming the FIRST entry to fail,
+        ``template`` carries the WHAT (function, modules, slots, cfg,
+        execution lane, out_dir); this method stamps the WHICH (share index of
+        K) and the WHERE (work, report, cache, device lock). Every child runs
+        the same recipe over a disjoint share, which is why the result is a
+        union rather than a merge — a class produced twice is a defect, and it
+        is refused by name below rather than silently last-writer-wins.
+
+        Raises :class:`EntryCompileFailed` naming the FIRST share to fail,
         after tearing down every sibling group. Returns a dict ordered by
-        entry NAME, never by completion, so the packaged cell cannot depend
-        on which child finished first.
+        graph-class NAME, never by completion, so what gets packed cannot
+        depend on which child finished first.
 
-        ``entries`` may be a SEQUENCE (every entry already exported — the
-        pre-pgw#1052 shape, unchanged) or an ITERATOR that produces entries
-        as they become ready. Pulling from an iterator runs the PRODUCER's
-        own work on this thread — on the overlapped mint path that is a
-        ``torch.export`` of the next declared row — while the children keep
-        compiling in their own processes. That single sentence is the whole
-        of pgw#1052: the phases were sequential by code, not by necessity.
-        The iterator contract is deliberately narrow — ``(name, program)``
-        pairs, staged internally — so a later producer that ships structure
-        instead of a full program (pgw#1056's fake-weight mint) changes
-        ``_stage``, not this orchestration. ``expected_total`` is the
-        producer's best count for progress reporting; the ledger records the
-        REAL count once the source is exhausted.
-
-        ``on_entry(name, done, total)`` (pgw#824) fires as each entry lands.
-        This loop is the longest wire-silent stretch of a mint — an 18-entry
-        sdxl cell spends the bulk of its wall clock right here — and until now
-        it reported nothing between "compiling" and "packed". Progress
+        ``on_share(name, done, total)`` (pgw#824) fires as each share lands.
+        This loop is the longest wire-silent stretch of a mint. Progress
         reporting is best-effort by construction: a raising callback must never
-        cost the mint the entries it already has.
+        cost the mint the classes it already has.
         """
-        staged: List[Tuple[EntryJob, Path]] = []
+        width = max(1, int(self.width.workers))
         running: List[_Running] = []
-        done: Dict[str, List[str]] = {}
-        # One program staged AHEAD of the running set, and no more. Staging is
-        # a multi-GB write (~16 s at 2.5 GB) and a freed slot that had to wait
-        # for one would idle a core through every round; one spare removes
-        # that without turning an 18-entry sdxl cell into ~46 GB on disk.
+        done: Dict[str, PackedGraphClass] = {}
+        by_share: Dict[str, List[str]] = {}
         failure: Optional[EntryCompileFailed] = None
+        #: Every child reports how many classes the WHOLE declaration produced
+        #: on its own pipeline. They must agree, and the union of the shares
+        #: must be exactly that many — which proves the class set is whole
+        #: without the parent having enumerated it.
+        declared: Dict[str, int] = {}
         # pgw#832: seed BEFORE the pool wall starts, so the cost is its own
         # named line (`seal_seed_s`) and never inside the capacity identity.
         self._seed_seal_memo()
-        streamed = not isinstance(entries, (list, tuple))
-        if streamed:
-            source: Iterator[Tuple[str, Any]] = iter(entries)
-            total = max(0, int(expected_total))
-            pulled = 0
-        else:
-            pending = [(i, name, prog)
-                       for i, (name, prog) in enumerate(entries)]
-            total = len(pending)
-            self.ledger.entries = total
-            # pgw#848 item 5: admission BEFORE the wall on the sequence path.
-            # It is parent-serial and occupies no worker slot, so charging it
-            # to the pool's capacity would price a recovered 626 s entry as
-            # pool idle. (The streamed path admits per pull instead — the
-            # entry does not exist before the pull, and the pull is already
-            # inside the wall by construction.)
-            pending = self._admit_banked(pending, done, on_entry, total)
-            source = iter([(name, prog) for _i, name, prog in pending])
-            pulled = total - len(pending)
-        exhausted = False
-
-        def _known_total() -> int:
-            if not streamed:
-                return total
-            return pulled if exhausted else max(total, pulled)
+        self.ledger.entries = width
 
         def _cb(name: str) -> None:
-            if on_entry is not None:
+            if on_share is not None:
                 try:
-                    on_entry(name, len(done), _known_total())
+                    on_share(name, len(by_share), width)
                 except Exception:  # noqa: BLE001 — telemetry never fails a mint
                     logger.debug(
                         "entry-pool progress callback failed", exc_info=True)
@@ -1305,84 +1345,54 @@ class EntryCompilePool:
             mark = now
 
         try:
-            while True:
-                staged_cap = max(1, self.width.workers + INFLIGHT_PROGRAM_SLACK)
-                # SPAWN first: a freed slot takes already-staged work before
-                # the parent disappears into a source pull that, on the
-                # overlapped path, can be minutes of export.
-                while staged and not failure \
-                        and len(running) < self.width.workers:
-                    job, job_path = staged.pop(0)
-                    free = self.width.workers - len(running)
-                    running.append(
-                        self._spawn(job, job_path, Path(job.program)))
-                    charge("idle_spawn_s", free)
-                # PULL one entry when there is stage room. The pull IS the
-                # producer's work (pgw#1052); the fresh program spawns at the
-                # top of the next iteration.
-                if not exhausted and not failure \
-                        and len(staged) + len(running) < staged_cap:
-                    free = self.width.workers - len(running)
-                    try:
-                        name, program = next(source)
-                    except StopIteration:
-                        exhausted = True
-                        self.ledger.entries = pulled
-                        charge("idle_source_s", free)
-                        continue
-                    charge("idle_source_s", free)
-                    pulled += 1
-                    if streamed:
-                        self.ledger.entries = pulled
-                        if self.bank is not None:
-                            # pgw#848 item 5 on the streamed path: per-pull
-                            # admission, same order-of-operations safety (the
-                            # graph hash is re-derived from THIS export).
-                            admission = self.bank.admit(name, program)
-                            if admission.ok:
-                                done[name] = list(admission.files)
-                                self._refresh_resume_facts()
-                                _cb(name)
-                                continue
-                    free = self.width.workers - len(running)
-                    staged.append(self._stage(name, program, pulled - 1))
-                    # The freed slot waits for the NEXT program to be written
-                    # before it can be refilled: export-vs-compile
-                    # serialization, charged where it happens.
-                    charge("idle_staging_s", free)
-                    continue
-                if not running:
-                    if failure is not None or (exhausted and not staged):
-                        break
-                    continue
-                free = self.width.workers - len(running)
-                # Nothing left to start: the free slots are the straggler
-                # tail, which is a SCHEDULING loss and not a compile cost.
-                # pgw#829's entry collapse moves this number; nothing about
-                # the compiler does.
-                bucket = "idle_drain_s" if exhausted and not staged \
-                    else "idle_other_s"
+            for index in range(width):
+                free = width - len(running)
+                job, job_path = self._stage(template, index, width)
+                charge("idle_staging_s", free)
+                running.append(self._spawn(job, job_path))
+                charge("idle_spawn_s", width - len(running))
+            while running:
+                free = width - len(running)
                 finished = self._reap(running)
                 if finished is None:
                     time.sleep(_POLL_S)
-                    charge(bucket, free)
+                    charge("idle_drain_s", free)
                     continue
-                charge(bucket, free)
+                charge("idle_drain_s", free)
                 running.remove(finished)
                 try:
-                    done[finished.entry] = self._collect(finished)
+                    packed = self._collect(finished)
                 except EntryCompileFailed as exc:
                     failure = exc
                     break
+                by_share[finished.entry] = [row.name for row in packed]
+                declared[finished.entry] = self.entry_declared.get(
+                    finished.entry, 0)
+                for packed_row in packed:
+                    if packed_row.name in done:
+                        failure = EntryCompileFailed(
+                            finished.entry,
+                            f"{finished.entry}: graph class "
+                            f"{packed_row.name!r} was "
+                            f"packed by two shares — the declaration's row "
+                            f"order is not stable across this pool's "
+                            f"children, so rows[i::{width}] does not "
+                            f"partition it and some class is missing "
+                            f"entirely")
+                        break
+                    done[packed_row.name] = packed_row
+                if failure is not None:
+                    break
                 _cb(finished.entry)
-                # Collection (report read, program unlink) and pgw#824's
-                # progress callback both run with the slot ALREADY FREE, so
-                # they are charged as idle rather than left outside the split
-                # — a callback that blocked would otherwise vanish from a
-                # ledger whose whole point is that nothing vanishes.
-                charge("idle_other_s", self.width.workers - len(running))
+                # Collection and pgw#824's progress callback both run with the
+                # slot ALREADY FREE, so they are charged as idle rather than
+                # left outside the split — a callback that blocked would
+                # otherwise vanish from a ledger whose whole point is that
+                # nothing vanishes.
+                charge("idle_other_s", width - len(running))
             if failure is not None:
                 raise failure
+            self._assert_shares_whole(declared, done, width)
         finally:
             self.ledger.wall_s = round(time.monotonic() - pool_t0, 3)
             self.ledger.busy_s = round(sum(self.entry_seconds.values()), 3)
@@ -1392,56 +1402,46 @@ class EntryCompilePool:
             self.ledger.capacity_s = round(self.ledger.capacity_s, 3)
             for row in running:
                 _terminate_group(row.proc)
-            self._sweep()
             # Re-emit only if the width moved since construction (no-op
             # otherwise); the ledger row keeps carrying the timing facts.
             self._emit_width("terminus")
             self._emit_ledger()
         return {name: done[name] for name in sorted(done)}
 
-    def _admit_banked(
-        self,
-        pending: List[Tuple[int, str, Any]],
-        done: Dict[str, List[str]],
-        on_entry: Optional[Callable[[str, int, int], None]],
-        total: int,
-    ) -> List[Tuple[int, str, Any]]:
-        """pgw#848 item 5: hand back the entries a previous attempt finished.
+    def _assert_shares_whole(
+        self, declared: Mapping[str, int], done: Mapping[str, Any], width: int,
+    ) -> None:
+        """The shares must reconstruct the WHOLE declared class set.
 
-        The order of operations is the safety property: the graph hash is
-        re-derived from the ExportedProgram THIS attempt exported and handed to
-        the bank, which compares it against what it recorded. An entry is never
-        admitted because a file exists at a path — under pgw#846 that is how a
-        stale artifact gets packed into a cell that verifies, arms, and is
-        wrong.
-
-        Every refusal falls through to a normal compile. A bank must never be
-        able to cost a mint a cell.
+        pgw#1089's proof, applied at the compile seam: the parent never
+        enumerated the classes (it holds no pipeline), so the only evidence
+        that ``rows[i::K]`` partitioned them is that every child reported the
+        same declared count and the union has exactly that many rows. Without
+        this a child whose share came back empty — a stale declaration, a
+        shard-index bug, a family whose fork differs per child — publishes a
+        SHORT cell that verifies, arms, and is missing a class.
         """
-        if self.bank is None:
-            return pending
-        remaining: List[Tuple[int, str, Any]] = []
-        for index, name, program in pending:
-            admission = self.bank.admit(name, program)
-            if not admission.ok:
-                remaining.append((index, name, program))
-                continue
-            done[name] = list(admission.files)
-            if on_entry is not None:
-                try:
-                    on_entry(name, len(done), total)
-                except Exception:  # noqa: BLE001 — telemetry never fails a mint
-                    logger.debug(
-                        "entry-pool progress callback failed", exc_info=True)
-        self._refresh_resume_facts()
-        if self.bank.resumed:
-            logger.info(
-                "aot-resume: %d of %d entr%s re-admitted from %s in %.2fs — "
-                "this attempt compiles %d",
-                len(self.bank.resumed), total,
-                "y" if total == 1 else "ies", self.bank.root,
-                self.bank.admit_s, len(remaining))
-        return remaining
+        counts = {int(v) for v in declared.values() if int(v) > 0}
+        if not counts:
+            raise EntryCompileFailed(
+                "pool",
+                f"none of the {width} compile child(ren) reported how many "
+                f"graph classes this family declares, so there is no evidence "
+                f"the shares cover it")
+        if len(counts) > 1:
+            raise EntryCompileFailed(
+                "pool",
+                f"the compile children disagree about how many graph classes "
+                f"this family declares ({sorted(counts)!r} across "
+                f"{sorted(declared)!r}) — they composed different pipelines, "
+                f"so their shares do not partition one declaration")
+        want = counts.pop()
+        if len(done) != want:
+            raise EntryCompileFailed(
+                "pool",
+                f"the {width} share(s) packed {len(done)} graph class(es) but "
+                f"every child reported {want} declared — rows[i::{width}] did "
+                f"not partition the declaration and this cell would be short")
 
     def _refresh_resume_facts(self) -> None:
         """Keep the LIVE ledger carrying the bank's row.
@@ -1592,15 +1592,12 @@ class EntryCompilePool:
             self.entry_device_peaks[entry] = (
                 max(held_a, allocated), max(held_r, reserved))
 
-    def _collect(self, row: _Running) -> List[str]:
+    def _collect(self, row: _Running) -> List[PackedGraphClass]:
         elapsed = time.monotonic() - row.started
         reap_epoch = time.time()
         self.entry_seconds[row.entry] = round(elapsed, 2)
         code = row.proc.returncode
         report = _read_report(Path(row.job.report))
-        # The program is the biggest thing on disk and is dead the moment the
-        # child exits; drop it before the next stage runs.
-        with_suppress_unlink(row.program_path)
         if report is not None:
             # pgw#877: banked BEFORE any gate can raise, and on the failure
             # path too — pgw#848's rule for the host half applies unchanged
@@ -1608,36 +1605,45 @@ class EntryCompilePool:
             # measurement the next one has to size against.
             self.observe_entry_device(report)
             self._verify_child_code(row, report)
-        if code == EXIT_COMPILED and report is not None and report.files:
+        # An EMPTY share is legitimate and must not read as a failure: the
+        # parent sizes K from an EXPECTED class count and never enumerates the
+        # real one, so a declaration with fewer classes than the pool has
+        # children genuinely leaves a child with nothing to do. Whether the
+        # shares together cover the declaration is `_assert_shares_whole`'s
+        # question, asked once over every child's reported count — asking it
+        # here, per child, would refuse the legitimate case and give the
+        # illegitimate one the wrong name.
+        if code == EXIT_COMPILED and report is not None:
             if report.peak_rss_bytes:
                 self.peak_rss_bytes = max(
                     self.peak_rss_bytes, int(report.peak_rss_bytes))
-            missing = [f for f in report.files if not Path(f).exists()]
+            missing = [
+                c.artifact for c in report.classes
+                if not c.artifact or not Path(c.artifact).exists()]
             if missing:
                 raise EntryCompileFailed(
                     row.entry,
-                    f"entry {row.entry!r}: child reported {len(report.files)} "
-                    f"compiled file(s) but {len(missing)} do not exist "
-                    f"(first: {missing[0]}) — the pool's shared inductor cache "
-                    f"dir {self.cache_dir!r} is not visible to this process")
+                    f"{row.entry}: child reported {len(report.classes)} packed "
+                    f"graph class(es) but {len(missing)} artifact(s) do not "
+                    f"exist (first: {missing[0] or '<no path>'}) — the pool's "
+                    f"out_dir {row.job.out_dir!r} is not visible to this "
+                    f"process")
+            self.entry_declared[row.entry] = int(report.declared_classes or 0)
             self.entry_phases[row.entry] = self._close_entry_partition(
                 row, report, elapsed=elapsed, reap_epoch=reap_epoch)
             self.entry_overlays[row.entry] = dict(report.overlays or {})
             self.entry_metrics_raw[row.entry] = dict(report.metrics_raw or {})
+            # pgw#1205's per-class row, at the granularity the child measured
+            # it: one share is several graph classes, and "how big was the
+            # biggest compile in this SHARE" answers nothing anybody asks.
+            for packed in report.classes:
+                self.class_spans[packed.name] = dict(packed.spans or {})
             logger.info(
-                "aot-pool: entry %r compiled in %.1fs (%d file(s)) spans=%s",
-                row.entry, elapsed, len(report.files),
+                "aot-pool: %s packed %d graph class(es) in %.1fs spans=%s",
+                row.entry, len(report.classes), elapsed,
                 self.entry_phases[row.entry])
-            if self.bank is not None:
-                # pgw#848 item 5: banked HERE, the moment the entry is finished
-                # and verified, never at the end of the pool — a mint that is
-                # SIGKILLed at entry 30 of 36 runs no `finally`, and an
-                # end-of-run bank would be exactly the thing the crash takes.
-                self.bank.put(
-                    row.entry, self.bank.graphs.get(row.entry, ""),
-                    list(report.files))
-                self._refresh_resume_facts()
-            return list(report.files)
+            self._refresh_resume_facts()
+            return list(report.classes)
         detail = report.detail if report is not None else ""
         if not detail:
             detail = _stderr_tail(row.stderr_path)
@@ -1646,11 +1652,12 @@ class EntryCompilePool:
             self.oom_entry, self.oom_basis = row.entry, basis
         raise EntryCompileFailed(
             row.entry,
-            f"entry {row.entry!r}: compile child exited {code} after "
+            f"{row.entry} (rows[{row.job.share_index}::"
+            f"{row.job.share_count}]): compile child exited {code} after "
             f"{elapsed:.0f}s ({_exit_note(code)}): {detail or 'no detail'}"
             + (
                 f" [pgw#848 classification: MEMORY SHORTFALL, basis={basis}; "
-                f"this entry's measured high-water was "
+                f"this share's measured high-water was "
                 f"{row.peak_rss_bytes / 1024**3:.2f} GiB and the pool ran "
                 f"K={self.width.workers} against a "
                 f"{self.width.per_entry_rss_bytes / 1024**3:.2f} GiB/entry "
@@ -1783,20 +1790,6 @@ class EntryCompilePool:
         spans["parent_stage_s"] = self.entry_stage_seconds.get(row.entry, 0.0)
         spans["parent_spawn_s"] = self.entry_spawn_seconds.get(row.entry, 0.0)
         return spans
-
-    def _sweep(self) -> None:
-        """Every staged program, gone. The loose compiled files stay: they
-        live in the inductor cache dir and are what ``package_aoti`` reads."""
-        for slot in sorted(self.workdir.glob("entry-*")):
-            with_suppress_unlink(slot / "program.pt2")
-
-
-def with_suppress_unlink(path: Path) -> None:
-    try:
-        path.unlink()
-    except OSError:
-        pass
-
 
 def _stderr_tail(path: Path, limit: int = 2048) -> str:
     try:

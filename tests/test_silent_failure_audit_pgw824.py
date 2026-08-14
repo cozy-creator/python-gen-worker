@@ -455,8 +455,8 @@ def test_the_mint_progress_tokens_are_the_hubs_own_phase_vocabulary() -> None:
     assert aot_mint.PHASE_SEAL_PUBLISH == activity.PHASE_SEAL_PUBLISH
 
 
-def test_the_entry_compile_pool_reports_each_entry_as_it_lands() -> None:
-    """The pool loop is the longest wire-silent stretch of a mint (an 18-entry
+def test_the_compile_pool_reports_each_share_as_it_lands() -> None:
+    """The pool loop is the longest wire-silent stretch of a mint (an 18-class
     sdxl cell spends the bulk of its wall clock there) and reported nothing
     between "compiling" and "packed"."""
     import inspect
@@ -464,11 +464,12 @@ def test_the_entry_compile_pool_reports_each_entry_as_it_lands() -> None:
     from gen_worker import aot_compile_pool
 
     src = inspect.getsource(aot_compile_pool.EntryCompilePool.compile)
-    assert "on_entry" in src
-    assert "len(done), _known_total()" in src, (
+    assert "on_share" in src
+    assert "len(by_share), width" in src, (
         "progress must carry BOTH a step and a total — a bare step is not "
-        "progress, it is a counter (pgw#1052: the total is the producer's "
-        "declared count until the source is exhausted, then the real one)")
+        "progress, it is a counter. Since pgw#1215 the total is K, the number "
+        "of shares dispatched, which the parent knows before it spawns any "
+        "of them (it no longer produces the work item by item)")
 
 
 def test_progress_reporting_never_costs_the_mint_its_work() -> None:

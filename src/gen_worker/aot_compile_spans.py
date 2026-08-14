@@ -23,7 +23,8 @@ growing rather than as time silently vanishing::
 
     child_wall_s (child module import -> report written)
       = child_seal_s + child_torch_import_s + child_devlock_s
-      + child_program_load_s + compile_wall_s + child_other_s
+      + child_setup_s + child_trace_s + compile_wall_s + child_pack_s
+      + child_other_s
 
     compile_wall_s (around aot_compile)
       = lowering_s + codegen_s + graph_passes_s + host_compile_s
@@ -107,9 +108,21 @@ PARTITIONS: Dict[str, Tuple[str, ...]] = {
     "compile_s": (
         "child_boot_s", "child_wall_s", "reap_lag_s", "parent_other_s",
     ),
+    # pgw#1215/pgw#1216: ``child_program_load_s`` is GONE, because the
+    # ``torch.export.save``/``load`` pair it measured is gone — the child that
+    # traces a graph class is the child that compiles it, so no
+    # ExportedProgram crosses a process boundary and there is nothing to
+    # deserialize. In its place stand the two spans the child pays instead:
+    # ``child_setup_s`` (composing the weight-free pipeline it traces) and
+    # ``child_trace_s`` (``torch.export`` itself). ``child_pack_s`` is the
+    # packaging tail the child now owns as well. All three are members and not
+    # overlays: they are disjoint stretches of the child's own wall, and a
+    # partition that left them out would hand the pgw#1216 leg a residual to
+    # reason about instead of a name.
     "child_wall_s": (
         "child_seal_s", "child_torch_import_s", "child_devlock_s",
-        "child_program_load_s", "compile_wall_s", "child_other_s",
+        "child_setup_s", "child_trace_s", "compile_wall_s", "child_pack_s",
+        "child_other_s",
     ),
     "compile_wall_s": (
         "lowering_s", "codegen_s", "graph_passes_s", "host_compile_s",

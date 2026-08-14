@@ -143,7 +143,10 @@ def test_a_real_oom_killed_entry_child_is_a_retryable_shortfall_that_teaches_the
         # concluding anything: no OOM means no OOM to classify, which is a
         # missing capability (skip), not a wrong verdict (fail).
         try:
-            box.compile([("probe/entry", program)])
+            box.compile(pool.EntryJob(
+                function="probe",
+                modules=("gen_worker_no_such_endpoint_module",),
+                out_dir=str(tmp_path / "artifacts")))
         except pool.EntryCompileFailed as exc:
             failure = exc
         else:
@@ -189,12 +192,12 @@ def test_a_real_oom_killed_entry_child_is_a_retryable_shortfall_that_teaches_the
 
         # 4. the aborted phase table carries the actionable half
         facts = aot_mint._pool_facts(box)
-        assert facts["oom_entry"] == "probe/entry"
+        assert facts["oom_entry"] == "share-000"
         assert facts["oom_basis"] == failure.basis
         assert facts["peak_child_rss_bytes"] == box.peak_rss_bytes > 0
         table = aot_mint._mint_phase_table([], {"total_s": 1.0}, None, width,
                                            facts)
-        assert table["pool"]["oom_entry"] == "probe/entry"
+        assert table["pool"]["oom_entry"] == "share-000"
 
         # 5. ...and the parent banks it, so the RETRY is narrower
         fam, execution_lane = "pgw848-oom", "w8a8-lora64"

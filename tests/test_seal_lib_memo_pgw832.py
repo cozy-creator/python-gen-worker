@@ -27,11 +27,12 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Tuple
+from typing import Dict, Iterator
 
 import pytest
 
 from gen_worker import aot_compile_pool as pool
+from gen_worker import aot_compile_spans as spans
 from gen_worker import env_seal
 
 torch = pytest.importorskip("torch")
@@ -39,24 +40,6 @@ torch = pytest.importorskip("torch")
 pytestmark = pytest.mark.filterwarnings("ignore::FutureWarning")
 
 _HIDDEN = 96
-
-
-def _program(seed: int) -> Any:
-    class Tiny(torch.nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.a = torch.nn.Linear(_HIDDEN, _HIDDEN)
-            self.b = torch.nn.Linear(_HIDDEN, _HIDDEN)
-
-        def forward(self, x: Any) -> Any:
-            y = torch.relu(self.a(x)) * (1.0 + seed)
-            return torch.tanh(self.b(y)) + y
-
-    return torch.export.export(Tiny(), (torch.randn(4, _HIDDEN),))
-
-
-def _entries(n: int) -> List[Tuple[str, Any]]:
-    return [(f"unet/adapter=true/dim={i}", _program(i)) for i in range(n)]
 
 
 # ---------------------------------------------------------------------------
@@ -225,25 +208,35 @@ def test_memo_file_is_versioned_and_keyed_by_the_triple(
 # ---------------------------------------------------------------------------
 
 
-def test_pooled_entries_stop_repaying_the_toolchain_hash(
+def test_pooled_children_stop_repaying_the_toolchain_hash(
     tmp_path: Path,
 ) -> None:
-    """Every pooled entry's ``seal_libhash_s`` collapses to metadata cost.
+    """Every compile child's ``seal_libhash_s`` collapses to metadata cost.
 
     pgw#830's attribution test asserts the span EXISTS; this is the sibling
-    that asserts the MAGNITUDE dropped. Real pool, real children, real
-    ``aot_compile`` — the process boundary is the thing being fixed, so a
-    probe of the memo function would test nothing.
+    that asserts the MAGNITUDE dropped. REAL children, spawned by the real
+    pool through the real ``child_argv``/``child_env`` — the process boundary
+    is the thing being fixed, so a probe of the memo function would test
+    nothing.
+
+    The children REFUSE (their job names a module this tree does not have), and
+    that is deliberate rather than a compromise: ``env_seal.establish()`` is the
+    child's FIRST act, before it touches the declaration, so the seal span is
+    already recorded and complete by the time the preflight refuses. A real
+    compile would add ~7 minutes and could not make the seal reading any more
+    real — and pgw#1215's child can no longer be handed an already-exported
+    program, so a "cheap real compile" here is not available at any price.
 
     The threshold is derived, not conjured: ``cold_s`` below is this box's
     measured full SHA-256 pass over the real toolchain (the cost every child
-    used to pay — 8.13 s at 0.49 GB/s when pgw#830 measured it). A
-    memo-served pass does no hashing at all — it is ~36 stats plus one small
-    JSON read, measured at ~1 % of the cold pass — so ``0.25 * cold_s``
-    splits the two regimes with >4x margin on either side, and the 0.75 s
-    absolute floor absorbs scheduler jitter on the ~0.1 s metadata pass
-    under a loaded suite while staying far below any real rehash.
+    used to pay — 8.13 s at 0.49 GB/s when pgw#830 measured it). A memo-served
+    pass does no hashing at all — ~36 stats plus one small JSON read, measured
+    at ~1 % of the cold pass — so ``0.25 * cold_s`` splits the two regimes with
+    >4x margin on either side, and the 0.75 s absolute floor absorbs scheduler
+    jitter under a loaded suite while staying far below any real rehash.
     """
+    import msgspec
+
     # The reference: measure THIS box's cold identity pass. Clearing the
     # process caches only makes the next pass recompute identical values, so
     # the suite's state is unchanged afterwards.
@@ -255,28 +248,17 @@ def test_pooled_entries_stop_repaying_the_toolchain_hash(
     assert manifest, "no toolchain libs found — the reference is meaningless"
     threshold = max(0.25 * cold_s, 0.75)
 
-    entries = _entries(3)
     width = pool.entry_workers(
-        len(entries), limit=2, vcpus=16, available_bytes=64 * 1024**3,
-        device_lock=True)
+        3, limit=2, vcpus=16, available_bytes=64 * 1024**3, device_lock=True)
     assert width.workers == 2
     box = pool.EntryCompilePool(
-        tmp_path / "pool", width=width,
-        inductor_configs={"compile_threads": 2},
-        cache_dir=str(tmp_path / "cache"))
-    out = box.compile(entries)
-    assert set(out) == {name for name, _ in entries}
-
-    for name, _ in entries:
-        seal = box.entry_overlays[name]
-        assert "seal_libhash_s" in seal, seal
-        # EVERY entry, not just entries after the first: the parent seeds the
-        # memo before any child spawns, so no child ever pays the pass.
-        assert seal["seal_libhash_s"] <= threshold, (
-            f"entry {name!r}: seal_libhash_s={seal['seal_libhash_s']:.2f}s "
-            f"exceeds {threshold:.2f}s (25 % of this box's measured "
-            f"{cold_s:.2f}s cold pass) — the child re-paid the toolchain "
-            f"hash the pgw#832 memo exists to remove")
+        tmp_path / "pool", width=width, cache_dir=str(tmp_path / "cache"))
+    template = pool.EntryJob(
+        function="nope",
+        modules=("gen_worker_no_such_endpoint_module",),
+        out_dir=str(tmp_path / "artifacts"))
+    with pytest.raises(pool.EntryCompileFailed):
+        box.compile(template)
 
     # The parent's one-time cost is named, never silent: it rides the pool
     # ledger as `seal_seed_s`, outside the capacity identity (it is paid
@@ -284,9 +266,22 @@ def test_pooled_entries_stop_repaying_the_toolchain_hash(
     facts = box.ledger.facts()
     assert facts["seal_seed_s"] == box.seal_seed_s
     assert Path(box.seal_memo).is_file()
-    # And the pgw#830 invariant still closes: the seal split (memo or not)
-    # must keep covering child_seal_s.
-    from gen_worker import aot_compile_spans as spans
 
-    for name, _ in entries:
-        assert not spans.check(box.entry_phases[name])
+    reports = sorted((tmp_path / "pool").glob("share-*/report.json"))
+    assert reports, "no child wrote a report — nothing was measured"
+    for path in reports:
+        report = msgspec.json.decode(
+            path.read_bytes(), type=pool.EntryReport)
+        assert report.status == pool.REFUSED, report.detail
+        seal = dict(report.overlays)
+        assert "seal_libhash_s" in seal, seal
+        # EVERY child, not just children after the first: the parent seeds the
+        # memo before any child spawns, so no child ever pays the pass.
+        assert seal["seal_libhash_s"] <= threshold, (
+            f"{report.entry}: seal_libhash_s={seal['seal_libhash_s']:.2f}s "
+            f"exceeds {threshold:.2f}s (25 % of this box's measured "
+            f"{cold_s:.2f}s cold pass) — the child re-paid the toolchain "
+            f"hash the pgw#832 memo exists to remove")
+        # And the pgw#830 invariant still closes on a refusing child: the seal
+        # split (memo or not) must keep covering child_seal_s.
+        assert not spans.check(report.spans), report.spans

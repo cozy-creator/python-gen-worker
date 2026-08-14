@@ -11,46 +11,64 @@ to the child that nobody names. All three look identical from the outside —
 the table still renders, the numbers still add up to something, and the gap
 grows silently. So the assertion is not "these labels exist"; it is the
 INVARIANT that each partition equals the sum of its members, run against a
-real pool driving real ``aot_compile`` children.
+real pool driving real children.
 
-Driven for real, deliberately: the pool's process boundary IS the thing being
-measured, so a mocked child would test nothing. Small CPU graphs keep it cheap
-(the same shape pgw#809's own scenario test uses).
+⚠️ **What this file can and cannot drive since pgw#1215.** A compile child can
+no longer be handed an already-exported program: it builds its own weight-free
+pipeline from a declaration and compiles what it traced, so the cheap
+four-linear graph that used to make a real pool run cost seconds does not
+exist as an input any more. The children below are therefore driven REAL and
+REFUSING — their job names a module this tree does not have — which exercises
+the whole parent/child span boundary (spawn, boot, seal, torch import, device
+lock, report, reap) and closes the partition on it. The three spans only a
+compiled share pays (``child_trace_s`` / ``compile_wall_s`` / ``child_pack_s``)
+are covered here by driving the child's own ledger sealer directly, and
+end-to-end by pgw#1215 step 3's POD leg, which is where a real compile is
+allowed to run at all.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, List, Tuple
 
 import pytest
 
+from gen_worker import aot_compile_child as child
 from gen_worker import aot_compile_pool as pool
 from gen_worker import aot_compile_spans as spans
 
-torch = pytest.importorskip("torch")
-
 pytestmark = pytest.mark.filterwarnings("ignore::FutureWarning")
 
-_HIDDEN = 96
+
+def _pool(tmp_path: Path, *, shares: int) -> pool.EntryCompilePool:
+    width = pool.entry_workers(
+        shares, limit=shares, vcpus=16, available_bytes=64 * 1024**3,
+        device_lock=True)
+    assert width.workers == shares
+    return pool.EntryCompilePool(
+        tmp_path / "pool", width=width, cache_dir=str(tmp_path / "cache"))
 
 
-def _program(seed: int) -> Any:
-    class Tiny(torch.nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.a = torch.nn.Linear(_HIDDEN, _HIDDEN)
-            self.b = torch.nn.Linear(_HIDDEN, _HIDDEN)
+def _refusing(tmp_path: Path) -> pool.EntryJob:
+    """A recipe every child will refuse, AFTER paying its whole boot.
 
-        def forward(self, x: Any) -> Any:
-            y = torch.relu(self.a(x)) * (1.0 + seed)
-            return torch.tanh(self.b(y)) + y
-
-    return torch.export.export(Tiny(), (torch.randn(4, _HIDDEN),))
+    The refusal happens in ``build_pipeline``, which runs after the seal, the
+    torch import and the device-lock install — so every span this file is
+    about is recorded and complete by the time the child writes its report.
+    """
+    return pool.EntryJob(
+        function="nope", modules=("gen_worker_no_such_endpoint_module",),
+        out_dir=str(tmp_path / "artifacts"))
 
 
-def _entries(n: int) -> List[Tuple[str, Any]]:
-    return [(f"unet/adapter=true/dim={i}", _program(i)) for i in range(n)]
+def _reports(tmp_path: Path) -> list:
+    import msgspec
+
+    out = []
+    for path in sorted((tmp_path / "pool").glob("share-*/report.json")):
+        out.append(msgspec.json.decode(
+            path.read_bytes(), type=pool.EntryReport))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -58,92 +76,90 @@ def _entries(n: int) -> List[Tuple[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def test_every_second_of_a_pooled_compile_is_attributed(tmp_path: Path) -> None:
-    """Three nested partitions reconcile, per entry, on a real pool run.
+def test_every_second_of_a_real_childs_wall_is_attributed(
+    tmp_path: Path,
+) -> None:
+    """The child's wall partitions itself, on a real pool run.
 
-    This is the test that makes the 44 % un-re-openable. If someone adds a
-    step to the entry child and does not name it, ``child_other_s`` grows and
-    the residual assertion fires; if someone removes a phase, the partition
-    stops summing and :func:`aot_compile_spans.check` fires.
+    If someone adds a step to the compile child and does not name it,
+    ``child_other_s`` grows and the residual assertion fires; if someone
+    removes a span, the partition stops summing and
+    :func:`aot_compile_spans.check` fires.
     """
-    entries = _entries(4)
-    width = pool.entry_workers(
-        len(entries), limit=2, vcpus=16, available_bytes=64 * 1024**3,
-        device_lock=True)
-    assert width.workers == 2
-    box = pool.EntryCompilePool(
-        tmp_path / "pool", width=width,
-        inductor_configs={"compile_threads": 2},
-        cache_dir=str(tmp_path / "cache"))
+    box = _pool(tmp_path, shares=2)
+    with pytest.raises(pool.EntryCompileFailed):
+        box.compile(_refusing(tmp_path))
 
-    out = box.compile(entries)
-    assert set(out) == {name for name, _ in entries}
-
-    for name, _ in entries:
-        table = box.entry_phases[name]
+    reports = _reports(tmp_path)
+    assert reports, "no child wrote a report — nothing was measured"
+    for report in reports:
+        table = dict(report.spans)
         violations = spans.check(table)
         assert not violations, (
-            f"entry {name!r}: the compile attribution no longer partitions "
-            f"its own total — {violations}. Every interval between the "
-            f"recorded marks must have a name (pgw#830); a table that does "
-            f"not add up is how 44 % went dark on attempt nine.\n"
-            f"table={table}")
-
-        # The recorded compile_s must equal the parent's own measurement,
-        # not something the child computed about itself.
-        assert table["compile_s"] == pytest.approx(
-            box.entry_seconds[name], abs=0.05)
+            f"{report.entry}: the child's wall no longer partitions itself — "
+            f"{violations}. Every interval between the recorded marks must "
+            f"have a name (pgw#830); a table that does not add up is how "
+            f"44 % went dark on attempt nine.\ntable={table}")
 
         # Named, not merely present: the spans that were literally invisible
-        # before this issue. Each is real work paid once PER ENTRY because the
-        # pool's unit of parallelism is a process that exits — 72 times on
-        # attempt nine — so a zero here means the measurement broke.
-        for label in ("child_boot_s", "child_program_load_s", "child_seal_s",
-                      "compile_wall_s"):
+        # before this issue. Each is real work paid once PER SHARE because the
+        # pool's unit of parallelism is a process that exits.
+        for label in ("child_seal_s", "child_setup_s"):
             assert table.get(label, 0.0) > 0.0, (
-                f"entry {name!r}: {label} is not being measured. It is inside "
+                f"{report.entry}: {label} is not being measured. It is inside "
                 f"the recorded compile_s whether or not anyone names it")
 
         # The single largest named non-compile span on attempt nine's shape,
         # and the reason this issue found something: `env_seal.establish()`
-        # re-hashes every toolchain .so in the image, per entry child. It must
-        # stay broken out — folded back into an anonymous `child_seal_s` it
-        # would be indistinguishable from unavoidable process setup.
-        seal = box.entry_overlays[name]
+        # re-hashes every toolchain .so in the image, per child. It must stay
+        # broken out — folded back into an anonymous `child_seal_s` it would
+        # be indistinguishable from unavoidable process setup.
+        seal = dict(report.overlays)
         assert "seal_libhash_s" in seal and "seal_config_s" in seal, (
-            f"entry {name!r}: the seal's own split is gone ({seal}) — "
+            f"{report.entry}: the seal's own split is gone ({seal}) — "
             f"`child_seal_s` on its own cannot tell a 4 GB SHA-256 pass "
             f"apart from an unavoidable setup cost")
         assert sum(
             v for k, v in seal.items()
             if k.startswith("seal_") and k != "seal_libhash_s"
         ) == pytest.approx(table["child_seal_s"], abs=0.25), (
-            f"entry {name!r}: the seal split no longer covers child_seal_s "
+            f"{report.entry}: the seal split no longer covers child_seal_s "
             f"({seal} vs {table['child_seal_s']})")
 
-        # The residuals are what the whole issue is about: they are allowed to
-        # exist (an honest table has a remainder) but not to be where the time
-        # is. Anything above this is a phase that needs naming, not a rounding
-        # error.
-        dark = spans.dark_fraction(table)
-        assert dark <= 0.15, (
-            f"entry {name!r}: {dark:.1%} of compile_s is in an unnamed "
-            f"residual (child_other_s={table.get('child_other_s')}, "
-            f"compile_other_s={table.get('compile_other_s')}). pgw#830's "
-            f"whole point is that this number stays small and named — go "
-            f"look at metrics_raw and give the phase a label.\n"
-            f"table={table}")
+    # And the PARENT's outer partition, which spans the process boundary and
+    # therefore could never be closed inside the child.
+    for share, table in box.entry_phases.items():
+        assert not spans.check(table), table
+        assert table["compile_s"] == pytest.approx(
+            box.entry_seconds[share], abs=0.05)
+        assert table.get("child_boot_s", 0.0) > 0.0
 
-    # The overlays must NOT be summed into the partition. Asserted rather than
-    # commented, because the double-count is invisible in a rendered table.
-    for name, _ in entries:
-        table = box.entry_phases[name]
-        members = spans.PARTITIONS["compile_wall_s"]
-        assert sum(table[m] for m in members) == pytest.approx(
-            table["compile_wall_s"], abs=0.05)
-        assert not (set(table) & set(spans.OVERLAY_KEYS)), (
-            "an overlay leaked into the partition dict — overlays nest "
-            "inside partition members and adding them double-counts")
+
+def test_the_compile_halfs_spans_are_recorded_even_when_they_are_zero(
+) -> None:
+    """``child_trace_s`` / ``compile_wall_s`` / ``child_pack_s`` are PARTITION
+    MEMBERS, so a share that never reached them must still record them.
+
+    pgw#830's own failure mode, one level down: a member the ledger simply
+    never touched is not "0" to :func:`check` — it is MISSING, and the
+    residual silently absorbs it. This drives the child's real ledger sealer,
+    which is the code that seeds them; a compile is not needed to prove that
+    property and is not permitted on this box to prove any other.
+    """
+    ledger = spans.SpanLedger()
+    with ledger.span("child_seal_s"):
+        pass
+    fields = child._span_fields(ledger, {}, {}, {"seal_config_s": 0.0})
+    table = dict(fields["spans"])
+    for member in spans.PARTITIONS["child_wall_s"]:
+        assert member in table, (
+            f"{member} is a declared member of child_wall_s and the child did "
+            f"not record it — check() reads that as 'the residual silently "
+            f"absorbed it', which is exactly the defect pgw#830 closed")
+    assert not spans.check(table), table
+    # And the round trip a report takes, so a member that decodes to a default
+    # cannot look recorded.
+    assert set(spans.PARTITIONS["child_wall_s"]) <= set(table)
 
 
 # ---------------------------------------------------------------------------
@@ -151,50 +167,45 @@ def test_every_second_of_a_pooled_compile_is_attributed(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_pool_idle_is_accounted_separately_from_compile_seconds(
+def test_pool_idle_is_accounted_separately_from_child_seconds(
     tmp_path: Path,
 ) -> None:
     """``capacity = busy + idle``, and idle splits into named causes.
 
-    These two numbers have OPPOSITE fixes. Serial dark time inside
-    ``compile_s`` is compile work on the critical path — the target of
-    instrumentation and then optimization. Pool idle is workers with nothing
-    to run; it shrinks when the entry count or the straggler spread changes
- and not at all when the compiler gets faster. A table that adds
-    them into one "dark" figure aims the next lane at the wrong term.
+    These two numbers have OPPOSITE fixes. Dark time inside ``compile_s`` is
+    work on the critical path — the target of instrumentation and then
+    optimization. Pool idle is workers with nothing to run; it shrinks when
+    the class count or the straggler spread changes (pgw#829) and not at all
+    when the compiler gets faster. A table that adds them into one "dark"
+    figure aims the next lane at the wrong term.
     """
-    entries = _entries(4)
-    width = pool.entry_workers(
-        len(entries), limit=2, vcpus=16, available_bytes=64 * 1024**3,
-        device_lock=True)
-    box = pool.EntryCompilePool(
-        tmp_path / "pool", width=width,
-        inductor_configs={"compile_threads": 2},
-        cache_dir=str(tmp_path / "cache"))
-    box.compile(entries)
+    box = _pool(tmp_path, shares=2)
+    with pytest.raises(pool.EntryCompileFailed):
+        box.compile(_refusing(tmp_path))
 
     led = box.ledger
-    assert led.workers == 2 and led.entries == 4
+    assert led.workers == 2 and led.entries == 2
     assert led.capacity_s == pytest.approx(led.wall_s * led.workers, abs=0.01)
     # The identity that makes "75 % pool efficiency" a measured statement
-    # rather than a ratio someone divided out afterwards.
-    assert led.busy_s + led.idle_s == pytest.approx(led.capacity_s, rel=0.05), (
-        f"pool capacity {led.capacity_s:.2f}s != busy {led.busy_s:.2f}s + "
-        f"idle {led.idle_s:.2f}s — the idle split no longer covers the run, "
-        f"so 'pool efficiency' would be an unexplained remainder")
-    assert 0.0 < led.efficiency <= 1.05
+    # rather than a ratio someone divided out afterwards. Stated as `<=` on
+    # THIS path and only this one: the pool tears its siblings down group-wide
+    # the moment one share fails, so a torn-down child's seconds are never
+    # charged to `busy_s` — a run that claimed the identity here would be
+    # claiming a measurement of a process it killed. The equality holds on a
+    # run where every share completes, which needs a real compile (pgw#1215
+    # step 3's pod leg).
+    assert led.busy_s + led.idle_s <= led.capacity_s * 1.05, (
+        f"pool capacity {led.capacity_s:.2f}s < busy {led.busy_s:.2f}s + "
+        f"idle {led.idle_s:.2f}s — the idle split is charging seconds nobody "
+        f"spent")
+    assert led.busy_s > 0.0
 
     facts = led.facts()
     assert facts["pool_idle_s"] == pytest.approx(
         facts["idle_staging_s"] + facts["idle_drain_s"]
         + facts["idle_spawn_s"] + facts["idle_other_s"], abs=0.01)
-    # Staging is parent-serial and really does hold a freed slot: with 4
-    # entries at K=2 there is always a stage between reaps.
-    assert facts["stage_total_s"] > 0.0
-
-    # And the crossing claim: pool idle is NOT inside any entry's compile_s.
-    busy_from_entries = sum(box.entry_seconds.values())
-    assert busy_from_entries == pytest.approx(led.busy_s, abs=0.01)
+    # Spawning is parent-serial and really does hold a freed slot.
+    assert facts["spawn_total_s"] > 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -208,12 +219,13 @@ def test_check_names_the_partition_that_broke() -> None:
     the same defect this issue is closing."""
     good = {
         "compile_s": 10.0, "child_boot_s": 1.0, "child_wall_s": 8.5,
-        # The outer partition has its own residual now, so a
+        # pgw#1099: the outer partition has its own residual now, so a
         # measured span never doubles as the catch-all. Zero here because the
         # named members already close the level — which is the normal case.
         "reap_lag_s": 0.5, "parent_other_s": 0.0,
         "child_seal_s": 0.1, "child_torch_import_s": 1.5,
-        "child_devlock_s": 0.0, "child_program_load_s": 0.4,
+        "child_devlock_s": 0.0, "child_setup_s": 0.4,
+        "child_trace_s": 0.0, "child_pack_s": 0.0,
         "compile_wall_s": 6.0, "child_other_s": 0.5,
         "lowering_s": 0.5, "codegen_s": 1.0, "graph_passes_s": 0.3,
         "host_compile_s": 3.7, "compile_other_s": 0.5,

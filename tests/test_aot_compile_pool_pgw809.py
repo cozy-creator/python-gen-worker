@@ -1,230 +1,276 @@
-"""pgw#809: the entry-compile pool — two scenarios, driven for real.
+"""pgw#809: the compile pool — the parent half, driven for real.
 
-Scenario-shaped rather than per-behaviour: ONE integration test drives the
-real :class:`EntryCompilePool` through a real multi-entry mint-to-completion
-(real ``torch.export`` programs, real ``aot_compile`` children, real
-``package_aoti`` assembly) and asserts everything that must hold about a
-successful pool run at once; a second drives a real mint-WITH-FAILURE and
-asserts everything that must hold when one entry dies mid-pool. The width
-policy is the one piece that must be exercised across pods the box cannot
+Scenario-shaped rather than per-behaviour: ONE integration test drives the real
+:class:`EntryCompilePool` through a real K-wide run and asserts everything that
+must hold when every share lands at once; a second drives a real run-WITH-
+FAILURE and asserts everything that must hold when one share dies mid-pool. The
+width policy is the one piece that must be exercised across pods the box cannot
 be, so it is a table.
 
 What the failure scenario is really testing is the thing that makes a pool
-dangerous: 18 children, one dies, and the other 17 plus every ``cc1plus``
-they spawned have to go with it. A leak there is a serving pod that keeps
-burning CPU against a cell nobody will ever adopt — so the assertion is a
-PROCESS SWEEP of the real process table, not a mocked call count.
+dangerous: K children, one dies, and the others plus every ``cc1plus`` they
+spawned have to go with it. A leak there is a serving pod that keeps burning
+CPU against a cell nobody will ever adopt — so the assertion is a PROCESS SWEEP
+of the real process table, not a mocked call count.
+
+⚠️ **The child's INTERIOR is not exercised here, and since pgw#1215 it cannot
+be.** A compile child builds its own weight-free pipeline and traces its own
+share, so the four-linear toy program this file used to hand it is not an input
+any more; a green end-to-end run needs a real AOTI compile of a real endpoint's
+declared graph class, which is pgw#1215 step 3's POD leg. Everything the PARENT
+does is still driven for real, against real spawned processes, through
+``harness.fake_compile_child`` — a separate executable, not a monkeypatch, so
+nothing under test is stubbed. The child's own refusal path is driven against
+the real module below.
 """
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import List
 
+import msgspec
 import pytest
 
 from gen_worker import aot_compile_pool as pool
+from harness import fake_compile_child
 from harness.progress_wait import Cadence, await_progress
 
 torch = pytest.importorskip("torch")
 
 pytestmark = pytest.mark.filterwarnings("ignore::FutureWarning")
 
-#: Wide enough that the compile is real work (a few seconds of codegen and a
-#: real g++ invocation) and small enough that the suite stays cheap.
-_HIDDEN = 96
+#: How many graph classes the fake declaration produces. Not a multiple of the
+#: widths used below, so `rows[i::K]` really has to partition unevenly.
+_DECLARED = 6
 
 
-def _program(seed: int) -> Any:
-    class Tiny(torch.nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.a = torch.nn.Linear(_HIDDEN, _HIDDEN)
-            self.b = torch.nn.Linear(_HIDDEN, _HIDDEN)
-
-        def forward(self, x: Any) -> Any:
-            y = torch.relu(self.a(x)) * (1.0 + seed)
-            return torch.tanh(self.b(y)) + y
-
-    return torch.export.export(Tiny(), (torch.randn(4, _HIDDEN),))
+def _template(tmp_path: Path) -> pool.EntryJob:
+    return pool.EntryJob(
+        function="generate",
+        modules=("harness.toy_endpoints",),
+        out_dir=str(tmp_path / "artifacts"))
 
 
-def _entries(n: int) -> List[Tuple[str, Any]]:
-    # Deliberately NOT in sorted order: the pool must assemble by entry name,
-    # and a list that was already sorted could not tell the difference.
-    names = [f"unet/adapter=true/dim={i}" for i in range(n)]
-    return [(names[i], _program(i)) for i in reversed(range(n))]
+def _child_script(tmp_path: Path, digest: str | None = None) -> str:
+    return fake_compile_child.script(tmp_path, digest=digest)
 
 
-def _descendants(pid: int) -> List[int]:
-    """Every live process whose group is this pid's — the orphan sweep."""
+def _pool(tmp_path: Path, *, workers: int, digest: str | None = None,
+          ) -> pool.EntryCompilePool:
+    # The width is STATED, not derived: a 4-vCPU CI runner honestly derives
+    # K=1, and these scenarios would then pass while exercising no pool at all.
+    width = pool.entry_workers(
+        _DECLARED, limit=workers, vcpus=16, available_bytes=64 * 1024**3,
+        device_lock=True)
+    assert width.workers == workers
+    return pool.EntryCompilePool(
+        tmp_path / "pool", width=width, cache_dir=str(tmp_path / "cache"),
+        python=_child_script(tmp_path, digest=digest))
+
+
+def _survivors(script: str) -> List[int]:
+    """Every live process still running THIS test's child script.
+
+    Matched on the command line rather than on the parent's process GROUP: the
+    pool spawns with ``start_new_session=True`` precisely so it can kill a
+    child's whole group, which means a leaked child is never in the parent's
+    group and a pgrp-based sweep can only ever return the empty set. That is
+    how this assertion was vacuous — it passed with the teardown deleted.
+    """
     out: List[int] = []
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
             continue
         try:
-            stat = (entry / "stat").read_text()
+            cmdline = (entry / "cmdline").read_bytes()
         except OSError:
             continue
-        # ... pid (comm) state ppid pgrp ...
-        tail = stat.rsplit(")", 1)[-1].split()
-        if len(tail) < 3:
-            continue
-        try:
-            if int(tail[2]) == pid:      # pgrp
-                out.append(int(entry.name))
-        except ValueError:
-            continue
+        if script.encode() in cmdline:
+            out.append(int(entry.name))
     return out
 
 
 # ---------------------------------------------------------------------------
-# Scenario 1: a mint that completes
+# Scenario 1: a run that completes
 # ---------------------------------------------------------------------------
 
 
-def test_pool_mints_a_multi_entry_cell(tmp_path: Path) -> None:
-    """Four entries, K=2, through the real children and into one ``.pt2``.
+def test_the_pool_dispatches_shares_and_assembles_by_class_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Six declared classes over K=2 shares, through real child processes.
 
-    Asserts, in one run: every entry comes back; the loose files exist and
-    are readable by the PARENT (the shared cache dir is the whole reason
-    they are); assembly is ordered by entry NAME and not by completion; the
-    pool really did run K children at once (structurally, not by clock);
-    the staged programs are swept; the
-    per-entry seconds and the child peak RSS are recorded (the memory bound
-    is measured, not assumed); and ``package_aoti`` accepts the result.
+    Asserts, in one run: every declared class comes back exactly once; the
+    packed artifacts exist and are readable by the PARENT; assembly is ordered
+    by graph-class NAME and not by completion; the pool really did run K
+    children at once (structurally, not by clock); the per-share seconds and
+    the child peak RSS are recorded (the memory bound is measured, not
+    assumed); and NOTHING was staged — the whole point of the keystone is that
+    no ExportedProgram crosses this boundary.
     """
-    from torch._inductor.package import package_aoti
+    monkeypatch.setenv("PGW_FAKE_CHILD", "ok")
+    monkeypatch.setenv("PGW_FAKE_DECLARED", str(_DECLARED))
+    box = _pool(tmp_path, workers=2)
 
-    entries = _entries(4)
-    # The width is STATED, not derived: a 4-vCPU CI runner honestly derives
-    # K=1, and this scenario would then pass while exercising no pool at all.
-    width = pool.entry_workers(
-        len(entries), limit=2, vcpus=16, available_bytes=64 * 1024**3,
-        device_lock=True)
-    assert width.workers == 2
-    box = pool.EntryCompilePool(
-        tmp_path / "pool", width=width,
-        inductor_configs={"compile_threads": 2},
-        cache_dir=str(tmp_path / "cache"))
+    out = box.compile(_template(tmp_path))
 
-    out = box.compile(entries)
-
-    assert set(out) == {name for name, _ in entries}
+    assert set(out) == {f"cls/dim={i}" for i in range(_DECLARED)}
     assert list(out) == sorted(out), (
-        "the cell must assemble by entry NAME; a dict ordered by completion "
-        "makes the artifact depend on which child finished first")
-    for name, files in out.items():
-        assert files, f"entry {name!r} came back with no files"
-        for path in files:
-            assert Path(path).exists(), (
-                f"{name}: {path} is not visible to the parent — the pool's "
-                f"shared TORCHINDUCTOR_CACHE_DIR is how loose files travel")
+        "the cell must assemble by graph-class NAME; a dict ordered by "
+        "completion makes the artifact depend on which child finished first")
+    for name, packed in out.items():
+        assert packed.key and packed.artifact
+        assert Path(packed.artifact).exists(), (
+            f"{name}: {packed.artifact} is not visible to the parent — the "
+            f"pool's out_dir is how packed graph classes travel")
 
-    assert set(box.entry_seconds) == set(out)
+    assert set(box.entry_seconds) == {"share-000", "share-001"}
+    assert set(box.class_spans) == set(out), (
+        "the per-CLASS spans are the granularity anybody asks about a "
+        "compile; a per-SHARE number answers a question nobody asked")
     # Overlap is asserted STRUCTURALLY — K processes really were alive at
-    # once — never as a wall-clock speedup. A `wall < serial_sum` assertion
-    # measures the runner's spare CPU, not this code: on a 4-vCPU CI box it
-    # read 85.504 < 85.22 and failed a release. The speedup claim belongs in
-    # pgw#809's measured tables, where it is CPU-seconds and byte-identity.
-    assert box.peak_concurrency == width.workers, (
-        f"pool never reached its own width: saw {box.peak_concurrency} "
-        f"concurrent children, K={width.workers}")
+    # once — never as a wall-clock speedup.
+    assert box.peak_concurrency == 2, box.peak_concurrency
     assert box.peak_rss_bytes > 0, (
-        "per-entry peak RSS is what bounds K by memory; an unmeasured peak "
+        "per-share peak RSS is what bounds K by memory; an unmeasured peak "
         "makes the width policy a guess")
 
-    staged = list((tmp_path / "pool").rglob("program.pt2"))
-    assert not staged, f"staged programs left on disk: {staged}"
-
-    package = package_aoti(str(tmp_path / "cell.pt2"), dict(out))
-    assert Path(package).exists() and Path(package).stat().st_size > 0
-
-
-# ---------------------------------------------------------------------------
-# Scenario 2: a mint where one entry dies
-# ---------------------------------------------------------------------------
+    staged = list((tmp_path / "pool").rglob("*.pt2"))
+    assert not staged, (
+        f"something staged a program: {staged}. pgw#1215's whole claim is "
+        f"that the ExportedProgram never crosses this boundary")
 
 
-def test_one_failing_entry_fails_the_mint_and_takes_its_siblings(
-    tmp_path: Path,
+def test_a_share_that_comes_back_short_fails_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One entry cannot compile. The mint must fail NAMING it, the siblings
-    must be torn down group-wide, and nothing may survive the call.
+    """The class set must be WHOLE, and the parent never enumerated it.
 
-    The failure is injected the only honest way: a job whose exported program
-    is corrupt, so the real child really does exit non-zero on the real code
-    path. Everything else in the run is real.
+    The parent holds no pipeline, so the only evidence that ``rows[i::K]``
+    partitioned the declaration is that every child reported the same declared
+    count and the union has exactly that many rows. Without this check a share
+    that came back empty publishes a SHORT cell that verifies, arms, and is
+    missing a class.
     """
-    entries = _entries(4)
-    doomed = entries[1][0]
-    width = pool.entry_workers(
-        len(entries), limit=4, vcpus=16, available_bytes=64 * 1024**3,
-        device_lock=True)
-    box = pool.EntryCompilePool(
-        tmp_path / "pool", width=width,
-        inductor_configs={"compile_threads": 2},
-        cache_dir=str(tmp_path / "cache"))
+    monkeypatch.setenv("PGW_FAKE_CHILD", "short")
+    monkeypatch.setenv("PGW_FAKE_DECLARED", str(_DECLARED))
+    box = _pool(tmp_path, workers=2)
 
-    real_stage = box._stage
-
-    def stage(entry: str, program: Any, index: int) -> Any:
-        job, job_path = real_stage(entry, program, index)
-        if entry == doomed:
-            Path(job.program).write_bytes(b"not an exported program")
-        return job, job_path
-
-    box._stage = stage           # type: ignore[method-assign]
-
-    before = set(_descendants(os.getpid()))
     with pytest.raises(pool.EntryCompileFailed) as caught:
-        box.compile(entries)
+        box.compile(_template(tmp_path))
+    assert "did not partition the declaration" in str(caught.value)
+    assert "short" in str(caught.value)
+
+
+def test_two_shares_packing_the_same_class_is_refused_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A class produced twice means the row order is not stable across
+    children, so some other class is missing entirely. Last-writer-wins would
+    hide exactly that."""
+    monkeypatch.setenv("PGW_FAKE_CHILD", "collide")
+    monkeypatch.setenv("PGW_FAKE_DECLARED", str(_DECLARED))
+    box = _pool(tmp_path, workers=2)
+
+    with pytest.raises(pool.EntryCompileFailed) as caught:
+        box.compile(_template(tmp_path))
+    assert "was packed by two shares" in str(caught.value)
+
+
+# ---------------------------------------------------------------------------
+# Scenario 2: a run where one share dies
+# ---------------------------------------------------------------------------
+
+
+def test_one_failing_share_fails_the_run_and_takes_its_siblings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One share cannot run. The mint must fail NAMING it, the siblings must
+    be torn down group-wide, and nothing may survive the call."""
+    monkeypatch.setenv("PGW_FAKE_CHILD", "die")
+    monkeypatch.setenv("PGW_FAKE_DECLARED", str(_DECLARED))
+    box = _pool(tmp_path, workers=2)
+    script = _child_script(tmp_path)
+
+    with pytest.raises(pool.EntryCompileFailed) as caught:
+        box.compile(_template(tmp_path))
 
     exc = caught.value
-    assert exc.entry == doomed
-    assert doomed in str(exc), (
-        "a pool of 18 that fails anonymously is undebuggable — the entry "
-        "name is the whole diagnostic on a pod with no logs")
+    assert exc.entry == "share-000"
+    assert "share-000" in str(exc), (
+        "a pool that fails anonymously is undebuggable — the share name and "
+        "its row stride are the whole diagnostic on a pod with no logs")
+    assert "rows[0::2]" in str(exc)
     assert "exited" in str(exc)
 
     # No orphans: the pool kills process GROUPS, so every child's own
     # inductor workers and g++ go with it. Waited on PROGRESS — each pid that
     # disappears is an advance — rather than on a clock, because a clock here
     # asserts the runner's speed and a wedged teardown must still FAIL rather
-    # than be outrun.
+    # than be outrun (pgw#795).
     await_progress(
-        lambda: tuple(
-            sorted(p for p in _descendants(os.getpid()) if p not in before)),
+        lambda: tuple(sorted(_survivors(script))),
         lambda leaked: not leaked,
-        what="the failed mint's sibling children to be reaped",
+        what="the failed run's sibling children to be reaped",
         cadence=Cadence(),
         render=lambda leaked: f"{len(leaked)} orphan(s): {list(leaked)[:8]}",
     )
 
-    staged = list((tmp_path / "pool").rglob("program.pt2"))
-    assert not staged, f"staged programs left on disk: {staged}"
+
+def test_a_hung_share_is_torn_down_with_its_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sibling that will NOT exit on its own must be KILLED, not waited for.
+
+    The sharper half of the teardown claim: in the row above every child dies
+    by itself, so a pool that reaped nothing would still look clean. Here
+    share 1 sleeps for ten minutes and only the group-wide kill ends it — the
+    shape a wedged ``cc1plus`` takes on a real pod.
+    """
+    monkeypatch.setenv("PGW_FAKE_CHILD", "die-and-hang")
+    monkeypatch.setenv("PGW_FAKE_DECLARED", str(_DECLARED))
+    box = _pool(tmp_path, workers=2)
+    script = _child_script(tmp_path)
+    with pytest.raises(pool.EntryCompileFailed):
+        box.compile(_template(tmp_path))
+    await_progress(
+        lambda: tuple(sorted(_survivors(script))),
+        lambda leaked: not leaked,
+        what="the sleeping sibling to be killed with its group",
+        cadence=Cadence(),
+        render=lambda leaked: f"{len(leaked)} orphan(s): {list(leaked)[:8]}",
+    )
+
+
+# ---------------------------------------------------------------------------
+# The real child, on the paths that need no compile
+# ---------------------------------------------------------------------------
 
 
 def test_a_named_child_refusal_is_reported_not_swallowed(tmp_path: Path) -> None:
-    """``aot_compile_child`` run by hand on a bad job: non-zero exit, a typed
-    report, and the refusal sentence on disk. The boundary is a file exactly
-    so a mint that fails on entry 13 of 18 is reproducible without the
-    pipeline."""
+    """The REAL ``aot_compile_child`` run by hand on a job whose recipe cannot
+    be built: non-zero exit, a typed report, and the refusal sentence on disk.
+
+    The boundary is a file exactly so a run that fails on share 2 of 4 is
+    reproducible without the parent. This is the child's own code — the
+    preflight it inherits from ``boot_trace_child`` — and it refuses before any
+    compile, which is why it is affordable here.
+    """
     slot = tmp_path / "slot"
     slot.mkdir()
-    (slot / "program.pt2").write_bytes(b"garbage")
     job = pool.EntryJob(
-        entry="unet/adapter=true/dim=0",
-        program=str(slot / "program.pt2"),
+        share="share-000", share_index=0, share_count=1,
+        function="generate",
+        modules=("gen_worker_no_such_endpoint_module",),
+        out_dir=str(tmp_path / "artifacts"),
+        work=str(slot / "work"),
         report=str(slot / pool.ENTRY_REPORT_NAME),
         inductor_configs={"compile_threads": 1},
         cache_dir=str(tmp_path / "cache"))
     job_path = slot / "job.json"
-    import msgspec
-
     job_path.write_bytes(msgspec.json.encode(job))
 
     proc = subprocess.run(
@@ -234,14 +280,14 @@ def test_a_named_child_refusal_is_reported_not_swallowed(tmp_path: Path) -> None
     report = msgspec.json.decode(
         (slot / pool.ENTRY_REPORT_NAME).read_bytes(), type=pool.EntryReport)
     assert report.status == pool.REFUSED
-    assert report.entry == job.entry
-    assert "exported program" in report.detail
-    assert not report.files
+    assert report.entry == "share-000"
+    assert "compile target" in report.detail or "not in this image" in report.detail
+    assert not report.classes
 
 
 def test_a_malformed_job_is_a_wiring_defect_not_a_retry(tmp_path: Path) -> None:
     bad = tmp_path / "job.json"
-    bad.write_bytes(b"{")
+    bad.write_bytes(b"{{")
     proc = subprocess.run(
         pool.child_argv(bad), capture_output=True, timeout=120)
     assert proc.returncode == pool.EXIT_BAD_JOB
@@ -255,7 +301,7 @@ def test_a_malformed_job_is_a_wiring_defect_not_a_retry(tmp_path: Path) -> None:
 #: A pod fat enough that CPU and host RAM are both out of the way, so a case
 #: can isolate the ONE bound it is about.
 #
-# The third bound is GONE. K used to divide free VRAM by a
+# pgw#1175 / §4.33: the third bound is GONE. K used to divide free VRAM by a
 # per-entry device ask whose only production source was
 # `mint_budget.co_residency().need_bytes` — the mint child's whole
 # co-residency estimate, led by the PARENT's resident weights, for a child
@@ -281,7 +327,7 @@ _ROOMY = dict(vcpus=64, available_bytes=512 * 1024**3, device_lock=True)
         ("3 entries", dict(entries=3), 3),
         # A single-entry cell never pays for a pool.
         ("1 entry", dict(entries=1), 1),
-        # a MEASURED per-entry RSS narrower than the 3 GiB default
+        # pgw#1175: a MEASURED per-entry RSS narrower than the 3 GiB default
         # buys width — the one per-entry footprint that still divides.
         ("measured 1 GiB per entry",
          dict(available_bytes=14 * 1024**3, peak_rss_bytes=1024**3), 8),
@@ -304,7 +350,7 @@ def test_an_unreadable_host_does_not_license_a_wide_pool() -> None:
     width = pool.entry_workers(
         18, vcpus=64, available_bytes=0, device_lock=True)
     assert width.workers == 1
-    # The footprint is supplied so this pins the MEMORY bound alone.
+    # pgw#877: the footprint is supplied so this pins the MEMORY bound alone.
     # Without it the width would be 1 for two reasons at once and the test
     # would pass while proving neither.
     assert width.binding == "host-memory", width.reason
@@ -314,14 +360,14 @@ def test_without_the_gpu_benchmark_lock_a_gpu_cell_stays_serial() -> None:
     """The pool's safety interlock, as a WIDTH decision.
 
     An AOTI compile picks kernel configs by timing them on the card. Two
-    entries timing at once measure each other's contention and bake the loser
+    children timing at once measure each other's contention and bake the loser
     into an artifact whose cell key does not move — a silently slower cell
     under a good cell's identity. If torch cannot serialize those timings, the
     only safe width is 1.
     """
     kwargs = dict(_ROOMY)
     kwargs["device_lock"] = False
-    # PRESENCE is the only thing K still asks the card, and it asks
+    # pgw#1175: PRESENCE is the only thing K still asks the card, and it asks
     # it for exactly this bound. Stated by the test because this box has no
     # usable driver, and because a bound that silently stops firing when the
     # probe changes is the class of defect the width record exists to prevent.
@@ -357,7 +403,7 @@ def test_the_width_and_its_inputs_ride_the_telemetry() -> None:
                 "available_bytes", "per_entry_rss_bytes",
                 "device_lock", "width_reason"):
         assert key in facts
-    # And the deleted terms must not creep back as telemetry that
+    # pgw#1175: and the deleted terms must not creep back as telemetry that
     # somebody later divides by.
     assert not [k for k in facts if "device" in k and k != "device_lock"]
 
@@ -376,7 +422,7 @@ def test_the_gpu_benchmark_lock_serializes_real_processes(
     section that appends to a shared file. If the lock works, the file's
     enter/leave markers nest perfectly; if it does not, they interleave.
     ``flock`` (not a multiprocessing primitive) is what makes a SIGKILLed
-    child release by dying — the OOM killer is how an entry child is expected
+    child release by dying — the OOM killer is how a compile child is expected
     to go.
     """
     from gen_worker import aot_device_lock
@@ -410,7 +456,7 @@ def test_the_gpu_benchmark_lock_serializes_real_processes(
         if line.startswith("+"):
             assert held == "", (
                 f"{line} entered while {held} still held it — the pool would "
-                f"be benchmarking two entries against each other")
+                f"be benchmarking two graph classes against each other")
             held = line[1:]
         else:
             assert held == line[1:]
@@ -468,16 +514,9 @@ def test_the_autotune_posture_the_mint_actually_compiles_under() -> None:
 def test_parallelism_is_not_sealed(tmp_path: Path) -> None:
     """pgw#757 established ``compile_threads`` as outside cell identity; the
     same argument covers K, and the digest check is how it is VERIFIED rather
-    than argued. The pool changes WHEN entries compile, never what."""
+    than argued. The pool changes WHEN classes compile, never what."""
     from gen_worker import env_seal
 
-    # The loop that used to sit here set GEN_WORKER_AOT_ENTRY_WORKERS
-    # and asserted the digest was unmoved. NOTHING IN src/ HAS EVER READ THAT
-    # NAME — the live width constant is `aot_compile_pool.MAX_ENTRY_WORKERS` —
-    # so the assertion held for the one reason that proves nothing (C1: a test
-    # exercising a knob that does not exist). The real property, that the
-    # shared cache DIR is a location and not a recipe, is asserted below
-    # against a value the code actually reads.
     base = env_seal.inductor_config_digest()
     env = pool.child_env(str(tmp_path / "cache"))
     assert env["TORCHINDUCTOR_CACHE_DIR"] == str(tmp_path / "cache")

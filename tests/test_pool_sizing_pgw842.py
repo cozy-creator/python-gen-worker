@@ -258,17 +258,21 @@ def test_a_real_pools_width_and_ledger_land_hub_side(tmp_path: Path) -> None:
     neither had the width block, which `_mint_phase_table` has always built
     and `emit_phase_events` never emitted. Both now ride the parent's relay.
     """
-    entries = [(f"unet/adapter=true/dim={i}", _program(i)) for i in range(2)]
     width = pool.entry_workers(
-        len(entries), vcpus=16, available_bytes=64 * _GIB,
-        device_lock=True, limit=2)
+        2, vcpus=16, available_bytes=64 * _GIB, device_lock=True, limit=2)
     assert width.workers == 2, width.reason
     box = pool.EntryCompilePool(
-        tmp_path / "pool", width=width,
-        inductor_configs={"compile_threads": 2},
-        cache_dir=str(tmp_path / "cache"))
-    out = box.compile(entries)
-    assert set(out) == {name for name, _ in entries}
+        tmp_path / "pool", width=width, cache_dir=str(tmp_path / "cache"))
+    # REAL children, spawned by the real pool, REFUSING: since pgw#1215 a
+    # child builds its own weight-free pipeline, so there is no cheap
+    # already-exported program to hand it and a green run needs a real
+    # compile (pgw#1215 step 3's pod leg). The width decision and the ledger
+    # this test is about are produced by the parent either way.
+    with pytest.raises(pool.EntryCompileFailed):
+        box.compile(pool.EntryJob(
+            function="nope",
+            modules=("gen_worker_no_such_endpoint_module",),
+            out_dir=str(tmp_path / "artifacts")))
 
     ledger = {
         **box.ledger.facts(),

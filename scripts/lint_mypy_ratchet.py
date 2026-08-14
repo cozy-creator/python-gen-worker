@@ -65,7 +65,11 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # test doubles" item exists for, and they were wholly unchecked: a bogus
     # attribute plus a `reveal_type` injected into cell_hub.py still produced
     # `Success: no issues found`.
-    "ignore_errors": (312, 2016),
+    # 312 -> 309: pgw#1215 deleted `tests.test_meta_roundtrip_pgw1111`,
+    # `tests.test_shape_hints_pgw998` and
+    # `tests.test_overlap_export_compile_pgw1052` with the save/load round trip
+    # and the overlapped export/compile shape they pinned.
+    "ignore_errors": (309, 2016),
 }
 
 #: WILDCARD patterns are structural policy, not debt, so they are not counted
