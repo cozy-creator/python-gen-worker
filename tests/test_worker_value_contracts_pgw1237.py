@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from gen_worker import activity, cell_resolve, compile_cache, host_canary
+from gen_worker import activity, callout, cell_resolve, compile_cache, host_canary
 from gen_worker.convert.layout_converters import derived_artifact_identity
 from gen_worker.local_cell_store import UNTRUSTED_REFUSAL_CODE
 from gen_worker.models import execution_lanes
@@ -70,6 +70,13 @@ def test_exact_worker_values_match_pgw1237() -> None:
         cell_resolve.REFUSAL_CODES
     )
     assert exact["cell_publish_untrusted_refusal_code"] == UNTRUSTED_REFUSAL_CODE
+    callout_codes = exact["callout_hub_refusal_codes"]
+    assert len(callout_codes) == 7
+    assert set(callout_codes) == set(callout._REFUSAL_CODES) | {  # noqa: SLF001
+        "child_calls_not_declared"
+    }
+    assert "child_calls_not_declared" in callout_codes
+    assert set(callout_codes).isdisjoint(callout._NOT_DECLARED_CODES)  # noqa: SLF001
     assert exact["compilecache_rank_buckets"] == list(RANK_BUCKETS)
     assert exact["execution_lane_bodies"] == _lane_rows()
     assert exact["pickle_weight_extensions"] == list(PICKLE_WEIGHT_EXTENSIONS)
@@ -202,6 +209,31 @@ def test_worker_value_relation_fence_can_go_red_pgw1237(tmp_path: Path) -> None:
     )
     assert got.returncode == 1
     assert "not-rtx-4090" in got.stdout
+
+
+def test_worker_value_callout_fence_can_go_red_pgw1237(tmp_path: Path) -> None:
+    document = json.loads(_DEFAULT_CORPUS.read_text(encoding="utf-8"))
+    document["exact"]["callout_hub_refusal_codes"][0] = "call_depth_broken"
+    corpus = tmp_path / _DEFAULT_CORPUS.name
+    corpus.write_text(json.dumps(document), encoding="utf-8")
+
+    got = subprocess.run(
+        [
+            "uv",
+            "run",
+            "pytest",
+            "-q",
+            os.fspath(Path(__file__)),
+            "-k",
+            "test_exact_worker_values_match_pgw1237",
+        ],
+        env={**os.environ, "WORKER_VALUE_CONTRACT_FILE": os.fspath(corpus)},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert got.returncode == 1
+    assert "call_depth_broken" in got.stdout
 
 
 def test_worker_value_peer_gate_can_go_red_pgw1237(tmp_path: Path) -> None:

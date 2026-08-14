@@ -1,4 +1,4 @@
 # sha256 of cozy_runtime_env_vectors.json — the shared cozy-local/worker
 # runtime path contract (th#1914 / pgw#1237 / cl#56).
 # PGW lands first; cozy-local vendors both files verbatim.
-f35662e035328b21773e70ea93a5fc237a7410665630713a1b59abddc3d5c149
+90ab5b929248df26dc257463d98f8e4cc622b0698ba0d36c5bd606d734b0b283

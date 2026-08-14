@@ -24,6 +24,15 @@
       "cell_resolve_transport_unavailable"
     ],
     "cell_publish_untrusted_refusal_code": "cell_publish_untrusted_tier",
+    "callout_hub_refusal_codes": [
+      "call_depth_exceeded",
+      "call_cycle_detected",
+      "tree_budget_exceeded",
+      "tier_escalation_denied",
+      "parent_not_running",
+      "budget_not_root",
+      "child_calls_not_declared"
+    ],
     "compilecache_rank_buckets": [
       16,
       32,

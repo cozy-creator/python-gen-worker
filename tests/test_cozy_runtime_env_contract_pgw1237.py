@@ -26,7 +26,7 @@ def _document() -> dict[str, Any]:
     return json.loads(_CORPUS.read_text(encoding="utf-8"))
 
 
-def _variables() -> dict[str, dict[str, str]]:
+def _variables() -> dict[str, dict[str, Any]]:
     document = _document()
     assert document["schema"] == "cozy-runtime-env-v1"
     rows = document["variables"]
@@ -38,7 +38,13 @@ def test_runtime_env_semantics_match_pgw1237(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     rows = _variables()
-    assert set(rows) == {"cache_root", "asset_ref_root", "compiled_graph_root"}
+    assert set(rows) == {
+        "cache_root",
+        "asset_ref_root",
+        "compiled_graph_root",
+        "hub_url",
+        "bearer_token",
+    }
 
     cache = rows["cache_root"]
     cache_root = tmp_path / "cache-root"
@@ -69,6 +75,32 @@ def test_runtime_env_semantics_match_pgw1237(
         compiled_root / compiled["consumer_relative_path"]
     )
     assert compiled["consumer_relative_path"] == local_cell_store.CELLS_DIRNAME
+
+    hub_url = rows["hub_url"]
+    assert hub_url == {
+        "name": "TENSORHUB_URL",
+        "role": "hub_url",
+        "config_field": "tensorhub_url",
+    }
+    monkeypatch.setenv(hub_url["name"], "https://hub.invalid")
+    settings = config.reload_for_test()
+    try:
+        assert getattr(settings, hub_url["config_field"]) == "https://hub.invalid"
+    finally:
+        config.reset_for_test()
+
+    bearer = rows["bearer_token"]
+    assert bearer["name"] == "TENSORHUB_TOKEN"
+    assert bearer["config_field"] == "tensorhub_token"
+    assert bearer["optional"] is True
+    assert bearer["secret"] is True
+    assert "value" not in bearer and "sample" not in bearer
+    monkeypatch.setenv(bearer["name"], "redacted-test-sentinel")
+    settings = config.reload_for_test()
+    try:
+        assert getattr(settings, bearer["config_field"]) == "redacted-test-sentinel"
+    finally:
+        config.reset_for_test()
 
 
 def test_runtime_env_corpus_digest_matches_pgw1237() -> None:
@@ -112,6 +144,8 @@ def test_runtime_env_digest_gate_can_go_red_pgw1237(tmp_path: Path) -> None:
             "name",
             "GEN_WORKER_LOCAL_CELLS_DIR_BROKEN",
         ),
+        ("hub_url", "name", "TENSORHUB_URL_BROKEN"),
+        ("bearer_token", "name", "TENSORHUB_TOKEN_BROKEN"),
     ],
 )
 def test_runtime_env_semantic_fence_can_go_red_pgw1237(

@@ -15,6 +15,18 @@
       "name": "GEN_WORKER_LOCAL_CELLS_DIR",
       "role": "compiled_graph_root",
       "consumer_relative_path": "aot-cells"
+    },
+    {
+      "name": "TENSORHUB_URL",
+      "role": "hub_url",
+      "config_field": "tensorhub_url"
+    },
+    {
+      "name": "TENSORHUB_TOKEN",
+      "role": "bearer_token",
+      "config_field": "tensorhub_token",
+      "optional": true,
+      "secret": true
     }
   ]
 }
