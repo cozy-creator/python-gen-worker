@@ -667,12 +667,8 @@ def _run_warm_gated(job: _WarmJob) -> None:
     # mid-compile attributes to THIS compile marker rather than to whatever
     # tenant request was in flight (which condemns (release, SKU) pairs for a
     # software race).
-    token = postmortem.note_inflight(
-        postmortem.COMPILE_KIND, postmortem.compile_marker(job.label))
-    try:
+    with postmortem.compile_inflight(job.label):
         _run_warm_compile(job)
-    finally:
-        postmortem.clear_inflight(token)
 
 
 def _run_warm_compile(job: _WarmJob) -> None:

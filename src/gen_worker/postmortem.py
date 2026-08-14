@@ -21,6 +21,7 @@ vs ``memory.peak``, and the ``memory.events`` ``oom_kill`` counter delta — so
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -28,7 +29,7 @@ import signal
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 import faulthandler
 from .procsplit import group_ordinal, host_siblings
 
@@ -825,6 +826,29 @@ def compile_marker(label: str) -> str:
     return _COMPILE_FN_PREFIX + str(label or "unknown")
 
 
+@contextlib.contextmanager
+def compile_inflight(
+    label: str, *, path: Optional[Path] = None,
+) -> Iterator[None]:
+    """Name a device-touching COMPILE span before it starts, and retire it on
+    every exit (pgw#1262).
+
+    The `finally` is the load-bearing half: a leaked marker would make the NEXT
+    unrelated signal death read as a compile crash, which is the same
+    misattribution this exists to prevent, pointed the other way.
+
+    Wrapping a span in this is what makes :func:`compile_crash_rows` — and so
+    pgw#714's eager-only reboot — cover it. A device-touching compile/adopt
+    phase that does NOT hold one of these is invisible to that mechanism, and
+    its deaths are charged to whatever tenant request happened to be in flight.
+    """
+    token = note_inflight(COMPILE_KIND, compile_marker(label), path=path)
+    try:
+        yield
+    finally:
+        clear_inflight(token, path=path)
+
+
 def compile_crash_rows(
     path: Optional[Path] = None,
 ) -> Dict[str, Dict[str, Any]]:
@@ -999,6 +1023,7 @@ __all__ = [
     "attribute_all_signal_deaths",
     "attribute_signal_death",
     "compile_crash_rows",
+    "compile_inflight",
     "compile_marker",
     "boot_record_is_volatile",
     "clear_boot_record",

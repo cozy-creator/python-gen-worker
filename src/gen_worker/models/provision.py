@@ -52,6 +52,7 @@ from .memory import place_pipeline
 from .refs import DEFAULT_REF_TAG, parse_model_ref
 from .. import activity as activity_mod
 from .. import mint_workers
+from .. import postmortem
 
 if TYPE_CHECKING:
     from ..aot_identity import ExpectedIdentity
@@ -424,6 +425,19 @@ def arm_aot(
     _resident_before, _ = mint_workers.adopt_watermark(_budget_device)
     _load_bytes = 0
     _emitted = False
+    # pgw#1262: the same seam, for the same reason, one question over. pgw#1168
+    # put the adopt's MEASUREMENT here because this is the one point every arm
+    # route passes; its ATTRIBUTION was never wired at all. The two device
+    # spans below (the load, and the §4.32 gate's forwards) are the adopt's
+    # whole GPU surface, and until now neither held a compile in-flight marker
+    # — so a signal death in either was charged to whatever tenant request was
+    # running, `postmortem.compile_crash_rows()` stayed empty, and pgw#714's
+    # eager-only reboot never fired. Measured 2026-08-14: a z-image pod booked
+    # its adopt SIGSEGV against `generate`, restarted the same two arm_keys and
+    # crash-looped while th#1326 paid to hold it.
+    _adopt_label = "adopt:" + (
+        str((meta or {}).get("family") or getattr(cfg, "family", "") or "")
+        or "unknown")
 
     def _emit_adopt_budget(verify_bytes: int, armed: bool) -> None:
         """One `cell_adopt_budget` row per arm attempt, whatever the outcome.
@@ -474,8 +488,16 @@ def arm_aot(
     #
     # pgw#1176 makes that refusal cheaper still: the attempt is ONE graph
     # class, so a card that cannot hold it costs that class and no other.
-    outcome = aot_serve.enable(
-        pipe, cfg, cache_dir, artifact, expected=expected, declared=declared)
+    #
+    # pgw#1262: and the attempt is NAMED while it runs. `_bind_headroom` turns
+    # a CATCHABLE device OOM into the typed miss above; a device exhaustion
+    # under `expandable_segments:True` (imposed by this SDK at
+    # `settings_authority.py:83`) is a native mapping abort that no `except`
+    # sees, so the process dies here. When it does, this marker is what makes
+    # the death read as a COMPILE crash rather than as the tenant's.
+    with postmortem.compile_inflight(_adopt_label):
+        outcome = aot_serve.enable(
+            pipe, cfg, cache_dir, artifact, expected=expected, declared=declared)
     _, _peak_after_load = mint_workers.adopt_watermark(_budget_device)
     _load_bytes = max(0, _peak_after_load - _resident_before)
     if not outcome.armed and lifted_install_error:
@@ -490,7 +512,17 @@ def arm_aot(
     if outcome.armed:
         # §4.32: quality is proven at MINT and in author CI, never at adoption.
         # An adopting pod materializes, arms and serves.
-        gate_ok = not verify_numerics or gate_cell_numerics(pipe, cfg, strict=True)
+        # pgw#1262: the gate runs TWO forwards on a card that is already
+        # holding the resident pipeline(s) plus the runner just loaded above,
+        # so it is the adopt's peak device moment — and it is where the
+        # 2026-08-14 z-image death actually landed (`probe_cell` ->
+        # `gate_cell_numerics` -> `arm_aot`). Named, so that death is a
+        # compile's.
+        if verify_numerics:
+            with postmortem.compile_inflight(_adopt_label):
+                gate_ok = gate_cell_numerics(pipe, cfg, strict=True)
+        else:
+            gate_ok = True
         _, _peak_after_verify = mint_workers.adopt_watermark(_budget_device)
         if gate_ok:
             _emit_adopt_budget(_peak_after_verify - _peak_after_load, True)
