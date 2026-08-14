@@ -1,0 +1,535 @@
+{
+  "_header": [
+    "th#1871 P1 / pgw#1225 — POSTURE WIRE CONFORMANCE VECTORS.",
+    "Vendored BYTE-IDENTICALLY in tensorhub (internal/orchestrator/measurement/testdata/) and",
+    "python-gen-worker (tests/testdata/). scripts/posture-vector-drift.sh gates it, PGW LANDS FIRST.",
+    "",
+    "WHAT EACH SIDE OWES THIS FILE, and why neither half is the property alone:",
+    "  python-gen-worker  every `wire` object is exactly what the SDK's own posture serializes to",
+    "                     (gen_worker.measured_posture.wire_json). It proves the PRODUCER's shape.",
+    "  tensorhub          every `wire` object decodes to measurement.Posture and digests to",
+    "                     `posture_digest`, with the stated `degraded` / `posture_mismatches` /",
+    "                     `applied_techniques` renderings. It proves the CONSUMER's identity.",
+    "",
+    "THE DIGEST HAS EXACTLY ONE IMPLEMENTATION and it is tensorhub's. The worker never computes",
+    "one — a second canonicalization of the same object is two implementations free to disagree",
+    "while both suites stay green, which is pgw#1188's topology divergence one contract over.",
+    "So the digests below are OPAQUE to python-gen-worker: it pins them, it does not derive them.",
+    "",
+    "`identity_rules` is the part that can go red for a REASON. Each row names two vectors and",
+    "whether they are the same measurement. Those are DESIGN-RULINGS §1.36 decisions, not",
+    "implementation details, and a change that flips one is a change to what the platform",
+    "believes a measurement is."
+  ],
+  "vectors": [
+    {
+      "name": "unreported",
+      "why": "A worker that does not report a posture. Lane only. Its digest must differ from every reported one — an unreported cell is a coverage fact, never a clean measurement.",
+      "wire": {
+        "execution_lane": "fp8-w8a8-dynamic",
+        "attention_backend": ""
+      },
+      "posture_digest": "b485daa6809aca26e2462b6520446cc716424f2c34b253f404480e5bef47a468",
+      "degraded": false,
+      "posture_mismatches": "",
+      "applied_techniques": ""
+    },
+    {
+      "name": "clean_resident",
+      "why": "Everything on the card, the kernel that was asked for, compiled as declared. The only posture whose numbers describe the PAIR rather than the pair plus a workaround.",
+      "wire": {
+        "execution_lane": "fp8-w8a8-dynamic",
+        "attention_backend": "fa3",
+        "attention_backend_wanted": "fa3",
+        "compile_state": "compiled",
+        "compile_state_wanted": "compiled",
+        "residency_mode": "all_resident",
+        "components": [
+          {
+            "component": "transformer",
+            "applied_quant": "fp8-w8a8-dynamic",
+            "bound_quant": "fp8-w8a8-dynamic",
+            "placement": "resident",
+            "bytes": 12884901888
+          },
+          {
+            "component": "vae",
+            "applied_quant": "bf16-w16a16",
+            "bound_quant": "bf16-w16a16",
+            "placement": "resident",
+            "bytes": 335544320
+          }
+        ]
+      },
+      "posture_digest": "d2351640a01d3199dd29e79e22cbf1ba48c2b4bc1cf8a708bfb2475a6fed0c08",
+      "degraded": false,
+      "posture_mismatches": "",
+      "applied_techniques": ""
+    },
+    {
+      "name": "clean_resident_components_reversed",
+      "why": "Byte-identical to clean_resident except the worker enumerated its pipeline in the other order. Same run, same posture.",
+      "wire": {
+        "execution_lane": "fp8-w8a8-dynamic",
+        "attention_backend": "fa3",
+        "attention_backend_wanted": "fa3",
+        "compile_state": "compiled",
+        "compile_state_wanted": "compiled",
+        "residency_mode": "all_resident",
+        "components": [
+          {
+            "component": "vae",
+            "applied_quant": "bf16-w16a16",
+            "bound_quant": "bf16-w16a16",
+            "placement": "resident",
+            "bytes": 335544320
+          },
+          {
+            "component": "transformer",
+            "applied_quant": "fp8-w8a8-dynamic",
+            "bound_quant": "fp8-w8a8-dynamic",
+            "placement": "resident",
+            "bytes": 12884901888
+          }
+        ]
+      },
+      "posture_digest": "d2351640a01d3199dd29e79e22cbf1ba48c2b4bc1cf8a708bfb2475a6fed0c08",
+      "degraded": false,
+      "posture_mismatches": "",
+      "applied_techniques": ""
+    },
+    {
+      "name": "ie707_silent_sdpa_fallback",
+      "why": "The measured specimen §1.36 names: flash-attn absent from the image, the lane declares flash, sdpa runs, nothing says so. One cell away from clean_resident and it is the difference between a ranking and an artifact of image contents.",
+      "wire": {
+        "execution_lane": "fp8-w8a8-dynamic",
+        "attention_backend": "sdpa",
+        "attention_backend_wanted": "fa2",
+        "compile_state": "compiled",
+        "compile_state_wanted": "compiled",
+        "residency_mode": "all_resident",
+        "applied": [
+          {
+            "name": "attention_fallback",
+            "reason": "kernel_unavailable"
+          }
+        ],
+        "components": [
+          {
+            "component": "transformer",
+            "applied_quant": "fp8-w8a8-dynamic",
+            "bound_quant": "fp8-w8a8-dynamic",
+            "placement": "resident",
+            "bytes": 12884901888
+          },
+          {
+            "component": "vae",
+            "applied_quant": "bf16-w16a16",
+            "bound_quant": "bf16-w16a16",
+            "placement": "resident",
+            "bytes": 335544320
+          }
+        ]
+      },
+      "posture_digest": "671d7f02ace7a6a1eb6dee4de3f9efad111d09dc58648171e0dde9ad6b0b9abc",
+      "degraded": true,
+      "posture_mismatches": "attention_backend:fa2\u003esdpa",
+      "applied_techniques": "attention_fallback"
+    },
+    {
+      "name": "deliberate_sdpa",
+      "why": "Same NUMBERS as ie707 and the opposite MEANING: sdpa was asked for and sdpa ran. This is why `wanted` is an identity axis rather than a column.",
+      "wire": {
+        "execution_lane": "fp8-w8a8-dynamic",
+        "attention_backend": "sdpa",
+        "attention_backend_wanted": "sdpa",
+        "compile_state": "compiled",
+        "compile_state_wanted": "compiled",
+        "residency_mode": "all_resident",
+        "components": [
+          {
+            "component": "transformer",
+            "applied_quant": "fp8-w8a8-dynamic",
+            "bound_quant": "fp8-w8a8-dynamic",
+            "placement": "resident",
+            "bytes": 12884901888
+          },
+          {
+            "component": "vae",
+            "applied_quant": "bf16-w16a16",
+            "bound_quant": "bf16-w16a16",
+            "placement": "resident",
+            "bytes": 335544320
+          }
+        ]
+      },
+      "posture_digest": "05ae67289ca00b5ced481674f13625a4e7a0b95b6c98c4af5138c9c084e9326e",
+      "degraded": false,
+      "posture_mismatches": "",
+      "applied_techniques": ""
+    },
+    {
+      "name": "reactive_descent",
+      "why": "model_offload chosen against free VRAM, then group_offload after a CUDA OOM. The order is the finding: group-offload AFTER model-offload failed, not instead of it.",
+      "wire": {
+        "execution_lane": "fp8-w8a8-dynamic",
+        "attention_backend": "sdpa",
+        "attention_backend_wanted": "sdpa",
+        "compile_state": "eager",
+        "residency_mode": "group_offload",
+        "applied": [
+          {
+            "name": "model_offload",
+            "component": "transformer",
+            "reason": "vram_shortfall",
+            "est_slowdown": 2.5
+          },
+          {
+            "name": "group_offload",
+            "component": "transformer",
+            "reason": "cuda_oom",
+            "est_slowdown": 3
+          }
+        ],
+        "components": [
+          {
+            "component": "transformer",
+            "applied_quant": "fp8-w8a8-dynamic",
+            "bound_quant": "bf16-w16a16",
+            "placement": "offloaded",
+            "bytes": 12884901888
+          }
+        ],
+        "shortfall": {
+          "resource": "vram",
+          "component": "transformer",
+          "needed_bytes": 32212254720,
+          "available_bytes": 25769803776
+        }
+      },
+      "posture_digest": "9c3a01f08f7818e3135d9dd6f5afa4fe77be475f391a7705bcf6226181ff4766",
+      "degraded": true,
+      "posture_mismatches": "",
+      "applied_techniques": "residency:group_offload\u003emodel_offload:transformer\u003egroup_offload:transformer"
+    },
+    {
+      "name": "reactive_descent_levers_swapped",
+      "why": "The same two levers reached for in the other order. A DIFFERENT run and a different price.",
+      "wire": {
+        "execution_lane": "fp8-w8a8-dynamic",
+        "attention_backend": "sdpa",
+        "attention_backend_wanted": "sdpa",
+        "compile_state": "eager",
+        "residency_mode": "group_offload",
+        "applied": [
+          {
+            "name": "group_offload",
+            "component": "transformer",
+            "reason": "cuda_oom",
+            "est_slowdown": 3
+          },
+          {
+            "name": "model_offload",
+            "component": "transformer",
+            "reason": "vram_shortfall",
+            "est_slowdown": 2.5
+          }
+        ],
+        "components": [
+          {
+            "component": "transformer",
+            "applied_quant": "fp8-w8a8-dynamic",
+            "bound_quant": "bf16-w16a16",
+            "placement": "offloaded",
+            "bytes": 12884901888
+          }
+        ],
+        "shortfall": {
+          "resource": "vram",
+          "component": "transformer",
+          "needed_bytes": 32212254720,
+          "available_bytes": 25769803776
+        }
+      },
+      "posture_digest": "f0e8fc1e2138954713e1617d52a13d4fa475caa8a886266cbc1928475553bf48",
+      "degraded": true,
+      "posture_mismatches": "",
+      "applied_techniques": "residency:group_offload\u003egroup_offload:transformer\u003emodel_offload:transformer"
+    },
+    {
+      "name": "reactive_descent_bigger_shortfall",
+      "why": "The same descent, short by 8 GiB instead of 6. One cell with two samples, not two cells with one each.",
+      "wire": {
+        "execution_lane": "fp8-w8a8-dynamic",
+        "attention_backend": "sdpa",
+        "attention_backend_wanted": "sdpa",
+        "compile_state": "eager",
+        "residency_mode": "group_offload",
+        "applied": [
+          {
+            "name": "model_offload",
+            "component": "transformer",
+            "reason": "vram_shortfall",
+            "est_slowdown": 2.5
+          },
+          {
+            "name": "group_offload",
+            "component": "transformer",
+            "reason": "cuda_oom",
+            "est_slowdown": 3
+          }
+        ],
+        "components": [
+          {
+            "component": "transformer",
+            "applied_quant": "fp8-w8a8-dynamic",
+            "bound_quant": "bf16-w16a16",
+            "placement": "offloaded",
+            "bytes": 12884901888
+          }
+        ],
+        "shortfall": {
+          "resource": "vram",
+          "component": "transformer",
+          "needed_bytes": 34359738368,
+          "available_bytes": 25769803776
+        }
+      },
+      "posture_digest": "9c3a01f08f7818e3135d9dd6f5afa4fe77be475f391a7705bcf6226181ff4766",
+      "degraded": true,
+      "posture_mismatches": "",
+      "applied_techniques": "residency:group_offload\u003emodel_offload:transformer\u003egroup_offload:transformer"
+    },
+    {
+      "name": "reactive_descent_reestimated",
+      "why": "The same descent with the SDK's slowdown estimates revised. An estimate OF a lever is not a property of the run.",
+      "wire": {
+        "execution_lane": "fp8-w8a8-dynamic",
+        "attention_backend": "sdpa",
+        "attention_backend_wanted": "sdpa",
+        "compile_state": "eager",
+        "residency_mode": "group_offload",
+        "applied": [
+          {
+            "name": "model_offload",
+            "component": "transformer",
+            "reason": "vram_shortfall",
+            "est_slowdown": 2.9
+          },
+          {
+            "name": "group_offload",
+            "component": "transformer",
+            "reason": "cuda_oom",
+            "est_slowdown": 3.4
+          }
+        ],
+        "components": [
+          {
+            "component": "transformer",
+            "applied_quant": "fp8-w8a8-dynamic",
+            "bound_quant": "bf16-w16a16",
+            "placement": "offloaded",
+            "bytes": 12884901888
+          }
+        ],
+        "shortfall": {
+          "resource": "vram",
+          "component": "transformer",
+          "needed_bytes": 32212254720,
+          "available_bytes": 25769803776
+        }
+      },
+      "posture_digest": "9c3a01f08f7818e3135d9dd6f5afa4fe77be475f391a7705bcf6226181ff4766",
+      "degraded": true,
+      "posture_mismatches": "",
+      "applied_techniques": "residency:group_offload\u003emodel_offload:transformer\u003egroup_offload:transformer"
+    },
+    {
+      "name": "h3_declared_compiled_ran_eager",
+      "why": "minimax-h3's largest shape: compiled declared, eager served, for hours, at the shape it serves most. Nothing in any schema could say so before this.",
+      "wire": {
+        "execution_lane": "fp8-w8a8-dynamic",
+        "attention_backend": "fa3",
+        "attention_backend_wanted": "fa3",
+        "compile_state": "eager",
+        "compile_state_wanted": "compiled",
+        "residency_mode": "all_resident",
+        "components": [
+          {
+            "component": "transformer",
+            "applied_quant": "fp8-w8a8-dynamic",
+            "bound_quant": "fp8-w8a8-dynamic",
+            "placement": "resident",
+            "bytes": 12884901888
+          },
+          {
+            "component": "vae",
+            "applied_quant": "bf16-w16a16",
+            "bound_quant": "bf16-w16a16",
+            "placement": "resident",
+            "bytes": 335544320
+          }
+        ]
+      },
+      "posture_digest": "baa49d6182704de4b6bd1cf033f8658a394422127480e69d965976a539be6e51",
+      "degraded": true,
+      "posture_mismatches": "compile_state:compiled\u003eeager",
+      "applied_techniques": ""
+    },
+    {
+      "name": "honest_eager",
+      "why": "An eager run on a lane that declared nothing. Not a mismatch — a mismatch needs a stated expectation to violate.",
+      "wire": {
+        "execution_lane": "fp8-w8a8-dynamic",
+        "attention_backend": "fa3",
+        "attention_backend_wanted": "fa3",
+        "compile_state": "eager",
+        "residency_mode": "all_resident",
+        "components": [
+          {
+            "component": "transformer",
+            "applied_quant": "fp8-w8a8-dynamic",
+            "bound_quant": "fp8-w8a8-dynamic",
+            "placement": "resident",
+            "bytes": 12884901888
+          },
+          {
+            "component": "vae",
+            "applied_quant": "bf16-w16a16",
+            "bound_quant": "bf16-w16a16",
+            "placement": "resident",
+            "bytes": 335544320
+          }
+        ]
+      },
+      "posture_digest": "d2351640a01d3199dd29e79e22cbf1ba48c2b4bc1cf8a708bfb2475a6fed0c08",
+      "degraded": false,
+      "posture_mismatches": "",
+      "applied_techniques": ""
+    },
+    {
+      "name": "isolated_wanted_flash",
+      "why": "flash asked, sdpa engaged, and NOTHING else reported — ie#707 as it actually happened. Isolated on purpose: the realistic pair below also differs in `applied`, so a rule keyed on it cannot fail when `wanted` is severed out of the identity.",
+      "wire": {
+        "execution_lane": "fp8-w8a8-dynamic",
+        "attention_backend": "sdpa",
+        "attention_backend_wanted": "fa2",
+        "residency_mode": "all_resident"
+      },
+      "posture_digest": "37874a7a7a07a2707e45df463b36aa97f1a7ebeb422525d428c2eabcf011b5bc",
+      "degraded": true,
+      "posture_mismatches": "attention_backend:fa2\u003esdpa",
+      "applied_techniques": ""
+    },
+    {
+      "name": "isolated_wanted_sdpa",
+      "why": "The same run with sdpa asked for. Same numbers, and the opposite verdict on whether the pair is mis-ranked.",
+      "wire": {
+        "execution_lane": "fp8-w8a8-dynamic",
+        "attention_backend": "sdpa",
+        "attention_backend_wanted": "sdpa",
+        "residency_mode": "all_resident"
+      },
+      "posture_digest": "596d3fcbf246995c616a079e1d8c9f6351b00520fc408bcb57023ce1777fce10",
+      "degraded": false,
+      "posture_mismatches": "",
+      "applied_techniques": ""
+    },
+    {
+      "name": "honest_compiled",
+      "why": "The same lane's compiled samples. §1.30: compile is a cache question over (execution, GPU), so these two AGGREGATE while h3's mismatch does not.",
+      "wire": {
+        "execution_lane": "fp8-w8a8-dynamic",
+        "attention_backend": "fa3",
+        "attention_backend_wanted": "fa3",
+        "compile_state": "compiled",
+        "residency_mode": "all_resident",
+        "components": [
+          {
+            "component": "transformer",
+            "applied_quant": "fp8-w8a8-dynamic",
+            "bound_quant": "fp8-w8a8-dynamic",
+            "placement": "resident",
+            "bytes": 12884901888
+          },
+          {
+            "component": "vae",
+            "applied_quant": "bf16-w16a16",
+            "bound_quant": "bf16-w16a16",
+            "placement": "resident",
+            "bytes": 335544320
+          }
+        ]
+      },
+      "posture_digest": "d2351640a01d3199dd29e79e22cbf1ba48c2b4bc1cf8a708bfb2475a6fed0c08",
+      "degraded": false,
+      "posture_mismatches": "",
+      "applied_techniques": ""
+    }
+  ],
+  "identity_rules": [
+    {
+      "rule": "components are SORTED before digesting",
+      "a": "clean_resident",
+      "b": "clean_resident_components_reversed",
+      "same_digest": true,
+      "why": "A worker enumerating its pipeline in a different order is the same posture. If this goes red the identity forks on an implementation detail of the producer and every cell splits in two."
+    },
+    {
+      "rule": "applied techniques are NOT sorted",
+      "a": "reactive_descent",
+      "b": "reactive_descent_levers_swapped",
+      "same_digest": false,
+      "why": "The order the worker reached for levers is a fact about the run. If this goes green the two descents aggregate into a cell whose mean describes neither."
+    },
+    {
+      "rule": "shortfall magnitudes are EXCLUDED",
+      "a": "reactive_descent",
+      "b": "reactive_descent_bigger_shortfall",
+      "same_digest": true,
+      "why": "Two runs short by 6.1 and 6.3 GiB that reached for the same levers are one cell with two samples. Including the byte counts shatters every cell into singletons."
+    },
+    {
+      "rule": "est_slowdown is EXCLUDED",
+      "a": "reactive_descent",
+      "b": "reactive_descent_reestimated",
+      "same_digest": true,
+      "why": "It is the worker's estimate OF the lever, not a property of the run. Two SDK versions estimating differently must not fork one posture."
+    },
+    {
+      "rule": "wanted is an IDENTITY axis",
+      "a": "isolated_wanted_flash",
+      "b": "isolated_wanted_sdpa",
+      "same_digest": false,
+      "why": "Identical numbers, opposite meanings: one is a clean measurement of the sdpa lane, the other is evidence the pair is mis-ranked. Keyed on the ISOLATED pair — the realistic one below differs in `applied` too, so it stays green when `wanted` is severed and proves nothing."
+    },
+    {
+      "rule": "wanted is an IDENTITY axis (the realistic pair)",
+      "a": "ie707_silent_sdpa_fallback",
+      "b": "deliberate_sdpa",
+      "same_digest": false,
+      "why": "The same rule as it appears in the field: the silent fallback also raises a lever, so this pair separates for two reasons. Kept because it is the shape a reader will actually meet, and NOT relied on as the red proof."
+    },
+    {
+      "rule": "the APPLIED compile state is NOT an identity axis",
+      "a": "honest_eager",
+      "b": "honest_compiled",
+      "same_digest": true,
+      "why": "§1.30: compile is a cache question over (execution, GPU) — always preferred, never identity. Keying on it splits every cell in two on a fact that is not part of what it is."
+    },
+    {
+      "rule": "a compile MISMATCH IS an identity axis",
+      "a": "honest_compiled",
+      "b": "h3_declared_compiled_ran_eager",
+      "same_digest": false,
+      "why": "Asked compiled, got eager is a degradation with an owner, not a cache state. Averaging it into the compiled number is how minimax-h3's eager hours vanished."
+    },
+    {
+      "rule": "an unreported posture is not a clean one",
+      "a": "unreported",
+      "b": "clean_resident",
+      "same_digest": false,
+      "why": "Nobody looked and everything was fine must never share a key. This is the property that lets the typed posture arrive with no backfill and no dual-read."
+    }
+  ]
+}

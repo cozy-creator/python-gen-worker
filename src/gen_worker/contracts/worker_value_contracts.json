@@ -1,0 +1,401 @@
+{
+  "schema": "worker-value-contracts-v1",
+  "_comment": "th#1914 / pgw#1237: public carrier for exact worker values and deliberately bounded cross-repo relations. Tensorhub vendors this file byte-for-byte and binds its private consumers to the same rows. Rows under relations state their domain explicitly; they are not claims about arbitrary inputs.",
+  "exact": {
+    "activity_decision_kinds": [
+      "self_mint_compile",
+      "warmup",
+      "aot_mint_phases"
+    ],
+    "activity_duration_rollups": [
+      {
+        "kind": "aot_mint_phases",
+        "phase": "minted"
+      },
+      {
+        "kind": "jit_compile",
+        "phase": "minted"
+      }
+    ],
+    "cell_resolve_hub_refusal_codes": [
+      "cell_resolve_ambiguous",
+      "compiled_graph_resolve_answer_out_of_order",
+      "compiled_graph_resolve_batch_signature",
+      "cell_resolve_client_supplied_field",
+      "compiled_graph_resolve_duplicate_key",
+      "cell_resolve_incomplete",
+      "compiled_graph_resolve_shared_receipt",
+      "compiled_graph_resolve_short_answer",
+      "compiled_graph_resolve_too_many_keys",
+      "cell_resolve_transport_unavailable",
+      "compiled_graph_resolve_unknown_status"
+    ],
+    "cell_publish_untrusted_refusal_code": "cell_publish_untrusted_tier",
+    "hardware_unsuitable_reason_classes": [
+      "torch_unavailable",
+      "cuda_unavailable",
+      "driver_too_old",
+      "cuda_error",
+      "unknown",
+      "worker_fatal"
+    ],
+    "lora_weight_bound": 4.0,
+    "callout_hub_refusal_codes": [
+      "call_depth_exceeded",
+      "call_cycle_detected",
+      "tree_budget_exceeded",
+      "tier_escalation_denied",
+      "parent_not_running",
+      "budget_not_root",
+      "child_calls_not_declared"
+    ],
+    "model_ref_sources": [
+      "tensorhub",
+      "huggingface",
+      "civitai",
+      "modelscope"
+    ],
+    "serving_modes": [
+      "eager",
+      "jit_cell",
+      "aot_cell"
+    ],
+    "per_request_fallback_reasons": [
+      "guard_miss",
+      "ingress_refused",
+      "healing",
+      "volatile"
+    ],
+    "eager_posture_reasons": [
+      "arm_pending",
+      "mint_in_progress",
+      "no_compile_declared",
+      "uncompiled",
+      "graph_break",
+      "declared_range_exceeded",
+      "operator_eager_only"
+    ],
+    "boot_phase_producer_values": [
+      "cell_arm",
+      "cell_fetch",
+      "cell_hub_rtt",
+      "cell_verify",
+      "compiled_swap",
+      "component_fetch",
+      "declaration_compose",
+      "eager_ready",
+      "entry_admit",
+      "env_establish",
+      "first_request_servable",
+      "hello",
+      "key_fold",
+      "lib_memo",
+      "pipeline_load",
+      "sdk_ready",
+      "trace_for_key",
+      "warmup",
+      "weights_fetch"
+    ],
+    "boot_outcomes": [
+      "ok",
+      "refused",
+      "failed",
+      "skipped"
+    ],
+    "boot_sources": [
+      "cas",
+      "volume",
+      "r2",
+      "hf_cache",
+      "inflight_share",
+      "local"
+    ],
+    "compilecache_rank_buckets": [
+      16,
+      32,
+      64,
+      128
+    ],
+    "execution_lane_bodies": [
+      {
+        "body": "fp8-w8a8-dynamic",
+        "family": "fp8",
+        "execution": [
+          "compiled"
+        ]
+      },
+      {
+        "body": "nvfp4-w4a4-static",
+        "family": "4bit",
+        "execution": [
+          "compiled"
+        ]
+      },
+      {
+        "body": "svdq-fp4-w4a4",
+        "family": "4bit",
+        "execution": [
+          "eager"
+        ]
+      },
+      {
+        "body": "svdq-int4-w4a4",
+        "family": "4bit",
+        "execution": [
+          "eager"
+        ]
+      },
+      {
+        "body": "bf16-w16a16",
+        "family": "bf16",
+        "execution": [
+          "compiled",
+          "eager"
+        ]
+      },
+      {
+        "body": "fp8-w8a16",
+        "family": "fp8",
+        "execution": [
+          "compiled",
+          "eager"
+        ]
+      }
+    ],
+    "pickle_weight_extensions": [
+      ".bin",
+      ".ckpt",
+      ".pt",
+      ".pth",
+      ".pkl",
+      ".pickle"
+    ]
+  },
+  "relations": {
+    "compilecache_flavor_label": {
+      "domain": "canonical sku slug, Python torch release, and worker execution-lane alias",
+      "cases": [
+        {
+          "sku": "rtx-4090",
+          "torch_version": "2.9.1+cu128",
+          "weight_lane": "",
+          "result": "inductor-rtx-4090-torch2.9"
+        },
+        {
+          "sku": "h100-80gb-hbm3",
+          "torch_version": "2.13.0+cu130",
+          "weight_lane": "w8a8",
+          "result": "inductor-h100-80gb-hbm3-torch2.13-w8a8"
+        },
+        {
+          "sku": "rtx-4090",
+          "torch_version": "2.9.1",
+          "weight_lane": "fp8-hooks",
+          "result": "inductor-rtx-4090-torch2.9-w8a16"
+        }
+      ]
+    },
+    "fn_degraded_ran": {
+      "relation": "pgw_producer_values are a subset of tensorhub_accepted_values",
+      "pgw_producer_values": [
+        "bf16",
+        "cpu",
+        "fp8",
+        "fp8_storage",
+        "offload"
+      ],
+      "tensorhub_accepted_values": [
+        "bf16",
+        "cpu",
+        "emergency_quant",
+        "fp8",
+        "fp8_storage",
+        "offload"
+      ],
+      "hub_only_legacy_values": [
+        "emergency_quant"
+      ]
+    },
+    "sku_slug": {
+      "domain": "ASCII GPU identity strings",
+      "cases": [
+        {
+          "input": "NVIDIA GeForce RTX 4090",
+          "result": "rtx-4090"
+        },
+        {
+          "input": "NVIDIA H100 80GB HBM3",
+          "result": "h100-80gb-hbm3"
+        },
+        {
+          "input": " NVIDIA---RTX 5090 ",
+          "result": "rtx-5090"
+        },
+        {
+          "input": "",
+          "result": ""
+        }
+      ]
+    },
+    "system_repo": {
+      "domain": "non-empty family names",
+      "cases": [
+        {
+          "family": "sdxl",
+          "result": "root/family-sdxl"
+        },
+        {
+          "family": "  wan22  ",
+          "result": "root/family-wan22"
+        }
+      ]
+    },
+    "execution_lane_with_bucket": {
+      "domain": "canonical base lane plus zero or a declared rank bucket",
+      "cases": [
+        {
+          "base": "",
+          "bucket": 0,
+          "result": ""
+        },
+        {
+          "base": "",
+          "bucket": 32,
+          "result": "lora32"
+        },
+        {
+          "base": "w8a16",
+          "bucket": 0,
+          "result": "w8a16"
+        },
+        {
+          "base": "w8a16",
+          "bucket": 16,
+          "result": "w8a16-lora16"
+        },
+        {
+          "base": "w8a8",
+          "bucket": 128,
+          "result": "w8a8-lora128"
+        },
+        {
+          "base": "w4a4",
+          "bucket": 64,
+          "result": "w4a4-lora64"
+        }
+      ]
+    },
+    "layout_id": {
+      "domain": "registered handles shared by both repositories",
+      "cases": [
+        {
+          "input": "plain.bf16@1",
+          "topology": null,
+          "quant": "plain.bf16@1",
+          "render": "+plain.bf16@1"
+        },
+        {
+          "input": "diffusers.multifile@1+plain.bf16@1",
+          "topology": "diffusers.multifile@1",
+          "quant": "plain.bf16@1",
+          "render": "diffusers.multifile@1+plain.bf16@1"
+        },
+        {
+          "input": "any+cozy.fp8-rowwise@1",
+          "topology": "any",
+          "quant": "cozy.fp8-rowwise@1",
+          "render": "any+cozy.fp8-rowwise@1"
+        },
+        {
+          "input": "transformers.native@1+",
+          "topology": "transformers.native@1",
+          "quant": null,
+          "render": "transformers.native@1+"
+        }
+      ],
+      "refusals": [
+        "",
+        "unknown.contract@1",
+        "plain.bf16@1+plain.bf16@1+extra"
+      ]
+    },
+    "derived_artifact_identity": {
+      "domain": "string source digest, ordered string converter digests, LayoutId wire render",
+      "cases": [
+        {
+          "source_digest": "sha256:source-a",
+          "chain_digests": [],
+          "target": {
+            "topology": null,
+            "quant": "plain.bf16@1"
+          },
+          "result": "582c7d9e7bc318ba8e3c57ef31d9741ee52286c1d15af13e8e418cc06d9a195c"
+        },
+        {
+          "source_digest": "sha256:source-b",
+          "chain_digests": [
+            "0123456789abcdef"
+          ],
+          "target": {
+            "topology": "diffusers.multifile@1",
+            "quant": "plain.bf16@1"
+          },
+          "result": "ceb9e6edf36a45e5c53443a784eda3319e55c9b496dc63459e16539caf7f2366"
+        },
+        {
+          "source_digest": "sha256:source-b",
+          "chain_digests": [
+            "aaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbb"
+          ],
+          "target": {
+            "topology": "diffusers.multifile@1",
+            "quant": "cozy.fp8-rowwise@1"
+          },
+          "result": "1341d3b74f287daf879f4928564720e6145edfa667e2375eeeb574334de58cac"
+        }
+      ]
+    },
+    "sp_fabric": {
+      "domain": "canonical worker-emitted interconnect spellings",
+      "min_peer_gbps": 200.0,
+      "cases": [
+        {
+          "interconnect": "nvlink",
+          "peer_gbps": 241.9,
+          "peer_access": true,
+          "admits": true,
+          "wedge": false
+        },
+        {
+          "interconnect": "nvlink",
+          "peer_gbps": 199.9,
+          "peer_access": true,
+          "admits": false,
+          "wedge": false
+        },
+        {
+          "interconnect": "pcie-p2p",
+          "peer_gbps": 500.0,
+          "peer_access": true,
+          "admits": false,
+          "wedge": false
+        },
+        {
+          "interconnect": "host-staged",
+          "peer_gbps": 0.0,
+          "peer_access": true,
+          "admits": false,
+          "wedge": true
+        },
+        {
+          "interconnect": "",
+          "peer_gbps": 0.0,
+          "peer_access": false,
+          "admits": false,
+          "wedge": false
+        }
+      ]
+    }
+  }
+}
