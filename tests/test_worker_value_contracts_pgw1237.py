@@ -18,8 +18,10 @@ from gen_worker import (
     callout,
     cell_resolve,
     compile_cache,
+    cuda_probe,
     host_canary,
     serving_mode,
+    worker_fatal,
 )
 from gen_worker.api.binding import ModelSource
 from gen_worker.convert.layout_converters import derived_artifact_identity
@@ -32,6 +34,7 @@ from gen_worker.models.tensor_layout_contract import (
     parse_layout_id,
 )
 from gen_worker.models.w8a8_lora import RANK_BUCKETS
+from gen_worker.utils.lora import LORA_WEIGHT_BOUND
 
 
 _ROOT = Path(__file__).parents[1]
@@ -97,6 +100,27 @@ def test_exact_worker_values_match_pgw1237() -> None:
         cell_resolve.REFUSAL_CODES
     )
     assert exact["cell_publish_untrusted_refusal_code"] == UNTRUSTED_REFUSAL_CODE
+    assert exact["hardware_unsuitable_reason_classes"] == [
+        "torch_unavailable",
+        "cuda_unavailable",
+        "driver_too_old",
+        "cuda_error",
+        "unknown",
+        worker_fatal.REASON_CLASS,
+    ]
+    assert {
+        cuda_probe.classify_probe_failure(reason)
+        for reason in (
+            "torch unavailable: import failed",
+            "torch.cuda.is_available() is False",
+            "CUDA initialization: driver too old (found version 12080)",
+            "CUDA-capable device is busy",
+            "",
+        )
+    } == set(exact["hardware_unsuitable_reason_classes"]) - {
+        worker_fatal.REASON_CLASS
+    }
+    assert exact["lora_weight_bound"] == LORA_WEIGHT_BOUND
     callout_codes = exact["callout_hub_refusal_codes"]
     assert len(callout_codes) == 7
     assert set(callout_codes) == set(callout._REFUSAL_CODES) | {  # noqa: SLF001
@@ -275,13 +299,18 @@ def test_worker_value_semantic_fence_can_go_red_pgw1237(tmp_path: Path) -> None:
     "boot_phase_producer_values",
     "boot_outcomes",
     "boot_sources",
+    "hardware_unsuitable_reason_classes",
+    "lora_weight_bound",
 ])
 def test_each_added_exact_section_can_go_red_pgw1237(
     tmp_path: Path, section: str,
 ) -> None:
     document = json.loads(_DEFAULT_CORPUS.read_text(encoding="utf-8"))
     mutant = f"broken-{section}"
-    document["exact"][section][0] = mutant
+    if isinstance(document["exact"][section], list):
+        document["exact"][section][0] = mutant
+    else:
+        document["exact"][section] = 99.0
     corpus = tmp_path / _DEFAULT_CORPUS.name
     corpus.write_text(json.dumps(document), encoding="utf-8")
 
@@ -301,7 +330,7 @@ def test_each_added_exact_section_can_go_red_pgw1237(
         text=True,
     )
     assert got.returncode == 1
-    assert mutant in got.stdout
+    assert mutant in got.stdout or section in got.stdout
 
 
 def test_worker_value_relation_fence_can_go_red_pgw1237(tmp_path: Path) -> None:
