@@ -365,7 +365,6 @@ def _attempt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **wires: Any) -> A
     return boot_adopt.attempt(
         function="generate", modules=("micro_diffusion.main",), cfg=_Cfg(),
         slots={}, declared_hint=3,
-        envelope={"shapes": [[64, 64]], "text_lens": [8], "guidance": []},
         work_root=tmp_path)[0]
 
 

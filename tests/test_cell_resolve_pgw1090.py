@@ -459,8 +459,6 @@ def _attempt(monkeypatch, tmp_path, *, derive=None, resolve_batch=None,
     (out,) = boot_adopt.attempt(
         function="txt2img", modules=("m",), cfg=_Cfg(), slots={},
         declared_hint=3,
-        envelope={"shapes": [[1024, 1024]], "text_lens": [77],
-                  "guidance": [7.5]},
         work_root=tmp_path)
     return out
 
@@ -488,8 +486,6 @@ def _attempt_all(monkeypatch, tmp_path, *, derive=None, resolve_batch=None,
     return boot_adopt.attempt(
         function="txt2img", modules=("m",), cfg=_Cfg(), slots={},
         declared_hint=3,
-        envelope={"shapes": [[1024, 1024]], "text_lens": [77],
-                  "guidance": [7.5]},
         work_root=tmp_path)
 
 

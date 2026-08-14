@@ -8446,7 +8446,6 @@ class Executor:
             cfg=cfg,
             slots=slots,
             declared_hint=declared_hint,
-            envelope=fleet_cells.declared_envelope_block(cfg),
             work_root=work_root,
             # The memo lives beside the cell cache and OUTLIVES one boot on a
             # pod with a volume — which is the whole point (§4.28's

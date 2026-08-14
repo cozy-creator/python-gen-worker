@@ -380,7 +380,6 @@ def attempt(
     cfg: Any,
     slots: Mapping[str, MintSlot],
     declared_hint: int,
-    envelope: Mapping[str, Any],
     work_root: Path,
     memo_dir: Optional[Path] = None,
     cache_dir: Optional[Path] = None,
@@ -397,9 +396,7 @@ def attempt(
     genuinely about the declaration rather than about a class.
 
     ``declared_hint`` is ``len(aot_declaration.cell_plans(decl))`` — it sizes
-    the trace pool and nothing else. ``envelope`` is
-    ``fleet_cells.declared_envelope_block(cfg)``, i.e. the same extraction the
-    publish path recomputes the envelope axis from.
+    the trace pool and nothing else.
 
     ``hub_absent`` (pgw#1127) is the caller's own sentence for why there is
     nobody to ask over the wire, "" when there is. It is a DETAIL, not a
