@@ -7,13 +7,20 @@ from an md5-over-key:shape lookup five libraries down.
 
 Classification is by the keys that DIFFER, not by counting: the minimax-h3
 diffusers repackaging and the minimax-native tree share exactly one key out of
-638/535, and the attention projection is where they part — fused
-`blocks.N.attn.qkv_proj` versus split `transformer_blocks.N.attn.to_q`.
+638/535, and the ATTENTION PROJECTIONS are where they part — fused
+`…attn.qkv_proj` versus split `…attn.to_q` / `to_k` / `to_v`. That
+discriminator is used directly rather than through a block-prefix pattern,
+because the block prefix varies across families (`transformer_blocks`,
+`single_transformer_blocks`, `blocks`, `down_blocks.N.attentions.N.…`) and the
+projection split does not.
 
-An unrecognized key set returns ``""``: UNKNOWN, which refuses nothing. A
-classifier that refused what it could not name would be an upper bound
-wearing a lower bound's clothes, and the fleet is full of legal trees this
-one has never seen.
+**Unclassified is not silently OK.** The caller is told three things — the
+token, whether the tree is in the DENOISER position, and whether any tensors
+were read — and it fails closed on the one combination that is dangerous: a
+denoiser whose key convention matches nothing registered. The axis does not
+apply to a VAE, a text encoder or a scheduler, and reporting "unknown" for
+those is a fact, not a hedge; `gen_worker.discovery.decode_set` is where that
+distinction becomes a refusal or a pass.
 """
 
 from __future__ import annotations
@@ -24,6 +31,8 @@ import struct
 from pathlib import Path
 from typing import Iterable
 
+import msgspec
+
 from .safetensors_header import header_len_ok
 from .tensor_layout_contract import (
     KEYS_DIFFUSERS_SPLIT_QKV,
@@ -31,21 +40,38 @@ from .tensor_layout_contract import (
     KEYS_TRANSFORMERS_NATIVE,
 )
 
-# Ordered: the first rule whose pattern appears wins, and the two denoiser
-# conventions are checked before the generic transformers one because a
-# transformers-style prefix can appear inside either.
+# Ordered: the first rule that matches wins. FUSED is checked first because a
+# tree carrying fused projections is the one no diffusers class can ingest, and
+# a tree carrying both spellings is a repackaging in progress, not a diffusers
+# tree.
 _RULES: tuple[tuple[str, "re.Pattern[str]"], ...] = (
-    (KEYS_NATIVE_FUSED_QKV,
-     re.compile(r"(^|\.)blocks\.\d+\..*\.(qkv_proj|qkv)\.")),
-    (KEYS_DIFFUSERS_SPLIT_QKV,
-     re.compile(r"(^|\.)transformer_blocks\.\d+\..*\.to_q\.")),
+    (KEYS_NATIVE_FUSED_QKV, re.compile(r"\.(qkv_proj|to_qkv|qkv)\.")),
+    (KEYS_DIFFUSERS_SPLIT_QKV, re.compile(r"\.(to_q|to_k|to_v)\.")),
     (KEYS_TRANSFORMERS_NATIVE,
-     re.compile(r"(^|\.)(model\.layers|encoder\.layer|encoder\.block)\.\d+\.")),
+     re.compile(r"\.(q_proj|k_proj|v_proj|query|key|value)\.")),
 )
 
 #: Header bytes are bounded by `header_len_ok`; this caps how many FILES we
 #: open, because a sharded tree's shards share one convention.
 _MAX_FILES = 8
+
+#: How many keys a refusal quotes. Enough to recognize the convention, few
+#: enough that the message stays readable.
+_SAMPLE = 6
+
+
+class SnapshotKeys(msgspec.Struct, frozen=True, kw_only=True):
+    """What the header scan found, and where it looked."""
+
+    topology: str          # a registered token, or "" for unclassified
+    denoiser: bool         # the scanned tree is in the DENOISER position
+    saw_tensors: bool      # any safetensors header was actually read
+    sample: tuple[str, ...] = ()
+
+    @property
+    def unclassified_denoiser(self) -> bool:
+        """The one combination that must fail closed."""
+        return self.denoiser and self.saw_tensors and not self.topology
 
 
 def tensor_keys(files: Iterable[Path]) -> tuple[str, ...]:
@@ -79,29 +105,53 @@ def identify_keys(keys: Iterable[str]) -> str:
     return ""
 
 
-def identify_snapshot_keys(root: Path, component: str = "") -> str:
-    """The key convention of a snapshot's denoiser tree, or ``""``.
+def _scan(directory: Path) -> tuple[str, tuple[str, ...]]:
+    files = sorted(p for p in directory.glob("*.safetensors") if p.is_file())
+    if not files:
+        return "", ()
+    keys = tensor_keys(files)
+    return identify_keys(keys), tuple(sorted(keys)[:_SAMPLE])
 
-    ``component`` names the subdirectory to read; empty scans the root's own
-    safetensors (single-file and root-layout trees).
+
+def classify_snapshot(root: Path, component: str = "") -> SnapshotKeys:
+    """Classify a snapshot's tree, reporting whether it is the DENOISER.
+
+    ``component`` names the subdirectory to read; empty scans the denoiser
+    component dirs and then the root. A ROOT-layout tree — one with no
+    ``model_index.json`` — is itself the denoiser (the singlefile and
+    sharded-transformers artifacts the quantized loaders detect), which is why
+    the position is derived here rather than guessed by the caller.
     """
     from ..component_vocab import denoiser_components
 
     base = Path(root)
+    denoisers = set(denoiser_components())
     if base.is_file():
-        return identify_keys(tensor_keys([base]))
+        keys = tensor_keys([base])
+        return SnapshotKeys(topology=identify_keys(keys), denoiser=True,
+                            saw_tensors=bool(keys),
+                            sample=tuple(sorted(keys)[:_SAMPLE]))
     if not base.is_dir():
-        return ""
-    candidates = [base / component] if component else [
-        base / name for name in denoiser_components()
-    ] + [base]
-    for directory in candidates:
+        return SnapshotKeys(topology="", denoiser=False, saw_tensors=False)
+
+    if component:
+        topology, sample = _scan(base / component)
+        return SnapshotKeys(
+            topology=topology, denoiser=component in denoisers,
+            saw_tensors=bool(sample), sample=sample)
+
+    for name in denoiser_components():
+        directory = base / name
         if not directory.is_dir():
             continue
-        files = sorted(p for p in directory.glob("*.safetensors") if p.is_file())
-        if not files:
-            continue
-        found = identify_keys(tensor_keys(files))
-        if found:
-            return found
-    return ""
+        topology, sample = _scan(directory)
+        if sample:
+            return SnapshotKeys(topology=topology, denoiser=True,
+                                saw_tensors=True, sample=sample)
+    topology, sample = _scan(base)
+    # A root-layout tree IS the denoiser; a pipeline root that merely happens
+    # to hold loose tensors beside a `model_index.json` is not.
+    return SnapshotKeys(
+        topology=topology,
+        denoiser=bool(sample) and not (base / "model_index.json").exists(),
+        saw_tensors=bool(sample), sample=sample)

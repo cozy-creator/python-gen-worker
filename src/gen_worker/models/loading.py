@@ -638,7 +638,9 @@ def require_decodable(contract: str, path: Any, *, component: str = "") -> None:
     first: `plain.bf16@1` minimax-native weights (fused `blocks.N.attn.qkv_proj`)
     and `plain.bf16@1` diffusers weights (split `to_q/to_k/to_v`) are the same
     contract, the same file topology and one key in common, and the diffusers
-    class cannot read the native tree at all.
+    class cannot read the native tree at all. A DENOISER whose convention
+    matches nothing registered refuses too — unknown is never a hopeful pass
+    where a model class is chosen from the architecture.
 
     The declared decode-set is th#1938's third intersection and the hub answers
     it ahead of time — but the worker is where the bytes actually arrive, so it
@@ -650,12 +652,12 @@ def require_decodable(contract: str, path: Any, *, component: str = "") -> None:
     module-level import here would make that walk import its own caller.
     """
     from ..discovery.decode_set import require_decodable as _require
-    from .key_topology import identify_snapshot_keys
+    from .key_topology import classify_snapshot
 
     _require(
         contract,
         where=str(path),
-        key_topology=identify_snapshot_keys(Path(path), component),
+        keys=classify_snapshot(Path(path), component),
     )
 
 

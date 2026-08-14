@@ -34,6 +34,8 @@ from gen_worker.discovery.decode_set import (
     REFUSAL_KEY_TOPOLOGY_UNSUPPORTED,
     ContractNotDecodableError,
     DecodeSet,
+    DecodeSetDriftError,
+    KeyTopologyUnclassifiedError,
     KeyTopologyUnsupportedError,
     accepted_key_topologies,
     assert_matches_baked,
@@ -42,7 +44,7 @@ from gen_worker.discovery.decode_set import (
     nearest_declared,
     require_decodable,
 )
-from gen_worker.models.key_topology import identify_keys, identify_snapshot_keys
+from gen_worker.models.key_topology import classify_snapshot, identify_keys
 from gen_worker.models.tensor_layout_contract import (
     CONTRACT_COZY_FP8_ROWWISE,
     CONTRACT_COZY_SVDQ_NVFP4_LR8,
@@ -153,10 +155,20 @@ def test_drift_between_the_baked_block_and_this_process_fails_closed() -> None:
     live = derive_decode_set()
     assert_matches_baked(manifest_block(live), live)  # agreement is silent
 
-    stale = dict(manifest_block(live), digest="0" * 64)
-    with pytest.raises(ContractNotDecodableError) as excinfo:
+    # A lock claiming a contract this process cannot derive: the shape of a
+    # decoder whose dependency is present at build and absent in the image.
+    stale = manifest_block(live)
+    stale["digest"] = "0" * 64
+    stale["contracts"] = stale["contracts"] + [
+        {"contract": "bfl.nvfp4-preswizzled@1", "decoder": "gone:decode"}]
+    with pytest.raises(DecodeSetDriftError) as excinfo:
         assert_matches_baked(stale, live)
-    assert "decode-set drift" in str(excinfo.value)
+    err = excinfo.value
+    assert err.code == "decode_set_drift"
+    assert err.lost == ("bfl.nvfp4-preswizzled@1",)
+    assert err.gained == ()
+    assert "decode-set drift" in str(err)
+    assert "Rebuild the image" in str(err)
 
     # An image that predates the block is UNPROVEN, not divergent.
     assert_matches_baked({}, live)
@@ -531,8 +543,11 @@ def test_the_two_h3_repackagings_classify_differently() -> None:
     assert identify_keys(_DIFFUSERS_KEYS) == "diffusers.split-qkv"
     assert identify_keys(("model.layers.0.self_attn.q_proj.weight",)) \
         == "transformers.native"
-    # A key set the classifier has never seen is UNKNOWN, never a refusal: a
-    # classifier that refused what it could not name would be an upper bound.
+    # The block prefix varies by family and the projection split does not, so
+    # flux's `single_transformer_blocks` classifies with everything else.
+    assert identify_keys(
+        ("single_transformer_blocks.0.attn.to_q.weight",)) \
+        == "diffusers.split-qkv"
     assert identify_keys(("some.tensor.weight",)) == ""
     assert identify_keys(()) == ""
 
@@ -545,8 +560,53 @@ def test_the_classifier_reads_headers_only(tmp_path: Path) -> None:
     _safetensors(root / "transformer" / "model.safetensors",
                  {k: "BF16" for k in _NATIVE_KEYS})
 
-    assert identify_snapshot_keys(root) == "native.fused-qkv"
-    assert identify_snapshot_keys(root, "transformer") == "native.fused-qkv"
+    whole = classify_snapshot(root)
+    assert whole.topology == "native.fused-qkv"
+    assert whole.denoiser is True
+    assert classify_snapshot(root, "transformer").topology == "native.fused-qkv"
+
+
+def test_unknown_means_REFUSE_for_a_denoiser_and_NOT_APPLICABLE_elsewhere(
+    tmp_path: Path,
+) -> None:
+    """The exact semantics of "unclassified", because the phrase is the one a
+    later reader will get wrong.
+
+    A DENOISER whose keys match nothing registered fails closed — the model
+    class is chosen from the architecture, so a hopeful pass is te#185's
+    second stop. A VAE's keys are not evaluated at all: no
+    architecture-specific class is selected from them, and refusing there
+    would refuse the whole fleet to catch nothing."""
+    root = tmp_path / "snap"
+    (root / "transformer").mkdir(parents=True)
+    (root / "vae").mkdir()
+    (root / "model_index.json").write_text(json.dumps({
+        "_class_name": "FakePipeline",
+        "transformer": ["diffusers", "FakeTransformer"],
+    }))
+    alien = {"stack.0.mixer.in.weight": "BF16", "stack.0.mixer.out.weight": "BF16"}
+    _safetensors(root / "transformer" / "model.safetensors", alien)
+    _safetensors(root / "vae" / "model.safetensors", alien)
+
+    denoiser = classify_snapshot(root, "transformer")
+    assert denoiser.topology == ""
+    assert denoiser.unclassified_denoiser is True
+
+    vae = classify_snapshot(root, "vae")
+    assert vae.topology == ""
+    assert vae.unclassified_denoiser is False   # the axis does not apply
+
+    ds = derive_decode_set()
+    with pytest.raises(KeyTopologyUnclassifiedError) as excinfo:
+        require_decodable(CONTRACT_PLAIN_BF16, decode_set=ds,
+                          where=str(root), keys=denoiser)
+    err = excinfo.value
+    assert err.code == "decode_set_key_topology_unclassified"
+    assert "stack.0.mixer.in.weight" in str(err)
+    assert "native.fused-qkv" in str(err)   # what IS registered
+    # The same bytes under a non-denoiser component pass, by design.
+    require_decodable(CONTRACT_PLAIN_BF16, decode_set=ds, where=str(root),
+                      keys=vae)
 
 
 def test_no_decoder_here_ingests_the_native_key_set() -> None:
@@ -558,6 +618,30 @@ def test_no_decoder_here_ingests_the_native_key_set() -> None:
         assert "native.fused-qkv" not in accepted_key_topologies(contract, ds)
     assert accepted_key_topologies(CONTRACT_PLAIN_BF16, ds) == (
         "diffusers.split-qkv", "transformers.native")
+
+
+def test_an_unclassifiable_denoiser_refuses_through_the_load_dispatch(
+    tmp_path: Path,
+) -> None:
+    """The fail-closed half, through the production dispatch rather than
+    through `require_decodable` directly."""
+    from gen_worker.models import loading
+
+    root = tmp_path / "alien"
+    (root / "transformer").mkdir(parents=True)
+    (root / "model_index.json").write_text(json.dumps({
+        "_class_name": "FakePipeline",
+        "transformer": ["diffusers", "FakeTransformer"],
+    }))
+    _safetensors(root / "transformer" / "model.safetensors", {
+        "stack.0.mixer.weight": "F8_E4M3",
+        "stack.0.mixer.weight_scale": "F32",
+    })
+
+    with pytest.raises(KeyTopologyUnclassifiedError) as excinfo:
+        loading.contract_loaded_component(root, "transformer", cls=_FakeCls)
+    assert excinfo.value.contract == CONTRACT_COZY_FP8_ROWWISE
+    assert str(root) in str(excinfo.value)
 
 
 def test_a_topology_mismatch_refuses_before_the_load(tmp_path: Path) -> None:
@@ -597,7 +681,7 @@ def test_the_accepted_topology_passes_the_same_gate(
 ) -> None:
     """Positive control: the diffusers repackaging of the same contract gets
     past both halves of the guard."""
-    assert identify_snapshot_keys(fp8_rowwise_tree) == "diffusers.split-qkv"
+    assert classify_snapshot(fp8_rowwise_tree).topology == "diffusers.split-qkv"
 
     with pytest.raises(Exception) as excinfo:
         loading_module().contract_loaded_component(

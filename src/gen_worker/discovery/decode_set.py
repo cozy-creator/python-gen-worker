@@ -32,6 +32,7 @@ from typing import Any, Dict, Optional
 
 import msgspec
 
+from gen_worker.models.key_topology import SnapshotKeys
 from gen_worker.models.tensor_layout_contract import (
     ContractDecoder,
     DecodeDimensions,
@@ -50,6 +51,8 @@ DEFAULT_DECODER_PACKAGES: tuple[str, ...] = ("gen_worker.models",)
 #: hub cannot drift into two names for one refusal.
 REFUSAL_CONTRACT_UNDECLARED = "decode_set_contract_undeclared"
 REFUSAL_KEY_TOPOLOGY_UNSUPPORTED = "decode_set_key_topology_unsupported"
+REFUSAL_KEY_TOPOLOGY_UNCLASSIFIED = "decode_set_key_topology_unclassified"
+REFUSAL_DECODE_SET_DRIFT = "decode_set_drift"
 
 
 class ExcludedDecoderModule(msgspec.Struct, frozen=True, kw_only=True):
@@ -299,26 +302,68 @@ def runtime_decode_set() -> DecodeSet:
     return _RUNTIME_SET
 
 
+class DecodeSetDriftError(Exception):
+    """The set this process derives is not the one stamped at image build.
+
+    Fails the boot closed. The hub selected variants against the LOCK's set,
+    so a process that would derive a different one accepts work it may not be
+    able to decode — a stale `endpoint.lock` layer, or a decoder whose
+    dependency is present at build and absent in the shipped image.
+    """
+
+    code = REFUSAL_DECODE_SET_DRIFT
+
+    def __init__(
+        self, *, stamped: str, live: str,
+        gained: tuple[str, ...] = (), lost: tuple[str, ...] = (),
+        excluded: tuple[ExcludedDecoderModule, ...] = (),
+    ) -> None:
+        self.stamped, self.live = stamped, live
+        self.gained, self.lost, self.excluded = gained, lost, excluded
+        detail = []
+        if lost:
+            detail.append(
+                f"the lock claims {', '.join(lost)} and this process derives "
+                "no decoder for them")
+        if gained:
+            detail.append(
+                f"this process decodes {', '.join(gained)} and the lock does "
+                "not declare them")
+        if not detail:
+            detail.append(
+                "the contract SET agrees, so a dimension, a decoder name or "
+                "an excluded module differs")
+        if excluded:
+            detail.append(
+                "excluded modules here: " + "; ".join(
+                    f"{m.module} ({m.reason})" for m in excluded))
+        super().__init__(
+            f"decode-set drift: endpoint.lock stamped {stamped[:16]}…, this "
+            f"process derives {live[:16]}… — " + ". ".join(detail) +
+            ". Rebuild the image so the lock and the code are one artifact."
+        )
+
+
 def assert_matches_baked(baked: Dict[str, Any], ds: Optional[DecodeSet] = None) -> None:
     """Refuse when the process's decode-set is not the image's baked one.
 
     A block with no digest is an OLDER image and is not evidence of anything;
-    a digest that disagrees is a real divergence — the code that runs is not
-    the code the hub was told about — and it fails closed.
+    a digest that disagrees is a real divergence and fails closed, naming the
+    contracts that appeared or vanished so the remedy is readable.
     """
     stamped = str((baked or {}).get("digest") or "")
     if not stamped:
         return
-    live = (ds or runtime_decode_set()).digest
-    if stamped != live:
-        raise ContractNotDecodableError(
-            "<image>",
-            declared=(ds or runtime_decode_set()).contracts(),
-            where=(
-                f"decode-set drift: endpoint.lock stamped {stamped[:16]}…, "
-                f"this process derives {live[:16]}…"
-            ),
-        )
+    live = ds or runtime_decode_set()
+    if stamped == live.digest:
+        return
+    was = {str(c.get("contract") or "") for c in (baked.get("contracts") or [])}
+    now = set(live.contracts())
+    raise DecodeSetDriftError(
+        stamped=stamped, live=live.digest,
+        gained=tuple(sorted(now - was)), lost=tuple(sorted(was - now)),
+        excluded=live.excluded_modules,
+    )
 
 
 class KeyTopologyUnsupportedError(Exception):
@@ -357,6 +402,45 @@ class KeyTopologyUnsupportedError(Exception):
         )
 
 
+class KeyTopologyUnclassifiedError(Exception):
+    """A DENOISER tree whose key convention matches no registered topology.
+
+    Fails closed, deliberately. The publish side refuses an underivable
+    topology rather than guessing a nearest match (th#1937), and the load side
+    holds the same line where it costs the most: the model class is selected
+    by the architecture the keys describe, so a convention nothing registers is
+    exactly the state that produced `Cannot detect the model type` after a
+    71 GB fetch.
+
+    Scoped to the denoiser ON PURPOSE. A VAE, text encoder, scheduler or
+    tokenizer is not addressed by an architecture-specific model class, so the
+    axis does not apply to them and "unclassified" there is a fact rather than
+    a hedge — refusing it would refuse the entire fleet to catch nothing.
+    """
+
+    code = REFUSAL_KEY_TOPOLOGY_UNCLASSIFIED
+
+    def __init__(
+        self, contract: str, *, sample: tuple[str, ...],
+        registered: tuple[str, ...], where: str = "",
+    ) -> None:
+        self.contract = contract
+        self.sample = sample
+        self.registered = registered
+        self.where = where
+        subject = f" at {where}" if where else ""
+        super().__init__(
+            f"the denoiser tree{subject} is in a tensor-KEY convention no "
+            f"registered topology matches (registered: "
+            f"{', '.join(registered)}). Keys seen: {', '.join(sample)}. The "
+            f"contract {contract} says what the bytes ARE; this says nothing "
+            f"here knows how they are ADDRESSED, and a model class chosen "
+            f"hopefully fails at load with an unrelated message. Register the "
+            f"topology and declare a decoder for it, or bind a tree in a "
+            f"known one."
+        )
+
+
 def accepted_key_topologies(contract: str, ds: DecodeSet) -> tuple[str, ...]:
     """Every key convention this image's decoders of ``contract`` ingest."""
     out: list[str] = []
@@ -374,15 +458,25 @@ def require_decodable(
     *,
     decode_set: Optional[DecodeSet] = None,
     where: str = "",
-    key_topology: str = "",
+    keys: Optional["SnapshotKeys"] = None,
 ) -> None:
-    """Refuse, typed, unless ``contract`` is in the image's decode-set — and,
-    when the artifact's key convention has been IDENTIFIED, unless a decoder
-    of that contract ingests it.
+    """Refuse, typed, unless this image can decode the artifact. Three checks,
+    three codes, all answered from headers before any tensor is read:
 
-    ``key_topology=""`` means UNKNOWN and refuses nothing: a classifier that
-    refused what it could not name would be an upper bound, and the fleet is
-    full of legal trees it has never seen.
+    1. ``contract`` is in the image's decode-set, else
+       ``decode_set_contract_undeclared``;
+    2. the artifact's key convention was CLASSIFIED — a DENOISER tree matching
+       no registered topology is ``decode_set_key_topology_unclassified``,
+       never a hopeful pass;
+    3. a decoder of ``contract`` ingests that convention, else
+       ``decode_set_key_topology_unsupported``.
+
+    **What "unknown" does, stated so it cannot be misread:** for the DENOISER
+    it REFUSES (check 2). For every other component — vae, text encoder,
+    scheduler — the key-topology axis does not apply and is not evaluated,
+    which is the tri-state's UNDECLARED rung, not a fail-open: a refusal there
+    would refuse the whole fleet to catch nothing, since no
+    architecture-specific model class is chosen from those trees.
     """
     ds = decode_set if decode_set is not None else runtime_decode_set()
     declared = ds.contracts()
@@ -394,9 +488,19 @@ def require_decodable(
             unregistered=ds.unregistered,
             where=where,
         )
-    if not key_topology:
+    if keys is None:
+        return
+    if keys.unclassified_denoiser:
+        from gen_worker.models.tensor_layout_contract import (
+            KNOWN_KEY_TOPOLOGIES,
+        )
+
+        raise KeyTopologyUnclassifiedError(
+            contract, sample=keys.sample, registered=KNOWN_KEY_TOPOLOGIES,
+            where=where)
+    if not keys.topology:
         return
     accepted = accepted_key_topologies(contract, ds)
-    if key_topology not in accepted:
+    if keys.topology not in accepted:
         raise KeyTopologyUnsupportedError(
-            contract, observed=key_topology, accepted=accepted, where=where)
+            contract, observed=keys.topology, accepted=accepted, where=where)
