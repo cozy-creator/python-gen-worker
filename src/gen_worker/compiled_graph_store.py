@@ -15,8 +15,8 @@ import json
 import logging
 import math
 import os
+import secrets
 import stat
-import tempfile
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -29,8 +29,8 @@ from torch_compiled_graphs import (
     Engine,
     QuarantinedArtifact,
     StorageError,
-    StoreOutcome,
     StoredCompiledGraph,
+    StoreOutcome,
     is_compiled_graph_key,
 )
 
@@ -172,31 +172,61 @@ class _PersistedStateAbsent(FileNotFoundError):
     """The state name was absent at its initial metadata lookup."""
 
 
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+def _absolute(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+@contextlib.contextmanager
+def _open_directory(path: Path, *, create: bool) -> Iterator[int]:
+    """Open an absolute directory chain without following any link.
+
+    Every state operation is relative to the descriptor returned here. This
+    makes the configured CAS root and every sidecar ancestor part of the same
+    no-symlink trust decision as the named JSON file itself.
+    """
+
+    absolute = _absolute(path)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(os.path.sep, flags)
     try:
-        os.fsync(descriptor)
+        for part in absolute.parts[1:]:
+            created = False
+            try:
+                child = os.open(part, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    os.mkdir(part, 0o755, dir_fd=descriptor)
+                    created = True
+                except FileExistsError:
+                    pass
+                child = os.open(part, flags, dir_fd=descriptor)
+                if created:
+                    try:
+                        os.fchmod(child, 0o755)
+                        os.fsync(descriptor)
+                    except BaseException:
+                        os.close(child)
+                        raise
+            os.close(descriptor)
+            descriptor = child
+        yield descriptor
     finally:
         os.close(descriptor)
 
 
-def _prepare_parent(path: Path) -> None:
-    missing: list[Path] = []
-    cursor = path.parent
-    while not cursor.exists():
-        missing.append(cursor)
-        cursor = cursor.parent
-    path.parent.mkdir(parents=True, exist_ok=True)
-    for directory in missing:
-        os.chmod(directory, 0o755)
-    # Persist every newly created directory entry from the outside in.  The
-    # later record-directory fsync cannot make an unfenced ancestor durable.
-    for directory in reversed(missing):
-        _fsync_directory(directory.parent)
+def _fsync_directory(path: Path) -> None:
+    with _open_directory(path, create=False) as descriptor:
+        os.fsync(descriptor)
 
 
-def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    _prepare_parent(path)
+def _encode_json(payload: dict[str, Any]) -> bytes:
     encoded = json.dumps(
         payload,
         allow_nan=False,
@@ -205,43 +235,63 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     ).encode("utf-8")
     if len(encoded) > _MAX_JSON_BYTES:
         raise ValueError(f"persisted JSON exceeds {_MAX_JSON_BYTES} bytes")
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.tmp-",
-        dir=path.parent,
+    return encoded
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    encoded = _encode_json(payload)
+    with _open_directory(path.parent, create=True) as directory_fd:
+        _write_json_atomic_at(directory_fd, path.name, encoded)
+
+
+def _write_json_atomic_at(
+    directory_fd: int,
+    name: str,
+    encoded: bytes,
+) -> None:
+    temporary = f".{name}.tmp-{secrets.token_hex(16)}"
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=directory_fd,
     )
-    temporary = Path(temporary_name)
     try:
         os.fchmod(descriptor, 0o644)
         with os.fdopen(descriptor, "wb") as target:
+            descriptor = -1
             target.write(encoded)
             target.flush()
             os.fsync(target.fileno())
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
+        os.replace(
+            temporary,
+            name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        os.fsync(directory_fd)
     except BaseException:
-        with contextlib.suppress(OSError):
+        if descriptor >= 0:
             os.close(descriptor)
-        temporary.unlink(missing_ok=True)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary, dir_fd=directory_fd)
         raise
 
 
 @contextlib.contextmanager
-def _record_lock(path: Path) -> Iterator[None]:
+def _record_lock(path: Path) -> Iterator[int]:
     """Serialize one fresh read-modify-write across threads and processes."""
 
-    _prepare_parent(path)
-    descriptor = os.open(
-        path.parent,
-        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-    )
-    try:
+    with _open_directory(path.parent, create=True) as descriptor:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         try:
-            yield
+            yield descriptor
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
-    finally:
-        os.close(descriptor)
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -253,9 +303,9 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
-def _read_json(path: Path) -> Any:
+def _read_json_at(directory_fd: int, name: str, path: Path) -> Any:
     try:
-        discovered = path.lstat()
+        discovered = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
     except FileNotFoundError as exc:
         raise _PersistedStateAbsent(path) from exc
     if not stat.S_ISREG(discovered.st_mode):
@@ -267,7 +317,14 @@ def _read_json(path: Path) -> Any:
     )
     if not getattr(os, "O_PATH", 0):
         flags |= getattr(os, "O_NONBLOCK", 0)
-    descriptor = os.open(path, flags | getattr(os, "O_PATH", 0))
+    try:
+        descriptor = os.open(
+            name,
+            flags | getattr(os, "O_PATH", 0),
+            dir_fd=directory_fd,
+        )
+    except FileNotFoundError as exc:
+        raise ValueError(f"persisted state changed while opening: {path}") from exc
     try:
         opened = os.fstat(descriptor)
         discovered_identity = (discovered.st_dev, discovered.st_ino)
@@ -293,6 +350,14 @@ def _read_json(path: Path) -> Any:
     if len(encoded) > _MAX_JSON_BYTES:
         raise ValueError(f"persisted JSON exceeds {_MAX_JSON_BYTES} bytes")
     return json.loads(encoded, object_pairs_hook=_reject_duplicate_keys)
+
+
+def _read_json(path: Path) -> Any:
+    try:
+        with _open_directory(path.parent, create=False) as directory_fd:
+            return _read_json_at(directory_fd, path.name, path)
+    except FileNotFoundError as exc:
+        raise _PersistedStateAbsent(path) from exc
 
 
 def _valid_text(value: object, *, maximum: int, allow_empty: bool) -> bool:
@@ -400,9 +465,27 @@ def _read_state(
     path: Path,
     valid: Callable[[object], bool],
     label: str,
-) -> Optional[dict[str, Any]]:
+) -> dict[str, Any] | None:
     try:
         value = _read_json(path)
+    except _PersistedStateAbsent:
+        return None
+    except (OSError, ValueError) as exc:
+        raise _PersistedStateError(f"invalid persisted {label} {path}: {exc}") from exc
+    if not valid(value):
+        raise _PersistedStateError(f"invalid persisted {label} {path}")
+    return cast(dict[str, Any], value)
+
+
+def _read_state_at(
+    directory_fd: int,
+    name: str,
+    path: Path,
+    valid: Callable[[object], bool],
+    label: str,
+) -> dict[str, Any] | None:
+    try:
+        value = _read_json_at(directory_fd, name, path)
     except _PersistedStateAbsent:
         return None
     except (OSError, ValueError) as exc:
@@ -416,12 +499,54 @@ def _read_record(path: Path) -> Optional[dict[str, Any]]:
     return _read_state(path, _valid_record, "compiled-graph sidecar")
 
 
+def _read_record_at(
+    directory_fd: int,
+    name: str,
+    path: Path,
+) -> dict[str, Any] | None:
+    return _read_state_at(
+        directory_fd,
+        name,
+        path,
+        _valid_record,
+        "compiled-graph sidecar",
+    )
+
+
 def _read_memo(path: Path) -> Optional[dict[str, Any]]:
     return _read_state(path, _valid_memo, "compiled-graph arm memo")
 
 
+def _read_memo_at(
+    directory_fd: int,
+    name: str,
+    path: Path,
+) -> dict[str, Any] | None:
+    return _read_state_at(
+        directory_fd,
+        name,
+        path,
+        _valid_memo,
+        "compiled-graph arm memo",
+    )
+
+
 def _read_trust(path: Path) -> Optional[dict[str, Any]]:
     return _read_state(path, _valid_trust, "compiled-graph trust class")
+
+
+def _read_trust_at(
+    directory_fd: int,
+    name: str,
+    path: Path,
+) -> dict[str, Any] | None:
+    return _read_state_at(
+        directory_fd,
+        name,
+        path,
+        _valid_trust,
+        "compiled-graph trust class",
+    )
 
 
 def _export(key: str, engine: Engine, root: Optional[Path]) -> Path:
@@ -516,31 +641,55 @@ def _memo_preflight(arm_token: str, key: str, root: Path | None) -> None:
         raise StorageError("arm memo already names a different compiled graph")
 
 
-def _install_staged_record(staged: Path, destination: Path) -> None:
+def _install_staged_record(
+    staged: Path,
+    destination: Path,
+    directory_fd: int | None = None,
+) -> None:
     """Publish a durable staged row without replacing any named state."""
 
-    os.link(staged, destination, follow_symlinks=False)
+    if directory_fd is None:
+        with _open_directory(destination.parent, create=False) as opened:
+            _install_staged_record(staged, destination, opened)
+        return
+    if staged.parent != destination.parent:
+        raise ValueError("staged and live compiled-graph rows must share one directory")
+    os.link(
+        staged.name,
+        destination.name,
+        src_dir_fd=directory_fd,
+        dst_dir_fd=directory_fd,
+        follow_symlinks=False,
+    )
     try:
-        _fsync_directory(destination.parent)
+        os.fsync(directory_fd)
     except BaseException:
         with contextlib.suppress(OSError):
-            destination.unlink()
-            _fsync_directory(destination.parent)
+            os.unlink(destination.name, dir_fd=directory_fd)
+            os.fsync(directory_fd)
         raise
     with contextlib.suppress(OSError):
-        staged.unlink()
-        _fsync_directory(destination.parent)
+        os.unlink(staged.name, dir_fd=directory_fd)
+        os.fsync(directory_fd)
 
 
-def _note_memo_locked(path: Path, key: str) -> bool:
-    existing = _read_memo(path)
+def _note_memo_locked(
+    path: Path,
+    key: str,
+    directory_fd: int | None = None,
+) -> bool:
+    if directory_fd is None:
+        with _open_directory(path.parent, create=True) as opened:
+            return _note_memo_locked(path, key, opened)
+    existing = _read_memo_at(directory_fd, path.name, path)
     if existing is not None:
         return str(existing["compiled_graph_key"]) == key
-    _write_json_atomic(path, {
+    encoded = _encode_json({
         "format": _FORMAT,
         "compiled_graph_key": key,
         "noted_at": time.time(),
     })
+    _write_json_atomic_at(directory_fd, path.name, encoded)
     return True
 
 
@@ -568,12 +717,12 @@ def store(
     try:
         path = sidecar_dir(key, root) / RECORD_NAME
         staged_path = path.with_name(_PENDING_RECORD_NAME)
-        with _record_lock(path):
+        with _record_lock(path) as record_fd:
             # Present-invalid is an operator fact, never permission to replace
             # it. Read it before importing so corrupt policy state cannot
             # mutate TCG as a side effect of a refused worker operation.
-            existing = _read_record(path)
-            staged = _read_record(staged_path)
+            existing = _read_record_at(record_fd, path.name, path)
+            staged = _read_record_at(record_fd, staged_path.name, staged_path)
             if existing is not None and existing["compiled_graph_key"] != key:
                 raise _PersistedStateError(
                     "compiled-graph sidecar is stored under a different key"
@@ -587,8 +736,8 @@ def store(
                     raise _PersistedStateError(
                         "live and staged compiled-graph sidecars disagree"
                     )
-                staged_path.unlink()
-                _fsync_directory(staged_path.parent)
+                os.unlink(staged_path.name, dir_fd=record_fd)
+                os.fsync(record_fd)
                 staged = None
             basis = existing if existing is not None else staged
             _memo_preflight(arm_token, key, root)
@@ -625,32 +774,58 @@ def store(
                 raise StorageError("worker sidecar failed its strict schema")
             if record["verdict"] == VERDICT_QUARANTINED:
                 return None
+            aliases = tuple(dict.fromkeys(
+                token
+                for token in (str(record["arm_token"]), arm_token)
+                if token
+            ))
+            alias_paths = tuple(memo_path(token, root) for token in aliases)
             if existing is not None:
                 # A new alias may safely precede the state update because it
                 # already resolves to this visible exact-key record. If alias
                 # persistence fails, the old record remains byte-for-byte.
-                if arm_token:
-                    alias_path = memo_path(arm_token, root)
-                    with _record_lock(alias_path):
-                        if not _note_memo_locked(alias_path, str(result.key)):
-                            raise StorageError("arm memo was not durably persisted")
-                        _write_json_atomic(path, record)
+                if alias_paths:
+                    with _record_lock(alias_paths[0]) as memo_fd:
+                        for alias_path in alias_paths:
+                            if not _note_memo_locked(
+                                alias_path,
+                                str(result.key),
+                                memo_fd,
+                            ):
+                                raise StorageError(
+                                    "arm memo was not durably persisted"
+                                )
+                        _write_json_atomic_at(
+                            record_fd,
+                            path.name,
+                            _encode_json(record),
+                        )
                 else:
-                    _write_json_atomic(path, record)
+                    _write_json_atomic_at(record_fd, path.name, _encode_json(record))
             else:
                 # Stage the complete row under a non-selectable name. Alias
                 # registration may fail or the process may die without ever
                 # exposing it. The final hard-link is a no-replace commit: any
                 # named record that raced us wins and is never overwritten.
-                _write_json_atomic(staged_path, record)
-                if record["arm_token"]:
-                    alias_path = memo_path(str(record["arm_token"]), root)
-                    with _record_lock(alias_path):
-                        if not _note_memo_locked(alias_path, str(result.key)):
-                            raise StorageError("arm memo was not durably persisted")
-                        _install_staged_record(staged_path, path)
+                _write_json_atomic_at(
+                    record_fd,
+                    staged_path.name,
+                    _encode_json(record),
+                )
+                if alias_paths:
+                    with _record_lock(alias_paths[0]) as memo_fd:
+                        for alias_path in alias_paths:
+                            if not _note_memo_locked(
+                                alias_path,
+                                str(result.key),
+                                memo_fd,
+                            ):
+                                raise StorageError(
+                                    "arm memo was not durably persisted"
+                                )
+                        _install_staged_record(staged_path, path, record_fd)
                 else:
-                    _install_staged_record(staged_path, path)
+                    _install_staged_record(staged_path, path, record_fd)
         if record["verdict"] == VERDICT_QUARANTINED:
             return None
         graph = _resolve_selected(
@@ -678,8 +853,8 @@ def mark(
     except ValueError:
         return False
     try:
-        with _record_lock(path):
-            record = _read_record(path)
+        with _record_lock(path) as record_fd:
+            record = _read_record_at(record_fd, path.name, path)
             if record is None:
                 return False
             current_verdict = str(record["verdict"])
@@ -695,7 +870,7 @@ def mark(
             record["sink"] = next_sink
             if not _valid_record(record):
                 return False
-            _write_json_atomic(path, record)
+            _write_json_atomic_at(record_fd, path.name, _encode_json(record))
     except (OSError, ValueError):
         return False
     return True
@@ -794,8 +969,8 @@ def note_memo(arm_token: str, key: str, root: Optional[Path] = None) -> bool:
         ):
             return False
         path = memo_path(arm_token, root)
-        with _record_lock(path):
-            return _note_memo_locked(path, key)
+        with _record_lock(path) as memo_fd:
+            return _note_memo_locked(path, key, memo_fd)
     except (OSError, ValueError):
         return False
 
@@ -815,18 +990,24 @@ def lookup_for_arm(
 def sweep_superseded_memos(scheme: str, root: Optional[Path] = None) -> int:
     current = str(scheme or "").strip() + "-"
     directory = sidecars_root(root) / MEMO_DIRNAME
-    if len(current) < 2 or not directory.is_dir():
+    if len(current) < 2:
         return 0
     removed = 0
-    with _record_lock(directory / ".sweep"):
-        for path in directory.glob("*.json"):
-            if path.name.startswith(current):
-                continue
-            try:
-                path.unlink()
-                removed += 1
-            except OSError:
-                pass
+    try:
+        lock_path = directory / ".sweep"
+        with _record_lock(lock_path) as directory_fd:
+            for name in os.listdir(directory_fd):
+                if not name.endswith(".json") or name.startswith(current):
+                    continue
+                try:
+                    os.unlink(name, dir_fd=directory_fd)
+                    removed += 1
+                except OSError:
+                    pass
+            if removed:
+                os.fsync(directory_fd)
+    except OSError:
+        return 0
     return removed
 
 
@@ -840,46 +1021,76 @@ def has_graphs(root: Optional[Path] = None) -> bool:
     """Return whether any well-formed sidecar exists without exporting bytes."""
 
     directory = sidecars_root(root)
-    if not directory.is_dir():
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        with _open_directory(directory, create=False) as directory_fd:
+            for name in os.listdir(directory_fd):
+                if name.startswith(".") or not is_compiled_graph_key(name):
+                    continue
+                try:
+                    child_fd = os.open(name, flags, dir_fd=directory_fd)
+                except OSError:
+                    continue
+                try:
+                    path = directory / name / RECORD_NAME
+                    record = _read_record_at(child_fd, RECORD_NAME, path)
+                except (OSError, ValueError):
+                    continue
+                finally:
+                    os.close(child_fd)
+                if record is not None and record["compiled_graph_key"] == name:
+                    return True
+    except OSError:
         return False
-    for path in directory.iterdir():
-        if not path.is_dir() or path.name.startswith("."):
-            continue
-        try:
-            record = _read_record(path / RECORD_NAME)
-        except (OSError, ValueError):
-            continue
-        if record is not None and record["compiled_graph_key"] == path.name:
-            return True
     return False
 
 
 def graphs_owed_to_sink(root: Optional[Path] = None) -> list[OwedCompiledGraph]:
     directory = sidecars_root(root)
-    if not directory.is_dir():
-        return []
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     rows: list[OwedCompiledGraph] = []
-    for path in sorted(directory.iterdir()):
-        if not path.is_dir() or path.name.startswith("."):
-            continue
-        try:
-            record = _read_record(path / RECORD_NAME)
-        except (OSError, ValueError):
-            continue
-        if (
-            record is None
-            or record["compiled_graph_key"] != path.name
-            or record["verdict"] != VERDICT_ADMITTED
-            or record["sink"] != SINK_OWED
-        ):
-            continue
-        rows.append(OwedCompiledGraph(
-            compiled_graph_key=str(record["compiled_graph_key"]),
-            content_digest=str(record["content_digest"]),
-            family=str(record["family"]),
-            arm_token=str(record["arm_token"]),
-            bytes=int(record["bytes"]),
-        ))
+    try:
+        with _open_directory(directory, create=False) as directory_fd:
+            for name in sorted(os.listdir(directory_fd)):
+                if name.startswith(".") or not is_compiled_graph_key(name):
+                    continue
+                try:
+                    child_fd = os.open(name, flags, dir_fd=directory_fd)
+                except OSError:
+                    continue
+                try:
+                    path = directory / name / RECORD_NAME
+                    record = _read_record_at(child_fd, RECORD_NAME, path)
+                except (OSError, ValueError):
+                    continue
+                finally:
+                    os.close(child_fd)
+                if (
+                    record is None
+                    or record["compiled_graph_key"] != name
+                    or record["verdict"] != VERDICT_ADMITTED
+                    or record["sink"] != SINK_OWED
+                ):
+                    continue
+                rows.append(OwedCompiledGraph(
+                    compiled_graph_key=str(record["compiled_graph_key"]),
+                    content_digest=str(record["content_digest"]),
+                    family=str(record["family"]),
+                    arm_token=str(record["arm_token"]),
+                    bytes=int(record["bytes"]),
+                ))
+    except OSError:
+        return []
     return rows
 
 
@@ -888,8 +1099,8 @@ def note_refusal(code: str, detail: str = "", root: Optional[Path] = None) -> bo
         return False
     try:
         path = sidecars_root(root) / TRUST_CLASS_NAME
-        with _record_lock(path):
-            if _read_trust(path) is not None:
+        with _record_lock(path) as directory_fd:
+            if _read_trust_at(directory_fd, path.name, path) is not None:
                 return True
             record = {
                 "format": _FORMAT,
@@ -900,7 +1111,7 @@ def note_refusal(code: str, detail: str = "", root: Optional[Path] = None) -> bo
             }
             if not _valid_trust(record):
                 return False
-            _write_json_atomic(path, record)
+            _write_json_atomic_at(directory_fd, path.name, _encode_json(record))
         return True
     except (OSError, ValueError):
         return False

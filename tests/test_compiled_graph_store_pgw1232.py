@@ -13,6 +13,7 @@ import sys
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from functools import cache
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -22,13 +23,13 @@ from hashrepo import LocalCAS
 from torch_compiled_graphs import (
     Engine,
     GraphClassDeclaration,
+    build_call_ingress,
 )
 from torch_compiled_graphs.artifact import build_metadata, pack_artifact
 from torch_compiled_graphs.host_isa import _host_requirement
 
 from gen_worker import compiled_graph_store, fleet_cells
 from gen_worker.models.cache_paths import open_worker_cas
-
 
 KEY = "cg-key-v1-" + "1" * 56
 OTHER_KEY = "cg-key-v1-" + "2" * 56
@@ -89,6 +90,20 @@ def _elf() -> bytes:
     return bytes(image)
 
 
+@cache
+def _canonical_fixture_ingress() -> tuple[dict[str, object], str]:
+    import torch
+
+    class TinyGraph(torch.nn.Module):  # type: ignore[misc]
+        def forward(self, sample: Any) -> Any:
+            return sample + 1
+
+    sample = torch.ones(1, 2)
+    program = torch.export.export(TinyGraph(), (sample,))
+    ingress = build_call_ingress(program, ("sample",), (sample,), {})
+    return ingress.as_dict(), ingress.digest()
+
+
 def _real_artifact(
     tmp_path: Path,
     *,
@@ -101,11 +116,12 @@ def _real_artifact(
         root = f"data/aotinductor/{name}"
         archive.writestr(f"{root}/model.wrapper.cpp", wrapper)
         archive.writestr(f"{root}/model.so", _elf())
+    ingress, range_digest = _canonical_fixture_ingress()
     graph = {
         "v": 3,
         "constant_fqns": [],
         "lifted_inputs": [],
-        "pytree": {"in": "leaf", "out": "leaf"},
+        "pytree": {"ingress": ingress},
         "specialization": {"test_variant": name},
     }
     declaration = GraphClassDeclaration(
@@ -113,7 +129,7 @@ def _real_artifact(
         target="unet",
         graph=graph,
         graph_witness="fedcba9876543210",
-        range_digest="0123456789abcdef" * 2,
+        range_digest=range_digest,
     )
     toolchain = {"torch": "torch-content", "triton": "triton-content"}
     metadata = build_metadata(
@@ -641,6 +657,95 @@ def test_store_refuses_any_named_nonregular_sidecar_before_tcg(
     ) is None
 
 
+@pytest.mark.parametrize("linked_ancestor", ["root", "sidecars", "key"])
+def test_sidecar_ancestors_never_cross_into_another_configured_root(
+    linked_ancestor: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact, key = _real_artifact(tmp_path / "artifact")
+    root = tmp_path / "first-cas"
+    other_root = tmp_path / "second-cas"
+    other_key_dir = compiled_graph_store.sidecar_dir(key, other_root)
+    other_key_dir.mkdir(parents=True)
+    sentinel = other_key_dir / "operator-sentinel"
+    sentinel.write_text("unchanged")
+
+    if linked_ancestor == "root":
+        root.symlink_to(other_root, target_is_directory=True)
+    elif linked_ancestor == "sidecars":
+        root.mkdir()
+        compiled_graph_store.sidecars_root(root).symlink_to(
+            compiled_graph_store.sidecars_root(other_root),
+            target_is_directory=True,
+        )
+    else:
+        compiled_graph_store.sidecars_root(root).mkdir(parents=True)
+        compiled_graph_store.sidecar_dir(key, root).symlink_to(
+            other_key_dir,
+            target_is_directory=True,
+        )
+
+    before = {
+        path.relative_to(other_root): path.read_bytes()
+        for path in other_root.rglob("*")
+        if path.is_file()
+    }
+
+    class NoEngine:
+        def __init__(self, _cas: object) -> None:
+            pytest.fail("linked sidecar ancestor reached TCG")
+
+    monkeypatch.setattr(compiled_graph_store, "Engine", NoEngine)
+    assert compiled_graph_store.store(
+        artifact,
+        key=key,
+        family="micro",
+        arm_token="arm-v1-linked-root",
+        sink=compiled_graph_store.SINK_OWED,
+        root=root,
+    ) is None
+    assert not compiled_graph_store.mark(key, sink=compiled_graph_store.SINK_OWED, root=root)
+    assert not compiled_graph_store.has_graphs(root)
+    assert compiled_graph_store.graphs_owed_to_sink(root) == []
+    if linked_ancestor != "key":
+        assert not compiled_graph_store.note_refusal(
+            compiled_graph_store.UNTRUSTED_REFUSAL_CODE,
+            root=root,
+        )
+        assert compiled_graph_store.trust_class(root) == ""
+    assert {
+        path.relative_to(other_root): path.read_bytes()
+        for path in other_root.rglob("*")
+        if path.is_file()
+    } == before
+    assert sentinel.read_text() == "unchanged"
+
+
+def test_memo_directory_link_cannot_publish_into_another_root(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "first-cas"
+    other_root = tmp_path / "second-cas"
+    _write_record(root, _record(KEY))
+    other_memos = (
+        compiled_graph_store.sidecars_root(other_root)
+        / compiled_graph_store.MEMO_DIRNAME
+    )
+    other_memos.mkdir(parents=True)
+    sentinel = other_memos / "operator-sentinel"
+    sentinel.write_text("unchanged")
+    memo_directory = (
+        compiled_graph_store.sidecars_root(root)
+        / compiled_graph_store.MEMO_DIRNAME
+    )
+    memo_directory.symlink_to(other_memos, target_is_directory=True)
+
+    assert not compiled_graph_store.note_memo("arm-v1-linked-memo", KEY, root)
+    assert list(other_memos.iterdir()) == [sentinel]
+    assert sentinel.read_text() == "unchanged"
+
+
 @pytest.mark.parametrize("replacement_kind", ["regular", "removed"])
 def test_persisted_state_refuses_a_regular_file_replaced_during_open(
     replacement_kind: str,
@@ -664,7 +769,11 @@ def test_persisted_state_refuses_a_regular_file_replaced_during_open(
         dir_fd: int | None = None,
     ) -> int:
         nonlocal replaced
-        if Path(os.fsdecode(opened)) == path and not replaced:
+        if (
+            os.fsdecode(opened) == path.name
+            and dir_fd is not None
+            and not replaced
+        ):
             replaced = True
             if replacement_kind == "regular":
                 os.replace(replacement, path)
@@ -790,11 +899,20 @@ def test_named_nonregular_staged_record_refuses_store_before_tcg(
 def test_device_state_is_rejected_by_metadata_without_opening(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        os,
-        "open",
-        lambda *_args, **_kwargs: pytest.fail("device state was opened"),
-    )
+    real_open = os.open
+
+    def refuse_device_open(
+        opened: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if os.fsdecode(opened) == "null":
+            pytest.fail("device state was opened")
+        return real_open(opened, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", refuse_device_open)
     with pytest.raises(compiled_graph_store._PersistedStateError):
         compiled_graph_store._read_record(Path("/dev/null"))
 
@@ -942,7 +1060,7 @@ def test_store_requires_arm_memo_and_preserves_all_aliases(
     artifact, key = _real_artifact(tmp_path)
     refused_root = tmp_path / "refused"
 
-    def fail_memo_write(_path: Path, _key: str) -> bool:
+    def fail_memo_write(_path: Path, _key: str, _directory_fd: int) -> bool:
         raise OSError("injected memo write failure")
 
     monkeypatch.setattr(compiled_graph_store, "_note_memo_locked", fail_memo_write)
@@ -1019,15 +1137,20 @@ def test_real_memo_collision_refuses_before_tcg_and_publishes_no_sidecar(
     )["compiled_graph_key"] == OTHER_KEY
 
 
-def test_alias_commit_failure_is_invisible_after_restart_and_retryable(
+def test_pending_retry_persists_original_and_new_alias_after_restart(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     artifact, key = _real_artifact(tmp_path)
     root = tmp_path / "cas"
-    token = "arm-v1-retry"
+    original_token = "arm-v1-retry-original"
+    retry_token = "arm-v1-retry-second"
 
-    def fail_install(_staged: Path, _destination: Path) -> None:
+    def fail_install(
+        _staged: Path,
+        _destination: Path,
+        _directory_fd: int,
+    ) -> None:
         raise OSError("injected commit failure")
 
     monkeypatch.setattr(compiled_graph_store, "_install_staged_record", fail_install)
@@ -1035,20 +1158,24 @@ def test_alias_commit_failure_is_invisible_after_restart_and_retryable(
         artifact,
         key=key,
         family="micro",
-        arm_token=token,
+        arm_token=original_token,
         sink=compiled_graph_store.SINK_OWED,
         root=root,
     ) is None
     assert compiled_graph_store.lookup(key, root) is None
-    assert compiled_graph_store.lookup_for_arm(token, root) is None
+    assert compiled_graph_store.lookup_for_arm(original_token, root) is None
     assert compiled_graph_store.graphs_owed_to_sink(root) == []
 
     restart_code = (
         "from pathlib import Path; "
         "from gen_worker import compiled_graph_store as s; "
-        f"root=Path({str(root)!r}); key={key!r}; token={token!r}; "
-        "print(int(s.lookup(key, root) is None), "
-        "int(s.lookup_for_arm(token, root) is None), "
+        f"root=Path({str(root)!r}); artifact=Path({str(artifact)!r}); "
+        f"key={key!r}; first={original_token!r}; second={retry_token!r}; "
+        "stored=s.store(artifact, key=key, family='micro', arm_token=second, "
+        "sink=s.SINK_OWED, root=root); "
+        "print(int(stored is not None), "
+        "int(s.lookup_for_arm(first, root) is not None), "
+        "int(s.lookup_for_arm(second, root) is not None), "
         "len(s.graphs_owed_to_sink(root)))"
     )
     restarted = subprocess.run(
@@ -1060,22 +1187,56 @@ def test_alias_commit_failure_is_invisible_after_restart_and_retryable(
         capture_output=True,
         text=True,
     )
-    assert restarted.stdout.strip() == "1 1 0"
+    assert restarted.stdout.strip() == "1 1 1 1"
 
-    monkeypatch.undo()
-    assert compiled_graph_store.store(
-        artifact,
-        key=key,
-        family="micro",
-        arm_token=token,
-        sink=compiled_graph_store.SINK_OWED,
-        root=root,
-    ) is not None
-    assert compiled_graph_store.lookup_for_arm(token, root) is not None
+    assert compiled_graph_store.lookup_for_arm(original_token, root) is not None
+    assert compiled_graph_store.lookup_for_arm(retry_token, root) is not None
     assert [
         row.compiled_graph_key
         for row in compiled_graph_store.graphs_owed_to_sink(root)
     ] == [key]
+
+
+def test_pending_retry_concurrently_persists_every_requested_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact, key = _real_artifact(tmp_path)
+    root = tmp_path / "cas"
+    original = "arm-v1-concurrent-original"
+    aliases = ("arm-v1-concurrent-second", "arm-v1-concurrent-third")
+
+    def fail_install(
+        _staged: Path,
+        _destination: Path,
+        _directory_fd: int,
+    ) -> None:
+        raise OSError("injected commit failure")
+
+    monkeypatch.setattr(compiled_graph_store, "_install_staged_record", fail_install)
+    assert compiled_graph_store.store(
+        artifact,
+        key=key,
+        family="micro",
+        arm_token=original,
+        root=root,
+    ) is None
+    monkeypatch.undo()
+
+    def retry(token: str) -> bool:
+        return compiled_graph_store.store(
+            artifact,
+            key=key,
+            family="micro",
+            arm_token=token,
+            root=root,
+        ) is not None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert list(pool.map(retry, aliases)) == [True, True]
+
+    for token in (original, *aliases):
+        assert compiled_graph_store.lookup_for_arm(token, root) is not None
 
 
 def test_failed_new_alias_does_not_apply_a_visible_record_transition(
