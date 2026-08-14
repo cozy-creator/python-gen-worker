@@ -139,10 +139,21 @@ name: CI
 # suite is on the PR trigger and not just the cheap half.
 #
 # pgw#977 (2026-08-05): `dev` is retired and lanes PR straight to `master`, so
-# the trigger names `master` alone. Both jobs here are the master ruleset's
-# REQUIRED contexts (`fast gates`, `tests`) — they gate the merge, and unlike
-# tensorhub this repo keeps its full suite pre-merge because it is public,
-# unmetered, and ~10m rather than ~18m.
+# the trigger names `master` alone.
+#
+# pgw#1264 (2026-08-14, Paul's ruling — SUPERSEDES the paragraph above about both
+# jobs being required): `fast gates` is now the master ruleset's ONLY required
+# context. `tests` gates nothing, and it no longer runs on `merge_group` at all.
+# Measured over ~300 runs before this change: `CI` on `merge_group` p50 911s, of
+# which `fast gates` was 122s and `tests` 868s — so the suite WAS the queue's
+# wall clock while proving nothing about the merge. With the queue widened to ten
+# speculative entries it would also hold ten concurrent 14-minute runners, and
+# the required job would queue behind its own workflow.
+#
+# What replaces it, so nothing is actually lost: `tests` still runs on EVERY PR
+# push (a lane sees its own regression before merging), on `workflow_dispatch`,
+# and NIGHTLY on `master` via the `schedule:` below. Pre-launch, a regression
+# found by tonight's nightly is cheaper than fifteen minutes on every merge.
 # pgw#1209 (2026-08-13): `master` has a MERGE QUEUE. A queued PR is validated on
 # a `gh-readonly-queue/master/...` ref carrying master's tip plus every entry
 # ahead of it — which is the only place the "two PRs green alone, red together"
@@ -152,11 +163,15 @@ name: CI
 #   1. `merge_group:` in the trigger list. Without it no run is created on the
 #      queue ref at all, the required contexts never report, and the queue sits
 #      until `check_response_timeout_minutes` expires and evicts the PR.
-#   2. `github.event_name == 'merge_group'` in each job's `if:`. On a merge_group
-#      event `github.event.pull_request` is NULL, so the draft guard alone
-#      evaluates false and the job SKIPS — and GitHub scores a skipped required
-#      check as satisfied. That failure is worse than the first: the queue merges
-#      having run nothing, and the PR page shows green.
+#   2. `github.event_name == 'merge_group'` in the REQUIRED job's `if:`. On a
+#      merge_group event `github.event.pull_request` is NULL, so the draft guard
+#      alone evaluates false and the job SKIPS — and GitHub scores a skipped
+#      required check as satisfied. That failure is worse than the first: the
+#      queue merges having run nothing, and the PR page shows green.
+#      pgw#1264: this is why the `merge_group:` trigger STAYS even though `tests`
+#      opts out of it. Deleting the trigger to stop `tests` would take `fast
+#      gates` with it and hang every entry to the 15-minute response timeout;
+#      the opt-out belongs in the job's `if:`, never in the trigger list.
 #
 # The trigger is deliberately bare (no `branches:`/`paths:` filter). A filter
 # that excludes a merge group is indistinguishable from case 1.
@@ -182,6 +197,15 @@ name: CI
 on:
   workflow_dispatch: {}
   merge_group:
+  # pgw#1264: the nightly is where the full suite lives now that it is off the
+  # merge path. 09:17 UTC — an odd minute, because the top of an hour is the
+  # busiest slot on GitHub's shared scheduler and a queued cron just runs late.
+  # This is the ONLY cron in the repo (native-kernels, proto-contract and
+  # publish are event-driven), so nothing collides with it.
+  # NOTE: a `schedule` event has no `github.event.pull_request` either — both
+  # jobs' `if:` name it explicitly for the same reason `merge_group` is named.
+  schedule:
+    - cron: '17 9 * * *'
   pull_request:
     branches: [master]
     # `ready_for_review` is NOT a default `pull_request` type, and the jobs below
@@ -192,7 +216,10 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # pgw#1264: superseded PR pushes should stop burning runners, but a merge-queue
+  # run must never be cancellable by group — a cancelled required check reports
+  # nothing, and the entry then sits until the queue's response timeout evicts it.
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 jobs:
   # ~1m35s. Everything decidable without running the suite, so a lane learns
@@ -203,7 +230,9 @@ jobs:
     # `merge_group` is listed FIRST and explicitly: on that event
     # `github.event.pull_request` is null, so the draft clause alone skips the
     # job and GitHub scores the skip as a satisfied required check (pgw#1209).
-    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    # This is the repo's ONLY required context (pgw#1264) — the merge-group arm
+    # of this condition is what the queue actually waits on. Do not weaken it.
+    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -215,6 +244,13 @@ jobs:
         uses: astral-sh/setup-uv@v4
         with:
           version: "latest"
+          # pgw#1264: `setup-uv@v4` does NOT cache by default (the `auto` default
+          # arrived in v6), so every run of the required job re-downloaded the
+          # dev dependency set — 19s of its measured 122s. The key is uv.lock's
+          # hash, so a lock bump misses and repopulates. Only this job asks for
+          # it: `tests` is off the merge path now, and two jobs writing one key
+          # just race to save the same cache.
+          enable-cache: true
 
       - name: Set up Python
         run: uv python install 3.12
@@ -427,14 +463,19 @@ jobs:
       - name: Build package
         run: uv build
 
-  # ~15m15s. The only job that can catch a behavioural regression — see the
-  # header on why that is worth a dev trigger rather than master-only.
+  # ~14m30s (measured p50 868s). The only job that can catch a behavioural
+  # regression — and, since pgw#1264, NOT a required context and NOT part of the
+  # merge path.
   tests:
     name: tests
-    # `merge_group` is listed FIRST and explicitly: on that event
-    # `github.event.pull_request` is null, so the draft clause alone skips the
-    # job and GitHub scores the skip as a satisfied required check (pgw#1209).
-    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    # pgw#1264: `!= 'merge_group'` is the whole change. This job proved nothing
+    # about a merge (it is not required) while costing the queue ~868s of its
+    # ~911s p50, and ten speculative entries would have held ten 14-minute
+    # runners in front of the required `fast gates`. It still runs on every PR
+    # push, on `workflow_dispatch`, and nightly on `master` via `schedule:`.
+    # `schedule` is named explicitly for the same null-`pull_request` reason
+    # `merge_group` was: without it the nightly would skip this job silently.
+    if: github.event_name != 'merge_group' && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event.pull_request.draft == false)
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:
