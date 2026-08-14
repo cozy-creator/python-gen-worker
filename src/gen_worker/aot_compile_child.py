@@ -93,6 +93,7 @@ from .child_preflight import (
     pick_compile_target,
     select_specs,
 )
+from .api.export_contract import export_declaration
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +209,7 @@ def build_pipeline(job: EntryJob) -> Tuple[Any, Any, Any]:
     typed, and because a test can reach the whole preflight without an
     inductor compile — the compile itself cannot be a cheap test.
     """
-    from . import aot_mint, compile_cache as cc, fleet_cells
+    from . import compile_cache as cc, fleet_cells
     from .cli.run import run_setup
     from .models import structure_only
     from .registry import collect_endpoints
@@ -261,7 +262,7 @@ def build_pipeline(job: EntryJob) -> Tuple[Any, Any, Any]:
         # halves drifted apart.
         cc.apply_lora_execution_lane(pipeline, int(cfg.lora_bucket))
     spec = fleet_cells.aot_export_spec(pipeline, cfg)
-    decl = aot_mint.export_declaration(str(spec.family or ""))
+    decl = export_declaration(str(spec.family or ""))
     if decl is None:
         raise PreflightRefused(
             f"family {spec.family!r} has no registered export declaration — "
@@ -312,8 +313,13 @@ def _graph_class_spec(traced: Any, export_spec: Any) -> Any:
     )
 
 
-def _tcg_runtime() -> Tuple[Any, Any]:
-    """Open TCG on the worker's sole CAS and sealed compiler-content facts."""
+def _tcg_runtime(cache_root: Optional[Path] = None) -> Tuple[Any, Any]:
+    """Open TCG with sealed compiler facts.
+
+    Production omits ``cache_root`` and therefore uses the worker's canonical
+    CAS. The explicit measurement CLI supplies a temporary root so a diagnostic
+    run cannot mutate serving state.
+    """
     from torch_compiled_graphs import Engine, RuntimeCompatibility
 
     from . import compile_cache
@@ -325,7 +331,8 @@ def _tcg_runtime() -> Tuple[Any, Any]:
         target,
         toolchain=dict(compile_cache.toolchain_digest()),
     )
-    return Engine(open_worker_cas()), compatibility
+    cas = open_worker_cas() if cache_root is None else open_worker_cas(cache_root)
+    return Engine(cas), compatibility
 
 
 def _compile_traced_class(
@@ -374,7 +381,7 @@ def _compile_traced_class(
     )
 
 
-def _compile_and_release(
+def compile_traced_class(
     traced: Any,
     export_spec: Any,
     engine: Any,
@@ -407,7 +414,6 @@ def _trace_share(
         declaration,
         share_index=int(job.share_index),
         share_count=int(job.share_count),
-        compile_now=False,
         have_classes=tuple(job.have_classes),
     )
 
@@ -509,7 +515,7 @@ def run(job: EntryJob) -> int:
             row_trace = float(timings.get("export_s", 0.0))
             trace_s += row_trace
             class_before = compile_spans.phase_snapshot()
-            result = _compile_and_release(
+            result = compile_traced_class(
                 traced,
                 spec,
                 engine,

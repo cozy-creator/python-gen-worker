@@ -33,9 +33,6 @@ import torch.nn as nn  # noqa: E402
 from gen_worker import (  # noqa: E402
     aot_declaration,
     aot_mint,
-    aot_serve,
-    cell_key,
-    compile_cache,
     fleet_cells,
 )
 from gen_worker.api.decorators import Compile  # noqa: E402
@@ -99,12 +96,6 @@ def _spec() -> aot_mint.ExportSpec:
         lifted_inputs=lora_lifted.LIFTED_INPUT_NAMES)
 
 
-def _fake_sm(mp) -> None:
-    full = {"sku": "", "sm": "sm_89", "torch": str(torch.__version__), "cuda": ""}
-    mp.setattr(compile_cache, "runtime_key", lambda: dict(full))
-    mp.setattr(aot_serve, "runtime_key", lambda: dict(full))
-
-
 @pytest.fixture(autouse=True)
 def _fresh_registry():
     reset_export_declarations()
@@ -155,80 +146,6 @@ def test_the_declared_feed_binds_once_the_execution_lane_is_armed() -> None:
     assert all(isinstance(a, torch.Tensor) for a in args)
 
 
-# ---------------------------------------------------------------------------
-# The mint, end to end: RED here at base, both classes here after the fix
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="module")
-def cell(tmp_path_factory, request) -> Dict[str, Any]:
-    """ONE real two-arm mint (torch.export + AOTI) from a CONTAINER-ONLY
-    pipeline — the state the child actually produced. At base this raises
-    ``MintRefused: ... ['lora_a', 'lora_b'] are not parameters of 'forward'``
-    and every assertion below is unreachable."""
-    from _pytest.monkeypatch import MonkeyPatch
-
-    mp = MonkeyPatch()
-    request.addfinalizer(mp.undo)
-    _fake_sm(mp)
-    _declare()
-    tmp = tmp_path_factory.mktemp("cell822")
-    pipe = _container_only_pipe()
-    result = aot_mint.mint(
-        pipe, _spec(), tmp / "out")
-    reset_export_declarations()
-    # The mint yields one independently keyed artifact per graph
-    # class. Index them by the class each NAMES — the addressing the atom
-    # makes natural, and what keeps a per-class assertion bisectable.
-    by_entry = {row.entry: row for row in result.entries}
-    assert len(by_entry) == len(result.entries), "two entries collided on one name"
-    return {"pipe": pipe, "result": result, "by_entry": by_entry}
-
-
-#: The two graph classes this declaration forks into.
-LEAN = "unet/adapter=false/B=2"
-FAT = "unet/adapter=true/B=2"
-
-
-def _entry_block(cell: Dict[str, Any], name: str) -> Dict[str, Any]:
-    """One class's recorded entry block, off ITS OWN artifact's metadata."""
-    block = dict(cell["by_entry"][name].metadata[cell_key.ENTRY_BLOCK_KEY])
-    assert block["name"] == name, block.get("name")
-    return block
-
-
-def test_a_container_only_pipeline_mints_both_graph_classes(cell) -> None:
-    """pgw#1176: "both classes in one cell" became "both classes as two
-    independently keyed artifacts" — the fork is unchanged, what it packages
-    into is not."""
-    result = cell["result"]
-    assert sorted(row.entry for row in result.entries) == [LEAN, FAT]
-    assert len({row.key for row in result.entries}) == 2
-
-
-def test_the_two_classes_were_prepared_DIFFERENTLY(cell) -> None:
-    """The pgw#790 fork survives the pgw#822 arm: the adapter-bearing class
-    carries the lifted pair, the branchless one is exported from the PLAIN
-    module and says so. A one-size wrapper would break this."""
-    fat = _entry_block(cell, FAT)
-    lean = _entry_block(cell, LEAN)
-    assert set(lora_lifted.LIFTED_INPUT_NAMES) <= {
-        row["name"] for row in fat["inputs"]}
-    assert not set(lora_lifted.LIFTED_INPUT_NAMES) & {
-        row["name"] for row in lean["inputs"]}
-    assert lean["excluded_inputs"] == list(lora_lifted.LIFTED_INPUT_NAMES)
-    assert fat["graph"]["lifted_inputs"] == sorted(
-        lora_lifted.LIFTED_INPUT_NAMES)
-    assert lean["graph"]["lifted_inputs"] == []
-
-
-def test_the_pipeline_is_left_lifted_after_the_mint(cell) -> None:
-    """The branchless exports disarm the pipeline; a mint that returned it
-    branchless would leave the process serving a different graph family."""
-    assert lora_lifted.lifted_binding(cell["pipe"].unet) is not None
-    assert w8a8_lora.branch_bucket(cell["pipe"].unet) == BUCKET
-
-
 def test_an_unarmed_export_refuses_naming_the_ARM_not_the_declaration() -> None:
     """The permanent guard. If a future caller reaches ``_export_entry`` with
     the lift missing, the sentence must point at the pipeline's PREPARATION —
@@ -240,7 +157,7 @@ def test_an_unarmed_export_refuses_naming_the_ARM_not_the_declaration() -> None:
         aot_declaration.cell_plans(decl), pipe, _spec())[0]
     assert arm is True
     with pytest.raises(aot_mint.MintRefused, match="carries no lifted forward"):
-        aot_mint._export_entry(pipe, _spec(), plan, decl, compile_now=False)
+        aot_mint._export_entry(pipe, _spec(), plan, decl)
 
 
 # ---------------------------------------------------------------------------

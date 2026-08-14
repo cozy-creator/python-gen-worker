@@ -268,7 +268,6 @@ def test_a_named_child_refusal_is_reported_not_swallowed(tmp_path: Path) -> None
         out_dir=str(tmp_path / "artifacts"),
         work=str(slot / "work"),
         report=str(slot / pool.ENTRY_REPORT_NAME),
-        inductor_configs={"compile_threads": 1},
         cache_dir=str(tmp_path / "cache"))
     job_path = slot / "job.json"
     job_path.write_bytes(msgspec.json.encode(job))
@@ -487,28 +486,18 @@ def test_the_lock_installs_on_torchs_own_hook() -> None:
         assert hasattr(benchmarking.Benchmarker, name)
 
 
-def test_the_autotune_posture_the_mint_actually_compiles_under() -> None:
-    """The premise the interlock rests on, READ FROM THE PIN rather than
-    assumed — because the two branches have very different device footprints.
+def test_the_worker_cannot_override_tcg_compiler_policy() -> None:
+    """Compiler options have one owner: TCG. The worker wire and public mint
+    seam cannot recreate caller-selected Inductor policy."""
+    import inspect
 
-    ``get_cpp_wrapper_config`` resolves an UNSET
-    ``triton.autotune_at_compile_time`` to ``has_triton() and
-    V.aot_compilation`` — True for AOTI. So the mint takes the ONE-pass
-    autotune-block path, not the two-pass "run the whole model on real
-    inputs" path below it. Both benchmark on the card; only the second holds
-    a full activation set. If a torch bump flips this default, the per-entry
-    VRAM figure in the width policy is wrong and this test says so.
-    """
-    import torch._inductor.config as inductor_config
     from gen_worker import aot_mint
 
-    assert inductor_config.triton.autotune_at_compile_time is None, (
-        "the pin no longer leaves autotune_at_compile_time unset — re-read "
-        "compile_fx.get_cpp_wrapper_config before trusting the VRAM policy")
-    resolved = aot_mint._entry_configs(None)
-    assert "triton.autotune_at_compile_time" not in resolved, (
-        "the mint must not pin this: the resolution is torch's, and pinning "
-        "it False switches on the whole-model-on-real-inputs pass")
+    assert "inductor_configs" not in pool.EntryJob.__struct_fields__
+    assert "inductor_configs" not in inspect.signature(
+        pool.EntryCompilePool).parameters
+    assert "inductor_configs" not in inspect.signature(
+        aot_mint.mint_graph_classes).parameters
 
 
 def test_parallelism_is_not_sealed(tmp_path: Path) -> None:

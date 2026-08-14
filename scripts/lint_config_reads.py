@@ -259,12 +259,6 @@ BEHAVIOUR_GATES: Dict[Tuple[str, str], str] = {
         "TRIPWIRE at the real placement boundary. Read as env rather than "
         "Settings because a control-plane box exports it box-wide with no worker "
         "config in sight. Threat: a CPU-offloading run on the shared dev box.",
-    ("src/gen_worker/aot_wrapper_split.py", "GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF"):
-        "LIVE ON THE FLEET, and that is why it survives its deleted sibling: 5 "
-        "SDXL releases declare it and 1 endpoint carries a non-deleted entry "
-        "(standing hub, 2026-08-03). Deleting a live switch changes a running "
-        "endpoint. Threat: the pgw#811 run_impl split regressing a family, with "
-        "no way to unstick it short of a release.",
     ("src/gen_worker/lifecycle.py", "$ENV_VAR"):
         "READ-ONLY WARNING PREDICATE. Re-reads the hub-delivered topology only "
         "to decide whether the 'GPUs are invisible' warning applies. Selects a "

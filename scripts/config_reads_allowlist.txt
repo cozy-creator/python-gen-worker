@@ -113,8 +113,6 @@ src/gen_worker/parallel/group.py::NCCL_NVLS_ENABLE LIBRARY reads the prior NCCL_
 src/gen_worker/env_seal.py::$name LIBRARY scrub_env() ERASES the behaviour namespaces before torch imports. The one place §1.18 is already mechanically enforced in either repo - copy it, do not weaken it.
 src/gen_worker/env_seal.py::PYTHONHASHSEED LIBRARY PYTHONHASHSEED is a CPython interpreter fact the seal must record.
 src/gen_worker/models/native_kernels.py::GEN_WORKER_NATIVE_KERNELS_LIB LIBRARY GEN_WORKER_NATIVE_KERNELS_LIB, explicit .so path override for the loader.
-src/gen_worker/aot_wrapper_split.py::GEN_WORKER_AOT_HOST_COMPILE_JOBS LIBRARY GEN_WORKER_AOT_HOST_COMPILE_JOBS, per-entry host-compile fan-out; derived from the pod budget when unset.
-src/gen_worker/aot_wrapper_split.py::GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF LIBRARY GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF. LIVE: five SDXL releases (0.2.111/112/113/116/117) declare it in `release_env_declarations` and one endpoint has a non-deleted `endpoint_env_entries` row. Verified on the standing hub 2026-08-03. NOT a deletion candidate.
 
 # ---------------------------------------------------------------------------
 # STANDALONE — CLI / convert paths that load no app config.
@@ -132,8 +130,6 @@ src/gen_worker/net.py::$name STANDALONE COZY_HTTP_*_TIMEOUT_S. Documented as "re
 src/gen_worker/compiled_graph_store.py::GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR STANDALONE GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR, the local compiled-graph store root: a path relocation like TENSORHUB_CACHE_DIR and a cross-repo contract with cozy-local.
 src/gen_worker/video_encode.py::GEN_WORKER_VIDEO_ENCODE_CONCURRENCY STANDALONE GEN_WORKER_VIDEO_ENCODE_CONCURRENCY, encode fan-out.
 src/gen_worker/models/native_kernels.py::GEN_WORKER_NATIVE_KERNELS VIOLATION GEN_WORKER_NATIVE_KERNELS. th#1887: NOT standalone — a serving-path rollout gate, not a CLI. Now also registered in BEHAVIOUR_GATES; deletion target pending a release-declaration check.
-src/gen_worker/aot_resume.py::GEN_WORKER_MINT_RESUME_MAX_BYTES STANDALONE GEN_WORKER_MINT_RESUME_MAX_BYTES, resume-area capacity bound.
-src/gen_worker/aot_resume.py::GEN_WORKER_MINT_RESUME_DIR STANDALONE GEN_WORKER_MINT_RESUME_DIR. Operator override for the resume root; production wiring is `aot_resume.set_root` (pgw#1030 deleted the zero-caller `resume_enabled()` wrapper — `open_bank` states the decision).
 
 # ---------------------------------------------------------------------------
 # TRIPWIRE — guards whose entire purpose is to fire on a misconfiguration.

@@ -24,12 +24,12 @@ from typing import Any, Dict
 
 import pytest
 
-from gen_worker import child_contract
 from gen_worker import aot_compile_pool as pool
-from gen_worker import aot_mint, mint_process, mint_supervisor
+from gen_worker import aot_mint, mint_supervisor
 from gen_worker.cell_adopt import AdoptOutcome
 
 _GIB = 1 << 30
+_SNAPSHOT = "phases.json"
 
 
 def _progress_midflight(tmp_path: Path) -> aot_mint.MintProgress:
@@ -59,7 +59,7 @@ def test_a_killed_mints_measurements_are_on_disk_before_it_dies(
     Atomicity is not decoration: the parent reads this file the instant after
     it kills the child, and a half-written table is a table nobody can use.
     """
-    snapshot = tmp_path / mint_process.PHASES_SNAPSHOT_NAME
+    snapshot = tmp_path / _SNAPSHOT
     progress = _progress_midflight(tmp_path)
 
     aot_mint.write_phase_snapshot(snapshot, progress)
@@ -77,7 +77,7 @@ def test_a_killed_mints_measurements_are_on_disk_before_it_dies(
 
 def test_nothing_measured_writes_nothing(tmp_path: Path) -> None:
     """"No measurement" and "zero" must not read the same."""
-    snapshot = tmp_path / mint_process.PHASES_SNAPSHOT_NAME
+    snapshot = tmp_path / _SNAPSHOT
     aot_mint.write_phase_snapshot(snapshot, aot_mint.MintProgress())
     assert not snapshot.exists()
     assert aot_mint.partial_phase_table(aot_mint.MintProgress()) == {}
@@ -91,17 +91,11 @@ def test_an_abandoned_outcome_emits_the_rows_it_measured(
     A child that wrote no report at all — which is every abandoned and every
     killed mint — must still put its entry rows and its pool row on the wire.
     """
-    snapshot = tmp_path / mint_process.PHASES_SNAPSHOT_NAME
+    snapshot = tmp_path / _SNAPSHOT
     progress = _progress_midflight(tmp_path)
     aot_mint.write_phase_snapshot(snapshot, progress)
 
-    request = mint_process.MintRequest(
-        function="f", modules=(), family="sdxl", arm_token="k",
-        target=str(tmp_path / "cell.tar.gz"), work_root=str(tmp_path),
-        report=str(tmp_path / "report.json"),
-        cfg=child_contract.CompileSpec(),
-        phases_snapshot=str(snapshot))
-    recovered = mint_process._read_phase_snapshot(request.phases_snapshot)
+    recovered = mint_supervisor._read_snapshot(snapshot)
     assert recovered, "the parent could not read what the child wrote"
 
     # The supervisor's own two-source rule: nothing was REPORTED (the mint
@@ -161,18 +155,9 @@ def test_a_report_beats_a_snapshot_when_both_exist(tmp_path: Path) -> None:
 
 
 def test_the_snapshot_path_reaches_the_child(tmp_path: Path) -> None:
-    """The wiring. Every measurement above is worthless if the child is never
-    told where to write."""
+    """The supervisor gives the active mint the snapshot it later reads."""
     import inspect
 
-    assert "phases_snapshot=str(" in inspect.getsource(
-        mint_process.build_request)
-    from gen_worker import mint_child
-
-    assert "phase_snapshot=(" in inspect.getsource(mint_child._mint_aot)
-    # ...and the SUPERVISED path, which is the one the fleet runs since
-    # pgw#1215 step 4: the parent tells `mint_graph_classes` where to write and
-    # reads it back on every outcome.
     assert "phase_snapshot=snapshot" in inspect.getsource(
         mint_supervisor.supervise)
     assert "_read_snapshot(snapshot)" in inspect.getsource(
@@ -183,29 +168,13 @@ def test_an_unreadable_snapshot_never_changes_an_outcome(
     tmp_path: Path,
 ) -> None:
     """Telemetry must not be able to fail a mint, in either direction."""
-    assert mint_process._read_phase_snapshot("") == {}
-    assert mint_process._read_phase_snapshot(str(tmp_path / "nope")) == {}
+    assert mint_supervisor._read_snapshot(tmp_path / "nope") == {}
     junk = tmp_path / "junk.json"
     junk.write_text("{not json")
-    assert mint_process._read_phase_snapshot(str(junk)) == {}
+    assert mint_supervisor._read_snapshot(junk) == {}
     listy = tmp_path / "listy.json"
     listy.write_text("[1, 2, 3]")
-    assert mint_process._read_phase_snapshot(str(listy)) == {}
-
-
-def test_the_retry_decision_is_untouched_by_recovered_telemetry() -> None:
-    """`retryable` branches on ``report is None``. Carrying the recovered
-    table in a SEPARATE field rather than a synthesized report is what keeps
-    a telemetry fix from silently changing a retry policy."""
-    crashed = mint_process.MintOutcome(
-        status=mint_process.CRASHED, partial_phases={"v": 1})
-    assert crashed.report is None
-    assert crashed.retryable is True
-    abandoned = mint_process.MintOutcome(
-        status=mint_process.ABANDONED, partial_phases={"v": 1})
-    assert abandoned.retryable is False, (
-        "abandonment is not a failure and must never be retried into a "
-        "second billed compile")
+    assert mint_supervisor._read_snapshot(listy) == {}
 
 
 @pytest.mark.filterwarnings("ignore::FutureWarning")
@@ -318,30 +287,19 @@ def test_every_mint_beat_feeds_both_survivors(
     beat: the phase snapshot (what it measured) and the pod-side progress
     token (that it was working). Neither may depend on the other running.
 
-    Was `inspect.getsource(aot_mint.mint)`, and that failed TWICE in a
-    release gate — once because I edited the file mid-run, once because a
-    SIBLING LANE did. That is the finding, not the accident: on a shared
-    chaos worktree the source file is not a stable object, so a source-text
-    assertion tests the file rather than the behaviour and can go red without
-    the behaviour changing. Driven through the real `mint()` entrypoint
-    instead: `_mint_cell` is replaced with one that beats once and raises, so
-    the REAL beat wrapper `mint()` installs is what runs.
+    Driven through the real beat wrapper, without the deleted local mint
+    process or a source-text assertion.
     """
-    snapshot = tmp_path / mint_process.PHASES_SNAPSHOT_NAME
+    snapshot = tmp_path / _SNAPSHOT
     state = tmp_path / "podguard"
     monkeypatch.setenv(aot_mint.PODGUARD_STATE_ENV, str(state))
 
-    def _one_beat(pipeline, spec, out_dir, **kw):  # type: ignore[no-untyped-def]
-        progress = kw["progress"]
-        progress.width = pool.entry_workers(
-            2, vcpus=16, available_bytes=64 * _GIB, device_lock=True, limit=2)
-        progress.timings["export_all_s"] = 1.0
-        progress.beat(aot_mint.PHASE_INDUCTOR_COMPILE, 1, 36, "unet/row=0")
-        raise aot_mint.MintRefused("stop here — the beat is what is under test")
-
-    monkeypatch.setattr(aot_mint, "_mint_cell", _one_beat)
-    with pytest.raises(aot_mint.MintRefused):
-        aot_mint.mint(None, None, tmp_path / "out", phase_snapshot=snapshot)
+    progress = aot_mint.MintProgress()
+    progress.width = pool.entry_workers(
+        2, vcpus=16, available_bytes=64 * _GIB, device_lock=True, limit=2)
+    progress.timings["export_all_s"] = 1.0
+    aot_mint._attach_snapshot(progress, snapshot)
+    progress.beat(aot_mint.PHASE_INDUCTOR_COMPILE, 1, 36, "unet/row=0")
 
     assert snapshot.exists(), (
         "the beat did not write the phase snapshot — a killed mint keeps "

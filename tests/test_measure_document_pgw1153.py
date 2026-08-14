@@ -2,9 +2,7 @@
 
 ``python -m gen_worker.measure_child <request>.mint.json`` is documented in
 endpoint sources and in ``MintBlocker``. Every ``aot/*.mint.json`` an endpoint
-repo commits is a flattened DECLARATION payload, NOT a runtime ``MintRequest``;
-decoding it as one raises ``ValidationError: Object missing required field
-'function'`` in the first millisecond of a rented card. The fence:
+repo commits is a flattened DECLARATION payload. The fence:
 
 1. **Every committed ``aot/*.mint.json`` in the fleet parses through the real
    entry** — the corpus under ``tests/fixtures/fleet_mint_requests/`` is a
@@ -32,14 +30,12 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Tuple
+from typing import Any, Dict, List
 
 import msgspec
 import pytest
 
 from gen_worker import measure_child
-from gen_worker.child_contract import CompileSpec
-from gen_worker.mint_process import MintRequest
 
 REPO = Path(__file__).resolve().parent.parent
 MICRO_SRC = REPO / "examples" / "micro-diffusion" / "src"
@@ -135,36 +131,7 @@ def test_no_committed_request_can_carry_an_output_destination(
 def test_the_document_type_is_input_side_only() -> None:
     fields = set(measure_child.MeasureDocument.__struct_fields__)
     assert fields.isdisjoint(measure_child.WITHHELD_FIELDS)
-    assert set(measure_child.WITHHELD_FIELDS) <= set(
-        MintRequest.__struct_fields__), (
-        "the withheld list must name fields a MintRequest actually carries")
-    # Everything the runtime envelope contributes is still a MintRequest field;
-    # the two additions are the committed payload's own, and both are inputs.
-    assert fields - set(MintRequest.__struct_fields__) == {
-        "declaration_module", "source_ref"}
-
-
-def test_a_runtime_mint_request_still_decodes_through_the_same_door(
-    tmp_path: Path,
-) -> None:
-    """The OTHER real artifact — a mint work root's ``request.json`` — has to
-    keep working, and through the SAME decoder. Two decoders is the defect."""
-    cfg = CompileSpec(family=FAMILY, targets=("transformer",))
-    request = MintRequest(
-        function="generate-w8a8", modules=("micro_diffusion.main_w8a8",),
-        family=FAMILY, arm_token="arm1-deadbeef",
-        target=str(tmp_path / "cell.tar.gz"), work_root=str(tmp_path / "work"),
-        report=str(tmp_path / "mint.json"), resume=str(tmp_path / "bank"),
-        cfg=cfg)
-    raw = msgspec.json.encode(request)
-    assert b"cell.tar.gz" in raw
-
-    doc, _flat = measure_child.load_document(raw)
-
-    assert doc.function == "generate-w8a8" and doc.cfg is not None
-    assert doc.cfg.family == FAMILY and doc.cfg.targets == ("transformer",)
-    for field in measure_child.WITHHELD_FIELDS:
-        assert not hasattr(doc, field), field
+    assert {"declaration_module", "source_ref", "family"} <= fields
 
 
 # ---------------------------------------------------------------------------
@@ -318,9 +285,8 @@ def test_a_family_no_endpoint_declares_refuses_by_name(on_path: None) -> None:
 def test_a_ref_the_local_store_does_not_hold_refuses_without_downloading(
     on_path: None,
 ) -> None:
-    """A measure run never downloads. ``mint_process`` states the rule for the
-    mint child and a measurement of a mint inherits it — so a slot that is not
-    already on this machine is a refusal, not a 40 GiB fetch."""
+    """A measure run never downloads, so a slot that is not already on this
+    machine is a refusal rather than a multi-gigabyte fetch."""
     refusal = _refusal(_committed_shape())
     assert refusal.reason == "slots_unresolvable"
     assert "never downloads" in refusal.detail
@@ -336,22 +302,6 @@ def test_a_malformed_slot_flag_refuses_by_name(on_path: None) -> None:
 # ---------------------------------------------------------------------------
 # 4. THE DOCUMENTED INVOCATION, end to end, on a committed-shape file.
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def faked_inductor(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The compile half, cardless. The export is REAL; only the AOTInductor
-    call is stood in for, at the one seam pgw#1134's own suite fakes it."""
-    from gen_worker import aot_mint
-
-    real = aot_mint._export_entry
-
-    def _fake(*a: Any, **kw: Any) -> Any:
-        kw = dict(kw)
-        kw["compile_now"] = False
-        return real(*a, **kw)
-
-    monkeypatch.setattr(aot_mint, "_export_entry", _fake, raising=True)
 
 
 def test_the_documented_command_measures_a_committed_shape_file(

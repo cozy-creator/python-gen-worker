@@ -29,7 +29,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tupl
 import msgspec
 
 from . import activity as activity_mod
-from . import aot_declaration, aot_mint
+from . import aot_declaration
 from . import boot_adopt
 from . import boot_phases as boot_mod
 from . import cell_adopt
@@ -54,6 +54,7 @@ from .api.binding import (
     component_overrides,
     wire_ref,
 )
+from .api.export_contract import export_declaration
 from .hubio.client import HubPublishError
 from .hub_error import HubApiError
 from . import cell_key
@@ -8391,7 +8392,7 @@ class Executor:
         # could raise out of here (and, uncaught, failed the whole model setup)
         # is retired; a blocked family carries its refusal as
         # `Compile.blockers` and the mint gate reads it.
-        decl = aot_mint.export_declaration(family)
+        decl = export_declaration(family)
         if decl is None:
             return (boot_adopt.refused(
                 "no_export_declaration",

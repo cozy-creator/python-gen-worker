@@ -2,16 +2,15 @@
 
     python -m gen_worker.measure_child <request>.mint.json [<report>.json]
 
-Runs the mint's own load and export loop — optionally with the INDUCTOR compile
-— against ONE declared class set, records what it cost on the card, and
-produces **nothing else**: no cell, no artifact, no package, no hub call, no
-advertisement.
+Runs the mint's own load and export loop — optionally through TCG's real
+compiler — against ONE declared class set and records what it cost on the
+card. Compiled bytes live only in a temporary diagnostic CAS: no serving-CAS
+state, remote publish, arm, hub call, or advertisement survives the run.
 
 ``<request>.mint.json`` is the DECLARATION payload an endpoint repo commits
 (``family``, ``shapes``, ``text_lens``, ``specialization``,
-``declaration_module``, ``source_ref``), not the runtime ``MintRequest`` the
-hub-driven parent builds. Both decode through :func:`load_document` ->
-:func:`resolve_job`, so there is ONE decoder. From the committed shape:
+``declaration_module``, ``source_ref``). It decodes through
+:func:`load_document` -> :func:`resolve_job`. From the committed shape:
 ``modules`` <- ``declaration_module``; ``function`` <- the endpoint whose
 ``Compile(family=)`` is the payload's ``family`` (``--function`` disambiguates);
 ``targets`` <- that endpoint's own ``Compile(targets=)`` when the payload names
@@ -20,32 +19,28 @@ cannot supply is refused BY NAME before a weight is read, naming the flag that
 supplies it.
 
 **Slots resolve OFFLINE** — a ref is looked up in the local store and never
-downloaded, inheriting ``mint_process``'s rule that a mint process which could
-download is one that can stall on a lemon host.
+downloaded, so a diagnostic cannot stall on a remote host.
 
-Why a second child exists: both other front doors are shut against a
-measurement run — ``mint_child._assert_family_mintable`` refuses while any
-blocker is open, and ``boot_trace_child`` composes structure-only, whose
-``_refuse_artifact_lanes`` refuses a w8a8/w4a4/svdq tree by name.
+Why a second child exists: a measurement is an explicit operator action over
+a committed declaration, not a worker mint obligation or a serving arm. It
+needs the real compile path while withholding every production output seam.
 
 The three properties that make that safe:
 
 1. **Explicit invocation, never an ambient bypass.** Nothing spawns this child.
    ``_assert_family_mintable`` is untouched and every real mint still fails
    closed.
-2. **It cannot produce an artifact, structurally.** :class:`MeasureJob` is a
-   DIFFERENT wire struct from ``MintRequest`` and declares none of the
-   output-side fields (:data:`WITHHELD_FIELDS` — ``target``, ``work_root``,
-   ``resume``, ``report``, ``arm_token``). msgspec drops what a struct does not
-   declare, so the artifact destination, resume bank and report path never
-   enter this process even when handed the same ``*.mint.json``.
+2. **It cannot retain an artifact.** :class:`MeasureJob` is a different wire
+   struct from the runtime request and declares no output-side fields. The TCG
+   Engine receives a temporary CAS root owned by this process, so exercising
+   the real compile path cannot populate the serving worker's CAS.
 3. **The real-weight fallback is scoped to HERE**, and the run REPORTS which
    lane it measured (:attr:`MeasureReport.weights`), read off the composed
    pipeline, so a weightless claim can never be implied by a run that was not.
 
 ``export_peak_device_bytes`` / ``export_peak_device_reserved_bytes`` are the
-mint's own names for the same two counters (``aot_mint._mint_cell``) on the
-same allocator, so numbers are comparable without translation. The per-entry
+mint path's names for the same two allocator counters, so numbers are
+comparable without translation. The per-entry
 figure is the RUNNING high-water after that entry — the counter is reset once
 before the first row, exactly as the mint resets it once before its export
 phase — so the row that raised the water line is the row named beside it.
@@ -60,6 +55,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -75,6 +71,7 @@ from .child_preflight import (
     pick_compile_target,
     select_specs,
 )
+from .api.export_contract import export_declaration
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +101,7 @@ REASONS: Tuple[str, ...] = (
     # The endpoint's own `setup()` raised. Never re-classified here: a load
     # that fails under measurement fails under a mint too.
     "load_failed",
-    # The composed pipeline carries no target the cell names.
+    # The composed pipeline carries no declared compile target.
     "no_compile_target",
     # The family ships no export declaration, so there is no class set to
     # measure.
@@ -117,10 +114,9 @@ REASONS: Tuple[str, ...] = (
     "child_error",
 )
 
-#: The ``MintRequest`` fields :class:`MeasureJob` deliberately does NOT
-#: declare. Every one of them is an output destination or a cross-attempt
-#: bank; a measure run has neither, and the cheapest way to prove it cannot
-#: write one is for the path never to arrive.
+#: Production output fields :class:`MeasureJob` deliberately does NOT declare.
+#: A measure run has no destination or cross-attempt bank; the cheapest proof
+#: it cannot write one is for the path never to arrive.
 WITHHELD_FIELDS: Tuple[str, ...] = (
     "target", "work_root", "report", "resume", "arm_token", "phases_snapshot",
 )
@@ -131,7 +127,7 @@ class MeasureJob(msgspec.Struct, frozen=True, kw_only=True):
     else.
 
     Decoded straight from a committed ``*.mint.json`` — an operator measures
-    the request they would mint, not a hand-copied approximation of it — and
+    the declaration they would mint, not a hand-copied approximation — and
     msgspec drops every field this struct does not name. See
     :data:`WITHHELD_FIELDS`.
     """
@@ -148,14 +144,10 @@ class MeasureJob(msgspec.Struct, frozen=True, kw_only=True):
 class MeasureDocument(msgspec.Struct, frozen=True, kw_only=True):
     """pgw#1153: what a ``*.mint.json`` FILE may carry, either shape.
 
-    There are exactly two request documents in the fleet and this decodes both,
-    because a tool that decodes one of them is the defect this struct closes:
-
-    * an endpoint repo's committed ``aot/*.mint.json`` — a flattened
-      declaration payload. ``family`` / ``declaration_module`` / ``source_ref``
-      are top-level and there is no ``cfg``, no ``function``, no ``slots``;
-    * a mint work root's ``request.json`` — the runtime ``MintRequest``, whose
-      input half is ``function`` / ``modules`` / ``cfg`` / ``slots``.
+    This decodes an endpoint repo's committed ``aot/*.mint.json`` declaration.
+    ``family`` / ``declaration_module`` / ``source_ref`` are top-level. The
+    optional expanded input fields remain useful to diagnostic callers, but no
+    production mint-request envelope exists.
 
     Every field is optional and every field is INPUT-SIDE. :data:`WITHHELD_FIELDS`
     still holds here for the same structural reason it holds on
@@ -164,7 +156,7 @@ class MeasureDocument(msgspec.Struct, frozen=True, kw_only=True):
     either.
     """
 
-    # The runtime envelope's input half.
+    # Optional expanded diagnostic input.
     function: str = ""
     modules: Tuple[str, ...] = ()
     cfg: Optional[CompileSpec] = None
@@ -210,8 +202,8 @@ class EntryMeasurement(msgspec.Struct, frozen=True, kw_only=True):
     #: is the row that sizes the mint.
     running_peak_device_bytes: int = 0
     running_peak_device_reserved_bytes: int = 0
-    #: Loose inductor files this entry compiled. Counted, then DELETED — see
-    #: :func:`_discard`. A measure run leaves no code behind.
+    #: Whether TCG produced or reused a temporary compiled artifact for this
+    #: row. The diagnostic CAS is deleted when the run exits.
     compiled_files: int = 0
     refusal: str = ""
 
@@ -219,8 +211,8 @@ class EntryMeasurement(msgspec.Struct, frozen=True, kw_only=True):
 class MeasureReport(msgspec.Struct, frozen=True, kw_only=True):
     """The typed evidence a blocker's ``resolution=`` can cite.
 
-    It carries no artifact, no digest and no cell key, and it never will: this
-    is a measurement of a mint, not a mint.
+    It carries no artifact, digest, or compiled-graph key: this is evidence
+    about a mint, not a publishable mint result.
     """
 
     ok: bool = False
@@ -245,9 +237,8 @@ class MeasureReport(msgspec.Struct, frozen=True, kw_only=True):
     precision: str = ""
     entries: Tuple[EntryMeasurement, ...] = ()
     declared_classes: int = 0
-    #: The mint's own two names for the phase high-water, on the mint's own
-    #: counters (``aot_mint._mint_cell``), so these numbers are comparable
-    #: with a real mint's without translation.
+    #: The mint path's two names for the same allocator high-water, so these
+    #: numbers are comparable with a production compile without translation.
     export_peak_device_bytes: int = 0
     export_peak_device_reserved_bytes: int = 0
     #: False under ``--export-only``: the peaks then cover the export alone,
@@ -299,24 +290,6 @@ def _device_label(job: MeasureJob) -> str:
         return "cpu"
     ordinal = int(job.device or -1)
     return f"cuda:{ordinal}" if ordinal >= 0 else "cuda"
-
-
-def _discard(files: Sequence[str]) -> int:
-    """Delete an entry's compiled output and return how much there was.
-
-    The compile is the half of the question that matters, and its OUTPUT is
-    the half that must not survive: a measure run that left loose ``.so``
-    files behind would be one packaging step away from the artifact this
-    module may not produce.
-    """
-    count = 0
-    for name in files:
-        count += 1
-        try:
-            Path(name).unlink()
-        except OSError:
-            logger.debug("measure: could not remove %s", name, exc_info=True)
-    return count
 
 
 # ---------------------------------------------------------------------------
@@ -372,8 +345,8 @@ def _slot_from_value(name: str, value: str, ref_text: str) -> MintSlot:
     refusal naming the flag that settles it, and a wrong guess would be a
     measurement of the wrong checkpoint.
 
-    Identity is deliberately weak on the path form. No cell key, digest or
-    artifact leaves this process (:class:`MeasureReport` carries none of the
+    Identity is deliberately weak on the path form. No compiled-graph key,
+    digest, or artifact leaves this process (:class:`MeasureReport` carries none of the
     three), so a slot's ``ref`` exists only to satisfy ``ctx.slots``; it is the
     operator's when ``,ref=`` gives one and a slot-shaped placeholder when not.
     """
@@ -430,8 +403,8 @@ def _declares(specs: Sequence[Any], family: str) -> bool:
 def _function_for_family(specs: Sequence[Any], family: str) -> str:
     """The endpoint function the payload's ``family`` names.
 
-    A committed payload names a FAMILY because that is what a cell is scoped to
-    (pgw#758: one mint -> one cell for the family's whole declared class set);
+    A committed payload names a FAMILY because graph-class declarations are
+    family-scoped;
     it does not name a function, and it should not have to. Functions sharing a
     class are interchangeable here — ``select_specs`` pulls the whole sibling
     set from any of them — so ambiguity is only real when the candidates span
@@ -468,8 +441,8 @@ def resolve_job(
 ) -> MeasureJob:
     """Build the job the run needs from whichever document arrived.
 
-    Imports the endpoint's declaring module — the same walk ``mint_child`` and
-    ``boot_trace_child`` do — because the three answers the committed payload
+    Imports the endpoint's declaring module — the same walk the compile child
+    and ``boot_trace_child`` use — because the answers the committed payload
     omits all live on the declaration, and reading them from anywhere else
     would be a second declaration.
     """
@@ -585,7 +558,13 @@ def run(
     job: MeasureJob, report_path: Path, *, compile_entries: bool = True,
 ) -> int:
     """Measure this job's declared class set. Never raises, never publishes."""
-    from . import aot_declaration, aot_mint, compile_cache as cc, fleet_cells
+    from . import (
+        aot_compile_child,
+        aot_declaration,
+        aot_mint,
+        compile_cache as cc,
+        fleet_cells,
+    )
     from .cli.run import run_setup
     from .models import structure_only
     from .registry import collect_endpoints
@@ -656,8 +635,8 @@ def run(
                      partial=partial)
 
     if cfg.lora_bucket:
-        # The CONTAINER half and the lane stamp, exactly as `mint_child` and
-        # `boot_trace_child` arm the pipeline they hand the export. The LIFTED
+        # The container half and lane stamp, exactly as the compile child and
+        # boot trace arm the pipeline they hand to export. The lifted
         # half belongs to the loop that needs it.
         cc.apply_lora_execution_lane(pipeline, int(cfg.lora_bucket))
     spec = fleet_cells.aot_export_spec(pipeline, cfg)
@@ -675,7 +654,7 @@ def run(
         compiled=bool(compile_entries),
         setup_ms=int((time.monotonic() - t_setup) * 1000))
 
-    decl = aot_mint.export_declaration(str(spec.family or family))
+    decl = export_declaration(str(spec.family or family))
     if decl is None:
         return _fail(
             report_path, "no_declaration",
@@ -707,24 +686,45 @@ def run(
     _reset_peak()
     t_entry = time.monotonic()
     try:
-        for traced in aot_mint.trace_for_key(
-                pipeline, spec, decl, compile_now=bool(compile_entries)):
-            allocated, reserved = _peaks()
-            timings = dict(traced.timings or {})
-            # ONE enumeration: `ordered` above and this count both come from
-            # `declared_class_rows`, so they cannot disagree.
-            declared = int(traced.declared) or declared
-            entries.append(EntryMeasurement(
-                entry=traced.name, ok=True, nodes=int(traced.nodes),
-                export_ms=int(float(timings.get("export_s", 0.0)) * 1000),
-                compile_ms=int(float(timings.get("compile_s", 0.0)) * 1000),
-                running_peak_device_bytes=allocated,
-                running_peak_device_reserved_bytes=reserved,
-                compiled_files=_discard(traced.files)))
-            # The program is the largest object this child holds and nothing
-            # downstream reads it.
-            traced.program = None
-            t_entry = time.monotonic()
+        with tempfile.TemporaryDirectory(prefix="measure-compiled-graphs-") as raw:
+            work = Path(raw)
+            engine_runtime = (
+                aot_compile_child._tcg_runtime(work / "cas")
+                if compile_entries else None
+            )
+            traced_rows = aot_mint.trace_for_key(pipeline, spec, decl)
+            for traced in traced_rows:
+                compile_ms = 0
+                compiled_files = 0
+                if engine_runtime is not None:
+                    engine, runtime = engine_runtime
+                    compiled = aot_compile_child.compile_traced_class(
+                        traced,
+                        spec,
+                        engine,
+                        runtime,
+                        work=work,
+                        out_dir=work / "exports",
+                    )
+                    compile_ms = int(
+                        (compiled.compile_s + compiled.reuse_s) * 1000
+                    )
+                    compiled_files = 1
+                else:
+                    traced.release()
+                allocated, reserved = _peaks()
+                timings = dict(traced.timings or {})
+                # ONE enumeration: `ordered` above and this count both come from
+                # `declared_class_rows`, so they cannot disagree.
+                declared = int(traced.declared) or declared
+                entries.append(EntryMeasurement(
+                    entry=traced.name, ok=True, nodes=int(traced.nodes),
+                    export_ms=int(float(timings.get("export_s", 0.0)) * 1000),
+                    compile_ms=compile_ms,
+                    running_peak_device_bytes=allocated,
+                    running_peak_device_reserved_bytes=reserved,
+                    compiled_files=compiled_files))
+                t_entry = time.monotonic()
     except BaseException as exc:  # noqa: BLE001 — an OOM here IS the answer
         allocated, reserved = _peaks()
         in_flight = ordered[len(entries)] if len(entries) < len(ordered) else ""
@@ -780,8 +780,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "request",
         help="an endpoint repo's committed aot/*.mint.json (a declaration "
-             "payload) or a mint work root's request.json; either way the "
-             "output-side fields are dropped by construction")
+             "payload); output-side fields are dropped by construction")
     parser.add_argument("report", nargs="?", default="",
                         help="where to write the typed measurement "
                              "(default: <request>.measure.json)")

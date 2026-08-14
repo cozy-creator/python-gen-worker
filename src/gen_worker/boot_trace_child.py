@@ -74,6 +74,7 @@ from .child_preflight import (
 from .boot_key import (
     CODE_DIGEST, EXIT_BAD_JOB, EXIT_OK, EXIT_REFUSED, TraceJob, TraceReport,
 )
+from .api.export_contract import export_declaration
 
 logger = logging.getLogger(__name__)
 
@@ -241,7 +242,7 @@ def run(job: TraceJob) -> int:
     export_spec = fleet_cells.aot_export_spec(pipeline, cfg)
     setup_ms = int((time.monotonic() - t_setup) * 1000)
 
-    decl = aot_mint.export_declaration(export_spec.family)
+    decl = export_declaration(export_spec.family)
     if decl is None:
         return _fail(
             report_path, "no_declaration",

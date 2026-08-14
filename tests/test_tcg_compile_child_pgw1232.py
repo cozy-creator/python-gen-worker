@@ -157,7 +157,7 @@ def test_every_in_flight_row_releases_on_refusal(tmp_path: Path) -> None:
     engine = _Engine(tmp_path, refusal=RuntimeError("compile refused"))
 
     with pytest.raises(RuntimeError, match="compile refused"):
-        child._compile_and_release(
+        child.compile_traced_class(
             traced,
             _export_spec(),
             engine,
@@ -173,7 +173,7 @@ def test_every_in_flight_row_releases_on_refusal(tmp_path: Path) -> None:
 def test_tcg_reuse_reports_zero_compile_time(tmp_path: Path) -> None:
     engine = _Engine(tmp_path, outcome="reused")
 
-    result = child._compile_and_release(
+    result = child.compile_traced_class(
         _Traced(),
         _export_spec(),
         engine,

@@ -35,24 +35,18 @@ So the program does not cross. The child receives the SHARE — which declared
 graph classes are its — plus the four facts it needs to build the weight-free
 pipeline itself (``function``, ``modules``, ``slots``, ``cfg``, exactly what
 ``boot_key.TraceJob`` carries), traces its rows with
-``aot_mint.trace_for_key(compile_now=True)``, and packs each one with
-``aot_mint.pack_graph_classes``. One address space from trace to artifact.
+``aot_mint.trace_for_key``, and hands each exported program directly to TCG's
+Engine. One address space from trace through TCG's compile and artifact export.
 
-The gates travel with the program, because they always ran beside it: every
-package-side gate (``program_package_drift``, ``eliminated_constants``,
-``input_contract``) is inside ``pack_graph_classes``, so it now runs in the
-child, against the program the child itself traced. That is strictly tighter
-than the old split — the parent used to gate ITS program against the CHILD's
-package, which could only ever catch divergence, and divergence is exactly
-what stops being possible when there is one program.
+TCG owns package admission and constant-table equality against the very program
+this child traced. No worker packager or package-side parser remains in this
+handoff.
 
 What this does NOT change
 -------------------------
-Cell identity. Parallelism is not sealed (pgw#757 established
-``compile_threads`` as non-identity by the same argument, and the digest check
-is re-run here): the pool changes WHEN entries compile, never what they
-compile. Assembly is ordered by ENTRY NAME, not completion, so a cell minted
-at K=4 is byte-identical to one minted at K=1.
+Compiled-graph identity. The pool changes WHEN graph classes compile, never
+TCG's compiler policy or what it compiles. Results are assembled by graph-class
+NAME rather than completion order.
 """
 
 from __future__ import annotations
@@ -705,7 +699,6 @@ class EntryJob(msgspec.Struct, frozen=True, kw_only=True):
     out_dir: str = ""
     work: str = ""
     report: str = ""
-    inductor_configs: Dict[str, Any] = {}
     cache_dir: str = ""
     device_lock: str = ""
 
@@ -1222,7 +1215,6 @@ class EntryCompilePool:
         workdir: Path,
         *,
         width: PoolWidth,
-        inductor_configs: Optional[Mapping[str, Any]] = None,
         cache_dir: str = "",
         python: str = "",
         entry_silence_window_s: float = _ENTRY_SILENCE_WINDOW_S,
@@ -1238,7 +1230,6 @@ class EntryCompilePool:
         #: happens only when they actually moved.
         self._emitted_width_facts: Optional[Dict[str, Any]] = None
         self._emit_width("construction")
-        self.inductor_configs = dict(inductor_configs or {})
         # TCG's canonical CAS owns completed-class reuse. A killed class is the
         # sole allowed loss in flight; the next attempt gets this pool's
         # explicit cache directory or fresh scratch and never consults the
@@ -1335,7 +1326,6 @@ class EntryCompilePool:
             out_dir=str(template.out_dir or (self.workdir / "artifacts")),
             work=str(slot / "work"),
             report=str(slot / ENTRY_REPORT_NAME),
-            inductor_configs=dict(self.inductor_configs),
             cache_dir=self.cache_dir,
             device_lock=str(self.device_lock_path),
         )
