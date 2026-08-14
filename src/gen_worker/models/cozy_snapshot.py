@@ -143,9 +143,6 @@ def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> Worke
                 url=str(file.url or "").strip() or None,
                 digest=str(entry.digest),
                 chunks=tuple(file.chunks),
-                # The ordered chunk lengths are authoritative. Preserve this
-                # transport ceiling as metadata; never infer a layout from it.
-                chunk_size_bytes=int(file.chunk_size_bytes or 0),
             )
         )
 

@@ -515,7 +515,6 @@ def _fetch_cell(rig: _Rig, cache: Path, entry: Dict[str, Any],
         size_bytes=int(entry.get("size_bytes") or 0),
         digest=str(entry.get("digest") or ""),
         url=str(entry.get("url") or ""),
-        chunk_size_bytes=0,
         chunks=(),
     )])
     try:

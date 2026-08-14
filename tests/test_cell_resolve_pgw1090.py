@@ -21,7 +21,6 @@ from typing import Any, Dict
 import pytest
 
 from gen_worker import aot_identity, cell_key as ck, cell_resolve, env_seal
-from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.procsplit import actions as actions_mod
 
 KEY = "cg-key-v1-" + "ab" * 28
@@ -404,9 +403,9 @@ def test_the_transport_is_shaped_for_the_existing_delivery_path(stub) -> None:
     files = list(cell.transport.files)
     assert len(files) == 1
     entry = files[0]
-    for attr in ("path", "size_bytes", "digest", "url", "chunks",
-                 "chunk_size_bytes"):
+    for attr in ("path", "size_bytes", "digest", "url", "chunks"):
         assert hasattr(entry, attr), attr
+    assert not hasattr(entry, "chunk_size_bytes")
     assert str(entry.path).endswith(".tar.gz")
 
 
@@ -424,7 +423,7 @@ def test_a_chunked_transport_carries_the_chunk_attributes(stub) -> None:
     chunks = list(cell.transport.files[0].chunks)
     assert [c.len for c in chunks] == [2048, 2048]
     assert chunks[0].sha256 == "aa" * 32
-    assert cell.transport.files[0].chunk_size_bytes == 2048
+    assert not hasattr(cell.transport.files[0], "chunk_size_bytes")
 
 
 def test_materialize_delegates_and_adds_nothing(monkeypatch, stub) -> None:

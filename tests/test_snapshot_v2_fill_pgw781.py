@@ -22,6 +22,8 @@ from gen_worker.models.hub_client import (
     WorkerResolvedRepoFile,
 )
 from gen_worker.models.refs import TensorhubRef
+from gen_worker.models.store import _snapshot_to_resolved
+from gen_worker.pb import worker_scheduler_pb2 as pb
 
 
 def _sha(data: bytes) -> str:
@@ -71,6 +73,30 @@ class BlobServer:
 
 def _ref() -> TensorhubRef:
     return TensorhubRef(owner="acme", repo="model", tag="latest")
+
+
+def test_grpc_adapter_keeps_ordered_lengths_and_drops_fixed_layout_scalar() -> None:
+    snapshot = pb.Snapshot(
+        digest="sha256:" + "ff" * 32,
+        files=[
+            pb.SnapshotFile(
+                path="weights.safetensors",
+                size_bytes=60,
+                digest="sha256:" + "ee" * 32,
+                chunk_size_bytes=64 * 1024 * 1024,
+                chunks=[
+                    pb.ChunkRef(sha256="aa" * 32, url="https://cas/0", len=3),
+                    pb.ChunkRef(sha256="bb" * 32, url="https://cas/1", len=56),
+                    pb.ChunkRef(sha256="cc" * 32, url="https://cas/2", len=1),
+                ],
+            )
+        ],
+    )
+
+    file = _snapshot_to_resolved(snapshot).files[0]
+
+    assert [chunk.length for chunk in file.chunks] == [3, 56, 1]
+    assert not hasattr(file, "chunk_size_bytes")
 
 
 class _BarrierCAS(LocalCAS):
@@ -366,9 +392,6 @@ def test_chunked_file_uses_manifest_recorded_variable_lengths(tmp_path: Path) ->
                         WorkerResolvedChunk(_sha(chunk), server.url(_sha(chunk)), len(chunk))
                         for chunk in chunks
                     ),
-                    # This scalar is deliberately unrelated to either chunk;
-                    # consumers must trust the ordered recorded lengths.
-                    chunk_size_bytes=2048,
                 )
             ],
         )

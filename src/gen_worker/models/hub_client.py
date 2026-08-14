@@ -43,7 +43,6 @@ class WorkerResolvedRepoFile:
     #: Present whenever the manifest stores an ordered object list; file size
     #: does not determine whether tensor-aligned chunks exist.
     chunks: tuple["WorkerResolvedChunk", ...] = ()
-    chunk_size_bytes: int = 0
 
     def cas_ref(self) -> str:
         """The algorithm-tagged digest of this entry.
@@ -271,7 +270,6 @@ def resolve_repo(
         files.append(WorkerResolvedRepoFile(
             path=path, size_bytes=int(ent.get("size_bytes") or 0), url=u,
             digest=tagged, chunks=chunks,
-            chunk_size_bytes=int(ent.get("chunk_size_bytes") or 0),
         ))
     if not digest or not files:
         raise HubResolveError(
