@@ -33,12 +33,6 @@ import msgspec
 
 from .api.binding import ModelRef, binding_wire_refs, wire_ref
 
-#: Every child progress frame is one stdout line with this prefix. Anything
-#: else the child (or a library it imports) prints is diagnostic tail, never
-#: parsed — a mint must not be steerable by a stray print.
-FRAME_PREFIX = "MINT_FRAME "
-
-
 class CompileSpec(msgspec.Struct, frozen=True, kw_only=True):
     """The declared compile contract, flattened — exactly the facts the CHILD
     reads.
@@ -183,23 +177,11 @@ class MintFrame(msgspec.Struct, frozen=True, kw_only=True):
     note: str = ""
 
 
-def frame_line(
-    phase: str = "", step: int = 0, total: int = 0, note: str = "",
-) -> str:
-    """One wire line for a progress frame — the child's half of the protocol,
-    kept here so both sides share one encoder."""
-    body = msgspec.json.encode(
-        MintFrame(phase=phase, step=step, total=total, note=note[:400]))
-    return FRAME_PREFIX + body.decode() + "\n"
-
-
 __all__ = [
-    "FRAME_PREFIX",
     "CompileSpec",
     "MintFrame",
     "MintSlot",
     "SlotSubject",
-    "frame_line",
     "slot_subjects",
     "subject_digest",
     "subject_facts",

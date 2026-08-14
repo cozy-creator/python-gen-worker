@@ -322,7 +322,7 @@ if cell is not None:
                        else pipe.transformer(x, t, cond))
                 deltas[name] = float((got - eager[name]).abs().max())
         out["parity_max_abs"] = deltas
-        out["served_entry_calls"] = dict(aot_serve.served_entry_calls(pipe))
+        out["served_entry_calls"] = dict(aot_serve._served_entry_calls(pipe))
         out["execution_count"] = int(aot_serve.execution_count(pipe))
         out["ingress_refusals"] = int(aot_serve.ingress_refusals(pipe))
         # A tolerance, not equality: AOTI fuses and reassociates, so bitwise
@@ -783,7 +783,7 @@ if cell is not None:
             out["parity_ok"] = all(v <= 3e-3 for v in rel.values())
         else:
             out["parity_ok"] = all(v <= 1e-4 for v in deltas.values())
-        out["served_entry_calls"] = dict(aot_serve.served_entry_calls(pipe))
+        out["served_entry_calls"] = dict(aot_serve._served_entry_calls(pipe))
         out["execution_count"] = int(aot_serve.execution_count(pipe))
         out["ok"] = bool(out["parity_ok"]) and out["execution_count"] > 0
     else:

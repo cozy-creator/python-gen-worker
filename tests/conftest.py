@@ -207,10 +207,8 @@ def _boot_isa_clamp():
     every real AOTI compile a test drove was built ``-march=native``: an
     unclamped, unportable object, silently unlike anything a pod produces.
 
-    pgw#811's ``assert_command_is_clamped`` made that visible by refusing it
-    at the argv level. The honest answer is to give the suite the boot
-    precondition production has, not to soften the assert — pgw#754 is a
-    SIGILL-class defect. Tests that exercise the clamp itself monkeypatch
+    The honest answer is to give the suite the boot precondition production
+    has — pgw#754 is a SIGILL-class defect. Tests that exercise the clamp itself monkeypatch
     ``inductor_config.cpp`` directly and are unaffected (monkeypatch restores).
     """
     from gen_worker import host_isa as _isa
@@ -251,9 +249,9 @@ def _fresh_receipt_gate():
     """
     from gen_worker import receipts as _receipts
 
-    _receipts.reset()
+    _receipts._reset_for_tests()
     yield
-    _receipts.reset()
+    _receipts._reset_for_tests()
 
 
 @pytest.fixture(scope="session", autouse=True)

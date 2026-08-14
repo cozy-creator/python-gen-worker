@@ -720,9 +720,9 @@ def derive(
     # identity is a pure function of the code closure this digest names, so a
     # hit folds the stored TCG hashes; the other axes are restated FRESH inside
     # `fold`, which is what makes it safe to skip the expensive half and still
-    # re-key on a toolchain upgrade or a different card. Honesty is enforced at
-    # the next MINT by `assert_memo_honest`, the only moment this pod holds a
-    # traced truth to compare against.
+    # re-key on a toolchain upgrade or a different card. The explicit
+    # `trust_memo=False` posture below re-traces and invalidates any dishonest
+    # memo before accepting fresh keys.
     if memoized:
         entry_keys = fold(memoized, family=family)
         wall_ms = int((time.monotonic() - t0) * 1000)

@@ -111,12 +111,7 @@ def configure(base_url: str) -> None:
     logger.info("receipts: gate configured against %s", base)
 
 
-def configured() -> bool:
-    with _LOCK:
-        return _CONFIG is not None
-
-
-def reset() -> None:
+def _reset_for_tests() -> None:
     """Disarm the gate and its JWKS cache (test/process-reset seam)."""
     global _CONFIG
     with _LOCK:
@@ -482,8 +477,6 @@ __all__ = [
     "Receipt",
     "ReceiptError",
     "configure",
-    "configured",
-    "reset",
     "verify_delivered_artifact",
     "verify_receipt",
 ]

@@ -110,7 +110,7 @@ def _clean_identity() -> Iterator[None]:
     yield
     worker_identity.reset()
     worker_credential.reset()
-    receipts.reset()
+    receipts._reset_for_tests()
     broker.install(None)
 
 
@@ -439,8 +439,7 @@ def test_an_adopted_cell_that_will_not_arm_does_not_kill_the_function(
     monkeypatch.setattr(
         executor_mod.compile_cache, "mandatory_serving", lambda pipe: False)
     ex = _executor(tmp_path)
-    order = executor_mod._ArmOrder(
-        backend="aot_cell", publisher_org=POD_ORG, adopt=_hit())
+    order = executor_mod._ArmOrder(backend="aot_cell", adopt=_hit())
 
     outcome = ex._enable_compiled(object(), _Cfg(), tmp_path / "cell.tar.gz",
                                   None, order)
@@ -466,7 +465,7 @@ def test_a_HUB_ordered_arm_stays_terminal(
     _Events(monkeypatch)
     _refusing_arm(monkeypatch)
     ex = _executor(tmp_path)
-    order = executor_mod._ArmOrder(backend="aot_cell", publisher_org=POD_ORG)
+    order = executor_mod._ArmOrder(backend="aot_cell")
 
     with pytest.raises(fleet_cells.OrderedArmError) as exc:
         ex._enable_compiled(object(), _Cfg(), tmp_path / "cell.tar.gz",
@@ -485,8 +484,7 @@ def test_a_mandatory_lane_still_fails_closed(
     monkeypatch.setattr(
         executor_mod.compile_cache, "mandatory_serving", lambda pipe: True)
     ex = _executor(tmp_path)
-    order = executor_mod._ArmOrder(
-        backend="aot_cell", publisher_org=POD_ORG, adopt=_hit())
+    order = executor_mod._ArmOrder(backend="aot_cell", adopt=_hit())
 
     with pytest.raises(fleet_cells.OrderedArmError):
         ex._enable_compiled(object(), _Cfg(), tmp_path / "cell.tar.gz",
@@ -515,14 +513,13 @@ def test_the_degrade_reruns_the_ordinary_policy_with_no_delivered_cell(
 
     monkeypatch.setattr(fleet_cells, "enable_compiled", _policy)
     ex = _executor(tmp_path)
-    order = executor_mod._ArmOrder(
-        backend="aot_cell", publisher_org=POD_ORG, adopt=_hit())
+    order = executor_mod._ArmOrder(backend="aot_cell", adopt=_hit())
 
     outcome = ex._enable_compiled(object(), _Cfg(), tmp_path / "cell.tar.gz",
                                   None, order)
 
     assert outcome.armed is True
-    assert seen == [(None, "", "")], (
+    assert seen == [("", "", "")], (
         "the degrade re-offered the refused artifact to the fleet policy")
 
 

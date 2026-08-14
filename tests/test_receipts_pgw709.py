@@ -190,10 +190,10 @@ def jwks(signing_key: rsa.RSAPrivateKey) -> Iterator[JWKSServer]:
 
 @pytest.fixture(autouse=True)
 def reset_receipts() -> Iterator[None]:
-    receipts.reset()
+    receipts._reset_for_tests()
     worker_identity.reset()
     yield
-    receipts.reset()
+    receipts._reset_for_tests()
     worker_identity.reset()
 
 

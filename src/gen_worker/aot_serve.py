@@ -947,13 +947,6 @@ class EntryDispatch:
         return int(self.retired_calls) + sum(
             runner.calls for _n, runner in self.runners)
 
-    def refusal_counts(self) -> Dict[str, int]:
-        out: Dict[str, int] = {}
-        for _n, runner in self.runners:
-            for reason, count in runner.refusals.items():
-                out[reason] = out.get(reason, 0) + count
-        return out
-
     def realignment_counts(self) -> Dict[str, int]:
         out: Dict[str, int] = {}
         for _n, runner in self.runners:
@@ -1609,30 +1602,6 @@ def disarm_entry(pipeline: Any, name: str, reason: str) -> bool:
     return dropped
 
 
-def entry_states(pipeline: Any) -> Dict[str, Dict[str, Any]]:
-    """Per-entry SERVE STATE — what this pod actually serves, per graph class.
-
-    pgw#1176 §1.4: the pod never claims "cell X armed". It reports, per entry,
-    ``armed`` / ``de_armed(reason)`` / ``pending`` — so there is no unit left
-    that can advertise more than it serves. This is the record the per-entry
-    hub events (§1.7) are built from.
-    """
-    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
-    out: Dict[str, Dict[str, Any]] = {}
-    for target in (marker.get("targets") or {}):
-        dispatch = _dispatch_for(marker, target)
-        if dispatch is None:
-            continue
-        for name, runner in dispatch.runners:
-            out[name] = {
-                "state": "armed", "target": target, "calls": int(runner.calls)}
-        for name, why in dispatch.de_armed.items():
-            out[name] = {"state": "de_armed", "target": target, "reason": why}
-        for name in dispatch.pending:
-            out[name] = {"state": "pending", "target": target}
-    return out
-
-
 def _marker_states(subject: Any) -> List[Dict[str, Any]]:
     """Every wrapped target's state dict on a marker — PIPELINE or MODULE.
 
@@ -1679,7 +1648,7 @@ def ingress_refusals(pipeline: Any) -> int:
         for state in _marker_states(pipeline))
 
 
-def realigned_inputs(pipeline: Any) -> Dict[str, int]:
+def _realigned_inputs(pipeline: Any) -> Dict[str, int]:
     """``"<input>/<reason>" -> count`` of ingress realignments (pgw#791).
 
     Zero is the contract holding. Non-zero is the tax MEASURED rather than
@@ -1704,7 +1673,7 @@ def realigned_inputs(pipeline: Any) -> Dict[str, int]:
     return out
 
 
-def served_entry_calls(pipeline: Any) -> Dict[str, int]:
+def _served_entry_calls(pipeline: Any) -> Dict[str, int]:
     """``entry -> served calls`` across every wrapped target (pgw#790).
 
     Which GRAPH CLASS served, not just that something did: an adapter-forked
@@ -1799,8 +1768,8 @@ def is_armed(pipeline: Any) -> bool:
     proven as full coverage because every armed entry passed the same mint
     parity gate against the same eager reference.
 
-    Ask :func:`armed_entries` / :func:`entry_states` when you need to know
-    WHAT is served rather than WHETHER anything is.
+    Ask :func:`armed_entries` when you need to know WHAT is served rather than
+    WHETHER anything is.
     """
     return bool(armed_entries(pipeline))
 
@@ -1884,7 +1853,6 @@ __all__ = [
     "bind_call_inputs",
     "disarm_entry",
     "entry_from_meta",
-    "entry_states",
     "execution_count",
     "holds_exported_cell",
     "ingress_class_name",

@@ -24,22 +24,11 @@ only reason to prefer it to a mock.
 from __future__ import annotations
 
 import ast
-import io
-import json
-import tarfile
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
-
-import pytest
+from typing import List
 
 from gen_worker import fleet_cells, local_serve
-from gen_worker.cell_adopt import AdoptOutcome
 from gen_worker.cli import run as cli_run
-from gen_worker.child_contract import MintSlot
-
-KEY_A = "cg-key-v1-" + "a" * 56
-ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * fleet_cells.ARM_DIGEST_HEX
 
 SRC = Path(fleet_cells.__file__).parent
 
@@ -51,104 +40,6 @@ LOCAL_SERVE_ENTRY = (
     SRC / "cli" / "run.py",
     SRC / "cli" / "serve.py",
 )
-
-
-class _Pipe:
-    pass
-
-
-@dataclass
-class _Cfg:
-    family: str = "micro-diffusion"
-    lora_bucket: int = 0
-    shapes: Tuple[Tuple[int, int], ...] = ((64, 64),)
-    targets: Tuple[str, ...] = ("transformer",)
-    text_lens: Tuple[int, ...] = (16,)
-    guidance_scales: Tuple[float, ...] = (1.0,)
-    regional: bool = False
-
-
-class _Arm:
-    def __init__(self, token: str = ARM_A) -> None:
-        self.token = token
-
-    def facts_dict(self) -> Dict[str, str]:
-        return {}
-
-
-def _armable_artifact(tmp_path: Path, *, key: str = KEY_A) -> Path:
-    """A cell with a READABLE envelope — `_arm_exported_cell` refuses an
-    unreadable one before every other gate (pgw#1098), local store included."""
-    p = tmp_path / "mint" / "cell.tar.gz"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(
-        {"kind": "aot-inductor", "cell_key": key, "family": "micro-diffusion"}
-    ).encode()
-    with tarfile.open(p, mode="w:gz") as tar:
-        info = tarfile.TarInfo("metadata.json")
-        info.size = len(payload)
-        tar.addfile(info, io.BytesIO(payload))
-    return p
-
-
-@pytest.fixture()
-def machine(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The FACTS about this box that a CPU runner cannot supply: a card, a C
-    toolchain, a resolvable compile target, a family that declares an export.
-
-    Deliberately only facts. Nothing in the decision under test —  the store
-    consult, its ordering against the pending, the sink choice, the arm gate —
-    is stubbed, because a test that stubs the thing it is measuring proves the
-    stub.
-    """
-    monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
-    monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
-    monkeypatch.setattr(
-        fleet_cells.cc, "has_compile_target", lambda pipe, cfg: True)
-    monkeypatch.setattr(
-        fleet_cells, "mint_recipe",
-        lambda pipe, cfg, **kw: fleet_cells.RECIPE_AOT)
-    monkeypatch.setattr(
-        fleet_cells, "arm_identity", lambda *a, **k: _Arm())
-    monkeypatch.setattr(
-        fleet_cells.provision, "enable_compiled",
-        lambda pipe, cfg, cache_dir=None, artifact=None: AdoptOutcome.miss(
-            "no_cell", "no artifact was delivered to this machine"))
-
-
-@pytest.fixture()
-def armable(monkeypatch: pytest.MonkeyPatch) -> List[Path]:
-    """`provision.arm_aot` succeeds; record WHICH artifact it was handed."""
-    seen: List[Path] = []
-
-    def _arm(pipe: Any, cfg: Any, cache_dir: Any, artifact: Path,
-             bucket: int, expected: Any = None, *,
-             verify_numerics: bool = False, **_kw: Any) -> AdoptOutcome:
-        # pgw#1141 / §4.32: the local store's route is an ADOPTION — these
-        # bytes were proven at their own mint — so it must not ask for the
-        # mint-time gate. Asserted rather than absorbed: a bare `**kwargs`
-        # shim would keep this file green if the per-adopter tax came back.
-        assert verify_numerics is False, (
-            "the local store's ADOPT path asked for the mint-time gate")
-        seen.append(Path(artifact))
-        return AdoptOutcome.hit(KEY_A)
-
-    monkeypatch.setattr(fleet_cells.provision, "arm_aot", _arm)
-    monkeypatch.setattr(
-        fleet_cells.artifact_meta, "read_metadata",
-        lambda p: {"cell_key": KEY_A, "family": "micro-diffusion"})
-    monkeypatch.setattr(
-        fleet_cells.artifact_meta, "try_read_metadata",
-        lambda p: {"cell_key": KEY_A, "family": "micro-diffusion"})
-    monkeypatch.setattr(fleet_cells, "arm_axis_divergence", lambda key, meta: "")
-    return seen
-
-
-def _ctx() -> local_serve.LocalMintContext:
-    return local_serve.mint_context(
-        function="generate", module="micro_diffusion.endpoint",
-        slots={"pipeline": MintSlot(ref="cozy/micro#1", path="/tmp/micro")},
-    )
 
 
 # ---------------------------------------------------------------------------

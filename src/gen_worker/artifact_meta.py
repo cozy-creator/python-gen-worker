@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import tarfile
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Union
 
 #: The packed envelope's member name, at the tar root, for every artifact kind.
 METADATA_NAME = "metadata.json"
@@ -109,23 +109,9 @@ def read_metadata(artifact: Union[str, Path]) -> Dict[str, Any]:
     raise ArtifactMetadataError(f"artifact {path} has no {METADATA_NAME}")
 
 
-def try_read_metadata(artifact: Union[str, Path]) -> Optional[Dict[str, Any]]:
-    """:func:`read_metadata`, or ``None`` when it cannot be read.
-
-    For the best-effort readers whose contract is that they never fail: an
-    adopt-event identity line, a lane verdict that falls back to a named
-    default. They report the absence themselves; this only refuses to raise.
-    """
-    try:
-        return read_metadata(artifact)
-    except ArtifactMetadataError:
-        return None
-
-
 __all__ = [
     "MAX_METADATA_BYTES",
     "METADATA_NAME",
     "ArtifactMetadataError",
     "read_metadata",
-    "try_read_metadata",
 ]

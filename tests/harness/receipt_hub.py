@@ -246,7 +246,7 @@ def hub(rsa_key: rsa.RSAPrivateKey) -> Iterator[HubStub]:
     receipts.configure(stub.base_url)
     yield stub
     stub.close()
-    receipts.reset()
+    receipts._reset_for_tests()
     worker_identity.reset()
     worker_credential.reset()
 

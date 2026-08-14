@@ -303,8 +303,8 @@ def test_realignments_surface_on_the_wrapped_pipeline(package, sink) -> None:
     with torch.no_grad():
         module(torch.randn(2, 8), _unaligned_timestep())
         module(torch.randn(2, 8), _unaligned_timestep())
-    assert aot_serve.realigned_inputs(pipe) == {"timestep/unaligned_16b": 2}
-    assert aot_serve.served_entry_calls(pipe) == {"unet/adapter=false": 2}
+    assert aot_serve._realigned_inputs(pipe) == {"timestep/unaligned_16b": 2}
+    assert aot_serve._served_entry_calls(pipe) == {"unet/adapter=false": 2}
 
 
 def test_the_realignment_counter_is_not_a_refusal(package, sink) -> None:
