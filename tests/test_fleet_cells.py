@@ -65,6 +65,19 @@ class _Pipe:
 FAKE_KEY = "cg-key-v1-" + "a" * 56
 
 
+def test_finalized_mint_speaks_compiled_graph_vocabulary(tmp_path: Path) -> None:
+    minted = fc.SelfMint(
+        family="fam",
+        compiled_graph_key=FAKE_KEY,
+        ref=f"root/family-fam#{FAKE_KEY}",
+        snapshot_digest="sha256:" + "0" * 64,
+        artifact=tmp_path / "graph.tgz",
+    )
+
+    assert minted.compiled_graph_key == FAKE_KEY
+    assert not hasattr(minted, "cell_key")
+
+
 @pytest.fixture(autouse=True)
 def _clear_pending():
     with fc._PENDING_LOCK:
@@ -271,7 +284,7 @@ def test_adopt_publishes_exactly_the_bytes_that_armed(monkeypatch, tmp_path):
     assert minted is not None
     assert calls == [], "adoption arms; only the coverage gate publishes"
     fc.publish_self_mint(pending)
-    assert minted.ref == f"root/family-fam#{minted.cell_key}"
+    assert minted.ref == f"root/family-fam#{minted.compiled_graph_key}"
     assert minted.snapshot_digest.startswith("sha256:")
     assert len(minted.snapshot_digest) == len("sha256:") + 64
     assert published.wait(5), "an adopted mint must attempt publish"

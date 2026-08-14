@@ -252,7 +252,7 @@ def test_a_packed_graph_class_is_adopted_through_the_delivered_cell_path(
         rows = [Path(a) for a in artifacts]
         adopted.extend(rows)
         return fleet_cells.SelfMint(
-            family="sdxl", cell_key="cg-key-v1-abc", ref="r#k",
+            family="sdxl", compiled_graph_key="cg-key-v1-abc", ref="r#k",
             snapshot_digest="blake3:x", artifact=rows[0])
 
     monkeypatch.setattr(fleet_cells, "adopt_delegated_mint", _adopt)
@@ -354,7 +354,8 @@ def test_a_retry_CONSUMES_what_the_first_attempt_already_packed(
     monkeypatch.setattr(
         fleet_cells, "adopt_delegated_mint",
         lambda pipe, pending, artifacts: fleet_cells.SelfMint(
-            family="sdxl", cell_key="k", ref="r", snapshot_digest="d",
+            family="sdxl", compiled_graph_key="k", ref="r",
+            snapshot_digest="d",
             artifact=Path(list(artifacts)[0])))
 
     result = asyncio.run(mint_supervisor.supervise(

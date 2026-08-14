@@ -1193,10 +1193,12 @@ def _mint_origin(bg: "_BackgroundMint", spec: EndpointSpec) -> str:
     slot-resolution errors it may raise. The delegated child's twin is
     ``mint_child.mint_identity``; both exist because ``ValueError: slot
     'pipeline': no resolved model ref`` named a symptom and no mint."""
-    keys = sorted({str(getattr(p, "cell_key", "")) for p in bg.pendings.values()})
+    tokens = sorted({
+        str(getattr(p, "arm_token", "")) for p in bg.pendings.values()
+    })
     return (
         f"in-process mint fn={spec.name!r} "
-        f"key={(keys[0] if len(keys) == 1 else keys) or '(none)'!r}")
+        f"arm_token={(tokens[0] if len(tokens) == 1 else tokens) or '(none)'!r}")
 
 
 def _mint_modules(spec: EndpointSpec) -> Tuple[str, ...]:
@@ -7887,15 +7889,15 @@ class Executor:
                 # the one that must confess if it does not.
                 continue
             family = str(getattr(pending, "family", "") or "")
-            key = str(getattr(pending, "cell_key", "") or "")
+            arm_token = str(getattr(pending, "arm_token", "") or "")
             logger.error(
-                "%s: SELF_MINT_UNRESOLVED family=%s key=%s — the boot opened "
+                "%s: SELF_MINT_UNRESOLVED family=%s arm_token=%s — the boot opened "
                 "a mint capture and reached readiness without packing, "
                 "publishing, withholding or abandoning it (pgw#815)",
-                spec.name, family, key)
+                spec.name, family, arm_token)
             activity_mod.emit_event(
                 "self_mint_abort",
-                f"family={family} key={key}: this boot opened a mint capture "
+                f"family={family} arm_token={arm_token}: this boot opened a mint capture "
                 f"and reached readiness without packing, publishing, "
                 f"withholding or abandoning it — no cell, no receipt, no "
                 f"local arm and no refusal. The capture is discarded so the "

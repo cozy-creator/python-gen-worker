@@ -123,7 +123,7 @@ class SelfMint:
     """
 
     family: str
-    cell_key: str
+    compiled_graph_key: str
     ref: str  # "root/family-<f>#<key>" — compile_cache.system_repo + key
     snapshot_digest: str  # "sha256:<hex>" of the packed artifact (self-attested)
     artifact: Path
@@ -459,7 +459,7 @@ _PENDING: Dict[str, "PendingSelfMint"] = {}
 # finishes. A ledger written under the stamped key could never be read by
 # the only caller there is: an arm that has computed its obligation and not
 # yet minted anything. The VALUE carries the stamped identity
-# (`SelfMint.cell_key`/`.ref`) — this map IS the process's
+# (`SelfMint.compiled_graph_key`/`.ref`) — this map IS the process's
 # arm-token -> stamped-cell index, and the quarantine gate below reads it
 # for exactly that.
 _FINALIZED: Dict[str, "SelfMint"] = {}
@@ -1883,7 +1883,7 @@ def _arming_policy(
                 pipe,
                 cfg,
                 cache_dir,
-                finalized_prior.cell_key,
+                finalized_prior.compiled_graph_key,
             )
             if not armed_ready:
                 logger.warning(
@@ -2215,7 +2215,7 @@ def arm_from_local_store(
     # redundant copy of a structural fact is how the convention survived long
     # enough for `arm_ordered` to not keep it.
     minted = SelfMint(
-        family=family, cell_key=key,
+        family=family, compiled_graph_key=key,
         ref=f"{cc.system_repo(family)}#{key}",
         snapshot_digest=local.content_digest,
         artifact=local.artifact,
@@ -2450,7 +2450,7 @@ def adopt_delegated_mint(
             _quarantine_durable(_durable_keys.get(row, ""))
     artifact_path = durable_paths.get(key, first_artifact)
     minted = SelfMint(
-        family=pending.family, cell_key=key,
+        family=pending.family, compiled_graph_key=key,
         ref=f"{cc.system_repo(pending.family)}#{key}",
         snapshot_digest="sha256:" + sha256_file(artifact_path),
         artifact=artifact_path,
@@ -2615,7 +2615,7 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
             getattr(state.get("minted"), "artifact", pending.target),
             dict(state.get("meta") or {}),
             cell_key_digest=str(
-                getattr(state.get("minted"), "cell_key", "")
+                getattr(state.get("minted"), "compiled_graph_key", "")
                 or pending.arm_token),
             mint_duration_ms=int(state.get("mint_duration_ms") or 0),
             # pgw#1096: the PRE-TRACE identity, carried so a hub refusal that

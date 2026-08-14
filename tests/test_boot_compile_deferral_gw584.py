@@ -41,7 +41,6 @@ from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
 import msgspec
-import pytest
 
 import gen_worker
 from gen_worker import Compile
@@ -202,7 +201,6 @@ def _harness(tmp_path: Path, monkeypatch, specs: List[EndpointSpec]):
             shutil.copy(artifact, p / artifact.name)
         return p
 
-    import gen_worker.executor as ex_mod
     monkeypatch.setattr(store_mod, "ensure_local", _fake_download)
 
     enables: List[Tuple[Any, Optional[Path]]] = []
@@ -246,7 +244,8 @@ def _mint_enable(cell_ref: str, digest: str, artifact_path: Path):
             "regional_mods": [],
         })
         return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
-            family=FAMILY, cell_key=cell_ref.rsplit("#", 1)[-1], ref=cell_ref,
+            family=FAMILY, compiled_graph_key=cell_ref.rsplit("#", 1)[-1],
+            ref=cell_ref,
             snapshot_digest=digest, artifact=artifact_path))
 
     return _enable

@@ -37,7 +37,6 @@ import msgspec
 import pytest
 
 import gen_worker
-import gen_worker.executor as executor_mod
 from gen_worker import (
     AxisClass,
     Compile,
@@ -48,7 +47,7 @@ from gen_worker import (
     worker_function,
 )
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells, guard_closure, hot_swap, mint_supervisor
+from gen_worker import fleet_cells, hot_swap, mint_supervisor
 from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.executor import Executor
 from gen_worker.models.store import ModelStore
@@ -201,7 +200,7 @@ class _Harness:
                 reason="synthetic_child_failure",
                 detail="synthetic inductor failure")
         minted = fleet_cells.SelfMint(
-            family=pending.family, cell_key=pending.arm_token,
+            family=pending.family, compiled_graph_key=pending.arm_token,
             ref=pending.ref, snapshot_digest="sha256:" + "b" * 64,
             artifact=pending.target)
         pending._state["minted"] = minted

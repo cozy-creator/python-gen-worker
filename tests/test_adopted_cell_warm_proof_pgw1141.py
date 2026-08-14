@@ -313,7 +313,7 @@ def _fake_adopt_arm(key: str, ref: str, *, revoke: bool = False):
             state["failed"] = True
             _dispatch.remove("unet/main", "revoked by the rig")
         adopted = fleet_cells.SelfMint(
-            family=FAMILY, cell_key=key, ref=ref,
+            family=FAMILY, compiled_graph_key=key, ref=ref,
             snapshot_digest="blake3:" + "ab" * 32,
             artifact=Path(cache_dir or ".") / "cell.tar")
         return fleet_cells.ArmOutcome(armed=True, self_mint=adopted)

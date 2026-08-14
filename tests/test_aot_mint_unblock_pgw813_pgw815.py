@@ -164,7 +164,6 @@ def _w8a8_miss(monkeypatch: pytest.MonkeyPatch) -> Any:
         lambda pipe: "w8a8-lora64")
     # The torch-VERSION floor for the lifted-LoRA fork is not what these tests
     # measure and torch is not importable on a CPU dev box.
-    from gen_worker import aot_mint
 
     yield
     gw_config.reload_for_test()
@@ -403,7 +402,7 @@ def _finalized_pending(tmp_path: Path, publisher: Any) -> Any:
         cfg=_Cfg(), target=target, mint_root=tmp_path / "root", publisher=publisher)
     pending.mint_root.mkdir(parents=True, exist_ok=True)
     pending._state["minted"] = fleet_cells.SelfMint(
-        family=FAMILY, cell_key=key, ref=pending.ref,
+        family=FAMILY, compiled_graph_key=key, ref=pending.ref,
         snapshot_digest="blake3:deadbeef", artifact=target)
     pending._state["meta"] = {"cell_key": key, "family": FAMILY}
     return pending
@@ -530,6 +529,8 @@ def test_a_boot_that_resolves_NOTHING_confesses(
         spec, [pending], driver_owns_delegated=False)  # type: ignore[arg-type]
 
     assert ("self_mint_abort", "no_terminus") in [(k, p) for k, p, _ in seen]
+    assert f"arm_token={pending.arm_token}" in seen[-1][2]
+    assert "key=:" not in seen[-1][2]
     assert fleet_cells.terminus_of(pending) == fleet_cells.TERMINUS_ABANDONED
 
 

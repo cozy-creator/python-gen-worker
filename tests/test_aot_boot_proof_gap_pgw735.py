@@ -147,7 +147,7 @@ def _fake_arm(key: str, ref: str):
         # `holds_exported_cell` answers the lane question off the OBJECT.
         # A fixture that needs a REAL boot-adopt drives tests/harness/adopt_rig.py.
         adopted = fleet_cells.SelfMint(
-            family=FAMILY, cell_key=key, ref=ref,
+            family=FAMILY, compiled_graph_key=key, ref=ref,
             snapshot_digest="blake3:" + "ab" * 32,
             artifact=Path(cache_dir or ".") / "cell.tar")
         return fleet_cells.ArmOutcome(armed=True, self_mint=adopted)

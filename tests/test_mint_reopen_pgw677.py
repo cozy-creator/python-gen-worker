@@ -211,7 +211,7 @@ class _Harness:
         """The child, minus the process: it adopts the pending it was given."""
         pending = task.pending
         minted = fleet_cells.SelfMint(
-            family=pending.family, cell_key=pending.arm_token,
+            family=pending.family, compiled_graph_key=pending.arm_token,
             ref=pending.ref, snapshot_digest="sha256:" + "b" * 64,
             artifact=pending.target)
         pending._state["minted"] = minted

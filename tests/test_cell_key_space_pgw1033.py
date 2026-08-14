@@ -195,7 +195,7 @@ def test_the_memo_is_keyed_on_the_arm_key_the_next_arm_can_look_up(
     assert pending is not None and pending.arm_token == ARM_KEY
 
     minted = _adopt(monkeypatch, pending)
-    assert minted is not None and minted.cell_key == STAMPED_KEY
+    assert minted is not None and minted.compiled_graph_key == STAMPED_KEY
 
     prior = fleet_cells.finalized_in_process(ARM_KEY)
     assert prior is minted, (
@@ -203,7 +203,7 @@ def test_the_memo_is_keyed_on_the_arm_key_the_next_arm_can_look_up(
         "cell — every same-key re-arm pays a second full export")
     # The VALUE still carries the cell's own identity; only the INDEX is the
     # arm key. Nothing looks the ledger up by the stamped key.
-    assert prior.cell_key == STAMPED_KEY
+    assert prior.compiled_graph_key == STAMPED_KEY
     assert prior.ref.endswith("#" + STAMPED_KEY)
 
 
@@ -314,7 +314,7 @@ def test_an_ARM_TOKEN_is_never_classified_as_an_exported_ref(
 
     minted = _adopt(monkeypatch, pending)
     assert minted is not None
-    assert minted.cell_key == STAMPED_KEY, (
+    assert minted.compiled_graph_key == STAMPED_KEY, (
         "the finalized cell carries the ARM token as its identity; the stamped "
         "key is the only thing that addresses the bytes")
     assert not aot_serve.is_aot_ref(pending.ref)

@@ -290,7 +290,8 @@ out = {"pid": os.getpid(), "ok": cell is not None}
 if cell is not None:
     meta = aot_serve.unpack_metadata(Path(cell.artifact))
     out.update({
-        "cell_key": cell.cell_key, "family": cell.family, "ref": cell.ref,
+        "compiled_graph_key": cell.compiled_graph_key,
+        "family": cell.family, "ref": cell.ref,
         "snapshot_digest": cell.snapshot_digest,
         "artifact_bytes": Path(cell.artifact).stat().st_size,
         "entries": sorted((meta.get("entries") or {})),
@@ -570,7 +571,8 @@ out = {"pid": os.getpid(), "ok": cell is not None}
 if cell is not None:
     meta = aot_serve.unpack_metadata(Path(cell.artifact))
     out.update({
-        "cell_key": cell.cell_key, "family": cell.family, "ref": cell.ref,
+        "compiled_graph_key": cell.compiled_graph_key,
+        "family": cell.family, "ref": cell.ref,
         "snapshot_digest": cell.snapshot_digest,
         "artifact_bytes": Path(cell.artifact).stat().st_size,
         "entries": sorted((meta.get("entries") or {})),
@@ -747,7 +749,8 @@ out = {"pid": os.getpid(), "ok": cell is not None}
 if cell is not None:
     meta = aot_serve.unpack_metadata(Path(cell.artifact))
     out.update({
-        "cell_key": cell.cell_key, "family": cell.family, "ref": cell.ref,
+        "compiled_graph_key": cell.compiled_graph_key,
+        "family": cell.family, "ref": cell.ref,
         "snapshot_digest": cell.snapshot_digest,
         "artifact_bytes": Path(cell.artifact).stat().st_size,
         "entries": sorted((meta.get("entries") or {})),
@@ -911,7 +914,8 @@ out = {"pid": os.getpid(), "ok": cell is not None}
 if cell is not None:
     meta = aot_serve.unpack_metadata(Path(cell.artifact))
     out.update({
-        "cell_key": cell.cell_key, "family": cell.family, "ref": cell.ref,
+        "compiled_graph_key": cell.compiled_graph_key,
+        "family": cell.family, "ref": cell.ref,
         "snapshot_digest": cell.snapshot_digest,
         "artifact_bytes": Path(cell.artifact).stat().st_size,
         "entries": sorted((meta.get("entries") or {})),
@@ -1080,7 +1084,8 @@ out = {"pid": os.getpid(), "ok": cell is not None}
 if cell is not None:
     meta = aot_serve.unpack_metadata(Path(cell.artifact))
     out.update({
-        "cell_key": cell.cell_key, "family": cell.family, "ref": cell.ref,
+        "compiled_graph_key": cell.compiled_graph_key,
+        "family": cell.family, "ref": cell.ref,
         "snapshot_digest": cell.snapshot_digest,
         "artifact_bytes": Path(cell.artifact).stat().st_size,
         "entries": sorted((meta.get("entries") or {})),
@@ -1271,7 +1276,8 @@ out = {"pid": os.getpid(), "ok": cell is not None, "pad_classes": pads,
 if cell is not None:
     meta = aot_serve.unpack_metadata(Path(cell.artifact))
     out.update({
-        "cell_key": cell.cell_key, "family": cell.family, "ref": cell.ref,
+        "compiled_graph_key": cell.compiled_graph_key,
+        "family": cell.family, "ref": cell.ref,
         "snapshot_digest": cell.snapshot_digest,
         "artifact_bytes": Path(cell.artifact).stat().st_size,
         "entries": sorted((meta.get("entries") or {})),
