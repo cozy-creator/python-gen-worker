@@ -283,8 +283,38 @@ gen_worker.boot_phases.servable_ms()
 #
 # Entries are `module.Symbol` for a type and `module.symbol()` for a callable.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# pgw#1271 — THE STANDING RULE, and the reason it had to become one.
+#
+# A row whose LEAF SYMBOL starts with `assert_` / `verify_` / `refuse_` /
+# `require_` / `check_` is a GATE, and a gate on this list is a gate that
+# CANNOT GO RED. It must carry an INLINE REASON or `lint_unreached_surface.py`
+# fails:
+#
+#     gen_worker.x.assert_y()  # a test-only assertion; the property is ...
+#
+# "Call from tests" is an acceptable reason. Silence is not — and silence is
+# what this file granted for months. The header above has named "A gate that
+# never runs" as the FIRST severity class since the day it was written, and it
+# has a working precedent for the right outcome (`numerics_ladder.gate`,
+# delisted 2026-08-02 the moment pgw#848 gave it a caller). But findings were
+# absorbed as unannotated lines, so `boot_key.assert_memo_honest` — the check
+# whose own module header promises "Honesty is enforced, not trusted... A wrong
+# key is never produced" — sat here with permanent tenure while the memo it was
+# supposed to police produced the `graph` axis of every published `cg-key-v1`
+# with nothing checking it. A gate's failure is INVISIBLE precisely because the
+# reasoning around it reads like enforcement; the ratchet has to make it say so
+# out loud.
+#
+# Delisted by WIRING under pgw#1271:
+#   boot_key.assert_memo_honest — called from `mint_supervisor.rule_on_boot_memo`
+#     at the seal/publish seam, the one moment a pod holds a freshly TRACED
+#     class set for the closure its boot may have answered from a memo.
+#   parallel.cp.refuse_unless_divisible — called from
+#     `install_context_parallel`, once per sharding candidate, on the declared
+#     head count.
+# ---------------------------------------------------------------------------
 
-gen_worker.boot_key.assert_memo_honest()
 gen_worker.boot_key.prop_economy()
 gen_worker.component_vocab.ComponentVocabulary.role_of()
 gen_worker.component_vocab.declare_components()
@@ -318,7 +348,7 @@ gen_worker.convert.writer.fp8_te_components()
 gen_worker.convert.writer.streaming_cast_snapshot()
 gen_worker.convert.writer.streaming_w8a8_snapshot()
 gen_worker.families.base.family_registry()
-gen_worker.geometry.FamilyGeometry.assert_declared()
+gen_worker.geometry.FamilyGeometry.assert_declared()  # its own docstring says "Call from tests": it asserts a DECLARATION consistency property (every fit bucket is a declared compile shape) that has no runtime decision to make, and a runtime caller would be re-checking a fact the mint already refuses on.
 gen_worker.input_assets.inputs_dir_for_request()
 gen_worker.io.exists()
 gen_worker.io.read_audio()
@@ -346,7 +376,6 @@ gen_worker.models.tensor_layout_contract.parse_layout_id()
 gen_worker.models.w4a4.quantize_tree_w4a4()
 gen_worker.models.w4a4.sanitize_w4a4_state_dict()
 gen_worker.parallel.cp._GroupMesh.get_group()
-gen_worker.parallel.cp.refuse_unless_divisible()
 gen_worker.procsplit.group.GroupPlan.child()
 gen_worker.progress.reset()
 gen_worker.progress.tracking

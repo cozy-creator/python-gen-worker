@@ -53,6 +53,15 @@ traced per-class hashes are compared against whatever the memo answered
 (:func:`assert_memo_honest`), and a mismatch invalidates the memo entry and
 re-traces on the next boot. A wrong key is never produced — at worst a memo is
 thrown away, by the pod that proved it wrong.
+
+THE CALLER, named here because for the whole of pgw#1089's life there was none:
+``mint_supervisor.rule_on_boot_memo``, at the seal/publish seam of every
+supervised mint. Until pgw#1271 this paragraph described a check with **zero
+``src/`` callers** — ``trust_memo=False`` was passed only from tests, both
+production callers took the default, and so the sentence above was FALSE in the
+deployed configuration. It is a sentence that reads exactly like enforcement,
+which is why nothing caught it. If you move the mint's publish seam, move the
+call with it; a paragraph is not a caller.
 """
 
 from __future__ import annotations

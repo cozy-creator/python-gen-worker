@@ -345,14 +345,40 @@ def test_a_usable_card_on_the_line_passes(tmp_path, monkeypatch, capsys) -> None
 
 
 def test_a_cardless_host_is_not_a_host_failure(tmp_path, monkeypatch) -> None:
-    """No driver at all is a different mistake and must not be reported as one."""
+    """No card at all is a different mistake and must not be reported as one.
+
+    pgw#1271 re-based the DISCRIMINATOR without touching the property. It used
+    to be "`nvidia-smi` did not answer", which let a BROKEN diagnostic buy the
+    same exemption as an absent card — so the refusal skipped exactly the hosts
+    it was written for. It is now the probe's own class: a cardless box answers
+    `cuda_unavailable` (`torch.cuda.is_available()` is false), and only a host
+    with a driver TO fail can answer `driver_too_old`. This fixture used to
+    pair `driver=None` with `cuda_unusable_class="driver_too_old"`, which no
+    real host can report — torch's "driver too old (found version ...)" comes
+    out of libcuda.
+    """
     _authority(tmp_path, monkeypatch)
     monkeypatch.setattr(
         rigcheck,
         "resolve_environment",
-        lambda: _on_line_env(driver=None, cuda_usable=False),
+        lambda: _on_line_env(
+            driver=None, cuda_usable=False,
+            cuda_unusable_reason="torch.cuda.is_available() is false",
+            cuda_unusable_class="cuda_unavailable"),
     )
     rigcheck.assert_fleet_line("recell", start=tmp_path)
+
+
+def test_a_broken_DIAGNOSTIC_no_longer_buys_a_cardless_exemption(
+    tmp_path, monkeypatch
+) -> None:
+    """pgw#1271. `nvidia-smi` unreadable, and the probe still MEASURED a driver
+    fault: that is a host this rig must refuse to measure on, not a CPU box."""
+    _authority(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        rigcheck, "resolve_environment", lambda: _on_line_env(driver=None))
+    with pytest.raises(rigcheck.CudaUnusable):
+        rigcheck.assert_fleet_line("recell", start=tmp_path)
 
 
 def test_wheel_mismatch_stays_a_plain_mismatch(tmp_path, monkeypatch) -> None:

@@ -871,8 +871,8 @@ def _upstream_baseline() -> Optional[Set[str]]:
         return None
     if out.returncode != 0:
         return None
-    return {ln.strip() for ln in out.stdout.splitlines()
-            if ln.strip() and not ln.startswith("#")}
+    return {ln.partition("#")[0].strip() for ln in out.stdout.splitlines()
+            if ln.strip() and not ln.startswith("#")} - {""}
 
 
 def rewrite_baseline(current: Set[str]) -> None:
@@ -892,9 +892,14 @@ def rewrite_baseline(current: Set[str]) -> None:
     comment_idx = [i for i, ln in enumerate(lines) if ln.startswith("#")]
     head_end = max(comment_idx) + 1 if comment_idx else 0
     header = lines[:head_end]
-    documented = {ln.strip() for ln in header
-                  if ln.strip() and not ln.strip().startswith("#")}
-    tail = sorted(current - documented)
+    documented = {ln.partition("#")[0].strip() for ln in header
+                  if ln.strip() and not ln.strip().startswith("#")} - {""}
+    # Inline reasons are DATA, not decoration: `gate_rows_without_reasons`
+    # fails the gate on a gate-shaped row that has lost one, so a rewriter
+    # that dropped them would turn every annotated gate row red.
+    _, _, reasons = baseline_rows()
+    tail = [label + (f"  # {reasons[label]}" if label in reasons else "")
+            for label in sorted(current - documented)]
     dropped = documented - current
     BASELINE.write_text("\n".join(header) + "\n\n" + "\n".join(tail) + "\n",
                         encoding="utf-8")
@@ -907,16 +912,43 @@ def rewrite_baseline(current: Set[str]) -> None:
               f"not touch prose.", file=sys.stderr)
 
 
-def baseline_rows() -> Tuple[Set[str], Dict[str, str]]:
-    """The ratchet's labels, and the OWNER/EXPIRY note governing each.
+#: A symbol whose LEAF NAME starts with one of these is a GATE: its whole
+#: purpose is to refuse. pgw#1271 — a gate on the ratchet is categorically
+#: different from an unreported metric or a duplicated helper, and the file's
+#: own header has always said so ("A gate that never runs" is its first
+#: severity class). The ratchet absorbed them as unannotated lines anyway, so
+#: `boot_key.assert_memo_honest` — the check that made the boot-key memo safe
+#: to have at all — sat here with permanent tenure while the memo produced the
+#: `graph` axis of every published key with nothing checking it.
+GATE_PREFIXES = ("assert_", "verify_", "refuse_", "require_", "check_")
 
-    The file writes those notes as prose above the rows they cover. Parsing
+
+def is_gate_label(label: str) -> bool:
+    """Whether a baseline label names a gate (by its leaf symbol, not its
+    module: `models.checkpoint.load` is not a gate, `x.check_slots` is)."""
+    leaf = label.rstrip("()").rsplit(".", 1)[-1]
+    return leaf.startswith(GATE_PREFIXES)
+
+
+def baseline_rows() -> Tuple[Set[str], Dict[str, str], Dict[str, str]]:
+    """The ratchet's labels, the OWNER/EXPIRY note governing each, and each
+    row's own INLINE reason.
+
+    The file writes the notes as prose above the rows they cover. Parsing
     them turns a note nobody reads into the first line of the failure that
     needs it: a row with an owner and an expiry is a deletion somebody OWES,
     and the reader who trips the gate is usually not that somebody.
+
+    An INLINE reason is written after the label on its own line::
+
+        gen_worker.geometry.FamilyGeometry.assert_declared()  # a test-only …
+
+    It is required on gate-shaped rows and optional everywhere else — see
+    :func:`gate_rows_without_reasons`.
     """
     known: Set[str] = set()
     notes: Dict[str, str] = {}
+    reasons: Dict[str, str] = {}
     current = ""
     buf: List[str] = []
     for raw in BASELINE.read_text(encoding="utf-8").splitlines():
@@ -939,10 +971,37 @@ def baseline_rows() -> Tuple[Set[str], Dict[str, str]]:
         if buf:
             current = " ".join(buf)
             buf = []
-        known.add(line)
+        label, _, inline = line.partition("#")
+        label = label.strip()
+        if not label:
+            continue
+        known.add(label)
+        if inline.strip():
+            reasons[label] = inline.strip()
         if current:
-            notes[line] = current
-    return known, notes
+            notes[label] = current
+    return known, notes, reasons
+
+
+def gate_rows_without_reasons(
+    known: Set[str], reasons: Dict[str, str],
+) -> List[str]:
+    """Gate-shaped baseline rows carrying no inline reason (pgw#1271).
+
+    THE STANDING RULE: a gate that is on this list is a gate that CANNOT GO
+    RED, and the ratchet's own delisting precedent (`numerics_ladder.gate`,
+    wired and removed 2026-08-02) proves the correct outcome is usually to
+    wire it. Absorbing it as a bare line grants it permanent tenure instead,
+    and — because the reasoning around an unwired gate reads exactly like
+    enforcement — nothing else in this repo will ever notice.
+
+    So a gate row must SAY, in one line, why it is not wired. "Call from
+    tests" is an acceptable reason. Silence is not: it is indistinguishable
+    from a gate everyone assumes is running.
+    """
+    return sorted(
+        label for label in known
+        if is_gate_label(label) and not reasons.get(label))
 
 
 def main() -> int:
@@ -998,7 +1057,25 @@ def main() -> int:
         rewrite_baseline(current)
         return 0
 
-    known, notes = baseline_rows()
+    known, notes, reasons = baseline_rows()
+    unexplained = gate_rows_without_reasons(known, reasons)
+    for label in unexplained:
+        print(f"GATE ROW WITH NO REASON: {label}\n"
+              f"  This is a GATE — its leaf name is one of "
+              f"{'/'.join(GATE_PREFIXES)}* — and it is on the ratchet, which "
+              f"means NOTHING IN src/ CALLS IT. A gate that cannot go red is "
+              f"the one class on this list that is worse than dead code: the "
+              f"reasoning around it reads like enforcement, so nothing else "
+              f"will ever notice.\n"
+              f"    WIRE IT   the usual outcome — see numerics_ladder.gate, "
+              f"delisted 2026-08-02 by acquiring a caller;\n"
+              f"    DELETE IT with its tests, if the property it guards is no "
+              f"longer load-bearing;\n"
+              f"    SAY WHY   append an inline reason to its line in "
+              f"{BASELINE.name}:\n"
+              f"                {label}  # a test-only assertion; …\n"
+              f"  'Call from tests' is an acceptable reason. Silence is not.",
+              file=sys.stderr)
     new = sorted(current - known)
     stale = sorted(known - current)
     for label in new:
@@ -1050,7 +1127,7 @@ def main() -> int:
                   f"nothing can. Delete its line from {BASELINE.name} in the "
                   f"same commit as the deletion. (Do not go looking for its new "
                   f"caller — there isn't one.)", file=sys.stderr)
-    return 1 if (new or stale) else 0
+    return 1 if (new or stale or unexplained) else 0
 
 
 if __name__ == "__main__":

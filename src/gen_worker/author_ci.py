@@ -502,13 +502,21 @@ def read_parity(subject: _Subject, declaration: Any,
     """The mint-parent gate's verdict — read, or (on an ADOPT) taken.
 
     A cell this process MINTED was already gated strictly on the way to
-    publication, so its report (``minted``) is simply read back — an armed cell
-    that had failed that gate would not be armed. A cell that came out of this
-    machine's store was gated at ITS mint and adoption runs no quality gate, so
-    there is no verdict to read and this run takes one through the SAME function
-    the mint uses. Never a comparison re-implemented here.
+    publication, so its report (``minted``) is read back — but READ, never
+    ASSUMED. Until pgw#1271 the mint branch set ``passed = True`` from the mere
+    EXISTENCE of a report: a report's presence was scored as its verdict, so an
+    armed cell whose worst axis is a degraded comparison reported PASS with the
+    failing cosine printed beside it. The verdict now comes from the same place
+    the mint's own gate takes it — ``report.comparison().healthy`` — and is
+    cross-checked against what the pipeline actually SERVES: an entry the arm
+    de-armed is a class this cell does not deliver, whatever its cosine says.
+
+    A cell that came out of this machine's store was gated at ITS mint and
+    adoption runs no quality gate, so there is no verdict to read and this run
+    takes one through the SAME function the mint uses. Never a comparison
+    re-implemented here.
     """
-    from . import numerics_probe
+    from . import aot_serve, numerics_probe
     from .models import provision
 
     pipe = subject.armed_pipeline()
@@ -516,20 +524,38 @@ def read_parity(subject: _Subject, declaration: Any,
         return Parity(False, None, "?", "nothing armed")
     report = minted
     if report is None:
-        passed = provision.gate_cell_numerics(pipe, declaration, strict=True)
+        taken = provision.gate_cell_numerics(pipe, declaration, strict=True)
         report = numerics_probe.last_report()
         detail = "taken by this run through the mint's own gate (adopted cell)"
     else:
-        passed = True
+        taken = None
         detail = "the mint-parent gate's own verdict (pgw#1141)"
     if report is None:
         return Parity(False, None, "?",
                       "the gate ran and produced no report — refusing to call "
                       "an unmeasurable cell healthy (pgw#868)")
     comparison = report.comparison()
+    if comparison is None:
+        return Parity(False, None, report.threshold_source,
+                      f"{detail}; the report names no comparison — "
+                      f"{report.context()[:300]}")
+    # `measured` is both clauses of pgw#868: every declared axis produced a
+    # comparison, and none errored. An unmeasured axis is absent evidence, and
+    # absent evidence is never a pass.
+    passed = bool(comparison.healthy) and bool(report.measured)
+    if taken is not None:
+        passed = passed and bool(taken)
+    de_armed = sorted(
+        name for name, row in aot_serve.entry_states(pipe).items()
+        if str(row.get("state") or "") != "armed")
+    if de_armed:
+        passed = False
+        detail += (f"; {len(de_armed)} entr{'y' if len(de_armed) == 1 else 'ies'} "
+                   f"NOT armed on the pipeline this verdict describes "
+                   f"({de_armed[:5]})")
     return Parity(
-        passed=bool(passed),
-        cosine=None if comparison is None else float(comparison.cosine),
+        passed=passed,
+        cosine=float(comparison.cosine),
         floor_source=report.threshold_source,
         detail=f"{detail}; {report.context()[:400]}")
 

@@ -777,6 +777,55 @@ def _complete_upload_session(
     raise ArtifactTransferError("tensorhub upload failed", provider="tensorhub", retryable=False)
 
 
+def _typed_presigned_put(
+    *,
+    url: str,
+    file_path: str,
+    offset: int,
+    length: int,
+    cancel_check: Optional[Any],
+    put_pool: Optional[PutPool],
+    extra_headers: Optional[Dict[str, str]] = None,
+    what: str,
+) -> str:
+    """THE presigned PUT. One leg, one typed vocabulary — for BOTH legs.
+
+    ``hubio.transport`` speaks ``TransportError``/``InterruptedError``; every
+    caller above this module speaks ``ArtifactTransferError``/``CanceledError``,
+    and the ``phase == "put"`` + ``status_code == 403`` pair is what
+    :func:`presigned_upload_file` re-plans an expired presign on.
+
+    This helper exists because the conversion used to live only in the
+    MULTIPART leg. The direct-final PUT — the leg production always takes,
+    since ``_stream`` always sends ``sha256`` and the hub therefore always
+    mints ``put_url`` — raised ``TransportError`` raw: it never matched the
+    re-plan's ``except ArtifactTransferError``, so an expired presign lost a
+    whole completed render as an untyped ``RuntimeError``.
+    """
+    try:
+        with _presigned_put_slot():
+            return upload_part_to_presigned_url(
+                url=url,
+                file_path=file_path,
+                offset=int(offset),
+                length=int(length),
+                cancel_check=cancel_check,
+                pool=put_pool,
+                extra_headers=extra_headers,
+            )
+    except InterruptedError as ie:
+        raise CanceledError("canceled") from ie
+    except TransportError as te:
+        raise ArtifactTransferError(
+            f"tensorhub R2 {what} PUT failed: {str(te) or type(te).__name__}",
+            provider="tensorhub",
+            phase="put",
+            retryable=bool(getattr(te, "retryable", False)),
+            status_code=getattr(te, "status_code", None),
+            cause_type=type(te).__name__,
+        ) from te
+
+
 def _put_whole_object(
     *,
     url: str,
@@ -793,16 +842,16 @@ def _put_whole_object(
     stale-socket isolation on retry — because a single-shot PUT is a part
     upload with one part and no ETag ceremony, not a new transport.
     """
-    with _presigned_put_slot():
-        upload_part_to_presigned_url(
-            url=url,
-            file_path=file_path,
-            offset=0,
-            length=int(size_bytes),
-            cancel_check=cancel_check,
-            pool=put_pool,
-            extra_headers=extra_headers,
-        )
+    _typed_presigned_put(
+        url=url,
+        file_path=file_path,
+        offset=0,
+        length=int(size_bytes),
+        cancel_check=cancel_check,
+        put_pool=put_pool,
+        extra_headers=extra_headers,
+        what="direct-final",
+    )
     if on_progress is not None:
         try:
             on_progress(1, 1, int(size_bytes))
@@ -843,27 +892,15 @@ def _upload_parts_to_s3(
         presigned_url = part_urls[part_index]
         offset = part_index * part_size
         length = min(part_size, file_size - offset)
-        try:
-            with _presigned_put_slot():
-                etag = upload_part_to_presigned_url(
-                    url=presigned_url,
-                    file_path=file_path,
-                    offset=offset,
-                    length=length,
-                    cancel_check=cancel_check,
-                    pool=put_pool,
-                )
-        except InterruptedError as ie:
-            raise CanceledError("canceled") from ie
-        except TransportError as te:
-            raise ArtifactTransferError(
-                f"tensorhub R2 multipart PUT failed: {str(te) or type(te).__name__}",
-                provider="tensorhub",
-                phase="put",
-                retryable=bool(getattr(te, "retryable", False)),
-                status_code=getattr(te, "status_code", None),
-                cause_type=type(te).__name__,
-            ) from te
+        etag = _typed_presigned_put(
+            url=presigned_url,
+            file_path=file_path,
+            offset=offset,
+            length=length,
+            cancel_check=cancel_check,
+            put_pool=put_pool,
+            what="multipart",
+        )
         return (part_number, etag, length)
 
     # Upload parts in parallel.

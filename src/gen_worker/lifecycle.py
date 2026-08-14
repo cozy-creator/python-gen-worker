@@ -37,7 +37,7 @@ from .transport import (
 from .api.binding import wire_ref
 # module import: tests monkeypatch worker_fatal.report_worker_error_async; stay late-bound.
 from . import worker_fatal
-from .topology import delivered_topology
+from .topology import TopologyError, delivered_topology
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +116,12 @@ def probe_hardware() -> Dict[str, Any]:
                     "instead of card 0 (%d bytes) — pgw#776",
                     int(worst), int(free_mem))
                 info["gpu_free_mem"] = int(worst)
+    except TopologyError:
+        # A WEDGED fabric is the one topology fault that must reach the caller:
+        # `delivered_topology` raises it so the hub re-packs instead of this
+        # worker booting and hanging every collective. Swallowed here it read
+        # as "card 0, fine" and the pod went on to serve.
+        raise
     except Exception:
         pass
     try:
@@ -166,6 +172,8 @@ def free_vram_bytes() -> int:
         if worst:
             _warn_once_if_gpus_are_invisible()
             return int(worst)
+    except TopologyError:
+        raise  # see `probe_hardware` — a wedged fabric is never a zero.
     except Exception:
         pass
     try:
