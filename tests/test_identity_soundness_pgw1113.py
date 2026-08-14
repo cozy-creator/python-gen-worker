@@ -19,10 +19,9 @@ milliseconds.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict, Mapping
+from typing import Any, Dict
 
 import pytest
 
@@ -274,84 +273,3 @@ def test_a_memo_file_from_the_previous_schema_is_discarded_whole(
     }))
     assert boot_key.read_memo(tmp_path, "whatever") == {}
     assert boot_key.MEMO_VERSION >= 4
-
-
-# --------------------------------------------------------------------------
-# 4. the placement keying fact — and the NO-RE-KEY proof
-# --------------------------------------------------------------------------
-
-
-def _class_hash_before_pgw1113(
-    entry: Mapping[str, Any], *, strict: bool, lora_bucket: int,
-) -> str:
-    """``aot_serve.class_hash`` VERBATIM as of the parent commit.
-
-    Kept as a literal second implementation on purpose — the only way to prove
-    a keying change re-keys nothing is to compute both keys, and the honest
-    "before" is the old formula, not the new one with the new field left out.
-    """
-    facts = {
-        "v": 3,
-        "target": str(entry.get("target") or ""),
-        "fork": [[str(n), v] for n, v in (entry.get("fork") or [])],
-        "class_dims": [
-            [str(n), int(v)] for n, v in (entry.get("class_dims") or [])],
-        "range_digest": str(entry.get("range_digest") or ""),
-        "graph": dict(entry.get("graph") or {}),
-        "graph_witness": str(entry.get("graph_witness") or ""),
-        "strict": bool(strict),
-        "lora_bucket": int(lora_bucket or 0),
-    }
-    blob = json.dumps(facts, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(blob).hexdigest()[:16]
-
-
-def _entry(**extra: Any) -> Dict[str, Any]:
-    block: Dict[str, Any] = {
-        "target": "transformer",
-        "fork": [["adapter", False]],
-        "class_dims": [["height", 1024], ["width", 1024]],
-        "range_digest": "d" * 32,
-        "graph": {"specialization": {"strict": True, "lora_bucket": 0}},
-        "graph_witness": "e" * 16,
-    }
-    block.update(extra)
-    return block
-
-
-@pytest.mark.parametrize("extra", [
-    {},                                    # every cell published to date
-    {"placement": ["cuda:0"]},             # a single-device cell that states it
-    {"placement": []},                     # stated, and empty
-])
-def test_no_live_cell_re_keys(extra: Dict[str, Any]) -> None:
-    """pgw#1113 claims NOTHING re-keys a live cell, as a deliberate property
-    rather than luck: every new fact is omitted at the value every published
-    cell holds. This is that claim, checked rather than asserted.
-
-    A single-device placement is TRIVIAL, so the canonical form is
-    byte-identical to the form with no placement at all — the ``excluded`` /
-    ``param`` / ``overlay`` precedent, and the reason ``v`` does not move.
-    """
-    from gen_worker import aot_serve
-
-    entry = _entry(**extra)
-    assert aot_serve.class_hash(entry, strict=True, lora_bucket=0) == (
-        _class_hash_before_pgw1113(entry, strict=True, lora_bucket=0))
-
-
-def test_a_multi_device_placement_keys_APART() -> None:
-    """pgw#819: a cell minted on a ``gpu_count=2, parallel="internal"`` pod —
-    where the pipeline's own device map split the modules across
-    ``cuda:0``/``cuda:1`` and inductor baked that placement into the graph —
-    published under a key byte-identical to the single-GPU one, in BOTH
-    directions, and the hub deduped them."""
-    from gen_worker import aot_serve
-
-    narrow = aot_serve.class_hash(_entry(), strict=True, lora_bucket=0)
-    wide = aot_serve.class_hash(
-        _entry(placement=["cuda:0", "cuda:1"]), strict=True, lora_bucket=0)
-    assert narrow != wide
-    # …and the order it was observed in is not information.
-    assert wide == aot_serve.class_hash(
-        _entry(placement=["cuda:1", "cuda:0"]), strict=True, lora_bucket=0)

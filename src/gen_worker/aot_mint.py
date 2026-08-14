@@ -1287,18 +1287,6 @@ class MintProgress:
             logger.debug("aot-mint progress callback failed", exc_info=True)
 
 
-#: pgw#1167 verdicts. UNRECONCILED is a FIRST-CLASS state, not a silent pass:
-#: the whole point is that a gate which cannot fire is indistinguishable from
-#: one that passed, so the two are named apart and both are reported.
-LATENT_RECONCILED = "latent_basis_reconciled"
-LATENT_UNRECONCILED_UNDECLARED = "latent_basis_unreconciled_no_declared_basis"
-LATENT_UNRECONCILED_NO_VAE = "latent_basis_unreconciled_no_vae"
-
-
-
-
-
-
 def _attach_snapshot(
     progress: "MintProgress", phase_snapshot: Optional[Path],
 ) -> None:

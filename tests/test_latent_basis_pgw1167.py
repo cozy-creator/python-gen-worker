@@ -5,7 +5,7 @@ divisor the author passes to `derive.cfg_image_classes(latent_scale=…)`. An
 unchecked divisor produces a whole cell of correctly-shaped, permanently
 unusable artifacts — silent, and paid for at full mint price.
 
-WHY IT IS CHECKED AT `mint()` AND NOWHERE EARLIER
+WHY IT IS CHECKED IN THE COMPILE CHILD AND NOWHERE EARLIER
 
 * Not at declaration time: `Compile` is built at endpoint import, no pipeline
   exists, and a latent divisor is a claim about the CHECKPOINT.
@@ -13,11 +13,9 @@ WHY IT IS CHECKED AT `mint()` AND NOWHERE EARLIER
   on fake/meta tensors, before any weight is resident, and the class rows feed
   the key. Reading the divisor off a loaded pipeline would make the key depend
   on runtime state and break boot-time adopt.
-* Not at `aot_export_spec`: `_load_spec` builds an `ExportSpec` from the
-  operator's mint-request JSON with NO pipeline, so that seam is on the pod
-  route only and would have exempted the operator entirely — a false pass BY
-  OMISSION. `mint()` is reached by both (`mint_child.py:745`,
-  `aot_mint.py` CLI) and is still before the export is paid for.
+* The compile child is now the sole mint path and is the first place the loaded
+  composition and declaration coexist. Its preflight runs before the first
+  export, so a wrong divisor costs no graph trace or compilation.
 
 THE CARRIER
 
@@ -32,15 +30,13 @@ cannot be told from one describing it.
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 
-from gen_worker import aot_mint
+from gen_worker import aot_compile_child as child
 from gen_worker.api import derive
 from gen_worker.api.decorators import Compile
 from gen_worker.api.export_contract import (
-    Dim, Fork, register_export_declaration, reset_export_declarations)
+    Dim, Fork)
 
 _SHAPES = ((1024, 1024), (1152, 896))
 
@@ -75,17 +71,6 @@ class _Pipe:
         else:
             self.vae = _Vae(1)
             self.vae_scale_factor = basis
-
-
-@pytest.fixture(autouse=True)
-def _clean():
-    reset_export_declarations()
-    yield
-    reset_export_declarations()
-
-
-def _spec() -> Any:
-    return aot_mint.ExportSpec(family="pgw1167-fam", target="")
 
 
 # ---------------------------------------------------------------------------
@@ -157,18 +142,16 @@ def test_a_DIFFERENT_basis_still_changes_the_digest_through_the_ROWS() -> None:
 def test_a_WRONG_divisor_refuses_before_the_export_is_paid_for() -> None:
     """RED on master: accepted, and the mint proceeded to build a whole cell
     of correctly-shaped, unusable artifacts."""
-    register_export_declaration(_decl(8))
-    with pytest.raises(aot_mint.MintRefused, match="latent_basis_mismatch"):
-        aot_mint.reconcile_latent_basis(_Pipe(16), _spec())
+    with pytest.raises(child.PreflightRefused, match="latent_basis_mismatch"):
+        child._reconcile_latent_basis(_Pipe(16), _decl(8))
 
 
 def test_the_refusal_blames_the_COMPOSITION_not_the_checkpoint() -> None:
     """A `component_overrides` vae swap genuinely makes the declared latent
     extents wrong for that composition, so refusing is right — but the text
     must not send the next reader to the checkpoint's repo."""
-    register_export_declaration(_decl(8))
-    with pytest.raises(aot_mint.MintRefused) as err:
-        aot_mint.reconcile_latent_basis(_Pipe(16), _spec())
+    with pytest.raises(child.PreflightRefused) as err:
+        child._reconcile_latent_basis(_Pipe(16), _decl(8))
     detail = str(err.value)
     assert "does not match this composition" in detail, detail
     assert "8" in detail and "16" in detail, detail
@@ -176,9 +159,8 @@ def test_the_refusal_blames_the_COMPOSITION_not_the_checkpoint() -> None:
 
 
 def test_a_MATCHING_divisor_reconciles() -> None:
-    register_export_declaration(_decl(8))
-    assert aot_mint.reconcile_latent_basis(_Pipe(8), _spec()) == \
-        aot_mint.LATENT_RECONCILED
+    assert child._reconcile_latent_basis(_Pipe(8), _decl(8)) == \
+        "latent_basis_reconciled"
 
 
 # ---------------------------------------------------------------------------
@@ -191,24 +173,21 @@ def test_a_pipeline_with_NO_vae_is_UNRECONCILED_not_reconciled() -> None:
     default nobody chose, indistinguishable from a real observation of 8.
     Believing it would reproduce pgw#1058's silent dtype default one field
     over, so the verdict is named apart from a pass."""
-    register_export_declaration(_decl(8))
-    verdict = aot_mint.reconcile_latent_basis(_Pipe(None), _spec())
-    assert verdict == aot_mint.LATENT_UNRECONCILED_NO_VAE
-    assert verdict != aot_mint.LATENT_RECONCILED
+    verdict = child._reconcile_latent_basis(_Pipe(None), _decl(8))
+    assert verdict == "latent_basis_unreconciled_no_vae"
+    assert verdict != "latent_basis_reconciled"
 
 
 def test_the_no_vae_case_does_not_accidentally_MATCH_a_declared_8() -> None:
     """The sharpest form of the trap: declared 8 against a defaulted 8 would
     look like a successful reconciliation while proving nothing."""
-    register_export_declaration(_decl(8))
     assert _Pipe(None).vae_scale_factor == 8      # the default is really there
-    assert aot_mint.observed_latent_basis(_Pipe(None)) is None
+    assert child._observed_latent_basis(_Pipe(None)) is None
 
 
 def test_an_UNDECLARED_basis_is_UNRECONCILED_not_reconciled() -> None:
-    register_export_declaration(_decl(8, derived=False))
-    assert aot_mint.reconcile_latent_basis(_Pipe(8), _spec()) == \
-        aot_mint.LATENT_UNRECONCILED_UNDECLARED
+    assert child._reconcile_latent_basis(_Pipe(8), _decl(8, derived=False)) == \
+        "latent_basis_unreconciled_no_declared_basis"
 
 
 # ---------------------------------------------------------------------------
@@ -216,16 +195,16 @@ def test_an_UNDECLARED_basis_is_UNRECONCILED_not_reconciled() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_mint_actually_CALLS_the_reconciler() -> None:
+def test_compile_child_actually_CALLS_the_reconciler() -> None:
     """A reconciliation that never fires is precisely the defect class this
     issue removes, so the wiring is asserted rather than assumed: delete the
-    call from `mint()` and this row goes red.
+    call from `build_pipeline()` and this row goes red.
     """
     import inspect
 
-    source = inspect.getsource(aot_mint.mint)
-    assert "reconcile_latent_basis(pipeline, spec)" in source, (
-        "mint() no longer calls the reconciler — the gate cannot fire")
+    source = inspect.getsource(child.build_pipeline)
+    assert "_reconcile_latent_basis(pipeline, decl)" in source, (
+        "the compile child no longer calls the reconciler — the gate cannot fire")
 
 
 def test_the_call_precedes_the_first_export() -> None:
@@ -233,23 +212,20 @@ def test_the_call_precedes_the_first_export() -> None:
     throw away the entire prize, which is that a wrong divisor costs seconds."""
     import inspect
 
-    source = inspect.getsource(aot_mint.mint)
-    call = source.index("reconcile_latent_basis(pipeline, spec)")
-    progress = source.index("MintProgress(")
-    assert call < progress, "the reconciliation must run before the mint starts"
+    source = inspect.getsource(child.build_pipeline)
+    call = source.index("_reconcile_latent_basis(pipeline, decl)")
+    done = source.index("return pipeline, spec, decl")
+    assert call < done, "the reconciliation must run before tracing can start"
 
 
 def test_the_gate_never_KILLS_a_mint_it_cannot_read() -> None:
     """It has exactly two outcomes: a NAMED refusal for a proven mismatch, and
     an explicit UNRECONCILED. Anything it cannot read is the latter.
 
-    Caught by `test_abandoned_mint_telemetry_pgw848`, which hands `mint()`
-    placeholder arguments because pipeline and spec are irrelevant to the
-    telemetry it measures — the first cut raised `AttributeError` from inside a
-    correctness check and took an unrelated path down with it. A gate that can
-    crash a mint is worse than the silence it replaced.
+    A gate that crashes on absent optional evidence is worse than the silence
+    it replaced.
     """
-    assert aot_mint.reconcile_latent_basis(None, None) == \
-        aot_mint.LATENT_UNRECONCILED_UNDECLARED
-    assert aot_mint.reconcile_latent_basis(_Pipe(8), None) == \
-        aot_mint.LATENT_UNRECONCILED_UNDECLARED
+    assert child._reconcile_latent_basis(None, None) == \
+        "latent_basis_unreconciled_no_declared_basis"
+    assert child._reconcile_latent_basis(_Pipe(8), None) == \
+        "latent_basis_unreconciled_no_declared_basis"

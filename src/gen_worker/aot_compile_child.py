@@ -195,6 +195,61 @@ def _device_fields() -> dict:
             "peak_device_reserved_bytes": reserved}
 
 
+_LATENT_RECONCILED = "latent_basis_reconciled"
+_LATENT_UNRECONCILED_UNDECLARED = (
+    "latent_basis_unreconciled_no_declared_basis"
+)
+_LATENT_UNRECONCILED_NO_VAE = "latent_basis_unreconciled_no_vae"
+
+
+def _observed_latent_basis(pipeline: Any) -> Optional[int]:
+    """The composed pipeline's real latent divisor, when observable."""
+    if getattr(pipeline, "vae", None) is None:
+        return None
+    value = getattr(pipeline, "vae_scale_factor", None)
+    if value is None:
+        return None
+    try:
+        basis = int(value)
+    except (TypeError, ValueError):
+        return None
+    return basis if basis > 0 else None
+
+
+def _reconcile_latent_basis(pipeline: Any, declaration: Any) -> str:
+    """Refuse a declared latent basis that disagrees with this composition.
+
+    The child is the only production path where the loaded composition and
+    declaration coexist before export. An absent declaration or VAE is an
+    explicit unreconciled state; only a proven mismatch refuses.
+    """
+    declared = getattr(declaration, "latent_basis", None)
+    if declared is None:
+        logger.info(
+            "aot-compile-child: %s",
+            _LATENT_UNRECONCILED_UNDECLARED,
+        )
+        return _LATENT_UNRECONCILED_UNDECLARED
+    observed = _observed_latent_basis(pipeline)
+    if observed is None:
+        logger.info(
+            "aot-compile-child: %s — declared basis %d",
+            _LATENT_UNRECONCILED_NO_VAE,
+            declared,
+        )
+        return _LATENT_UNRECONCILED_NO_VAE
+    if int(declared) != observed:
+        raise PreflightRefused(
+            "latent_basis_mismatch: the declaration derived its graph classes "
+            f"at a latent divisor of {declared}, and the composed pipeline's "
+            f"vae divides by {observed}. Every declared latent extent is "
+            "therefore wrong: the declaration does not match this composition "
+            "— check the `latent_scale=` passed to the class deriver and any "
+            "VAE component override"
+        )
+    return _LATENT_RECONCILED
+
+
 def build_pipeline(job: EntryJob) -> Tuple[Any, Any, Any]:
     """``(pipeline, export spec, export declaration)`` for this child's share.
 
@@ -292,6 +347,7 @@ def build_pipeline(job: EntryJob) -> Tuple[Any, Any, Any]:
         raise PreflightRefused(
             f"family {spec.family!r} has no registered export declaration — "
             f"a multi-graph cell derives its class set from it")
+    _reconcile_latent_basis(pipeline, decl)
     return pipeline, spec, decl
 
 
