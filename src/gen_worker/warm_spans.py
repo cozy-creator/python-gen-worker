@@ -11,7 +11,7 @@ A mint hour with one name on it cannot be optimised — you cannot tell a
 compile-bound mint from a warm plan that is simply running too many diffusion
 steps. This module measures the split.
 
-Same instrument as the AOT path (:mod:`gen_worker.aot_compile_spans`): deltas
+Same instrument as the AOT path (:mod:`torch_compiled_graphs.spans`): deltas
 of dynamo's process-global ``compilation_time_metrics`` across a span. The KEY
 SET is different and that difference is the whole point — the AOT partition
 was derived for ``aot_compile`` and **silently under-reports a JIT compile**.
@@ -41,7 +41,7 @@ import contextlib
 import time
 from typing import Any, Dict, Iterator, List, Mapping, Tuple
 
-from . import aot_compile_spans
+from torch_compiled_graphs.spans import phase_delta, phase_snapshot
 
 #: Bump when the partition changes shape, so a reader never mixes two ledgers.
 WARM_SPANS_V = 1
@@ -146,7 +146,7 @@ class WarmLedger:
     def job(self, name: str) -> Iterator[None]:
         """Measure ONE warm forward. Never raises on the telemetry path — the
         job's own exception propagates untouched."""
-        before = aot_compile_spans.phase_snapshot()
+        before = phase_snapshot()
         started = time.monotonic()
         try:
             yield
@@ -154,8 +154,7 @@ class WarmLedger:
             wall = time.monotonic() - started
             self._wall += wall
             try:
-                _p, _o, raw = aot_compile_spans.phase_delta(
-                    before, aot_compile_spans.phase_snapshot())
+                _p, _o, raw = phase_delta(before, phase_snapshot())
                 for key, value in raw.items():
                     self._raw[key] = round(
                         self._raw.get(key, 0.0) + float(value), 3)

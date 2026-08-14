@@ -35,7 +35,7 @@ import pytest
 
 from gen_worker import aot_compile_child as child
 from gen_worker import aot_compile_pool as pool
-from gen_worker import aot_compile_spans as spans
+from torch_compiled_graphs import spans
 
 pytestmark = pytest.mark.filterwarnings("ignore::FutureWarning")
 
@@ -84,7 +84,7 @@ def test_every_second_of_a_real_childs_wall_is_attributed(
     If someone adds a step to the compile child and does not name it,
     ``child_other_s`` grows and the residual assertion fires; if someone
     removes a span, the partition stops summing and
-    :func:`aot_compile_spans.check` fires.
+    :func:`torch_compiled_graphs.spans.check` fires.
     """
     box = _pool(tmp_path, shares=2)
     with pytest.raises(pool.EntryCompileFailed):

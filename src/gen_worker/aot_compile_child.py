@@ -69,7 +69,15 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import msgspec
 
-from . import aot_compile_spans
+from torch_compiled_graphs.spans import (
+    PARTITION_KEYS,
+    PARTITIONS,
+    SPANS_V,
+    SpanLedger,
+    phase_delta,
+    phase_snapshot,
+)
+
 from .aot_compile_pool import (
     CODE_DIGEST,
     COMPILED,
@@ -274,7 +282,7 @@ def run(job: EntryJob) -> int:
     # pgw#830: the child's own wall, partitioned. `close()` at every exit,
     # including the refusal paths — a share that died still spent its seconds
     # somewhere, and an aborted mint's table is the one a reader needs most.
-    ledger = aot_compile_spans.SpanLedger()
+    ledger = SpanLedger()
     report_path = Path(job.report)
     # Before anything expensive: if the parent dies, this work dies with it. A
     # serving pod must never be left burning CPU on a cell nobody is waiting
@@ -339,7 +347,7 @@ def run(job: EntryJob) -> int:
     except Exception:  # noqa: BLE001 — a probe never changes an outcome
         pass
 
-    before = aot_compile_spans.phase_snapshot()
+    before = phase_snapshot()
     # pgw#1183's ordering, held at the graph class (pgw#1215). The rows are
     # packed INSIDE the loop, one class at a time, and never accumulated for a
     # batch pack at the end. That is not a style choice: a child that held its
@@ -443,8 +451,8 @@ def run(job: EntryJob) -> int:
     ledger.mark("child_trace_s", trace_s)
     ledger.mark("compile_wall_s", compile_s)
     ledger.mark("child_pack_s", pack_s)
-    partition, overlays, raw = aot_compile_spans.phase_delta(
-        before, aot_compile_spans.phase_snapshot())
+    partition, overlays, raw = phase_delta(
+        before, phase_snapshot())
     if refusal:
         _write(report_path, EntryReport(
             entry=job.share, status=REFUSED, classes=packed,
@@ -474,7 +482,7 @@ def run(job: EntryJob) -> int:
 
 
 def _span_fields(
-    ledger: aot_compile_spans.SpanLedger,
+    ledger: SpanLedger,
     partition: Dict[str, float],
     overlays: Dict[str, float],
     seal_detail: Dict[str, float],
@@ -491,19 +499,19 @@ def _span_fields(
     has to do the subtraction himself is exactly how 44 % went dark.
     """
     # EVERY declared member, seeded to zero before the ledger closes. A member
-    # the ledger never touched is not "0" to `aot_compile_spans.check` — it is
+    # the ledger never touched is not "0" to `torch_compiled_graphs.spans.check` — it is
     # MISSING, and the residual silently absorbs it, which is pgw#830's own
     # defect one level down. A child that refuses before it traces has really
     # spent zero seconds tracing, and must say so.
-    for label in aot_compile_spans.PARTITIONS["child_wall_s"]:
+    for label in PARTITIONS["child_wall_s"]:
         if label != "child_other_s":
             ledger.spans.setdefault(label, 0.0)
     spans = ledger.close("child_wall_s", "child_other_s")
     compile_wall = float(spans.get("compile_wall_s", 0.0))
-    for label in aot_compile_spans.PARTITION_KEYS:
+    for label in PARTITION_KEYS:
         spans[label] = round(float(partition.get(label, 0.0)), 3)
     spans["compile_other_s"] = round(compile_wall - sum(
-        spans[label] for label in aot_compile_spans.PARTITION_KEYS), 3)
+        spans[label] for label in PARTITION_KEYS), 3)
     overlay = dict(overlays)
     # A split of `child_seal_s`, never a member of any partition: the seal's
     # own steps, published by env_seal. `seal_libhash_s` is the identity
@@ -516,7 +524,7 @@ def _span_fields(
     return {
         "spans": spans,
         "overlays": overlay,
-        "spans_v": aot_compile_spans.SPANS_V,
+        "spans_v": SPANS_V,
         "module_import_epoch": MODULE_IMPORT_EPOCH,
         "run_start_epoch": ledger.start_epoch,
         "report_epoch": time.time(),
