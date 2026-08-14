@@ -16,6 +16,7 @@ import pathlib
 import pytest
 
 from gen_worker.models import cozy_snapshot, download, loading
+from gen_worker.models.refs import WireRef
 from gen_worker.api import binding as binding_mod
 from gen_worker.api import errors as errors_mod
 from gen_worker.child_contract import MintSlot
@@ -47,10 +48,10 @@ def test_the_fetch_key_is_the_composed_digest_not_the_ref() -> None:
         pb.ModelBinding(slot="pipeline", ref="acme/sdxl:prod", manifest_digest="d-a"),
         pb.ModelBinding(slot="refiner", ref="acme/sdxl-r:prod", manifest_digest="d-b"),
     ])
-    assert out["acme/sdxl:prod"].digest == "d-a"
-    assert out["acme/sdxl-r:prod"].digest == "d-b"
+    assert out[WireRef("acme/sdxl:prod")].digest == "d-a"
+    assert out[WireRef("acme/sdxl-r:prod")].digest == "d-b"
     # THE WHOLE TRUTH: every file the pod puts on disk, nothing withheld.
-    assert [f.path for f in out["acme/sdxl:prod"].files] == [
+    assert [f.path for f in out[WireRef("acme/sdxl:prod")].files] == [
         "model_index.json", "vae/a.safetensors"]
 
 
@@ -59,7 +60,8 @@ def test_an_artifact_with_no_composition_still_resolves_by_its_own_key() -> None
     keys them by ref. One lookup, two legitimate kinds of key — not a fallback
     ladder: the caller either holds a binding or holds a bare ref."""
     wire = {"acme/lora:prod": _snap("dl", "adapter.safetensors")}
-    assert index_snapshots(wire, []) == {"acme/lora:prod": wire["acme/lora:prod"]}
+    assert index_snapshots(wire, []) == {
+        WireRef("acme/lora:prod"): wire["acme/lora:prod"]}
 
 
 def test_one_ref_bound_to_two_manifests_refuses_typed() -> None:
