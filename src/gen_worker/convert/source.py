@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, Iterator, Literal
+from typing import TYPE_CHECKING, Any, Iterable, Iterator
 
 from gen_worker.api.errors import ValidationError
 
