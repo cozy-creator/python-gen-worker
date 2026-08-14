@@ -36,6 +36,7 @@ from gen_worker import (
 from gen_worker.executor import Executor
 from gen_worker.models import execution_lanes as lanespec
 from gen_worker.models import provision
+from gen_worker.models.records import vacate_record
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs
 from gen_worker.models import store as store_mod
@@ -207,7 +208,7 @@ def test_the_lane_dies_with_the_instance(boot) -> None:
         await ex.ensure_setup(eff, snaps)
         rec = ex._classes[eff.instance_key]
         assert rec.applied_lanes
-        await ex._vacate_record(rec)
+        await vacate_record(rec, ex.teardown_seam)
         assert rec.applied_lanes == []
         assert ex._served_execution_lane(eff).startswith("bf16-w16a16+")
 
