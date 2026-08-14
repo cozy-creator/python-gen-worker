@@ -29,7 +29,7 @@ from typing import Dict, Mapping, Optional, Tuple
 import msgspec
 
 from . import cell_key
-from .api.binding import ModelRef, binding_wire_refs, wire_ref
+from .api.binding import ModelRef, wire_ref
 
 #: Every child progress frame is one stdout line with this prefix. Anything
 #: else the child (or a library it imports) prints is diagnostic tail, never
@@ -66,11 +66,10 @@ class CompileSpec(msgspec.Struct, frozen=True, kw_only=True):
 class MintSlot(msgspec.Struct, frozen=True, kw_only=True):
     """One setup slot, as the parent resolved it. Present and complete, or absent.
 
-    pgw#974. This used to be THREE parallel slot-keyed dicts on
-    ``MintRequest`` — ``snapshots`` (bytes), ``slot_bindings`` (identity,
-    pgw#969) and ``component_paths`` (composition, pgw#816) — written by three
-    separate statements, each independently allowed to be empty. Two of the
-    three combinations that describes are incoherent, and one of them cost two
+    pgw#974. This used to be parallel slot-keyed dicts on ``MintRequest`` —
+    ``snapshots`` (bytes) and ``slot_bindings`` (identity, pgw#969) — written
+    by separate statements, each independently allowed to be empty. Some of
+    the combinations that describes are incoherent, and one of them cost two
     L40S pods: ``{"pipeline": "/tmp/x"}`` with no binding decoded, type-checked
     and looked complete, and the child died 0.0 s into ``warmup_forward`` at
     ``ctx.slots["pipeline"]``. ``ref`` and ``path`` therefore carry no
@@ -90,16 +89,14 @@ class MintSlot(msgspec.Struct, frozen=True, kw_only=True):
     * ``path`` — WHERE its bytes already are, materialized by the parent, so
       the child never touches the network: a mint is compute, and a mint
       process that could download is one that can stall on a lemon host.
-    * ``component_paths`` — pgw#617 per-component overrides, comp -> that
-      component's own local tree. Empty for most slots and part of the
-      composition when not: th#1330 B2 EXCLUDES an overridden component's
-      files from the base fetch, so ``path`` alone then names a narrowed tree
-      (``<digest>__x<fp>``) that no loader can open.
+
+    th#1941: nothing rides beside them. The hub composes the manifest, so
+    ``path`` names a COHERENT tree by construction — there is no second tree
+    for the child to be handed and no narrowing for it to detect.
     """
 
     ref: ModelRef
     path: str
-    component_paths: Dict[str, str] = {}
 
     def __post_init__(self) -> None:
         if not self.path:
@@ -117,15 +114,13 @@ def slot_subjects(
     THE single derivation, so the arm token, the local-store memo and the
     boot-key memo cannot disagree about which checkpoint a pipeline is bound
     to. ``path`` is deliberately excluded — where the bytes were materialized
-    is a location on this machine, never an identity — and so is
-    ``component_paths``, whose identity half is already in the ref's
-    ``component_overrides`` (``binding_wire_refs``).
+    is a location on this machine, never an identity.
     """
     have = dict(digests or {})
     return tuple(
         cell_key.SlotSubject(
             slot=str(name),
-            refs=tuple(binding_wire_refs(slot.ref)),
+            refs=(wire_ref(slot.ref),),
             snapshot_digest=str(have.get(str(name), "") or ""),
         )
         for name, slot in sorted(slots.items())

@@ -562,7 +562,6 @@ def instantiate_class(cls: Optional[type]) -> Any:
 def run_setup(
     instance: Any, resolved_models: Dict[str, str], *, device: str = "",
     arm_compile: bool = True, return_loaded: bool = False,
-    component_paths: Optional[Dict[str, Dict[str, str]]] = None,
     structure_only: Sequence[str] = (), place: bool = True,
     selected: Optional["_SelectedFunction"] = None,
 ) -> Optional[Dict[str, Any]]:
@@ -595,14 +594,6 @@ def run_setup(
     two-slot family's auxiliary slot has no denoiser); a component that CANNOT
     be built from config refuses typed (``StructureOnlyUnsupported``) rather
     than silently loading its weights.
-
-    ``component_paths`` (slot -> component -> local override tree) carries the
-    caller's ALREADY-RESOLVED component overrides. The executor resolves them
-    from the dispatch and injects them into the same
-    ``from_pretrained(components=...)`` seam; the mint child is handed the
-    executor's map so it composes the identical pipeline. Without it a slot
-    whose base tree was fetched with the overridden component EXCLUDED
-    (``<digest>__x<fp>``) cannot load at all.
 
     A bare ``def setup(self)`` is legitimate (model-selectable endpoints receive
     their model per-request in the handler instead), so unclaimed slots are
@@ -661,8 +652,7 @@ def run_setup(
     # even when `arm_compile` is False so the two paths cannot drift into
     # resolving slots differently.
     mint = _local_mint_context(
-        instance, resolved_models, wanted,
-        component_paths=component_paths, selected=selected)
+        instance, resolved_models, wanted, selected=selected)
     # A mint this load OWES is collected, not run. Arming from the local store
     # still happens inside the load (the endpoint's `setup()` must receive an
     # armed pipeline), but the MINT waits until `setup()` and `warmup()` have
@@ -673,7 +663,6 @@ def run_setup(
         k: _load_injected_model(
             hints.get(k), v, decl=decl, slot=k, device=device,
             arm_compile=arm_compile, place=place,
-            overrides=dict((component_paths or {}).get(k) or {}),
             structure_only=tuple(structure_only), mint=mint,
             defer=deferred)
         for k, v in resolved_models.items()
@@ -701,7 +690,6 @@ def _local_mint_context(
     resolved_models: Dict[str, str],
     wanted: Any,
     *,
-    component_paths: Optional[Dict[str, Dict[str, str]]],
     selected: Optional[_SelectedFunction],
 ) -> Optional["local_serve.LocalMintContext"]:
     """This run's resolution, in the shape a delegated mint child reads.
@@ -729,7 +717,6 @@ def _local_mint_context(
         slots=local_serve.slot_map(
             {k: v for k, v in resolved_models.items() if k in wanted},
             selected.bindings,
-            component_paths,
         ),
     )
 
@@ -818,7 +805,6 @@ def _structure_device(device: str) -> str:
 def _load_injected_model(
     annotation: Any, local_path: str, *, decl: Any = None, slot: str = "",
     device: str = "", arm_compile: bool = True, place: bool = True,
-    overrides: Optional[Dict[str, str]] = None,
     structure_only: Sequence[str] = (),
     mint: Optional["local_serve.LocalMintContext"] = None,
     defer: Optional[List[Any]] = None,
@@ -826,16 +812,10 @@ def _load_injected_model(
     """Load one setup slot via the shared core, with a per-process warm cache
     (so ``serve`` and repeated local dispatches never reload weights).
 
-    ``overrides`` (component -> local tree) are loaded from their OWN trees
-    and injected through ``from_pretrained(components=...)`` — the same seam
-    and the same loader the executor's setup uses, so a composition assembled
-    here is the composition assembled there."""
-    # the override trees are part of the slot's identity: two loads of the
-    # same base path with different overrides are different pipelines.
+    """
     key = (
         str(annotation),
-        str(local_path) + "".join(
-            f"|{c}={p}" for c, p in sorted((overrides or {}).items()))
+        str(local_path)
         # A structure-only composition is a DIFFERENT object from the
         # real-weight one; sharing a cache entry between them would hand a
         # weightless pipeline to a caller that asked for weights.
@@ -864,13 +844,6 @@ def _load_injected_model(
                 local_path, comp, device=_structure_device(device),
                 dtype=str(getattr(binding, "dtype", "") or ""))
             injected[comp] = module
-    if overrides:
-        from ..models.loading import load_component_override
-
-        for comp, comp_path in sorted(overrides.items()):
-            injected[comp] = load_component_override(
-                local_path, comp, comp_path,
-                dtype=str(getattr(binding, "dtype", "") or ""))
     sl = provision.load_slot(
         annotation, local_path, binding=binding, slot=slot, device=device,
         place=place, components=injected or None,

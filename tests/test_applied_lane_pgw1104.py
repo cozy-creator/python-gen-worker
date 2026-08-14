@@ -125,7 +125,7 @@ def boot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     eff = ex._dispatched_spec(
         ex.specs["generate"],
-        {"pipeline": dispatch.SlotOrder(ref=REF, components=())},
+        {"pipeline": dispatch.SlotOrder(ref=REF)},
     )
     snaps = {
         REF: pb.Snapshot(

@@ -228,13 +228,10 @@ def build_pipeline(job: EntryJob) -> Tuple[Any, Any, Any]:
         what=f"compile of {job.share or 'share'} for {job.function!r}")
 
     paths = {name: slot.path for name, slot in job.slots.items()}
-    overrides = {
-        name: dict(slot.component_paths or {})
-        for name, slot in job.slots.items() if slot.component_paths}
     try:
         loaded = run_setup(
             chosen.cls(), dict(paths), arm_compile=False, return_loaded=True,
-            component_paths=overrides, place=False,
+            place=False,
             structure_only=tuple(cfg.targets)) or {}
     except structure_only.StructureNotHonored as exc:
         raise PreflightRefused(
@@ -256,7 +253,7 @@ def build_pipeline(job: EntryJob) -> Tuple[Any, Any, Any]:
                 "weights", structure_only.refusal_token(exc), exc)
         loaded = run_setup(
             chosen.cls(), dict(paths), arm_compile=False, return_loaded=True,
-            component_paths=overrides, place=False) or {}
+            place=False) or {}
     _slot, pipeline = pick_compile_target(loaded, cfg)
 
     if cfg.lora_bucket:

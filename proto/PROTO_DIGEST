@@ -3,4 +3,4 @@
 # BOTH repos commit this same digest, so a one-sided edit fails scripts/proto-drift-check.sh
 # offline, in the repo where it happened. Regenerate with:
 #   sha256sum internal/orchestrator/grpc/proto/worker_scheduler.proto
-1804bb54f40e45aa53a5e8de0ff66fa862e9163bf638ab02657c92d0988ae57b
+ff3c374be1ccf8a593dc97dc8d7f406dd24460e0abf97ab9bfe93c27dfee5690

@@ -153,7 +153,6 @@ def test_the_child_refuses_the_AOT_recipe_before_reading_weights(
     """The child's own belt-and-braces: the parent may be an older SDK."""
     from gen_worker import mint_child
 
-    monkeypatch.setattr(mint_child, "assert_composable", lambda *a, **k: None)
     monkeypatch.setattr(cc, "toolchain_present", lambda: True)
     monkeypatch.setattr(cc, "cxx_toolchain_present", lambda: False)
 

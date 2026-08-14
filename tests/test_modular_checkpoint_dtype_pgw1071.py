@@ -36,7 +36,6 @@ from harness.modular_endpoint import (
     TinyModularPipeline,
     build_base_tree,
     build_mixed_precision_tree,
-    build_override_vae_tree,
     tiny_vae,
 )
 
@@ -182,22 +181,6 @@ def test_a_declared_map_routes_per_component_and_the_rest_read_disk(
 # ---------------------------------------------------------------------------
 # the source of the dtype is the component's OWN dir
 # ---------------------------------------------------------------------------
-
-
-def test_an_override_tree_is_read_for_its_own_dtype(tmp_path) -> None:
-    """A th#980/pgw#617 override is a different artifact from the base dir it
-    replaces — the base tree's bytes say nothing about it."""
-    tree = build_mixed_precision_tree(tmp_path / "base", vae_dtype="bf16")
-    override = tmp_path / "ovr"
-    tiny_vae(2.0).to(torch.float32).save_pretrained(override / "vae")
-    pipe = TinyModularPipeline.from_pretrained(str(tree))
-
-    hydrate_modular_pipeline(
-        pipe, tree, component_trees={"vae": str(override)})
-
-    assert set(_dtypes(pipe.vae).values()) == {"torch.float32"}
-
-
 def test_the_hydration_event_carries_the_dtype_each_component_landed_at(
     tmp_path, monkeypatch,
 ) -> None:
@@ -260,11 +243,8 @@ def test_each_stored_precision_maps_to_itself(tmp_path) -> None:
 
 def test_a_uniform_tree_is_unaffected(tmp_path) -> None:
     tree = build_base_tree(tmp_path / "base")
-    override = build_override_vae_tree(tmp_path / "ovr")
 
-    pipe = _load_modular_pipeline(
-        TinyModularPipeline, str(tree),
-        component_trees={"vae": str(override)})
+    pipe = _load_modular_pipeline(TinyModularPipeline, str(tree))
 
     assert set(_dtypes(pipe.unet).values()) == {"torch.float32"}
     assert set(_dtypes(pipe.vae).values()) == {"torch.float32"}

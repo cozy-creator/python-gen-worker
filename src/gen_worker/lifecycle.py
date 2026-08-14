@@ -21,6 +21,7 @@ from . import serve_posture
 from . import progress as progress_mod
 from .models.records import shutdown_instances
 from .models.refs import WireRef
+from .wire_snapshots import index_snapshots
 from .config import Settings
 from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
 from .executor import Executor
@@ -232,6 +233,15 @@ def _semantic_model_key(
             sorted((ref, _snapshot_content_key(snap)) for ref, snap in desired.snapshots.items())
         ),
         tuple(sorted(inst.SerializeToString(deterministic=True) for inst in desired.hot)),
+    )
+
+
+def _desired_snapshots(desired: "pb.DesiredResidency") -> dict:
+    """th#1941: the digest-keyed wire map, resolved to the ref-keyed view the
+    residency layer materializes from."""
+    return index_snapshots(
+        desired.snapshots,
+        [m for inst in desired.hot for m in inst.models],
     )
 
 
@@ -589,7 +599,7 @@ class Lifecycle:
             self.executor.store.keep = list(dict.fromkeys(
                 ref for ref in desired.disk_refs if ref and ref not in _superseded))
             self.executor.store.replace_desired_snapshots(
-                dict(desired.snapshots),
+                _desired_snapshots(desired),
                 generation=generation,
             )
             self._replace_residency_reconcile(desired, model_key=_semantic_model_key(ack, desired))
@@ -598,7 +608,7 @@ class Lifecycle:
             # by run_job: it stages the NEXT instance while jobs compute
             # (fence-conflicting refs are left to the idle-gated pass).
             self.executor.preloader.update_desired(
-                list(desired.hot), dict(desired.snapshots), generation)
+                list(desired.hot), _desired_snapshots(desired), generation)
         # New connection: per-worker fn disables/degradations were wiped by
         # Hello. Capacity evidence has causal priority over retained results;
         # other finite baseline messages follow it in the same prepend lane.
@@ -730,7 +740,7 @@ class Lifecycle:
         return tuple(
             (
                 ref,
-                _snapshot_content_key(desired.snapshots.get(ref)),
+                _snapshot_content_key(_desired_snapshots(desired).get(ref)),
                 resolutions.get(ref),
             )
             for ref in sorted({r for r in refs if r})
@@ -805,7 +815,7 @@ class Lifecycle:
         restart: asyncio.Event,
     ) -> None:
         """One convergence pass over ``desired`` in declared order."""
-        snapshots = dict(desired.snapshots)
+        snapshots = _desired_snapshots(desired)
         # Never materialize a declared spelling the hub's own
         # resolutions have replaced with another ref in this same list.
         superseded = self._superseded_disk_refs(desired)

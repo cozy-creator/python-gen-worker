@@ -23,7 +23,6 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, c
 from .. import activity as activity_mod
 from .. import boot_phases as boot_mod
 from .. import progress as progress_mod
-from ..api.binding import component_overrides
 from ..capability import InsufficientDiskError
 from ..lifecycle_intents import IntentRegistry
 from ..pb import worker_scheduler_pb2 as pb
@@ -64,37 +63,6 @@ _MISSING_SNAPSHOT_WAIT_S = 60.0
 _DISK_GC_MARGIN_BYTES = 2 * _GiB
 # Refs used within the grace window are not disk-GC candidates.
 _DISK_GC_GRACE_S = 300.0
-
-def _snapshot_files_without_components(
-    snapshot: "Optional[pb.Snapshot]", exclude: typing.Sequence[str],
-) -> "List[pb.SnapshotFile]":
-    """``snapshot.files`` minus every entry under an excluded ``<comp>/``
-    subfolder. The one place the worker's byte accounting agrees with what the
-    downloader will actually fetch."""
-    files = list(snapshot.files) if snapshot is not None else []
-    drop = {str(c).strip() for c in exclude if str(c or "").strip()}
-    if not drop:
-        return files
-    kept = []
-    for f in files:
-        rel = str(f.path).strip().lstrip("/")
-        top, sep, _ = rel.partition("/")
-        if sep and top in drop:
-            continue
-        kept.append(f)
-    return kept
-
-def _snapshot_without_components(
-    snapshot: "Optional[pb.Snapshot]", exclude: typing.Sequence[str],
-) -> "Optional[pb.Snapshot]":
-    """``snapshot`` re-stated over the narrowed file set — the manifest a
-    verifier must use when the tree on disk was fetched with an exclusion."""
-    if snapshot is None or not exclude:
-        return snapshot
-    return pb.Snapshot(
-        digest=snapshot.digest,
-        files=_snapshot_files_without_components(snapshot, exclude),
-    )
 
 # ---------------------------------------------------------------------------
 # Model seam: models.download (ensure-local) + models.residency (tier map),
@@ -243,9 +211,6 @@ class ModelStore:
             "materialize_intent", default=""
         )
         self._bindings: Dict[str, Any] = {}
-        # ref -> the component set last skipped for it, so the
-        # typed event fires on transitions and not once per materialization.
-        self._override_exclusions_reported: Dict[str, Tuple[str, ...]] = {}
         self.keep: list[str] = []
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._index = disk_gc.RefIndex(self._cache_dir)
@@ -1141,53 +1106,6 @@ class ModelStore:
         startup prefetch), so ``files=`` selections apply everywhere (#377)."""
         self._bindings.setdefault(ref, binding)
 
-    def _override_excluded_components(
-        self, ref: WireRef, binding: Any, snapshot: Optional[pb.Snapshot],
-    ) -> Tuple[str, ...]:
-        """Base-composition subfolders this materialization must NOT fetch
-        the components a pgw#617 dispatch SUBSTITUTES.
-
-        The override's own tree is materialized separately and handed to
-        ``from_pretrained`` as a constructed object, so diffusers never reads
-        the base's copy — it was downloaded and discarded (~1.64 GB per SDXL
-        text-encoder override). The exclusion is derived only from the
-        binding's ``component_overrides``, i.e. from the dispatch that is
-        about to load, never from standing state.
-
-        Only components the snapshot ACTUALLY carries as a subfolder are
-        excluded, so the value is a fetch fact and not a guess — and a
-        narrowed tree therefore keys on exactly what was left out."""
-        overrides = component_overrides(binding)
-        if not overrides:
-            return ()
-        present = {
-            str(f.path).strip().lstrip("/").partition("/")[0]
-            for f in (snapshot.files if snapshot is not None else ())
-            if "/" in str(f.path).strip().lstrip("/")
-        }
-        drop = tuple(sorted(
-            {comp for comp, _ in overrides if comp in present}))
-        if not drop:
-            return ()
-        saved = sum(
-            int(f.size_bytes) for f in (snapshot.files if snapshot else ())
-            if str(f.path).strip().lstrip("/").partition("/")[0] in drop
-        )
-        if self._override_exclusions_reported.get(ref) != drop:
-            self._override_exclusions_reported[ref] = drop
-            logger.info(
-                "not fetching %s from %s: substituted by a component override "
-                "(%d bytes skipped)", "/".join(drop), ref, saved,
-            )
-            activity_mod.emit_event(
-                "component_fetch_skipped",
-                f"base composition {ref} ships {'/'.join(drop)} that this "
-                f"dispatch substitutes with a component override; skipping "
-                f"{saved} bytes the load would discard (th#1330)",
-                phase="skipped",
-            )
-        return drop
-
     async def _await_hub_snapshot(
         self,
         ref: WireRef,
@@ -1275,11 +1193,6 @@ class ModelStore:
         elif snapshot is None:
             snapshot = self._snapshots.get(ref)
         operation_identity = self._snapshot_identity(ref, snapshot)
-        # The components this dispatch SUBSTITUTES are not fetched
-        # from the base composition. The base is loaded with the override
-        # object handed to `from_pretrained` (pgw#617 load-then-substitute),
-        # so its own copy of that subfolder is downloaded and discarded.
-        exclude_components = self._override_excluded_components(ref, binding, snapshot)
         registry = self._intent_registry
         scoped_intent_id = self._materialize_intent_context.get()
         command_owned = bool(intent_id or scoped_intent_id)
@@ -1349,19 +1262,9 @@ class ModelStore:
             want = ""
             if snapshot is not None and snapshot.digest:
                 want = snapshot.digest.split(":", 1)[-1].strip().lower()
-            # With an override exclusion the acceptable cached
-            # names are the exclusion's own key OR the bare digest — the
-            # latter is a SUPERSET (a complete tree already on disk serves an
-            # excluded fetch for free, and is never narrowed retroactively).
-            acceptable = {want}
-            if want and exclude_components:
-                acceptable.add(cozy_snapshot.snapshot_dir_key(
-                    want, (), exclude_components))
-            cached_partial = (
-                cached is not None and want and cached.name != want
-                and cached.name in acceptable
-            )
-            if cached is not None and cached.exists() and (not want or cached.name in acceptable):
+            # th#1941: the composed manifest digest IS the directory name, so
+            # there is exactly one acceptable spelling per fetch identity.
+            if cached is not None and cached.exists() and (not want or cached.name == want):
                 if ref in self._verified:
                     self._index.touch(ref)
                     await self._confirm_cached_identity(ref, operation_identity)
@@ -1370,9 +1273,7 @@ class ModelStore:
                 # pod-churn-truncated snapshot used to fatal every load until
                 # a manual delete; now it is quarantined + re-materialized.
                 ok, bad = await asyncio.to_thread(
-                    self._verify_snapshot_tree, cached,
-                    _snapshot_without_components(snapshot, exclude_components)
-                    if cached_partial else snapshot,
+                    self._verify_snapshot_tree, cached, snapshot,
                 )
                 if ok:
                     self._verified.add(ref)
@@ -1409,12 +1310,10 @@ class ModelStore:
                         intent_id=intent_id,
                     )
                     operation_identity = self._snapshot_identity(ref, snapshot)
-            # Every byte figure below (headroom gate, DOWNLOADING
-            # totals, the boot weights span) counts what will actually be
-            # fetched, so an override's skipped component never shows up as
-            # bytes anybody planned for or reported.
-            fetch_files = _snapshot_files_without_components(
-                snapshot, exclude_components)
+            # Every byte figure below (headroom gate, DOWNLOADING totals, the
+            # boot weights span) counts the resolved manifest's whole file
+            # list — th#1941 made it exactly what gets fetched.
+            fetch_files = list(snapshot.files) if snapshot is not None else []
             if snapshot is not None and snapshot.files:
                 # Sizes are known up front for tensorhub snapshots: gate on
                 # disk headroom, GC-ing LRU refs first (#370).
@@ -1520,7 +1419,6 @@ class ModelStore:
                                 hf_token=self._hf_token,
                                 allow_patterns=tuple(getattr(binding, "files", ()) or ()),
                                 components=tuple(getattr(binding, "components", ()) or ()),
-                                exclude_components=exclude_components,
                                 progress=_progress,
                                 fill_source_dir=self._fill_source_dir,
                             )

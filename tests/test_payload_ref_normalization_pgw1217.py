@@ -6,8 +6,8 @@ arrive as free-form strings from the job payload. Before this fix the executor
 took them verbatim and used each for TWO things that both require normal form:
 
   1. `snapshots.get(ref)` — a lookup into the hub-resolved snapshot map, which
-     is keyed by NORMALIZED refs (it is built from `binding_wire_refs` /
-     `wire_ref`, i.e. `models.refs` normal form); and
+     is keyed by NORMALIZED refs (`wire_snapshots.index_snapshots` files each
+     composed manifest under its binding's `models.refs` normal form); and
   2. `store.ensure_local(ref, ...)` — the residency key itself.
 
 So a non-normal spelling of the same model MISSED its snapshot and then minted

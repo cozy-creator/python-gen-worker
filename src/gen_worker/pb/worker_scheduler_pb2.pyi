@@ -1001,31 +1001,24 @@ class ResolvedCompute(_message.Message):
     def __init__(self, accelerator: _Optional[str] = ..., gpu_index: _Optional[int] = ...) -> None: ...
 
 class ModelBinding(_message.Message):
-    __slots__ = ("slot", "ref", "loras", "inference_defaults", "components", "objective", "distilled", "distilled_status")
-    class ComponentsEntry(_message.Message):
-        __slots__ = ("key", "value")
-        KEY_FIELD_NUMBER: _ClassVar[int]
-        VALUE_FIELD_NUMBER: _ClassVar[int]
-        key: str
-        value: str
-        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+    __slots__ = ("slot", "ref", "loras", "inference_defaults", "objective", "distilled", "distilled_status", "manifest_digest")
     SLOT_FIELD_NUMBER: _ClassVar[int]
     REF_FIELD_NUMBER: _ClassVar[int]
     LORAS_FIELD_NUMBER: _ClassVar[int]
     INFERENCE_DEFAULTS_FIELD_NUMBER: _ClassVar[int]
-    COMPONENTS_FIELD_NUMBER: _ClassVar[int]
     OBJECTIVE_FIELD_NUMBER: _ClassVar[int]
     DISTILLED_FIELD_NUMBER: _ClassVar[int]
     DISTILLED_STATUS_FIELD_NUMBER: _ClassVar[int]
+    MANIFEST_DIGEST_FIELD_NUMBER: _ClassVar[int]
     slot: str
     ref: str
     loras: _containers.RepeatedCompositeFieldContainer[LoraOverlay]
     inference_defaults: str
-    components: _containers.ScalarMap[str, str]
     objective: str
     distilled: bool
     distilled_status: str
-    def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., loras: _Optional[_Iterable[_Union[LoraOverlay, _Mapping]]] = ..., inference_defaults: _Optional[str] = ..., components: _Optional[_Mapping[str, str]] = ..., objective: _Optional[str] = ..., distilled: _Optional[bool] = ..., distilled_status: _Optional[str] = ...) -> None: ...
+    manifest_digest: str
+    def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., loras: _Optional[_Iterable[_Union[LoraOverlay, _Mapping]]] = ..., inference_defaults: _Optional[str] = ..., objective: _Optional[str] = ..., distilled: _Optional[bool] = ..., distilled_status: _Optional[str] = ..., manifest_digest: _Optional[str] = ...) -> None: ...
 
 class LoraOverlay(_message.Message):
     __slots__ = ("ref", "weight", "inference_defaults")
@@ -1038,12 +1031,43 @@ class LoraOverlay(_message.Message):
     def __init__(self, ref: _Optional[str] = ..., weight: _Optional[float] = ..., inference_defaults: _Optional[str] = ...) -> None: ...
 
 class Snapshot(_message.Message):
-    __slots__ = ("digest", "files")
+    __slots__ = ("digest", "files", "provenance")
     DIGEST_FIELD_NUMBER: _ClassVar[int]
     FILES_FIELD_NUMBER: _ClassVar[int]
+    PROVENANCE_FIELD_NUMBER: _ClassVar[int]
     digest: str
     files: _containers.RepeatedCompositeFieldContainer[SnapshotFile]
-    def __init__(self, digest: _Optional[str] = ..., files: _Optional[_Iterable[_Union[SnapshotFile, _Mapping]]] = ...) -> None: ...
+    provenance: ResolvedProvenance
+    def __init__(self, digest: _Optional[str] = ..., files: _Optional[_Iterable[_Union[SnapshotFile, _Mapping]]] = ..., provenance: _Optional[_Union[ResolvedProvenance, _Mapping]] = ...) -> None: ...
+
+class ResolvedProvenance(_message.Message):
+    __slots__ = ("repo", "release", "variant_id", "component_sources")
+    class ComponentSourcesEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: ComponentOrigin
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[_Union[ComponentOrigin, _Mapping]] = ...) -> None: ...
+    REPO_FIELD_NUMBER: _ClassVar[int]
+    RELEASE_FIELD_NUMBER: _ClassVar[int]
+    VARIANT_ID_FIELD_NUMBER: _ClassVar[int]
+    COMPONENT_SOURCES_FIELD_NUMBER: _ClassVar[int]
+    repo: str
+    release: str
+    variant_id: str
+    component_sources: _containers.MessageMap[str, ComponentOrigin]
+    def __init__(self, repo: _Optional[str] = ..., release: _Optional[str] = ..., variant_id: _Optional[str] = ..., component_sources: _Optional[_Mapping[str, ComponentOrigin]] = ...) -> None: ...
+
+class ComponentOrigin(_message.Message):
+    __slots__ = ("repo", "release", "variant_id")
+    REPO_FIELD_NUMBER: _ClassVar[int]
+    RELEASE_FIELD_NUMBER: _ClassVar[int]
+    VARIANT_ID_FIELD_NUMBER: _ClassVar[int]
+    repo: str
+    release: str
+    variant_id: str
+    def __init__(self, repo: _Optional[str] = ..., release: _Optional[str] = ..., variant_id: _Optional[str] = ...) -> None: ...
 
 class SnapshotFile(_message.Message):
     __slots__ = ("path", "size_bytes", "blake3", "url", "digest", "chunk_size_bytes", "chunks")

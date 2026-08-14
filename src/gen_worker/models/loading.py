@@ -1337,20 +1337,14 @@ def _accepts_kwarg(fn: Any, name: str) -> bool:
 
 
 def load_component(
-    tree: str | Path, component: str, *,
-    dtype: str = "", weights_tree: str | Path | None = None,
+    tree: str | Path, component: str, *, dtype: str = "",
 ) -> Any:
     """THE production loader for ONE named pipeline component.
 
-    Every caller that needs a single component — the executor's substitution,
-    the rotation preloader, the swap benchmark — goes through here, so what
-    they load is by construction what serving loads.
-
-    ``tree`` is the BASE composition: it names the module class
-    (model_index.json) and decides the compute dtype. ``weights_tree`` is
-    where the bytes live (default: ``tree``); an override binding points it
-    at its own snapshot, whose ``<component>/`` subtree is used when present,
-    else its root.
+    Every caller that needs a single component — the rotation preloader, the
+    swap benchmark — goes through here, so what they load is by construction
+    what serving loads. ``tree`` is the composition: it names the module
+    class (model_index.json), decides the compute dtype, and holds the bytes.
 
     Quantized artifacts take their OWN lane, exactly as
     :func:`load_from_pretrained` routes a whole pipeline: a w8a8/w4a4
@@ -1371,7 +1365,7 @@ def load_component(
     event loop run it off-thread."""
 
     base = Path(tree)
-    root = Path(weights_tree) if weights_tree is not None else base
+    root = base
     entry = model_index_entry(base, component)
     if entry is None:
         raise ValueError(
@@ -1497,63 +1491,11 @@ def contract_loaded_component(
     return None
 
 
-def load_component_override(
-    base_path: str | Path, component: str, override_path: str | Path,
-    *, dtype: str = "",
-) -> Any:
-    """Load one named pipeline component from an OVERRIDE snapshot tree —
-    :func:`load_component` with the weights pointed at the override."""
-    return load_component(
-        base_path, component, dtype=dtype, weights_tree=override_path)
-
-
 class ModularHydrationError(RuntimeError):
     """A ModularPipeline slot could not be hydrated from the LOCAL tree
 . Typed so the failure is a refusal at load — never a silent
     shell handed to ``setup()``, and never a fetch from the repo id the
     snapshot's index happens to name."""
-
-
-class ComponentSubstitutionError(RuntimeError):
-    """A non-modular diffusers composition names a component the local tree
-    does not carry and the dispatch injected nothing for it.
-
-    DETERMINISTIC: the tree is already materialized and the injected set is
-    already known, so nothing about a retry can change the answer — a refetch
-    cannot widen a manifest the hub narrowed. Callers classify it terminal for
-    the dispatched identity rather than retryable.
-
-    ``missing``/``expected``/``injected``/``tree`` carry the comparison the
-    raw ``OSError: Error no file named config.json found in directory <root>``
-    does not: what the composition wanted, what the tree had, what arrived."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        tree: str = "",
-        missing: Sequence[str] = (),
-        expected: Sequence[str] = (),
-        injected: Sequence[str] = (),
-    ) -> None:
-        super().__init__(message)
-        self.tree = tree
-        self.missing = tuple(missing)
-        self.expected = tuple(expected)
-        self.injected = tuple(injected)
-
-
-def _component_dir_present(root: Path, component: str) -> bool:
-    """True when the tree carries a non-empty ``<root>/<component>/`` dir.
-
-    Deliberately not a config-name check: schedulers, tokenizers, processors
-    and models each name their config differently, and a layout we do not
-    model must not be refused. An ABSENT (or empty) dir is the narrowing this
-    guards: the hub withheld the component's files from the snapshot."""
-    src = root / component
-    if not src.is_dir():
-        return False
-    return next(src.iterdir(), None) is not None
 
 
 def _pipeline_component_names(cls: Any) -> Optional[set]:
@@ -1590,76 +1532,6 @@ def _pipeline_component_names(cls: Any) -> Optional[set]:
     return names or None
 
 
-def assert_composition_satisfiable(
-    cls: Any,
-    path: str | Path,
-    *,
-    components: Optional[Dict[str, Any]] = None,
-    ref: str = "",
-) -> None:
-    """Refuse a diffusers-layout load whose composition cannot be satisfied.
-
-    ``model_index.json`` names the parts; each must arrive either from its own
-    dir in the local tree or through the ``components=`` injection the
-    dispatched binding's overrides derive. When one does neither, diffusers
-    raises ``OSError: Error no file named config.json found in directory
-    <snapshot root>`` — naming neither the component nor the cause — and the
-    caller retries a condition no retry can fix.
-
-    Skipped, because the composition is not this tree's to satisfy: layouts
-    with no readable ``model_index.json`` (single-file checkpoints,
-    transformers trees, root-layout quantized artifacts — all of which
-    detect only in the absence of an index), the svdq lane (it swaps a
-    nunchaku denoiser in and ignores ``components=`` outright), and gguf
-    snapshots (the denoiser is a loose ``.gguf``, not a component dir).
-    Also skipped per-component: anything the index names that the pipeline
-    class's own signature does not (see :func:`_pipeline_component_names`).
-    The modular lane never reaches here — it refuses in
-    :func:`hydrate_modular_pipeline` with ``ModularHydrationError``."""
-    root = Path(path)
-    expected = model_index_component_classes(root)
-    if not expected:
-        return
-    declared = _pipeline_component_names(cls)
-    if declared is not None:
-        expected = {k: v for k, v in expected.items() if k in declared}
-        if not expected:
-            return
-    injected = tuple(sorted(components or ()))
-    missing = tuple(
-        name for name in sorted(expected)
-        if name not in (components or {})
-        and not _component_dir_present(root, name)
-    )
-    if not missing:
-        return
-    # Only on the refusal path: both probes walk the tree, and the happy path
-    # must not pay for a lane it is not on.
-    if detect_svdq_artifact(root) is not None:
-        return
-    if detect_gguf_snapshot(root) is not None:
-        return
-    detail = (
-        f"pipeline={getattr(cls, '__name__', cls)} "
-        f"ref={ref or '<none>'} tree={root} "
-        f"missing={','.join(missing)} "
-        f"expected={','.join(sorted(expected))} "
-        f"injected={','.join(injected) or '<nothing>'}"
-    )
-    activity_mod.emit_event(
-        activity_mod.KIND_COMPONENT_MISS, detail, phase="refused")
-    raise ComponentSubstitutionError(
-        f"base tree {root} carries no {missing[0]!r}/ and the dispatch "
-        f"injected " + (f"only {list(injected)}" if injected else "nothing")
-        + f" for it (composition {getattr(cls, '__name__', cls)} names "
-        f"{sorted(expected)}; missing {list(missing)}). A narrowed snapshot "
-        f"with no matching component override is the th#1711/th#1715 shape — "
-        f"deterministic, so this load is refused rather than retried.",
-        tree=str(root), missing=missing,
-        expected=tuple(sorted(expected)), injected=injected,
-    )
-
-
 def is_modular_pipeline_class(cls: Any) -> bool:
     """Duck-typed: a modular pipeline class exposes ``load_components``
     (weights hydrate AFTER construction) — ``DiffusionPipeline`` does not."""
@@ -1675,13 +1547,6 @@ def _is_modular_pipeline(obj: Any) -> bool:
         hasattr(obj, "_component_specs")
         and callable(getattr(obj, "load_components", None))
     )
-
-
-def _resolve_override_tree(root: Path, component: str) -> Path:
-    """Override-tree layout convention (same as :func:`load_component`): the
-    tree's ``<component>/`` subtree when present, else its root."""
-    sub = root / component
-    return sub if sub.is_dir() else root
 
 
 def _local_component_dir(base: Path, spec: Any, name: str) -> Optional[Path]:
@@ -1762,18 +1627,14 @@ def _admit_component_staging(component: str, nbytes: int) -> None:
         )
 
 
-def modular_staging_units(
-    base: Path,
-    component_trees: Optional[Mapping[str, str]] = None,
-) -> Dict[str, int]:
+def modular_staging_units(base: Path) -> Dict[str, int]:
     """Bytes per INDEPENDENTLY STAGED unit of a modular snapshot.
 
     :func:`hydrate_modular_pipeline` loads one component at a time from that
     component's own source dir, so the unit of host-RAM staging is a
     component dir — never the tree. This reads the same sources the hydration
     loop will: each ``modular_model_index.json`` entry's subfolder under
-    ``base`` (falling back to the component name), and each override tree in
-    ``component_trees`` in place of the base dir it replaces.
+    ``base`` (falling back to the component name).
 
     Empty when the index is absent or unreadable: callers treat that as "no
     per-component knowledge" and keep whole-tree accounting."""
@@ -1784,10 +1645,9 @@ def modular_staging_units(
         return {}
     if not isinstance(entries, dict):
         return {}
-    trees = dict(component_trees or {})
     units: Dict[str, int] = {}
     for name, entry in entries.items():
-        if str(name).startswith("_") or name in trees:
+        if str(name).startswith("_"):
             continue
         sub = ""
         if isinstance(entry, list) and len(entry) >= 3 and isinstance(entry[2], dict):
@@ -1800,12 +1660,6 @@ def modular_staging_units(
         if src is None:
             continue
         units[str(name)] = disk_gc.tree_bytes(src)
-    for name, tree in trees.items():
-        root = Path(tree)
-        if not root.is_dir():
-            continue
-        units[f"{name} (override)"] = disk_gc.tree_bytes(
-            _resolve_override_tree(root, str(name)))
     return units
 
 
@@ -1860,7 +1714,6 @@ class StreamedHydrationPlan:
 def plan_streamed_hydration(
     base: Path,
     *,
-    component_trees: Optional[Mapping[str, str]] = None,
     device_free_bytes: Optional[int] = None,
     placement_mode: str = "",
 ) -> StreamedHydrationPlan:
@@ -1886,7 +1739,7 @@ def plan_streamed_hydration(
 
     Engaged only on all three. Every other answer keeps today's behaviour,
     including the refusal, so this can only turn a refusal into a boot."""
-    units = modular_staging_units(Path(base), component_trees)
+    units = modular_staging_units(Path(base))
     if device_free_bytes is None:
         device_free_bytes = int(get_available_vram_gb() * _GIB)
     return decide_streamed_hydration(
@@ -2012,7 +1865,6 @@ def hydrate_modular_pipeline(
     path: str | Path,
     *,
     torch_dtype: Any = None,
-    component_trees: Optional[Dict[str, str]] = None,
     preloaded: Optional[Dict[str, Any]] = None,
     place_device: str = "",
 ) -> Dict[str, str]:
@@ -2028,8 +1880,6 @@ def hydrate_modular_pipeline(
     ``pipe.load_components()`` can reach huggingface.co.
 
     - base components load from ``<snapshot>/<subfolder>``;
-    - ``component_trees`` overrides re-route a component to its OWN
-      materialized tree (``<tree>/<component>/`` or the tree root);
     - a config-only weight-bearing dir is the unselected partition: SKIPPED,
       its spec neutralized so nothing can ever fetch it;
     - a component the index names but the snapshot does not carry refuses
@@ -2059,19 +1909,7 @@ def hydrate_modular_pipeline(
     to."""
     base = Path(path)
     specs = dict(getattr(pipe, "_component_specs", None) or {})
-    trees = dict(component_trees or {})
     pre = dict(preloaded or {})
-
-    unknown = sorted(set(trees) - set(specs))
-    if unknown:
-        raise ModularHydrationError(
-            f"component override {unknown[0]!r} is not a component of "
-            f"{type(pipe).__name__} (specs: {sorted(specs)})")
-    both = sorted(set(trees) & set(pre))
-    if both:
-        raise ModularHydrationError(
-            f"component {both[0]!r} arrived as BOTH an override tree and a "
-            f"preloaded module; one delivery mechanism per component")
 
     sources: Dict[str, str] = {}
     skipped: List[str] = []
@@ -2079,14 +1917,6 @@ def hydrate_modular_pipeline(
         if getattr(spec, "default_creation_method", "") != "from_pretrained":
             continue
         if name in pre:
-            continue
-        if name in trees:
-            root = Path(trees[name])
-            if not root.is_dir():
-                raise ModularHydrationError(
-                    f"override tree for component {name!r} does not exist: "
-                    f"{root}")
-            sources[name] = str(_resolve_override_tree(root, name))
             continue
         src = _local_component_dir(base, spec, name)
         if src is None:
@@ -2341,7 +2171,6 @@ def _load_modular_pipeline(
     dtype: str = "",
     storage_dtype: str = "",
     components: Optional[Dict[str, Any]] = None,
-    component_trees: Optional[Dict[str, str]] = None,
     placement_mode: str = "",
 ) -> Any:
     """The modular lane of :func:`load_from_pretrained`:
@@ -2376,9 +2205,7 @@ def _load_modular_pipeline(
     # cannot disagree about which shape the load takes; if free VRAM moved
     # between them the per-component gate inside hydration still refuses
     # with the measured numbers rather than thrashing the host.
-    plan = plan_streamed_hydration(
-        Path(path), component_trees=component_trees,
-        placement_mode=placement_mode)
+    plan = plan_streamed_hydration(Path(path), placement_mode=placement_mode)
     if plan.engaged:
         logger.info(
             "modular slot stages per component onto the device: %s",
@@ -2390,8 +2217,7 @@ def _load_modular_pipeline(
             f"{type(pipe).__name__} without _component_specs/load_components;"
             f" cannot hydrate")
     hydrate_modular_pipeline(
-        pipe, Path(path), torch_dtype=torch_dtype,
-        component_trees=component_trees, preloaded=components,
+        pipe, Path(path), torch_dtype=torch_dtype, preloaded=components,
         place_device="cuda" if plan.engaged else "",
     )
     unmaterialized = meta_tensors(pipe)
@@ -2437,7 +2263,6 @@ def load_from_pretrained(
     attrs: Optional[Dict[str, str]] = None,
     storage_dtype: str = "",
     components: Optional[Dict[str, Any]] = None,
-    component_trees: Optional[Dict[str, str]] = None,
     ref: str = "",
     placement_mode: str = "",
 ) -> Any:
@@ -2456,9 +2281,7 @@ def load_from_pretrained(
     satisfy pipeline-typed ``setup()`` annotations; endpoints may also call
     it. A modular pipeline class (one exposing ``load_components``) takes its
     own lane — construct, re-point every component spec at the LOCAL tree,
-    hydrate; ``component_trees`` routes component overrides to their own
-    materialized trees on that lane (the ``components=`` kwarg is what
-    ``ModularPipeline.__init__`` silently discards).
+    hydrate.
     ``placement_mode`` is the rung the worker will place
     this pipeline on: an offload rung keeps the weights in host RAM, so the
     modular lane must not stage them onto the card and must not take the
@@ -2467,19 +2290,8 @@ def load_from_pretrained(
     if is_modular_pipeline_class(cls):
         return _load_modular_pipeline(
             cls, path, dtype=dtype, storage_dtype=storage_dtype,
-            components=components, component_trees=component_trees,
-            placement_mode=placement_mode,
+            components=components, placement_mode=placement_mode,
         )
-    if component_trees:
-        raise ModularHydrationError(
-            f"component_trees is the MODULAR delivery mechanism and "
-            f"{getattr(cls, '__name__', cls)} is not a modular pipeline "
-            f"class; non-modular overrides ride components= (pgw#617)")
-    # The composition the index names must be satisfiable from the tree plus
-    # the injection BEFORE any lane touches from_pretrained. A
-    # component that is in neither is a deterministic miss, and every lane
-    # below reports it as the same nameless OSError against the snapshot root.
-    assert_composition_satisfiable(cls, path, components=components, ref=ref)
     # SVDQuant/nunchaku 4-bit flavors: self-describing snapshots take
     # the svdq lane — a nunchaku transformer swapped into the standard
     # pipeline. Detection precedes every other rung; failures are typed
@@ -2714,7 +2526,5 @@ __all__ = [
     "plan_streamed_hydration",
     "StreamedHydrationPlan",
     "ModularHydrationError",
-    "ComponentSubstitutionError",
-    "assert_composition_satisfiable",
     "load_gguf_pipeline",
 ]

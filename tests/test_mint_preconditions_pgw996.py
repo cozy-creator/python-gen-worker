@@ -401,7 +401,6 @@ def test_the_CHILD_still_refuses_a_toolchainless_AOT_mint(
     eager serving and says nothing."""
     from gen_worker import mint_child
 
-    monkeypatch.setattr(mint_child, "assert_composable", lambda *a, **k: None)
     monkeypatch.setattr(cc, "toolchain_present", lambda: True)
     monkeypatch.setattr(cc, "cxx_toolchain_present", lambda: False)
 

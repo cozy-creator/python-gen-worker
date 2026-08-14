@@ -300,6 +300,9 @@ message DesiredResidency {
   uint64 generation = 1;
   repeated string disk_refs = 2;
   repeated DesiredInstance hot = 3;
+  // th#1941: keyed by COMPOSED MANIFEST DIGEST, not by canonical ref. Two
+  // resolutions of one repo that differ in their component sources are two
+  // entries with two digests and cannot interfere.
   map<string, Snapshot> snapshots = 4;
   // th#1087/th#1085: hub-authoritative desired state is the PAIR
   // (release_id, config_generation). config_generation is the release's
@@ -778,9 +781,10 @@ message RunJob {
   OutputMode output_mode = 9;  // client's inline-vs-url preference for media outputs
   ResolvedCompute compute = 10;
   repeated ModelBinding models = 11; // slot -> ref bindings resolved by the orchestrator
-  // Presigned snapshots keyed by canonical ref. Ordinary warm-local bindings
-  // may be omitted; required_compile retains every exact model digest plus the
-  // selected cell so the worker can revalidate immutable execution identity.
+  // th#1941: presigned snapshots keyed by COMPOSED MANIFEST DIGEST, not by
+  // canonical ref. Ordinary warm-local bindings may be omitted;
+  // required_compile retains every exact model digest plus the selected cell
+  // so the worker can revalidate immutable execution identity.
   map<string, Snapshot> snapshots = 12;
   // Unique exact current-state fence selected by Tensorhub. Multiple
   // applicable targets fail closed. Mandatory for W8A8; when present on any
@@ -855,13 +859,11 @@ message ModelBinding {
   // (precedence: explicit payload value > this > endpoint fallback preset).
   // Additive: old workers ignore this field.
   string inference_defaults = 4;
-  // th#980 hierarchical slots: per-component repo substitutions on the base
-  // composition, component name -> canonical tensorhub ref (normal form,
-  // same grammar as `ref`). The worker loads the base composition then
-  // substitutes each named component from its materialized snapshot (pgw
-  // companion issue). Snapshots for these refs ride RunJob.snapshots /
-  // DesiredResidency exactly like base refs. Additive: old workers ignore.
-  map<string, string> components = 5;
+  // th#1941: `components` was the SUBTRACTION — "load the base composition,
+  // then substitute", the only wire syntax for "load X but not part of X".
+  // The hub now composes hub-side and sends a resolved manifest.
+  reserved 5;
+  reserved "components";
   // th#1139 (pgw#654) objective split, retiring th#1017's never-landed regime
   // field: the resolved checkpoint's stamped serving facts. objective is the
   // training objective ("epsilon" | "v_prediction" | "flow"; "" =
@@ -875,6 +877,10 @@ message ModelBinding {
   string objective = 6;
   bool   distilled = 7;
   string distilled_status = 8;
+  // The composed manifest digest this slot fetches (th#1941). Key into
+  // DesiredResidency.snapshots / RunJob.snapshots. `ref` above survives as
+  // the display/audit label; THIS is the fetch pointer.
+  string manifest_digest = 9;
 }
 
 // One LoRA adapter overlay: a resolved tensorhub ref + its adapter weight.
@@ -899,8 +905,36 @@ message LoraOverlay {
 // never calls tensorhub for ref resolution; the orchestrator is the only
 // resolver and ships snapshots on DesiredResidency / RunJob.
 message Snapshot {
-  string digest = 1; // snapshot digest the download is pinned to
+  // th#1941 — the COMPOSED manifest digest: sha256 over the sorted
+  // (path, digest, size) triples of `files`. For an uncomposed variant it
+  // equals that variant's own storage digest. Fetch identity, dispatch key
+  // AND the worker's snapshot directory name — one key, one meaning.
+  string digest = 1;
+  // THE WHOLE TRUTH. Every file the pod puts on disk for this entry, already
+  // composed hub-side: a component sourced from another release appears here
+  // remapped under its subfolder, and the displaced files are simply ABSENT.
+  // Nothing here can express subtraction because there is nothing to subtract
+  // from — the list is the answer, not an input to one.
   repeated SnapshotFile files = 2;
+  // Audit/display ONLY. A worker that reads this to decide what to fetch has
+  // reintroduced the bug this deletes; `files` is complete by construction.
+  ResolvedProvenance provenance = 3;
+}
+
+// th#1941 — where a composed manifest's files came from. Audit/display only.
+message ResolvedProvenance {
+  string repo       = 1;  // owner/repo
+  string release    = 2;  // author-chosen release identifier (th#1936)
+  string variant_id = 3;  // the variant the contract-spec resolved to (th#1938)
+  // component -> where that component's files came from, for components NOT
+  // supplied by variant_id.
+  map<string, ComponentOrigin> component_sources = 4;
+}
+
+message ComponentOrigin {
+  string repo       = 1;
+  string release    = 2;
+  string variant_id = 3;
 }
 
 message SnapshotFile {
