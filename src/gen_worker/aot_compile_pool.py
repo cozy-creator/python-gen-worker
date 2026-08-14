@@ -67,7 +67,7 @@ import msgspec
 from torch_compiled_graphs import spans as compile_spans
 
 from . import aot_device_lock, env_seal
-from . import compile_posture, kernel_path
+from . import compile_posture
 from .child_contract import CompileSpec, MintSlot
 from .compile_posture import (
     USER_MACHINE_RSS_RESERVE_BYTES, CompilePosture)
@@ -671,10 +671,6 @@ class EntryJob(msgspec.Struct, frozen=True, kw_only=True):
     modules: Tuple[str, ...] = ()
     cfg: CompileSpec = msgspec.field(default_factory=CompileSpec)
     slots: Dict[str, MintSlot] = {}
-    #: pgw#947's measured serving-kernel lane, stamped into every artifact this
-    #: child packs. The parent measures it (only the loader can swap the
-    #: linears) and the child cannot re-derive it, so it crosses.
-    execution_lane: Optional[kernel_path.Verdict] = None
     #: The parent states whose machine this is. The child installs the same
     #: posture before any compile so local work is niced and pod work is not.
     posture: CompilePosture = compile_posture.FLEET

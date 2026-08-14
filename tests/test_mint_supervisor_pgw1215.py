@@ -47,7 +47,7 @@ import torch
 from gen_worker import activity as activity_mod
 from gen_worker import aot_compile_pool, aot_mint
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells, kernel_path, mint_supervisor, mint_workers
+from gen_worker import fleet_cells, mint_supervisor, mint_workers
 from gen_worker.api.decorators import DynamicDim
 from gen_worker.registry import CompileCell
 from gen_worker.cell_adopt import AdoptOutcome
@@ -438,34 +438,6 @@ def test_a_declared_blocker_REFUSES_on_the_parent_and_never_spawns(
         mint_supervisor.DeclaredBlockerRefusal, aot_mint.MintRefused), (
         "the declared-blocker refusal and the every-class-refused refusal are "
         "different verdicts and must stay distinguishable at the terminus")
-
-
-def test_the_serving_parent_STATES_its_lane_instead_of_benchmarking_one(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """pgw#947, re-based on the reroute.
-
-    The mint child A/B'd the kernel lanes by loading one full pipeline per
-    candidate onto an empty card. A SERVING parent has no empty card and no
-    right to take one — and it does not need the probe, because the lane this
-    pod SERVES on is a fact it holds first-hand and is the lane the artifact
-    must be stamped with. Recorded as a TYPED verdict with its reason, never
-    as an absence: a cell with no verdict makes the serving side guess.
-    """
-    _stub_parent_gates(monkeypatch)
-    seen: List[Any] = []
-
-    def _mint(template: Any, **kw: Any) -> Any:
-        seen.append(template.execution_lane)
-        raise aot_mint.MintRefused("stop here")
-
-    monkeypatch.setattr(aot_mint, "mint_graph_classes", _mint)
-    _events(monkeypatch)
-    asyncio.run(mint_supervisor.supervise(
-        _task(tmp_path, execution_lane="w8a16"), act=_Act(), max_attempts=1))
-    assert seen and seen[0] is not None
-    assert seen[0].winner == "w8a16"
-    assert seen[0].binding == kernel_path.BIND_UNMEASURED
 
 
 def test_the_only_bank_that_SIZES_anything_is_the_host_rss_one(

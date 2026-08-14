@@ -269,7 +269,6 @@ module = [
   "gen_worker.hardware_report",
   "gen_worker.host_canary",
   "gen_worker.hot_swap",
-  "gen_worker.kernel_path",
   "gen_worker.media_transfer",
   "gen_worker.models.fp8_storage",
   "gen_worker.models.loading",

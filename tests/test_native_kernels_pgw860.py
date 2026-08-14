@@ -8,7 +8,6 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from gen_worker import kernel_path  # noqa: E402
 from gen_worker.models import native_kernels as nk  # noqa: E402
 from gen_worker.models import svdq_fused  # noqa: E402
 from gen_worker.models import svdq_native as native  # noqa: E402
@@ -19,10 +18,8 @@ from gen_worker.models.svdq_layout import DecodedLinear  # noqa: E402
 @pytest.fixture(autouse=True)
 def _reset_arming(monkeypatch: pytest.MonkeyPatch):
     nk.reset_native_kernels_arming()
-    kernel_path.clear()
     yield
     nk.reset_native_kernels_arming()
-    kernel_path.clear()
 
 
 # --- env gating ------------------------------------------------------------
@@ -38,124 +35,29 @@ def test_unset_env_stays_baseline_dormant(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_kill_switch_forces_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(nk.NATIVE_ENV, "0")
-    # Even an armed verdict + passing self-checks must not arm past the
-    # kill-switch, on either axis.
-    kernel_path.pin("fused+packed", "test")
-    monkeypatch.setattr(nk, "_fused_linear_self_check", lambda: None)
-    monkeypatch.setattr(nk, "_packed_modulation_self_check", lambda: None)
     assert nk.svdq_linear_execution_lane() == "baseline"
     assert "kill-switch" in nk.svdq_linear_execution_lane_reason()
     assert nk.svdq_modulation_execution_lane() == "dense"
     assert "kill-switch" in nk.svdq_modulation_execution_lane_reason()
 
 
-def test_armed_verdict_with_passing_self_checks_arms_both_axes(
+def test_format_one_has_one_deterministic_native_kernel_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """TCG's closed metadata cannot hide a second worker-local verdict."""
     monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    kernel_path.pin("fused+packed", "cell verdict")
-    monkeypatch.setattr(nk, "_fused_linear_self_check", lambda: None)
-    monkeypatch.setattr(nk, "_packed_modulation_self_check", lambda: None)
-    assert nk.svdq_linear_execution_lane() == "fused"
-    assert nk.svdq_modulation_execution_lane() == "packed"
-    assert "cell verdict" in nk.svdq_linear_execution_lane_reason()
-    assert "cell verdict" in nk.svdq_modulation_execution_lane_reason()
-
-
-def test_the_axes_are_independent(monkeypatch: pytest.MonkeyPatch) -> None:
-    """pgw#863: a card whose fused LINEAR loses must still get the packed
-    modulation. Binding them to one switch cost sm_100 either the residency
-    win or 19% of its step time, with no way to take both — so the verdict
-    vocabulary has to be able to say `baseline+packed`, and B200's does."""
-    monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    kernel_path.pin("baseline+packed", "cell verdict: B200 228 vs 350 ms")
-    monkeypatch.setattr(nk, "_packed_modulation_self_check", lambda: None)
-    assert nk.svdq_linear_execution_lane() == "baseline"
-    assert nk.svdq_modulation_execution_lane() == "packed"
-
-
-def test_a_baseline_axis_never_runs_its_self_check(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An axis a cell puts on its degraded value is obeyed verbatim: no
-    probe, no SM read, no compile."""
-    def boom() -> str:
-        raise AssertionError("the self-check must not run for a degraded axis")
-
-    monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    kernel_path.pin("baseline+dense", "cell verdict: B200 measured 228 vs 350")
-    monkeypatch.setattr(nk, "_fused_linear_self_check", boom)
-    monkeypatch.setattr(nk, "_packed_modulation_self_check", boom)
     assert nk.svdq_linear_execution_lane() == "baseline"
     assert nk.svdq_modulation_execution_lane() == "dense"
-    assert "228 vs 350" in nk.svdq_linear_execution_lane_reason()
-
-
-def test_a_failing_self_check_degrades_only_its_own_axis(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    kernel_path.pin("fused+packed", "cell verdict")
-    monkeypatch.setattr(nk, "_fused_linear_self_check", lambda: "no fp4 here")
-    monkeypatch.setattr(nk, "_packed_modulation_self_check", lambda: None)
-    assert nk.svdq_linear_execution_lane() == "baseline"
-    assert "no fp4 here" in nk.svdq_linear_execution_lane_reason()
-    assert nk.svdq_modulation_execution_lane() == "packed"
-
-
-def test_self_check_raise_degrades_not_raises(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def boom() -> str:
-        raise RuntimeError("driver exploded")
-
-    monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    kernel_path.pin("fused+packed", "cell verdict")
-    monkeypatch.setattr(nk, "_fused_linear_self_check", boom)
-    assert nk.svdq_linear_execution_lane() == "baseline"
-    assert "driver exploded" in nk.svdq_linear_execution_lane_reason()
-
-
-def test_no_verdict_is_the_declared_default_and_says_so(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """pgw#947 (d): nothing pinned a lane => the conservative default on BOTH
-    axes, with a TYPED reason. Never a silent fall-through to a hand tuple."""
-    monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    kernel_path.clear()
-    assert nk.svdq_linear_execution_lane() == kernel_path.linear_of(
-        kernel_path.DEFAULT_EXECUTION_LANE)
-    assert nk.svdq_modulation_execution_lane() == kernel_path.modulation_of(
-        kernel_path.DEFAULT_EXECUTION_LANE)
-    assert kernel_path.REASON_ABSENT in nk.svdq_linear_execution_lane_reason()
-    assert kernel_path.REASON_ABSENT in nk.svdq_modulation_execution_lane_reason()
+    assert "format 1" in nk.svdq_linear_execution_lane_reason()
+    assert "format 1" in nk.svdq_modulation_execution_lane_reason()
 
 
 def test_no_sm_allowlist_survives() -> None:
-    """pgw#863 + pgw#947: BOTH hand-maintained tuples are DELETED, not
-    renamed and not split in two. The only SM fact left in the mechanism is
-    the fused linear's capability floor, and it lives in kernel_lane where
-    the candidate enumeration is — the packed modulation has no SM term at
-    all, because its kernel never needed Blackwell silicon."""
+    """No hardware tuple silently chooses a worker-local artifact policy."""
     assert not hasattr(nk, "FUSED_SMS")
     assert not hasattr(nk, "FUSED_LINEAR_SMS")
     assert not hasattr(nk, "PACKED_MODULATION_SMS")
     assert not hasattr(nk, "BLACKWELL_SMS")
-    assert kernel_path.FUSED_MIN_SM == 100
-
-
-def test_real_self_checks_on_this_host_degrade_cleanly(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """On a box without the kernels the REAL self-checks must return a
-    reason, never raise (on a Blackwell runner they instead arm — also
-    fine)."""
-    monkeypatch.setenv(nk.NATIVE_ENV, "1")
-    kernel_path.pin("fused+packed", "cell verdict")
-    assert nk.svdq_linear_execution_lane() in ("baseline", "fused")
-    assert nk.svdq_linear_execution_lane_reason()
-    assert nk.svdq_modulation_execution_lane() in ("dense", "packed")
-    assert nk.svdq_modulation_execution_lane_reason()
 
 
 # --- extension probe -------------------------------------------------------

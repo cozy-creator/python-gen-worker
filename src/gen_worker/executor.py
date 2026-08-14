@@ -38,7 +38,6 @@ from . import dispatch
 from . import handler_proof
 from .procsplit import broker as procsplit_broker
 from . import cpu_budget
-from . import kernel_path
 from . import measured_posture as posture_mod
 from . import mint_workers
 from . import settings_authority
@@ -5342,7 +5341,6 @@ class Executor:
                 f"the spec names an exact cell but this pod cannot arm one: "
                 f"{topology_eager}")
         compile_selection = arm.selection if arm is not None else None
-        compile_artifact = compile_selection.path if compile_selection else None
         # §4.27 steps 1-3 (pgw#1089/pgw#1090): with no Plan-named artifact, this
         # pod derives its OWN cell key from code alone and asks the hub by that
         # key BEFORE `setup()` puts a weight in this process. On a hit the
@@ -5387,7 +5385,6 @@ class Executor:
             boot_local_key = adopt.local_key
             if adopt.adoption is not None:
                 got = adopt.adoption
-                compile_artifact = got.artifact
                 arm = _ArmOrder.for_artifact(
                     path=got.artifact, ref=got.ref,
                     snapshot_digest=got.snapshot_digest,
@@ -5424,18 +5421,6 @@ class Executor:
                 eager_only,
                 family=str(getattr(spec.compile, "family", "") or ""),
                 function=str(spec.name or ""))
-        # pgw#947: the serving-kernel lane comes from the CELL, and it has to
-        # be pinned BEFORE setup() — the linears are swapped at model load, so
-        # a verdict read afterwards would arrive one whole pipeline too late.
-        # No cell (eager boot, self-minting boot, pre-pgw#947 cell) is the
-        # declared conservative default WITH a typed reason; there is no SM
-        # allowlist and no per-boot probe to fall back on any more.
-        # The verdict is EVIDENCE, not an instruction: cells are keyed on SM
-        # and the lane is not a key axis, so a 96 GB card's winner can reach a
-        # 32 GB card of the same SM. adopt() re-applies the fit constraint
-        # against THIS device before pinning.
-        kernel_path.adopt_from_artifact(
-            compile_artifact, source=f"{spec.name} boot")
         # Loads serialize: concurrent setups would cross-contaminate each
         # other's allocator deltas and place_pipeline's free-VRAM reads.
         async with self._intent_lock(
@@ -8259,7 +8244,6 @@ class Executor:
                     modules=bg.modules or _mint_modules(spec),
                     slots=dict(bg.slots),
                     weight_lane=compile_cache.cell_base_execution_lane(pipe),
-                    execution_lane=self._served_execution_lane(spec),
                     configs={spec.name: self._effective_config(spec)},
                     device=mint_workers.device_of(pipe),
                     # pgw#1199: this boot ran the endpoint's own handler on the
