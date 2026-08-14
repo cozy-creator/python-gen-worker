@@ -74,6 +74,26 @@ COMPONENT_DTYPES: Dict[str, ComponentDtype] = {
         "frames visibly, and the diffusers Wan reference usage loads it fp32 "
         "alongside a bf16 transformer (ie#546 wave-2 / pgw#667)",
     ),
+    "AutoencoderKLMiniMaxH3": ComponentDtype(
+        "fp32",
+        "H3's released VAE is fp32 and its verified decode recipe is fp16 "
+        "AUTOCAST OVER fp32 weights, so the class pins "
+        "_keep_in_fp32_modules=[encoder, decoder, quant_conv, "
+        "post_quant_conv]. The compute is already fp16 — narrowing the "
+        "weights buys bandwidth only, at 3 fewer mantissa bits than the "
+        "arithmetic. Measured: the fp16-WEIGHT arm (strictly wider than "
+        "bf16) scored 74.97 dB PSNR min / 0.0186 max abs against the fp32 "
+        "decode and ran 0.94x — worse on both axes (ie#621, ie#718)",
+    ),
+    "AutoencoderKLMiniMaxH3Audio": ComponentDtype(
+        "fp32",
+        "H3's audio VAE is a DAC/BigVGAN stack (weight-normalized "
+        "convolutions, Snake activations) that upstream measures as "
+        "~20 dB QUIETER under bfloat16, and it decodes at its own parameter "
+        "dtype with no autocast to widen it back. H3's audio is also the "
+        "half two independent probes found fragile, so a video-only review "
+        "would not catch it (te#191/te#192, ie#718)",
+    ),
 }
 
 
