@@ -13,6 +13,7 @@ import types
 from typing import Dict, List
 
 import pytest
+from torch_compiled_graphs import spans
 
 from gen_worker import warm_spans
 
@@ -69,9 +70,7 @@ def test_the_aot_partition_would_have_missed_this_compile() -> None:
     ``AotCodeCompiler.compile`` never runs on the JIT path, so the AOT ledger
     prices a JIT compile at a fifth of its cost and calls the rest residual.
     """
-    from gen_worker import aot_compile_spans
-
-    aot_members, _o, _raw = aot_compile_spans.phase_delta({}, REAL_DELTA)
+    aot_members, _o, _raw = spans.phase_delta({}, REAL_DELTA)
     aot_total = sum(aot_members.values())
     jit_members, _ = warm_spans.partition(REAL_DELTA)
 

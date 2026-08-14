@@ -30,9 +30,9 @@ from pathlib import Path
 from typing import Dict, Iterator
 
 import pytest
+from torch_compiled_graphs import spans
 
 from gen_worker import aot_compile_pool as pool
-from gen_worker import aot_compile_spans as spans
 from gen_worker import env_seal
 
 torch = pytest.importorskip("torch")

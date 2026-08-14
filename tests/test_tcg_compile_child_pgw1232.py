@@ -13,9 +13,10 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from torch_compiled_graphs import spans
 
 from gen_worker import aot_compile_child as child
-from gen_worker import aot_compile_spans
+from gen_worker import aot_compile_pool as pool
 from gen_worker import aot_mint
 from gen_worker.aot_compile_pool import EntryJob
 
@@ -244,20 +245,41 @@ def test_runtime_uses_the_canonical_worker_cas(monkeypatch: pytest.MonkeyPatch) 
     }
 
 
-def test_child_runs_the_span_closure_check(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pool_has_no_exported_program_resume_bank(tmp_path: Path) -> None:
+    width = pool.entry_workers(
+        1,
+        limit=1,
+        vcpus=16,
+        available_bytes=64 * 1024**3,
+        device_lock=True,
+    )
+    box = pool.EntryCompilePool(tmp_path / "pool", width=width)
+
+    assert not hasattr(box, "bank")
+    assert box.cache_dir == str(tmp_path / "pool" / "inductor-cache")
+    assert not any(key.startswith("resume_") for key in box.ledger.facts())
+    assert "aot_resume" not in inspect.getsource(pool)
+
+
+def test_child_runs_the_span_closure_check_nonfatally(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     seen: list[dict[str, float]] = []
 
     def record(spans: Mapping[str, float]) -> list[str]:
         seen.append(dict(spans))
-        return []
+        return ["forced partition defect"]
 
-    monkeypatch.setattr(aot_compile_spans, "check", record)
-    ledger = aot_compile_spans.SpanLedger()
+    monkeypatch.setattr(spans, "check", record)
+    ledger = spans.SpanLedger()
 
-    child._span_fields(ledger, {}, {}, {})
+    fields = child._span_fields(ledger, {}, {}, {})
 
     assert seen
     assert "child_wall_s" in seen[0]
+    assert fields["spans"]
+    assert "forced partition defect" in caplog.text
 
 
 def test_tcg_compile_stays_in_the_compile_child_and_fence_is_green() -> None:

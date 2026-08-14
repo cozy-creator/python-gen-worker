@@ -32,10 +32,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from torch_compiled_graphs import spans
 
 from gen_worker import aot_compile_child as child
 from gen_worker import aot_compile_pool as pool
-from gen_worker import aot_compile_spans as spans
 
 pytestmark = pytest.mark.filterwarnings("ignore::FutureWarning")
 
@@ -84,7 +84,7 @@ def test_every_second_of_a_real_childs_wall_is_attributed(
     If someone adds a step to the compile child and does not name it,
     ``child_other_s`` grows and the residual assertion fires; if someone
     removes a span, the partition stops summing and
-    :func:`aot_compile_spans.check` fires.
+    :func:`torch_compiled_graphs.spans.check` fires.
     """
     box = _pool(tmp_path, shares=2)
     with pytest.raises(pool.EntryCompileFailed):
@@ -104,10 +104,18 @@ def test_every_second_of_a_real_childs_wall_is_attributed(
         # Named, not merely present: the spans that were literally invisible
         # before this issue. Each is real work paid once PER SHARE because the
         # pool's unit of parallelism is a process that exits.
-        for label in ("child_seal_s", "child_setup_s"):
-            assert table.get(label, 0.0) > 0.0, (
-                f"{report.entry}: {label} is not being measured. It is inside "
-                f"the recorded compile_s whether or not anyone names it")
+        assert table.get("child_seal_s", 0.0) > 0.0, (
+            f"{report.entry}: child_seal_s is not being measured. It is "
+            "inside the recorded compile_s whether or not anyone names it"
+        )
+        # The refusing fixture reaches setup and rejects a missing module in
+        # under 0.5 ms on fast hosts. SpanLedger deliberately publishes three
+        # decimal places, so 0.000 is a truthful sub-ms measurement, not an
+        # absent one. Presence plus the refusal terminus proves the interval
+        # ran without inventing a non-zero floor.
+        assert "child_setup_s" in table
+        assert table["child_setup_s"] >= 0.0
+        assert "could not build the compile target" in report.detail
 
         # The single largest named non-compile span on attempt nine's shape,
         # and the reason this issue found something: `env_seal.establish()`
@@ -160,6 +168,18 @@ def test_the_compile_halfs_spans_are_recorded_even_when_they_are_zero(
     # And the round trip a report takes, so a member that decodes to a default
     # cannot look recorded.
     assert set(spans.PARTITIONS["child_wall_s"]) <= set(table)
+
+
+def test_pool_code_identity_hashes_tcgs_partition_source() -> None:
+    """The extracted partition remains part of the parent/child code seal."""
+    sources = pool._CONTRACT_SOURCES
+    assert spans.__file__ is not None
+    assert Path(spans.__file__).resolve() in sources
+    assert all(
+        source is None or source.name != "aot_compile_spans.py"
+        for source in sources
+    )
+    assert pool.CODE_DIGEST
 
 
 # ---------------------------------------------------------------------------

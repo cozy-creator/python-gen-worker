@@ -57,27 +57,28 @@ at K=4 is byte-identical to one minted at K=1.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import (
     Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple)
 
 import msgspec
+from torch_compiled_graphs import spans as compile_spans
 
-from . import aot_compile_spans, aot_device_lock, aot_resume, env_seal
+from . import aot_device_lock, env_seal
 from . import compile_posture, kernel_path
 from .child_contract import CompileSpec, MintSlot
 from .compile_posture import (
     USER_MACHINE_RSS_RESERVE_BYTES, CompilePosture)
 from .postmortem import cpu_quota_cores
 from .stall import SilenceWindow
-import hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -90,10 +91,18 @@ ENTRY_REPORT_NAME = "report.json"
 #: ``-m gen_worker.aot_compile_child`` to mean THIS gen_worker.
 PACKAGE_ROOT = str(Path(__file__).resolve().parent.parent)
 
-#: The three modules that define the parent/child contract: the child's own
-#: entrypoint, this module (the job/report structs) and the span partition.
-_CONTRACT_MODULES = (
-    "aot_compile_child.py", "aot_compile_pool.py", "aot_compile_spans.py")
+#: The three sources that define the parent/child contract: the child's own
+#: entrypoint, this module (the job/report structs), and TCG's sole span
+#: partition. Hashing the installed TCG source makes version skew fail closed;
+#: retaining the deleted worker copy here would instead hash dead code.
+_TCG_SPANS_SOURCE = (
+    Path(compile_spans.__file__).resolve() if compile_spans.__file__ else None
+)
+_CONTRACT_SOURCES = (
+    Path(__file__).with_name("aot_compile_child.py"),
+    Path(__file__).resolve(),
+    _TCG_SPANS_SOURCE,
+)
 
 
 def _code_digest() -> str:
@@ -112,11 +121,12 @@ def _code_digest() -> str:
     afterwards.
     """
 
-    here = Path(__file__).resolve().parent
     digest = hashlib.sha256()
-    for name in _CONTRACT_MODULES:
+    for source in _CONTRACT_SOURCES:
+        if source is None:
+            return ""
         try:
-            digest.update(hashlib.sha256((here / name).read_bytes()).digest())
+            digest.update(hashlib.sha256(source.read_bytes()).digest())
         except OSError:  # zipimport / frozen: no source to compare
             return ""
     return digest.hexdigest()[:16]
@@ -656,8 +666,9 @@ class EntryJob(msgspec.Struct, frozen=True, kw_only=True):
     Three fields died with the round trip and are not coming back, because the
     thing they repaired is not happening: ``program`` (the staged file),
     ``symbol_values`` and ``symbol_labels`` (pgw#998 — the ShapeEnv values
-    ``torch.export``'s save/load loses). See ``aot_compile_spans`` for the
-    matching hole in the span partition.
+    ``torch.export``'s save/load loses). See
+    :mod:`torch_compiled_graphs.spans` for the matching hole in the span
+    partition.
     """
 
     #: WHAT to build. Identical for every child of one mint — the pool copies
@@ -912,15 +923,6 @@ class PoolLedger:
     #: which is the pass every CHILD used to pay.
     seal_seed_s: float = 0.0
     entries: int = 0
-    #: pgw#848 item 5: the resume bank's own row (``resume_root``, ``resumed``,
-    #: ``resume_cold``, ``resume_refused`` by reason, ``resume_admit_s``).
-    #: Empty on every mint that runs without a bank, so a pod with no resume
-    #: root reads exactly as it did before. It rides the LEDGER rather than a
-    #: second event because "N of 36 entries were recovered" is the first thing
-    #: that explains a pool wall, and a reader who has to join two rows to
-    #: learn it will price a resumed mint as a fast compile.
-    resume: Dict[str, Any] = field(default_factory=dict)
-
     @property
     def idle_s(self) -> float:
         return round(
@@ -949,7 +951,6 @@ class PoolLedger:
             "pool_entries": int(self.entries),
             "pool_workers": int(self.workers),
             "pool_workers_initial": int(self.workers_initial),
-            **dict(self.resume),
         }
 
 
@@ -1238,27 +1239,12 @@ class EntryCompilePool:
         self._emitted_width_facts: Optional[Dict[str, Any]] = None
         self._emit_width("construction")
         self.inductor_configs = dict(inductor_configs or {})
-        # pgw#848 item 5, NARROWED by pgw#1215 to the one half that survives
-        # the keystone: the bank is opened for its CACHE DIRECTORY and its
-        # ledger row, never for file admission any more. Admission was
-        # `bank.admit(entry, program)` — it re-derived the graph hash from the
-        # ExportedProgram THIS attempt exported, and the parent no longer
-        # exports anything, so the identity it compared against cannot be
-        # computed here. What survives is strictly the better half: the
-        # inductor cache stays scoped to the MINT rather than the attempt, so
-        # a killed mint's next attempt still hits torch's own FX graph cache.
-        # ⚠️ OWED (step 3/4): re-home file-level resume at the graph-class
-        # artifact, which is where pgw#1176 already made durability live.
-        self.bank = aot_resume.open_bank(
-            inductor_configs=self.inductor_configs)
-        # The inductor cache follows the bank when there is one. A per-attempt
-        # cache dir is why a killed mint got not even a cache hit on retry;
-        # inductor's key is the graph, not the process (measured — see this
-        # module's header), so widening the scope from one attempt to one mint
-        # cannot change what is produced.
+        # TCG's canonical CAS owns completed-class reuse. A killed class is the
+        # sole allowed loss in flight; the next attempt gets this pool's
+        # explicit cache directory or fresh scratch and never consults the
+        # deleted ExportedProgram resume bank.
         self.cache_dir = str(
             cache_dir
-            or (self.bank.cache_dir if self.bank is not None else "")
             or (self.workdir / "inductor-cache"))
         # pgw#809: ONE lock file for the whole pool. Every entry child routes
         # its inductor GPU benchmarks through it, so no two entries ever time
@@ -1577,18 +1563,6 @@ class EntryCompilePool:
                 f"rows[i::{width}] did not partition the declaration and this "
                 f"cell would be short")
 
-    def _refresh_resume_facts(self) -> None:
-        """Keep the LIVE ledger carrying the bank's row.
-
-        pgw#848 refreshes `progress.pool_ledger` on every completed entry, so
-        the phase snapshot an abandoned mint leaves behind already carries K
-        and its binding. The resume row belongs in the same place for the same
-        reason: an abandoned attempt's most useful fact is how much of it the
-        NEXT one will not have to repeat.
-        """
-        if self.bank is not None:
-            self.ledger.resume = self.bank.facts()
-
     def _seed_seal_memo(self) -> None:
         """pgw#832: write the parent's toolchain digests where every entry
         child can verify-and-reuse them instead of re-hashing ~4 GB apiece.
@@ -1849,7 +1823,6 @@ class EntryCompilePool:
                 "aot-pool: %s packed %d graph class(es) in %.1fs spans=%s",
                 row.entry, len(report.classes), elapsed,
                 self.entry_phases[row.entry])
-            self._refresh_resume_facts()
             return list(report.classes)
         # pgw#1215: a share that REFUSED at class k still packed k-1
         # artifacts, and they are on disk. Their measurement is banked before
@@ -1996,7 +1969,7 @@ class EntryCompilePool:
             spans["compile_s"] - spans["child_boot_s"]
             - float(spans.get("child_wall_s", 0.0))
             - spans["reap_lag_s"], 3)
-        violations = aot_compile_spans.check(spans)
+        violations = compile_spans.check(spans)
         if violations:
             # Named, loud, and non-fatal: an attribution defect must never
             # fail a mint, and must never be silent either (pgw#824's class).
@@ -2005,7 +1978,8 @@ class EntryCompilePool:
                 row.entry, "; ".join(violations))
         spans["child_interp_s"] = spans.get("child_interp_s", 0.0)
         # Parent-side work for THIS entry. Prefixed, and listed in
-        # `aot_compile_spans.SUBSPANS`, because it is not inside `compile_s`:
+        # `torch_compiled_graphs.spans.SUBSPANS`, because it is not inside
+        # `compile_s`:
         # staging overlaps other children, so summing it into the compile
         # total would invent seconds nobody spent compiling. Its idle FRACTION
         # is `ledger.idle_staging_s`, which is a pool number, not an entry one.

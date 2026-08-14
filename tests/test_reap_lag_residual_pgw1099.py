@@ -24,8 +24,8 @@ from pathlib import Path
 from typing import Dict
 
 import pytest
+from torch_compiled_graphs import spans
 
-from gen_worker import aot_compile_spans as spans
 from gen_worker.aot_compile_pool import EntryCompilePool, EntryReport, _Running
 
 

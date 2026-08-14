@@ -6,10 +6,11 @@ SMALL share of a mint. On a real w8a8 SDXL UNet AOTI entry (L4 sm_89,
 over 96 calls, 3.1 %** — so the whole ceiling of a perfect cross-mint autotune
 cache is ~3 % of a mint. Unnamed, that term gets argued about as a large share.
 
-It is named now, in both the pooled ledger (`aot_compile_spans`) and the serial
-mint's own table (`aot_mint._phase_delta`), as an OVERLAY: the autotune block
-runs during `GraphLowering.codegen` (`autotune_at_compile_time` resolves True
-for AOTI), so summing it with `codegen_s` double-counts.
+It is named now, in both the pooled ledger (`torch_compiled_graphs.spans`) and
+the serial mint's own table (`aot_mint._phase_delta`), as an OVERLAY: the
+autotune block runs during `GraphLowering.codegen`
+(`autotune_at_compile_time` resolves True for AOTI), so summing it with
+`codegen_s` double-counts.
 
 The second reason it is named is the byte-identity finding — the selected
 config is baked into the generated wrapper (`grid_0` block size and the
@@ -22,7 +23,8 @@ from __future__ import annotations
 
 from typing import Dict
 
-from gen_worker import aot_compile_spans as spans
+from torch_compiled_graphs import spans
+
 from gen_worker import aot_mint
 
 
