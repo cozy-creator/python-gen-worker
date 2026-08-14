@@ -2261,6 +2261,46 @@ def keying_block(
     }
 
 
+def tcg_graph_class_spec(traced: TracedClass, export_spec: ExportSpec) -> Any:
+    """Translate one worker export row into TCG's sole public declaration.
+
+    Both the compile child and the boot-trace child call this function.  The
+    former hands the result to ``Engine.compile``; the latter calls
+    ``GraphClassSpec.declare`` while the exported program is still alive and
+    memoizes only TCG's resulting class hash.  Keeping the translation here
+    prevents boot lookup and mint from growing two worker-side descriptions of
+    the same graph class.
+    """
+    from torch_compiled_graphs import GraphClassSpec
+
+    if traced.program is None:
+        raise ValueError(f"graph class {traced.name!r} carries no exported program")
+    block = dict(traced.block or {})
+    graph = block.get("graph")
+    if not isinstance(graph, dict):
+        raise ValueError(f"graph class {traced.name!r} carries no graph interface")
+    try:
+        fork = tuple((str(name), value) for name, value in block["fork"])
+        class_dims = tuple(
+            (str(name), int(value)) for name, value in block["class_dims"]
+        )
+        target = str(block["target"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"graph class {traced.name!r} carries incomplete coordinates: {exc}"
+        ) from exc
+    return GraphClassSpec(
+        graph_class=str(traced.name),
+        target=target,
+        program=traced.program,
+        graph=dict(graph),
+        fork=fork,
+        class_dims=class_dims,
+        strict=bool(export_spec.strict),
+        lora_bucket=int(export_spec.lora_bucket or 0),
+    )
+
+
 def _mint_phase_table(
     minted: Sequence[_MintedEntry],
     timings: Mapping[str, float],

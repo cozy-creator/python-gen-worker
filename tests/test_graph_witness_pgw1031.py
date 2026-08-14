@@ -28,7 +28,6 @@ The weights are the rig's 1.1 MB generated checkpoint.
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, Tuple
@@ -37,7 +36,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from gen_worker import aot_serve, boot_key  # noqa: E402
+from gen_worker import boot_key  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 MICRO_SRC = REPO / "examples" / "micro-diffusion" / "src"
@@ -64,17 +63,13 @@ def _gpu_runtime() -> Any:
     }
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(compile_cache, "runtime_key", lambda: dict(full))
-        mp.setattr(aot_serve, "runtime_key", lambda: {
-            "sku": full["sku"], "sm": full["sm"], "torch": full["torch"],
-            "cuda": full["cuda"]})
         yield
 
 
 def _trace(
     vehicle_name: str, tree: Path,
-) -> Tuple[Dict[str, Any], Any, Dict[str, Any]]:
-    """``({entry: keying block}, {entry: cg-key-v1 key}, declared envelope)`` — trace
-    only. pgw#1176: a declaration folds to a KEY SET, not one key."""
+) -> Tuple[Dict[str, Any], Any]:
+    """Return TCG declarations and exact keys after one export-only trace."""
     from harness import rig_vehicles
 
     from gen_worker import aot_mint, fleet_cells
@@ -93,15 +88,18 @@ def _trace(
     _slot, pipeline = pick_compile_target(loaded, cfg)
     export_spec = fleet_cells.aot_export_spec(pipeline, cfg)
     decl = export_declaration(export_spec.family)
-    blocks: Dict[str, Any] = {}
+    declarations: Dict[str, Any] = {}
+    key_blocks: Dict[str, Any] = {}
     for traced in aot_mint.trace_for_key(pipeline, export_spec, decl):
-        blocks[traced.name] = traced.block
-        traced.program = None  # the largest object here; nothing below reads it
-    envelope = fleet_cells.declared_envelope_block(cfg)
-    entry_keys, _hashes, _manifest = boot_key.fold(
-        blocks, family=export_spec.family, precision="", strict=True,
-        lora_bucket=int(cfg.lora_bucket or 0), envelope=envelope)
-    return blocks, entry_keys, envelope
+        declared = aot_mint.tcg_graph_class_spec(traced, export_spec).declare()
+        declarations[traced.name] = {
+            "graph": dict(declared.graph),
+            "graph_witness": declared.graph_witness,
+            "class_hash": declared.class_hash,
+        }
+        key_blocks[traced.name] = {"class_hash": declared.class_hash}
+        traced.release()
+    return declarations, boot_key.fold(key_blocks, family=export_spec.family)
 
 
 @pytest.fixture(scope="module")
@@ -115,13 +113,9 @@ def traced_pair(
     tree = rig_vehicles.vehicle(PAIR[0]).build_checkpoint(root / "checkpoint")
     out: Dict[str, Any] = {}
     for name in PAIR:
-        blocks, key, envelope = _trace(name, tree)
-        out[name] = {"blocks": blocks, "key": key, "envelope": envelope}
+        blocks, key = _trace(name, tree)
+        out[name] = {"blocks": blocks, "key": key}
     return out
-
-
-def _canon(block: Any) -> str:
-    return json.dumps(block, sort_keys=True, separators=(",", ":"))
 
 
 def test_the_bodies_now_key_apart(traced_pair: Dict[str, Any]) -> None:
@@ -136,9 +130,7 @@ def test_the_bodies_now_key_apart(traced_pair: Dict[str, Any]) -> None:
     assert set(fixed["blocks"]) == set(branchy["blocks"]) == {"transformer"}
 
     a, b = fixed["blocks"]["transformer"], branchy["blocks"]["transformer"]
-    interface_a = {k: v for k, v in a.items() if k != "graph_witness"}
-    interface_b = {k: v for k, v in b.items() if k != "graph_witness"}
-    assert _canon(interface_a) == _canon(interface_b), (
+    assert a["graph"] == b["graph"], (
         "the INTERFACE half of the block is expected to be IDENTICAL — the two "
         "members declare the same ingress; if this fails the pair no longer "
         "isolates the body axis and pgw#1031's sighting needs re-stating")
@@ -163,21 +155,6 @@ def test_the_bodies_now_key_apart(traced_pair: Dict[str, Any]) -> None:
         "again — class_hash must fold graph_witness")
 
 
-def _meta(row: Dict[str, Any], family: str) -> Dict[str, Any]:
-    """One family's cell metadata, as the mint would stamp it."""
-    from gen_worker import cell_key as ck, compile_cache as cc, env_seal
-
-    name = sorted(row["blocks"])[0]
-    meta = aot_serve.entry_metadata(
-        family=family, precision="", cell_key=row["key"][name],
-        name=name, entry=row["blocks"][name],
-        strict_export=True, lora_bucket=0)
-    meta["kind"] = ck.EXPORTED_KIND
-    meta["toolchain"] = dict(cc.toolchain_digest())
-    meta[env_seal.SEAL_KEY] = env_seal.effective_seal()
-    return meta
-
-
 def test_the_key_now_separates_what_the_gates_could_not(
     traced_pair: Dict[str, Any],
 ) -> None:
@@ -196,15 +173,8 @@ def test_the_key_now_separates_what_the_gates_could_not(
       worker projection that can reinterpret the class as a match.
     """
     fixed, branchy = traced_pair[PAIR[0]], traced_pair[PAIR[1]]
-    cell_a = _meta(fixed, PAIR[0])
-
-    cell_b = _meta(branchy, PAIR[1])
-    assert cell_b["cell_key"] != cell_a["cell_key"], (
+    name = sorted(fixed["key"])[0]
+    assert branchy["key"][name] != fixed["key"][name], (
         "THE FIX: pod B must derive a different key from cell A's, so the hub "
         "never answers B's pull with A. A red here means the key went body-"
         "blind — class_hash must fold graph_witness")
-
-    # Each declaration remains internally self-consistent; separation belongs
-    # to the key, not to a second post-hoc comparison.
-    assert aot_serve.verify_contract(cell_a) == ""
-    assert aot_serve.verify_contract(cell_b) == ""

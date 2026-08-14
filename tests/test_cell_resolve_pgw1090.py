@@ -496,30 +496,30 @@ def _attempt_all(monkeypatch, tmp_path, *, derive=None, resolve_batch=None,
 def _derived_multi() -> Any:
     """A declaration that traced THREE graph classes — the shape the batch wire
     exists for, and the one a single-key loop would bill three round trips."""
-    from gen_worker import boot_key, cell_key as ck
+    from torch_compiled_graphs.identity import from_axes
+
+    from gen_worker import boot_key
 
     axes = [{"graph": g, "sm": "sm_89", "toolchain": "t" * 16}
             for g in ("c0ffee0000000000", "beef000000000000",
                       "dead000000000000")]
     return boot_key.DerivedKey(
-        entry_keys={f"e{i}": ck.from_axes(a).digest
+        entry_keys={f"e{i}": str(from_axes(a))
                     for i, a in enumerate(axes)},
-        class_hashes={f"e{i}": a["graph"] for i, a in enumerate(axes)},
-        manifest=ck.manifest_digest([a["graph"] for a in axes]),
         workers=2, width_reason="test", traced=3, memo="miss", wall_ms=1234)
 
 
 def _derived(digest: str = KEY) -> Any:
-    from gen_worker import boot_key, cell_key as ck
+    from torch_compiled_graphs.identity import from_axes
+
+    from gen_worker import boot_key
 
     return boot_key.DerivedKey(
         # pgw#1176: a boot derives a KEY SET. These declarations trace to one
         # class, so the set has one member and callers take it from `keys`.
-        entry_keys={"a": ck.from_axes({
+        entry_keys={"a": str(from_axes({
             "graph": "c0ffee0000000000",
-            "sm": "sm_89", "toolchain": "t" * 16}).digest},
-        class_hashes={"a": "c0ffee0000000000"},
-        manifest=ck.manifest_digest(["c0ffee0000000000"]),
+            "sm": "sm_89", "toolchain": "t" * 16}))},
         workers=2, width_reason="test", traced=1, memo="miss", wall_ms=1234)
 
 

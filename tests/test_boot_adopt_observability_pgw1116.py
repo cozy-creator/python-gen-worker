@@ -323,16 +323,14 @@ def test_the_gates_are_pairwise_distinguishable(
 
 
 def _derived(wall_ms: int = 1234) -> Any:
-    from gen_worker import cell_key as ck
+    from torch_compiled_graphs.identity import from_axes
 
     return boot_key.DerivedKey(
         # pgw#1176: a boot derives a KEY SET. These declarations trace to one
         # class, so the set has one member and callers take it from `keys`.
-        entry_keys={"a": ck.from_axes({
+        entry_keys={"a": str(from_axes({
             "graph": "c0ffee0000000000",
-            "sm": "sm_89", "toolchain": "t" * 16}).digest},
-        class_hashes={"a": "c0ffee0000000000"},
-        manifest=ck.manifest_digest(["c0ffee0000000000"]),
+            "sm": "sm_89", "toolchain": "t" * 16}))},
         workers=2, width_reason="test", traced=1, memo="miss",
         wall_ms=wall_ms)
 

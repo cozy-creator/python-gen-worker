@@ -147,7 +147,7 @@ def test_clamped_compile_package_is_portable_and_loads(
     )
     engine, runtime = aot_compile_child._tcg_runtime(tmp_path / "cas")
     compiled = engine.compile(
-        aot_compile_child._graph_class_spec(traced, export_spec),
+        aot_mint.tcg_graph_class_spec(traced, export_spec),
         runtime,
         tmp_path / "materialized",
     )

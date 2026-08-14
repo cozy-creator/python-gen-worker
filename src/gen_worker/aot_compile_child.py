@@ -305,36 +305,6 @@ class _TCGClassResult:
     pack_s: float
 
 
-def _graph_class_spec(traced: Any, export_spec: Any) -> Any:
-    """Translate the export-only worker row into TCG's one public spec."""
-    from torch_compiled_graphs import GraphClassSpec
-
-    if traced.program is None:
-        raise ValueError(f"graph class {traced.name!r} carries no exported program")
-    block = dict(traced.block or {})
-    graph = block.get("graph")
-    if not isinstance(graph, dict):
-        raise ValueError(f"graph class {traced.name!r} carries no graph interface")
-    try:
-        fork = tuple((str(name), value) for name, value in block["fork"])
-        class_dims = tuple((str(name), int(value)) for name, value in block["class_dims"])
-        target = str(block["target"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError(
-            f"graph class {traced.name!r} carries incomplete coordinates: {exc}"
-        ) from exc
-    return GraphClassSpec(
-        graph_class=str(traced.name),
-        target=target,
-        program=traced.program,
-        graph=dict(graph),
-        fork=fork,
-        class_dims=class_dims,
-        strict=bool(export_spec.strict),
-        lora_bucket=int(export_spec.lora_bucket or 0),
-    )
-
-
 def _tcg_runtime(cache_root: Optional[Path] = None) -> Tuple[Any, Any]:
     """Open TCG with sealed compiler facts.
 
@@ -367,7 +337,9 @@ def _compile_traced_class(
     out_dir: Path,
 ) -> _TCGClassResult:
     """Compile/reuse and export exactly one TCG-owned artifact."""
-    spec = _graph_class_spec(traced, export_spec)
+    from . import aot_mint
+
+    spec = aot_mint.tcg_graph_class_spec(traced, export_spec)
     token = hashlib.sha256(str(traced.name).encode()).hexdigest()[:16]
     materialized = work / "tcg-materialized" / token
     started = time.monotonic()

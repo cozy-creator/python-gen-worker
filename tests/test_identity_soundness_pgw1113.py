@@ -1,6 +1,5 @@
 """pgw#1113 — the obligation names its subject, the memo names what it traced,
 the advertisement names what armed, and the key names the placement.
-
 THE GOVERNING PRINCIPLE, which is why these five changes are one change:
 
     The CELL KEY is the computation and must not OVER-split (the membership
@@ -219,13 +218,10 @@ def test_a_rebinding_forces_a_memo_MISS() -> None:
 
     ``closure_digest`` folded the SDK+endpoint code content and the
     declaration — and not the resolved slot refs the traces are actually run
-    against. A memo HIT skips the traces and returns the MEMO's own witnesses
-    (``graph_witnesses_of(memoized)``), which ``boot_adopt`` then verifies the
-    pulled cell against. On that path pgw#1031's graph-witness floor — the
-    fail-closed backstop for a wrong cell by key — was comparing a cell
-    against a stale record of a DIFFERENT checkpoint's graph, so it could only
-    agree. It was structurally unable to fire on the one path that most needs
-    it.
+    against. A memo HIT skips the traces and returns TCG's memoized class hash,
+    which is the graph axis of the exact key ``boot_adopt`` resolves. Without
+    the slot refs in the closure, a rebinding could ask for the previous
+    checkpoint's graph without retracing.
 
     Folding the slots in is what makes that check capable of failing.
     """
@@ -245,8 +241,7 @@ def test_the_memo_row_of_one_checkpoint_does_not_answer_for_another(
     redeploy that rebinds the slot."""
     cfg = _spec()
     was = boot_key.closure_digest("q", cfg, function="fn", slots=_slots(BASE))
-    boot_key.write_memo(tmp_path, was, {
-        "a": {"class_hash": "1" * 16, "graph_witness": "w" * 16}})
+    boot_key.write_memo(tmp_path, was, {"a": {"class_hash": "1" * 16}})
     assert boot_key.read_memo(tmp_path, was), "the memo must answer itself"
 
     now = boot_key.closure_digest("q", cfg, function="fn", slots=_slots(EDIT))
@@ -360,51 +355,3 @@ def test_a_multi_device_placement_keys_APART() -> None:
     # …and the order it was observed in is not information.
     assert wide == aot_serve.class_hash(
         _entry(placement=["cuda:1", "cuda:0"]), strict=True, lora_bucket=0)
-
-
-def test_the_graph_hash_still_scrubs_the_device_index() -> None:
-    """The placement rides its OWN fact precisely so the canonical graph form
-    does not have to change. Un-scrubbing the index there would re-key every
-    published cell to record a fact all of them state trivially — and it is
-    scrubbed by deliberate design (*"placement is the sm axis, not graph
-    identity"*)."""
-    import inspect
-
-    from gen_worker import graph_hash
-
-    body = inspect.getsource(graph_hash._render_scalar)
-    assert 'text.split(":", 1)[0]' in body
-
-
-def _fx_module(torch: Any, first: str, second: str) -> Any:
-    """A two-node graph whose nodes name two devices. No allocation, no CUDA
-    context, no card — ``torch.device("cuda:1")`` is just a value."""
-    graph = torch.fx.Graph()
-    x = graph.placeholder("x")
-    a = graph.call_function(
-        torch.zeros, (2,), {"device": torch.device(first)})
-    b = graph.call_function(
-        torch.zeros, (2,), {"device": torch.device(second)})
-    graph.output((x, a, b))
-    return torch.fx.GraphModule(torch.nn.Module(), graph)
-
-
-def test_device_placement_reads_exactly_what_the_graph_hash_scrubs() -> None:
-    """pgw#819, demonstrated on a CPU in milliseconds.
-
-    The two graphs differ ONLY in the device index of one node — a 1-card
-    program and a 2-card one. Their canonical graph forms are byte-identical
-    (the index is scrubbed by design), which is why no key axis could tell
-    them apart and both directions of the adoption were silent. The placement
-    observer sees the difference the canonical form deliberately does not.
-    """
-    torch = pytest.importorskip("torch")
-
-    from gen_worker import graph_hash
-
-    narrow = _fx_module(torch, "cuda:0", "cuda:0")
-    wide = _fx_module(torch, "cuda:0", "cuda:1")
-
-    assert graph_hash.graph_hash(narrow) == graph_hash.graph_hash(wide)
-    assert graph_hash.device_placement(narrow) == ("cuda:0",)
-    assert graph_hash.device_placement(wide) == ("cuda:0", "cuda:1")

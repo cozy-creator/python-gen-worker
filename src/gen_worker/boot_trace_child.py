@@ -2,9 +2,9 @@
 
 Composes the compile target STRUCTURE-ONLY (pgw#1080's builder, reached through
 the loader's own ``components=`` seam), exports its assigned graph classes on
-fake tensors, and writes each class's keying block. It holds no checkpoint
-value, opens no socket, and returns no artifact — only the facts an entry's
-``class_hash`` is computed from.
+fake tensors, and asks TCG to declare each class while the exported program is
+still alive. It holds no checkpoint value, opens no socket, and returns no
+artifact — only TCG's resulting ``class_hash``.
 
 **This is pgw#1080's owed widening**, discharged the only way that keeps ONE
 load path: the boot derivation runs the mint child's own load
@@ -271,8 +271,14 @@ def run(job: TraceJob) -> int:
             if not export_ms:
                 export_ms = elapsed
                 prop_ms = _probe_prop_ms(traced.program)
+            declaration = aot_mint.tcg_graph_class_spec(
+                traced, export_spec,
+            ).declare()
             blocks[traced.name] = json.dumps(
-                traced.block, sort_keys=True, separators=(",", ":"))
+                {"class_hash": declaration.class_hash},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
             # The program is the largest object this child holds and nothing
             # downstream reads it.
             traced.program = None
@@ -297,10 +303,6 @@ def run(job: TraceJob) -> int:
         setup_ms=setup_ms,
         declared_classes=declared,
         structure_only=tuple(virtual),
-        weight_lane=str(export_spec.weight_lane or ""),
-        precision=str(export_spec.precision or ""),
-        strict=bool(export_spec.strict),
-        lora_bucket=int(export_spec.lora_bucket or 0),
         code_digest=CODE_DIGEST,
         prop_probe_ms=prop_ms,
         export_probe_ms=export_ms,

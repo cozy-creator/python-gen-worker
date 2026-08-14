@@ -39,8 +39,7 @@ Because a refusal at any of the three steps must **degrade to the pre-existing
 behaviour and say why**, and there are eight distinct ways to fail:
 the family has no structure-only build, a trace child died, the hub refused
 typed, the hub answered a different key, the transport was unusable, the bytes
-failed their digest, the delivered cell would not state its metadata, and
-(pgw#1031) the cell's recorded graph witness is not the graph this pod traced.
+failed their digest, or the delivered compiled graph failed TCG admission.
 Every one of them means "boot as we booted yesterday", and every one of them is
 a different sentence someone will need. Spreading that across an executor
 branch is how the reason ends up being `logger.debug`.
@@ -432,7 +431,6 @@ def attempt(
             cfg=spec,
             slots=dict(slots),
             declared_hint=int(declared_hint),
-            envelope=dict(envelope),
             work_root=Path(work_root),
             memo_dir=Path(memo_dir) if memo_dir else None,
             device=int(device),
@@ -454,8 +452,8 @@ def attempt(
 
     # ── pgw#1176: a boot derives a KEY SET, and asks per key ──────────────
     #
-    # §4.27 ruled "THE cell key" (singular). It is a derived SET plus a
-    # manifest now, and every property that ruling wanted survives
+    # §4.27 ruled "THE cell key" (singular). It is a derived SET now, and
+    # every property that ruling wanted survives
     # STRENGTHENED, because a PARTIAL result is useful: a pod that resolves 30
     # of 36 keys arms 30 classes and compiles 6, where the cell key made that
     # same outcome a total miss and a full re-mint.
@@ -476,9 +474,9 @@ def attempt(
             detail="the declaration traced to no graph class at all",
             derive_ms=derived.wall_ms, family=family, function=fn)),)
     logger.info(
-        "boot-adopt: %s asking for %d key(s) (manifest %s, %d class(es), "
-        "K=%d, memo=%s, derived in %d ms)",
-        family, len(keys), derived.manifest, derived.traced, derived.workers,
+        "boot-adopt: %s asking for %d key(s) (%d class(es), K=%d, memo=%s, "
+        "derived in %d ms)",
+        family, len(keys), derived.traced, derived.workers,
         derived.memo, derived.wall_ms)
 
     # ── §4.28 / pgw#1127: THIS MACHINE, before the wire ────────────────────
@@ -551,7 +549,7 @@ def _adopt_answer(
 ) -> BootAdoptOutcome:
     """Turn ONE of the batch's answers into this graph class's outcome.
 
-    A miss, a per-answer hub fault, or a witness mismatch here costs THIS graph
+    A miss, per-answer hub fault, or admission refusal here costs THIS graph
     class. Its siblings were answered by their own keys in the same batch and
     are not affected — which is what makes a partial hit useful instead of a
     total miss, and it is the property the per-answer signing buys: nothing

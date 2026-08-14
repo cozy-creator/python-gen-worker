@@ -106,7 +106,7 @@ class _Engine:
 def test_exported_row_maps_to_one_tcg_graph_class_spec() -> None:
     traced = _Traced()
 
-    spec = child._graph_class_spec(traced, _export_spec())
+    spec = aot_mint.tcg_graph_class_spec(traced, _export_spec())
 
     assert spec.graph_class == traced.name
     assert spec.target == "denoiser"
@@ -138,7 +138,7 @@ def test_real_nested_call_uses_one_tcg_ingress_and_rekeys_on_change() -> None:
         program=program,
     )
 
-    declared = child._graph_class_spec(traced, export_spec).declare()
+    declared = aot_mint.tcg_graph_class_spec(traced, export_spec).declare()
 
     assert block["graph"]["pytree"]["ingress"] == ingress.as_dict()
     assert not ({"inputs", "symbols", "range_digest"} & set(block))
@@ -152,7 +152,7 @@ def test_real_nested_call_uses_one_tcg_ingress_and_rekeys_on_change() -> None:
         ("unused",),
     )
     changed_block = aot_mint.keying_block(program, changed, export_spec)
-    changed_spec = child._graph_class_spec(
+    changed_spec = aot_mint.tcg_graph_class_spec(
         aot_mint.TracedClass(
             name=traced.name,
             block=changed_block,

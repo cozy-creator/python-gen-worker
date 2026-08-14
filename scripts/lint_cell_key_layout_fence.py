@@ -76,7 +76,6 @@ AXIS_PRODUCERS: Tuple[str, ...] = (
 #: axis inputs (graph / sm / toolchain). The envelope is not one of them.
 FENCE_SEED: Tuple[str, ...] = (
     "cell_key.py",
-    "graph_hash.py",
     "env_seal.py",
     "host_isa.py",
     "guard_closure.py",

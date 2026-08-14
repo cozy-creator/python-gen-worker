@@ -2,8 +2,8 @@
 before a single weight byte is resident. Target: **< 60 s, every time**, ~99 %
 of it the traces.
 
-The result is a KEY SET plus a derived contract manifest — one ``cg-key-v1``
-per declared graph class — so a PARTIAL resolve helps: a pod that resolves 30
+The result is a KEY SET — one ``cg-key-v1`` per declared graph class — so a
+PARTIAL resolve helps: a pod that resolves 30
 of 36 keys arms 30 classes and compiles 6, where a single cell key made that
 same outcome a total miss and a full re-mint.
 
@@ -29,30 +29,24 @@ inside that child exactly as the mint orders them inside its one process.
 
 Parallelism is not an identity axis
 -----------------------------------
-Blocks are assembled by ENTRY NAME, never by completion, and the fold is over
-``aot_serve.stamp_entry`` — the mint's own stamping code, called with the
-mint's own blocks. K-wide and 1-wide therefore produce the identical key by
-construction rather than by care.
+TCG declarations are assembled by ENTRY NAME, never by completion.  The boot
+child and compile child share one worker-to-TCG translation, and only TCG's
+resulting class hash crosses the process boundary. K-wide and 1-wide therefore
+produce the identical key by construction rather than by care.
 
 The memo, and what it may hold
 ------------------------------
-``closure digest -> the per-class KEYING BLOCKS`` — i.e. the GRAPH half of the
-identity, and **never the folded keys.** The other two axes (sm, toolchain)
+``closure digest -> the per-class TCG class hashes`` — i.e. the GRAPH half of
+the identity, and **never the folded keys.** The other two axes (sm, toolchain)
 re-derive in milliseconds every boot and MUST: an sm or toolchain that changed
 has to move every key on the very next boot, and a memoized key would answer
 with the previous pod's. Memoizing the graph half is sound because the traced
 graph is a pure function of the code closure the digest names.
 
 **A memo hit SKIPS THE TRACES** — that is the point of having one. It stores
-the blocks rather than the finished class hashes so this module never
-recomputes a class hash itself; stored blocks re-fold through the mint's own
-code.
-
-Honesty is enforced, not trusted: when this pod goes on to MINT, the freshly
-traced per-class hashes are compared against whatever the memo answered
-(:func:`assert_memo_honest`), and a mismatch invalidates the memo entry and
-re-traces on the next boot. A wrong key is never produced — at worst a memo is
-thrown away, by the pod that proved it wrong.
+TCG outputs rather than enough inputs for the worker to grow another graph
+identity implementation. ``trust_memo=False`` is the explicit verification
+posture: it retraces, compares TCG class hashes, and invalidates disagreement.
 """
 
 from __future__ import annotations
@@ -69,7 +63,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import msgspec
 
-from . import aot_serve, boot_phases, cell_key, compile_cache as cc, env_seal
+from . import boot_phases, cell_key, compile_cache as cc
 from .child_contract import CompileSpec, MintSlot, slot_subjects
 from .postmortem import cpu_quota_cores, effective_cpu_count
 
@@ -161,10 +155,9 @@ class TraceJob(msgspec.Struct, frozen=True, kw_only=True):
 class TraceReport(msgspec.Struct, frozen=True, kw_only=True):
     """What one child measured and derived.
 
-    ``blocks`` carries each entry's keying block as CANONICAL JSON rather than
-    a decoded object: the parent hands it straight to
-    ``aot_serve.artifact_metadata``, and a re-encode on either side is a place
-    for two canonicalizations to disagree about the thing being hashed.
+    ``blocks`` carries each entry's TCG-derived class hash as canonical JSON.
+    The exported program never crosses the child boundary and the worker never
+    recomputes graph identity from a serialized approximation.
     """
 
     ok: bool = False
@@ -180,10 +173,6 @@ class TraceReport(msgspec.Struct, frozen=True, kw_only=True):
     #: without the parent ever enumerating it.
     declared_classes: int = 0
     structure_only: Tuple[str, ...] = ()
-    weight_lane: str = ""
-    precision: str = ""
-    strict: bool = True
-    lora_bucket: int = 0
     code_digest: str = ""
     #: ``FakeTensorProp`` seconds over this child's first program, beside that
     #: program's export seconds. Never read by a decision here — see
@@ -203,17 +192,10 @@ class TraceReport(msgspec.Struct, frozen=True, kw_only=True):
 
 @dataclass(frozen=True)
 class DerivedKey:
-    """The KEY SET this boot derived — the contract manifest — and the
-    measurements that produced it.
-    """
+    """The exact compiled-graph key set and measurements that produced it."""
 
     #: entry name -> that class's ``cg-key-v1`` key. THE thing resolve asks for.
     entry_keys: Mapping[str, str]
-    #: entry name -> that class's 16-hex ``class_hash``. THE memoizable half.
-    class_hashes: Mapping[str, str]
-    #: the declaration-wide coverage LABEL (``cell_key.manifest_digest``) —
-    #: telemetry, never identity, never an adoption unit.
-    manifest: str
     workers: int
     width_reason: str
     traced: int
@@ -221,13 +203,6 @@ class DerivedKey:
     wall_ms: int
     trace_ms: Mapping[str, int] = field(default_factory=dict)
     nodes: Mapping[str, int] = field(default_factory=dict)
-    #: Entry name -> the NODE-level digest of the graph this boot traced
-    #: (``aot_mint.keying_block``'s ``graph_witness``). FOLDED into
-    #: ``class_hash`` (so the key separates two bodies behind one declaration)
-    #: AND kept here for the adopt backstop, which compares it against the
-    #: cell's own record. Rides the keying blocks, so a memo hit carries it
-    #: exactly as a cold trace does.
-    graph_witnesses: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def keys(self) -> Tuple[str, ...]:
@@ -303,7 +278,7 @@ def trace_workers(classes: int, *, limit: int = 0) -> PoolWidth:
 #: row is unaddressable AND the file it lives in is discarded whole — two
 #: independent reasons it cannot be misread, which is what typed invalidation
 #: has to mean for a cache whose wrong answer is a wrong cell.
-MEMO_VERSION = 4
+MEMO_VERSION = 5
 MEMO_FILENAME = "boot-key-graphs.json"
 
 
@@ -321,11 +296,8 @@ def closure_digest(
     CHECKPOINT's own config: ``zero_cond_t`` exists on ``Qwen-Image-Edit-2511``
     and not on ``Qwen-Image``, and block counts, head counts and quantization
     ops are the general case. Without it, a redeploy that rebinds a slot to a
-    different checkpoint would answer from the PREVIOUS checkpoint's row — and
-    because a memo hit skips the traces and returns the memo's own witnesses,
-    the witness floor ``boot_adopt`` runs against them could only ever agree
-    with itself. Cost: one memo miss and one trace on the first boot after a
-    rebinding.
+    different checkpoint would answer from the PREVIOUS checkpoint's TCG class
+    hash. Cost: one memo miss and one trace on the first boot after a rebinding.
 
     Deliberately NOT included: sm, toolchain, env seal. They are key AXES and
     they re-derive every boot in milliseconds; folding them in here would make
@@ -385,6 +357,10 @@ def read_memo(
         if not isinstance(parsed, dict):
             return {}
         out[str(name)] = parsed
+    try:
+        class_hashes_of(out)
+    except ValueError:
+        return {}
     return out
 
 
@@ -392,8 +368,12 @@ def write_memo(
     memo_dir: Optional[Path], digest: str,
     blocks: Mapping[str, Mapping[str, Any]],
 ) -> bool:
-    """Memoize this closure's per-class keying blocks. Best effort."""
+    """Memoize this closure's per-class TCG class hashes. Best effort."""
     if not memo_dir or not digest or not blocks:
+        return False
+    try:
+        class_hashes_of(blocks)
+    except ValueError:
         return False
     path = _memo_path(Path(memo_dir))
     try:
@@ -440,164 +420,62 @@ def invalidate_memo(memo_dir: Optional[Path], digest: str) -> bool:
         return False
 
 
-def assert_memo_honest(
-    memo_dir: Optional[Path],
-    digest: str,
-    minted_entries: Mapping[str, Mapping[str, Any]],
-) -> str:
-    """THE honesty gate: what the memo answered must equal what the mint traced.
-
-    Called from the publish path with the freshly minted artifact's own entry
-    blocks. Returns ``''`` when the memo agreed (or held nothing for this
-    closure), otherwise the reason — and the offending entry is invalidated so
-    the next boot re-traces rather than re-reading a hash that has been proven
-    wrong. A memo that is CHECKED against the traced truth every time this pod
-    produces one can only ever cost a re-trace, which is what makes the memo
-    safe to have at all.
-    """
-    memoized = read_memo(memo_dir, digest)
-    if not memoized:
-        return ""
-    # The memo holds BLOCKS, so the comparison stamps them through the same
-    # `artifact_metadata` the mint stamped its own with — two class hashes
-    # compared here were computed by one function, never by two.
-    try:
-        had_hashes = class_hashes_of(memoized)
-    except Exception as exc:  # noqa: BLE001 — an unstampable memo IS dishonest
-        invalidate_memo(memo_dir, digest)
-        return (
-            f"boot-key memo for closure {digest} could not be stamped "
-            f"({type(exc).__name__}: {exc}) and has been invalidated")
-    had_witnesses = graph_witnesses_of(memoized)
-    disagreements: List[str] = []
-    for name, block in sorted(minted_entries.items()):
-        want = str((block or {}).get("class_hash") or "")
-        had = had_hashes.get(str(name))
-        if had and want and had != want:
-            disagreements.append(f"{name}: memo {had} != traced {want}")
-        # The memo also answers the ADOPT-side witness, so a memo whose class
-        # hash is right and whose witness is stale would admit a colliding cell
-        # on the very axis the witness exists to separate.
-        want_w = str((block or {}).get("graph_witness") or "")
-        had_w = had_witnesses.get(str(name)) or ""
-        if want_w and had_w != want_w:
-            disagreements.append(
-                f"{name}: memo graph_witness {had_w or '<absent>'} != traced "
-                f"{want_w}")
-    extra = sorted(set(had_hashes) - set(minted_entries))
-    missing = sorted(set(minted_entries) - set(had_hashes))
-    if extra or missing:
-        disagreements.append(
-            f"class set differs (memo-only {extra[:3]!r}, "
-            f"traced-only {missing[:3]!r})")
-    if not disagreements:
-        return ""
-    invalidate_memo(memo_dir, digest)
-    return (
-        f"boot-key memo for closure {digest} was DISHONEST and has been "
-        f"invalidated: " + "; ".join(disagreements[:4]))
-
-
-# ---------------------------------------------------------------------------
-# The fold — the mint's OWN stamping code, called with the mint's own blocks
-# ---------------------------------------------------------------------------
-
-
-def graph_witnesses_of(
-    blocks: Mapping[str, Mapping[str, Any]],
-) -> Dict[str, str]:
-    """``{entry: graph_witness}`` for one set of keying blocks.
-
-    Read off the blocks rather than recomputed: the witness is stamped where
-    the program is, by ``aot_mint.keying_block``, and a second derivation here
-    would be the same two-implementations hazard :func:`fold` refuses for the
-    key itself. A block that carries none yields ``""`` and cannot restate the
-    selected TCG graph-class identity.
-    """
-    return {
-        str(name): str((block or {}).get("graph_witness") or "")
-        for name, block in blocks.items()
-    }
-
-
 def class_hashes_of(
     blocks: Mapping[str, Mapping[str, Any]],
 ) -> Dict[str, str]:
-    """``{entry: class_hash}`` for one set of keying blocks.
-
-    Stamped by ``aot_serve.stamp_entry`` — the mint's own function — so a
-    hash computed here and a hash the mint stamped are the same computation.
-    The precision/family arguments do not reach ``class_hash`` (it folds
-    target/fork/class_dims/range_digest/graph/graph_witness/strict/
-    lora_bucket), which is why this can answer without them; ``strict``/
-    ``lora_bucket`` DO, so they are read off the blocks' own
-    ``graph.specialization``.
-    """
-    head = next(iter(blocks.values()), {}) if blocks else {}
-    spec = dict((head.get("graph") or {}).get("specialization") or {})
-    strict = bool(spec.get("strict", True))
-    bucket = int(spec.get("lora_bucket", 0) or 0)
-    return {
-        str(name): str(aot_serve.stamp_entry(
-            str(name), dict(block), strict=strict,
-            lora_bucket=bucket).get("class_hash") or "")
-        for name, block in blocks.items()
-    }
+    """Validate and return TCG's memoized graph-axis outputs."""
+    hashes: Dict[str, str] = {}
+    for name, block in blocks.items():
+        if not isinstance(block, Mapping) or set(block) != {"class_hash"}:
+            raise ValueError(
+                f"boot graph class {name!r} must contain only class_hash"
+            )
+        value = block.get("class_hash")
+        if (
+            not isinstance(value, str)
+            or len(value) != 16
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ValueError(
+                f"boot graph class {name!r} has a malformed TCG class_hash"
+            )
+        hashes[str(name)] = value
+    return hashes
 
 
 def fold(
     blocks: Mapping[str, Mapping[str, Any]],
     *,
     family: str,
-    precision: str,
-    strict: bool,
-    lora_bucket: int,
-    envelope: Mapping[str, Any],
-) -> Tuple[Dict[str, str], Dict[str, str], str]:
-    """``({entry: entry_key}, {entry: class_hash}, manifest_digest)`` for one
-    declaration's class set — THE derived contract manifest.
+) -> Dict[str, str]:
+    """Fold TCG class hashes with freshly stated runtime axes.
 
-    The fold is ``aot_serve.stamp_entry`` followed by
-    ``cell_key.from_entry_metadata`` — i.e. the mint's own stamp and the
-    publish path's own recomputation, reached through the identical
-    functions. There is deliberately no ``class_hash`` arithmetic in this
-    module: a second implementation of the fold produces a declared-facts key
-    beside a traced-facts key under one axis name.
-
-    The two non-graph axes are restated FRESH here on every call — ``sm``
-    from ``aot_serve.runtime_key()``, toolchain from ``cc.toolchain_digest()``
-    — which is why the memo may hold graph hashes and must never hold a key.
-    ``envelope`` is recorded on the MANIFEST and reaches no key: it digests the
-    union of the ladder across the whole bundle, so folding it into identity
-    would re-mint every class that traced identically whenever it widened.
+    TCG produced every graph-axis value while the exported program was alive.
+    This parent supplies only the current ``sm`` and toolchain through TCG's
+    own identity functions; no worker graph or key arithmetic remains.
     """
-    runtime = aot_serve.runtime_key()
+    from torch_compiled_graphs.identity import from_axes, toolchain_axis_digest
+
+    sm = str(cc.runtime_key().get("sm") or "")
+    if not sm:
+        raise ValueError("boot key cannot be folded without a runtime sm")
     toolchain = dict(cc.toolchain_digest())
-    seal = env_seal.effective_seal()
-    # `envelope` and `precision` are MANIFEST facts — recorded by the caller on
-    # the manifest, read by no key axis here.
-    del envelope, precision
+    toolchain_digest = toolchain_axis_digest(toolchain)
+    class_hashes = class_hashes_of(blocks)
     with boot_phases.span(
         boot_phases.PHASE_KEY_FOLD, function=str(family or ""),
     ) if boot_phases.in_boot() else _null() as span:
-        entry_keys: Dict[str, str] = {}
-        class_hashes: Dict[str, str] = {}
-        for name, block in blocks.items():
-            stamped = aot_serve.stamp_entry(
-                str(name), dict(block), strict=bool(strict),
-                lora_bucket=int(lora_bucket or 0))
-            class_hashes[str(name)] = str(stamped.get("class_hash") or "")
-            entry_keys[str(name)] = cell_key.from_entry_metadata({
-                "kind": aot_serve.ARTIFACT_KIND,
-                **runtime,
-                cell_key.ENTRY_BLOCK_KEY: stamped,
-                "toolchain": toolchain,
-                env_seal.SEAL_KEY: seal,
-            }).digest
+        entry_keys = {
+            name: str(from_axes({
+                "graph": class_hash,
+                "sm": sm,
+                "toolchain": toolchain_digest,
+            }))
+            for name, class_hash in class_hashes.items()
+        }
         if span is not None:
             span.note(f"classes={len(blocks)}")
-    return entry_keys, class_hashes, cell_key.manifest_digest(
-        class_hashes.values())
+    return entry_keys
 
 
 def _null() -> Any:
@@ -805,15 +683,12 @@ def derive(
     cfg: CompileSpec,
     slots: Mapping[str, MintSlot],
     declared_hint: int,
-    envelope: Mapping[str, Any],
     work_root: Path,
     memo_dir: Optional[Path] = None,
     device: int = -1,
     workers: int = 0,
     python: str = "",
     trust_memo: bool = True,
-    precision: str = "",
-    strict: bool = True,
 ) -> DerivedKey:
     """Derive this boot's ``ck1`` key from code alone.
 
@@ -843,26 +718,21 @@ def derive(
 
     # THE MEMO PATH — milliseconds, and no trace at all. The graph half of the
     # identity is a pure function of the code closure this digest names, so a
-    # hit re-folds the stored blocks; the other axes are restated FRESH inside
+    # hit folds the stored TCG hashes; the other axes are restated FRESH inside
     # `fold`, which is what makes it safe to skip the expensive half and still
     # re-key on a toolchain upgrade or a different card. Honesty is enforced at
     # the next MINT by `assert_memo_honest`, the only moment this pod holds a
     # traced truth to compare against.
     if memoized:
-        entry_keys, class_hashes, manifest = fold(
-            memoized, family=family,
-            precision=str(precision or ""), strict=strict,
-            lora_bucket=int(cfg.lora_bucket or 0), envelope=envelope)
+        entry_keys = fold(memoized, family=family)
         wall_ms = int((time.monotonic() - t0) * 1000)
         logger.info(
-            "boot-key: manifest %s from MEMO in %d ms — %d key(s), no trace "
-            "(closure %s)", manifest, wall_ms, len(entry_keys), digest)
+            "boot-key: %d key(s) from MEMO in %d ms — no trace (closure %s)",
+            len(entry_keys), wall_ms, digest)
         return DerivedKey(
-            entry_keys=entry_keys, class_hashes=class_hashes,
-            manifest=manifest, workers=0,
+            entry_keys=entry_keys, workers=0,
             width_reason="memo hit — no trace child was spawned",
-            traced=0, memo="hit", wall_ms=wall_ms,
-            graph_witnesses=graph_witnesses_of(memoized))
+            traced=0, memo="hit", wall_ms=wall_ms)
 
     work = Path(work_root)
     work.mkdir(parents=True, exist_ok=True)
@@ -937,15 +807,8 @@ def derive(
             f"({duplicated} duplicated) of the {total} this declaration "
             f"produces — the shares do not reconstruct the class set")
 
-    head = reports[0]
-    entry_keys, class_hashes, manifest = fold(
-        blocks,
-        family=family,
-        precision=head.precision,
-        strict=head.strict,
-        lora_bucket=head.lora_bucket,
-        envelope=envelope,
-    )
+    entry_keys = fold(blocks, family=family)
+    class_hashes = class_hashes_of(blocks)
 
     # `trust_memo=False` is the VERIFY posture: trace anyway and rule on
     # whatever the memo held. It is the only way a stale memo is caught before
@@ -971,12 +834,10 @@ def derive(
 
     wall_ms = int((time.monotonic() - t0) * 1000)
     logger.info(
-        "boot-key: manifest %s in %d ms — %s, %d key(s), memo=%s",
-        manifest, wall_ms, width.reason, len(entry_keys), memo_state)
+        "boot-key: %d key(s) in %d ms — %s, memo=%s",
+        len(entry_keys), wall_ms, width.reason, memo_state)
     return DerivedKey(
         entry_keys=entry_keys,
-        class_hashes=class_hashes,
-        manifest=manifest,
         workers=width.workers,
         width_reason=width.reason,
         traced=len(class_hashes),
@@ -984,7 +845,6 @@ def derive(
         wall_ms=wall_ms,
         trace_ms=trace_ms,
         nodes=nodes,
-        graph_witnesses=graph_witnesses_of(blocks),
     )
 
 
@@ -1023,13 +883,11 @@ __all__ = [
     "TRACE_CHILD_MODULE",
     "TraceJob",
     "TraceReport",
-    "assert_memo_honest",
     "child_argv",
     "child_env",
     "class_hashes_of",
     "closure_digest",
     "derive",
-    "graph_witnesses_of",
     "shares",
     "fold",
     "invalidate_memo",

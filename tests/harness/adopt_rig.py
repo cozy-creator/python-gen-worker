@@ -272,7 +272,7 @@ def _derived(digest: str) -> boot_key.DerivedKey:
         # pgw#1176: the rig's derived manifest — one entry key per declared
         # class. `digest` stands in for the traced graph, as it always did.
         entry_keys={"rig": "cg-key-v1-" + (digest * 56)[:56]},
-        class_hashes={}, manifest="", workers=1, width_reason="rig",
+        workers=1, width_reason="rig",
         traced=len(ROWS), memo="miss", wall_ms=10_291,
     )
 
