@@ -1,0 +1,225 @@
+name: master health
+
+# pgw#1267 — make "is `master`'s required set green?" answerable WITHOUT a PR.
+#
+# THE FAILURE THIS EXISTS FOR, AND IT HAPPENED HERE. A REQUIRED context can sit
+# RED on `master` with no PR responsible, and every merge-queue entry behind it
+# pays. Live 2026-08-13 in THIS repository: the required `fast gates` context
+# was red on master from a dead `typing.Literal` import left by an unrelated
+# merge. Queue entries that had nothing to do with it were blocked until
+# another session happened to notice. Nobody owned the red, because no PR
+# caused it. The nightly at 09:17 would have re-run the gate within 24h — and
+# would have said nothing to anyone, because a red run in the Actions tab is
+# not loud. That gap is what this file closes.
+#
+# THIS IS NOT A MERGE GATE AND MUST NEVER BECOME ONE. The job is named
+# `master_health` so it can never be confused with this repository's one
+# required context, `fast gates`, and this workflow never triggers on
+# `pull_request` or `merge_group` — so it can never report on a queue ref, and
+# can never be the skipped-required-check hazard that GitHub scores as
+# satisfied.
+#
+# WHY A SCHEDULE AND NOT `push: [master]` (measured 2026-08-14).
+# A push-triggered run is attributable to the merge commit, which is why it was
+# the first choice. Two things sank it here:
+#
+#   * REDUNDANCY. The merge queue re-runs `fast gates` against the exact tree
+#     that becomes `master`, immediately before it becomes `master`. A push
+#     re-run can only disagree with the queue through drift that is TIME-based
+#     rather than merge-based — a released dependency, a runner-image bump, a
+#     peer repo at `@master`. Time-based drift is precisely what a schedule
+#     catches and a push structurally cannot.
+#   * VOLUME. `master` takes ~38 merges/day (266 first-parent merges over 7
+#     days). A full CI pass bills ~17 job-minutes (measured run 31832283855:
+#     `fast gates` 115s, `tests` 861s, each rounded UP to the minute). This
+#     repository is PUBLIC, so standard-runner minutes are free and unmetered
+#     — the cost is not billing, it is ~646 runner-minutes/day of concurrency
+#     competing with the repo's own PR CI, for a verdict the queue already gave.
+#
+# 4x/day bounds detection at 6h for four extra CI passes a day.
+#
+# COST WHEN GREEN. The alert path is `if:`-gated on a FAILED watched run and a
+# skipped job bills nothing, so on a green `master` this workflow costs only
+# its own 4 ticks/day plus the gate runs it dispatches.
+
+on:
+  # Offset off the hour and off ci.yaml's own 09:17 nightly.
+  schedule:
+    - cron: "23 2,8,14,20 * * *"
+
+  workflow_dispatch:
+    inputs:
+      alert_run_id:
+        description: "Report on this run id instead of reconciling (red-path verification). Empty = normal reconcile + probe."
+        required: false
+        default: ""
+
+  # Immediacy. The reconcile step below is the FALLBACK and is authoritative on
+  # its own: if this cascade ever fails to fire (a token-created run not
+  # producing a workflow_run event, a `workflows:` display name drifting),
+  # detection degrades to the next tick — <=6h — instead of degrading to
+  # silence.
+  #
+  # `branches:` filters on the TRIGGERING run's head_branch, and it is doing
+  # real work: without it this job would wake on every PR and every queue-ref
+  # run of three workflows (~135/day) purely to decide it has nothing to say.
+  # `master-health-selftest` is the deliberate red-path probe branch — pushing
+  # a break there and dispatching a gate workflow on it is how this monitor is
+  # PROVEN to go red without breaking `master`.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [master, master-health-selftest]
+
+permissions:
+  contents: read
+  actions: write # dispatch the gate workflows against master
+  issues: write # open/update/close the one alert issue
+
+concurrency:
+  group: master-health
+  cancel-in-progress: false
+
+jobs:
+  master_health:
+    # Never wake on a green watched run. `cancelled` is excluded on purpose:
+    # the gate workflows use cancel-in-progress keyed on `github.ref`, so a
+    # nightly cron run and a tick's dispatch legitimately cancel each other.
+    if: >-
+      github.event_name != 'workflow_run'
+      || github.event.workflow_run.conclusion == 'failure'
+      || github.event.workflow_run.conclusion == 'timed_out'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: report or reconcile
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          WR_RUN_ID: ${{ github.event.workflow_run.id }}
+          ALERT_RUN_ID: ${{ inputs.alert_run_id }}
+          # FILE names, not display names. This repository has TWO registered
+          # workflows that both display as "CI" (`ci.yaml` and a dead `ci.yml`
+          # that survives in the workflow list because it once had runs); only
+          # the file name disambiguates them. The `workflows: ["CI"]` filter
+          # above matches by display name and so matches both — harmless,
+          # because the dead one can never run.
+          WATCH: "ci.yaml"
+          DISPATCH: "ci.yaml"
+          REQUIRED: "`fast gates`"
+        run: |
+          set -euo pipefail
+
+          RED_TITLE="master required set is RED"
+
+          open_issue() { # $1 = exact title -> issue number, or empty
+            gh issue list -R "$REPO" --state open --limit 200 --json number,title \
+              | jq -r --arg t "$1" '.[] | select(.title == $t) | .number' | head -1
+          }
+
+          report() { # $1 = run id
+            local run name branch sha url concl ev job_list title body num
+            run=$(gh api "/repos/$REPO/actions/runs/$1")
+            name=$(jq -r .name        <<<"$run")
+            branch=$(jq -r .head_branch <<<"$run")
+            sha=$(jq -r .head_sha     <<<"$run")
+            url=$(jq -r .html_url     <<<"$run")
+            concl=$(jq -r .conclusion <<<"$run")
+            ev=$(jq -r .event         <<<"$run")
+
+            job_list=$(gh api --paginate "/repos/$REPO/actions/runs/$1/jobs" \
+              -q '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out") | "- `" + .name + "` (" + .conclusion + ")"')
+            [ -n "$job_list" ] || job_list="- (no job reported a failure; the run itself concluded \`$concl\`)"
+
+            if [ "$branch" = "master" ]; then
+              title="$RED_TITLE"
+            else
+              title="master health self-test: $branch is RED"
+            fi
+
+          # The heredoc body sits at the block scalar's BASE indent on purpose:
+          # YAML ends a literal block at the first less-indented line, and an
+          # unindented `EOF` would take the rest of this file with it.
+          body=$(cat <<EOF
+          **\`$branch\` is RED on a required-context-bearing workflow. No PR caused this**, so
+          nothing else reports it — every merge-queue entry behind it pays until it is fixed.
+
+          | | |
+          |---|---|
+          | workflow | **$name** (run event \`$ev\`, concluded \`$concl\`) |
+          | commit | [\`$sha\`](https://github.com/$REPO/commit/$sha) |
+          | run | $url |
+          | detected | $(date -u '+%Y-%m-%d %H:%M UTC') |
+
+          Failing jobs:
+
+          $job_list
+
+          Required contexts on this repository: $REQUIRED.
+
+          <sub>Opened by \`.github/workflows/master-health.yaml\` (pgw#1267). A MONITOR, not a merge
+          gate: \`master_health\` is not a required context and never runs on \`pull_request\` or
+          \`merge_group\`. Closed automatically by the next tick that finds every watched workflow
+          green on \`master\`.</sub>
+          EOF
+          )
+
+            num=$(open_issue "$title")
+            if [ -n "$num" ]; then
+              # One comment per distinct failing run, not one per tick.
+              if gh issue view "$num" -R "$REPO" --json body,comments \
+                   -q '.body, (.comments[].body)' | grep -qF "$url"; then
+                echo "::notice::already reported on issue #$num: $url"
+                return 0
+              fi
+              gh issue comment "$num" -R "$REPO" --body "$body"
+              echo "::error::$title — still red, commented on issue #$num ($url)"
+            else
+              num=$(gh issue create -R "$REPO" --title "$title" --body "$body" | tail -1)
+              echo "::error::$title — opened $num ($url)"
+            fi
+          }
+
+          # ---- alert mode: a watched run just failed, or a verification dispatch.
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_run" ]; then
+            report "$WR_RUN_ID"
+            exit 0
+          fi
+          if [ -n "${ALERT_RUN_ID:-}" ]; then
+            report "$ALERT_RUN_ID"
+            exit 0
+          fi
+
+          # ---- reconcile mode: the standing verdict, independent of the cascade.
+          red=0
+          for wf in $WATCH; do
+            rid=$(gh api "/repos/$REPO/actions/workflows/$wf/runs?branch=master&status=completed&per_page=10" \
+                    -q '[.workflow_runs[] | select(.conclusion == "success" or .conclusion == "failure" or .conclusion == "timed_out")][0].id // empty')
+            if [ -z "$rid" ]; then
+              echo "$wf: no decided master run yet"
+              continue
+            fi
+            concl=$(gh api "/repos/$REPO/actions/runs/$rid" -q .conclusion)
+            echo "$wf: $concl (run $rid)"
+            if [ "$concl" != "success" ]; then
+              red=1
+              report "$rid"
+            fi
+          done
+
+          if [ "$red" = 0 ]; then
+            num=$(open_issue "$RED_TITLE")
+            if [ -n "$num" ]; then
+              gh issue comment "$num" -R "$REPO" --body \
+                "Green again — every watched workflow's latest decided \`master\` run succeeded as of $(date -u '+%Y-%m-%d %H:%M UTC'). Closing; the next red opens a fresh issue."
+              gh issue close "$num" -R "$REPO"
+              echo "::notice::closed #$num — master is green"
+            else
+              echo "master is green; nothing open."
+            fi
+          fi
+
+          # ---- probe: leave a fresh verdict for the next tick to reconcile.
+          for wf in $DISPATCH; do
+            gh workflow run "$wf" -R "$REPO" --ref master && echo "dispatched $wf"
+          done
