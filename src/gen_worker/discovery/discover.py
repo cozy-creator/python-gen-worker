@@ -31,6 +31,10 @@ from gen_worker.api.types import (
     Tensors,
     VideoAsset,
 )
+from gen_worker.discovery.decode_set import derive_decode_set
+from gen_worker.discovery.decode_set import (
+    manifest_block as decode_set_manifest_block,
+)
 from gen_worker.discovery.execution_lanes import (
     DerivedExecutionLanes,
     derive_execution_lanes,
@@ -945,7 +949,11 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
     # same heavy-dep stubbing the endpoint walk used, so a torch-less manifest
     # build derives the same set an in-image build does.
     with stub_missing_heavy_deps(cfg.discovery_heavy_deps) as stubbed:
-        derived = derive_execution_lanes()
+        # ONE import walk: the decode-set is what the image can READ
+        # (th#1938's third intersection) and the lane block is what it can
+        # RUN. Two renders of one census, never two censuses.
+        decode_set = derive_decode_set()
+        derived = derive_execution_lanes(decode_set=decode_set)
         # The AOT lane's STATIC preconditions, decided in the image that will
         # run them. `validate_endpoint_lock` turns a refusal into a build error,
         # so an endpoint that declares an export it cannot compile never reaches
@@ -977,6 +985,7 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
     manifest: Dict[str, Any] = {
         "functions": functions,
         "execution_lanes": manifest_block(derived),
+        "decode_set": decode_set_manifest_block(decode_set),
     }
     if preconditions:
         manifest["aot_preconditions"] = [

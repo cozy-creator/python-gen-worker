@@ -27,7 +27,23 @@ import struct
 
 from ..capability import HostRamCapacityError, InsufficientHostRamError
 from . import disk_gc, load_progress
-from .tensor_layout_contract import CONTRACT_PLAIN_BF16, implements_contract
+from .tensor_layout_contract import (
+    CONTRACT_COZY_FP8_ROWWISE,
+    KEYS_DIFFUSERS_SPLIT_QKV,
+    KEYS_TRANSFORMERS_NATIVE,
+    CONTRACT_NUNCHAKU_V1,
+    CONTRACT_PLAIN_BF16,
+    ELEMENT_BF16,
+    ELEMENT_FP16,
+    ELEMENT_FP32,
+    SCALE_NONE,
+    SHARD_COMPONENT_DIR,
+    SHARD_INDEX_SHARDED,
+    SHARD_SINGLE_FILE,
+    DecodeDimensions,
+    implements_contract,
+    unregistered_decode_path,
+)
 from .fp8_storage import restructure_fp8_storage
 from .rung import touches_host_ram
 from .memory import (
@@ -612,6 +628,37 @@ def block_offload_active(obj: Any) -> bool:
     )
 
 
+def require_decodable(contract: str, path: Any, *, component: str = "") -> None:
+    """Refuse, typed, before handing bytes to a decoder this IMAGE does not
+    declare (pgw#1245).
+
+    Two questions, both answered from HEADERS, both before any tensor is read:
+    is this contract in the image's decode-set, and is the artifact's tensor-KEY
+    convention one a decoder of that contract ingests. The second is not the
+    first: `plain.bf16@1` minimax-native weights (fused `blocks.N.attn.qkv_proj`)
+    and `plain.bf16@1` diffusers weights (split `to_q/to_k/to_v`) are the same
+    contract, the same file topology and one key in common, and the diffusers
+    class cannot read the native tree at all.
+
+    The declared decode-set is th#1938's third intersection and the hub answers
+    it ahead of time — but the worker is where the bytes actually arrive, so it
+    is where an image that lost a decoder, or was offered the other
+    repackaging, must say so by name instead of dying five libraries away as
+    `Cannot detect the model type`.
+
+    Imported lazily: `discovery` walks `models` to derive the set, and a
+    module-level import here would make that walk import its own caller.
+    """
+    from ..discovery.decode_set import require_decodable as _require
+    from .key_topology import identify_snapshot_keys
+
+    _require(
+        contract,
+        where=str(path),
+        key_topology=identify_snapshot_keys(Path(path), component),
+    )
+
+
 def detect_gguf_snapshot(path: Path) -> Optional[tuple[Path, str]]:
     """Return the GGUF denoiser and qtype in a composed diffusers snapshot."""
     p = Path(path)
@@ -634,6 +681,13 @@ def detect_gguf_snapshot(path: Path) -> Optional[tuple[Path, str]]:
     return (ggufs[0], qtype) if qtype else None
 
 
+@unregistered_decode_path(
+    reason="gguf.native@1 is a TOPOLOGY contract; no QUANT contract names the "
+           "k-quant block encodings this reads, and diffusers' "
+           "GGUFQuantizationConfig decodes them inside its own loader. So the "
+           "bytes are decodable here and unnameable in the decode-set until "
+           "the platform registers a descriptor for them.",
+)
 def load_gguf_pipeline(
     cls: Any,
     path: Path,
@@ -1389,6 +1443,8 @@ def contract_loaded_component(
 
     w8a8_art = detect_w8a8_artifact(weights)
     if w8a8_art is not None and _covers(w8a8_art.component):
+        require_decodable(
+            CONTRACT_COZY_FP8_ROWWISE, weights, component=w8a8_art.component)
         return load_w8a8_denoiser(
             weights, w8a8_art, compute_dtype=compute_dtype, cls=cls)
     w4a4_art = detect_w4a4_artifact(weights)
@@ -2322,6 +2378,19 @@ def _load_modular_pipeline(
     contract=CONTRACT_PLAIN_BF16,
     serves=("bf16-w16a16", "fp8-w8a16"),
     composes_lora=True,
+    decodes=DecodeDimensions(
+        elements=(ELEMENT_BF16, ELEMENT_FP16, ELEMENT_FP32),
+        # `none` is the DECLARATION, not an omission: dense weights carry no
+        # scale tensors, and a tree that does carry them belongs to a
+        # quantized contract whose own decoder reads them.
+        scales=(SCALE_NONE,),
+        shards=(SHARD_COMPONENT_DIR, SHARD_INDEX_SHARDED, SHARD_SINGLE_FILE),
+        # `from_pretrained` addresses tensors by the class's own parameter
+        # names. `native.fused-qkv` is registered and DECLARED BY NOTHING
+        # here: a minimax-native tree offered to this loader is refused by
+        # name rather than dying as an md5 miss inside a detection helper.
+        key_topologies=(KEYS_DIFFUSERS_SPLIT_QKV, KEYS_TRANSFORMERS_NATIVE),
+    ),
     why="the dense-weights path: plain bf16 bytes are read as stored "
         "(bf16-w16a16), and `storage_dtype=fp8` restructures the SAME bytes "
         "into fp8 storage with per-layer upcast (fp8-w8a16). Both are "
@@ -2386,6 +2455,7 @@ def load_from_pretrained(
 
     svdq_art = detect_svdq_artifact(Path(path))
     if svdq_art is not None and callable(getattr(cls, "from_pretrained", None)):
+        require_decodable(CONTRACT_NUNCHAKU_V1, path)
         if components:
             logger.warning("preloaded components ignored on the svdq lane")
         return load_svdq_pipeline(cls, Path(path), svdq_art)
@@ -2396,6 +2466,7 @@ def load_from_pretrained(
 
     w8a8_art = detect_w8a8_artifact(Path(path))
     if w8a8_art is not None and callable(getattr(cls, "from_pretrained", None)):
+        require_decodable(CONTRACT_COZY_FP8_ROWWISE, path)
         compute = None
         if dtype:
             try:
@@ -2457,6 +2528,10 @@ def load_from_pretrained(
         except Exception:
             pass
         return pipe
+    # The generic arm IS the plain.bf16@1 decoder. An image whose decoder
+    # modules failed to import declares nothing, and "nothing" must refuse by
+    # name here rather than produce a pipeline nobody declared.
+    require_decodable(CONTRACT_PLAIN_BF16, path)
     kwargs: Dict[str, Any] = {}
     if components:
         kwargs.update(components)

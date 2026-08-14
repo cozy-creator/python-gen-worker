@@ -63,8 +63,20 @@ from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
 from .tensor_layout_contract import (
+    BAKE_LOWRANK_BRANCH,
+    BAKE_QUANTIZED_LOWRANK,
     CONTRACT_COZY_SVDQ_NVFP4_LR8,
     CONTRACT_NUNCHAKU_V1,
+    ELEMENT_BF16,
+    ELEMENT_FP8_E4M3,
+    ELEMENT_INT4,
+    ELEMENT_NVFP4,
+    KEYS_CONTRACT_NATIVE,
+    SCALE_GROUP_16,
+    SCALE_PER_CHANNEL_OUT,
+    SCALE_PER_TENSOR,
+    SHARD_SINGLE_FILE,
+    DecodeDimensions,
     implements_contract,
 )
 from .nvfp4_quant import BLOCK, pack_e2m1, to_blocked_scales
@@ -485,6 +497,18 @@ def _decode_quantized_lowrank(
     contract=CONTRACT_NUNCHAKU_V1,
     serves=("svdq-fp4-w4a4",),
     composes_lora=False,
+    decodes=DecodeDimensions(
+        elements=(ELEMENT_NVFP4, ELEMENT_INT4, ELEMENT_BF16),
+        # `wscales` are group-of-16; the second level is per-channel
+        # (`wcscales`) or per-tensor (`wtscale`) and the decoder branches on
+        # which is present, so both are decoded shapes of ONE handle.
+        scales=(SCALE_GROUP_16, SCALE_PER_CHANNEL_OUT, SCALE_PER_TENSOR),
+        shards=(SHARD_SINGLE_FILE,),
+        # The descriptor fixes the keys: there is one nunchaku single-file
+        # convention and no repackaging of it in circulation.
+        key_topologies=(KEYS_CONTRACT_NATIVE,),
+        bakes=(BAKE_LOWRANK_BRANCH,),
+    ),
     why="pgw#685: this is THE decoder of the nunchaku v1 single-file layout. "
         "The decoded SvdqLinear has no additive adapter branch (w8a8_lora is "
         "branch-capable on w8a8 / fp8-storage / plain bf16 only).",
@@ -493,6 +517,16 @@ def _decode_quantized_lowrank(
     contract=CONTRACT_COZY_SVDQ_NVFP4_LR8,
     serves=("svdq-fp4-w4a4",),
     composes_lora=False,
+    decodes=DecodeDimensions(
+        elements=(ELEMENT_NVFP4, ELEMENT_INT4, ELEMENT_FP8_E4M3, ELEMENT_BF16),
+        scales=(SCALE_GROUP_16, SCALE_PER_CHANNEL_OUT, SCALE_PER_TENSOR),
+        shards=(SHARD_SINGLE_FILE,),
+        key_topologies=(KEYS_CONTRACT_NATIVE,),
+        # The bake that IS the difference from nunchaku.v1@1: the low-rank
+        # branch stored quantized (`lowrank_quant`), which this decoder
+        # branches on and which the flat declaration could not express.
+        bakes=(BAKE_LOWRANK_BRANCH, BAKE_QUANTIZED_LOWRANK),
+    ),
     why="te#148's quantized low-rank branch is a distinct MAJOR and this "
         "decoder branches on it (`lowrank_quant`), which is what makes the "
         "claim true rather than inherited from nunchaku.v1@1.",

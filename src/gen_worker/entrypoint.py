@@ -410,6 +410,19 @@ def _run_main() -> int:
     manifest = load_manifest(manifest_path)
     user_modules: List[str] = []
     if manifest:
+        # The decode-set the hub was told about is the one stamped in this
+        # lock at IMAGE BUILD. If this process would derive a different one,
+        # the code that runs is not the code the hub selected against, and
+        # every downstream answer is about the wrong image (pgw#1245).
+        try:
+            from .discovery.decode_set import assert_matches_baked
+
+            assert_matches_baked(manifest.get("decode_set") or {})
+        except Exception as e:
+            _log_worker_fatal("decode_set_drift", e, exit_code=1,
+                              settings=settings)
+            logger.error(str(e))
+            return 1
         user_modules = get_modules_from_manifest(manifest)
         _log_startup_phase(
             "manifest_loaded",

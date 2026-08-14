@@ -55,17 +55,188 @@ KNOWN_CONTRACTS: tuple[str, ...] = (
 
 _HANDLE_RE = re.compile(r"^([a-z0-9]+)\.([a-z0-9][a-z0-9._-]*)@([1-9][0-9]*)$")
 
+# ── The DECODE DIMENSIONS (pgw#1245; th#1937 ratifies the vocabulary) ────────
+#
+# A handle names a byte FORMAT. It does not say which of that format's legal
+# shapes a given decoder reads, and the shapes are exactly where decoders
+# branch: `cozy.fp8-rowwise@1` is one handle whether or not the tree carries
+# the optional `input_scale` leaf, and a decoder that ignores it serves
+# different bytes than one that consumes it. So a declaration carries four
+# axes, and th#1938's `resolve()` intersects a variant's derived contract
+# against them rather than against the handle alone.
+#
+# Registered tokens only, on every axis. An unregistered token fails the
+# BUILD for the same reason an unregistered handle does: a decoder that can
+# mint its own vocabulary is back to being a trusted string.
+
+# Element encoding of the quantized weights the decoder reads.
+ELEMENT_BF16 = "bf16"
+ELEMENT_FP16 = "fp16"
+ELEMENT_FP32 = "fp32"
+ELEMENT_FP8_E4M3 = "fp8_e4m3"
+ELEMENT_NVFP4 = "nvfp4"
+ELEMENT_INT4 = "int4"
+KNOWN_ELEMENTS: tuple[str, ...] = (
+    ELEMENT_BF16, ELEMENT_FP16, ELEMENT_FP32,
+    ELEMENT_FP8_E4M3, ELEMENT_NVFP4, ELEMENT_INT4,
+)
+
+# Scale granularity. `none` is EXPLICIT: a dense decoder states that it reads
+# no scale tensors, which is a fact, where an empty axis would be a silence.
+SCALE_NONE = "none"
+SCALE_PER_TENSOR = "per_tensor"
+SCALE_PER_CHANNEL_OUT = "per_channel_out"
+SCALE_STATIC_ACTIVATION = "static_activation"
+SCALE_BLOCK_128X128 = "block_128x128"
+SCALE_GROUP_16 = "group_16"
+KNOWN_SCALES: tuple[str, ...] = (
+    SCALE_NONE, SCALE_PER_TENSOR, SCALE_PER_CHANNEL_OUT,
+    SCALE_STATIC_ACTIVATION, SCALE_BLOCK_128X128, SCALE_GROUP_16,
+)
+
+# File topology the decoder can consume — the sharding half of th#1937's
+# completeness list. `sp_sharded` (pre-sharded sequence-parallel, the H3
+# int64/SP program) is registered and DECLARED BY NOTHING: a variant that is
+# pre-sharded therefore finds no decoder and is refused, which is the correct
+# answer until a decoder branches on it.
+SHARD_SINGLE_FILE = "single_file"
+SHARD_COMPONENT_DIR = "component_dir"
+SHARD_INDEX_SHARDED = "index_sharded"
+SHARD_SP_SHARDED = "sp_sharded"
+KNOWN_SHARDS: tuple[str, ...] = (
+    SHARD_SINGLE_FILE, SHARD_COMPONENT_DIR,
+    SHARD_INDEX_SHARDED, SHARD_SP_SHARDED,
+)
+
+# Structural bakes the decoder CONSUMES — tensor-set membership facts, not
+# element facts. The two modulation tokens are registered and declared by
+# nothing for the same reason `sp_sharded` is: te#195's two artifacts differ
+# exactly there and are byte-detectable, and no decoder in this image branches
+# on the difference today, so a modulation-baked variant must be REFUSED
+# rather than handed to a loader that would read it as a table.
+BAKE_LOWRANK_BRANCH = "lowrank_branch"
+BAKE_QUANTIZED_LOWRANK = "quantized_lowrank"
+BAKE_MODULATION_TABLE = "modulation_table"
+BAKE_MODULATION_BAKED = "modulation_baked"
+KNOWN_BAKES: tuple[str, ...] = (
+    BAKE_LOWRANK_BRANCH, BAKE_QUANTIZED_LOWRANK,
+    BAKE_MODULATION_TABLE, BAKE_MODULATION_BAKED,
+)
+
+# KEY TOPOLOGY — which tensor-KEY convention the decoder's model class can
+# ingest. Provisional here; th#1937 owns the single published vocabulary.
+#
+# This axis exists because of a measured failure (2026-08-14): DiffSynth's
+# MiniMaxH3DiT accepts the MINIMAX-NATIVE key set (535 keys, fused
+# `blocks.N.attn.qkv_proj`) and every minimax-h3 artifact we hold is the
+# DIFFUSERS repackaging (638 keys, split `transformer_blocks.N.attn.to_q/
+# to_k/to_v`) — ONE key in common. It surfaced as `Cannot detect the model
+# type` from an md5-over-key:shape lookup deep inside a detection helper,
+# after a 71 GB fetch onto a rented 4xH100.
+#
+# **File topology cannot see it**: both are multi-file safetensors trees, so
+# `diffusers.multifile@1` classifies them identically. Nor can the quant
+# contract: both would be `plain.bf16@1`. The key convention is a third fact
+# and it needs its own axis or the decode-set is a lie that dies at load.
+#: `transformer_blocks.N.attn.to_q|to_k|to_v` — the diffusers repackaging.
+KEYS_DIFFUSERS_SPLIT_QKV = "diffusers.split-qkv"
+#: `blocks.N.attn.qkv_proj` — the upstream/native fused set.
+KEYS_NATIVE_FUSED_QKV = "native.fused-qkv"
+#: HF transformers module keys (`model.layers.N.…`, `encoder.layer.N.…`).
+KEYS_TRANSFORMERS_NATIVE = "transformers.native"
+#: The contract's OWN convention: a single-file artifact whose descriptor
+#: fixes the keys, with no alternative repackaging in circulation.
+KEYS_CONTRACT_NATIVE = "contract.native"
+KNOWN_KEY_TOPOLOGIES: tuple[str, ...] = (
+    KEYS_DIFFUSERS_SPLIT_QKV,
+    KEYS_NATIVE_FUSED_QKV,
+    KEYS_TRANSFORMERS_NATIVE,
+    KEYS_CONTRACT_NATIVE,
+)
+
+DECODE_AXES: tuple[str, ...] = (
+    "elements", "scales", "shards", "bakes", "key_topologies",
+)
+
+
+class DecodeDimensions(msgspec.Struct, frozen=True, kw_only=True):
+    """What one decoder reads WITHIN a contract handle.
+
+    `elements`, `scales`, `shards` and `key_topologies` are non-empty: a
+    decoder that states nothing on them has not declared anything. `bakes` may
+    be empty — "this decoder consumes no structural bake fact" is itself a
+    complete answer, and it is the answer that makes a baked variant refuse.
+    """
+
+    elements: tuple[str, ...]
+    scales: tuple[str, ...]
+    shards: tuple[str, ...]
+    key_topologies: tuple[str, ...]
+    bakes: tuple[str, ...] = ()
+
+
+def _axis(values: object, *, known: tuple[str, ...], axis: str,
+          where: str, allow_empty: bool = False) -> tuple[str, ...]:
+    if isinstance(values, (str, bytes)) or not isinstance(
+            values, (tuple, list)):
+        raise ValueError(
+            f"{where}: decodes.{axis} must be a tuple of tokens, got "
+            f"{type(values).__name__}")
+    out: list[str] = []
+    for item in values:
+        if not isinstance(item, str) or item.strip() not in known:
+            raise ValueError(
+                f"{where}: decodes.{axis} token {item!r} is not registered; "
+                f"valid: {', '.join(known)}")
+        token = item.strip()
+        if token in out:
+            raise ValueError(
+                f"{where}: decodes.{axis} repeats {token!r}; a set states "
+                "each member once")
+        out.append(token)
+    if not out and not allow_empty:
+        raise ValueError(
+            f"{where}: decodes.{axis} is empty. A decoder that states nothing "
+            f"on {axis} has declared nothing — the handle alone is what this "
+            "mechanism replaces.")
+    # Canonical order: the declaration is a SET, and two authors writing the
+    # same set in different orders must produce the same derived bytes or the
+    # image's decode-set digest is not deterministic.
+    return tuple(sorted(out))
+
+
+def _validate_dimensions(dims: object, *, where: str) -> DecodeDimensions:
+    if not isinstance(dims, DecodeDimensions):
+        raise ValueError(
+            f"{where}: decodes= must be a DecodeDimensions, got "
+            f"{type(dims).__name__}")
+    return DecodeDimensions(
+        elements=_axis(dims.elements, known=KNOWN_ELEMENTS,
+                       axis="elements", where=where),
+        scales=_axis(dims.scales, known=KNOWN_SCALES,
+                     axis="scales", where=where),
+        shards=_axis(dims.shards, known=KNOWN_SHARDS,
+                     axis="shards", where=where),
+        key_topologies=_axis(dims.key_topologies,
+                             known=KNOWN_KEY_TOPOLOGIES,
+                             axis="key_topologies", where=where),
+        bakes=_axis(dims.bakes, known=KNOWN_BAKES, axis="bakes",
+                    where=where, allow_empty=True),
+    )
+
 
 class ContractDecoder(msgspec.Struct, frozen=True, kw_only=True):
-    """One decoder's declaration: the contract it decodes, and the lane BODIES
-    the decoded units execute as. The execution axis (eager/compiled) is NOT
-    declared here — the platform owns it, and the derivation crosses these
-    bodies with the lane table's own execution support."""
+    """One decoder's declaration: the contract it decodes, WHICH SHAPES of it
+    it decodes, and the lane BODIES the decoded units execute as. The
+    execution axis (eager/compiled) is NOT declared here — the platform owns
+    it, and the derivation crosses these bodies with the lane table's own
+    execution support."""
 
     contract: str
     decoder: str  # "module:qualname" — the function carrying the marker
     serves: tuple[str, ...]  # lane body tokens, e.g. "svdq-fp4-w4a4"
     composes_lora: bool
+    decodes: DecodeDimensions
     why: str = ""
 
 
@@ -111,20 +282,27 @@ def implements_contract(
     contract: str,
     serves: Iterable[str],
     composes_lora: bool,
+    decodes: DecodeDimensions,
     why: str = "",
 ) -> Callable[[F], F]:
     """Mark a decode entrypoint as implementing ``contract``.
+
+    ``decodes`` is REQUIRED and has no default: a declaration that names a
+    handle and stops is the incomplete declaration pgw#1245 exists to remove,
+    and a default would let one be written by omission.
 
     Stackable: one function may implement several contracts (``decode_linear``
     implements both the nunchaku layout and the quantized-branch major).
     """
 
     def deco(fn: F) -> F:
+        where = f"{fn.__module__}:{fn.__qualname__}"
         dec = ContractDecoder(
             contract=contract,
-            decoder=f"{fn.__module__}:{fn.__qualname__}",
+            decoder=where,
             serves=tuple(serves),
             composes_lora=bool(composes_lora),
+            decodes=_validate_dimensions(decodes, where=where),
             why=why,
         )
         _validate(dec)
@@ -146,6 +324,47 @@ def contract_decoders_of(obj: Any) -> tuple[ContractDecoder, ...]:
     if not isinstance(marked, tuple):
         return ()
     return tuple(d for d in marked if isinstance(d, ContractDecoder))
+
+
+class UnregisteredDecodePath(msgspec.Struct, frozen=True, kw_only=True):
+    """A decoder that reads real bytes NO registered contract covers.
+
+    It satisfies no gate and is never intersected with anything — a decode-set
+    entry needs a handle, and a handle needs a hub-side descriptor (A2). It is
+    recorded because the alternative is a source comment, which no refusal can
+    read: when `resolve()` refuses a variant these bytes belong to, the answer
+    "this image decodes them but the platform has no contract for them" is the
+    remedy, and it is a different remedy from "ship a different image".
+    """
+
+    decoder: str
+    reason: str
+
+
+MARKER_UNREGISTERED = "__cozy_unregistered_decode_path__"
+
+
+def unregistered_decode_path(*, reason: str) -> Callable[[F], F]:
+    """Mark a decode entrypoint whose bytes no registered contract names."""
+
+    def deco(fn: F) -> F:
+        if not reason.strip():
+            raise ValueError(
+                f"{fn.__module__}:{fn.__qualname__}: an unregistered decode "
+                "path without a reason is an untraceable gap")
+        setattr(fn, MARKER_UNREGISTERED, UnregisteredDecodePath(
+            decoder=f"{fn.__module__}:{fn.__qualname__}",
+            reason=reason.strip(),
+        ))
+        return fn
+
+    return deco
+
+
+def unregistered_decode_path_of(obj: Any) -> tuple[UnregisteredDecodePath, ...]:
+    """The unregistered-path record carried by one object, or ``()``."""
+    marked = getattr(obj, MARKER_UNREGISTERED, None)
+    return (marked,) if isinstance(marked, UnregisteredDecodePath) else ()
 
 
 # ── §1.33: the DEMAND side of the same vocabulary ─────────────────────────────

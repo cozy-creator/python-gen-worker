@@ -44,7 +44,12 @@ about the WEIGHTS, not about the compiled program:
   (th#1580 / th#1721; was called "the artifact contract".) **th#1803 makes this
   a core platform feature:** code is quant-generic over a declared layout, and
   the platform answers compatibility ahead of time — at rebind and at request
-  time — never by loading and running on a rented pod.
+  time — never by loading and running on a rented pod. **pgw#1245** makes the
+  image's side of that answer a derived artifact: `[decode_set]` in
+  `endpoint.lock` (`gen_worker.discovery.decode_set`) enumerates every contract
+  the image's decoders implement, with the dimensions each reads — elements,
+  scales, shards, KEY TOPOLOGIES and structural bakes — plus a digest the boot
+  checks against what it would derive. It is th#1938's third intersection.
 - **The tensor-binding contract** — the artifact's LINKING rule for tensors:
   bound by name at load (DYNAMIC — an opaque slot the compiler must never
   value-specialize, which is what makes a cell checkpoint-agnostic) versus a

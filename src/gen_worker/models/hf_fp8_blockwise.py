@@ -46,7 +46,17 @@ from typing import Any, Dict, Optional, Tuple
 import msgspec
 
 from .safetensors_header import header_len_ok
-from .tensor_layout_contract import CONTRACT_HF_FP8_BLOCKWISE, implements_contract
+from .tensor_layout_contract import (
+    CONTRACT_HF_FP8_BLOCKWISE,
+    KEYS_TRANSFORMERS_NATIVE,
+    ELEMENT_BF16,
+    ELEMENT_FP8_E4M3,
+    SCALE_BLOCK_128X128,
+    SHARD_COMPONENT_DIR,
+    SHARD_INDEX_SHARDED,
+    DecodeDimensions,
+    implements_contract,
+)
 
 # The registry's declared reference dequant for this contract. Named here so
 # the SDK's transform and tensorhub's descriptor point at ONE spec rather than
@@ -309,6 +319,16 @@ def _hf_model_class(path: Path, cls: Any) -> Any:
     contract=CONTRACT_HF_FP8_BLOCKWISE,
     serves=("fp8-w8a8-dynamic", "fp8-w8a16"),
     composes_lora=False,
+    decodes=DecodeDimensions(
+        elements=(ELEMENT_FP8_E4M3, ELEMENT_BF16),
+        # 128x128 block scales ONLY. `inspect_hf_fp8_blockwise` verifies the
+        # grid and refuses anything else, so declaring rowwise here would be
+        # the exact conflation `cozy.fp8-rowwise@1` exists to prevent.
+        scales=(SCALE_BLOCK_128X128,),
+        shards=(SHARD_COMPONENT_DIR, SHARD_INDEX_SHARDED),
+        # transformers' own loader, so transformers' own key convention.
+        key_topologies=(KEYS_TRANSFORMERS_NATIVE,),
+    ),
     why="th#1803: transformers' FineGrainedFP8 reads this layout natively — "
         "resident fp8 weights with a 128x128 block scale grid, dynamic "
         "per-token activation scales through the triton/DeepGEMM blockwise "
@@ -340,6 +360,9 @@ def load_hf_fp8_blockwise(
     import torch
     from transformers import FineGrainedFP8Config
 
+    from ..discovery.decode_set import require_decodable
+
+    require_decodable(CONTRACT_HF_FP8_BLOCKWISE, where=str(root))
     verified = tree or inspect_hf_fp8_blockwise(root, component=component)
     path = verified.path
     compute = dtype or torch.bfloat16
