@@ -234,8 +234,19 @@ jobs:
     # `github.event.pull_request.draft == false` as false, the job skipped, and
     # the PR read fully green having run nothing. Undrafting produced no new run
     # (the sha already had one) and re-running replays the original draft=true
-    # payload, so the lane escaped only by force-pushing a no-op amend. The same
-    # clause is false on `merge_group`, where `github.event.pull_request` is null.
+    # payload, so the lane escaped only by force-pushing a no-op amend.
+    #
+    # It is NOT, contrary to the version of this comment that landed with the
+    # guard removal, also false on `merge_group`. `null == false` is TRUE:
+    # GitHub coerces both sides of `==` to a number, so it reads `0 == 0`
+    # (measured te#199 round 2 on training-endpoints queue ref run 31833225624,
+    # where a job guarded by exactly that clause RAN). The explicit
+    # `merge_group` / `schedule` / `workflow_dispatch` arms this line used to
+    # carry were therefore redundant — they defended a mechanism that does not
+    # exist, while the draft failure that does went unnoticed behind them. That
+    # is the second argument for no condition at all rather than a carefully
+    # armed one: a guard whose behaviour turns on an expression-coercion rule is
+    # a guard nobody reads correctly.
     # At ~1m35s the draft guard saved a rounding error; unconditional is the fix.
     runs-on: ubuntu-latest
     timeout-minutes: 15
