@@ -8,14 +8,23 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
-from gen_worker import activity, callout, cell_resolve, compile_cache, host_canary
+from gen_worker import (
+    activity,
+    boot_phases,
+    callout,
+    cell_resolve,
+    compile_cache,
+    host_canary,
+    serving_mode,
+)
+from gen_worker.api.binding import ModelSource
 from gen_worker.convert.layout_converters import derived_artifact_identity
 from gen_worker.local_cell_store import UNTRUSTED_REFUSAL_CODE
-from gen_worker.models import execution_lanes
+from gen_worker.models import execution_lanes, rung
 from gen_worker.models.cozy_snapshot import PICKLE_WEIGHT_EXTENSIONS
 from gen_worker.models.tensor_layout_contract import (
     LayoutDeclarationError,
@@ -54,6 +63,24 @@ def _lane_rows() -> list[dict[str, Any]]:
     return rows
 
 
+def _pgw_fn_degraded_ran_values() -> set[str]:
+    """Values this worker can currently put in a degraded report's `ran`.
+
+    A non-native ladder plan emits its coarse run mode. A failed native
+    storage cast emits the actual bf16/fp8 storage family instead. `native`
+    itself is not a degradation and therefore is not a producer value.
+    """
+    non_native = {
+        item.run_mode
+        for item in rung.LADDER
+        if item.run_mode != rung.RUN_NATIVE
+    }
+    return non_native | {
+        execution_lanes.WEIGHTS_BF16,
+        execution_lanes.WEIGHTS_FP8,
+    }
+
+
 def test_exact_worker_values_match_pgw1237() -> None:
     exact = _document()["exact"]
 
@@ -77,6 +104,39 @@ def test_exact_worker_values_match_pgw1237() -> None:
     }
     assert "child_calls_not_declared" in callout_codes
     assert set(callout_codes).isdisjoint(callout._NOT_DECLARED_CODES)  # noqa: SLF001
+    assert exact["model_ref_sources"] == list(get_args(ModelSource))
+    assert exact["serving_modes"] == [
+        serving_mode.MODE_EAGER,
+        serving_mode.MODE_JIT_CELL,
+        serving_mode.MODE_AOT_CELL,
+    ]
+    assert set(exact["per_request_fallback_reasons"]) == (
+        serving_mode._PER_REQUEST_FALLBACKS  # noqa: SLF001
+    )
+    assert exact["eager_posture_reasons"] == [
+        serving_mode.POSTURE_ARM_PENDING,
+        serving_mode.POSTURE_MINT_IN_PROGRESS,
+        serving_mode.POSTURE_NO_COMPILE_DECLARED,
+        serving_mode.POSTURE_UNCOMPILED,
+        serving_mode.POSTURE_GRAPH_BREAK,
+        serving_mode.POSTURE_DECLARED_RANGE_EXCEEDED,
+        serving_mode.POSTURE_OPERATOR_EAGER_ONLY,
+    ]
+    assert exact["boot_phase_producer_values"] == sorted(boot_phases.PHASES)
+    assert exact["boot_outcomes"] == [
+        boot_phases.OUTCOME_OK,
+        boot_phases.OUTCOME_REFUSED,
+        boot_phases.OUTCOME_FAILED,
+        boot_phases.OUTCOME_SKIPPED,
+    ]
+    assert exact["boot_sources"] == [
+        boot_phases.SOURCE_CAS,
+        boot_phases.SOURCE_VOLUME,
+        boot_phases.SOURCE_R2,
+        boot_phases.SOURCE_HF_CACHE,
+        boot_phases.SOURCE_INFLIGHT_SHARE,
+        boot_phases.SOURCE_LOCAL,
+    ]
     assert exact["compilecache_rank_buckets"] == list(RANK_BUCKETS)
     assert exact["execution_lane_bodies"] == _lane_rows()
     assert exact["pickle_weight_extensions"] == list(PICKLE_WEIGHT_EXTENSIONS)
@@ -84,6 +144,27 @@ def test_exact_worker_values_match_pgw1237() -> None:
 
 def test_bounded_worker_relations_match_pgw1237() -> None:
     relations = _document()["relations"]
+
+    flavor_relation = relations["compilecache_flavor_label"]
+    assert flavor_relation["domain"] == (
+        "canonical sku slug, Python torch release, and worker execution-lane alias"
+    )
+    for case in flavor_relation["cases"]:
+        assert compile_cache.flavor_label(
+            case["sku"], case["torch_version"], case["weight_lane"]
+        ) == case["result"]
+
+    degraded = relations["fn_degraded_ran"]
+    assert degraded["relation"] == (
+        "pgw_producer_values are a subset of tensorhub_accepted_values"
+    )
+    producer_values = set(degraded["pgw_producer_values"])
+    accepted_values = set(degraded["tensorhub_accepted_values"])
+    assert producer_values == _pgw_fn_degraded_ran_values()
+    assert producer_values < accepted_values
+    assert set(degraded["hub_only_legacy_values"]) == {
+        "emergency_quant"
+    } == accepted_values - producer_values
 
     assert relations["sku_slug"]["domain"] == "ASCII GPU identity strings"
     for case in relations["sku_slug"]["cases"]:
@@ -186,6 +267,43 @@ def test_worker_value_semantic_fence_can_go_red_pgw1237(tmp_path: Path) -> None:
     assert "compilecache_rank_buckets" in got.stdout
 
 
+@pytest.mark.parametrize("section", [
+    "model_ref_sources",
+    "serving_modes",
+    "per_request_fallback_reasons",
+    "eager_posture_reasons",
+    "boot_phase_producer_values",
+    "boot_outcomes",
+    "boot_sources",
+])
+def test_each_added_exact_section_can_go_red_pgw1237(
+    tmp_path: Path, section: str,
+) -> None:
+    document = json.loads(_DEFAULT_CORPUS.read_text(encoding="utf-8"))
+    mutant = f"broken-{section}"
+    document["exact"][section][0] = mutant
+    corpus = tmp_path / _DEFAULT_CORPUS.name
+    corpus.write_text(json.dumps(document), encoding="utf-8")
+
+    got = subprocess.run(
+        [
+            "uv",
+            "run",
+            "pytest",
+            "-q",
+            os.fspath(Path(__file__)),
+            "-k",
+            "test_exact_worker_values_match_pgw1237",
+        ],
+        env={**os.environ, "WORKER_VALUE_CONTRACT_FILE": os.fspath(corpus)},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert got.returncode == 1
+    assert mutant in got.stdout
+
+
 def test_worker_value_relation_fence_can_go_red_pgw1237(tmp_path: Path) -> None:
     document = json.loads(_DEFAULT_CORPUS.read_text(encoding="utf-8"))
     document["relations"]["sku_slug"]["cases"][0]["result"] = "not-rtx-4090"
@@ -209,6 +327,62 @@ def test_worker_value_relation_fence_can_go_red_pgw1237(tmp_path: Path) -> None:
     )
     assert got.returncode == 1
     assert "not-rtx-4090" in got.stdout
+
+
+def test_worker_value_flavor_relation_can_go_red_pgw1237(tmp_path: Path) -> None:
+    document = json.loads(_DEFAULT_CORPUS.read_text(encoding="utf-8"))
+    mutant = "inductor-broken-flavor"
+    document["relations"]["compilecache_flavor_label"]["cases"][0][
+        "result"
+    ] = mutant
+    corpus = tmp_path / _DEFAULT_CORPUS.name
+    corpus.write_text(json.dumps(document), encoding="utf-8")
+
+    got = subprocess.run(
+        [
+            "uv",
+            "run",
+            "pytest",
+            "-q",
+            os.fspath(Path(__file__)),
+            "-k",
+            "test_bounded_worker_relations_match_pgw1237",
+        ],
+        env={**os.environ, "WORKER_VALUE_CONTRACT_FILE": os.fspath(corpus)},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert got.returncode == 1
+    assert mutant in got.stdout
+
+
+def test_worker_value_fn_degraded_relation_can_go_red_pgw1237(
+    tmp_path: Path,
+) -> None:
+    document = json.loads(_DEFAULT_CORPUS.read_text(encoding="utf-8"))
+    mutant = "broken-degraded-mode"
+    document["relations"]["fn_degraded_ran"]["pgw_producer_values"][0] = mutant
+    corpus = tmp_path / _DEFAULT_CORPUS.name
+    corpus.write_text(json.dumps(document), encoding="utf-8")
+
+    got = subprocess.run(
+        [
+            "uv",
+            "run",
+            "pytest",
+            "-q",
+            os.fspath(Path(__file__)),
+            "-k",
+            "test_bounded_worker_relations_match_pgw1237",
+        ],
+        env={**os.environ, "WORKER_VALUE_CONTRACT_FILE": os.fspath(corpus)},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert got.returncode == 1
+    assert mutant in got.stdout
 
 
 def test_worker_value_callout_fence_can_go_red_pgw1237(tmp_path: Path) -> None:

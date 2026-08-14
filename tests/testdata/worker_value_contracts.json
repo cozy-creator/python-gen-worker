@@ -33,6 +33,67 @@
       "budget_not_root",
       "child_calls_not_declared"
     ],
+    "model_ref_sources": [
+      "tensorhub",
+      "huggingface",
+      "civitai",
+      "modelscope"
+    ],
+    "serving_modes": [
+      "eager",
+      "jit_cell",
+      "aot_cell"
+    ],
+    "per_request_fallback_reasons": [
+      "guard_miss",
+      "ingress_refused",
+      "healing",
+      "volatile"
+    ],
+    "eager_posture_reasons": [
+      "arm_pending",
+      "mint_in_progress",
+      "no_compile_declared",
+      "uncompiled",
+      "graph_break",
+      "declared_range_exceeded",
+      "operator_eager_only"
+    ],
+    "boot_phase_producer_values": [
+      "cell_arm",
+      "cell_fetch",
+      "cell_hub_rtt",
+      "cell_verify",
+      "compiled_swap",
+      "component_fetch",
+      "declaration_compose",
+      "eager_ready",
+      "entry_admit",
+      "env_establish",
+      "first_request_servable",
+      "hello",
+      "key_fold",
+      "lib_memo",
+      "pipeline_load",
+      "sdk_ready",
+      "trace_for_key",
+      "warmup",
+      "weights_fetch"
+    ],
+    "boot_outcomes": [
+      "ok",
+      "refused",
+      "failed",
+      "skipped"
+    ],
+    "boot_sources": [
+      "cas",
+      "volume",
+      "r2",
+      "hf_cache",
+      "inflight_share",
+      "local"
+    ],
     "compilecache_rank_buckets": [
       16,
       32,
@@ -95,6 +156,50 @@
     ]
   },
   "relations": {
+    "compilecache_flavor_label": {
+      "domain": "canonical sku slug, Python torch release, and worker execution-lane alias",
+      "cases": [
+        {
+          "sku": "rtx-4090",
+          "torch_version": "2.9.1+cu128",
+          "weight_lane": "",
+          "result": "inductor-rtx-4090-torch2.9"
+        },
+        {
+          "sku": "h100-80gb-hbm3",
+          "torch_version": "2.13.0+cu130",
+          "weight_lane": "w8a8",
+          "result": "inductor-h100-80gb-hbm3-torch2.13-w8a8"
+        },
+        {
+          "sku": "rtx-4090",
+          "torch_version": "2.9.1",
+          "weight_lane": "fp8-hooks",
+          "result": "inductor-rtx-4090-torch2.9-w8a16"
+        }
+      ]
+    },
+    "fn_degraded_ran": {
+      "relation": "pgw_producer_values are a subset of tensorhub_accepted_values",
+      "pgw_producer_values": [
+        "bf16",
+        "cpu",
+        "fp8",
+        "fp8_storage",
+        "offload"
+      ],
+      "tensorhub_accepted_values": [
+        "bf16",
+        "cpu",
+        "emergency_quant",
+        "fp8",
+        "fp8_storage",
+        "offload"
+      ],
+      "hub_only_legacy_values": [
+        "emergency_quant"
+      ]
+    },
     "sku_slug": {
       "domain": "ASCII GPU identity strings",
       "cases": [
