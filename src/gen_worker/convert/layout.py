@@ -165,6 +165,9 @@ def detect_huggingface_source_layout(*, repo_dir: Path, files: list[str]) -> Sou
     """
     signals = _DEFAULT_SIGNALS
     normalized = _normalize_paths(files)
+    # Annotated `str`, not inferred: the ruled tokens are `Final[Literal[...]]`
+    # so an inferred type here would narrow to the first branch's literal.
+    source_layout: str
     if _has_diffusers_layout_signals(normalized, signals):
         source_layout = MULTI_FILE
         reason = "diffusers_layout_signals_present"
