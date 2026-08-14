@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
-# th#1914 / pgw#1237 / cl#56 — the Cozy runner and worker must agree on the
-# exact environment names and the path semantics behind them. This script is
-# committed VERBATIM in python-gen-worker and cozy-local.
+# th#1914 / pgw#1237 / cl#56 — the Cozy runner, hub, and worker must agree on
+# exact environment names and the path semantics behind them. Committed
+# VERBATIM to all three repos.
 #
-# Layer 1 in each repo pins its local corpus. Layer 2 runs from cozy-local and
-# compares to public python-gen-worker. Running this in PGW without an explicit
-# peer directory is local-only by design; a public repo cannot fetch its
-# private consumer and must never call a self-comparison peer proof.
-#
-# Direction: PGW LANDS FIRST.
+# Layer 1 in each repo pins its local corpus. Layer 2 runs from private
+# consumers and compares to public python-gen-worker. Running this in PGW
+# without an explicit peer directory is local-only by design; a public repo
+# cannot fetch its private consumers and must never call a self-comparison a
+# peer proof. Direction: PGW LANDS FIRST.
 #
 #   COZY_RUNTIME_ENV_PEER_REF=<branch>  PGW ref to fetch (default: master)
 #   COZY_RUNTIME_ENV_PEER_DIR=<dir>     local PGW tests/testdata directory
@@ -17,6 +16,7 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 pgw_rel="tests/testdata"
 cozy_rel="internal/cli/testdata"
+hub_rel="internal/orchestrator/localcells/testdata"
 corpus="cozy_runtime_env_vectors.json"
 digest="COZY_RUNTIME_ENV_DIGEST"
 
@@ -26,8 +26,11 @@ if [ -f "$here/$pgw_rel/$corpus" ]; then
 elif [ -f "$here/$cozy_rel/$corpus" ]; then
   local_dir="$here/$cozy_rel"
   side="cozy"
+elif [ -f "$here/$hub_rel/$corpus" ]; then
+  local_dir="$here/$hub_rel"
+  side="hub"
 else
-  echo "cozy-runtime-env-drift: no $corpus under $here" >&2
+  echo "cozy-runtime-env-drift: no $corpus under $here ($pgw_rel, $cozy_rel, or $hub_rel)" >&2
   exit 2
 fi
 
@@ -86,7 +89,7 @@ for name in "$corpus" "$digest"; do
   fi
 done
 if [ "$status" -ne 0 ]; then
-  echo "cozy-runtime-env-drift: land PGW first, then copy corpus and digest verbatim to cozy-local" >&2
+  echo "cozy-runtime-env-drift: land PGW first, then copy corpus and digest verbatim to private consumers" >&2
   exit 1
 fi
 
