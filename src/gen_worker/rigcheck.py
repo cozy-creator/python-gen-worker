@@ -69,6 +69,14 @@ __all__ = [
 #: never WHETHER the assertion runs.
 FLEET_LINE_FILE_ENV = "GEN_WORKER_FLEET_LINE_FILE"
 
+#: ``cuda_probe.classify_probe_failure`` classes that mean THERE IS NO CUDA
+#: DEVICE HERE, as against a device this host cannot drive. A cardless box is a
+#: different mistake and must not be reported as a host fault (pgw#1120) — but
+#: "cardless" is a fact about the PROBE, not about whether `nvidia-smi` could be
+#: read: only a host with a driver to fail can answer `driver_too_old` or
+#: `cuda_error`, so a broken diagnostic can no longer buy an exemption.
+CARDLESS_PROBE_CLASSES = frozenset({"cuda_unavailable", "torch_unavailable"})
+
 #: Wheels whose version decides whether a kernel/quantization result is about the
 #: fleet's stack or about the rig's. Reported on every run; absence is reported,
 #: not raised — an unbuildable wheel is the finding.
@@ -538,11 +546,16 @@ def assert_fleet_line(
     # A HOST fault is reported before a WHEEL fault even when both are present:
     # on a too-old driver every version string above can be perfect while nothing
     # allocates, and "rebuild the environment" is then the wrong instruction.
-    # NOT gated on `driver`: reading the driver version means `nvidia-smi` ran,
-    # and a host broken enough that it does not is exactly the host this refusal
-    # is for. `cuda_usable is False` is already a MEASUREMENT (a real allocation
-    # was attempted and failed) — `None` means unmeasured and does not refuse.
-    if env.get("cuda_usable") is False:
+    # NOT gated on `driver` any more: reading a driver version means
+    # `nvidia-smi` RAN, and a host broken enough that it does not is exactly the
+    # host this refusal is for — the check was skipping the machines it was
+    # written for. The carve-out it was carrying ("no card at all is a different
+    # mistake") survives, on a signal a broken diagnostic cannot fake: the probe
+    # says WHICH failure this is, and only a host that has a driver to fail can
+    # answer `driver_too_old`/`cuda_error`.
+    if (env.get("cuda_usable") is False
+            and str(env.get("cuda_unusable_class") or "")
+            not in CARDLESS_PROBE_CLASSES):
         raise CudaUnusable(
             f"{what}: REFUSING TO MEASURE — the wheel is on the fleet line but "
             f"this HOST cannot run it.\n"
