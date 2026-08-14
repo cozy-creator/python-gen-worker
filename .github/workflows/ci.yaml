@@ -208,8 +208,8 @@ on:
     - cron: '17 9 * * *'
   pull_request:
     branches: [master]
-    # `ready_for_review` is NOT a default `pull_request` type, and the jobs below
-    # skip drafts. Without it listed here a lane that opens a draft, pushes, then
+    # `ready_for_review` is NOT a default `pull_request` type, and `tests` below
+    # skips drafts. Without it listed here a lane that opens a draft, pushes, then
     # clicks "Ready for review" gets NO run for the head it actually merges —
     # the same invisible-green this issue exists to remove.
     types: [opened, synchronize, reopened, ready_for_review]
@@ -227,12 +227,16 @@ jobs:
   # behind an 11-minute pytest run.
   gates:
     name: fast gates
-    # `merge_group` is listed FIRST and explicitly: on that event
-    # `github.event.pull_request` is null, so the draft clause alone skips the
-    # job and GitHub scores the skip as a satisfied required check (pgw#1209).
-    # This is the repo's ONLY required context (pgw#1264) — the merge-group arm
-    # of this condition is what the queue actually waits on. Do not weaken it.
-    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event.pull_request.draft == false
+    # pgw#1268: this job has NO `if:` and must never grow one. It is the repo's
+    # only required context, and GitHub scores a SKIPPED required check as
+    # SATISFIED — so any condition here is a false-green generator. Measured on
+    # th#1223 (2026-08-14): a run triggered while the PR was a draft evaluated
+    # `github.event.pull_request.draft == false` as false, the job skipped, and
+    # the PR read fully green having run nothing. Undrafting produced no new run
+    # (the sha already had one) and re-running replays the original draft=true
+    # payload, so the lane escaped only by force-pushing a no-op amend. The same
+    # clause is false on `merge_group`, where `github.event.pull_request` is null.
+    # At ~1m35s the draft guard saved a rounding error; unconditional is the fix.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
