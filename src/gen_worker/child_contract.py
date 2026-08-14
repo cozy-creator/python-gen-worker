@@ -24,11 +24,13 @@ codes and reports stay with the driver that owns them.
 
 from __future__ import annotations
 
-from typing import Dict, Mapping, Optional, Tuple
+import hashlib
+import json
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
 import msgspec
 
-from . import cell_key
 from .api.binding import ModelRef, binding_wire_refs, wire_ref
 
 #: Every child progress frame is one stdout line with this prefix. Anything
@@ -108,10 +110,50 @@ class MintSlot(msgspec.Struct, frozen=True, kw_only=True):
                 f"empty path for {wire_ref(self.ref)!r}")
 
 
+@dataclass(frozen=True)
+class SlotSubject:
+    """WHICH checkpoint one setup slot resolved to.
+
+    This is worker-obligation identity, not compiled-graph identity. ``refs``
+    is the base wire ref plus every component override in binding order;
+    ``snapshot_digest`` is the materialized tree digest when the resolver can
+    state one.
+    """
+
+    slot: str
+    refs: Tuple[str, ...] = ()
+    snapshot_digest: str = ""
+
+
+def subject_facts(subjects: Iterable[SlotSubject]) -> Dict[str, Any]:
+    """Canonical resolved-subject facts, independent of resolution order."""
+    return {
+        "v": 1,
+        "slots": [
+            [subject.slot, list(subject.refs), subject.snapshot_digest]
+            for subject in sorted(tuple(subjects), key=lambda item: item.slot)
+        ],
+    }
+
+
+def subject_digest(subjects: Iterable[SlotSubject]) -> str:
+    """The resolved-subject digest, or ``""`` when no subject is known."""
+    known = tuple(subjects)
+    if not known:
+        return ""
+    encoded = json.dumps(
+        subject_facts(known),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
 def slot_subjects(
     slots: Mapping[str, MintSlot],
     digests: Optional[Mapping[str, str]] = None,
-) -> Tuple[cell_key.SlotSubject, ...]:
+) -> Tuple[SlotSubject, ...]:
     """The resolved SUBJECT of one arm or one boot trace (pgw#1113).
 
     THE single derivation, so the arm token, the local-store memo and the
@@ -123,7 +165,7 @@ def slot_subjects(
     """
     have = dict(digests or {})
     return tuple(
-        cell_key.SlotSubject(
+        SlotSubject(
             slot=str(name),
             refs=tuple(binding_wire_refs(slot.ref)),
             snapshot_digest=str(have.get(str(name), "") or ""),
@@ -156,6 +198,9 @@ __all__ = [
     "CompileSpec",
     "MintFrame",
     "MintSlot",
+    "SlotSubject",
     "frame_line",
     "slot_subjects",
+    "subject_digest",
+    "subject_facts",
 ]

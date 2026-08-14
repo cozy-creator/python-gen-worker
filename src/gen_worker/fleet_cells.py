@@ -63,12 +63,14 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from torch_compiled_graphs import CompiledGraphKey, IdentityError, is_compiled_graph_key
-from torch_compiled_graphs.identity import from_artifact_metadata
+from torch_compiled_graphs.identity import (
+    from_artifact_metadata,
+    toolchain_axis_digest,
+)
 
 from . import activity as activity_mod
 from . import (
     aot_serve,
-    cell_key,
     env_seal,
     compiled_graph_store,
     receipts,
@@ -78,6 +80,7 @@ from . import boot_phases as boot_mod
 from . import compile_cache as cc
 from .api.export_contract import blocker_refusal, export_declaration, open_blockers
 from .cell_adopt import AdoptOutcome, CellAdoption, EagerPhase
+from .child_contract import SlotSubject, subject_digest
 from .file_hash import sha256_file
 from .hubio.client import HubPublishError
 
@@ -127,7 +130,7 @@ class SelfMint:
 
 
 #: The mint-obligation identity prefix. An arm token must never pass
-#: ``cell_key.is_key`` / the hub's ``compilecache.IsCompiledGraphKey``,
+#: ``is_compiled_graph_key`` / the hub's ``compilecache.IsCompiledGraphKey``,
 #: because it is NOT a compiled-graph key — see :class:`ArmIdentity`.
 #:
 #: The digit is the token's FACT-SET SCHEMA, and it is the memo-invalidation
@@ -187,8 +190,7 @@ class ArmIdentity:
 
 #: The ENVIRONMENT half of an :class:`ArmIdentity` — the facts a delegated
 #: child re-derives in its own process and RECORDS on the cell it hands back.
-#: ``envelope`` and ``toolchain`` use the exported key's own derivations
-#: (``cell_key.envelope_digest`` / ``cell_key.facts_digest``), ``lane`` the
+#: ``toolchain`` uses the exported key's own TCG derivation; ``lane`` uses the
 #: one lane label (``cc.execution_lane_label``) — :func:`arm_axis_divergence`
 #: compares exactly these, so an axis that fails to survive the parent->child
 #: boundary is refused BY NAME at the handback seam.
@@ -205,7 +207,7 @@ ARM_ENVIRONMENT_FACTS = ("family", aot_serve.COMPILED_GRAPH_FORMAT_KEY,
 
 #: The SUBJECT half (pgw#1113): WHAT this obligation compiles, as opposed to
 #: what runtime it compiles on. ``subject`` is the resolved slot identity
-#: (:func:`cell_key.subject_digest` — which slot, which checkpoint refs,
+#: (:func:`child_contract.subject_digest` — which slot, which checkpoint refs,
 #: which snapshot digest); ``targets``/``dynamic``/``regional`` are the rest
 #: of ``cc.declared_compile_facts`` the token could not previously see.
 #:
@@ -220,12 +222,12 @@ ARM_SUBJECT_FACTS = ("subject", "targets", "dynamic", "regional")
 #: Every fact in the token, in report order.
 ARM_FACTS = ARM_ENVIRONMENT_FACTS + ARM_SUBJECT_FACTS
 
-#: The pipeline attribute carrying the resolved :class:`cell_key.SlotSubject`
+#: The pipeline attribute carrying the resolved :class:`child_contract.SlotSubject`
 #: set the executor built this object from (pgw#1113). Stamped beside the
 #: execution lane, read here for the same reason the lane is read here rather
 #: than threaded through six call sites: the pipe is the one handle every arm
 #: site holds. A pipeline the worker did not resolve carries none, and
-#: :func:`cell_key.subject_digest` answers "" for it — honestly narrower, not
+#: :func:`child_contract.subject_digest` answers "" for it — honestly narrower, not
 #: silently equal to some other subject.
 ARM_SUBJECT_ATTR = "_cozy_arm_subject"
 
@@ -240,7 +242,7 @@ def stamp_arm_subject(
     leaves the subject unstated, which is the pre-pgw#1113 posture and never
     an exception on a serving path.
     """
-    subject = cell_key.SlotSubject(
+    subject = SlotSubject(
         slot=str(slot or ""),
         refs=tuple(str(ref) for ref in refs if str(ref or "")),
         snapshot_digest=str(snapshot_digest or ""),
@@ -255,11 +257,11 @@ def stamp_arm_subject(
                      exc_info=True)
 
 
-def pipeline_arm_subject(pipe: Any) -> Tuple[cell_key.SlotSubject, ...]:
+def pipeline_arm_subject(pipe: Any) -> Tuple[SlotSubject, ...]:
     """The resolved subject stamped on ``pipe``, or ``()``."""
     stamped = getattr(pipe, ARM_SUBJECT_ATTR, None) or ()
     return tuple(
-        sub for sub in stamped if isinstance(sub, cell_key.SlotSubject))
+        sub for sub in stamped if isinstance(sub, SlotSubject))
 
 
 def declared_envelope_block(cfg: Any) -> Dict[str, Any]:
@@ -267,9 +269,8 @@ def declared_envelope_block(cfg: Any) -> Dict[str, Any]:
     extraction :func:`aot_export_spec` performs (``shapes`` /
     ``text_lens`` / ``guidance_scales``, no fallbacks: ``text_len`` was
     dropped from the child handoff in pgw#1034), so the parent's pre-mint
-    envelope digest and the digest of the block the child RECORDS under
-    ``cell_key.EXPORT_ENVELOPE_KEY`` agree by construction (canonical form:
-    ``cell_key.envelope_facts``). GPU-gauntlet-proven: a fallback here that
+    envelope digest and the block the child records agree by construction.
+    GPU-gauntlet-proven: a fallback here that
     the spec extraction does not share reds every handback as
     ``envelope`` divergence."""
     return {
@@ -283,7 +284,7 @@ def declared_envelope_block(cfg: Any) -> Dict[str, Any]:
 
 def arm_identity(
     family: str, weight_lane: str, lora_bucket: int, cfg: Any,
-    subject: Iterable[cell_key.SlotSubject] = (),
+    subject: Iterable[SlotSubject] = (),
 ) -> ArmIdentity:
     """This runtime's :class:`ArmIdentity` for one owed mint.
 
@@ -325,8 +326,8 @@ def arm_identity(
             str(weight_lane or ""), int(lora_bucket or 0)),
         "sm": sm,
         "env_seal": env_seal.seal_digest(env_seal.effective_seal()),
-        "toolchain": cell_key.toolchain_axis_digest(dict(cc.toolchain_digest())),
-        "subject": cell_key.subject_digest(subject),
+        "toolchain": toolchain_axis_digest(dict(cc.toolchain_digest())),
+        "subject": subject_digest(subject),
         "targets": ",".join(str(t) for t in declared["targets"]),
         "dynamic": json.dumps(
             declared["dynamic"], sort_keys=True, separators=(",", ":")),

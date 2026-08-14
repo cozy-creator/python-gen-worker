@@ -29,6 +29,7 @@ from torch_compiled_graphs import (
     build_call_ingress,
     exported_input_name,
 )
+from torch_compiled_graphs.identity import toolchain_axis_digest
 
 from . import activity as activity_mod
 from . import aot_compile_pool, aot_serve, boot_phases
@@ -1780,7 +1781,6 @@ def _device_peak_provenance() -> Dict[str, str]:
     the RSS bank by) and adds it when banking. A fact belongs to whoever knows
     it first-hand.
     """
-    from . import cell_key
     from . import compile_cache as cc
 
     try:
@@ -1788,7 +1788,7 @@ def _device_peak_provenance() -> Dict[str, str]:
     except Exception:  # noqa: BLE001 — telemetry never fails a mint
         runtime = {}
     try:
-        toolchain = cell_key.toolchain_axis_digest(dict(cc.toolchain_digest()))
+        toolchain = toolchain_axis_digest(dict(cc.toolchain_digest()))
     except Exception:  # noqa: BLE001
         toolchain = ""
     try:

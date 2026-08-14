@@ -7,7 +7,9 @@ and the local CLI. Signature inspection lives here and nowhere else.
 from __future__ import annotations
 
 import collections.abc as cabc
+import hashlib
 import inspect
+import json
 import logging
 import types as py_types
 import typing
@@ -32,7 +34,6 @@ from .models.tensor_layout_contract import LAYOUT_KEY_ANY_COMPONENT
 from .warmup import validate_class_warmup
 import dataclasses
 from .api.compile_axis import warm_guidance_values
-from .cell_key import facts_digest
 from .api.export_contract import (
     declares_export_contract, register_export_declaration, registered_entry,
 )
@@ -139,7 +140,13 @@ class CompileCell:
         }
 
     def contract_digest(self) -> str:
-        return facts_digest(self.contract_facts())
+        encoded = json.dumps(
+            self.contract_facts(),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()
+        return hashlib.sha256(encoded).hexdigest()[:16]
 
 
 @dataclass(frozen=True)

@@ -83,8 +83,10 @@ from typing import (
 
 import sys
 
+from torch_compiled_graphs import is_compiled_graph_key
+
 from . import (
-    cell_key, dist_records, env_seal, guard_closure, hot_swap,
+    dist_records, env_seal, guard_closure, hot_swap,
     serve_posture, settings_authority,
 )
 from .api.errors import FatalError, RetryableError
@@ -162,7 +164,7 @@ def _cell_ref_identity(ref: str) -> str:
     family, flavor = parse_cell_ref(ref)
     if family and flavor:
 
-        if cell_key.is_key(flavor):
+        if is_compiled_graph_key(flavor):
             return f"{family}#{flavor}"
     return ref
 
@@ -746,7 +748,7 @@ def execution_lane_label(weight_lane: str, lora_bucket: int = 0) -> str:
     string already carries wins — it is what was actually traced.
 
     pgw#1040: this body existed twice, byte for byte, as
-    ``cell_key._canonical_execution_lane`` and
+    the former key module's private lane canonicalizer and
     ``aot_inputs.ExportSpec.execution_lane_label``; both were folded here.
     Since pgw#1059 the lane is store METADATA + discovery scoping, never a
     key axis — but the one-derivation rule stands for the same reason: a
@@ -1006,8 +1008,9 @@ def toolchain_digest() -> Tuple[Tuple[str, str], ...]:
     and for the two fences (B1 code-only + the pgw#1097 folding fence;
     ``env_seal.assert_seal_unchanged``) that close the routes around it.
     Folded here, every model-library patch release re-keyed every cell in
-    the fleet for a graph that had not moved. ``cell_key.toolchain_facts``
-    is the READER of the same membership, and the pair is what keeps one
+    the fleet for a graph that had not moved. TCG's
+    ``identity.toolchain_axis_digest`` is the READER of the same membership,
+    and the pair is what keeps one
     axis one derivation. Their versions stay RECORDED for forensics
     (:func:`_lib_versions`, ``artifact_metadata``'s ``libs`` block) — an
     observability fact, exactly like ``sku``.
@@ -1178,7 +1181,12 @@ def _semantic_cache_tag(pipeline: Any, cfg: Any) -> str:
         str(SEMANTIC_TAG_FORMAT), "inductor",
         str(getattr(cfg, "family", "") or ""), execution_lane,
         "regional" if bool(getattr(cfg, "regional", False)) else "whole",
-        cell_key.facts_digest(declared_compile_facts(cfg)),
+        hashlib.sha256(json.dumps(
+            declared_compile_facts(cfg),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()).hexdigest()[:16],
     ))
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 

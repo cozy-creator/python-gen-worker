@@ -26,7 +26,7 @@ from typing import Any, Dict, Mapping
 
 import pytest
 
-from gen_worker import boot_key, cell_key, fleet_cells
+from gen_worker import boot_key, child_contract, fleet_cells
 from gen_worker.api.binding import Hub
 from gen_worker.child_contract import CompileSpec, MintSlot
 
@@ -164,7 +164,7 @@ def test_an_unstamped_pipeline_states_no_subject_and_says_so() -> None:
     ``""`` is the honest answer and it UNDER-splits, which is why the executor
     stamps every subject it can (including, for that path, all of them)."""
     assert fleet_cells.pipeline_arm_subject(_Pipe()) == ()
-    assert cell_key.subject_digest(()) == ""
+    assert child_contract.subject_digest(()) == ""
     facts = fleet_cells.arm_identity("f", "", 0, _Cfg()).facts_dict()
     assert facts["subject"] == ""
 
