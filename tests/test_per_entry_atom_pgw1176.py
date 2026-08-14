@@ -129,7 +129,8 @@ def test_a_ck1_key_is_key_shaped_and_still_names_nothing() -> None:
 
 def test_one_artifact_carries_exactly_one_graph(tmp_path: Path) -> None:
     meta = entry_meta(*rig.ROWS[0])
-    assert meta["format"] == 3
+    assert (meta[aot.COMPILED_GRAPH_FORMAT_KEY]
+            == aot.COMPILED_GRAPH_FORMAT == 1)
     assert aot.verify_contract(meta) == ""
     entry = meta[cell_key.ENTRY_BLOCK_KEY]
     assert entry["name"] == rig.entry_name(*rig.ROWS[0])

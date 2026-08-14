@@ -199,7 +199,8 @@ def test_one_mint_packages_EVERY_declared_class_AS_ITS_OWN_ARTIFACT(
     assert all(r.metadata["manifest_digest"] == result.manifest
                for r in result.entries)
     for i, row in enumerate(result.entries):
-        assert row.metadata["format"] == 3
+        assert (row.metadata[aot_serve.COMPILED_GRAPH_FORMAT_KEY]
+                == 1)
         assert "entries" not in row.metadata
         with tarfile.open(row.artifact) as tar:
             tar.extractall(minted_cell["tmp"] / f"x{i}", filter="data")

@@ -119,7 +119,8 @@ class Cfg:
 
 
 META: Dict[str, Any] = {
-    "format": aot_serve.ARTIFACT_FORMAT, "kind": aot_serve.ARTIFACT_KIND,
+    aot_serve.COMPILED_GRAPH_FORMAT_KEY: aot_serve.COMPILED_GRAPH_FORMAT,
+    "kind": aot_serve.ARTIFACT_KIND,
     "family": "sdxl-base", "precision": "w8a8", "sku": "l4", "sm": "sm_89",
     "torch": "2.13.0+cu130", "cuda": "13.0",
     # This is now an ENTRY key and rides the marker's `entries` row,

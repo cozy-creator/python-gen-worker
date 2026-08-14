@@ -195,8 +195,8 @@ class ArmIdentity:
 # whole declaration, not about one graph class — so comparing it here would
 # compare a value the child can no longer state against one the parent can,
 # and refuse every handback by construction.
-ARM_ENVIRONMENT_FACTS = ("family", "format", "lane", "sm",
-                         "env_seal", "toolchain")
+ARM_ENVIRONMENT_FACTS = ("family", aot_serve.COMPILED_GRAPH_FORMAT_KEY,
+                         "lane", "sm", "env_seal", "toolchain")
 
 #: The SUBJECT half (pgw#1113): WHAT this obligation compiles, as opposed to
 #: what runtime it compiles on. ``subject`` is the resolved slot identity
@@ -308,15 +308,14 @@ def arm_identity(
         cfg, lora_bucket_override=int(lora_bucket or 0))
     facts = {
         "family": str(family or ""),
-        # THE producer's constant, read from the module that WRITES the value
-        # this is compared against (`aot_serve.entry_metadata` stamps
-        # `meta["format"]` from the same symbol). pgw#1230: this said
-        # `cc.ARTIFACT_FORMAT`, a DIFFERENT fact that merely shared the name —
-        # the torch-inductor-cache producer format (gw#391), which has been 2
-        # since 2026 and has nothing to do with the cell metadata schema. The
-        # two agreed by coincidence until pgw#1176 moved the real one to 3, and
-        # from that commit every freshly minted cell failed to arm.
-        "format": str(aot_serve.ARTIFACT_FORMAT),
+        # THE producer's constant AND its key name, both read from the module
+        # that WRITES them (`aot_serve.entry_metadata` stamps the same two
+        # symbols). pgw#1230: this said `cc.ARTIFACT_FORMAT`, a DIFFERENT fact
+        # that merely shared the name, and a fully compiled 4-class mint armed
+        # nothing. DESIGN-RULINGS §1.38b then QUALIFIED the axis name for that
+        # exact reason — a generic `format` is what let two epochs be compared.
+        aot_serve.COMPILED_GRAPH_FORMAT_KEY:
+            str(aot_serve.COMPILED_GRAPH_FORMAT),
         "lane": cc.execution_lane_label(
             str(weight_lane or ""), int(lora_bucket or 0)),
         "sm": sm,
@@ -1859,7 +1858,8 @@ def arm_axis_divergence(
     """
     child: Dict[str, str] = {
         "family": str(meta.get("family") or ""),
-        "format": str(meta.get("format") or ""),
+        aot_serve.COMPILED_GRAPH_FORMAT_KEY: str(
+            meta.get(aot_serve.COMPILED_GRAPH_FORMAT_KEY) or ""),
         "lane": cc.execution_lane_label(
             str(meta.get("weight_lane") or ""),
             int(meta.get("lora_bucket") or 0)),

@@ -46,7 +46,7 @@ def _meta(**over: Any) -> dict[str, Any]:
     """An artifact's ``metadata.json`` as ``aot_mint`` writes it: the stamped
     envelope PLUS the identity blocks ``shared_identity_blocks`` merges in."""
     meta: dict[str, Any] = {
-        "format": aot_serve.ARTIFACT_FORMAT,
+        aot_serve.COMPILED_GRAPH_FORMAT_KEY: aot_serve.COMPILED_GRAPH_FORMAT,
         "kind": aot_serve.ARTIFACT_KIND,
         "family": "micro",
         "cell_key": "aot-inductor:k1",

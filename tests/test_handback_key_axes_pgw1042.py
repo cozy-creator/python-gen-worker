@@ -49,7 +49,7 @@ _DECLARED_ENVELOPE = {
 def _arm_key(seal: Dict[str, Any], toolchain: Dict[str, Any]) -> fleet_cells.ArmIdentity:
     return fleet_cells.ArmIdentity(facts=tuple(sorted({
         "family": "micro-diffusion",
-        "format": str(aot_serve.ARTIFACT_FORMAT),
+        aot_serve.COMPILED_GRAPH_FORMAT_KEY: str(aot_serve.COMPILED_GRAPH_FORMAT),
         "lane": "w8a8-lora64",
         "sm": "sm_89",
         "envelope": cell_key.envelope_digest(_DECLARED_ENVELOPE),
@@ -62,7 +62,7 @@ def _envelope(seal: Dict[str, Any], toolchain: Dict[str, Any]) -> Dict[str, Any]
     return {
         "cell_key": "cg-key-v1-" + "e" * 56,
         "kind": "aot-inductor",
-        "format": str(aot_serve.ARTIFACT_FORMAT),
+        aot_serve.COMPILED_GRAPH_FORMAT_KEY: str(aot_serve.COMPILED_GRAPH_FORMAT),
         "family": "micro-diffusion",
         "weight_lane": "w8a8",
         "lora_bucket": 64,
@@ -97,7 +97,8 @@ def test_env_seal_divergence_is_named() -> None:
     ("sm", "sm_80", "sm"),
     ("family", "other-family", "family"),
     ("lora_bucket", 0, "lane"),
-    ("format", "1", "format"),
+    (aot_serve.COMPILED_GRAPH_FORMAT_KEY, "99",
+     aot_serve.COMPILED_GRAPH_FORMAT_KEY),
 ])
 def test_every_shared_axis_is_guarded(field: str, value: Any, axis: str) -> None:
     seal = _seal_dict()

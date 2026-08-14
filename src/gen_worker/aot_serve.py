@@ -145,11 +145,38 @@ RECAST_EVENT = "aot_input_recast"
 #: ``timesteps[i]``, a scalar VIEW at an odd element offset — makes the
 #: runner clone it per call. Not a knob: it is the compiler's constant.
 AOTI_ALIGNMENT = 16
-#: Format 3 = ONE graph class per artifact (pgw#1176): the metadata carries
-#: one ``entry`` block instead of an ``entries`` map. Formats 1 and 2 are
-#: RETIRED — a format-2 cell cannot restate a per-entry identity, so the ck1
-#: corpus is purged in the coordinated re-key rather than migrated.
-ARTIFACT_FORMAT = 3
+#: THE compiled-graph artifact metadata/package version. v1 = ONE graph class
+#: per artifact: the metadata carries one ``entry`` block, never an ``entries``
+#: map.
+#:
+#: DESIGN-RULINGS §1.38b (Paul, 2026-08-13): *"we are pre-launch, so we should
+#: be on v1 for everything, including our compiled-graph format."* The version
+#: records the FIRST CONTRACT WE SHIP, not the number of abandoned internal
+#: prototypes — carrying the old `ARTIFACT_FORMAT = 3` forward would turn
+#: pre-launch history into a permanent public constraint for no benefit. The
+#: surviving compiled-graph boundaries each begin at their own v1 and are
+#: INDEPENDENT: `cg-key-v1` (key grammar), this (artifact metadata/package),
+#: the manifest schema, the local CAS record schema, and the hub's
+#: resolve/publish route. A future artifact v2 does not make the key grammar
+#: v2.
+#:
+#: HARD CUT, not compatibility: formats 1/2/3 of the deleted cell/bundle
+#: implementations have no reader here. There is no 3->1 mapping and no
+#: accepted set — an artifact of a retired format is REFUSED BY NAME
+#: (`verify_declared`), which is what makes a v1 reader unable to consume one.
+#: The window is real and was measured before this shipped: `cell_store` held
+#: 0 rows and no `cg-key-v1` object existed anywhere durable.
+#:
+#: The name is QUALIFIED on purpose. §1.38b: *"use qualified names such as
+#: `compiled_graph_format`, never the generic `format` that let pgw#1230
+#: compare the AOT package schema with an unrelated torch-inductor
+#: semantic-cache epoch."* That collision cost a fully compiled 4-class mint.
+COMPILED_GRAPH_FORMAT = 1
+
+#: The metadata KEY the value above is stamped under, and the arm axis name.
+#: One symbol so the stamp and the comparison cannot drift into two spellings
+#: — the pgw#1230 failure mode, one level up.
+COMPILED_GRAPH_FORMAT_KEY = "compiled_graph_format"
 #: Separator between the entry name and the constant FQN in
 #: ``constants.safetensors`` keys. Entry names never contain it (targets are
 #: dotted identifiers; coordinate values are ints/bools/identifiers).
@@ -636,6 +663,13 @@ def class_hash(
         # canonical form.
         facts["placement"] = placement
     blob = json.dumps(facts, sort_keys=True, separators=(",", ":")).encode()
+    # 64 bits, DERIVED (pgw#1232, §1.38b review). THIS is the `graph` axis of a
+    # `cg-key-v1` key — the second of its two 64-bit chokepoints, the other
+    # being `graph_hash._DIGEST_HEX`, which produces one of the facts above.
+    # The axis has the MINIMUM of the two, so a widening moves both or neither;
+    # `graph_hash` carries the birthday derivation (P ~= N^2/2^65: ~3e-12 at
+    # 10^4 classes, ~3e-8 at 10^6). Kept at v1 deliberately rather than
+    # inherited.
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
@@ -737,7 +771,7 @@ def entry_metadata(
         name, entry, strict=bool(strict_export),
         lora_bucket=int(lora_bucket or 0))
     meta: Dict[str, Any] = {
-        "format": ARTIFACT_FORMAT,
+        COMPILED_GRAPH_FORMAT_KEY: COMPILED_GRAPH_FORMAT,
         "kind": ARTIFACT_KIND,
         **runtime_key(),
         "family": str(family or ""),
@@ -782,7 +816,7 @@ def entry_metadata(
 #: presented as cost, not as an error. ``fleet_cells`` now asserts at import
 #: that nothing it strips appears here.
 DECLARED_AXES: Tuple[str, ...] = (
-    "format", "kind", "package_constants_in_so",
+    COMPILED_GRAPH_FORMAT_KEY, "kind", "package_constants_in_so",
     "constant_folding_fenced", *IDENTITY_AXES,
     "host_isa", "family",
 )
@@ -808,8 +842,10 @@ def verify_declared(meta: Dict[str, Any], *, family: str = "") -> str:
     (``compile_cache.verify``) carried the identical hard sku pin and shed it
     in the ck3 wave; this is the same defect on the exported lane.
     """
-    if int(meta.get("format") or 0) != ARTIFACT_FORMAT:
-        return f"format {meta.get('format')!r} != {ARTIFACT_FORMAT}"
+    stated = meta.get(COMPILED_GRAPH_FORMAT_KEY)
+    if int(stated or 0) != COMPILED_GRAPH_FORMAT:
+        return (f"{COMPILED_GRAPH_FORMAT_KEY} {stated!r} != "
+                f"{COMPILED_GRAPH_FORMAT}")
     if str(meta.get("kind") or "") != ARTIFACT_KIND:
         return f"kind {meta.get('kind')!r} != {ARTIFACT_KIND}"
     # A weights-baked artifact is refused OUTRIGHT, never merely warned
@@ -3472,7 +3508,8 @@ def unwrap(pipeline: Any) -> bool:
 
 __all__ = [
     "AdoptOutcome",
-    "ARTIFACT_FORMAT",
+    "COMPILED_GRAPH_FORMAT",
+    "COMPILED_GRAPH_FORMAT_KEY",
     "ARTIFACT_KIND",
     "ArtifactContract",
     "ArtifactRunner",

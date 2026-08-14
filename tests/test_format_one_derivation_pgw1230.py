@@ -3,8 +3,9 @@
 THE DEFECT, and why nothing caught it. Two different facts shared the name
 ``ARTIFACT_FORMAT`` in two modules:
 
-  * ``aot_serve.ARTIFACT_FORMAT``   — the AOT cell metadata schema. The CHILD
-    stamps it into every artifact (``aot_serve.entry_metadata``).
+  * ``aot_serve.COMPILED_GRAPH_FORMAT`` (then spelled ``ARTIFACT_FORMAT``) —
+    the compiled-graph metadata schema. The CHILD stamps it into every
+    artifact (``aot_serve.entry_metadata``).
   * ``compile_cache.ARTIFACT_FORMAT`` — the torch-inductor-cache PRODUCER
     format (gw#391), an ingredient of the JIT semantic cache tag and nothing
     to do with cell metadata.
@@ -109,7 +110,8 @@ def test_the_stamp_and_the_computed_format_are_the_same_value(
         family=_Cfg.family, precision="w8a8", cell_key="", name="x",
         entry=_child_meta()[cell_key.ENTRY_BLOCK_KEY],
     )
-    assert parent.facts_dict()["format"] == str(stamped["format"])
+    k = aot_serve.COMPILED_GRAPH_FORMAT_KEY
+    assert parent.facts_dict()[k] == str(stamped[k])
 
 
 def test_a_freshly_minted_cell_arms_in_the_tree_that_minted_it(
@@ -134,11 +136,13 @@ def test_a_divergent_format_is_still_refused_by_name(
     fix removes the DISAGREEMENT, never the detection — a cell of a foreign
     schema must still be refused loudly rather than armed hopefully."""
     parent = fleet_cells.arm_identity(_Cfg.family, "", 0, _Cfg())
-    foreign = dict(_child_meta(), format=aot_serve.ARTIFACT_FORMAT + 1)
+    foreign = dict(_child_meta())
+    foreign[aot_serve.COMPILED_GRAPH_FORMAT_KEY] = (
+        aot_serve.COMPILED_GRAPH_FORMAT + 1)
     got = fleet_cells.arm_axis_divergence(parent, foreign)
-    assert got.startswith("format: ")
-    assert str(aot_serve.ARTIFACT_FORMAT + 1) in got
-    assert str(aot_serve.ARTIFACT_FORMAT) in got
+    assert got.startswith(aot_serve.COMPILED_GRAPH_FORMAT_KEY + ": ")
+    assert str(aot_serve.COMPILED_GRAPH_FORMAT + 1) in got
+    assert str(aot_serve.COMPILED_GRAPH_FORMAT) in got
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +160,7 @@ def test_exactly_one_module_defines_an_artifact_format(
     definers = sorted(
         path.name
         for path in SRC.rglob("*.py")
-        if re.search(r"^ARTIFACT_FORMAT\s*=", path.read_text(), re.M)
+        if re.search(r"^COMPILED_GRAPH_FORMAT\s*=", path.read_text(), re.M)
     )
     assert definers == ["aot_serve.py"], definers
 
@@ -169,7 +173,9 @@ def test_the_inductor_cache_format_is_not_called_a_format_of_the_artifact(
     name that let it be read as the cell schema."""
     assert cc.SEMANTIC_TAG_FORMAT == 2
     assert not hasattr(cc, "ARTIFACT_FORMAT")
-    assert aot_serve.ARTIFACT_FORMAT == 3
+    assert not hasattr(aot_serve, "ARTIFACT_FORMAT")  # 1.38b hard cut
+    assert aot_serve.COMPILED_GRAPH_FORMAT == 1
+    assert aot_serve.COMPILED_GRAPH_FORMAT_KEY == "compiled_graph_format"
 
 
 def test_no_module_computes_the_format_axis_from_a_second_source(
@@ -181,7 +187,8 @@ def test_no_module_computes_the_format_axis_from_a_second_source(
     was not WRONG about the format, it was asking a different module.
     """
     text = (SRC / "fleet_cells.py").read_text()
-    assert '"format": str(aot_serve.ARTIFACT_FORMAT)' in text
+    assert "aot_serve.COMPILED_GRAPH_FORMAT_KEY:" in text
+    assert "str(aot_serve.COMPILED_GRAPH_FORMAT)" in text
     # CODE only — the comment above that line names the old symbol on purpose,
     # because a reader who does not know what it was cannot see why this one
     # is spelled the way it is.

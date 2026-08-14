@@ -119,7 +119,8 @@ def _meta(**over: Any) -> Dict[str, Any]:
     # multi-entry envelope is a shape production cannot produce.
     entry = over.pop("entry", None) or _entry()
     m: Dict[str, Any] = {
-        "format": aot_serve.ARTIFACT_FORMAT, "kind": aot_serve.ARTIFACT_KIND,
+        aot_serve.COMPILED_GRAPH_FORMAT_KEY: aot_serve.COMPILED_GRAPH_FORMAT,
+        "kind": aot_serve.ARTIFACT_KIND,
         **RUNTIME, "family": FAMILY, "precision": "w8a8",
         "cell_key": KEY, cell_key_mod.ENTRY_BLOCK_KEY: entry,
         "strict_export": True, "lora_bucket": 0,

@@ -27,7 +27,7 @@ from typing import Any, Dict, Mapping
 
 import pytest
 
-from gen_worker import boot_key, cell_key, fleet_cells, local_cell_store
+from gen_worker import aot_serve, boot_key, cell_key, fleet_cells, local_cell_store
 from gen_worker.api.binding import Hub
 from gen_worker.child_contract import CompileSpec, MintSlot
 
@@ -210,7 +210,8 @@ def test_a_subject_difference_is_not_a_handback_divergence() -> None:
     facts = arm.facts_dict()
     meta: Dict[str, Any] = {
         "family": facts["family"],
-        "format": facts["format"],
+        aot_serve.COMPILED_GRAPH_FORMAT_KEY:
+            facts[aot_serve.COMPILED_GRAPH_FORMAT_KEY],
         "weight_lane": "",
         "lora_bucket": 0,
         "sm": facts["sm"],
