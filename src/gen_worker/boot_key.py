@@ -511,8 +511,8 @@ def graph_witnesses_of(
     Read off the blocks rather than recomputed: the witness is stamped where
     the program is, by ``aot_mint.keying_block``, and a second derivation here
     would be the same two-implementations hazard :func:`fold` refuses for the
-    key itself. A block that carries none yields ``""`` — and an empty witness
-    is what ``aot_identity.verify_graph_witness`` refuses on, never skips.
+    key itself. A block that carries none yields ``""`` and cannot restate the
+    selected TCG graph-class identity.
     """
     return {
         str(name): str((block or {}).get("graph_witness") or "")

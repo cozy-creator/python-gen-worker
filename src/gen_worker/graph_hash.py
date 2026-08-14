@@ -6,9 +6,8 @@ folded input to the key. ``aot_serve.class_hash`` (facts v3) folds
 ``graph_witness`` so the ``graph`` axis (``combined_graph_hash`` over
 ``class_hash``) is the traced COMPUTATION, not merely the traced ingress: two
 different computations behind one declaration key APART. The witness also stays
-recorded as a top-level sibling and is compared at adopt time by
-``aot_identity.verify_graph_witness`` — the fail-closed backstop that catches
-any residual witness-blind collision (defense-in-depth).
+recorded as a top-level sibling so TCG admission can refuse artifact metadata
+that does not restate the selected graph-class identity.
 
 Cell identity is the digest of the TRACED graph, never a hash over code: the
 axes that used to stand in for it (``family``, ``lane``, ``mode``, ``contract``,

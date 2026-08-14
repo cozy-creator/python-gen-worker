@@ -59,7 +59,6 @@ src/gen_worker/entrypoint.py::$var VIOLATION writes TORCHINDUCTOR_CACHE_DIR/TRIT
 
 src/gen_worker/topology.py::<unresolved> VIOLATION binds the WHOLE environment as the default source and reads WORKER_EXECUTION_TOPOLOGY out of it. The hub-delivered topology has no Settings field; absent is legal and means one slot, so a misspelling silently serves one card on a multi-GPU pod.
 src/gen_worker/aot_compile_pool.py::<unresolved> IPC seeds the AOT entry child's env from this process's (TORCHINDUCTOR_CACHE_DIR, seal memo). Parent-to-child handoff; the inherited base is the denylist shape above.
-src/gen_worker/mint_process.py::<unresolved> IPC seeds the mint child's env, then sets GEN_WORKER_MINT_CHILD. Same handoff shape.
 src/gen_worker/boot_key.py::<unresolved> IPC seeds the boot-TRACE child's env — PYTHONPATH is rewritten so the package root leads and PYTHONSAFEPATH removes the cwd (pgw#840's failure at the boot seam). Byte-for-byte aot_compile_pool.child_env's shape; it reads NO config value and DECIDES nothing (K comes from the cgroup's cpu.max, never from an env).
 src/gen_worker/runtimes/server.py::<unresolved> IPC seeds an engine-server subprocess's env. The engine is a third-party binary configured by environment; there is no other API.
 src/gen_worker/subproc.py::<unresolved> IPC seeds a per-invoke subprocess's env in order to set GEN_WORKER_CONFIG_SNAPSHOT_PATH. §1.18 ownership test FAILS with its sibling at :144 - the snapshot path originates in Settings.
@@ -127,7 +126,6 @@ src/gen_worker/convert/clone.py::COZY_CONVERT_WORKDIR STANDALONE COZY_CONVERT_WO
 src/gen_worker/convert/ingest.py::COZY_CLONE_DOWNLOAD_ATTEMPTS STANDALONE COZY_CLONE_DOWNLOAD_ATTEMPTS, convert-tool retry count.
 src/gen_worker/models/download.py::COZY_CIVITAI_DOWNLOAD_ATTEMPTS STANDALONE COZY_CIVITAI_DOWNLOAD_ATTEMPTS, provider retry count.
 src/gen_worker/net.py::$name STANDALONE COZY_HTTP_*_TIMEOUT_S. Documented as "read from env on every call (test-tunable)" - i.e. env used as a TEST SEAM, which is what loader `init_kwargs` exists for. Worth fixing; it is the last piece of prose from the old 5-file exception list that is still true.
-src/gen_worker/compiled_graph_store.py::GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR STANDALONE GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR, the local compiled-graph store root: a path relocation like TENSORHUB_CACHE_DIR and a cross-repo contract with cozy-local.
 src/gen_worker/video_encode.py::GEN_WORKER_VIDEO_ENCODE_CONCURRENCY STANDALONE GEN_WORKER_VIDEO_ENCODE_CONCURRENCY, encode fan-out.
 src/gen_worker/models/native_kernels.py::GEN_WORKER_NATIVE_KERNELS VIOLATION GEN_WORKER_NATIVE_KERNELS. th#1887: NOT standalone — a serving-path rollout gate, not a CLI. Now also registered in BEHAVIOUR_GATES; deletion target pending a release-declaration check.
 
@@ -169,8 +167,7 @@ src/gen_worker/aot_mint.py::PODGUARD_STATE TRIPWIRE External watchdog adapter wi
 #
 # ...but only together with a MEASURED declaration count. Zero fleet
 # declarations is what licenses a deletion, and it is a fact you query, not one
-# you infer from the code — `GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF` looks identical
-# to its deleted sibling in this file and is LIVE on the standing hub.
+# you infer from the code.
 #
 # VERDICTS (declaration counts measured on the standing hub 2026-08-03):
 #
@@ -185,10 +182,10 @@ src/gen_worker/aot_mint.py::PODGUARD_STATE TRIPWIRE External watchdog adapter wi
 #     GEN_WORKER_EAGER_FIRST_BOOT       pgw#671 eager-first is now unconditional
 #     GEN_WORKER_AOT_WRAPPER_SPLIT_OFF  v1 ctor-split is now unconditional
 #
+#   DELETED by pgw#1232 — pre-launch hard cut with the implementation:
+#     GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF TCG owns the one runner implementation
+#
 #   NOT DELETED, and each for a stated reason:
-#     GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF LIVE: 5 SDXL releases declare it, 1
-#             endpoint carries a non-deleted entry. Deleting it changes a
-#             running endpoint.
 #     GEN_WORKER_HOST_MOVE_GUARD        ruled exception: safety guard, on by
 #             default, named threat, documented. Do not touch.
 #     GEN_WORKER_PROBE / _PUBLISH_ARMED security boundary; deliberately NOT a

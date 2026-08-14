@@ -2270,9 +2270,8 @@ def keying_block(
     (identical signature, symbol ranges, pytree spec, constant FQNs and
     declared envelope) from 112- and 102-node graphs, one key, two artifacts.
     The witness closes that at the key: two bodies key apart, a collision is a
-    MISS (eager + mint). It stays a top-level field for the adopt backstop
-    (``aot_identity.verify_graph_witness``, defense-in-depth), which refuses a
-    materialized cell whose recorded witness is not this pod's graph.
+    MISS (eager + mint). It stays a top-level field so TCG admission can refuse
+    artifact metadata that does not restate the selected graph-class identity.
     """
     inputs, symbols = aot_package.input_contract(program, flat_leaves)
     block: Dict[str, Any] = {

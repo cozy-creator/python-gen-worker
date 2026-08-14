@@ -78,6 +78,7 @@ def _trace(
     from harness import rig_vehicles
 
     from gen_worker import aot_mint, fleet_cells
+    from gen_worker.api.export_contract import export_declaration
     from gen_worker.cli.run import run_setup
     from gen_worker.child_preflight import pick_compile_target
     from gen_worker.registry import collect_endpoints
@@ -91,7 +92,7 @@ def _trace(
         return_loaded=True) or {}
     _slot, pipeline = pick_compile_target(loaded, cfg)
     export_spec = fleet_cells.aot_export_spec(pipeline, cfg)
-    decl = aot_mint.export_declaration(export_spec.family)
+    decl = export_declaration(export_spec.family)
     blocks: Dict[str, Any] = {}
     for traced in aot_mint.trace_for_key(pipeline, export_spec, decl):
         blocks[traced.name] = traced.block

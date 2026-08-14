@@ -41,7 +41,7 @@ from __future__ import annotations
 import ast
 import sys
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO / "src" / "gen_worker"
@@ -282,10 +282,9 @@ BEHAVIOUR_GATES: Dict[Tuple[str, str], str] = {
     # hot-path modules. They are registered here rather than deleted because
     # deletion needs one fact this box cannot produce: whether any published
     # release DECLARES the variable in `endpoint_env_entries`. That is not
-    # hypothetical — GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF above is declared by
-    # five live SDXL releases, so "nothing sets it" is a hub query, not an
-    # assumption. Deleting a declared switch is exactly the
-    # GEN_WORKER_PREFER_AOT failure this whole gate exists to prevent.
+    # hypothetical: declaration counts remain hub facts, not source guesses.
+    # The AOT run-implementation switch named here previously was hard-cut
+    # together with its implementation by pgw#1232.
     # ---------------------------------------------------------------------
     ("src/gen_worker/models/native_kernels.py", "GEN_WORKER_NATIVE_KERNELS"):
         "th#1887 DELETION TARGET, pending a declaration check. Tri-state "
@@ -438,18 +437,24 @@ class BehaviourVisitor(ast.NodeVisitor):
             tainted: Dict[str, Tuple[int, str]] = {}
             for node in ast.walk(scope):
                 targets: List[ast.expr] = []
+                value: Optional[ast.expr] = None
                 if isinstance(node, ast.Assign):
                     targets = node.targets
+                    value = node.value
                 elif isinstance(node, ast.AnnAssign) and node.value is not None:
                     targets = [node.target]
+                    value = node.value
                 if len(targets) != 1 or not isinstance(targets[0], ast.Name):
                     continue
-                if node.value is None:
+                if value is None:
                     continue
-                peeled = _peel_scalar(node.value)
+                peeled = _peel_scalar(value)
                 name = _env_read_name(peeled, consts)
                 if name is not None:
-                    tainted[targets[0].id] = (peeled.lineno, name)
+                    tainted[targets[0].id] = (
+                        int(getattr(peeled, "lineno", 0)),
+                        name,
+                    )
             if not tainted:
                 continue
             for node in ast.walk(scope):

@@ -42,9 +42,9 @@ honest granularity that test admits THREE axes and no more:
                   byte-identical keying block, one key, two artifacts; post-fix
                   two keys. A residual collision (a witness-blind or hash-broken
                   entry) is still caught belt-and-braces: every entry records a
-                  ``graph_witness`` top-level sibling and the adopt path refuses
-                  a cell whose witness is not the graph this pod traced
-                  (``aot_identity.verify_graph_witness``).
+                  ``graph_witness`` top-level sibling and TCG admission refuses
+                  artifact metadata whose class identity does not restate its
+                  selected compiled-graph key.
     sm            compute capability (sm_89, ...) — the GPU architecture.
     toolchain     "the compiler stack AS WE CONFIGURE IT" (amendment 4):
                   CONTENT digest of the compile stack (pgw#710 dist-info

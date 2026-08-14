@@ -144,8 +144,7 @@ _DERIVATION_ALLOWLIST = {
     # two ends can disagree about membership.
     "toolchain_axis_digest(": {
         "cell_key.py",     # def (+ toolchain_facts)
-        "fleet_cells.py",  # arm_identity + arm_axis_divergence
-        "aot_identity.py",  # artifact_identity (the wire fact)
+        "fleet_cells.py",  # arm_identity is the worker obligation projection
         # pgw#1205: the device-peak census's provenance. Added CONSCIOUSLY,
         # which is what this fence's own message offers as the alternative to
         # reading a stamped value — and here there is no stamped value to
