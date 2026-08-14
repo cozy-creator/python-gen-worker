@@ -63,8 +63,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import msgspec
 
-from . import boot_phases, cell_key, compile_cache as cc
-from .child_contract import CompileSpec, MintSlot, slot_subjects
+from . import boot_phases, compile_cache as cc
+from .child_contract import CompileSpec, MintSlot, slot_subjects, subject_facts
 from .postmortem import cpu_quota_cores, effective_cpu_count
 
 logger = logging.getLogger(__name__)
@@ -317,7 +317,7 @@ def closure_digest(
             "guidance": sorted(float(v) for v in cfg.guidance_scales),
             "lora_bucket": int(cfg.lora_bucket or 0),
         },
-        "subject": cell_key.subject_facts(slot_subjects(dict(slots or {}))),
+        "subject": subject_facts(slot_subjects(dict(slots or {}))),
     }
     blob = json.dumps(facts, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(blob).hexdigest()[:32]
