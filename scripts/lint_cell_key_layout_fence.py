@@ -1,40 +1,21 @@
 #!/usr/bin/env python3
-"""CONVERSION IS UPSTREAM OF COMPUTE — no cell re-keys.
+"""CONVERSION IS UPSTREAM OF COMPUTE — compiled graphs never key on layout.
 
-    Every byte the endpoint's loader/`setup()` observes is in one of the slot's
-    DECLARED accepted layouts. Conversion completes strictly before
-    materialization into the worker's snapshot tree, and the endpoint has no code
-    path that can observe the source layout, the conversion, or its provenance.
-    Therefore the traced graph, `Compile.contract_axes()`, the ck1 cell key and
-    the declared envelope are unchanged by any conversion, and no cell re-keys —
-    ever.
+Every byte the endpoint loader observes is already in one of the slot's
+declared layouts.  Conversion completes before materialization into the
+worker's snapshot tree, so neither TCG's graph-class declaration nor its
+runtime identity may observe layout demand, conversion, or provenance.
 
-Two fences, both structural:
+Two structural fences enforce that boundary:
 
-**FENCE 1 — no cell-key axis reads the layout vocabulary.** The fenced module
-set is DERIVED, not hand-listed: any module that calls a cell-key axis producer
-(`cell_key.from_axes`, `envelope_digest`, `toolchain_axis_digest`,
-`facts_digest`, `from_entry_metadata`, or constructs `CellKey`) is
-in it, plus `cell_key` itself. A new module that starts computing a key joins
-the fence automatically — the failure mode of a hand-maintained list is that the
-one file that violates the rule is the one nobody added.
-
-Inside the fence, referencing the DEMAND / CONVERSION half of the layout
-vocabulary is red: the `layout_converters` module, `Slot.layouts`, `LayoutId`,
-the planner, the verdict, the provenance. Whether by import, by attribute, or by
-a string naming the module — a deferred `importlib.import_module` is the obvious
-way around an import check, so strings count.
-
-Deliberately NOT banned: `@implements_contract` and `ContractDecoder`. Those are
-the DECODER CENSUS half of the same module — "which decoders does this image
-contain" — which is a property of the wheel that legitimately reaches the
-toolchain closure. The banned set is the demand/conversion half.
-
-**FENCE 2 — the compatibility RELATION holds no format knowledge.** The
-extensibility invariant: contract CONTENTS evolve; the compatibility RELATION
-never does. So the functions that compute the rung must contain zero literal
-contract handles. A handle literal appearing there is the first line of a
-per-format special case; it is also the shape a similarity heuristic arrives in.
+1. Modules that call TCG's canonical declaration/runtime/identity producers,
+   or the worker's sole ``tcg_graph_class_spec`` bridge, are discovered from
+   their imports and calls.  In those modules the demand/conversion vocabulary
+   is forbidden.  TCG remains the only identity implementation; this script
+   contains no key arithmetic.
+2. The layout compatibility relation contains no concrete contract handle.
+   Contract contents may evolve, but the relation never gains per-format
+   branches.
 
 Run::
 
@@ -53,36 +34,27 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 REPO = Path(__file__).resolve().parents[1]
 SRC = REPO / "src" / "gen_worker"
 
-#: Calling one of these MAKES a module a cell-key axis producer. Narrow on
-#: purpose: `facts_digest` and `subject_digest` are generic canonical-digest
-#: helpers whose callers say so (`contract_facts`: "NOT a key-axis input";
-#: `subject_digest` names a MINT OBLIGATION, never a cell key), so probing on
-#: them would fence modules that compute no key and make the gate noise.
-# A fence that names a DELETED symbol guards nothing and passes vacuously
-# forever. After ANY rename, re-read every fence and ask what symbol it names
-# NOW.
-#
-# `envelope_digest` is deliberately absent: the envelope is a MANIFEST fact,
-# not a key axis, so fencing on it would fence modules that compute no key —
-# exactly the noise the note above says to avoid.
-AXIS_PRODUCERS: Tuple[str, ...] = (
+# These are TCG 0.4's public inputs to graph declaration and compiled-graph
+# identity.  The symbol guard resolves them against the installed TCG package,
+# so an API rename cannot leave this fence green and vacuous.
+TCG_PRODUCERS: Tuple[str, ...] = (
+    "CompiledGraphKey",
+    "GraphClassDeclaration",
+    "GraphClassSpec",
+    "RuntimeCompatibility",
+    "from_artifact_metadata",
     "from_axes",
     "toolchain_axis_digest",
-    "from_entry_metadata",
-    "CellKey",
 )
+TCG_MODULE_PREFIX = "torch_compiled_graphs"
 
-#: Always fenced, whatever they call: they DEFINE the key or one of its THREE
-#: axis inputs (graph / sm / toolchain). The envelope is not one of them.
-FENCE_SEED: Tuple[str, ...] = (
-    "cell_key.py",
-    "env_seal.py",
-    "host_isa.py",
-    "guard_closure.py",
-    "compile_cache.py",
-)
+# The worker has one translation from an exported row into GraphClassSpec.
+# Both mint and boot must call it rather than restating declaration inputs.
+WORKER_DECLARATION_BRIDGES: Tuple[str, ...] = ("tcg_graph_class_spec",)
 
-#: The DEMAND / CONVERSION half of the layout vocabulary. Names.
+# The demand/conversion half of the layout vocabulary.  Decoder census symbols
+# are deliberately absent: which decoders a wheel contains is a legitimate
+# toolchain fact, while which layout a slot requests is not.
 BANNED_NAMES: Tuple[str, ...] = (
     "LayoutId",
     "LayoutRung",
@@ -108,15 +80,12 @@ BANNED_NAMES: Tuple[str, ...] = (
     "CONVERSION_PROVENANCE_KEY",
 )
 
-#: Module paths that must not be reachable from a fenced module, including via
-#: a string handed to importlib.
 BANNED_MODULES: Tuple[str, ...] = (
     "gen_worker.convert.layout_converters",
     "convert.layout_converters",
     "layout_converters",
 )
 
-#: The functions that COMPUTE the rung. Fence 2 applies to their bodies.
 RELATION_MODULE = SRC / "convert" / "layout_converters.py"
 RELATION_FUNCTIONS: Tuple[str, ...] = (
     "classify_layout",
@@ -131,65 +100,101 @@ _HANDLE_LITERAL = re.compile(r"^[a-z0-9]+\.[a-z0-9][a-z0-9._-]*@[1-9][0-9]*$")
 
 
 def _iter_modules(root: Path) -> List[Path]:
-    return sorted(p for p in root.rglob("*.py"))
+    return sorted(root.rglob("*.py"))
 
 
-def _called_names(tree: ast.AST) -> Set[str]:
-    """Every callee's last name component in one module."""
-    out: Set[str] = set()
+def _root_name(node: ast.AST) -> str:
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else ""
+
+
+def _producer_calls(tree: ast.AST) -> Set[str]:
+    """Canonical producer symbols called by one module.
+
+    Imports are resolved first so aliases remain visible.  Merely importing a
+    producer does not fence a consumer that only handles a typed value; the
+    boundary is where declaration or identity inputs are actually assembled.
+    """
+
+    producers = set(TCG_PRODUCERS)
+    imported: Dict[str, str] = {}
+    modules: Dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module == TCG_MODULE_PREFIX or module.startswith(TCG_MODULE_PREFIX + "."):
+                for alias in node.names:
+                    local = alias.asname or alias.name
+                    if alias.name in producers:
+                        imported[local] = alias.name
+                    else:
+                        modules[local] = f"{module}.{alias.name}"
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == TCG_MODULE_PREFIX or alias.name.startswith(
+                    TCG_MODULE_PREFIX + "."
+                ):
+                    modules[alias.asname or alias.name.split(".", 1)[0]] = alias.name
+
+    hits: Set[str] = set()
+    bridges = set(WORKER_DECLARATION_BRIDGES)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        func = node.func
-        if isinstance(func, ast.Attribute):
-            out.add(func.attr)
-        elif isinstance(func, ast.Name):
-            out.add(func.id)
-    return out
+        function = node.func
+        if isinstance(function, ast.Name):
+            if function.id in imported:
+                hits.add(imported[function.id])
+            elif function.id in bridges:
+                hits.add(function.id)
+        elif isinstance(function, ast.Attribute):
+            if function.attr in bridges:
+                hits.add(function.attr)
+            elif function.attr in producers and _root_name(function) in modules:
+                hits.add(function.attr)
+    return hits
 
 
 def fenced_modules(root: Path = SRC) -> Dict[Path, str]:
-    """Modules the fence covers, mapped to WHY they are covered."""
-    out: Dict[Path, str] = {}
+    """Modules that assemble TCG declaration or identity inputs."""
+
+    fenced: Dict[Path, str] = {}
     for path in _iter_modules(root):
-        if path.name in FENCE_SEED and path.parent == root:
-            out[path] = "defines the cell key or one of its axis inputs"
-            continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except (OSError, SyntaxError):
             continue
-        hits = sorted(_called_names(tree) & set(AXIS_PRODUCERS))
+        hits = sorted(_producer_calls(tree))
         if hits:
-            out[path] = f"computes a cell-key axis ({', '.join(hits)})"
-    return out
+            fenced[path] = f"calls canonical compiled-graph producer(s): {', '.join(hits)}"
+    return fenced
 
 
 def _docstring_nodes(tree: ast.AST) -> Set[int]:
-    """Every docstring Constant, by id.
+    """Every docstring constant by identity; prose is not a reference."""
 
-    PROSE IS NOT A REFERENCE. A gate that reds on the word appearing in a
-    comment teaches lanes to avoid explaining themselves.
-    """
     out: Set[int] = set()
     for node in ast.walk(tree):
-        if not isinstance(node, (ast.Module, ast.ClassDef,
-                                 ast.FunctionDef, ast.AsyncFunctionDef)):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         body = getattr(node, "body", [])
-        if (body and isinstance(body[0], ast.Expr)
-                and isinstance(body[0].value, ast.Constant)
-                and isinstance(body[0].value.value, str)):
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
             out.add(id(body[0].value))
     return out
 
 
 def _violations(path: Path) -> List[Tuple[int, str]]:
-    """Layout-vocabulary references in one fenced module."""
-    text = path.read_text(encoding="utf-8")
-    tree = ast.parse(text)
+    """Layout-vocabulary references in one compiled-graph producer module."""
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     banned = set(BANNED_NAMES)
-    word = re.compile(r"\b(" + "|".join(re.escape(n) for n in BANNED_NAMES) + r")\b")
+    word = re.compile(r"\b(" + "|".join(re.escape(name) for name in BANNED_NAMES) + r")\b")
     docstrings = _docstring_nodes(tree)
     hits: List[Tuple[int, str]] = []
     for node in ast.walk(tree):
@@ -208,52 +213,65 @@ def _violations(path: Path) -> List[Tuple[int, str]]:
             hits.append((node.lineno, f".{node.attr}"))
         elif isinstance(node, ast.Name) and node.id in banned:
             hits.append((node.lineno, node.id))
-        elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                and id(node) not in docstrings):
-            # Non-docstring strings count: `getattr(slot, "layouts")`, a
-            # deferred `import_module("...layout_converters")` and a stringized
-            # annotation are the three ways around a name/import check.
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in docstrings
+        ):
             found = word.search(node.value)
             if node.value in BANNED_MODULES:
                 hits.append((node.lineno, f"string {node.value!r}"))
-            elif found and any(m in node.value for m in BANNED_MODULES):
+            elif found and any(module in node.value for module in BANNED_MODULES):
                 hits.append((node.lineno, f"string {node.value!r}"))
             elif found:
                 hits.append((node.lineno, f"string names {found.group(1)!r}"))
     return sorted(set(hits))
 
 
-def _relation_handle_literals() -> List[Tuple[int, str]]:
-    """Contract-handle literals inside the rung computation (fence 2)."""
-    tree = ast.parse(RELATION_MODULE.read_text(encoding="utf-8"))
+def _relation_handle_literals(
+    path: Path = RELATION_MODULE,
+) -> Tuple[List[Tuple[int, str]], Set[str]]:
+    """Concrete handles and missing named functions in the layout relation."""
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found: Set[str] = set()
     hits: List[Tuple[int, str]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef) or node.name not in RELATION_FUNCTIONS:
             continue
+        found.add(node.name)
         for inner in ast.walk(node):
-            if (isinstance(inner, ast.Constant)
-                    and isinstance(inner.value, str)
-                    and _HANDLE_LITERAL.match(inner.value)):
+            if (
+                isinstance(inner, ast.Constant)
+                and isinstance(inner.value, str)
+                and _HANDLE_LITERAL.fullmatch(inner.value)
+            ):
                 hits.append((inner.lineno, f"{node.name}: {inner.value!r}"))
-    return sorted(set(hits))
+    return sorted(set(hits)), set(RELATION_FUNCTIONS) - found
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--src", type=Path, default=SRC,
-        help="package root to sweep (default: src/gen_worker). Exists so the "
-             "gate's own RED can be executed against a tree that violates it — "
-             "a fence nobody has watched fail is a fence nobody knows works.")
+        "--src",
+        type=Path,
+        default=SRC,
+        help=(
+            "package root to sweep; retained so CI's exact entry point can be "
+            "red-proved against a synthetic violating tree"
+        ),
+    )
     args = parser.parse_args(argv)
     failures: List[str] = []
 
     fenced = fenced_modules(args.src)
     if not fenced:
-        print("FAIL: the fence covers NO module — the axis-producer probe is "
-              "stale, which makes this gate green for the wrong reason")
+        print(
+            "FAIL: no TCG declaration or identity producer is fenced; "
+            "the producer discovery is stale"
+        )
         return 1
-    print(f"fence 1: {len(fenced)} cell-key module(s)")
+    print(f"fence 1: {len(fenced)} compiled-graph producer module(s)")
     for path, why in sorted(fenced.items()):
         rel = path.relative_to(REPO) if path.is_relative_to(REPO) else path
         hits = _violations(path)
@@ -264,27 +282,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else:
             print(f"  [ok]   {rel} — {why}")
 
-    literals = _relation_handle_literals()
+    literals, missing = _relation_handle_literals()
     print(f"fence 2: {len(RELATION_FUNCTIONS)} relation function(s)")
-    if literals:
+    if missing:
+        failures.append(f"layout relation fence names missing functions: {sorted(missing)!r}")
+        print(f"  [FAIL] missing relation functions: {', '.join(sorted(missing))}")
+    elif literals:
         for line, what in literals:
             failures.append(
-                f"{RELATION_MODULE.relative_to(REPO)}:{line}: the compatibility "
-                f"RELATION names a format ({what})")
+                f"{RELATION_MODULE.relative_to(REPO)}:{line}: "
+                f"the compatibility relation names a format ({what})"
+            )
         print("  [FAIL] a handle literal reached the relation")
     else:
         print("  [ok]   no contract-handle literal in the relation")
 
     if failures:
-        print(f"\n§1.33 point 5 fence BROKEN ({len(failures)} violation(s)):")
-        for line in failures:
-            print(f"  - {line}")
+        print(f"\nconversion-before-compute fence BROKEN ({len(failures)} violation(s)):")
+        for failure in failures:
+            print(f"  - {failure}")
         print(
-            "\nConversion is UPSTREAM of compute. If a cell-key axis needs to "
-            "know the layout, the conversion is happening too late — move it "
-            "ahead of materialization instead of widening the key.")
+            "\nConversion is upstream of compute. Move layout handling before "
+            "materialization; never widen or locally restate compiled-graph identity."
+        )
         return 1
-    print("\n§1.33 point 5 fence holds: no cell re-keys on a conversion")
+    print("\nconversion-before-compute fence holds: compiled graphs never key on layout")
     return 0
 
 
