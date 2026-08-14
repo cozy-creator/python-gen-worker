@@ -154,7 +154,7 @@ def test_a_slot_with_bytes_and_no_identity_cannot_reach_the_child() -> None:
 def test_the_request_the_rig_hands_the_child_carries_a_resolved_slot(
     tmp_path: Path,
 ) -> None:
-    """Built through `mint_delegate.build_request` — the REAL parent chain, not
+    """Built through `mint_process.build_request` — the REAL parent chain, not
     a hand-written `MintRequest`. A hand-written request is the one shape the
     handoff can never produce, so it could not catch a handoff defect."""
     import msgspec

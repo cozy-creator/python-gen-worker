@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
-from gen_worker import fleet_cells, local_cell_store, local_serve, mint_delegate
+from gen_worker import fleet_cells, local_cell_store, local_serve, mint_supervisor
 from gen_worker.cell_adopt import AdoptOutcome
 from gen_worker.cli import run as cli_run
 from gen_worker.child_contract import MintSlot
@@ -237,7 +237,7 @@ def test_a_second_run_on_this_machine_arms_from_its_own_store_and_never_mints(
     that did exist could not address a ck1-keyed cell at all.
     """
     monkeypatch.setattr(
-        mint_delegate, "build_cell",
+        mint_supervisor, "supervise",
         lambda *a, **k: pytest.fail("a machine holding its own cell re-minted"))
     local_cell_store.store(
         _armable_artifact(tmp_path), key=KEY_A, family="micro-diffusion",
@@ -362,7 +362,7 @@ def test_a_pending_this_process_cannot_drive_is_ended_not_dropped(
     module cannot be handed to a child, and the obligation it would have
     discharged must not simply be forgotten."""
     monkeypatch.setattr(
-        mint_delegate, "build_cell",
+        mint_supervisor, "supervise",
         lambda *a, **k: pytest.fail("an undrivable pending spawned a child"))
     monkeypatch.setattr(
         fleet_cells.provision, "arm_aot",

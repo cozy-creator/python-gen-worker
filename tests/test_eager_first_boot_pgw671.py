@@ -48,7 +48,7 @@ from gen_worker import (
     worker_function,
 )
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells, guard_closure, hot_swap, mint_delegate
+from gen_worker import fleet_cells, guard_closure, hot_swap, mint_supervisor
 from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.executor import Executor
 from gen_worker.models.store import ModelStore
@@ -166,7 +166,7 @@ class _Harness:
         # side is what pgw#671 is about: READY at eager tier first, the tier
         # flipping only when the mint lands.
         monkeypatch.setattr(
-            mint_delegate, "build_cell", self._fake_build_cell)
+            mint_supervisor, "supervise", self._fake_build_cell)
         # The pgw#681 mint gate this simmed is deleted with the
         # `torch-inductor-cache` format whose metadata carried its manifest.
         self.ex = Executor(self.specs, _send, store=store)
@@ -190,14 +190,14 @@ class _Harness:
                 else:
                     # The parent pulled the plug mid-build: a real child is
                     # reaped and nothing is adopted.
-                    return mint_delegate.DelegatedResult(
-                        status=mint_delegate.ABANDONED, attempts=1,
+                    return mint_supervisor.SupervisedResult(
+                        status=mint_supervisor.ABANDONED, attempts=1,
                         detail="abandoned mid-build")
             else:
                 await asyncio.sleep(self.compile_delay_s)
         if self.compile_raises:
-            return mint_delegate.DelegatedResult(
-                status=mint_delegate.FAILED, attempts=1,
+            return mint_supervisor.SupervisedResult(
+                status=mint_supervisor.FAILED, attempts=1,
                 reason="synthetic_child_failure",
                 detail="synthetic inductor failure")
         minted = fleet_cells.SelfMint(
@@ -207,8 +207,8 @@ class _Harness:
         pending._state["minted"] = minted
         pending.target.parent.mkdir(parents=True, exist_ok=True)
         pending.target.write_bytes(b"stub-cell")
-        return mint_delegate.DelegatedResult(
-            status=mint_delegate.ADOPTED, minted=minted, attempts=1)
+        return mint_supervisor.SupervisedResult(
+            status=mint_supervisor.ADOPTED, minted=minted, attempts=1)
 
     # -- the compile-arm leaf ------------------------------------------------
 
@@ -408,7 +408,7 @@ def test_no_env_read_survives_in_the_eager_first_and_bg_yield_paths() -> None:
     kept two live gates after one was believed removed. So read the source.
     """
     import gen_worker.executor as _ex
-    import gen_worker.mint_delegate as _md
+    import gen_worker.mint_supervisor as _md
     import gen_worker.aot_wrapper_split as _ws
 
     src = "".join(

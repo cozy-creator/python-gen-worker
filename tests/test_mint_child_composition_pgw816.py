@@ -36,7 +36,7 @@ import pytest
 
 from gen_worker import child_preflight
 from gen_worker import child_contract
-from gen_worker import fleet_cells, mint_child, mint_delegate
+from gen_worker import fleet_cells, mint_child, mint_supervisor
 from gen_worker import mint_process as mp
 from gen_worker.api.binding import ModelRef, wire_ref
 from gen_worker.cli import run as cli_run
@@ -253,11 +253,11 @@ def test_the_parent_hands_its_resolved_overrides_across_the_wire(
         modules=("app",),
         slots={"pipeline": resolved},
     )
-    task = mint_delegate.MintTask(
+    task = mp.MintTask(
         pending=pending, pipe=object(), function="gen",
         modules=bg.modules, slots=dict(bg.slots),
         execution_lane="fp8-w8a16", device=0)
-    request = mint_delegate.build_request(
+    request = mp.build_request(
         task, workdir=tmp_path / "w")
 
     wire = msgspec.json.decode(msgspec.json.encode(request), type=mp.MintRequest)
@@ -414,7 +414,7 @@ def _fake_card(monkeypatch: pytest.MonkeyPatch) -> None:
         torch.cuda, "max_memory_allocated", lambda dev=0: resident + GIB)
 
 
-def _task(tmp_path: Path) -> mint_delegate.MintTask:
+def _task(tmp_path: Path) -> mp.MintTask:
     pending = fleet_cells.PendingSelfMint(
         family="sdxl", arm_token="ck1-abc", ref="root/family-sdxl#cg-key-v1-abc",
         cfg=CompileCell(shapes=((1024, 1024),), targets=("unet",),
@@ -423,7 +423,7 @@ def _task(tmp_path: Path) -> mint_delegate.MintTask:
                         text_lens=()),
         target=tmp_path / "cell.tar.gz", mint_root=tmp_path / "root", publisher=None, cache_dir=tmp_path,
         delegated=True)
-    return mint_delegate.MintTask(
+    return mp.MintTask(
         pending=pending, pipe=SimpleNamespace(), function="gen",
         modules=("harness.toy_endpoints",), weight_lane="fp8", device=0)
 
@@ -439,57 +439,18 @@ class _Act:
         pass
 
 
-def test_a_classified_child_crash_is_not_retried(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _stub_child: None,
-) -> None:
-    """Two identical 8.5 s crashes bought nothing on the real L4.
-
-    A child that wrote a ``status="failed"`` report caught its own exception,
-    named it, and did so from the same request file against the same on-disk
-    inputs — attempt 2 re-runs it exactly. Only a death the child could NOT
-    classify (no report: signal, OOM-killer, stall kill) can differ next time,
-    and a genuine resource shortfall exits ``EXIT_RESOURCE``, which still
-    retries.
-    """
-    _fake_card(monkeypatch)
-    seen: List[tuple] = []
-    monkeypatch.setattr(
-        mint_delegate.activity_mod, "emit_event",
-        lambda kind, detail, phase="", **kw: seen.append((kind, phase, detail)))
-    monkeypatch.setattr(
-        fleet_cells.activity_mod, "emit_event",
-        lambda kind, detail, phase="", **kw: seen.append((kind, phase, detail)))
-
-    monkeypatch.setenv("MINT_STUB_MODE", "failed")
-    result = asyncio.run(mint_delegate.build_cell(
-        _task(tmp_path), act=_Act(), max_attempts=3))
-    assert result.status == mint_delegate.FAILED
-    assert result.attempts == 1, (
-        "a load failure the child already classified must not buy a second "
-        "billed compile of the same failure")
-
-    aborts = [e for e in seen if e[0] == "self_mint_abort"]
-    assert aborts and aborts[0][1] == "delegated_crashed"
-    assert "deterministic" in aborts[0][2], (
-        "the wire must say WHY there was no second attempt")
-    assert "kept serving eager" in aborts[0][2]
-
-
-def test_an_unclassified_death_still_gets_its_retry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _stub_child: None,
-) -> None:
-    """The complement, so the fix narrows the retry rather than removing it:
-    a child that died without classifying itself is still worth one more."""
-    _fake_card(monkeypatch)
-    monkeypatch.setattr(
-        mint_delegate.activity_mod, "emit_event", lambda *a, **k: None)
-    monkeypatch.setattr(
-        fleet_cells.activity_mod, "emit_event", lambda *a, **k: None)
-    monkeypatch.setenv("MINT_STUB_MODE", "crash")
-    result = asyncio.run(mint_delegate.build_cell(
-        _task(tmp_path), act=_Act(), max_attempts=2))
-    assert result.status == mint_delegate.FAILED
-    assert result.attempts == 2
+# `test_a_classified_child_crash_is_not_retried` and
+# `test_an_unclassified_death_still_gets_its_retry` are CONSOLIDATED, not
+# ported (§4.34). They drove the retry policy through
+# `mint_delegate.build_cell`, which pgw#1215 step 4 deleted along with the
+# one-shot child it spawned. The policy itself survives verbatim on the
+# supervisor's accretion loop — a deterministic refusal costs one attempt, a
+# resource shortfall gets another — and is asserted there, against the process
+# that now makes the decision:
+# `tests/test_mint_supervisor_pgw1215.py::test_a_named_refusal_is_never_retried`
+# and `::test_a_resource_shortfall_gets_exactly_one_more_attempt`. The rule
+# below (the CHILD's own classification, which is what this file is about) is
+# unchanged and still tested.
 
 
 def test_the_retry_classification_reads_the_child_report() -> None:

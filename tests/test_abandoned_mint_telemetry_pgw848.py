@@ -26,7 +26,7 @@ import pytest
 
 from gen_worker import child_contract
 from gen_worker import aot_compile_pool as pool
-from gen_worker import aot_mint, mint_delegate, mint_process
+from gen_worker import aot_mint, mint_process, mint_supervisor
 from gen_worker.cell_adopt import AdoptOutcome
 
 _GIB = 1 << 30
@@ -104,10 +104,9 @@ def test_an_abandoned_outcome_emits_the_rows_it_measured(
     recovered = mint_process._read_phase_snapshot(request.phases_snapshot)
     assert recovered, "the parent could not read what the child wrote"
 
-    outcome = mint_process.MintOutcome(
-        status=mint_process.ABANDONED,
-        detail="background mint abandoned (shutdown: worker shutdown)",
-        report=None, elapsed_s=1741.33, partial_phases=recovered)
+    # The supervisor's own two-source rule: nothing was REPORTED (the mint
+    # was abandoned mid-flight), so the snapshot is what there is.
+    table = mint_supervisor.phase_table({}, recovered)
 
     emitted: list[Dict[str, Any]] = []
 
@@ -117,7 +116,9 @@ def test_an_abandoned_outcome_emits_the_rows_it_measured(
     original = aot_mint.emit_phase_events
     aot_mint.emit_phase_events = _capture  # type: ignore[assignment]
     try:
-        mint_delegate._emit_aot_phases(outcome, family="sdxl", execution_lane="w8a8")
+        mint_supervisor._emit_aot_phases(
+            table, family="sdxl", execution_lane="w8a8",
+            terminus=mint_supervisor.ABANDONED, elapsed_s=1741.33)
     finally:
         aot_mint.emit_phase_events = original  # type: ignore[assignment]
 
@@ -140,20 +141,18 @@ def test_an_abandoned_outcome_emits_the_rows_it_measured(
 def test_a_report_beats_a_snapshot_when_both_exist(tmp_path: Path) -> None:
     """The child reaching its own terminus is better evidence than the last
     beat before it got there. The snapshot is a fallback, never an override."""
-    outcome = mint_process.MintOutcome(
-        status=mint_process.REFUSED, elapsed_s=10.0,
-        report=mint_process.MintReport(
-            status="refused", elapsed_s=10.0,
-            mint_phases={"v": 1, "terminus": "aborted",
-                         "pool": {"entry_workers": 7}}),
-        partial_phases={"v": 1, "pool": {"entry_workers": 99}})
+    table = mint_supervisor.phase_table(
+        {"v": 1, "terminus": "aborted", "pool": {"entry_workers": 7}},
+        {"v": 1, "pool": {"entry_workers": 99}})
 
     emitted: list[Dict[str, Any]] = []
     original = aot_mint.emit_phase_events
     aot_mint.emit_phase_events = (
         lambda **kw: emitted.append(kw))  # type: ignore[assignment]
     try:
-        mint_delegate._emit_aot_phases(outcome, family="sdxl", execution_lane="w8a8")
+        mint_supervisor._emit_aot_phases(
+            table, family="sdxl", execution_lane="w8a8",
+            terminus="aborted", elapsed_s=10.0)
     finally:
         aot_mint.emit_phase_events = original  # type: ignore[assignment]
 
@@ -167,10 +166,17 @@ def test_the_snapshot_path_reaches_the_child(tmp_path: Path) -> None:
     import inspect
 
     assert "phases_snapshot=str(" in inspect.getsource(
-        mint_delegate.build_request)
+        mint_process.build_request)
     from gen_worker import mint_child
 
     assert "phase_snapshot=(" in inspect.getsource(mint_child._mint_aot)
+    # ...and the SUPERVISED path, which is the one the fleet runs since
+    # pgw#1215 step 4: the parent tells `mint_graph_classes` where to write and
+    # reads it back on every outcome.
+    assert "phase_snapshot=snapshot" in inspect.getsource(
+        mint_supervisor.supervise)
+    assert "_read_snapshot(snapshot)" in inspect.getsource(
+        mint_supervisor.supervise)
 
 
 def test_an_unreadable_snapshot_never_changes_an_outcome(

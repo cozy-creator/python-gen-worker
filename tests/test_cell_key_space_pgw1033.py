@@ -39,7 +39,7 @@ import pytest
 
 from gen_worker import aot_serve, compile_cache, fleet_cells
 from gen_worker import config as gw_config
-from gen_worker import mint_delegate
+from gen_worker import mint_supervisor
 from gen_worker.api.decorators import Compile, Dim, GraphClass, Input
 from gen_worker.api.export_contract import (
     register_export_declaration, reset_export_declarations,
@@ -109,7 +109,7 @@ def _events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
         seen.append((kind, phase, detail))
 
     monkeypatch.setattr(fleet_cells.activity_mod, "emit_event", _sink)
-    monkeypatch.setattr(mint_delegate.activity_mod, "emit_event", _sink)
+    monkeypatch.setattr(mint_supervisor.activity_mod, "emit_event", _sink)
     return seen
 
 

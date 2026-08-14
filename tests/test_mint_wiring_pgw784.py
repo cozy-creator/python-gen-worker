@@ -11,7 +11,7 @@ Proves the serving worker CALLS it, and that the exception contract
 2. `_BackgroundMint` carries the two facts a child cannot rediscover — the
    declaring module(s) to walk, and the already-materialized local snapshot
    path per slot (a mint is compute; the child never touches the network).
-3. `_delegated_mint_run` drives a child, adopts, publishes on the
+3. `_supervise_mint` drives a child, adopts, publishes on the
    sibling-coverage rule, and advertises through the SAME phase-4 code the
    in-process route uses.
 4. Its failure modes map onto the wrapper's vocabulary: `_MintAbandoned` (stop
@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, List
@@ -31,7 +32,8 @@ import pytest
 
 from gen_worker import child_contract
 import gen_worker.executor as executor_mod
-from gen_worker import fleet_cells, mint_delegate, mint_workers
+from gen_worker import (
+    aot_compile_pool, aot_mint, fleet_cells, mint_supervisor, mint_workers)
 from gen_worker.api.binding import ModelRef
 from gen_worker import mint_process as mp
 from gen_worker.executor import (
@@ -187,14 +189,68 @@ def _executor(tmp_path: Path) -> Executor:
 
 
 class _Act:
+    kind = "self_mint_compile"
+
     def __init__(self) -> None:
         self.phases: List[str] = []
+        self.outcome = ""
 
     def phase(self, phase: str, step: int = 0, total: int = 0) -> None:
         self.phases.append(phase)
 
     def note(self, detail: str) -> None:
         pass
+
+    def heartbeat(self) -> None:
+        pass
+
+    def completed(self) -> None:
+        self.outcome = "completed"
+
+    def failed(self, exc: BaseException) -> None:
+        self.outcome = "failed"
+
+
+def _stub_supervised_mint(
+    monkeypatch: pytest.MonkeyPatch, *, seconds: float = 0.0,
+) -> None:
+    """The supervisor's three parent-side reads, plus a compile pool double.
+
+    A test box composes no pipeline and may not run inductor, so the class
+    ENUMERATION is stated and `mint_graph_classes` is replaced by a double
+    that writes the bytes a real child would have packed. Everything between
+    — the accretion loop, the adopt, the publish decision, the advertisement —
+    is the production code.
+    """
+    monkeypatch.setattr(
+        mint_supervisor, "assert_family_mintable", lambda family: None)
+    monkeypatch.setattr(
+        fleet_cells, "aot_export_spec",
+        lambda pipe, cfg: SimpleNamespace(
+            family="sdxl", strict=True, lora_bucket=0))
+    monkeypatch.setattr(
+        mint_supervisor, "export_declaration", lambda family: object())
+    monkeypatch.setattr(
+        aot_mint, "declared_class_rows", lambda pipe, spec, decl: [object()])
+
+    def _mint(template: Any, **kw: Any) -> Any:
+        should = kw["should_abandon"]
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if should():
+                raise aot_compile_pool.EntryCompileAbandoned("supervisor stop")
+            time.sleep(0.02)
+        out = Path(template.out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        artifact = out / "cls-a.tar.gz"
+        artifact.write_bytes(b"stub-cell-bytes")
+        return aot_mint.MintResult(
+            entries=(aot_mint.MintedArtifact(
+                key="cg-key-v1-" + "a" * 56, entry="cls-a",
+                artifact=artifact, metadata={"entry": {"name": "cls-a"}}),),
+            manifest="m", timings={})
+
+    monkeypatch.setattr(aot_mint, "mint_graph_classes", _mint)
 
 
 def _wired(
@@ -247,12 +303,13 @@ def test_the_delegated_route_mints_in_a_child_adopts_and_advertises(
     monkeypatch.setattr(fleet_cells, "adopt_delegated_mint", _adopt)
     monkeypatch.setattr(
         fleet_cells, "publish_self_mint", lambda p: published.append(p))
+    _stub_supervised_mint(monkeypatch)
     ex, rec, bg, pending, (pipe,) = _wired(tmp_path, monkeypatch)
     monkeypatch.setattr(ex, "_refresh_compile_target", lambda t: None)
     monkeypatch.setattr(ex, "_bind_compile_guard", lambda r, t: True)
 
     act = _Act()
-    asyncio.run(ex._delegated_mint_run(rec, bg, act))
+    asyncio.run(ex._supervise_mint(rec, bg, act))
 
     # A real child produced real bytes, and they were adopted through the
     # delivered-cell path rather than trusted.
@@ -283,24 +340,25 @@ def test_shared_holders_mint_one_cell_between_them(
     kept it off the wire.
     """
     spawns: List[Any] = []
-    real = mint_delegate.build_cell
+    real = mint_supervisor.supervise
 
     async def _counting(task: Any, **kw: Any) -> Any:
         spawns.append(task)
         return await real(task, **kw)
 
-    monkeypatch.setattr(mint_delegate, "build_cell", _counting)
+    monkeypatch.setattr(mint_supervisor, "supervise", _counting)
     monkeypatch.setattr(
         fleet_cells, "adopt_delegated_mint",
         lambda pipe, pending, artifacts: fleet_cells.SelfMint(
             family="sdxl", cell_key="k", ref="r", snapshot_digest="d",
             artifact=Path(list(artifacts)[0])))
     monkeypatch.setattr(fleet_cells, "publish_self_mint", lambda p: None)
+    _stub_supervised_mint(monkeypatch)
     ex, rec, bg, _pending, objs = _wired(tmp_path, monkeypatch, pipes=2)
     monkeypatch.setattr(ex, "_refresh_compile_target", lambda t: None)
     monkeypatch.setattr(ex, "_bind_compile_guard", lambda r, t: True)
 
-    asyncio.run(ex._delegated_mint_run(rec, bg, _Act()))
+    asyncio.run(ex._supervise_mint(rec, bg, _Act()))
     assert len(spawns) == 1, "one shared cell must mean one child process"
     armed_pipe = spawns[0].pipe
     advertised = {
@@ -330,13 +388,12 @@ def test_an_abandon_raises_MintAbandoned(
 ) -> None:
     """Adopt-on-arm, vacate and shutdown all abandon a mint. None of them is a
     broken worker, so none may look like one."""
-    monkeypatch.setenv("MINT_STUB_MODE", "silent")
-    monkeypatch.setenv("MINT_STUB_SECONDS", "120")
+    _stub_supervised_mint(monkeypatch, seconds=120.0)
     ex, rec, bg, _pending, _objs = _wired(tmp_path, monkeypatch)
 
     async def _go() -> None:
-        task = asyncio.ensure_future(ex._delegated_mint_run(rec, bg, _Act()))
-        await asyncio.sleep(1.0)
+        task = asyncio.ensure_future(ex._supervise_mint(rec, bg, _Act()))
+        await asyncio.sleep(0.2)
         bg.abandon.set()
         await task
 
@@ -352,7 +409,7 @@ def test_a_dead_child_raises_a_plain_exception_and_never_advertises(
     monkeypatch.setenv("MINT_STUB_MODE", "sigkill")
     ex, rec, bg, _pending, _objs = _wired(tmp_path, monkeypatch)
     with pytest.raises(Exception) as err:
-        asyncio.run(ex._delegated_mint_run(rec, bg, _Act()))
+        asyncio.run(ex._supervise_mint(rec, bg, _Act()))
     assert not isinstance(err.value, _MintAbandoned)
     assert rec.compile_targets["t0"].active_compile_ref == ""
     assert rec.compile_targets["t0"].active_self_mint is False
@@ -376,13 +433,20 @@ def test_the_mint_driver_has_exactly_one_route_and_it_is_the_child(
     async def _delegated(r: Any, b: Any, a: Any) -> None:
         took.append("delegated")
 
+    async def _noop(act: Any) -> None:
+        pass
+
     def _plan_must_not_run(spec: Any, r: Any) -> Any:
         took.append("in-process")
         return [], []
 
-    monkeypatch.setattr(ex, "_delegated_mint_run", _delegated)
+    monkeypatch.setattr(ex, "_supervise_mint", _delegated)
     monkeypatch.setattr(ex, "_warmup_plan", _plan_must_not_run)
-    asyncio.run(ex._background_mint_run(rec, bg, _Act()))
+    bg.act = _Act()
+    monkeypatch.setattr(ex, "_await_publish_durable", _noop)
+    monkeypatch.setattr(ex, "_mark_warm_complete", lambda r, name: None)
+    monkeypatch.setattr(ex, "_on_state_change", lambda: None)
+    asyncio.run(ex._background_mint(rec, bg))
     assert took == ["delegated"], (
         "the mint driver ran a compile in the serving process — the loop that "
         "carries the beat (th#1299)")

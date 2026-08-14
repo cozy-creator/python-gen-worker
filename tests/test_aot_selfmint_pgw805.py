@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Tuple
 import pytest
 
 from gen_worker import child_preflight
-from gen_worker import aot_mint, fleet_cells, mint_delegate
+from gen_worker import aot_mint, fleet_cells, mint_process, mint_supervisor
 from gen_worker.api.decorators import Compile, Dim, GraphClass, Input
 from gen_worker.api.export_contract import (
     export_declaration, register_export_declaration, reset_export_declarations,
@@ -97,7 +97,7 @@ def _events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
         seen.append((kind, phase, detail))
 
     monkeypatch.setattr(fleet_cells.activity_mod, "emit_event", _sink)
-    monkeypatch.setattr(mint_delegate.activity_mod, "emit_event", _sink)
+    monkeypatch.setattr(mint_supervisor.activity_mod, "emit_event", _sink)
     return seen
 
 
@@ -181,10 +181,10 @@ def test_the_child_is_handed_one_artifact_kind_and_cannot_choose(
     pending = _arm(delegate=True).self_mint
     assert pending is not None
 
-    task = mint_delegate.MintTask(
+    task = mint_process.MintTask(
         pending=pending, pipe=_Pipe(), function="generate",
         modules=("sdxl.main",), weight_lane="w8a8")
-    request = mint_delegate.build_request(
+    request = mint_process.build_request(
         task, workdir=tmp_path)
     assert not hasattr(request, "recipe")
     assert request.work_root == str(tmp_path)
@@ -406,14 +406,11 @@ def test_the_parent_reemits_the_childs_aot_phase_table(
 def test_a_mint_that_produced_no_cell_still_reports_its_seconds(
     _events: List[Tuple[str, str, str]],
 ) -> None:
-    from gen_worker import mint_process
-    from gen_worker.mint_process import MintOutcome, MintReport
-
-    outcome = MintOutcome(
-        status=mint_process.CRASHED, detail="boom", elapsed_s=120.0,
-        report=MintReport(status="failed", elapsed_s=120.0))
-    assert not outcome.minted
-    mint_delegate._emit_aot_phases(outcome, family=FAMILY, execution_lane="w8a8")
+    # No table at either source: the mint died before it measured anything.
+    # The seconds are still real and still reported, under `aborted`.
+    mint_supervisor._emit_aot_phases(
+        mint_supervisor.phase_table({}, {}), family=FAMILY,
+        execution_lane="w8a8", terminus="aborted", elapsed_s=120.0)
 
     assert ("aot_mint_phases", "aborted") in [(k, p) for k, p, _ in _events]
 
@@ -471,7 +468,7 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
         fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
 
     from gen_worker.mint_process import MintRequest
-    from gen_worker.mint_delegate import cfg_spec
+    from gen_worker.mint_process import cfg_spec
 
     request = MintRequest(
         function="generate", modules=("sdxl.main",), family=FAMILY,
@@ -518,7 +515,7 @@ def test_a_named_export_refusal_is_a_refusal_not_a_crash(
         fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
 
     from gen_worker.mint_process import MintRequest
-    from gen_worker.mint_delegate import cfg_spec
+    from gen_worker.mint_process import cfg_spec
 
     request = MintRequest(
         function="generate", modules=("sdxl.main",), family=FAMILY,

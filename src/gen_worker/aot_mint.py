@@ -2742,6 +2742,43 @@ def pack_graph_classes(
         entries=tuple(packed), manifest=manifest, timings=timings)
 
 
+def fold_held_graph_classes(
+    held: Sequence[MintedArtifact], *, spec: ExportSpec,
+) -> MintResult:
+    """The result for a mint that has to compile NOTHING (pgw#1215 step 4).
+
+    Coverage accretes on disk, so an attempt can legitimately find every
+    declared graph class already packed — a supervisor restarted after a
+    crash, or a retry whose only failing class succeeded on the pass before.
+    Standing up a K-wide pool to prove that is more expensive than the answer.
+
+    Runs the same two gates and the same fold :func:`mint_graph_classes` runs
+    over its shares, because they are properties of the SET and not of who
+    compiled it: a pgw#917 cluster is just as ambiguous when it is read off
+    disk, and the declaration-wide coverage label must be the same digest
+    either way.
+    """
+    metas = {str(row.entry): dict(row.metadata) for row in held}
+    blocks: Dict[str, Dict[str, Any]] = {}
+    for name, meta in metas.items():
+        block = meta.get(cell_key.ENTRY_BLOCK_KEY)
+        if not isinstance(block, dict):
+            raise MintRefused(
+                f"held graph class {name!r} carries no entry block, so its "
+                f"coverage cannot be folded")
+        blocks[name] = block
+    absorbed_by = canonicalize_packed_classes(blocks, metas)
+    absorbed = {n for names in absorbed_by.values() for n in names}
+    survivors = [row for row in held if str(row.entry) not in absorbed]
+    manifest = class_manifest(
+        {n: b for n, b in blocks.items() if n not in absorbed}, spec)
+    for row in survivors:
+        row.metadata["manifest_digest"] = manifest
+    return MintResult(
+        entries=tuple(survivors), manifest=manifest,
+        timings={"total_s": 0.0, "held_classes": float(len(held))})
+
+
 def mint_graph_classes(
     template: aot_compile_pool.EntryJob,
     *,
@@ -2752,9 +2789,11 @@ def mint_graph_classes(
     python: str = "",
     on_progress: Optional[Callable[[str, int, int, str], None]] = None,
     phase_snapshot: Optional[Path] = None,
+    held: Sequence[MintedArtifact] = (),
+    should_abandon: Optional[Callable[[], bool]] = None,
 ) -> MintResult:
     """Trace, compile and pack a family's declared graph classes K-wide, in
-    CHILDREN, and return what they packed.
+    CHILDREN, and return what they packed BESIDE what this pod already held.
 
     th#1834 Phase 3's two-tier shape (pgw#1215). The caller does NOT export:
     everything a child needs to build its own weight-free target rides on
@@ -2776,11 +2815,17 @@ def mint_graph_classes(
     is how the ONE failure class a narrower pool would have fixed became the
     one class routed down the never-retry path (pgw#848).
 
-    ⚠️ This function does NOT publish and does not arm. The parent's row loop
-    owns local CAS -> verify -> arm -> async publish per graph class
-    (pgw#1183), which is step 4's edit; here the terminus is an artifact on
-    disk with its key and its envelope already stamped by the child that
-    traced it.
+    ``held`` (pgw#1215 step 4) is what an EARLIER attempt of this same mint
+    already packed — ``template.have_classes`` is the set of names the
+    children were told to skip, and these are the artifacts behind it. They
+    join the result as ordinary entries and they join the manifest fold,
+    because coverage is a property of the pod and not of one attempt. A
+    retry's honest report is *"36 of 36 classes"*, not *"1 of 36"*.
+
+    ⚠️ This function does NOT publish and does not arm. The supervisor's row
+    loop owns local CAS -> verify -> arm -> async publish per graph class
+    (pgw#1183); here the terminus is an artifact on disk with its key and its
+    envelope already stamped by the child that traced it.
     """
     progress = MintProgress(
         inductor_configs=inductor_configs, on_progress=on_progress)
@@ -2798,7 +2843,13 @@ def mint_graph_classes(
         packed = pool.compile(
             template,
             on_share=lambda name, done, total: progress.beat(
-                PHASE_INDUCTOR_COMPILE, done, total, name))
+                PHASE_INDUCTOR_COMPILE, done, total, name),
+            should_abandon=should_abandon)
+    except aot_compile_pool.EntryCompileAbandoned:
+        # Not a failure and not this mint's fault: the ledger still has to
+        # survive, because the next attempt sizes K off it (pgw#848).
+        progress.pool_ledger = _pool_facts(pool)
+        raise
     except aot_compile_pool.EntryCompileFailed as exc:
         # pgw#848: the pool's ledger and its MEASURED peak have to survive the
         # failure, because the aborted phase table is what the parent banks
@@ -2834,8 +2885,45 @@ def mint_graph_classes(
                 f"block, so its coverage cannot be folded")
         metas[name] = meta
         decoded_blocks[name] = block
+    keys: Dict[str, str] = {name: str(packed[name].key) for name in metas}
+    artifacts: Dict[str, Path] = {
+        name: Path(packed[name].artifact) for name in metas}
+    # What an earlier attempt already packed, joining as an ordinary entry. A
+    # class that is BOTH held and freshly packed means the skip list did not
+    # reach the child that owned it, which would publish two artifacts for one
+    # class — refused by name rather than resolved by last-writer-wins.
+    for carried in held:
+        name = str(carried.entry)
+        if name in metas:
+            raise MintRefused(
+                f"graph class {name!r} was compiled by this attempt AND is "
+                f"already held from an earlier one — the skip list did not "
+                f"reach the child that owns it, so one class would publish "
+                f"two artifacts")
+        held_meta = dict(carried.metadata)
+        held_block = held_meta.get(cell_key.ENTRY_BLOCK_KEY)
+        if not isinstance(held_block, dict):
+            raise MintRefused(
+                f"held graph class {name!r} carries no entry block, so its "
+                f"coverage cannot be folded")
+        metas[name] = held_meta
+        decoded_blocks[name] = held_block
+        keys[name] = str(carried.key)
+        artifacts[name] = Path(carried.artifact)
 
-    # ── DEDUPE BY KEY (pgw#917's alias mechanism, narrower predicate) ──────
+    # ── INGRESS MERGE (pgw#917 proper), then DEDUPE BY KEY ────────────────
+    #
+    # The parent is the only process that sees every share, so BOTH gates run
+    # here and in this order. The ingress merge is the semantic one — two rows
+    # the dispatch cannot tell apart are ONE class, and a cluster that is not
+    # one class is a terminal refusal naming the axis; it keys them APART
+    # (`class_hash` folds `class_dims`), so the by-key dedupe below never sees
+    # the pair. The by-key dedupe is the narrower second net: a true same-key
+    # duplicate, which publish would otherwise discover as a 409 on the pod
+    # after both compiles were paid for.
+    absorbed_by: Dict[str, List[str]] = {
+        keep: list(merged) for keep, merged
+        in canonicalize_packed_classes(decoded_blocks, metas).items()}
     #
     # A compile child holds ONE SHARE, so two declared classes that key
     # identically can land in different children and neither can see the
@@ -2850,15 +2938,17 @@ def mint_graph_classes(
     #
     # ⚠️ It is NOT pgw#917's ingress merge and must not be read as one: rows
     # that share an ingress contract while differing in `class_dims` key APART
-    # (dims fold into `class_hash`), so this never sees them. That merge needs
-    # the whole declaration BEFORE sharding and is owed at step 4.
+    # (dims fold into `class_hash`), so this never sees them. That merge is
+    # `canonicalize_packed_classes`, run above.
     #
     # An alias is not a `class_hash` fact (`aot_serve.class_hash` folds named
     # fields only), so recording one cannot re-key the survivor.
-    absorbed_by: Dict[str, List[str]] = {}
+    merged_at_ingress = {n for names in absorbed_by.values() for n in names}
     survivor_of: Dict[str, str] = {}
     for name in sorted(metas):
-        key = str(packed[name].key)
+        if name in merged_at_ingress:
+            continue
+        key = keys[name]
         keep = survivor_of.setdefault(key, name)
         if keep != name:
             absorbed_by.setdefault(keep, []).append(name)
@@ -2870,7 +2960,7 @@ def mint_graph_classes(
         if name in absorbed:
             continue
         block = decoded_blocks[name]
-        merged = absorbed_by.get(name) or ()
+        merged = sorted(absorbed_by.get(name) or ())
         if merged:
             # Recorded so the merge is auditable from the result alone — a
             # reader asking "where did class row X go" gets an answer instead
@@ -2884,12 +2974,12 @@ def mint_graph_classes(
             ]
             logger.info(
                 "aot-mint: pgw#917 graph class %s absorbed %d class(es) "
-                "keying identically (%s) -> %s",
-                name, len(merged), ", ".join(merged), packed[name].key)
+                "(one ingress contract, or one key) (%s) -> %s",
+                name, len(merged), ", ".join(merged), keys[name])
         blocks[name] = block
         entries.append(MintedArtifact(
-            key=str(packed[name].key), entry=name,
-            artifact=Path(packed[name].artifact), metadata=metas[name]))
+            key=keys[name], entry=name,
+            artifact=artifacts[name], metadata=metas[name]))
     # The declaration-wide coverage label, folded HERE because this is the
     # only process that sees every share. Each child stamped its artifact's
     # own `manifest_digest` EMPTY rather than a share-local digest that would
@@ -3041,6 +3131,20 @@ def _entry_ingress_declaration(
 
         meta["excluded_inputs"] = list(lora_lifted.LIFTED_INPUT_NAMES)
     contract = aot_serve.contract_from_meta(meta)
+    return contract, _representative_calls(contract), meta
+
+
+def _representative_calls(contract: Any) -> Tuple[Dict[str, Any], ...]:
+    """One call per corner of an entry's symbol hull — all symbols at their
+    lower bound, all at their upper, all at the midpoint — deduplicated.
+
+    A fully specialized entry (the sdxl case) yields exactly one call, which
+    is the call its class row exists to serve. Shared by the two sites that
+    ask the ambiguity question — the whole-declaration gate, which holds
+    ``ExportedProgram``s, and :func:`canonicalize_packed_classes`, which holds
+    only packed envelopes — so the sharded path and the serial path cannot
+    drift into two ideas of which calls an entry admits.
+    """
 
     def _at(pick: Callable[[int, int], int]) -> Dict[str, Any]:
         return {
@@ -3061,7 +3165,7 @@ def _entry_ingress_declaration(
         call = _at(pick)
         if call not in calls:
             calls.append(call)
-    return contract, tuple(calls), meta
+    return tuple(calls)
 
 
 def _admits(contract: Any, call: Mapping[str, Any]) -> bool:
@@ -3264,6 +3368,193 @@ def canonicalize_dispatch_classes(
             phase="entry_merged",
         )
     return [row for row in minted if row.name not in dropped], aliases
+
+
+#: The identity axes :func:`_class_identity` folds, addressed in the PACKED
+#: envelope instead of in the ``_MintedEntry`` it was projected from. Every
+#: axis is present — the fold loses nothing — which is what makes the sharded
+#: path's merge exactly as strict as the whole-declaration path's:
+#:
+#: ===================  ==========================================
+#: ``_class_identity``  packed envelope
+#: ===================  ==========================================
+#: ``target``           ``entry.target``
+#: ``fork``             ``entry.fork``
+#: ``graph``            ``entry.graph_witness`` (the same
+#:                      ``graph_hash.graph_hash`` of the program)
+#: ``ingress``          ``entry.range_digest``
+#: ``pytree``           ``entry.graph.pytree``
+#: ``literal_values``   ``entry.graph.literals``
+#: ``specialization``   ``entry.graph.specialization``
+#: ``lifted_inputs``    ``entry.graph.lifted_inputs``
+#: ``precision``        ``metadata.precision``
+#: ``lora_bucket``      ``metadata.lora_bucket``
+#: ``strict``           ``metadata.strict_export``
+#: ``source_digest``    ``metadata.source_digest``
+#: ===================  ==========================================
+#:
+#: ``class_dims`` is deliberately ABSENT: it is the class-row COORDINATE, the
+#: one axis two mergeable rows are allowed to differ on.
+def _packed_class_identity(
+    block: Mapping[str, Any], meta: Mapping[str, Any],
+) -> Dict[str, Any]:
+    graph = dict(block.get("graph") or {})
+    return {
+        "target": str(block.get("target") or ""),
+        "fork": [[str(n), v] for n, v in (block.get("fork") or [])],
+        "graph": str(block.get("graph_witness") or ""),
+        "ingress": str(block.get("range_digest") or ""),
+        "pytree": graph.get("pytree"),
+        "literal_values": graph.get("literals"),
+        "specialization": graph.get("specialization"),
+        "lifted_inputs": sorted(
+            str(n) for n in (graph.get("lifted_inputs") or ())),
+        "precision": str(meta.get("precision") or ""),
+        "lora_bucket": int(meta.get("lora_bucket") or 0),
+        "strict": bool(meta.get("strict_export")),
+        "source_digest": str(meta.get("source_digest") or ""),
+    }
+
+
+def canonicalize_packed_classes(
+    blocks: Mapping[str, Mapping[str, Any]],
+    metas: Mapping[str, Mapping[str, Any]],
+) -> Dict[str, List[str]]:
+    """pgw#917 over PACKED envelopes: ``{survivor: [absorbed names]}``.
+
+    :func:`canonicalize_dispatch_classes` asks the same question of
+    ``_MintedEntry`` rows — before a kernel is built, which is the pgw#847
+    compile saving — and it can only be asked there by a process holding the
+    WHOLE declaration's ``ExportedProgram``s. Under th#1834 Phase 3 no such
+    process exists: a compile child holds ONE SHARE, and the serving parent
+    that supervises the shares may not trace at all (the th#1299 fence). So
+    the sharded path lost the gate entirely, and the loss is SILENT — worse
+    than the duplicate-key 409 an earlier reading of this predicted.
+    Measured: a mergeable pair keys APART, because ``aot_serve.class_hash``
+    folds ``class_dims`` and ``class_dims`` is the one axis such a pair
+    differs on (``6decad0789e30a3a`` vs ``a185615c3fd880e4`` over a
+    byte-identical block). Both rows compile, both publish, both arm, and
+    :meth:`aot_serve.EntryDispatch.select` answers ``entry_ambiguous`` on
+    every call they carry — 100 % eager on those coordinates, which is the
+    4,200-refusal defect pgw#917 was filed to fix. The parent-side dedupe by
+    KEY that landed with the keystone is a different, narrower invariant and
+    never sees this pair.
+
+    This is the same gate at the only seam the supervisor can reach: the
+    packed envelope. It is asked of ``aot_serve.contract_from_meta`` and
+    ``aot_serve.assert_ingress`` — the serve path's own parser and its own
+    admission — so it cannot drift from what dispatch will do, and its
+    identity axes are ``_class_identity``'s, complete (see
+    :func:`_packed_class_identity`). Merge when a colliding cluster differs
+    only on the class-row coordinate; REFUSE, naming the members and the
+    differing axes, when it does not.
+
+    **What it does NOT recover, stated rather than implied:** the duplicate
+    COMPILE. Both members of a mergeable cluster are already built by the
+    time an envelope exists, so pgw#847's "36 of sdxl regional's 72 compiles
+    bought nothing" still costs what it costs on this path. Recovering that
+    needs the decision BEFORE the trace, and the predicate is a property of
+    the traced program — so it belongs to whichever change gives the shards a
+    cluster-preserving partition, not to this one. Correctness first: a merged
+    entry serves those coordinates compiled today, where two published rows
+    served them eager.
+    """
+    groups: Dict[Tuple[str, Any], List[str]] = {}
+    for name in sorted(blocks):
+        block = blocks[name]
+        fork = {str(n): v for n, v in (block.get("fork") or [])}
+        groups.setdefault(
+            (str(block.get("target") or ""), fork.get(ADAPTER_FORK)),
+            []).append(name)
+
+    aliases: Dict[str, List[str]] = {}
+    conflicts: List[str] = []
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        declared: Dict[str, Tuple[Any, Tuple[Dict[str, Any], ...]]] = {}
+        for name in members:
+            try:
+                contract = aot_serve.contract_from_meta(blocks[name])
+            except ValueError as exc:
+                # An unreadable declaration is not "probably fine": it is an
+                # artifact whose dispatchability nobody can prove.
+                raise MintRefused(
+                    f"graph class {name!r}: dispatch-ambiguity gate cannot "
+                    f"read the packed ingress contract, so this artifact "
+                    f"cannot be shown to be dispatchable at all: {exc}"
+                ) from exc
+            declared[name] = (contract, _representative_calls(contract))
+
+        cluster_of: Dict[str, str] = {name: name for name in declared}
+
+        def _root(name: str, _of: Dict[str, str] = cluster_of) -> str:
+            while _of[name] != name:
+                _of[name] = _of[_of[name]]
+                name = _of[name]
+            return name
+
+        for name, (_own, calls) in declared.items():
+            for other, (contract, _c) in declared.items():
+                if other == name or not any(
+                    _admits(contract, call) for call in calls
+                ):
+                    continue
+                a, b = _root(name), _root(other)
+                if a != b:
+                    cluster_of[max(a, b)] = min(a, b)
+        clusters: Dict[str, List[str]] = {}
+        for name in sorted(declared):
+            clusters.setdefault(_root(name), []).append(name)
+
+        for cluster in clusters.values():
+            if len(cluster) < 2:
+                continue
+            identities = {
+                name: _packed_class_identity(blocks[name], metas.get(name, {}))
+                for name in cluster
+            }
+            axes = _differing_axes(identities)
+            if axes:
+                conflicts.append(
+                    f"{sorted(cluster)[:4]!r} collide at ingress but are NOT "
+                    f"one class — they differ on {list(axes)!r}")
+                continue
+            keep, *rest = sorted(cluster)
+            aliases[keep] = rest
+
+    if conflicts:
+        raise MintRefused(
+            f"dispatch-ambiguity gate: {len(conflicts)} cluster(s) of packed "
+            f"graph classes are admitted by more than one entry of the same "
+            f"dispatch, so every call they carry would be refused "
+            f"'entry_ambiguous' and served EAGER — "
+            + "; ".join(conflicts[:4]) + ". Rows that reduce to ONE "
+            "dispatchable ingress contract are one entry and are merged "
+            "automatically; these cannot be, because the named axes say they "
+            "are different artifacts. Fix the declaration so every entry's "
+            "ingress contract is uniquely admitting, rather than publishing a "
+            "class the dispatch could never select")
+
+    if aliases:
+        for keep, merged in sorted(aliases.items()):
+            logger.info(
+                "aot-mint: pgw#917 canonicalized %d packed graph class(es) "
+                "onto entry %r — identical ingress contract, target and code, "
+                "so they are ONE dispatchable class: %s",
+                len(merged), keep, merged)
+        activity_mod.emit_event(
+            "aot_class_canonicalized",
+            f"{sum(len(v) for v in aliases.values())} of {len(blocks)} packed "
+            f"graph classes reduce to an ingress contract a sibling already "
+            f"declares; merged onto {len(aliases)} entry/entries as aliases "
+            f"instead of publishing a class the dispatch could never select: "
+            + "; ".join(
+                f"{keep} <- {merged}"
+                for keep, merged in sorted(aliases.items())[:4]),
+            phase="entry_merged",
+        )
+    return aliases
 
 
 def release_mint_residents(
@@ -3566,6 +3857,7 @@ def trace_for_key(
     share_count: int = 1,
     compile_now: bool = False,
     inductor_configs: Optional[Mapping[str, Any]] = None,
+    have_classes: Sequence[str] = (),
 ) -> Iterator[TracedClass]:
     """Export the named declared graph classes and yield each one's KEYING
     facts — §4.27 step 1's unit of work (pgw#1089).
@@ -3618,6 +3910,17 @@ def trace_for_key(
     count = max(1, int(share_count))
     rows = ordered[max(0, int(share_index)) % count::count] if count > 1 \
         else ordered
+    # pgw#1215 step 4: a class this pod already holds as a packed artifact is
+    # dropped from the share BEFORE the export, so a retry pays neither the
+    # trace nor the compile for it. `declared` is unchanged — it is the size
+    # of the DECLARATION, and the pool's whole-set proof counts held classes
+    # beside packed ones (`_assert_shares_whole(have=...)`). Filtering after
+    # the shard rather than before it keeps `rows[i::K]` the same partition of
+    # the same order, so a skipped class does not move its siblings between
+    # children.
+    have = {str(n) for n in have_classes}
+    if have:
+        rows = [row for row in rows if _decl.plan_entry_name(row[0]) not in have]
     # pgw#1132: the adapter-BEARING rows export from the LIFTED forward, and
     # arming it is this loop's job exactly as it is `mint_targets`' — the
     # callers of both (`boot_trace_child`, `mint_child`) arm the CONTAINER
@@ -3845,7 +4148,7 @@ def _emit_pool_event(
     5 and then 3. Nothing hub-side recorded WHY: the width block existed in
     the phase table and was never emitted, and the pgw#830 pool ledger was
     emitted from the mint CHILD, which holds no orchestrator session (see
-    ``mint_delegate._emit_aot_phases``) — so both were pod-log-only and died
+    ``mint_supervisor._emit_aot_phases``) — so both were pod-log-only and died
     with the pod. A width narrower than the pod could carry is a performance
     defect; it must be READABLE from one mint's record, not inferred by
     diffing two pods that no longer exist.

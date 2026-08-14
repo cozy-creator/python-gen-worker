@@ -1,6 +1,6 @@
 """The mint child's evidence counter must survive a phase change.
 
-The locus is one captured object. If ``mint_delegate._on_evidence`` acquires
+The locus is one captured object. If ``mint_supervisor._on_evidence`` acquires
 the ``mint_child_evidence`` counter ONCE and closes over it, it goes deaf:
 ``Activity.counter()`` binds a counter to the phase that registered it, and
 ``Activity.phase()`` FINISHES — unregisters from the process registry — every
@@ -24,7 +24,7 @@ from typing import List
 import pytest
 
 from gen_worker import activity as activity_mod
-from gen_worker import mint_delegate
+from gen_worker import mint_supervisor
 from gen_worker import progress as progress_mod
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
@@ -58,7 +58,7 @@ def test_evidence_counter_survives_the_mint_s_phase_changes() -> None:
     """
     seen = _capture()
     act = activity_mod.begin("self_mint_compile", "load")
-    apply = mint_delegate._on_evidence(act)
+    apply = mint_supervisor._on_evidence(act)
 
     # Phase `load`: the child is reading weights and the counter works.
     apply(10.0)
@@ -83,7 +83,7 @@ def test_evidence_counter_survives_the_mint_s_phase_changes() -> None:
         "silence, and no hub-side rule can see through it"
     )
     last = beats[-1]
-    assert last.counter == mint_delegate.EVIDENCE_COUNTER
+    assert last.counter == mint_supervisor.EVIDENCE_COUNTER
     assert last.counter_done == pytest.approx(85.0), (
         f"beat carries counter_done={last.counter_done}; the reader must see "
         f"the LATEST evidence, not a value frozen at the phase change"
@@ -101,7 +101,7 @@ def test_the_counter_is_readable_through_the_process_registry() -> None:
     REGISTERED is invisible to both, which is the whole defect."""
     _capture()
     act = activity_mod.begin("self_mint_compile", "load")
-    apply = mint_delegate._on_evidence(act)
+    apply = mint_supervisor._on_evidence(act)
     apply(10.0)
     act.phase("trace_graph", 1, 36)
     apply(20.0)
@@ -112,7 +112,7 @@ def test_the_counter_is_readable_through_the_process_registry() -> None:
         "`freshest(act.id)` is None, so on_beat returns without emitting and "
         "self_diagnosis can never confess"
     )
-    assert snap.name == mint_delegate.EVIDENCE_COUNTER
+    assert snap.name == mint_supervisor.EVIDENCE_COUNTER
     assert snap.done == pytest.approx(20.0)
 
 
@@ -130,7 +130,7 @@ def test_a_frozen_mint_can_now_confess() -> None:
     progress_mod._now = lambda: clock[0]
     try:
         act = activity_mod.begin("self_mint_compile", "load")
-        apply = mint_delegate._on_evidence(act)
+        apply = mint_supervisor._on_evidence(act)
         apply(10.0)
         act.phase("trace_graph", 1, 36)
         apply(20.0)
@@ -143,7 +143,7 @@ def test_a_frozen_mint_can_now_confess() -> None:
         assert not any(u.self_stalled for u in seen), "confessed while advancing"
 
         # Past the compile family's window with the value frozen.
-        window = progress_mod.window_for(mint_delegate.EVIDENCE_COUNTER)
+        window = progress_mod.window_for(mint_supervisor.EVIDENCE_COUNTER)
         clock[0] += window + 60.0
         apply(30.0)  # no advance
         activity_mod.on_beat()
@@ -159,10 +159,10 @@ def test_evidence_counter_takes_the_compile_family_s_patience() -> None:
     """It measures an AOTI compile, so it must inherit the ``compile``
     window (600 s), not the unnamed default (300 s) it got by having no
     family prefix at all."""
-    assert mint_delegate.EVIDENCE_COUNTER.startswith("compile:")
-    assert progress_mod.window_for(mint_delegate.EVIDENCE_COUNTER) == (
+    assert mint_supervisor.EVIDENCE_COUNTER.startswith("compile:")
+    assert progress_mod.window_for(mint_supervisor.EVIDENCE_COUNTER) == (
         progress_mod.STALL_WINDOW_S["compile"])
-    assert (progress_mod.window_for(mint_delegate.EVIDENCE_COUNTER)
+    assert (progress_mod.window_for(mint_supervisor.EVIDENCE_COUNTER)
             > progress_mod.DEFAULT_STALL_WINDOW_S), (
         "an entry that spends minutes inside one inductor call is exactly "
         "what the compile family's longer patience exists for")
@@ -181,7 +181,7 @@ def test_telemetry_still_never_costs_the_mint_its_work() -> None:
             self.beats += 1
 
     act = _ActNoCounter()
-    apply = mint_delegate._on_evidence(act)
+    apply = mint_supervisor._on_evidence(act)
     apply(12.5)
     apply(13.5)
     assert act.beats == 2

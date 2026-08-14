@@ -7,7 +7,7 @@ release."* Its own §6 states the evidence — **zero ``os.nice`` calls anywhere
 with a co-resident TENANT rather than for a desktop with a co-resident HUMAN.
 
 Since pgw#1127 S1 (`b29a5e95`) ``cozy serve`` drives the ordinary
-``mint_delegate`` -> ``mint_process`` -> ``mint_child`` chain, so that saturation
+``mint_supervisor`` -> ``aot_compile_pool`` -> ``aot_compile_child`` chain, so that saturation
 is now a shipping product behaviour and not a hypothetical.
 
 WHAT IS PROVEN HERE, and what each section would have looked like before
@@ -48,7 +48,8 @@ import msgspec
 import pytest
 
 from gen_worker import (
-    aot_compile_pool, compile_posture, local_serve, mint_child, mint_delegate)
+    aot_compile_pool, compile_posture, local_serve, mint_child, mint_process,
+    mint_supervisor)
 from gen_worker.compile_posture import FLEET, USER_MACHINE, CompilePosture
 from gen_worker.child_contract import (
     CompileSpec, MintFrame, MintSlot)
@@ -94,7 +95,7 @@ class _Task:
         self.task: Any = None
         self.watch: Any = None
 
-    def build_cell(self, task: Any, **kw: Any) -> Any:
+    def supervise(self, task: Any, **kw: Any) -> Any:
         self.task = task
         self.watch = kw.get("watch")
 
@@ -134,7 +135,7 @@ def test_the_local_serve_entry_DECLARES_the_user_machine_posture(
     mint child sized its pool from a fleet policy on a desktop.
     """
     cap = _Task()
-    monkeypatch.setattr(mint_delegate, "build_cell", cap.build_cell)
+    monkeypatch.setattr(mint_supervisor, "supervise", cap.supervise)
     monkeypatch.setattr(local_serve, "_drive", lambda coro: None)
     monkeypatch.setattr(
         local_serve.cc, "cell_base_execution_lane", lambda pipe: "bf16")
@@ -209,10 +210,10 @@ def test_the_posture_survives_the_parent_to_child_WIRE() -> None:
     ``device`` — so the round trip through msgspec is
     the property, not the in-process object identity.
     """
-    task = mint_delegate.MintTask(
+    task = mint_process.MintTask(
         pending=_Pending(), pipe=None, function="generate",
         modules=("micro_diffusion.endpoint",), posture=USER_MACHINE)
-    request = mint_delegate.build_request(
+    request = mint_process.build_request(
         task, workdir=Path("/tmp/pgw1137"))
     assert request.posture == USER_MACHINE
 
@@ -228,10 +229,10 @@ def test_a_fleet_mint_declares_nothing_and_gets_the_fleet_posture() -> None:
     """The non-regression that makes the whole design safe: FLEET is the
     struct default, so every caller that has not heard of this issue — the
     executor, every scheduled mint — is unchanged by construction."""
-    task = mint_delegate.MintTask(
+    task = mint_process.MintTask(
         pending=_Pending(), pipe=None, function="generate", modules=("m",))
     assert task.posture == FLEET
-    request = mint_delegate.build_request(
+    request = mint_process.build_request(
         task, workdir=Path("/tmp/pgw1137"))
     assert request.posture == FLEET
     assert MintRequest(
@@ -594,10 +595,10 @@ def test_the_terminal_watcher_never_displaces_the_HUB_activity() -> None:
     seen: List[MintFrame] = []
     frame = MintFrame(phase="compile_entries", step=2, total=18, note="hi")
 
-    mint_delegate._on_frame(_Act())(frame)          # the fleet shape
+    mint_supervisor._on_frame(_Act())(frame)          # the fleet shape
     assert phases == [("compile_entries", 2, 18)] and notes == ["hi"]
 
-    mint_delegate._on_frame(_Act(), seen.append)(frame)
+    mint_supervisor._on_frame(_Act(), seen.append)(frame)
     assert phases == [("compile_entries", 2, 18)] * 2
     assert seen == [frame]
 
@@ -636,8 +637,8 @@ def test_a_stopped_local_mint_does_not_WASTE_what_it_finished() -> None:
     the notice would become a lie.
     """
     workdir = Path("/tmp/pgw1137/child-1")
-    request = mint_delegate.build_request(
-        mint_delegate.MintTask(
+    request = mint_process.build_request(
+        mint_process.MintTask(
             pending=_Pending(), pipe=None, function="generate",
             modules=("m",), posture=USER_MACHINE),
         workdir=workdir)

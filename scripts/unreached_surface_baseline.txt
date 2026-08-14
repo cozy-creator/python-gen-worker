@@ -185,6 +185,35 @@ gen_worker.boot_phases.servable_ms()
 #
 
 # ---------------------------------------------------------------------------
+# pgw#1215 step 4 (th#1834 Phase 3) — THE ONE-SHOT MINT CHAIN LOST ITS
+# PRODUCTION CALLER, AND THAT IS THE POINT OF THE CHANGE.
+#
+# The serving parent no longer spawns a mint child: it supervises compile
+# children directly (`mint_supervisor`). `mint_delegate.py` is DELETED and its
+# request vocabulary moved to `mint_process`. What is left of
+# `mint_process` -> `mint_child` is reached by exactly one thing —
+# `scripts/micro_mint_rig.py`, the pre-publish proof harness Paul asked for and
+# which th#1834's own census marks RE-POINT, never delete.
+#
+# So these three are listed rather than deleted, and they are listed as a debt
+# with a named end, not as an exemption:
+#
+#   OWNER:  pgw#1215's follow-up — re-point `micro_mint_rig.py` onto
+#           `mint_supervisor`, so there is ONE mint path in the tree instead of
+#           a fleet one and an operator one.
+#   EXPIRY: the first 0.115.0 flag-day campaign that uses the rig. Doing it
+#           BEFORE that campaign would change the harness the campaign is meant
+#           to validate the reroute with, which is the wrong order.
+#
+#   aot_resume.discard — its only caller was `mint_delegate.build_cell`'s
+#   success terminus. The supervisor keeps no resume bank at all: coverage
+#   accretes in an attempt-STABLE artifact directory and a retry consumes the
+#   artifacts, so there is nothing to discard. `aot_resume` itself stays (it has
+#   two live importers, `aot_compile_pool` and `mint_child`) and its deletion
+#   remains sequenced where th#1834 put it — the change that proves boot
+#   resolves already-compiled graphs locally, which is not this one.
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # IN FLIGHT — a seam that landed AHEAD of its caller. Not 2026-08-01 debt.
 #
 # Segregated deliberately. An exemption list that only ever gains entries is a
@@ -323,3 +352,6 @@ gen_worker.worker_credential.expires_at()
 gen_worker.worker_credential.reset()
 gen_worker.worker_fatal.fatal_identity()
 gen_worker.worker_goals.install()
+gen_worker.aot_resume.discard()
+gen_worker.mint_process.build_request()
+gen_worker.mint_process.run_mint()

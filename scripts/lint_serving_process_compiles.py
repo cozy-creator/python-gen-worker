@@ -79,10 +79,38 @@ BANNED_CALLS: Tuple[Tuple[str, ...], ...] = (
 CHILD_ONLY: Dict[str, str] = {
     "aot_mint": (
         "the export + AOTI recipe itself; reached from the compile child "
-        "(`aot_compile_child`) and the trace child (`boot_trace_child`). The "
-        "serving parent imports it for `emit_phase_events` / "
-        "`pack_graph_classes` only — supervision and packaging, never a "
-        "compile."
+        "(`aot_compile_child`) and the trace child (`boot_trace_child`). "
+        "pgw#1215 step 4 made the serving parent CALL into this module — "
+        "`mint_supervisor` drives `mint_graph_classes`, `declared_class_rows` "
+        "and `fold_held_graph_classes` on the serving process — so the claim "
+        "this row makes is narrower than it looks and is worth restating: "
+        "every one of those is supervision, enumeration or folding. The "
+        "banned calls all sit under `_export_entry`, which only "
+        "`trace_for_key` reaches and only a child calls."
+    ),
+}
+
+#: Modules a SUPERVISING parent calls into, asserted to hold no banned call of
+#: their own. Not exemptions — the opposite: naming them here is a claim that
+#: the default rule (serving-process code may not compile) applies to them,
+#: and it is checked, so a later edit that puts an export in the supervisor's
+#: call path reds even though the module was never suspected.
+#:
+#: pgw#1215 step 4 is why the list exists. `aot_compile_pool` and
+#: `aot_compile_child` WERE declared child-only until `601af398` shrank the
+#: set — they were exempt to describe a `torch.export.save`/`load` round trip
+#: the keystone deleted. The supervisor now calls the pool directly from the
+#: serving loop, so their status changed from "exempt" to "must be clean", and
+#: a stale exemption would have been indistinguishable from a real one.
+SUPERVISED: Dict[str, str] = {
+    "aot_compile_pool": (
+        "the K-wide pool. `mint_supervisor` constructs and drives it on the "
+        "serving process (in a worker thread); it spawns, reaps and collects, "
+        "and it must never itself export or compile."
+    ),
+    "mint_supervisor": (
+        "the serving parent's own mint driver. Supervision only: enumerate, "
+        "spawn, collect, adopt, publish."
     ),
 }
 
@@ -113,8 +141,10 @@ def _is_banned(path: Tuple[str, ...]) -> bool:
 def main() -> int:
     violations: List[str] = []
     seen_allowed: set[str] = set()
+    seen_modules: set[str] = set()
     for file in sorted(SRC.rglob("*.py")):
         module = _module_name(file)
+        seen_modules.add(module)
         tree = ast.parse(file.read_text(), filename=str(file))
         hits: List[Tuple[int, str]] = []
         for node in ast.walk(tree):
@@ -147,6 +177,23 @@ def main() -> int:
             f"symbol. Drop the row — a fence exemption for a module that "
             f"stopped violating is a hole waiting for the next edit.")
 
+    # The same staleness rule on the other list: a SUPERVISED row that names a
+    # module the tree no longer has is a claim about nothing. It cannot go red
+    # for a violation (a supervised module is checked by the default rule
+    # above, like every other module), so the only way it can go red at all is
+    # this — and a row that can never go red is not a fence.
+    for module in sorted(set(SUPERVISED) - seen_modules):
+        violations.append(
+            f"SUPERVISED names `{module}`, which is not a module in "
+            f"src/gen_worker. Drop the row or fix the name — it is asserting "
+            f"the serving-process rule over a file that does not exist.")
+    overlap = sorted(set(SUPERVISED) & set(CHILD_ONLY))
+    for module in overlap:
+        violations.append(
+            f"`{module}` is in BOTH CHILD_ONLY and SUPERVISED — it cannot be "
+            f"exempt from the serving-process rule and asserted to obey it. "
+            f"Decide which the module is.")
+
     for line in violations:
         print(line, file=sys.stderr)
     if violations:
@@ -156,7 +203,8 @@ def main() -> int:
         return 1
     print(
         f"serving-process compile fence: clean "
-        f"({len(seen_allowed)} declared child-only module(s))")
+        f"({len(seen_allowed)} declared child-only module(s), "
+        f"{len(SUPERVISED)} supervised module(s) proven clean)")
     return 0
 
 

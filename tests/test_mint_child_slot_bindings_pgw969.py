@@ -39,7 +39,7 @@ import pytest
 from gen_worker import child_preflight
 from gen_worker import child_contract
 from gen_worker import handler_proof
-from gen_worker import mint_child, mint_delegate, registry, warmup
+from gen_worker import mint_child, mint_process, registry, warmup
 from gen_worker import mint_process as mp
 from gen_worker.api.binding import ModelRef, wire_ref
 from gen_worker.cli import run as cli_run
@@ -137,11 +137,11 @@ def _request(
         slots=({"pipeline": child_contract.MintSlot(ref=binding, path=str(tree))}
                if binding is not None else {}),
     )
-    task = mint_delegate.MintTask(
+    task = mint_process.MintTask(
         pending=pending, pipe=object(), function=function,
         modules=bg.modules, slots=dict(bg.slots),
         execution_lane="w8a8-lora64", device=-1)
-    request = mint_delegate.build_request(
+    request = mint_process.build_request(
         task, workdir=tmp_path / "w")
     return msgspec.json.decode(msgspec.json.encode(request), type=mp.MintRequest)
 

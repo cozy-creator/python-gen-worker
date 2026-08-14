@@ -267,7 +267,7 @@ def test_the_bank_outlives_an_abandoned_mint(
     """
     from types import SimpleNamespace
 
-    from gen_worker import fleet_cells, local_cell_store, mint_delegate
+    from gen_worker import fleet_cells, local_cell_store, mint_process
 
     monkeypatch.setenv(
         local_cell_store.ENV_STORE_DIR, str(tmp_path / "store"))
@@ -276,8 +276,8 @@ def test_the_bank_outlives_an_abandoned_mint(
     key = "ck1:sdxl:deadbeef"
 
     # 1. The request the parent actually builds points OUTSIDE the mint tree.
-    request = mint_delegate.build_request(
-        mint_delegate.MintTask(
+    request = mint_process.build_request(
+        mint_process.MintTask(
             pending=SimpleNamespace(
                 family="sdxl", arm_token=key, mint_root=mint_root,
                 cfg=SimpleNamespace(shapes=(), targets=(), family="sdxl")),

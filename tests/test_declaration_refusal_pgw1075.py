@@ -36,7 +36,7 @@ import pytest
 
 from gen_worker import child_preflight
 from gen_worker import child_contract
-from gen_worker import mint_child, mint_delegate
+from gen_worker import mint_child, mint_process
 from gen_worker import mint_process as mp
 from gen_worker.api.binding import ModelRef
 from gen_worker.api.errors import IllegalCombination, ValidationError
@@ -78,7 +78,7 @@ def _request(checkpoint: Path, workdir: Path, *, bucket: int) -> mp.MintRequest:
     pending = SimpleNamespace(
         family=ep.FAMILY, arm_token="arm1-pgw1075", cfg=cfg,
         target=workdir / "cell.tar.gz", mint_root=workdir)
-    task = mint_delegate.MintTask(
+    task = mint_process.MintTask(
         pending=pending, pipe=None, function=FUNCTION,
         modules=(ENDPOINT_MODULE,),
         slots={"pipeline": child_contract.MintSlot(
@@ -86,7 +86,7 @@ def _request(checkpoint: Path, workdir: Path, *, bucket: int) -> mp.MintRequest:
                          tag="prod"),
             path=str(checkpoint))},
         device=-1, execution_lane="", configs={})
-    request = mint_delegate.build_request(task, workdir=workdir)
+    request = mint_process.build_request(task, workdir=workdir)
     return msgspec.json.decode(msgspec.json.encode(request), type=mp.MintRequest)
 
 

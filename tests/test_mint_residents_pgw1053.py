@@ -39,7 +39,7 @@ import torch.nn as nn  # noqa: E402
 from gen_worker import aot_compile_pool as pool_mod  # noqa: E402
 from gen_worker import (  # noqa: E402
     aot_flatten, aot_mint, aot_package, aot_serve, compile_cache, graph_hash,
-    mint_delegate)
+    mint_supervisor)
 from gen_worker.api.decorators import Compile  # noqa: E402
 from gen_worker.api.export_contract import (  # noqa: E402
     Dim,
@@ -267,10 +267,10 @@ def test_the_parent_never_parks_its_eager_pipeline_any_more() -> None:
     and is deleted with it: every mint now runs beside a live tenant whose
     eager pipeline stays resident and hot (Paul ruling 2).
 
-    RED before this change: `mint_delegate.maybe_park_eager` existed and
+    RED before this change: `mint_supervisor.maybe_park_eager` existed and
     `build_cell` called it before the first budget probe.
     """
     for gone in ("ParkedEager", "maybe_park_eager", "restore_eager_pipeline",
                  "_eager_modules"):
-        assert not hasattr(mint_delegate, gone), gone
-    assert "park" not in mint_delegate.__all__
+        assert not hasattr(mint_supervisor, gone), gone
+    assert "park" not in mint_supervisor.__all__

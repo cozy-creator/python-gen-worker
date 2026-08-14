@@ -563,7 +563,7 @@ module = [
   "tests.test_mint_child_slot_bindings_pgw969",
   "tests.test_mint_child_warm_context_pgw828",
   "tests.test_mint_credential_expiry_th1423",
-  "tests.test_mint_delegate_pgw784",
+  "tests.test_mint_supervisor_pgw1215",
   "tests.test_mint_dispatch_admission_pgw844",
   "tests.test_mint_liveness_pgw784",
   "tests.test_mint_memory_fit_pgw848",

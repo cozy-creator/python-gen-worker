@@ -41,7 +41,7 @@ import pytest
 from gen_worker import child_preflight
 from gen_worker import child_contract
 from gen_worker import Compile, MintBlocker, fleet_cells
-from gen_worker import mint_child, mint_delegate
+from gen_worker import mint_child, mint_process
 from gen_worker import mint_process as mp
 from gen_worker import config as gw_config
 from gen_worker.api.derive import (
@@ -366,13 +366,13 @@ def _blocked_request(tmp_path: Path) -> mp.MintRequest:
                         dynamic=(), lora_bucket=0, guidance_scales=(),
                         text_lens=()),
         target=tmp_path / "cell.tar.gz", mint_root=tmp_path)
-    task = mint_delegate.MintTask(
+    task = mint_process.MintTask(
         pending=pending, pipe=object(), function="blocked-echo",
         modules=(HARNESS_MODULE,),
         slots={"pipeline": child_contract.MintSlot(
             ref=blocked.DECLARED_PIPELINE, path=str(tree))},
         execution_lane="w8a8", device=-1)
-    request = mint_delegate.build_request(
+    request = mint_process.build_request(
         task, workdir=tmp_path / "w")
     return msgspec.json.decode(msgspec.json.encode(request), type=mp.MintRequest)
 

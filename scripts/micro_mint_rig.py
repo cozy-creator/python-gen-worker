@@ -12,7 +12,7 @@ WHAT IT ACTUALLY RUNS. Every leg below is the production code path, against a
 randomly-initialized toy latent-diffusion model on this box's card:
 
   1. resolve      — the parent builds a real `MintSlot` (identity + bytes)
-  2. handoff      — `mint_delegate.build_request` -> `MintRequest` -> a JSON file
+  2. handoff      — `mint_process.build_request` -> `MintRequest` -> a JSON file
   3. spawn        — `mint_process.run_mint` starts a REAL child interpreter
   4. load         — the child re-runs module discovery and `run_setup` from scratch
   5. warm         — `warmup_forward` over the endpoint's own declared plan
@@ -252,7 +252,7 @@ def _mint_slot(tree: Path, ref_path: str) -> Any:
 def _mint_request(
     workdir: Path, tree: Path, veh: Any, *, ordinal: int = 0,
 ) -> Any:
-    """Built through `mint_delegate.build_request` — the REAL parent chain.
+    """Built through `mint_process.build_request` — the REAL parent chain.
 
     Not a hand-written `MintRequest`: the thing under test is the handoff, and
     a hand-written request is the one shape the handoff can never produce.
@@ -261,8 +261,8 @@ def _mint_request(
     child RSS), so a rig cycle takes the pool path on its own cores without an
     operator priming a device basis.
     """
-    from gen_worker import mint_delegate
-    from gen_worker.mint_delegate import MintTask
+    from gen_worker import mint_process
+    from gen_worker.mint_process import MintTask
 
     cfg = veh.compile_cell()
     pending = SimpleNamespace(
@@ -275,7 +275,7 @@ def _mint_request(
         function=veh.function, modules=tuple(veh.modules),
         slots={"pipeline": _mint_slot(tree, veh.ref_path)}, device=ordinal,
         execution_lane="", configs={})
-    return mint_delegate.build_request(task, workdir=workdir)
+    return mint_process.build_request(task, workdir=workdir)
 
 
 #: What the rig's endpoint function DECLARES, the way a real build reads it off
