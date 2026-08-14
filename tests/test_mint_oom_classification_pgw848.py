@@ -149,6 +149,24 @@ def test_a_real_oom_killed_entry_child_is_a_retryable_shortfall_that_teaches_the
                 out_dir=str(tmp_path / "artifacts")))
         except pool.EntryCompileFailed as exc:
             failure = exc
+            # ⚠️ pgw#1215: the kernel counter arbitrates the RAISING branch
+            # too, and it did not before. A non-enforcing box now lands HERE
+            # rather than in the `else` below: the child composes its own
+            # compile target instead of loading a staged program, so a probe
+            # job that never resolves an endpoint refuses in its preflight
+            # instead of calmly compiling. Same environment gap, opposite
+            # branch — and the arbiter is the same either way. No OOM in the
+            # kernel's own counter means there is no OOM to classify, whichever
+            # way the pool returned. Everything below still runs, unchanged, on
+            # every box that really does enforce the cap.
+            if _oom_kills(cgroup) == kills_before:
+                pytest.skip(
+                    "the memory cap did not OOM-kill the child: this box has "
+                    "a delegated cgroup v2 memory controller but it did not "
+                    "enforce memory.max on this process tree, so the child "
+                    f"failed for an unrelated reason ({failure.basis}: "
+                    f"{failure.detail[:200]}) and there is no OOM here to "
+                    "classify")
         else:
             if _oom_kills(cgroup) == kills_before:
                 pytest.skip(

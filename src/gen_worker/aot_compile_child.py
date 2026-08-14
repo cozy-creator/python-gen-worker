@@ -185,7 +185,22 @@ def build_pipeline(job: EntryJob) -> Tuple[Any, Any, Any]:
 
     ``place=False`` (pgw#1124): this pipeline never runs a forward, so the
     worker's serving placement ladder must not move its real non-target
-    components onto the card the serving parent is resident on.
+    components onto the card the serving parent is resident on. That holds on
+    BOTH composition paths below — the fallback loads a checkpoint, it still
+    never executes one.
+
+    **Structure-only is PREFERRED, never REQUIRED** (pgw#1215, restoring the
+    semantics ``mint_child._load`` has had since pgw#1123). A family whose
+    component has no config-only surface — a quantized artifact lane, a class
+    the tree's ``model_index.json`` does not name — is stranded on the
+    real-weight mint, and a real-weight mint is a correct, more expensive
+    mint. Requiring structure-only here would make every such family, which
+    minted on the parent-traced path, UNMINTABLE the moment the trace moved
+    into this process: a capability regression with no fleet-facing notice.
+    ``StructureNotHonored`` is the one refusal that stays fatal, because it
+    means the target WAS built weight-free and the pipeline discarded it —
+    falling back there exports weight-scale REAL tensors while the child
+    reports weightless (ie#638's silent 40 GiB OOM).
 
     A named function because every one of its refusals is deterministic and
     typed, and because a test can reach the whole preflight without an
@@ -193,6 +208,7 @@ def build_pipeline(job: EntryJob) -> Tuple[Any, Any, Any]:
     """
     from . import aot_mint, compile_cache as cc, fleet_cells
     from .cli.run import run_setup
+    from .models import structure_only
     from .registry import collect_endpoints
 
     cfg = job.cfg
@@ -207,10 +223,32 @@ def build_pipeline(job: EntryJob) -> Tuple[Any, Any, Any]:
     overrides = {
         name: dict(slot.component_paths or {})
         for name, slot in job.slots.items() if slot.component_paths}
-    loaded = run_setup(
-        chosen.cls(), dict(paths), arm_compile=False, return_loaded=True,
-        component_paths=overrides, place=False,
-        structure_only=tuple(cfg.targets)) or {}
+    try:
+        loaded = run_setup(
+            chosen.cls(), dict(paths), arm_compile=False, return_loaded=True,
+            component_paths=overrides, place=False,
+            structure_only=tuple(cfg.targets)) or {}
+    except structure_only.StructureNotHonored as exc:
+        raise PreflightRefused(
+            f"structure-only was requested for {job.function!r} and the "
+            f"target built weight-free, but the composed pipeline did not "
+            f"carry it: {exc}") from exc
+    except structure_only.StructureOnlyUnsupported as exc:
+        # A CAPABILITY refusal is not this family declining, it is this image
+        # being unable to (pgw#1123) — and it is louder, because the same
+        # image derives no boot key either, so every pod running it re-mints.
+        if isinstance(exc, structure_only.StructureCapabilityMissing):
+            logger.error(
+                "the weight-free compile is unavailable in this image, so "
+                "this share loads real weights and every boot in it will "
+                "self-mint: %s", exc)
+        else:
+            logger.warning(
+                "structure-only %s: %s — this share compiles from real "
+                "weights", structure_only.refusal_token(exc), exc)
+        loaded = run_setup(
+            chosen.cls(), dict(paths), arm_compile=False, return_loaded=True,
+            component_paths=overrides, place=False) or {}
     _slot, pipeline = pick_compile_target(loaded, cfg)
 
     if cfg.lora_bucket:
