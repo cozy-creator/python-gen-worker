@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Mapping, Optional, Sequence
 
 from gen_worker.api.errors import ValidationError
-from .file_layout import MULTI_FILE, SINGLE_FILE
+from ..models.file_layout import MULTI_FILE, SINGLE_FILE
 
 _PICKLE_EXTS = {".bin", ".pt", ".pth", ".ckpt", ".pickle", ".pkl"}
 _JUNK_EXTS = {

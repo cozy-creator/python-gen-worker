@@ -62,6 +62,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
+from .file_layout import MULTI_FILE
 from .tensor_layout_contract import (
     BAKE_LOW_RANK_BRANCH,
     CONTRACT_COZY_SVDQ_NVFP4_LR8,
@@ -504,6 +505,14 @@ def _decode_quantized_lowrank(
         # fixes the keys, so the fact lives on the HANDLE and a synonym for it
         # here would be a second home (th#1937 declined `contract.native`).
         key_topologies=(),
+        # MULTI-FILE ONLY, and it is the artifact that is constrained, not the
+        # checkpoint: the nunchaku file is one flat namespace, but BOTH svdq
+        # engines refuse an artifact that is only that file —
+        # `load_svdq_nunchaku_pipeline` and `load_svdq_native_pipeline` each
+        # raise on `not art.component` ("a servable flavor must be a full
+        # diffusers tree with the checkpoint under its denoiser directory"),
+        # and `convert/svdq.py` builds exactly that.
+        file_layouts=(MULTI_FILE,),
         bakes=(BAKE_LOW_RANK_BRANCH,),
     ),
     why="pgw#685: this is THE decoder of the nunchaku v1 single-file layout. "
@@ -518,6 +527,7 @@ def _decode_quantized_lowrank(
         elements=(ELEMENT_NVFP4, ELEMENT_INT4, ELEMENT_FP8_E4M3, ELEMENT_BF16),
         scales=(SCALE_GROUP_16, SCALE_PER_CHANNEL_OUT, SCALE_PER_TENSOR),
         key_topologies=(),
+        file_layouts=(MULTI_FILE,),   # same two engine refusals as above
         # The QUANTIZED low-rank branch is what separates this handle from
         # nunchaku.v1@1, and the handle is where that fact lives — the ruled
         # tensor-set registry names the SET, not the scheme it is stored in.

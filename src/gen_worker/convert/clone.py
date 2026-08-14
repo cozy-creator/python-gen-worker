@@ -81,7 +81,7 @@ _KNOWN_DTYPES = {
     "q4_0", "q4_1", "q3_k_m", "q3_k_s", "q2_k",
 }
 from ..component_vocab import quant_candidate_components
-from .file_layout import KNOWN_FILE_LAYOUTS, MULTI_FILE, SINGLE_FILE
+from ..models.file_layout import KNOWN_FILE_LAYOUTS, MULTI_FILE, SINGLE_FILE
 
 _KNOWN_FILE_LAYOUTS = set(KNOWN_FILE_LAYOUTS)
 _KNOWN_FILE_TYPES = {"safetensors", "gguf"}

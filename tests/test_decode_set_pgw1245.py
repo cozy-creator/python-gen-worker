@@ -74,7 +74,8 @@ from gen_worker.models.tensor_layout_contract import (
 @implements_contract(
     contract="{contract}", serves=("{body}",), composes_lora=False,
     decodes=DecodeDimensions(
-        elements=("{element}",), scales=("{scale}",), key_topologies=(), bakes=()),
+        elements=("{element}",), scales=("{scale}",), key_topologies=(),
+        file_layouts=(), bakes=()),
     why="fake decoder",
 )
 def decode(tensors):
@@ -228,7 +229,7 @@ def test_a_declaration_cannot_be_written_by_omission() -> None:
             composes_lora=False,
             decodes=DecodeDimensions(
                 elements=(), scales=("none",), key_topologies=(),
-                bakes=()),
+                file_layouts=(), bakes=()),
         )
         def _empty_axis(x):
             return x
@@ -239,7 +240,7 @@ def test_a_declaration_cannot_be_written_by_omission() -> None:
             composes_lora=False,
             decodes=DecodeDimensions(
                 elements=("fp6_e3m2",), scales=("none",),
-                key_topologies=(), bakes=()),
+                key_topologies=(), file_layouts=(), bakes=()),
         )
         def _invented_token(x):
             return x

@@ -37,7 +37,7 @@ from .writer import streaming_dtype_cast
 from .writer import streaming_fp8_storage_cast
 from ..subproc import ProcessStalledError, run_process
 from .gguf_tools import (GGUF_TOOLCHAIN_STALL_WINDOW_S, prepare_hf_source_tree_for_gguf, resolve_gguf_convert_script, run_hf_to_gguf_conversion)
-from .file_layout import SINGLE_FILE
+from ..models.file_layout import SINGLE_FILE
 
 logger = logging.getLogger(__name__)
 

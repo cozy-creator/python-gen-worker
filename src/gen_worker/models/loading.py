@@ -27,6 +27,12 @@ import struct
 
 from ..capability import HostRamCapacityError, InsufficientHostRamError
 from . import disk_gc, load_progress
+from .file_layout import (
+    MULTI_FILE,
+    SINGLE_FILE,
+    is_single_file_snapshot,
+    observed_file_layout,
+)
 from .tensor_layout_contract import (
     CONTRACT_COZY_FP8_ROWWISE,
     CONTRACT_HF_FP8_BLOCKWISE,
@@ -631,9 +637,10 @@ def require_decodable(contract: str, path: Any, *, component: str = "") -> None:
     """Refuse, typed, before handing bytes to a decoder this IMAGE does not
     declare (pgw#1245).
 
-    Two questions, both answered from HEADERS, both before any tensor is read:
-    is this contract in the image's decode-set, and is the artifact's tensor-KEY
-    convention one a decoder of that contract ingests. The second is not the
+    Three questions, all answered from HEADERS and directory shape, all before
+    any tensor is read: is this contract in the image's decode-set, is the
+    artifact's on-disk SHAPE one a decoder of that contract opens, and is its
+    tensor-KEY convention one that decoder ingests. The third is not the
     first: `plain.bf16@1` minimax-native weights (fused `blocks.N.attn.qkv_proj`)
     and `plain.bf16@1` diffusers weights (split `to_q/to_k/to_v`) are the same
     contract, the same file topology and one key in common, and the diffusers
@@ -653,10 +660,12 @@ def require_decodable(contract: str, path: Any, *, component: str = "") -> None:
     from ..discovery.decode_set import require_decodable as _require
     from .key_topology import classify_snapshot
 
+    tree = Path(path) / component if component else Path(path)
     _require(
         contract,
         where=str(path),
         keys=classify_snapshot(Path(path), component),
+        layout=observed_file_layout(tree),
     )
 
 
@@ -744,13 +753,15 @@ def _single_file_checkpoint(path: Path) -> Optional[Path]:
     ``*.safetensors.index.json`` (the HF shard convention), so a big
     single-file checkpoint arrives as N shards. Those are reassembled once
     into the original file (mmap-backed, ~disk-copy cost) and cached in the
-    snapshot dir — ``from_single_file`` only takes one file."""
+    snapshot dir — ``from_single_file`` only takes one file.
+
+    The SHAPE test is :func:`file_layout.is_single_file_snapshot`, shared with
+    the load-side layout observation so the routing decision and the declared
+    axis cannot disagree about what "single-file" means."""
+    if not is_single_file_snapshot(path):
+        return None
     if path.is_file():
-        return path if path.suffix == ".safetensors" else None
-    if not path.is_dir():
-        return None
-    if (path / "model_index.json").exists() or (path / "config.json").exists():
-        return None
+        return path
     singles = sorted(p for p in path.glob("*.safetensors") if p.is_file())
     if len(singles) == 1:
         return singles[0]
@@ -2407,6 +2418,10 @@ def _load_modular_pipeline(
         # here: a minimax-native tree offered to this loader is refused by
         # name rather than dying as an md5 miss inside a detection helper.
         key_topologies=(KEYS_DIFFUSERS_SPLIT_QKV, KEYS_TRANSFORMERS_SPLIT_QKV),
+        # BOTH, and each by its own entry point: a component-directory tree
+        # goes to `from_pretrained`, and `_single_file_checkpoint` routes a
+        # loose checkpoint to `from_single_file` (:2583).
+        file_layouts=(MULTI_FILE, SINGLE_FILE),
         bakes=(),
     ),
     why="the dense-weights path: plain bf16 bytes are read as stored "

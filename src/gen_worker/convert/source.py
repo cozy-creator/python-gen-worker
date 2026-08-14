@@ -24,7 +24,7 @@ from .writer import iter_source_tensors
 if TYPE_CHECKING:
     import torch
 
-from .file_layout import MULTI_FILE, SINGLE_FILE, FileLayout  # noqa: F401  (re-exported)
+from ..models.file_layout import MULTI_FILE, SINGLE_FILE, FileLayout  # noqa: F401  (re-exported)
 
 
 # Default set of component subdirs that the iter_hf_components passthrough

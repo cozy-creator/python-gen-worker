@@ -52,6 +52,7 @@ DEFAULT_DECODER_PACKAGES: tuple[str, ...] = ("gen_worker.models",)
 REFUSAL_CONTRACT_UNDECLARED = "decode_set_contract_undeclared"
 REFUSAL_KEY_TOPOLOGY_UNSUPPORTED = "decode_set_key_topology_unsupported"
 REFUSAL_KEY_TOPOLOGY_UNCLASSIFIED = "decode_set_key_topology_unclassified"
+REFUSAL_FILE_LAYOUT_UNSUPPORTED = "decode_set_file_layout_unsupported"
 REFUSAL_DECODE_SET_DRIFT = "decode_set_drift"
 
 
@@ -188,6 +189,7 @@ def manifest_block(ds: DecodeSet) -> Dict[str, Any]:
                 "elements": list(e.decodes.elements),
                 "scales": list(e.decodes.scales),
                 "key_topologies": list(e.decodes.key_topologies),
+                "file_layouts": list(e.decodes.file_layouts),
                 "bakes": list(e.decodes.bakes),
             }
             for e in ds.entries
@@ -440,6 +442,57 @@ class KeyTopologyUnclassifiedError(Exception):
         )
 
 
+class FileLayoutUnsupportedError(Exception):
+    """The artifact's on-disk SHAPE is one no decoder of this contract reads.
+
+    A third fact, distinct from the handle and from the key convention: the
+    bytes may be exactly the right format, addressed in exactly the right
+    convention, and still arrive as a shape the decoder's entry point cannot
+    open. Measured case: both svdq engines refuse a bare single-file nunchaku
+    transformer — a servable flavor must be a full diffusers tree with the
+    checkpoint under its denoiser directory — and until this axis existed that
+    fact lived only in two `raise` statements reached AFTER the CUDA gate, so
+    a host without a GPU reported "svdq artifacts require a CUDA GPU" for an
+    artifact no GPU would have helped.
+    """
+
+    code = REFUSAL_FILE_LAYOUT_UNSUPPORTED
+
+    def __init__(
+        self,
+        contract: str,
+        *,
+        observed: str,
+        accepted: tuple[str, ...],
+        where: str = "",
+    ) -> None:
+        self.contract = contract
+        self.observed = observed
+        self.accepted = accepted
+        self.where = where
+        subject = f" at {where}" if where else ""
+        super().__init__(
+            f"the artifact{subject} is in file layout {observed!r}, which "
+            f"this image's {contract} decoder does not read (it accepts: "
+            f"{', '.join(accepted) or 'none'}). The bytes may be the right "
+            f"format in the right key convention and still be the wrong "
+            f"SHAPE — bind a variant published in an accepted layout, or ship "
+            f"an image whose decoder opens this one."
+        )
+
+
+def accepted_file_layouts(contract: str, ds: DecodeSet) -> tuple[str, ...]:
+    """Every on-disk shape this image's decoders of ``contract`` read."""
+    out: list[str] = []
+    for entry in ds.entries:
+        if entry.contract != contract:
+            continue
+        for token in entry.decodes.file_layouts:
+            if token not in out:
+                out.append(token)
+    return tuple(sorted(out))
+
+
 def accepted_key_topologies(contract: str, ds: DecodeSet) -> tuple[str, ...]:
     """Every key convention this image's decoders of ``contract`` ingest."""
     out: list[str] = []
@@ -458,17 +511,25 @@ def require_decodable(
     decode_set: Optional[DecodeSet] = None,
     where: str = "",
     keys: Optional["SnapshotKeys"] = None,
+    layout: str = "",
 ) -> None:
-    """Refuse, typed, unless this image can decode the artifact. Three checks,
-    three codes, all answered from headers before any tensor is read:
+    """Refuse, typed, unless this image can decode the artifact. Four checks,
+    four codes, all answered from headers and directory shape before any
+    tensor is read:
 
     1. ``contract`` is in the image's decode-set, else
        ``decode_set_contract_undeclared``;
-    2. the artifact's key convention was CLASSIFIED — a DENOISER tree matching
+    2. a decoder of ``contract`` reads the artifact's on-disk SHAPE, else
+       ``decode_set_file_layout_unsupported``;
+    3. the artifact's key convention was CLASSIFIED — a DENOISER tree matching
        no registered topology is ``decode_set_key_topology_unclassified``,
        never a hopeful pass;
-    3. a decoder of ``contract`` ingests that convention, else
+    4. a decoder of ``contract`` ingests that convention, else
        ``decode_set_key_topology_unsupported``.
+
+    ``layout`` is an OBSERVATION (``models.file_layout.observed_file_layout``),
+    and an empty one is an unclassifiable shape: not evaluated, the same
+    UNDECLARED rung an unconstrained axis takes.
 
     **What "unknown" does, stated so it cannot be misread:** for the DENOISER
     it REFUSES (check 2). For every other component — vae, text encoder,
@@ -487,6 +548,11 @@ def require_decodable(
             unregistered=ds.unregistered,
             where=where,
         )
+    if layout:
+        readable = accepted_file_layouts(contract, ds)
+        if readable and layout not in readable:
+            raise FileLayoutUnsupportedError(
+                contract, observed=layout, accepted=readable, where=where)
     if keys is None:
         return
     accepted = accepted_key_topologies(contract, ds)

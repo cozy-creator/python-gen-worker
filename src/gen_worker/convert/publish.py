@@ -28,7 +28,7 @@ from ..models.ladder import (
 from .dtype_pins import verify_produced_tree
 from .produced import ProducedFlavor
 from .writer import assert_one_file_per_component
-from .file_layout import validate_file_layout
+from ..models.file_layout import validate_file_layout
 
 _PLACEMENT_ATTR_KEYS = ("placement_sm_allowed", "placement_sm_min", "placement_engines")
 
