@@ -538,6 +538,8 @@ def test_cell_artifact_legitimate_transfer_is_unaffected(rig: _Rig, tmp_path: Pa
              "digest": ARTIFACT_DIGEST, "size_bytes": len(ARTIFACT)}
     out = _fetch_cell(rig, tmp_path, entry, ARTIFACT_DIGEST)
     assert out is not None and out.read_bytes() == ARTIFACT
+    assert (tmp_path / "objects").is_dir()
+    assert not (tmp_path / "hashrepo").exists()
 
 
 def test_cell_artifact_without_size_bytes_is_a_typed_miss(rig: _Rig, tmp_path: Path) -> None:

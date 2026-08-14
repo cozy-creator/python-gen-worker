@@ -19,11 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import msgspec
-
-from gen_worker.pb import worker_scheduler_pb2 as pb
-
 from harness.blob_host import BlobHost, CorruptingBlobHost
-from harness.progress_wait import Cadence, await_progress
 from harness.hub_double import (
     hub_double,
     is_exact_model_event,
@@ -31,7 +27,10 @@ from harness.hub_double import (
     is_ready,
     is_result_for,
 )
+from harness.progress_wait import Cadence, await_progress
 from harness.toy_endpoints import EchoIn, EchoOut
+
+from gen_worker.pb import worker_scheduler_pb2 as pb
 
 _MODEL_REF = "harness/residency-tiny"
 _BROKEN_REF = "harness/residency-broken"
@@ -431,10 +430,11 @@ def test_corrupt_load_failure_refetches_and_retries_once(tmp_path, monkeypatch) 
     Network boundary faked (real ModelStore/Executor, no hub_double needed
     here — this bug lives entirely below the wire)."""
     import asyncio
+    import hashlib
     import json
     import struct
 
-    import hashlib
+    from hashrepo import TransferReport
 
     import gen_worker.models.cozy_snapshot as snap_mod
     from gen_worker.api.binding import Hub as HubRef
@@ -456,11 +456,15 @@ def test_corrupt_load_failure_refetches_and_retries_once(tmp_path, monkeypatch) 
     )])
     calls = {"n": 0}
 
-    async def _fake_dl(url, dst, expected_size, expected_digest, on_bytes=None):
+    def _fake_dl(grants, cas, *, progress=None):
         calls["n"] += 1
-        dst.write_bytes(content)
+        for grant in grants:
+            cas.put_bytes(content, expected=grant.digest)
+            if progress is not None:
+                progress(grant.digest, grant.size_bytes)
+        return TransferReport(examined=len(grants), succeeded=len(grants))
 
-    monkeypatch.setattr(snap_mod, "afetch_verified", _fake_dl)
+    monkeypatch.setattr(snap_mod, "download", _fake_dl)
     monkeypatch.setattr(_WeightsPipe, "expected", content)
 
     ref = "harness/snapshot-corruption-quarantine"

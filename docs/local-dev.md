@@ -29,8 +29,7 @@ Everything else derives from the code:
 - Model weights resolve from the local CAS first. The CAS path is derived by
   `models/cache_paths.tensorhub_cas_dir()` from **`$TENSORHUB_CACHE_DIR`**
   (default `/tmp/tensorhub-cache`, so the CAS is `/tmp/tensorhub-cache/cas`).
-  Set `TENSORHUB_CACHE_DIR` to relocate it — `TENSORHUB_CAS_DIR` is a narrow
-  override that `cache_paths` does not consult and will not move the CLI's CAS.
+  Set `TENSORHUB_CACHE_DIR` to relocate the cache and CAS together.
 - On cache miss the CLI auto-fetches from the upstream registry
   (HuggingFace for `HF` bindings; cozy refs require an
   orchestrator-warmed cache today — see *Cozy ref cache miss* below).

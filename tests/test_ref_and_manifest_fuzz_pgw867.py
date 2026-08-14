@@ -11,7 +11,7 @@ the worker then acts on, and each fails SILENTLY rather than loudly.
   FORM IS A FIXED POINT, because hub-minted refs and worker wire refs are
   compared byte-wise, so a ref that normalizes two ways is a cache miss that
   presents as a missing model.
-* **CAS refs** (``gen_worker.models.chunk_cas.parse_cas_ref``): a bare hex
+* **CAS refs** (``hashrepo.CASRef``): a bare hex
   string must not default to ``blake3:``. ``len(digest) == 64`` cannot tell
   blake3 from sha256 — both are 32 bytes — so a length check is not a
   discriminator, it only looks like one.
@@ -28,10 +28,10 @@ import pathlib
 from typing import Any
 
 import pytest
+from hashrepo import CASRef
 from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
-from gen_worker.models.chunk_cas import parse_cas_ref
 from gen_worker.models.hub_client import HubResolveError, parse_chunk_list, resolved_entry_digest
 from gen_worker.models.refs import (
     DEFAULT_REF_TAG,
@@ -190,17 +190,15 @@ def test_parse_cas_ref_acceptance_is_fully_determined(ref: str) -> None:
     """Acceptance implies a complete, self-consistent (algo, hex) pair, and the
     parse is idempotent under its own normal form."""
     try:
-        algo, hexpart = parse_cas_ref(ref)
+        parsed = CASRef.parse(ref)
     except ValueError:
         return
-    assert algo in ("sha256", "blake3")
+    hexpart = parsed.digest
     assert len(hexpart) == 64
     assert all(c in "0123456789abcdef" for c in hexpart)
     assert hexpart == hexpart.lower()
-    algo2, hex2 = parse_cas_ref(f"{algo}:{hexpart}")
-    assert (algo2, hex2) == (algo, hexpart), "the normal form does not re-parse to itself"
-    algo3, hex3 = parse_cas_ref(f"{algo}:{hexpart}".upper())
-    assert (algo3, hex3) == (algo, hexpart), "case changes the identity of a ref"
+    assert CASRef.parse(str(parsed)) == parsed, "the normal form does not re-parse to itself"
+    assert CASRef.parse(str(parsed).upper()) == parsed, "case changes the identity of a ref"
 
 
 def test_bare_hex_is_refused_pgw871() -> None:
@@ -217,13 +215,13 @@ def test_bare_hex_is_refused_pgw871() -> None:
     it only looks like one.
     """
     with pytest.raises(ValueError, match="algorithm-tagged"):
-        parse_cas_ref(HEX64)
+        CASRef.parse(HEX64)
     # The other CAS-digest reader in this repo, which already refused it.
     with pytest.raises(ValueError):
         resolved_entry_digest({"digest": HEX64})
-    # Tagged refs are unaffected, both algorithms.
-    assert parse_cas_ref(f"sha256:{HEX64}") == ("sha256", HEX64)
-    assert parse_cas_ref(f"blake3:{HEX64}") == ("blake3", HEX64)
+    assert CASRef.parse(f"sha256:{HEX64}") == CASRef(HEX64)
+    with pytest.raises(ValueError, match="unsupported algorithm"):
+        CASRef.parse(f"blake3:{HEX64}")
 
 
 # ---------------------------------------------------------------------------

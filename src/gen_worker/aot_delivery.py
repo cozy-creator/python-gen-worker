@@ -20,23 +20,21 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 
-import requests
+from hashrepo import (
+    CHUNK_SIZE,
+    CASRef,
+    Chunk,
+    DigestMismatch,
+    FileEntry,
+    TransferGrant,
+    download,
+)
 
 from . import boot_phases
 from .api.errors import RetryableError
-from .bounded_stream import copy_bounded
-from .models.chunk_cas import (
-    CAS_CHUNK_SIZE_BYTES,
-    ChunkSpec,
-    DigestMismatch,
-    download_chunked_file,
-    verify_file_digest,
-)
+from .models.cache_paths import open_worker_cas
 
 logger = logging.getLogger(__name__)
-
-_DOWNLOAD_TIMEOUT_S = 120
-
 
 class NamedArtifactUnavailable(RetryableError):
     """The named cell's bytes could not be materialized AS NAMED."""
@@ -90,19 +88,18 @@ def _materialize_named_artifact(
         raise NamedArtifactUnavailable(
             "artifact_unpinned", f"{what}: named cell {cell_ref!r} carries no "
             "content digest")
-    dest_dir = (
-        Path(cache_dir) if cache_dir else Path.home() / ".cache" / "gen-worker"
-    ) / "aot-cells"
+    cas = open_worker_cas(cache_dir)
+    dest_dir = cas.root / "aot-cells"
     dest = dest_dir / f"{digest.split(':', 1)[-1]}.tar.gz"
-
+    try:
+        expected = CASRef.parse(digest)
+    except ValueError as exc:
+        raise NamedArtifactUnavailable("artifact_unpinned", f"{what}: {exc}") from exc
     if dest.is_file():
         try:
-            verify_file_digest(dest, digest)
-        except DigestMismatch:
+            cas.put_file(dest, expected=expected, size=dest.stat().st_size)
+        except (DigestMismatch, OSError):
             dest.unlink(missing_ok=True)  # stale cache — refetch below
-        except ValueError as exc:
-            raise NamedArtifactUnavailable(
-                "artifact_unpinned", f"{what}: {exc}") from exc
         else:
             # A cache hit is a real and countable outcome of this phase, not a
             # zero-byte fetch: the verify pass still reads the whole tarball.
@@ -127,8 +124,8 @@ def _materialize_named_artifact(
             "artifact tarball")
 
     declared_size = int(entry.size_bytes or 0)
-    chunks = list(entry.chunks or ())
-    if not chunks and declared_size <= 0:
+    remote_chunks = list(entry.chunks or ())
+    if not remote_chunks and declared_size <= 0:
         # A cell artifact is compiled code fetched before serving; an entry
         # that cannot say how big it is cannot be sized against disk
         #  — refuse rather than an unbounded write.
@@ -136,50 +133,48 @@ def _materialize_named_artifact(
             "missing_content",
             f"{what}: transport for {cell_ref!r} declares no size_bytes")
 
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(".part")
     try:
-        if chunks:
-            # Every chunk's sha256 AND the whole-file digest are verified
-            # inside the commit stream — one pass, no second read.
-            download_chunked_file(
-                [ChunkSpec(sha256=c.sha256, url=c.url, length=int(c.len))
-                 for c in chunks],
-                tmp,
-                whole_digest=digest,
-                total_size=declared_size,
-                chunk_size_bytes=(
-                    int(entry.chunk_size_bytes or 0) or CAS_CHUNK_SIZE_BYTES),
+        if remote_chunks and int(entry.chunk_size_bytes or CHUNK_SIZE) != CHUNK_SIZE:
+            raise ValueError(
+                f"chunk size {entry.chunk_size_bytes} does not match "
+                f"HashRepo v1 ({CHUNK_SIZE})"
             )
-        else:
-            url = str(entry.url or "")
-            if not url:
-                raise ValueError("transport entry has no URL")
-            with requests.get(url, timeout=_DOWNLOAD_TIMEOUT_S, stream=True) as dl:
-                dl.raise_for_status()
-                with open(tmp, "wb") as f:
-                    got = copy_bounded(
-                        dl.iter_content(1 << 20), f.write,
-                        limit_bytes=declared_size,
-                        what=f"named cell artifact {cell_ref}")
-            if got != declared_size:
-                raise ValueError(
-                    f"truncated: transport declares {declared_size} bytes, "
-                    f"got {got}")
-            verify_file_digest(tmp, digest)
+        chunks = tuple(
+            Chunk(CASRef.parse(f"sha256:{chunk.sha256}"), int(chunk.len))
+            for chunk in remote_chunks
+        )
+        file_entry = FileEntry(dest.name, declared_size, expected, chunks)
+        grants = (
+            tuple(
+                TransferGrant(chunk.digest, chunk.length, remote.url)
+                for chunk, remote in zip(chunks, remote_chunks, strict=True)
+            )
+            if chunks
+            else (TransferGrant(expected, declared_size, str(entry.url or "")),)
+        )
+    except ValueError as exc:
+        raise NamedArtifactUnavailable(
+            "artifact_fetch_failed",
+            f"{what}: named cell {cell_ref!r} has invalid HashRepo transport: {exc}",
+        ) from exc
+    try:
+        report = download(grants, cas)
+        if not report.ok:
+            failures = "; ".join(detail for _digest, detail in report.failures)
+            raise RuntimeError(failures or "artifact grants expired")
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        cas.materialize(file_entry, dest)
     except NamedArtifactUnavailable:
-        tmp.unlink(missing_ok=True)
         raise
-    except (ValueError, RuntimeError, requests.RequestException) as exc:
-        tmp.unlink(missing_ok=True)
+    except (ValueError, RuntimeError, OSError) as exc:
+        dest.unlink(missing_ok=True)
         raise NamedArtifactUnavailable(
             "content_digest_mismatch" if isinstance(exc, DigestMismatch)
             else "artifact_fetch_failed",
             f"{what}: named cell {cell_ref!r} bytes refused against "
             f"{digest[:24]}…: {exc}") from exc
-    tmp.replace(dest)
     if span is not None:
-        span.classify("fetched", f"ref={cell_ref} chunks={len(chunks)}")
+        span.classify("fetched", f"ref={cell_ref} chunks={len(remote_chunks)}")
         span.bytes_moved(declared_size or dest.stat().st_size,
                          boot_phases.SOURCE_CAS)
     return dest

@@ -61,29 +61,33 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import (
-    Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple)
-
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from . import activity as activity_mod
-from . import aot_identity, aot_serve, artifact_meta, cell_key, env_seal
+from . import (
+    aot_identity,
+    aot_serve,
+    artifact_meta,
+    cell_key,
+    env_seal,
+    local_cell_store,
+    serve_posture,
+)
 from . import boot_phases as boot_mod
-from . import local_cell_store
-from . import serve_posture
 from . import compile_cache as cc
+from .api.export_contract import blocker_refusal, export_declaration, open_blockers
 from .cell_adopt import AdoptOutcome, CellAdoption, EagerPhase
-from .models.chunk_cas import sha256_file
-from .procsplit import broker
+from .file_hash import sha256_file
+from .hubio.client import HubPublishError
+
 # module import (not `from .loading import pipeline_weight_lane`): tests
 # monkeypatch models.loading.pipeline_weight_lane; stay late-bound.
-from .models import loading, provision
+from .models import loading, lora_lifted, provision
+from .procsplit import broker
 from .request_context._helpers import _decode_unverified_jwt_claims
-from .hubio.client import HubPublishError
-from .api.export_contract import (
-    blocker_refusal, export_declaration, open_blockers)
-from .models import lora_lifted
 
 logger = logging.getLogger(__name__)
+
 
 #: pgw#805 mint recipes, as re-cut by pgw#1010. ``aot`` (torch.export +
 #: AOTInductor) is the ONLY recipe that produces an artifact — the only kind

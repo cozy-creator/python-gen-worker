@@ -11,8 +11,9 @@ than assumed:
   the destruction is in the LIFECYCLE: one writer's failure path unlinks the
   other's in-flight download, and the victim fails its own rename after paying
   for every byte. This file proves that, and proves the fix.
-* ``models/disk_gc.RefIndex._save_locked`` — **racy across PROCESSES.** The
-  lock it holds is a thread lock; the index sits in the shared model cache dir.
+* ``models/disk_gc.RefIndex._save_locked`` — **process-locked.** Every mutation
+  refreshes and merges under a flock on the stable cache-directory inode before
+  its durable replace. There is no ownership-sensitive lock sidecar.
 * ``env_seal.write_library_memo`` — **per-attempt today** (its only caller
   seeds ``<mint workdir>/seal-lib-memo.json``, and the workdir is per mint
   attempt), but the atomicity promise is the function's, so it no longer
@@ -26,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import http.server
 import json
+import multiprocessing
 import threading
 from pathlib import Path
 from typing import Any, List, Optional
@@ -43,6 +45,12 @@ _RENDEZVOUS_S = 60.0
 
 _PAYLOAD = bytes(range(256)) * 8192          # 2 MiB, > the 1 MiB read chunk
 _DIGEST = "sha256:" + hashlib.sha256(_PAYLOAD).hexdigest()
+
+
+def _record_shared_ref(cache: str, ref: str, barrier: Any) -> None:
+    index = RefIndex(Path(cache))
+    barrier.wait(_RENDEZVOUS_S)
+    index.record(ref, Path(cache) / ref.replace("/", "-"), 1024)
 
 
 class _Rendezvous:
@@ -148,35 +156,58 @@ def test_a_failing_writer_cannot_destroy_a_concurrent_one(shard_server, tmp_path
     assert sorted(p.name for p in dest.parent.iterdir()) == [dest.name]
 
 
-def test_two_ref_index_writers_leave_a_whole_document(tmp_path):
-    """`RefIndex`'s lock is per-process, so two processes sharing a cache dir
-    are ordered by nothing. Whoever renames last wins — but every reader must
-    see a COMPLETE index, never a mixture of two states."""
+def test_two_ref_index_processes_merge_without_losing_an_owner(tmp_path):
     cache = tmp_path / "cache"
     cache.mkdir()
-    left, right = RefIndex(cache), RefIndex(cache)
-    barrier = threading.Barrier(2, timeout=_RENDEZVOUS_S)
-
-    def write(index: RefIndex, prefix: str) -> None:
-        barrier.wait()
-        for i in range(60):
-            index.record(f"{prefix}/model-{i}", cache / f"{prefix}-{i}", 1024 * i)
-
-    threads = [threading.Thread(target=write, args=(left, "a")),
-               threading.Thread(target=write, args=(right, "b"))]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=_RENDEZVOUS_S)
-        assert not t.is_alive()
+    context = multiprocessing.get_context("fork")
+    barrier = context.Barrier(2)
+    processes = [
+        context.Process(
+            target=_record_shared_ref, args=(str(cache), ref, barrier)
+        )
+        for ref in ("a/model", "b/model")
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=_RENDEZVOUS_S)
+        assert process.exitcode == 0
 
     doc = json.loads((cache / "ref-index.json").read_text("utf-8"))
-    # A torn write is not a partial dict — it is unparseable, or a document
-    # holding entries whose refs came from two different writers' states.
-    owners = {ref.split("/", 1)[0] for ref in doc}
-    assert owners in ({"a"}, {"b"}), f"the index mixes two writers: {sorted(doc)}"
-    assert not [p for p in cache.iterdir() if p.name != "ref-index.json"], \
-        "a temp file was left behind"
+    assert set(doc) == {"a/model", "b/model"}
+    assert {p.name for p in cache.iterdir()} == {"ref-index.json"}
+
+
+def test_ref_index_uses_directory_authority_not_root_owned_lock_metadata(tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    root_writer = RefIndex(cache)
+    root_writer.record("root/model", cache / "root", 1)
+
+    # Reproduce the privilege lane's ownership boundary without requiring this
+    # unit test itself to run as root: the directory remains writable, while
+    # metadata left by the old root writer is read-only to the next writer.
+    index_path = cache / "ref-index.json"
+    index_path.chmod(0o444)
+    legacy_lock = cache / ".ref-index.json.lock"
+    legacy_lock.touch(mode=0o444)
+    legacy_lock.chmod(0o444)
+
+    dropped_writer = RefIndex(cache)
+    dropped_writer.record("child/model", cache / "child", 2)
+    assert set(RefIndex(cache).entries()) == {"root/model", "child/model"}
+    assert index_path.stat().st_mode & 0o777 == 0o644
+
+
+def test_ref_index_instances_refresh_before_reads_and_writes(tmp_path):
+    cache = tmp_path / "cache"
+    left, right = RefIndex(cache), RefIndex(cache)
+    left.record("a/model", cache / "a", 1)
+    assert right.path("a/model") == cache / "a"
+    right.record("b/model", cache / "b", 2)
+    assert set(left.entries()) == {"a/model", "b/model"}
+    left.remove("a/model")
+    assert right.path("a/model") is None
 
 
 def test_the_library_memo_survives_a_shared_destination(tmp_path):

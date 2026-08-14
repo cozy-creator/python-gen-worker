@@ -22,19 +22,19 @@ test box registers no export declarations at all.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
 from pathlib import Path
 
 import pytest
+from harness.cell_meta import exported_cell_meta
 
 from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells as fc
-from gen_worker import guard_closure
-from gen_worker.models import provision
 from gen_worker.cell_adopt import AdoptOutcome
-from harness.cell_meta import exported_cell_meta
+from gen_worker.models import provision
 
 
 class _Cfg:
@@ -280,11 +280,9 @@ def test_adopt_publishes_exactly_the_bytes_that_armed(monkeypatch, tmp_path):
     # th#1355: the mint cost travels with the publish, so "what did this cell
     # cost to build" can be joined to the cell it describes.
     assert mint_duration_ms >= 0
-    from gen_worker.models.chunk_cas import sha256_file
-
     copy = tmp_path / "published-copy.tar.gz"
     copy.write_bytes(tar_bytes)
-    assert minted.snapshot_digest == "sha256:" + sha256_file(copy)
+    assert minted.snapshot_digest == "sha256:" + hashlib.sha256(tar_bytes).hexdigest()
     # Adoption is memoized for same-key siblings: publish resolves once.
     #
     # Asserted by calling the adopt DIRECTLY on the same child path, rather

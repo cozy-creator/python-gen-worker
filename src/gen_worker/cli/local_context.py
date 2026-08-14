@@ -25,12 +25,16 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sys
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from hashrepo import CASRef
+
 from ..api.types import Asset
+from ..models.cache_paths import open_worker_cas
 from ..request_context import (
     REF_ORIGIN_PAYLOAD,
     ConversionContext,
@@ -38,8 +42,6 @@ from ..request_context import (
     RequestContext,
     TrainingContext,
 )
-from ..models.cache_paths import tensorhub_cas_dir
-
 
 _LOCAL_OUTPUT_DIR_NAME = ".gen-worker-run"
 
@@ -136,6 +138,15 @@ class LocalRequestContext(LocalRequestContextMixin, RequestContext):
     """Inference-kind local context."""
 
 
+def _materialize_local_blob(digest: str, dest: str | os.PathLike[str]) -> Path:
+    ref = CASRef.parse(digest)
+    source = open_worker_cas().verify_object(ref)
+    output = Path(dest)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, output)
+    return output
+
+
 class LocalConversionContext(LocalRequestContextMixin, ConversionContext):
     """Conversion-kind local context.
 
@@ -156,18 +167,14 @@ class LocalConversionContext(LocalRequestContextMixin, ConversionContext):
         d = (digest or "").strip()
         if not d:
             raise ValueError("materialize_blob: empty digest")
-        prefix = d.split(":", 1)[-1]
-        candidate = tensorhub_cas_dir() / "blobs" / prefix
-        if not candidate.exists():
+        try:
+            return _materialize_local_blob(d, dest)
+        except FileNotFoundError:
             raise FileNotFoundError(
                 f"materialize_blob: blob {digest!r} not found in local CAS "
-                f"({tensorhub_cas_dir()}); rerun without --offline or pre-seed "
+                f"({open_worker_cas().root}); rerun without --offline or pre-seed "
                 "the CAS by running an unrelated job that produces this blob."
-            )
-        out = Path(dest)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(candidate.read_bytes())
-        return out
+            ) from None
 
 
 class LocalDatasetContext(LocalRequestContextMixin, DatasetContext):
@@ -183,17 +190,13 @@ class LocalDatasetContext(LocalRequestContextMixin, DatasetContext):
         d = (digest or "").strip()
         if not d:
             raise ValueError("materialize_blob: empty digest")
-        prefix = d.split(":", 1)[-1]
-        candidate = tensorhub_cas_dir() / "blobs" / prefix
-        if not candidate.exists():
+        try:
+            return _materialize_local_blob(d, dest)
+        except FileNotFoundError:
             raise FileNotFoundError(
                 f"materialize_blob: blob {digest!r} not found in local CAS "
-                f"({tensorhub_cas_dir()})"
-            )
-        out = Path(dest)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(candidate.read_bytes())
-        return out
+                f"({open_worker_cas().root})"
+            ) from None
 
 
 class LocalTrainingContext(LocalRequestContextMixin, TrainingContext):

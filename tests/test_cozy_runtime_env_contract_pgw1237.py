@@ -11,11 +11,13 @@ from typing import Any
 
 import pytest
 
-from gen_worker import config
-from gen_worker import local_cell_store
+from gen_worker import aot_delivery, config, local_cell_store
 from gen_worker.cli.local_context import _save_local_bytes
-from gen_worker.models.cache_paths import tensorhub_cache_dir, tensorhub_cas_dir
-
+from gen_worker.models.cache_paths import (
+    open_worker_cas,
+    tensorhub_cache_dir,
+    tensorhub_cas_dir,
+)
 
 _DEFAULT_CORPUS = Path(__file__).parent / "testdata" / "cozy_runtime_env_vectors.json"
 _DEFAULT_DIGEST = Path(__file__).parent / "testdata" / "COZY_RUNTIME_ENV_DIGEST"
@@ -51,8 +53,10 @@ def test_runtime_env_semantics_match_pgw1237(
     monkeypatch.setenv(cache["name"], os.fspath(cache_root))
     config.reload_for_test()
     try:
+        assert not hasattr(config.Settings(), "tensorhub_cas_dir")
         assert tensorhub_cache_dir() == cache_root
         assert tensorhub_cas_dir() == cache_root / cache["consumer_relative_path"]
+        assert open_worker_cas().root == tensorhub_cas_dir()
     finally:
         config.reset_for_test()
 
@@ -99,6 +103,34 @@ def test_runtime_env_semantics_match_pgw1237(
     settings = config.reload_for_test()
     try:
         assert getattr(settings, bearer["config_field"]) == "redacted-test-sentinel"
+    finally:
+        config.reset_for_test()
+
+
+def test_aot_default_uses_the_canonical_worker_cas(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("TENSORHUB_CACHE_DIR", os.fspath(tmp_path / "cache-root"))
+    config.reload_for_test()
+    seen: list[Path | None] = []
+    real_open = open_worker_cas
+
+    def _open(root: Path | None = None) -> Any:
+        seen.append(root)
+        return real_open(root)
+
+    monkeypatch.setattr(aot_delivery, "open_worker_cas", _open)
+    try:
+        with pytest.raises(aot_delivery.NamedArtifactUnavailable, match="no transport"):
+            aot_delivery._materialize_named_artifact(
+                "cell-v1",
+                "sha256:" + "0" * 64,
+                None,
+                cache_dir=None,
+                what="root convergence test",
+            )
+        assert seen == [None]
+        assert open_worker_cas().root == tensorhub_cas_dir()
     finally:
         config.reset_for_test()
 

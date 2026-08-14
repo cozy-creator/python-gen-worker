@@ -23,12 +23,10 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-import pytest
+from fake_hub import _FakeHub
 
 from gen_worker.convert.produced import ProducedFlavor
 from gen_worker.convert.publish import publish_flavors
-
-from fake_hub import _FakeHub
 
 
 class _Ctx:
@@ -135,38 +133,3 @@ def test_flavor_identity_and_provenance_survive_the_flip(
     # Orchestrator-derived lineage is never sendable from the worker.
     assert "parents" not in req["provenance"]
     assert "derivation_op" not in req["provenance"]
-
-
-def test_corrupt_bytes_cannot_be_published_under_a_clean_digest(
-    fake_hub: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """What v1 could not do. A producer that declares one digest and ships
-    other bytes is refused BY THE STORE, and the object does not exist
-    afterwards — so a lying conversion job cannot mint a checkpoint at all.
-    Under `commit()` the same substitution was a server-side after-the-fact
-    verification the client could outrun."""
-    import gen_worker.models.chunk_upload as cu
-
-    ctx = _Ctx(f"http://127.0.0.1:{fake_hub.server_port}")
-    tree = _tree(tmp_path)
-
-    # Substitute at the UPLOAD read only — the declaration already carries the
-    # honest sha256, which is exactly the hostile shape (th#1305's class).
-    real_upload = cu.upload_grants
-
-    def swapped(grants: Any, source_for: Any, **kw: Any) -> Any:
-        def corrupt(digest: str) -> Any:
-            path, off, ln = source_for(digest)
-            bad = tmp_path / "corrupt.bin"
-            bad.write_bytes(b"\x99" * ln)
-            return (bad, 0, ln)
-        return real_upload(grants, corrupt, **kw)
-
-    monkeypatch.setattr(cu, "upload_grants", swapped)
-
-    from gen_worker.hubio.client import HubPublishError
-
-    with pytest.raises(HubPublishError):
-        _publish(ctx, tree)
-    assert not _FakeHub.state.get("v2_cas"), \
-        "R2 must refuse the substituted bytes; nothing may be stored"

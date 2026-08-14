@@ -51,7 +51,8 @@ import time
 from typing import IO, Any, Mapping, Optional, cast
 
 import urllib3
-from urllib3.exceptions import HTTPError, MaxRetryError, ProtocolError, SSLError, TimeoutError as Urllib3TimeoutError
+from urllib3.exceptions import HTTPError, MaxRetryError, ProtocolError, SSLError
+from urllib3.exceptions import TimeoutError as Urllib3TimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -202,14 +203,6 @@ class TransportError(RuntimeError):
         super().__init__(message)
         self.retryable = bool(retryable)
         self.status_code = status_code
-
-
-class GrantExpired(Exception):
-    """A presigned grant is (or has just proven to be) expired.
-
-    NOT a failure of the bytes and NOT terminal: an expired presign is fixed
-    by asking the hub for fresh grants (re-plan). The discrimination from a
-    substituted-claim 403 lives HERE so every PUT path shares one policy."""
 
 
 #: put_verdict() results — the ONE status classification for presigned PUTs.

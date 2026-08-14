@@ -47,7 +47,8 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # 60 -> 56: PR 7 cleared the BUILD-TIME surface (registry,
     # discovery.discover, discovery.execution_lanes, entrypoint) — what an
     # endpoint image build exercises.
-    "disallow_any_generics": (56, 285),
+    # 56 -> 55: pgw#1232 moved the generic transfer journal to HashRepo.
+    "disallow_any_generics": (55, 285),
     # 26 -> 25: PR 6, request_context.
     "warn_return_any": (25, 48),
     "disallow_untyped_calls": (20, 37),
@@ -57,7 +58,8 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # 17 -> 16: pgw#1202 PR 4 closed 1 of the 8 OURS (the other 9 are
     # third-party stub gaps and are not debt). The remaining 5 are blocked on
     # open lanes owning their importers, not on difficulty.
-    "implicit_reexport": (16, 34),
+    # 16 -> 15: pgw#1232 deleted the worker-owned chunk uploader.
+    "implicit_reexport": (15, 34),
     # test modules still dirty at the relaxed test posture.
     # 170 of 486 were already clean and are checked from that commit on.
     # 314 -> 312: PR 8 took the two HARNESS doubles — `tests.harness.cell_hub`
@@ -69,7 +71,8 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # `tests.test_shape_hints_pgw998` and
     # `tests.test_overlap_export_compile_pgw1052` with the save/load round trip
     # and the overlapped export/compile shape they pinned.
-    "ignore_errors": (309, 2016),
+    # 309 -> 302: pgw#1235 deleted seven duplicate generic CAS test modules.
+    "ignore_errors": (302, 2016),
 }
 
 #: WILDCARD patterns are structural policy, not debt, so they are not counted

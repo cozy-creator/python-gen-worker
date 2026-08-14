@@ -19,10 +19,9 @@ between one release and another's weights. It is therefore:
 *   **FILE-PARALLEL** — hashing is CPU-bound and releases the GIL inside
     ``hashlib``, so N files hash on N cores. At ~2 GB/s per core, 8
     cores put a 40 GiB tree at a few seconds.
-*   **MEMOIZED per (root, digest)** — content-addressed bytes cannot change
-    under a digest, so re-verifying the same blob in the same root within a
-    process is pure waste. Memoization records only PASSES; a failure is always
-    re-checked because it triggers deletion and refetch.
+*   **COPY-SPECIFIC** — every materialized file is hashed. A digest identifies
+    expected content, not the mutable path being checked, so one good copy can
+    never authorize another same-sized copy.
 
 Every report carries the DENOMINATOR it examined. A verdict computed from zero
 files is a broken reader, not a clean tree, and ``ok`` is false in that case
@@ -31,36 +30,27 @@ whenever files were expected.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
-from .chunk_cas import DigestMismatch, hash_file, parse_cas_ref
-from .cozy_snapshot import _is_part_file, _is_parts_manifest, _norm_rel_path
+from hashrepo import CASRef, DigestMismatch
+
+from .cozy_snapshot import _norm_rel_path
 
 __all__ = [
     "VerifyReport",
     "VerifyTarget",
     "snapshot_verify_targets",
     "verify_files",
-    "clear_memo",
 ]
 
 _log = logging.getLogger(__name__)
-
-# (blobs_root, algo:hex) -> True. Passes only.
-_memo: Dict[Tuple[str, str], bool] = {}
-_memo_lock = threading.Lock()
-
-
-def clear_memo() -> None:
-    with _memo_lock:
-        _memo.clear()
-
 
 @dataclass(frozen=True)
 class VerifyTarget:
@@ -82,7 +72,6 @@ class VerifyReport:
 
     examined: int = 0
     hashed: int = 0
-    memo_hits: int = 0
     bytes_hashed: int = 0
     bad: List[str] = field(default_factory=list)
     findings: List[str] = field(default_factory=list)
@@ -110,7 +99,6 @@ def _max_workers(n: int) -> int:
 def verify_files(
     targets: Sequence[VerifyTarget],
     *,
-    blobs_root: str = "",
     parallel: Optional[int] = None,
 ) -> VerifyReport:
     """Verify every target. Hashes in parallel; never samples."""
@@ -123,7 +111,7 @@ def verify_files(
     def _one(t: VerifyTarget) -> None:
         label = t.label or t.ref
         try:
-            algo, want = parse_cas_ref(t.ref)
+            parsed = CASRef.parse(t.ref)
         except ValueError as exc:
             # An unreadable digest is CORRUPT, not "nothing to check". Treating
             # it as a mere finding would let a malformed manifest entry pass
@@ -134,27 +122,21 @@ def verify_files(
                 rep.bad.append(label)
                 rep.findings.append(f"{t.path.name}: unreadable digest {t.ref!r}: {exc}")
             return
-        memo_key = (blobs_root, f"{algo}:{want}")
         try:
             if not t.path.exists():
                 raise DigestMismatch("missing")
             actual = t.path.stat().st_size
             if t.size and actual != t.size:
                 raise DigestMismatch(f"size mismatch (declared {t.size}, on disk {actual})")
-            with _memo_lock:
-                hit = _memo.get(memo_key, False)
-            if hit:
-                with lock:
-                    rep.examined += 1
-                    rep.memo_hits += 1
-                return
-            got = hash_file(t.path, algo)
-            if got.lower() != want:
+            digest = hashlib.sha256()
+            with t.path.open("rb") as handle:
+                while block := handle.read(1 << 20):
+                    digest.update(block)
+            got = digest.hexdigest()
+            if got != parsed.digest:
                 raise DigestMismatch(
-                    f"{algo} of bytes is {got[:16]}…, manifest says {want[:16]}…"
+                    f"sha256 of bytes is {got[:16]}…, manifest says {parsed.digest[:16]}…"
                 )
-            with _memo_lock:
-                _memo[memo_key] = True
             with lock:
                 rep.examined += 1
                 rep.hashed += 1
@@ -175,8 +157,8 @@ def verify_files(
             list(pool.map(_one, targets))
 
     _log.info(
-        "volume_verify examined=%d/%d hashed=%d memo=%d bytes=%d bad=%d",
-        rep.examined, rep.expected, rep.hashed, rep.memo_hits, rep.bytes_hashed, len(rep.bad),
+        "volume_verify examined=%d/%d hashed=%d bytes=%d bad=%d",
+        rep.examined, rep.expected, rep.hashed, rep.bytes_hashed, len(rep.bad),
     )
     return rep
 
@@ -201,8 +183,6 @@ def snapshot_verify_targets(
     skipped: List[str] = []
     for f in files:
         path_attr = getattr(f, "path", "") or ""
-        if _is_parts_manifest(path_attr) or _is_part_file(path_attr):
-            continue  # not materialized: parts live only in blobs/
         try:
             dst = root / _norm_rel_path(path_attr)
         except ValueError:

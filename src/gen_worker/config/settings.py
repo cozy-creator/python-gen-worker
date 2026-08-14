@@ -107,13 +107,9 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # workers get orchestrator-resolved manifests and never dial these.
     tensorhub_url: str = ""        # TENSORHUB_URL
     tensorhub_token: str = ""      # TENSORHUB_TOKEN
-    # CAS/cache roots. cache_dir moves the whole tensorhub cache off /tmp
-    # (cozy local persists weights across reboots); cas_dir points the
-    # standalone CLI (`gen-worker run`) at an explicit CAS root — also the
-    # test-isolation knob for the CLI resolver tests (real consumer:
-    # models/provision.py::resolve_local_path).
+    # The single cache root moves all Tensorhub state, including HashRepo's
+    # local CAS, off /tmp (cozy local persists weights across reboots).
     tensorhub_cache_dir: str = ""  # TENSORHUB_CACHE_DIR
-    tensorhub_cas_dir: str = ""    # TENSORHUB_CAS_DIR
     # Endpoint-scoped datacenter-warm fill source (RunPod network volume mount),
     # tried before R2. Never the CAS root itself — see
     # models/cache_paths.py::tensorhub_fill_source_dir.

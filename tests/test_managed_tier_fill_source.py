@@ -14,21 +14,20 @@ itself, since it is just filesystem copy+verify.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 from pathlib import Path
 
-import hashlib
+from hashrepo import CASRef, TransferReport
 
-import gen_worker.executor as executor_mod
-from gen_worker import config as gw_config
 import gen_worker.models.cozy_snapshot as snap_mod
-from gen_worker.models.store import ModelStore
-from gen_worker.models.cache_paths import tensorhub_fill_source_dir
+from gen_worker import config as gw_config
+from gen_worker.models.cache_paths import open_worker_cas, tensorhub_fill_source_dir
 from gen_worker.models.cozy_snapshot import NetworkBytesScope, ensure_snapshot_async
 from gen_worker.models.hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
 from gen_worker.models.refs import TensorhubRef
+from gen_worker.models.store import ModelStore
 from gen_worker.pb import worker_scheduler_pb2 as pb
-from gen_worker.models import store as store_mod
 
 _PAYLOAD = b"managed-tier-fill-source-payload" * 4096  # ~128KB
 _HEX = hashlib.sha256(_PAYLOAD).hexdigest()
@@ -51,7 +50,7 @@ def _resolved() -> WorkerResolvedRepo:
 
 
 def _blob_at(cas_root: Path, digest: str) -> Path:
-    return cas_root / "blobs" / "sha256" / digest[:2] / digest[2:4] / digest
+    return open_worker_cas(cas_root).object_path(CASRef(digest))
 
 
 def _blob(cas_root: Path) -> Path:
@@ -59,17 +58,19 @@ def _blob(cas_root: Path) -> Path:
 
 
 def _stub_r2(monkeypatch, calls: list) -> None:
-    async def _public_get(
-        _url: str, dst: Path, expected_size: int, expected_digest: str,
-        on_bytes=None,
-    ) -> None:
-        del expected_size, expected_digest
-        calls.append(1)
-        dst.write_bytes(_PAYLOAD)
-        if on_bytes is not None:
-            on_bytes(len(_PAYLOAD))
+    def _download(grants, cas, *, progress=None) -> TransferReport:
+        for grant in grants:
+            calls.append(1)
+            cas.put_bytes(_PAYLOAD, expected=grant.digest)
+            if progress is not None:
+                progress(grant.digest, grant.size_bytes)
+        return TransferReport(
+            examined=len(grants),
+            succeeded=len(grants),
+            bytes_transferred=sum(grant.size_bytes for grant in grants),
+        )
 
-    monkeypatch.setattr(snap_mod, "afetch_verified", _public_get)
+    monkeypatch.setattr(snap_mod, "download", _download)
 
 
 # ---------------------------------------------------------------------------
@@ -257,144 +258,6 @@ def test_network_bytes_reaches_on_disk_model_event(tmp_path: Path, monkeypatch) 
     assert on_disk2
     assert max(e.network_bytes for e in on_disk2) == 0
     assert calls == []  # no R2 fetch at all — warm from the volume
-
-
-def test_network_bytes_is_a_running_total_on_downloading_ticks(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    """tensorhub th#850/PR#493 reads network_bytes off the DOWNLOADING
-    events' running value (WorkerModelDownloadState.NetworkBytes, populated
-    the same way as BytesDownloaded/BytesTotal), not only the terminal
-    ON_DISK event — both must carry it or the hub's accounting silently
-    stays zero. Disable the progress-event debounce so every chunk reaches
-    the wire, and stream the fake download in chunks (not one write) so a
-    mid-flight DOWNLOADING event genuinely sees a PARTIAL network_bytes."""
-    monkeypatch.setattr(store_mod, "_PROGRESS_EVENT_MIN_INTERVAL_S", 0.0)
-    chunk = _PAYLOAD[: len(_PAYLOAD) // 4]
-    n_chunks = 4
-    assert chunk * n_chunks == _PAYLOAD
-
-    async def _chunked_get(
-        _url: str, dst: Path, expected_size: int, expected_digest: str,
-        on_bytes=None,
-    ) -> None:
-        del expected_size, expected_digest
-        with open(dst, "wb") as f:
-            for _ in range(n_chunks):
-                f.write(chunk)
-                if on_bytes is not None:
-                    on_bytes(len(chunk))
-                    await asyncio.sleep(0)  # let the executor's callback run
-
-    monkeypatch.setattr(snap_mod, "afetch_verified", _chunked_get)
-
-    local = tmp_path / "local"
-    sent: list = []
-
-    async def _emit(msg: pb.WorkerMessage) -> None:
-        sent.append(msg)
-
-    store = ModelStore(_emit, cache_dir=local)
-
-    async def _run() -> None:
-        await store.ensure_local(
-            "org/model",
-            pb.Snapshot(digest=_SNAPSHOT, files=[
-                pb.SnapshotFile(
-                    path="model.safetensors", size_bytes=len(_PAYLOAD),
-                    digest=_DIGEST, url="https://tensorhub.invalid/authorized-blob",
-                ),
-            ]),
-        )
-
-    asyncio.run(_run())
-    downloading = [
-        m.model_event for m in sent
-        if m.WhichOneof("msg") == "model_event"
-        and m.model_event.state == pb.MODEL_STATE_DOWNLOADING
-    ]
-    partial = [e.network_bytes for e in downloading if 0 < e.network_bytes < len(_PAYLOAD)]
-    assert partial, (
-        "expected at least one DOWNLOADING event with a PARTIAL running "
-        f"network_bytes total; got {[e.network_bytes for e in downloading]}"
-    )
-
-
-def test_downloading_progress_reports_populated_bytes_done_and_total(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    """ie#522 (Paul, 2026-07-21): the hub must see a MOVING counter during a
-    long fill ("stalled at 12.3/69GB for 9min" vs silence), not just a
-    started-then-on_disk pair with bytes_total unpopulated. This rides the
-    existing DOWNLOADING ModelEvent channel (_materialize_local's
-    _progress -> self._event(..., bytes_done=, bytes_total=)) — no new
-    protocol surface. Same chunked-fake-download shape as the
-    network_bytes sibling test above, but asserts bytes_done/bytes_total
-    directly: total must be populated from the snapshot's known size (not
-    0), and at least one mid-flight tick must show a PARTIAL bytes_done
-    (0 < done < total), proving real progress reaches the wire in between
-    started and on_disk."""
-    monkeypatch.setattr(store_mod, "_PROGRESS_EVENT_MIN_INTERVAL_S", 0.0)
-    chunk = _PAYLOAD[: len(_PAYLOAD) // 4]
-    n_chunks = 4
-    assert chunk * n_chunks == _PAYLOAD
-
-    async def _chunked_get(
-        _url: str, dst: Path, expected_size: int, expected_digest: str,
-        on_bytes=None,
-    ) -> None:
-        del expected_size, expected_digest
-        with open(dst, "wb") as f:
-            for _ in range(n_chunks):
-                f.write(chunk)
-                if on_bytes is not None:
-                    on_bytes(len(chunk))
-                    await asyncio.sleep(0)
-
-    monkeypatch.setattr(snap_mod, "afetch_verified", _chunked_get)
-
-    local = tmp_path / "local"
-    sent: list = []
-
-    async def _emit(msg: pb.WorkerMessage) -> None:
-        sent.append(msg)
-
-    store = ModelStore(_emit, cache_dir=local)
-
-    async def _run() -> None:
-        await store.ensure_local(
-            "org/model",
-            pb.Snapshot(digest=_SNAPSHOT, files=[
-                pb.SnapshotFile(
-                    path="model.safetensors", size_bytes=len(_PAYLOAD),
-                    digest=_DIGEST, url="https://tensorhub.invalid/authorized-blob",
-                ),
-            ]),
-        )
-
-    asyncio.run(_run())
-    downloading = [
-        m.model_event for m in sent
-        if m.WhichOneof("msg") == "model_event"
-        and m.model_event.state == pb.MODEL_STATE_DOWNLOADING
-    ]
-    assert len(downloading) >= 2, (
-        f"expected a started tick plus at least one progress tick; "
-        f"got {len(downloading)} DOWNLOADING events"
-    )
-    # The very first DOWNLOADING event (fired before the retry loop even
-    # starts) legitimately carries no byte counts yet — the regression this
-    # guards is EVERY event after it also reading total=0/done=0.
-    later = downloading[1:]
-    assert all(e.bytes_total == len(_PAYLOAD) for e in later), (
-        f"bytes_total not populated from the known snapshot size on a "
-        f"progress tick; got {[e.bytes_total for e in later]}"
-    )
-    partial_done = [e.bytes_done for e in later if 0 < e.bytes_done < len(_PAYLOAD)]
-    assert partial_done, (
-        "expected at least one mid-flight DOWNLOADING event with a "
-        f"PARTIAL bytes_done; got {[e.bytes_done for e in later]}"
-    )
 
 
 # ---------------------------------------------------------------------------

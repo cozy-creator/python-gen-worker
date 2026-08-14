@@ -11,7 +11,6 @@ deleted wall clocks made impossible.
 
 from __future__ import annotations
 
-import asyncio
 import http.server
 import json
 import os
@@ -22,14 +21,13 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 import pytest
 import requests
-import hashlib
+from harness.progress_wait import Cadence, await_progress
 
 from gen_worker.stall import ProgressFloor, SilenceWindow
-from harness.progress_wait import Cadence, await_progress
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "gen_worker"
 
@@ -361,114 +359,6 @@ def test_degrading_boot_degrades_on_silence_not_on_a_clock(tmp_path) -> None:
         assert handle.alive
     finally:
         handle.stop()
-
-
-# ---------------------------------------------------------------------------
-# C — hubio/fetch.py (was models/cozy_cas.py): the CAS retry give-up is byte progress
-# ---------------------------------------------------------------------------
-
-
-class _FlakyBlobServer:
-    """Serves ``blob`` with Range resume, severing the connection after
-    ``sever_after`` bytes of every response (or answering ``fail_status``)."""
-
-    def __init__(self, blob: bytes, *, sever_after: int = 0, fail_status: int = 0) -> None:
-        self.blob, self.calls = blob, 0
-        outer = self
-
-        class _H(http.server.BaseHTTPRequestHandler):
-            protocol_version = "HTTP/1.1"
-
-            def do_GET(self) -> None:
-                outer.calls += 1
-                if fail_status:
-                    self.send_response(fail_status)
-                    self.send_header("Content-Length", "0")
-                    self.end_headers()
-                    return
-                start = 0
-                rng = str(self.headers.get("Range") or "")
-                if rng.startswith("bytes="):
-                    start = int(rng.split("=", 1)[1].split("-", 1)[0])
-                body = outer.blob[start:]
-                self.send_response(206 if start else 200)
-                if start:
-                    self.send_header(
-                        "Content-Range",
-                        f"bytes {start}-{len(outer.blob) - 1}/{len(outer.blob)}",
-                    )
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                if sever_after and len(body) > sever_after:
-                    # Truncate mid-body and drop the socket: exactly what a
-                    # flaky pod uplink does, and the client resumes by Range.
-                    self.wfile.write(body[:sever_after])
-                    self.wfile.flush()
-                    self.close_connection = True
-                    self.connection.close()
-                else:
-                    self.wfile.write(body)
-
-            def log_message(self, *a: Any) -> None:
-                pass
-
-        self.port = _free_port()
-        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", self.port), _H)
-        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
-
-    @property
-    def url(self) -> str:
-        return f"http://127.0.0.1:{self.port}/blob"
-
-    def __enter__(self) -> "_FlakyBlobServer":
-        self.thread.start()
-        return self
-
-    def __exit__(self, *exc: Any) -> None:
-        self.httpd.shutdown()
-        self.httpd.server_close()
-
-
-def _fetch(url: str, dst: Path, blob: bytes) -> None:
-    from gen_worker.hubio import fetch
-
-    asyncio.run(fetch.afetch_verified(
-        url, dst, expected_size=len(blob),
-        expected_digest="sha256:" + hashlib.sha256(blob).hexdigest(),
-    ))
-
-
-@pytest.fixture()
-def fast_cas_retries(monkeypatch) -> None:
-    from gen_worker.hubio import fetch
-
-    monkeypatch.setattr(fetch, "_RETRY_BACKOFF_CAP_S", 0.01)
-    monkeypatch.setattr(fetch, "_RETRY_PROGRESS_FLOOR_BYTES", 4 * 1024 * 1024)
-    monkeypatch.setattr(fetch, "_TRANSIENT_MAX_TRIES", 2)
-
-
-def test_a_flaky_but_advancing_cas_fetch_outlives_its_retry_cap(
-    tmp_path, fast_cas_retries,
-) -> None:
-    """Two severed connections against a cap of TWO — and it still lands,
-    because each attempt put 8 MiB on disk and cleared the byte floor. The
-    old code counted failures (and wall seconds) regardless of bytes."""
-    blob = os.urandom(24 * 1024 * 1024)
-    dst = tmp_path / "blob.bin"
-    with _FlakyBlobServer(blob, sever_after=8 * 1024 * 1024) as srv:
-        _fetch(srv.url, dst, blob)
-        assert srv.calls == 3  # 8 MiB + 8 MiB + the resumed tail
-    assert dst.read_bytes() == blob
-
-
-def test_a_cas_fetch_that_delivers_nothing_gives_up_on_the_count(
-    tmp_path, fast_cas_retries,
-) -> None:
-    blob = os.urandom(4096)
-    with _FlakyBlobServer(blob, fail_status=500) as srv:
-        with pytest.raises(requests.RequestException):
-            _fetch(srv.url, tmp_path / "blob.bin", blob)
-        assert srv.calls == 2  # exactly _TRANSIENT_MAX_TRIES, no byte progress
 
 
 # ---------------------------------------------------------------------------

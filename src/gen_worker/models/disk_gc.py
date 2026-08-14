@@ -9,6 +9,7 @@ in refs (the vocabulary of `keep`, Residency, and ModelEvents).
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
@@ -17,8 +18,13 @@ import stat
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
+
+from hashrepo import RefConflict
+
+from .cache_paths import open_worker_cas
 
 logger = logging.getLogger(__name__)
 
@@ -26,17 +32,20 @@ _INDEX_NAME = "ref-index.json"
 
 
 class RefIndex:
-    """Persistent {ref: {path, bytes, last_used}}. Thread-safe; every mutation
-    is written through (small file, rare writes)."""
+    """Persistent {ref: {path, bytes, last_used}} with process-safe writes."""
 
     def __init__(self, cache_dir: Path) -> None:
         self._path = Path(cache_dir) / _INDEX_NAME
         self._lock = threading.Lock()
         self._data: Dict[str, Dict[str, Any]] = {}
+        with self._locked(exclusive=False):
+            pass
+
+    def _read_locked(self) -> Dict[str, Dict[str, Any]]:
         try:
             raw = json.loads(self._path.read_text("utf-8"))
             if isinstance(raw, dict):
-                self._data = {
+                return {
                     str(k): v for k, v in raw.items()
                     if isinstance(v, dict) and v.get("path")
                 }
@@ -44,20 +53,34 @@ class RefIndex:
             pass
         except Exception as exc:
             logger.warning("ref-index unreadable (%s); starting empty", exc)
+        return {}
+
+    @contextmanager
+    def _locked(self, *, exclusive: bool) -> Iterator[None]:
+        """Refresh while flocking the stable cache-directory inode."""
+        with self._lock:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            directory = os.open(
+                self._path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            )
+            try:
+                fcntl.flock(
+                    directory, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+                )
+                try:
+                    self._data = self._read_locked()
+                    yield
+                finally:
+                    fcntl.flock(directory, fcntl.LOCK_UN)
+            finally:
+                os.close(directory)
 
     def _save_locked(self) -> None:
         """Write the index through, atomically.
 
-        ``self._lock`` is a THREAD lock, so it orders the writers in
-        one process and says nothing about the others. The index lives in the
-        model cache dir — a path a mounted cache can share between processes
-        (procsplit members, a second container on the same volume) — and the
-        old temp name was derived from the destination, so every such writer
-        opened one file. Interleaved writes of two different index states
-        produce a torn document that the reader above logs as "unreadable" and
-        starts EMPTY from, losing the ref accounting GC and the boot rescan
-        reason in. A unique temp file per writer keeps the rename atomic and
-        makes the loser's outcome a whole valid index rather than a mixture.
+        The caller holds both the thread lock and the process-shared flock and
+        has refreshed ``self._data`` from disk. A unique temp file keeps the
+        replacement atomic; file and directory fsync make it durable.
         """
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -66,9 +89,20 @@ class RefIndex:
                 suffix=".tmp")
             tmp = Path(tmp_name)
             try:
+                # The cache directory is the write authority. Keep the index
+                # readable when a root control parent writes it after granting
+                # that directory to the dropped compute uid.
+                os.fchmod(fd, 0o644)
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
                     fh.write(json.dumps(self._data))
+                    fh.flush()
+                    os.fsync(fh.fileno())
                 tmp.replace(self._path)
+                directory = os.open(self._path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
             except BaseException:
                 tmp.unlink(missing_ok=True)
                 raise
@@ -76,36 +110,36 @@ class RefIndex:
             logger.warning("ref-index write failed: %s", exc)
 
     def record(self, ref: str, path: Path, size_bytes: int) -> None:
-        with self._lock:
+        with self._locked(exclusive=True):
             self._data[ref] = {
                 "path": str(path), "bytes": int(size_bytes), "last_used": time.time(),
             }
             self._save_locked()
 
     def touch(self, ref: str) -> None:
-        with self._lock:
+        with self._locked(exclusive=True):
             e = self._data.get(ref)
             if e is not None:
                 e["last_used"] = time.time()
                 self._save_locked()
 
     def remove(self, ref: str) -> None:
-        with self._lock:
+        with self._locked(exclusive=True):
             if self._data.pop(ref, None) is not None:
                 self._save_locked()
 
     def path(self, ref: str) -> Optional[Path]:
-        with self._lock:
+        with self._locked(exclusive=False):
             e = self._data.get(ref)
             return Path(e["path"]) if e else None
 
     def last_used(self, ref: str) -> float:
-        with self._lock:
+        with self._locked(exclusive=False):
             e = self._data.get(ref)
             return float(e.get("last_used") or 0.0) if e else 0.0
 
     def entries(self) -> Dict[str, Dict[str, Any]]:
-        with self._lock:
+        with self._locked(exclusive=False):
             return {k: dict(v) for k, v in self._data.items()}
 
 
@@ -229,6 +263,16 @@ def _retention_unit(path: Path, cas_dir: Path) -> Path:
 def delete_ref_bytes(ref: str, path: Path, cas_dir: Path) -> None:
     unit = _retention_unit(path, cas_dir)
     logger.info("disk-gc: deleting %s (%s)", ref, unit)
+    snapshots = Path(cas_dir) / "snapshots"
+    if unit.parent == snapshots:
+        cas = open_worker_cas(cas_dir)
+        name = f"snapshot:{unit.name}"
+        current = cas.read_ref(name)
+        if current is not None:
+            try:
+                cas.compare_and_swap_ref(name, None, expected=current)
+            except RefConflict:
+                logger.info("disk-gc: snapshot ref %s changed while deleting", name)
     if unit.is_dir():
         shutil.rmtree(unit, ignore_errors=True)
     else:
@@ -236,31 +280,13 @@ def delete_ref_bytes(ref: str, path: Path, cas_dir: Path) -> None:
 
 
 def sweep_orphan_blobs(cas_dir: Path) -> int:
-    """Delete CAS blobs no snapshot links anymore (st_nlink == 1). Snapshot
-    trees hardlink into blobs/, so link count is the reference count.
+    """Collect unpinned HashRepo objects after the writer safety grace."""
 
-    Skips dotfiles: writer-unique in-flight temp artifacts
-    (``.<digest>.part-<writer-id>``, see cozy_cas.py) live in this same
-    directory tree and always have nlink==1 while a download is in
-    progress — treating them as orphans would delete a live writer's bytes
-    out from under it."""
-    blobs = Path(cas_dir) / "blobs"
-    freed = 0
-    if not blobs.is_dir():
-        return 0
-    for dirpath, _dirs, names in os.walk(blobs):
-        for name in names:
-            if name.startswith("."):
-                continue
-            fp = os.path.join(dirpath, name)
-            try:
-                st = os.stat(fp)
-                if st.st_nlink <= 1:
-                    os.unlink(fp)
-                    freed += int(st.st_size)
-            except OSError:
-                continue
-    return freed
+    return int(
+        open_worker_cas(cas_dir).collect_garbage(
+            older_than=_STALE_WRITER_TEMP_AGE_S
+        ).bytes_deleted
+    )
 
 
 # Generous: the largest blobs can legitimately take hours on a slow link.
@@ -272,25 +298,26 @@ _STALE_WRITER_TEMP_AGE_S = 6 * 3600
 def sweep_stale_writer_temp(
     cas_dir: Path, *, older_than_s: float = _STALE_WRITER_TEMP_AGE_S,
 ) -> int:
-    """Remove abandoned writer-unique temp artifacts: blob downloads stage to
-    ``.<name>.part-<writer-id>`` and snapshot builds stage to
-    ``<key>.building-<writer-id>`` (writer-unique so concurrent writers on a
-    SHARED CAS root — several pods on one RunPod volume — never collide). A
-    writer that dies mid-transfer leaves its temp behind; on pod-local disk that
-    vanishes with the pod, but a persistent volume keeps it forever unless
-    swept. Call at boot (`ModelStore.rescan_disk`) — safe
-    at any time since only artifacts idle past ``older_than_s`` are removed.
+    """Remove abandoned snapshot-materialization staging directories.
+
+    HashRepo owns transfer temporaries under its ``tmp/`` namespace. The
+    worker owns the product-level ``snapshots/`` destination, including an
+    atomic materialization that died before rename. Only directories idle past
+    ``older_than_s`` are removed.
     """
     removed = 0
     root = Path(cas_dir)
     now = time.time()
-    for base_name in ("blobs", "snapshots"):
+    # HashRepo owns objects/ and tmp/. This worker scans only its product-level
+    # materialization namespace; generic transfer-temporary cleanup belongs to
+    # the library.
+    for base_name in ("snapshots",):
         base = root / base_name
         if not base.is_dir():
             continue
         for dirpath, dirnames, filenames in os.walk(base):
             for name in list(dirnames):
-                if ".building-" not in name:
+                if not (name.startswith(".") or ".building-" in name):
                     continue
                 p = Path(dirpath) / name
                 try:

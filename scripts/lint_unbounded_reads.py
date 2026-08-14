@@ -35,7 +35,7 @@ or carry a ``# bound-justified:`` comment, exactly as rule 1 does. Loops that
 delegate to ``bounded_stream.copy_bounded`` have no loop here to inspect, which
 is the point of that helper existing.
 
-The counter must be a DIRECT operand of the compare: ``cozy_cas`` also compares
+The counter must be a DIRECT operand of the compare: a downloader may compare
 ``downloaded - last_log >= log_every`` for progress logging, and a rule that
 accepted a counter buried in a sub-expression would have taken that for the
 bound.
@@ -87,9 +87,8 @@ STREAM_READERS = {"read", "read1", "recv", "recv_into", "readinto"}
 # Calls that put the block somewhere it accumulates: a file, a list, a buffer.
 SINK_METHODS = {"write", "writelines", "append", "extend", "send", "put"}
 
-# Free functions that write a block through to storage (chunk_cas's positional
-# write). Named explicitly rather than matched by shape — a bare call is not
-# evidence of a sink.
+# Free functions that write a block through to storage. Named explicitly rather
+# than matched by shape — a bare call is not evidence of a sink.
 SINK_FUNCTIONS = {"_pwrite_all", "pwrite"}
 
 

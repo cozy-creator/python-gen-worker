@@ -30,21 +30,15 @@ import uuid
 from pathlib import Path
 
 import pytest
+from hashrepo import TransferReport
 
-from gen_worker import aot_serve, cell_key, env_seal
+import gen_worker.hubio.client as hub_client
+from gen_worker import aot_serve, cell_key, env_seal, receipts
 from gen_worker import fleet_cells as fc
-from gen_worker import receipts
 from gen_worker.hubio.client import HubPublishError
-from gen_worker.models import chunk_upload as cu
 from gen_worker.procsplit import actions
 
 FAMILY = "sdxl"
-
-# Small enough to keep the test in kilobytes, large enough that the artifact
-# is genuinely MULTI-CHUNK — a single-chunk publish exercises none of the
-# ordering, resume or per-chunk-refusal behaviour this route exists for.
-CHUNK = 4096
-
 
 def _blob(total: int, seed: int = 7) -> bytes:
     out = bytearray(total)
@@ -280,11 +274,6 @@ TODAYS_FALLBACK_META = {
 }
 
 
-@pytest.fixture(autouse=True)
-def small_chunks(monkeypatch):
-    monkeypatch.setattr(cu, "CAS_CHUNK_SIZE_BYTES", CHUNK)
-
-
 def _publisher(hub) -> fc.CellPublisher:
     return fc.CellPublisher(base_url=hub.base, worker_jwt=lambda: "worker-jwt",
                             image_digest="sha256:" + "1" * 64)
@@ -317,9 +306,9 @@ def test_publish_takes_the_v2_route_and_never_the_frozen_v1_one(
     (f,) = decl["files"]
     assert f["digest"].startswith("sha256:")
     assert f["size_bytes"] == artifact.stat().st_size
-    # Genuinely chunked, and the chunk digests are what was PUT.
-    assert len(f["chunks"]) > 1
-    assert sorted(hub.httpd.puts) == sorted(c["digest"] for c in f["chunks"])
+    # This small control-plane artifact is one HashRepo object.
+    assert "chunks" not in f
+    assert hub.httpd.puts == [f["digest"].split(":", 1)[1]]
     assert decl["mode"] == "replace"
     # pgw#1159: the cell key is the token's claim, never a body field.
     assert "flavor" not in decl
@@ -330,8 +319,7 @@ def test_publish_takes_the_v2_route_and_never_the_frozen_v1_one(
         assert forbidden not in decl
 
     # The reassembled object is byte-identical to the artifact.
-    joined = b"".join(hub.httpd.objects["sha256:" + c["digest"]]
-                      for c in f["chunks"])
+    joined = hub.httpd.objects[f["digest"]]
     assert joined == artifact.read_bytes()
     assert hashlib.sha256(joined).hexdigest() == f["digest"].split(":", 1)[1]
 
@@ -502,19 +490,15 @@ def test_a_corrupted_chunk_is_refused_by_the_store_and_fails_the_publish(
     object exists afterwards), so the publish fails loudly instead of minting a
     checkpoint over bytes nothing can arm. The refusal survives the client's
     re-plan passes, and the hub hears `ok=false`."""
-    # Plan the chunk digests exactly as the publisher will, then poison one.
-    decl = cu.hash_file_and_chunks(artifact, chunk_size=CHUNK,
-                                   rel_path=artifact.name)
-    assert len(decl.chunks) > 1
-    hub.httpd.corrupt.add(decl.chunks[1].sha256)
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    hub.httpd.corrupt.add(digest)
 
     seen = _events(monkeypatch)
     with pytest.raises(HubPublishError) as exc:
         _publisher(hub).publish(FAMILY, artifact, dict(META))
     assert "failed to upload" in str(exc.value)
     # The poisoned object never landed; every honest one did.
-    assert ("sha256:" + decl.chunks[1].sha256) not in hub.httpd.objects
-    assert ("sha256:" + decl.chunks[0].sha256) in hub.httpd.objects
+    assert ("sha256:" + digest) not in hub.httpd.objects
     # The hub still hears about it: a failed publish files ok=false.
     complete = next(b for p, b in hub.httpd.calls if p.endswith("publish-complete"))
     assert complete["ok"] is False
@@ -526,8 +510,7 @@ def test_complete_over_missing_objects_is_a_typed_repudiation(hub, artifact,
     """The other half of the refusal: when `/complete` answers with a th#1301
     PROJECTION rather than an error envelope, the client reads the hub's own
     `code` + `retryable` bit and puts THAT on the wire as the failure phase."""
-    monkeypatch.setattr(cu, "upload_grants",
-                        lambda *a, **k: cu.UploadReport(granted=0, uploaded=0))
+    monkeypatch.setattr(hub_client, "upload", lambda *a, **k: TransferReport())
     with pytest.raises(HubPublishError) as exc:
         _publisher(hub).publish(FAMILY, artifact, dict(META))
     assert exc.value.code == "objects_missing"

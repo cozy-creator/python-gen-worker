@@ -25,9 +25,18 @@ from typing import Any, Iterable, Optional
 
 from gen_worker.api.errors import ValidationError
 
-from ..hubio.client import HubClient, files_from_tree
-from ..hubio.journal import JOURNAL_NAME, PublishJournal
-from .keepalive import HubKeepalive
+from ..api.slot import OBJECTIVES
+from ..hubio.client import HubClient, _dtype_token, files_from_tree
+from ..hubio.publish_state import JOURNAL_NAME, ProducerRecovery
+from .convert import run_inline_conversion
+from .dtype_pins import (
+    DTYPE_BITS as _DTYPE_STORAGE_BITS,
+)
+from .dtype_pins import (
+    cast_exempt_components,
+    check_explicit_pin_conflict,
+    verify_produced_tree,
+)
 from .ingest import (
     IngestedSource,
     ingest_civitai,
@@ -35,27 +44,23 @@ from .ingest import (
     plan_civitai,
     plan_huggingface,
 )
+from .keepalive import HubKeepalive
+from .layout import canonical_model_family_from_variant, infer_model_family_variant_from_hint
+from .registry import repackage_family
 from .writer import (
     CAST_NORMALIZE_DTYPES as _CAST_NORMALIZE_DTYPES,
-    fp8_default_components,
+)
+from .writer import (
     apply_objective_scheduler_config,
     copy_non_weight_files,
     deshard_mirror_tree,
-    tree_has_sharded_safetensors,
-    normalize_variant_filenames as _normalize_variant_filenames,
+    fp8_default_components,
     snapshot_weight_groups,
+    tree_has_sharded_safetensors,
 )
-from .convert import run_inline_conversion
-from .dtype_pins import (
-    DTYPE_BITS as _DTYPE_STORAGE_BITS,
-    cast_exempt_components,
-    check_explicit_pin_conflict,
-    verify_produced_tree,
+from .writer import (
+    normalize_variant_filenames as _normalize_variant_filenames,
 )
-from .layout import canonical_model_family_from_variant, infer_model_family_variant_from_hint
-from .registry import repackage_family
-from ..api.slot import OBJECTIVES
-from ..hubio.client import _dtype_token
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +81,7 @@ _KNOWN_DTYPES = {
     "q4_0", "q4_1", "q3_k_m", "q3_k_s", "q2_k",
 }
 from ..component_vocab import quant_candidate_components
+
 _KNOWN_FILE_LAYOUTS = {"diffusers", "singlefile"}
 _KNOWN_FILE_TYPES = {"safetensors", "gguf"}
 
@@ -614,8 +620,8 @@ def _reusable_flavor_tree(
     """
     if not flavor_dir.is_dir():
         return None
-    journal = PublishJournal.open(workdir / JOURNAL_NAME)
-    entry = journal.for_producer(spec_label=str(spec_label), tree=str(flavor_dir))
+    recovery = ProducerRecovery(workdir / JOURNAL_NAME)
+    entry = recovery.find(spec_label=str(spec_label), tree=str(flavor_dir))
     if entry is None:
         return None
     attrs = entry.producer_state.get("attrs")
@@ -624,12 +630,12 @@ def _reusable_flavor_tree(
     if not entry.declares([f.path for f in files_from_tree(flavor_dir)]):
         logger.info(
             "flavor-%s: retained tree no longer matches publish %s's declaration; "
-            "rebuilding", spec_label, entry.publish_id)
+            "rebuilding", spec_label, entry.session_id)
         return None
     logger.warning(
         "flavor-%s: REUSING the retained cast output for publish %s — "
         "re-uploading rather than re-casting (pgw#1003)",
-        spec_label, entry.publish_id)
+        spec_label, entry.session_id)
     return {str(k): str(v) for k, v in attrs.items()}
 
 
@@ -1108,8 +1114,9 @@ def run_clone(
         # The tree survives exactly as long as there is a session to resume it
         # into. `_sweep_stale_workdirs` reaps any unlocked workdir past
         # COZY_CONVERT_SCRATCH_TTL_S at the start of the next clone.
-        resumable = 0 if succeeded else len(
-            PublishJournal.open(workdir / JOURNAL_NAME).entries)
+        resumable = (
+            0 if succeeded else ProducerRecovery(workdir / JOURNAL_NAME).count()
+        )
         if resumable:
             logger.warning(
                 "clone failed with %d publish session(s) still resumable; "

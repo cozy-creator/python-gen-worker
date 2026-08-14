@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from hashrepo import LocalCAS
+
 from ..config import Settings, current_or
 
 _STANDALONE = Settings()
@@ -33,6 +35,18 @@ def tensorhub_cache_dir() -> Path:
 def tensorhub_cas_dir() -> Path:
     """Worker CAS root: <TENSORHUB_CACHE_DIR>/cas. Always local/pod storage."""
     return tensorhub_cache_dir() / "cas"
+
+
+def open_worker_cas(root: Path | None = None) -> LocalCAS:
+    """Open the worker's one HashRepo store.
+
+    Production callers omit ``root`` and therefore share
+    :func:`tensorhub_cas_dir`. The override exists for an explicitly scoped
+    model store (local CLI and tests); consumers must pass that same root on
+    every path rather than inventing a private CAS subdirectory.
+    """
+
+    return LocalCAS(tensorhub_cas_dir() if root is None else Path(root))
 
 
 def tensorhub_fill_source_dir() -> Path | None:

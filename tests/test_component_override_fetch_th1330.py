@@ -7,25 +7,24 @@ Measured cost on the shape this exists for: ~1.64 GB per SDXL text-encoder
 override, per pod.
 
 Same real boundary as ``test_component_bindings_pgw617``: real worker, real
-executor, real sha256 CAS downloader against an HTTP blob host. The evidence
-is the CAS itself — a blob that was never fetched is not in ``blobs/``.
+executor, real HashRepo downloader against an HTTP blob host. The evidence is
+the CAS itself — a blob that was never fetched is not in ``objects/``.
 """
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import msgspec
-import hashlib
+from harness.blob_host import BlobHost
+from harness.hub_double import hub_double, is_ready, is_result_for
+from harness.toy_endpoints import COMPOSED_DECLARED, COMPOSED_SETUPS, EchoIn, EchoOut
 
 from gen_worker.api.binding import wire_ref
 from gen_worker.models.cozy_snapshot import snapshot_dir_key
 from gen_worker.models.download import select_component_paths
 from gen_worker.pb import worker_scheduler_pb2 as pb
-
-from harness.blob_host import BlobHost
-from harness.hub_double import hub_double, is_ready, is_result_for
-from harness.toy_endpoints import COMPOSED_DECLARED, COMPOSED_SETUPS, EchoIn, EchoOut
 
 BASE_REF = wire_ref(COMPOSED_DECLARED)
 VAE_REF = "harness/override-vae:prod"
@@ -67,7 +66,7 @@ def _run(conn, rid: str, models, snapshots) -> pb.JobResult:
 
 
 def _cas_blob_digests(cache_dir: Path) -> set:
-    root = cache_dir / "cas" / "blobs"
+    root = cache_dir / "cas" / "objects"
     if not root.is_dir():
         return set()
     return {p.name for p in root.rglob("*") if p.is_file()}

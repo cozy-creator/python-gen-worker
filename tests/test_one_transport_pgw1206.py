@@ -1,6 +1,6 @@
 """pgw#1206 B — the One-transport contract.
 
-Three properties, each previously true on at most ONE of the upload paths:
+Two properties, each previously true on at most ONE of the upload paths:
 
 1. ONE status classification for presigned PUTs (`hubio.transport.put_verdict`)
    — chunk-CAS and the media multipart path project from the same table, so
@@ -9,10 +9,6 @@ Three properties, each previously true on at most ONE of the upload paths:
 2. ONE grant-expiry behavior — RED against `1b282a82`: a 403 from a media
    part PUT was TERMINAL there (`ArtifactTransferError`), while chunk-CAS had
    re-planned since pgw#1004. Now the media path re-creates the session once.
-3. `fetch_verified` refuses to fetch what it cannot verify — absent, untagged
-, or disallowed-algorithm digests raise before a byte moves
-   (th#1303 S1), and the in-loop byte cap raises `StreamTooLarge`.
-
 The dead credentialed lane is also pinned dead: the hub has ZERO
 `transfer_grant` producers, so `gen_worker.s3_transfer` and the boto3
 dependency are gone whole — a revival must reintroduce them consciously.
@@ -26,7 +22,6 @@ import pytest
 
 from gen_worker.api.errors import ArtifactTransferError
 from gen_worker.hubio import transport
-from gen_worker.hubio.fetch import fetch_verified
 from gen_worker.hubio.transport import (
     PUT_EXPIRED,
     PUT_OK,
@@ -34,7 +29,6 @@ from gen_worker.hubio.transport import (
     PUT_TRANSIENT,
     put_verdict,
 )
-
 
 # --- 1. the one classification table ----------------------------------------
 
@@ -50,14 +44,13 @@ def test_put_verdict_is_the_one_table() -> None:
         assert put_verdict(status) == PUT_TRANSIENT, status
 
 
-def test_both_put_paths_project_from_it() -> None:
-    """The engine's TransportError and chunk-CAS's typed outcomes are
-    projections of put_verdict, not second tables."""
+def test_media_put_path_projects_from_it() -> None:
+    """Worker-owned media transport keeps one status table.
+
+    Repository-object transfer lives in HashRepo and is tested there.
+    """
     import inspect
 
-    from gen_worker.models import chunk_upload
-
-    assert "put_verdict" in inspect.getsource(chunk_upload._classify_put)
     assert "put_verdict" in inspect.getsource(transport._classify_response_status)
     # And the projections agree on the transient set (408 included — the
     # engine's old private table called it terminal).
@@ -158,33 +151,3 @@ def test_non_403_failures_do_not_replan(monkeypatch: pytest.MonkeyPatch, tmp_pat
             headers={}, create_payload={}, blake3_hex="00", size_bytes=1,
         )
     assert len(calls) == 1
-
-
-# --- 3. fetch_verified refuses what it cannot verify ------------------------
-
-def test_fetch_refuses_an_absent_digest(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="no expected digest"):
-        fetch_verified("http://x.invalid/b", tmp_path / "b", expected_digest="")
-
-
-def test_fetch_refuses_an_untagged_digest(tmp_path: Path) -> None:
-    """pgw#871: 64 hex chars name no algorithm; a guess verifies nothing."""
-    with pytest.raises(ValueError, match="not algorithm-tagged"):
-        fetch_verified("http://x.invalid/b", tmp_path / "b", expected_digest="ab" * 32)
-
-
-def test_fetch_refuses_a_disallowed_algorithm(tmp_path: Path) -> None:
-    """th#1303 S1: sha256 is the servable vocabulary; a blake3 ref names
-    bytes the hub can no longer address."""
-    with pytest.raises(ValueError, match="not\\s+verifiable"):
-        fetch_verified("http://x.invalid/b", tmp_path / "b",
-                       expected_digest="blake3:" + "ab" * 32)
-
-
-def test_the_refusals_fire_before_any_fetch(tmp_path: Path) -> None:
-    """A permanent refusal must not spend retries looking like a flaky
-    network: the URL above is unresolvable, so reaching the network would
-    raise a RequestException — the ValueError proves we never did."""
-    # (Asserted implicitly by the three tests above: .invalid never resolves,
-    # and no ConnectionError surfaced.)
-    assert True

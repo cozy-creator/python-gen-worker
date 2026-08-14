@@ -24,20 +24,28 @@ from __future__ import annotations
 import json
 import logging
 import random
+import socket
 import time
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional
+from typing import Any, Callable, Dict, Mapping, Optional, cast
 
 import requests
-import socket
-from ..stall import SilenceWindow
+from hashrepo import (
+    CASRef,
+    RepositoryManifest,
+    TransferGrant,
+    TransferJournal,
+    TransferSession,
+    upload,
+)
+
 from .. import activity as _activity
 from ..http_origin import is_definite_hub_answer
-from ..models import chunk_upload as _cu
-from ..models.chunk_upload import UploadGrant
-from .journal import JOURNAL_NAME, JournalEntry, PublishJournal, artifact_key
+from ..models.cache_paths import open_worker_cas
+from ..stall import SilenceWindow
+from .publish_state import JOURNAL_NAME, STATE_NAME, ProducerRecovery
 
 logger = logging.getLogger(__name__)
 
@@ -378,7 +386,7 @@ class HubClient:
             logger.debug("publish %s abort failed", publish_id, exc_info=True)
 
     def _post_v2_complete(self, path: str) -> requests.Response:
-        """POST /complete WITHOUT the envelope-guessing retry loop.
+        """POST the hub's idempotent v2 completion.
 
         `_send_with_retries` decides "did we hear from the hub?" from the body's
         SHAPE, and a v2 completion's refusal is a projection rather than an
@@ -387,10 +395,11 @@ class HubClient:
         session already terminal and returns 409 `publish_repudiated`: a
         consequence in place of the cause, which is gone.
 
-        A publish is not idempotent to re-complete, so a blind retry here can
-        only ever destroy the diagnosis. Network-level failures still retry
-        (nothing was heard); an HTTP answer of any status is the hub speaking
-        and is returned as-is for the typed handling below.
+        Tensorhub makes this route idempotent: completing an already-promoted
+        session returns its terminal status and checkpoint id. Network-level
+        failures therefore retry safely, including a lost success response;
+        an HTTP answer of any status is the hub speaking and is returned as-is
+        for the typed handling below.
         """
         return _send_with_retries(
             f"POST {path}",
@@ -481,47 +490,42 @@ class HubClient:
         ``journal_path`` turns "the upload died" into "re-upload"
         rather than "re-run the cast". The session id is recorded beside the
         produced bytes BEFORE the first PUT, so a retry on this pod re-adopts
-        the same session (same staging prefix) and re-plans it instead of
-        declaring a fresh one. See ``hubio.journal`` for what this does and
-        does not cover, and for the hub dependency it is built to exploit.
+        the same HashRepo session (same staging prefix) and re-plans it instead
+        of declaring a fresh one.
         """
-
-        # Read the constant off the module at CALL time rather than binding a
-        # default: it must equal the hub's `storage.CASChunkSizeBytes`, and a
-        # call-time read keeps that single source of truth substitutable in
-        # tests without exposing a tuning knob on this method.
-        chunk_size = _cu.CAS_CHUNK_SIZE_BYTES
 
         if not files:
             raise HubPublishError("publish_v2 requires at least one file")
 
         repo_path = self._repo_path(destination_repo)
 
-        # ONE streaming pass per file yields the whole-file sha256 AND every
-        # per-chunk sha256. A by-reference add has no local bytes and therefore
-        # cannot be declared under a protocol whose whole point is that the
-        # digest is proven from the bytes.
-        decls = []
-        sources: dict[str, tuple[Path, int, int]] = {}
+        # HashRepo owns the local objects and manifest. A by-reference add has
+        # no bytes to ingest and therefore cannot enter this protocol.
+        cas = open_worker_cas()
+        entries = []
         for f in files:
             if f.local_path is None:
                 raise HubPublishError(
                     f"publish_v2: {f.path!r} is a by-reference add; v2 declares "
-                    "digests computed from local bytes (use commit() or supply bytes)"
+                    "digests computed from local bytes"
                 )
-            local = Path(f.local_path)
-            decl = _cu.hash_file_and_chunks(
-                local, chunk_size=chunk_size, rel_path=f.path)
-            decls.append(decl)
-            if decl.chunks:
-                for c in decl.chunks:
-                    sources["sha256:" + c.sha256] = (local, c.offset, c.length)
-            else:
-                sources[decl.digest] = (local, 0, decl.size_bytes)
+            entries.append(cas.ingest_file(Path(f.local_path), manifest_path=f.path))
+        manifest = RepositoryManifest(tuple(entries))
+        manifest_ref = manifest.digest()
+
+        def _tensorhub_file(entry: Any) -> dict[str, object]:
+            """Adapt HashRepo v1 to Tensorhub's fixed-sha256 request shape."""
+            raw = cast(dict[str, object], entry.to_dict())
+            chunks = raw.get("chunks")
+            if isinstance(chunks, list):
+                for chunk in chunks:
+                    if isinstance(chunk, dict):
+                        chunk["digest"] = CASRef.parse(str(chunk["digest"])).digest
+            return raw
 
         body: dict[str, Any] = {
             "mode": mode,
-            "files": [d.to_wire() for d in decls],
+            "files": [_tensorhub_file(entry) for entry in manifest.files],
         }
         # An EMPTY list is an explicit "move no tags" and must reach the wire
         # (the classification gate refuses an OMITTED tags field on repos that
@@ -559,16 +563,40 @@ class HubClient:
             # not. The merged stamp is captured at DECLARE, where the token is
             # presented, and replayed through `resolvePublishProvenance` at
             # completion, so v1 and v2 mirrors record identical lineage.
-            body["provenance"] = {k: v for k, v in dict(provenance).items() if v}
+            allowed = {
+                "step_number",
+                "epoch_number",
+                "quantization_method",
+                "quantization_library",
+                "upstream_revision",
+                "upstream_attestation",
+            }
+            body["provenance"] = {
+                key: value
+                for key, value in dict(provenance).items()
+                if key in allowed and value
+            }
         for key in ("kind", "library_name", "model_family", "class_name",
                     "adapter_for_family"):
             val = str((repo_spec or {}).get(key) or "").strip()
             if val:
                 body[key] = val
 
-        total_bytes = sum(d.size_bytes for d in decls)
-        art_key = artifact_key(sorted(sources))
-        journal = PublishJournal.open(journal_path) if journal_path else None
+        total_bytes = sum(entry.size_bytes for entry in manifest.files)
+        declaration_ref = CASRef.digest_bytes(
+            json.dumps(
+                body,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        )
+        session_name = (
+            f"tensorhub:{destination_repo}:{mode}:"
+            f"{manifest_ref.digest}:{declaration_ref.digest}"
+        )
+        journal = TransferJournal(journal_path) if journal_path else None
+        recovery = ProducerRecovery(journal_path) if journal_path else None
 
         def _stage(stage: str, **facts: Any) -> None:
             if on_stage is None:
@@ -578,29 +606,21 @@ class HubClient:
             except Exception:  # noqa: BLE001 — reporting never fails a publish
                 logger.debug("publish_v2 on_stage(%s) raised", stage, exc_info=True)
 
-        def _grants_of(payload: Mapping[str, Any]) -> list["UploadGrant"]:
+        def _grants_of(payload: Mapping[str, Any]) -> list[TransferGrant]:
             out = []
             for g in payload.get("need") or []:
                 if not isinstance(g, dict):
                     continue
-                out.append(UploadGrant(
-                    digest=str(g.get("digest") or "").strip().lower(),
+                expiry = str(g.get("expires_at") or "").strip() or None
+                out.append(TransferGrant(
+                    digest=CASRef.parse(str(g.get("digest") or "").strip().lower()),
                     size_bytes=int(g.get("size_bytes") or 0),
-                    put_url=str(g.get("put_url") or ""),
+                    url=str(g.get("put_url") or ""),
                     headers={str(k): str(v) for k, v in (g.get("headers") or {}).items()},
                     staging_key=str(g.get("staging_key") or ""),
-                    # `chunkcas/plan.go` ObjectGrant.ExpiresAt.
-                    expires_at=str(g.get("expires_at") or ""),
+                    expires_at=expiry,
                 ))
             return out
-
-        def _source_for(digest: str) -> tuple[Path, int, int]:
-            span = sources.get(digest.strip().lower())
-            if span is None:
-                raise ValueError(
-                    f"hub granted {digest[:20]}… which this publish never declared"
-                )
-            return span
 
         def _replan(pid: str) -> Mapping[str, Any]:
             """Re-plan an EXISTING session. This is also the CAS path's presign
@@ -622,29 +642,29 @@ class HubClient:
         #
         # The DECLARATION is not re-sent: the session already carries it, and
         # the journal key is the declared object set, so an adopted session is
-        # about exactly these bytes. A re-run that wants a different
-        # declaration (other tags, other metadata) produces the same objects
-        # and therefore adopts the same session — if that is ever wrong, the
-        # answer is a distinct journal key, never a second declare onto a live
-        # session.
+        # about exactly these bytes and declaration semantics. The journal key
+        # includes a canonical digest of tags, metadata and policy fields, so a
+        # caller changing those facts declares a fresh session instead of
+        # silently completing the predecessor's request.
         session: Optional[Mapping[str, Any]] = None
         publish_id = ""
-        prior = (journal.find(destination_repo=destination_repo, mode=mode, key=art_key)
-                 if journal is not None else None)
+        prior = journal.find(session_name, manifest_ref) if journal is not None else None
         if prior is not None:
             try:
-                session = _replan(prior.publish_id)
-                publish_id = prior.publish_id
+                session = _replan(prior.session_id)
+                publish_id = prior.session_id
                 logger.info(
                     "publish_v2 resuming journalled session %s for %s (%d objects)",
-                    publish_id, destination_repo, prior.objects)
+                    publish_id, destination_repo, len(manifest.files))
                 _stage("resumed", publish_id=publish_id,
                        need=len(session.get("need") or []), bytes=total_bytes)
             except HubPublishError as exc:
                 logger.info(
                     "publish_v2 could not resume journalled session %s (%s); "
-                    "declaring a fresh publish", prior.publish_id, exc)
-                journal.clear(prior.publish_id)  # type: ignore[union-attr]
+                    "declaring a fresh publish", prior.session_id, exc)
+                journal.clear(session_name, session_id=prior.session_id)  # type: ignore[union-attr]
+                if recovery is not None:
+                    recovery.clear(prior.session_id)
                 session = None
 
         if session is None:
@@ -666,14 +686,13 @@ class HubClient:
         # Recorded BEFORE the first PUT: a journal written after the transfer
         # is a journal that never survives the transfer failing.
         if journal is not None:
-            journal.record(JournalEntry(
-                publish_id=publish_id, destination_repo=destination_repo, mode=mode,
-                artifact_key=art_key, objects=distinct or len(sources),
-                bytes_declared=total_bytes,
-                source_root=str(Path(files[0].local_path or ".").parent),
-                paths=tuple(d.path for d in decls),
-                producer_state=dict(journal_state or {}),
-            ))
+            journal.record(TransferSession(session_name, publish_id, manifest_ref))
+            if recovery is not None:
+                recovery.record(
+                    publish_id,
+                    paths=tuple(entry.path for entry in manifest.files),
+                    producer_state=dict(journal_state or {}),
+                )
 
         try:
             grants = _grants_of(session)
@@ -684,12 +703,13 @@ class HubClient:
             while grants:
                 _stage("uploading", publish_id=publish_id, objects=len(grants),
                        bytes=sum(g.size_bytes for g in grants), attempt=attempt)
-                report = _cu.upload_grants(
-                    grants, _source_for,
-                    on_bytes=(lambda n: part_progress(0, 0, n))
+                report = upload(
+                    grants,
+                    cas,
+                    progress=(lambda _digest, n: part_progress(0, 0, n))
                     if callable(part_progress) else None,
                 )
-                uploaded_objects += report.uploaded
+                uploaded_objects += report.succeeded
                 if callable(progress):
                     progress(resident + uploaded_objects, distinct or len(grants))
                 if report.ok:
@@ -716,7 +736,10 @@ class HubClient:
                     raise HubPublishError(
                         f"publish {publish_id}: {len(report.failures)} object(s) failed to "
                         f"upload after {_REUPLOAD_ATTEMPTS + 1} passes: "
-                        + "; ".join(report.failures[:5])
+                        + "; ".join(
+                            f"{digest}: {detail}"
+                            for digest, detail in report.failures[:5]
+                        )
                     )
                 # RESUME NEEDS NO CLIENT STATE FOR THIS PROCESS: re-plan and
                 # the need set names what still has to move, and it comes back
@@ -757,7 +780,13 @@ class HubClient:
                     status=done.status_code, code=_error_code_of(done))
             final = self._json(done)
             ckpt = final.get("checkpoint") if isinstance(final.get("checkpoint"), dict) else {}
-            checkpoint_id = str((ckpt or {}).get("checkpoint_id") or "").strip()
+            status = final.get("status") if isinstance(final.get("status"), dict) else {}
+            checkpoint_id = str(
+                (ckpt or {}).get("checkpoint_id")
+                or final.get("checkpoint_id")
+                or (status or {}).get("checkpoint_id")
+                or ""
+            ).strip()
             if not checkpoint_id:
                 raise HubPublishError(
                     f"publish {publish_id} completed without a checkpoint id: "
@@ -773,7 +802,9 @@ class HubClient:
             if _is_terminal_repudiation(exc):
                 self._abort_publish(repo_path, publish_id)
                 if journal is not None:
-                    journal.clear(publish_id)
+                    journal.clear(session_name, session_id=publish_id)
+                if recovery is not None:
+                    recovery.clear(publish_id)
             else:
                 logger.warning(
                     "publish %s failed with a non-terminal error (%s); leaving the "
@@ -784,7 +815,9 @@ class HubClient:
         # Promoted. The produced tree and this journal entry have no further
         # job: the bytes are in the CAS.
         if journal is not None:
-            journal.clear(publish_id)
+            journal.clear(session_name, session_id=publish_id)
+        if recovery is not None:
+            recovery.clear(publish_id)
         # Surfaced, not swallowed: the hub names which canonical checks it did
         # NOT run. A list that promises 19 and silently runs 14 is worse than
         # one promising 14.
@@ -811,8 +844,9 @@ def files_from_tree(tree: Path, *, prefix: str = "") -> list[CommitFile]:
     """Build CommitFile entries for every regular file under ``tree``.
 
     ``.cache/huggingface/**`` is skipped: huggingface_hub's local-dir download
-    metadata is cache-layout junk, never repo content. So is a publish journal
- — it is recovery bookkeeping about the tree, not part of it."""
+    metadata is cache-layout junk, never repo content. Publish recovery state
+    and its locks are bookkeeping about the tree, not part of it.
+    """
     tree = Path(tree)
     out: list[CommitFile] = []
     for f in sorted(tree.rglob("*")):
@@ -821,7 +855,12 @@ def files_from_tree(tree: Path, *, prefix: str = "") -> list[CommitFile]:
         rel_parts = f.relative_to(tree).parts
         if rel_parts[:2] == (".cache", "huggingface"):
             continue
-        if f.name == JOURNAL_NAME:
+        if f.name in (
+            JOURNAL_NAME,
+            STATE_NAME,
+            f".{JOURNAL_NAME}.lock",
+            f".{STATE_NAME}.lock",
+        ):
             continue
         rel = f.relative_to(tree).as_posix()
         if prefix:
