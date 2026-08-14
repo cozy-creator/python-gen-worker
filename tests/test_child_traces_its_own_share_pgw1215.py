@@ -109,7 +109,7 @@ def _request(tmp_path: Path) -> Any:
         slots={"pipeline": MintSlot(
             ref=_ref(), path=str(tmp_path / "tree"))},
         phases_snapshot=str(tmp_path / "phases.json"),
-        entry_peak_rss_bytes=1024 ** 3,
+        compiled_graph_peak_rss_bytes=1024 ** 3,
     )
 
 
@@ -174,7 +174,10 @@ def test_mint_child_drives_the_K_WIDE_path_and_hands_over_the_recipe(
     assert kwargs["width"].reason
     # pgw#848: the banked per-entry RSS really reaches the width policy. It
     # went unpassed for the whole fleet's history once already.
-    assert kwargs["width"].per_entry_rss_bytes == request.entry_peak_rss_bytes
+    assert (
+        kwargs["width"].per_entry_rss_bytes
+        == request.compiled_graph_peak_rss_bytes
+    )
     # pgw#848: the on-disk phase snapshot survives the rewiring — a mint this
     # process is KILLED must still leave its measurements behind.
     assert kwargs["phase_snapshot"] == Path(request.phases_snapshot)
