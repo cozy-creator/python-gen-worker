@@ -34,6 +34,11 @@ from gen_worker import aot_compile_child as child  # noqa: E402
 from gen_worker import aot_compile_pool as pool  # noqa: E402
 from gen_worker import aot_mint  # noqa: E402
 from gen_worker.api.binding import ModelRef  # noqa: E402
+from gen_worker.api.export_contract import (  # noqa: E402
+    export_declaration,
+    register_export_declaration,
+    reset_export_declarations,
+)
 from gen_worker.child_contract import CompileSpec, MintSlot  # noqa: E402
 from gen_worker.child_preflight import PreflightRefused  # noqa: E402
 from gen_worker.models import structure_only  # noqa: E402
@@ -54,6 +59,11 @@ def checkpoint(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def _job(checkpoint: Path, tmp_path: Path) -> pool.EntryJob:
     from harness import tiny_diffusion_endpoint as ep
 
+    # Other test modules deliberately reset the process-global declaration
+    # registry.  Importing this already-cached module cannot restore its
+    # import-time registration, so make each job self-contained.
+    register_export_declaration(ep.DECLARATION, replace=True)
+
     return pool.EntryJob(
         function=FUNCTION,
         modules=(ENDPOINT_MODULE,),
@@ -71,6 +81,17 @@ def _job(checkpoint: Path, tmp_path: Path) -> pool.EntryJob:
 # ---------------------------------------------------------------------------
 # 1. The real composition, on the family that has no weight-free path
 # ---------------------------------------------------------------------------
+
+
+def test_each_job_restores_its_declaration_after_a_registry_reset(
+    checkpoint: Path,
+    tmp_path: Path,
+) -> None:
+    reset_export_declarations()
+
+    job = _job(checkpoint, tmp_path)
+
+    assert export_declaration(job.cfg.family) is not None
 
 
 def test_a_family_with_no_structure_only_path_still_has_a_target_to_mint(
