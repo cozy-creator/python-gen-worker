@@ -56,7 +56,7 @@ class NamesAnArtifact(Protocol):
     """
 
     @property
-    def cell_key(self) -> str: ...
+    def compiled_graph_key(self) -> str: ...
 
     @property
     def toolchain_digest(self) -> str: ...
@@ -118,7 +118,7 @@ class ExpectedIdentity(msgspec.Struct, frozen=True):
         cannot reach one source and not the other.
         """
         return ExpectedIdentity(
-            cell_key=named.cell_key,
+            cell_key=named.compiled_graph_key,
             toolchain_digest=named.toolchain_digest,
             env_seal_digest=named.env_seal_digest,
             graph_contract_digest=graph_contract_digest,

@@ -1,6 +1,6 @@
 [project]
 name = "gen-worker"
-version = "0.115.0"
+version = "0.116.0"
 description = "A library used to build custom functions in Cozy Creator's serverless function platform."
 readme = "README.md"
 license = "MIT"
@@ -29,6 +29,7 @@ dependencies = [
     "pyyaml>=6.0.0",
     "blake3>=1.0.0",
     "hashrepo>=0.3,<0.4",
+    "torch-compiled-graphs>=0.3,<0.4",
     "huggingface-hub>=0.26.0",
     # gen_worker.convert (GGUF quantization tooling; small, pure-python)
     "gguf>=0.10.0",

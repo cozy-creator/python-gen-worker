@@ -685,19 +685,6 @@ def enable_compiled(
     cost +21-32% eager (gw#547); the eager adapter path re-enables sparse
     placement per request."""
     from .. import aot_serve, compile_cache  # lazy: keeps `import gen_worker` off the compile/pb stack
-    # Deferred: receipts pulls +151 modules onto the `import gen_worker` path.
-    from .. import receipts
-
-    # pgw#709: hub-delivered artifacts must carry a verifiable hub-signed
-    # receipt (signature + blake3/size + key binding + revocation check).
-    # A refused artifact is DROPPED — the ordinary miss policy (fleet
-    # self-mint / eager / typed refusal) takes over. No-op when the gate is
-    # unconfigured (cozy-local, CLI, unit rigs — local trust model).
-    if artifact is not None and not receipts.gate_delivered_artifact(
-        Path(artifact), family=str(getattr(cfg, "family", "") or "")
-    ):
-        artifact = None
-
     refused: Optional[AdoptOutcome] = None
     bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
     if bucket and not compile_cache.has_compile_target(pipe, cfg):

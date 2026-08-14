@@ -564,7 +564,7 @@ wheels = [
 
 [[package]]
 name = "gen-worker"
-version = "0.115.0"
+version = "0.116.0"
 source = { editable = "." }
 dependencies = [
     { name = "blake3" },
@@ -579,6 +579,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "requests" },
     { name = "tomli-w" },
+    { name = "torch-compiled-graphs" },
 ]
 
 [package.optional-dependencies]
@@ -662,6 +663,7 @@ requires-dist = [
     { name = "tomli-w", specifier = ">=1.0.0" },
     { name = "torch", marker = "(sys_platform == 'linux' and extra == 'torch') or (sys_platform == 'win32' and extra == 'torch')", specifier = ">=2.13.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'torch'", specifier = ">=2.13.0" },
+    { name = "torch-compiled-graphs", specifier = ">=0.3,<0.4" },
     { name = "torchvision", marker = "(sys_platform == 'linux' and extra == 'vision') or (sys_platform == 'win32' and extra == 'vision')", specifier = ">=0.28.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torchvision", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'vision'", specifier = ">=0.28.0" },
     { name = "transformers", marker = "extra == 'dev'", specifier = ">=5.13" },
@@ -2027,6 +2029,19 @@ wheels = [
     { url = "https://download-r2.pytorch.org/whl/cu130/torch-2.13.0%2Bcu130-cp315-cp315-manylinux_2_28_x86_64.whl", upload-time = "2026-07-08T11:20:00Z" },
     { url = "https://download-r2.pytorch.org/whl/cu130/torch-2.13.0%2Bcu130-cp315-cp315t-manylinux_2_28_aarch64.whl", upload-time = "2026-07-08T11:20:04Z" },
     { url = "https://download-r2.pytorch.org/whl/cu130/torch-2.13.0%2Bcu130-cp315-cp315t-manylinux_2_28_x86_64.whl", upload-time = "2026-07-08T11:20:04Z" },
+]
+
+[[package]]
+name = "torch-compiled-graphs"
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "hashrepo" },
+    { name = "safetensors" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1e/f0/90093e1c3af811dfdc3890a91ac8f49084724c6eb09c21d2508eb37d30ee/torch_compiled_graphs-0.3.0.tar.gz", hash = "sha256:b75d5268f7ccbc5764a34fb0c9af5935b83a832c5b6e6e9c76e797bd8ec70b7c", size = 65440, upload-time = "2026-08-14T12:04:50.611Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fb/21/437ef18ea1e83d8f9ddac11f8251a9f467145391f288bab65df5a15fe9c8/torch_compiled_graphs-0.3.0-py3-none-any.whl", hash = "sha256:251d557c090cd919fc43a7aa9a70c130eabd8d378564adefcc9d1cb1493c42cf", size = 72824, upload-time = "2026-08-14T12:04:49.463Z" },
 ]
 
 [[package]]

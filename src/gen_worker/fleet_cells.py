@@ -63,6 +63,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from torch_compiled_graphs import CompiledGraphKey, IdentityError, is_compiled_graph_key
+
 from . import activity as activity_mod
 from . import (
     aot_identity,
@@ -624,7 +626,6 @@ MAX_PUBLISH_ENTRIES = 256
 #: indicts the pod and every entry from it is suspect. Only a fact about ONE
 #: key is answered per entry.
 PUBLISH_STATUS_GRANTED = "granted"
-PUBLISH_STATUS_CONDEMNED = "condemned"
 
 
 @dataclass(frozen=True)
@@ -646,7 +647,7 @@ class PublishEntry:
 
     def wire(self) -> Dict[str, Any]:
         return {
-            "cell_key": self.compiled_graph_key,
+            "compiled_graph_key": self.compiled_graph_key,
             "identity_axes": {str(k): str(v)
                               for k, v in dict(self.identity_axes).items()},
             "mint_duration_ms": max(0, int(self.mint_duration_ms or 0)),
@@ -807,9 +808,7 @@ class CellPublisher:
         invite a body claiming two SKUs for one pod and make the hub choose.
 
         Raises :class:`CellPublishRefused` / :class:`HubPublishError` for a
-        WHOLE-BATCH refusal. A per-entry refusal is not a raise: it is a grant
-        with ``status="condemned"``, so one quarantined key does not throw away
-        35 siblings whose bytes have not moved.
+        refusal. The hub has one successful per-entry status: ``granted``.
         """
         asked = tuple(entries)
         if not family.strip():
@@ -825,9 +824,9 @@ class CellPublisher:
         seen: Dict[str, int] = {}
         for i, entry in enumerate(asked):
             key = entry.compiled_graph_key
-            if not cell_key.is_key(key):
+            if not is_compiled_graph_key(key):
                 raise CellPublishRefused(
-                    f"entries[{i}].cell_key is {key!r}, which is not a "
+                    f"entries[{i}].compiled_graph_key is {key!r}, which is not a "
                     f"compiled-graph key")
             if key in seen:
                 # Answers are positional; a collapsed duplicate would shift
@@ -835,14 +834,18 @@ class CellPublisher:
                 raise CellPublishRefused(
                     f"entries[{i}] repeats entries[{seen[key]}]'s key {key}")
             seen[key] = i
-            for axis in cell_key.KEY_AXES:
-                if not str(entry.identity_axes.get(axis) or "").strip():
-                    raise CellPublishRefused(
-                        f"entries[{i}].identity_axes states no {axis!r}; an "
-                        f"entry that cannot restate all of (graph, sm, "
-                        f"toolchain) cannot restate its own key, and a row "
-                        f"whose identity is only verifiable inside its batch "
-                        f"is not an identity")
+            try:
+                restated = CompiledGraphKey(tuple(sorted(
+                    (str(name), str(value))
+                    for name, value in entry.identity_axes.items()
+                )))
+            except IdentityError as exc:
+                raise CellPublishRefused(
+                    f"entries[{i}].identity_axes cannot restate its key: {exc}"
+                ) from exc
+            if str(restated) != key:
+                raise CellPublishRefused(
+                    f"entries[{i}].identity_axes restates {restated}, not {key}")
         # th#1423: a mint outliving its credential is only visible AFTER the
         # compile, in a 401 nothing could group. The credential states its own
         # `exp`, so the lapse is a MEASURED fact at the one moment it decides
@@ -852,7 +855,7 @@ class CellPublisher:
             _publish_leg(family, asked[0].compiled_graph_key,
                          "credential_expired", {"past_exp_s": int(lapse)})
         body = self._post(
-            "/v1/worker/cells/publish-intent",
+            "/v1/worker/compiled-graphs/publish-intent",
             {
                 "family": family,
                 # The three HUB-ATTESTED axes (pgw#709), checked against the
@@ -884,7 +887,7 @@ class CellPublisher:
             row = rows[i]
             if not isinstance(row, dict):
                 raise RuntimeError(f"publish-intent answers[{i}] is not an answer")
-            echoed = str(row.get("cell_key") or "").strip()
+            echoed = str(row.get("compiled_graph_key") or "").strip()
             if echoed != entry.compiled_graph_key:
                 raise RuntimeError(
                     f"publish-intent answers[{i}] answers {echoed!r} and "
@@ -892,11 +895,6 @@ class CellPublisher:
                     f"are consumed positionally, so a transposed batch would "
                     f"upload every artifact under a sibling's grant")
             status = str(row.get("status") or "").strip()
-            if status == PUBLISH_STATUS_CONDEMNED:
-                grants.append(PublishGrant(
-                    compiled_graph_key=echoed, status=PUBLISH_STATUS_CONDEMNED,
-                    detail=str(row.get("detail") or "")))
-                continue
             token = str(row.get("capability_token") or "").strip()
             if status != PUBLISH_STATUS_GRANTED or not token:
                 raise RuntimeError(
@@ -958,8 +956,7 @@ class CellPublisher:
         key = grant.compiled_graph_key
         if not grant.granted:
             raise CellPublishRefused(
-                grant.detail or f"the hub refused to admit {key}",
-                code="cell_publish_key_condemned")
+                grant.detail or f"the hub refused to admit {key}")
         try:
             from .hubio.client import CommitFile, HubClient
 
@@ -997,8 +994,8 @@ class CellPublisher:
             # Best-effort failure report so the hub's ledger/alarms see it.
             try:
                 self._post(
-                    "/v1/worker/cells/publish-complete",
-                    {"family": family, "cell_key": key, "ok": False,
+                    "/v1/worker/compiled-graphs/publish-complete",
+                    {"family": family, "compiled_graph_key": key, "ok": False,
                      "error": str(exc)[:300]},
                     timeout=_COMPLETE_TIMEOUT_S,
                 )
@@ -1012,8 +1009,8 @@ class CellPublisher:
             "bytes": result.total_bytes,
         })
         self._post(
-            "/v1/worker/cells/publish-complete",
-            {"family": family, "cell_key": key,
+            "/v1/worker/compiled-graphs/publish-complete",
+            {"family": family, "compiled_graph_key": key,
              "checkpoint_id": checkpoint_id, "ok": True},
             timeout=_COMPLETE_TIMEOUT_S,
         )
@@ -1566,7 +1563,10 @@ def arm_ordered(
     delivered_ref: str,
     delivered_digest: str,
     expected: Optional["aot_identity.ExpectedIdentity"],
+    compiled_graph_key: str,
     publisher_org: str,
+    publisher_tier: str,
+    receipt: str,
 ) -> ArmOutcome:
     """Obey one Plan's ``Arm`` (pgw#904) — the fleet POLICY does not run.
 
@@ -1640,12 +1640,14 @@ def arm_ordered(
             "an ordered cell arm requires the hub receipt gate; this process "
             "has no hub wiring to verify the publisher against")
     try:
-        receipt = receipts.verify_delivered_artifact(Path(artifact), family)
+        verified_receipt = receipts.verify_delivered_artifact(
+            Path(artifact), family, receipt,
+        )
     except receipts.ReceiptError as exc:
         raise OrderedArmError(
             "artifact_receipt_refused", f"{exc.reason}: {exc}") from exc
     want_org = str(publisher_org or "").strip()
-    have_org = str(receipt.publisher_org_id or "").strip()
+    have_org = str(verified_receipt.publisher_org_id or "").strip()
     # Exact publisher (§4.26): the spec NAMES the producing org and the signed
     # receipt must name the same one. Fail-closed on silence — an artifact
     # whose receipt cannot name its publisher cannot be shown to match.
@@ -1654,6 +1656,20 @@ def arm_ordered(
             "publisher_mismatch",
             f"publisher_org: expected {want_org or '<unnamed>'}, receipt "
             f"names {have_org or '<unnamed>'}")
+    want_tier = str(publisher_tier or "").strip()
+    if verified_receipt.publisher_tier != want_tier:
+        raise OrderedArmError(
+            "publisher_tier_mismatch",
+            f"publisher_tier: expected {want_tier or '<unnamed>'}, receipt "
+            f"names {verified_receipt.publisher_tier or '<unnamed>'}",
+        )
+    want_key = str(compiled_graph_key or "").strip()
+    if verified_receipt.compiled_graph_key != want_key:
+        raise OrderedArmError(
+            "receipt_key_mismatch",
+            f"compiled_graph_key: expected {want_key or '<unnamed>'}, receipt "
+            f"names {verified_receipt.compiled_graph_key or '<unnamed>'}",
+        )
 
     if bucket:
         cc.apply_lora_execution_lane(pipe, bucket)

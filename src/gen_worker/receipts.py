@@ -1,4 +1,4 @@
-"""Hub-signed cell receipt verification.
+"""Hub-signed compiled-graph receipt verification.
 
 A ``cell_store`` row (cell_key -> artifact) is a Nix *realisation*: fetch
 verifies the BYTES against the hub's recorded digest, but nothing signs the
@@ -47,24 +47,22 @@ import logging
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional, Set, Tuple
+from typing import Dict, Mapping, Optional
 
 import requests
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from . import activity as activity_mod
 from . import artifact_meta
 from . import worker_identity
-from .procsplit import broker
 
 logger = logging.getLogger(__name__)
 
 # `publisher_tier` and `publisher_org_id` are LOAD-BEARING at the arm gate
 # below, so an older receipt must never be read as a v2 one with the trust
 # fields missing: the version check refuses outright rather than defaulting.
-RECEIPT_VERSION = "cell-receipt-v2"
+RECEIPT_VERSION = "compiled-graph-receipt-v1"
 
 # Publisher tiers. `platform` means the platform vouches for the
 # publishing org's endpoint code, so the cell is adoptable fleet-wide within its
@@ -82,8 +80,6 @@ CELL_PUBLISHER_TIER_ORG = "org"
 # later is still a local change — it is just not pre-paid here.
 ARTIFACT_DIGEST_ALGORITHM = "sha256"
 JWKS_PATH = "/api/v1/artifacts/.well-known/jwks.json"
-RECEIPT_PATH = "/v1/worker/cells/receipt"
-REVOCATIONS_PATH = "/v1/worker/cells/revocations"
 
 # Per-CALL socket budget on the three small control-plane round trips this
 # module makes (JWKS, receipt, revocations). Not a kill — none of them can be
@@ -128,7 +124,7 @@ class Receipt:
 
     version: str
     family: str
-    cell_key: str
+    compiled_graph_key: str
     owning_endpoint_id: str
     # The publisher-trust boundary, inside the signature.
     publisher_tier: str
@@ -142,11 +138,6 @@ class Receipt:
 @dataclass
 class _Config:
     base_url: str
-    #: A BEARER, and nothing else. Under the split the parent supplies the real
-    #: credential and ignores this one; it is used only by the single-process
-    #: path's direct fetches. WHO THIS POD IS comes from ``worker_identity``,
-    #: never from decoding this.
-    worker_jwt: Callable[[], str]
     # kid -> RSA public key, lazily fetched from the hub JWKS.
     jwks: Dict[str, rsa.RSAPublicKey] = field(default_factory=dict)
 
@@ -155,7 +146,7 @@ _LOCK = threading.Lock()
 _CONFIG: Optional[_Config] = None
 
 
-def configure(base_url: str, worker_jwt: Callable[[], str]) -> None:
+def configure(base_url: str) -> None:
     """Arm the receipt gate. Called from the HelloAck site; idempotent
     (re-configuration replaces the base URL and drops the JWKS cache so a
     hub bounce with rotated keys re-fetches)."""
@@ -164,7 +155,7 @@ def configure(base_url: str, worker_jwt: Callable[[], str]) -> None:
     if not base:
         return
     with _LOCK:
-        _CONFIG = _Config(base_url=base, worker_jwt=worker_jwt)
+        _CONFIG = _Config(base_url=base)
     logger.info("receipts: gate configured against %s", base)
 
 
@@ -399,7 +390,7 @@ def verify_receipt_jws(jws: str, keys: Mapping[str, rsa.RSAPublicKey]) -> Receip
     return Receipt(
         version=version,
         family=str(payload.get("family") or ""),
-        cell_key=str(payload.get("cell_key") or ""),
+        compiled_graph_key=str(payload.get("compiled_graph_key") or ""),
         owning_endpoint_id=str(payload.get("owning_endpoint_id") or ""),
         publisher_tier=_normalize_publisher_tier(payload.get("publisher_tier")),
         publisher_org_id=str(payload.get("publisher_org_id") or ""),
@@ -458,74 +449,6 @@ def _kid_of(jws: str) -> str:
     return str(header.get("kid") or "").strip() if isinstance(header, dict) else ""
 
 
-def _fetch_receipt_jws(cfg: _Config, digest: str, cell_key: str) -> str:
-    """Fetch the signed receipt for one artifact.
-
-    The lookup key is the ALGORITHM-TAGGED digest — never bare hex, which
-    silently acquires whatever algorithm the reader assumed. There is no
-    per-algorithm 404-and-retry chain: a silent downgrade would make "which
-    digest armed this cell?" unanswerable, and a 404 from a proxy is not a 404
-    from the hub.
-
-    Parent-mediated when the split is on (the child holds no worker JWT); the
-    identical GET otherwise.
-    """
-    params: Dict[str, Any] = {
-        "cell_key": cell_key,
-        "artifact_digest": digest,
-    }
-    resp = broker.request(
-        "GET",
-        RECEIPT_PATH,
-        base_url=cfg.base_url,
-        bearer=cfg.worker_jwt(),
-        params=params,
-        timeout=_HTTP_TIMEOUT_S,
-    )
-    if resp.status_code == 404:
-        raise ReceiptError(
-            "receipt_not_found",
-            f"no hub receipt for {digest[:23]} key={cell_key}",
-        )
-    if resp.status_code != 200:
-        raise ReceiptError("receipt_fetch_failed", f"{RECEIPT_PATH} -> {resp.status_code}")
-    try:
-        body = resp.json()
-    except ValueError as exc:
-        raise ReceiptError("receipt_fetch_failed", f"response parse: {exc}") from exc
-    jws = str(body.get("receipt") or "").strip()
-    if not jws:
-        raise ReceiptError("receipt_fetch_failed", "empty receipt in response")
-    return jws
-
-
-def _fetch_revocations(cfg: _Config) -> Set[Tuple[str, str]]:
-    resp = broker.request(
-        "GET",
-        REVOCATIONS_PATH,
-        base_url=cfg.base_url,
-        bearer=cfg.worker_jwt(),
-        timeout=_HTTP_TIMEOUT_S,
-    )
-    if resp.status_code != 200:
-        # Fail closed: an unreadable revocation list means the recall
-        # channel is down — refusing costs one self-mint, trusting could
-        # arm a recalled cell.
-        raise ReceiptError("revocations_unavailable", f"{REVOCATIONS_PATH} -> {resp.status_code}")
-    try:
-        body = resp.json()
-    except ValueError as exc:
-        raise ReceiptError("revocations_unavailable", f"response parse: {exc}") from exc
-    out: Set[Tuple[str, str]] = set()
-    for entry in body.get("revoked") or []:
-        if isinstance(entry, dict):
-            key = str(entry.get("cell_key") or "").strip()
-            digest = str(entry.get("snapshot_digest") or "").strip()
-            if key and digest:
-                out.add((key, digest))
-    return out
-
-
 # -- local bindings ---------------------------------------------------------
 
 
@@ -547,7 +470,9 @@ def _embedded_meta(artifact: Path) -> Dict[str, object]:
         raise ReceiptError("artifact_unreadable", f"{artifact.name}: {exc}") from exc
 
 
-def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
+def verify_delivered_artifact(
+    artifact: Path, family: str, receipt_jws: str,
+) -> Receipt:
     """Full verification of one hub-delivered artifact. Raises
     :class:`ReceiptError` (named reason) on any failure; returns the
     verified receipt on success.
@@ -570,15 +495,22 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
 
     artifact = Path(artifact)
     meta = _embedded_meta(artifact)
-    meta_key = str(meta.get("cell_key") or "").strip()
+    meta_key = str(meta.get("compiled_graph_key") or "").strip()
     meta_family = str(meta.get("family") or "").strip()
     if not meta_key:
-        raise ReceiptError("artifact_unkeyed", f"{artifact.name} metadata has no cell_key")
+        raise ReceiptError(
+            "artifact_unkeyed",
+            f"{artifact.name} metadata has no compiled_graph_key",
+        )
 
     local = artifact_digest(artifact)
     size = artifact.stat().st_size
 
-    jws = _fetch_receipt_jws(cfg, local, meta_key)
+    jws = str(receipt_jws or "").strip()
+    if not jws:
+        raise ReceiptError(
+            "receipt_missing", "resolve returned no embedded compiled-graph receipt"
+        )
     receipt = verify_receipt_jws(jws, _jwks_for(cfg, _kid_of(jws)))
 
     # Both sides are ALGORITHM-TAGGED and `canonical_artifact_digest` has
@@ -593,10 +525,10 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
         raise ReceiptError(
             "receipt_size_mismatch",
             f"receipt={receipt.artifact_size_bytes} local={size}")
-    if receipt.cell_key != meta_key:
+    if receipt.compiled_graph_key != meta_key:
         raise ReceiptError(
             "receipt_key_mismatch",
-            f"receipt={receipt.cell_key} artifact={meta_key}")
+            f"receipt={receipt.compiled_graph_key} artifact={meta_key}")
     want_family = str(family or "").strip()
     if want_family and receipt.family != want_family:
         raise ReceiptError(
@@ -608,11 +540,6 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
             f"receipt={receipt.family} artifact={meta_family}")
     if not receipt.snapshot_digest:
         raise ReceiptError("receipt_unbound", "no snapshot_digest (derivation binding)")
-
-    if (receipt.cell_key, receipt.snapshot_digest) in _fetch_revocations(cfg):
-        raise ReceiptError(
-            "cell_revoked",
-            f"key={receipt.cell_key} snapshot={receipt.snapshot_digest} is recalled")
 
     # LAST: who published this, and may we run it. Deliberately after the
     # signature — the tier is only meaningful once the claims are proven — and
@@ -640,46 +567,6 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
     return receipt
 
 
-def gate_delivered_artifact(artifact: Path, family: str) -> bool:
-    """The one arming hook (called from ``models.provision.enable_compiled``
-    for every non-None delivered artifact). True = arm may proceed.
-
-    Unconfigured (cozy-local, CLI, unit rigs): no-op True. Configured
-    (fleet workers, armed at HelloAck): full verification; ANY failure
-    emits the typed ``cell_receipt_refused`` wire event and returns False —
-    the caller drops the delivered artifact and the ordinary miss policy
-    (self-mint) takes over. Never raises; never kills serving.
-    """
-    if not configured():
-        return True
-    try:
-        receipt = verify_delivered_artifact(Path(artifact), family)
-    except ReceiptError as exc:
-        logger.error(
-            "receipts: REFUSING delivered artifact %s (%s)", Path(artifact).name, exc)
-        activity_mod.emit_event(
-            "cell_receipt_refused",
-            f"family={family} artifact={Path(artifact).name}: {exc}",
-            phase=exc.reason,
-        )
-        return False
-    except Exception as exc:  # noqa: BLE001 — refuse, never crash the arm path
-        logger.error(
-            "receipts: REFUSING delivered artifact %s (unexpected %s: %s)",
-            Path(artifact).name, type(exc).__name__, exc)
-        activity_mod.emit_event(
-            "cell_receipt_refused",
-            f"family={family} artifact={Path(artifact).name}: "
-            f"{type(exc).__name__}: {exc}",
-            phase="internal_error",
-        )
-        return False
-    logger.info(
-        "receipts: verified %s (key=%s, kid-signed, snapshot=%s)",
-        Path(artifact).name, receipt.cell_key, receipt.snapshot_digest[:16])
-    return True
-
-
 __all__ = [
     "ARTIFACT_DIGEST_ALGORITHM",
     "CELL_PUBLISHER_TIER_ORG",
@@ -690,7 +577,6 @@ __all__ = [
     "canonical_artifact_digest",
     "configure",
     "configured",
-    "gate_delivered_artifact",
     "needs_viewer_identity",
     "refuse_untrusted_publisher",
     "reset",

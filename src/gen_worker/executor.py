@@ -819,7 +819,10 @@ class _ArmOrder:
     backend: str
     selection: Optional["_CompileArtifactSelection"] = None
     expected: Optional["aot_identity.ExpectedIdentity"] = None
+    compiled_graph_key: str = ""
     publisher_org: str = ""
+    publisher_tier: str = ""
+    receipt: str = ""
     adopt: Optional["boot_adopt.BootAdoptOutcome"] = None
     #: pgw#1176: the OTHER entries this boot resolved. A boot derives a key SET
     #: and coverage ACCRETES, so several hits are the expected shape — each is
@@ -827,8 +830,11 @@ class _ArmOrder:
     #: wrap after the first. A failure on one of these is a per-entry degrade
     #: (that class serves eager), never terminal: the first arm already proved
     #: the pod can serve compiled.
-    extra: Tuple[Tuple[Path, Optional["aot_identity.ExpectedIdentity"], str],
-                 ...] = ()
+    extra: Tuple[
+        Tuple[
+            Path, Optional["aot_identity.ExpectedIdentity"], str, str, str, str,
+        ], ...,
+    ] = ()
 
     @classmethod
     def for_artifact(
@@ -838,10 +844,15 @@ class _ArmOrder:
         ref: str,
         snapshot_digest: str,
         expected: Optional["aot_identity.ExpectedIdentity"],
+        compiled_graph_key: str,
         publisher_org: str,
+        publisher_tier: str,
+        receipt: str,
         adopt: Optional["boot_adopt.BootAdoptOutcome"] = None,
         extra: Tuple[
-            Tuple[Path, Optional["aot_identity.ExpectedIdentity"], str], ...
+            Tuple[
+                Path, Optional["aot_identity.ExpectedIdentity"], str, str, str, str,
+            ], ...
         ] = (),
     ) -> "_ArmOrder":
         """THE artifact -> arming-order map, in one place (pgw#1152).
@@ -863,7 +874,10 @@ class _ArmOrder:
             selection=_CompileArtifactSelection(
                 path=path, ref=ref, snapshot_digest=snapshot_digest),
             expected=expected,
+            compiled_graph_key=compiled_graph_key,
             publisher_org=publisher_org,
+            publisher_tier=publisher_tier,
+            receipt=receipt,
             adopt=adopt,
             extra=extra,
         )
@@ -5392,14 +5406,23 @@ class Executor:
                     path=got.artifact, ref=got.ref,
                     snapshot_digest=got.snapshot_digest,
                     expected=got.expected,
+                    compiled_graph_key=got.cell.compiled_graph_key,
                     publisher_org=got.cell.publisher_org,
+                    publisher_tier=got.cell.publisher_tier,
+                    receipt=got.cell.receipt,
                     # pgw#1122: this order is the POD's, not the hub's.
                     adopt=adopt,
                     # pgw#1176: every OTHER class this boot resolved, armed
                     # into the same registry after this one.
                     extra=tuple(
-                        (got_other.artifact, got_other.expected,
-                         got_other.cell.publisher_org)
+                        (
+                            got_other.artifact,
+                            got_other.expected,
+                            got_other.cell.compiled_graph_key,
+                            got_other.cell.publisher_org,
+                            got_other.cell.publisher_tier,
+                            got_other.cell.receipt,
+                        )
                         for got_other in (
                             o.adoption for o in resolved[1:]
                             if o.adoption is not None)))
@@ -8508,21 +8531,34 @@ class Executor:
                     delivered_digest=(
                         delivered.snapshot_digest if delivered else ""),
                     expected=arm.expected,
+                    compiled_graph_key=arm.compiled_graph_key,
                     publisher_org=arm.publisher_org,
+                    publisher_tier=arm.publisher_tier,
+                    receipt=arm.receipt,
                 )
                 # pgw#1176: THE ACCRETION LOOP. Every other class this boot
                 # resolved arms into the SAME registry, target pool and live
                 # wrap. A failure here costs that class and nothing else —
                 # the pod is already serving compiled, so degrading one entry
                 # to eager is the design's normal state, not a fallback.
-                for extra_path, extra_expected, extra_org in arm.extra:
+                for (
+                    extra_path,
+                    extra_expected,
+                    extra_key,
+                    extra_org,
+                    extra_tier,
+                    extra_receipt,
+                ) in arm.extra:
                     try:
                         fleet_cells.arm_ordered(
                             pipe, cfg, self.store._cache_dir,
                             backend=arm.backend, artifact=extra_path,
                             delivered_ref="", delivered_digest="",
                             expected=extra_expected,
+                            compiled_graph_key=extra_key,
                             publisher_org=extra_org,
+                            publisher_tier=extra_tier,
+                            receipt=extra_receipt,
                         )
                     except Exception as extra_exc:  # noqa: BLE001
                         activity_mod.emit_event(

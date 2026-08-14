@@ -497,10 +497,7 @@ class Lifecycle:
         # Arm the cell-receipt gate the moment the hub wiring exists: every
         # delivered compile cell is signature-verified before it may arm.
         if self.executor.file_base_url:
-            receipts.configure(
-                base_url=self.executor.file_base_url,
-                worker_jwt=self.executor.worker_jwt_provider,
-            )
+            receipts.configure(base_url=self.executor.file_base_url)
             # The platform private key never enters this pod — the hub signs
             # the claim bytes. Until this call lands, a signing-configured
             # worker FAILS media requests rather than shipping them unsigned.

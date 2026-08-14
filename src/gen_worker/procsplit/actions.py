@@ -106,24 +106,6 @@ ACTIONS: Dict[str, HubAction] = {
             r"^/v1/worker/c2pa/sign$",
             body=("alg", "claim_b64"),
         ),
-        # pgw#709 cell-receipt gate: fetch one receipt, fetch the revocation
-        # list. Read-only, and the gate fails closed without them.
-        # ``artifact_digest`` is ONE algorithm-tagged digest (pgw#1034 collapsed
-        # the multi-algorithm ceremony; the bare ``blake3`` key had already gone
-        # with the v1 publish protocol). The repeat handling below still accepts
-        # a list — it is parse-side input validation on an untrusted seam, not a
-        # promise to any particular caller.
-        _a(
-            "cells.receipt",
-            "GET",
-            r"^/v1/worker/cells/receipt$",
-            query=("cell_key", "artifact_digest"),
-        ),
-        _a(
-            "cells.revocations",
-            "GET",
-            r"^/v1/worker/cells/revocations$",
-        ),
         # Self-mint publish (gw#587/th#910). publish-intent returns a
         # key-pinned capability token — a short-TTL, least-authority grant, the
         # one credential shape the child is explicitly allowed to hold.
@@ -143,9 +125,9 @@ ACTIONS: Dict[str, HubAction] = {
         # still admitted them would let a client speak the dead shape past the
         # one gate that can refuse it.
         _a(
-            "cells.publish_intent",
+            "compiled_graphs.publish_intent",
             "POST",
-            r"^/v1/worker/cells/publish-intent$",
+            r"^/v1/worker/compiled-graphs/publish-intent$",
             body=("family", "axes", "entries"),
             timeout_s=60.0,
         ),
@@ -157,17 +139,17 @@ ACTIONS: Dict[str, HubAction] = {
         # enumeration is not a convention, it is the request: an action table
         # that admitted one more key would make the whole resolve refuse.
         _a(
-            "cells.resolve",
+            "compiled_graphs.resolve",
             "POST",
-            r"^/v1/worker/cells/resolve$",
+            r"^/v1/worker/compiled-graphs/resolve$",
             body=("family", "keys"),
             timeout_s=30.0,
         ),
         _a(
-            "cells.publish_complete",
+            "compiled_graphs.publish_complete",
             "POST",
-            r"^/v1/worker/cells/publish-complete$",
-            body=("family", "cell_key", "checkpoint_id", "ok", "error"),
+            r"^/v1/worker/compiled-graphs/publish-complete$",
+            body=("family", "compiled_graph_key", "checkpoint_id", "ok", "error"),
             timeout_s=60.0,
         ),
         # AOT cell discovery: list a system repo's checkpoints, resolve one
@@ -225,7 +207,9 @@ CONTROL_BODY_CEILING_BYTES = _MAX_JSON_BYTES
 
 #: pgw#980: the two actions that WRITE a cell into a shared family namespace.
 #: Every other action in the table reads, renews or reports.
-PUBLISH_ACTIONS = frozenset({"cells.publish_intent", "cells.publish_complete"})
+PUBLISH_ACTIONS = frozenset({
+    "compiled_graphs.publish_intent", "compiled_graphs.publish_complete",
+})
 
 #: pgw#980: the env that marks a pod a LIVE-EDIT PROBE. A probe runs code that
 #: was rsync'd onto it — code that is, by construction, not any released
