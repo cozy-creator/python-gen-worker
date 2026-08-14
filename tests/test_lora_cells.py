@@ -179,7 +179,7 @@ def test_enable_compiled_rolls_back_branches_when_eager(plain_pipe: Any) -> None
     """No cell + no CUDA => stays eager; the declared branch lane must not
     leak into eager serving (canonical zeroed slots cost +21-32% eager)."""
     cfg = _cfg("loracells-test", lora_bucket=32)
-    armed = provision.enable_compiled(plain_pipe, cfg, cache_dir=None, artifact=None).armed
+    armed = provision.enable_compiled(plain_pipe, cfg, cache_dir=None).armed
     assert armed is False
     assert branch_bucket(plain_pipe.unet) == 0
     from gen_worker.models.loading import pipeline_weight_lane
@@ -190,7 +190,7 @@ def test_enable_compiled_rolls_back_branches_when_eager(plain_pipe: Any) -> None
 def test_enable_compiled_w8a8_fail_closed_keeps_contract(w8a8_pipe: Any) -> None:
     cfg = _cfg("loracells-test", lora_bucket=128)
     with pytest.raises(compile_cache.CompiledExecutionLaneUnavailableError):
-        provision.enable_compiled(w8a8_pipe, cfg, cache_dir=None, artifact=None)
+        provision.enable_compiled(w8a8_pipe, cfg, cache_dir=None)
 
 
 def test_rank_buckets_cover_declared_cells() -> None:
@@ -230,7 +230,7 @@ def test_enable_compiled_skips_execution_lane_on_component_slot_without_target()
 
     vae = _Vae()
     cfg = _cfg("loracells-test", lora_bucket=64)
-    armed = provision.enable_compiled(vae, cfg, cache_dir=None, artifact=None).armed
+    armed = provision.enable_compiled(vae, cfg, cache_dir=None).armed
     assert armed is False
 
 
@@ -269,5 +269,5 @@ def test_delivered_lora_cell_on_component_slot_is_ordinary_miss(
 
     vae = _Vae()
     armed = provision.enable_compiled(
-        vae, cfg, cache_dir=tmp_path / "cache", artifact=None).armed
+        vae, cfg, cache_dir=tmp_path / "cache").armed
     assert armed is False

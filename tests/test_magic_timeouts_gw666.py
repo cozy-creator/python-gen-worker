@@ -649,7 +649,6 @@ _DEADLINE_BURNDOWN = {
 _ELAPSED_ASSERT_BURNDOWN = {
     "test_boot_smoke_hardware_report.py",  # hang bound: refused connect << 15s
     "test_hardware_report.py",             # hang bound: refused connect << 10s
-    "test_mint_process_pgw784.py",         # hang bound: reap must not wait out a 600s child
     "test_subprocess_stall_gw665.py",      # hang bound: stall window << 30s
     "test_mint_reopen_pgw677.py",          # LATENCY BUDGET — anchor it next
     # exposed by the widened pattern below, each reviewed:

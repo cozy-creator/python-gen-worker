@@ -797,14 +797,29 @@ def test_persisted_state_refuses_a_regular_file_replaced_during_open(
     assert replaced
 
 
-def test_fifo_state_is_refused_without_blocking(tmp_path: Path) -> None:
+def test_fifo_state_is_refused_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     path = _record_path(tmp_path)
     path.parent.mkdir(parents=True)
     os.mkfifo(path)
-    started = time.monotonic()
+    real_open = os.open
+
+    def guarded_open(
+        opened: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if os.fsdecode(opened) == path.name and dir_fd is not None:
+            pytest.fail("FIFO state reached open instead of lstat refusal")
+        return real_open(opened, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", guarded_open)
     with pytest.raises(compiled_graph_store._PersistedStateError):
         compiled_graph_store._read_record(path)
-    assert time.monotonic() - started < 1.0
 
 
 @pytest.mark.parametrize(
