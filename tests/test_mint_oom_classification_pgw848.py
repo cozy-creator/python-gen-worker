@@ -198,9 +198,9 @@ def test_a_real_oom_killed_entry_child_is_a_retryable_shortfall_that_teaches_the
 
         # 5. ...and the parent banks it, so the RETRY is narrower
         fam, execution_lane = "pgw848-oom", "w8a8-lora64"
-        mint_workers.record_entry_peak_rss(
+        mint_workers.record_compiled_graph_peak_rss(
             fam, execution_lane, int(table["pool"]["peak_child_rss_bytes"]))
-        banked = mint_workers.entry_peak_rss(fam, execution_lane)
+        banked = mint_workers.compiled_graph_peak_rss(fam, execution_lane)
         assert banked > 0
         common = dict(vcpus=16, available_bytes=8 * _GIB, device_lock=True)
         before = pool.entry_workers(18, **common)

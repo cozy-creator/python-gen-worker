@@ -38,7 +38,7 @@ from typing import Any, Dict, NamedTuple, Optional, Tuple
 _ENTRY_RSS_PEAKS: Dict[Tuple[str, str], int] = {}
 
 
-def record_entry_peak_rss(family: str, weight_lane: str, peak_bytes: int) -> None:
+def record_compiled_graph_peak_rss(family: str, weight_lane: str, peak_bytes: int) -> None:
     """Bank one entry child's measured host high-water for the next mint.
 
     Written on EVERY outcome including failures: an aborted mint's entries
@@ -51,7 +51,7 @@ def record_entry_peak_rss(family: str, weight_lane: str, peak_bytes: int) -> Non
     _ENTRY_RSS_PEAKS[key] = max(_ENTRY_RSS_PEAKS.get(key, 0), int(peak_bytes))
 
 
-def entry_peak_rss(family: str, weight_lane: str) -> int:
+def compiled_graph_peak_rss(family: str, weight_lane: str) -> int:
     """0 = never measured on this pod; ``entry_workers`` says so in its basis."""
     return _ENTRY_RSS_PEAKS.get((str(family or ""), str(weight_lane or "")), 0)
 
@@ -235,6 +235,6 @@ def adopt_watermark(device: Optional[int] = None) -> Tuple[int, int]:
 __all__ = [
     "adopt_watermark",
     "device_of",
-    "entry_peak_rss",
-    "record_entry_peak_rss",
+    "compiled_graph_peak_rss",
+    "record_compiled_graph_peak_rss",
 ]

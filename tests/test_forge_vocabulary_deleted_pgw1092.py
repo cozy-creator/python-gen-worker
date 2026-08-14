@@ -55,7 +55,16 @@ def test_the_mint_goal_module_is_gone_and_the_package_still_imports() -> None:
     # The serve-path readback the executor's own publish wait uses SURVIVES.
     assert hasattr(fleet_cells, "publishes_in_flight")
     assert hasattr(fleet_cells, "publish_durable_progress")
-    assert hasattr(executor.Executor, "declares_compile")
+    # pgw#1215 step 4: `declares_compile` is gone with the same reasoning one
+    # step further. It answered "does this RELEASE declare anything to mint",
+    # which is a whole-release verdict about a project called "the mint" — and
+    # it never had a caller, only this line asserting it existed. Under
+    # per-graph-class accretion (greenfield §1.3) there is no release-wide mint
+    # to be finished or missed: each declared class is resolved, compiled and
+    # armed on its own, and the only question anyone asks is per class. A
+    # caller-less predicate pinned by a `hasattr` is not surface, so this row
+    # now pins the DELETION.
+    assert not hasattr(executor.Executor, "declares_compile")
 
 
 def test_the_goal_set_has_exactly_one_goal() -> None:

@@ -400,9 +400,19 @@ def test_mint_seed_window_forces_eager_enqueue_on_degraded_routers(
 ) -> None:
     """Inside the mint seed window a novel signature NEVER compiles inline:
     EAGER + background enqueue even when the router is non-concurrent or
-    (turn-gated) short on headroom. Outside the window the legacy verdicts
-    stand."""
+    short on headroom. Outside the window the sequential verdict stands.
+
+    pgw#1215 step 4: the row that used to close this test — an UNGATED router
+    keeping "the pre-fix degrade (kill-switch parity)" — is gone with the mode
+    it described. There is no kill switch to be at parity with
+    (``test_no_env_restores_the_pre_pgw677_tree``, ten lines below, asserts
+    ``GEN_WORKER_BG_YIELD`` cannot exist), and an ungated router now refuses
+    typed rather than degrading. What replaces it asserts the contract that
+    is actually live: a TURN-GATED router does not degrade on tight headroom,
+    and an ungated one cannot route concurrently at all.
+    """
     router = hot_swap.Router()
+    router.set_turn_gate(lambda kind: contextlib.nullcontext())
 
     def compiled(*args: Any, **kwargs: Any) -> None:
         return None
@@ -423,16 +433,17 @@ def test_mint_seed_window_forces_eager_enqueue_on_degraded_routers(
     # inside its exclusive turn.
     monkeypatch.setattr(hot_swap, "_headroom_ok", lambda device: False)
     gated = hot_swap.Router()
-    gated.enable()
     gated.set_turn_gate(lambda kind: contextlib.nullcontext())
+    gated.enable()
     verdict, sig = gated.route("t", compiled, ("c",), {})
     assert verdict == hot_swap.EAGER
-    # Ungated legacy router with tight headroom keeps the pre-fix degrade
-    # (kill-switch parity).
-    legacy = hot_swap.Router()
-    legacy.enable()
-    verdict, _sig = legacy.route("t", compiled, ("d",), {})
-    assert verdict == hot_swap.COMPILED
+    # An UNGATED router cannot reach that decision at all: concurrency is
+    # refused typed, so the degrade branch has no state left to fire from.
+    # RED before pgw#1215 step 4: `legacy.enable()` succeeded and the route
+    # returned COMPILED.
+    ungated = hot_swap.Router()
+    with pytest.raises(hot_swap.RouterNotGated):
+        ungated.enable()
 
 
 # ---------------------------------------------------------------------------

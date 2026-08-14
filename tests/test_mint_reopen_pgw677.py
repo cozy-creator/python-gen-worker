@@ -27,6 +27,7 @@ lose its publish outcome. Three failure modes, each pinned here:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 import time
 from pathlib import Path
@@ -561,8 +562,15 @@ def test_seed_window_holes_never_compile_inline(
     """RED on 0.70.0: the _MAX_SIGS overflow and the dummy-build failure
     branches returned COMPILED even inside the seed window — an inline
     Dynamo+Inductor compile while holding the run gate. Post-fix both
-    return EAGER and count ``seed_dropped`` so the driver aborts loudly."""
+    return EAGER and count ``seed_dropped`` so the driver aborts loudly.
+
+    pgw#1215 step 4: both routers wire the turn gate, exactly as the mint
+    pipes do in production (`Executor._wire_turn_gate` runs before
+    `hot_swap.enable` and therefore before the first seed can route). An
+    ungated router is a typed refusal now, not a mode.
+    """
     router = hot_swap.Router()
+    router.set_turn_gate(lambda kind: contextlib.nullcontext())
 
     def compiled(*args: Any, **kwargs: Any) -> None:
         return None
@@ -581,10 +589,11 @@ def test_seed_window_holes_never_compile_inline(
         hot_swap, "_dummy_value",
         lambda value, depth=0: (_ for _ in ()).throw(RuntimeError("boom")))
     fresh = hot_swap.Router()
+    fresh.set_turn_gate(lambda kind: contextlib.nullcontext())
     with hot_swap.mint_seed_window():
         verdict, _sig = fresh.route("t", compiled, ("nodummy",), {})
     assert verdict == hot_swap.EAGER
     assert fresh.seed_dropped == 1
-    # Outside the window the legacy verdict stands.
+    # Outside the window the sequential verdict stands.
     verdict, _sig = fresh.route("t", compiled, ("plain",), {})
     assert verdict == hot_swap.COMPILED

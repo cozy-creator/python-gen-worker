@@ -382,10 +382,10 @@ def test_the_only_bank_that_SIZES_anything_is_the_host_rss_one(
     * Nothing device-shaped is handed down on the request.
     """
     mint_workers._ENTRY_RSS_PEAKS.clear()
-    assert mint_workers.entry_peak_rss("sdxl", "w8a8") == 0
-    mint_workers.record_entry_peak_rss("sdxl", "w8a8", 5 * GIB)
-    mint_workers.record_entry_peak_rss("sdxl", "w8a8", 2 * GIB)
-    assert mint_workers.entry_peak_rss("sdxl", "w8a8") == 5 * GIB, (
+    assert mint_workers.compiled_graph_peak_rss("sdxl", "w8a8") == 0
+    mint_workers.record_compiled_graph_peak_rss("sdxl", "w8a8", 5 * GIB)
+    mint_workers.record_compiled_graph_peak_rss("sdxl", "w8a8", 2 * GIB)
+    assert mint_workers.compiled_graph_peak_rss("sdxl", "w8a8") == 5 * GIB, (
         "the bank is not monotone — a lucky run talked the ask down")
 
     # The two whose names are history: they had consumers, and a consumer is
@@ -407,10 +407,10 @@ def test_the_only_bank_that_SIZES_anything_is_the_host_rss_one(
         f"arithmetic returning, and §4.33 deleted it on measured evidence")
 
     # ...and nothing device-shaped crosses to the child, which is the other
-    # half of the sentence this fence used to carry. `entry_peak_rss_bytes` is
+    # half of the sentence this fence used to carry. `compiled_graph_peak_rss_bytes` is
     # the one measurement handed down; `vram_cap_bytes` died with pgw#1175.
     handed_down = set(mp.MintRequest.__struct_fields__)
-    assert "entry_peak_rss_bytes" in handed_down
+    assert "compiled_graph_peak_rss_bytes" in handed_down
     assert not [
         f for f in handed_down
         if ("vram" in f or "device" in f) and f.endswith("_bytes")

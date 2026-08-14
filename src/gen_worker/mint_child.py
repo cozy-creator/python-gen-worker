@@ -474,8 +474,8 @@ def _mint_aot(
             pipe, spec, out_dir, on_progress=_progress,
             # pgw#848: banked by the parent from a previous mint on this pod.
             # 0 on a pod that has never minted this (family, lane).
-            entry_peak_rss_bytes=int(
-                getattr(request, "entry_peak_rss_bytes", 0) or 0),
+            compiled_graph_peak_rss_bytes=int(
+                getattr(request, "compiled_graph_peak_rss_bytes", 0) or 0),
             # pgw#848: rewritten on every beat, so a mint this process is
             # KILLED in still leaves its measurements on disk for the parent.
             phase_snapshot=(

@@ -5682,11 +5682,15 @@ class Executor:
                     # The pipe serves eager until `adopt_delegated_mint` reads
                     # the STAMPED key off the packed envelope.
                     mint_pipes[pid] = candidate.pipeline
-                    hot_swap.enable(candidate.pipeline)
                     # pgw#677: the mint's own background compiles are the
                     # first consumers of the turn gate — wire it before the
-                    # first seed can enqueue a warm job.
+                    # first seed can enqueue a warm job. pgw#1215 step 4: this
+                    # pair used to run in the opposite order, which the prose
+                    # already said was wrong; `Router.enable` now refuses an
+                    # ungated router typed, so the order is enforced instead
+                    # of merely intended.
                     self._wire_turn_gate(rec, candidate.pipeline)
+                    hot_swap.enable(candidate.pipeline)
                 rec.background_mint = _BackgroundMint(
                     spec=spec,
                     instance=instance,
@@ -8628,18 +8632,6 @@ class Executor:
         return fleet_cells.enable_compiled(
             pipe, cfg, cache_dir, artifact,
             publisher=self._cell_publisher(),
-        )
-
-
-    def declares_compile(self) -> bool:
-        """Whether ANY discovered spec declares a compile family.
-
-        A release that declares none has nothing to mint, so a boot that ends
-        uncompiled there is not a miss.
-        """
-        return any(
-            s.compile is not None and getattr(s.compile, "family", "")
-            for s in self.specs.values()
         )
 
     async def shutdown_instances(self) -> None:

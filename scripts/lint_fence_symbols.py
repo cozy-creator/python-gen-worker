@@ -49,6 +49,7 @@ SRC = ROOT / "src" / "gen_worker"
 FENCES: Tuple[str, ...] = (
     "scripts/lint_fence_symbols.py",
     "scripts/lint_cell_key_layout_fence.py",
+    "scripts/lint_serving_process_compiles.py",
     "scripts/lint_arm_state_feeders.py",
     "scripts/lint_unreached_surface.py",
     "tests/test_cell_key_pgw1059.py",
