@@ -15,13 +15,14 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 pgw_rel="tests/testdata"
+pgw_authority_rel="src/gen_worker/contracts"
 cozy_rel="internal/cli/testdata"
 hub_rel="internal/orchestrator/localcells/testdata"
 corpus="cozy_runtime_env_vectors.json"
 digest="COZY_RUNTIME_ENV_DIGEST"
 
-if [ -f "$here/$pgw_rel/$corpus" ]; then
-  local_dir="$here/$pgw_rel"
+if [ -f "$here/$pgw_authority_rel/$corpus" ]; then
+  local_dir="$here/$pgw_authority_rel"
   side="pgw"
 elif [ -f "$here/$cozy_rel/$corpus" ]; then
   local_dir="$here/$cozy_rel"

@@ -675,6 +675,9 @@ class EntryJob(msgspec.Struct, frozen=True, kw_only=True):
     #: child packs. The parent measures it (only the loader can swap the
     #: linears) and the child cannot re-derive it, so it crosses.
     execution_lane: Optional[kernel_path.Verdict] = None
+    #: The parent states whose machine this is. The child installs the same
+    #: posture before any compile so local work is niced and pod work is not.
+    posture: CompilePosture = compile_posture.FLEET
 
     #: WHICH classes. ``rows[i::K]`` over ``aot_mint.declared_class_rows`` —
     #: by INDEX and never by name, because the adapter fork is decided by the

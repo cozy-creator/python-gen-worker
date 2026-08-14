@@ -25,7 +25,6 @@ Cardless: no GPU, no pod, no mint, no weights.
 from __future__ import annotations
 
 import ast
-import asyncio
 import json
 import os
 import subprocess
@@ -38,11 +37,7 @@ from typing import Any, List, Tuple
 import msgspec
 import pytest
 
-from gen_worker import child_preflight
-from gen_worker import child_contract
 from gen_worker import Compile, MintBlocker, fleet_cells
-from gen_worker import mint_child, mint_process
-from gen_worker import mint_process as mp
 from gen_worker import config as gw_config
 from gen_worker.api.derive import (
     DeclarationMismatch, assert_blockers, assert_faithful, blocker_delta,
@@ -52,7 +47,6 @@ from gen_worker.api.export_contract import (
     DeclarationError, open_blockers, reset_export_declarations,
 )
 from gen_worker.cell_adopt import AdoptOutcome
-from gen_worker.registry import CompileCell
 
 from harness import blocked_endpoint_pgw1115 as blocked
 
@@ -352,80 +346,6 @@ def test_a_family_with_no_open_blockers_is_not_blocked(
 
     phases = [p for k, p, _d in _events if k == "self_mint_skipped"]
     assert "declaration_blocked" not in phases, phases
-
-
-def _blocked_request(tmp_path: Path) -> mp.MintRequest:
-    """A mint request for the blocked family, built through the REAL parent
-    chain and round-tripped through msgspec — the boundary IS a file."""
-    tree = tmp_path / "weights"
-    tree.mkdir(parents=True, exist_ok=True)
-    pending = SimpleNamespace(
-        family=FAMILY, arm_token="ck1-blocked", recipe="aot",
-        cfg=CompileCell(shapes=((64, 64),), targets=("transformer",),
-                        family=FAMILY, regional=False, text_len=128,
-                        dynamic=(), lora_bucket=0, guidance_scales=(),
-                        text_lens=()),
-        target=tmp_path / "cell.tar.gz", mint_root=tmp_path)
-    task = mint_process.MintTask(
-        pending=pending, pipe=object(), function="blocked-echo",
-        modules=(HARNESS_MODULE,),
-        slots={"pipeline": child_contract.MintSlot(
-            ref=blocked.DECLARED_PIPELINE, path=str(tree))},
-        execution_lane="w8a8", device=-1)
-    request = mint_process.build_request(
-        task, workdir=tmp_path / "w")
-    return msgspec.json.decode(msgspec.json.encode(request), type=mp.MintRequest)
-
-
-def test_the_mint_child_refuses_a_blocked_family_before_it_reads_a_weight(
-    tmp_path: Path,
-) -> None:
-    """The FAIL-CLOSED half, on the real entrypoint: ``python -m
-    gen_worker.mint_child request.json``, spawned by the parent's real
-    supervisor. The parent declines a blocked family in ``mint_recipe``, so a
-    request that reaches a child came from somewhere else — an operator CLI, a
-    delegated request built against a stale declaration — and a refusal only
-    one of the two paths honours is not a refusal (pgw#1080's lesson: split by
-    type and fail closed; never degrade).
-    """
-    request = _blocked_request(tmp_path)
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(
-        [str(Path(__file__).resolve().parent), env.get("PYTHONPATH", "")])
-    outcome = asyncio.run(mp.run_mint(
-        request, workdir=tmp_path / "w", python=sys.executable, env=env))
-
-    assert outcome.status == mp.REFUSED, (
-        f"{outcome.status}: {outcome.detail or outcome.stderr_tail}")
-    assert outcome.exit_code == mp.EXIT_REFUSED, "a refusal must be TERMINAL"
-    report = outcome.report
-    assert report is not None and report.status == "refused"
-    for ident in blocked.OPEN_IDS:
-        assert ident in report.detail, report.detail
-    # Before any side effect the child could have: no artifact, no weights.
-    assert not Path(request.target).exists()
-    assert "warmup_forward" not in report.phases, report.phases
-
-
-def test_the_mint_child_mints_a_family_whose_blockers_are_all_resolved(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The control for the child gate — in-process, because the point is the
-    gate and not the export: a declaration with no open blocker passes it
-    silently, and one with an open blocker does not."""
-    reset_export_declarations()
-    try:
-        from gen_worker.api.export_contract import register_export_declaration
-
-        register_export_declaration(_clean(), replace=True)
-        mint_child._assert_family_mintable(FAMILY)  # no raise
-
-        register_export_declaration(blocked.BLOCKED_COMPILE, replace=True)
-        with pytest.raises(child_preflight.PreflightRefused) as exc:
-            mint_child._assert_family_mintable(FAMILY)
-        assert all(i in str(exc.value) for i in blocked.OPEN_IDS)
-    finally:
-        reset_export_declarations()
 
 
 def test_the_image_BUILD_says_a_family_is_blocked_without_renting_a_pod() -> None:

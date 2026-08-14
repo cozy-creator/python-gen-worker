@@ -9,8 +9,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CORPUS = ROOT / "tests" / "testdata" / "cozy_runtime_env_vectors.json"
-DEFAULT_DIGEST = ROOT / "tests" / "testdata" / "COZY_RUNTIME_ENV_DIGEST"
+CONTRACTS = ROOT / "src" / "gen_worker" / "contracts"
+DEFAULT_CORPUS = CONTRACTS / "cozy_runtime_env_vectors.json"
+DEFAULT_DIGEST = CONTRACTS / "COZY_RUNTIME_ENV_DIGEST"
 
 
 def recorded_digest(path: Path) -> str:

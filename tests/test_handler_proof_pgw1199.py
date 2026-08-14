@@ -24,16 +24,15 @@ the mint. It never degrades to "mint anyway".
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
 
-from gen_worker import child_preflight
-from gen_worker import child_contract
 from gen_worker import handler_proof
-from gen_worker import mint_process
+from gen_worker import mint_supervisor
 
 REPO = Path(__file__).resolve().parent.parent
 MICRO_SRC = REPO / "examples" / "micro-diffusion" / "src"
@@ -88,116 +87,85 @@ def test_functions_are_proven_INDIVIDUALLY() -> None:
 
 
 # ---------------------------------------------------------------------------
-# The wire — the parent declares it, the request carries it
+# The resident parent gate
 # ---------------------------------------------------------------------------
 
 
-def _task(**kw: Any) -> mint_process.MintTask:
+def _task(tmp_path: Path, **kw: Any) -> mint_supervisor.MintTask:
     pending = type("_Pending", (), {
-        "family": "micro-diffusion", "arm_token": "arm1-x",
-        "mint_root": "/tmp", "cfg": type("_Cfg", (), {
-            "shapes": (), "targets": ("transformer",), "family": "micro-diffusion",
-            "lora_bucket": 0, "guidance_scales": (), "text_lens": (),
+        "family": "micro-diffusion",
+        "arm_token": "cg-key-v1-" + "a" * 56,
+        "mint_root": tmp_path,
+        "cfg": type("_Cfg", (), {
+            "shapes": (),
+            "targets": ("transformer",),
+            "family": "micro-diffusion",
+            "lora_bucket": 0,
+            "guidance_scales": (),
+            "text_lens": (),
         })(),
     })()
     base: Dict[str, Any] = dict(
-        pending=pending, pipe=object(), function="generate", modules=("m",))
+        pending=pending,
+        pipe=object(),
+        function="generate",
+        modules=("m",),
+    )
     base.update(kw)
-    return mint_process.MintTask(**base)
+    return mint_supervisor.MintTask(**base)
 
 
-def test_the_request_carries_the_parents_proof(tmp_path: Path) -> None:
-    task = _task(handler_proof="boot warm forward 'generate' (real weights)")
-    request = mint_process.build_request(task, workdir=tmp_path)
-    assert request.handler_proof == "boot warm forward 'generate' (real weights)"
+def test_the_task_carries_the_resident_parents_proof(tmp_path: Path) -> None:
+    proof = "boot warm forward 'generate' (real weights)"
+    assert _task(tmp_path, handler_proof=proof).handler_proof == proof
 
 
-def test_an_unproven_parent_sends_an_EMPTY_proof_rather_than_a_guess(
-    tmp_path: Path,
+def test_the_task_defaults_to_unproven(tmp_path: Path) -> None:
+    assert _task(tmp_path).handler_proof == ""
+
+
+def test_the_supervisor_refuses_before_spawning_without_a_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An absent measurement is no evidence — never a silent pass. A parent
-    that cannot say its handler ran says nothing, and the child refuses."""
-    request = mint_process.build_request(_task(), workdir=tmp_path)
-    assert request.handler_proof == ""
+    from gen_worker import fleet_cells
+
+    abandoned: List[Any] = []
+    monkeypatch.setattr(fleet_cells, "abandon_self_mint", abandoned.append)
+    monkeypatch.setattr(mint_supervisor, "_emit_abort", lambda **_kw: None)
+
+    result = asyncio.run(mint_supervisor.supervise(_task(tmp_path), act=object()))
+
+    assert result.status == mint_supervisor.FAILED
+    assert result.reason == "handler_unproven"
+    assert "no handler proof" in result.detail
+    assert abandoned
+    assert not (tmp_path / mint_supervisor.GRAPH_DIRNAME).exists()
 
 
-def test_the_request_field_defaults_to_unproven() -> None:
-    """A field that defaulted to "proven" would make every caller that forgot
-    to set it silently satisfy pgw#984."""
-    assert mint_process.MintRequest.__struct_defaults__ is not None
-    request = mint_process.MintRequest(
-        function="generate", modules=(), family="f", arm_token="a",
-        target="t", work_root="w", report="r",
-        cfg=child_contract.CompileSpec())
-    assert request.handler_proof == ""
+def test_a_proof_reaches_the_next_parent_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gen_worker import fleet_cells
 
+    monkeypatch.setattr(fleet_cells, "abandon_self_mint", lambda _pending: None)
+    monkeypatch.setattr(mint_supervisor, "_emit_abort", lambda **_kw: None)
+    monkeypatch.setattr(
+        mint_supervisor,
+        "assert_family_mintable",
+        lambda _family: (_ for _ in ()).throw(
+            mint_supervisor.DeclaredBlockerRefusal("next gate")),
+    )
 
-# ---------------------------------------------------------------------------
-# The child — refuses rather than re-proving, because re-proving IS the cost
-# ---------------------------------------------------------------------------
+    result = asyncio.run(mint_supervisor.supervise(
+        _task(
+            tmp_path,
+            handler_proof="boot warm forward 'generate' (real weights)",
+        ),
+        act=object(),
+    ))
 
-
-def _request(**kw: Any) -> mint_process.MintRequest:
-    base: Dict[str, Any] = dict(
-        function="generate", modules=("m",), family="micro-diffusion",
-        arm_token="arm1-x", target="t", work_root="w", report="r",
-        cfg=child_contract.CompileSpec(targets=("transformer",)))
-    base.update(kw)
-    return mint_process.MintRequest(**base)
-
-
-def test_the_child_refuses_a_weight_free_mint_with_no_proof() -> None:
-    """The whole of pgw#1199 in one row.
-
-    A weight-free mint whose parent sent no proof must REFUSE. The tempting
-    alternative — prove it here — is the 56.2 GB allocation that killed
-    wan-2.2; the other — mint anyway — drops pgw#984.
-    """
-    from gen_worker import mint_child
-
-    with pytest.raises(child_preflight.PreflightRefused) as caught:
-        mint_child.assert_handler_proven(_request())
-
-    said = str(caught.value)
-    assert "no handler proof" in said
-    assert "handler_proof" in said, "the message must name what to set"
-
-
-def test_the_child_accepts_a_mint_whose_parent_DID_prove_the_handler() -> None:
-    from gen_worker import mint_child
-
-    mint_child.assert_handler_proven(
-        _request(handler_proof="boot warm forward 'generate' (real weights)"))
-
-
-def test_whitespace_is_not_a_proof() -> None:
-    """A caller that sets the field to something empty-but-truthy has not run
-    a forward, and must be refused exactly as one that set nothing."""
-    from gen_worker import mint_child
-
-    with pytest.raises(child_preflight.PreflightRefused):
-        mint_child.assert_handler_proven(_request(handler_proof="   "))
-
-
-def test_the_child_still_proves_on_the_REAL_WEIGHT_fallback() -> None:
-    """Not every family has a structure-only path (a quantized artifact lane,
-    a class with no config surface). Those mints load the checkpoint into the
-    child anyway, so the proof costs nothing extra there and must NOT have been
-    deleted with the weight-free one — otherwise pgw#1199 would have removed a
-    guarantee instead of relocating it."""
-    from gen_worker import mint_child
-
-    source = Path(mint_child.__file__).read_text()
-    assert "_drive_warm_plan(" in source
-    assert "proof_only=True" in source
-
-
-def test_the_structure_only_module_offers_no_route_to_real_values() -> None:
-    from gen_worker.models import structure_only
-
-    for gone in ("materialize_random", "restore_virtual", "stray_real_tensors",
-                 "proof_cost_bytes"):
-        assert not hasattr(structure_only, gone), gone
+    assert result.reason == "declared_blocker"
+    assert result.detail == "next gate"
 
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@ and gathering it must not be able to publish anything.
 
 The catch-22 this guards against:
 
-* ``mint_child._assert_family_mintable`` refuses a family while ANY blocker is
+* ``mint_supervisor.assert_family_mintable`` refuses a family while ANY blocker is
   open — so the run that would CLOSE a blocker is refused BY it;
 * ``boot_trace_child`` is ungated but composes structure-only, and
   ``structure_only._refuse_artifact_lanes`` refuses a w8a8 artifact tree by
@@ -40,16 +40,21 @@ import ast
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Tuple
 
 import msgspec
 import pytest
 
-from gen_worker import child_preflight
-from gen_worker import activity, aot_mint, boot_trace_child, boot_key
-from gen_worker import measure_child, mint_child
+from gen_worker import (
+    activity,
+    aot_compile_child,
+    boot_key,
+    boot_trace_child,
+    measure_child,
+    mint_supervisor,
+)
 from gen_worker.child_contract import CompileSpec, MintSlot
-from gen_worker.mint_process import MintRequest
 
 REPO = Path(__file__).resolve().parent.parent
 MICRO_SRC = REPO / "examples" / "micro-diffusion" / "src"
@@ -201,8 +206,8 @@ def test_both_front_doors_are_shut_and_the_measure_child_runs_anyway(
     family because its tree is a quantized artifact. Door 3 — the measure
     child runs, on real weights, and says so.
     """
-    with pytest.raises(child_preflight.PreflightRefused) as refusal:
-        mint_child._assert_family_mintable(FAMILY)
+    with pytest.raises(mint_supervisor.DeclaredBlockerRefusal) as refusal:
+        mint_supervisor.assert_family_mintable(FAMILY)
     assert BLOCKER_ID in str(refusal.value)
 
     trace_report = tmp_path / "trace.json"
@@ -255,8 +260,8 @@ def test_the_mint_gate_is_UNTOUCHED_by_a_measurement(
     measure_child.run(
         _measure_job(w8a8_tree), tmp_path / "m.json", compile_entries=False)
 
-    with pytest.raises(child_preflight.PreflightRefused) as refusal:
-        mint_child._assert_family_mintable(FAMILY)
+    with pytest.raises(mint_supervisor.DeclaredBlockerRefusal) as refusal:
+        mint_supervisor.assert_family_mintable(FAMILY)
     assert BLOCKER_ID in str(refusal.value)
 
     from gen_worker.api.export_contract import export_declaration, open_blockers
@@ -302,31 +307,34 @@ def test_the_wire_struct_withholds_every_output_destination() -> None:
     ``*.mint.json`` — and msgspec drops what the struct does not declare. So
     there is no publish call to audit because there is nowhere to publish to.
     """
-    mint_fields = set(MintRequest.__struct_fields__)
     measure_fields = set(measure_child.MeasureJob.__struct_fields__)
 
-    assert set(measure_child.WITHHELD_FIELDS) <= mint_fields, (
-        "the withheld list must name fields a MintRequest actually carries, "
-        "or it is describing a struct that no longer exists")
     assert set(measure_child.WITHHELD_FIELDS).isdisjoint(measure_fields)
-    assert measure_fields < mint_fields, (
-        "a measure job may only ever be a SUBSET of a mint request — a field "
-        "of its own is a second wire nobody validates")
+    assert measure_fields == {
+        "function", "modules", "cfg", "family", "slots", "device",
+        "execution_lane",
+    }
 
 
-def test_a_full_mint_request_decodes_with_its_destinations_dropped(
+def test_an_input_document_decodes_with_its_destinations_dropped(
     tmp_path: Path,
 ) -> None:
-    """The fence, exercised rather than asserted: a REAL MintRequest, encoded
-    and decoded as the operator's file, arrives carrying no destination."""
+    """The operator document can carry stale output fields, but the closed
+    measurement struct admits only diagnostic inputs."""
     cfg = CompileSpec(family=FAMILY, targets=("transformer",))
-    request = MintRequest(
-        function="generate-w8a8", modules=("micro_diffusion.main_w8a8",), family=FAMILY,
-        arm_token="arm1-deadbeef", target=str(tmp_path / "cell.tar.gz"),
-        work_root=str(tmp_path / "work"), report=str(tmp_path / "mint.json"),
-        resume=str(tmp_path / "bank"), cfg=cfg)
-    raw = msgspec.json.encode(request)
-    assert b"cell.tar.gz" in raw
+    document = {
+        "function": "generate-w8a8",
+        "modules": ["micro_diffusion.main_w8a8"],
+        "family": FAMILY,
+        "cfg": msgspec.to_builtins(cfg),
+        "arm_token": "arm1-deadbeef",
+        "target": str(tmp_path / "compiled-graph.tar.gz"),
+        "work_root": str(tmp_path / "work"),
+        "report": str(tmp_path / "mint.json"),
+        "resume": str(tmp_path / "bank"),
+    }
+    raw = msgspec.json.encode(document)
+    assert b"compiled-graph.tar.gz" in raw
 
     job = msgspec.json.decode(raw, type=measure_child.MeasureJob)
 
@@ -338,27 +346,18 @@ def test_a_full_mint_request_decodes_with_its_destinations_dropped(
 def test_the_report_type_carries_no_artifact_identity() -> None:
     """A measurement that could name an artifact is one field away from being
     mistaken for one. ``MeasureReport`` has no path, no digest, no cell key —
-    and the mint's own report has all three, which is what makes the absence
-    deliberate rather than accidental."""
-    from gen_worker.mint_process import MintReport
+    because a diagnostic report is never an artifact handoff."""
 
     fields = set(measure_child.MeasureReport.__struct_fields__)
     forbidden = {"artifact", "digest", "cell_key", "cell_ref", "content_digest"}
     assert fields.isdisjoint(forbidden)
-    assert forbidden & set(MintReport.__struct_fields__), (
-        "the mint report must still carry what this one refuses to, or the "
-        "comparison this test rests on has rotted")
 
 
 PUBLISH_SURFACE = (
     # (module attribute path, why it publishes)
     ("fleet_cells", "publish_self_mint"),
-    ("local_cell_store", "store"),
     ("aot_serve", "artifact_metadata"),
     ("aot_mint", "mint_targets"),
-    ("aot_package", "pack"),
-    ("mint_child", "mint"),
-    ("mint_process", "run_mint"),
     ("aot_delivery", "materialize_named_artifact"),
     ("cell_resolve", "materialize"),
 )
@@ -443,18 +442,17 @@ def fake_compiler(
     """
     made: List[Tuple[str, Path]] = []
 
-    def _compile(program: Any, entry: str, **_kw: Any) -> List[str]:
-        out = tmp_path / "inductor" / entry.replace("/", "_")
-        out.mkdir(parents=True, exist_ok=True)
-        files = []
-        for suffix in (".so", ".cpp"):
-            path = out / f"model{suffix}"
-            path.write_bytes(b"\x00" * 16)
-            files.append(str(path))
-            made.append((entry, path))
-        return files
+    def _compile(traced: Any, _spec: Any, _engine: Any, _runtime: Any,
+                 *, out_dir: Path, **_kw: Any) -> Any:
+        path = out_dir / (traced.name.replace("/", "_") + ".tar.gz")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"tcg diagnostic artifact")
+        made.append((traced.name, path))
+        traced.release()
+        return SimpleNamespace(compile_s=0.01, reuse_s=0.0)
 
-    monkeypatch.setattr(aot_mint, "compile_entry_files", _compile)
+    monkeypatch.setattr(
+        aot_compile_child, "compile_traced_class", _compile)
     return made
 
 
@@ -473,9 +471,9 @@ def test_the_compile_half_runs_and_leaves_nothing_behind(
 
     assert rc == measure_child.EXIT_OK and report.ok, report.detail[:600]
     assert report.compiled is True
-    assert len(fake_compiler) == 6, (
+    assert len(fake_compiler) == 3, (
         f"every declared class must reach the compiler: {fake_compiler}")
-    assert [e.compiled_files for e in report.entries] == [2, 2, 2]
+    assert [e.compiled_files for e in report.entries] == [1, 1, 1]
     assert [str(p) for _e, p in fake_compiler if p.exists()] == [], (
         "a measure run that leaves loose .so files behind is one packaging "
         "step away from the artifact it may not produce")
@@ -493,10 +491,11 @@ def test_an_entry_that_runs_out_of_memory_IS_the_measurement(
     The compiler is faked into raising — a real OOM is a pod fact, and this is
     the classification path, which is cardless.
     """
-    def _oom(_program: Any, entry: str, **_kw: Any) -> List[str]:
-        raise MemoryError(f"entry {entry!r}: OUT OF DEVICE MEMORY")
+    def _oom(traced: Any, *_args: Any, **_kw: Any) -> Any:
+        raise MemoryError(f"entry {traced.name!r}: OUT OF DEVICE MEMORY")
 
-    monkeypatch.setattr(aot_mint, "compile_entry_files", _oom)
+    monkeypatch.setattr(
+        aot_compile_child, "compile_traced_class", _oom)
 
     report_path = tmp_path / "measure.json"
     rc = measure_child.run(_measure_job(w8a8_tree), report_path)

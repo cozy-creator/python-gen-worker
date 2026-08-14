@@ -33,6 +33,7 @@ rule explicitly permits.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import threading
@@ -62,21 +63,6 @@ KEY = "cg-key-v1-" + "3f" * 28
 # Capture: the REAL sink, so the assertions read the same ActivityUpdate the
 # hub's worker_activity_events row is built from.
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def _empty_local_store(
-    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory,
-) -> None:
-    """pgw#1127: the pre-derive gate asks whether ANYBODY could answer, and this
-    machine's own cell store is one of the two answerers. Pin it to an empty
-    root so every row here reads a fact about the test rather than about
-    whatever `~/.cache/cozy/compile-cells` happens to hold on the box."""
-    from gen_worker import local_cell_store
-
-    monkeypatch.setenv(
-        local_cell_store.ENV_STORE_DIR,
-        str(tmp_path_factory.mktemp("empty-cells")))
 
 
 @pytest.fixture
@@ -228,7 +214,7 @@ def _executor(tmp_path: Path) -> Any:
         (
             "no_export_declaration",
             lambda mp: mp.setattr(
-                executor_mod.aot_mint, "export_declaration", lambda f: None),
+                executor_mod, "export_declaration", lambda f: None),
             "no registered export declaration",
         ),
         # pgw#1107: there is no `declaration_refused` row any more. The gate
@@ -251,7 +237,7 @@ def test_each_pre_attempt_gate_names_itself_on_the_wire(
     gate: str, wire: Any, expect: str,
 ) -> None:
     monkeypatch.setattr(
-        executor_mod.aot_mint, "export_declaration", lambda f: object())
+        executor_mod, "export_declaration", lambda f: object())
     monkeypatch.setattr(
         executor_mod.aot_declaration, "cell_plans", lambda d: [object()])
     monkeypatch.setattr(
@@ -281,7 +267,7 @@ def test_no_cell_source_names_which_half_of_the_readiness_was_missing(
     from gen_worker.procsplit import broker
 
     monkeypatch.setattr(
-        executor_mod.aot_mint, "export_declaration", lambda f: object())
+        executor_mod, "export_declaration", lambda f: object())
     monkeypatch.setattr(
         executor_mod.aot_declaration, "cell_plans", lambda d: [object()])
     monkeypatch.setattr(broker, "_broker", None, raising=False)
@@ -315,10 +301,10 @@ def test_the_gates_are_pairwise_distinguishable(
 
     ex = _executor(tmp_path)
     monkeypatch.setattr(
-        executor_mod.aot_mint, "export_declaration", lambda f: None)
+        executor_mod, "export_declaration", lambda f: None)
     ex._boot_adopt(_Spec(), {})
     monkeypatch.setattr(
-        executor_mod.aot_mint, "export_declaration", lambda f: object())
+        executor_mod, "export_declaration", lambda f: object())
     monkeypatch.setattr(
         executor_mod.aot_declaration, "cell_plans", _raise(ValueError("nope")))
     ex._boot_adopt(_Spec(), {})
@@ -398,13 +384,10 @@ def _batched(per_key: Any) -> Any:
             cell = per_key(_family, key)
             out.append(cell_resolve.ResolveAnswer(
                 compiled_graph_key=key,
-                status="miss" if cell is None else "hit", cell=cell))
+                status="miss" if cell is None else "hit",
+                compiled_graph=cell))
         return tuple(out)
     return _call
-
-
-def _refuse_hub(code: str) -> Any:
-    return _raise(cell_resolve.CellResolveRefused(code, "the hub said so", status=409))
 
 
 @pytest.mark.parametrize(
@@ -420,10 +403,8 @@ def _refuse_hub(code: str) -> Any:
         ("child_died", {"derive": _raise(boot_key.BootKeyUnavailable(
             "child_died", "trace child exited 1 without a report"))}),
         ("derive_failed", {"derive": _raise(MemoryError("no headroom"))}),
-        # Step 2 — the ask. A typed hub refusal is NOT a miss.
-        ("cell_resolve_ambiguous",
-         {"derive": lambda **_k: _derived(), "resolve": _refuse_hub(
-             "cell_resolve_ambiguous")}),
+        # Step 2 — the ask. A typed hub refusal is NOT a miss. Ambiguity has
+        # no row: the registry key is exactly (family, compiled_graph_key).
         ("resolve_unreachable",
          {"derive": lambda **_k: _derived(),
           "resolve": _raise(OSError("connection reset"))}),
@@ -470,7 +451,7 @@ def test_a_pod_that_derived_and_missed_is_not_a_pod_that_never_derived(
     events.clear()
 
     monkeypatch.setattr(
-        executor_mod.aot_mint, "export_declaration", lambda f: None)
+        executor_mod, "export_declaration", lambda f: None)
     _executor(tmp_path)._boot_adopt(_Spec(), {})
     never = _one(events)
 
@@ -507,7 +488,7 @@ class _ResolveHub(BaseHTTPRequestHandler):
         out = json.dumps({
             "object": "compiled_graph_resolve_batch",
             "family": body.get("family"),
-            "answers": [{"cell_key": k, "status": "miss", "found": False}
+            "answers": [{"compiled_graph_key": k, "status": "miss", "found": False}
                         for k in keys],
             "hits": 0, "misses": len(keys),
         }).encode()
@@ -606,8 +587,9 @@ def test_a_cold_boot_with_a_reachable_hub_actually_issues_the_resolve(
         sys.path.insert(0, str(MICRO_SRC))
     monkeypatch.syspath_prepend(str(REPO / "tests"))
     monkeypatch.setenv(
-        "PYTHONPATH", ":".join([
-            str(REPO / "src"), str(REPO / "tests"), str(MICRO_SRC)]))
+            "PYTHONPATH", ":".join([
+                str(REPO / "src"), str(REPO / "tests"), str(MICRO_SRC),
+                os.environ.get("PYTHONPATH", "")]))
     # Single-process posture: no seam, a local bearer. `broker.request` then
     # makes the same POST the parent makes on a split pod.
     monkeypatch.setattr(broker, "_broker", None, raising=False)
@@ -677,9 +659,9 @@ def test_the_same_boot_derives_a_key_with_accelerate_UNIMPORTABLE(
         sys.path.insert(0, str(MICRO_SRC))
     monkeypatch.syspath_prepend(str(REPO / "tests"))
     monkeypatch.setenv(
-        "PYTHONPATH", ":".join([
-            str(shade), str(REPO / "src"), str(REPO / "tests"),
-            str(MICRO_SRC)]))
+            "PYTHONPATH", ":".join([
+                str(shade), str(REPO / "src"), str(REPO / "tests"),
+                str(MICRO_SRC), os.environ.get("PYTHONPATH", "")]))
     monkeypatch.setattr(broker, "_broker", None, raising=False)
 
     specs = collect_endpoints(["harness.rig_runtime", "micro_diffusion.main"])

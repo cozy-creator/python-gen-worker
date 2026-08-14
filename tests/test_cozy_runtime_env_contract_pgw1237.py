@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from gen_worker import aot_delivery, config, local_cell_store
+from gen_worker import aot_delivery, config
 from gen_worker.cli.local_context import _save_local_bytes
 from gen_worker.models.cache_paths import (
     open_worker_cas,
@@ -19,8 +19,9 @@ from gen_worker.models.cache_paths import (
     tensorhub_cas_dir,
 )
 
-_DEFAULT_CORPUS = Path(__file__).parent / "testdata" / "cozy_runtime_env_vectors.json"
-_DEFAULT_DIGEST = Path(__file__).parent / "testdata" / "COZY_RUNTIME_ENV_DIGEST"
+_CONTRACTS = Path(__file__).parents[1] / "src" / "gen_worker" / "contracts"
+_DEFAULT_CORPUS = _CONTRACTS / "cozy_runtime_env_vectors.json"
+_DEFAULT_DIGEST = _CONTRACTS / "COZY_RUNTIME_ENV_DIGEST"
 _CORPUS = Path(os.environ.get("COZY_RUNTIME_ENV_CORPUS", _DEFAULT_CORPUS))
 
 
@@ -43,7 +44,6 @@ def test_runtime_env_semantics_match_pgw1237(
     assert set(rows) == {
         "cache_root",
         "asset_ref_root",
-        "compiled_graph_root",
         "hub_url",
         "bearer_token",
     }
@@ -69,16 +69,6 @@ def test_runtime_env_semantics_match_pgw1237(
     assert asset.local_path is not None
     assert Path(asset.local_path) == expected
     assert expected.read_bytes() == b"pgw#1237"
-
-    compiled = rows["compiled_graph_root"]
-    assert compiled["name"] == local_cell_store.ENV_STORE_DIR
-    compiled_root = tmp_path / "compiled-graph-root"
-    monkeypatch.setenv(compiled["name"], os.fspath(compiled_root))
-    assert local_cell_store.store_root() == compiled_root
-    assert local_cell_store.cells_root() == (
-        compiled_root / compiled["consumer_relative_path"]
-    )
-    assert compiled["consumer_relative_path"] == local_cell_store.CELLS_DIRNAME
 
     hub_url = rows["hub_url"]
     assert hub_url == {
@@ -123,9 +113,12 @@ def test_aot_default_uses_the_canonical_worker_cas(
     try:
         with pytest.raises(aot_delivery.NamedArtifactUnavailable, match="no transport"):
             aot_delivery._materialize_named_artifact(
-                "cell-v1",
+                "cg-key-v1-" + "a" * 56,
+                "micro-diffusion",
+                "compiled-graph-v1",
                 "sha256:" + "0" * 64,
                 None,
+                receipt=object(),  # type: ignore[arg-type]
                 cache_dir=None,
                 what="root convergence test",
             )
@@ -143,6 +136,12 @@ def test_runtime_env_corpus_digest_matches_pgw1237() -> None:
     ]
     assert len(active) == 1
     assert active[0] == hashlib.sha256(_DEFAULT_CORPUS.read_bytes()).hexdigest()
+
+
+def test_removal_blocked_projection_matches_package_authority() -> None:
+    projection = Path(__file__).parent / "testdata"
+    assert (projection / _DEFAULT_CORPUS.name).read_bytes() == _DEFAULT_CORPUS.read_bytes()
+    assert (projection / _DEFAULT_DIGEST.name).read_bytes() == _DEFAULT_DIGEST.read_bytes()
 
 
 def test_runtime_env_digest_gate_can_go_red_pgw1237(tmp_path: Path) -> None:
@@ -171,11 +170,6 @@ def test_runtime_env_digest_gate_can_go_red_pgw1237(tmp_path: Path) -> None:
     [
         ("cache_root", "consumer_relative_path", "not-cas"),
         ("asset_ref_root", "name", "GEN_WORKER_LOCAL_OUTPUT_DIR_BROKEN"),
-        (
-            "compiled_graph_root",
-            "name",
-            "GEN_WORKER_LOCAL_CELLS_DIR_BROKEN",
-        ),
         ("hub_url", "name", "TENSORHUB_URL_BROKEN"),
         ("bearer_token", "name", "TENSORHUB_TOKEN_BROKEN"),
     ],

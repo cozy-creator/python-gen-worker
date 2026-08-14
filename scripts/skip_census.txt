@@ -114,13 +114,6 @@ CI-SKIPPED tests/test_registry_contract_pgw740.py|uv not on path
 CI-SKIPPED tests/test_adapter_fidelity_pgw794.py|local hf cache carries no models--stabilityai--stable-diffusion-xl-base-#<path>
 CI-SKIPPED tests/test_adapter_fidelity_pgw794.py|local hf cache carries no models--alibaba-pai--z-image-fun-lora-distill/z-image-fun-lora-distill-#-steps-#.safetensors
 
-# ─── CI-SKIPPED: a cgroup the runner has but does not enforce ─────────────────
-# The runner presents a delegated cgroup v2 memory controller and then does not
-# apply `memory.max` to the process tree, so there is no OOM to classify. The
-# row already refuses to assert through that (it would be a coin flip); it is
-# measured on a box whose cgroup enforces.
-CI-SKIPPED tests/test_mint_oom_classification_pgw848.py|the memory cap did not oom-kill the child: this box has a delegated cgroup v# memory controller but it did not enforce m
-
 # pgw#1013 wave 2. `test_rule_2_fires_on_all_four_filed_sites_as_they_were`
 # re-reads all four defective downloaders from `d7881b40` and asserts the guard
 # fires on each — `actions/checkout@v4` is shallow, so the commit is not in the

@@ -10,7 +10,11 @@ from importlib.resources import files
 from pathlib import Path
 
 from gen_worker.contracts import (
+    COZY_RUNTIME_ENV_CONTRACT_NAME,
+    COZY_RUNTIME_ENV_DIGEST_NAME,
     WORKER_VALUE_CONTRACT_NAME,
+    cozy_runtime_env_contract_bytes,
+    cozy_runtime_env_contract_sha256,
     worker_value_contract_bytes,
     worker_value_contract_sha256,
 )
@@ -20,8 +24,8 @@ ROOT = Path(__file__).parents[1]
 PACKAGE = files("gen_worker.contracts")
 
 
-def _recorded_digest() -> str:
-    for line in PACKAGE.joinpath("WORKER_VALUE_CONTRACTS_DIGEST").read_text().splitlines():
+def _recorded_digest(name: str) -> str:
+    for line in PACKAGE.joinpath(name).read_text().splitlines():
         value = line.strip()
         if value and not value.startswith("#"):
             return value
@@ -48,10 +52,21 @@ def test_importable_corpus_carries_explicit_axes_and_emitters() -> None:
 
 
 def test_packaged_corpus_matches_its_packaged_digest() -> None:
-    assert worker_value_contract_sha256() == _recorded_digest()
+    assert worker_value_contract_sha256() == _recorded_digest(
+        "WORKER_VALUE_CONTRACTS_DIGEST"
+    )
     assert worker_value_contract_sha256() == hashlib.sha256(
         worker_value_contract_bytes()
     ).hexdigest()
+
+
+def test_importable_runtime_env_corpus_matches_its_packaged_digest() -> None:
+    payload = cozy_runtime_env_contract_bytes()
+    assert payload == PACKAGE.joinpath(COZY_RUNTIME_ENV_CONTRACT_NAME).read_bytes()
+    assert cozy_runtime_env_contract_sha256() == _recorded_digest(
+        COZY_RUNTIME_ENV_DIGEST_NAME
+    )
+    assert cozy_runtime_env_contract_sha256() == hashlib.sha256(payload).hexdigest()
 
 
 def test_temporary_testdata_projection_is_byte_identical() -> None:

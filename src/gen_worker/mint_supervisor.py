@@ -106,6 +106,10 @@ class DeclaredBlockerRefusal(RuntimeError):
     """
 
 
+class HandlerProofRefusal(RuntimeError):
+    """The resident parent has not proven that this handler can serve."""
+
+
 @dataclass(frozen=True)
 class MintTask:
     """Everything the serving process knows that a mint of one obligation
@@ -547,7 +551,6 @@ async def supervise(
     family = str(pending.family)
     cfg = pending.cfg
     out_dir = graph_dir(pending)
-    out_dir.mkdir(parents=True, exist_ok=True)
     snapshot = Path(pending.mint_root) / "phases.json"
 
     def _abandoned() -> bool:
@@ -555,11 +558,13 @@ async def supervise(
 
     # ── PARENT-SIDE GATES ────────────────────────────────────────────────
     #
-    # The two things only a process holding the LIVE pipeline can do. They ran
-    # in `mint_child` while a middle tier existed; a reroute that dropped them
-    # would mint a family the declaration says is blocked, and would have no
-    # class count to size K against.
+    # The three things only a process holding the LIVE pipeline can do: prove
+    # its handler, enforce declaration blockers, and enumerate graph classes.
     try:
+        if not task.handler_proof.strip():
+            raise HandlerProofRefusal(
+                f"function {task.function!r} has no handler proof; run its "
+                "resident warm forward before compiling")
         assert_family_mintable(family)
         spec = fleet_cells.aot_export_spec(task.pipe, cfg)
         decl = export_declaration(str(spec.family or ""))
@@ -571,13 +576,16 @@ async def supervise(
         # how many classes exist (the adapter fork depends on the composition);
         # it can only be told which SHARE of them is its own.
         declared = len(aot_mint.declared_class_rows(task.pipe, spec, decl))
-    except DeclaredBlockerRefusal as exc:
+    except (DeclaredBlockerRefusal, HandlerProofRefusal) as exc:
         fleet_cells.abandon_self_mint(pending)
         _emit_abort(
             family=family, key=str(pending.arm_token), attempt=0,
             status="refused", detail=str(exc), retryable=False)
         return SupervisedResult(
-            status=FAILED, detail=str(exc), reason="declared_blocker")
+            status=FAILED, detail=str(exc), reason=(
+                "handler_unproven"
+                if isinstance(exc, HandlerProofRefusal)
+                else "declared_blocker"))
     except Exception as exc:  # noqa: BLE001 — never die with the mint
         fleet_cells.abandon_self_mint(pending)
         detail = f"{type(exc).__name__}: {exc}"
@@ -587,6 +595,7 @@ async def supervise(
         return SupervisedResult(
             status=FAILED, detail=detail, reason="declaration_unreadable")
 
+    out_dir.mkdir(parents=True, exist_ok=True)
     template = aot_compile_pool.EntryJob(
         function=task.function,
         modules=tuple(task.modules),
@@ -604,6 +613,7 @@ async def supervise(
             "supervised mint: the serving parent states the lane it is "
             "already serving on rather than benchmarking a second pipeline "
             "onto the card it is resident on"),
+        posture=task.posture,
         out_dir=str(out_dir),
     )
 

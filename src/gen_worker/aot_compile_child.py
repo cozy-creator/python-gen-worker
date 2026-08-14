@@ -98,6 +98,23 @@ from .api.export_contract import export_declaration
 logger = logging.getLogger(__name__)
 
 
+def _install_posture(job: EntryJob) -> None:
+    """Install worker-owned host policy before tracing or compiling."""
+    from . import compile_posture
+
+    compile_posture.install(job.posture)
+    level = job.posture.nice_level()
+    if level:
+        try:
+            os.nice(level)
+        except OSError:
+            logger.warning(
+                "compile child could not apply nice level %d; continuing",
+                level,
+            )
+    arm_parent_death_signal()
+
+
 def _write(path: Path, report: EntryReport) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -430,7 +447,7 @@ def run(job: EntryJob) -> int:
     # Before anything expensive: if the parent dies, this work dies with it. A
     # serving pod must never be left burning CPU on a cell nobody is waiting
     # for any more.
-    arm_parent_death_signal()
+    _install_posture(job)
     # The seal is the parent's — re-established, not re-derived, because this
     # process emits the very bytes the seal describes. A child that sealed
     # differently would produce an artifact the parent's verify() rejects on

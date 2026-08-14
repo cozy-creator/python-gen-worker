@@ -27,7 +27,7 @@ from typing import Any, Dict, Mapping
 
 import pytest
 
-from gen_worker import aot_serve, boot_key, cell_key, fleet_cells, local_cell_store
+from gen_worker import boot_key, cell_key, fleet_cells
 from gen_worker.api.binding import Hub
 from gen_worker.child_contract import CompileSpec, MintSlot
 
@@ -199,30 +199,6 @@ def test_the_arm_facts_split_into_environment_and_subject() -> None:
     assert "graph" not in identity.facts_dict()
 
 
-def test_a_subject_difference_is_not_a_handback_divergence() -> None:
-    """A cell records no subject, so the handback seam must not ask for one —
-    otherwise every delegated mint would refuse itself."""
-    pipe = _Pipe()
-    fleet_cells.stamp_arm_subject(pipe, "pipeline", ["q/img"], "sha256:aa")
-    arm = fleet_cells.arm_identity(
-        "qwen-image", "", 0, _Cfg(),
-        subject=fleet_cells.pipeline_arm_subject(pipe))
-    facts = arm.facts_dict()
-    meta: Dict[str, Any] = {
-        "family": facts["family"],
-        aot_serve.COMPILED_GRAPH_FORMAT_KEY:
-            facts[aot_serve.COMPILED_GRAPH_FORMAT_KEY],
-        "weight_lane": "",
-        "lora_bucket": 0,
-        "sm": facts["sm"],
-        cell_key.EXPORT_ENVELOPE_KEY: fleet_cells.declared_envelope_block(
-            _Cfg()),
-        "toolchain": dict(fleet_cells.cc.toolchain_digest()),
-    }
-    meta[fleet_cells.env_seal.SEAL_KEY] = fleet_cells.env_seal.effective_seal()
-    assert fleet_cells.arm_axis_divergence(arm, meta) == ""
-
-
 # --------------------------------------------------------------------------
 # 2. the boot-key memo is no longer checkpoint-blind
 # --------------------------------------------------------------------------
@@ -303,30 +279,6 @@ def test_a_memo_file_from_the_previous_schema_is_discarded_whole(
     }))
     assert boot_key.read_memo(tmp_path, "whatever") == {}
     assert boot_key.MEMO_VERSION >= 4
-
-
-# --------------------------------------------------------------------------
-# 3. the local-store memo: superseded arm tokens are swept, not left to rot
-# --------------------------------------------------------------------------
-
-
-def test_the_arm_token_scheme_is_its_fact_set(tmp_path: Path) -> None:
-    """The scheme digit IS the schema. ``arm1`` could not state a subject, so
-    an ``arm1-`` memo row is an answer to a question no reader asks — and the
-    cost of that, one re-mint per family per machine, is spent explicitly and
-    counted rather than discovered later as a store of unreadable files."""
-    memo_dir = local_cell_store.cells_root(tmp_path) / local_cell_store.MEMO_DIRNAME
-    memo_dir.mkdir(parents=True)
-    stale = memo_dir / ("arm1-" + "a" * 56 + ".json")
-    current = memo_dir / (fleet_cells.ARM_SCHEME + "-" + "b" * fleet_cells.ARM_DIGEST_HEX + ".json")
-    for entry in (stale, current):
-        entry.write_text(json.dumps({"cell_key": "cg-key-v1-" + "c" * 56}))
-
-    dropped = local_cell_store.sweep_superseded_memos(
-        fleet_cells.ARM_SCHEME, tmp_path)
-    assert dropped == 1
-    assert not stale.exists() and current.exists()
-    assert fleet_cells.ARM_SCHEME != "arm1"
 
 
 # --------------------------------------------------------------------------

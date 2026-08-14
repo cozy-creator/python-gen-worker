@@ -26,16 +26,14 @@ from __future__ import annotations
 import ast
 import io
 import json
-import subprocess
-import sys
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import pytest
 
-from gen_worker import fleet_cells, local_cell_store, local_serve, mint_supervisor
+from gen_worker import fleet_cells, local_serve
 from gen_worker.cell_adopt import AdoptOutcome
 from gen_worker.cli import run as cli_run
 from gen_worker.child_contract import MintSlot
@@ -53,13 +51,6 @@ LOCAL_SERVE_ENTRY = (
     SRC / "cli" / "run.py",
     SRC / "cli" / "serve.py",
 )
-
-
-@pytest.fixture()
-def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    root = tmp_path / "cozy-cells"
-    monkeypatch.setenv(local_cell_store.ENV_STORE_DIR, str(root))
-    return root
 
 
 class _Pipe:
@@ -222,210 +213,6 @@ def test_nothing_under_the_cli_imports_the_JIT_local_cell_module() -> None:
     assert not offenders, f"cli still reaches the JIT local store: {offenders}"
 
 
-def test_a_second_run_on_this_machine_arms_from_its_own_store_and_never_mints(
-    store: Path, tmp_path: Path, machine: None, armable: List[Path],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Compile-once-run-forever, through the entry `cozy serve` actually calls.
-
-    The whole ordering runs for real: delivered-artifact miss -> in-process
-    ledgers -> **this machine's store** -> (never reached) the pending. A mint
-    opened here would mean the machine recompiled what it already had, so the
-    delegated mint is wired to FAIL the test rather than to be counted.
-
-    RED before pgw#1127: `gen_worker.local_serve` did not exist, and the entry
-    that did exist could not address a ck1-keyed cell at all.
-    """
-    monkeypatch.setattr(
-        mint_supervisor, "supervise",
-        lambda *a, **k: pytest.fail("a machine holding its own cell re-minted"))
-    local_cell_store.store(
-        _armable_artifact(tmp_path), key=KEY_A, family="micro-diffusion",
-        arm_token=ARM_A)
-
-    armed = local_serve.enable_compiled(_Pipe(), _Cfg(), None, mint=_ctx())
-
-    assert armed is True
-    assert armable and armable[0] == store / "aot-cells" / KEY_A / "cell.tar.gz"
-
-
-def test_the_local_entry_hands_the_arming_brain_no_sink_at_all(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """§4.28 at the seam: ``publisher=None`` is what makes ``local_keep_reason``
-    answer ``no_publish_sink``, which is what makes the mint's own cell land in
-    this machine's store instead of being rmtree'd behind a failed publish."""
-    seen: Dict[str, Any] = {}
-
-    def _enable(pipe: Any, cfg: Any, cache_dir: Any = None, artifact: Any = None,
-                **kw: Any) -> fleet_cells.ArmOutcome:
-        seen.update(kw)
-        return fleet_cells.ArmOutcome(armed=True)
-
-    monkeypatch.setattr(fleet_cells, "enable_compiled", _enable)
-    assert local_serve.enable_compiled(_Pipe(), _Cfg(), None, mint=_ctx())
-    assert "publisher" in seen and seen["publisher"] is None
-    assert fleet_cells.no_publish_sink_reason(seen["publisher"]) == (
-        fleet_cells.KEEP_NO_PUBLISHER)
-
-
-# ---------------------------------------------------------------------------
-# 2. THE FENCE — never-publish is STRUCTURAL, not a keyword argument
-# ---------------------------------------------------------------------------
-
-
-def test_the_local_serve_entry_constructs_no_publisher(
-) -> None:
-    """The fence pgw#1127 §4 says is owed.
-
-    RED-provable in one edit: add ``CellPublisher(...)`` anywhere on the local
-    serve entry and this fails. That is the difference between a property and a
-    habit — ``publisher=None`` at one call site is a habit, and after S1 the
-    module the local CLI now runs is one that CAN publish.
-    """
-    banned = {"CellPublisher", "publish_self_mint", "_publish_async",
-              "publish_intent", "presign", "put_object", "upload"}
-    offenders: List[str] = []
-    for path in LOCAL_SERVE_ENTRY:
-        tree = ast.parse(path.read_text())
-        for node in ast.walk(tree):
-            name = (
-                node.id if isinstance(node, ast.Name)
-                else node.attr if isinstance(node, ast.Attribute)
-                else "")
-            if name in banned:
-                offenders.append(f"{path.name}:{node.lineno} {name}")
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                for alias in node.names:
-                    if alias.name in banned:
-                        offenders.append(
-                            f"{path.name}:{node.lineno} import {alias.name}")
-    assert not offenders, (
-        "§4.28: the local serve entry must never name a publish route — "
-        f"{offenders}")
-
-
-def test_the_sinkless_call_is_a_LITERAL_none_and_not_a_variable() -> None:
-    """A ``publisher=publisher`` that is None today is a sink tomorrow.
-
-    The keyword is pinned to the literal so that wiring one in is an EDIT to
-    this line, seen in review, rather than a value that changes upstream.
-    """
-    tree = ast.parse((SRC / "local_serve.py").read_text())
-    fn = next(
-        n for n in ast.walk(tree)
-        if isinstance(n, ast.FunctionDef) and n.name == "enable_compiled")
-    passed = [
-        kw for call in ast.walk(fn)
-        if isinstance(call, ast.Call)
-        for kw in call.keywords if kw.arg == "publisher"
-    ]
-    assert passed, "the local entry must state its sink, not inherit a default"
-    for kw in passed:
-        assert isinstance(kw.value, ast.Constant) and kw.value.value is None, (
-            "publisher= must be the literal None on the local serve entry")
-
-
-def test_the_obligation_ends_at_a_terminus_that_cannot_publish(
-    store: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A driven local mint ends at ``keep_self_mint_local`` — pgw#815's rule
-    (every obligation ends somewhere nameable) met by a function that takes no
-    publisher and therefore cannot grow into one.
-
-    ``publish_self_mint`` would also have "worked": its sinkless branch is a
-    WIRING ALARM for a fleet pod that lost its `file_base_url`, and firing it on
-    the one machine §4.28 was written about would make correct and broken
-    indistinguishable forever.
-    """
-    monkeypatch.setattr(
-        fleet_cells, "publish_self_mint",
-        lambda pending: pytest.fail("cozy-local reached the publish gate"))
-    pending = fleet_cells.PendingSelfMint(
-        family="micro-diffusion", arm_token=ARM_A, ref="repo#x", cfg=_Cfg(),
-        target=tmp_path / "cell.tar.gz", mint_root=tmp_path / "mint",
-        publisher=None, cache_dir=None, arm_key=_Arm(),
-    )
-    (tmp_path / "mint").mkdir(exist_ok=True)
-    pending._state["minted"] = object()
-
-    fleet_cells.keep_self_mint_local(pending)
-
-    assert fleet_cells.terminus_of(pending) == fleet_cells.TERMINUS_WITHHELD
-    assert not (tmp_path / "mint").exists(), "the capture dir must be cleaned"
-
-
-def test_a_pending_this_process_cannot_drive_is_ended_not_dropped(
-    store: Path, tmp_path: Path, machine: None, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """pgw#815, on the local path: a mint context that names no importable
-    module cannot be handed to a child, and the obligation it would have
-    discharged must not simply be forgotten."""
-    monkeypatch.setattr(
-        mint_supervisor, "supervise",
-        lambda *a, **k: pytest.fail("an undrivable pending spawned a child"))
-    monkeypatch.setattr(
-        fleet_cells.provision, "arm_aot",
-        lambda *a, **k: pytest.fail("nothing is armed on a miss (pgw#784)"))
-
-    armed = local_serve.enable_compiled(
-        _Pipe(), _Cfg(), None,
-        mint=local_serve.mint_context(function="f", module="", slots={}))
-
-    assert armed is False
-    pending = fleet_cells._PENDING.get(ARM_A)
-    assert pending is None or fleet_cells.terminus_of(pending)
-
-
-def test_storing_a_cell_imports_no_transport_at_all(tmp_path: Path) -> None:
-    """§4.28's *"never uploaded"*, proven by ABSENCE in a real interpreter.
-
-    The AST fence in ``test_aot_local_mint_pgw1096`` proves the module names no
-    transport. This proves the RUN does not: a cell enters the store in a fresh
-    process and no HTTP client, no CAS client and no upload module is resident
-    afterwards. A store that reached transport lazily — the one shape an AST
-    scan of the module cannot see — fails here.
-    """
-    root = tmp_path / "store"
-    artifact = tmp_path / "cell.tar.gz"
-    artifact.write_bytes(b"packed")
-    program = f"""
-import os, sys
-os.environ["GEN_WORKER_LOCAL_CELLS_DIR"] = {str(root)!r}
-from gen_worker import local_cell_store
-cell = local_cell_store.store(
-    {str(artifact)!r}, key={KEY_A!r}, family="micro-diffusion",
-    arm_token={ARM_A!r})
-assert cell is not None, "the store refused a well-formed cell"
-assert local_cell_store.lookup({KEY_A!r}) is not None
-banned = [
-    m for m in sys.modules
-    if m in ("httpx", "requests", "urllib3", "boto3", "aiohttp")
-    or m.startswith(("gen_worker.convert", "gen_worker.presigned_upload",
-                     "gen_worker.hubio.transport", "gen_worker.transport"))
-]
-print(",".join(sorted(banned)))
-"""
-    out = subprocess.run(
-        [sys.executable, "-c", program], capture_output=True, text=True,
-        timeout=300)
-    assert out.returncode == 0, out.stderr
-    resident = out.stdout.strip()
-    assert not resident, (
-        "storing a cell pulled transport into the process: " + resident)
-
-
-def _store_artifact(tmp_path: Path) -> Path:
-    p = tmp_path / "cell.tar.gz"
-    p.write_bytes(b"packed")
-    return p
-
-
-# ---------------------------------------------------------------------------
-# 3. The mint context — what a child needs, resolved once, or declared absent
-# ---------------------------------------------------------------------------
-
-
 def test_a_mint_context_missing_its_module_is_INCOMPLETE_not_silently_empty(
 ) -> None:
     """A module list a child cannot import is a machine that compiles nothing,
@@ -476,12 +263,12 @@ def test_the_local_run_resolves_the_WHOLE_setup_not_one_slot_at_a_time(
         for n in ast.walk(tree)), "run_setup must build it"
 
 
-def test_the_mint_child_path_never_opens_a_mint_of_its_own() -> None:
-    """``mint_child`` and ``boot_trace_child`` both call ``run_setup``. Neither
+def test_compile_children_never_open_a_mint_of_their_own() -> None:
+    """``aot_compile_child`` and ``boot_trace_child`` call ``run_setup``. Neither
     may arm — a child that opened its own mint is the recursion this must not
     have — and neither names a function, so the context is None by
     construction as well as by ``arm_compile=False``."""
-    for module in ("mint_child.py", "boot_trace_child.py"):
+    for module in ("aot_compile_child.py", "boot_trace_child.py"):
         tree = ast.parse((SRC / module).read_text())
         for call in ast.walk(tree):
             if not (isinstance(call, ast.Call)

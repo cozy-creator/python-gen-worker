@@ -48,12 +48,10 @@ import msgspec
 import pytest
 
 from gen_worker import (
-    aot_compile_pool, compile_posture, local_serve, mint_child, mint_process,
+    aot_compile_child, aot_compile_pool, compile_posture, local_serve,
     mint_supervisor)
 from gen_worker.compile_posture import FLEET, USER_MACHINE, CompilePosture
-from gen_worker.child_contract import (
-    CompileSpec, MintFrame, MintSlot)
-from gen_worker.mint_process import MintRequest
+from gen_worker.child_contract import MintFrame, MintSlot
 
 SRC = Path(aot_compile_pool.__file__).parent
 
@@ -206,19 +204,17 @@ def test_no_environment_variable_can_switch_politeness() -> None:
 def test_the_posture_survives_the_parent_to_child_WIRE() -> None:
     """The child sizes the pool, so the declaration has to reach it.
 
-    It rides ``MintRequest`` — the same JSON file that already carries
-    ``device`` — so the round trip through msgspec is
-    the property, not the in-process object identity.
+    It rides ``EntryJob``, the one compile-child file, so the round trip
+    through msgspec is the property, not in-process object identity.
     """
-    task = mint_process.MintTask(
-        pending=_Pending(), pipe=None, function="generate",
-        modules=("micro_diffusion.endpoint",), posture=USER_MACHINE)
-    request = mint_process.build_request(
-        task, workdir=Path("/tmp/pgw1137"))
-    assert request.posture == USER_MACHINE
+    request = aot_compile_pool.EntryJob(
+        function="generate",
+        modules=("micro_diffusion.endpoint",),
+        posture=USER_MACHINE,
+    )
 
     decoded = msgspec.json.decode(
-        msgspec.json.encode(request), type=MintRequest)
+        msgspec.json.encode(request), type=aot_compile_pool.EntryJob)
     assert decoded.posture.user_machine is True, (
         "the width is computed INSIDE the mint child, whose only input is "
         "this file — a posture that does not survive the encode is a posture "
@@ -229,16 +225,10 @@ def test_a_fleet_mint_declares_nothing_and_gets_the_fleet_posture() -> None:
     """The non-regression that makes the whole design safe: FLEET is the
     struct default, so every caller that has not heard of this issue — the
     executor, every scheduled mint — is unchanged by construction."""
-    task = mint_process.MintTask(
+    task = mint_supervisor.MintTask(
         pending=_Pending(), pipe=None, function="generate", modules=("m",))
     assert task.posture == FLEET
-    request = mint_process.build_request(
-        task, workdir=Path("/tmp/pgw1137"))
-    assert request.posture == FLEET
-    assert MintRequest(
-        function="f", modules=(), family="x", arm_token="", target="",
-        work_root="", report="",
-        cfg=CompileSpec()).posture == FLEET
+    assert aot_compile_pool.EntryJob().posture == FLEET
 
 
 # ---------------------------------------------------------------------------
@@ -327,14 +317,11 @@ def _drive_child_posture(
     armed: List[bool] = []
     monkeypatch.setattr(os, "nice", nice)
     monkeypatch.setattr(
-        aot_compile_pool, "arm_parent_death_signal",
+        aot_compile_child, "arm_parent_death_signal",
         lambda: armed.append(True) or True)
-    request = MintRequest(
-        function="generate", modules=("m",), family="micro-diffusion",
-        arm_token="arm2-x", target="/tmp/c.tar.gz", work_root="/tmp",
-        report="/tmp/r.json", cfg=CompileSpec(),
-        posture=posture)
-    mint_child._install_posture(request)
+    request = aot_compile_pool.EntryJob(
+        function="generate", modules=("m",), posture=posture)
+    aot_compile_child._install_posture(request)
     return nice, armed
 
 
@@ -361,7 +348,7 @@ def test_a_FLEET_mint_child_never_nices_itself(
     prioritising it on top of that would slow paid work for no gain."""
     nice, armed = _drive_child_posture(monkeypatch, FLEET)
     assert nice.levels == []
-    assert armed == []
+    assert armed == [True], "every orphaned compile child must die with its parent"
     assert compile_posture.current() == FLEET
 
 
@@ -375,12 +362,9 @@ def test_a_kernel_that_refuses_the_nice_leaves_a_RUDE_mint_not_a_DEAD_one(
 
     monkeypatch.setattr(os, "nice", _refuse)
     monkeypatch.setattr(
-        aot_compile_pool, "arm_parent_death_signal", lambda: False)
-    request = MintRequest(
-        function="generate", modules=("m",), family="f", arm_token="",
-        target="", work_root="", report="",
-        cfg=CompileSpec(), posture=USER_MACHINE)
-    mint_child._install_posture(request)   # must not raise
+        aot_compile_child, "arm_parent_death_signal", lambda: False)
+    request = aot_compile_pool.EntryJob(posture=USER_MACHINE)
+    aot_compile_child._install_posture(request)   # must not raise
     assert compile_posture.current() == USER_MACHINE
 
 
@@ -402,7 +386,7 @@ def test_the_nice_is_applied_by_the_CHILD_and_never_through_a_preexec_fn(
     entry children when parallelism returns, inductor's compile workers and
     every ``cc1plus`` under them.
     """
-    for name in ("aot_compile_pool.py", "mint_process.py", "mint_child.py"):
+    for name in ("aot_compile_pool.py", "aot_compile_child.py"):
         tree = ast.parse((SRC / name).read_text())
         passed = {
             kw.arg for node in ast.walk(tree) if isinstance(node, ast.Call)
@@ -625,28 +609,6 @@ def test_a_user_machine_mint_child_DIES_WITH_ITS_PARENT(
     """
     _, armed = _drive_child_posture(monkeypatch, USER_MACHINE)
     assert armed == [True]
-
-
-def test_a_stopped_local_mint_does_not_WASTE_what_it_finished() -> None:
-    """The claim the notice makes out loud ("Ctrl-C is safe"), pinned.
-
-    ``aot_resume``'s bank is keyed by the pending's arm token and sited OUTSIDE
-    the per-attempt workdir on purpose — ``abandon_self_mint`` rmtree's
-    ``mint_root``, and abandonment is how a killed mint ends. A bank inside the
-    workdir would be deleted on its way out of the one case it exists for, and
-    the notice would become a lie.
-    """
-    workdir = Path("/tmp/pgw1137/child-1")
-    request = mint_process.build_request(
-        mint_process.MintTask(
-            pending=_Pending(), pipe=None, function="generate",
-            modules=("m",), posture=USER_MACHINE),
-        workdir=workdir)
-    bank = Path(request.resume)
-    assert str(bank), "a local mint must bank its finished entries"
-    assert workdir not in bank.parents and bank != workdir, (
-        "the resume bank must outlive the attempt AND the pending, or a "
-        "cancelled compile throws away every entry it had already finished")
 
 
 def test_the_local_notice_and_the_local_posture_cannot_drift(

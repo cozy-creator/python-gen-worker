@@ -17,9 +17,8 @@ What is real here:
 * The JIT compile that has to be comparable against an AOT mint is the INTAKE
   compile on a serving pod, emitted by the executor's proof window through
   `emit_jit_compile_event`; the mint child runs no JIT recipe.
-* The `mint_child` phase clock is driven through the real `frame()` funnel, in a
-  real subprocess-free path, and the resulting `MintReport` is what the parent
-  emitter consumes.
+* Compile-child spans are owned and closed by torch-compiled-graphs; this file
+  proves only the worker-owned event transport and aggregation.
 """
 
 from __future__ import annotations
@@ -36,7 +35,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from gen_worker import activity as activity_mod  # noqa: E402
 from gen_worker import compile_cache as cc  # noqa: E402
-from gen_worker import mint_process  # noqa: E402
 from gen_worker.pb import worker_scheduler_pb2 as pb  # noqa: E402
 from harness.hub_double import hub_double  # noqa: E402
 
@@ -116,51 +114,6 @@ def test_emit_event_never_invents_a_duration() -> None:
     finally:
         activity_mod.bind_sink(None, None)
         loop.close()
-
-
-# --------------------------------------------------------------------------
-# The mint_child phase clock (the JIT route's own measurement)
-# --------------------------------------------------------------------------
-
-
-def test_child_phase_clock_measures_spans_not_frames(capsys: Any) -> None:
-    """`frame()` is the single funnel every child phase transition goes
-    through, so the span table comes out of it. Repeat frames for the same
-    phase (step/note updates) must NOT restart or split that phase's span —
-    `warmup_forward` emits one frame per warm job."""
-    child = importlib.reload(importlib.import_module("gen_worker.mint_child"))
-
-    child.frame(phase="load", note="env seal")
-    time.sleep(0.05)
-    child.frame(phase="warmup_forward", step=0, total=2)
-    child.frame(phase="warmup_forward", step=1, total=2, note="txt2img")
-    time.sleep(0.05)
-    child.frame(phase="warmup_forward", step=2, total=2, note="turbo")
-    child.frame(phase="seal_publish", note="packing")
-    phases = child._close_phases()
-
-    assert set(phases) == {"load", "warmup_forward", "seal_publish"}, phases
-    assert phases["load"] >= 0.05, phases
-    assert phases["warmup_forward"] >= 0.05, phases
-    # One span for the phase, not three: the frames are progress, the phase is
-    # the span.
-    capsys.readouterr()
-
-
-def test_child_report_carries_the_phase_table() -> None:
-    """A MintReport round-trips its phase table, so the parent reads the
-    CHILD's measurement rather than deriving spans from pipe receipts."""
-    import msgspec
-
-    report = mint_process.MintReport(
-        status="minted", elapsed_s=612.5,
-        phases={"load": 33.1, "warmup_forward": 540.2, "seal_publish": 39.2})
-    round_tripped = msgspec.json.decode(
-        msgspec.json.encode(report), type=mint_process.MintReport)
-    assert round_tripped.phases == report.phases
-    # Absent by default, and empty rather than zero for a child that died
-    # before writing one: no measurement is not a measurement of nothing.
-    assert mint_process.MintReport(status="failed").phases == {}
 
 
 # --------------------------------------------------------------------------

@@ -35,10 +35,8 @@ Both live in the SUPERVISION of a compile child, so pgw#1215 step 4 moving the
 supervision down a tier moved the defect with it, and made it worse: the pool's
 drain loop has no give-up test of any kind — ``proc.poll()`` forever,
 ``time.sleep`` forever — because the three-tier stack used to get one for free
-from the mint child's own supervisor. Both tiers are fixed here: the pool
-(``aot_compile_pool``, the production path) and the one-shot mint child
-(``mint_process``, the operator/rig path, which is where the literal
-``finalize`` frame still lives).
+from the deleted middle-tier supervisor. The surviving fix lives in the
+compile pool (``aot_compile_pool``), which is the only production path.
 
 Paul's ruling on the fix shape (2026-08-14):
 
@@ -66,13 +64,12 @@ import subprocess
 import threading
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, List
 
 import pytest
 
 from gen_worker import aot_compile_pool as pool
 from gen_worker import child_contract
-from gen_worker import mint_process as mp
 from gen_worker import mint_supervisor
 from gen_worker import progress as progress_mod
 from harness import fake_compile_child
@@ -298,134 +295,6 @@ def test_a_refusal_that_hangs_on_the_way_out_is_still_a_refusal(
 
 
 # ======================================================================
-# TIER 2 — the one-shot mint child: `finalize` still lives here
-# ======================================================================
-
-STUB_MODULE = "harness.mint_child_stub"
-_POLL_S = 0.2
-
-
-@pytest.fixture
-def _stub_child(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(mp, "MINT_CHILD_MODULE", STUB_MODULE)
-
-
-def _request(tmp_path: Path) -> mp.MintRequest:
-    return mp.MintRequest(
-        function="gen", modules=("harness.toy_endpoints",), family="sdxl",
-        arm_token="arm1-deadbeef",
-        target=str(tmp_path / "cell.tar.gz"),
-        work_root=str(tmp_path / "capture"),
-        report=str(tmp_path / mp.REPORT_NAME),
-        cfg=child_contract.CompileSpec(
-            family="sdxl", shapes=((1024, 1024),), targets=("unet",)))
-
-
-def _env(mode: str) -> Dict[str, str]:
-    root = Path(__file__).resolve().parents[1]
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(
-        [str(root / "src"), str(root / "tests"), env.get("PYTHONPATH", "")])
-    env["MINT_STUB_MODE"] = mode
-    return env
-
-
-def _run(
-    tmp_path: Path, mode: str, *, window_s: float,
-    frames: Optional[List[child_contract.MintFrame]] = None,
-) -> mp.MintOutcome:
-    async def _drive() -> mp.MintOutcome:
-        return await asyncio.wait_for(
-            mp.run_mint(
-                _request(tmp_path), workdir=tmp_path / "work", env=_env(mode),
-                on_frame=(frames.append if frames is not None else None),
-                evidence_window_s=window_s, observe_interval_s=_POLL_S),
-            timeout=_TAPE_GUARD_S)
-
-    return asyncio.run(_drive())
-
-
-@pytest.mark.parametrize("mode", ["wedged_spin", "wedged_block"])
-def test_a_mint_child_that_reported_and_never_died_still_mints(
-    tmp_path: Path, mode: str, _stub_child: None,
-) -> None:
-    """RED before pgw#1243, on the tier where ``finalize`` is a real frame.
-
-    ``wedged_spin`` is the production shape: walk ``seal_publish`` ->
-    ``finalize``, write the entries and the report, then burn a core forever.
-    ``wedged_block`` is the flat-CPU teardown, which the old supervisor could
-    only escape by calling a finished mint a CRASH and discarding its cell.
-    """
-    frames: List[child_contract.MintFrame] = []
-    outcome = _run(tmp_path, mode, window_s=_UNREACHABLE_WINDOW_S,
-                   frames=frames)
-
-    assert outcome.status == mp.MINTED, (
-        f"a child that packed, moved and REPORTED its entries produced a "
-        f"mint; its teardown is not the parent's business: {outcome.detail}")
-    assert [p.name for p in outcome.artifacts] == ["cell.tar.gz"]
-    assert outcome.report is not None and outcome.report.status == "minted"
-    assert outcome.last_phase == mp.TERMINAL_CHILD_PHASE
-    assert [f.phase for f in frames][-1] == mp.TERMINAL_CHILD_PHASE
-
-
-def test_a_healthy_mint_child_is_still_classified_by_its_exit_code(
-    tmp_path: Path, _stub_child: None,
-) -> None:
-    """The terminus watcher must not change the ordinary path.
-
-    A child that exits under its own power is reaped before the report poll
-    fires, so every existing classification is untouched. Its own tape because
-    "I fixed the wedge and broke every normal mint" is the failure that
-    matters here.
-    """
-    outcome = _run(tmp_path, "minted", window_s=_UNREACHABLE_WINDOW_S)
-    assert outcome.status == mp.MINTED
-    assert outcome.exit_code == mp.EXIT_MINTED, (
-        "a child that exits normally must still be classified by its exit "
-        f"code, not synthesized from its report: {outcome.exit_code}")
-
-
-def test_a_wedge_inside_finalize_is_detected_and_named(
-    tmp_path: Path, _stub_child: None,
-) -> None:
-    """``wedged_no_report`` declares ``finalize`` and then spins forever
-    without writing a report — stuck INSIDE the terminal phase, where the
-    terminus watcher cannot help. Under the old rule its core was admitted as
-    progress and the window was re-touched every poll."""
-    outcome = _run(tmp_path, "wedged_no_report", window_s=_SHORT_WINDOW_S)
-
-    assert outcome.status == mp.CRASHED, (
-        "a child wedged inside its terminal phase must be DETECTED; it was "
-        f"burning a core, which is not progress there: {outcome.detail}")
-    detail = outcome.detail
-    assert mp.TERMINAL_CHILD_PHASE in detail
-    assert "report" in detail and "residue" in detail
-    assert "process-tree CPU" in detail
-    assert outcome.last_phase == mp.TERMINAL_CHILD_PHASE
-
-
-def test_ambient_cpu_still_proves_progress_before_the_terminal_phase(
-    tmp_path: Path, _stub_child: None,
-) -> None:
-    """The positive control for tier 2: a child burning CPU in
-    ``inductor_compile`` for three windows must never be killed."""
-    env = _env("busy")
-    env["MINT_STUB_SECONDS"] = str(_SHORT_WINDOW_S * 3)
-
-    async def _drive() -> mp.MintOutcome:
-        return await asyncio.wait_for(
-            mp.run_mint(
-                _request(tmp_path), workdir=tmp_path / "work", env=env,
-                evidence_window_s=_SHORT_WINDOW_S, observe_interval_s=_POLL_S),
-            timeout=_TAPE_GUARD_S)
-
-    outcome = asyncio.run(_drive())
-    assert outcome.status == mp.MINTED, (
-        f"that is the whole doctrine: {outcome.detail}")
-
-
-# ======================================================================
 # The counter that let it hide
 # ======================================================================
 
@@ -512,7 +381,8 @@ def _task(tmp_path: Path) -> Any:
     pending.mint_root.mkdir(parents=True, exist_ok=True)
     return mint_supervisor.MintTask(
         pending=pending, pipe=object(), function="gen",
-        modules=("harness.toy_endpoints",), weight_lane="fp8", device=0)
+        modules=("harness.toy_endpoints",), weight_lane="fp8", device=0,
+        handler_proof="resident warm forward 'gen' (real weights)")
 
 
 def test_a_wedged_compile_fails_the_BUILD_and_never_the_WORKER(

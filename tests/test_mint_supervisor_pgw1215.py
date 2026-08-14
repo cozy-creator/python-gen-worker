@@ -45,19 +45,14 @@ import pytest
 import torch
 
 from gen_worker import activity as activity_mod
-from gen_worker import aot_compile_pool, aot_mint, child_contract
+from gen_worker import aot_compile_pool, aot_mint
 from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells, kernel_path, mint_supervisor, mint_workers
-from gen_worker import mint_process as mp
-from gen_worker.api.binding import ModelRef
 from gen_worker.api.decorators import DynamicDim
 from gen_worker.registry import CompileCell
 from gen_worker.cell_adopt import AdoptOutcome
 
 GIB = 1 << 30
-STUB_MODULE = "harness.mint_child_stub"
-
-
 def _cfg() -> CompileCell:
     return CompileCell(
         shapes=((1024, 1024), (832, 1216)),
@@ -70,14 +65,6 @@ def _cfg() -> CompileCell:
         guidance_scales=(5.0, 7.5),
         text_lens=(77, 226),
     )
-
-
-@pytest.fixture(autouse=True)
-def _stub_child(monkeypatch: pytest.MonkeyPatch) -> None:
-    root = Path(__file__).resolve().parents[1]
-    monkeypatch.setattr(mp, "MINT_CHILD_MODULE", STUB_MODULE)
-    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(
-        [str(root / "src"), str(root / "tests")]))
 
 
 def _fake_card(
@@ -156,7 +143,7 @@ def test_the_wire_form_preserves_the_declared_export_exactly() -> None:
     does not cross the wire.
     """
     parent = _cfg()
-    wire = mp.cfg_spec(parent)
+    wire = mint_supervisor.cfg_spec(parent)
     pipe = SimpleNamespace()
 
     assert (fleet_cells.aot_export_spec(pipe, wire)
@@ -166,32 +153,6 @@ def test_the_wire_form_preserves_the_declared_export_exactly() -> None:
     # No child reads these, so they do not ride.
     for dead in ("regional", "text_len", "dynamic"):
         assert not hasattr(wire, dead), dead
-
-
-def test_the_request_carries_the_execution_lane_and_the_effective_config(
-    tmp_path: Path,
-) -> None:
-    """Both steer the warm forwards, so both must be the PARENT's values —
-    a child warming at different config traces different graphs and the
-    parent's own proof then misses."""
-    pending = SimpleNamespace(
-        family="sdxl", arm_token="ck1-abc", cfg=_cfg(),
-        target=tmp_path / "cell.tar.gz", mint_root=tmp_path)
-    task = mp.MintTask(
-        pending=pending, pipe=object(), function="gen",
-        modules=("app",), slots={"pipeline": child_contract.MintSlot(
-            ref=ModelRef(source="tensorhub", path="harness/sdxl",
-                         tag="prod"), path="/cas/sdxl")},
-        execution_lane="fp8-w8a16", configs={"gen": {"steps": 28}}, device=3)
-    req = mp.build_request(task, workdir=tmp_path / "w")
-    assert req.execution_lane == "fp8-w8a16"
-    assert req.configs == {"gen": {"steps": 28}}
-    assert req.slots["pipeline"].path == "/cas/sdxl"
-    assert req.device == 3
-    # The child's WORK ROOT — the tree it actually writes into, and
-    # the byte-growth half of the parent's progress evidence. It used to be
-    # the inductor capture dir, which an AOT mint never touched.
-    assert req.work_root == str(tmp_path / "w")
 
 
 # --------------------------------------------------- 3. failure inversion
@@ -206,7 +167,8 @@ def _task(tmp_path: Path, **over: Any) -> mint_supervisor.MintTask:
     pending.mint_root.mkdir(parents=True, exist_ok=True)
     fields: Dict[str, Any] = dict(
         pending=pending, pipe=SimpleNamespace(), function="gen",
-        modules=("harness.toy_endpoints",), weight_lane="fp8", device=0)
+        modules=("harness.toy_endpoints",), weight_lane="fp8", device=0,
+        handler_proof="resident warm forward 'gen' (real weights)")
     fields.update(over)
     return mint_supervisor.MintTask(**fields)
 
