@@ -205,20 +205,12 @@ def svdq_precision_for_sm(gpu_sm: int) -> str:
 # ---------------------------------------------------------------------------
 
 SVDQ_ENGINES = ("native", "nunchaku")
-_ENGINE_ENV = "GEN_WORKER_SVDQ_ENGINE"
 
-
-def svdq_engine_override() -> str:
-    """Operational kill-switch: pin the engine for this process. Empty (the
-    default) means "choose per artifact + host"."""
-
-    raw = str(os.environ.get(_ENGINE_ENV, "") or "").strip().lower()
-    if raw and raw not in SVDQ_ENGINES:
-        raise SvdqError(
-            f"{_ENGINE_ENV}={raw!r} is not a known svdq engine "
-            f"({', '.join(SVDQ_ENGINES)})")
-    return raw
-
+# th#1887: the GEN_WORKER_SVDQ_ENGINE process-wide pin is deleted. It was a
+# PROCESS-wide override of a PER-ARTIFACT decision, so one incident's pin
+# outlived the incident and silently served every later artifact on the wrong
+# engine. The typed `override=` argument below survives and is the supported
+# way to force one: it is per call, so it cannot leak into the next load.
 
 def svdq_engine_candidates(precision: str) -> tuple[str, ...]:
     """Engines that could serve this precision, best first.
@@ -245,7 +237,7 @@ def select_svdq_engine(precision: str, *, override: str = "",
     # Deferred: svdq_native adds +2 modules to the `import gen_worker` path.
     from .svdq_native import svdq_native_reason
 
-    chosen = str(override or "").strip().lower() or svdq_engine_override()
+    chosen = str(override or "").strip().lower()
     if chosen and chosen not in SVDQ_ENGINES:
         raise SvdqError(f"unknown svdq engine {chosen!r} "
                         f"({', '.join(SVDQ_ENGINES)})")
@@ -448,7 +440,6 @@ __all__ = [
     "load_svdq_pipeline",
     "select_svdq_engine",
     "svdq_engine_candidates",
-    "svdq_engine_override",
     "svdq_precision_for_sm",
     "svdq_stack_reason",
 ]

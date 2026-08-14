@@ -113,12 +113,23 @@ def test_truthiness_alone_is_not_a_gate() -> None:
         '    return u\n')
 
 
-def test_the_three_th1887_gates_are_still_seen_in_the_real_tree() -> None:
-    """Instance-level backstop for the shape tests above."""
+def test_the_scanner_still_sees_a_real_gate_in_the_tree() -> None:
+    """Instance-level backstop: the pass must still fire on real source.
+
+    Two of the three gates this pass originally exposed are now DELETED
+    (th#1887, Paul: "get rid of these envs please, I hate envs like this"), so
+    asserting on them would pin the wrong thing. NATIVE_KERNELS is still here
+    and is still only visible through the discriminated-locals pass, which
+    makes it the honest live specimen.
+    """
     found = set(lint.scan_behaviour())
-    for site in (
-        ("src/gen_worker/video_encode.py", "GEN_WORKER_VIDEO_ENCODER"),
-        ("src/gen_worker/models/svdq.py", "GEN_WORKER_SVDQ_ENGINE"),
-        ("src/gen_worker/models/native_kernels.py", "GEN_WORKER_NATIVE_KERNELS"),
-    ):
-        assert site in found, f"{site} went invisible again"
+    site = ("src/gen_worker/models/native_kernels.py", "GEN_WORKER_NATIVE_KERNELS")
+    assert site in found, f"{site} went invisible again"
+
+
+def test_the_deleted_envs_do_not_come_back() -> None:
+    """th#1887: two env reads were deleted; nothing may reintroduce them."""
+    found = {name for _, name in lint.scan_behaviour()}
+    for gone in ("GEN_WORKER_VIDEO_ENCODER", "GEN_WORKER_SVDQ_ENGINE"):
+        assert gone not in found, (
+            f"{gone} was deleted by th#1887 and has reappeared as a behaviour gate")

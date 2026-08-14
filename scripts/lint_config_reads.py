@@ -299,17 +299,6 @@ BEHAVIOUR_GATES: Dict[Tuple[str, str], str] = {
         "the automatic choice, so deletion should be a no-op for every pod "
         "that does not declare it. Threat while it lives: a dormant rollout "
         "switch nobody re-tests, dark exactly like PREFER_AOT was.",
-    ("src/gen_worker/models/svdq.py", "GEN_WORKER_SVDQ_ENGINE"):
-        "th#1887 DELETION TARGET, pending a declaration check. Self-described "
-        "in-code as an 'operational kill-switch' that PINS the svdq engine for "
-        "the process; empty (the default) means choose per artifact and host. "
-        "Threat while it lives: a pinned engine outliving the incident it was "
-        "pinned for, silently serving a stale path on every later boot.",
-    ("src/gen_worker/video_encode.py", "GEN_WORKER_VIDEO_ENCODER"):
-        "th#1887 DELETION TARGET, pending a declaration check. Selects the "
-        "video encoder: 'auto' probes NVENC, 'x264' skips the probe entirely. "
-        "Threat while it lives: a pod pinned to x264 keeps encoding on CPU "
-        "after its GPU encoder starts working, and nothing reports the gap.",
     ("src/gen_worker/parallel/group.py", "NCCL_NVLS_ENABLE"):
         "READ-ONLY WARNING PREDICATE, same class as lifecycle.py above. Reads "
         "the pre-imposition value only to decide whether to warn that the "
