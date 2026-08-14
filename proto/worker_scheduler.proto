@@ -1533,6 +1533,42 @@ message BootPhase {
 // because a hardware gate failed or its model download / pipeline setup
 // failed terminally. Cleared implicitly by the next Hello, or by the
 // function reappearing in StateDelta.available_functions.
+//
+// th#1867 (§1.35) removed THREE tokens from the closed set below, and each
+// removal is a population that now SERVES rather than refusing — never one
+// that goes quiet:
+//   * `insufficient_vram` — the card is small, so the offload rung carries
+//     the load and says so on FnDegraded. §1.35 clause 1 names this token
+//     explicitly: it "should not exist" as a decline class.
+//   * `compute_capability_unmet` — pgw#1148 had already moved every
+//     SM-window verdict onto the loaders' tensor-layout contracts, so the
+//     only verdict still reaching this arm was a missing quant library, for
+//     which `missing_cuda_library` is the honest name. The kernel-capability
+//     refusal §2.4 ruling 1 protects is unaffected: it lives at
+//     `refuseLaneUnservableOnTier`, at config-write, with nothing rented.
+//   * `artifact_envelope_exceeded` — th#1777/pgw#1117's pre-stage
+//     precondition. Its two inputs were the release's declared `vram_gb`
+//     and `strict_vram`; both are deleted, so it had no question left to
+//     ask. Detecting a WRONG BINDING is still worth doing — it is a
+//     catalog question, not a VRAM one (th#1913).
+//   * `cuda_unavailable` — W's only trigger for it was `strict_vram` on a
+//     CUDA-less pod. th#1867 first tried to KEEP this refusal by re-basing it
+//     on the fact (no CUDA device), citing pgw#1212's unproven CPU serve
+//     path — and the worker's own boot tests refuted that. Every gen-worker
+//     harness endpoint declares `Resources(gpu=True)` and SERVES on CPU-only
+//     CI, warmup forward included, so the refusal withdrew functions that
+//     demonstrably work: the opposite of §1.35 amendment 2's bar. The CPU
+//     rung is planned and served, behind a loud FnDegraded warning.
+//     pgw#1212's protection is UNCHANGED and lives where it is true — W's
+//     REACTIVE rung walk still stops one rung short of CPU
+//     (`FLOOR_CPU_RUNG_UNEXECUTABLE`), so a pod that OOMs its way down
+//     refuses and names our code.
+//     `cuda_unavailable` still exists in `HardwareUnsuitable.reason_class`
+//     (:213) — a boot DRIVER probe, a different vocabulary, untouched.
+// These names are recorded HERE, outside the message body, on purpose: the
+// AST gate (`test_fn_unavailable_vocabulary_th1563.py`) matches an emitted
+// token against the body text, so documenting a dead token inside it would
+// let the emission come back with the gate still green.
 message FnUnavailable {
   string function_name = 1;
   // reason vocabulary — the CLOSED set. Every token here is a write into
@@ -1544,36 +1580,20 @@ message FnUnavailable {
   //
   // Machine FACTS about this pod — nothing O can wait for changes them, so O
   // never re-probes them on a timer:
-  //   compute_capability_unmet, missing_cuda_library, cuda_unavailable,
-  //   hardware_unmet, native_crash_streak.
+  //   missing_cuda_library, hardware_unmet, native_crash_streak.
   // `hardware_unmet` is HardwareUnmetError's base default: a gate subclass
   // that declares no token of its own reports under it.
   //
   // State that can change — O re-probes these with backoff:
-  //   insufficient_vram, insufficient_disk, insufficient_host_ram,
-  //   host_ram_capacity, setup_failed, retry_exhausted, compile_cell_failed,
-  //   model_unavailable, multi_group_async_handler, cancel_unwind_stuck.
+  //   insufficient_disk, insufficient_host_ram, host_ram_capacity,
+  //   setup_failed, retry_exhausted, compile_cell_failed, model_unavailable,
+  //   multi_group_async_handler, cancel_unwind_stuck.
   //
   // `native_crash_streak` is not only an availability fact: W's own PROCESS
   // died by signal on this pod and W's registry refuses the function there
   // (pgw#676). It carries axes{streak, last_signal, last_kind}, and O
   // condemns the WORKER on it (th#1205) — the pod is recycled, so the
   // recovery from this one disable is the pod going away, not a re-probe.
-  //
-  // RELEASE/BINDING facts — the declaration and the artifact it is bound to
-  // disagree, identically on every pod. Nothing about the machine, the place
-  // or the payload participates, so O neither re-probes them nor charges
-  // them to host/datacenter health:
-  //   artifact_envelope_exceeded.
-  // `artifact_envelope_exceeded` (th#1777/pgw#1117) is W's PRE-STAGE
-  // precondition: the bound artifact, weighed as it will load, is clearly
-  // larger than the release's declared `vram_gb`. It carries
-  // axes{estimated_vram_gb, declared_vram_gb, artifact_digest, ref,
-  // on_disk_dtype, load_dtype}. It replaces a paid setup OOM with a $0
-  // refusal, so it must NOT be laundered into the fast-failure streak the
-  // OOM fed (th#1259's allowlist): it is ground truth on first sight, and O
-  // marks the function broken directly instead of buying two more pods to
-  // re-derive a deterministic fact.
   string reason = 2;
   string detail = 3; // human-readable elaboration for the admin availability view
   map<string, string> axes = 4; // e.g. {detected_sm: "8.9", required_sm: "10.0"}
@@ -1582,16 +1602,24 @@ message FnUnavailable {
 // Worker -> orchestrator: this worker DOES serve function_name, but degraded —
 // not at the release's native quality/speed on this card (th#683 P3 serve-time
 // adaptive fit). Emitted once per connection per degraded function after
-// hardware gating; re-emitted on reconnect. Observational placement signal:
-// "this release degraded on this card, it wants a bigger one". Additive
-// proto3 oneof field: older orchestrators ignore it silently.
+// hardware gating; re-emitted on reconnect. Observational evidence for the
+// OPERATOR — every field here is MEASURED or OBSERVED, and nothing on this
+// message may become an input to a placement gate (th#1867/§4.33).
+//
+// th#1867 deleted `recommended_vram_gb` (was field 6). It was not a
+// measurement: its only source was the author's `Resources(vram_gb_hint)`,
+// which §1.2 measured wrong in BOTH directions on live releases (anima
+// declared 8 against a 10.6 GiB peak; sdxl declared 20 against 9.3 GiB), and
+// the hub then learned a monotone buy floor from it (th#1720, deleted in
+// `96229a73`). What survives is what actually happened — `wanted` vs `ran`
+// and the realised slowdown — which is the loud, quantified degradation
+// §1.36's amendment requires, with no declared number laundered as evidence.
 message FnDegraded {
   string function_name = 1;
   string wanted = 2; // what the function declares (stored flavor, or "bf16")
   string ran = 3;    // how it actually runs: fp8_storage | emergency_quant | offload | cpu
   string reason = 4; // honest-guidance detail, incl. a better-flavor hint when one exists
   double est_latency_multiplier = 5; // realistic slowdown vs a native run
-  double recommended_vram_gb = 6;    // ideal card size for a native run; 0 = unknown
 }
 
 // Orchestrator -> worker: stop accepting work, finish in-flight jobs, ship

@@ -840,14 +840,17 @@ def pipeline_weight_lane(pipeline: Any) -> str:
 # Fit ladder: bf16 -> fp8 flavor -> nvfp4 (Blackwell) -> runtime fp8-E4M3
 # storage -> CPU offload. When even the downloaded flavor cannot fit free
 # VRAM, the load path tries fp8-E4M3 weight storage (apply_fp8_storage: fp8
-# bytes resident, bf16 compute) and then hands the slot to the offload ladder.
-# Nothing QUANTIZES here — Paul: "We shouldn't be doing runtime quants; if
-# we're really memory-constrained then we should be fetching the quant we
-# need". Armed on CUDA hosts; fitting is the runtime's job, not a flag.
-# Resident factor after fp8-E4M3 storage of the denoiser, expressed against
-# the declared CARD SIZE (resources.vram_gb — includes activation/framework
-# headroom over raw weights). The ONE fp8 fit factor.
-FP8_STORAGE_FIT_FACTOR = 0.55
+# bytes resident, bf16 compute — quality ~= a stored #fp8 flavor) and then
+# hands the slot to the offload ladder. Nothing QUANTIZES here: the bnb-nf4
+# emergency rung was deleted in pgw#1206 D (Paul: "We shouldn't be doing
+# runtime quants; if we're really memory-constrained then we should be
+# fetching the quant we need"). Armed on CUDA hosts (gw#420: fitting is the
+# runtime's job, not a flag).
+# th#1867 deleted FP8_STORAGE_FIT_FACTOR. It was a resident factor expressed
+# against the DECLARED card size (`resources.vram_gb`), consumed only by
+# `variant_fit`'s size arm to predict whether fp8 storage would fit. Both the
+# declaration and the prediction are gone; the fp8-storage rung is now entered
+# from a measured load, not from a factor times a guess.
 _EMERGENCY_MARGIN_GB = 2.0
 
 
@@ -2181,30 +2184,10 @@ def snapshot_component_weight_bytes(model_path: Path) -> Dict[str, int]:
     return {k: v for k, v in out.items() if v > 0}
 
 
-def specialized_weight_layout(model_path: str | Path) -> str:
-    """The non-plain lane :func:`load_from_pretrained` would take for this
-    snapshot (``"quantized"``/``"svdq"``/``"w8a8"``/``"w4a4"``/``"gguf"``), or
-    ``""`` for the plain dense-safetensors path.
-
-    Answers one question: is this tree's resident size computable from
-    safetensors headers? On every lane named here it is not — packed 4-bit
-    weights, fp8 GEMM scale tables and GGUF blocks all have a header story
-    that differs from their in-memory story — so the envelope precondition
-    abstains instead of guessing. Same detectors, same ORDER as the loader,
-    so the answer cannot drift from the lane actually taken."""
-    p = Path(model_path)
-    if read_on_disk_quant_config(p):
-        return "quantized"
-    if detect_svdq_artifact(p) is not None:
-        return "svdq"
-    if detect_w8a8_artifact(p) is not None:
-        return "w8a8"
-    if detect_w4a4_artifact(p) is not None:
-        return "w4a4"
-    if detect_gguf_snapshot(p) is not None:
-        return "gguf"
-    return ""
-
+# th#1867 deleted `specialized_weight_layout`. Its own docstring named its only
+# consumer — "pgw#1117 asks exactly one question of it" — and pgw#1117's envelope
+# precondition is deleted with the two declarations it compared. The lane
+# detectors it wrapped are unchanged and still live in the loader itself.
 
 def _adaptive_fit_rung(
     cls: Any, path: Path, *, fp8_planned: bool, compute_dtype: Any = None
@@ -2353,7 +2336,6 @@ def load_from_pretrained(
     storage_dtype: str = "",
     components: Optional[Dict[str, Any]] = None,
     component_trees: Optional[Dict[str, str]] = None,
-    declared_vram_gb: float = 0.0,
     ref: str = "",
     placement_mode: str = "",
 ) -> Any:
@@ -2616,7 +2598,6 @@ __all__ = [
     "model_index_components",
     "model_index_component_classes",
     "snapshot_component_weight_bytes",
-    "specialized_weight_layout",
     "load_from_pretrained",
     "is_modular_pipeline_class",
     "hydrate_modular_pipeline",

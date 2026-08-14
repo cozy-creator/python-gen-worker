@@ -40,7 +40,7 @@ class Rendered(msgspec.Struct, frozen=True):
 
 
 @endpoint(
-    resources=Resources(gpu=True, vram_gb_hint=12.0),
+    resources=Resources(gpu=True),
     compile=Compile(family="example", shapes=((512, 512),), text_len=77),
     models={"pipeline": Slot(str, default_checkpoint=HF("example/pipeline"))},
 )

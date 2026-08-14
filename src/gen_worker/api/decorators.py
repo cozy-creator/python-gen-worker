@@ -119,65 +119,76 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     planner / economics gate — all of which have measurements the endpoint
     author does not.
 
-    ``vram_gb_hint`` is an OPTIONAL first-build placement hint used only
-    before profiling measurements exist. It is never a gate, never a runtime
-    ceiling, and never a per-load reservation. Declaring it implies
-    ``gpu=True``.
+    th#1867 (DESIGN-RULINGS §1.35) deleted the LAST THREE VRAM markers this
+    struct carried — ``vram_gb_hint``, ``min_vram_gb`` and ``strict_vram`` —
+    and they went as ONE change because §2.4 ruling 4 measured what a partial
+    cut does: the hub builder folds an absent ``min_vram_gb`` from ``vram_gb``,
+    so deleting one of them silently drops a floor. Paul's ruling in one line:
+    *"We should be able to run any model on any GPU. The challenge is not IF it
+    can run — it's: is it an EFFICIENT choice?"* A card that looks too small is
+    a card whose best (GPU, lane) pair sits further down the operator's ladder,
+    and the RUNTIME picks that rung from what it MEASURES (``models/memory.py``
+    ``select_auto_mode``), never from what the author guessed. §1.2 measured the
+    guess against live serve profiles and it was wrong in BOTH directions —
+    anima declared 8 GB against a 10.6 GiB peak, sdxl declared 20 against a
+    proven 9.3 GiB run on a 16 GB A4000.
 
-    ``min_vram_gb`` is the HARD VRAM floor: a floor the hub may exceed, never
-    a cap (the same reading as ``min_disk_gb``). It is deliberately NOT
-    ``vram_gb_hint`` promoted — the hint's contract is "never a gate", and
-    teaching the scheduler to gate on a value declared as advisory would
-    silently turn every existing hint into a hard refusal. Declare it ONLY
-    for a genuine incapability; a function that merely runs BETTER with more
-    VRAM declares nothing and lets the fit ladder choose.
+    ``compute_capability`` is NOT one of them and survives untouched: an sm
+    floor is a statement about which KERNELS exist in our build, not about how
+    big a card is (§2.4 ruling 1).
 
-    Declaring it implies ``gpu=True``. Where both are present the floor must
-    not exceed the hint: a hint BELOW the floor is a contradiction (the
-    first-build placement would land under the value the function says it
-    cannot run below), and it is refused here rather than shipped.
+    ``ram_gb_hint`` (pgw#670) is its HOST-side twin, restored after the v2
+    cut deleted ``ram_gb`` on the reasoning that host RAM is an
+    opportunistic latency tier. For ltx-video-2.3 it was neither
+    opportunistic nor a guess: ie#484 measured 179-301 s mp4-encode and
+    147 s VAE-decode tails on host-starved allocations at IDENTICAL GPU
+    step-ms, ie#492 sized the floor at 64 GB from that failure, and the hub
+    consumed it (pod-create minimum + th#740 read-back-and-reject). Without
+    it a starved allocation DEGRADES SILENTLY — a slow request, not a
+    refused pod — which is exactly what the declaration existed to prevent.
+    It is an ALLOCATION-time ask (the hub's ``min_ram_gb``), never a runtime
+    gate: nothing refuses a request because host RAM is low. That distinction
+    is why it survives th#1867 while every VRAM marker went — the deleted
+    fields were sizing a CARD, which §1.35 rules is never the question. It does not imply ``gpu=True`` — the components are
+    pinned host staging, model-load staging, frame/encoder buffers and
+    page-cache headroom, and a CPU-only encode lane needs them too.
+    Asymmetry note: ``vcpus`` survived the v2 cut and covers the CPU side of
+    the very same encode tail, which is what made the RAM deletion read as
+    accidental rather than principled.
 
-    It is a PLACEMENT gate and nothing else. It deliberately does not reach
-    the worker-side fit ladder (``models/serve_fit.py``), which by contract
-    "never refuses on the recommended-VRAM hint alone" and whose sole author
-    opt-out is ``strict_vram``. A floor that also became a runtime refusal
-    could refuse requests a pod can answer.
+    ``compute_capability`` (pgw#660) is the HARD GPU-architecture floor,
+    restored after the v2 cut deleted it. The cut's reasoning — "precision
+    per card is the fit ladder's call, never a placement gate" — is right
+    about precision SELECTION and wrong about INCAPABILITY: a producer whose
+    kernel is ``torch._scaled_mm`` cannot run below sm_89 at any precision,
+    on any rung, ever. With no carrier the hub emitted no
+    ``compute_capability`` in ``requirement_payload_json`` and the scheduler
+    placed the fp8 producer on sm_80 A100s (th#1155 six times; te#125
+    again). This is NOT a hint and has no ``_hint`` suffix: the scheduler
+    filters offers on it and refuses to rent below it. th#1867 deleted the
+    VRAM markers and deliberately LEFT this one (§2.4 ruling 1): an sm floor
+    says which kernels exist in our build, which is a statement about our
+    code — a card size is a statement about the card.
+    Declare the DOTTED capability the way NVIDIA writes it — ``8.9``,
+    ``"8.9"``, or ``"sm_89"`` — never the bare SM code. Declaring it implies
+    ``gpu=True``. Declare it ONLY for a genuine incapability; a function that
+    merely runs BETTER on newer silicon declares nothing and lets the ladder
+    choose.
 
-    ``ram_gb_hint`` is its HOST-side twin: without it a host-starved
-    allocation DEGRADES SILENTLY — a slow request, not a refused pod. Like
-    ``vram_gb_hint`` it is an ALLOCATION-time ask (the hub's ``min_ram_gb``),
-    never a runtime gate: nothing refuses a request because host RAM is low.
-    It does not imply ``gpu=True`` — the components are pinned host staging,
-    model-load staging, frame/encoder buffers and page-cache headroom, and a
-    CPU-only encode lane needs them too.
-
-    ``compute_capability`` is the HARD GPU-architecture floor. It states
-    INCAPABILITY, not precision SELECTION: a producer whose kernel is
-    ``torch._scaled_mm`` cannot run below sm_89 at any precision, on any
-    rung, ever. Unlike ``vram_gb_hint`` this is NOT a hint and has no
-    ``_hint`` suffix: the scheduler filters offers on it and refuses to rent
-    below it. Declare the DOTTED capability the way NVIDIA writes it —
-    ``8.9``, ``"8.9"``, or ``"sm_89"`` — never the bare SM code. Declaring it
-    implies ``gpu=True``. Declare it ONLY for a genuine incapability; a
-    function that merely runs BETTER on newer silicon declares nothing and
-    lets the ladder choose.
-
-    ``strict_vram=True`` is a genuine incapability declaration for bindings
-    that cannot tolerate CPU-resident weights (a compiled fixed-shape
-    graph, a TensorRT engine): the worker refuses the CPU-touching fit
-    rungs (offload / cpu) outright instead of serving slowly. The on-GPU
-    rungs (fp8 storage, emergency 4-bit) remain available.
-
-    ``min_disk_gb`` is the CONTAINER-DISK floor: a floor the hub may exceed,
-    never a cap. The hub already sizes a conversion pod's disk from the bytes
-    the job will materialize, so the common case needs no declaration at all.
-    The residue is jobs whose need is NOT derivable from the source —
-    multi-source marries, large intermediate scratch, and the live example,
-    ``mirror_svdq``, which fetches a 13.08 GB nunchaku checkpoint straight
-    from HuggingFace; no catalog read will ever see those bytes.
-    ``mergeRequestDiskIntoSupply`` honours it as an additional floor, exactly
-    like ``min_vram_gb``. Like ``ram_gb_hint`` it is an ALLOCATION-time ask
-    and does not imply ``gpu=True``.
+    ``min_disk_gb`` (pgw#732) is the CONTAINER-DISK floor, and it is named
+    for what it is: a floor the hub may exceed, never a cap, so ``min_`` reads
+    truer than a ``_hint`` suffix. th#1233 already sizes a conversion pod's
+    disk from the bytes the job will materialize, so the common case needs no
+    declaration at all. The residue is jobs whose need is NOT derivable from
+    the source — multi-source marries, large intermediate scratch, and the
+    live example, ``mirror_svdq``, which fetches a 13.08 GB nunchaku
+    checkpoint straight from HuggingFace. No catalog read will ever see those
+    bytes; only the author knows they exist. The hub half is already wired and
+    waiting: ``mergeRequestDiskIntoSupply`` honours a per-function
+    ``min_disk_gb`` as an additional floor, and until this axis existed
+    nothing emitted it. Like ``ram_gb_hint`` it is an
+    ALLOCATION-time ask and does not imply ``gpu=True`` — a CPU-only
+    conversion is the case that needed it first.
 
     ``vcpus`` declares the host-side vCPU ask (CPU-heavy encode);
     it does not imply ``gpu=True``. ``gpu_count`` declares how many devices
@@ -210,10 +221,7 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     gpu: bool = False
     gpu_count: int = 1
     libraries: tuple[str, ...] = ()
-    strict_vram: bool = False
     vcpus: int | None = None
-    vram_gb_hint: float | None = None
-    min_vram_gb: float | None = None
     ram_gb_hint: float | None = None
     min_disk_gb: float | None = None
     compute_capability: float | str | None = None
@@ -230,17 +238,23 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
         that name. One mapping, in one place, rather than a second spelling
         for endpoint authors to get wrong.
 
-        ``min_disk_gb``, ``min_vram_gb`` and ``compute_capability`` need no
-        remap — they are already the keys the hub reads
-        (``mergeRequestDiskIntoSupply``; ``function_requirements.go``'s fold
-        of ``min_vram_gb`` into ``requirement_payload_json`` and on to
-        ``req.VRAMGB`` → ``MinVRAMGB`` → the GPU candidate filter; and the
-        scalar-or-``{"min": ...}`` parse into
-        ``FunctionRequirements.ComputeCapabilityMin``). The builder's own
-        ``vram_gb`` → ``min_vram_gb`` fallback applies only *when the explicit
-        key is absent*, so this field can never be shadowed by it.
-        ``min_compute_capability`` is typed-REJECTED by the builder
-        (``ErrMinComputeCapabilityRemoved``) and must never appear on the wire.
+        ``min_disk_gb`` (pgw#732) needs no remap either — it is already the
+        key the hub reads as an additional disk floor
+        (``mergeRequestDiskIntoSupply``), the same spelling on both sides.
+
+        th#1867: nothing VRAM-shaped is projected any more. The hub still has
+        a ``min_vram_gb`` fold in ``function_requirements.go`` and a buy-side
+        candidate filter behind it; both are th#1867 S4's to delete, and after
+        this change no manifest reaches them. That absence is NAMED here rather
+        than left to be discovered, because a hub gate reading a key nobody
+        emits is exactly how pgw#660's gate vanished silently the first time.
+
+        ``compute_capability`` needs no remap: it is already the key
+        ``internal/builder/function_requirements.go`` parses (scalar or
+        ``{"min": ...}``) into ``FunctionRequirements.ComputeCapabilityMin``.
+        Note ``min_compute_capability`` — v1's author-facing spelling — is
+        typed-REJECTED by the builder (th#1015 ``ErrMinComputeCapabilityRemoved``),
+        so it must never appear on the wire.
         """
         raw = msgspec.to_builtins(self)
         out: Dict[str, Any] = dict(raw) if isinstance(raw, dict) else {}
@@ -259,27 +273,10 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
         if n_gpu <= 0:
             raise ValueError(f"gpu_count must be positive, got {self.gpu_count}")
         force(self, "gpu_count", n_gpu)
-        if self.vram_gb_hint is not None:
-            v = float(self.vram_gb_hint)
-            if v <= 0:
-                raise ValueError(f"vram_gb_hint must be positive, got {v}")
-            force(self, "vram_gb_hint", v)
-        if self.min_vram_gb is not None:
-            f = float(self.min_vram_gb)
-            if f <= 0:
-                raise ValueError(f"min_vram_gb must be positive, got {f}")
-            force(self, "min_vram_gb", f)
-            if self.vram_gb_hint is not None and self.vram_gb_hint < f:
-                raise ValueError(
-                    f"vram_gb_hint {self.vram_gb_hint} is below min_vram_gb {f}: "
-                    "the hint places the first build, and placing it under the "
-                    "hard floor cannot be what was meant")
         if self.compute_capability is not None:
             force(self, "compute_capability",
                   _normalize_compute_capability(self.compute_capability))
-        if (n_gpu > 1 or self.vram_gb_hint is not None
-                or self.min_vram_gb is not None
-                or self.compute_capability is not None):
+        if n_gpu > 1 or self.compute_capability is not None:
             force(self, "gpu", True)
         if self.ram_gb_hint is not None:
             r = float(self.ram_gb_hint)

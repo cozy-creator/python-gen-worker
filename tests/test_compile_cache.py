@@ -553,7 +553,7 @@ def test_endpoint_compile_reaches_spec():
     import types
 
     @endpoint(
-        resources=Resources(vram_gb_hint=4),
+        resources=Resources(gpu=True),
         compile=Compile(shapes=((768, 768),), text_len=0),
     )
     class Ep:

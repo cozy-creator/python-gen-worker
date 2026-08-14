@@ -277,9 +277,10 @@ class Source:
         sources, and sums the file sizes of any ``.safetensors``,
         ``.bin``, ``.pt``, ``.pth``, ``.ckpt`` files found.
 
-        Used by quant tenants to compute per-scheme `the per-function Resources(min_vram_gb=...) declaration` gates
-        without depending on the snapshot manifest plumbing — the loader
-        only needs a number of bytes to reason about. For bf16 sources
+        Used by quant tenants to size their own working set from real bytes
+        without depending on the snapshot manifest plumbing — the loader only
+        needs a number of bytes to reason about. It feeds no placement gate:
+        th#1867 deleted the per-function VRAM declarations entirely. For bf16 sources
         this number ≈ ``num_params * 2``, which is the right multiplicand
         for the heuristic ``required_vram = scheme_factor * source_size +
         working_overhead``.

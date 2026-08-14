@@ -1425,20 +1425,18 @@ class FnUnavailable(_message.Message):
     def __init__(self, function_name: _Optional[str] = ..., reason: _Optional[str] = ..., detail: _Optional[str] = ..., axes: _Optional[_Mapping[str, str]] = ...) -> None: ...
 
 class FnDegraded(_message.Message):
-    __slots__ = ("function_name", "wanted", "ran", "reason", "est_latency_multiplier", "recommended_vram_gb")
+    __slots__ = ("function_name", "wanted", "ran", "reason", "est_latency_multiplier")
     FUNCTION_NAME_FIELD_NUMBER: _ClassVar[int]
     WANTED_FIELD_NUMBER: _ClassVar[int]
     RAN_FIELD_NUMBER: _ClassVar[int]
     REASON_FIELD_NUMBER: _ClassVar[int]
     EST_LATENCY_MULTIPLIER_FIELD_NUMBER: _ClassVar[int]
-    RECOMMENDED_VRAM_GB_FIELD_NUMBER: _ClassVar[int]
     function_name: str
     wanted: str
     ran: str
     reason: str
     est_latency_multiplier: float
-    recommended_vram_gb: float
-    def __init__(self, function_name: _Optional[str] = ..., wanted: _Optional[str] = ..., ran: _Optional[str] = ..., reason: _Optional[str] = ..., est_latency_multiplier: _Optional[float] = ..., recommended_vram_gb: _Optional[float] = ...) -> None: ...
+    def __init__(self, function_name: _Optional[str] = ..., wanted: _Optional[str] = ..., ran: _Optional[str] = ..., reason: _Optional[str] = ..., est_latency_multiplier: _Optional[float] = ...) -> None: ...
 
 class Drain(_message.Message):
     __slots__ = ("deadline_ms",)

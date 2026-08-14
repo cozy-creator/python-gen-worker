@@ -135,13 +135,11 @@ KIND_COMPONENT_MISS = "component_miss"
 # hub-side instead of invisible.
 KIND_OUTPUT_INTEGRITY = "output_integrity"
 # pgw#1117 / th#1777: the pre-stage envelope precondition refused a slot load.
-# `phase=refused` — deterministic and fail-CLOSED: the bound artifact weighs
-# more, as it will load, than the release's declared `vram_gb` envelope, so
-# nothing was staged and no GPU time was spent. `detail` carries BOTH numbers
-# and the artifact digest, which is the whole point: ie#642's OOM banked
-# `CUDA out of memory` and sent an operator measuring the model, when the fact
-# that mattered was that the binding pointed at an fp32 archive clone.
-KIND_ENVELOPE_REFUSAL = "artifact_envelope_exceeded"
+# th#1867 deleted KIND_ENVELOPE_REFUSAL with the precondition that emitted it
+# (pgw#1117/th#1777): it compared the bound artifact against the release's
+# declared `vram_gb` under `strict_vram`, and both declarations are gone. The
+# question it was really asking — "is this slot bound to the wrong artifact?" —
+# is th#1913's, and it is answered against the CATALOG, not a card size.
 KIND_ROTATION_PRELOAD = "rotation_preload"
 KIND_CAPABILITY_RENEWAL = "capability_renewal"
 KIND_RESIDENCY_FAULT = "residency_fault"

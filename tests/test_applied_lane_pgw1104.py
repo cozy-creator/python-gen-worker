@@ -240,7 +240,8 @@ def test_every_reportable_body_composes_at_either_observed_posture() -> None:
     an owner ladder, an admin override, a resolution — and `fp8-w8a8-dynamic`
     is compiled-only there because eager w8a8 is unmeasured, not because it
     cannot happen. It happens: a serve-time recipe quantizes and the self-mint
-    then declines (wan-2.2, `insufficient_vram` on an H100). Naming that state
+    then declines (wan-2.2, on an H100 — the decline said `insufficient_vram`
+    before th#1867 deleted that token). Naming that state
     is the whole point; coercing it into the choosable set is the defect."""
     for body in lanespec.known_execution_lane_bodies():
         for compiled in (True, False):

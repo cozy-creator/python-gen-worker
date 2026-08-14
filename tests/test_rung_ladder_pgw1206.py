@@ -1,10 +1,15 @@
 """pgw#1206 A2 — THE degrade-don't-OOM ruling as ONE test on the One Rung ladder.
 
 The ruling (Paul, 2026-07-10): a CUDA OOM is a ladder transition, never a hard
-fail — descend one rung and retry, down to the terminal rung; the only opt-out
-is the author's ``Resources(strict_vram=True)``. The implementation used to
-span three vocabularies in five files; this file is the ruling's single
+fail — descend one rung and retry, down to the terminal rung. The implementation
+used to span three vocabularies in five files; this file is the ruling's single
 red-verified guard on the consolidated ladder.
+
+th#1867 removed the ruling's one exception. ``Resources(strict_vram=True)`` let
+an author opt out of the host-RAM-touching rungs, which turned "runs slower"
+into "does not run" — §2.4 ruling 4 read it as a card requirement in softer
+words and deleted it with `vram_gb_hint`/`min_vram_gb`. The descent now has no
+opt-out at all: it ends where OUR ladder ends and nowhere else.
 
 The wire half was RED against 91df247a: ``serve_fit.demoted`` wrote
 ``ran="offload:<placement>"`` while tensorhub matches ``FnDegraded.ran``
@@ -54,8 +59,8 @@ def test_one_ordered_ladder() -> None:
     assert "emergency_quant" not in {r.run_mode for r in rung.LADDER}
     prices = [r.latency for r in rung.LADDER]
     assert prices == sorted(prices), "price must be monotonic down the ladder"
-    # Host-RAM-touching == exactly the placement tail (the strict_vram
-    # boundary and the pgw#1063 whole-tree host-RAM charge).
+    # Host-RAM-touching == exactly the placement tail (the pgw#1063 whole-tree
+    # host-RAM charge; it was the strict_vram boundary until th#1867).
     assert rung.PLACEMENT_LADDER == ("model_offload", "group_offload", "sequential")
     for r in rung.LADDER:
         assert r.touches_host_ram == (r.name in rung.PLACEMENT_LADDER)
@@ -80,10 +85,21 @@ def test_descend_walks_every_rung_and_terminates() -> None:
     assert seen == list(rung.PLACEMENT_LADDER)
 
 
-def test_strict_vram_truncates_before_host_ram() -> None:
-    """The author's opt-out: no descent may reach a host-RAM-touching rung."""
-    assert rung.descend("", strict_vram=True) is None
-    assert rung.descend("model_offload", strict_vram=True) is None
+def test_no_declaration_can_truncate_the_ladder_th1867() -> None:
+    """th#1867 deleted ``strict_vram``, which cut this walk before the first
+    host-RAM-touching rung. The walk must now end ONLY where the ladder ends —
+    a fact about our code — and never on an author's say-so, so ``descend``
+    takes no declaration argument at all and cannot grow one back silently."""
+    import inspect
+    for fn in (rung.descend, rung.descent_floor):
+        params = set(inspect.signature(fn).parameters)
+        assert params == {"current"}, (
+            f"{fn.__name__} takes {sorted(params)}: a second parameter here is "
+            "a declaration re-entering the descent (th#1867 §2.4 ruling 4)")
+    first = rung.descend("")
+    second = rung.descend("model_offload")
+    assert first is not None and first.name == "model_offload"
+    assert second is not None and second.name == "group_offload"
 
 
 def test_floor_only_deepens() -> None:
@@ -145,14 +161,18 @@ def test_oom_below_terminal_rung_raises(monkeypatch: pytest.MonkeyPatch) -> None
     assert attempted == ["off"] + list(rung.PLACEMENT_LADDER)
 
 
-def test_strict_vram_refuses_instead_of_descending(monkeypatch: pytest.MonkeyPatch) -> None:
-    """th#1107/th#1043: strict_vram refuses BEFORE any host-RAM rung — on the
-    reactive path too, with a typed message, never a silent slow serve."""
+def test_the_reactive_descent_has_no_declaration_opt_out_th1867(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scenario `strict_vram` used to refuse now DESCENDS and serves.
+
+    Same arm as the deleted test — a pipeline that OOMs resident and serves at
+    `model_offload`. It used to raise before touching a host-RAM rung. §1.35
+    makes that descent the normal path, so the ladder is walked and the
+    placement is applied."""
     attempted = _arm(monkeypatch, serves_at="model_offload")
-    with pytest.raises(RuntimeError, match="strict_vram"):
-        place_pipeline(
-            object(), mode="off", strict_vram=True, logger=logging.getLogger("t"))
-    assert attempted == ["off"]
+    place_pipeline(object(), mode="off", logger=logging.getLogger("t"))
+    assert attempted == ["off", "model_offload"]
 
 
 # --- the wire: ran is the Go vocabulary, exactly ----------------------------
@@ -184,10 +204,13 @@ def test_load_rung_and_cast_drop_share_the_one_replan() -> None:
 # --- pgw#1206 D: no rung manufactures a quant, and the floor still holds -----
 
 
-def _resources(vram_gb: float, *, strict: bool = False) -> Any:
+def _resources() -> Any:
     from gen_worker.api.decorators import Resources
 
-    return Resources(gpu=True, vram_gb_hint=vram_gb, strict_vram=strict)
+    # th#1867: there is nothing size-shaped left to declare. The rung a load
+    # lands on is decided by `models/memory` from MEASURED bytes, which is why
+    # the tests below drive `place_pipeline` rather than `plan_serve`.
+    return Resources(gpu=True)
 
 
 def _cuda_caps() -> Any:
@@ -197,36 +220,34 @@ def _cuda_caps() -> Any:
         cuda_version="13.0", gpu_sm=90, torch_version="2.13.0", installed_libs=[])
 
 
-@pytest.mark.parametrize("free_gb", [
-    40.0,  # THE nf4 window: 0.45*80 <= 40 < 0.55*80 — master answers
-           # `emergency_quant` here and nothing else in the suite covers it
-    8.0,   # far past every resident rung
-])
-def test_a_model_over_VRAM_lands_on_OFFLOAD_and_never_refuses(free_gb: float) -> None:
-    """Degrade-don't-OOM (Paul, 2026-07-10) survives the nf4 deletion.
+@pytest.mark.parametrize("free_gb", [40.0, 8.0])
+def test_a_model_over_VRAM_SERVES_and_never_refuses(free_gb: float) -> None:
+    """Degrade-don't-OOM (Paul, 2026-07-10) survives the nf4 deletion AND
+    th#1867's deletion of the whole plan-time estimate.
 
-    At 40 GB free the old ladder had exactly one answer — quantize the
-    denoiser to 4 bits at load, at a quality nobody gated. The rung is gone,
-    so the same input must serve through the OFFLOAD ladder: slower, honest,
-    still a serve. A hard fail here would be the OOM the ruling forbids, and
-    a silent 4-bit serve is what the ruling now forbids instead.
+    At 40 GB free the old ladder had exactly one answer — quantize the denoiser
+    to 4 bits at load, at a quality nobody gated. That rung is gone. th#1867
+    then removed the plan-time prediction itself, so what this asserts is the
+    property that outlived both: an 80 GB model on an 8 GB card is SERVEABLE,
+    at every free-VRAM value, and the descent that carries it is measured at
+    load time rather than guessed here.
     """
-    plan = plan_serve(_resources(80.0), _cuda_caps(), free_vram_gb=free_gb)
+    plan = plan_serve(_resources(), _cuda_caps(), free_vram_gb=free_gb)
 
     assert plan.serveable, plan.reason
-    assert plan.run_mode == RUN_OFFLOAD
-    assert plan.ran in GO_RAN_VOCABULARY
-    assert plan.degraded
     assert "emergency" not in (plan.warning or "").lower()
     assert "4-bit" not in (plan.warning or "")
 
 
-def test_the_only_refusal_left_is_the_authors_own_strict_vram_optout() -> None:
-    """The floor is universal; the ONE exception is the author saying weights
-    may not touch host RAM. That is an opt-out, not a hardware verdict."""
-    plan = plan_serve(_resources(80.0, strict=True), _cuda_caps(), free_vram_gb=8.0)
-    assert not plan.serveable
-    assert "strict_vram" in plan.reason
+def test_the_reactive_demotion_still_reports_the_go_vocabulary() -> None:
+    """The plan-time ladder is gone; the WIRE contract it fed is not. A
+    measured demotion must still project `ran` into tensorhub's exact-match
+    RunMode vocabulary, or the degradation arrives unreadable."""
+    demoted = replan(None, run_mode=RUN_OFFLOAD, detail="measured: 80.0 GB tree, 8.0 GB free")
+    assert demoted.ran in GO_RAN_VOCABULARY
+    assert demoted.degraded
+    # The measured numbers survive into the warning, beside the priced story.
+    assert "8.0 GB free" in demoted.warning
 
 
 def test_no_runtime_quant_rung_exists_to_be_reached() -> None:

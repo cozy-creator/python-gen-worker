@@ -9,10 +9,11 @@ ever see those bytes; only the author knows they exist.
 
 The hub half was already wired: `mergeRequestDiskIntoSupply` honours a
 per-function `min_disk_gb` as an additional floor, exactly like
-`min_vram_gb`. Nothing emitted it, because `Resources` had no disk axis at
+the VRAM floor th#1867 has since deleted. Nothing emitted it, because
+`Resources` had no disk axis at
 all. This closes the emitter.
 
-Shape is copied from `vram_gb_hint` / `ram_gb_hint` / `compute_capability`
+Shape is copied from `ram_gb_hint` / `compute_capability`
 deliberately — a fourth spelling of "an allocation-time ask" is how an author
 gets one of them wrong.
 """
@@ -33,7 +34,7 @@ def test_the_axis_exists_and_projects_under_the_hubs_own_key() -> None:
 
 
 def test_it_is_a_FLOOR_not_a_hint_and_the_name_says_so() -> None:
-    """Naming is the contract. `vram_gb_hint`/`ram_gb_hint` are asks the
+    """Naming is the contract. `ram_gb_hint` is an ask the
     platform may miss; this one the hub raises the pod's disk to meet, and may
     exceed — so `min_` reads truer than a `_hint` suffix, and there must be no
     `disk_gb_hint` spelling for an author to reach for by analogy."""
@@ -44,7 +45,7 @@ def test_it_is_a_FLOOR_not_a_hint_and_the_name_says_so() -> None:
 
 def test_it_does_NOT_imply_gpu() -> None:
     """The case that needed it first is a CPU-only conversion. `gpu_count>1`,
-    `vram_gb_hint` and `compute_capability` all force `gpu=True`; disk must
+    `compute_capability` forces `gpu=True`; disk must
     not, or declaring a scratch floor would rent a card."""
     assert Resources(min_disk_gb=200).gpu is False
     # ...and the projection carries no `gpu` key at all when it is false,
@@ -77,11 +78,10 @@ def test_an_undeclared_floor_emits_NOTHING() -> None:
 
 
 def test_it_composes_with_the_other_axes() -> None:
-    res = Resources(gpu=True, vram_gb_hint=48, ram_gb_hint=64,
+    res = Resources(gpu=True, ram_gb_hint=64,
                     min_disk_gb=200, vcpus=8)
     assert res.manifest_dict() == {
         "gpu": True,
-        "vram_gb_hint": 48.0,
         "ram_gb": 64.0,          # the ONE remapped key
         "min_disk_gb": 200.0,    # not remapped
         "vcpus": 8,

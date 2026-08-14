@@ -34,8 +34,9 @@ not a duplicated hash.
 §1.35's second amendment stands: loudness is diagnostics.
 
 **It does not recommend a card.** The worker knows what it was short by; only
-the hub knows the catalog and the prices (§1.36 amendment, clause 3). The old
-``recommended_vram_gb`` was the author's own declared hint handed back.
+the hub knows the catalog and the prices (§1.36 amendment, clause 3). ``recommended_vram_gb`` was the author's own declared hint handed back, and
+th#1867 deleted it from the wire outright rather than leaving it to be read as
+a measurement.
 
 THE THREE RULES THAT ARE THE HUB'S, RESTATED SO THE PRODUCER OBEYS THEM
 ----------------------------------------------------------------------

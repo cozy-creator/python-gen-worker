@@ -29,26 +29,24 @@ ALL_TOKENS = (
 FLOORS = {
     rung.FLOOR_CPU_RUNG_UNEXECUTABLE,
     rung.FLOOR_LADDER_EXHAUSTED,
-    rung.FLOOR_STRICT_VRAM_TRUNCATED,
 }
 
 
 # --- the two halves cannot disagree ----------------------------------------
 
 @pytest.mark.parametrize("token", ALL_TOKENS)
-@pytest.mark.parametrize("strict", [False, True])
-def test_a_rung_or_a_floor_never_both_and_never_neither(token: str, strict: bool) -> None:
+def test_a_rung_or_a_floor_never_both_and_never_neither(token: str) -> None:
     """th#1867 §3.0 — diagnosis and action read ONE verdict.
 
     A descent that returned a rung has nothing to explain; a descent that
     returned None must say why. Two implementations of the same question drift;
     this asserts the property that makes the drift impossible to express.
     """
-    nxt = rung.descend(token, strict_vram=strict)
-    floor = rung.descent_floor(token, strict_vram=strict)
+    nxt = rung.descend(token)
+    floor = rung.descent_floor(token)
     assert (nxt is None) != (floor is None), (
-        f"{token!r} (strict_vram={strict}) -> rung={nxt}, floor={floor}: exactly "
-        "one of the two must be set"
+        f"{token!r} -> rung={nxt}, floor={floor}: exactly one of the two "
+        "must be set"
     )
     assert floor is None or floor in FLOORS
 
@@ -121,20 +119,21 @@ def test_the_walk_only_ever_descends() -> None:
 # --- opposite findings may not share a token --------------------------------
 
 @pytest.mark.parametrize("token", [None, "", "resident", "model_offload", "group_offload"])
-def test_strict_vram_truncation_names_the_declaration_not_the_ladder(token: str) -> None:
-    """The author's opt-out stopping the walk and the ladder running out are
-    OPPOSITE findings — one is a declaration we honoured, one is our floor.
-    th#1867 §3.2 costs an investigation per occurrence when a token cannot
-    distinguish its two causes; this is that lesson applied before it is paid.
+def test_no_declaration_can_stop_the_walk_th1867(token: str) -> None:
+    """``FLOOR_STRICT_VRAM_TRUNCATED`` is DELETED, and so is the only thing
+    that could produce it.
+
+    The two findings this file kept apart were "the author's opt-out stopped
+    the walk" and "our ladder ran out". §2.4 ruling 4 deleted the first one
+    outright — it was a card requirement in softer words — so every remaining
+    floor names OUR code by construction. From any of these tokens the walk
+    must now find a real rung.
     """
-    assert rung.descend(token, strict_vram=True) is None
-    assert rung.descent_floor(token, strict_vram=True) == rung.FLOOR_STRICT_VRAM_TRUNCATED
-
-
-def test_strict_vram_does_not_mask_the_cpu_floor() -> None:
-    """At ``sequential`` the next rung is ``cpu``, which does NOT touch host
-    RAM — so strict_vram has nothing to truncate and the floor is still ours."""
-    assert rung.descent_floor("sequential", strict_vram=True) == rung.FLOOR_CPU_RUNG_UNEXECUTABLE
+    assert not hasattr(rung, "FLOOR_STRICT_VRAM_TRUNCATED"), (
+        "the declaration-truncation floor is back; §1.35 forbids an author "
+        "declaration ending a descent the ladder could continue")
+    assert rung.descend(token) is not None
+    assert rung.descent_floor(token) is None
 
 
 # --- the floor names our code, never the card -------------------------------

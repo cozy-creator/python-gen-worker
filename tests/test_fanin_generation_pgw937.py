@@ -258,7 +258,7 @@ def test_a_respawned_group_does_not_inherit_the_dead_ones_unavailability():
     p._slots[1].begin_generation()                 # ...and comes back serving
 
     out = p._fan_in(p._slots[0], pb.WorkerMessage(fn_unavailable=pb.FnUnavailable(
-        function_name="txt2img", reason="insufficient_vram")))
+        function_name="txt2img", reason="setup_failed")))
     assert out is None, (
         "the respawned group inherited the dead one's FnUnavailable, so a "
         "transient failure in g0 retired a function g1 was serving"
@@ -276,7 +276,7 @@ def test_a_down_group_is_excluded_from_the_merge_not_defaulted_to_serving():
     p._retire_group_generation(p._slots[1])
 
     out = p._fan_in(p._slots[0], pb.WorkerMessage(fn_unavailable=pb.FnUnavailable(
-        function_name="txt2img", reason="insufficient_vram")))
+        function_name="txt2img", reason="setup_failed")))
     assert out is not None, (
         "the down group was defaulted to 'serves everything', so the worker "
         "never reported a function no live group can serve"

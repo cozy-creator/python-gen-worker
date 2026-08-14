@@ -140,9 +140,10 @@ MARGIN_FRACTION = 0.05
 # "Fits" = the measured peak, plus an allowance for the shapes the mint did
 # NOT measure. The mint times ONE representative shape; a tenant may ask for a
 # larger resolution or a longer prompt, and the allocator fragments. The
-# strict_vram rule stands (declare the honest peak ask — a marketing-GB
-# declaration is release-broken by one GiB), so the allowance is explicit and
-# the term that bound a verdict is recorded with it.
+# honest-peak rule stands (round the MEASURED ask up, never down), so the
+# allowance is explicit and the term that bound a verdict is recorded with it.
+# It survives th#1867 because it is arithmetic over a measurement this code
+# took, not a declaration anyone wrote.
 ACTIVATION_SPIKE_FRACTION = 0.20
 FRAGMENTATION_HEADROOM_BYTES = 1 << 30  # 1 GiB
 
@@ -153,7 +154,7 @@ FRAGMENTATION_HEADROOM_BYTES = 1 << 30  # 1 GiB
 # move the number and strand the cell. Rounding to a coarse grain makes the
 # recorded byte count reproducible for the same reason `MARGIN_FRACTION`
 # makes the winner reproducible, and rounding UP can only make the fit test
-# stricter, never optimistic (the strict_vram rule).
+# stricter, never optimistic.
 PEAK_QUANTUM_BYTES = 1 << 28  # 256 MiB
 
 # Fixed measurement protocol — part of the verdict's determinism, recorded

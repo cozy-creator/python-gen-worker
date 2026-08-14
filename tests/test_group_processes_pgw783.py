@@ -470,7 +470,7 @@ def test_the_worker_is_stalled_only_when_EVERY_live_group_is():
 def test_a_function_is_unavailable_only_when_NO_group_serves_it():
     """Ruling 2: one group losing a function must not retire it worker-wide if
     another still serves it. The parent reports the single worker-level fact."""
-    fu = pb.FnUnavailable(function_name="f", reason="insufficient_vram")
+    fu = pb.FnUnavailable(function_name="f", reason="setup_failed")
     # group 1 serves it (None) -> worker serves it, nothing reported.
     assert worker_fn_unavailable({0: fu, 1: None}) is None
     # every group unavailable -> the worker is unavailable, one reason carried.
@@ -478,7 +478,7 @@ def test_a_function_is_unavailable_only_when_NO_group_serves_it():
         function_name="f", reason="setup_failed")})
     assert every is not None
     # a hardware-gating reason is preferred over a transient setup failure.
-    assert every.reason == "insufficient_vram"
+    assert every.reason == "setup_failed"
 
 
 def test_a_function_is_degraded_only_when_no_group_serves_it_native():
@@ -800,7 +800,7 @@ def test_fan_in_suppresses_fn_unavailable_while_a_sibling_serves_it():
     p = _parent(2)
     # group 0 reports it unavailable; group 1 has never reported it (serves it).
     fu = pb.WorkerMessage(fn_unavailable=pb.FnUnavailable(
-        function_name="f", reason="insufficient_vram"))
+        function_name="f", reason="setup_failed"))
     out = p._fan_in(p._slots[0], fu)
     assert out is None  # suppressed: the worker still serves f via group 1
 

@@ -51,13 +51,14 @@ _GiB = 1024 ** 3
 
 
 # ---------------------------------------------------------------------------
-# 1. _estimate_setup_need: vram_gb is a placement hint, never the ask.
+# 1. _estimate_setup_need: only MEASURED bytes are the ask (th#1867 deleted
+#    the declared fallback along with the declaration).
 # ---------------------------------------------------------------------------
 
 
 def test_estimate_prefers_measured_hint_over_everything() -> None:
     # (hint, snapshot_bytes): the measured 5.1 GiB footprint wins.
-    need = _estimate_setup_need([(int(5.1 * _GiB), int(4.7 * _GiB))], 12.0)
+    need = _estimate_setup_need([(int(5.1 * _GiB), int(4.7 * _GiB))])
     assert need == int(5.1 * _GiB)
 
 
@@ -67,17 +68,24 @@ def test_estimate_uses_snapshot_bytes_for_never_seen_picks() -> None:
     # evicted the resident pipeline on a 24 GB card; the honest ask is the
     # snapshot byte total.
     need = _estimate_setup_need(
-        [(0, int(4.7 * _GiB)), (int(0.2 * _GiB), 0)], 12.0
+        [(0, int(4.7 * _GiB)), (int(0.2 * _GiB), 0)]
     )
     assert need == int(4.7 * _GiB) + int(0.2 * _GiB)
     assert need < 12 * _GiB
 
 
-def test_estimate_falls_back_to_declared_only_when_no_facts() -> None:
-    assert _estimate_setup_need([(0, 0)], 12.0) == 12 * _GiB
-    # No declaration either: 0 (make_room becomes a no-op; the load ladder
-    # still sizes honestly at load time).
-    assert _estimate_setup_need([(0, 0)], 0.0) == 0
+def test_estimate_asks_for_NOTHING_when_there_are_no_facts_th1867() -> None:
+    """There is no declared fallback left to reach for.
+
+    This used to return the endpoint's declared `vram_gb` (12 GiB here) when a
+    ref had neither a measured hint nor snapshot bytes. §2.4 ruling 4 deleted
+    the declaration, so an unweighed ref asks for nothing: `make_room` becomes
+    a no-op and the load ladder sizes honestly at load time from what it can
+    actually see. Note the signature carries no second argument at all — a
+    declaration cannot re-enter this estimate without changing the call."""
+    assert _estimate_setup_need([(0, 0)]) == 0
+    import inspect
+    assert set(inspect.signature(_estimate_setup_need).parameters) == {"per_ref"}
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +198,7 @@ def test_packing_juggle_24gb_card_holds_multiple_picks() -> None:
     picks = ["pick-a", "pick-b", "pick-c", "pick-d"]
     objs = {}
     for pick in picks:
-        need = _estimate_setup_need([(0, 5 * _GiB)], 12.0)
+        need = _estimate_setup_need([(0, 5 * _GiB)])
         assert need == 5 * _GiB  # honest per-pick ask, not 12 GiB
         assert res.make_room(need) is True
         objs[pick] = _FakeModule()

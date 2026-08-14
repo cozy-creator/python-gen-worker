@@ -52,7 +52,7 @@ def test_warm_forward_fault_leaves_setup_typed() -> None:
     async def _send(msg: pb.WorkerMessage) -> None:
         sent.append(msg)
 
-    @endpoint(resources=Resources(vram_gb_hint=8))
+    @endpoint(resources=Resources(gpu=True))
     class Ep:
         def setup(self) -> None:
             return None
@@ -92,7 +92,7 @@ def test_load_phase_fault_is_not_claimed_as_the_release_s() -> None:
     async def _send(msg: pb.WorkerMessage) -> None:
         sent.append(msg)
 
-    @endpoint(resources=Resources(vram_gb_hint=8))
+    @endpoint(resources=Resources(gpu=True))
     class Ep:
         def setup(self) -> None:
             raise ValueError("load blew up")

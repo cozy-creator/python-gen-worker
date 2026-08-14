@@ -46,7 +46,7 @@ def _boot_updates() -> List[pb.ActivityUpdate]:
     async def _send(msg: pb.WorkerMessage) -> None:
         sent.append(msg)
 
-    @endpoint(resources=Resources(vram_gb_hint=8))
+    @endpoint(resources=Resources(gpu=True))
     class Ep:
         def setup(self) -> None:
             pass

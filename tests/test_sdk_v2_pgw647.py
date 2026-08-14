@@ -273,7 +273,7 @@ def test_contract_digest_changes_with_the_contract():
 
 def test_resources_v2_deleted_fields_raise():
     # `vram_gb` and `ram_gb` stay deleted; their successors are the explicitly
-    # non-binding `vram_gb_hint` / `ram_gb_hint`.
+    # non-binding `ram_gb_hint` (pgw#670); th#1867 deleted the VRAM markers.
     for kw in ({"vram_gb": 12}, {"ram_gb": 48}, {"min_compute_capability": 8.0}):
         with pytest.raises(TypeError):
             Resources(**kw)
@@ -290,7 +290,7 @@ def test_resources_v2_compute_capability_is_restored_as_a_hard_floor():
 
 
 def test_resources_v2_hint_and_gpu_count_imply_gpu():
-    assert Resources(vram_gb_hint=8).gpu is True
+    assert Resources(compute_capability=8.9).gpu is True
     assert Resources(gpu_count=2).gpu is True
     assert Resources().gpu is False
     with pytest.raises(ValueError):

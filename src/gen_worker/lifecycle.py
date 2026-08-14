@@ -1179,7 +1179,6 @@ class Lifecycle:
                         ran=ran,
                         reason=plan.warning,
                         est_latency_multiplier=float(plan.est_latency_multiplier),
-                        recommended_vram_gb=float(plan.recommended_vram_gb or 0.0),
                     )
                 ),
                 hello_ack=hello_ack,

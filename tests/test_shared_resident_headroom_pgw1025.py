@@ -1,11 +1,12 @@
 """``select_auto_mode`` must not count already-resident shared components twice.
 
-The shape: a second lane of a shared-component endpoint boots against a card
-that ALREADY holds the shared text encoder / VAE. Free VRAM has already been
-reduced by those bytes, and the requirement estimate
-(``estimate_pipeline_size_gb``) counting them again overstates by ~7.85 GB for
-z-image and ~15.5 GB for qwen-image — enough to fall off the resident rung
-entirely.
+The gw#479 shape: a second lane of a shared-component endpoint boots against
+a card that ALREADY holds the shared text encoder / VAE. Free VRAM has
+already been reduced by those bytes, and the requirement estimate
+(``estimate_pipeline_size_gb``) counts them again — measured overstatement
+~7.85 GB for z-image, ~15.5 GB for qwen-image. Enough to fall off the
+resident rung entirely; under th#1107's since-deleted ``strict_vram`` that was not a slower
+placement but a hard refusal (th#1043, the live failure).
 
 Sizes are declared through tensor SHAPE, not allocation: a 1-element storage
 expanded to the weight count, a real tensor with a real, distinct ``data_ptr``
@@ -64,12 +65,15 @@ def test_resident_shared_bytes_are_not_charged_twice() -> None:
     )
 
 
-def test_strict_vram_lane_places_instead_of_refusing(
+def test_shared_resident_lane_places_resident_end_to_end(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """th#1043 end to end through ``place_pipeline``: the overstatement is
-    what turned a working placement into a typed refusal, because th#1107
-    refuses an auto SELECTION into a CPU-touching rung."""
+    """pgw#1025 end to end through ``place_pipeline``: the overstatement used
+    to turn a working RESIDENT placement into an offload one. th#1867 deleted
+    the `strict_vram` refusal that made that misread fatal, but the misread
+    itself is still a real defect — a lane charged twice for bytes already on
+    the card serves slower than it needs to, which is exactly the efficiency
+    question §1.35 says IS the question."""
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(memory, "get_available_vram_gb", lambda *a, **k: 45.0)
     monkeypatch.setattr(memory, "get_total_vram_gb", lambda *a, **k: 80.0)
@@ -84,7 +88,6 @@ def test_strict_vram_lane_places_instead_of_refusing(
 
     result = memory.place_pipeline(
         _SharedLanePipeline(), mode="auto", ref="qwen-image/edit",
-        strict_vram=True,
     )
     assert applied == ["off"]
     assert result["mode"] == "off"
