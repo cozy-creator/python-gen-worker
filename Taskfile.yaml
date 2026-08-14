@@ -9,7 +9,7 @@ tasks:
       - uv build
 
   # THERE IS NO `task publish`, deliberately (pgw#1140, 2026-08-12). PyPI
-  # publication is the TAG PUSH: `.github/workflows/publish.yml` refuses to ship
+  # publication is the TAG PUSH: `.github/workflows/publish.yaml` refuses to ship
   # a tree no CI run has proven, and a local `uv publish` walks around that gate.
   # One procedure, and it lives in docs/releasing.md. Do not re-add this task.
   #
@@ -132,7 +132,7 @@ tasks:
       pgw#944 — fail if the VENDORED contract was hand-edited: the local
       proto/worker_scheduler.proto must hash to proto/PROTO_DIGEST, the same
       digest tensorhub commits. Gated in CI by
-      .github/workflows/proto-contract.yml on PRs into dev AND master.
+      .github/workflows/proto-contract.yaml on PRs into dev AND master.
     cmds:
       - PROTO_SKIP_PEER=1 scripts/proto-drift-check.sh
 
@@ -220,7 +220,7 @@ tasks:
     # module/session fixture and everything that shares its process stay
     # together. Override with `task test WORKERS=1` to debug serially.
     #
-    # pgw#808: `tests_v2/` runs as its own step, mirroring ci.yml — a suite CI
+    # pgw#808: `tests_v2/` runs as its own step, mirroring ci.yaml — a suite CI
     # gates on but `task test` skips is the same dead weight in a slower form.
     vars:
       WORKERS: '{{.WORKERS | default "4"}}'

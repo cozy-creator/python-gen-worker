@@ -1,7 +1,7 @@
 # Releasing gen-worker
 
-**This file is the ONLY release procedure.** Publication is the **tag push** — `publish.yml` refuses
-to ship a tree no CI run has proven. `Taskfile.yml` deliberately has no `publish` task: a local
+**This file is the ONLY release procedure.** Publication is the **tag push** — `publish.yaml` refuses
+to ship a tree no CI run has proven. `Taskfile.yaml` deliberately has no `publish` task: a local
 `uv publish` walks around that gate, and a second written procedure is how a cutter ends up
 following the stale one. **No local mint is a release gate** — the `rig:*` tasks are development
 vehicles, they run real inductor/AOTI compiles, and Paul's 2026-08-10 hard cut puts every mint on a
@@ -92,9 +92,9 @@ one version deliberately; do not reach for a global exact pin to get it.
 
 ## The gate — what actually has to be green
 
-`ci.yml`. **A local `pytest` run is not the gate** and will let you push a red.
+`ci.yaml`. **A local `pytest` run is not the gate** and will let you push a red.
 
-Since pgw#952 it is TWO PARALLEL JOBS, and both must be green — `publish.yml` keys on
+Since pgw#952 it is TWO PARALLEL JOBS, and both must be green — `publish.yaml` keys on
 the run's conclusion, which is success only when both are. It runs on **every PR into `master`**
 (pgw#977 narrowed the trigger back to `[master]` alone when `dev` was deleted, so that IS the
 every-lane trigger), plus `workflow_dispatch` — so a cut no longer inherits a pile of unproven lane
@@ -116,11 +116,11 @@ merges. A third context, `drift`, also gates.
 3. `pytest tests/ -n 4 --dist loadfile`
 4. `pytest tests_v2/ -n 4 --dist loadfile` — **`testpaths = ["tests"]`, so a bare `pytest` skips this.**
 
-**`ruff check src/gen_worker` is NOT a gate.** `ci.yml` runs it with
+**`ruff check src/gen_worker` is NOT a gate.** `ci.yaml` runs it with
 `continue-on-error: true` (lint debt, mostly `worker.py`) — it is visible in
 the logs and blocks nothing. Do not spend cut time on red ruff output.
 
-**Publishing additionally requires a green CI run carrying this exact TREE** (`publish.yml` compares
+**Publishing additionally requires a green CI run carrying this exact TREE** (`publish.yaml` compares
 tree SHAs, not commit SHAs). Tag a commit CI has already proven, or dispatch CI on the tag and re-run
 publish.
 
@@ -135,7 +135,7 @@ Measured on the 0.90.6 cut: three reds, none authored by the cutter — another 
 stale pgw#849 baseline entry, and **two tests that had never passed CI in their lives** (established
 by `git merge-base --is-ancestor` against the last green run).
 
-**Since pgw#952** every lane PR is gated, so the debt stopped accruing: `ci.yml` had been
+**Since pgw#952** every lane PR is gated, so the debt stopped accruing: `ci.yaml` had been
 `branches: [master]` while lanes targeted `dev`, and such a PR ran NO CI AT ALL (PR #466's
 `statusCheckRollup` was literally `[]`). `dev` has since been deleted and pgw#977 pointed the
 trigger back at `master`, which is now where every lane PRs — so a red is refused at the lane PR
@@ -201,8 +201,8 @@ git merge-base --is-ancestor <commit> HEAD    # per must-ride
 git rev-list --count v<prev>..HEAD            # and COUNT it; do not estimate
 
 # 3. green CI on this exact tree, then tag and push
-gh workflow run ci.yml --ref <branch>
-git tag -s v<X.Y.Z> -m "..." && git push origin v<X.Y.Z>   # tag push triggers publish.yml
+gh workflow run ci.yaml --ref <branch>
+git tag -s v<X.Y.Z> -m "..." && git push origin v<X.Y.Z>   # tag push triggers publish.yaml
 ```
 
 **Tags are SSH-SIGNED** (`git tag -s`; the repo sets `gpg.format=ssh` + `user.signingkey`). Check
@@ -211,13 +211,13 @@ release marker, which v0.110.0 is.
 
 ### Only a DISPATCHED run proves a tree — the gate enforces this, you do not have to remember it
 
-Step 3 is `gh workflow run ci.yml --ref <branch>` for a reason: a `workflow_dispatch` (or `push`) run
+Step 3 is `gh workflow run ci.yaml --ref <branch>` for a reason: a `workflow_dispatch` (or `push`) run
 checks out the ref it names, so its `head_sha` genuinely names the tree it built. **A `pull_request`
-run does not** — `ci.yml` checks out with no `ref:`, so GitHub builds `refs/pull/<n>/merge`, your head
+run does not** — `ci.yaml` checks out with no `ref:`, so GitHub builds `refs/pull/<n>/merge`, your head
 merged with whatever `master` is at that moment, while still recording your branch head as
 `head_sha`.
 
-**`publish.yml` refuses a `pull_request` run as proof** (pgw#1191, `scripts/assert_ci_proof.py`), so
+**`publish.yaml` refuses a `pull_request` run as proof** (pgw#1191, `scripts/assert_ci_proof.py`), so
 this is a rule the gate holds rather than a step you can forget. If you see it, the refusal tells you
 which problem you have:
 

@@ -45,7 +45,7 @@
 # other side. The suite reaches exactly three third parties, all of which now
 # degrade to a counted skip below rather than to a red:
 #
-#   github.com  the pinned llama-server tarball (ci.yml, continue-on-error).
+#   github.com  the pinned llama-server tarball (ci.yaml, continue-on-error).
 #   Docker Hub  `ubuntu:24.04` for the pgw#858 root parent (exit 125 -> skip).
 #   PyPI        `uv build` + `uv pip install` in the pgw#740 wheel row — the
 #               same PyPI `uv sync --locked` already required in step 5.

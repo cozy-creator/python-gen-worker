@@ -25,7 +25,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "assert_ci_proof.py"
-PUBLISH_YML = REPO / ".github" / "workflows" / "publish.yml"
+PUBLISH_YAML = REPO / ".github" / "workflows" / "publish.yaml"
 
 TAG_TREE = "aaaa111122223333444455556666777788889999"
 OTHER_TREE = "bbbb111122223333444455556666777788889999"
@@ -147,7 +147,7 @@ def test_failed_and_unresolvable_runs_are_ignored_not_trusted() -> None:
 
 
 # --------------------------------------------------------------------------
-# the CLI, driven exactly as publish.yml drives it
+# the CLI, driven exactly as publish.yaml drives it
 # --------------------------------------------------------------------------
 
 
@@ -174,7 +174,7 @@ def test_cli_exits_nonzero_and_explains_itself_on_a_pr_only_proof(tmp_path: Path
     assert "::error::" in proc.stderr
     assert gate.ONLY_PULL_REQUEST_PROOF in proc.stderr
     # It must tell the releaser the ONE command that fixes it.
-    assert "gh workflow run ci.yml" in proc.stderr
+    assert "gh workflow run ci.yaml" in proc.stderr
 
 
 def test_cli_exits_zero_on_a_dispatched_proof(tmp_path: Path) -> None:
@@ -196,10 +196,10 @@ def test_cli_exits_zero_on_a_dispatched_proof(tmp_path: Path) -> None:
 def test_publish_workflow_calls_the_gate_and_keeps_no_inline_matcher() -> None:
     """A gate that can be quietly replaced by the shell loop it fixed is not a
     gate. This is the row that goes red if someone inlines the match again."""
-    text = PUBLISH_YML.read_text()
+    text = PUBLISH_YAML.read_text()
 
     assert "scripts/assert_ci_proof.py" in text
     assert 'select(.conclusion=="success")' not in text, (
-        "publish.yml matches CI runs inline again — the pgw#1191 rule "
+        "publish.yaml matches CI runs inline again — the pgw#1191 rule "
         "(a pull_request run proves the MERGE tree, not the head) is bypassed"
     )

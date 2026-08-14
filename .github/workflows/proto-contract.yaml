@@ -4,16 +4,16 @@ name: proto contract
 # copy of tensorhub's canonical copy. Until th#1457/#1488 makes the schema
 # generated, the two are maintained by hand and this gate keeps them identical.
 #
-# SEPARATE FROM ci.yml on purpose — but NOT for the reason first written here.
-# The original text said ci.yml was master-only "because CI spend is metered
+# SEPARATE FROM ci.yaml on purpose — but NOT for the reason first written here.
+# The original text said ci.yaml was master-only "because CI spend is metered
 # (WORKSPACE-GIT-POLICY.md)". pgw#952 measured that premise and it is false for
 # THIS repo: python-gen-worker is PUBLIC, so standard-runner minutes are free and
-# unmetered. ci.yml now runs on `[dev, master]` like this workflow does.
+# unmetered. ci.yaml now runs on `[dev, master]` like this workflow does.
 #
 # What still justifies a separate file is COST SHAPE, not spend: this job is a
 # sha256sum plus one codegen (~40s, no llama-server, no pytest), so it returns a
-# contract verdict in well under a minute instead of behind ci.yml's 15m suite,
-# and keeping it out of ci.yml is what guarantees it stays that cheap.
+# contract verdict in well under a minute instead of behind ci.yaml's 15m suite,
+# and keeping it out of ci.yaml is what guarantees it stays that cheap.
 #
 # This side runs LAYER 1 ONLY (local copy vs the shared PROTO_DIGEST). Layer 2 —
 # comparing against tensorhub's copy — cannot run here: tensorhub is a PRIVATE
@@ -30,7 +30,7 @@ on:
       - "scripts/proto-drift-check.sh"
       - "scripts/vendor-proto.sh"
       - "src/gen_worker/pb/**"
-      - ".github/workflows/proto-contract.yml"
+      - ".github/workflows/proto-contract.yaml"
       # pgw#952: the second step REGENERATES the bindings with grpc_tools.protoc
       # and diffs them, so the generator's own version is an input to this
       # gate's verdict. A `grpcio-tools` bump moves the generated header and the
