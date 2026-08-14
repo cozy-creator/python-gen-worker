@@ -38,7 +38,6 @@ from gen_worker.models.refs import normalize_model_ref
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs
 from gen_worker.models import store as store_mod
-from torch_compiled_graphs import CallIngress, CallInput
 
 FAMILY = "sdxl"
 
@@ -65,6 +64,11 @@ class _Unet:
 class _Pipe:
     def __init__(self) -> None:
         self.unet = _Unet()
+
+
+class _FakeRunner:
+    def __init__(self) -> None:
+        self.calls = 0
 
 
 #: per-test wiring the endpoint instance reads at setup/handler time.
@@ -113,18 +117,11 @@ def _fake_arm(key: str, ref: str):
                 publisher: Any = None) -> "fleet_cells.ArmOutcome":
         unet = pipe.unet
         # production wraps a REGISTRY; `is_armed` reads it.
-        _runner = aot_serve.ArtifactRunner(
-            package=None,
-            contract=CallIngress(
-                parameters=("sample",),
-                flat_arity=1,
-                inputs=(CallInput(
-                    "sample", 0, "sample", 0, (), "sample", "float32", (1,),
-                ),),
-            ),
-            constants=(), module_name="unet", entry="unet/main")
-        _dispatch = aot_serve.EntryDispatch(declared=("unet/main",))
-        _dispatch.add("unet/main", _runner)
+        _runner = _FakeRunner()
+        _dispatch = aot_serve.EntryDispatch(
+            runners=(("unet/main", _runner),),  # type: ignore[arg-type]
+            declared=("unet/main",),
+        )
         state = {"successful_calls": 0, "failed": False,
                  "original": unet.forward, "runner": _dispatch}
         # The two markers are DIFFERENT SHAPES in production and
@@ -138,7 +135,7 @@ def _fake_arm(key: str, ref: str):
             "meta": {},
             "targets": {"unet": {
                 "module": unet, "attr": "forward", "state": state}},
-            "entries": {"unet/main": {"key": ""}},
+            "entries": {"unet/main": {"compiled_graph_key": key}},
         })
         # An `aot_serve.note_aot_key(key)` stood here — the ONE line no
         # production arm route ever called, which is why these rows were green

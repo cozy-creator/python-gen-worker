@@ -27,6 +27,7 @@ import json
 import os
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from harness.cell_meta import exported_cell_meta
@@ -133,45 +134,30 @@ def _publisher(calls):
 # ---------------------------------------------------------------------------
 
 
-_ADOPT_META = {"cell_key": "cg-key-v1-" + "d" * 56, "family": "fam",
-               "kind": "aot-inductor"}
-
-
-def _real_cell(path: Path, meta: dict) -> Path:
-    """A tarball with a READABLE `metadata.json` at the root.
-
-    pgw#1098: these helpers used to write raw bytes and patch the metadata
-    read. `adopt_delegated_mint` now refuses `cell_envelope_unreadable` before
-    the arm — unreadable is no longer the same thing as absent — so a test
-    about ADOPTION has to hand it a cell it can actually read.
-    """
-    import io as _io
-    import json as _json
-    import tarfile as _tarfile
-
-    payload = _json.dumps(meta).encode()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _tarfile.open(path, mode="w:gz") as tar:
-        info = _tarfile.TarInfo("metadata.json")
-        info.size = len(payload)
-        tar.addfile(info, _io.BytesIO(payload))
-    return path
+_ADOPT_META = exported_cell_meta(family="fam")
 
 
 def _adopted(monkeypatch, pending):
     """Drive the pending to ADOPTED the way the delegated driver does: the
-    child wrote a cell, `arm_aot` accepted it, `adopt_delegated_mint` records
-    the identity. The arm itself is `provision`'s to prove (pgw#805)."""
-    child = _real_cell(pending.mint_root / "child-cell.tar.gz", _ADOPT_META)
+    child wrote one TCG artifact, the one arm seam accepted its exact key, and
+    `adopt_delegated_mint` records the durable object. TCG admission and real
+    binding have their own integration tests; this helper isolates fleet
+    obligation/publish policy without reviving the deleted artifact format."""
+    child = pending.mint_root / "compiled-graph.tar.gz"
+    child.parent.mkdir(parents=True, exist_ok=True)
+    child.write_bytes(b"opaque-tcg-artifact")
+    key = str(_ADOPT_META["compiled_graph_key"])
+    monkeypatch.setattr(fc, "_stage_durable", lambda *_a, **_k: key)
     monkeypatch.setattr(
-        provision, "arm_aot", lambda *a, **k: AdoptOutcome.hit())
-    # pgw#1098: the pgw#1042 divergence gate now actually RUNS on these
-    # fixtures. It used to be skipped silently because `meta` was `None` — the
-    # very hole this issue closes — so stubbing it here is making an existing
-    # bypass EXPLICIT, not adding one. These tests are about the publish path;
-    # the gate's own verdict is `test_handback_key_axes_pgw1042`'s.
-    monkeypatch.setattr(fc, "arm_axis_divergence", lambda arm_key, meta, **_kw: "")
-    # pgw#1176: the adopt takes the SET of entry artifacts.
+        fc,
+        "_arm_compiled_graph",
+        lambda *_a, **_k: (True, dict(_ADOPT_META), ("", "")),
+    )
+    monkeypatch.setattr(
+        fc,
+        "_admit_durable",
+        lambda *_a, **_k: SimpleNamespace(artifact=child),
+    )
     return fc.adopt_delegated_mint(_Pipe(), pending, [child])
 
 
@@ -192,8 +178,8 @@ def test_cell_selection_bug_reports_and_self_mints(monkeypatch, tmp_path):
     """th#1031: a self-requested, identity-verified cell that refuses to
     arm is still a BUG — reported to the caller via ``ArmOutcome.
     selection_bug`` (unchanged wire visibility) — but no longer aborts
-    arming. cell_key has no graph-shape axis, so two structurally different
-    graphs can legitimately collide on one key; a worker stuck retrying the
+    arming. A worker stuck retrying an exact-key artifact that still cannot
+    arm is worse than
     identical unusable cell forever is worse than a loud report + recovery.
     This call falls through to self-mint exactly like an ordinary miss."""
     bug = cc.CellSelectionBugError("self-requested cell refused to arm")
@@ -345,7 +331,9 @@ def test_publish_failure_never_affects_serving(monkeypatch, tmp_path):
     class _Pub(fc.CellPublisher):
         def publish(self, family, artifact, meta, mint_duration_ms=0):
             refused.set()
-            raise fc.CellPublishRefused("cell_publish_untrusted_tier: community_tier")
+            raise fc.CellPublishRefused(
+                "compiled_graph_publish_untrusted_tier: community_tier"
+            )
 
     pub = _Pub(base_url="http://hub", worker_jwt=lambda: "jwt", image_digest="d")
     _mintable(monkeypatch)
@@ -416,12 +404,13 @@ def _granted(body, repo: str) -> dict:
     with ITS OWN token (pgw#1224 / th#1842 PR #1121)."""
     entries = (body or {}).get("entries") or []
     return {
-        "object": "cell_publish_intent_batch",
+        "object": "compiled_graph_publish_intent_batch",
         "repo": repo,
         "family": str((body or {}).get("family") or ""),
         "granted": len(entries),
         "answers": [
-            {"cell_key": str(e.get("cell_key") or ""), "status": "granted",
+            {"compiled_graph_key": str(e.get("compiled_graph_key") or ""),
+             "status": "granted",
              "capability_token": f"cap-token-{i}",
              "expires_at_unix": 4102444800}
             for i, e in enumerate(entries)
@@ -434,7 +423,9 @@ def test_publisher_drives_intent_publish_v2_complete(monkeypatch, tmp_path):
     # pgw#1046: a real exported-cell envelope — the publish path recomputes the
     # key from its blocks, so an invented one is refused before the intent.
     meta = exported_cell_meta(sku="b200", gen_worker="0.39.0")
-    key = meta["cell_key"]
+    key = meta["compiled_graph_key"]
+    monkeypatch.setattr(cc, "runtime_key", lambda: {"sku": "b200"})
+    monkeypatch.setattr(cc, "gen_worker_version", lambda: "0.39.0")
 
     def _post(url, headers=None, json=None, timeout=None):
         posts.append((url, json))
@@ -490,13 +481,13 @@ def test_publisher_drives_intent_publish_v2_complete(monkeypatch, tmp_path):
     assert pub.publish("fam", artifact, meta) == "cp-42"
 
     intent_url, intent_body = posts[0]
-    assert intent_url.endswith("/v1/worker/cells/publish-intent")
+    assert intent_url.endswith("/v1/worker/compiled-graphs/publish-intent")
     # The claimed axes the hub will attest.
     assert intent_body["axes"] == {
         "sku": "b200", "image_digest": "sha256:img", "gen_worker": "0.39.0"}
     # pgw#1224: the KEY is per ENTRY, the attested axes are per BATCH. A
     # one-artifact publish is a one-entry batch — the single-entry body is gone.
-    assert [e["cell_key"] for e in intent_body["entries"]] == [key]
+    assert [e["compiled_graph_key"] for e in intent_body["entries"]] == [key]
     assert set(intent_body) == {"family", "axes", "entries"}
 
     kind, kw = committed[0]
@@ -509,17 +500,19 @@ def test_publisher_drives_intent_publish_v2_complete(monkeypatch, tmp_path):
     assert "tags" not in kw  # a cell publish never binds tags
     # th#1340 refuses a body that names the cell identity: it is hub-derived
     # and rides the capability token.
-    for forbidden in ("cell_publish", "cell_key", "family", "owning_endpoint_id",
+    for forbidden in ("compiled_graph_publish", "compiled_graph_key", "family", "owning_endpoint_id",
                       "axes", "default_flavor"):
         assert forbidden not in kw
 
     complete_url, complete_body = posts[-1]
-    assert complete_url.endswith("/v1/worker/cells/publish-complete")
+    assert complete_url.endswith("/v1/worker/compiled-graphs/publish-complete")
     assert complete_body["ok"] is True and complete_body["checkpoint_id"] == "cp-42"
     # pgw#711's artifact_digest/manifest_digest are gone: the hub's
-    # publish-complete route has no such fields (it decodes family, cell_key,
+    # publish-complete route has no such fields (it decodes family, key,
     # checkpoint_id, ok, error) and the delta-1 seam refuses unlisted keys.
-    assert set(complete_body) == {"family", "cell_key", "checkpoint_id", "ok"}
+    assert set(complete_body) == {
+        "family", "compiled_graph_key", "checkpoint_id", "ok"
+    }
 
     # Every LEG of the publish is on the wire, not just its terminus.
     assert [p for k, p in events if k == "self_mint_publish"] == [
@@ -528,7 +521,13 @@ def test_publisher_drives_intent_publish_v2_complete(monkeypatch, tmp_path):
 
 def test_publisher_typed_refusal_is_terminal(monkeypatch, tmp_path):
     def _post(url, headers=None, json=None, timeout=None):
-        return _FakeResp(403, {"error": "cell_publish_forged_axis", "message": "axis=sku"})
+        return _FakeResp(
+            403,
+            {
+                "error": "compiled_graph_publish_forged_axis",
+                "message": "axis=sku",
+            },
+        )
 
     import requests
 
@@ -537,7 +536,9 @@ def test_publisher_typed_refusal_is_terminal(monkeypatch, tmp_path):
     artifact.write_bytes(b"bytes")
     pub = fc.CellPublisher(
         base_url="http://hub", worker_jwt=lambda: "worker-jwt", image_digest="d")
-    with pytest.raises(fc.CellPublishRefused, match="cell_publish_forged_axis"):
+    with pytest.raises(
+        fc.CellPublishRefused, match="compiled_graph_publish_forged_axis"
+    ):
         pub.publish("fam", artifact, exported_cell_meta())
 
 

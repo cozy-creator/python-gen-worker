@@ -117,11 +117,11 @@ ACTIONS: Dict[str, HubAction] = {
         # were exactly that gap; `status`/`detail`/`axes` were names on
         # `publish-complete` that no caller and no hub route ever had.
         # pgw#1224 (th#1842 PR #1121): the intent is a BATCH. `entries[]`
-        # carries the per-artifact facts — `cell_key`, `identity_axes` (all
+        # carries the per-artifact facts — `compiled_graph_key`, `identity_axes` (all
         # three key axes restated, never hoisted), `mint_duration_ms` — and
         # `axes` stays batch-level because all three of ITS members are
         # properties of the POD, not of a compiled graph. The old top-level
-        # `cell_key`/`identity_axes`/`mint_duration_ms` are GONE: a table that
+        # `compiled_graph_key`/`identity_axes`/`mint_duration_ms` are GONE: a table that
         # still admitted them would let a client speak the dead shape past the
         # one gate that can refuse it.
         _a(

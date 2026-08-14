@@ -114,7 +114,7 @@ class DevicePeakKey(NamedTuple):
     card: str
     sm: str
     #: The SAME digest the cell key's toolchain axis uses
-    #: (``cell_key.toolchain_axis_digest``), so a banked row and the cell it
+    #: (``torch_compiled_graphs.identity.toolchain_axis_digest``), so a banked row and the graph it
     #: was measured for agree about what "this toolchain" means.
     toolchain: str
     gen_worker: str
@@ -211,29 +211,7 @@ def device_of(pipeline: Any) -> Optional[int]:
     return None
 
 
-def adopt_watermark(device: Optional[int] = None) -> Tuple[int, int]:
-    """``(allocated_now, peak_so_far)`` on this device, or ``(0, 0)``.
-
-    The pair an adopt brackets itself with, and the instrument behind the
-    ``cell_adopt_budget`` row — the only answer anyone has to "where does a
-    loaded cell's device memory go". ``max_memory_allocated`` is
-    process-monotone, so the caller takes ``peak_after - allocated_before``
-    and never resets the counter, which other readers on this process share.
-    """
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return 0, 0
-        dev = torch.cuda.current_device() if device is None else int(device)
-        return (int(torch.cuda.memory_allocated(dev)),
-                int(torch.cuda.max_memory_allocated(dev)))
-    except Exception:  # noqa: BLE001 — a probe never changes an outcome
-        return 0, 0
-
-
 __all__ = [
-    "adopt_watermark",
     "device_of",
     "compiled_graph_peak_rss",
     "record_compiled_graph_peak_rss",

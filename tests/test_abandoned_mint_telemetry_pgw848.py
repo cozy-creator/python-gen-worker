@@ -26,7 +26,6 @@ import pytest
 
 from gen_worker import aot_compile_pool as pool
 from gen_worker import aot_mint, mint_supervisor
-from gen_worker.cell_adopt import AdoptOutcome
 
 _GIB = 1 << 30
 _SNAPSHOT = "phases.json"
@@ -439,22 +438,15 @@ def test_the_unchecked_announcement_is_gone_because_the_gate_landed(
 
     * `_announce_unchecked_numerics` no longer exists. A cell that armed while
       announcing it was unchecked is exactly what the gate refuses now.
-    * `arm_aot` FAILS CLOSED when there is nothing to measure. The old shape
-      of this test drove `arm_aot` with a stub `enable` and asserted True;
-      today that same call arms NOTHING (no marker, no runner, no eager
-      reference), so it must refuse — `phase=unmeasurable`, never `unchecked`.
-
-    The gate's own behaviour lives in `tests/test_numerics_gate_pgw868.py`,
-    which drives the real arm path against a real packed artifact.
+    * the gate FAILS CLOSED when there is nothing to measure. A bare object
+      carries no marker, runner, or eager reference, so it must refuse with
+      `phase=unmeasurable`, never `unchecked`.
     """
     import gen_worker.activity as activity_mod
-    from gen_worker import aot_serve
     from gen_worker.models import provision
 
     assert not hasattr(provision, "_announce_unchecked_numerics")
 
-    monkeypatch.setattr(
-        aot_serve, "enable", lambda *a, **k: AdoptOutcome.hit())
     said: list[tuple[str, str, str]] = []
     monkeypatch.setattr(
         activity_mod, "emit_event",
@@ -464,13 +456,9 @@ def test_the_unchecked_announcement_is_gone_because_the_gate_landed(
     cfg = type("Cfg", (), {"family": "sdxl", "numerics_floor": 0.995,
                            "numerics_warn": 0.999, "lora_bucket": 0,
                            "targets": ()})()
-    # The gate runs on the MINT arm now (adoption runs no
-    # quality gate at all), so this is the flag the minting pod passes. What
-    # this test is about is unchanged: an arm that could not be MEASURED is a
-    # refusal, never a silent `unchecked` announcement.
-    assert provision.arm_aot(
-        object(), cfg, None, Path("cell.pt2"), 0,
-        verify_numerics=True).armed is False
+    # The gate runs on the minting pod; adoption runs no quality gate. An arm
+    # that could not be measured is a refusal, never a silent announcement.
+    assert provision.gate_cell_numerics(object(), cfg, strict=True) is False
     rows = [(d, p) for k, d, p in said if k == activity_mod.KIND_CELL_NUMERICS]
     assert rows, "an arm that could not be measured said nothing"
     detail, phase = rows[-1]

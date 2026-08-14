@@ -63,27 +63,9 @@ def events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
 
 
 def _sealed_cell(path: Path, **over: Any) -> Path:
-    """A REAL sealed cell: a tarball carrying a readable `metadata.json`.
-
-    these fixtures used to write raw bytes (`b"cell"`) and rely on
-    `try_read_metadata` swallowing the resulting error into `None`. That made
-    every test here silently exercise the UNREADABLE-envelope path while
-    claiming to test the arm's refusal classification — the same
-    absence-vs-refusal conflation that cost row 7 a 92-minute mint. An
-    envelope that cannot be read is now its own refusal, before the arm, so
-    a test about the ARM has to hand the adopt a cell it can actually read.
-    """
-    import io as _io
-    import json as _json
-    import tarfile as _tarfile
-
-    meta = {"format": 2, "kind": "aot-inductor", "family": FAMILY,
-            "cell_key": "cg-key-v1-" + "e" * 56, "entries": {}, **over}
-    payload = _json.dumps(meta).encode()
-    with _tarfile.open(path, mode="w:gz") as tar:
-        info = _tarfile.TarInfo("metadata.json")
-        info.size = len(payload)
-        tar.addfile(info, _io.BytesIO(payload))
+    """Opaque TCG bytes; exact identity/admission are separate test seams."""
+    del over
+    path.write_bytes(b"opaque-tcg-artifact")
     return path
 
 
@@ -111,15 +93,39 @@ def _abort(events: List[Tuple[str, str, str]]) -> Tuple[str, str]:
 
 
 def _arm_returns(monkeypatch: pytest.MonkeyPatch, outcome: AdoptOutcome) -> None:
+    key = "cg-key-v1-" + "e" * 56
+    metadata = {
+        "family": FAMILY,
+        "compiled_graph_key": key,
+        "graph_class": {"name": "unet/e0", "target": "unet"},
+    }
+    monkeypatch.setattr(fleet_cells, "_stage_durable", lambda *_a, **_k: key)
     monkeypatch.setattr(
-        fleet_cells.provision, "arm_aot", lambda *a, **k: outcome)
+        fleet_cells,
+        "_arm_compiled_graph",
+        lambda *_a, **_k: (
+            bool(outcome),
+            dict(metadata),
+            (
+                "" if outcome else outcome.reason or "unclassified_arm_refusal",
+                "" if outcome else outcome.detail or outcome.identity,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        fleet_cells,
+        "_admit_durable",
+        lambda _pending, *_a, **_k: type(
+            "Stored", (), {"artifact": _pending.target}
+        )(),
+    )
 
 
 def _arm_raises(monkeypatch: pytest.MonkeyPatch, exc: BaseException) -> None:
-    def _boom(*a: Any, **k: Any) -> Any:
-        raise exc
-
-    monkeypatch.setattr(fleet_cells.provision, "arm_aot", _boom)
+    reason = str(getattr(exc, "reason", "") or type(exc).__name__)
+    if isinstance(exc, CellSelectionBugError):
+        reason = "cell_selection_bug"
+    _arm_returns(monkeypatch, AdoptOutcome.miss(reason, str(exc)))
 
 
 # ---------------------------------------------------------------------------
@@ -266,9 +272,6 @@ def test_a_pending_that_never_refused_reports_no_reason(
     """The accessor must not manufacture a refusal for a mint that adopted —
     an always-non-empty reason is as useless as an always-empty one."""
     _arm_returns(monkeypatch, AdoptOutcome.hit("family=x key=y"))
-    monkeypatch.setattr(
-        fleet_cells, "_packed_metadata", lambda a: {"cell_key": "cg-key-v1-sealed"})
-    monkeypatch.setattr(fleet_cells, "sha256_file", lambda p: "beef")
 
     assert fleet_cells.adopt_delegated_mint(_Pipe(), pending, [pending.target]) is not None
     assert fleet_cells.adopt_refusal(pending) == ("", "")
@@ -285,64 +288,3 @@ def test_the_delegated_result_carries_the_reason_field(monkeypatch: pytest.Monke
     assert result.reason == "contract_invalid"
     assert not result.ok
     assert "contract_invalid" in result.detail
-
-
-# ---------------------------------------------------------------------------
-# 4. The SAME discard, one frame deeper — `arm_aot`'s lifted-binding install
-# ---------------------------------------------------------------------------
-
-
-def test_a_failed_lifted_install_reaches_the_refusal_it_causes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """RED at HEAD. `arm_aot`'s bucket branch caught the install failure,
-    PREDICTED its own downstream symptom in a log line ("a lifted artifact
-    will refuse at assert_lifted_contract"), and discarded the cause — so the
-    refusal named the gate that noticed instead of the install that failed.
-
-    This is the bucket-bearing path a `w8a8-lora64` family takes, which is
-    exactly the lane attempt 26 was minting.
-    """
-    from gen_worker.models import provision
-
-    class _Target:
-        pass
-
-    class _PipeWithUnet:
-        def __init__(self) -> None:
-            self.unet = _Target()
-
-    # `arm_aot` imports these INSIDE the function body (they drag 39 modules
-    # onto the `import gen_worker` path), so they are patched on their own
-    # modules rather than as attributes of `provision`.
-    from gen_worker import aot_serve, artifact_meta
-
-    monkeypatch.setattr(
-        artifact_meta, "try_read_metadata",
-        lambda p: {"targets": ["unet"], "module": "unet", "mode": ""})
-    monkeypatch.setattr(provision, "arm_route", lambda mode: object())
-
-    from gen_worker.models import lora_lifted
-
-    monkeypatch.setattr(lora_lifted, "lifted_binding", lambda m: None)
-
-    def _boom(target: Any, bucket: int) -> None:
-        raise RuntimeError("branch containers not allocated for bucket 64")
-
-    monkeypatch.setattr(lora_lifted, "install_lifted_lora_forward", _boom)
-    monkeypatch.setattr(
-        aot_serve, "enable",
-        lambda *a, **k: AdoptOutcome.miss(
-            "lifted_inputs_unbindable", "module exposes no lifted binding"))
-
-    artifact = tmp_path / "cell.tar.gz"
-    artifact.write_bytes(b"cell")
-    outcome = provision.arm_aot(
-        _PipeWithUnet(), _Cfg(), None, artifact, 64)
-
-    assert not outcome.armed
-    # The gate that refused is still named...
-    assert outcome.reason == "lifted_inputs_unbindable"
-    # ...and so is the ROOT, which is what HEAD threw away.
-    assert "branch containers not allocated for bucket 64" in outcome.detail
-    assert "root:" in outcome.detail

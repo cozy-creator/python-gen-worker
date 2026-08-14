@@ -181,7 +181,7 @@ def test_arm_compile_inside_scope_reaches_enable_compiled(monkeypatch, tmp_path)
     scope = provision.ArmingScope(cfg, tmp_path, None)
     with scope:
         assert provision.arm_compile(pipe) is True
-    assert seen == [(pipe, cfg, tmp_path, None)]
+    assert seen == [(pipe, cfg, tmp_path, "")]
     assert scope.objects == ((pipe, True),)
     # the scope closed: arming outside it is a no-op again (never armed),
     # not a raise — a compiled release's setup() calling arm_compile() a

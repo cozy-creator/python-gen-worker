@@ -12,7 +12,7 @@ unreadable:
   arriving during the mint could never be picked up.
 
 These drive the REAL publisher against a localhost server speaking tensorhub's
-real refusal envelope — real sockets, real threads, a real packed cell — because
+real refusal envelope — real sockets, real threads, opaque exported bytes — because
 what is under test is what the worker does with a live 401, not a mock's idea of
 one. Every wait here is a `Thread.join()` on the publish thread itself: no
 sleeps, no durations.
@@ -44,7 +44,7 @@ FAMILY = "sdxl"
 # credential-lapse legs below have to ride a cell that could genuinely publish.
 META = exported_cell_meta(family=FAMILY, gen_worker="0.76.6",
                           weight_lane="w8a8", lora_bucket=64)
-CELL_KEY = META["cell_key"]
+CELL_KEY = META["compiled_graph_key"]
 
 
 def _jwt(*, lifetime_s: float) -> str:
@@ -124,19 +124,11 @@ def hub():
 
 @pytest.fixture()
 def artifact(tmp_path: Path) -> Path:
-    # packed by the exported packer. `compile_cache.pack` wrote the
-    # `torch-inductor-cache` envelope, whose producer died in pgw#1178 and
-    # whose format is deleted; what a pod publishes is an exported cell, and
-    # what this file is about is the CREDENTIAL on the publish leg, not the
-    # bytes underneath it.
-    from gen_worker import aot_serve
-
-    root = tmp_path / "capture"
-    root.mkdir(parents=True, exist_ok=True)
-    (root / aot_serve.PACKAGE_NAME).write_bytes(b"\x11" * 4096)
-    out = tmp_path / "mintdir" / "cell.tar.gz"
-    out.parent.mkdir()
-    aot_serve.pack(root, out, dict(META))
+    # Artifact construction/admission belongs to TCG. This suite exercises
+    # only the credential on the worker transport seam, so inventing a second
+    # archive format here would test the wrong owner.
+    out = tmp_path / "compiled-graph.tar.gz"
+    out.write_bytes(b"\x11" * 4096)
     return out
 
 
@@ -160,7 +152,9 @@ def test_intent_401_carries_the_hubs_status_and_code(hub, artifact):
     assert exc.code == "unauthorized"
     assert fc._publish_failure_phase(exc) == "unauthorized"
     # The refusal was really spoken over the wire, by the credential we hold.
-    assert hub.httpd.seen == [("/v1/worker/cells/publish-intent", live)]
+    assert hub.httpd.seen == [
+        ("/v1/worker/compiled-graphs/publish-intent", live)
+    ]
 
 
 def test_an_expired_credential_is_named_as_such_not_as_a_generic_401(
@@ -230,7 +224,7 @@ def test_the_background_publish_reports_the_grouped_phase(hub, artifact,
 
     thread = fc._publish_async(
         _publisher(hub, _jwt(lifetime_s=-LAPSE_S)),
-        FAMILY, artifact, dict(META), cell_key_digest=CELL_KEY)
+        FAMILY, artifact, dict(META), compiled_graph_key=CELL_KEY)
     thread.join()  # the publish thread itself is the bound — no clock
 
     assert ("self_mint_publish_failed", "worker_credential_expired") in seen
@@ -261,7 +255,7 @@ def test_the_mint_publisher_reads_the_credential_at_use_time(
     """RED before the fix: `_publisher_from_settings` closed over
     `worker_jwt=lambda: token`, so a rotation landing during the mint — the
     only thing that can save a compile longer than the TTL — was invisible."""
-    from gen_worker import aot_mint, config, worker_credential
+    from gen_worker import config, worker_credential
 
     boot = _jwt(lifetime_s=60)
     rotated = _jwt(lifetime_s=3600)
@@ -270,15 +264,20 @@ def test_the_mint_publisher_reads_the_credential_at_use_time(
     monkeypatch.setenv("TENSORHUB_URL", "http://127.0.0.1:1")
     monkeypatch.delenv("TENSORHUB_PUBLIC_URL", raising=False)
     monkeypatch.delenv("TENSORHUB_TOKEN", raising=False)
-    config.reload_for_test()
+    settings = config.reload_for_test()
     # The CLI's own starting state: nothing has handed the process-wide
     # credential source anything yet.
     worker_credential.reset()
     monkeypatch.setattr(worker_credential, "_BOOTSTRAP", "", raising=False)
 
-    publisher = aot_mint._publisher_from_settings()
-    # `install_bootstrap` must have run here, or the process-wide credential
-    # source is empty and the fallback is silently doing all the work.
+    worker_credential.install_bootstrap(settings)
+    publisher = fc.CellPublisher(
+        base_url="http://127.0.0.1:1",
+        worker_jwt=worker_credential.current,
+        image_digest="sha256:image",
+    )
+    # The process entry installs this same bootstrap before Executor builds
+    # its per-use publisher from the process-wide rotating provider.
     assert publisher.worker_jwt() == boot
 
     # 0.0 = expiry unknown to the installer; the token states its own.

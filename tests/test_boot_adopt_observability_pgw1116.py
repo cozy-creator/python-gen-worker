@@ -552,7 +552,7 @@ def sm_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     combined into a key is faked."""
     import torch
 
-    from gen_worker import aot_serve, compile_cache
+    from gen_worker import compile_cache
 
     full = {
         "sku": "l4", "sm": "sm_89", "torch": str(torch.__version__),
@@ -560,8 +560,6 @@ def sm_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
         "image_digest": "sha256:" + "ab" * 32,
     }
     monkeypatch.setattr(compile_cache, "runtime_key", lambda: dict(full))
-    monkeypatch.setattr(aot_serve, "runtime_key", lambda: {
-        k: full[k] for k in ("sku", "sm", "torch", "cuda")})
 
 
 def test_a_cold_boot_with_a_reachable_hub_actually_issues_the_resolve(

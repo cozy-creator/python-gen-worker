@@ -431,11 +431,12 @@ class Activity:
         _end(self)
 
 
-#: pgw#1176 / th#1839: cell identity travels as TYPED WIRE FIELDS.
+#: pgw#1176 / th#1839: compiled-graph identity travels as TYPED WIRE FIELDS.
 #:
-#: ``ActivityUpdate.family`` / ``.cell_key`` / ``.graph_class`` (proto fields
+#: ``ActivityUpdate.family`` / ``.compiled_graph_key`` / ``.graph_class``
+#: (proto fields
 #: 18-20) land in the hub's existing ``worker_activity_events`` columns. The
-#: prose form they replace was measured: ``detail LIKE 'ref=%#'||cell_key||'
+#: prose form they replace was measured: ``detail LIKE 'ref=%#'||key||'
 #: %'`` matched one of three rows correctly, because four emitters spelled
 #: identity four ways. A fact that has to be regex-scraped out of a sentence
 #: cannot be indexed, cannot be grouped, and returns NULL the first time the
@@ -450,7 +451,7 @@ class Activity:
 
 def emit_event(
     kind: str, detail: str, phase: str = "", duration_ms: int = 0,
-    *, family: str = "", cell_key: str = "", graph_class: str = "",
+    *, family: str = "", compiled_graph_key: str = "", graph_class: str = "",
 ) -> None:
     """One self-contained COMPLETED ActivityUpdate — a countable typed
     EVENT (pgw#680 ``guard_miss``), not a running activity.
@@ -474,7 +475,7 @@ def emit_event(
         state=pb.ActivityState.ACTIVITY_STATE_COMPLETED,
         detail=detail[:2000],
         family=str(family or "")[:200],
-        cell_key=str(cell_key or "")[:200],
+        compiled_graph_key=str(compiled_graph_key or "")[:200],
         graph_class=str(graph_class or "")[:300],
         duration_ms=max(0, int(duration_ms)),
         updated_at_unix_ms=int(time.time() * 1000),

@@ -56,11 +56,24 @@ def test_aot_delivery_materializes_small_variable_chunks(
         )
 
     monkeypatch.setattr(aot_delivery, "download", fake_download)
+    monkeypatch.setattr(
+        aot_delivery.receipts,
+        "verify_delivered_artifact",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        aot_delivery.compiled_graph_store,
+        "store",
+        lambda artifact, **_kwargs: SimpleNamespace(artifact=artifact),
+    )
 
     output = aot_delivery._materialize_named_artifact(
+        "cg-key-v1-" + "a" * 56,
+        "sdxl",
         "repo/family#compiled-graph",
         whole,
         presigned,
+        receipt=object(),  # type: ignore[arg-type]
         cache_dir=tmp_path / "cache",
         what="th#1931 variable-layout proof",
     )

@@ -51,9 +51,7 @@ import torch
 import torch.nn as nn
 from torch._dynamo import exc as dexc
 
-import gen_worker.executor as executor_mod
 from gen_worker import Compile, activity as activity_mod
-from gen_worker import cell_key as cell_key_mod
 from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells, hot_swap
 from gen_worker.api.binding import Hub, wire_ref
@@ -558,15 +556,6 @@ class _Rig:
         monkeypatch.setattr(
             cc, "compile_wall_seconds",
             lambda: self.compile_wall.pop(0) if self.compile_wall else 12.5)
-        # When the guard-closure mint gate is present,
-        # neutralize it — it audits REAL dynamo graphs, which this rig's
-        # simulated torch boundary never creates. Orthogonal to the
-        # guard-miss doctrine under test here.
-        try:
-            from gen_worker import guard_closure as gc_mod
-
-        except ImportError:
-            pass
         monkeypatch.setattr(
             self.ex, "_enable_compiled",
             lambda p, cfg, artifact, delivered=None, arm=None, boot_local_key="":

@@ -1148,7 +1148,7 @@ def _note_durable(key: str, event: str) -> None:
 
 
 def publishes_in_flight() -> Dict[str, Tuple[str, float]]:
-    """``{cell_key: (family, started_monotonic)}`` for every publish whose
+    """``{compiled_graph_key: (family, started_monotonic)}`` for each publish whose
     thread has neither succeeded nor failed yet (pgw#815)."""
     with _IN_FLIGHT_LOCK:
         return dict(_IN_FLIGHT)
@@ -1156,7 +1156,7 @@ def publishes_in_flight() -> Dict[str, Tuple[str, float]]:
 
 def _publish_async(
     publisher: CellPublisher, family: str, artifact: Path, meta: dict,
-    cell_key_digest: str = "", mint_duration_ms: int = 0,
+    compiled_graph_key: str = "", mint_duration_ms: int = 0,
     arm_token: str = "",
 ) -> threading.Thread:
     """Ship an ALREADY-DURABLE cell in the background (pgw#1183 / §1.5).
@@ -1178,7 +1178,7 @@ def _publish_async(
     leaves the record ``pending`` for :func:`resume_owed_publishes` to
     re-attempt on the next boot. The pod no longer has to survive anything.
     """
-    key = cell_key_digest or str(meta.get("compiled_graph_key") or "")
+    key = compiled_graph_key or str(meta.get("compiled_graph_key") or "")
     try:
         size_mb = artifact.stat().st_size / 1e6
     except OSError:
@@ -1304,7 +1304,7 @@ def resume_owed_publishes(
         threads.append(_publish_async(
             publisher, cell.family or str(meta.get("family") or ""),
             resolved.artifact, meta,
-            cell_key_digest=cell.compiled_graph_key,
+            compiled_graph_key=cell.compiled_graph_key,
             arm_token=cell.arm_token))
     if threads:
         logger.info(
@@ -1356,7 +1356,7 @@ def _arm_candidate(
     pipe: Any,
     cfg: Any,
     cache_dir: Optional[Path],
-    artifact: Optional[Path],
+    compiled_graph_key: str,
     *,
     ref: str,
     snapshot_digest: str,
@@ -1382,12 +1382,14 @@ def _arm_candidate(
             artifact_kind=artifact_kind,
             artifact_key=snapshot_digest,
         )
-        if artifact is not None and boot_mod.in_boot()
+        if compiled_graph_key and boot_mod.in_boot()
         else None
     )
     started = time.monotonic()
     try:
-        outcome = provision.enable_compiled(pipe, cfg, cache_dir, artifact)
+        outcome = provision.enable_compiled(
+            pipe, cfg, cache_dir, compiled_graph_key
+        )
     except BaseException as exc:
         if span is not None:
             span.close(exc)
@@ -1420,6 +1422,7 @@ def _arm_candidate(
         reason=outcome.reason,
         detail=outcome.detail or outcome.identity,
         pipeline_id=id(pipe),
+        compiled_graph_key=compiled_graph_key,
     )
 
 
@@ -1427,7 +1430,7 @@ def enable_compiled(
     pipe: Any,
     cfg: Any,
     cache_dir: Optional[Path] = None,
-    artifact: Optional[Path] = None,
+    compiled_graph_key: str = "",
     publisher: Optional[CellPublisher] = None,
     delegate: Optional[bool] = None,
     delivered_ref: str = "",
@@ -1455,7 +1458,7 @@ def enable_compiled(
             armed=False, eager_reason=EagerPhase.OPERATOR_EAGER_ONLY)
     adoptions: List[CellAdoption] = []
     outcome = _arming_policy(
-        pipe, cfg, cache_dir, artifact,
+        pipe, cfg, cache_dir, compiled_graph_key,
         publisher=publisher, delegate=delegate,
         delivered_ref=delivered_ref, delivered_digest=delivered_digest,
         adoptions=adoptions, boot_local_key=boot_local_key,
@@ -1592,6 +1595,7 @@ def arm_ordered(
         reason=outcome.reason,
         detail=outcome.detail or outcome.identity,
         pipeline_id=id(pipe),
+        compiled_graph_key=want_key,
     )
     if not outcome.armed:
         if bucket:
@@ -1611,7 +1615,7 @@ def _arming_policy(
     pipe: Any,
     cfg: Any,
     cache_dir: Optional[Path],
-    artifact: Optional[Path],
+    compiled_graph_key: str,
     *,
     publisher: Optional[CellPublisher],
     delegate: Optional[bool],
@@ -1668,17 +1672,17 @@ def _arming_policy(
     # DELETED. A connected worker never lists, ranks or chooses a published
     # cell — the hub resolves the exact artifact and names it in
     # `Arm.artifact`, and `arm_ordered` is that path. What remains below is
-    # the hub-less policy: the delivered artifact, then self-mint/intake.
+    # the hub-less policy: an exact local key, then self-mint/intake.
     try:
         delivered_out, delivered_row = _arm_candidate(
-            pipe, cfg, cache_dir, artifact,
+            pipe, cfg, cache_dir, compiled_graph_key,
             ref=delivered_ref,
             snapshot_digest=delivered_digest,
             artifact_kind="",
         )
-        if artifact is not None:
+        if compiled_graph_key:
             # ONE rule, the same one `_arm_candidate` opens its boot span on: a
-            # call with no delivered artifact is not an adoption ATTEMPT —
+            # call with no exact local key is not an adoption ATTEMPT —
             # `compile_cache.enable` also covers the seeded and ALLOW_COLD
             # lanes — so it must not manufacture a row for a cell that was
             # never offered, in either direction.
@@ -2225,13 +2229,13 @@ def arm_from_local_store(
         # same record must re-arm these bytes rather than pay a second lookup.
         _FINALIZED[arm_key.token] = minted
     logger.info(
-        "fleet-cells: armed %s from THIS MACHINE's local cell store "
+        "fleet-cells: armed %s from this machine's compiled-graph store "
         "(key=%s, %.1f MB, route=%s) — no mint, no hub, no network (§4.28)",
         family, key, local.bytes / 1e6, route)
     activity_mod.emit_event(
-        "local_cell_armed",
-        f"family={family} arm_key={arm_key.token} cell_key={key} "
-        f"route={route}: this machine minted this cell on an earlier boot and "
+        "local_compiled_graph_armed",
+        f"family={family} arm_key={arm_key.token} compiled_graph_key={key} "
+        f"route={route}: this machine minted this compiled graph on an earlier boot and "
         f"stored it locally; it arms from disk with no mint and no publish "
         f"route"
         + (" — addressed by the key THIS BOOT derived, so the arm-token memo "
@@ -2364,7 +2368,7 @@ def adopt_delegated_mint(
                 f"unaffected.",
                 phase=row_refusal[0],
                 family=pending.family,
-                cell_key=row_key,
+                compiled_graph_key=row_key,
                 graph_class=entry_name or row.name,
             )
             continue
@@ -2388,15 +2392,15 @@ def adopt_delegated_mint(
         # which every reader already knew from the event kind.
         state["adopt_refusal"] = (reason, detail)
         # pgw#1042: BOTH identities, labeled. The parent's computed ARM key
-        # and the child's stamped cell key live in disjoint spaces by
+        # and the child's stamped compiled-graph key live in disjoint spaces by
         # formula (pgw#1032/#1033); one unlabeled `key=` carrying the arm
         # key while the detail quoted the stamped one is what the pod lane
         # read as "the child computed a different key".
-        stamped = str((meta or {}).get("cell_key") or "") or "unreadable"
+        stamped = str((meta or {}).get("compiled_graph_key") or "") or "unreadable"
         activity_mod.emit_event(
             "self_mint_abort",
             f"family={pending.family} arm_key={pending.arm_token} "
-            f"cell_key={stamped}: the child process produced a cell this "
+            f"compiled_graph_key={stamped}: the child produced a compiled graph this "
             f"runtime could not adopt "
             f"({reason}{': ' + detail if detail else ''}); serving stays "
             f"eager, nothing is published, and the artifact is QUARANTINED in "
@@ -2553,7 +2557,7 @@ def _admit_durable(
     activity_mod.emit_event(
         "compiled_graph_stored",
         f"family={pending.family} arm_key={pending.arm_token} "
-        f"cell_key={key}: durable in this machine's local CAS before it "
+        f"compiled_graph_key={key}: durable in this machine's local CAS before it "
         f"armed, and admitted now that it has (§1.5); every later boot of "
         f"this machine arms it from disk with no mint"
         + ("" if cell.sink != compiled_graph_store.SINK_OWED
@@ -2614,7 +2618,7 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
             # upload a race against the cleanup.
             getattr(state.get("minted"), "artifact", pending.target),
             dict(state.get("meta") or {}),
-            cell_key_digest=str(
+            compiled_graph_key=str(
                 getattr(state.get("minted"), "compiled_graph_key", "")
                 or pending.arm_token),
             mint_duration_ms=int(state.get("mint_duration_ms") or 0),

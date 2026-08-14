@@ -177,7 +177,6 @@ module = [
   "gen_worker.aot_serve",
   "gen_worker.boot_key",
   "gen_worker.boot_phases",
-  "gen_worker.cell_key",
   "gen_worker.cli.invoke",
   "gen_worker.cli.local_context",
   "gen_worker.cli.prefetch",

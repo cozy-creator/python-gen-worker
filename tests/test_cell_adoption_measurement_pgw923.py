@@ -150,24 +150,24 @@ class _Cfg:
     lora_bucket = 0
 
 
+KEY = "cg-key-v1-" + "a" * 56
+
+
 def test_the_arm_is_measured_and_recorded_as_the_cell_arm_boot_phase(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`cell_arm` was a DECLARED boot phase with no producer anywhere in the
     SDK — only unit tests constructed it. It now brackets the real arm, and its
     duration is the same interval the adoption reports, so the boot ladder and
     the hub's adoption measurement cannot disagree about what an arm cost.
     """
-    artifact = tmp_path / "cell.tar.gz"
-    artifact.write_bytes(b"cell")
-
-    def _slow_arm(pipe: Any, cfg: Any, cache_dir: Any, art: Any) -> AdoptOutcome:
+    def _slow_arm(pipe: Any, cfg: Any, cache_dir: Any, key: Any) -> AdoptOutcome:
         time.sleep(_INDUCED_ARM_S)
-        return AdoptOutcome.hit("family=sdxl key=ck1-abc")
+        return AdoptOutcome.hit(f"family=sdxl key={key}")
 
     monkeypatch.setattr(fleet_cells.provision, "enable_compiled", _slow_arm)
     outcome = fleet_cells.enable_compiled(
-        _Pipe(), _Cfg(), artifact=artifact,
+        _Pipe(), _Cfg(), compiled_graph_key=KEY,
         delivered_ref=REF, delivered_digest=DIGEST)
 
     assert outcome.armed
@@ -184,17 +184,15 @@ def test_the_arm_is_measured_and_recorded_as_the_cell_arm_boot_phase(
 
 
 def test_a_refused_arm_records_the_reason_on_its_boot_phase(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    artifact = tmp_path / "cell.tar.gz"
-    artifact.write_bytes(b"cell")
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
         lambda *a, **k: AdoptOutcome.miss("host_isa_unsupported", "sparc64"))
     monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: False)
 
     outcome = fleet_cells.enable_compiled(
-        _Pipe(), _Cfg(), artifact=artifact,
+        _Pipe(), _Cfg(), compiled_graph_key=KEY,
         delivered_ref=REF, delivered_digest=DIGEST)
 
     assert not outcome.armed

@@ -140,6 +140,29 @@ def _mark_fake_guard(pipeline) -> None:
     })
 
 
+class _FakeExportedRunner:
+    def __init__(self) -> None:
+        self.calls = 0
+
+
+def _mark_fake_exported(pipeline, compiled_graph_key: str) -> None:
+    """Install the current TCG-backed per-entry marker in this executor rig."""
+    from gen_worker import aot_serve
+
+    runner = _FakeExportedRunner()
+    dispatch = aot_serve.EntryDispatch(
+        runners=(("warmup", runner),),  # type: ignore[arg-type]
+        declared=("warmup",),
+    )
+    setattr(pipeline, aot_serve._MARKER_ATTR, {
+        "meta": {"compiled_graph_key": compiled_graph_key},
+        "targets": {"transformer": {"state": {"runner": dispatch}}},
+        "entries": {
+            "warmup": {"compiled_graph_key": compiled_graph_key},
+        },
+    })
+
+
 def _record_fake_warm(pipeline, *, hits=None, misses=None) -> None:
     marker = getattr(pipeline, cc._MARKER_ATTR, None) or {}
     signal = marker.get("failure_signal")
@@ -155,6 +178,16 @@ def _record_fake_warm(pipeline, *, hits=None, misses=None) -> None:
         signal["cache_misses"] += (
             (0 if activated else _FAKE_WARM_PROOF["misses"])
             if misses is None else misses)
+
+    from gen_worker import aot_serve
+
+    exported = getattr(pipeline, aot_serve._MARKER_ATTR, None) or {}
+    for row in (exported.get("targets") or {}).values():
+        dispatch = (row.get("state") or {}).get("runner")
+        if not isinstance(dispatch, aot_serve.EntryDispatch):
+            continue
+        for _name, runner in dispatch.runners:
+            runner.calls += 1
 
 
 def _guarded_apply(pipeline, _cfg, *, cache_ready, guard=True):
@@ -211,28 +244,17 @@ def _spec(compile_cfg=None) -> EndpointSpec:
 def _artifact(
     tmp_path: Path, *, family: str = FAMILY, **meta_overrides,
 ) -> Path:
-    """A delivered cell on disk, in the format this repository can WRITE.
+    """Opaque delivery bytes for executor plumbing tests.
 
-    pgw#1181 retargeted this from `compile_cache.pack` — the whole-cell
-    `torch-inductor-cache` tarball, whose last producer died with
-    `mint_artifact` and which is now deleted — onto the exported
-    `aot-inductor` cell, through the same shared harness the publish-path
-    tests use. The rows below stub `_enable_compiled`, so what they need from
-    this file is that it EXISTS at a path the executor's snapshot plumbing
-    carries; building it out of a format nothing writes made every one of
-    them a fixture constructing a shape production cannot produce (§4.34).
+    These rows replace `_enable_compiled`; TCG's real artifact admission and
+    restart path are exercised in the dedicated store/runtime suites. Keeping
+    a worker-authored tar format here would resurrect the implementation this
+    cut deletes.
     """
-    from gen_worker import aot_serve
-    from harness.cell_meta import exported_cell_meta
-
-    meta = exported_cell_meta(family=family)
-    meta.update(meta_overrides)
-    work = tmp_path / "cap"
-    work.mkdir(exist_ok=True)
-    (work / aot_serve.PACKAGE_NAME).write_bytes(b"\x00not-a-real-pt2")
-    snapdir = tmp_path / "snap"
-    snapdir.mkdir(exist_ok=True)
-    return aot_serve.pack(work, snapdir / "cell.tar.gz", meta)
+    del family, meta_overrides
+    artifact = tmp_path / "compiled-graph.tar.gz"
+    artifact.write_bytes(b"opaque-tcg-artifact")
+    return artifact
 
 
 #: pgw#1148: the w8a8 lane no longer arrives as a `#fp8-w8a8` ref TOKEN
@@ -754,7 +776,7 @@ def test_self_mint_boot_serves_compiled_after_own_warmup_proof(
     )
 
     def _minting_enable(pipeline, *_args):
-        _mark_fake_guard(pipeline)
+        _mark_fake_exported(pipeline, mint_key)
         return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
             family=FAMILY, compiled_graph_key=mint_key, ref=mint_ref,
             snapshot_digest=mint_digest, artifact=mint_artifact))

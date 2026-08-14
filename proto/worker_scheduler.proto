@@ -702,7 +702,7 @@ message DiskUsageReport {
 // and the hub answers by key or misses.
 message CellLookup {
   string family = 1;
-  string cell_key = 2; // "ck1-<sha256hex>", computed by gen_worker.cell_key
+  string cell_key = 2; // retired computed-key lookup; no producer remains
 }
 
 // One exact live pipeline object. incarnation_id is opaque, worker-minted,
@@ -729,7 +729,7 @@ message CompileTarget {
   // This may be a strict subset of the function's/RunJob's setup bindings.
   repeated CompileTargetBinding model_bindings = 9;
   // th#883 pull-by-key (gw#581): the exact cell key this live object's
-  // runtime computed for itself (gen_worker.cell_key — the ONE compatibility
+  // runtime computed for itself (the retired computed-key lookup — the ONE compatibility
   // brain). The hub serves a stored cell by this key or misses; it never
   // derives compatibility hub-side. Empty when the runtime cannot state a
   // required axis.
@@ -1415,10 +1415,10 @@ message ActivityUpdate {
   // breakdown is groupable too.
   int64 duration_ms = 17;
 
-  // pgw#1176 / th#1839: cell identity as TYPED FIELDS, so the hub's existing
-  // `worker_activity_events.family` / `.cell_key` columns are populated from
+  // pgw#1176 / th#1839: compiled-graph identity as TYPED FIELDS, so the hub's
+  // `worker_activity_events.family` / `.compiled_graph_key` columns are populated from
   // the wire instead of regex-scraped out of `detail`. The measured cost of
-  // the prose form: `detail LIKE 'ref=%#'||cell_key||' %'` matched one of
+  // the prose form: `detail LIKE 'ref=%#'||key||' %'` matched one of
   // three rows correctly, because four emitters spelled identity four ways.
   //
   // `graph_class` is the pgw#1176 atom's unit — one artifact is ONE graph
@@ -1432,7 +1432,7 @@ message ActivityUpdate {
   // reconstructed by parsing prose is a field that silently returns NULL the
   // first time the formatting changes.
   string family      = 18;
-  string cell_key    = 19; // the `ek1` ENTRY key (pgw#1176), not a cell key
+  string compiled_graph_key = 19; // exact TCG compiled-graph identity
   string graph_class = 20; // the entry/class name inside the declaration
 }
 

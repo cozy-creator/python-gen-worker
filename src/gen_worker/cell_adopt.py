@@ -244,4 +244,4 @@ class CellAdoption:
     #: attempt would otherwise have no way to state, so it can still be
     #: reported instead of dropped.
     entry: str = ""
-    cell_key: str = ""
+    compiled_graph_key: str = ""

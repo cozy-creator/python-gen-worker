@@ -1175,7 +1175,7 @@ def wrap_module(
                 f"target={label}: {detail}",
                 phase=reason,
                 family=str(meta.get("family") or ""),
-                cell_key=str(meta.get("compiled_graph_key") or ""),
+                compiled_graph_key=str(meta.get("compiled_graph_key") or ""),
                 graph_class=name,
             )
             siblings = tuple(getattr(runner, "runners", ()) or ())
@@ -1262,7 +1262,7 @@ def wrap_module(
                 declared_class=ingress_class_name(label, args, kwargs),
                 reason=exc.reason,
                 detail=str(exc)[:400],
-                cell_key=str(meta.get("compiled_graph_key") or ""),
+                compiled_graph_key=str(meta.get("compiled_graph_key") or ""),
             ))
             return original(*args, **eager_kwargs)
         except ConstantsUnboundError as exc:

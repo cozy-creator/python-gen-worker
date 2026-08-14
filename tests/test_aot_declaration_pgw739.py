@@ -27,7 +27,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from gen_worker import aot_declaration, aot_mint, cell_key  # noqa: E402
+from gen_worker import aot_declaration, aot_mint  # noqa: E402
 from gen_worker.aot_mint import ExportSpec, MintRefused  # noqa: E402
 from gen_worker.api.decorators import Compile, DynamicDim  # noqa: E402
 from gen_worker.api.export_contract import (  # noqa: E402
@@ -452,7 +452,7 @@ def test_declared_inputs_actually_export() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_mint_refuses_kwarg_example_feeds_by_name(tmp_path) -> None:
+def test_mint_refuses_kwarg_example_feeds_by_name() -> None:
     """The pod-9 shape, refused at the mint instead of discovered at first
     serve: the flat forward traced the lifted pair as kwargs, the package
     demanded kwargs, the positional serve marshal fed none — 'Ran into a
@@ -475,12 +475,13 @@ def test_mint_refuses_kwarg_example_feeds_by_name(tmp_path) -> None:
         def forward(self, x, lora_a=None, lora_b=None):  # type: ignore[no-untyped-def]
             return self.proj(x)
 
-    register_export_declaration(Compile(
+    declaration = Compile(
         family="kwargfam", targets=("unet",),
         dims=(Dim("B", carried_by=(("x", 0),)),),
         classes=(GraphClass(dims={"B": 2}),),
         shape_strategy="static-rows", warm_changes_key=False,
-    ))
+    )
+    register_export_declaration(declaration)
 
     @aot_inputs.inputs_for("kwargfam")
     def _kwarg_builder(module, spec):  # type: ignore[no-untyped-def]
@@ -490,8 +491,11 @@ def test_mint_refuses_kwarg_example_feeds_by_name(tmp_path) -> None:
     try:
         spec = ExportSpec(family="kwargfam", target="", weight_lane="w8a8")
         with pytest.raises(MintRefused, match="kwarg"):
-            aot_mint.mint(
-                SimpleNamespace(unet=Tiny().eval()), spec, tmp_path)
+            tuple(
+                aot_mint.trace_for_key(
+                    SimpleNamespace(unet=Tiny().eval()), spec, declaration
+                )
+            )
     finally:
         aot_inputs._BUILDERS.pop(("kwargfam", ""), None)
 
@@ -632,43 +636,3 @@ def test_hand_dynamic_rows_are_refused_at_declaration_time() -> None:
             **_fields(decl),
             "dynamic": (DynamicDim("H_lat", min=90, max=160),),
         })
-
-
-def test_fork_and_row_reach_the_cell_identity() -> None:
-    """A fork is a DISTINCT graph class in #716's hash; a static row is the
-    artifact's identity. Both travel through the per-class hash, which pgw#1176
-    made the key's `graph` axis DIRECTLY — the fold into a combined hash is
-    gone, so a fork that did not reach `class_hash` would no longer be
-    disguised by a set-wide digest."""
-    from gen_worker import aot_serve, cell_key
-
-    def _identity(fork: list, class_dims: list) -> str:
-        entry = {
-            "name": "unet/main",
-            "target": "unet", "fork": fork, "class_dims": class_dims,
-            "range_digest": "r1", "graph": {"v": 2},
-        }
-        ch = aot_serve.class_hash(entry, strict=True, lora_bucket=0)
-        entry["class_hash"] = ch
-        meta = {
-            "sm": "sm_89", "format": 3, "family": "sdxl-shaped",
-            "kind": aot_serve.ARTIFACT_KIND,
-            # ONE entry block, which NAMES its class. The manifest
-            # digest rides beside it as a coverage label, never as identity.
-            cell_key.ENTRY_BLOCK_KEY: entry,
-            "manifest_digest": cell_key.manifest_digest([ch]),
-            # Every key input is now a RECORDED block, so this
-            # fixture states them rather than relying on an empty-dict digest.
-            "env_seal": {"v": 1}, "toolchain": {"torch": "2.9.0"},
-            "declared_envelope": {"shapes": [], "text_lens": [], "guidance": []},
-            "lora_bucket": 0, "strict_export": True,
-        }
-        return aot_mint.cell_identity(meta).digest
-
-    a = _identity([["cfg", True]], [])
-    b = _identity([["cfg", False]], [])
-    c = _identity([], [])
-    assert len({a, b, c}) == 3
-    d1 = _identity([], [["H_lat", 128], ["W_lat", 128]])
-    d2 = _identity([], [["H_lat", 112], ["W_lat", 144]])
-    assert d1 != d2

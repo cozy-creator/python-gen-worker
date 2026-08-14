@@ -116,7 +116,7 @@ A shared GRAMMAR corpus differs between this repo and python-gen-worker@${peer_r
 
 These files are the contract between two validators that must answer
 identically — tensorhub's compilecache.IsCompiledGraphKey and
-release.ParseCanonicalRef against gen_worker.cell_key.is_key and
+release.ParseCanonicalRef against torch_compiled_graphs.identity and
 gen_worker.models.refs.parse_model_ref. A disagreement is not caught by either
 repo's tests, is not caught by review, and surfaces as a 45-minute mint refused
 at the publish gate (th#1897).

@@ -183,7 +183,14 @@ src/gen_worker/aot_mint.py::PODGUARD_STATE TRIPWIRE External watchdog adapter wi
 #     GEN_WORKER_AOT_WRAPPER_SPLIT_OFF  v1 ctor-split is now unconditional
 #
 #   DELETED by pgw#1232 — pre-launch hard cut with the implementation:
-#     GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF TCG owns the one runner implementation
+#     GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF TCG owns the one runner implementation.
+#             Five SDXL releases (0.2.111/.112/.113/.116/.117) and one endpoint
+#             row declared this on the 2026-08-03 fleet. The rebuilt standing
+#             stack was re-queried before this cut: none of those releases
+#             exists and both declaration counts are zero. If the pre-rebuild
+#             fleet still exists elsewhere, retire/migrate it before deploying
+#             gen-worker 0.116.0; absence from the rebuilt DB is not evidence
+#             about a separate old hub.
 #
 #   NOT DELETED, and each for a stated reason:
 #     GEN_WORKER_HOST_MOVE_GUARD        ruled exception: safety guard, on by

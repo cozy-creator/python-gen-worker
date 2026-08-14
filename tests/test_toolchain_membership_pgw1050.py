@@ -25,7 +25,7 @@ from typing import Any, Dict
 import pytest
 from torch_compiled_graphs.identity import toolchain_axis_digest
 
-from gen_worker import cell_key, compile_cache as cc, dist_records
+from gen_worker import compile_cache as cc, dist_records
 
 from harness.cell_meta import exported_cell_meta
 
@@ -66,7 +66,7 @@ def _bumped(component: str) -> Dict[str, str]:
 def _key(block: Dict[str, str]) -> str:
     """The ck1 key of a cell whose graph, envelope and sm are held fixed and
     whose toolchain block is ``block``."""
-    return str(exported_cell_meta(toolchain=block)["cell_key"])
+    return str(exported_cell_meta(toolchain=block)["compiled_graph_key"])
 
 
 # ---------------------------------------------------------------------------
@@ -96,9 +96,7 @@ def test_the_axis_ignores_the_library_even_when_a_cell_records_it(
     without = {k: v for k, v in TOOLCHAIN.items() if k not in MODEL_LIBRARIES}
     with_one = dict(without)
     with_one[library] = TOOLCHAIN[library]
-    assert (cell_key.toolchain_axis_digest(with_one)
-            == cell_key.toolchain_axis_digest(without))
-    assert library not in cell_key.toolchain_facts(TOOLCHAIN)
+    assert toolchain_axis_digest(with_one) == toolchain_axis_digest(without)
 
 
 # ---------------------------------------------------------------------------
@@ -166,8 +164,8 @@ def test_producer_and_reader_agree_on_membership() -> None:
     """One axis, one membership: whatever the producer collects survives the
     reader's canonical form untouched."""
     collected = dict(cc.toolchain_digest())
-    assert cell_key.toolchain_facts(collected) == {
-        str(k): str(v) for k, v in collected.items()}
+    assert toolchain_axis_digest(collected) == toolchain_axis_digest({
+        str(k): str(v) for k, v in collected.items()})
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +180,7 @@ def test_the_published_toolchain_wire_fact_follows_the_key(
     """TCG's toolchain identity uses the same narrowed compiler membership."""
     def _wire(block: Dict[str, Any]) -> str:
         recorded = exported_cell_meta(toolchain=block)["toolchain"]
-        return toolchain_axis_digest(cell_key.toolchain_facts(recorded))
+        return toolchain_axis_digest(recorded)
 
     assert _wire(_bumped(library)) == _wire(dict(TOOLCHAIN))
     assert _wire(_bumped("torch")) != _wire(dict(TOOLCHAIN))

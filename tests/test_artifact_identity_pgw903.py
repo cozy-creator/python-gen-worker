@@ -22,10 +22,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import torch
 from torch_compiled_graphs import Engine, GraphClassDeclaration
 from torch_compiled_graphs.artifact import build_metadata, pack_artifact
 from torch_compiled_graphs.host_isa import _host_requirement
 from torch_compiled_graphs.identity import from_artifact_metadata
+from torch_compiled_graphs.ingress import build_call_ingress
 
 from gen_worker import (
     aot_delivery,
@@ -81,11 +83,18 @@ def _artifact(tmp_path: Path, witness: str) -> tuple[Path, dict[str, Any]]:
         root = f"data/aotinductor/{graph_class}"
         archive.writestr(f"{root}/model.wrapper.cpp", wrapper)
         archive.writestr(f"{root}/model.so", _elf())
+    class _Identity(torch.nn.Module):
+        def forward(self, sample: torch.Tensor) -> torch.Tensor:
+            return sample
+
+    args = (torch.ones(1),)
+    program = torch.export.export(_Identity(), args)
+    ingress = build_call_ingress(program, ("sample",), args, {})
     graph = {
         "v": 3,
         "constant_fqns": [],
         "lifted_inputs": [],
-        "pytree": {"in": "leaf", "out": "leaf"},
+        "pytree": {"in": "leaf", "out": "leaf", "ingress": ingress.as_dict()},
         "specialization": {},
     }
     declaration = GraphClassDeclaration(
@@ -93,7 +102,7 @@ def _artifact(tmp_path: Path, witness: str) -> tuple[Path, dict[str, Any]]:
         target="denoiser",
         graph=graph,
         graph_witness=witness,
-        range_digest="0123456789abcdef" * 2,
+        range_digest=ingress.digest(),
     )
     metadata = build_metadata(
         graph_class={
@@ -159,9 +168,9 @@ def test_worker_expected_identity_authority_is_deleted() -> None:
         source = inspect.getsource(module)
         assert "ExpectedIdentity" not in source
         assert "expected_identity_mismatch" not in source
-    assert "expected" not in inspect.signature(aot_serve.stage_artifact).parameters
-    assert "expected" not in inspect.signature(aot_serve.arm_entry).parameters
-    assert "expected" not in inspect.signature(provision.arm_aot).parameters
+    assert not hasattr(aot_serve, "stage_artifact")
+    assert not hasattr(aot_serve, "arm_entry")
+    assert not hasattr(provision, "arm_aot")
 
 
 def test_real_receipt_and_tcg_engine_are_the_complete_identity_path(

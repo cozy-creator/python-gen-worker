@@ -67,14 +67,14 @@ FEEDERS: Tuple[Feeder, ...] = (
         seam=None, arm_simulating=False,
     ),
     Feeder(
-        dotted="local_cell_store.store", owner="local_cell_store.py",
-        state="this machine's own cell store (§4.28)",
+        dotted="compiled_graph_store.store", owner="compiled_graph_store.py",
+        state="this machine's compiled-graph sidecar (§4.28)",
         seam=None, arm_simulating=False,
-        distinctive=False, receivers=("local_cell_store", "store"),
+        distinctive=False, receivers=("compiled_graph_store", "store"),
     ),
     Feeder(
-        dotted="local_cell_store.note_memo", owner="local_cell_store.py",
-        state="the pre-trace arm-token -> ck1 memo (§4.28)",
+        dotted="compiled_graph_store.note_memo", owner="compiled_graph_store.py",
+        state="the pre-trace arm-token -> compiled-graph-key memo (§4.28)",
         seam=None, arm_simulating=False,
     ),
 )

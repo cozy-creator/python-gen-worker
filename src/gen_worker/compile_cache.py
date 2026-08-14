@@ -899,7 +899,6 @@ def declared_compile_facts(cfg: Any, *, lora_bucket_override: Optional[int] = No
 _CLOSURE_ENTRYPOINTS = (
     "gen_worker.compile_cache",
     "gen_worker.guard_closure",
-    "gen_worker.cell_key",
     "gen_worker.env_seal",
     "gen_worker.models.loading",
     "gen_worker.models.provision",
@@ -1004,7 +1003,7 @@ def toolchain_digest() -> Tuple[Tuple[str, str], ...]:
     ``transformers`` / ``peft`` rode this axis until 2026-08-11 and were
     evicted because their whole effect on a cell arrives through the traced
     graph, which the ``graph`` axis hashes node-for-node since pgw#1031 —
-    see ``cell_key``'s module docstring for the channel-by-channel argument
+    see ``torch_compiled_graphs.identity`` for the channel-by-channel argument
     and for the two fences (B1 code-only + the pgw#1097 folding fence;
     ``env_seal.assert_seal_unchanged``) that close the routes around it.
     Folded here, every model-library patch release re-keyed every cell in

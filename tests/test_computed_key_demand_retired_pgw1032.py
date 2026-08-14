@@ -19,8 +19,9 @@ from __future__ import annotations
 
 
 import pytest
+from torch_compiled_graphs import is_compiled_graph_key
 
-from gen_worker import aot_serve, cell_key, serving_mode
+from gen_worker import aot_serve, serving_mode
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 FAMILY = "sdxl"
@@ -43,27 +44,9 @@ def test_an_arm_token_and_a_stamped_key_are_disjoint_by_grammar() -> None:
 
     token = fleet_cells.ArmIdentity(facts=(("family", FAMILY),)).token
     assert token.startswith(fleet_cells.ARM_SCHEME + "-")
-    assert not cell_key.is_key(token)
+    assert not is_compiled_graph_key(token)
     assert fleet_cells.ARM_DIGEST_HEX != 56
     assert aot_serve.ARTIFACT_KIND == "aot-inductor"
-
-
-def test_the_pre_trace_computed_key_no_longer_exists() -> None:
-    """The producer of the computed key space is DELETED, not merely
-    unplugged: ``cell_key`` exposes no ``compute``/``from_artifact_metadata``
-    — the stamp derivation is the only key derivation there is."""
-    assert not hasattr(cell_key, "compute")
-    assert not hasattr(cell_key, "from_artifact_metadata")
-    assert not hasattr(cell_key, "stamp")
-    assert not hasattr(cell_key, "mismatch")
-
-
-def test_a_non_exported_kind_has_no_key_identity() -> None:
-    """The other direction of the same wall: only exported cells are keyed;
-    a torch-inductor-cache artifact is refused by name."""
-    with pytest.raises(cell_key.CellKeyError, match="no entry-key identity"):
-        cell_key.from_entry_metadata(
-            {"kind": "torch-inductor-cache", "cell_key": "cg-key-v1-" + "b" * 56})
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +193,8 @@ def test_serving_tier_and_serving_mode_answer_DIFFERENT_questions(
     assert cc.is_compile_armed(pipe) is True
     # A cell ref IS what makes the tier compiled — nothing else.
     assert serving_mode.classify_mode(
-        f"root/family-{FAMILY}#cg-key-v1-" + "b" * 56, None) == serving_mode.MODE_JIT_CELL
+        f"root/family-{FAMILY}#cg-key-v1-" + "b" * 56, None
+    ) == serving_mode.MODE_AOT_CELL
 
 
 def test_an_armed_target_still_advertises_the_identity_it_serves() -> None:

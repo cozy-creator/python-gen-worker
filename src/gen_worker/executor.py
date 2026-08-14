@@ -5525,7 +5525,8 @@ class Executor:
                     # setup() cannot arm a compile — and cannot self-mint —
                     # on a context-parallel pod.
                     None if eager_only else spec.compile_cell(),
-                    self.store._cache_dir, compile_artifact,
+                    self.store._cache_dir,
+                    arm.compiled_graph_key if arm is not None else boot_local_key,
                     enable=functools.partial(
                         self._arming_enable,
                         subject=slot_subjects(
@@ -8429,7 +8430,7 @@ class Executor:
         # pgw#1127 S2: this used to RETURN here, before the derivation, on the
         # premise that "deriving a key nobody will answer is pure boot latency".
         # The premise is false on exactly the machines §4.28 is about: the
-        # derived `ck1` key IS `local_cell_store`'s own address, so an offline
+        # derived compiled-graph key IS the local sidecar's own address, so an offline
         # box holding the exact cell it needs was being told there was nobody
         # to ask. The gate survives in its honest form — refuse only when BOTH
         # answerers are absent — and `attempt` decides the rest, after the
@@ -8577,7 +8578,7 @@ class Executor:
                     outcome,
                     eager_reason=cell_adopt.EagerPhase.ADOPTED_CELL_REFUSED)
         return fleet_cells.enable_compiled(
-            pipe, cfg, self.store._cache_dir, artifact,
+            pipe, cfg, self.store._cache_dir, boot_local_key,
             publisher=self._cell_publisher(),
             delivered_ref=delivered.ref if delivered else "",
             delivered_digest=delivered.snapshot_digest if delivered else "",
@@ -8589,7 +8590,7 @@ class Executor:
 
     def _arming_enable(
         self, pipe: Any, cfg: Any, cache_dir: Optional[Path],
-        artifact: Optional[Path],
+        compiled_graph_key: str,
         subject: Tuple[SlotSubject, ...] = (),
     ) -> "fleet_cells.ArmOutcome":
         """ArmingScope adapter: a self-loaded pipeline's ``arm_compile()``
@@ -8608,7 +8609,7 @@ class Executor:
             fleet_cells.stamp_arm_subject(
                 pipe, sub.slot, sub.refs, sub.snapshot_digest)
         return fleet_cells.enable_compiled(
-            pipe, cfg, cache_dir, artifact,
+            pipe, cfg, cache_dir, compiled_graph_key,
             publisher=self._cell_publisher(),
         )
 
@@ -8676,7 +8677,7 @@ class Executor:
                 #
                 # `ModelEvent` is keyed by ref and genuinely cannot carry
                 # this, so the miss goes out on the channel that CAN: the
-                # typed activity event, whose family/cell_key/graph_class
+                    # typed activity event, whose family/compiled_graph_key/graph_class
                 # fields (proto 18-20) land in the hub's own columns.
                 activity_mod.emit_event(
                     "aot_entry_missed",
@@ -8686,7 +8687,7 @@ class Executor:
                     f"the class serves EAGER and is queued to compile",
                     phase=adoption.reason or "no_cell",
                     family=str(getattr(inj, "family", "") or ""),
-                    cell_key=adoption.cell_key,
+                    compiled_graph_key=adoption.compiled_graph_key,
                     graph_class=adoption.entry,
                 )
                 continue

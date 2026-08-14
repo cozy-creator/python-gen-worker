@@ -353,11 +353,11 @@ class AxisVerdict:
 
 
 @dataclass(frozen=True)
-class CellNumerics:
-    """The whole cell's verdict, and every axis it is made of."""
+class CompiledGraphNumerics:
+    """The compiled graph's verdict, and every axis it is made of."""
 
     family: str
-    cell_key: str
+    compiled_graph_key: str
     thresholds: Thresholds
     threshold_source: str
     verdicts: Tuple[AxisVerdict, ...]
@@ -403,7 +403,7 @@ class CellNumerics:
         """Everything a reader needs to re-run this verdict, in one line."""
         worst = self.worst()
         head = (
-            f"family={self.family} key={self.cell_key or '?'} "
+            f"family={self.family} key={self.compiled_graph_key or '?'} "
             f"axes={len(self.verdicts)}/{self.axes_total} "
             f"thresholds={self.thresholds} source={self.threshold_source} "
             f"took={self.elapsed_ms}ms")
@@ -419,7 +419,7 @@ def probe_cell(
     meta: Mapping[str, Any],
     *,
     only: str = "",
-) -> CellNumerics:
+) -> CompiledGraphNumerics:
     """Measure an ARMED pipeline against the eager forward it replaced.
 
     ``only`` names one axis (``ProbeAxis.name``, i.e. the packaged entry name)
@@ -485,8 +485,9 @@ def probe_cell(
         verdicts.append(AxisVerdict(
             axis=axis, comparison=comparison,
             elapsed_ms=int((time.monotonic() - t0) * 1000)))
-    report = CellNumerics(
-        family=family, cell_key=str(meta.get("cell_key") or ""),
+    report = CompiledGraphNumerics(
+        family=family,
+        compiled_graph_key=str(meta.get("compiled_graph_key") or ""),
         thresholds=thresholds, threshold_source=source,
         verdicts=tuple(verdicts), axes_total=len(axes),
         elapsed_ms=int((time.monotonic() - started) * 1000))
@@ -497,10 +498,10 @@ def probe_cell(
 
 
 _LAST_LOCK = threading.Lock()
-_LAST: Optional[CellNumerics] = None
+_LAST: Optional[CompiledGraphNumerics] = None
 
 
-def last_report() -> Optional[CellNumerics]:
+def last_report() -> Optional[CompiledGraphNumerics]:
     """The most recent :func:`probe_cell` report in this process, or None.
 
     The GATE (``provision.gate_cell_numerics``) answers yes/no and confesses
@@ -517,7 +518,7 @@ def last_report() -> Optional[CellNumerics]:
 
 __all__ = [
     "AxisVerdict",
-    "CellNumerics",
+    "CompiledGraphNumerics",
     "CellNumericsRefused",
     "ProbeAxis",
     "ProbeUnavailable",

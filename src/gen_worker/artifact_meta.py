@@ -12,7 +12,7 @@ modules that must not import the compile stack:
 
 * ``receipts`` verifies a delivered artifact before anything imports torch;
 * ``guard_closure`` sits inside the ``env_seal -> guard_closure -> compile_cache
-  -> registry -> cell_key -> env_seal`` cycle, so its own metadata read had to be
+  -> registry -> compiled-graph identity -> env_seal`` cycle, so its own metadata read had to be
   a function-local import.
 
 Callers keep their own refusal vocabulary (``AdoptError``, ``ReceiptError``, a
