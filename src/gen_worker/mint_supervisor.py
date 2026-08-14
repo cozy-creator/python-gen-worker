@@ -230,18 +230,51 @@ EVIDENCE_COUNTER = "compile:mint_child_evidence"
 Watcher = Callable[[MintFrame], None]
 
 
+#: pgw#1243: the mint's BOUNDED axis — whatever the current phase is counting,
+#: out of the total it declares (shares landed during `inductor_compile`, and
+#: every other phase that states a total).
+#:
+#: ``EVIDENCE_COUNTER`` counts against no total at all, which is what let the
+#: wedge hide: two mints reported `counter_done=1077.99 counter_total=0
+#: self_stalled=FALSE` for an hour, and with no total there is no fraction, so
+#: a frozen position is indistinguishable from a slow one. The frames have
+#: carried a real `step/total` all along; it just never reached a COUNTER,
+#: which is the only thing the hub's liveness rule and
+#: ``progress.self_diagnosis`` read. An unbounded counter is not progress
+#: evidence; this one is.
+PROGRESS_COUNTER = "compile:mint_progress"
+
+
 def _on_frame(act: Any, watch: Optional[Watcher] = None) -> Any:
     """Land one supervision frame on the activity the hub already reads."""
 
     def _apply(frame: MintFrame) -> None:
         if frame.phase:
             act.phase(frame.phase, frame.step, frame.total)
+            _count_progress(act, frame)
         if frame.note:
             act.note(frame.note[:200])
         if watch is not None:
             watch(frame)
 
     return _apply
+
+
+def _count_progress(act: Any, frame: MintFrame) -> None:
+    """Carry a frame's step/total onto a real counter (best effort).
+
+    The activity's own `step`/`total_steps` already ride the wire, but the
+    hub's liveness rule and ``progress.self_diagnosis`` both read COUNTERS —
+    which is why a mint whose shares had stopped landing still confessed
+    ``self_stalled=FALSE``.
+    """
+    if frame.total <= 0:
+        return
+    make = getattr(act, "counter", None)
+    if not callable(make):
+        return
+    make(PROGRESS_COUNTER, progress_mod.UNIT_STEPS,
+         float(frame.total)).set_done(float(frame.step))
 
 
 def _on_evidence(act: Any) -> Any:
@@ -757,6 +790,7 @@ __all__ = [
     "ABANDONED",
     "ADOPTED",
     "EVIDENCE_COUNTER",
+    "PROGRESS_COUNTER",
     "FAILED",
     "GRAPH_DIRNAME",
     "MAX_ATTEMPTS",

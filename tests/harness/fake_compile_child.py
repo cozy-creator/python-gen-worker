@@ -43,6 +43,15 @@ if mode in ("hang", "die-and-hang"):
     # A share that will NOT exit on its own: only a group-wide teardown ends
     # it, which is the property the pool's failure path has to hold.
     time.sleep(600)
+if mode == "wedged-no-report":
+    # pgw#1243: wedged BEFORE writing a report, and SPINNING while it is —
+    # the shape that defeated every evidence window the platform had, because
+    # a burning core is admitted as progress. One core, exactly, which is
+    # what instance A's `@ 1.00/s` counter rate literally was.
+    acc = 0
+    while True:
+        for i in range(200000):
+            acc += i * i
 
 declared = int(os.environ.get("PGW_FAKE_DECLARED", "6"))
 mine = [f"cls/dim={{i}}" for i in range(index, declared, count)]
@@ -96,6 +105,14 @@ report.write_bytes(json.dumps({{
     "report_epoch": now,
     "code_digest": {digest!r}, "code_dir": {code_dir!r},
 }}).encode())
+if mode == "wedged-after-report":
+    # pgw#1243, the observed wedge: every graph class packed, the report
+    # written — and then the interpreter never comes down. Two production
+    # mints did exactly this for 78.9 and 62 minutes.
+    acc = 0
+    while True:
+        for i in range(200000):
+            acc += i * i
 sys.exit(2 if refused else 0)
 '''
 
