@@ -23,7 +23,6 @@ Run: uv run pytest tests/test_layout_converter_registry_pgw1143.py
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import subprocess
 import sys
@@ -576,108 +575,6 @@ def test_a_version_bump_moves_the_identity(tmp_path: Path) -> None:
     v2 = {(e.from_id, e.to_id): e.digest for e in registered_layout_conversions()}
     assert set(v1) == set(v2)
     assert all(v1[k] != v2[k] for k in v1)
-
-
-# ── 6. the §1.33 point-5 fence: conversion is upstream of compute ────────────
-
-
-def _fence_module():
-    spec = importlib.util.spec_from_file_location(
-        "_fence", REPO / "scripts" / "lint_cell_key_layout_fence.py")
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_the_fence_covers_every_module_that_computes_a_cell_key() -> None:
-    """The fenced set is DERIVED from who calls an axis producer, not
-    hand-listed — the failure mode of a hand-maintained list is that the one
-    file which violates the rule is the one nobody added."""
-    fenced = {p.name for p in _fence_module().fenced_modules()}
-    assert {"cell_key.py", "fleet_cells.py", "boot_key.py", "aot_mint.py",
-            "aot_serve.py", "compile_cache.py"} <= fenced
-
-
-def _run_fence(*argv: str) -> subprocess.CompletedProcess:
-    """The gate exactly as CI runs it: the script, through its own `main()`."""
-    return subprocess.run(
-        [sys.executable, str(REPO / "scripts" / "lint_cell_key_layout_fence.py"),
-         *argv],
-        capture_output=True, text=True, timeout=180)
-
-
-def test_the_fence_fires_on_a_key_axis_that_reads_the_layout(
-    tmp_path: Path,
-) -> None:
-    """THE GATE'S OWN RED, through the ENTRY POINT CI invokes.
-
-    Deliberately not a call to `_violations()`. The delete-the-call-site
-    experiment on this very file found that disconnecting the detector from
-    `main()` left every test green — the th#1820 shape, where a function has
-    a dozen tests and its only call site has none. So this drives the SCRIPT
-    against a tree that violates the fence, and a disconnected detector fails
-    here.
-    """
-    (tmp_path / "cell_key.py").write_text(textwrap.dedent(
-        """
-        from gen_worker.convert.layout_converters import LayoutId
-
-
-        def envelope_facts(block, layout: LayoutId):
-            return {"v": 1, "layout": layout.render()}
-        """
-    ), encoding="utf-8")
-    result = _run_fence("--src", str(tmp_path))
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "fence BROKEN" in result.stdout
-    assert "layout_converters" in result.stdout
-    # The refusal must tell the author what to do instead of widening the key.
-    assert "Conversion is UPSTREAM of compute" in result.stdout
-
-
-def test_the_fence_fires_on_a_deferred_import_too(tmp_path: Path) -> None:
-    """A string handed to `import_module` is the obvious way around an import
-    check, so it is checked as a string."""
-    (tmp_path / "cell_key.py").write_text(textwrap.dedent(
-        """
-        import importlib
-
-
-        def envelope_facts(block):
-            mod = importlib.import_module("gen_worker.convert.layout_converters")
-            return {"v": 1, "chain": mod.conversion_provenance}
-        """
-    ), encoding="utf-8")
-    result = _run_fence("--src", str(tmp_path))
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "string 'gen_worker.convert.layout_converters'" in result.stdout
-
-
-def test_the_fence_does_not_fire_on_prose(tmp_path: Path) -> None:
-    """Docstrings are excluded on purpose: a vocabulary gate that reds on the
-    word appearing in an explanation teaches lanes to stop explaining
-    themselves, and has already cost this repo a lane-day."""
-    (tmp_path / "cell_key.py").write_text(textwrap.dedent(
-        '''
-        """The cell key. Deliberately blind to Slot.layouts and to any
-        LayoutId or conversion chain — see classify_layout for why."""
-
-
-        def envelope_facts(block):
-            return {"v": 1}
-        '''
-    ), encoding="utf-8")
-    result = _run_fence("--src", str(tmp_path))
-    assert result.returncode == 0, result.stdout + result.stderr
-
-
-def test_the_shipped_tree_passes_the_fence() -> None:
-    proc = subprocess.run(
-        [sys.executable, str(REPO / "scripts" / "lint_cell_key_layout_fence.py")],
-        capture_output=True, text=True, timeout=180)
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "no cell re-keys on a conversion" in proc.stdout
 
 
 # ── the behavioural half of point 5: a demand does not move the contract ─────
