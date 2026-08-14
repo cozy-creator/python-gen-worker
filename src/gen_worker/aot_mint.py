@@ -4628,46 +4628,71 @@ class _CallableTarget:
 # ---------------------------------------------------------------------------
 
 
-def publish_entry(
-    row: MintedArtifact, publisher: Any, mint_duration_ms: int = 0,
-) -> str:
-    """Publish ONE minted entry through a ``fleet_cells.CellPublisher``.
+def publish(result: MintResult, publisher: Any) -> Dict[str, str]:
+    """Publish every compiled graph a mint produced. ``{key -> checkpoint}``.
+
+    ONE attested intent for the whole mint (pgw#1224 / th#1842 PR #1121), then
+    one transfer per entry under that entry's OWN token. This is the caller the
+    batch wire exists for: it holds every artifact of a mint at once, so a
+    36-class sdxl mint pays one axis attestation instead of 36. The transfers
+    stay per entry because the grants are — a token for entry 5 cannot publish
+    entry 6's bytes.
+
+    Failures are NOT swallowed and not collected: the first refusal raises. A
+    caller that wants best-effort per-entry publishing drives the two halves
+    itself — one ``publish_intent`` for the batch, then ``publish_granted`` per
+    entry — and decides what a partial set means. (``publish_entry`` used to be
+    that seam and is DELETED with the per-entry intent it wrapped: under the
+    batch wire it would have issued one attested intent per artifact, which is
+    the cost this change exists to remove.) What changed under pgw#1176 is that
+    a partial set is now a coherent outcome rather than a broken cell.
 
     Receipts are the HUB's business: it adds them at publish-finalize (#709),
     so the producer's whole obligation is a keyed ``metadata.json`` inside the
-    tar — which :func:`mint` has already stamped and proven. Refuses before the
-    wire when the artifact carries no key, since an unaddressable entry would
-    be stored under a flavor nothing can request.
-
-    pgw#1176: publish is PER ENTRY, and a failure is per entry. Nothing waits
-    for a set; nothing is rolled back because a sibling failed.
+    tar — which :func:`mint` has already stamped and proven. An artifact with
+    no key is refused before the wire, since an unaddressable entry would be
+    stored under a flavor nothing can request.
     """
-    if not row.key:
-        raise MintRefused("cannot publish an artifact with no cell_key")
-    family = str(row.metadata.get("family") or "")
-    if not family:
-        raise MintRefused("cannot publish an artifact with no family")
-    return str(publisher.publish(
-        family, row.artifact, dict(row.metadata), int(mint_duration_ms)))
+    from . import fleet_cells
 
-
-def publish(result: MintResult, publisher: Any) -> Dict[str, str]:
-    """Publish every entry a mint produced. ``{entry key -> checkpoint}``.
-
-    Failures are NOT swallowed and not collected: the first refusal raises, so
-    a caller that wants best-effort per-entry publishing drives
-    :func:`publish_entry` itself and decides what a partial set means. What
-    changed under pgw#1176 is that a partial set is now a coherent outcome
-    rather than a broken cell.
-    """
+    rows = list(result.entries)
+    if not rows:
+        return {}
     # th#1355: the mint pod already measured this (timings["total_s"]), so the
     # cell's own cell_store row records what it cost to build instead of the
     # cost living only in an activity event that carries no cell key.
     mint_duration_ms = max(0, int(round(
         float(result.timings.get("total_s") or 0.0) * 1000)))
+    family = ""
+    entries = []
+    sku = gen_worker = ""
+    for row in rows:
+        if not row.key:
+            raise MintRefused("cannot publish an artifact with no cell_key")
+        row_family = str(row.metadata.get("family") or "")
+        if not row_family:
+            raise MintRefused("cannot publish an artifact with no family")
+        if family and row_family != family:
+            # The family is the batch's namespace and the hub attests it once.
+            # A mint spanning two would have to be two intents, and silently
+            # publishing the second under the first's declaration is how a row
+            # lands in a namespace nobody asked for.
+            raise MintRefused(
+                f"this mint's entries name two families ({family!r} and "
+                f"{row_family!r}); one intent declares one family")
+        family = row_family
+        entry, row_sku, row_gen_worker = fleet_cells.intent_entry(
+            family, dict(row.metadata), mint_duration_ms)
+        sku = sku or row_sku
+        gen_worker = gen_worker or row_gen_worker
+        entries.append(entry)
+    batch = publisher.publish_intent(
+        family, entries, sku=sku, gen_worker=gen_worker)
     return {
-        row.key: publish_entry(row, publisher, mint_duration_ms)
-        for row in result.entries
+        row.key: str(publisher.publish_granted(
+            family, row.artifact, dict(row.metadata),
+            batch.grant_for(row.key), repo=batch.repo))
+        for row in rows
     }
 
 
@@ -4884,7 +4909,6 @@ __all__ = [
     "MINT_COMPILE_THREADS",
     "MintResult",
     "MintedArtifact",
-    "publish_entry",
     "autotune_posture",
     "bench_step",
     "cell_identity",

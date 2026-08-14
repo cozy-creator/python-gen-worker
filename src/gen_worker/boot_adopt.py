@@ -3,14 +3,17 @@
 ONE function, and it is the whole of §4.27's first three steps for a serving
 pod:
 
-1. **Derive** the ``ck1`` key from code alone — ``boot_key.derive``, process-
-   parallel structure-only traces, no weight resident anywhere.
+1. **Derive** the ``cg-key-v1`` key SET from code alone — ``boot_key.derive``,
+   process-parallel structure-only traces, no weight resident anywhere. One key
+   per graph class (pgw#1176), not one per pod.
 2. **Ask THIS MACHINE first** (pgw#1127 S2, §4.28) — ``local_cell_store.
    lookup(key)``. The derived key is the local store's own address, so an
    offline machine holding the exact cell it needs answers here and no hub is
    asked at all. ONE key, TWO lookup routes, the same CAS.
-3. **Ask the hub** by that key — ``cell_resolve.resolve``, ONE artifact or a
-   MISS, never a listing.
+3. **Ask the hub** for everything the machine did not hold, in ONE call —
+   ``cell_resolve.resolve_batch`` (pgw#1224), which answers each requested key
+   with one independently signed answer, in request order. Exact keys in, rows
+   for exactly those keys out: never a listing.
 4. **Materialize** a hit through the EXISTING delivery path and hand the
    caller an admission expectation, so the arm runs the gates the Plan path
    runs and not one gate fewer.
@@ -26,7 +29,7 @@ That is false on exactly the machines §4.28 is about. It survives in the
 honest form — :data:`GATE_REASONS`' ``no_cell_source``, which refuses only when
 BOTH answerers are absent (no hub AND an empty local store).
 
-A MISS returns ``None`` and that is a complete answer: the pod serves eager,
+A MISS is a complete answer, not an absence: the pod serves eager,
 mints in the background (§4.28: trusted hardware publishes, untrusted keeps it
 local) and the request path waits for none of it (pgw#1091).
 
@@ -68,7 +71,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import (
     activity, aot_identity, artifact_meta, boot_key, cell_resolve,
@@ -159,7 +162,7 @@ DERIVE_REASONS: Tuple[str, ...] = (
 #: The hub's own typed refusal codes ride through verbatim, which is the point
 #: of them being typed.
 ASK_REASONS: Tuple[str, ...] = (
-    "invalid_request", "cell_resolve_key_mismatch", "resolve_unreachable",
+    "invalid_request", "resolve_unreachable",
     "miss", "materialize_failed", "witness_unreadable",
     "graph_witness_mismatch", "hit",
     # pgw#1122 — the LAST terminus, and the one the journey previously ran off
@@ -489,92 +492,116 @@ def attempt(
     # and a "the boot adopted" boolean over 36 classes is exactly the claim
     # that could lie.
     #
-    # PHASE 2 slots the batch resolve in HERE: the loop below issues one
-    # `cell_resolve.resolve` per key, which is correct and is what the hub
-    # answers today; when the hub grows `POST /v1/worker/cells/resolve`
-    # {family, keys[]} -> one signed answer per key, this becomes one call and
-    # the per-key bodies consume its answers unchanged.
+    # pgw#1224 lands PHASE 2's batch wire HERE: this machine is asked per key
+    # (a local stat, no wire) and the hub is asked ONCE for everything the
+    # machine did not already hold. A 36-class sdxl boot went from 36 resolve
+    # round trips to one; minimax-h3 from 198 to one.
     keys = derived.keys
     if not keys:
         return (report(BootAdoptOutcome(
             reason="derive_failed",
             detail="the declaration traced to no graph class at all",
             derive_ms=derived.wall_ms, family=family, function=fn)),)
-    return tuple(
-        _attempt_key(
-            key, derived, family=family, fn=fn, cache_dir=cache_dir,
-            base_url=base_url, bearer=bearer, hub_absent=hub_absent)
-        for key in keys)
+    logger.info(
+        "boot-adopt: %s asking for %d key(s) (manifest %s, %d class(es), "
+        "K=%d, memo=%s, derived in %d ms)",
+        family, len(keys), derived.manifest, derived.traced, derived.workers,
+        derived.memo, derived.wall_ms)
+
+    # ── §4.28 / pgw#1127: THIS MACHINE, before the wire ────────────────────
+    # The derived key is the local store's own address. A machine that minted
+    # this graph on an earlier boot answers here and the hub is never asked for
+    # it — which is what "never requested" means and what makes an offline box
+    # arm exactly as well as an online one. Costs one stat per key on the fleet
+    # path, where the store is always empty.
+    settled: Dict[str, BootAdoptOutcome] = {}
+    ask: List[str] = []
+    for key in keys:
+        local = _local_answer(key, derived, family=family, fn=fn)
+        if local is not None:
+            settled[key] = local
+        elif hub_absent:
+            # Derived, asked this machine, and there is nobody else. A
+            # DIFFERENT fact from `no_cell_source` (which never derived) and
+            # from `miss` (which asked a hub): this one says the key exists and
+            # nothing here holds it.
+            settled[key] = report(BootAdoptOutcome(
+                reason="local_miss_no_hub", detail=hub_absent,
+                derived_key=key, derive_ms=derived.wall_ms,
+                family=family, function=fn))
+        else:
+            ask.append(key)
+
+    answers: Dict[str, cell_resolve.ResolveAnswer] = {}
+    refused: Tuple[str, str] = ("", "")
+    if ask:
+        try:
+            for answer in cell_resolve.resolve_batch(
+                    family, ask, base_url=base_url, bearer=bearer):
+                answers[answer.compiled_graph_key] = answer
+        except cell_resolve.CellResolveRefused as exc:
+            # A WHOLE-BATCH refusal is a fact about the caller or the request,
+            # so it is true of every key in the batch and each one reports it
+            # under the hub's own code. A typed refusal is NOT a miss — reading
+            # it as one sends the pod to a full cold mint per key believing the
+            # hub holds nothing, which is false and expensive. It still
+            # degrades to the old boot; it is the SENTENCE that differs, and
+            # that sentence is what gets the hub fixed.
+            refused = (exc.code or "resolve_unreachable", exc.detail)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("boot-adopt: resolve call failed", exc_info=True)
+            refused = ("resolve_unreachable", f"{type(exc).__name__}: {exc}")
+
+    out: List[BootAdoptOutcome] = []
+    for key in keys:
+        done = settled.get(key)
+        if done is not None:
+            out.append(done)
+            continue
+        if refused[0]:
+            out.append(report(BootAdoptOutcome(
+                reason=refused[0], detail=refused[1], derived_key=key,
+                derive_ms=derived.wall_ms, family=family, function=fn)))
+            continue
+        out.append(_adopt_answer(
+            answers[key], derived, family=family, fn=fn, cache_dir=cache_dir))
+    return tuple(out)
 
 
-def _attempt_key(
-    key: str,
+def _adopt_answer(
+    answer: cell_resolve.ResolveAnswer,
     derived: "boot_key.DerivedKey",
     *,
     family: str,
     fn: str,
     cache_dir: Optional[Path],
-    base_url: str,
-    bearer: str,
-    hub_absent: str,
 ) -> BootAdoptOutcome:
-    """Ask this machine, then the hub, for ONE derived entry key.
+    """Turn ONE of the batch's answers into this graph class's outcome.
 
-    A miss, a refusal or a witness mismatch here costs THIS graph class. Its
-    siblings are resolved by their own keys and are not affected — which is
-    what makes a partial hit useful instead of a total miss.
+    A miss, a per-answer hub fault, or a witness mismatch here costs THIS graph
+    class. Its siblings were answered by their own keys in the same batch and
+    are not affected — which is what makes a partial hit useful instead of a
+    total miss, and it is the property the per-answer signing buys: nothing
+    about this answer's trust depends on the collection it arrived in.
     """
-    logger.info(
-        "boot-adopt: %s asking for %s (manifest %s, %d class(es), K=%d, "
-        "memo=%s, derived in %d ms)",
-        family, key, derived.manifest, derived.traced, derived.workers,
-        derived.memo, derived.wall_ms)
-
-    # ── §4.28 / pgw#1127: THIS MACHINE, before the wire ────────────────────
-    # The derived key is the local store's own address. A machine that minted
-    # this cell on an earlier boot answers here, and the hub is not asked at
-    # all — which is what "never requested" means and what makes an offline
-    # box arm exactly as well as an online one. Costs one stat on the fleet
-    # path, where the store is always empty.
-    local = _local_answer(key, derived, family=family, fn=fn)
-    if local is not None:
-        return local
-    if hub_absent:
-        # Derived, asked this machine, and there is nobody else. A DIFFERENT
-        # fact from `no_cell_source` (which never derived) and from `miss`
-        # (which asked a hub): this one says the key exists and nothing here
-        # holds it.
+    key = answer.compiled_graph_key
+    if answer.refusal_code:
+        # ambiguous / incomplete / transport_unavailable — a HUB-SIDE fault
+        # about this one key, carrying the code it carried when the same fault
+        # refused a whole request. Not a miss, and the pod must not mint over
+        # it.
         return report(BootAdoptOutcome(
-            reason="local_miss_no_hub", detail=hub_absent,
+            reason=answer.refusal_code, detail=answer.detail,
             derived_key=key, derive_ms=derived.wall_ms,
             family=family, function=fn))
-
-    try:
-        cell = cell_resolve.resolve(
-            family, key, base_url=base_url, bearer=bearer)
-    except cell_resolve.CellResolveRefused as exc:
-        # A typed refusal is NOT a miss — treating it as one sends the pod to
-        # a full cold mint believing the hub holds nothing, which is false and
-        # expensive. It still degrades to the old boot; it is the SENTENCE
-        # that differs, and that sentence is what gets the hub fixed.
-        return report(BootAdoptOutcome(
-            reason=exc.code or "resolve_unreachable", detail=exc.detail,
-            derived_key=key, derive_ms=derived.wall_ms,
-            family=family, function=fn))
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("boot-adopt: resolve call failed", exc_info=True)
-        return report(BootAdoptOutcome(
-            reason="resolve_unreachable", detail=f"{type(exc).__name__}: {exc}",
-            derived_key=key, derive_ms=derived.wall_ms,
-            family=family, function=fn))
-
+    cell = answer.cell
     if cell is None:
         # A pod that DERIVED a key and was told MISS is a different fact from a
         # pod that never derived one — `derived_key` is what tells them apart,
         # and it is on the event.
         return report(BootAdoptOutcome(
             reason="miss",
-            detail=f"the hub holds no entitled cell for {key}",
+            detail=f"the hub holds no entitled compiled graph for {key}",
             derived_key=key, derive_ms=derived.wall_ms,
             family=family, function=fn))
 

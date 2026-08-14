@@ -371,7 +371,11 @@ def _attempt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **wires: Any) -> A
     if "derive" in wires:
         monkeypatch.setattr(boot_key, "derive", wires["derive"])
     if "resolve" in wires:
-        monkeypatch.setattr(cell_resolve, "resolve", wires["resolve"])
+        # pgw#1224: the wire is a BATCH. The per-key wires below are lifted to
+        # the batch shape here rather than rewritten one by one, so each row
+        # keeps stating the TERMINUS it is about.
+        monkeypatch.setattr(
+            cell_resolve, "resolve_batch", _batched(wires["resolve"]))
     if "materialize" in wires:
         monkeypatch.setattr(cell_resolve, "materialize", wires["materialize"])
     return boot_adopt.attempt(
@@ -379,6 +383,24 @@ def _attempt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **wires: Any) -> A
         slots={}, declared_hint=3,
         envelope={"shapes": [[64, 64]], "text_lens": [8], "guidance": []},
         work_root=tmp_path)[0]
+
+
+def _batched(per_key: Any) -> Any:
+    """A single-key wire -> the batch wire, answer for answer.
+
+    A raise stays a WHOLE-BATCH raise (that is what a caller-scoped refusal is,
+    and every key in the batch reports it); a returned cell/None becomes that
+    key's own answer.
+    """
+    def _call(_family: str, keys: Any, **_kw: Any) -> Any:
+        out = []
+        for key in keys:
+            cell = per_key(_family, key)
+            out.append(cell_resolve.ResolveAnswer(
+                compiled_graph_key=key,
+                status="miss" if cell is None else "hit", cell=cell))
+        return tuple(out)
+    return _call
 
 
 def _refuse_hub(code: str) -> Any:
@@ -477,7 +499,18 @@ class _ResolveHub(BaseHTTPRequestHandler):
         # th#1788: the live hub withholds every self-minted cell from a resolve,
         # so a MISS is what a correct worker gets today. The property under test
         # is that it ASKED.
-        out = json.dumps({"found": False}).encode()
+        # pgw#1224: the real hub answers the BATCH — one answer per requested
+        # key, in request order, and a miss is an ANSWER rather than an
+        # omission. This double answers exactly that, so the end-to-end row
+        # exercises the arity and order checks on a real socket.
+        keys = list(body.get("keys") or [])
+        out = json.dumps({
+            "object": "cell_resolve_batch",
+            "family": body.get("family"),
+            "answers": [{"cell_key": k, "status": "miss", "found": False}
+                        for k in keys],
+            "hits": 0, "misses": len(keys),
+        }).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(out)))
@@ -594,11 +627,15 @@ def test_a_cold_boot_with_a_reachable_hub_actually_issues_the_resolve(
     out = ex._boot_adopt(spec, slots)[0]
 
     resolves = [c for c in hub.calls if c[0] == cell_resolve.RESOLVE_PATH]
-    assert len(resolves) == 3, (
-        "the worker did not ask the hub by its derived key — this is the pod "
-        f"defect, reproduced off-pod. Hub saw: {hub.calls}")
-    assert resolves[0][1] == {
-        "family": "micro-diffusion", "cell_key": out.derived_key}
+    # pgw#1224: THREE declared classes, ONE round trip. The count was 3 while
+    # the wire was per key; a loop that survived the cut reds here.
+    assert len(resolves) == 1, (
+        "the worker did not ask the hub by its derived key set — this is the "
+        f"pod defect, reproduced off-pod. Hub saw: {hub.calls}")
+    assert resolves[0][1]["family"] == "micro-diffusion"
+    assert len(resolves[0][1]["keys"]) == 3
+    assert out.derived_key in resolves[0][1]["keys"]
+    assert "cell_key" not in resolves[0][1]
     assert out.derived_key.startswith("cg-key-v1-")
     assert out.reason == "miss"
 
@@ -665,7 +702,7 @@ def test_the_same_boot_derives_a_key_with_accelerate_UNIMPORTABLE(
     assert out.reason == "miss", out.detail
     assert out.derived_key.startswith("cg-key-v1-")
     resolves = [c for c in hub.calls if c[0] == cell_resolve.RESOLVE_PATH]
-    assert len(resolves) == 3, (
+    assert len(resolves) == 1 and len(resolves[0][1]["keys"]) == 3, (
         "an image without `accelerate` must still ASK — this is the pgw#1123 "
         f"pod defect, reproduced off-pod. Hub saw: {hub.calls}")
     assert _one(events).phase == "miss"

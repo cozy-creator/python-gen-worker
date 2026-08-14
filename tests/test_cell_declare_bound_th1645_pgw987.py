@@ -154,8 +154,14 @@ class _Hub(http.server.BaseHTTPRequestHandler):
         body = self._body()
 
         if path.endswith("/v1/worker/cells/publish-intent"):
-            self._json(200, {"capability_token": "cap-token",
-                             "repo": f"root/family-{body.get('family')}"})
+            entries = body.get("entries") or []
+            self._json(200, {
+                "repo": f"root/family-{body.get('family')}",
+                "granted": len(entries),
+                "answers": [
+                    {"cell_key": e.get("cell_key"), "status": "granted",
+                     "capability_token": f"cap-token-{i}"}
+                    for i, e in enumerate(entries)]})
             return
         if path.endswith("/v1/worker/cells/publish-complete"):
             with srv.lock:

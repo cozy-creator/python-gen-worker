@@ -134,26 +134,33 @@ ACTIONS: Dict[str, HubAction] = {
         # model since pgw#783). `identity_axes`/`mint_duration_ms` (th#1355)
         # were exactly that gap; `status`/`detail`/`axes` were names on
         # `publish-complete` that no caller and no hub route ever had.
+        # pgw#1224 (th#1842 PR #1121): the intent is a BATCH. `entries[]`
+        # carries the per-artifact facts — `cell_key`, `identity_axes` (all
+        # three key axes restated, never hoisted), `mint_duration_ms` — and
+        # `axes` stays batch-level because all three of ITS members are
+        # properties of the POD, not of a compiled graph. The old top-level
+        # `cell_key`/`identity_axes`/`mint_duration_ms` are GONE: a table that
+        # still admitted them would let a client speak the dead shape past the
+        # one gate that can refuse it.
         _a(
             "cells.publish_intent",
             "POST",
             r"^/v1/worker/cells/publish-intent$",
-            body=("family", "cell_key", "axes", "identity_axes",
-                  "mint_duration_ms"),
+            body=("family", "axes", "entries"),
             timeout_s=60.0,
         ),
-        # pgw#1090/th#1750 (§4.29): pull-by-key. The body carries the family
-        # and the derived cell key and NOTHING else — every entitlement input
-        # is resolved hub-side from the live session, and a body naming one is
-        # a named 400 (`cell_resolve_client_supplied_field`), not an ignored
-        # field. So this enumeration is not a convention, it is the request:
-        # an action table that admitted one more key would make the whole
-        # resolve refuse.
+        # pgw#1090/th#1750 (§4.29), batched by pgw#1224 (th#1842 PR #1118):
+        # pull-by-key-SET. The body carries the family and the derived keys and
+        # NOTHING else — every entitlement input is resolved hub-side from the
+        # live session, and a body naming one is a named 400
+        # (`cell_resolve_client_supplied_field`), not an ignored field. So this
+        # enumeration is not a convention, it is the request: an action table
+        # that admitted one more key would make the whole resolve refuse.
         _a(
             "cells.resolve",
             "POST",
             r"^/v1/worker/cells/resolve$",
-            body=("family", "cell_key"),
+            body=("family", "keys"),
             timeout_s=30.0,
         ),
         _a(

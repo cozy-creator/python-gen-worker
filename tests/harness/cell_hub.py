@@ -225,8 +225,24 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             family = str(body.get("family") or "")
             with srv.lock:
                 srv.intents.append(dict(body))
-            self._json(200, {"capability_token": "local-rig-cap",
-                             "repo": f"root/family-{family}"})
+            # pgw#1224/th#1842 PR #1121: one answer per entry, IN REQUEST
+            # ORDER, each carrying ITS OWN token. The double mints distinct
+            # tokens deliberately — a double that handed every entry one token
+            # would make the client's "one token each" check unfalsifiable.
+            entries = body.get("entries") or []
+            self._json(200, {
+                "object": "cell_publish_intent_batch",
+                "repo": f"root/family-{family}",
+                "family": family,
+                "granted": len(entries),
+                "answers": [
+                    {"cell_key": str(e.get("cell_key") or ""),
+                     "status": "granted",
+                     "capability_token": f"local-rig-cap-{i}",
+                     "expires_at_unix": 4102444800}
+                    for i, e in enumerate(entries)
+                ],
+            })
             return
 
         if path.endswith("/v1/worker/cells/publish-complete"):
