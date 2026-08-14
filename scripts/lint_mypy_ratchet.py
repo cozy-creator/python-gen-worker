@@ -156,7 +156,7 @@ def check(pyproject: Path) -> List[str]:
     # `tests tests_v2` from the invocation would return the suite to zero static
     # coverage and every check would stay green — the exact shape of failure
     # this repo keeps paying for, so it is asserted rather than trusted.
-    workflow = pyproject.parent / ".github" / "workflows" / "ci.yml"
+    workflow = pyproject.parent / ".github" / "workflows" / "ci.yaml"
     if workflow.exists():
         invocations = [
             line.strip() for line in workflow.read_text().splitlines()

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """A tag publishes only against a CI run that BUILT the tagged tree.
 
-Matching the tag's tree against a green `ci.yml` run by `head_sha` is not
-enough. `ci.yml` checks out with `actions/checkout@v4` and no `ref:`, so on a
+Matching the tag's tree against a green `ci.yaml` run by `head_sha` is not
+enough. `ci.yaml` checks out with `actions/checkout@v4` and no `ref:`, so on a
 `pull_request` event GitHub builds `refs/pull/<n>/merge` -- the PR head merged
 with whatever `master` is at that moment -- while still recording the PR BRANCH
 HEAD as the run's `head_sha`. A green PR run therefore names a commit it never
@@ -42,7 +42,7 @@ NO_RUN_CARRIES_TREE = "no_run_carries_tree"
 
 @dataclass(frozen=True)
 class Run:
-    """One `ci.yml` run, as the Actions API reports it."""
+    """One `ci.yaml` run, as the Actions API reports it."""
 
     id: int
     head_sha: str
@@ -118,7 +118,7 @@ def _gh_json(args: Sequence[str]) -> object:
 
 def _api_runs(repo: str, per_page: int) -> list[Run]:
     payload = _gh_json(
-        ["api", f"repos/{repo}/actions/workflows/ci.yml/runs?per_page={per_page}"])
+        ["api", f"repos/{repo}/actions/workflows/ci.yaml/runs?per_page={per_page}"])
     rows = (payload or {}).get("workflow_runs", []) if isinstance(payload, dict) else []
     return [Run.from_api(r) for r in rows]
 
@@ -150,7 +150,7 @@ class of hole pgw#795 closed for v0.78.0).
 
 The fix is one CI run:
 
-    gh workflow run ci.yml --ref <this-tag>     # or the branch you will tag
+    gh workflow run ci.yaml --ref <this-tag>     # or the branch you will tag
 
 then re-run this publish job once it is green.
 

@@ -30,7 +30,7 @@ jobs:
 
       # --locked (pgw#524 item 6): fail loudly if uv.lock drifts from
       # pyproject.toml instead of silently re-resolving newer dependency
-      # versions than what PR CI (ci.yml, also --locked) validated — the
+      # versions than what PR CI (ci.yaml, also --locked) validated — the
       # 0.18.0 root cause: a tag's publish run resolved different versions
       # than the merged PR did and failed AFTER the tag was already cut.
       - name: Install dependencies
@@ -40,11 +40,11 @@ jobs:
       # re-derive it.
       #
       # This step used to be `pytest tests/` — the same suite, on the same tree,
-      # with the same `--locked` resolution that ci.yml had already run green.
+      # with the same `--locked` resolution that ci.yaml had already run green.
       # A second identical run cannot produce new information; its only possible
       # novel outcomes are infrastructure flake and timing flake, and it produced
       # three of those in a row for v0.78.0 at ~22 minutes each, on top of a 4.6h
-      # scheduling stall, blocking three downstream lanes. So: ci.yml's full
+      # scheduling stall, blocking three downstream lanes. So: ci.yaml's full
       # suite at -n 4 is THE test gate, and this job runs only what is
       # artifact-facing (build + the pgw#740 wheel contract) once the tree it is
       # about to ship is known to have passed it.
