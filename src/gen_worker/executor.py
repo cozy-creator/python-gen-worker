@@ -332,9 +332,10 @@ def _snapshot_digest(snapshots: Any, ref: str) -> str:
 
 def _reserved_repo_info(payload: Any, field_name: str) -> Dict[str, Any]:
     """``payload.source`` / ``payload.destination`` / ``payload.text_encoder``
-    / ``payload.candidate`` as a plain dict ({} when absent). Producer payloads
-    carry these reserved-name structs (#376, pgw#594, pgw#684). The set of
-    names is hardcoded here; pgw#690 tracks making it declarative."""
+    / ``payload.candidate`` / ``payload.resume_from`` as a plain dict ({} when
+    absent). Producer payloads carry these reserved-name structs (#376,
+    pgw#594, pgw#684, pgw#1242). The set of names is hardcoded here; pgw#690
+    tracks making it declarative."""
     obj = getattr(payload, field_name, None)
     if obj is None:
         return {}
@@ -9576,6 +9577,12 @@ class Executor:
         # under test from `candidate`. Absent on every existing payload
         # struct — stays {} and is a no-op.
         candidate_info = _reserved_repo_info(payload, "candidate") if producer else {}
+        # pgw#1242/te#185: a previously PUBLISHED checkpoint to CONTINUE from.
+        # `ctx.save_checkpoint` already publishes; this is the door back in, so
+        # a long training run can survive pod loss instead of restarting from
+        # zero. Absent on every existing payload struct — stays {} and is a
+        # no-op.
+        resume_from_info = _reserved_repo_info(payload, "resume_from") if producer else {}
 
         # gw#453: arm repo-CAS checkpoint routing for producer jobs. Without
         # kind/destination_repo/job_id the ctx's _repo_job_upload_scope() is
@@ -9600,6 +9607,7 @@ class Executor:
                 destination_info=destination_info,
                 text_encoder_info=text_encoder_info,
                 candidate_info=candidate_info,
+                resume_from_info=resume_from_info,
                 hf_token=getattr(self._settings, "hf_token", "") or "",
             )
 
@@ -9683,6 +9691,11 @@ class Executor:
                 await self._materialize_source(
                     ctx, candidate_info, snapshots,
                     set_path=ctx._set_candidate_path, field_name="candidate",
+                )
+            if resume_from_info:
+                await self._materialize_source(
+                    ctx, resume_from_info, snapshots,
+                    set_path=ctx._set_resume_from_path, field_name="resume_from",
                 )
             if producer:
                 await self._materialize_datasets(ctx, payload)
