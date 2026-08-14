@@ -48,9 +48,9 @@ import msgspec
 from .safetensors_header import header_len_ok
 from .tensor_layout_contract import (
     CONTRACT_HF_FP8_BLOCKWISE,
-    KEYS_TRANSFORMERS_NATIVE,
     ELEMENT_BF16,
     ELEMENT_FP8_E4M3,
+    KEYS_TRANSFORMERS_NATIVE,
     SCALE_BLOCK_128X128,
     SHARD_COMPONENT_DIR,
     SHARD_INDEX_SHARDED,
