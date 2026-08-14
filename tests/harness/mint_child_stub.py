@@ -18,6 +18,13 @@ Behaviour is chosen with ``MINT_STUB_MODE``:
 ``busy``        burn CPU for MINT_STUB_SECONDS, then mint
 ``silent``      sleep for MINT_STUB_SECONDS doing nothing at all
 ``grow``        write work-root bytes slowly (CPU-quiet but progressing)
+
+pgw#1243's three wedge shapes — each walks the real terminal frames
+(``seal_publish`` then ``finalize``) and then never exits:
+
+``wedged_spin``      report written, then one core spins forever
+``wedged_block``     report written, then blocked forever (flat CPU)
+``wedged_no_report`` wedged INSIDE finalize: no report is ever written
 """
 
 from __future__ import annotations
@@ -112,6 +119,30 @@ def main() -> int:
             time.sleep(0.2)
         _mint(request)
         return 0
+    if mode in ("wedged_spin", "wedged_block", "wedged_no_report"):
+        # pgw#1243: the wedge, in its three observable shapes. Each one walks
+        # the real terminal frames (`seal_publish` then `finalize`) and then
+        # never dies — which is what both production instances did.
+        sys.stdout.write(frame_line(
+            phase="seal_publish", note="packed 4 entry artifact(s)"))
+        sys.stdout.flush()
+        sys.stdout.write(frame_line(phase="finalize", note="manifest stub"))
+        sys.stdout.flush()
+        if mode != "wedged_no_report":
+            # The child reached its OWN terminus: entries moved, report
+            # written. Only the interpreter teardown hangs.
+            _mint(request)
+        acc = 0
+        while True:
+            if mode == "wedged_block":
+                # A non-daemon thread `threading._shutdown` will never join:
+                # flat CPU, flat bytes, alive forever.
+                time.sleep(3600)
+            # ...and the shape instance A measured: one core at 1.00 CPU-s/s,
+            # which re-touched the parent's silence window every single poll.
+            for i in range(200000):
+                acc += i * i
+
     if mode == "busy":
         sys.stdout.write(frame_line(phase="inductor_compile", note="burning"))
         sys.stdout.flush()

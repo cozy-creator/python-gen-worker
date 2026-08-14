@@ -120,6 +120,18 @@ _EVIDENCE_WINDOW_S = 300.0
 #: Evidence advance (CPU-seconds + MiB written) that counts as progress.
 _EVIDENCE_EPS = 0.05
 
+#: pgw#1243: the phase after which the child has no WORK left — only a JSON
+#: write and an interpreter teardown. ``mint_child._mint_aot`` emits it once
+#: every entry is packed, moved and hashed and the manifest is named; ``main``
+#: then writes the report and returns. So two things are true past this frame
+#: and neither was expressed anywhere: the child's own TERMINUS is its report,
+#: not its exit; and process-tree CPU is RESIDUE (a leftover pool grandchild, a
+#: non-daemon thread torch never joined, a CUDA teardown that spins) rather than
+#: evidence of work. Both instances of the wedge were exactly this — the child
+#: said ``finalize`` and never spoke again, while its residue burned one core at
+#: 1.00 CPU-s/s, re-touching the silence window every poll for 62 minutes.
+TERMINAL_CHILD_PHASE = "finalize"
+
 #: Bytes of the child's stderr kept for the failure report.
 _STDERR_TAIL_BYTES = 8192
 
@@ -545,6 +557,8 @@ async def _observe(
     window: SilenceWindow,
     on_evidence: Optional[Callable[[float], None]],
     interval_s: float,
+    *,
+    state: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Watch the child's MEASURED progress. Returns the stall reason, or ''
     when cancelled because the child exited.
@@ -557,18 +571,30 @@ async def _observe(
     * a signal that is merely quiet — work-root bytes during a long ``g++`` —
       cannot cancel one that is moving. Only the absence of BOTH advances is
       silence, which is the only thing this window is entitled to judge.
+
+    pgw#1243 — THE TERMINAL PHASE ADMITS NO AMBIENT EVIDENCE. Both signals
+    describe a child that is BUILDING something. Past ``TERMINAL_CHILD_PHASE``
+    the child is not building anything: it has packed, moved and hashed every
+    entry, and the only progress it has left is its report. Crediting tree CPU
+    there does not merely measure the wrong thing — it makes the window
+    UNFIREABLE, because any residue that spins re-touches it every poll. That
+    is precisely how a mint that had finished its work sat in ``finalize`` for
+    62 minutes reporting ``self_stalled=FALSE``: the counter was admitted as a
+    position, and in this phase the position is a lie. An axis that cannot go
+    silent is not a progress axis, so in this phase it is not consulted.
     """
     cpu, mib = _evidence(pid, work_root)
     window.touch()
     while True:
         await asyncio.sleep(interval_s)
         now_cpu, now_mib = _evidence(pid, work_root)
+        terminal = str((state or {}).get("phase") or "") == TERMINAL_CHILD_PHASE
         advanced = False
         if now_cpu is not None and (cpu is None or now_cpu - cpu >= _EVIDENCE_EPS):
             cpu, advanced = now_cpu, True
         if now_mib is not None and (mib is None or now_mib - mib >= _EVIDENCE_EPS):
             mib, advanced = now_mib, True
-        if advanced:
+        if advanced and not terminal:
             window.touch()
             if on_evidence is not None:
                 try:
@@ -576,13 +602,61 @@ async def _observe(
                 except Exception:
                     logger.exception("mint evidence callback failed")
         elif window.stalled():
+            cpu_note = "unreadable" if now_cpu is None else f"{now_cpu:.1f}s"
+            mib_note = "unreadable" if now_mib is None else f"{now_mib:.1f}MiB"
+            if terminal:
+                return (
+                    f"the mint process reached its terminal phase "
+                    f"{TERMINAL_CHILD_PHASE!r} and then stopped: it has not "
+                    f"written its report for {window.silent_for():.0f}s "
+                    f"(window {window.window_s:.0f}s). Past that phase every "
+                    f"entry is already packed and moved, so the report is the "
+                    f"only progress left and process-tree CPU ({cpu_note}) is "
+                    f"residue — a leftover compile worker or an interpreter "
+                    f"teardown that never finished — not work. Observed "
+                    f"work-root {mib_note}")
             return (
                 f"the mint process made no measured progress for "
                 f"{window.silent_for():.0f}s (window {window.window_s:.0f}s): "
-                f"process-tree CPU {'unreadable' if now_cpu is None else f'{now_cpu:.1f}s'} "
+                f"process-tree CPU {cpu_note} "
                 f"and work-root "
-                f"{'unreadable' if now_mib is None else f'{now_mib:.1f}MiB'} "
+                f"{mib_note} "
                 f"both flat")
+
+
+async def _await_terminus(report_path: Path, interval_s: float) -> "MintReport":
+    """Resolve when the child has written its report — its own TERMINUS.
+
+    pgw#1243. ``mint_child.main`` writes the report as its LAST statement on
+    every path (minted, refused, resource, classified failure) and then
+    returns; whatever the process does afterwards is interpreter teardown, and
+    teardown is not work the parent has any reason to wait on. Waiting on the
+    EXIT instead of the report is what turned a completed 45-minute compile
+    into a 62-minute wedge that published nothing: the artifacts were on disk
+    and the report named them, and the parent sat on ``proc.wait()``.
+
+    The write is atomic (``os.replace`` off a ``.part``), so a decodable report
+    is a whole one — there is no torn-read window to poll around.
+    """
+    while True:
+        report = _decode_report(report_path)
+        if report is not None:
+            return report
+        await asyncio.sleep(interval_s)
+
+
+#: The exit code a report's own status stands for, when the child wrote the
+#: report and then failed to exit. Anything unrecognised is the classified
+#: failure code — the child caught something, named it, and wrote it down.
+_REPORT_EXIT_CODES: Dict[str, int] = {
+    "minted": EXIT_MINTED,
+    "refused": EXIT_REFUSED,
+    "resource": EXIT_RESOURCE,
+}
+
+
+def _code_for_report(report: MintReport) -> int:
+    return _REPORT_EXIT_CODES.get(str(report.status), 1)
 
 
 def _terminate_group(pid: int, *, grace_s: float = 10.0) -> None:
@@ -653,21 +727,38 @@ async def run_mint(
     errs = asyncio.ensure_future(_pump_stderr(proc.stderr, state))
     watch = asyncio.ensure_future(_observe(
         proc.pid, work_root,
-        SilenceWindow(evidence_window_s), on_evidence, observe_interval_s))
+        SilenceWindow(evidence_window_s), on_evidence, observe_interval_s,
+        state=state))
     reap = asyncio.ensure_future(proc.wait())
+    # pgw#1243: the child's terminus, watched beside its exit. A healthy child
+    # exits within milliseconds of writing, so `reap` wins this race on every
+    # normal mint and nothing below changes; this only ever fires for a child
+    # that finished its work and then failed to die.
+    terminus = asyncio.ensure_future(
+        _await_terminus(report_path, observe_interval_s))
     stop = (
         asyncio.ensure_future(abandon.wait()) if abandon is not None
         else None)
-    waits = [reap, watch] + ([stop] if stop is not None else [])
+    waits = [reap, watch, terminus] + ([stop] if stop is not None else [])
 
     killed_reason = ""
+    #: True when the child did not exit under its own power and the parent
+    #: reaped its group — so a signal exit code below is the PARENT's, and
+    #: says nothing about how the mint ended (pgw#1243).
+    reaped_by_parent = False
     try:
         await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
         if not reap.done():
+            reaped_by_parent = True
             if watch.done() and watch.result():
                 killed_reason = watch.result()
             elif stop is not None and stop.done():
                 killed_reason = ABANDONED
+            elif terminus.done():
+                logger.info(
+                    "mint_process: pid=%s wrote its report and did not exit "
+                    "— reaping its group; the report is the terminus "
+                    "(pgw#1243)", proc.pid)
             await asyncio.to_thread(_terminate_group, proc.pid)
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(
@@ -676,11 +767,12 @@ async def run_mint(
         await asyncio.to_thread(_terminate_group, proc.pid)
         raise
     finally:
-        for fut in (frames, errs, watch, reap, stop):
+        for fut in (frames, errs, watch, reap, terminus, stop):
             if fut is not None and not fut.done():
                 fut.cancel()
         with contextlib.suppress(Exception):
-            await asyncio.gather(frames, errs, watch, return_exceptions=True)
+            await asyncio.gather(
+                frames, errs, watch, terminus, return_exceptions=True)
 
     code = reap.result() if reap.done() and not reap.cancelled() else None
     elapsed = time.monotonic() - started
@@ -705,6 +797,21 @@ async def run_mint(
 
     if killed_reason == ABANDONED:
         return _out(ABANDONED, "the parent abandoned this mint")
+    # pgw#1243: a report and a missing exit code are not a contradiction —
+    # they are a child that reached its own terminus and then failed to die.
+    # The report carries the same CLASSIFICATION the exit code does, so read
+    # it off there and let the ladder below run unchanged. This also
+    # reinterprets a stall the parent had to kill: a mint whose report is on
+    # disk produced whatever the report says it produced, and calling that a
+    # crash would throw away a finished cell over a teardown that hung.
+    if reaped_by_parent and report is not None:
+        code = _code_for_report(report)
+        logger.info(
+            "mint_process: classifying pid=%s from its report (status=%r) — "
+            "it reached its terminus and never exited%s",
+            proc.pid, report.status,
+            f" ({killed_reason})" if killed_reason else "")
+        killed_reason = ""
     if killed_reason:
         return _out(CRASHED, killed_reason)
 

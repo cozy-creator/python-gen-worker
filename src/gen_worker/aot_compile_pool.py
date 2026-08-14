@@ -76,6 +76,7 @@ from .child_contract import CompileSpec, MintSlot
 from .compile_posture import (
     USER_MACHINE_RSS_RESERVE_BYTES, CompilePosture)
 from .postmortem import cpu_quota_cores
+from .stall import SilenceWindow
 import hashlib
 
 logger = logging.getLogger(__name__)
@@ -215,6 +216,19 @@ DEFAULT_ENTRY_PEAK_RSS_BYTES = 3 * 1024**3
 
 _KILL_GRACE_S = 10.0
 _POLL_S = 0.25
+
+#: pgw#1243: how long ONE compile child's measured evidence — its process
+#: tree's CPU seconds plus the bytes it has written — may fail to advance
+#: before the pool calls it wedged. A SILENCE window, never a compile budget:
+#: an entry that spends forty minutes inside one `aot_compile` advances this
+#: every poll and is never touched. It exists because the drain loop below had
+#: no give-up test of ANY kind — it polled `proc.poll()` forever — and the
+#: three-tier stack's own window (which used to cover this whole tree from the
+#: mint child) went away with the middle tier.
+_ENTRY_SILENCE_WINDOW_S = 300.0
+
+#: Evidence advance (CPU-seconds + MiB written) that counts as progress.
+_ENTRY_EVIDENCE_EPS = 0.05
 
 
 @dataclass(frozen=True)
@@ -830,6 +844,17 @@ class _Running:
     #: Wall clock at the moment ``Popen`` returned — the other end of the
     #: child's boot span, which no monotonic clock can close across processes.
     spawn_epoch: float = 0.0
+    #: pgw#1243: this child's own silence window, and the high-water marks it
+    #: judges. Per ROW, because the pool's question is per row: one share
+    #: finishing tells you nothing about whether a sibling has wedged, and a
+    #: pool-wide signal lets a busy sibling vouch for a dead one.
+    window: Optional[SilenceWindow] = None
+    cpu_s: Optional[float] = None
+    work_mib: Optional[float] = None
+    #: True when the child wrote its report and the PARENT ended it, rather
+    #: than the child exiting under its own power. The exit code is then the
+    #: parent's signal and says nothing about the compile — read the report.
+    reaped_at_terminus: bool = False
 
 
 @dataclass
@@ -1123,6 +1148,57 @@ def _peak_rss_bytes(proc: subprocess.Popen) -> int:
     return sum(_vmhwm_bytes(pid) for pid in _descendants(proc.pid))
 
 
+def _tree_cpu_seconds(pid: int) -> Optional[float]:
+    """CPU seconds burned by a child's whole process tree, reaped members
+    included (pgw#964, ported to the pool by pgw#1243).
+
+    The reaped counters are what make it monotonic: a member's CPU leaves its
+    own ``utime/stime`` and enters its parent's ``cutime/cstime`` the instant
+    the parent waits for it, so a plain live-member sum falls into a hole one
+    finished sub-process deep — and a supervisor comparing against a
+    high-water mark reads that as death. ``None`` (never 0) when the tree
+    cannot be sampled: an absent measurement is no evidence, not a zero.
+    """
+    try:
+        import psutil
+    except Exception:  # pragma: no cover — psutil is a hard dep in practice
+        return None
+    try:
+        proc = psutil.Process(pid)
+        members = [proc] + proc.children(recursive=True)
+    except Exception:
+        return None
+    total = 0.0
+    for member in members:
+        try:
+            times = member.cpu_times()
+        except Exception:
+            continue
+        total += float(times.user) + float(times.system)
+        total += float(getattr(times, "children_user", 0.0) or 0.0)
+        total += float(getattr(times, "children_system", 0.0) or 0.0)
+    return total
+
+
+def _dir_mib(root: Path) -> Optional[float]:
+    """MiB a child has written into its scratch — generated sources, objects,
+    the packed artifact. It grows in BURSTS (sources land, then a single
+    ``cc1plus`` chews for minutes writing nothing), so its growth proves work
+    and its silence proves nothing: an independent positive signal that can
+    never, on its own, vote to condemn."""
+    total = 0
+    try:
+        for path in root.rglob("*"):
+            try:
+                if path.is_file():
+                    total += path.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        return None
+    return total / (1 << 20)
+
+
 class EntryCompilePool:
     """Trace, compile and pack a family's declared graph classes K-wide, out
     of process.
@@ -1148,8 +1224,13 @@ class EntryCompilePool:
         inductor_configs: Optional[Mapping[str, Any]] = None,
         cache_dir: str = "",
         python: str = "",
+        entry_silence_window_s: float = _ENTRY_SILENCE_WINDOW_S,
     ) -> None:
         self.workdir = Path(workdir)
+        #: pgw#1243: how long ONE share may make no measured progress. A
+        #: parameter so a tape can drive the window rather than wait it out;
+        #: production never passes it.
+        self.entry_silence_window_s = float(entry_silence_window_s)
         self.workdir.mkdir(parents=True, exist_ok=True)
         self.width = width
         #: pgw#842/th#1359: the width facts as last EMITTED, so a re-emit
@@ -1621,7 +1702,71 @@ class EntryCompilePool:
             self.peak_rss_bytes = max(self.peak_rss_bytes, row.peak_rss_bytes)
             if row.proc.poll() is not None:
                 return row
+            # pgw#1243: A CHILD'S TERMINUS IS ITS REPORT, NOT ITS EXIT.
+            # `aot_compile_child.run` writes the report as its last statement
+            # and returns; everything after is interpreter teardown, and a
+            # process that has just traced and AOTI-compiled has plenty that
+            # can hang there — a non-daemon thread, a subproc pool, CUDA. Two
+            # production mints packed and reported an entire cell and then sat
+            # in `finalize` for 78.9 and 62 minutes while the tier above them
+            # waited on an exit that never came. Everything this pool needs is
+            # in the report; the corpse is not part of the contract.
+            if _read_report(Path(row.job.report)) is not None:
+                logger.info(
+                    "aot-pool: %s wrote its report and did not exit — reaping "
+                    "its group; the report is the terminus (pgw#1243)",
+                    row.entry)
+                row.reaped_at_terminus = True
+                _terminate_group(row.proc)
+                return row
+            self._judge_entry_liveness(row)
         return None
+
+    def _judge_entry_liveness(self, row: _Running) -> None:
+        """Condemn a share that has stopped making MEASURED progress.
+
+        pgw#1243. Until this existed the drain loop had no give-up test at
+        all: `proc.poll()` forever, `time.sleep(_POLL_S)` forever. The
+        three-tier stack used to get this for free — the mint child's own
+        supervisor watched this whole process tree — and pgw#1215 step 4
+        deleted that tier without moving the watch down with it.
+
+        Progress is MEASURED (process-tree CPU plus bytes written), never a
+        clock and never a frame the child could print while wedged, and the two
+        signals keep separate high-water marks so a quiet one cannot cancel a
+        moving one (pgw#964). A child inside a forty-minute `aot_compile`
+        advances this every poll and is never touched.
+        """
+        if row.window is None:
+            row.window = SilenceWindow(self.entry_silence_window_s)
+        cpu = _tree_cpu_seconds(row.proc.pid)
+        mib = _dir_mib(Path(row.job.work))
+        advanced = False
+        if cpu is not None and (
+                row.cpu_s is None or cpu - row.cpu_s >= _ENTRY_EVIDENCE_EPS):
+            row.cpu_s, advanced = cpu, True
+        if mib is not None and (
+                row.work_mib is None
+                or mib - row.work_mib >= _ENTRY_EVIDENCE_EPS):
+            row.work_mib, advanced = mib, True
+        if advanced:
+            row.window.touch()
+            return
+        if not row.window.stalled():
+            return
+        raise EntryCompileFailed(
+            row.entry,
+            f"{row.entry} (rows[{row.job.share_index}::"
+            f"{row.job.share_count}]): the compile child made no measured "
+            f"progress for {row.window.silent_for():.0f}s (window "
+            f"{row.window.window_s:.0f}s) and wrote no report — process-tree "
+            f"CPU "
+            f"{'unreadable' if row.cpu_s is None else f'{row.cpu_s:.1f}s'} "
+            f"and its work dir "
+            f"{'unreadable' if row.work_mib is None else f'{row.work_mib:.1f}MiB'} "
+            f"are both flat. It is wedged, not compiling; this build FAILS and "
+            f"this worker keeps serving eager",
+            peak_rss_bytes=row.peak_rss_bytes)
 
     def observe_entry_device(self, report: EntryReport) -> None:
         """Bank one entry child's DEVICE high-water (pgw#877 #2).
@@ -1651,6 +1796,15 @@ class EntryCompilePool:
         self.entry_seconds[row.entry] = round(elapsed, 2)
         code = row.proc.returncode
         report = _read_report(Path(row.job.report))
+        if row.reaped_at_terminus and report is not None:
+            # pgw#1243: this child reached its own terminus and then failed to
+            # die, so the parent ended it — the exit code below is the
+            # PARENT's signal and says nothing about the compile. The report
+            # carries the same classification the exit code does, so read it
+            # there and let the ladder run unchanged. Without this a share
+            # that packed every one of its graph classes would be reported as
+            # a signal death and its artifacts thrown away.
+            code = EXIT_COMPILED if report.status == COMPILED else EXIT_REFUSED
         if report is not None:
             # pgw#877: banked BEFORE any gate can raise, and on the failure
             # path too — pgw#848's rule for the host half applies unchanged
