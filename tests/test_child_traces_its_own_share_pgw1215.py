@@ -1,7 +1,7 @@
 """pgw#1215 (th#1834 Phase 3 keystone) — the wiring, the durability bound, and
 the one label a share cannot state.
 
-Three properties, none of which any other file covers:
+Four properties, none of which any other file covers:
 
 1. **``mint_child`` drives the K-wide path.** The keystone is worth nothing if
    the production mint still calls the serial one — that would be a K=1
@@ -16,6 +16,10 @@ Three properties, none of which any other file covers:
 3. **A share cannot state a declaration-wide coverage label.** Each child
    stamps ``manifest_digest`` EMPTY; the parent folds the real one across every
    share. A share-local digest in the artifact would read like a whole one.
+4. **Two shares that emit ONE key collapse to ONE artifact.** No child can see
+   a peer's keys, so a duplicate is only detectable at the parent — and if it
+   reaches the hub it is a publish 409 discovered after both compiles are paid
+   for. The absorbed name is recorded as an alias, never silently dropped.
 """
 
 from __future__ import annotations
@@ -429,6 +433,141 @@ def test_the_parent_stamps_the_folded_label_on_what_it_returns(
         assert row.metadata["manifest_digest"] == want
         assert row.metadata["mint_phases"], (
             "the whole-mint phase table must replace each share's own")
+
+
+# ---------------------------------------------------------------------------
+# 4. Two shares that emit ONE key collapse to one artifact
+# ---------------------------------------------------------------------------
+
+
+def _packed_with_keys(keys: Dict[str, str]) -> Dict[str, Any]:
+    """``{class name: PackedGraphClass}`` as the pool hands it back, with the
+    key each child stamped stated by the caller."""
+    rows: Dict[str, Any] = {}
+    for i, (name, key) in enumerate(sorted(keys.items())):
+        meta = {
+            "family": FAMILY,
+            cell_key.ENTRY_BLOCK_KEY: aot_serve.stamp_entry(
+                name, _block(name, i), strict=True, lora_bucket=0),
+            "manifest_digest": "",
+        }
+        rows[name] = pool.PackedGraphClass(
+            name=name, key=key, artifact=f"/tmp/{i}.tar.gz",
+            metadata=json.dumps(meta))
+    return rows
+
+
+def _drive(packed_rows: Dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> Any:
+    class _Pool:
+        entry_seconds: Dict[str, float] = {}
+        peak_rss_bytes = 0
+
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        def compile(self, template: Any, **kw: Any) -> Any:
+            return packed_rows
+
+    monkeypatch.setattr(pool, "EntryCompilePool", _Pool)
+    monkeypatch.setattr(aot_mint, "_pool_facts", lambda p: {})
+    width = pool.entry_workers(
+        len(packed_rows) or 1, limit=2, vcpus=16,
+        available_bytes=64 * 1024**3, device_lock=True)
+    return aot_mint.mint_graph_classes(
+        pool.EntryJob(function="generate", modules=("m",), out_dir="/tmp"),
+        workdir=Path("/tmp/pgw1215-nowhere"), width=width,
+        spec=aot_mint.ExportSpec(family=FAMILY, target="unet"))
+
+
+def test_two_shares_that_emit_ONE_key_collapse_to_ONE_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RED if the parent returns both — the second publish is a 409.
+
+    Each compile child holds ONE SHARE and stamps its own keys, so two classes
+    that key identically can land in different children and neither can see
+    the other. Nothing below the parent can catch it: the pool returns a dict
+    keyed by class NAME, so two names carrying one key survive the collection
+    intact and the collision is only discovered by the hub, on the pod, after
+    both compiles are paid for. The parent is the only process that sees every
+    share, so the collapse belongs here.
+    """
+    _declare()
+    shared = "ek1-" + "a" * 56
+    result = _drive(_packed_with_keys({
+        "cls/dim=0": shared,
+        "cls/dim=1": shared,
+        "cls/dim=2": "ek1-" + "b" * 56,
+    }), monkeypatch)
+
+    keys = [row.key for row in result.entries]
+    assert len(keys) == len(set(keys)), (
+        f"the parent returned two artifacts under one key {keys!r} — the "
+        f"second publish of that key is a 409")
+    assert sorted(keys) == sorted({shared, "ek1-" + "b" * 56})
+    names = {row.entry for row in result.entries}
+    assert names == {"cls/dim=0", "cls/dim=2"}, (
+        "the survivor must be deterministic (first by name), or two mints of "
+        "the same declaration publish different class names")
+
+    # The absorbed name is RECORDED, not merely dropped: a reader asking
+    # "where did cls/dim=1 go" gets an answer instead of an absence.
+    survivor = next(r for r in result.entries if r.key == shared)
+    aliases = survivor.metadata[cell_key.ENTRY_BLOCK_KEY].get("aliases") or []
+    assert [a["name"] for a in aliases] == ["cls/dim=1"], (
+        f"the absorbed class left no alias: {aliases!r}")
+    assert aliases[0]["class_dims"] == [["B", 1]], (
+        "the alias must carry the absorbed class's own coordinate")
+
+    # And the alias must not re-key the survivor: it is not a `class_hash`
+    # fact, so the key the child stamped is the key the parent returns.
+    assert survivor.key == shared
+
+
+def test_a_declaration_with_no_key_collision_is_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dedupe is a collapse, never a filter — distinct keys all survive,
+    nothing is aliased, and the coverage label covers all of them."""
+    _declare()
+    rows = _packed_with_keys({
+        f"cls/dim={i}": f"ek1-{i:056d}" for i in range(3)})
+    result = _drive(rows, monkeypatch)
+
+    assert len(result.entries) == 3
+    for row in result.entries:
+        assert "aliases" not in row.metadata[cell_key.ENTRY_BLOCK_KEY]
+    spec = aot_mint.ExportSpec(family=FAMILY, target="unet")
+    blocks = {
+        row.entry: row.metadata[cell_key.ENTRY_BLOCK_KEY]
+        for row in result.entries}
+    assert result.manifest == aot_mint.class_manifest(blocks, spec)
+
+
+def test_the_coverage_label_does_not_count_an_absorbed_class_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An absorbed class contributes the same ``class_hash`` its survivor
+    already contributes, so folding it as well would make the declaration-wide
+    label depend on how the declaration happened to be sharded."""
+    _declare()
+    shared = "ek1-" + "c" * 56
+    result = _drive(_packed_with_keys({
+        "cls/dim=0": shared, "cls/dim=1": shared}), monkeypatch)
+
+    spec = aot_mint.ExportSpec(family=FAMILY, target="unet")
+    both = {name: _block(name, i)
+            for i, name in enumerate(("cls/dim=0", "cls/dim=1"))}
+    one = {"cls/dim=0": both["cls/dim=0"]}
+    # Stated as two independent folds so the assertion cannot pass by reading
+    # the same set back out of the result it is checking.
+    assert aot_mint.class_manifest(one, spec) \
+        != aot_mint.class_manifest(both, spec)
+    assert result.manifest == aot_mint.class_manifest(one, spec), (
+        "the absorbed class was folded into the coverage label as well, so "
+        "the label now depends on how the declaration was sharded")
+    for row in result.entries:
+        assert row.metadata["manifest_digest"] == result.manifest
 
 
 def test_a_child_envelope_that_cannot_be_parsed_refuses(

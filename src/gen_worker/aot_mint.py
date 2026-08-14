@@ -2816,8 +2816,8 @@ def mint_graph_classes(
     timings["compile_all_s"] = round(time.monotonic() - t_mint, 2)
     timings["entry_workers"] = float(width.workers)
     timings["total_s"] = round(time.monotonic() - t_mint, 2)
-    entries: List[MintedArtifact] = []
-    blocks: Dict[str, Dict[str, Any]] = {}
+    metas: Dict[str, Dict[str, Any]] = {}
+    decoded_blocks: Dict[str, Dict[str, Any]] = {}
     for name in sorted(packed):
         row = packed[name]
         try:
@@ -2832,14 +2832,71 @@ def mint_graph_classes(
             raise MintRefused(
                 f"graph class {name!r}: the packed envelope carries no entry "
                 f"block, so its coverage cannot be folded")
+        metas[name] = meta
+        decoded_blocks[name] = block
+
+    # ── DEDUPE BY KEY (pgw#917's alias mechanism, narrower predicate) ──────
+    #
+    # A compile child holds ONE SHARE, so two declared classes that key
+    # identically can land in different children and neither can see the
+    # other. The pool returns a dict keyed by class NAME, so both survive the
+    # collection intact and the collision is first discovered by the HUB — a
+    # duplicate-key 409 on the second publish, on the pod, after both compiles
+    # are paid for. The parent is the only process that sees every share, so
+    # it collapses them HERE: one artifact per key, the absorbed names
+    # recorded as that entry's aliases. The key is what publish uniques on, so
+    # grouping by it makes the 409 impossible by construction rather than
+    # merely unlikely.
+    #
+    # ⚠️ It is NOT pgw#917's ingress merge and must not be read as one: rows
+    # that share an ingress contract while differing in `class_dims` key APART
+    # (dims fold into `class_hash`), so this never sees them. That merge needs
+    # the whole declaration BEFORE sharding and is owed at step 4.
+    #
+    # An alias is not a `class_hash` fact (`aot_serve.class_hash` folds named
+    # fields only), so recording one cannot re-key the survivor.
+    absorbed_by: Dict[str, List[str]] = {}
+    survivor_of: Dict[str, str] = {}
+    for name in sorted(metas):
+        key = str(packed[name].key)
+        keep = survivor_of.setdefault(key, name)
+        if keep != name:
+            absorbed_by.setdefault(keep, []).append(name)
+
+    entries: List[MintedArtifact] = []
+    blocks: Dict[str, Dict[str, Any]] = {}
+    absorbed = {n for names in absorbed_by.values() for n in names}
+    for name in sorted(metas):
+        if name in absorbed:
+            continue
+        block = decoded_blocks[name]
+        merged = absorbed_by.get(name) or ()
+        if merged:
+            # Recorded so the merge is auditable from the result alone — a
+            # reader asking "where did class row X go" gets an answer instead
+            # of an absence. Same shape `pack_graph_classes` writes.
+            block["aliases"] = [
+                {"name": alias,
+                 "class_dims": [
+                     [str(n), int(v)] for n, v in sorted(
+                         decoded_blocks[alias].get("class_dims") or ())]}
+                for alias in merged
+            ]
+            logger.info(
+                "aot-mint: pgw#917 graph class %s absorbed %d class(es) "
+                "keying identically (%s) -> %s",
+                name, len(merged), ", ".join(merged), packed[name].key)
         blocks[name] = block
         entries.append(MintedArtifact(
-            key=str(row.key), entry=name, artifact=Path(row.artifact),
-            metadata=meta))
+            key=str(packed[name].key), entry=name,
+            artifact=Path(packed[name].artifact), metadata=metas[name]))
     # The declaration-wide coverage label, folded HERE because this is the
     # only process that sees every share. Each child stamped its artifact's
     # own `manifest_digest` EMPTY rather than a share-local digest that would
-    # read like a whole-declaration one (see `pack_graph_classes`).
+    # read like a whole-declaration one (see `pack_graph_classes`). Folded
+    # over the SURVIVORS: an absorbed class contributes the same `class_hash`
+    # its survivor already contributes, so folding it as well would make the
+    # label depend on how the declaration happened to be sharded.
     manifest = class_manifest(blocks, spec)
     phase_table = _mint_phase_table(
         [], timings, inductor_configs, width, progress.pool_ledger)

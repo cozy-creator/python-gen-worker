@@ -356,8 +356,9 @@ def run(job: EntryJob) -> int:
                 out_dir=Path(job.out_dir),
                 # pgw#917's dispatch-class merge is a WHOLE-declaration
                 # question and this process holds one share of it, so nothing
-                # is aliased here. ⚠️ OWED (step 4): the merge moves to the
-                # parent, which is the only process that sees every class.
+                # is aliased here. The parent runs it over every share's keys
+                # (`aot_mint.mint_graph_classes`) — it is the only process
+                # that sees every class.
                 class_aliases={},
                 timings={},
                 t_mint=t_mint,
