@@ -56,14 +56,14 @@ def wired(monkeypatch, tmp_path):
     calls: list[Dict[str, Any]] = []
 
     # The pre-derive gate now asks whether ANYBODY could answer, and
-    # this machine's own cell store is one of the two answerers. Pin it to an
-    # empty tmp root so the gate under test reads a fact about the test and not
-    # about whatever the developer's `~/.cache/cozy/compile-cells` happens to
-    # hold — the ambient-input class of flake this repo has been bitten by.
-    from gen_worker import local_cell_store
-
-    monkeypatch.setenv(
-        local_cell_store.ENV_STORE_DIR, str(tmp_path / "empty-cells"))
+    # this machine's own compiled-graph store is one of the two answerers.
+    # Pin the authority's metadata-only query so ambient cache contents cannot
+    # decide this credential test.
+    monkeypatch.setattr(
+        executor_mod.boot_adopt.compiled_graph_store,
+        "has_graphs",
+        lambda: False,
+    )
 
     def _attempt(**kw: Any) -> Any:
         calls.append(kw)
@@ -74,8 +74,7 @@ def wired(monkeypatch, tmp_path):
         return (executor_mod.boot_adopt.BootAdoptOutcome(reason="miss"),)
 
     # Everything before the gate: a declaration exists and sizes one class.
-    monkeypatch.setattr(executor_mod.aot_mint, "export_declaration",
-                        lambda family: object())
+    monkeypatch.setattr(executor_mod, "export_declaration", lambda family: object())
     monkeypatch.setattr(executor_mod.aot_declaration, "cell_plans",
                         lambda decl: [object()])
     monkeypatch.setattr(executor_mod, "_mint_modules", lambda spec: ("m",))
