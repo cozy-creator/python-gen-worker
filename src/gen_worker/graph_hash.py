@@ -72,6 +72,25 @@ SYM_PREFIX = "sym "
 SIG_PREFIX = "sig "
 SPEC_PREFIX = "spec "
 
+# 64 bits, DERIVED and deliberately kept at v1 (pgw#1232, §1.38b review).
+#
+# This feeds the `graph` axis of a `cg-key-v1` key, so a collision here is not
+# a cache miss — it is two different traced computations sharing an axis value,
+# one artifact silently serving both. Birthday bound: at N distinct graph
+# classes over the fleet's lifetime, P(collision) ~= N^2 / 2^65.
+#
+#   N = 10^4   ->  ~3e-12      (realistic: ~15 families x classes x lanes)
+#   N = 10^6   ->  ~3e-8
+#   N = 10^9   ->  ~3e-2       (not reachable by a compiled-graph corpus)
+#
+# Comfortable by seven orders of magnitude at any scale this fleet reaches, so
+# widening to 128 bits buys nothing measurable and costs a full re-key.
+#
+# IF IT IS EVER WIDENED, BOTH CHOKEPOINTS MOVE TOGETHER. The axis is
+# `aot_serve.class_hash`, which truncates its OWN facts blob to 16 hex as well
+# — this digest is only one fact inside that blob. Widening this constant alone
+# re-keys the whole corpus and leaves axis collision resistance at 64 bits,
+# because the minimum of the two chokepoints is what the axis actually has.
 _DIGEST_HEX = 16
 _INF = "oo"
 

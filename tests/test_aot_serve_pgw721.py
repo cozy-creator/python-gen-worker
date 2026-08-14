@@ -165,7 +165,8 @@ def _meta(**over):
         if k in over}
     entry = over.pop("entry", None) or _entry(**entry_over)
     m = {
-        "format": aot.ARTIFACT_FORMAT, "kind": aot.ARTIFACT_KIND, **RUNTIME,
+        aot.COMPILED_GRAPH_FORMAT_KEY: aot.COMPILED_GRAPH_FORMAT,
+        "kind": aot.ARTIFACT_KIND, **RUNTIME,
         "family": FAMILY, "precision": "w8a8",
         "cell_key": "deadbeef", cell_key_mod.ENTRY_BLOCK_KEY: entry,
         "manifest_digest": cell_key_mod.manifest_digest(
@@ -603,7 +604,8 @@ def test_verify_is_abi_exact(stub_runtime):
     # refused on sm_90-vs-sm_89, never on the marketing name.
     assert aot.verify(_meta(sku="h100-80gb-hbm3")) == ""
     assert "kind" in aot.verify(_meta(kind="an-unknown-kind"))
-    assert "format" in aot.verify(_meta(format=99))
+    assert aot.COMPILED_GRAPH_FORMAT_KEY in aot.verify(
+        _meta(**{aot.COMPILED_GRAPH_FORMAT_KEY: 99}))
     assert "family" in aot.verify(_meta(family="flux2"), family=FAMILY)
 
 

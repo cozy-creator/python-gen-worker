@@ -773,7 +773,8 @@ def test_mint_produces_a_packed_keyed_gated_cell(cell: Dict[str, Any]) -> None:
 
     meta = aot_serve.unpack_metadata(row.artifact)
     assert meta["kind"] == aot_serve.ARTIFACT_KIND
-    assert meta["format"] == 3
+    assert (meta[aot_serve.COMPILED_GRAPH_FORMAT_KEY]
+            == aot_serve.COMPILED_GRAPH_FORMAT == 1)
     assert meta["package_constants_in_so"] is False
     assert meta["strict_export"] is True
     assert meta["weight_lane"] == "w8a8"

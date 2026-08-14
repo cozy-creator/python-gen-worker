@@ -100,7 +100,7 @@ logger = logging.getLogger(__name__)
 
 # The JIT/torch-inductor-cache PRODUCER format, and NOTHING ELSE — it is an
 # ingredient of the semantic cache tag (`_semantic_cache_tag`) and is not the
-# AOT cell metadata schema, which is `aot_serve.ARTIFACT_FORMAT`.
+# compiled-graph metadata schema, which is `aot_serve.COMPILED_GRAPH_FORMAT`.
 #
 # pgw#1230 RENAMED it from `ARTIFACT_FORMAT`. Two different facts shared that
 # name across two modules; `fleet_cells.arm_identity` read THIS one to compute
