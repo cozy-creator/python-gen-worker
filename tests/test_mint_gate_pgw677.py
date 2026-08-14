@@ -201,12 +201,6 @@ class _Harness:
         mint_root = self.tmp_path / f"mint-{id(pipe)}"
         capture = mint_root / "capture"
         (capture / "inductor" / "fxgraph").mkdir(parents=True, exist_ok=True)
-        pending = fleet_cells.PendingSelfMint(
-            family=FAMILY, arm_token="cg-key-v1-" + "a" * 56,
-            ref=f"{cc.system_repo(FAMILY)}#cg-key-v1-{'a' * 56}",
-            cfg=cfg, target=mint_root / "cell.tar.gz", mint_root=mint_root,
-            publisher=None, cache_dir=cache_dir,
-        )
         original = pipe.transformer.forward
         harness = self
 
@@ -251,7 +245,11 @@ class _Harness:
         pipe.transformer.forward = cc._guarded(
             original, compiled, "transformer", failure_signal=signal)
         cc._armed_pipelines().add(pipe)
-        return fleet_cells.ArmOutcome(armed=True, self_mint=pending)
+        # This harness exercises the JIT intake router. Returning an AOT
+        # self-mint obligation would hand it to the compiled-graph supervisor,
+        # which correctly refuses this declaration-less family before the JIT
+        # shape-warm thread can run.
+        return fleet_cells.ArmOutcome(armed=True)
 
     # -- drive ---------------------------------------------------------------
 
@@ -357,6 +355,11 @@ def test_compile_and_tenant_forward_never_overlap_and_red_verifies(
 
     async def _on() -> None:
         await h_on.boot()
+        # The executor wires the instance turn gate while it registers the
+        # live compile target. Enable only after that boundary, then submit one
+        # novel JIT signature through the real router.
+        hot_swap.enable(h_on.pipes[0])
+        h_on.pipes[0].transformer.forward("16:9")
         deadline = time.monotonic() + 10.0
         while not h_on.in_compile.is_set():
             assert time.monotonic() < deadline, "no background compile ran"
