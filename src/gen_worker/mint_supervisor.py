@@ -58,9 +58,8 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 import msgspec
 
 from . import activity as activity_mod
-from . import artifact_meta
 from . import boot_phases
-from . import cell_key as cell_key_mod
+from . import compiled_graph_store
 from . import compile_posture
 from . import kernel_path
 from . import mint_workers
@@ -491,9 +490,9 @@ def held_graph_classes(out_dir: Path) -> List[Any]:
 
     THE consume-on-retry read, and it is deliberately filesystem-first: the
     artifact is the durable fact, and the supervisor may have died between
-    attempts. Each file is named by its own ``cg-key-v1`` key and carries its
-    envelope, so both the identity and the class NAME come back off the bytes
-    — nothing is remembered in memory across an attempt.
+    attempts. Each file is named by its exact compiled-graph key; TCG resolves
+    that key from HashRepo and returns the verified class name, so nothing is
+    remembered in memory across an attempt.
 
     An unreadable artifact is DROPPED rather than refused: the honest reading
     of a half-written file is that this class is not held, and the next
@@ -507,9 +506,15 @@ def held_graph_classes(out_dir: Path) -> List[Any]:
         return held
     for path in sorted(out_dir.glob("*.tar.gz")):
         try:
-            meta = dict(artifact_meta.read_metadata(path))
-            name = str(meta[cell_key_mod.ENTRY_BLOCK_KEY]["name"])
-            key = str(meta.get("cell_key") or "")
+            key = path.name.removesuffix(".tar.gz")
+            graph = compiled_graph_store.describe(key)
+            if graph is None:
+                raise ValueError("TCG cannot resolve the exact key")
+            meta = dict(graph.metadata)
+            graph_class = meta.get("graph_class")
+            if not isinstance(graph_class, Mapping):
+                raise ValueError("TCG metadata has no graph_class")
+            name = str(graph_class.get("name") or "")
         except Exception:  # noqa: BLE001 — see the docstring
             logger.warning(
                 "mint-supervisor: %s is not a readable compiled graph; this "

@@ -54,7 +54,6 @@ import dataclasses
 import hashlib
 import json
 import logging
-import os
 import shutil
 import tempfile
 import threading
@@ -1961,9 +1960,12 @@ def _arming_policy(
         # is reached it now earns the arm the same way every other
         # self-produced cell does.
         try:
-            armed_ready, _meta, refusal = _arm_exported_cell(
-                pipe, cfg, cache_dir, bucket,
-                Path(finalized_prior.artifact), arm_key)
+            armed_ready, _meta, refusal = _arm_compiled_graph(
+                pipe,
+                cfg,
+                cache_dir,
+                finalized_prior.cell_key,
+            )
             if not armed_ready:
                 logger.warning(
                     "fleet-cells: the in-process finalized cell for key=%s "
@@ -2055,57 +2057,6 @@ def _arming_policy(
         eager_reason=EagerPhase.MINT_IN_PROGRESS)
 
 
-def _packed_metadata(artifact: Path) -> Dict[str, Any]:
-    """The stamped metadata inside a packed cell (metadata members only)."""
-    return artifact_meta.read_metadata(artifact)
-
-
-def arm_axis_divergence(
-    arm_key: ArmIdentity, meta: Mapping[str, Any],
-) -> str:
-    """'' when the child's cell-metadata states the parent's obligation
-    identity on every ENVIRONMENT fact (:data:`ARM_ENVIRONMENT_FACTS`), else
-    the FIRST diverging fact with both values (pgw#1042).
-
-    A delegated child re-derives every environment-shaped fact in its own
-    process, so a fact that fails to survive the boundary (the measured
-    case: torch's `aot_compile` mutating global inductor config between the
-    child's establish and its metadata assembly) previously surfaced only as
-    a downstream numerics or constants error on a $3 pod. Here it is refused
-    BY NAME at the handback seam. ``graph`` is deliberately NOT compared —
-    it exists only post-trace, and comparing a declared-facts stand-in
-    against the traced fact was the attempt-28 phantom divergence
-    (pgw#1059). Every compared fact uses the SAME derivation on both sides.
-
-    :data:`ARM_SUBJECT_FACTS` are equally deliberately NOT compared
-    (pgw#1113). A cell records no subject and must not: the key is the traced
-    computation, so one cell legally serves every checkpoint whose graph it
-    is, and demanding the cell restate the checkpoint it was minted from
-    would refuse exactly the reuse the membership axiom exists to allow. The
-    subject splits the obligation on THIS side of the boundary; what crosses
-    it is compared here.
-    """
-    child: Dict[str, str] = {
-        "family": str(meta.get("family") or ""),
-        aot_serve.COMPILED_GRAPH_FORMAT_KEY: str(
-            meta.get(aot_serve.COMPILED_GRAPH_FORMAT_KEY) or ""),
-        "lane": cc.execution_lane_label(
-            str(meta.get("weight_lane") or ""),
-            int(meta.get("lora_bucket") or 0)),
-        "sm": str(meta.get("sm") or ""),
-        "env_seal": env_seal.seal_digest(
-            dict(meta.get(env_seal.SEAL_KEY) or {})),
-        "toolchain": cell_key.toolchain_axis_digest(
-            dict(meta.get("toolchain") or {})),
-    }
-    parent = arm_key.facts_dict()
-    for fact in ARM_ENVIRONMENT_FACTS:
-        if parent.get(fact, "") != child.get(fact, ""):
-            return (f"{fact}: child cell states {child.get(fact, '')!r}, "
-                    f"this runtime computed {parent.get(fact, '')!r}")
-    return ""
-
-
 #: pgw#1096: WHY a machine has nowhere to ship the cell it just minted. Each is
 #: a fact about the SINK, and none of them is the worker deciding its own trust
 #: class — which stays what §4.28 makes it, the hub's call and only the hub's.
@@ -2160,102 +2111,61 @@ def no_publish_sink_reason(publisher: Optional[CellPublisher]) -> str:
     return ""
 
 
-def _arm_exported_cell(
-    pipe: Any, cfg: Any, cache_dir: Optional[Path], bucket: int,
-    artifact: Path, arm_key: Optional[ArmIdentity],
-    *, verify_numerics: bool = False,
+def _arm_compiled_graph(
+    pipe: Any,
+    cfg: Any,
+    cache_dir: Optional[Path],
+    compiled_graph_key: str,
+    *,
+    verify_numerics: bool = False,
 ) -> Tuple[bool, Optional[Dict[str, Any]], Tuple[str, str]]:
-    """THE gate every cell this machine produced for itself must pass.
+    """Arm one self-produced graph through TCG's exact-key runner.
 
-    ``verify_numerics`` (§4.32) is set by ONE caller —
-    :func:`adopt_delegated_mint`, the pod that just minted these bytes and is
-    about to publish them. The other three routes here are ADOPTIONS of bytes
-    already proven at their own mint (an in-process finalized cell, the local
-    store's, a fresh child mint being re-armed), and adoption runs no quality
-    gate.
-
-    pgw#1096 extracted this from :func:`adopt_delegated_mint` so the two
-    self-produced sources — a child process's fresh mint, and this machine's
-    OWN local store (§4.28) — pass through ONE gate rather than two that agree
-    today. A cell out of the local store is neither newer nor more trusted
-    than the child's: it is the same bytes the same machine minted, and it
-    earns its arm the same way.
-
-    Two checks, in this order:
-
-    1. **key-axis divergence** (pgw#1042) — the cell's recorded metadata must
-       state THIS runtime on every pre-trace environment axis
-       (:data:`ARM_ENVIRONMENT_FACTS`), refused
-       by fact name. This is what makes a toolchain/sm/envelope move an honest
-       refusal instead of a wrong arm;
-    2. **the AOT arm** (pgw#805) — ``provision.arm_aot``: lifted-binding
-       install, ``aot_serve.enable``, rollback on failure. Deliberately NOT
-       ``provision.enable_compiled``, whose pgw#709 receipts gate drops any
-       artifact the hub has not countersigned — which by construction is every
-       cell in this family.
-
-    Returns ``(armed, meta, (reason, detail))``. ``reason`` is initialized to a
-    NAMED unset rather than "" so a branch that forgets to classify shows up as
-    a gap in this function instead of as an empty string that reads like "no
-    reason exists" (pgw#999).
+    TCG has already admitted the artifact and owns every runtime/toolchain/
+    host comparison.  The worker retains only device-lane policy and the
+    author's one-time output-parity gate before publication.
     """
-    refusal: Tuple[str, str] = ("unclassified_arm_refusal", "")
-    # pgw#1098: UNREADABLE IS NOT ABSENT, and this is check 0.
-    #
-    # `try_read_metadata` answers None for both "this cell has no envelope" and
-    # "I refused to read the envelope it has", and every consumer here spent
-    # that distinction on `meta is not None`. Measured on row 7: a 16 MiB bound
-    # refused a 36-entry sdxl envelope, so check 1 below SILENTLY DID NOT RUN,
-    # `arm_aot` was handed None and skipped the lifted-binding install, and the
-    # refusal that reached the wire named a downstream contract gate
-    # (`lifted_inputs_unbindable`) with no root. 36/36 entries, 92 minutes and
-    # $1.584 discarded; the only trace of the cause was the word `unreadable`
-    # in one event's `cell_key=` field.
-    #
-    # An envelope this runtime cannot READ is refused here, by name, before any
-    # arm — the same class as a cell that does not describe us. It belongs in
-    # THIS function rather than at either call site, because pgw#1096's whole
-    # point is that the child's cell and the local store's earn their arm the
-    # same way, and a store whose envelope cannot be read is exactly as
-    # unarmable as a child's.
+
     try:
-        meta: Optional[Dict[str, Any]] = artifact_meta.read_metadata(artifact)
-    except artifact_meta.ArtifactMetadataError as exc:
-        return False, None, ("cell_envelope_unreadable", (
-            f"the cell's {artifact_meta.METADATA_NAME} could not be read, so "
-            f"no gate that reads it could run: {exc}"))
-    divergence = ""
-    if meta is not None and arm_key is not None:
-        divergence = arm_axis_divergence(arm_key, meta)
-    if divergence:
-        stamped = str(meta.get("cell_key") or "") if meta else "MISSING"
-        return False, meta, ("key_axis_divergence", (
-            f"the cell (stamped key {stamped}) does not describe this "
-            f"runtime: {divergence}"))
-    try:
-        outcome = provision.arm_aot(
-            pipe, cfg, cache_dir, artifact, bucket, meta,
-            verify_numerics=verify_numerics)
-        if outcome:
-            return True, meta, ("", "")
-        refusal = (outcome.reason or "unclassified_arm_refusal",
-                   outcome.detail or outcome.identity)
-    except cc.CellSelectionBugError as exc:
-        # th#883: a cell whose axes describe exactly this runtime refused to
-        # arm. Loud — a bug in the one selection brain, not a compat miss.
-        logger.error(
-            "fleet-cells: cell_selection_bug arming a self-produced cell "
-            "(%s): %s", artifact, exc)
-        refusal = ("cell_selection_bug", str(exc))
+        outcome = aot_serve.enable_compiled_graph(
+            pipe,
+            cfg,
+            compiled_graph_key,
+            cache_dir,
+        )
+        meta = dict(aot_serve.armed_metadata(pipe) or {})
+        if not outcome:
+            return False, meta or None, (
+                outcome.reason or "unclassified_arm_refusal",
+                outcome.detail or outcome.identity,
+            )
+        if verify_numerics and not provision.gate_cell_numerics(
+            pipe,
+            cfg,
+            strict=True,
+        ):
+            graph_class = dict(meta.get("graph_class") or {})
+            aot_serve.disarm_entry(
+                pipe,
+                str(graph_class.get("name") or ""),
+                "numerics_refused",
+            )
+            return False, meta or None, (
+                "numerics_refused",
+                "the freshly compiled graph did not reproduce its eager "
+                "forward and will not be published",
+            )
+        return True, meta or None, ("", "")
     except Exception as exc:  # noqa: BLE001 — adoption failure => eager
         logger.warning(
-            "fleet-cells: self-produced cell %s did not adopt (%s)",
-            artifact, exc)
-        # An `AdoptError` already carries the token; anything else is named by
-        # its type rather than flattened into one word nobody can count.
-        refusal = (str(getattr(exc, "reason", "") or "") or type(exc).__name__,
-                   str(exc))
-    return False, meta, refusal
+            "fleet-cells: self-produced compiled graph %s did not adopt (%s)",
+            compiled_graph_key,
+            exc,
+        )
+        return False, None, (
+            str(getattr(exc, "reason", "") or "") or type(exc).__name__,
+            str(exc),
+        )
 
 
 #: One sweep per process: the store is this machine's, the predecessor
@@ -2336,8 +2246,12 @@ def arm_from_local_store(
         return None
     if local is None:
         return None
-    armed, meta, (reason, detail) = _arm_exported_cell(
-        pipe, cfg, cache_dir, bucket, local.artifact, arm_key)
+    armed, meta, (reason, detail) = _arm_compiled_graph(
+        pipe,
+        cfg,
+        cache_dir,
+        local.compiled_graph_key,
+    )
     if not armed:
         dropped = route == ROUTE_MEMO
         logger.warning(
@@ -2439,17 +2353,6 @@ def adopt_delegated_mint(
         state["adopt_refusal"] = (
             "no_entry_artifact", "the child reported no entry artifact")
         return None
-    # The FIRST entry keeps the pending's canonical target path (the resume
-    # bank and the local-store write address it); the rest sit beside it under
-    # their own keys. Nothing reads a cell-shaped single path any more.
-    artifact = rows[0]
-    if artifact != pending.target:
-        try:
-            pending.target.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(artifact, pending.target)
-        except OSError:
-            shutil.copy2(artifact, pending.target)
-    rows[0] = pending.target
     # §1.5 / §4.33 step 3 — DURABLE FIRST, and this is the whole ordering
     # change. The bytes go to the local CAS BEFORE anything verifies, arms,
     # publishes or cleans up, on EVERY tier, because the alternative is what
@@ -2507,10 +2410,14 @@ def adopt_delegated_mint(
     adopted: List[Tuple[str, Path, Dict[str, Any]]] = []
     refusals: List[Tuple[str, str, str]] = []
     for row in rows:
-        row_armed, row_meta, row_refusal = _arm_exported_cell(
-            pipe, pending.cfg, pending.cache_dir,
-            int(getattr(pending.cfg, "lora_bucket", 0) or 0),
-            row, pending.arm_key, verify_numerics=True)
+        row_key = _durable_keys.get(row, "")
+        row_armed, row_meta, row_refusal = _arm_compiled_graph(
+            pipe,
+            pending.cfg,
+            pending.cache_dir,
+            row_key,
+            verify_numerics=True,
+        )
         # pgw#1176 DEFECT, found by lane 2 and it is production, not a
         # fixture. `_arm_exported_cell` returns `(False, None, …)` with reason
         # `cell_envelope_unreadable` PRECISELY WHEN `read_metadata` raised —
@@ -2523,18 +2430,10 @@ def adopt_delegated_mint(
         # An unreadable envelope is exactly the case where the fallback CANNOT
         # help, so it must not be attempted. The refusal below already carries
         # everything a reader needs.
-        if row_meta is not None:
-            row_meta = dict(row_meta)
-        elif row_armed:
-            # Armed but silent on its metadata: the read is worth attempting,
-            # and a raise here is a genuine surprise rather than the
-            # already-classified one above.
-            row_meta = _packed_metadata(row)
-        else:
-            row_meta = {}
-        row_key = str(row_meta.get("cell_key") or "").strip()
+        row_meta = dict(row_meta or {})
+        row_key = str(row_meta.get("compiled_graph_key") or row_key).strip()
         entry_name = str(
-            (row_meta.get(cell_key.ENTRY_BLOCK_KEY) or {}).get("name") or "")
+            (row_meta.get("graph_class") or {}).get("name") or "")
         if not row_armed:
             refusals.append((entry_name or row.name, *row_refusal))
             activity_mod.emit_event(
@@ -2554,8 +2453,8 @@ def adopt_delegated_mint(
             # pgw#1059: a produced entry without a stamped key has no identity
             # to advertise, publish or ledger.
             refusals.append((
-                entry_name or row.name, "cell_key_missing",
-                "the child's entry carries no stamped cell_key"))
+                entry_name or row.name, "compiled_graph_key_missing",
+                "the child artifact carries no exact compiled_graph_key"))
             continue
         adopted.append((row_key, row, row_meta))
 
@@ -2670,24 +2569,21 @@ def adopt_delegated_mint(
 
 
 def _stage_durable(pending: "PendingSelfMint", artifact: Path) -> str:
-    """Write a freshly minted artifact to the local CAS, UNVERIFIED.
+    """Attach a child-exported TCG artifact to its worker sidecar.
 
-    Returns the stamped ``ck1`` key the bytes were filed under, or ``""`` when
-    the artifact carries no readable stamp — in which case there is nothing to
-    address it by and the ordinary ``cell_key_missing`` refusal downstream is
-    the honest end.
+    The compile child names the file by the exact key returned from
+    ``Engine.compile`` and already stored the bytes in the same HashRepo CAS.
+    Importing here re-verifies that filename-to-artifact binding; there is no
+    worker metadata reader or second key derivation.
 
     Unconditional, on every tier (§1.5). The publish state is decided here and
     only here: a machine with a live sink OWES an upload from this moment,
     which is what makes :func:`resume_owed_publishes` able to finish a
     transfer the minting process never did.
     """
-    try:
-        key = str((artifact_meta.try_read_metadata(artifact) or {}).get(
-            "cell_key") or "").strip()
-    except Exception:  # noqa: BLE001 — an unreadable stamp is refused below
-        key = ""
-    if not key or not cell_key.is_key(key):
+    name = Path(artifact).name
+    key = name.removesuffix(".tar.gz") if name.endswith(".tar.gz") else ""
+    if not is_compiled_graph_key(key):
         return ""
     sink_absent = no_publish_sink_reason(pending.publisher)
     stored = compiled_graph_store.store(
@@ -2704,7 +2600,8 @@ def _stage_durable(pending: "PendingSelfMint", artifact: Path) -> str:
         activity_mod.emit_event(
             "compiled_graph_store_failed",
             f"family={pending.family} arm_key={pending.arm_token} "
-            f"cell_key={key}: the local CAS write FAILED, so this mint has no "
+            f"compiled_graph_key={key}: the local CAS write FAILED, so this "
+            "mint has no "
             f"durable copy and a crash before publish loses it",
             phase="store_failed",
         )
@@ -2724,11 +2621,9 @@ def _admit_durable(
 ) -> Optional[compiled_graph_store.LocalCompiledGraph]:
     """Promote a staged artifact to ADMITTED once its gate has passed.
 
-    ``staged_key`` is what the pre-arm stamp read; ``key`` is what the armed
-    metadata states. They agree on every path that works — the divergence is
-    already refused by name at ``arm_axis_divergence`` — so a mismatch here
-    means the staged row describes different bytes and is left unpromoted
-    rather than blessed.
+    ``staged_key`` is the exact child filename/store address; ``key`` is what
+    TCG returned from the admitted artifact. A mismatch means the staged row
+    describes different bytes and is left unpromoted rather than blessed.
     """
     if not key or staged_key != key:
         return None
@@ -3262,7 +3157,6 @@ __all__ = [
     "PendingSelfMint",
     "SelfMint",
     "abandon_self_mint",
-    "arm_axis_divergence",
     "delegation_refusal",
     "enable_compiled",
     "finalized_in_process",

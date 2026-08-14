@@ -289,6 +289,23 @@ def load_runner(
         return None
 
 
+def describe(
+    key: str,
+    root: Optional[Path] = None,
+) -> Optional[StoredCompiledGraph]:
+    """Resolve one exact graph for metadata without loading its package."""
+
+    if not is_compiled_graph_key(key):
+        return None
+    try:
+        return _engine(root).resolve(
+            key,
+            _root(root) / ".described" / key,
+        )
+    except (OSError, QuarantinedArtifact, StorageError):
+        return None
+
+
 def note_memo(arm_token: str, key: str, root: Optional[Path] = None) -> bool:
     if not arm_token or not is_compiled_graph_key(key):
         return False
@@ -431,6 +448,7 @@ __all__ = [
     "VERDICT_QUARANTINED",
     "VERDICT_UNVERIFIED",
     "drop",
+    "describe",
     "graphs_owed_to_sink",
     "has_graphs",
     "keeps_graphs_locally",

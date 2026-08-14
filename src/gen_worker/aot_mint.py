@@ -1004,6 +1004,8 @@ class MintedArtifact:
     entry: str
     artifact: Path
     metadata: Dict[str, Any]
+    aliases: Tuple[str, ...] = ()
+    mint_phases: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -2542,19 +2544,23 @@ def _mint_cell(
 def class_manifest(
     entry_blocks: Mapping[str, Mapping[str, Any]], spec: ExportSpec,
 ) -> str:
-    """The declaration-wide coverage LABEL over a set of entry blocks.
+    """A deterministic v1 telemetry view over TCG graph classes.
 
-    ONE fold, so the label a whole-declaration mint stamps and the label
-    :func:`mint_graph_classes` assembles from K shares are the same
-    computation over the same stamped ``class_hash`` values. Telemetry, never
-    identity: nothing resolves it and nothing downloads it — the hub folds
-    compile-health rows under ``(manifest, sm, toolchain)`` with it.
+    Each member remains independently keyed and admitted. The manifest is a
+    report of what one supervised mint observed, never an identity or trust
+    unit.
     """
-    return cell_key.manifest_digest(
-        aot_serve.stamp_entry(
-            name, block, strict=bool(spec.strict),
-            lora_bucket=int(spec.lora_bucket or 0)).get("class_hash") or ""
-        for name, block in entry_blocks.items())
+
+    del spec
+    rows = [
+        {
+            "name": str(name),
+            "class_hash": str(block.get("class_hash") or ""),
+        }
+        for name, block in sorted(entry_blocks.items())
+    ]
+    payload = json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()
+    return "compiled-graph-manifest-v1-" + hashlib.sha256(payload).hexdigest()
 
 
 def pack_graph_classes(
@@ -2761,19 +2767,17 @@ def fold_held_graph_classes(
     metas = {str(row.entry): dict(row.metadata) for row in held}
     blocks: Dict[str, Dict[str, Any]] = {}
     for name, meta in metas.items():
-        block = meta.get(cell_key.ENTRY_BLOCK_KEY)
+        block = meta.get("graph_class")
         if not isinstance(block, dict):
             raise MintRefused(
-                f"held graph class {name!r} carries no entry block, so its "
+                f"held graph class {name!r} carries no graph_class, so its "
                 f"coverage cannot be folded")
-        blocks[name] = block
+        blocks[name] = dict(block)
     absorbed_by = canonicalize_packed_classes(blocks, metas)
     absorbed = {n for names in absorbed_by.values() for n in names}
     survivors = [row for row in held if str(row.entry) not in absorbed]
     manifest = class_manifest(
         {n: b for n, b in blocks.items() if n not in absorbed}, spec)
-    for row in survivors:
-        row.metadata["manifest_digest"] = manifest
     return MintResult(
         entries=tuple(survivors), manifest=manifest,
         timings={"total_s": 0.0, "held_classes": float(len(held))})
@@ -2803,10 +2807,9 @@ def mint_graph_classes(
     already carries its envelope. The ExportedProgram is never serialized.
 
     ``spec`` is the caller's own :class:`ExportSpec` for this family — the same
-    object it would have handed :func:`mint`. It is read for exactly one thing
-    here: the ``strict``/``lora_bucket`` axes the shared class-hash fold needs
-    (:func:`class_manifest`). Nothing about the graphs is derived from it in
-    this process; each child derives its own from the pipeline it composed.
+    object it would have handed :func:`mint`. It names the supervised mint but
+    supplies no artifact identity: each child derives and stamps its exact TCG
+    graph class from the pipeline it composed.
 
     Refusals are mapped onto the mint's own vocabulary, exactly as the old
     program-staging driver did: a MEMORY shortfall is
@@ -2878,13 +2881,17 @@ def mint_graph_classes(
                 f"graph class {name!r}: the compile child returned an "
                 f"unreadable envelope ({exc}) — an artifact whose metadata "
                 f"this process cannot parse cannot be published") from exc
-        block = meta.get(cell_key.ENTRY_BLOCK_KEY)
-        if not isinstance(block, dict):
+        graph_class = meta.get("graph_class")
+        if (
+            not isinstance(graph_class, dict)
+            or str(graph_class.get("name") or "") != name
+            or str(meta.get("compiled_graph_key") or "") != str(row.key)
+        ):
             raise MintRefused(
-                f"graph class {name!r}: the packed envelope carries no entry "
-                f"block, so its coverage cannot be folded")
+                f"graph class {name!r}: TCG metadata does not restate the "
+                "child's exact name and compiled_graph_key")
         metas[name] = meta
-        decoded_blocks[name] = block
+        decoded_blocks[name] = dict(graph_class)
     keys: Dict[str, str] = {name: str(packed[name].key) for name in metas}
     artifacts: Dict[str, Path] = {
         name: Path(packed[name].artifact) for name in metas}
@@ -2901,13 +2908,13 @@ def mint_graph_classes(
                 f"reach the child that owns it, so one class would publish "
                 f"two artifacts")
         held_meta = dict(carried.metadata)
-        held_block = held_meta.get(cell_key.ENTRY_BLOCK_KEY)
+        held_block = held_meta.get("graph_class")
         if not isinstance(held_block, dict):
             raise MintRefused(
-                f"held graph class {name!r} carries no entry block, so its "
+                f"held graph class {name!r} carries no graph_class, so its "
                 f"coverage cannot be folded")
         metas[name] = held_meta
-        decoded_blocks[name] = held_block
+        decoded_blocks[name] = dict(held_block)
         keys[name] = str(carried.key)
         artifacts[name] = Path(carried.artifact)
 
@@ -2953,6 +2960,8 @@ def mint_graph_classes(
         if keep != name:
             absorbed_by.setdefault(keep, []).append(name)
 
+    phase_table = _mint_phase_table(
+        [], timings, inductor_configs, width, progress.pool_ledger)
     entries: List[MintedArtifact] = []
     blocks: Dict[str, Dict[str, Any]] = {}
     absorbed = {n for names in absorbed_by.values() for n in names}
@@ -2962,16 +2971,6 @@ def mint_graph_classes(
         block = decoded_blocks[name]
         merged = sorted(absorbed_by.get(name) or ())
         if merged:
-            # Recorded so the merge is auditable from the result alone — a
-            # reader asking "where did class row X go" gets an answer instead
-            # of an absence. Same shape `pack_graph_classes` writes.
-            block["aliases"] = [
-                {"name": alias,
-                 "class_dims": [
-                     [str(n), int(v)] for n, v in sorted(
-                         decoded_blocks[alias].get("class_dims") or ())]}
-                for alias in merged
-            ]
             logger.info(
                 "aot-mint: pgw#917 graph class %s absorbed %d class(es) "
                 "(one ingress contract, or one key) (%s) -> %s",
@@ -2979,26 +2978,14 @@ def mint_graph_classes(
         blocks[name] = block
         entries.append(MintedArtifact(
             key=keys[name], entry=name,
-            artifact=artifacts[name], metadata=metas[name]))
-    # The declaration-wide coverage label, folded HERE because this is the
-    # only process that sees every share. Each child stamped its artifact's
-    # own `manifest_digest` EMPTY rather than a share-local digest that would
-    # read like a whole-declaration one (see `pack_graph_classes`). Folded
-    # over the SURVIVORS: an absorbed class contributes the same `class_hash`
-    # its survivor already contributes, so folding it as well would make the
-    # label depend on how the declaration happened to be sharded.
+            artifact=artifacts[name], metadata=metas[name],
+            aliases=tuple(merged), mint_phases=phase_table))
+    # The declaration-wide telemetry view is folded HERE because this is the
+    # only process that sees every share. It never enters TCG's closed artifact
+    # metadata. Fold over SURVIVORS: an absorbed class contributes the same
+    # class_hash its survivor already contributes, so counting it as well would
+    # make the report depend on how the declaration happened to be sharded.
     manifest = class_manifest(blocks, spec)
-    phase_table = _mint_phase_table(
-        [], timings, inductor_configs, width, progress.pool_ledger)
-    for artifact in entries:
-        # `mint_phases` rides the RESULT, never the packed envelope (the
-        # artifact deliberately carries no wall clocks), so the whole-mint
-        # table replaces the share-local one each child attached.
-        artifact.metadata["mint_phases"] = phase_table
-        # ...and so does the folded coverage label. The bytes INSIDE each
-        # artifact keep the empty stamp its child honestly wrote; this is the
-        # result-side view, which is what the publish path reads.
-        artifact.metadata["manifest_digest"] = manifest
     logger.info(
         "aot-mint: pgw#1215 %d compile child(ren) packed %d graph class(es) "
         "in %.0fs (sum of child seconds %.0fs, peak child RSS %.1f GiB) -> "
@@ -3409,10 +3396,11 @@ def _packed_class_identity(
         "specialization": graph.get("specialization"),
         "lifted_inputs": sorted(
             str(n) for n in (graph.get("lifted_inputs") or ())),
-        "precision": str(meta.get("precision") or ""),
-        "lora_bucket": int(meta.get("lora_bucket") or 0),
-        "strict": bool(meta.get("strict_export")),
-        "source_digest": str(meta.get("source_digest") or ""),
+        "lora_bucket": int(block.get("lora_bucket") or 0),
+        "strict": bool(block.get("strict")),
+        "placement": list(block.get("placement") or ()),
+        "sm": str(meta.get("sm") or ""),
+        "toolchain": dict(meta.get("toolchain") or {}),
     }
 
 
@@ -3475,7 +3463,10 @@ def canonicalize_packed_classes(
         declared: Dict[str, Tuple[Any, Tuple[Dict[str, Any], ...]]] = {}
         for name in members:
             try:
-                contract = aot_serve.contract_from_meta(blocks[name])
+                graph = blocks[name].get("graph")
+                if not isinstance(graph, Mapping):
+                    raise ValueError("graph class records no graph interface")
+                contract = aot_serve.contract_from_meta(graph)
             except ValueError as exc:
                 # An unreadable declaration is not "probably fine": it is an
                 # artifact whose dispatchability nobody can prove.

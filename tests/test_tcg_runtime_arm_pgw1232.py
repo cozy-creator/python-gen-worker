@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 import pytest
 
-from gen_worker import aot_serve, compiled_graph_store
+from gen_worker import aot_serve, compiled_graph_store, fleet_cells
 
 
 KEY = "cg-key-v1-" + "1" * 56
@@ -139,3 +139,32 @@ def test_failed_tcg_bind_leaves_the_pipeline_eager(
     assert outcome.reason == "constant_unresolved"
     assert module.forward == original
     assert module.forward(Tensor()) == "eager"
+
+
+def test_self_mint_stage_uses_the_childs_exact_tcg_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / f"{KEY}.tar.gz"
+    artifact.write_bytes(b"owned by TCG")
+    calls: list[tuple[Path, str]] = []
+
+    def store(path: Path, *, key: str, **_kwargs: object) -> object:
+        calls.append((path, key))
+        return SimpleNamespace(compiled_graph_key=key)
+
+    monkeypatch.setattr(fleet_cells, "no_publish_sink_reason", lambda _sink: "")
+    monkeypatch.setattr(compiled_graph_store, "store", store)
+
+    pending = SimpleNamespace(
+        family="micro",
+        arm_token="arm-v1-test",
+        publisher=SimpleNamespace(),
+    )
+    assert fleet_cells._stage_durable(cast(Any, pending), artifact) == KEY
+    assert calls == [(artifact, KEY)]
+
+    wrong_name = tmp_path / "compiled-graph.tar.gz"
+    wrong_name.write_bytes(b"not addressed")
+    assert fleet_cells._stage_durable(cast(Any, pending), wrong_name) == ""
+    assert calls == [(artifact, KEY)]
