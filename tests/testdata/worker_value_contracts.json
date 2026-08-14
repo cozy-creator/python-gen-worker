@@ -19,9 +19,16 @@
     ],
     "cell_resolve_hub_refusal_codes": [
       "cell_resolve_ambiguous",
+      "cell_resolve_answer_out_of_order",
+      "cell_resolve_batch_signature",
       "cell_resolve_client_supplied_field",
+      "cell_resolve_duplicate_key",
       "cell_resolve_incomplete",
-      "cell_resolve_transport_unavailable"
+      "cell_resolve_shared_receipt",
+      "cell_resolve_short_answer",
+      "cell_resolve_too_many_keys",
+      "cell_resolve_transport_unavailable",
+      "cell_resolve_unknown_status"
     ],
     "cell_publish_untrusted_refusal_code": "cell_publish_untrusted_tier",
     "hardware_unsuitable_reason_classes": [
