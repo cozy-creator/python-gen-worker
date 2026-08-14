@@ -76,7 +76,7 @@ def _hit_body(**over: Any) -> Dict[str, Any]:
 def _batch(*answers: Any, **top: Any) -> Dict[str, Any]:
     """The hub's envelope. ``answers`` is the contract; the counts are logs."""
     body: Dict[str, Any] = {
-        "object": "cell_resolve_batch",
+        "object": "compiled_graph_resolve_batch",
         "family": "sdxl",
         "answers": list(answers),
         "hits": sum(1 for a in answers if a.get("status") == "hit"),
@@ -179,7 +179,7 @@ def test_a_miss_is_an_answer_never_an_omission(stub) -> None:
 
 @pytest.mark.parametrize("code,status", [
     ("cell_resolve_client_supplied_field", 400),
-    ("cell_resolve_too_many_keys", 400),
+    ("compiled_graph_resolve_too_many_keys", 400),
 ])
 def test_a_whole_batch_refusal_still_raises(stub, code, status) -> None:
     """The refusals that survive as whole-request are the ones that are
@@ -226,7 +226,7 @@ def test_an_unknown_status_is_refused_and_never_read_as_a_miss(stub) -> None:
         {"cell_key": KEY, "status": "something_new", "found": False}))
     with pytest.raises(cell_resolve.CellResolveRefused) as err:
         _one()
-    assert err.value.code == "cell_resolve_unknown_status"
+    assert err.value.code == "compiled_graph_resolve_unknown_status"
 
 
 def test_an_answer_naming_a_different_key_is_refused_not_adopted(stub) -> None:
@@ -237,12 +237,12 @@ def test_an_answer_naming_a_different_key_is_refused_not_adopted(stub) -> None:
     resp["r"] = _Resp(200, _batch(_hit_body(cell_key=OTHER_KEY)))
     with pytest.raises(cell_resolve.CellResolveRefused) as err:
         _one()
-    assert err.value.code == "cell_resolve_answer_out_of_order"
+    assert err.value.code == "compiled_graph_resolve_answer_out_of_order"
 
 
 #: ``cell_key`` is caught one gate earlier — an empty echo is not the key that
 #: was asked for, so the ORDER gate names the seam that lied first.
-_EARLIER_GATE = {"cell_key": "cell_resolve_answer_out_of_order"}
+_EARLIER_GATE = {"cell_key": "compiled_graph_resolve_answer_out_of_order"}
 
 
 @pytest.mark.parametrize("field", [f for f, _ in cell_resolve._REQUIRED])
@@ -660,7 +660,7 @@ def test_a_short_answer_is_refused_not_read_as_misses(stub) -> None:
     resp["r"] = _Resp(200, _batch(_hit_body()))
     with pytest.raises(cell_resolve.CellResolveRefused) as err:
         cell_resolve.resolve_batch("sdxl", [KEY, OTHER_KEY, THIRD_KEY])
-    assert err.value.code == "cell_resolve_short_answer"
+    assert err.value.code == "compiled_graph_resolve_short_answer"
     assert "asked 3 keys, got 1 answers" in err.value.detail
 
 
@@ -671,15 +671,15 @@ def test_a_long_answer_is_refused_too(stub) -> None:
     resp["r"] = _Resp(200, _batch(_hit_body(), _miss(OTHER_KEY)))
     with pytest.raises(cell_resolve.CellResolveRefused) as err:
         cell_resolve.resolve_batch("sdxl", [KEY])
-    assert err.value.code == "cell_resolve_short_answer"
+    assert err.value.code == "compiled_graph_resolve_short_answer"
 
 
 def test_a_reply_with_no_answers_at_all_is_refused(stub) -> None:
     _sent, resp = stub
-    resp["r"] = _Resp(200, {"object": "cell_resolve_batch", "family": "sdxl"})
+    resp["r"] = _Resp(200, {"object": "compiled_graph_resolve_batch", "family": "sdxl"})
     with pytest.raises(cell_resolve.CellResolveRefused) as err:
         cell_resolve.resolve_batch("sdxl", [KEY])
-    assert err.value.code == "cell_resolve_short_answer"
+    assert err.value.code == "compiled_graph_resolve_short_answer"
 
 
 def test_transposed_answers_are_refused(stub) -> None:
@@ -691,7 +691,7 @@ def test_transposed_answers_are_refused(stub) -> None:
     resp["r"] = _Resp(200, _batch(_hit_body(cell_key=OTHER_KEY), _hit_body()))
     with pytest.raises(cell_resolve.CellResolveRefused) as err:
         cell_resolve.resolve_batch("sdxl", [KEY, OTHER_KEY])
-    assert err.value.code == "cell_resolve_answer_out_of_order"
+    assert err.value.code == "compiled_graph_resolve_answer_out_of_order"
     assert "answers[0]" in err.value.detail
 
 
@@ -705,7 +705,7 @@ def test_a_batch_level_signature_is_refused_never_ignored(stub) -> None:
         resp["r"] = _Resp(200, _batch(_hit_body(), **{field: "eyJ.x.y"}))
         with pytest.raises(cell_resolve.CellResolveRefused) as err:
             cell_resolve.resolve_batch("sdxl", [KEY])
-        assert err.value.code == "cell_resolve_batch_signature"
+        assert err.value.code == "compiled_graph_resolve_batch_signature"
         assert field in err.value.detail
 
 
@@ -722,7 +722,7 @@ def test_two_answers_may_not_share_one_receipt(stub) -> None:
         _hit_body(), _hit_body(cell_key=OTHER_KEY)))
     with pytest.raises(cell_resolve.CellResolveRefused) as err:
         cell_resolve.resolve_batch("sdxl", [KEY, OTHER_KEY])
-    assert err.value.code == "cell_resolve_shared_receipt"
+    assert err.value.code == "compiled_graph_resolve_shared_receipt"
 
 
 def test_distinctly_signed_answers_are_both_adopted(stub) -> None:
@@ -772,7 +772,7 @@ def test_a_duplicate_key_is_refused_before_the_hub_is_dialled(stub) -> None:
     sent, _resp = stub
     with pytest.raises(cell_resolve.CellResolveRefused) as err:
         cell_resolve.resolve_batch("sdxl", [KEY, OTHER_KEY, KEY])
-    assert err.value.code == "cell_resolve_duplicate_key"
+    assert err.value.code == "compiled_graph_resolve_duplicate_key"
     assert not sent
 
 
@@ -785,7 +785,7 @@ def test_over_the_bound_is_refused_before_the_hub_is_dialled(stub) -> None:
                 for i in range(cell_resolve.MAX_RESOLVE_KEYS + 1)]
     with pytest.raises(cell_resolve.CellResolveRefused) as err:
         cell_resolve.resolve_batch("sdxl", too_many)
-    assert err.value.code == "cell_resolve_too_many_keys"
+    assert err.value.code == "compiled_graph_resolve_too_many_keys"
     assert not sent
     # ...and exactly the bound is fine, so the guard is a bound and not a ban.
     _resp["r"] = _Resp(200, _batch(*[_miss(k) for k in too_many[:-1]]))
