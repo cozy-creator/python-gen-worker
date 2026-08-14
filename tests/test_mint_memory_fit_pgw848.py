@@ -36,9 +36,6 @@ import sys
 from pathlib import Path
 from typing import Any, Dict
 
-import pytest
-
-from gen_worker import child_contract
 from gen_worker import aot_compile_pool as pool
 from gen_worker import mint_workers
 
@@ -228,54 +225,6 @@ def test_the_measured_ask_is_banked_and_survives_to_the_next_mint() -> None:
     assert mint_workers.compiled_graph_peak_rss(fam, execution_lane) == 9 * _GIB
     # Keyed, not global.
     assert mint_workers.compiled_graph_peak_rss(fam, "plain") == 0
-
-
-def test_the_pools_own_measurement_reaches_the_bank_over_the_real_relay(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """END TO END over the path that was dark.
-
-    The pool has published ``peak_child_rss_bytes`` in its phase table since
-    pgw#830 and the parent has relayed that table since pgw#842 — and nothing
-    ever read the field. This drives the REAL ``build_cell`` bookkeeping
-    against a real ``MintOutcome`` and asserts the ask lands in the bank.
-    """
-    from gen_worker import mint_process
-    from gen_worker import aot_mint
-
-    fam, execution_lane = "pgw848-relay", "w8a8-lora64"
-    width = pool.entry_workers(
-        2, vcpus=16, available_bytes=64 * _GIB, device_lock=True, limit=2)
-    table = aot_mint._mint_phase_table(
-        [], {"total_s": 1.0}, None, width,
-        {"peak_child_rss_bytes": 6 * _GIB, "pool_workers": 2})
-    assert table["pool"]["peak_child_rss_bytes"] == 6 * _GIB, (
-        "the pool's measurement must be IN the table the parent relays")
-
-    outcome = mint_process.MintOutcome(
-        status=mint_process.MINTED, elapsed_s=1.0,
-        report=mint_process.MintReport(
-            status=mint_process.MINTED, elapsed_s=1.0, mint_phases=table))
-
-    assert mint_workers.compiled_graph_peak_rss(fam, execution_lane) == 0
-    # The exact statement `build_cell` runs, against the real structures.
-    pool_block = (outcome.report.mint_phases or {}).get("pool")
-    mint_workers.record_compiled_graph_peak_rss(
-        fam, execution_lane, int((pool_block or {}).get("peak_child_rss_bytes") or 0))
-    assert mint_workers.compiled_graph_peak_rss(fam, execution_lane) == 6 * _GIB
-
-    # ...and the request the NEXT attempt builds carries it to the child.
-    banked = mint_workers.compiled_graph_peak_rss(fam, execution_lane)
-    assert banked == 6 * _GIB
-    request = mint_process.MintRequest(
-        function="f", modules=(), family=fam, arm_token="k", target="t",
-        work_root="c", report="r",
-        cfg=child_contract.CompileSpec(),
-        compiled_graph_peak_rss_bytes=banked)
-    assert request.compiled_graph_peak_rss_bytes == 6 * _GIB, (
-        "a banked measurement that cannot cross the process boundary is a "
-        "measurement the width will never see — the width is computed in the "
-        "child, whose memory dies with it")
 
 
 def test_the_harness_import_cannot_depend_on_collection_order() -> None:

@@ -282,24 +282,11 @@ def _arm(pipe: _Pipe, *_args: Any) -> Any:
 
 
 def _cell_snapshot(tmp_path: Path) -> Path:
-    """A real packed cell tarball, in the format this repository can WRITE.
+    """Opaque delivery bytes; this suite replaces the arm boundary itself."""
 
-    pgw#1181 retargeted this from `compile_cache.pack` (the whole-cell
-    `torch-inductor-cache` tarball, no writer since pgw#1178, deleted here)
-    onto the exported `aot-inductor` cell, through the same shared harness the
-    publish-path tests use. What the rows below need is a cell ON DISK that
-    the executor's snapshot/selection plumbing carries; building it out of a
-    format nothing writes made them fixtures constructing a shape production
-    cannot produce (§4.34)."""
-    from gen_worker import aot_serve
-    from harness.cell_meta import exported_cell_meta
-
-    work = tmp_path / "cap"
-    work.mkdir(parents=True, exist_ok=True)
-    (work / aot_serve.PACKAGE_NAME).write_bytes(b"\x00not-a-real-pt2")
-    out = tmp_path / "minted"
-    out.mkdir(exist_ok=True)
-    return aot_serve.pack(work, out / "cell.tar.gz", exported_cell_meta(family=FAMILY))
+    artifact = tmp_path / "compiled-graph.tar.gz"
+    artifact.write_bytes(b"opaque-compiled-graph")
+    return artifact
 
 
 def _arm_dynamo(pipe: _Pipe, *_args: Any) -> Any:

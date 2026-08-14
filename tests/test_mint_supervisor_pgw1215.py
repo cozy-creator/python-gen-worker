@@ -268,6 +268,54 @@ def test_a_packed_graph_class_is_adopted_through_the_delivered_cell_path(
     assert "load" in act.phases and "seal_publish" in act.phases
 
 
+def test_the_pool_peak_reaches_the_parent_bank(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The current supervisor consumes the child phase table directly."""
+
+    _stub_parent_gates(monkeypatch, declared=1)
+    mint_workers._ENTRY_RSS_PEAKS.clear()
+    peak = 6 * GIB
+
+    def _mint(template: Any, **kw: Any) -> Any:
+        row = _artifact(
+            Path(kw["workdir"]).parent / "graph.tar.gz",
+            "cls-a",
+            "cg-key-v1-" + "a" * 56,
+        )
+        row.metadata["mint_phases"] = {
+            "pool": {"peak_child_rss_bytes": peak, "pool_workers": 1},
+        }
+        return aot_mint.MintResult(
+            entries=(row,), manifest="m", timings={})
+
+    monkeypatch.setattr(aot_mint, "mint_graph_classes", _mint)
+    monkeypatch.setattr(
+        fleet_cells,
+        "adopt_delegated_mint",
+        lambda *_a, **_kw: fleet_cells.SelfMint(
+            family="sdxl",
+            compiled_graph_key="cg-key-v1-" + "a" * 56,
+            ref="r#k",
+            snapshot_digest="blake3:x",
+            artifact=tmp_path / "graph.tar.gz",
+        ),
+    )
+
+    result = asyncio.run(mint_supervisor.supervise(_task(tmp_path), act=_Act()))
+
+    assert result.ok
+    assert mint_workers.compiled_graph_peak_rss("sdxl", "fp8") == peak
+    measured = aot_compile_pool.entry_workers(
+        2,
+        vcpus=16,
+        available_bytes=64 * GIB,
+        device_lock=True,
+        peak_rss_bytes=peak,
+    )
+    assert measured.per_entry_rss_basis == "measured"
+
+
 def test_a_named_refusal_is_never_retried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

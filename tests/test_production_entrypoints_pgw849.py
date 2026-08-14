@@ -62,8 +62,8 @@ LADDERS: Dict[str, Tuple[str, ...]] = {
         "gen_worker.executor.Executor._enable_compiled",
         "gen_worker.fleet_cells.enable_compiled",
         "gen_worker.models.provision.enable_compiled",
-        "gen_worker.models.provision.arm_aot",
-        "gen_worker.aot_serve.enable",
+        "gen_worker.aot_serve.enable_compiled_graph",
+        "gen_worker.aot_serve.arm_compiled_graph",
     ),
     "publish": (
         "gen_worker.executor.Executor._supervise_mint",
@@ -89,8 +89,8 @@ UNCOVERED: Dict[str, Tuple[str, str, str]] = {
     "arm": (
         "gen_worker.executor.Executor._enable_compiled",
         "Nothing enters at Executor._enable_compiled from a booted worker. "
-        "fleet_cells.enable_compiled has ~29 direct callers in tests and "
-        "aot_serve.enable has 2, all below the executor. The one file that "
+        "fleet_cells.enable_compiled and aot_serve.arm_compiled_graph have "
+        "direct unit callers below the executor. The one file that "
         "tried to instrument the arm end to end, "
         "test_boot_phases_arm_pgw764.py, declares itself STAGED AND NOT "
         "COMMITTABLE in its own docstring. This is the exact shape of "
@@ -192,7 +192,7 @@ def test_serve_ladder_is_driven_from_the_wire() -> None:
 # ---------------------------------------------------------------------------
 
 def test_the_instrument_sees_a_unit_level_test() -> None:
-    """The red arm. Call ``aot_serve.enable`` the way ~29 files call
+    """The red arm. Call ``aot_serve.arm_compiled_graph`` the way unit tests call
     ``fleet_cells.enable_compiled`` today — straight from the test, with no
     executor above it — and the ladder must report the chain broken and the
     call attributed to the TEST, not to production.
@@ -204,11 +204,11 @@ def test_the_instrument_sees_a_unit_level_test() -> None:
 
     with ladder(*LADDERS["arm"]) as rec:
         try:
-            aot_serve.enable(object(), object())      # signature is irrelevant
+            aot_serve.arm_compiled_graph(object(), object(), "not-a-key")
         except Exception:
             pass                                      # the ENTRY is the datum
 
-    leaf = "gen_worker.aot_serve.enable"
+    leaf = "gen_worker.aot_serve.arm_compiled_graph"
     assert rec.reached(leaf), "the leaf never recorded — instrument is broken"
     calls = rec.entries[leaf]
     assert not any(c.from_production for c in calls), (
