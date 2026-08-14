@@ -31,20 +31,20 @@ speaking the language the hub accepts.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Final, Literal
 
 #: A component-directory tree, read through a multi-component loader entry
 #: point (``DiffusionPipeline.from_pretrained``).
-MULTI_FILE = "multi-file"
+MULTI_FILE: Final[Literal["multi-file"]] = "multi-file"
 
 #: One flat key namespace, read through a single-file entry point
 #: (``from_single_file``).
-SINGLE_FILE = "single-file"
+SINGLE_FILE: Final[Literal["single-file"]] = "single-file"
 
 #: The absent value: the declaring library's loader does not branch on this
 #: axis.  Distinct from "unknown" only in that nothing may state it in a
 #: contract-spec — an absent dimension already matches everything.
-NOT_APPLICABLE = ""
+NOT_APPLICABLE: Final[Literal[""]] = ""
 
 FileLayout = Literal["multi-file", "single-file"]
 
