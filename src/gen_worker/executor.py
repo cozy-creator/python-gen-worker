@@ -29,7 +29,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tupl
 import msgspec
 
 from . import activity as activity_mod
-from . import aot_declaration, aot_identity, aot_mint
+from . import aot_declaration, aot_mint
 from . import boot_adopt
 from . import boot_phases as boot_mod
 from . import cell_adopt
@@ -818,10 +818,7 @@ class _ArmOrder:
 
     backend: str
     selection: Optional["_CompileArtifactSelection"] = None
-    expected: Optional["aot_identity.ExpectedIdentity"] = None
     compiled_graph_key: str = ""
-    publisher_org: str = ""
-    publisher_tier: str = ""
     receipt: str = ""
     adopt: Optional["boot_adopt.BootAdoptOutcome"] = None
     #: pgw#1176: the OTHER entries this boot resolved. A boot derives a key SET
@@ -830,11 +827,7 @@ class _ArmOrder:
     #: wrap after the first. A failure on one of these is a per-entry degrade
     #: (that class serves eager), never terminal: the first arm already proved
     #: the pod can serve compiled.
-    extra: Tuple[
-        Tuple[
-            Path, Optional["aot_identity.ExpectedIdentity"], str, str, str, str,
-        ], ...,
-    ] = ()
+    extra: Tuple[Tuple[Path, str, str], ...] = ()
 
     @classmethod
     def for_artifact(
@@ -843,17 +836,10 @@ class _ArmOrder:
         path: Path,
         ref: str,
         snapshot_digest: str,
-        expected: Optional["aot_identity.ExpectedIdentity"],
         compiled_graph_key: str,
-        publisher_org: str,
-        publisher_tier: str,
         receipt: str,
         adopt: Optional["boot_adopt.BootAdoptOutcome"] = None,
-        extra: Tuple[
-            Tuple[
-                Path, Optional["aot_identity.ExpectedIdentity"], str, str, str, str,
-            ], ...
-        ] = (),
+        extra: Tuple[Tuple[Path, str, str], ...] = (),
     ) -> "_ArmOrder":
         """THE artifact -> arming-order map, in one place (pgw#1152).
 
@@ -873,10 +859,7 @@ class _ArmOrder:
             backend="aot_cell",
             selection=_CompileArtifactSelection(
                 path=path, ref=ref, snapshot_digest=snapshot_digest),
-            expected=expected,
             compiled_graph_key=compiled_graph_key,
-            publisher_org=publisher_org,
-            publisher_tier=publisher_tier,
             receipt=receipt,
             adopt=adopt,
             extra=extra,
@@ -5405,11 +5388,9 @@ class Executor:
                 arm = _ArmOrder.for_artifact(
                     path=got.artifact, ref=got.ref,
                     snapshot_digest=got.snapshot_digest,
-                    expected=got.expected,
-                    compiled_graph_key=got.cell.compiled_graph_key,
-                    publisher_org=got.cell.publisher_org,
-                    publisher_tier=got.cell.publisher_tier,
-                    receipt=got.cell.receipt,
+                    compiled_graph_key=(
+                        got.compiled_graph.compiled_graph_key),
+                    receipt=got.receipt,
                     # pgw#1122: this order is the POD's, not the hub's.
                     adopt=adopt,
                     # pgw#1176: every OTHER class this boot resolved, armed
@@ -5417,11 +5398,8 @@ class Executor:
                     extra=tuple(
                         (
                             got_other.artifact,
-                            got_other.expected,
-                            got_other.cell.compiled_graph_key,
-                            got_other.cell.publisher_org,
-                            got_other.cell.publisher_tier,
-                            got_other.cell.receipt,
+                            got_other.compiled_graph.compiled_graph_key,
+                            got_other.receipt,
                         )
                         for got_other in (
                             o.adoption for o in resolved[1:]
@@ -8530,10 +8508,7 @@ class Executor:
                     delivered_ref=delivered.ref if delivered else "",
                     delivered_digest=(
                         delivered.snapshot_digest if delivered else ""),
-                    expected=arm.expected,
                     compiled_graph_key=arm.compiled_graph_key,
-                    publisher_org=arm.publisher_org,
-                    publisher_tier=arm.publisher_tier,
                     receipt=arm.receipt,
                 )
                 # pgw#1176: THE ACCRETION LOOP. Every other class this boot
@@ -8543,10 +8518,7 @@ class Executor:
                 # to eager is the design's normal state, not a fallback.
                 for (
                     extra_path,
-                    extra_expected,
                     extra_key,
-                    extra_org,
-                    extra_tier,
                     extra_receipt,
                 ) in arm.extra:
                     try:
@@ -8554,10 +8526,7 @@ class Executor:
                             pipe, cfg, self.store._cache_dir,
                             backend=arm.backend, artifact=extra_path,
                             delivered_ref="", delivered_digest="",
-                            expected=extra_expected,
                             compiled_graph_key=extra_key,
-                            publisher_org=extra_org,
-                            publisher_tier=extra_tier,
                             receipt=extra_receipt,
                         )
                     except Exception as extra_exc:  # noqa: BLE001
@@ -8570,8 +8539,7 @@ class Executor:
                             phase=str(getattr(extra_exc, "reason", "")
                                       or "arm_failed"),
                             family=str(getattr(cfg, "family", "") or ""),
-                            cell_key=str(
-                                getattr(extra_expected, "cell_key", "") or ""),
+                            compiled_graph_key=extra_key,
                         )
                 return outcome
             except fleet_cells.OrderedArmError as exc:

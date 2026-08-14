@@ -292,7 +292,8 @@ def test_an_ordered_aot_arm_is_obeyed_as_eager_not_refused() -> None:
         FakePipeline(FakeModule()), Cfg(), None,
         backend="aot_cell", artifact=Path("/nonexistent/cell.pt2"),
         delivered_ref="root/family-sdxl-base#cg-key-v1-abc",
-        delivered_digest="sha256:abc", expected=None, publisher_org="root")
+        delivered_digest="sha256:abc", compiled_graph_key="cg-key-v1-abc",
+        receipt="not-reached-under-eager-only")
     assert outcome.armed is False
     assert outcome.eager_reason == EagerPhase.OPERATOR_EAGER_ONLY
 

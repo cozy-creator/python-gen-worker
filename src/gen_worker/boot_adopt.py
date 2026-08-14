@@ -74,8 +74,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import (
-    activity, aot_identity, artifact_meta, boot_key, cell_resolve,
-    compiled_graph_store,
+    activity, boot_key, cell_resolve, compiled_graph_store,
 )
 from .child_contract import CompileSpec, MintSlot
 
@@ -128,12 +127,6 @@ LOCAL_REASONS: Tuple[str, ...] = (
     # that used to fire BEFORE the derivation and therefore before the local
     # store had an address to be asked at.
     "local_miss_no_hub",
-    # The local store answered with bytes whose recorded graphs are not the
-    # graphs this pod traced (the pgw#1031 floor, applied to route B). NOT a
-    # drop: unlike the memo — which this machine's own mint wrote for this
-    # exact arm token — a derived-key hit is an inference, so it refuses
-    # without destroying a cell some other pipe may legitimately own.
-    "local_graph_witness_mismatch",
 )
 
 #: Step 1 — the derivation. ``boot_key.BootKeyUnavailable.reason`` tokens,
@@ -158,13 +151,12 @@ DERIVE_REASONS: Tuple[str, ...] = (
     "derive_failed",
 )
 
-#: Steps 2-3 — asking the hub, materializing, and the pgw#1031 witness floor.
+#: Steps 2-3 — asking the hub and materializing through TCG admission.
 #: The hub's own typed refusal codes ride through verbatim, which is the point
 #: of them being typed.
 ASK_REASONS: Tuple[str, ...] = (
     "invalid_request", "resolve_unreachable",
-    "miss", "materialize_failed", "witness_unreadable",
-    "graph_witness_mismatch", "hit",
+    "miss", "materialize_failed", "hit",
     # pgw#1122 — the LAST terminus, and the one the journey previously ran off
     # the end of. `hit` was reported at resolve+materialize, and everything
     # after it (the receipt gate, the publisher check, the arm itself) was
@@ -194,23 +186,23 @@ LOCAL_HIT = "local_hit"
 
 @dataclass(frozen=True)
 class BootAdoption:
-    """A cell this boot resolved by its OWN derived key, ready to arm."""
+    """A compiled graph resolved by its own derived key, ready to arm."""
 
     derived: boot_key.DerivedKey
-    cell: cell_resolve.ResolvedCell
+    compiled_graph: cell_resolve.ResolvedCompiledGraph
     artifact: Path
 
     @property
-    def expected(self) -> aot_identity.ExpectedIdentity:
-        return self.cell.expected_identity()
-
-    @property
     def ref(self) -> str:
-        return self.cell.cell_ref
+        return self.compiled_graph.compiled_graph_ref
 
     @property
     def snapshot_digest(self) -> str:
-        return self.cell.transport.snapshot_digest
+        return self.compiled_graph.transport.snapshot_digest
+
+    @property
+    def receipt(self) -> str:
+        return self.compiled_graph.receipt
 
 
 @dataclass(frozen=True)
@@ -360,12 +352,9 @@ def _local_answer(
     is the ADDRESS, on ``local_key``, for ``fleet_cells.arm_from_local_store``
     to arm through the same gate a child's fresh mint passes.
 
-    The pgw#1031 graph-witness floor applies here exactly as it does to a hub
-    hit, and for the same reason: ``ck1`` is an ingress identity, so two
-    endpoints whose declared contracts match can share one key while their
-    bodies differ. It refuses WITHOUT dropping, though — the memo route is
-    written by this machine's own mint for one exact arm token, while a
-    derived-key hit is an inference about which pipe owns the bytes.
+    TCG derives the key from the complete graph-class identity and validates
+    the imported artifact against that key.  There is no second graph-witness
+    reader here.
     """
     try:
         cell = compiled_graph_store.lookup(key)
@@ -375,22 +364,6 @@ def _local_answer(
         return None
     if cell is None:
         return None
-    try:
-        meta = artifact_meta.read_metadata(Path(cell.artifact))
-        mismatch = aot_identity.verify_graph_witness(
-            meta, derived.graph_witnesses)
-    except Exception as exc:  # noqa: BLE001 — unreadable IS unproven
-        mismatch = f"unreadable ({type(exc).__name__}: {exc})"
-    if mismatch:
-        return report(BootAdoptOutcome(
-            reason="local_graph_witness_mismatch",
-            detail=(
-                f"this machine's own store holds {key} and its graphs are not "
-                f"this pod's graphs: {mismatch}. The cell is LEFT in place — a "
-                f"derived-key hit is an inference, not the memo this machine "
-                f"wrote for its own arm — and this pod asks the hub instead"),
-            derived_key=key, derive_ms=derived.wall_ms,
-            family=family, function=fn))
     return report(BootAdoptOutcome(
         reason="local_hit",
         detail=(
@@ -539,7 +512,7 @@ def attempt(
             for answer in cell_resolve.resolve_batch(
                     family, ask, base_url=base_url, bearer=bearer):
                 answers[answer.compiled_graph_key] = answer
-        except cell_resolve.CellResolveRefused as exc:
+        except cell_resolve.CompiledGraphResolveRefused as exc:
             # A WHOLE-BATCH refusal is a fact about the caller or the request,
             # so it is true of every key in the batch and each one reports it
             # under the hub's own code. A typed refusal is NOT a miss — reading
@@ -594,8 +567,8 @@ def _adopt_answer(
             reason=answer.refusal_code, detail=answer.detail,
             derived_key=key, derive_ms=derived.wall_ms,
             family=family, function=fn))
-    cell = answer.cell
-    if cell is None:
+    compiled_graph = answer.compiled_graph
+    if compiled_graph is None:
         # A pod that DERIVED a key and was told MISS is a different fact from a
         # pod that never derived one — `derived_key` is what tells them apart,
         # and it is on the event.
@@ -607,7 +580,8 @@ def _adopt_answer(
 
     try:
         artifact = cell_resolve.materialize(
-            cell, cache_dir=Path(cache_dir) if cache_dir else None,
+            compiled_graph,
+            cache_dir=Path(cache_dir) if cache_dir else None,
             what=f"boot adopt of {key} (family {family})")
     except Exception as exc:  # noqa: BLE001
         logger.debug("boot-adopt: materialize failed", exc_info=True)
@@ -616,46 +590,15 @@ def _adopt_answer(
             derived_key=key, derive_ms=derived.wall_ms,
             family=family, function=fn))
 
-    # pgw#1031, THE GRAPH-WITNESS FLOOR. Everything above this line agreed on
-    # the KEY, and the key is an ingress identity: two endpoints whose declared
-    # contracts match while their bodies differ mint under one `ck1`
-    # (`micro-pad32` vs `micro-pad32-branchy`, measured 2026-08-10 — identical
-    # keying block from 112- and 102-node graphs). Pull-by-key would hand this
-    # pod the other endpoint's kernels, and only the arm-time numerics
-    # tolerance would stand in the way. So the last thing checked before an
-    # adoption is returned is that the cell's compiled graphs ARE the graphs
-    # this pod traced.
-    try:
-        # THE one bounded reader (pgw#1098): a second scan of the same
-        # member is a divergence waiting for the first caller who bounds
-        # only one of them.
-        meta = artifact_meta.read_metadata(Path(artifact))
-    except Exception as exc:  # noqa: BLE001 — unreadable IS unproven
-        logger.debug("boot-adopt: metadata unreadable", exc_info=True)
-        return report(BootAdoptOutcome(
-            reason="witness_unreadable",
-            detail=(
-                f"the materialized cell for {key} would not state its "
-                f"metadata ({type(exc).__name__}: {exc}), so its graphs cannot "
-                f"be shown to be this pod's graphs"),
-            derived_key=key, derive_ms=derived.wall_ms,
-            family=family, function=fn))
-    mismatch = aot_identity.verify_graph_witness(
-        meta, derived.graph_witnesses)
-    if mismatch:
-        return report(BootAdoptOutcome(
-            reason="graph_witness_mismatch",
-            detail=(
-                f"the key matched {cell.cell_ref} and the graph did not: "
-                f"{mismatch}. This pod serves eager and mints its own."),
-            derived_key=key, derive_ms=derived.wall_ms,
-            family=family, function=fn))
-
     return report(BootAdoptOutcome(
-        adoption=BootAdoption(derived=derived, cell=cell, artifact=artifact),
+        adoption=BootAdoption(
+            derived=derived,
+            compiled_graph=compiled_graph,
+            artifact=artifact,
+        ),
         reason=HIT,
         detail=(
-            f"resolved to {cell.cell_ref} ({cell.publisher_tier} tier), "
+            f"resolved to {compiled_graph.compiled_graph_ref}, "
             f"materialized at {artifact} — arming with ZERO dispatches having "
             f"occurred"),
         derived_key=key, derive_ms=derived.wall_ms,

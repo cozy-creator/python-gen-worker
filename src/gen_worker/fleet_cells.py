@@ -67,7 +67,6 @@ from torch_compiled_graphs import CompiledGraphKey, IdentityError, is_compiled_g
 
 from . import activity as activity_mod
 from . import (
-    aot_identity,
     aot_serve,
     artifact_meta,
     cell_key,
@@ -1565,22 +1564,16 @@ def arm_ordered(
     artifact: Optional[Path],
     delivered_ref: str,
     delivered_digest: str,
-    expected: Optional["aot_identity.ExpectedIdentity"],
     compiled_graph_key: str,
-    publisher_org: str,
-    publisher_tier: str,
     receipt: str,
 ) -> ArmOutcome:
     """Obey one Plan's ``Arm`` (pgw#904) — the fleet POLICY does not run.
 
-    ``aot_cell`` arms exactly the pre-materialized ``artifact`` (its bytes
-    already verified against the spec's content digest by the head): the
-    hub-signed receipt is verified STRICTLY (a refused receipt is a typed
-    refusal, never a drop-to-eager), the receipt's ``publisher_org_id`` must
-    equal the org the spec named (§4.26 — the trust answer is WHO produced
-    it), and pgw#903's declared-identity verification runs inside
-    ``stage_artifact`` via ``expected``. ``dynamo`` arms JIT intake.
-    ``eager_only`` arms nothing, by order.
+    ``aot_cell`` arms exactly the pre-materialized ``artifact``. The delivery
+    path has already verified its content digest and imported it through TCG's
+    admission gate. The embedded hub receipt is verified here and must name
+    the same compiled-graph key. ``dynamo`` arms JIT intake; ``eager_only``
+    arms nothing, by order.
     """
     if serve_posture.eager_only():
         # pgw#1142 / §4.32 item 4: the operator's order outranks the hub's
@@ -1627,11 +1620,11 @@ def arm_ordered(
     if backend != "aot_cell":
         raise OrderedArmError(
             "unknown_ordered_backend", f"no arm for backend {backend!r}")
-    if artifact is None or expected is None:
+    if artifact is None or not compiled_graph_key or not receipt:
         raise OrderedArmError(
             "artifact_unmaterialized",
             "an aot_cell arm reached arming with no materialized artifact "
-            "or no expected identity — the head must supply both")
+            "or without its compiled-graph key and embedded receipt")
 
     # Deferred: receipts pulls +151 modules onto the `import gen_worker` path.
     from . import receipts
@@ -1649,23 +1642,6 @@ def arm_ordered(
     except receipts.ReceiptError as exc:
         raise OrderedArmError(
             "artifact_receipt_refused", f"{exc.reason}: {exc}") from exc
-    want_org = str(publisher_org or "").strip()
-    have_org = str(verified_receipt.publisher_org_id or "").strip()
-    # Exact publisher (§4.26): the spec NAMES the producing org and the signed
-    # receipt must name the same one. Fail-closed on silence — an artifact
-    # whose receipt cannot name its publisher cannot be shown to match.
-    if not want_org or have_org != want_org:
-        raise OrderedArmError(
-            "publisher_mismatch",
-            f"publisher_org: expected {want_org or '<unnamed>'}, receipt "
-            f"names {have_org or '<unnamed>'}")
-    want_tier = str(publisher_tier or "").strip()
-    if verified_receipt.publisher_tier != want_tier:
-        raise OrderedArmError(
-            "publisher_tier_mismatch",
-            f"publisher_tier: expected {want_tier or '<unnamed>'}, receipt "
-            f"names {verified_receipt.publisher_tier or '<unnamed>'}",
-        )
     want_key = str(compiled_graph_key or "").strip()
     if verified_receipt.compiled_graph_key != want_key:
         raise OrderedArmError(
@@ -1679,7 +1655,7 @@ def arm_ordered(
     started = time.monotonic()
     try:
         outcome = provision.arm_aot(
-            pipe, cfg, cache_dir, Path(artifact), bucket, expected=expected)
+            pipe, cfg, cache_dir, Path(artifact), bucket, expected=None)
     except BaseException:
         if bucket:
             cc.drop_lora_execution_lane(pipe)
