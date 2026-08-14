@@ -101,6 +101,67 @@ def _materialize_process(
         results.put(("error", f"{type(exc).__name__}: {exc}"))
 
 
+def _resident_resolved(digest: str, size: int) -> WorkerResolvedRepo:
+    return WorkerResolvedRepo(
+        snapshot_digest="sha256:" + "8" * 64,
+        files=[
+            WorkerResolvedRepoFile(
+                "config.json",
+                size,
+                "http://127.0.0.1:1/must-not-fetch",
+                digest="sha256:" + digest,
+            )
+        ],
+    )
+
+
+def _stale_invalid_process(
+    root: str,
+    digest: str,
+    size: int,
+    stale_checked: Any,
+    rebuilt: Any,
+    ensure_entered: Any,
+    allow_ensure: Any,
+    results: Any,
+) -> None:
+    real_tree_matches = snapshot_mod._tree_matches
+    real_ensure = snapshot_mod.CozySnapshotDownloader._ensure_objects
+    first_match = True
+
+    def delayed_first_match(path: Path, manifest: RepositoryManifest) -> bool:
+        nonlocal first_match
+        matches = real_tree_matches(path, manifest)
+        if first_match:
+            first_match = False
+            stale_checked.set()
+            if not rebuilt.wait(30):
+                raise TimeoutError("rebuild did not finish")
+        return matches
+
+    async def observed_ensure(self: Any, *args: Any, **kwargs: Any) -> None:
+        ensure_entered.set()
+        if not allow_ensure.wait(30):
+            raise TimeoutError("rebuild observer did not release ensure")
+        await real_ensure(self, *args, **kwargs)
+
+    setattr(snapshot_mod, "_tree_matches", delayed_first_match)
+    setattr(snapshot_mod.CozySnapshotDownloader, "_ensure_objects", observed_ensure)
+    try:
+        path = asyncio.run(
+            snapshot_mod.CozySnapshotDownloader().ensure_snapshot(
+                Path(root),
+                _ref(),
+                resolved=_resident_resolved(digest, size),
+            )
+        )
+        results.put(("stale", (path / "config.json").read_bytes()))
+    except BaseException as exc:
+        results.put(("stale_error", f"{type(exc).__name__}: {exc}"))
+        stale_checked.set()
+        ensure_entered.set()
+
+
 def test_whole_file_downloads_into_hashrepo_and_reuses_it(tmp_path: Path) -> None:
     body = b"hashrepo-worker-adapter"
     digest = _sha(body)
@@ -181,6 +242,58 @@ def test_materialization_collision_refuses_an_invalid_winner(tmp_path: Path) -> 
         )
     assert caught.value.errno == errno.ENOTEMPTY
     assert (target / "config.json").read_bytes() == b"diverged"
+
+
+def test_stale_invalid_validation_cannot_delete_a_rebuilt_tree(
+    tmp_path: Path,
+) -> None:
+    body = b"valid-after-recovery"
+    digest = LocalCAS(tmp_path).put_bytes(body)
+    target = tmp_path / "snapshots" / snapshot_mod.snapshot_dir_key(
+        "sha256:" + "8" * 64
+    )
+    target.mkdir(parents=True)
+    (target / "config.json").write_bytes(b"invalid-old-target")
+
+    context = multiprocessing.get_context("fork")
+    stale_checked = context.Event()
+    rebuilt = context.Event()
+    ensure_entered = context.Event()
+    allow_ensure = context.Event()
+    results = context.Queue()
+    stale = context.Process(
+        target=_stale_invalid_process,
+        args=(
+            str(tmp_path),
+            digest.digest,
+            len(body),
+            stale_checked,
+            rebuilt,
+            ensure_entered,
+            allow_ensure,
+            results,
+        ),
+    )
+    stale.start()
+    try:
+        assert stale_checked.wait(30)
+        rebuilt_path = asyncio.run(
+            snapshot_mod.CozySnapshotDownloader().ensure_snapshot(
+                tmp_path,
+                _ref(),
+                resolved=_resident_resolved(digest.digest, len(body)),
+            )
+        )
+        rebuilt.set()
+        assert ensure_entered.wait(30)
+        assert (rebuilt_path / "config.json").read_bytes() == body
+    finally:
+        rebuilt.set()
+        allow_ensure.set()
+        stale.join(timeout=40)
+
+    assert stale.exitcode == 0
+    assert results.get(timeout=5) == ("stale", body)
 
 
 def test_same_snapshot_key_in_two_scoped_roots_does_not_crosstalk(

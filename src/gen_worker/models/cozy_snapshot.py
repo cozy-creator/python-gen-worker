@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import errno
+import fcntl
 import hashlib
 import logging
 import re
@@ -275,6 +276,26 @@ def _materialize_repository(
         raise
 
 
+def _publish_snapshot(
+    cas: LocalCAS, manifest: RepositoryManifest, target: Path
+) -> Path:
+    """Revalidate and publish one target under its process-shared lock."""
+
+    lock_path = target.parent / f".{target.name}.lock"
+    with lock_path.open("a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            if target.exists():
+                if _tree_matches(target, manifest):
+                    return target
+                # This exact target is protected by the flock. Never remove a
+                # tree based on validation performed before acquiring it.
+                shutil.rmtree(target)
+            return _materialize_repository(cas, manifest, target)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def _pin_manifest(cas: LocalCAS, key: str, manifest: RepositoryManifest) -> None:
     target = cas.store_manifest(manifest)
     name = f"snapshot:{key}"
@@ -343,7 +364,6 @@ class CozySnapshotDownloader:
                         _TRUSTED_SNAPSHOTS.clear()
                     _TRUSTED_SNAPSHOTS.add(trust_key)
                     return target
-                shutil.rmtree(target, ignore_errors=True)
 
             await self._ensure_objects(
                 open_worker_cas(base_dir),
@@ -357,7 +377,7 @@ class CozySnapshotDownloader:
             )
             cas = open_worker_cas(base_dir)
             await asyncio.to_thread(_pin_manifest, cas, key, manifest)
-            await asyncio.to_thread(_materialize_repository, cas, manifest, target)
+            await asyncio.to_thread(_publish_snapshot, cas, manifest, target)
             if len(_TRUSTED_SNAPSHOTS) >= _TRUST_CAP:
                 _TRUSTED_SNAPSHOTS.clear()
             _TRUSTED_SNAPSHOTS.add(trust_key)
