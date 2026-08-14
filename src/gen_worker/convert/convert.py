@@ -37,6 +37,7 @@ from .writer import streaming_dtype_cast
 from .writer import streaming_fp8_storage_cast
 from ..subproc import ProcessStalledError, run_process
 from .gguf_tools import (GGUF_TOOLCHAIN_STALL_WINDOW_S, prepare_hf_source_tree_for_gguf, resolve_gguf_convert_script, run_hf_to_gguf_conversion)
+from .file_layout import SINGLE_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -421,7 +422,7 @@ def _run_gguf_inline(
     attrs = {
         "dtype": f"gguf:{dtype}",
         "file_type": "gguf",
-        "file_layout": "single-file",
+        "file_layout": SINGLE_FILE,
         "conversion_strategy": "inline_gguf",
         "quant_library": "gguf",
         "quant_recipe": f"gguf:{dtype}",

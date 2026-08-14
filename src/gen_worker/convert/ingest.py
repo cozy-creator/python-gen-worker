@@ -33,6 +33,7 @@ from ..net import hf, install_hf_http_timeouts
 from ..models.safetensors_header import header_len_ok
 from .classifier import RepoClassification, apply_source_include, classify_repo
 from .layout import detect_huggingface_source_layout
+from .file_layout import SINGLE_FILE
 from huggingface_hub.errors import EntryNotFoundError, GatedRepoError, RepositoryNotFoundError, RevisionNotFoundError
 
 
@@ -179,7 +180,7 @@ class IngestedSource:
     source_ref: str               # canonical repo id / civitai version id
     source_revision: str          # resolved commit sha / manifest hash
     dir: Path                     # local snapshot root
-    layout: str                   # diffusers | singlefile | unknown
+    layout: str                   # multi-file | single-file | unknown
     model_family: str
     model_family_variant: str
     classification: Optional[RepoClassification] = None
@@ -744,7 +745,7 @@ def ingest_civitai(
         "base_model_family": base_family,
         "base_model_civitai_baseModel": base_model_raw,
         "lineage_source": "civitai_baseModel" if base_model_raw else "unknown",
-        "file_layout": layout_info.source_layout if layout_info.source_layout != "unknown" else "singlefile",
+        "file_layout": layout_info.source_layout if layout_info.source_layout != "unknown" else SINGLE_FILE,
     }
     on_disk_dtype = detect_snapshot_dtype(dest_dir)
     if on_disk_dtype:
@@ -765,7 +766,7 @@ def ingest_civitai(
         quant = _local_gguf_quant(dest_dir / gguf_names[0])
         attrs["dtype"] = f"gguf:{quant}" if quant else "gguf"
         attrs["file_type"] = "gguf"
-        attrs["file_layout"] = "singlefile"
+        attrs["file_layout"] = SINGLE_FILE
         classification = RepoClassification(
             strategy="gguf",
             runtime_library="diffusers-single-file",

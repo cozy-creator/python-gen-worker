@@ -337,12 +337,12 @@ def test_a_retained_cast_output_is_republished_instead_of_rebuilt(
             destination_repo="acme/model", files=files,
             journal_path=workdir / JOURNAL_NAME,
             journal_state={"spec_label": "fp8", "tree": str(flavor_dir),
-                           "attrs": {"dtype": "fp8", "file_layout": "diffusers"}},
+                           "attrs": {"dtype": "fp8", "file_layout": "multi-file"}},
         )
 
     # The successor recognises its predecessor's finished output.
     attrs = clone._reusable_flavor_tree(workdir, "fp8", flavor_dir)
-    assert attrs == {"dtype": "fp8", "file_layout": "diffusers"}
+    assert attrs == {"dtype": "fp8", "file_layout": "multi-file"}
 
     # A tree that no longer matches the declaration is rebuilt, not published.
     (flavor_dir / "stray.json").write_bytes(b"{}")

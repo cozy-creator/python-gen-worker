@@ -217,6 +217,7 @@ def _tensor_to_bytes(t: "torch.Tensor") -> Any:
 
 
 # ---------------------------------------------------------------------------
+from .file_layout import MULTI_FILE, SINGLE_FILE
 from ..component_vocab import (
     denoiser_components,
     text_encoder_components,
@@ -276,7 +277,7 @@ def iter_source_tensors(
     components_filter: list[str] | None = None,
 ) -> Iterator[tuple[str, str, "torch.Tensor"]]:
     """Yield (component, name, tensor) across a whole source snapshot."""
-    if file_layout == "singlefile":
+    if file_layout == SINGLE_FILE:
         for name, tensor in iter_component_tensors(root):
             yield "", name, tensor
         return
@@ -702,7 +703,7 @@ def snapshot_weight_groups(source_dir: Path, layout: str) -> list[tuple[str, Pat
                  if p.is_file() and p.name not in sharded_members]
         return idx + loose
 
-    if layout == "diffusers":
+    if layout == MULTI_FILE:
         for entry in sorted(source_dir.iterdir()):
             if entry.is_dir():
                 found = _entries_for(entry)
@@ -1011,7 +1012,7 @@ def streaming_fp8_snapshot(
     if components is None:
         components = fp8_default_components()
     source_dir, out_dir = Path(source_dir), Path(out_dir)
-    if file_layout != "diffusers":
+    if file_layout != MULTI_FILE:
         root_groups = snapshot_weight_groups(source_dir, file_layout)
         if len(root_groups) != 1 or root_groups[0][0] != "":
             raise ConversionImplementationError(
@@ -1034,7 +1035,7 @@ def streaming_fp8_snapshot(
                 "converted_count": int(result["converted_count"]),
                 "components": [""], "output_dir": out_dir}
     denoiser_set, te_set = set(components), set(te_components)
-    groups = [(c, e) for c, e in snapshot_weight_groups(source_dir, "diffusers")
+    groups = [(c, e) for c, e in snapshot_weight_groups(source_dir, MULTI_FILE)
               if c in denoiser_set | te_set]
     if not groups:
         raise ConversionImplementationError(
@@ -1134,7 +1135,7 @@ def streaming_w8a8_snapshot(
         components = fp8_default_components()
 
     source_dir, out_dir = Path(source_dir), Path(out_dir)
-    if file_layout != "diffusers":
+    if file_layout != MULTI_FILE:
         if te_components:
             raise ConversionImplementationError(
                 "te_components need a diffusers layout (no component "
@@ -1194,7 +1195,7 @@ def streaming_w8a8_snapshot(
             "weight_set_patterns applies to non-diffusers layouts only "
             "(diffusers selection is by component name)")
     denoiser_set, te_set = set(components), set(te_components)
-    groups = [(c, e) for c, e in snapshot_weight_groups(source_dir, "diffusers")
+    groups = [(c, e) for c, e in snapshot_weight_groups(source_dir, MULTI_FILE)
               if c in denoiser_set | te_set]
     if not any(c in denoiser_set for c, _ in groups):
         raise ConversionImplementationError(

@@ -87,8 +87,8 @@ def _source(root: Path) -> IngestedSource:
         source_ref="Wan-AI/Wan2.2-T2V-A14B-Diffusers",
         source_revision="5be7df9619b54f4e2667b2755bc6a756675b5cd7",
         dir=str(root),
-        layout="diffusers",
-        attrs={"dtype": "fp32", "file_layout": "diffusers", "file_type": "safetensors"},
+        layout="multi-file",
+        attrs={"dtype": "fp32", "file_layout": "multi-file", "file_type": "safetensors"},
         metadata={},
         model_family="wan",
         model_family_variant="wan22",
@@ -120,7 +120,7 @@ def test_bf16_cast_keeps_the_pinned_vae_byte_identical_and_casts_the_experts(tmp
 
     out, attrs = build_flavor_tree(
         _source(src),
-        OutputSpec(dtype="bf16", file_layout="diffusers", file_type="safetensors"),
+        OutputSpec(dtype="bf16", file_layout="multi-file", file_type="safetensors"),
         tmp_path / "out",
     )
 
@@ -147,7 +147,7 @@ def test_an_explicit_request_to_quantize_the_pinned_component_is_refused_by_name
     with pytest.raises(ComponentDtypePinError) as excinfo:
         build_flavor_tree(
             _source(src),
-            OutputSpec(dtype="fp8", file_layout="diffusers", file_type="safetensors"),
+            OutputSpec(dtype="fp8", file_layout="multi-file", file_type="safetensors"),
             tmp_path / "out",
             quantize_components=["transformer", "vae"],
         )
@@ -162,7 +162,7 @@ def test_an_fp32_cast_of_a_pinned_component_is_not_refused(tmp_path):
     src = _wan_tree(tmp_path / "src")
     out, _ = build_flavor_tree(
         _source(src),
-        OutputSpec(dtype="fp32", file_layout="diffusers", file_type="safetensors"),
+        OutputSpec(dtype="fp32", file_layout="multi-file", file_type="safetensors"),
         tmp_path / "out",
     )
     assert component_dtypes_on_disk(out)["vae"] == "fp32"
