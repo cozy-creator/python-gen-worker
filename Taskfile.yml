@@ -120,6 +120,14 @@ tasks:
     cmds:
       - PROTO_SKIP_PEER=1 scripts/proto-drift-check.sh
 
+  formula-vector-check:
+    desc: |
+      pgw#1236 / th#1914 — pin this repo's shared formula corpus offline.
+      Tensorhub performs the peer comparison; PGW lands first.
+    cmds:
+      - uv run python scripts/check_formula_corpus_digest.py
+      - scripts/formula-vector-drift.sh
+
   proto:
     desc: Regenerate src/gen_worker/pb/ from proto/ (grpcio-tools codegen)
     cmds:

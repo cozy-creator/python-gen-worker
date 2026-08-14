@@ -324,6 +324,13 @@ jobs:
       - name: th#1897 gate - the shared grammar corpora match their digest
         run: uv run python scripts/check_grammar_corpus_digest.py
 
+      # GATING (th#1914 / pgw#1236): both languages execute their formula
+      # implementation against a vendored corpus. Pin the PGW copy offline;
+      # Tensorhub performs the one meaningful peer comparison because this
+      # repository is public and Tensorhub is private. No network here.
+      - name: pgw#1236 gate - the shared formula corpus matches its digest
+        run: uv run python scripts/check_formula_corpus_digest.py
+
       # GATING (pgw#1122): the compute child holds no worker credential BY
       # CONSTRUCTION, so a gate that reads one to answer "who am I?" or "is
       # there a hub?" refuses on every real serving pod (pgw#1108, then
