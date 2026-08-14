@@ -12,9 +12,9 @@
       "sample_asset_ref": "outputs/request-1/result.bin"
     },
     {
-      "name": "GEN_WORKER_LOCAL_CELLS_DIR",
+      "name": "GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR",
       "role": "compiled_graph_root",
-      "consumer_relative_path": "aot-cells"
+      "consumer_relative_path": "aot-compiled-graphs"
     },
     {
       "name": "TENSORHUB_URL",

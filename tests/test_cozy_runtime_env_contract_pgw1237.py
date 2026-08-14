@@ -174,7 +174,7 @@ def test_runtime_env_digest_gate_can_go_red_pgw1237(tmp_path: Path) -> None:
         (
             "compiled_graph_root",
             "name",
-            "GEN_WORKER_LOCAL_CELLS_DIR_BROKEN",
+            "GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR_BROKEN",
         ),
         ("hub_url", "name", "TENSORHUB_URL_BROKEN"),
         ("bearer_token", "name", "TENSORHUB_TOKEN_BROKEN"),

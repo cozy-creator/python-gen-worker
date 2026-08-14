@@ -89,7 +89,7 @@ def _materialize_named_artifact(
             "artifact_unpinned", f"{what}: named cell {cell_ref!r} carries no "
             "content digest")
     cas = open_worker_cas(cache_dir)
-    dest_dir = cas.root / "aot-cells"
+    dest_dir = cas.root / "aot-compiled-graphs"
     dest = dest_dir / f"{digest.split(':', 1)[-1]}.tar.gz"
     try:
         expected = CASRef.parse(digest)

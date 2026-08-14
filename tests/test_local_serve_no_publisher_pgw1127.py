@@ -246,7 +246,7 @@ def test_a_second_run_on_this_machine_arms_from_its_own_store_and_never_mints(
     armed = local_serve.enable_compiled(_Pipe(), _Cfg(), None, mint=_ctx())
 
     assert armed is True
-    assert armable and armable[0] == store / "aot-cells" / KEY_A / "cell.tar.gz"
+    assert armable and armable[0] == store / "aot-compiled-graphs" / KEY_A / "cell.tar.gz"
 
 
 def test_the_local_entry_hands_the_arming_brain_no_sink_at_all(
@@ -391,7 +391,7 @@ def test_storing_a_cell_imports_no_transport_at_all(tmp_path: Path) -> None:
     artifact.write_bytes(b"packed")
     program = f"""
 import os, sys
-os.environ["GEN_WORKER_LOCAL_CELLS_DIR"] = {str(root)!r}
+os.environ["GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR"] = {str(root)!r}
 from gen_worker import local_cell_store
 cell = local_cell_store.store(
     {str(artifact)!r}, key={KEY_A!r}, family="micro-diffusion",

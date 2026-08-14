@@ -102,7 +102,7 @@ def test_a_cell_is_addressed_by_the_same_ck1_key_the_hub_store_uses(
 
     assert cell is not None
     assert cell.key == KEY_A and cell_key.is_key(cell.key)
-    assert cell.artifact == store / "aot-cells" / KEY_A / "cell.tar.gz"
+    assert cell.artifact == store / "aot-compiled-graphs" / KEY_A / "cell.tar.gz"
     assert cell.artifact.read_bytes() == b"packed-cell-bytes"
 
     found = local_cell_store.lookup(KEY_A)
@@ -131,7 +131,7 @@ def test_a_record_written_but_never_filled_is_absent_not_short(
     """The record is written LAST (aot_resume's rule): a crash mid-store leaves
     a directory the next lookup treats as absent, never as a short cell."""
     local_cell_store.store(_artifact(tmp_path), key=KEY_A, family="f")
-    (store / "aot-cells" / KEY_A / local_cell_store.RECORD_NAME).unlink()
+    (store / "aot-compiled-graphs" / KEY_A / local_cell_store.RECORD_NAME).unlink()
     assert local_cell_store.lookup(KEY_A) is None
 
 
@@ -216,7 +216,7 @@ def test_a_stale_memo_costs_one_re_mint_and_never_a_wrong_cell(
     local_cell_store.drop(KEY_A)
     assert local_cell_store.lookup_for_arm(ARM_A) is None
 
-    (store / "aot-cells" / local_cell_store.MEMO_DIRNAME / f"{ARM_A}.json"
+    (store / "aot-compiled-graphs" / local_cell_store.MEMO_DIRNAME / f"{ARM_A}.json"
      ).write_text(json.dumps({"cell_key": "not-a-key"}))
     assert local_cell_store.lookup_for_arm(ARM_A) is None
 
@@ -269,7 +269,7 @@ def test_no_env_declares_the_trust_class(store: Path) -> None:
     ]
     assert [ast.unparse(a) for a in read] == ["ENV_STORE_DIR"], (
         "the only env this module may read is the store LOCATION")
-    assert local_cell_store.ENV_STORE_DIR == "GEN_WORKER_LOCAL_CELLS_DIR", (
+    assert local_cell_store.ENV_STORE_DIR == "GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR", (
         "the name is a cross-repo contract with cozy-local's paths.go")
 
 
@@ -422,7 +422,7 @@ def test_a_second_boot_arms_from_this_machines_own_store_with_no_mint(
     assert minted is not None
     assert minted.cell_key == KEY_A
     assert minted.ref.endswith("#" + KEY_A)
-    assert armable == [store / "aot-cells" / KEY_A / "cell.tar.gz"], (
+    assert armable == [store / "aot-compiled-graphs" / KEY_A / "cell.tar.gz"], (
         "the arm must be handed the STORE's bytes, not a copy nobody hashed")
     assert fleet_cells._FINALIZED[ARM_A] is minted, (
         "a sibling pipe of the same record must re-arm these bytes in-process")

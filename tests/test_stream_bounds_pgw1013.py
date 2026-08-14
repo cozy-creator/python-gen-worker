@@ -564,8 +564,8 @@ def test_cell_artifact_oversized_stream_is_abandoned_mid_transfer(
     assert _fetch_cell(rig, tmp_path, entry, ARTIFACT_DIGEST) is None
     _aborted_early(rig, "/cell-big.tar.gz")
     hexname = ARTIFACT_DIGEST.split(":", 1)[-1]
-    assert not (tmp_path / "aot-cells" / f"{hexname}.tar.gz").exists()
-    assert not (tmp_path / "aot-cells" / f"{hexname}.part").exists()
+    assert not (tmp_path / "aot-compiled-graphs" / f"{hexname}.tar.gz").exists()
+    assert not (tmp_path / "aot-compiled-graphs" / f"{hexname}.part").exists()
 
 
 # ---------------------------------------------------------------------------

@@ -54,9 +54,9 @@ carry that:
 LAYOUT (one directory per cell, so a cell and the facts about it move as a
 unit and a partial write leaves nothing admissible)::
 
-    <root>/aot-cells/<ck1-…>/cell.tar.gz   the packed artifact
-    <root>/aot-cells/<ck1-…>/record.json   {cell_key, content_digest, family, …}
-    <root>/aot-cells/.memo/<arm1-…>.json   the MEMO: pre-trace identity -> ck1 key
+    <root>/aot-compiled-graphs/<ck1-…>/cell.tar.gz   the packed artifact
+    <root>/aot-compiled-graphs/<ck1-…>/record.json   {cell_key, content_digest, family, …}
+    <root>/aot-compiled-graphs/.memo/<arm1-…>.json   the MEMO: pre-trace identity -> ck1 key
     <root>/trust-class.json                the learned trust class
     <root>/.mint-resume/…                  aot_resume's crash-only bank (pgw#848)
 
@@ -119,9 +119,9 @@ def _sha256_file(path: Path) -> str:
 #: ``workerEnv`` (``cozy-local/internal/paths/paths.go``) and the ``cozy
 #: cells`` CLI reads the same root, so the NAME and the DEFAULT are a
 #: cross-repo contract: changing either goes dark on that CLI.
-ENV_STORE_DIR = "GEN_WORKER_LOCAL_CELLS_DIR"
+ENV_STORE_DIR = "GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR"
 
-CELLS_DIRNAME = "aot-cells"
+CELLS_DIRNAME = "aot-compiled-graphs"
 MEMO_DIRNAME = ".memo"
 ARTIFACT_NAME = "cell.tar.gz"
 RECORD_NAME = "record.json"
@@ -179,7 +179,7 @@ def store_root() -> Path:
     env = os.environ.get(ENV_STORE_DIR, "").strip()
     if env:
         return Path(env).expanduser()
-    return Path.home() / ".cache" / "cozy" / "compile-cells"
+    return Path.home() / ".cache" / "cozy" / "compiled-graphs"
 
 
 def cells_root(root: Optional[Path] = None) -> Path:

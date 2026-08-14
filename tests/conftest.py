@@ -375,13 +375,13 @@ def _isolated_local_cell_store(tmp_path_factory):
     Save and restore the variable by hand so this fixture adds no ordering
     edge to anything.
     """
-    prior = os.environ.get("GEN_WORKER_LOCAL_CELLS_DIR")
-    os.environ["GEN_WORKER_LOCAL_CELLS_DIR"] = str(
+    prior = os.environ.get("GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR")
+    os.environ["GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR"] = str(
         tmp_path_factory.mktemp("local-cell-store"))
     try:
         yield
     finally:
         if prior is None:
-            os.environ.pop("GEN_WORKER_LOCAL_CELLS_DIR", None)
+            os.environ.pop("GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR", None)
         else:
-            os.environ["GEN_WORKER_LOCAL_CELLS_DIR"] = prior
+            os.environ["GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR"] = prior

@@ -144,7 +144,7 @@ def _run(mode: str, store: Path, artifact: Path) -> dict:
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
         [str(REPO / "src"), str(REPO / "tests"), env.get("PYTHONPATH", "")])
-    env["GEN_WORKER_LOCAL_CELLS_DIR"] = str(store)
+    env["GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR"] = str(store)
     env["PGW1096_ARTIFACT"] = str(artifact)
     proc = subprocess.run(
         [sys.executable, "-c", _PROGRAM, mode],

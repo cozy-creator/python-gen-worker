@@ -141,7 +141,7 @@ _OWNED_NON_SETTINGS: frozenset[str] = frozenset(REFUSED_KEY_MATERIAL) | frozense
     "GEN_WORKER_PROBE_PUBLISH_ARMED",
     # Library/standalone-tool knobs; see scripts/config_reads_allowlist.txt.
     "GEN_WORKER_LOG_LEVEL",
-    "GEN_WORKER_LOCAL_CELLS_DIR",
+    "GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR",
     "GEN_WORKER_LOCAL_OUTPUT_DIR",
     "GEN_WORKER_MINT_RESUME_DIR",
     "GEN_WORKER_MINT_RESUME_MAX_BYTES",
