@@ -7,6 +7,8 @@ back.  tensorhub now refuses a dead spelling at DECLARE with
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from gen_worker.convert.clone import OutputSpec, normalize_outputs
@@ -51,7 +53,7 @@ def test_normalize_outputs_speaks_only_the_ruled_vocabulary() -> None:
         normalize_outputs([{"dtype": "bf16", "file_layout": "diffusers"}])
 
 
-def test_source_detection_returns_ruled_tokens(tmp_path) -> None:
+def test_source_detection_returns_ruled_tokens(tmp_path: Path) -> None:
     from gen_worker.convert.source import _detect_file_layout
 
     (tmp_path / "model_index.json").write_text("{}", encoding="utf-8")
