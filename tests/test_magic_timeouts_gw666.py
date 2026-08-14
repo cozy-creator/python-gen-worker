@@ -658,7 +658,15 @@ _ELAPSED_ASSERT_BURNDOWN = {
                                               # fail it, slowness only raises it
     "test_progress_gw621.py",                 # LOWER bound on the fixture's own
                                               # configured freeze window
-    "test_mint_gate_pgw677.py",               # LOWER bounds on induced seed work
+    # pgw#1249 deleted this file's entry rather than re-justifying it. Its two
+    # "LOWER bounds on induced seed work" (`wall >= 0.1`,
+    # `instance_gate_wait >= 100`) were floors on how long a MACHINE took, and
+    # the review note above — "an order of magnitude of headroom over the
+    # observed value" — was simply false for them: the tenant enters somewhere
+    # INSIDE an 800 ms compile, so the observed value ranges over (0, 800] and
+    # the floor sat at 100. It came in at 90 on a loaded runner and turned a
+    # correct tree red on the release path. The property is causal (the tenant
+    # waited for the instance) and is asserted as ordering now.
     "test_procsplit_pgw763.py",               # hang bound: cancel across the seam
                                               # << 3s against a 50ms handler poll
 }
