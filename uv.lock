@@ -663,7 +663,7 @@ requires-dist = [
     { name = "tomli-w", specifier = ">=1.0.0" },
     { name = "torch", marker = "(sys_platform == 'linux' and extra == 'torch') or (sys_platform == 'win32' and extra == 'torch')", specifier = ">=2.13.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'torch'", specifier = ">=2.13.0" },
-    { name = "torch-compiled-graphs", specifier = ">=0.3,<0.4" },
+    { name = "torch-compiled-graphs", specifier = ">=0.4,<0.5" },
     { name = "torchvision", marker = "(sys_platform == 'linux' and extra == 'vision') or (sys_platform == 'win32' and extra == 'vision')", specifier = ">=0.28.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torchvision", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'vision'", specifier = ">=0.28.0" },
     { name = "transformers", marker = "extra == 'dev'", specifier = ">=5.13" },
@@ -2033,15 +2033,15 @@ wheels = [
 
 [[package]]
 name = "torch-compiled-graphs"
-version = "0.3.0"
+version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "hashrepo" },
     { name = "safetensors" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1e/f0/90093e1c3af811dfdc3890a91ac8f49084724c6eb09c21d2508eb37d30ee/torch_compiled_graphs-0.3.0.tar.gz", hash = "sha256:b75d5268f7ccbc5764a34fb0c9af5935b83a832c5b6e6e9c76e797bd8ec70b7c", size = 65440, upload-time = "2026-08-14T12:04:50.611Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1e/0d/56e112d872c60d9e32b0002a694acf927f4af485d099a05ae65c94409a51/torch_compiled_graphs-0.4.0.tar.gz", hash = "sha256:167b7c9f0016cd12452077c9c48e3b347220f51e2c618151c0ba4157edda5f8c", size = 70273, upload-time = "2026-08-14T16:22:21.727Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fb/21/437ef18ea1e83d8f9ddac11f8251a9f467145391f288bab65df5a15fe9c8/torch_compiled_graphs-0.3.0-py3-none-any.whl", hash = "sha256:251d557c090cd919fc43a7aa9a70c130eabd8d378564adefcc9d1cb1493c42cf", size = 72824, upload-time = "2026-08-14T12:04:49.463Z" },
+    { url = "https://files.pythonhosted.org/packages/d9/7e/71fd20b3ff9920b4d600fcabc5ddfaf5c2fcb569d023ca0c6226e4b7ffd2/torch_compiled_graphs-0.4.0-py3-none-any.whl", hash = "sha256:390d167bd8fcee494f4dc368a63fbbb0f6fff10b6f4e9edab9c2e8738d7ae723", size = 78723, upload-time = "2026-08-14T16:22:20.546Z" },
 ]
 
 [[package]]
