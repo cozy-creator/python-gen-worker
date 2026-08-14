@@ -154,12 +154,12 @@ def cfg_spec(cfg: Any) -> CompileSpec:
 
 
 def build_request(
-    task: MintTask, *, workdir: Path, entry_peak_rss_bytes: int = 0,
+    task: MintTask, *, workdir: Path, compiled_graph_peak_rss_bytes: int = 0,
     device: Optional[int] = None,
 ) -> MintRequest:
     pending = task.pending
     return MintRequest(
-        entry_peak_rss_bytes=int(entry_peak_rss_bytes),
+        compiled_graph_peak_rss_bytes=int(compiled_graph_peak_rss_bytes),
         function=task.function,
         modules=tuple(task.modules),
         family=str(pending.family),
@@ -386,7 +386,7 @@ async def build_cell(
             # child on this pod really peaked at, in HOST RSS. It is K's
             # divisor and nothing else. Read here rather than in the child
             # because the child is the thing that dies.
-            entry_peak_rss_bytes=mint_workers.entry_peak_rss(
+            compiled_graph_peak_rss_bytes=mint_workers.compiled_graph_peak_rss(
                 family, task.weight_lane))
         act.phase(activity_mod.PHASE_LOAD)
         outcome = await mint_process.run_mint(
@@ -400,13 +400,13 @@ async def build_cell(
             # attempt that follows is exactly the one that needs the fact.
             # pgw#1175: the three DEVICE banks that stood beside this one are
             # gone; this is the only measurement any decision still reads.
-            mint_workers.record_entry_peak_rss(
+            mint_workers.record_compiled_graph_peak_rss(
                 family, task.weight_lane,
                 _pool_stat(outcome.report.mint_phases,
                            "peak_child_rss_bytes"))
         # ...and from the SNAPSHOT when the child never wrote a report at all,
         # which is every killed and every abandoned mint.
-        mint_workers.record_entry_peak_rss(
+        mint_workers.record_compiled_graph_peak_rss(
             family, task.weight_lane,
             _pool_stat(outcome.partial_phases, "peak_child_rss_bytes"))
         # pgw#1205: the DEVICE reading, per graph class, from both sources for

@@ -10,6 +10,7 @@ arming entirely — the real kill switch.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
 
@@ -17,6 +18,23 @@ import pytest
 
 from gen_worker import compile_cache as cc
 from gen_worker import hot_swap, postmortem
+
+
+
+def _gate(kind: str) -> "contextlib.AbstractContextManager[None]":
+    """`Executor._wire_turn_gate`'s factory, as a test double.
+
+    pgw#1215 step 4: an ungated router is a typed refusal, not a mode — so a
+    test that enables concurrent routing (or hands `_run_warm` a job) wires
+    the gate exactly as production does.
+    """
+    return contextlib.nullcontext()
+
+
+def _router(*, fail_closed: bool = False) -> "hot_swap.Router":
+    router = hot_swap.Router(fail_closed=fail_closed)
+    router.set_turn_gate(_gate)
+    return router
 
 
 @pytest.fixture()
@@ -84,11 +102,11 @@ def test_warm_thread_marks_and_clears_the_compile_inflight(tmp_postmortem):
         seen["active"] = json.loads(inflight.read_text())["active"]
         raise RuntimeError("boom (contained per-signature)")
 
-    router = hot_swap.Router()
+    router = _router()
     job = hot_swap._WarmJob(
         router=router, label="unet", sig=("s",), compiled=compiled,
         args=(), kwargs={}, device=None, grad_mode="no_grad",
-        autocast_dtype=None, turn=None)
+        autocast_dtype=None, turn=_gate)
     router.pending.add(job.sig)
     hot_swap._run_warm(job)
 

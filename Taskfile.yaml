@@ -205,6 +205,7 @@ tasks:
       - cmd: uv run python scripts/lint_settings_writers.py
       - cmd: uv run python scripts/lint_layout_declarations.py
       - cmd: uv run python scripts/lint_cell_key_layout_fence.py
+      - cmd: uv run python scripts/lint_serving_process_compiles.py
       - cmd: uv run python scripts/check_registry_contract.py
       - cmd: uv run python scripts/check_cozy_runtime_env_digest.py
       - cmd: uv run python scripts/check_worker_value_contracts_digest.py

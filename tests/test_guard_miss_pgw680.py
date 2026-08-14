@@ -37,6 +37,7 @@ permanent contrast tape for the warm/mint windows.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import threading
 import time
@@ -61,6 +62,23 @@ from gen_worker.models import provision
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec
 from gen_worker.models import store as store_mod
+
+
+def _gate(kind: str) -> "contextlib.AbstractContextManager[None]":
+    """`Executor._wire_turn_gate`'s factory, as a test double.
+
+    pgw#1215 step 4: an ungated router is a typed refusal, not a mode — so a
+    test that enables concurrent routing (or hands `_run_warm` a job) wires
+    the gate exactly as production does.
+    """
+    return contextlib.nullcontext()
+
+
+def _router(*, fail_closed: bool = False) -> "hot_swap.Router":
+    router = hot_swap.Router(fail_closed=fail_closed)
+    router.set_turn_gate(_gate)
+    return router
+
 
 FAMILY = "sdxl"
 MODEL_DIGEST = "blake3:" + "c" * 64
@@ -117,7 +135,7 @@ def test_serve_window_guard_miss_serves_eager_records_and_heals() -> None:
     mod = _Mod()
     original = mod.forward
     compiled = torch.compile(mod.forward, backend="eager", dynamic=False)
-    router = hot_swap.Router()
+    router = _router()
     signal = _signal(router)
     misses: List[cc.GuardMiss] = []
     signal["on_guard_miss"] = misses.append
@@ -170,7 +188,7 @@ def test_outside_serve_window_recompiles_inline() -> None:
     recompile silently — windows that exist to compile keep compiling."""
     mod = _Mod()
     compiled = torch.compile(mod.forward, backend="eager", dynamic=False)
-    router = hot_swap.Router()
+    router = _router()
     signal = _signal(router)
     misses: List[cc.GuardMiss] = []
     signal["on_guard_miss"] = misses.append
@@ -193,7 +211,7 @@ def test_repeatedly_volatile_signature_routes_eager_permanently() -> None:
     stop compile churn, route it eager permanently, keep serving."""
     mod = _Mod()
     compiled = torch.compile(mod.forward, backend="eager", dynamic=False)
-    router = hot_swap.Router()
+    router = _router()
     signal = _signal(router)
     misses: List[cc.GuardMiss] = []
     signal["on_guard_miss"] = misses.append
@@ -242,7 +260,7 @@ def test_regional_guard_miss_serves_eager_and_preserves_blocks() -> None:
     original = stack.forward
     stack.blk.compile(backend="eager", dynamic=False)  # in place, like
     # compile_repeated_blocks
-    signal = _signal(hot_swap.Router())
+    signal = _signal(_router())
     misses: List[cc.GuardMiss] = []
     signal["on_guard_miss"] = misses.append
     wrapped = cc._guarded_regional(
@@ -418,7 +436,7 @@ def _sim_apply_factory(sim: _Sim):
         if getattr(pipeline, cc._MARKER_ATTR, None) is not None:
             return True
         original = pipeline.transformer.forward
-        signal = _signal(hot_swap.Router(fail_closed=True))
+        signal = _signal(_router(fail_closed=True))
 
         def compiled(*args: Any, **kwargs: Any) -> Any:
             return sim.compiled_call(original, "transformer", args, kwargs)
@@ -707,7 +725,7 @@ def test_tenant_guard_miss_end_to_end(
 
 def test_warm_job_carries_the_requesting_threads_intra_op_count() -> None:
     """Both job-creating paths record the count of the thread that ASKED."""
-    router = hot_swap.Router()
+    router = _router()
     x = torch.ones(4)
     captured: List[Any] = []
 
@@ -731,7 +749,7 @@ def test_warm_job_carries_the_requesting_threads_intra_op_count() -> None:
 def test_the_warm_compile_imposes_that_count_before_compiling() -> None:
     """The whole point: the compile runs at the requesting thread's value, so
     the entry's GLOBAL_STATE guard matches the thread that will serve it."""
-    router = hot_swap.Router()
+    router = _router()
     seen: List[int] = []
 
     def recording_compiled(*_a: Any, **_k: Any) -> Any:
@@ -744,7 +762,7 @@ def test_the_warm_compile_imposes_that_count_before_compiling() -> None:
         router=router, label="transformer.forward", sig=("s",),
         compiled=recording_compiled, args=(torch.ones(4),), kwargs={},
         device=None, grad_mode="grad", autocast_dtype=None,
-        num_threads=diverged, turn=None,
+        num_threads=diverged, turn=_gate,
     )
     restore = int(torch.get_num_threads())
     try:

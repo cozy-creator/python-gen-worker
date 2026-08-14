@@ -204,7 +204,7 @@ ENTRY_RSS_RESERVE_BYTES = 4 * 1024**3
 #: mint-time host OOM — the answer then is to make the FIRST entry serial and
 #: bank its peak, not to guess a larger constant.
 #:
-#: Banked per (family, lane) once measured (``mint_workers.entry_peak_rss``).
+#: Banked per (family, lane) once measured (``mint_workers.compiled_graph_peak_rss``).
 #: pgw#1175: this is now the ONLY per-entry footprint K divides by.
 DEFAULT_ENTRY_PEAK_RSS_BYTES = 3 * 1024**3
 
@@ -293,7 +293,7 @@ class PoolWidth:
     memory: Optional[MemoryFacts] = None
     #: ``"measured"`` here is literal: the value is one entry child's VmHWM
     #: summed over its real descendant tree (``_peak_rss_bytes``), banked by
-    #: the serving parent (``mint_workers.record_entry_peak_rss``).
+    #: the serving parent (``mint_workers.record_compiled_graph_peak_rss``).
     per_entry_rss_basis: str = "default"
     #: §4.30 / pgw#1137: whose MACHINE this is. Distinct from the goals above,
     #: which say what the pod was bought to do — a K held down for a human at
@@ -479,7 +479,7 @@ def entry_workers(
       :data:`SERVING_HEADROOM_CPUS`. ~94 % of an entry compile is ONE core of
       serial host work, so this bound is generous and scales near-perfectly.
     * **Host RAM** over one entry child's MEASURED peak RSS
-      (``mint_workers.entry_peak_rss``, banked by the serving parent from a
+      (``mint_workers.compiled_graph_peak_rss``, banked by the serving parent from a
       previous entry on this pod). Read via :func:`memory_facts`, whose cgroup
       half counts the WORKING SET rather than everything the pod has ever
       paged in.

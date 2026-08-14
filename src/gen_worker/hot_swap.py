@@ -27,7 +27,7 @@ import queue
 import threading
 import time
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, ContextManager, Iterator, Optional, Tuple
 from . import activity as activity_mod
 from . import compile_cache
@@ -39,6 +39,24 @@ logger = logging.getLogger(__name__)
 
 EAGER = "eager"
 COMPILED = "compiled"
+
+#: The executor's background GPU turn, as a factory over a turn KIND. Every
+#: background compile this module runs executes inside one.
+TurnGate = Callable[[str], ContextManager[None]]
+
+
+class RouterNotGated(RuntimeError):
+    """A router was asked to run a background compile with no turn gate.
+
+    pgw#1215 step 4 (th#1834 Phase 3): the "ungated legacy" mode is DELETED.
+    It survived on kill-switch parity with ``GEN_WORKER_BG_YIELD``, and
+    pgw#995 deleted that switch and made ``_wire_turn_gate`` unconditional —
+    so the mode was being preserved for parity with a switch this tree
+    asserts cannot exist. Ungated is now a typed refusal instead of a silent
+    degrade, because the two are indistinguishable in a pod log and only one
+    of them is a bug.
+    """
+
 
 # The GPU-turn admission types and the debounced republish are arm-agnostic and
 # live in `shape_growth`, which BOTH arms reach; they are re-exported here (same
@@ -215,10 +233,12 @@ class _WarmJob:
     # requesting thread (every heal would be dead, sigs would go volatile).
     # The warm compile imposes this value first, like grad/autocast.
     num_threads: Optional[int] = None
-    # The executor's background GPU turn — the compile executes
-    # ONLY inside it (yields to tenant demand; mutually exclusive with
-    # tenant forwards on the owning instance). None = ungated legacy.
-    turn: Optional[Callable[[str], ContextManager[None]]] = None
+    # The executor's background GPU turn — the compile executes ONLY inside
+    # it (yields to tenant demand; mutually exclusive with tenant forwards on
+    # the owning instance). REQUIRED — `kw_only` only so it may follow the
+    # defaulted fields above: there is no ungated warm job any more, so this
+    # field can no longer be absent and `_run_warm` has no ungated branch.
+    turn: TurnGate = field(kw_only=True)
 
 
 class Router:
@@ -254,22 +274,44 @@ class Router:
         # would be incomplete — the driver aborts loudly instead of
         # finalizing/publishing a partial cell.
         self.seed_dropped = 0
-        # Executor-provided background-turn factory. When set, every warm job for
-        # this router executes inside a turn, and route() stops degrading novel
-        # signatures to inline compiles on tight VRAM headroom (the warm thread
-        # ensures headroom inside its exclusive turn instead).
-        self.turn_gate: Optional[Callable[[str], ContextManager[None]]] = None
+        # Executor-provided background-turn factory. Every warm job for this
+        # router executes inside a turn; the warm thread ensures VRAM headroom
+        # inside its own exclusive turn (`_ensure_headroom`), which is what
+        # replaced route()'s degrade-to-inline-compile.
+        #
+        # ``None`` is the pre-wiring state and NOTHING MAY RUN IN IT: a router
+        # cannot be enabled ungated (:meth:`enable` refuses typed) and cannot
+        # enqueue a warm job ungated (:meth:`route` refuses typed). It is not
+        # a mode.
+        self.turn_gate: Optional[TurnGate] = None
 
-    def set_turn_gate(
-        self, turn_gate: Optional[Callable[[str], ContextManager[None]]],
-    ) -> None:
+    def set_turn_gate(self, turn_gate: TurnGate) -> None:
+        """Wire the executor's background turn. Idempotent; ``None`` is not a
+        value — un-wiring a gate would re-create the deleted ungated mode."""
+        if turn_gate is None:
+            raise RouterNotGated(
+                "a turn gate cannot be un-wired: an ungated router is not a "
+                "mode this worker has (pgw#1215)")
         with self.lock:
             self.turn_gate = turn_gate
 
     def enable(self, on_warmed: Optional[Callable[[], None]] = None) -> bool:
+        """Turn on eager-while-compiling. Refuses typed when ungated.
+
+        pgw#1215 step 4: concurrency is exactly the state that made the
+        ungated branch reachable, so the gate is a PRECONDITION of it rather
+        than something a later call may or may not supply. In production
+        ``Executor._wire_turn_gate`` is unconditional (pgw#995), so this
+        raises only on a wiring-order bug — which is what it exists to make
+        loud instead of silently slow.
+        """
         if self.fail_closed:
             return False
         with self.lock:
+            if self.turn_gate is None:
+                raise RouterNotGated(
+                    "concurrent routing needs the executor's background turn "
+                    "gate; wire it before enabling (pgw#677/pgw#1215)")
             self.concurrent = True
             self.on_warmed = on_warmed
         return True
@@ -345,18 +387,22 @@ class Router:
                     return EAGER, sig
                 return COMPILED, sig
             device = _first_cuda_device(args, kwargs)
-            # With a turn gate the warm thread owns the device while it compiles
-            # (no concurrent transient to protect against) and ensures headroom
-            # itself; only ungated legacy routers keep the
-            # degrade-to-inline-compile fallback — and never for seeds.
-            if (self.turn_gate is None and not seed
-                    and not _headroom_ok(device)):
-                logger.warning(
-                    "hot-swap: tight VRAM headroom for novel %s signature; "
-                    "degrading to sequential compile-then-serve", label)
-                return COMPILED, sig
-            self.pending.add(sig)
+            # pgw#1215 step 4: the degrade-to-inline-compile fallback that
+            # stood here is DELETED with the ungated mode it belonged to. The
+            # warm thread owns the device while it compiles and ensures its
+            # own headroom inside the exclusive turn (`_ensure_headroom`), so
+            # tight headroom is no longer a reason to pay an inline compile on
+            # the serving thread.
             turn = self.turn_gate
+            if turn is None:
+                # Unreachable in production: `route` only gets here when the
+                # router is concurrent (which `enable` refuses ungated) or
+                # inside a mint seed window (whose pipes are wired before the
+                # first seed can run). Typed rather than degraded.
+                raise RouterNotGated(
+                    f"target={label}: a background compile was enqueued on a "
+                    f"router with no turn gate (pgw#677/pgw#1215)")
+            self.pending.add(sig)
         try:
             job = _WarmJob(
                 router=self, label=label, sig=sig, compiled=compiled,
@@ -440,8 +486,14 @@ class Router:
             if sig in self.healing:
                 return "healing"
             self.healing.add(sig)
-            self.pending.add(sig)
             turn = self.turn_gate
+            if turn is None:
+                # pgw#680's heal runs the same background compile as a warm
+                # job and takes the same turn. Ungated is not a mode.
+                raise RouterNotGated(
+                    f"target={label}: a guard-miss heal was scheduled on a "
+                    f"router with no turn gate (pgw#680/pgw#1215)")
+            self.pending.add(sig)
         try:
             job = _WarmJob(
                 router=self, label=label, sig=sig, compiled=compiled,
@@ -574,42 +626,40 @@ def _run_warm(job: _WarmJob) -> None:
         if router.closed:
             router.pending.discard(job.sig)
             return
-    if job.turn is not None:
-        # The compile + dummy forward execute the SAME modules the serving path
-        # runs (and inductor benchmarks on the same device). Ungated, that races
-        # live tenant forwards: 8.6x tenant latency during mints, and an sm_86
-        # SIGSEGV from _forward_with_branch concurrent with compile_wrapper. The
-        # turn yields to tenant demand and excludes tenant forwards for the
-        # bounded duration of ONE compile.
-        try:
-            with job.turn("compile"):
-                with router.lock:
-                    if router.closed:
-                        router.pending.discard(job.sig)
-                        return
-                _ensure_headroom(job.device)
-                _run_warm_gated(job)
-        except TurnGateBusy:
-            # Live tenant demand: re-queue rather than block the one warm
-            # thread — other routers' jobs keep flowing; this one retries
-            # (and is eventually admitted by idle or the steal rule).
-            if not _submit(job):
-                with router.lock:
+    # The compile + dummy forward execute the SAME modules the serving path
+    # runs (and inductor benchmarks on the same device). Ungated, that races
+    # live tenant forwards: 8.6x tenant latency during mints, and an sm_86
+    # SIGSEGV from _forward_with_branch concurrent with compile_wrapper. The
+    # turn yields to tenant demand and excludes tenant forwards for the
+    # bounded duration of ONE compile. pgw#1215 step 4: there is no ungated
+    # branch beside this one any more — `job.turn` is a required field.
+    try:
+        with job.turn("compile"):
+            with router.lock:
+                if router.closed:
                     router.pending.discard(job.sig)
-                    router.healing.discard(job.sig)
-                logger.warning(
-                    "hot-swap: warm queue full while yielding to tenant "
-                    "demand; %s stays eager (retried on a later request)",
-                    job.label)
-        except TurnGateClosed:
+                    return
+            _ensure_headroom(job.device)
+            _run_warm_gated(job)
+    except TurnGateBusy:
+        # Live tenant demand: re-queue rather than block the one warm
+        # thread — other routers' jobs keep flowing; this one retries
+        # (and is eventually admitted by idle or the steal rule).
+        if not _submit(job):
             with router.lock:
                 router.pending.discard(job.sig)
                 router.healing.discard(job.sig)
-            logger.info(
-                "hot-swap: background turn gate closed; dropping warm job "
-                "for %s (stays eager)", job.label)
-        return
-    _run_warm_gated(job)
+            logger.warning(
+                "hot-swap: warm queue full while yielding to tenant "
+                "demand; %s stays eager (retried on a later request)",
+                job.label)
+    except TurnGateClosed:
+        with router.lock:
+            router.pending.discard(job.sig)
+            router.healing.discard(job.sig)
+        logger.info(
+            "hot-swap: background turn gate closed; dropping warm job "
+            "for %s (stays eager)", job.label)
 
 
 def _run_warm_gated(job: _WarmJob) -> None:
@@ -752,6 +802,8 @@ __all__ = [
     "COMPILED",
     "EAGER",
     "Router",
+    "RouterNotGated",
+    "TurnGate",
     "enable",
     "router_of",
     "signature",

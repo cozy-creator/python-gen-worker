@@ -1,22 +1,42 @@
 """pgw#622: eager-while-compiling with hot-swap.
 
 A novel input signature serves eager immediately, warms the compiled path
-in a background thread, and atomically hot-swaps; tight headroom degrades
-to the sequential compile-then-serve; a preexisting warm signature (cell/
-boot-warmed) short-circuits everything; the completed warm republishes the
-grown cell.
+in a background thread, and atomically hot-swaps; tight headroom does NOT
+degrade to a sequential compile (pgw#1215 step 4 deleted the ungated arm that
+could, and the warm thread ensures headroom inside its own turn); a
+preexisting warm signature (cell/boot-warmed) short-circuits everything; the
+completed warm republishes the grown cell.
 """
 
 from __future__ import annotations
 
+import contextlib
 import tarfile
 import threading
 import time
 
+import pytest
 import torch
 
 from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells, hot_swap
+
+
+def _gate(kind: str):
+    """The executor's background turn, as a test double.
+
+    pgw#1215 step 4: an ungated Router is no longer a mode — `Router.enable`
+    and every warm-job enqueue refuse it typed — so a test that wants
+    concurrent routing wires the gate exactly as `Executor._wire_turn_gate`
+    does in production.
+    """
+    return contextlib.nullcontext()
+
+
+def _router(*, fail_closed: bool = False) -> "hot_swap.Router":
+    router = hot_swap.Router(fail_closed=fail_closed)
+    router.set_turn_gate(_gate)
+    return router
 
 
 def _wait(predicate, timeout=30.0):
@@ -91,7 +111,7 @@ def test_miss_serves_eager_then_hot_swaps():
         assert release.wait(30)
         return "compiled"
 
-    router = hot_swap.Router()
+    router = _router()
     assert router.enable()
     wrapper = _wrapper(original, compiled, router)
 
@@ -120,7 +140,7 @@ def test_swap_is_race_free_vs_in_flight_eager_batch():
     def compiled(x):
         return "compiled"
 
-    router = hot_swap.Router()
+    router = _router()
     router.enable()
     wrapper = _wrapper(original, compiled, router)
     x = torch.zeros(2, 8)
@@ -137,8 +157,25 @@ def test_swap_is_race_free_vs_in_flight_eager_batch():
     assert results == ["eager"]           # in-flight batch finished eagerly
 
 
-def test_tight_headroom_degrades_to_sequential(monkeypatch):
-    monkeypatch.setattr(hot_swap, "_first_cuda_device", lambda a, k: 0)
+def test_tight_headroom_does_not_degrade_a_gated_router(monkeypatch):
+    """Tight VRAM headroom is NOT a reason to pay an inline compile.
+
+    pgw#1215 step 4 rewrites what this row asserts. It used to pin the
+    degrade-to-sequential fallback — a branch that only an UNGATED router
+    could reach, kept alive for "kill-switch parity" with
+    ``GEN_WORKER_BG_YIELD``, a switch pgw#995 deleted and which
+    ``test_no_env_restores_the_pre_pgw677_tree`` asserts cannot exist. The
+    real contract is the one pgw#677 shipped: the warm thread owns the device
+    inside its exclusive turn and ensures its own headroom there
+    (``_ensure_headroom``), so a novel signature serves EAGER and warms in the
+    background no matter how tight the headroom is.
+
+    This row is a CONTRACT assertion, not the deletion's red-proof — a gated
+    router already behaved this way. Its predecessor asserted the opposite on
+    a BARE (ungated) router, which is the only state that could degrade; the
+    red-proof for the deletion is
+    ``test_an_ungated_router_cannot_route_concurrently`` below.
+    """
     monkeypatch.setattr(hot_swap, "_headroom_ok", lambda device: False)
     calls = []
 
@@ -146,19 +183,38 @@ def test_tight_headroom_degrades_to_sequential(monkeypatch):
         calls.append("inline")
         return "compiled"
 
-    router = hot_swap.Router()
+    router = _router()
     router.enable()
     wrapper = _wrapper(lambda x: "eager", compiled, router)
     x = torch.zeros(2, 8)
-    assert wrapper(x) == "compiled"       # today's compile-then-serve
-    assert calls == ["inline"]            # no background job
+    assert wrapper(x) == "eager"          # serves eager, never inline
+    assert calls == []                    # the serving thread compiled nothing
     sig = ("toy", hot_swap.signature((x,), {}))
-    assert sig in router.warm             # inline success still marks warm
+    assert _wait(lambda: sig in router.warm)  # the background turn did it
+
+
+def test_an_ungated_router_cannot_route_concurrently(monkeypatch):
+    """The "ungated legacy" mode is DELETED, not merely unused.
+
+    RED before this change: an ungated Router enabled fine and its
+    tight-headroom route returned COMPILED — the pre-pgw#677 degrade, kept
+    for parity with a kill switch that no longer exists.
+    """
+    monkeypatch.setattr(hot_swap, "_headroom_ok", lambda device: False)
+    ungated = hot_swap.Router()
+    with pytest.raises(hot_swap.RouterNotGated):
+        ungated.enable()
+    assert not ungated.concurrent
+    # ...and the gate cannot be un-wired back into that state either.
+    ungated.set_turn_gate(_gate)
+    with pytest.raises(hot_swap.RouterNotGated):
+        ungated.set_turn_gate(None)
+    assert ungated.enable()
 
 
 def test_prewarmed_signature_short_circuits():
     """Boot-warmed / cell-covered shapes never enter the eager+bg path."""
-    router = hot_swap.Router()
+    router = _router()
     wrapper = _wrapper(lambda x: "eager", lambda x: "compiled", router)
     x = torch.zeros(2, 8)
     assert wrapper(x) == "compiled"       # sequential window (pre-enable)
@@ -168,7 +224,7 @@ def test_prewarmed_signature_short_circuits():
 
 
 def test_fail_closed_execution_lane_never_enables():
-    router = hot_swap.Router(fail_closed=True)
+    router = _router(fail_closed=True)
     assert not router.enable()
     wrapper = _wrapper(lambda x: "eager", lambda x: "compiled", router)
     assert wrapper(torch.zeros(2, 8)) == "compiled"
@@ -180,7 +236,7 @@ def test_background_failure_is_contained_per_signature():
             raise RuntimeError("boom")
         return "compiled"
 
-    router = hot_swap.Router()
+    router = _router()
     router.enable()
     wrapper = _wrapper(lambda x: "eager", compiled, router)
     bad = torch.zeros(9, 8)
@@ -195,7 +251,7 @@ def test_background_failure_is_contained_per_signature():
 
 
 def test_signature_explosion_disables_concurrency():
-    router = hot_swap.Router()
+    router = _router()
     router.enable()
     with router.lock:
         router.warm.update(("toy", ("pad", i)) for i in range(hot_swap._MAX_SIGS))
@@ -209,7 +265,7 @@ def test_unwrap_closes_router():
         pass
 
     pipe = Pipe()
-    router = hot_swap.Router()
+    router = _router()
     setattr(pipe, cc._MARKER_ATTR, {
         "targets": ["toy"], "shapes": [], "cache": True, "originals": [],
         "regional_mods": [], "failure_signal": _signal(router),
@@ -247,7 +303,7 @@ def test_real_compile_eager_while_compiling_roundtrip():
     m = Toy()
     original = m.forward
     compiled = torch.compile(m.forward, dynamic=False)
-    router = hot_swap.Router()
+    router = _router()
     wrapper = _wrapper(original, compiled, router, label="toy.forward")
 
     # boot warmup window: sequential compile marks the declared shape warm
@@ -358,6 +414,9 @@ def test_apply_installs_router_for_guarded_arms(monkeypatch):
     router = hot_swap.router_of(pipe)
     assert isinstance(router, hot_swap.Router)
     assert not router.concurrent          # sequential until executor enables
+    # pgw#1215 step 4: `compile_cache.apply` installs the router; the EXECUTOR
+    # wires the turn gate (`_wire_turn_gate`) before it enables concurrency.
+    router.set_turn_gate(_gate)
     assert hot_swap.enable(pipe)
     assert router.concurrent
     cc.unwrap(pipe)

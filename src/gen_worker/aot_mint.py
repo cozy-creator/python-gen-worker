@@ -1911,7 +1911,7 @@ def mint(
     *,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     entry_workers: int = 0,
-    entry_peak_rss_bytes: int = 0,
+    compiled_graph_peak_rss_bytes: int = 0,
     on_progress: Optional[Callable[[str, int, int, str], None]] = None,
     phase_snapshot: Optional[Path] = None,
     execution_lane_verdict: Optional[kernel_path.Verdict] = None,
@@ -1982,7 +1982,7 @@ def mint(
             pipeline, spec, out_dir,
             inductor_configs=inductor_configs,
             entry_workers=entry_workers,
-            entry_peak_rss_bytes=entry_peak_rss_bytes,
+            compiled_graph_peak_rss_bytes=compiled_graph_peak_rss_bytes,
             execution_lane_verdict=execution_lane_verdict,
             release_residents=release_residents,
             progress=progress)
@@ -2259,7 +2259,7 @@ def _mint_cell(
     *,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     entry_workers: int = 0,
-    entry_peak_rss_bytes: int = 0,
+    compiled_graph_peak_rss_bytes: int = 0,
     execution_lane_verdict: Optional[kernel_path.Verdict] = None,
     release_residents: bool = False,
     progress: Optional[MintProgress] = None,
@@ -2355,7 +2355,7 @@ def _mint_cell(
         # divided available RAM by a 3 GiB constant on every mint the fleet
         # has run and `per_entry_rss_basis` said "default" forever. 0 keeps
         # the constant, and keeps saying so.
-        peak_rss_bytes=int(entry_peak_rss_bytes or 0))
+        peak_rss_bytes=int(compiled_graph_peak_rss_bytes or 0))
     # pgw#1111: a structure-only mint used to DISCARD this width and run K=1.
     # `fc77b923` made every production mint weight-free, so that override made
     # the pool dead code fleet-wide — and because `progress.width` is recorded

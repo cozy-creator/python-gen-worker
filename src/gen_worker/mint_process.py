@@ -168,7 +168,7 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     #: compile. Empty = this mint does not resume and behaves as it did before.
     resume: str = ""
     #: pgw#848: one ENTRY child's measured host high-water, banked by the
-    #: parent from a previous mint on this pod (``mint_workers.entry_peak_rss``).
+    #: parent from a previous mint on this pod (``mint_workers.compiled_graph_peak_rss``).
     #: 0 = never measured here, and the pool's width falls back to its
     #: constant. It has to travel on the request because the width is computed
     #: INSIDE the mint child, whose memory dies with it — and a bank read in a
@@ -177,7 +177,7 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     #: pgw#1175: the last of the four peak banks, and the ONLY one. Its three
     #: device siblings, and the ``vram_cap_bytes`` ceiling that used to ride
     #: beside it, are deleted — nothing predicts VRAM (§4.33).
-    entry_peak_rss_bytes: int = 0
+    compiled_graph_peak_rss_bytes: int = 0
     #: The hub-resolved execution lane (``ctx.lane``) and the effective
     #: declared-parameter values per function (th#1087). Both STEER the warm
     #: forwards, so both must be the parent's values — a child warming at

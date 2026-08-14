@@ -16,6 +16,7 @@ wired, not through a test double of the event API.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -25,6 +26,23 @@ from gen_worker import activity, capability_renewal, hot_swap, preload
 from gen_worker.models import lane_residency_gate, residency
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.utils import lora
+
+
+
+def _gate(kind: str) -> "contextlib.AbstractContextManager[None]":
+    """`Executor._wire_turn_gate`'s factory, as a test double.
+
+    pgw#1215 step 4: an ungated router is a typed refusal, not a mode — so a
+    test that enables concurrent routing (or hands `_run_warm` a job) wires
+    the gate exactly as production does.
+    """
+    return contextlib.nullcontext()
+
+
+def _router(*, fail_closed: bool = False) -> "hot_swap.Router":
+    router = hot_swap.Router(fail_closed=fail_closed)
+    router.set_turn_gate(_gate)
+    return router
 
 
 @pytest.fixture()
@@ -51,7 +69,7 @@ def _by_kind(events: List[Any], kind: str) -> List[Any]:
 
 
 def test_warm_compile_failure_rides_typed_event(events: List[Any]) -> None:
-    router = hot_swap.Router()
+    router = _router()
     router.enable()
     sig = ("unet", (("T", (1, 4), "torch.bfloat16", "cpu"),))
     with router.lock:
@@ -63,7 +81,7 @@ def test_warm_compile_failure_rides_typed_event(events: List[Any]) -> None:
     job = hot_swap._WarmJob(
         router=router, label="unet", sig=sig, compiled=boom,
         args=(), kwargs={}, device=None, grad_mode="grad",
-        autocast_dtype=None,
+        autocast_dtype=None, turn=_gate,
     )
     hot_swap._run_warm_compile(job)
 
@@ -79,7 +97,7 @@ def test_sig_vocab_explosion_rides_typed_event(
     events: List[Any], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(hot_swap, "_MAX_SIGS", 1)
-    router = hot_swap.Router()
+    router = _router()
     router.enable()
     with router.lock:
         router.warm.add(("unet", ("old",)))
