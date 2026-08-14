@@ -313,6 +313,13 @@ jobs:
       - name: pgw#1237 gate - Cozy runtime env corpus matches its digest
         run: uv run python scripts/check_cozy_runtime_env_digest.py
 
+      # GATING (th#1914 / pgw#1237): public carrier for the exact worker
+      # values and bounded relations Tensorhub consumes. PGW pins layer 1;
+      # private Tensorhub performs the meaningful peer comparison after PGW
+      # lands. Running that peer script here would compare PGW to itself.
+      - name: pgw#1237 gate - worker value corpus matches its digest
+        run: uv run python scripts/check_worker_value_contracts_digest.py
+
       # GATING (th#1897/pgw#1213): the shared grammar corpora are pinned to the
       # digest BOTH repos commit, so a one-sided hand-edit of
       # compiled_graph_key_vectors.json or ref_grammar_vectors.json is red

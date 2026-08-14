@@ -111,6 +111,14 @@ tasks:
     cmds:
       - scripts/vendor-proto.sh {{.CLI_ARGS}}
 
+  worker-value-contract-check:
+    desc: |
+      pgw#1237 — pin the public worker-value carrier locally. Tensorhub vendors
+      the corpus and runs the meaningful Hub -> public-PGW byte comparison, so
+      the coupled-cut direction is PGW LANDS FIRST.
+    cmds:
+      - uv run python scripts/check_worker_value_contracts_digest.py
+
   proto-check:
     desc: |
       pgw#944 — fail if the VENDORED contract was hand-edited: the local
@@ -190,6 +198,7 @@ tasks:
       - cmd: uv run python scripts/lint_layout_declarations.py
       - cmd: uv run python scripts/lint_cell_key_layout_fence.py
       - cmd: uv run python scripts/check_registry_contract.py
+      - cmd: uv run python scripts/check_worker_value_contracts_digest.py
       - cmd: uv run python scripts/lint_credential_identity.py
       - cmd: uv run python scripts/lint_arm_state_feeders.py
       - cmd: uv run python scripts/lint_ambient_census.py
