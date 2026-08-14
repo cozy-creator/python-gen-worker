@@ -1,0 +1,65 @@
+{
+  "schema": "hub-worker-boundary-contracts-v1",
+  "contracts": {
+    "active_launch_settings": [
+      {
+        "env": "ORCHESTRATOR_PUBLIC_ADDR",
+        "field": "orchestrator_public_addr"
+      },
+      {
+        "env": "TENSORHUB_PUBLIC_URL",
+        "field": "tensorhub_public_url"
+      },
+      {
+        "env": "WORKER_JWT",
+        "field": "bootstrap_worker_jwt"
+      },
+      {
+        "env": "WORKER_ID",
+        "field": "worker_id"
+      },
+      {
+        "env": "WORKER_CONFIG_GENERATION",
+        "field": "boot_config_generation"
+      },
+      {
+        "env": "WORKER_IMAGE_DIGEST",
+        "field": "worker_image_digest"
+      }
+    ],
+    "external_secret_env_names": [
+      "CIVITAI_API_KEY",
+      "HF_TOKEN"
+    ],
+    "c2pa": {
+      "supplied": [
+        {
+          "env": "GEN_WORKER_C2PA_CERT_PEM",
+          "field": "c2pa_cert_pem"
+        },
+        {
+          "env": "GEN_WORKER_C2PA_ALG",
+          "field": "c2pa_alg"
+        },
+        {
+          "env": "GEN_WORKER_C2PA_TA_URL",
+          "field": "c2pa_ta_url"
+        }
+      ],
+      "forbidden": [
+        "GEN_WORKER_C2PA_KEY_PATH",
+        "GEN_WORKER_C2PA_KEY_PEM"
+      ]
+    },
+    "managed_fill_source": {
+      "env": "TENSORHUB_FILL_SOURCE_DIR",
+      "field": "tensorhub_fill_source_dir"
+    },
+    "execution_topology": {
+      "env": "WORKER_EXECUTION_TOPOLOGY"
+    },
+    "build_input_failure": {
+      "marker": "TENSORHUB_BUILD_INPUT_FAILURE:discovery"
+    }
+  }
+}

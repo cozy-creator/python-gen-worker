@@ -119,6 +119,15 @@ tasks:
     cmds:
       - uv run python scripts/check_worker_value_contracts_digest.py
 
+  hub-worker-boundary-check:
+    desc: |
+      pgw#1239 / th#1914 — pin the public Hub-to-worker launch ABI carrier.
+      Tensorhub performs the meaningful private-Hub -> public-PGW comparison,
+      so the coupled-cut direction is PGW LANDS FIRST.
+    cmds:
+      - uv run python scripts/check_hub_worker_boundary_contracts_digest.py
+      - scripts/hub-worker-boundary-drift.sh
+
   cozy-runtime-env-check:
     desc: |
       pgw#1237 / cl#56 — pin the public Cozy runtime-env carrier locally.
