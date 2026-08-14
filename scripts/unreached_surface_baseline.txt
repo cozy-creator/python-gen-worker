@@ -37,7 +37,9 @@
 #
 #   Measured and then dropped (the pgw#848 CP1 shape)
 #     boot_phases.servable_ms — "THE cold-boot number", computed, never read.
-#     aot_compile_spans.dark_fraction — unattributed compile time, never emitted.
+#     aot_compile_spans.dark_fraction — ✅ DELISTED 2026-08-14 (pgw#1270) by
+#       EXTRACTION. The span partition is torch_compiled_graphs.spans now, so
+#       the surface is the library's to reach, not this tree's.
 #     aot_serve.realigned_inputs / served_entry_calls / EntryDispatch.refusal_counts
 #       — the pgw#790/#791 adapter-fork and realignment tax, measured "rather
 #       than inferred from a stderr line nobody can read", and never reported.
@@ -155,7 +157,6 @@
 #     They stay listed rather than exempted: an exemption rule broad enough to
 #     clear them would also clear real hits.
 #
-gen_worker.aot_compile_spans.dark_fraction()
 gen_worker.aot_inputs.inputs_for()
 gen_worker.aot_inputs.latent_dims()
 gen_worker.aot_package.package_entry_names()

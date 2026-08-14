@@ -920,7 +920,7 @@ _PHASE_KEYS: Dict[str, Tuple[str, ...]] = {
 #: two questions that were being read out of a residual: the whole ceiling of a
 #: shared autotune cache, and whether the selected config moved between two
 #: mints of one key — it is baked into the generated wrapper's grid expression
-#: and ``num_warps``. Same keys as ``aot_compile_spans.OVERLAY_KEYS``.
+#: and ``num_warps``. Same keys as ``torch_compiled_graphs.spans.OVERLAY_KEYS``.
 _AUTOTUNE_KEYS: Tuple[str, ...] = (
     "CachingAutotuner.benchmark_all_configs",
     "CachingAutotuner.coordinate_descent_tuning",

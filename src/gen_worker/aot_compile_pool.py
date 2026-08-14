@@ -70,7 +70,9 @@ from typing import (
 
 import msgspec
 
-from . import aot_compile_spans, aot_device_lock, aot_resume, env_seal
+from torch_compiled_graphs.spans import check as check_spans
+
+from . import aot_device_lock, aot_resume, env_seal
 from . import compile_posture, kernel_path
 from .child_contract import CompileSpec, MintSlot
 from .compile_posture import (
@@ -90,10 +92,13 @@ ENTRY_REPORT_NAME = "report.json"
 #: ``-m gen_worker.aot_compile_child`` to mean THIS gen_worker.
 PACKAGE_ROOT = str(Path(__file__).resolve().parent.parent)
 
-#: The three modules that define the parent/child contract: the child's own
-#: entrypoint, this module (the job/report structs) and the span partition.
-_CONTRACT_MODULES = (
-    "aot_compile_child.py", "aot_compile_pool.py", "aot_compile_spans.py")
+#: The two LOCAL modules that define the parent/child contract: the child's own
+#: entrypoint and this module (the job/report structs). The span partition left
+#: for ``torch_compiled_graphs.spans`` (pgw#1270) and is pinned by the wheel
+#: rather than digested here — the stray-tree hazard pgw#840 guards against is a
+#: second ``gen_worker`` on the path, not a second TCG; the report carries
+#: ``spans_v`` for the partition's own shape.
+_CONTRACT_MODULES = ("aot_compile_child.py", "aot_compile_pool.py")
 
 
 def _code_digest() -> str:
@@ -656,7 +661,7 @@ class EntryJob(msgspec.Struct, frozen=True, kw_only=True):
     Three fields died with the round trip and are not coming back, because the
     thing they repaired is not happening: ``program`` (the staged file),
     ``symbol_values`` and ``symbol_labels`` (pgw#998 — the ShapeEnv values
-    ``torch.export``'s save/load loses). See ``aot_compile_spans`` for the
+    ``torch.export``'s save/load loses). See ``torch_compiled_graphs.spans`` for the
     matching hole in the span partition.
     """
 
@@ -1996,7 +2001,7 @@ class EntryCompilePool:
             spans["compile_s"] - spans["child_boot_s"]
             - float(spans.get("child_wall_s", 0.0))
             - spans["reap_lag_s"], 3)
-        violations = aot_compile_spans.check(spans)
+        violations = check_spans(spans)
         if violations:
             # Named, loud, and non-fatal: an attribution defect must never
             # fail a mint, and must never be silent either (pgw#824's class).
@@ -2005,7 +2010,7 @@ class EntryCompilePool:
                 row.entry, "; ".join(violations))
         spans["child_interp_s"] = spans.get("child_interp_s", 0.0)
         # Parent-side work for THIS entry. Prefixed, and listed in
-        # `aot_compile_spans.SUBSPANS`, because it is not inside `compile_s`:
+        # `torch_compiled_graphs.spans.SUBSPANS`, because it is not inside `compile_s`:
         # staging overlaps other children, so summing it into the compile
         # total would invent seconds nobody spent compiling. Its idle FRACTION
         # is `ledger.idle_staging_s`, which is a pool number, not an entry one.

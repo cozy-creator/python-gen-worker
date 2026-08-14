@@ -31,6 +31,7 @@ from typing import Any, Dict, List
 
 import msgspec
 import pytest
+from torch_compiled_graphs import spans
 
 torch = pytest.importorskip("torch")
 
@@ -651,7 +652,6 @@ def test_every_declared_partition_member_survives_a_refusing_share(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """pgw#830's closure has to hold on the terminus a mint actually takes."""
-    from gen_worker import aot_compile_spans as spans
 
     monkeypatch.setenv("PGW_FAKE_CHILD", "refuse-midway")
     monkeypatch.setenv("PGW_FAKE_DECLARED", str(_DECLARED))
