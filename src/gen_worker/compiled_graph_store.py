@@ -8,15 +8,20 @@ verdict and the remote-publish obligation.
 
 from __future__ import annotations
 
-import hashlib
+import contextlib
+import fcntl
 import json
 import logging
+import math
 import os
+import tempfile
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
+from hashrepo import CASRef, LocalCAS
 from torch_compiled_graphs import (
     CompiledGraphRunner,
     Engine,
@@ -31,7 +36,6 @@ from .models.cache_paths import open_worker_cas
 
 logger = logging.getLogger(__name__)
 
-ENV_STORE_DIR = "GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR"
 SIDECARS_DIRNAME = "aot-compiled-graphs"
 MEMO_DIRNAME = ".memo"
 EXPORTS_DIRNAME = ".exports"
@@ -51,21 +55,35 @@ SINK_DELIVERED = "delivered"
 SINK_REFUSED = "refused"
 
 _FORMAT = 1
+# One PiB is far beyond a deployable compiled graph while still bounding hostile
+# persisted integers before they reach filesystem or transport accounting.
+_MAX_BYTES = 1 << 50
+_VERDICTS = frozenset({
+    VERDICT_UNVERIFIED,
+    VERDICT_ADMITTED,
+    VERDICT_QUARANTINED,
+})
+_SINKS = frozenset({SINK_NONE, SINK_OWED, SINK_DELIVERED, SINK_REFUSED})
 
 
 def store_root() -> Path:
-    configured = os.environ.get(ENV_STORE_DIR, "").strip()
-    if configured:
-        return Path(configured).expanduser()
-    return Path.home() / ".cache" / "cozy" / "compiled-graphs"
+    """The canonical worker CAS namespace that owns graph bytes and sidecars."""
+
+    return Path(open_worker_cas().root)
 
 
 def _root(root: Optional[Path]) -> Path:
     return Path(root) if root is not None else store_root()
 
 
+def _cas(root: Optional[Path] = None) -> LocalCAS:
+    # Non-None is an explicit local-CLI/test namespace. Production never
+    # derives another root: it opens the configured worker CAS unchanged.
+    return open_worker_cas() if root is None else open_worker_cas(Path(root))
+
+
 def _engine(root: Optional[Path] = None) -> Engine:
-    return Engine(open_worker_cas(root))
+    return Engine(_cas(root))
 
 
 def sidecars_root(root: Optional[Path] = None) -> Path:
@@ -80,7 +98,7 @@ def sidecar_dir(key: str, root: Optional[Path] = None) -> Path:
 
 def memo_path(arm_token: str, root: Optional[Path] = None) -> Path:
     token = str(arm_token or "").strip()
-    if not token or "/" in token or token.startswith("."):
+    if not _valid_arm_token(token, allow_empty=False):
         raise ValueError(f"not an arm-identity token: {arm_token!r}")
     return sidecars_root(root) / MEMO_DIRNAME / f"{token}.json"
 
@@ -93,9 +111,6 @@ class LocalCompiledGraph:
     family: str
     arm_token: str
     bytes: int
-    stored_at: float
-    manifest: str
-    verdict: str = VERDICT_ADMITTED
     sink: str = SINK_NONE
 
 
@@ -113,6 +128,7 @@ _SIDECAR_FIELDS = frozenset({
     "family",
     "arm_token",
     "bytes",
+    "content_digest",
     "stored_at",
     "manifest",
     "verdict",
@@ -120,38 +136,176 @@ _SIDECAR_FIELDS = frozenset({
 })
 
 
-def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _prepare_parent(path: Path) -> None:
+    missing: list[Path] = []
+    cursor = path.parent
+    while not cursor.exists():
+        missing.append(cursor)
+        cursor = cursor.parent
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    temporary.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
-    os.replace(temporary, path)
+    for directory in missing:
+        os.chmod(directory, 0o755)
+    # Persist every newly created directory entry from the outside in.  The
+    # later record-directory fsync cannot make an unfenced ancestor durable.
+    for directory in reversed(missing):
+        _fsync_directory(directory.parent)
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    _prepare_parent(path)
+    encoded = json.dumps(
+        payload,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.tmp-",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o644)
+        with os.fdopen(descriptor, "wb") as target:
+            target.write(encoded)
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+@contextlib.contextmanager
+def _record_lock(path: Path) -> Iterator[None]:
+    """Serialize one fresh read-modify-write across threads and processes."""
+
+    _prepare_parent(path)
+    descriptor = os.open(
+        path.parent,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    )
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        value[key] = item
+    return value
+
+
+def _read_json(path: Path) -> Any:
+    return json.loads(path.read_text(), object_pairs_hook=_reject_duplicate_keys)
+
+
+def _valid_text(value: object, *, maximum: int, allow_empty: bool) -> bool:
+    if not isinstance(value, str) or value != value.strip():
+        return False
+    if not value:
+        return allow_empty
+    return (
+        len(value) <= maximum
+        and not value.startswith(".")
+        and "/" not in value
+        and "\\" not in value
+        and all(character.isprintable() for character in value)
+    )
+
+
+def _valid_family(value: object) -> bool:
+    return _valid_text(value, maximum=128, allow_empty=False)
+
+
+def _valid_arm_token(value: object, *, allow_empty: bool = True) -> bool:
+    return _valid_text(value, maximum=256, allow_empty=allow_empty)
+
+
+def _canonical_ref(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return str(CASRef.parse(value)) == value
+    except ValueError:
+        return False
+
+
+def _positive_finite_number(value: object) -> bool:
+    if type(value) not in (int, float):
+        return False
+    numeric = float(cast(int | float, value))
+    return math.isfinite(numeric) and numeric > 0.0
+
+
+def _valid_record(value: object) -> bool:
+    if not isinstance(value, dict) or frozenset(value) != _SIDECAR_FIELDS:
+        return False
+    stored_at = value.get("stored_at")
+    return (
+        type(value.get("format")) is int
+        and value["format"] == _FORMAT
+        and isinstance(value.get("compiled_graph_key"), str)
+        and is_compiled_graph_key(value["compiled_graph_key"])
+        and _valid_family(value.get("family"))
+        and _valid_arm_token(value.get("arm_token"))
+        and type(value.get("bytes")) is int
+        and 0 < value["bytes"] <= _MAX_BYTES
+        and _canonical_ref(value.get("content_digest"))
+        and _positive_finite_number(stored_at)
+        and _canonical_ref(value.get("manifest"))
+        and value.get("verdict") in _VERDICTS
+        and value.get("sink") in _SINKS
+    )
+
+
+def _allows_verdict(current: str, requested: str) -> bool:
+    return (
+        requested == current
+        or current == VERDICT_UNVERIFIED
+        or (current == VERDICT_ADMITTED and requested == VERDICT_QUARANTINED)
+    )
+
+
+def _allows_sink(current: str, requested: str) -> bool:
+    return requested == current or (
+        current == SINK_OWED and requested in {SINK_DELIVERED, SINK_REFUSED}
+    )
 
 
 def _read_record(path: Path) -> Optional[dict[str, Any]]:
     try:
-        value = json.loads(path.read_text())
+        value = _read_json(path)
     except (OSError, ValueError):
         return None
-    if (
-        not isinstance(value, dict)
-        or frozenset(value) != _SIDECAR_FIELDS
-        or value.get("format") != _FORMAT
-        or not is_compiled_graph_key(value.get("compiled_graph_key"))
-    ):
+    if not _valid_record(value):
         return None
-    return value
-
-
-def _artifact_digest(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while block := source.read(4 << 20):
-            digest.update(block)
-    return f"sha256:{digest.hexdigest()}"
+    return cast(dict[str, Any], value)
 
 
 def _export(key: str, root: Optional[Path]) -> Path:
-    destination = _root(root) / EXPORTS_DIRNAME / key / "compiled_graph.tar.gz"
+    destination = (
+        sidecars_root(root) / EXPORTS_DIRNAME / key / "compiled_graph.tar.gz"
+    )
     destination.parent.mkdir(parents=True, exist_ok=True)
     return Path(_engine(root).export_artifact(key, destination))
 
@@ -162,13 +316,10 @@ def _local(record: dict[str, Any], root: Optional[Path]) -> LocalCompiledGraph:
     return LocalCompiledGraph(
         compiled_graph_key=key,
         artifact=artifact,
-        content_digest=_artifact_digest(artifact),
+        content_digest=str(record["content_digest"]),
         family=str(record["family"]),
         arm_token=str(record["arm_token"]),
         bytes=int(record["bytes"]),
-        stored_at=float(record["stored_at"]),
-        manifest=str(record["manifest"]),
-        verdict=str(record["verdict"]),
         sink=str(record["sink"]),
     )
 
@@ -185,30 +336,68 @@ def store(
 ) -> Optional[LocalCompiledGraph]:
     """Import one strict TCG artifact, then record its worker-only sidecar."""
 
+    if (
+        not is_compiled_graph_key(key)
+        or not _valid_family(family)
+        or not _valid_arm_token(arm_token)
+        or verdict not in {VERDICT_UNVERIFIED, VERDICT_ADMITTED}
+        or sink not in {SINK_NONE, SINK_OWED}
+    ):
+        logger.warning("compiled-graph-store: invalid worker sidecar input")
+        return None
     try:
-        result = _engine(root).import_artifact(key, artifact)
+        cas = _cas(root)
+        result = Engine(cas).import_artifact(key, artifact)
         if result.outcome == StoreOutcome.DIVERGENT:
             logger.error(
                 "compiled-graph-store: divergent bytes for %s were quarantined", key
             )
             return None
+        manifest = cas.load_manifest(result.manifest)
+        if len(manifest.files) != 1:
+            raise StorageError("compiled graph CAS manifest is not one artifact")
+        stored_file = manifest.files[0]
         now = time.time()
         record = {
             "format": _FORMAT,
             "compiled_graph_key": str(result.key),
-            "family": str(family or ""),
-            "arm_token": str(arm_token or ""),
-            "bytes": int(Path(artifact).stat().st_size),
+            "family": family,
+            "arm_token": arm_token,
+            "bytes": int(stored_file.size_bytes),
+            "content_digest": str(stored_file.digest),
             "stored_at": now,
             "manifest": str(result.manifest),
-            "verdict": str(verdict),
-            "sink": str(sink),
+            "verdict": verdict,
+            "sink": sink,
         }
-        _write_json_atomic(sidecar_dir(str(result.key), root) / RECORD_NAME, record)
+        path = sidecar_dir(str(result.key), root) / RECORD_NAME
+        with _record_lock(path):
+            existing = _read_record(path)
+            if existing is not None:
+                immutable = (
+                    "compiled_graph_key",
+                    "family",
+                    "bytes",
+                    "content_digest",
+                    "manifest",
+                )
+                if any(existing[field] != record[field] for field in immutable):
+                    raise StorageError(
+                        "worker sidecar disagrees with the selected compiled graph"
+                    )
+                record["stored_at"] = existing["stored_at"]
+                record["arm_token"] = arm_token or existing["arm_token"]
+                if not _allows_verdict(str(existing["verdict"]), verdict):
+                    record["verdict"] = existing["verdict"]
+                if not _allows_sink(str(existing["sink"]), sink):
+                    record["sink"] = existing["sink"]
+            if not _valid_record(record):
+                raise StorageError("worker sidecar failed its strict schema")
+            _write_json_atomic(path, record)
         if arm_token:
             note_memo(arm_token, str(result.key), root)
         return _local(record, root)
-    except (OSError, StorageError, ValueError) as exc:
+    except (OSError, QuarantinedArtifact, StorageError, ValueError) as exc:
         logger.warning("compiled-graph-store: could not import %s (%s)", key, exc)
         return None
 
@@ -224,15 +413,25 @@ def mark(
         path = sidecar_dir(key, root) / RECORD_NAME
     except ValueError:
         return False
-    record = _read_record(path)
-    if record is None:
-        return False
-    if verdict is not None:
-        record["verdict"] = str(verdict)
-    if sink is not None:
-        record["sink"] = str(sink)
     try:
-        _write_json_atomic(path, record)
+        with _record_lock(path):
+            record = _read_record(path)
+            if record is None:
+                return False
+            current_verdict = str(record["verdict"])
+            current_sink = str(record["sink"])
+            next_verdict = current_verdict if verdict is None else verdict
+            next_sink = current_sink if sink is None else sink
+            if (
+                not _allows_verdict(current_verdict, next_verdict)
+                or not _allows_sink(current_sink, next_sink)
+            ):
+                return False
+            record["verdict"] = next_verdict
+            record["sink"] = next_sink
+            if not _valid_record(record):
+                return False
+            _write_json_atomic(path, record)
     except OSError:
         return False
     return True
@@ -249,7 +448,7 @@ def lookup(key: str, root: Optional[Path] = None) -> Optional[LocalCompiledGraph
         or record["verdict"] != VERDICT_ADMITTED
     ):
         return None
-    destination = _root(root) / ".resolved" / key
+    destination = sidecars_root(root) / ".resolved" / key
     try:
         graph = _engine(root).resolve(key, destination)
         if graph is None:
@@ -274,8 +473,8 @@ def load_runner(
     if not is_compiled_graph_key(key):
         return None
     engine = _engine(root)
-    destination = _root(root) / ".resolved" / key
-    runner_destination = _root(root) / ".runners" / key
+    destination = sidecars_root(root) / ".resolved" / key
+    runner_destination = sidecars_root(root) / ".runners" / key
     try:
         graph = engine.resolve(key, destination)
         if graph is None:
@@ -300,14 +499,17 @@ def describe(
     try:
         return _engine(root).resolve(
             key,
-            _root(root) / ".described" / key,
+            sidecars_root(root) / ".described" / key,
         )
     except (OSError, QuarantinedArtifact, StorageError):
         return None
 
 
 def note_memo(arm_token: str, key: str, root: Optional[Path] = None) -> bool:
-    if not arm_token or not is_compiled_graph_key(key):
+    if (
+        not _valid_arm_token(arm_token, allow_empty=False)
+        or not is_compiled_graph_key(key)
+    ):
         return False
     try:
         _write_json_atomic(memo_path(arm_token, root), {
@@ -324,14 +526,21 @@ def lookup_for_arm(
     arm_token: str, root: Optional[Path] = None,
 ) -> Optional[LocalCompiledGraph]:
     try:
-        value = json.loads(memo_path(arm_token, root).read_text())
+        value = _read_json(memo_path(arm_token, root))
     except (OSError, ValueError):
         return None
-    if not isinstance(value, dict) or set(value) != {
-        "format", "compiled_graph_key", "noted_at",
-    } or value.get("format") != _FORMAT:
+    noted_at = value.get("noted_at") if isinstance(value, dict) else None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"format", "compiled_graph_key", "noted_at"}
+        or type(value.get("format")) is not int
+        or value["format"] != _FORMAT
+        or not isinstance(value.get("compiled_graph_key"), str)
+        or not is_compiled_graph_key(value["compiled_graph_key"])
+        or not _positive_finite_number(noted_at)
+    ):
         return None
-    return lookup(str(value.get("compiled_graph_key") or ""), root)
+    return lookup(value["compiled_graph_key"], root)
 
 
 def sweep_superseded_memos(scheme: str, root: Optional[Path] = None) -> int:
@@ -366,45 +575,40 @@ def has_graphs(root: Optional[Path] = None) -> bool:
     return any(
         path.is_dir()
         and not path.name.startswith(".")
-        and _read_record(path / RECORD_NAME) is not None
+        and (record := _read_record(path / RECORD_NAME)) is not None
+        and record["compiled_graph_key"] == path.name
         for path in directory.iterdir()
     )
 
 
-def stored_graphs(root: Optional[Path] = None) -> list[LocalCompiledGraph]:
-    rows: list[LocalCompiledGraph] = []
+def graphs_owed_to_sink(root: Optional[Path] = None) -> list[LocalCompiledGraph]:
     directory = sidecars_root(root)
     if not directory.is_dir():
-        return rows
+        return []
+    rows: list[LocalCompiledGraph] = []
     for path in sorted(directory.iterdir()):
         if not path.is_dir() or path.name.startswith("."):
             continue
         record = _read_record(path / RECORD_NAME)
-        if record is None or record["compiled_graph_key"] != path.name:
+        if (
+            record is None
+            or record["compiled_graph_key"] != path.name
+            or record["verdict"] != VERDICT_ADMITTED
+            or record["sink"] != SINK_OWED
+        ):
             continue
         try:
             rows.append(_local(record, root))
-        except (OSError, StorageError):
+        except (OSError, QuarantinedArtifact, StorageError):
             continue
     return rows
-
-
-def quarantined_graphs(root: Optional[Path] = None) -> list[LocalCompiledGraph]:
-    return [row for row in stored_graphs(root) if row.verdict == VERDICT_QUARANTINED]
-
-
-def graphs_owed_to_sink(root: Optional[Path] = None) -> list[LocalCompiledGraph]:
-    return [
-        row for row in stored_graphs(root)
-        if row.verdict == VERDICT_ADMITTED and row.sink == SINK_OWED
-    ]
 
 
 def note_refusal(code: str, detail: str = "", root: Optional[Path] = None) -> bool:
     if str(code or "").strip() != UNTRUSTED_REFUSAL_CODE:
         return False
     try:
-        _write_json_atomic(_root(root) / TRUST_CLASS_NAME, {
+        _write_json_atomic(sidecars_root(root) / TRUST_CLASS_NAME, {
             "format": _FORMAT,
             "class": TRUST_UNTRUSTED,
             "code": UNTRUSTED_REFUSAL_CODE,
@@ -418,53 +622,24 @@ def note_refusal(code: str, detail: str = "", root: Optional[Path] = None) -> bo
 
 def trust_class(root: Optional[Path] = None) -> str:
     try:
-        value = json.loads((_root(root) / TRUST_CLASS_NAME).read_text())
+        value = _read_json(sidecars_root(root) / TRUST_CLASS_NAME)
     except (OSError, ValueError):
         return ""
-    if not isinstance(value, dict) or value.get("format") != _FORMAT:
+    learned_at = value.get("learned_at") if isinstance(value, dict) else None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"format", "class", "code", "detail", "learned_at"}
+        or type(value.get("format")) is not int
+        or value["format"] != _FORMAT
+        or value.get("class") != TRUST_UNTRUSTED
+        or value.get("code") != UNTRUSTED_REFUSAL_CODE
+        or not isinstance(value.get("detail"), str)
+        or len(value["detail"]) > 500
+        or not _positive_finite_number(learned_at)
+    ):
         return ""
-    return str(value.get("class") or "")
+    return TRUST_UNTRUSTED
 
 
 def keeps_graphs_locally(root: Optional[Path] = None) -> bool:
     return trust_class(root) == TRUST_UNTRUSTED
-
-
-__all__ = [
-    "ENV_STORE_DIR",
-    "LoadedCompiledGraph",
-    "LocalCompiledGraph",
-    "MEMO_DIRNAME",
-    "RECORD_NAME",
-    "SIDECARS_DIRNAME",
-    "SINK_DELIVERED",
-    "SINK_NONE",
-    "SINK_OWED",
-    "SINK_REFUSED",
-    "TRUST_CLASS_NAME",
-    "TRUST_UNTRUSTED",
-    "UNTRUSTED_REFUSAL_CODE",
-    "VERDICT_ADMITTED",
-    "VERDICT_QUARANTINED",
-    "VERDICT_UNVERIFIED",
-    "drop",
-    "describe",
-    "graphs_owed_to_sink",
-    "has_graphs",
-    "keeps_graphs_locally",
-    "lookup",
-    "lookup_for_arm",
-    "load_runner",
-    "mark",
-    "memo_path",
-    "note_memo",
-    "note_refusal",
-    "quarantined_graphs",
-    "sidecar_dir",
-    "sidecars_root",
-    "store",
-    "store_root",
-    "stored_graphs",
-    "sweep_superseded_memos",
-    "trust_class",
-]
