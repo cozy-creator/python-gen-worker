@@ -45,12 +45,17 @@ if mode in ("hang", "die-and-hang"):
     time.sleep(600)
 
 declared = int(os.environ.get("PGW_FAKE_DECLARED", "6"))
+mine = [f"cls/dim={{i}}" for i in range(index, declared, count)]
 if mode == "short" and index == 0:
     names = []
 elif mode == "collide":
     names = ["cls/dim=0"]
+elif mode == "refuse-midway":
+    # pgw#1183 at the graph class: pack the first half, then refuse. The
+    # artifacts that already exist must be REPORTED, not discarded.
+    names = mine[:1]
 else:
-    names = [f"cls/dim={{i}}" for i in range(index, declared, count)]
+    names = mine
 
 out = Path(job["out_dir"])
 out.mkdir(parents=True, exist_ok=True)
@@ -65,10 +70,15 @@ for name in names:
     }})
 
 now = time.time()
+refused = mode == "refuse-midway"
 report.write_bytes(json.dumps({{
-    "entry": share, "status": "compiled", "classes": classes,
+    "entry": share, "status": "refused" if refused else "compiled",
+    "classes": classes,
     "declared_classes": declared,
-    "detail": f"{{len(classes)}} packed graph class(es)",
+    "detail": (
+        f"{{len(classes)}} graph class(es) packed before the share refused: "
+        f"graph class {{mine[1] if len(mine) > 1 else '?'}} refused"
+        if refused else f"{{len(classes)}} packed graph class(es)"),
     "elapsed_s": 0.05, "peak_rss_bytes": 1024 * 1024,
     "phases": {{"lowering_s": 0.5, "codegen_s": 0.5, "graph_passes_s": 0.5,
                "host_compile_s": 0.5}},
@@ -86,7 +96,7 @@ report.write_bytes(json.dumps({{
     "report_epoch": now,
     "code_digest": {digest!r}, "code_dir": {code_dir!r},
 }}).encode())
-sys.exit(0)
+sys.exit(2 if refused else 0)
 '''
 
 

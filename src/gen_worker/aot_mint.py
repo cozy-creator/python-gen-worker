@@ -96,6 +96,8 @@ import logging
 import os
 import sys
 import time
+
+import msgspec
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
@@ -1903,6 +1905,41 @@ def reconcile_latent_basis(pipeline: Any, spec: ExportSpec) -> str:
     return LATENT_RECONCILED
 
 
+def _attach_snapshot(
+    progress: "MintProgress", phase_snapshot: Optional[Path],
+) -> None:
+    """Make every beat re-write the on-disk phase table and touch podguard.
+
+    pgw#848: a mint that is KILLED still leaves the minutes it did spend behind
+    it — a 36-class mint abandoned at 30 must not report "no cell produced".
+    Wrapped around the caller's own sink rather than replacing it: both are
+    best-effort and neither may cost a mint.
+
+    ONE implementation, shared by :func:`mint` and :func:`mint_graph_classes`
+    (pgw#1215). Two would be two answers to "what does an abandoned mint leave
+    on disk", and the K-wide driver is precisely the one whose runs get
+    abandoned.
+    """
+    if phase_snapshot is None:
+        return
+    inner = progress.on_progress
+    snap = Path(phase_snapshot)
+
+    def _beat(phase: str, step: int, total: int, note: str) -> None:
+        try:
+            write_phase_snapshot(snap, progress)
+            # pgw#848: the SAME beat tells the pod-side reaper this mint is
+            # progressing. It has to be a CHANGING token, so it carries the
+            # position — which is the honest signal anyway.
+            _touch_pod_progress(f"aot_mint {phase} {step}/{total} {note}")
+        except Exception:  # noqa: BLE001 — telemetry never fails a mint
+            logger.debug("aot-mint: phase snapshot failed", exc_info=True)
+        if inner is not None:
+            inner(phase, step, total, note)
+
+    progress.on_progress = _beat
+
+
 def mint(
     pipeline: Any,
     spec: ExportSpec,
@@ -1955,27 +1992,7 @@ def mint(
     reconcile_latent_basis(pipeline, spec)
     progress = MintProgress(
         inductor_configs=inductor_configs, on_progress=on_progress)
-    if phase_snapshot is not None:
-        # pgw#848: every beat re-writes the on-disk table, so a mint that is
-        # KILLED still leaves 29 minutes of measurement behind it. Wrapped
-        # around the caller's sink rather than replacing it: both are
-        # best-effort and neither may cost a mint.
-        inner = progress.on_progress
-        snap = Path(phase_snapshot)
-
-        def _beat(phase: str, step: int, total: int, note: str) -> None:
-            try:
-                write_phase_snapshot(snap, progress)
-                # pgw#848: the SAME beat tells the pod-side reaper this mint
-                # is progressing. It has to be a CHANGING token, so it carries
-                # the position — which is the honest signal anyway.
-                _touch_pod_progress(f"aot_mint {phase} {step}/{total} {note}")
-            except Exception:  # noqa: BLE001 — telemetry never fails a mint
-                logger.debug("aot-mint: phase snapshot failed", exc_info=True)
-            if inner is not None:
-                inner(phase, step, total, note)
-
-        progress.on_progress = _beat
+    _attach_snapshot(progress, phase_snapshot)
     try:
         return _mint_cell(
             pipeline, spec, out_dir,
@@ -2479,7 +2496,7 @@ def _mint_cell(
     _close_export_phase()
     if release_residents:
         t0 = time.monotonic()
-        timings.update(_release_mint_residents(pipeline, minted))
+        timings.update(release_mint_residents(pipeline, minted))
         timings["residents_release_s"] = round(time.monotonic() - t0, 2)
     # Asked of the EXPORTED programs: a cell whose entries cannot be told
     # apart at dispatch must cost seconds to refuse, not a full compile bill
@@ -2522,6 +2539,24 @@ def _mint_cell(
 
 
 
+def class_manifest(
+    entry_blocks: Mapping[str, Mapping[str, Any]], spec: ExportSpec,
+) -> str:
+    """The declaration-wide coverage LABEL over a set of entry blocks.
+
+    ONE fold, so the label a whole-declaration mint stamps and the label
+    :func:`mint_graph_classes` assembles from K shares are the same
+    computation over the same stamped ``class_hash`` values. Telemetry, never
+    identity: nothing resolves it and nothing downloads it — the hub folds
+    compile-health rows under ``(manifest, sm, toolchain)`` with it.
+    """
+    return cell_key.manifest_digest(
+        aot_serve.stamp_entry(
+            name, block, strict=bool(spec.strict),
+            lora_bucket=int(spec.lora_bucket or 0)).get("class_hash") or ""
+        for name, block in entry_blocks.items())
+
+
 def pack_graph_classes(
     minted: Sequence["_MintedEntry"],
     *,
@@ -2536,6 +2571,7 @@ def pack_graph_classes(
     pool_ledger: Optional[Mapping[str, Any]] = None,
     execution_lane_verdict: Optional[kernel_path.Verdict] = None,
     progress: Optional["MintProgress"] = None,
+    manifest: Optional[str] = None,
 ) -> MintResult:
     """Pack every compiled graph class into its own artifact — the mint's tail.
 
@@ -2556,6 +2592,19 @@ def pack_graph_classes(
     ``timings`` keys written at the same points, the same phase event.
     ``progress`` is optional only so a caller with no beat can pack; every
     other argument is required because the artifact's identity depends on it.
+
+    ``manifest`` (pgw#1215) states WHOSE coverage the packed label describes.
+    ``None`` — the caller holds the whole declaration — computes it over the
+    rows in hand, which is what every caller before the keystone did and what
+    the serial path still does. A compile child holds ONE SHARE and passes
+    ``""``: it cannot state a declaration-wide coverage label, and the
+    honest answer to "how much of the declaration does this cover" is silence
+    rather than a share-local digest that reads like a whole one. The publish
+    path already says so in as many words (``fleet_cells._identity_axes``:
+    *"Empty is HONEST for an entry minted by a pod that has not folded its
+    whole declaration, so it is not a publish refusal"*), and the label is
+    telemetry — it reaches no key. :func:`mint_graph_classes` folds the real
+    one across every share and stamps it on the result it returns.
     """
     progress = MintProgress() if progress is None else progress
     # ── PACK PER ENTRY (pgw#1176) ──────────────────────────────────────────
@@ -2623,11 +2672,8 @@ def pack_graph_classes(
     # mint produced. Telemetry, never identity: nothing resolves it, nothing
     # downloads it, and the hub folds compile-health rows under
     # (manifest, sm, toolchain) with it.
-    manifest = cell_key.manifest_digest(
-        aot_serve.stamp_entry(
-            name, block, strict=bool(spec.strict),
-            lora_bucket=int(spec.lora_bucket or 0)).get("class_hash") or ""
-        for name, block in entry_blocks.items())
+    manifest = class_manifest(entry_blocks, spec) if manifest is None \
+        else str(manifest)
     timings["declare_s"] = round(time.monotonic() - t0, 2)
     timings["total_s"] = round(time.monotonic() - t_mint, 2)
     phase_table = _mint_phase_table(
@@ -2701,50 +2747,120 @@ def mint_graph_classes(
     *,
     workdir: Path,
     width: aot_compile_pool.PoolWidth,
+    spec: ExportSpec,
     inductor_configs: Optional[Mapping[str, Any]] = None,
     python: str = "",
-    on_share: Optional[Callable[[str, int, int], None]] = None,
-) -> Tuple[Dict[str, aot_compile_pool.PackedGraphClass], Dict[str, Any]]:
+    on_progress: Optional[Callable[[str, int, int, str], None]] = None,
+    phase_snapshot: Optional[Path] = None,
+) -> MintResult:
     """Trace, compile and pack a family's declared graph classes K-wide, in
-    CHILDREN, and hand back what they packed plus the pool's own facts.
+    CHILDREN, and return what they packed.
 
-    th#1834 Phase 3's two-tier shape (pgw#1215). The caller holds the resident
-    weights and serves; it does not hold — and must not hold — a second
-    pipeline for the mint. Everything the children need to build their own
-    weight-free target rides on ``template`` (``function`` / ``modules`` /
-    ``slots`` / ``cfg`` / ``execution_lane`` / ``out_dir``); the pool stamps
-    the share and the locations.
+    th#1834 Phase 3's two-tier shape (pgw#1215). The caller does NOT export:
+    everything a child needs to build its own weight-free target rides on
+    ``template`` (``function`` / ``modules`` / ``slots`` / ``cfg`` /
+    ``execution_lane`` / ``out_dir``), the pool stamps the share and the
+    locations, and each child hands back an artifact that is already keyed and
+    already carries its envelope. The ExportedProgram is never serialized.
 
-    Refusals are mapped onto the mint's own vocabulary here, exactly as the
-    old program-staging driver did: a MEMORY shortfall is
+    ``spec`` is the caller's own :class:`ExportSpec` for this family — the same
+    object it would have handed :func:`mint`. It is read for exactly one thing
+    here: the ``strict``/``lora_bucket`` axes the shared class-hash fold needs
+    (:func:`class_manifest`). Nothing about the graphs is derived from it in
+    this process; each child derives its own from the pipeline it composed.
+
+    Refusals are mapped onto the mint's own vocabulary, exactly as the old
+    program-staging driver did: a MEMORY shortfall is
     :class:`MintResourceExhausted` (retryable at a narrower K) and everything
     else is :class:`MintRefused` (deterministic, terminal). Collapsing the two
     is how the ONE failure class a narrower pool would have fixed became the
     one class routed down the never-retry path (pgw#848).
 
     ⚠️ This function does NOT publish and does not arm. The parent's row loop
-    owns local CAS -> verify -> arm -> publish per graph class (pgw#1183),
-    which is step 4's edit; here the terminus is an artifact on disk with its
-    key and its envelope already stamped by the child that traced it.
+    owns local CAS -> verify -> arm -> async publish per graph class
+    (pgw#1183), which is step 4's edit; here the terminus is an artifact on
+    disk with its key and its envelope already stamped by the child that
+    traced it.
     """
+    progress = MintProgress(
+        inductor_configs=inductor_configs, on_progress=on_progress)
+    progress.width = width
+    _attach_snapshot(progress, phase_snapshot)
+    t_mint = time.monotonic()
+    progress.t_mint = t_mint
     pool = aot_compile_pool.EntryCompilePool(
         Path(workdir), width=width, inductor_configs=inductor_configs,
         python=python)
-    t0 = time.monotonic()
+    progress.beat(
+        PHASE_INDUCTOR_COMPILE, 0, width.workers,
+        f"{width.workers} compile child(ren), one share each — {width.reason}")
     try:
-        packed = pool.compile(template, on_share=on_share)
+        packed = pool.compile(
+            template,
+            on_share=lambda name, done, total: progress.beat(
+                PHASE_INDUCTOR_COMPILE, done, total, name))
     except aot_compile_pool.EntryCompileFailed as exc:
+        # pgw#848: the pool's ledger and its MEASURED peak have to survive the
+        # failure, because the aborted phase table is what the parent banks
+        # and re-sizes K from. Without this the OOM'd attempt teaches the
+        # retry nothing and attempt 2 runs the identical width.
+        progress.pool_ledger = _pool_facts(pool)
         if exc.resource:
             raise MintResourceExhausted(
                 str(exc), entry=exc.entry, basis=exc.basis,
                 peak_rss_bytes=exc.peak_rss_bytes) from exc
         raise MintRefused(str(exc)) from exc
+    progress.pool_ledger = _pool_facts(pool)
+
+    timings = progress.timings
+    timings["compile_all_s"] = round(time.monotonic() - t_mint, 2)
+    timings["entry_workers"] = float(width.workers)
+    timings["total_s"] = round(time.monotonic() - t_mint, 2)
+    entries: List[MintedArtifact] = []
+    blocks: Dict[str, Dict[str, Any]] = {}
+    for name in sorted(packed):
+        row = packed[name]
+        try:
+            meta = dict(msgspec.json.decode(row.metadata.encode()))
+        except (msgspec.DecodeError, ValueError) as exc:
+            raise MintRefused(
+                f"graph class {name!r}: the compile child returned an "
+                f"unreadable envelope ({exc}) — an artifact whose metadata "
+                f"this process cannot parse cannot be published") from exc
+        block = meta.get(cell_key.ENTRY_BLOCK_KEY)
+        if not isinstance(block, dict):
+            raise MintRefused(
+                f"graph class {name!r}: the packed envelope carries no entry "
+                f"block, so its coverage cannot be folded")
+        blocks[name] = block
+        entries.append(MintedArtifact(
+            key=str(row.key), entry=name, artifact=Path(row.artifact),
+            metadata=meta))
+    # The declaration-wide coverage label, folded HERE because this is the
+    # only process that sees every share. Each child stamped its artifact's
+    # own `manifest_digest` EMPTY rather than a share-local digest that would
+    # read like a whole-declaration one (see `pack_graph_classes`).
+    manifest = class_manifest(blocks, spec)
+    phase_table = _mint_phase_table(
+        [], timings, inductor_configs, width, progress.pool_ledger)
+    for artifact in entries:
+        # `mint_phases` rides the RESULT, never the packed envelope (the
+        # artifact deliberately carries no wall clocks), so the whole-mint
+        # table replaces the share-local one each child attached.
+        artifact.metadata["mint_phases"] = phase_table
+        # ...and so does the folded coverage label. The bytes INSIDE each
+        # artifact keep the empty stamp its child honestly wrote; this is the
+        # result-side view, which is what the publish path reads.
+        artifact.metadata["manifest_digest"] = manifest
     logger.info(
         "aot-mint: pgw#1215 %d compile child(ren) packed %d graph class(es) "
-        "in %.0fs (sum of child seconds %.0fs, peak child RSS %.1f GiB)",
-        width.workers, len(packed), time.monotonic() - t0,
-        sum(pool.entry_seconds.values()), pool.peak_rss_bytes / 1024**3)
-    return packed, _pool_facts(pool)
+        "in %.0fs (sum of child seconds %.0fs, peak child RSS %.1f GiB) -> "
+        "manifest %s",
+        width.workers, len(entries), time.monotonic() - t_mint,
+        sum(pool.entry_seconds.values()), pool.peak_rss_bytes / 1024**3,
+        manifest)
+    return MintResult(
+        entries=tuple(entries), manifest=manifest, timings=timings)
 
 
 #: The mint window `entry_device_peaks` measures. Named on the row rather than
@@ -3093,8 +3209,8 @@ def canonicalize_dispatch_classes(
     return [row for row in minted if row.name not in dropped], aliases
 
 
-def _release_mint_residents(
-    pipeline: Any, minted: Sequence["_MintedEntry"],
+def release_mint_residents(
+    pipeline: Any, minted: Sequence["_MintedEntry"] = (),
 ) -> Dict[str, float]:
     """pgw#1053: hand the mint parent's dead residents back to the card.
 
@@ -3118,6 +3234,12 @@ def _release_mint_residents(
     NO gate is dropped; each runs against the code-only projection. The
     compile children read the STAGED programs from disk, written before this
     runs, byte for byte — nothing about the artifact can move (pgw#846).
+
+    Public since pgw#1215: the K-wide path releases from ``mint_child``, which
+    holds a pipeline it will never export from once the compile children trace
+    their own shares. ``minted`` defaults to empty for exactly that caller —
+    there are no retained programs in that process to project, only the
+    pipeline.
 
     Best-effort in every direction: a tensor or module that refuses the
     projection is skipped, and the release reports what it actually freed. A

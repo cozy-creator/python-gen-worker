@@ -33,6 +33,14 @@ Three things died with the round trip, and none of them is a loss:
   — a FAKE tensor has no storage to serialize, so a weight-free program used
   to cross as META and be re-virtualized on the far side. Nothing crosses.
 
+Packing is INSIDE the trace loop, one class at a time (pgw#1183's ordering,
+held at the graph class). A child that accumulated its compiled share and
+packed it on the way out would lose every finished class to a crash on class
+k — up to 36/K classes at a measured 156-509 s each, which is the
+all-or-nothing loss th#1825 spent 1 h 37 m on. Packed means ON DISK: a crash
+costs the ONE class in flight, and a refusal at class k reports the k-1
+artifacts that already exist rather than discarding them.
+
 What it still does NOT do: touch the hub, warm anything, publish anything, or
 decide anything about which classes exist. The declaration decides that; this
 child takes ``rows[share_index::share_count]`` of it, exactly as
@@ -294,11 +302,21 @@ def run(job: EntryJob) -> int:
         pass
 
     before = aot_compile_spans.phase_snapshot()
-    rows: List[Any] = []
+    # pgw#1183's ordering, held at the graph class (pgw#1215). The rows are
+    # packed INSIDE the loop, one class at a time, and never accumulated for a
+    # batch pack at the end. That is not a style choice: a child that held its
+    # whole compiled share in memory and packed it on the way out would lose
+    # every class it had finished to a crash on class k — up to 36/K classes at
+    # a measured 156-509 s each — which is exactly the all-or-nothing loss
+    # th#1825 spent 1 h 37 m on and pgw#1183 fixed. Packed means ON DISK, so a
+    # crash costs the ONE class in flight.
+    packed: List[PackedGraphClass] = []
     class_spans: Dict[str, Dict[str, float]] = {}
     trace_s = 0.0
     compile_s = 0.0
+    pack_s = 0.0
     declared = 0
+    refusal = ""
     t_mint = time.monotonic()
     try:
         for traced in aot_mint.trace_for_key(
@@ -327,25 +345,12 @@ def run(job: EntryJob) -> int:
                      "nodes": float(traced.nodes)}
             phases = timings.get("phases") or {}
             if isinstance(phases, dict):
-                spans.update(
-                    {str(k): float(v) for k, v in phases.items()})
+                spans.update({str(k): float(v) for k, v in phases.items()})
             class_spans[traced.name] = spans
-            rows.append(traced.row)
-    except aot_mint.MintRefused as exc:
-        partition, overlays, _raw = aot_compile_spans.phase_delta(
-            before, aot_compile_spans.phase_snapshot())
-        ledger.mark("child_trace_s", trace_s)
-        ledger.mark("compile_wall_s", compile_s)
-        ledger.mark("child_pack_s", 0.0)
-        return _refuse(str(exc), partition)
-    ledger.mark("child_trace_s", trace_s)
-    ledger.mark("compile_wall_s", compile_s)
 
-    pack_timings: Dict[str, Any] = {}
-    try:
-        with ledger.span("child_pack_s"):
+            t_pack = time.monotonic()
             result = aot_mint.pack_graph_classes(
-                rows,
+                [traced.row],
                 spec=spec,
                 work=Path(job.work),
                 out_dir=Path(job.out_dir),
@@ -354,26 +359,55 @@ def run(job: EntryJob) -> int:
                 # is aliased here. ⚠️ OWED (step 4): the merge moves to the
                 # parent, which is the only process that sees every class.
                 class_aliases={},
-                timings=pack_timings,
+                timings={},
                 t_mint=t_mint,
                 inductor_configs=job.inductor_configs,
-                execution_lane_verdict=job.execution_lane)
+                execution_lane_verdict=job.execution_lane,
+                # This process holds ONE SHARE and cannot state a
+                # declaration-wide coverage label. Empty is the honest answer
+                # and the publish path already treats it as one; the parent
+                # folds the real manifest across every share.
+                manifest="")
+            pack_s += time.monotonic() - t_pack
+            for artifact in result.entries:
+                packed.append(PackedGraphClass(
+                    name=artifact.entry,
+                    key=artifact.key,
+                    artifact=str(artifact.artifact),
+                    metadata=msgspec.json.encode(artifact.metadata).decode(),
+                    spans=class_spans.get(artifact.entry, {})))
+            # The compiled program and its minted row are the largest objects
+            # this process holds and the artifact is already on disk. Dropped
+            # HERE so the child holds one class at a time rather than its
+            # whole share.
+            traced.release()
     except aot_mint.MintRefused as exc:
-        partition, _overlays, _raw = aot_compile_spans.phase_delta(
-            before, aot_compile_spans.phase_snapshot())
-        return _refuse(str(exc), partition)
+        # NOT a discard. Every class this child already packed is on disk and
+        # is named in the report — a share is not all-or-nothing, which is the
+        # whole point of the per-graph-class atom. The refusal rides beside
+        # them so the parent can say WHICH class stopped the share.
+        refusal = str(exc)
 
+    ledger.mark("child_trace_s", trace_s)
+    ledger.mark("compile_wall_s", compile_s)
+    ledger.mark("child_pack_s", pack_s)
     partition, overlays, raw = aot_compile_spans.phase_delta(
         before, aot_compile_spans.phase_snapshot())
-    packed = [
-        PackedGraphClass(
-            name=row.entry,
-            key=row.key,
-            artifact=str(row.artifact),
-            metadata=msgspec.json.encode(row.metadata).decode(),
-            spans=class_spans.get(row.entry, {}))
-        for row in result.entries
-    ]
+    if refusal:
+        _write(report_path, EntryReport(
+            entry=job.share, status=REFUSED, classes=packed,
+            declared_classes=declared,
+            phases=dict(partition),
+            detail=(
+                f"{len(packed)} graph class(es) packed before the share "
+                f"refused: {refusal}")[:8000],
+            elapsed_s=round(time.monotonic() - started, 2),
+            peak_rss_bytes=_peak_rss(),
+            **_device_fields(),
+            metrics_raw={k: v for k, v in sorted(raw.items())},
+            **_span_fields(ledger, partition, overlays, seal_detail)))
+        return EXIT_REFUSED
+
     _write(report_path, EntryReport(
         entry=job.share, status=COMPILED, classes=packed,
         declared_classes=declared,

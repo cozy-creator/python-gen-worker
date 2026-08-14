@@ -95,7 +95,7 @@ def test_release_projects_programs_code_only() -> None:
     assert literal_digest_before, "the fixture must actually lift a literal"
 
     pipe = types.SimpleNamespace(unet=module)
-    facts = aot_mint._release_mint_residents(pipe, [row])
+    facts = aot_mint.release_mint_residents(pipe, [row])
 
     # The weights are GONE from residency...
     for fqn in weights_before:

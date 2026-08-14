@@ -132,22 +132,6 @@
 #     (kills the `str.strip` class outright), and flag any guarded module with
 #     no importer in src/ regardless of per-symbol reach.
 #
-#   WIRED BY A CHANGE THAT HAS NOT LANDED — OWNER: pgw#1215 step 4 (the
-#   executor-side supervisor). EXPIRY: that step's merge; both rows must be
-#   DELISTED by it, and if step 4 ships without them acquiring a caller the
-#   keystone shipped a compile path nothing drives.
-#     aot_compile_pool.entry_workers / aot_mint.mint_graph_classes — pgw#1215
-#       step 2b (th#1834 Phase 3's keystone) deleted the shape that used to
-#       call them: `_mint_cell` exported in the parent and shipped each
-#       ExportedProgram to a compile child, and that `torch.export.save`/`load`
-#       pair is the 36.04 s/class this program is deleting. K-wide now means K
-#       children that each TRACE their own share, which needs the recipe
-#       (function/modules/slots/cfg) that only the serving parent holds — so
-#       the driver and its width policy are reachable only from the executor,
-#       and rewriting the executor is step 4. Recorded here rather than papered
-#       over with a fake caller: the honest state is "built, proven by test,
-#       not yet driven", and this file is where that is said.
-
 #   KNOWN FALSE POSITIVES (3 of 24 — the measured rate is 12.5%)
 #     aot_inputs.inputs_for / latent_dims — declaration-author surface; the
 #       callers are endpoint repos that vendor the wheel, like gen_worker.api.
@@ -251,10 +235,9 @@ gen_worker.boot_phases.servable_ms()
 # `from gen_worker.convert import Dataset` against a class defined in
 # `gen_worker.convert.dataset`.
 #
-# ---------------------------------------------------------------------------
 # Entries are `module.Symbol` for a type and `module.symbol()` for a callable.
-gen_worker.aot_compile_pool.entry_workers()
-gen_worker.aot_mint.mint_graph_classes()
+# ---------------------------------------------------------------------------
+
 gen_worker.boot_key.assert_memo_honest()
 gen_worker.boot_key.prop_economy()
 gen_worker.component_vocab.ComponentVocabulary.role_of()

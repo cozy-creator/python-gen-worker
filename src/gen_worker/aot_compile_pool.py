@@ -1194,6 +1194,11 @@ class EntryCompilePool:
         #: share -> how many graph classes the WHOLE declaration produced on
         #: that child's pipeline. The evidence `_assert_shares_whole` reads.
         self.entry_declared: Dict[str, int] = {}
+        #: pgw#1215: share -> the graph classes a REFUSING child had already
+        #: packed before it refused. They exist on disk; recording them is how
+        #: "this share produced nothing" and "this share produced most of a
+        #: cell and then hit one bad class" stop reading the same.
+        self.refused_classes: Dict[str, List[PackedGraphClass]] = {}
         #: pgw#1215: graph class -> that class's OWN `export_s`/`compile_s`
         #: and inductor phase split, as the child measured them. The pool's
         #: other tables are per SHARE, and a share is several classes — the
@@ -1644,6 +1649,17 @@ class EntryCompilePool:
                 self.entry_phases[row.entry])
             self._refresh_resume_facts()
             return list(report.classes)
+        # pgw#1215: a share that REFUSED at class k still packed k-1
+        # artifacts, and they are on disk. Their measurement is banked before
+        # the raise for pgw#848's reason — the attempt that FAILED is exactly
+        # the attempt the next one has to size against — and `refused_classes`
+        # names what exists so a caller is never told the share produced
+        # nothing when it produced most of a cell.
+        if report is not None and report.classes:
+            for packed in report.classes:
+                self.class_spans[packed.name] = dict(packed.spans or {})
+            self.refused_classes[row.entry] = list(report.classes)
+            self.entry_declared[row.entry] = int(report.declared_classes or 0)
         detail = report.detail if report is not None else ""
         if not detail:
             detail = _stderr_tail(row.stderr_path)
@@ -1655,6 +1671,10 @@ class EntryCompilePool:
             f"{row.entry} (rows[{row.job.share_index}::"
             f"{row.job.share_count}]): compile child exited {code} after "
             f"{elapsed:.0f}s ({_exit_note(code)}): {detail or 'no detail'}"
+            + (
+                f" [{len(self.refused_classes.get(row.entry) or ())} graph "
+                f"class(es) from this share ARE packed and on disk]"
+                if self.refused_classes.get(row.entry) else "")
             + (
                 f" [pgw#848 classification: MEMORY SHORTFALL, basis={basis}; "
                 f"this share's measured high-water was "
