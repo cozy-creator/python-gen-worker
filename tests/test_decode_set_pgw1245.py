@@ -585,7 +585,8 @@ def test_unknown_means_REFUSE_for_a_denoiser_and_NOT_APPLICABLE_elsewhere(
         "_class_name": "FakePipeline",
         "transformer": ["diffusers", "FakeTransformer"],
     }))
-    alien = {"stack.0.mixer.in.weight": "BF16", "stack.0.mixer.out.weight": "BF16"}
+    alien = {"blocks.0.attention.wqkv.weight": "BF16",
+             "blocks.0.attention.wo.weight": "BF16"}
     _safetensors(root / "transformer" / "model.safetensors", alien)
     _safetensors(root / "vae" / "model.safetensors", alien)
 
@@ -603,7 +604,7 @@ def test_unknown_means_REFUSE_for_a_denoiser_and_NOT_APPLICABLE_elsewhere(
                           where=str(root), keys=denoiser)
     err = excinfo.value
     assert err.code == "decode_set_key_topology_unclassified"
-    assert "stack.0.mixer.in.weight" in str(err)
+    assert "blocks.0.attention.wqkv.weight" in str(err)
     assert "native.fused-qkv@1" in str(err)   # what IS registered
     # The same bytes under a non-denoiser component pass, by design.
     require_decodable(CONTRACT_PLAIN_BF16, decode_set=ds, where=str(root),
@@ -635,8 +636,8 @@ def test_an_unclassifiable_denoiser_refuses_through_the_load_dispatch(
         "transformer": ["diffusers", "FakeTransformer"],
     }))
     _safetensors(root / "transformer" / "model.safetensors", {
-        "stack.0.mixer.weight": "F8_E4M3",
-        "stack.0.mixer.weight_scale": "F32",
+        "blocks.0.attention.wqkv.weight": "F8_E4M3",
+        "blocks.0.attention.wqkv.weight_scale": "F32",
     })
 
     with pytest.raises(KeyTopologyUnclassifiedError) as excinfo:
@@ -705,3 +706,51 @@ def test_a_late_shard_still_classifies_the_denoiser(tmp_path: Path) -> None:
     keys = classify_snapshot(root, "transformer")
     assert keys.topology == "diffusers.split-qkv@1"
     assert keys.unclassified_denoiser is False
+
+
+def test_a_tree_with_no_attention_substructure_is_out_of_the_axis(
+    tmp_path: Path,
+) -> None:
+    """CI's counter-example, kept as a test.
+
+    The corrupt-load quarantine fixture (`test_p2_residency_reconcile.py`) is a
+    root-layout snapshot holding ONE tensor named `w`. It is a legal thing to
+    hand a loader and it carries no attention convention to get wrong, so the
+    key-topology axis is not about it. The first cut of the fail-closed rule
+    refused it — the axis is scoped to attention substructure now, derived from
+    the BYTES rather than from the component name."""
+    root = tmp_path / "tiny"
+    root.mkdir()
+    _safetensors(root / "model.safetensors", {"w": "F32"})
+
+    keys = classify_snapshot(root)
+    assert keys.denoiser is True           # root layout IS the denoiser
+    assert keys.saw_tensors is True
+    assert keys.attention_shaped is False
+    assert keys.unclassified_denoiser is False
+    require_decodable(CONTRACT_PLAIN_BF16, decode_set=derive_decode_set(),
+                      where=str(root), keys=keys)   # does not raise
+
+
+def test_a_FOURTH_attention_spelling_still_refuses(tmp_path: Path) -> None:
+    """The case the refusal exists for survives the scoping: a denoiser whose
+    attention is spelled in a way no rule here has seen is the H3 class of
+    failure, and it must not be handed to a model class hopefully."""
+    root = tmp_path / "fourth"
+    (root / "transformer").mkdir(parents=True)
+    (root / "model_index.json").write_text(json.dumps({
+        "_class_name": "FakePipeline",
+        "transformer": ["diffusers", "FakeTransformer"],
+    }))
+    _safetensors(root / "transformer" / "model.safetensors", {
+        "blocks.0.attention.wqkv.weight": "BF16",
+        "blocks.0.attention.wo.weight": "BF16",
+    })
+
+    keys = classify_snapshot(root, "transformer")
+    assert keys.topology == ""
+    assert keys.attention_shaped is True
+    assert keys.unclassified_denoiser is True
+    with pytest.raises(KeyTopologyUnclassifiedError):
+        require_decodable(CONTRACT_PLAIN_BF16, decode_set=derive_decode_set(),
+                          where=str(root), keys=keys)

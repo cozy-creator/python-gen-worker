@@ -67,19 +67,41 @@ _MAX_FILES = 64
 #: enough that the message stays readable.
 _SAMPLE = 6
 
+# Whether the tree has ATTENTION substructure at all. This axis discriminates
+# attention-projection conventions, so a tree with no attention in it is not
+# something the axis can be about — the same reason a vae is out of scope, but
+# derived from the BYTES instead of from the component name.
+#
+# It is what keeps the unclassified REFUSAL precise. Without it, every tree
+# whose keys the three rules do not match refuses, and CI produced the
+# counter-example immediately: the corrupt-load quarantine fixture
+# (`test_p2_residency_reconcile.py`) is a root-layout snapshot holding one
+# tensor named `w`, which is a legal thing to hand a loader and carries no
+# convention to get wrong. With it, a FOURTH attention spelling — the H3 class
+# of failure, one no rule here has seen — still refuses, which is the case the
+# refusal exists for.
+_ATTENTION_SHAPED = re.compile(r"(^|\.)(attn|attention|self_attn)[\._]")
+
 
 class SnapshotKeys(msgspec.Struct, frozen=True, kw_only=True):
     """What the header scan found, and where it looked."""
 
-    topology: str          # a registered token, or "" for unclassified
-    denoiser: bool         # the scanned tree is in the DENOISER position
-    saw_tensors: bool      # any safetensors header was actually read
+    topology: str            # a registered token, or "" for unclassified
+    denoiser: bool           # the scanned tree is in the DENOISER position
+    saw_tensors: bool        # any safetensors header was actually read
+    attention_shaped: bool = False   # the keys carry attention substructure
     sample: tuple[str, ...] = ()
 
     @property
     def unclassified_denoiser(self) -> bool:
-        """The one combination that must fail closed."""
-        return self.denoiser and self.saw_tensors and not self.topology
+        """The one combination that must fail closed: a DENOISER carrying
+        attention substructure spelled in no way this image recognizes."""
+        return (
+            self.denoiser
+            and self.saw_tensors
+            and self.attention_shaped
+            and not self.topology
+        )
 
 
 def tensor_keys(files: Iterable[Path]) -> tuple[str, ...]:
@@ -113,7 +135,12 @@ def identify_keys(keys: Iterable[str]) -> str:
     return ""
 
 
-def _scan(directory: Path) -> tuple[str, tuple[str, ...]]:
+def attention_shaped(keys: Iterable[str]) -> bool:
+    """Whether a tensor-name set carries attention substructure at all."""
+    return any(_ATTENTION_SHAPED.search(name) for name in keys)
+
+
+def _scan(directory: Path) -> tuple[str, bool, tuple[str, ...]]:
     """Classify a directory's shards, stopping at the first file that answers.
 
     Early exit matters on the fail-closed path: reading every shard of a
@@ -123,15 +150,15 @@ def _scan(directory: Path) -> tuple[str, tuple[str, ...]]:
     """
     files = sorted(p for p in directory.glob("*.safetensors") if p.is_file())
     if not files:
-        return "", ()
+        return "", False, ()
     seen: list[str] = []
     for path in files[:_MAX_FILES]:
         keys = tensor_keys([path])
         seen.extend(keys)
         topology = identify_keys(keys)
         if topology:
-            return topology, tuple(sorted(seen)[:_SAMPLE])
-    return "", tuple(sorted(seen)[:_SAMPLE])
+            return topology, True, tuple(sorted(seen)[:_SAMPLE])
+    return "", attention_shaped(seen), tuple(sorted(seen)[:_SAMPLE])
 
 
 def classify_snapshot(root: Path, component: str = "") -> SnapshotKeys:
@@ -151,28 +178,31 @@ def classify_snapshot(root: Path, component: str = "") -> SnapshotKeys:
         keys = tensor_keys([base])
         return SnapshotKeys(topology=identify_keys(keys), denoiser=True,
                             saw_tensors=bool(keys),
+                            attention_shaped=attention_shaped(keys),
                             sample=tuple(sorted(keys)[:_SAMPLE]))
     if not base.is_dir():
         return SnapshotKeys(topology="", denoiser=False, saw_tensors=False)
 
     if component:
-        topology, sample = _scan(base / component)
+        topology, attention, sample = _scan(base / component)
         return SnapshotKeys(
             topology=topology, denoiser=component in denoisers,
-            saw_tensors=bool(sample), sample=sample)
+            saw_tensors=bool(sample), attention_shaped=attention,
+            sample=sample)
 
     for name in denoiser_components():
         directory = base / name
         if not directory.is_dir():
             continue
-        topology, sample = _scan(directory)
+        topology, attention, sample = _scan(directory)
         if sample:
             return SnapshotKeys(topology=topology, denoiser=True,
-                                saw_tensors=True, sample=sample)
-    topology, sample = _scan(base)
+                                saw_tensors=True, attention_shaped=attention,
+                                sample=sample)
+    topology, attention, sample = _scan(base)
     # A root-layout tree IS the denoiser; a pipeline root that merely happens
     # to hold loose tensors beside a `model_index.json` is not.
     return SnapshotKeys(
         topology=topology,
         denoiser=bool(sample) and not (base / "model_index.json").exists(),
-        saw_tensors=bool(sample), sample=sample)
+        saw_tensors=bool(sample), attention_shaped=attention, sample=sample)

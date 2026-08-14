@@ -36,6 +36,14 @@ from gen_worker.discovery.execution_lanes import (
     DerivedContract,
     DerivedExecutionLanes,
 )
+from gen_worker.discovery.decode_set import DERIVATION as _DS_DERIVATION
+from gen_worker.discovery.decode_set import DecodeSet
+
+#: The census reads `contracts` only; an empty set states that plainly
+#: rather than letting the field be omitted.
+_EMPTY_DECODE_SET = DecodeSet(
+    derivation=_DS_DERIVATION, entries=(), unregistered=(),
+    excluded_modules=())
 from gen_worker.families.base import GenerationDefaults
 from gen_worker.models.tensor_layout_contract import (
     CONTRACT_HF_FP8_BLOCKWISE,
@@ -284,6 +292,7 @@ def test_a_declared_handle_no_decoder_backs_is_reported_not_refused() -> None:
             composes_lora=True,
         ),),
         excluded_modules=(),
+        decode_set=_EMPTY_DECODE_SET,
     )
     fn = {
         "name": "generate",
@@ -306,6 +315,7 @@ def test_the_census_is_silent_for_an_undeclared_slot() -> None:
     derived = DerivedExecutionLanes(
         derivation="gen_worker.discovery.execution_lanes@1",
         execution_lanes=(), contracts=(), excluded_modules=(),
+        decode_set=_EMPTY_DECODE_SET,
     )
     fn = {
         "name": "generate",
