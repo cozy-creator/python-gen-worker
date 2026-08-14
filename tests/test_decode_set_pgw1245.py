@@ -687,3 +687,20 @@ def test_the_accepted_topology_passes_the_same_gate(
         loading_module().contract_loaded_component(
             fp8_rowwise_tree, "transformer", cls=_FakeCls)
     assert not isinstance(excinfo.value, KeyTopologyUnsupportedError)
+
+
+def test_a_late_shard_still_classifies_the_denoiser(tmp_path: Path) -> None:
+    """The fail-closed path may not be defeated by shard ORDER: a tree whose
+    leading shards hold only embeddings must not read as unclassified."""
+    root = tmp_path / "sharded"
+    denoiser = root / "transformer"
+    denoiser.mkdir(parents=True)
+    for i in range(1, 12):
+        _safetensors(denoiser / f"model-{i:05d}-of-00012.safetensors",
+                     {f"embeddings.{i}.weight": "BF16"})
+    _safetensors(denoiser / "model-00012-of-00012.safetensors",
+                 {"transformer_blocks.0.attn.to_q.weight": "BF16"})
+
+    keys = classify_snapshot(root, "transformer")
+    assert keys.topology == "diffusers.split-qkv"
+    assert keys.unclassified_denoiser is False

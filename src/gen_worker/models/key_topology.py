@@ -52,8 +52,13 @@ _RULES: tuple[tuple[str, "re.Pattern[str]"], ...] = (
 )
 
 #: Header bytes are bounded by `header_len_ok`; this caps how many FILES we
-#: open, because a sharded tree's shards share one convention.
-_MAX_FILES = 8
+#: open. It is high, and the scan stops at the first file that classifies,
+#: because the cap now sits on a FAIL-CLOSED path: a 30-shard denoiser whose
+#: leading shards hold only embeddings would otherwise read as unclassified
+#: and refuse. Attention projections appear early in practice, so the walk
+#: costs one or two headers on every real tree and the cap only bounds the
+#: pathological one.
+_MAX_FILES = 64
 
 #: How many keys a refusal quotes. Enough to recognize the convention, few
 #: enough that the message stays readable.
@@ -106,11 +111,24 @@ def identify_keys(keys: Iterable[str]) -> str:
 
 
 def _scan(directory: Path) -> tuple[str, tuple[str, ...]]:
+    """Classify a directory's shards, stopping at the first file that answers.
+
+    Early exit matters on the fail-closed path: reading every shard of a
+    30-way tree to reach the same answer the first one gave is wasted IO, and
+    reading only the first few and giving up would REFUSE a tree whose leading
+    shards happen to hold embeddings.
+    """
     files = sorted(p for p in directory.glob("*.safetensors") if p.is_file())
     if not files:
         return "", ()
-    keys = tensor_keys(files)
-    return identify_keys(keys), tuple(sorted(keys)[:_SAMPLE])
+    seen: list[str] = []
+    for path in files[:_MAX_FILES]:
+        keys = tensor_keys([path])
+        seen.extend(keys)
+        topology = identify_keys(keys)
+        if topology:
+            return topology, tuple(sorted(seen)[:_SAMPLE])
+    return "", tuple(sorted(seen)[:_SAMPLE])
 
 
 def classify_snapshot(root: Path, component: str = "") -> SnapshotKeys:
