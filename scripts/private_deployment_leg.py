@@ -692,8 +692,11 @@ class _Run:
         self.check("seal.sku_matches_rented_card", bool(matched),
                    f"{len(matched)} graph(s) on sku={want!r} (from pod gpu_class {observed!r}); "
                    f"the store holds {sorted({str(c.get('sku', '')) for c in mine})} for this "
-                   f"release [note: the pod view exposes no gpu_class provenance, so a "
-                   f"provider-reported card and an echoed ask are indistinguishable from here]")
+                   f"release [CAVEAT: the pod view exposes no gpu_class PROVENANCE, so a card the "
+                   f"provider confirmed it delivered and the ask echoed back are indistinguishable "
+                   f"here; this claim is 'the card the pod row records', which is weaker than 'the "
+                   f"card actually rented' sounds. th#1955 closes it, and this becomes a refusal "
+                   f"on source=requested]")
         if not matched:
             return
         # Sealed means an ARTIFACT exists, not merely that a key was computed.
