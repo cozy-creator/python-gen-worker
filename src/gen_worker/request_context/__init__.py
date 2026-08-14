@@ -1792,7 +1792,12 @@ class _PublisherMixin:
             if resp.status_code in (401, 403):
                 if caller_supplied:
                     raise BlobForbiddenError(digest, resp.status_code)
-                raise AuthError(f"blob fetch unauthorized ({resp.status_code}) digest={digest}")
+                from ..hub_error import hub_error_of
+
+                raise AuthError(
+                    f"blob fetch unauthorized ({resp.status_code}) digest={digest}: "
+                    f"{hub_error_of(resp).detail()}".rstrip(": ")
+                )
             if resp.status_code == 404:
                 if caller_supplied:
                     raise BlobNotFoundError(digest)

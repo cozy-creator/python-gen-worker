@@ -54,6 +54,7 @@ from .api.binding import (
     wire_ref,
 )
 from .hubio.client import HubPublishError
+from .hub_error import HubApiError
 from . import cell_key
 from .child_contract import MintSlot, slot_subjects
 from .api.errors import (
@@ -488,6 +489,12 @@ def _map_exception(exc: BaseException) -> Tuple["pb.JobStatus", str]:
         status = (pb.JOB_STATUS_RETRYABLE if exc.retryable is True
                   else pb.JOB_STATUS_FATAL)
         return status, detail[:512]
+    if isinstance(exc, HubApiError):
+        # pgw#1229. The hub named the code AND the remedy; `str(exc)` already
+        # carries both on one line, so it goes on the wire verbatim rather than
+        # being re-derived into "403 Client Error: Forbidden for url: ...".
+        status = pb.JOB_STATUS_RETRYABLE if exc.retryable else pb.JOB_STATUS_FATAL
+        return status, _sanitize(str(exc) or "hub refused the call")[:512]
     if isinstance(exc, HardwareUnmetError):
         return pb.JOB_STATUS_RETRYABLE, _sanitize(str(exc) or "hardware unmet")
     if isinstance(exc, UrlExpiredError):

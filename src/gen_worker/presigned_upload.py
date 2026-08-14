@@ -673,19 +673,11 @@ def _presigned_upload_file_scoped(
 
 
 def _error_code_of(resp: requests.Response) -> str:
-    """Best-effort extraction of the structured `error.code` field
-    (docs/api-conventions.md: `{"error": {"code": ..., ...}}`); "" if the
-    body isn't that shape."""
-    try:
-        body = resp.json()
-    except ValueError:
-        return ""
-    if not isinstance(body, dict):
-        return ""
-    err = body.get("error")
-    if not isinstance(err, dict):
-        return ""
-    return str(err.get("code") or "")
+    """The hub's `error.code`, or "" when the body isn't an envelope.
+    pgw#1229: one parser, in ``hub_error``."""
+    from .hub_error import hub_error_of
+
+    return hub_error_of(resp).code
 
 
 def _poll_until_finalized(
