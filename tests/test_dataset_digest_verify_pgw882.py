@@ -65,7 +65,7 @@ def _entry(url: str, checksum: str) -> dict:
 def test_sha256_checksum_rejects_wrong_bytes(serve, tmp_path: Path):
     """THE defect: a sha256 entry served the wrong bytes used to succeed."""
     url = serve(EVIL)
-    with pytest.raises(RuntimeError, match="of bytes is"):  # DigestMismatch wording (hubio.fetch)
+    with pytest.raises(RuntimeError, match="bytes do not match sha256:"):
         download_entries([_entry(url, f"sha256:{SHA_GOOD}")], tmp_path)
     assert not (tmp_path / "shard.bin").exists(), "unverified bytes must not survive"
 

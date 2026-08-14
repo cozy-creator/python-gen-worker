@@ -20,7 +20,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, BinaryIO, Dict, Iterable, Iterator, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
 from hashrepo import RefConflict
 
@@ -36,7 +36,6 @@ class RefIndex:
 
     def __init__(self, cache_dir: Path) -> None:
         self._path = Path(cache_dir) / _INDEX_NAME
-        self._lock_path = self._path.with_name(f".{self._path.name}.lock")
         self._lock = threading.Lock()
         self._data: Dict[str, Dict[str, Any]] = {}
         with self._locked(exclusive=False):
@@ -57,19 +56,24 @@ class RefIndex:
         return {}
 
     @contextmanager
-    def _locked(self, *, exclusive: bool) -> Iterator[BinaryIO]:
-        """Refresh while holding the process-shared index lock."""
+    def _locked(self, *, exclusive: bool) -> Iterator[None]:
+        """Refresh while flocking the stable cache-directory inode."""
         with self._lock:
-            self._lock_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._lock_path.open("a+b") as lock:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            directory = os.open(
+                self._path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            )
+            try:
                 fcntl.flock(
-                    lock.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+                    directory, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
                 )
                 try:
                     self._data = self._read_locked()
-                    yield lock
+                    yield
                 finally:
-                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(directory, fcntl.LOCK_UN)
+            finally:
+                os.close(directory)
 
     def _save_locked(self) -> None:
         """Write the index through, atomically.
@@ -85,6 +89,10 @@ class RefIndex:
                 suffix=".tmp")
             tmp = Path(tmp_name)
             try:
+                # The cache directory is the write authority. Keep the index
+                # readable when a root control parent writes it after granting
+                # that directory to the dropped compute uid.
+                os.fchmod(fd, 0o644)
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
                     fh.write(json.dumps(self._data))
                     fh.flush()

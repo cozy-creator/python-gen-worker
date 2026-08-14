@@ -12,7 +12,8 @@ than assumed:
   other's in-flight download, and the victim fails its own rename after paying
   for every byte. This file proves that, and proves the fix.
 * ``models/disk_gc.RefIndex._save_locked`` — **process-locked.** Every mutation
-  refreshes and merges under the cache-wide flock before its durable replace.
+  refreshes and merges under a flock on the stable cache-directory inode before
+  its durable replace. There is no ownership-sensitive lock sidecar.
 * ``env_seal.write_library_memo`` — **per-attempt today** (its only caller
   seeds ``<mint workdir>/seal-lib-memo.json``, and the workdir is per mint
   attempt), but the atomicity promise is the function's, so it no longer
@@ -174,10 +175,28 @@ def test_two_ref_index_processes_merge_without_losing_an_owner(tmp_path):
 
     doc = json.loads((cache / "ref-index.json").read_text("utf-8"))
     assert set(doc) == {"a/model", "b/model"}
-    assert {p.name for p in cache.iterdir()} == {
-        ".ref-index.json.lock",
-        "ref-index.json",
-    }
+    assert {p.name for p in cache.iterdir()} == {"ref-index.json"}
+
+
+def test_ref_index_uses_directory_authority_not_root_owned_lock_metadata(tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    root_writer = RefIndex(cache)
+    root_writer.record("root/model", cache / "root", 1)
+
+    # Reproduce the privilege lane's ownership boundary without requiring this
+    # unit test itself to run as root: the directory remains writable, while
+    # metadata left by the old root writer is read-only to the next writer.
+    index_path = cache / "ref-index.json"
+    index_path.chmod(0o444)
+    legacy_lock = cache / ".ref-index.json.lock"
+    legacy_lock.touch(mode=0o444)
+    legacy_lock.chmod(0o444)
+
+    dropped_writer = RefIndex(cache)
+    dropped_writer.record("child/model", cache / "child", 2)
+    assert set(RefIndex(cache).entries()) == {"root/model", "child/model"}
+    assert index_path.stat().st_mode & 0o777 == 0o644
 
 
 def test_ref_index_instances_refresh_before_reads_and_writes(tmp_path):
