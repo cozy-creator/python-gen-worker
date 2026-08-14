@@ -307,6 +307,12 @@ jobs:
       - name: pgw#740 guard - registry contract
         run: uv run python scripts/check_registry_contract.py
 
+      # GATING (th#1914 / pgw#1237 / cl#56): this public corpus is the
+      # authority both sides bind to real path behavior. PGW pins it offline;
+      # cozy-local performs the meaningful peer comparison after PGW lands.
+      - name: pgw#1237 gate - Cozy runtime env corpus matches its digest
+        run: uv run python scripts/check_cozy_runtime_env_digest.py
+
       # GATING (th#1897/pgw#1213): the shared grammar corpora are pinned to the
       # digest BOTH repos commit, so a one-sided hand-edit of
       # compiled_graph_key_vectors.json or ref_grammar_vectors.json is red

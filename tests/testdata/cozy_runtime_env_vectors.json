@@ -1,0 +1,15 @@
+{
+  "schema": "cozy-runtime-env-v1",
+  "variables": [
+    {
+      "name": "TENSORHUB_CACHE_DIR",
+      "role": "cache_root",
+      "consumer_relative_path": "cas"
+    },
+    {
+      "name": "GEN_WORKER_LOCAL_OUTPUT_DIR",
+      "role": "asset_ref_root",
+      "sample_asset_ref": "outputs/request-1/result.bin"
+    }
+  ]
+}
