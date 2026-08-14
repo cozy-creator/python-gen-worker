@@ -1,4 +1,4 @@
-"""pgw#667: per-COMPONENT load dtype — the wan fp32-VAE blocker.
+"""Per-COMPONENT load dtype — the wan fp32-VAE case.
 
 A component's dtype is part of its resident identity and is decided AT LOAD:
 upcasting a bf16-loaded VAE afterwards recovers no precision, it only hides the
@@ -230,7 +230,7 @@ def test_a_fact_agreeing_with_the_default_stays_out_of_the_kwargs(
 
 
 def test_substituted_component_keeps_the_fact(tmp_path: Path) -> None:
-    # pgw#617 component override: the base composition computes bf16, but the
+    # The base composition computes bf16, but the
     # substituted Wan VAE must still be resident fp32.
     base = _wan_tree(tmp_path / "base")
     override = tmp_path / "override"

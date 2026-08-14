@@ -145,7 +145,7 @@ def test_a_RETRYABLE_completion_refusal_keeps_everything(
 
 
 # ---------------------------------------------------------------------------
-# pgw#1003 — the journal, and what it buys
+# The journal, and what it buys
 # ---------------------------------------------------------------------------
 
 
@@ -306,7 +306,7 @@ def test_expired_grants_are_RE_MINTED_without_spending_the_reupload_budget(
 
 
 # ---------------------------------------------------------------------------
-# pgw#1003 — the payoff: a retry re-uploads instead of re-CASTING
+# The payoff: a retry re-uploads instead of re-CASTING
 # ---------------------------------------------------------------------------
 
 

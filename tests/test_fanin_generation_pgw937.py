@@ -1,12 +1,11 @@
-"""pgw#937: a DEAD group's last frame must not outvote the live ones.
+"""A DEAD group's last frame must not outvote the live ones.
 
 The parent's three per-group fan-in dicts (`_group_activities`,
 `_group_fn_unavail`, `_group_fn_degraded`) plus `slot.last_state_delta` are
 GENERATION-SCOPED facts: they say what the CURRENT incarnation of a group
-reported. Before this issue nothing ever cleaned them, and nothing ever asked
-whether the group behind an entry was still alive — so a group that died mid
-activity could pin that activity RUNNING forever, veto a live group's
-`self_stalled` confession, and retire a function a live group was serving.
+reported. Uncleaned, a group that died mid-activity can pin that activity
+RUNNING forever, veto a live group's `self_stalled` confession, and retire a
+function a live group is serving.
 
 The ruling this file proves is "down-group semantics" in ``procsplit/parent.py``:
 **a group without a live child is not a participant, and its facts are UNKNOWN

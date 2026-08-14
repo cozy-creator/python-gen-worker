@@ -1,27 +1,19 @@
-"""pgw#1141 (DESIGN-RULINGS §4.31 + §4.32): a boot-ADOPTED cell materializes,
-arms and SERVES. No warmup barrier, and no quality gate at adoption.
+"""DESIGN-RULINGS §4.31 + §4.32: a boot-ADOPTED cell materializes, arms and
+SERVES. No warmup barrier, and no quality gate at adoption.
 
-MEASURED, twice, on two real pods (RTX 4000 Ada, gen-worker 0.106.0, hub
-`7ae35d54a2`): `boot_adopt=hit` -> materialize -> `cell_numerics cos=1.00000
-ret=1.0000 rel_l2=0.0000` on 3/3 axes -> and then the setup warmup scored that
-same artifact `unexercised` (it dispatched nothing through it — the adopt arms
-BEFORE setup, so by construction nothing has), folded it into `unproven`, wrote
-`function_proofs[id]=set()` and unwrapped it. `functions=()` then made the
-target omission (`target_applicability_incomplete`) and the orphan report
-(`armed_target_unresolved`) inevitable, and the pod served eager for life. The
-SELF-MINT arm was healthy on the same wheel, card and release, because a mint's
-warmup DRIVES its own capture and therefore dispatches.
+§4.31: skip the warmup / arm check and serve right away; if serving raises and
+the cell is the cause, de-arm the cell and serve eager. The barrier could never
+pass for an adopt anyway — the adopt arms BEFORE setup, so the setup warmup
+dispatches nothing through the artifact, scores it `unexercised`, folds it into
+`unproven` and unwraps it. (The SELF-MINT arm is healthy because a mint's warmup
+drives its own capture and therefore dispatches.)
 
-§4.31 deleted the barrier: *"skip the warmup / arm check, so we can serve right
-away … try to serve, if an error is encountered, and it's the cause of the
-cell, de-arm the cell, and serve eager instead."*
-
-§4.32 then deleted the adopt-side numerics re-check too, and moved the quality
-question to where the defect is: every failure that gate ever caught (a baked
-`conv_out.bias`, timestep dtype scars) was an AUTHOR defect in endpoint code or
-config. Re-measuring on every adopter taxes the fleet forever for one author's
-one-time mistake. Adoption is materialize -> arm -> serve; the gate runs ONCE,
-on the pod that minted the bytes, before they are published, and it is STRICT.
+§4.32: no adopt-side numerics re-check either. Every failure that gate ever
+caught (a baked `conv_out.bias`, timestep dtype scars) was an AUTHOR defect in
+endpoint code or config; re-measuring on every adopter taxes the fleet forever
+for one author's one-time mistake. Adoption is materialize -> arm -> serve; the
+gate runs ONCE, on the pod that minted the bytes, before they are published,
+and it is STRICT.
 
 Safety without re-measurement comes from CONSTRUCTION, not from checkpoint
 identity (a `ck1` key is graph x envelope x sm x toolchain and carries no
@@ -44,10 +36,9 @@ D. try-serve — a cell-attributable failure answers the request eager and
    de-arms sticky; a transient OOM does neither.
 
 Nothing is stubbed. Parts A and B drive the REAL `provision.arm_aot` against a
-real packed artifact (the pgw#868 rig, whose ONE substitution is the AOTI
-`.so`); part C drives the REAL `ensure_setup`, faking only the download and the
-arming policy (the seam `test_aot_boot_proof_gap_pgw735.py` uses); part D
-drives the real serving wrapper.
+real packed artifact (the rig's ONE substitution is the AOTI `.so`); part C
+drives the REAL `ensure_setup`, faking only the download and the arming policy;
+part D drives the real serving wrapper.
 """
 
 from __future__ import annotations
@@ -102,10 +93,10 @@ def test_the_MINTING_pod_proves_its_own_bytes_before_they_ship(
     assert outcome.armed is True
     assert aot_serve.is_armed(pipeline) is True
     rows = [(p, d) for k, d, p in events if k == activity.KIND_CELL_NUMERICS]
-    # pgw#1176: ONE row per graph class — the gate runs at the moment that
+    # ONE row per graph class — the gate runs at the moment that
     # entry exists, never "after all N" (DESIGN-RULINGS 4.32).
     assert [p for p, _d in rows] == ["checked", "checked"], rows
-    # pgw#1176: ONE axis per artifact, so the report is 1/1 twice, never
+    # ONE axis per artifact, so the report is 1/1 twice, never
     # 2/2 once. A report over a collection is what the atom removed.
     assert "axes=1/1" in rows[0][1]
 
@@ -122,11 +113,11 @@ def test_the_MINT_gate_is_strict_a_gray_band_cell_does_not_ship(
     assert outcome.armed is False, "a gray-band cell was published to the fleet"
     assert aot_serve.is_armed(pipeline) is False
     assert outcome.reason == "numerics_refused"
-    # pgw#1176: the refusal is per CLASS, so it says "is not published" of
+    # The refusal is per CLASS, so it says "is not published" of
     # that class rather than "nothing is published" of a bundle.
     assert "is not published" in outcome.detail
     # It still CONFESSES — a fleet-wide rate is only countable from rows.
-    # pgw#1176: one gate row PER GRAPH CLASS — this declaration has two,
+    # One gate row PER GRAPH CLASS — this declaration has two,
     # so the vocabulary repeats rather than aggregating.
     assert [p for k, _d, p in events
             if k == activity.KIND_CELL_NUMERICS] == ["degraded", "degraded"]
@@ -143,7 +134,7 @@ def test_the_MINT_gate_refuses_a_cell_below_its_floor(
 
     assert outcome.armed is False
     assert aot_serve.is_armed(pipeline) is False
-    # pgw#1176: one gate row PER GRAPH CLASS — this declaration has two,
+    # One gate row PER GRAPH CLASS — this declaration has two,
     # so the vocabulary repeats rather than aggregating.
     assert [p for k, _d, p in events
             if k == activity.KIND_CELL_NUMERICS] == ["refused", "refused"]
@@ -219,12 +210,12 @@ def test_a_FAITHFUL_cell_passes_the_mint_gate_and_is_publishable(
     minted = _delegated_mint(tmp_path, monkeypatch, declared, packages, events)
 
     assert minted is not None, "a faithful cell was refused by the mint gate"
-    # pgw#1176: the key is COMPUTED from the artifact's own recorded facts, not
+    # The key is COMPUTED from the artifact's own recorded facts, not
     # a fixture placeholder. `"cell868"` was a stand-in from when the harness
     # stamped a literal; asserting it now would assert that the mint FAILED to
     # key its own product.
     assert cell_key.is_key(minted.cell_key), minted.cell_key
-    # pgw#1176: ONE gate row here, and the count is load-bearing rather than
+    # ONE gate row here, and the count is load-bearing rather than
     # incidental — the DELEGATED mint adopts a single entry artifact, so one
     # class is gated. (My own "one row per class" sweep over-applied to this
     # row and expected two; the rows that DO see two arm two artifacts. A
@@ -331,7 +322,7 @@ class AdoptedFamily:
         if RIG.get("dispatch"):
             marker = getattr(self.pipe, aot_serve._MARKER_ATTR, None)
             if marker is not None:
-                # pgw#1176: `execution_count` sums the RUNNERS' own calls, so a
+                # `execution_count` sums the RUNNERS' own calls, so a
                 # dispatch that only bumped the state counter moved a number
                 # production does not read. Move the artifact's own.
                 for row in (marker.get("targets") or {}).values():
@@ -357,7 +348,7 @@ def _fake_adopt_arm(key: str, ref: str, *, revoke: bool = False):
     def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any,
                 publisher: Any = None, **_kw: Any) -> "fleet_cells.ArmOutcome":
         unet = pipe.unet
-        # pgw#1176: production's `arm_entry` puts an `EntryDispatch` REGISTRY
+        # production's `arm_entry` puts an `EntryDispatch` REGISTRY
         # in `state["runner"]`, and `is_armed`/`armed_entries` read it — a
         # boolean was deleted precisely because it can claim more than the pod
         # serves. A double that sets the marker but no registry models a
@@ -372,7 +363,7 @@ def _fake_adopt_arm(key: str, ref: str, *, revoke: bool = False):
         _dispatch.add("unet/main", _runner)
         state = {"successful_calls": PROBE_CALLS, "failed": False,
                  "original": unet.forward, "runner": _dispatch}
-        # pgw#1176: the two markers are DIFFERENT SHAPES in production and
+        # The two markers are DIFFERENT SHAPES in production and
         # this rig now models that honestly. `wrap_module` writes a bare
         # `state` on the MODULE; `arm_entry` writes `targets` (+ `entries`) on
         # the PIPELINE. Sharing one dict between them was what kept a
@@ -386,14 +377,14 @@ def _fake_adopt_arm(key: str, ref: str, *, revoke: bool = False):
             "entries": {"unet/main": {"key": key, "target": "unet"}},
         })
         marker = getattr(pipe, aot_serve._MARKER_ATTR)
-        # pgw#1152: an `aot_serve.note_aot_key(key)` stood here — the ONE line no
+        # An `aot_serve.note_aot_key(key)` stood here — the ONE line no
         # production arm route ever called, which is why these rows were green
         # while the pod served eager (pgw#1141b). It is DELETED, not moved: the
         # marker set above is what `arm_entry` publishes, so
         # `holds_exported_cell` answers the lane question off the OBJECT.
         # A fixture that needs a REAL boot-adopt drives tests/harness/adopt_rig.py.
         if revoke:
-            # pgw#1176: revoking is DE-ARMING. `is_armed` asks the registry,
+            # revoking is DE-ARMING. `is_armed` asks the registry,
             # so a flag left the runner armed and the pipeline claiming
             # compiled service it was not giving — the exact lie a cell-level
             # boolean makes possible.

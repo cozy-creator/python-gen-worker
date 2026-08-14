@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""svdq lane bench driver — ONE watched pod, cells run in sequence (pgw#865).
+"""svdq lane bench driver — ONE watched pod, cells run in sequence.
 
-Promoted from the one-shot te#137/pgw#862 drivers into the repeatable
-instrument pgw#865 owns, and generalised over the card so pgw#863's sm_100
-row is the same instrument as the banked sm_120 one.
+Generalised over the card, so an sm_100 row is the same instrument as an
+sm_120 one.
 
 Cells (``--cells``, run in the order given):
 
   mat    materialize pod-side: Qwen-Image component tree (+ bf16 transformer
          when the bf16 arm is asked for) and the official nunchaku fp4_r128
          checkpoint. Weights never touch the control box.
-  corr   bench_b0 correctness — activation-quant bit-identity vs the pgw#685
+  corr   bench_b0 correctness — activation-quant bit-identity vs the reference
          chain on REAL captured activations, fused-vs-fp32-ref error per unit.
   bb     bench_b0 bucket bench, BASELINE lane (synthetic frame, eager +
          compiled forward, top kernels, peak VRAM).
@@ -39,8 +38,7 @@ from pathlib import Path
 
 # NOTE: do NOT drop SSH_AUTH_SOCK. The runpod key on this box is
 # passphrase-protected, so `-i` alone cannot authenticate — the agent holds
-# the only usable copy. Dropping it produced 90 silent "Permission denied"
-# retries that read exactly like a slow boot.
+# the only usable copy, and dropping it looks exactly like a slow boot.
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent

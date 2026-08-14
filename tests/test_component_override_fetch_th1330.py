@@ -1,7 +1,6 @@
-"""th#1330 B2: a component OVERRIDE must not also fetch the component it
-overrides.
+"""A component OVERRIDE must not also fetch the component it overrides.
 
-pgw#617 is load-then-substitute: the override's own tree is materialized and
+The override's own tree is materialized and
 handed to ``from_pretrained`` as a constructed object, so the base
 composition's copy of that subfolder is downloaded and then never read.
 Measured cost on the shape this exists for: ~1.64 GB per SDXL text-encoder

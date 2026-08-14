@@ -124,7 +124,7 @@ def test_identical_model_set_keeps_the_running_reconcile(tmp_path) -> None:
         # Non-model deltas still applied: the observed generation advanced.
         assert lc._observed_residency_generation == 3
 
-        # gw#623: a sibling ref joining the set is NOT a reason to discard
+        # a sibling ref joining the set is NOT a reason to discard
         # the in-flight load of _REF_A — the loop converges to the new set
         # (including _REF_B) after the active item completes.
         await lc.on_hello_ack(_ack(4, [_REF_A, _REF_B]))

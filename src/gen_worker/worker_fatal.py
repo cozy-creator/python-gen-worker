@@ -1,11 +1,10 @@
-"""gw#640/th#1077: worker -> hub fatal report, dialed BEFORE the process dies.
+"""Worker -> hub fatal report, dialed BEFORE the process dies.
 
-``entrypoint._log_worker_fatal`` wrote the exception + traceback to the pod's
-stdout ONLY. RunPod exposes no container-logs API, so every cloud-only worker
-death was unobservable by construction — the th#1085 cold-boot investigation
-burned six live runs on a crash whose traceback existed and was unreachable.
+Writing the exception + traceback to the pod's stdout is not enough: RunPod
+exposes no container-logs API, so a cloud-only worker death is unobservable by
+construction — the traceback exists and is unreachable.
 
-This module reuses the ``HardwareUnsuitable`` carrier (gw#619/th#988) with
+This module reuses the ``HardwareUnsuitable`` carrier with
 ``reason_class="worker_fatal"``: the hub already persists that message as a
 durable ``pod_events`` row (class ``hardware_unsuitable``, reason = the class,
 full JSON payload in ``provider_message``) and logs it, so a fatal becomes
@@ -36,7 +35,7 @@ REASON_CLASS = "worker_fatal"
 
 
 def _broker_active() -> bool:
-    """True in a pgw#763 compute child with a live control seam."""
+    """True in a compute child with a live control seam."""
     try:
         from .procsplit import broker
 
@@ -112,9 +111,9 @@ def report_worker_fatal(
     if settings is None or not (settings.orchestrator_public_addr or "").strip():
         return False
     detail = build_fatal_detail(phase, exc, exit_code=exit_code)
-    # pgw#763 delta 1: in the compute child there is no worker JWT to open a
+    # In the compute child there is no worker JWT to open a
     # Connect with, and there should not be — a HardwareUnsuitable-carrier
-    # report is a fleet-wide verdict key (th#1310), so it is worth more dialed
+    # report is a fleet-wide verdict key, so it is worth more dialed
     # by the process that runs no tenant code. The parent dials it.
     if _broker_active():
         from .procsplit import broker
@@ -129,10 +128,10 @@ def report_worker_fatal(
 
 
 async def report_worker_error_async(settings: Optional[Settings], detail: str) -> bool:
-    """pgw#654: dial the hub from a STILL-LIVE worker that just entered
+    """Dial the hub from a STILL-LIVE worker that just entered
     WORKER_PHASE_ERROR — same carrier and durable ``pod_events`` row as the
     process-death fatal. The hub persists only the bare phase flip ("worker
-    phase reported error"), so without this the cause of a phase error was
+    phase reported error"), so without this the cause of a phase error is
     unreachable (RunPod exposes no logs API, and a malformed lifecycle
     snapshot is dropped by hub shadow validation). Best-effort on the
     caller's running loop; opens its own short Connect like every report."""
@@ -150,7 +149,7 @@ async def report_worker_error_async(settings: Optional[Settings], detail: str) -
 
 
 def report_worker_detail(settings: Optional[Settings], detail: str) -> bool:
-    """Dial the hub with an already-formatted fatal detail (gw#640 post-mortem).
+    """Dial the hub with an already-formatted fatal detail (post-mortem).
 
     Same carrier and same durable `pod_events` row as `report_worker_fatal`;
     used by the supervisor parent, which has a `waitpid` verdict rather than a

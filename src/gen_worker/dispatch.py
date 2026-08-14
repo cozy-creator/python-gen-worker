@@ -3,9 +3,7 @@
 The wire-reading head ``executor.handle_run_job`` projects its message into
 these values at the boundary. The driver and every shared helper read ONLY
 these: ``pb.RunJob`` never crosses into shared machinery, which is what makes
-the head replaceable without touching the driver. (pgw#1206 D deleted the
-second head, the RunAttempt/Plan one — tensorhub deleted its producer in
-``ec978c68`` — and this seam is why that cost the driver nothing.)
+the head replaceable without touching the driver.
 """
 
 from __future__ import annotations

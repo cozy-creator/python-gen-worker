@@ -54,7 +54,7 @@ def test_hf_binding_refuses_a_flavor_selector() -> None:
 
 
 def test_raw_modelref_construction_refuses_too() -> None:
-    """The factories are sugar; the struct is the boundary (pgw#511). A
+    """The factories are sugar; the struct is the boundary. A
     `msgspec.structs.replace` or a direct construction must not slip past."""
     with pytest.raises(FlavorSelectorRemoved):
         ModelRef(source="tensorhub", path="owner/repo#fp8")

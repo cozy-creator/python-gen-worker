@@ -1,4 +1,4 @@
-"""Progress registry (gw#621 / th#994): named monotonic counters for
+"""Progress registry: named monotonic counters for
 long-running phases.
 
 Long phases register a counter (download per-ref bytes, watchdog evidence
@@ -43,13 +43,11 @@ _now = time.monotonic
 
 _lock = threading.Lock()
 
-#: ``(owner, name) -> Counter``. pgw#894: the key used to be the NAME alone, so
-#: one process-global namespace held every phase's counters and `freshest()`
-#: returned whichever of them advanced most recently — regardless of which work
-#: it described. A serving request's `infer:steps` therefore refreshed a
-#: background mint's stall clock: measured on the standing chaos hub, 28 log
-#: lines reporting `infer:steps` under `self_mint_compile`, one of which
-#: declined a condemnation because that mint activity was "0s ago".
+#: ``(owner, name) -> Counter``. The owner is part of the key: keyed on the NAME
+#: alone, one process-global namespace holds every phase's counters and
+#: `freshest()` returns whichever advanced most recently regardless of which work
+#: it described — a serving request's `infer:steps` then refreshes a background
+#: mint's stall clock and declines its condemnation.
 #:
 #: The OWNER is the scope the counter belongs to (an activity id, a request
 #: id). Registry-wide queries still exist and still mean what they meant — "is
@@ -71,7 +69,7 @@ class Snapshot:
     #: The scope that owns this counter ("" = unowned/process-wide). LAST and
     #: defaulted on purpose: a Snapshot is constructed by hand in tests and by
     #: readers that do not care whose counter it is, and a new field must be
-    #: additive rather than a positional break (pgw#894).
+    #: additive rather than a positional break.
     owner: str = ""
 
 
@@ -136,7 +134,7 @@ def counter(
 ) -> Counter:
     """Register-or-get the open counter `name` within `owner` (idempotent).
 
-    ``owner`` scopes the counter to the work it describes (pgw#894). Two
+    ``owner`` scopes the counter to the work it describes. Two
     scopes may use the same NAME — two concurrent requests both counting
     ``infer:steps`` is the ordinary case — and neither can advance the
     other's clock.
@@ -188,7 +186,7 @@ def freshest(owner: Optional[str] = None) -> Optional[Snapshot]:
     what a "did this pod wedge" question wants.
 
     ``owner="..."`` is the SCOPE view, and it is the one a stall verdict must
-    use (pgw#894). A mint asking "am I still advancing" must not be answered
+    use. A mint asking "am I still advancing" must not be answered
     by a request that happens to be running beside it.
     """
     snaps = snapshot(owner)
@@ -200,16 +198,15 @@ def self_diagnosis(owner: Optional[str] = None) -> Optional[Snapshot]:
     window — the typed self_stalled confession the beat reports so the hub
     kills on fact, not inference.
 
-    Scoped to ``owner`` when one is named, registry-wide otherwise. pgw#894:
-    registry-wide was the ONLY form, and it is the right answer to "is this
-    process alive" and the wrong one to "is this mint stalled" — a request
-    running beside a wedged mint answered for it. `Activity.on_beat` passes
-    the activity's own id.
+    Scoped to ``owner`` when one is named, registry-wide otherwise:
+    registry-wide is the right answer to "is this process alive" and the wrong
+    one to "is this mint stalled" — a request running beside a wedged mint would
+    answer for it. `Activity.on_beat` passes the activity's own id.
 
     Counter LIFETIME still has to be honest within a scope: a counter left
     open after its producer's phase ended is the min-age counter of a phase it
     knows nothing about, and confesses for it. `Activity.counter()` scopes
-    them to the phase for that reason (pgw#962)."""
+    them to the phase for that reason."""
     fresh = freshest(owner)
     if fresh is not None and fresh.age_s > fresh.window_s:
         return fresh

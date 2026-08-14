@@ -103,7 +103,7 @@ class AudioAsset(MediaAsset):
 # direct alias for enum.StrEnum, NOT a subclass: subclassing an empty enum base
 # makes members of a tenant's `class Size(StringEnum)` resolve as `str` to mypy
 # (an empty-enum-base gap), which forced `# type: ignore[assignment]` on every
-# preset default `size: Size = Size.SQUARE`. The alias checks clean (ie#345).
+# preset default `size: Size = Size.SQUARE`. The alias checks clean.
 StringEnum = StrEnum
 
 
@@ -138,7 +138,7 @@ class ExpectedOutput:
     # ``input.<field>`` ref to a payload field already denominated in seconds.
     # Derived expressions (num_frames / fps) are not supported — frame-based
     # endpoints leave this unset; settlement uses the probed
-    # ``VideoAsset.duration_s`` instead (tensorhub counterpart th#572).
+    # ``VideoAsset.duration_s`` instead.
     duration_s: int | str | None = None
 
 
@@ -208,8 +208,8 @@ class SourceRepo(msgspec.Struct):
 
     Also reused verbatim for the other independent reserved repo fields,
     materialized the same way into their own ctx paths: ``text_encoder``
-    (pgw#594) -> ``ctx.text_encoder_path``, e.g. a text-encoder repo wholly
-    separate from the primary ``source`` model; and ``candidate`` (pgw#684)
+ -> ``ctx.text_encoder_path``, e.g. a text-encoder repo wholly
+    separate from the primary ``source`` model; and ``candidate``
     -> ``ctx.candidate_path``, the arm a two-ref quality eval compares
     against ``source`` instead of building from.
 

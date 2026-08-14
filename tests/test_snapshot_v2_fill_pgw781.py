@@ -1,14 +1,8 @@
-"""pgw#781 / th#1303: the worker can FILL a manifest-v2 (sha256 / chunked)
-snapshot, and every integrity check on that path actually runs.
+"""The worker can FILL a manifest-v2 (sha256 / chunked) snapshot, and every
+integrity check on that path actually runs.
 
-Before this, ``cozy_snapshot`` was blake3-only end to end: ``_blob_path``
-hardcoded ``blobs/blake3/…``, ``chunk_cas`` was not imported by the fill path
-at all, and a v2 entry died at ``missing blake3 for <path>``. So a v2 publish
-was unconsumable — which makes "publish v2" untestable as an outcome.
-
-th#1303 S1 deleted the v1 arm these also used to pin (the two
-``test_v1_*`` cases): after the repoint nothing resolves to a blake3
-manifest, so a v1 entry is a stale pointer and is REFUSED, not filled.
+Nothing resolves to a blake3 manifest any more, so a v1 entry is a stale pointer
+and is REFUSED, not filled.
 
 These drive the REAL ``ensure_snapshot_async`` over a real localhost HTTP
 server: sockets, threads, files, the actual reassembly. The assertions are
@@ -314,7 +308,7 @@ def test_chunk_lengths_must_sum_to_the_declared_size(tmp_path, store):
 
 
 def test_network_bytes_counts_chunked_transfer(tmp_path, store):
-    """The volume-attached-boot assertion (th#850) reads this counter; a
+    """The volume-attached-boot assertion reads this counter; a
     chunked fill that reported zero would make a cold boot look warm."""
     data = body(CS * 3 + 11)
     with NetworkBytesScope() as scope:

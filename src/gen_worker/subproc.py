@@ -37,9 +37,9 @@ class LineTail:
     Draining is not optional: a child whose pipe fills BLOCKS, so whoever
     captures output must keep reading for the process's whole life.
 
-    ``run_process`` uses it to bound a run-to-completion tool (gw#665);
+    ``run_process`` uses it to bound a run-to-completion tool;
     ``runtimes.server`` uses it to bound an engine BOOT while keeping the
-    child alive afterwards (gw#666).
+    child alive afterwards.
     """
 
     __slots__ = ("_proc", "_on_line", "_window", "_thread")
@@ -129,7 +129,7 @@ def run_process(
       once the child has been silent this long. ``None`` (default) = no
       watchdog. There is deliberately no total-runtime bound: a wall clock
       cannot tell a healthy 3-hour quantize from a wedge, so it is either
-      useless or it kills real work (gw#655's residency-design principle).
+      useless or it kills real work.
     - Returns the process exit code on natural exit (callers decide whether
       nonzero is fatal).
     """

@@ -1,4 +1,4 @@
-"""Child-side client for parent-mediated hub calls (pgw#763 delta 1).
+"""Child-side client for parent-mediated hub calls (delta 1).
 
 In the split, the compute child holds no worker JWT — so it cannot make an
 identity-bearing hub call itself, by construction. It asks the parent, which
@@ -109,7 +109,7 @@ def request(
 
 
 def viewer_identity() -> Dict[str, str]:
-    """Ask the parent WHO THIS POD IS (pgw#1122).
+    """Ask the parent WHO THIS POD IS.
 
     Returns ``{"endpoint_id": ..., "org_id": ...}`` — the two hub-stamped
     viewer claims, decoded by the parent out of the credential it holds. The
@@ -119,7 +119,7 @@ def viewer_identity() -> Dict[str, str]:
     Raises :class:`BrokerError` when there is no parent or the parent will not
     answer. It does NOT return an empty identity in that case — "the hub
     stamped nothing" and "nobody could be asked" are different facts, and
-    collapsing them is the pgw#1122 defect.
+    collapsing them is a defect.
     """
     b = _broker
     if b is None:

@@ -1,9 +1,5 @@
 """The ONE streaming safetensors writer.
 
-Collapses gen_worker.conversion's seven IO modules (writer, streaming_primitives,
-_sharding, _tensor_iter, _streaming_incremental, _streaming_convert,
-safetensors_io) into one:
-
   - IncrementalSafetensorsWriter: header first, then tensor bytes — O(1) memory
   - tensor iteration over single/sharded/pickle sources
   - streaming_dtype_cast / streaming_fp8_storage_cast: read one tensor,
@@ -12,9 +8,8 @@ safetensors_io) into one:
   - streaming_cast_snapshot / streaming_fp8_snapshot: whole-tree variants
   - merge_safetensors_by_offset: raw byte-range de-shard, zero decode
 
-th#1362: the re-shard planner (byte budgets, tensor packing, index.json
-rewriting) is GONE. Every producer here emits exactly one file per component;
-reading a sharded input stays supported forever.
+There is no re-shard planner: every producer here emits exactly one file per
+component; reading a sharded input stays supported forever.
 
 torch/safetensors imports are deferred so importing gen_worker.convert stays cheap.
 """
@@ -47,20 +42,6 @@ logger = logging.getLogger(__name__)
 class ConversionImplementationError(RuntimeError):
     """A conversion primitive can't proceed (bad input, missing dep)."""
 
-
-# Was 5GB (HF's own default shard size) until e2e tracker #110: tensorhub's
-# per-upload /complete verifies the whole shard synchronously (streams it
-# back from R2 and hashes it) in one HTTP request, and something in front of
-# it (observed: a consistent, exact ~300s ceiling, almost certainly the
-# ngrok tunnel this whole cloud stack rides on rather than tensorhub itself)
-# kills that request outright regardless of tensorhub's own generous
-# timeout. Live: a 5.36GB shard sometimes finished in ~200-260s (racy, close
-# to the wall); a 9.8GB shard failed the SAME way on every one of 5 retries
-# (it deterministically needs longer than the wall allows, so retrying
-# doesn't help). 2GB keeps every shard's verify time comfortably clear of
-# that ceiling regardless of R2 throughput variance. gen_worker.hubio.client's
-# retry/poll resilience (#62/#63) still covers the remaining transient case;
-# this fixes the deterministic one.
 
 _PICKLE_EXTS = (".ckpt", ".pt", ".pth", ".bin")
 
@@ -121,11 +102,9 @@ class IncrementalSafetensorsWriter:
 
     ``metadata`` (string-valued) is emitted as the header's ``__metadata__``.
 
-    pgw#1003: bytes go to a same-directory temp and reach ``output_path`` only
-    via fsync -> os.replace -> fsync(dir), the durable-finalize shape the
-    download side already uses (``hubio/fetch.py``, ``models/chunk_cas.py``).
-    A hard-killed pod therefore leaves no truncated cast output under the
-    real name — the output either exists whole or does not exist. An
+    Bytes go to a same-directory temp and reach ``output_path`` only via
+    fsync -> os.replace -> fsync(dir), so a hard-killed pod leaves no
+    truncated output under the real name — it exists whole or not at all. An
     incomplete tensor set is never committed either.
     """
 
@@ -250,54 +229,6 @@ def _weight_component_dirs() -> frozenset[str]:
     return frozenset(weight_components())
 
 
-#: Where a converted pickle is staged, beside the component it came from.
-#: One spelling, because there is one pickle reader (pgw#498).
-PICKLE_CACHE_DIR = ".__pickle_cache__"
-
-
-def materialize_pickle_to_safetensors(pickle_path: Path, work_dir: Path) -> Path:
-    """Convert a pickle weight file to safetensors (``weights_only=True``).
-
-    **The only pickle reader in this package** (pgw#498). Conversion ingests
-    ARBITRARY tenant-submitted repos, so every ``.bin``/``.ckpt`` reaching this
-    process is untrusted bytes; ``weights_only=True`` is passed EXPLICITLY and
-    never left to torch's default, which ``TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD``
-    in the pod environment silently flips back for any call site that omitted
-    the argument.
-    """
-    import torch
-    from safetensors.torch import save_file
-
-    try:
-        state = torch.load(str(pickle_path), map_location="cpu", weights_only=True)
-    except Exception as exc:
-        # A checkpoint the SAFE unpickler cannot read is a checkpoint whose
-        # bytes ask to construct something other than tensors. That is the
-        # refusal this vocabulary exists for; there is no permissive retry.
-        if "weights only" in str(exc).lower() or type(exc).__name__ == "UnpicklingError":
-            raise ConversionImplementationError(
-                f"unsafe_weight_format:{pickle_path.name}: the file only loads "
-                f"with unpickling enabled, which executes arbitrary code in "
-                f"this pod. Republish it as safetensors. "
-                f"({type(exc).__name__}: {str(exc)[:200]})"
-            ) from exc
-        raise ConversionImplementationError(
-            f"pickle_load_failed: {type(exc).__name__}: {str(exc)[:200]}"
-        ) from exc
-    if isinstance(state, dict) and isinstance(state.get("state_dict"), dict):
-        state = state["state_dict"]
-    tensors = {
-        k: v.contiguous() for k, v in state.items()
-        if hasattr(v, "dtype") and hasattr(v, "shape")
-    }
-    if not tensors:
-        raise ConversionImplementationError(f"pickle_no_tensors_found:{pickle_path}")
-    work_dir.mkdir(parents=True, exist_ok=True)
-    out = work_dir / (pickle_path.stem + ".safetensors")
-    save_file(tensors, str(out))
-    return out
-
-
 def _resolve_input_shards(input_path: Path) -> list[Path]:
     if input_path.name.lower().endswith(".safetensors.index.json"):
         return list_shard_files_from_index(input_path)
@@ -307,7 +238,8 @@ def _resolve_input_shards(input_path: Path) -> list[Path]:
 def iter_component_tensors(component_dir: Path) -> Iterator[tuple[str, "torch.Tensor"]]:
     """Yield (name, tensor) for every weight in one component directory.
 
-    Preference: sharded index > single safetensors > pickle (converted).
+    Preference: sharded index > single safetensors. A component that offers
+    only a pickle is REFUSED -- pickles are banned platform-wide.
     """
     from safetensors import safe_open
 
@@ -324,9 +256,11 @@ def iter_component_tensors(component_dir: Path) -> Iterator[tuple[str, "torch.Te
         for ext in _PICKLE_EXTS:
             found = sorted(component_dir.glob(f"*{ext}"))
             if found:
-                entry = materialize_pickle_to_safetensors(
-                    found[0], component_dir / PICKLE_CACHE_DIR)
-                break
+                raise ConversionImplementationError(
+                    f"pickle_only:{found[0].name}: this component offers only "
+                    f"a pickle, and pickles are refused. Mirror the source "
+                    f"repo without the pickle (safetensors) and convert that."
+                )
     if entry is None:
         return
     for shard in _resolve_input_shards(entry):
@@ -403,7 +337,7 @@ def stream_reencode(
                 metas.append((name, out_dtype, shape, shard_path))
                 size_map[name] = numel * _ST_DTYPE_SIZES[out_dtype]
 
-    # th#1362: ONE file per component. Tensor order is sorted-name, which is
+    # ONE file per component. Tensor order is sorted-name, which is
     # what the planner produced for a single-shard plan, so nothing about the
     # output changed except that there is now always exactly one of them.
     metas.sort(key=lambda row: row[0])
@@ -570,7 +504,7 @@ def streaming_fp8_storage_cast(
 
 
 # ---------------------------------------------------------------------------
-# W8A8 per-channel-scaled fp8 producer (gw#557 / ie#494) — data-free requant
+# W8A8 per-channel-scaled fp8 producer — data-free requant
 # from the bf16 source, streaming. The tensor-layout contract is gw#534's
 # ``#fp8-w8a8`` (consumed by gen_worker.models.w8a8): per quantized Linear a
 # F8_E4M3 ``weight`` plus a F32 [out] ``weight_scale`` DEQUANT twin; excluded
@@ -801,7 +735,7 @@ def copy_non_weight_files(source_dir: Path, out_dir: Path, *, skip_components: s
     those.
 
     A passthrough component that arrives as an HF shard set is COLLAPSED here
-    (th#1362). This is the only door untouched weights enter a tree we produce,
+. This is the only door untouched weights enter a tree we produce,
     and every caller is one of our producers, so the one-file-per-component
     invariant is satisfied at the door rather than at each of the callers. The
     source is untouched: what is unlinked is this tree's hardlink, and the
@@ -831,7 +765,7 @@ def copy_non_weight_files(source_dir: Path, out_dir: Path, *, skip_components: s
             deshard_indexed_safetensors(index_path)
 
 
-# pgw#654: scheduler config overrides per checkpoint objective/distilled
+# scheduler config overrides per checkpoint objective/distilled
 # fact. v_prediction needs zero-terminal-SNR v-prediction sampling;
 # distilled needs trailing timestep spacing (few-step, near-zero CFG).
 _OBJECTIVE_SCHEDULER_OVERRIDES: dict[str, dict[str, Any]] = {
@@ -982,7 +916,7 @@ def te_fp8_castable_keys(component_dir: Path) -> frozenset[str]:
     graph walk + the loader's key translation is the zero-drift contract:
     the stored artifact is byte-identical to what cast-at-load produces.
 
-    Block-window rules (gw#460): castable = Linear/conv WEIGHTS inside the
+    Block-window rules: castable = Linear/conv WEIGHTS inside the
     children of top-level ``nn.ModuleList`` containers, excluding params
     shared with modules outside a block (tied lm_head / embeddings).
     Embeddings, norms, biases, poolers stay at source precision."""
@@ -1177,7 +1111,7 @@ def streaming_w8a8_snapshot(
     the gw#534 corroborating ``quantization_config`` (the safetensors
     headers stay authoritative for detection).
 
-    Non-diffusers layouts (gw#562) scan the WHOLE tree for weight sets
+    Non-diffusers layouts scan the WHOLE tree for weight sets
     (root and nested — split-checkpoint layouts keep component files under
     subdirs). Exactly the denoiser set(s) get the requant: a single
     discovered set is unambiguous; with several, ``weight_set_patterns``
@@ -1312,7 +1246,7 @@ def verify_w8a8_snapshot(
     seed: int = 0,
     source_compute_dtype: str = "storage",
 ) -> dict[str, Any]:
-    """Byte-gate a produced w8a8 tree against its source (gw#557 / ie#494).
+    """Byte-gate a produced w8a8 tree against its source.
 
     Detection runs through the CONSUMER's own sniffer
     (:func:`gen_worker.models.w8a8.detect_w8a8_artifact`), then for a
@@ -1830,7 +1764,7 @@ def merge_safetensors_by_offset(
 def deshard_indexed_safetensors(index_path: Path) -> Path:
     """Collapse ONE HF shard set into a single ``<prefix>.safetensors``.
 
-    th#1362: bytes WE own are normalised to one file per component — mirrors we
+    bytes WE own are normalised to one file per component — mirrors we
     ingest AND the passthrough components of the flavors we produce, which are
     the same bytes one step later. Chunked CAS already gives resumable,
     parallel, partial-failure-tolerant transfer BELOW the file, so the shard set
@@ -1912,7 +1846,7 @@ def deshard_mirror_tree(tree: Path) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Canonical published filenames (gw#466 / gw#522)
+# Canonical published filenames
 # ---------------------------------------------------------------------------
 
 CAST_NORMALIZE_DTYPES = {"fp16", "bf16", "fp32", "f16", "f32"}
@@ -1996,7 +1930,6 @@ __all__ = [
     "assert_one_file_per_component",
     "IncrementalSafetensorsWriter",
     "torch_dtype_to_st",
-    "materialize_pickle_to_safetensors",
     "iter_component_tensors",
     "iter_source_tensors",
     "streaming_dtype_cast",

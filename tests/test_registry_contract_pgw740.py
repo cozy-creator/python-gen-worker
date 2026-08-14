@@ -22,7 +22,7 @@ REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "check_registry_contract.py"
 
 
-# pgw#966: the three `uv` calls below build an isolated environment, which means
+# The three `uv` calls below build an isolated environment, which means
 # PyPI — the one remaining third party in this suite. It is the SAME PyPI the
 # job's own `uv sync --locked` already required, so this adds no new dependency;
 # what it did add was a way for a transient 503 mid-run to turn a required check

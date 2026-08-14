@@ -1,4 +1,4 @@
-"""th#1085 lifecycle intent registry and reconnect projection."""
+"""Lifecycle intent registry and reconnect projection."""
 
 from __future__ import annotations
 
@@ -13,27 +13,23 @@ from typing import Any, Awaitable, Callable, Iterable, Optional, TypeVar
 from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
 from .pb import worker_scheduler_pb2 as pb
 
-# pgw#973 (§4.24). Both are retention bounds on hub-driven maps in a
-# long-lived worker process: the hub opens intents and the worker answers with
-# receipts, and neither side ever says "you may forget this one". Without a
-# bound the registry is a leak whose rate is set by hub traffic — a pod serving
-# for days accumulates every intent it has ever seen. Trimmed oldest-first, so
-# what is dropped is what no reconnect projection will be asked about.
+# Retention bounds on hub-driven maps in a long-lived worker process: the hub
+# opens intents and the worker answers with receipts, and neither side ever
+# says "you may forget this one". Without a bound the registry leaks at a rate
+# set by hub traffic. Trimmed oldest-first, so what is dropped is what no
+# reconnect projection will be asked about.
 _MAX_INTENTS = 128
 _MAX_RECEIPTS = 32
 #: How long a caller waits for an intent's first report before proceeding
 #: without one. Not a kill: nothing is cancelled, the caller just stops
 #: blocking on a report that is a courtesy.
 _UNREPORTED_WAIT_TIMEOUT_S = 2.0
-# gw#640: fallback deadline for a WAITING state with no blocker and no retry
-# time. Mirrors the hub's shadow first-action budget (60s).
-#
-# pgw#973: NOT a gw#666 fixed-duration kill, and it was censused as one. It
-# ends nothing on this side — `deadline_at_unix_ms` is a required wire field
-# (the hub's shadow validator rejects a WAITING state carrying none of
-# blocker/retry/deadline), so this fills a protocol hole and the hub owns
-# whatever it decides at expiry. Changing it is a protocol change, not a
-# tuning; it belongs with the hub's budget or nowhere.
+# Fallback deadline for a WAITING state with no blocker and no retry time.
+# Mirrors the hub's shadow first-action budget (60s). NOT a kill: it ends
+# nothing on this side. `deadline_at_unix_ms` is a required wire field (the
+# hub's shadow validator rejects a WAITING state carrying none of
+# blocker/retry/deadline), so this fills a protocol hole and the hub owns what
+# it decides at expiry. Changing it is a protocol change, not a tuning.
 _WAITING_DEADLINE_FALLBACK_MS = 60_000
 _ACTIVE_INTENT_STATES = {
     pb.LIFECYCLE_INTENT_STATUS_ACCEPTED,
@@ -113,11 +109,10 @@ class IntentRegistry:
         on_change: Optional[Callable[[], None]] = None,
         unreported_wait_timeout_s: float = _UNREPORTED_WAIT_TIMEOUT_S,
     ) -> None:
-        # pgw#783: under the process split the PARENT mints the session id once
-        # and passes it down (GEN_WORKER_SESSION_ID), so it survives child
-        # respawns — child-minted it changed on every respawn and the hub
-        # rejected the cross-session shadow state. Absent the env (no split), a
-        # fresh uuid, exactly as before.
+        # Under the process split the PARENT mints the session id once and
+        # passes it down (GEN_WORKER_SESSION_ID) so it survives child respawns;
+        # a child-minted id changes on every respawn and the hub rejects the
+        # cross-session shadow state. Absent the env (no split), a fresh uuid.
         self.worker_session_id = (
             os.environ.get("GEN_WORKER_SESSION_ID", "").strip() or uuid.uuid4().hex
         )
@@ -133,12 +128,12 @@ class IntentRegistry:
         self._last_receipt: Optional[pb.GoalReceipt] = None
         self._command_receipts: "OrderedDict[tuple[int, bytes], pb.GoalReceipt]" = OrderedDict()
         self._target_config_generation = 0
-        # gw#668: two distinct facts, not one number. ``_boot_config_injected``
-        # False means no boot-only environment exists for this process to be
-        # stale against (a host-process/BYO worker: tensorhub injects
+        # Two distinct facts, not one number. ``_boot_config_injected`` False
+        # means no boot-only environment exists for this process to be stale
+        # against (a host-process/BYO worker: tensorhub injects
         # WORKER_CONFIG_GENERATION only into pod-launch env), so the boot class
-        # is NOT APPLICABLE and converges. A pod-launched worker with a genuinely
-        # old stamp still reports BOOT_STALE so the th#1087 rollout replaces it.
+        # is NOT APPLICABLE and converges. A pod-launched worker with a
+        # genuinely old stamp still reports BOOT_STALE so the hub replaces it.
         self._boot_config_injected = int(boot_config_generation) >= 0
         self._boot_config_generation = max(0, int(boot_config_generation))
         self._intents: "OrderedDict[str, pb.IntentState]" = OrderedDict()
@@ -402,12 +397,12 @@ class IntentRegistry:
                     )
                 )
 
-        # th#1283: the hub declares fail-closed scope PER INTENT. Errors on
-        # mandatory work reject the command and latch; a command-level error
-        # rejects the command and latches only when that abandons mandatory
-        # work not already registered under the same identity; errors scoped
-        # to advisory intents decline exactly those intents and accept the
-        # rest, so a bad preposition or binding cannot brick the process.
+        # The hub declares fail-closed scope PER INTENT. Errors on mandatory
+        # work reject the command and latch; a command-level error rejects and
+        # latches only when it abandons mandatory work not already registered
+        # under the same identity; errors scoped to advisory intents decline
+        # exactly those intents and accept the rest, so a bad preposition or
+        # binding cannot brick the process.
         declined: dict[str, tuple["pb.LifecycleErrorCode", str]] = {}
         if command_errors:
             intents_by_id = {
@@ -450,12 +445,12 @@ class IntentRegistry:
         ]
         incoming_ids = {str(intent.intent_id) for intent in accepted_intents}
         for intent_id, state in self._intents.items():
-            # pgw#654: a command is a full replacement of COMMAND-OWNED work
-            # only. Worker-local compat obligations (job/setup/materialize
-            # carriers, never present in any hub command) must survive a
-            # generation bump — superseding them terminalized a LIVE job's
-            # intent mid-flight, so its next legal transition raised.
-            # Command-born intents are exactly the ids in _intent_digests.
+            # A command is a full replacement of COMMAND-OWNED work only.
+            # Worker-local compat obligations (job/setup/materialize carriers,
+            # never present in any hub command) must survive a generation bump:
+            # superseding them terminalizes a LIVE job's intent mid-flight, so
+            # its next legal transition raises. Command-born intents are exactly
+            # the ids in _intent_digests.
             if intent_id not in self._intent_digests:
                 continue
             if intent_id not in incoming_ids and int(state.status) in _ACTIVE_INTENT_STATES:
@@ -604,19 +599,15 @@ class IntentRegistry:
     ) -> str:
         """Find command-owned work or create a compatibility intent.
 
-        pgw#654: this used to return "" whenever a v5 command was registered
-        but the matching intent was terminal (or absent) — "missing work is
-        not fabricated; guard_await fails it closed". That armed the 2.0s
-        unreported-wait bomb on every RECONCILE RE-PASS after convergence:
-        the pass's first await (``wait_idle``) blocks for the whole duration
-        of any in-flight tenant job, so the first real request on a freshly
-        converged pod drove the worker to WORKER_PHASE_ERROR two seconds in
-        (the hub then counted a "model load failure" on a healthy worker and
-        broke the release — the 0.58.0/0.60.0 fleet-wide false
-        ``model_load_failure_streak``). Re-verifying converged command work
-        is legitimate; it just needs a REPORTABLE carrier — so mint the same
-        worker-local compat intent the no-command path uses. guard_await's
-        fail-closed remains for waits that genuinely carry no intent id.
+        Never returns "" when a command is registered but the matching intent
+        is terminal or absent: re-verifying converged command work is
+        legitimate and needs a REPORTABLE carrier, so this mints the same
+        worker-local compat intent the no-command path uses. Without one, the
+        reconcile re-pass's first await (``wait_idle``, which blocks for the
+        whole duration of any in-flight tenant job) trips the unreported-wait
+        timeout and drives a healthy worker to WORKER_PHASE_ERROR.
+        ``guard_await``'s fail-closed remains for waits that genuinely carry
+        no intent id.
         """
         intent_id = self.intent_id(kind, function_name=function_name, ref=ref)
         if intent_id:
@@ -752,13 +743,11 @@ class IntentRegistry:
             state.ClearField("blocker_request")
         else:
             state.blocker_request.CopyFrom(blocker_request)
-        # gw#640: a WAITING state MUST carry a blocker, a retry time, or a
-        # deadline — the hub's shadow validator requires one of the three, and
-        # compat-synthesized intents (compat-materialize-*, minted outside a
-        # DesiredStateCommand) had none, so they were rejected. Guarantee it at
-        # the single choke point instead of at each call site. (The hub no
-        # longer kills the stream over this as of the gw#640 hub fix; emitting
-        # well-formed state is still ours to get right.)
+        # A WAITING state MUST carry a blocker, a retry time, or a deadline —
+        # the hub's shadow validator requires one of the three, and
+        # compat-synthesized intents minted outside a DesiredStateCommand have
+        # none of their own. Guaranteed at this single choke point rather than
+        # at each call site.
         if int(status) == pb.LIFECYCLE_INTENT_STATUS_WAITING:
             blocked = bool(state.blocker_intent_id) or bool(
                 state.blocker_request.request_id
@@ -839,24 +828,19 @@ class IntentRegistry:
     ) -> _T:
         """Assert that a long protocol-owned await already has typed state.
 
-        pgw#845 — an already-reported wait is awaited DIRECTLY, in the caller's
-        own task. It used to be wrapped in ``ensure_future`` like the unreported
-        one, and that wrapper opened a window: the inner task completes, the
-        caller is cancelled before it resumes, and asyncio discards the result.
-        When the result is an ACQUISITION the resource is then held by nobody
-        for the life of the process — a tenant job preempting the residency
-        reconcile (``Lifecycle.on_message`` cancels it on every run_job) at the
-        instant the ref lock was granted left that ref, and every desired ref
-        behind it in the serialized pass, permanently unmaterializable. Awaited
+        An already-reported wait is awaited DIRECTLY, in the caller's own task,
+        never wrapped in ``ensure_future``: a wrapper opens a window where the
+        inner task completes, the caller is cancelled before it resumes, and
+        asyncio discards the result. When that result is an ACQUISITION the
+        resource is then held by nobody for the life of the process. Awaited
         inline, ``Lock.acquire``/``Semaphore.acquire`` handle their own
-        cancel-after-grant (they re-wake the next waiter) and the leak is
-        structurally impossible.
+        cancel-after-grant and the leak is structurally impossible.
 
         An UNREPORTED wait still needs its own task, because the fail-closed
         timer must fire while the awaitable is still running. There the inner
-        task is cancelled explicitly on every exit path: ``asyncio.wait`` does
-        not cancel what it was given, so a cancellation arriving mid-window used
-        to orphan it.
+        task is cancelled explicitly on every exit path — ``asyncio.wait`` does
+        not cancel what it was given, so a cancellation arriving mid-window
+        would otherwise orphan it.
         """
         if self._reported(intent_id):
             return await awaitable
@@ -983,16 +967,13 @@ class IntentRegistry:
         current.target_generation = gen
         current.received_generation = gen
         if initial:
-            # Only the pod-launch stamp proves which boot-only environment
-            # this process received. The first command proves receipt, not
-            # boot convergence.
-            #
-            # gw#668: unless there IS no boot-only environment. A process that
-            # was never pod-launched received no WORKER_CONFIG_GENERATION, so
-            # "stale boot config" is vacuous for it — there is nothing to be
-            # stale against, and the only advertised remedy (pod replacement)
-            # does not exist. Converge the class instead of pending it forever
-            # against every target >= 1.
+            # Only the pod-launch stamp proves which boot-only environment this
+            # process received; the first command proves receipt, not boot
+            # convergence. Unless there IS no boot-only environment: a process
+            # never pod-launched received no WORKER_CONFIG_GENERATION, so
+            # "stale boot config" is vacuous and the only advertised remedy
+            # (pod replacement) does not exist. Converge the class instead of
+            # pending it forever against every target >= 1.
             current.boot_generation = (
                 min(gen, self._boot_config_generation)
                 if self._boot_config_injected
@@ -1137,9 +1118,8 @@ class IntentRegistry:
                 for target in executor.compile_targets()
                 for name in target.function_names
             }
-            # pgw#671 (th#1187 wire contract): per-function serving tier —
-            # "eager" | "compiled" — carried only on READY capabilities; ""
-            # is reserved for pre-0.65 workers.
+            # Per-function serving tier ("eager" | "compiled"), carried only on
+            # READY capabilities.
             tiers_fn = getattr(executor, "serving_tiers", None)
             tiers: dict[str, str] = tiers_fn() if callable(tiers_fn) else {}
             config_state = int(self._config_application.state)

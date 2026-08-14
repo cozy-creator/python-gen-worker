@@ -1,14 +1,12 @@
 """Pre-import hardware + canary measurement for the control parent (delta 2).
 
-th#1310's finding, restated: a handful of floats a worker reports about itself
-become FLEET-WIDE verdicts. ``HardwareUnsuitable`` fences a machine;
-``HostCanary`` condemns a SKU on the SPFabricLedger; the reported ``gpu_name``
-chooses which verdict key gets written. Those numbers were measured in
-``Lifecycle.build_resources`` — i.e. in the process that has already imported
-tenant endpoint code (``Worker.__init__`` runs ``collect_endpoints`` before
-``transport.run()``), so any of them could be replaced by a handler, a module
-import side effect, or a monkeypatched ``torch``. The hub-side corroboration
-gate contains that; this removes the ability.
+A handful of floats a worker reports about itself become FLEET-WIDE verdicts:
+``HardwareUnsuitable`` fences a machine; ``HostCanary`` condemns a SKU on the
+SPFabricLedger; the reported ``gpu_name`` chooses which verdict key gets written.
+Measured inside the worker process — which has already imported tenant endpoint
+code — any of them could be replaced by a handler, a module import side effect,
+or a monkeypatched ``torch``. The hub-side corroboration gate contains that; this
+removes the ability.
 
 The control parent must stay torch-free (it is the process that survives a CUDA
 death), so it cannot measure the silicon itself. It runs THIS module as a

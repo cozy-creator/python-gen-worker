@@ -212,7 +212,7 @@ def test_fork_and_input_targets_must_exist() -> None:
 
 
 def test_dim_bindings_must_name_declared_inputs_when_inputs_exist() -> None:
-    # pgw#853 widened the rule: a TEMPLATED Arg is a legal carrier too (an
+    # a TEMPLATED Arg is a legal carrier too (an
     # extent may enter as a python int inside a container), so the refusal
     # now names both kinds of row it looked for.
     with pytest.raises(DeclarationError,

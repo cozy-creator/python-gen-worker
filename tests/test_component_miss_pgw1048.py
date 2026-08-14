@@ -1,25 +1,18 @@
-"""pgw#1048: a composition the tree cannot satisfy is a TYPED refusal, not a
-retry-loop on a nameless OSError.
+"""A composition the tree cannot satisfy is a TYPED refusal, not a retry-loop on
+a nameless OSError.
 
-pgw#1047 measured the defect on a paid L40S: the hub's seed path dropped the
-sdxl deploy's ``vae`` component override (th#1715) while th#1711 had already
-narrowed the outbound snapshot to exclude ``vae/``, so the pod fetched a
-vae-less tree, loaded the composition with nothing substituted, and diffusers
-raised
+A pod fetching a tree missing a component override loads the composition with
+nothing substituted, and diffusers raises a bare
+``OSError: Error no file named config.json found in directory <cas path>``,
+naming neither the component nor the cause — which the rotation preloader then
+retries on every desired-set generation until the hub reaps the pod.
 
-    OSError: Error no file named config.json found in directory
-             /tmp/tensorhub-cache/cas/snapshots/sha256:32fa2ba6…
-
-— naming neither the component nor the cause. The rotation preloader then
-retried that deterministic condition on every desired-set generation until the
-hub reaped the pod, nine minutes later.
-
-The root cause was hub-side and is fixed. This is the worker's own half: the
-failure SHAPE. Every assertion below runs the REAL load path.
+This is the worker's half: the failure SHAPE. Every assertion below runs the
+REAL load path.
 
   1. real tiny SDXL (unet = a real ``streaming_w8a8_cast`` product carrying the
      production ``quantization_config`` block), real ``load_component_override``,
-     real ``provision.load_slot`` — the pgw#1047 ``repro_1047_w8a8.py`` fixture;
+     real ``provision.load_slot``;
   2. the refusal reaches the hub through the REAL activity sink the worker
      transport binds, not an in-process spy;
   3. the real executor + real ``Preloader`` classify it terminal for the

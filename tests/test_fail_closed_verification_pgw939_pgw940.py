@@ -244,7 +244,7 @@ def test_a_torn_prior_manifest_is_no_evidence(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# pgw#940 §1 — DELETED WITH ITS SUBJECT (pgw#1175)
+# pgw#940 §1 — DELETED WITH ITS SUBJECT
 # ---------------------------------------------------------------------------
 #
 # pgw#940 §1 covered `entry_workers`' DEVICE bound: an unreadable card used to

@@ -1,11 +1,11 @@
-"""Host-driver preflight for measurement rigs (pgw#1120).
+"""Host-driver preflight for measurement rigs.
 
-``rigcheck`` answers "is the SOFTWARE on the fleet line". This module answers the
-question two lanes lost an evening to on 2026-08-11: **can this HOST run it at
-all.** RunPod's driver version is per-host, not per-datacenter and not per-GPU
-type — the kernel harness drew ``580.159.04`` (US-GA-2) while an H100 in CA-MTL-1
-drew ``570.211.01``, which is CUDA 12.8 and cannot run a cu130 build. torch
-2.13+cu130 *imports* perfectly there and then fails on the first allocation with
+``rigcheck`` answers "is the SOFTWARE on the fleet line". This module answers
+**can this HOST run it at all.** RunPod's driver version is per-host, not
+per-datacenter and not per-GPU type — one host draws ``580.159.04`` while an
+H100 elsewhere draws ``570.211.01``, which is CUDA 12.8 and cannot run a cu130
+build. torch 2.13+cu130 *imports* perfectly there and then fails on the first
+allocation with
 ``CUDA initialization: driver too old``, so the failure looks like a torch bug and
 arrives ~20 minutes in, after the multi-GB weight fetch.
 
@@ -17,10 +17,8 @@ Two consequences, both mechanical here:
 2. **A too-old driver is repairable, not fatal.** NVIDIA ships a forward-compat
    libcuda (``cuda-compat-13-0``) for data-center GPUs; installing it and putting
    it ahead of the host's libcuda makes a cu130 build run against a 570 host
-   driver. pgw#1081 proved this on the very host that blocked pgw#1043
-   (``evidence/ENV.json``: driver ``570.211.01``, ``cuda_available true``, torch
-   ``2.13.0+cu130``, H100 sm9.0). :func:`ensure_cuda_line` installs it and
-   re-verifies; only when THAT fails is the verdict "re-roll this host".
+   driver. :func:`ensure_cuda_line` installs it and re-verifies; only when THAT
+   fails is the verdict "re-roll this host".
 
 The module always says which of the three paths it took — ``native``,
 ``compat`` or ``reroll`` — because a wall measured through forward-compat libcuda
@@ -80,8 +78,8 @@ ENV_FILE = "/etc/profile.d/zz-cuda-compat.sh"
 #: treated as unknown and the probe reports rather than guesses.
 #:
 #: TUPLES, not floats. ``580.159.04`` is NEWER than the ``580.65.06`` floor, and
-#: as floats 580.159 < 580.65 — the comparison would reject the exact host
-#: (US-GA-2's 580.159.04) that runs cu130 natively.
+#: as floats 580.159 < 580.65 — a float comparison rejects hosts that run cu130
+#: natively.
 _MIN_DRIVER_BY_CUDA_MAJOR: dict[int, tuple[int, ...]] = {
     11: (450, 80, 2),
     12: (525, 60, 13),
@@ -278,10 +276,10 @@ def _install_compat(cuda: str, log: TextIO) -> Optional[str]:
     apt("update", "-qq")
     code, out = apt("install", "-y", "-qq", package)
     if code != 0:
-        # The fleet base (`pytorch/pytorch:*-runtime`) does NOT carry NVIDIA's apt
-        # repo, and it has no curl either — measured on pod farksl1bxrefqg,
-        # 2026-08-11. So the deb is fetched with the stdlib and dpkg'd directly:
-        # no keyring, no repo, no extra package needed to install a package.
+        # The fleet base (`pytorch/pytorch:*-runtime`) does NOT carry NVIDIA's
+        # apt repo, and it has no curl either. So the deb is fetched with the
+        # stdlib and dpkg'd directly: no keyring, no repo, no extra package
+        # needed to install a package.
         print(f"[rigboot] apt has no {package} ({out.strip()[-200:]}); "
               "fetching the .deb straight from NVIDIA", file=log, flush=True)
         deb = _download_compat_deb(package, log)
@@ -513,8 +511,7 @@ def assert_cuda_usable(cuda: str, *, log: Optional[TextIO] = None) -> dict[str, 
 
     For rigs that want the abort rather than the record. :class:`DriverTooOld`
     carries the whole diagnosis, because the failure it replaces (a cu130
-    allocation error 20 minutes into a run) reads as a torch bug to everyone who
-    has not lost an evening to it.
+    allocation error 20 minutes into a run) reads as a torch bug.
     """
     record = ensure_cuda_line(cuda, log=log)
     if record.get("path") == "reroll":

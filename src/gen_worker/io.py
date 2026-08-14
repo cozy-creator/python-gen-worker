@@ -144,7 +144,7 @@ IMAGE_FORMATS: dict[str, tuple[str, str]] = {
 def image_format(format: str = DEFAULT_IMAGE_FORMAT) -> tuple[str, str]:
     """``(PIL format, file extension)`` for a tenant-facing format name.
 
-    Split out of :func:`encode_image` so the deferred-tail path (th#1130) can
+    Split out of :func:`encode_image` so the deferred-tail path can
     validate the format and derive the ref's extension EAGERLY, at the
     ``save_image`` call — a bad format must raise in the handler, never in the
     finalize tail.
@@ -223,7 +223,7 @@ def write_image(
     is typed ``ImageAsset`` don't have to round-trip through
     ``msgspec.to_builtins``.
     """
-    # th#1107: the encode+upload tail runs slotless so it overlaps the next
+    # the encode+upload tail runs slotless so it overlaps the next
     # request's denoise, the same terminal handoff write_video performs. The
     # release is TERMINAL and once-only — safe here because this call is the
     # handler's last GPU-relevant act, which is why it is not applied to
@@ -234,9 +234,9 @@ def write_image(
 
     with finalize_permit():
         _release_gpu_slot_for_finalize(ctx)
-        # pgw#1094: look at the PIXELS before the encode. A rejected output
+        # look at the PIXELS before the encode. A rejected output
         # raises and is never encoded, never uploaded, never banked. Its own
-        # stage so the floor's wall is ATTRIBUTED, never residual (th#1111).
+        # stage so the floor's wall is ATTRIBUTED, never residual.
         if judged(ctx):
             with _stage(ctx, "output_integrity"):
                 guard_image(image, ref=ref)
@@ -319,7 +319,7 @@ def write_video(
       [-1, 1]); mono is duplicated to stereo. ``audio_sample_rate`` is
       required when audio is given.
 
-    Encoder selection + GPU-slot handoff (gw#476 / gw#516): the backend is
+    Encoder selection + GPU-slot handoff: the backend is
     NVENC when the card has the encoder block (probed once per process),
     else libx264 at a fast preset. For array input the request's GPU slot is
     terminally released once the frames are on the host — the CPU encode and
@@ -356,14 +356,14 @@ def write_video(
                 # Chunks arrive while the producer still owns the GPU; the
                 # encode interleaves (NVENC costs zero SMs). Release the slot
                 # only once decode is done, before the flush + upload tail.
-                # CUDA-tensor chunks take the gw#549 staging pipeline: uint8
+                # CUDA-tensor chunks take the staging pipeline: uint8
                 # conversion on-GPU (2-4x PCIe byte cut) + pinned async D2H
                 # one chunk behind the producer, so chunk N's copy overlaps
                 # chunk N+1's decode and chunk N-1's CPU encode. Other chunk
                 # types pass through unchanged.
                 from .media_transfer import staged_uint8_chunks
 
-                # pgw#1094: each chunk is judged INSIDE the loop — the staged
+                # Each chunk is judged INSIDE the loop — the staged
                 # host buffer a chunk borrows is only valid until the next
                 # iteration step, and nothing here may rebuffer the clip. Its
                 # wall lands on `video_encode` (it interleaves with the
@@ -385,12 +385,12 @@ def write_video(
                 arr = frames_to_uint8(frames)
                 # Bounded CPU-finalize admission BEFORE the slot release:
                 # back-pressure holds the GPU slot rather than stacking raw
-                # frame buffers in host RAM (gw#516).
+                # frame buffers in host RAM.
                 with finalize_permit():
                     _release_gpu_slot_for_finalize(ctx)
                     if judged(ctx):
                         with _stage(ctx, "output_integrity"):
-                            guard_frames(arr, ref=ref)  # pgw#1094, pre-encode
+                            guard_frames(arr, ref=ref)  # pre-encode
                     encoder.add(arr)
                     del arr
                     encoder.finish(audio)
@@ -412,7 +412,7 @@ def _is_chunk_iterator(frames: Any) -> bool:
 
 
 def _release_gpu_slot_for_finalize(ctx: Any) -> None:
-    """Terminal GPU-slot release at the decode->finalize handoff (gw#516)."""
+    """Terminal GPU-slot release at the decode->finalize handoff."""
     release = getattr(ctx, "_release_gpu_slot_for_finalize", None)
     if callable(release):
         release()

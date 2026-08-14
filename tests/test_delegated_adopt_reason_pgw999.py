@@ -10,7 +10,7 @@ three ways and none carried a cause:
                               did not adopt on this runtime)"
     error                  : "delegated mint produced no advertisable cell"
 
-Attempt 26 paid 2 h 45 m and $2.72 of L40S to learn "something". The
+A mint can therefore burn hours of rented GPU to report "something". The
 classified string existed in-process — ``contract_invalid``,
 ``constants_unbound``, ``no_arm_for_mode``, ``numerics_refused`` — and was
 discarded one frame before the wire. This is the ``worker-errors-to-
@@ -65,7 +65,7 @@ def events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
 def _sealed_cell(path: Path, **over: Any) -> Path:
     """A REAL sealed cell: a tarball carrying a readable `metadata.json`.
 
-    pgw#1098: these fixtures used to write raw bytes (`b"cell"`) and rely on
+    these fixtures used to write raw bytes (`b"cell"`) and rely on
     `try_read_metadata` swallowing the resulting error into `None`. That made
     every test here silently exercise the UNREADABLE-envelope path while
     claiming to test the arm's refusal classification — the same

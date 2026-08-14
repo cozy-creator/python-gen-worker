@@ -1,4 +1,4 @@
-"""Per-job capability-token renewal (client half of tensorhub #561 / th#639).
+"""Per-job capability-token renewal (worker half).
 
 While a job is in flight, a background task renews its capability token at
 ~80% of the token's TTL via ``POST {file_base_url}/v1/worker/capability/renew``
@@ -20,7 +20,7 @@ from .request_context._helpers import _decode_unverified_jwt_claims
 logger = logging.getLogger(__name__)
 
 RENEW_PATH = "/v1/worker/capability/renew"
-# pgw#973 (§4.24). Renew at 80% of the token's OWN lifetime, so the fraction is
+# Renew at 80% of the token's OWN lifetime, so the fraction is
 # a statement about the remaining budget rather than a duration anybody picked:
 # whatever TTL the hub issues, a fifth of it is left for the retries below.
 # The threat is a job losing its capability MID-FLIGHT — an in-flight upload or
@@ -56,7 +56,7 @@ def renew_once(
     ``RuntimeError`` on transient failures (5xx / malformed response).
     """
 
-    # pgw#763 delta 1: under the process split this runs in the compute child,
+    # Under the process split this runs in the compute child,
     # which holds no worker JWT — the parent performs the renewal (it also
     # proves the request is one it dispatched) and returns only the new token.
     # Off the split, this is the same POST it always was.
@@ -139,7 +139,7 @@ async def renew_capability_while_running(
                 )
             except RenewDenied as exc:
                 logger.warning("capability renewal for %s stopped: %s", request_id, exc)
-                # pgw#760: the job keeps a token that will expire; its next
+                # The job keeps a token that will expire; its next
                 # upload fails with a bare auth error unless the denial is
                 # named on the wire NOW.
                 activity_mod.emit_event(
@@ -166,7 +166,7 @@ async def renew_capability_while_running(
                 "capability renewal for %s exhausted retries; token will expire",
                 request_id,
             )
-            # pgw#760: retries exhausted silently — the downstream symptom
+            # retries exhausted silently — the downstream symptom
             # (an expired-token upload failure minutes later) never names
             # this cause without the typed event.
             activity_mod.emit_event(

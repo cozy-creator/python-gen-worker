@@ -1,21 +1,21 @@
-"""Pinned host-RAM weight swapping (gw#551, pgw#674).
+"""Pinned host-RAM weight swapping.
 
-Tier swaps used to ride whole-object ``.to(device)``: pageable host memory
-throttles H2D copies far below PCIe line rate, so promoting a ~38 GB
-transformer took many seconds. This module keeps a pinned host copy of every
-weight, cached on the module across swaps:
+Pageable host memory throttles H2D copies far below PCIe line rate, so a
+whole-object ``.to(device)`` takes many seconds to promote a ~38 GB
+transformer. This module keeps a pinned host copy of every weight, cached on
+the module across swaps:
 
 - demote (cuda -> cpu): weights are copied D2H into pinned staging ONCE and
   parameters re-pointed at it. Later demotes of an unchanged weight are pure
   pointer swaps (the host copy is already current — residency-managed weights
   are immutable; adapters detach via ``pre_demote`` before any move).
 - promote (cpu -> cuda): one ``non_blocking`` H2D per tensor from pinned
-  memory at full PCIe bandwidth, issued on the DEDICATED COPY STREAM
-  (pgw#674): copy engines are separate hardware from the SMs, so a
+  memory at full PCIe bandwidth, issued on the DEDICATED COPY STREAM: copy
+  engines are separate hardware from the SMs, so a
   background promote overlaps the serving job's compute instead of
   serializing behind it on the default stream. Only the copy stream is
   synchronized before returning — never the whole device.
-- prestage (pgw#674): :func:`prestage_module` builds the pinned cache for a
+- prestage: :func:`prestage_module` builds the pinned cache for a
   CPU-resident module EAGERLY (no prior demote), so the rotation preload's
   first promote is already a full-PCIe H2D.
 
@@ -108,10 +108,10 @@ def swap_module(module: Any, device: str) -> bool:
     cache: Dict[str, _PinSlot] = getattr(module, _CACHE_ATTR, None) or {}
     moved: Dict[int, Any] = {}   # source data_ptr -> replacement (alias dedupe)
     keep_alive: List[Any] = []   # D2H sources stay alive until the sync
-    # Promotes ride the dedicated copy stream (pgw#674): H2D from pinned
+    # Promotes ride the dedicated copy stream: H2D from pinned
     # memory overlaps compute on the SMs. Demotes (D2H) stay on the ambient
     # stream — they must order after any compute that produced the weights.
-    # pgw#780 item 4: the TARGET device's stream — a promote onto cuda:3 must
+    # The TARGET device's stream — a promote onto cuda:3 must
     # ride (and synchronize) a cuda:3 stream, not a device-0 singleton.
     copy_stream = staging.copy_stream(target) if target.type == "cuda" else None
     try:
@@ -176,7 +176,7 @@ def _swap_one(torch: Any, t: Any, target: Any, name: str, cache: Dict[str, _PinS
             return slot.host
         host = slot.host if (slot is not None and _slot_matches(slot, t)) else None
         if host is None:
-            host = staging.alloc_pinned_like(torch, t)  # pool-gated (pgw#674)
+            host = staging.alloc_pinned_like(torch, t)  # pool-gated
             if host is None:
                 host = torch.empty_like(t, device="cpu")  # pageable fallback
         host.copy_(t, non_blocking=host.is_pinned())
@@ -222,7 +222,7 @@ def swap_object(obj: Any, device: str) -> bool:
 
 def prestage_module(module: Any) -> int:
     """Eagerly build the pinned swap cache for a CPU-resident module
-    (pgw#674 rotation preload): every CPU parameter/buffer moves into pinned
+    every CPU parameter/buffer moves into pinned
     host memory NOW and the module is re-pointed at the pinned copies, so
     the FIRST promote is already a full-PCIe H2D on the copy stream — no
     prior demote required. Returns bytes newly pinned. Fail-soft and

@@ -1,10 +1,9 @@
-"""pgw#1120 — the host-driver gate's own red/green.
+"""The host-driver gate's own red/green.
 
-Two lanes lost an evening to the same host fact on 2026-08-11: RunPod's driver is
-per-host, ``570.211.01`` is CUDA 12.8, and a cu130 torch imports perfectly there
-before failing on the first allocation ~20 minutes in — after the weight fetch,
-looking like a torch bug. What is tested here is exactly the machinery that turns
-that into a five-second refusal at bring-up:
+RunPod's driver is per-host: ``570.211.01`` is CUDA 12.8, and a cu130 torch
+imports perfectly there before failing on the first allocation ~20 minutes in —
+after the weight fetch, looking like a torch bug. Tested here is the machinery
+that turns that into a five-second refusal at bring-up:
 
 * the ``nvidia-smi`` parsing (real output shapes, including the container image
   that prints no CUDA banner),

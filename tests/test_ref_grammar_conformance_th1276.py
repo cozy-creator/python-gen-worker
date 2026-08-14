@@ -5,7 +5,7 @@ tensorhub (``internal/orchestrator/release/testdata/``). Until th#1276 the file
 was decorative — nothing loaded it in either repo, so the two parsers could
 drift silently. This test (and its Go twin) make the fixture load-bearing.
 
-th#1276 ruling under test: the grammar's default tag is ``prod`` (the stable
+the grammar's default tag is ``prod`` (the stable
 serving pointer); ``latest`` (the moving publish pointer) is now an ordinary
 tag that must be written explicitly and round-trips stamped.
 """

@@ -1,15 +1,14 @@
-"""Boot host canary (gw#550): measure the host ONCE, report at registration.
+"""Boot host canary: measure the host ONCE, report at registration.
 
-ie#484 proved the GPU-pod host lottery lives entirely in the CPU-bound
-stages: identical per-step denoise times across every host sampled, while
-VAE-decode tails ranged 26-147 s and mp4-encode 27-301 s on the SAME job.
-The hub's degraded-host watch (th#740) only trips AFTER slow completions.
-This canary measures the three host properties those tails depend on —
-host memcpy bandwidth, pinned PCIe H2D/D2H bandwidth, raw CPU throughput —
-in a bounded ~1.5 s at boot, and ships them in ``Hello.resources`` so a bad
-host is visible BEFORE it serves.
+The GPU-pod host lottery lives entirely in the CPU-bound stages: identical
+per-step denoise times across every host sampled, while VAE-decode tails ranged
+26-147 s and mp4-encode 27-301 s on the SAME job. The hub's degraded-host watch
+only trips AFTER slow completions. This canary measures the three host
+properties those tails depend on — host memcpy bandwidth, pinned PCIe H2D/D2H
+bandwidth, raw CPU throughput — in a bounded ~1.5 s at boot, and ships them in
+``Hello.resources`` so a bad host is visible BEFORE it serves.
 
-pgw#748 phase 0 adds a **2-GPU leg** on the same principle. Sequence
+A **2-GPU leg** follows the same principle. Sequence
 parallelism's whole latency case rests on the GPU-to-GPU fabric a delivered
 pod actually has, and the hub cannot infer it: the SKU says SXM, the pod
 says nothing about whether ITS two cards have peer access. The leg measures
@@ -56,7 +55,7 @@ _MEMCPY_REPS = 3
 _PCIE_REPS = 3
 _CPU_SLICE_S = 0.25
 _HASH_BLOCK = 1 << 20
-# 2-GPU leg (pgw#748): same 256 MiB buffer, 3 timed peer copies.
+# 2-GPU leg: same 256 MiB buffer, 3 timed peer copies.
 _PEER_REPS = 3
 
 # Measured interconnect classes, worst to best.
@@ -65,7 +64,7 @@ INTERCONNECT_HOST_STAGED = "host-staged"
 INTERCONNECT_PCIE_P2P = "pcie-p2p"
 INTERCONNECT_NVLINK = "nvlink"
 
-# SP_MIN_PEER_GBPS (pgw#818) is the measured-bandwidth floor a pod must clear
+# SP_MIN_PEER_GBPS is the measured-bandwidth floor a pod must clear
 # to carry a platform-sharded group, IN ADDITION to classifying ``nvlink`` —
 # the hub's ``topology.SPMinPeerGbps`` (tensorhub topology/interconnect.go),
 # verbatim. Class alone is a string a degraded NV4 host also prints. The
@@ -75,10 +74,10 @@ INTERCONNECT_NVLINK = "nvlink"
 #   achieved all-to-all    NVLink 241.9 - 273.9  |  everything else <= 30.2
 #   device-to-device copy  NVLink 388.2 - 389.8  |  everything else <= 52.9
 #
-# 200 GB/s sits inside both gaps. Hub and worker gate INDEPENDENTLY on the
-# same measurement with the same two-term predicate (th#1285 interpretation 4
-# holds only while the predicates match — pgw#818 is what happened when one
-# side grew a floor alone); there is deliberately no HelloAck demote field.
+# 200 GB/s sits inside both gaps. Hub and worker gate INDEPENDENTLY on the same
+# measurement with the same two-term predicate — they agree only while the
+# predicates match, so the constants must move together — and there is
+# deliberately no HelloAck demote field.
 SP_MIN_PEER_GBPS = 200.0
 
 
@@ -93,17 +92,16 @@ def sp_admits(interconnect: str, peer_gbps: float) -> bool:
 
 
 def is_fabric_wedge(peer_access: bool, peer_gbps: float) -> bool:
-    """An NCCL WEDGE, not a slow host: peer access reported, bandwidth
-    measured exactly zero. Reproduced twice on machine 8n9k05n0sz03 (H100
-    NVL, SECURE): the collective HUNG — no exception, no timeout, no log. A
-    pod serving in that state strands every request routed to it. Zero
-    WITHOUT peer access is just "not measured" (a 1-GPU pod), no verdict.
-    Mirrors the hub's ``topology.IsFabricWedge``.
+    """An NCCL WEDGE, not a slow host: peer access reported, bandwidth measured
+    exactly zero. The collective then HANGS — no exception, no timeout, no log —
+    and a pod serving in that state strands every request routed to it. Zero
+    WITHOUT peer access is just "not measured" (a 1-GPU pod), no verdict. Mirrors
+    the hub's ``topology.IsFabricWedge``.
     """
     return peer_access and peer_gbps == 0.0
 
-# The wan-2.2 A14B production activation shape one Ulysses all-to-all moves
-# (SEQPAR-DESIGN §3): [batch, heads, tokens, head_dim] bf16 = 387 MB.
+# The wan-2.2 A14B production activation shape one Ulysses all-to-all moves:
+# [batch, heads, tokens, head_dim] bf16 = 387 MB.
 PRODUCTION_ACTIVATION_SHAPE: Tuple[int, ...] = (1, 40, 37800, 128)
 # 4 all-to-alls per layer x 40 layers = one model call's worth of collectives.
 PRODUCTION_COLLECTIVES_PER_CALL = 160
@@ -122,7 +120,7 @@ class HostCanaryReport:
     vcpus: int = 0
     ram_total_gb: float = 0.0
     duration_ms: int = 0
-    # pgw#748 2-GPU leg. All inert on a 1-GPU pod: gpu_count<=1 leaves
+    # 2-GPU leg. All inert on a 1-GPU pod: gpu_count<=1 leaves
     # interconnect "" and peer_gbps 0, which the hub reads as "not measured".
     gpu_count: int = 0
     interconnect: str = INTERCONNECT_NONE
@@ -176,8 +174,8 @@ def _measure_cpu_mbps(workers: int) -> float:
 
 
 def _measure_pcie() -> tuple[float, float, bool]:
-    """Pinned H2D/D2H bandwidth (GB/s) — the exact transfer the gw#549 media
-    staging path uses. Returns (h2d, d2h, pinned_alloc_ok); zeros sans CUDA."""
+    """Pinned H2D/D2H bandwidth (GB/s) — the exact transfer the media staging
+    path uses. Returns (h2d, d2h, pinned_alloc_ok); zeros sans CUDA."""
     try:
         import torch
 
@@ -223,7 +221,7 @@ def _measure_pcie() -> tuple[float, float, bool]:
 
 
 # ---------------------------------------------------------------------------
-# The 2-GPU leg (pgw#748): what fabric does THIS pod actually have?
+# The 2-GPU leg: what fabric does THIS pod actually have?
 # ---------------------------------------------------------------------------
 
 
@@ -278,8 +276,8 @@ def _nvidia_smi_topo_link(a: int, b: int) -> str:
 def classify_interconnect(topo_link: str, peer_access: bool) -> str:
     """Map (topology code, peer-access capability) onto the fabric class the
     latency model cares about. These are PERFORMANCE classes, not mechanisms:
-    each names a row of the projected-wall table, and the pgw#748 probe
-    measured all three on real RunPod pods.
+    each names a row of the projected-wall table, and all three were measured on
+    real RunPod pods.
 
     ``nvidia-smi`` reports NV# for an NVLink pair; PIX/PXB/PHB/NODE/SYS are
     PCIe paths of decreasing quality.
@@ -364,11 +362,9 @@ def measure_host_canary() -> HostCanaryReport:
     """Run every axis once; failures zero their axis instead of raising."""
     t0 = time.perf_counter()
     memcpy = single = multi = 0.0
-    # gw#640: os.cpu_count() reports the HOST's cores — 32 on a pod that owns
-    # 4 — and shipping that next to a cgroup-derived ram_total_gb produced a
-    # "32 vCPUs / 14.9 GB" report nobody could interpret. Report what this
-    # container may actually use, and benchmark with that many threads.
-
+    # NOT os.cpu_count(): it reports the HOST's cores — 32 on a pod that owns 4 —
+    # which next to a cgroup-derived ram_total_gb reads as "32 vCPUs / 14.9 GB".
+    # Report what this container may use, and benchmark with that many threads.
     vcpus = effective_cpu_count()
     try:
         memcpy = _measure_memcpy_gbps()

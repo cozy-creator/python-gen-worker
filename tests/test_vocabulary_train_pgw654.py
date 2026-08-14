@@ -41,7 +41,7 @@ class GenIn(msgspec.Struct):
 
 
 class TurboIn(msgspec.Struct):
-    # The distilled contract: NO guidance field (ie#462) — its graph class
+    # The distilled contract: NO guidance field — its graph class
     # is the one containing 0 (no wire CFG == batch-1).
     prompt: str
     aspect_ratio: Annotated[str, CompileAxis(classes="enum")] = "1:1"
@@ -431,7 +431,7 @@ def test_model_ref_label_mirrors_registry_wire_forms() -> None:
     from gen_worker import HF, Civitai, Hub
 
     assert HF("acme/gonzalomo-xl").label == "acme/gonzalomo-xl"
-    # th#1276: `prod` is the grammar default, so the normal form ELIDES it;
+    # `prod` is the grammar default, so the normal form ELIDES it;
     # every other tag — `latest` included — is stamped verbatim.
     assert Hub("acme/wai-illustrious", tag="prod").label \
         == "acme/wai-illustrious"

@@ -1,14 +1,14 @@
-"""nvfp4 format primitives + the fused triton activation quantizer (pgw#685).
+"""nvfp4 format primitives + the fused triton activation quantizer.
 
 The pure-torch quantize chain (:func:`quantize_activation_torch`) is ~8 passes
 over the activation: fp32 upcast, per-16-block amax, e4m3 block scale, divide,
 ``searchsorted`` e2m1 cast, nibble pack, then a pad/permute swizzle of the
-scales into the cuBLAS blocked layout. gw#540 measured that chain as the whole
-reason the w4a4 lane LOST to bf16 (0.807x eager on sm_120) — the fp4 GEMM was
+scales into the cuBLAS blocked layout. That chain is the whole reason the w4a4
+lane LOST to bf16 (0.807x eager on sm_120) — the fp4 GEMM was
 never the problem. :func:`quantize_activation` runs all of it in ONE triton
 kernel, writing each block scale directly at its blocked-layout address.
 
-Measured (pgw#682 G-B/G-B2, RTX 5090 sm_120 + B200 sm_100, torch 2.13/triton
+Measured (RTX 5090 sm_120 + B200 sm_100, torch 2.13/triton
 3.7.1): the quant step alone 6-36x faster; the stacked-block lane 0.807x ->
 2.043x bf16 eager and 2.045x -> 2.472x compiled on sm_120, 1.03x -> 1.24x on
 sm_100. Triton JITs per arch, so one source covers sm_100/103 and sm_120/121
@@ -41,7 +41,7 @@ BLOCK = 16
 
 # Work-per-program for the fused kernel. Both arches want the SAME shape —
 # 128 blocks (2048 elements) per program; only the warp count differs
-# (pgw#682: sweeping this fixed a false "sm_100 is bad at 4-bit" reading. At
+# (sweeping this fixed a false "sm_100 is bad at 4-bit" reading: at
 # 8 blocks/program the B200 ran 21x off its own bandwidth floor). Halved
 # automatically when a shape has fewer k-blocks than this.
 _BLOCKS_PER_PROG = 128

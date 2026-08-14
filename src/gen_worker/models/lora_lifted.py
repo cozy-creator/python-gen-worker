@@ -1,12 +1,12 @@
-"""LoRA input-lifting (pgw#725): the rank-bucket adapter as call INPUTS.
+"""LoRA input-lifting: the rank-bucket adapter as call INPUTS.
 
 Under AOT (``torch.export`` -> ``aoti_compile_and_package``) a compiled
 artifact's tensors are either graph INPUTS or baked constants. Today's hot swap
 copies into ``lora_a``/``lora_b`` module slots, which an exported artifact would
-capture — a baked adapter is silent-wrong-output for every subsequent request
-(pgw#704 S9). Lifting removes the failure mode by construction: the whole
-bucket arrives as two flat tensors in the call, so there is nothing to bake and
-the no-baked-adapter gate degenerates to a signature check (G3).
+capture — a baked adapter is silent-wrong-output for every subsequent request.
+Lifting removes the failure mode by construction: the whole bucket arrives as
+two flat tensors in the call, so there is nothing to bake and the
+no-baked-adapter gate degenerates to a signature check (G3).
 
 **The shipped semantics are reused, not reimplemented.** The flat pair is a
 re-layout of exactly the buffers canonical placement already allocates
@@ -33,8 +33,8 @@ both take it as call data):
     denoiser(*base_args, lora_a=<flat A>, lora_b=<flat B>, **base_kwargs)
 
 Both kwargs are MANDATORY: tracing with them absent would trace the branchless
-graph and silently produce the constant-folded-away bug S9 names, so a missing
-half refuses typed.
+graph and silently constant-fold the adapter away, so a missing half refuses
+typed.
 
 The single deferred ``import torch`` (in :meth:`LiftedLoraPlan.alloc`) is
 deliberate and matches ``w8a8``/``w8a8_lora``: ``compile_cache`` imports those at
@@ -344,12 +344,11 @@ def _lifted_signature(forward: Any) -> Any:
     ordinary positional parameters.
 
     The mint reads this (``aot_declaration._positionalize``,
-    ``aot_mint._input_names``) to bind example inputs to positional slots.
-    Before pgw#790 the wrapper declared them KEYWORD-ONLY, which made the
-    lifted lane unmintable in BOTH directions: `_positionalize` refuses a
-    declared keyword-only input by name, and feeding the pair positionally
-    landed it in ``*args`` while the branch bound ``None`` and refused. So the
-    call convention is stated in the signature instead of being implied.
+    ``aot_mint._input_names``) to bind example inputs to positional slots. They
+    must NOT be keyword-only: `_positionalize` refuses a declared keyword-only
+    input by name, and feeding the pair positionally would land it in ``*args``
+    while the branch bound ``None`` and refused. The call convention is stated
+    in the signature instead of being implied.
     """
 
     try:
@@ -396,20 +395,19 @@ def install_lifted_lora_forward(model: Any, bucket: int = 0) -> LiftedLoraBindin
         lora_a = kwargs.pop("lora_a", None)
         lora_b = kwargs.pop("lora_b", None)
         if lora_a is None and lora_b is None and len(args) == arity + 2:
-            # The all-positional MINT feed (pgw#723 residuals / pod 9): an
-            # AOTI package's call convention mirrors the traced args/kwargs
-            # split, so the pair must be traceable positionally. It fills
-            # exactly the two slots this wrapper appends to the denoiser's own
-            # signature, and `_positionalize` fills every slot before them —
-            # so the arity is exact, never a guess about a trailing tensor.
+            # The all-positional MINT feed: an AOTI package's call convention
+            # mirrors the traced args/kwargs split, so the pair must be
+            # traceable positionally. It fills exactly the two slots this
+            # wrapper appends to the denoiser's own signature, and
+            # `_positionalize` fills every slot before them — so the arity is
+            # exact, never a guess about a trailing tensor.
             args, lora_a, lora_b = args[:-2], args[-2], args[-1]
         if lora_a is None and lora_b is None:
-            # pgw#1001: arming a bucket must not alter the semantics of calls
-            # that do not use it. This wrapper replaces `forward` wholesale, so
-            # without this branch a plain call RAISES on an armed pod — a
-            # serving break, not just a probe one. After the positional-feed
-            # extraction, so it sees the pair however it arrived; a HALF-
-            # supplied pair is still a caller error and refuses below.
+            # Arming a bucket must not alter the semantics of calls that do not
+            # use it. This wrapper replaces `forward` wholesale, so without this
+            # branch a plain call RAISES on an armed pod. After the
+            # positional-feed extraction, so it sees the pair however it
+            # arrived; a HALF-supplied pair is a caller error and refuses below.
             #
             # Tracing the branchless arm with no operands is CORRECT (that arm
             # is what an `adapter=false` entry is), so this is not gated on a
@@ -463,15 +461,15 @@ def adapter_active(model: Any) -> bool:
     flat pair's values: a ``lora_b.any()`` read would be a device
     synchronisation on every request.
 
-    pgw#790's serve-side routing question: with a zeroed branch the
-    branch-bearing graph and the branchless graph return the same tensor, so
-    "no adapter is active" is the licence to serve the cheaper one.
+    Serve-side routing: with a zeroed branch the branch-bearing graph and the
+    branchless graph return the same tensor, so "no adapter is active" is the
+    licence to serve the cheaper one.
     """
     return bool(w8a8_lora.branches_active(model))
 
 
 # ---------------------------------------------------------------------------
-# Set level (gw#679): every branch-capable denoiser the pipeline carries gets
+# Set level: every branch-capable denoiser the pipeline carries gets
 # its OWN flat pair — the module sets differ, so the layouts do — and they
 # always move together.
 # ---------------------------------------------------------------------------
@@ -492,16 +490,16 @@ def arm_lifted_lora_execution_lanes(
     pipe: Any, bucket: int,
 ) -> Dict[str, LiftedLoraBinding]:
     """Put a pipeline on the LIFTED branch-bearing graph family: canonical
-    branch containers first, lifted call signature second (pgw#822).
+    branch containers first, lifted call signature second.
 
     THE arm for every AOT path — the mint's adapter-bearing classes, the
     operator compose, and (via the same two calls) the serving arm in
     ``models.provision.arm_aot``. Order is load-bearing in one direction:
     the flat layout is derived from the allocated containers, so a lone
-    :func:`install_lifted_lora_lanes` on an unarmed pipeline has nothing to
-    lay out, and a lone ``enable_branch_lanes`` leaves the denoiser's own
-    forward — which is pgw#822 exactly: the declaration lifts ``lora_a``/
-    ``lora_b`` and the module handed to ``torch.export`` never took them.
+    :func:`install_lifted_lora_lanes` on an unarmed pipeline has nothing to lay
+    out, and a lone ``enable_branch_lanes`` leaves the denoiser's own forward —
+    the declaration would lift ``lora_a``/``lora_b`` while the module handed to
+    ``torch.export`` never took them.
 
     Idempotent; a no-op at bucket 0 (the branchless pipeline is its own graph
     class and carries no adapter arguments at all).
@@ -545,19 +543,18 @@ def swap_lifted_execution_lane_set(
 
 
 # ---------------------------------------------------------------------------
-# Gate G3 (pgw#704 S9): under input-lifting the no-baked-adapter gate is a
-# SIGNATURE check — there is no constant to bake, so the assertion is "no LoRA
-# name reached the constant table, and the signature carries the pair".
+# Gate G3: under input-lifting the no-baked-adapter gate is a SIGNATURE check —
+# there is no constant to bake, so the assertion is "no LoRA name reached the
+# constant table, and the signature carries the pair".
 #
-# MEASURED CORRECTION to S9's G1 (pgw#725, CPU AOTI, torch 2.13): the gate must
-# be asserted on the ExportedProgram, NOT on the loaded package. Packing keeps
-# the FQN of a registered BUFFER (``lora_a``) but renames a plain-``__dict__``
-# tensor to ``_tensor_constant0`` — and the ``__dict__`` home is deliberate on
-# the plain-bf16 and fp8-hooks lanes (gw#558/ie#374, so cast hooks cannot
-# round-trip the branch through fp8). So a name scan of ``get_constant_fqns()``
-# returns a FALSE PASS for two of the three branch-capable lanes: the adapter is
-# baked in and no name matches. ``ep.constants`` still carries ``lin.lora_a``,
-# which is why the pack-time gate reads the export.
+# The gate must be asserted on the ExportedProgram, NOT on the loaded package.
+# Packing keeps the FQN of a registered BUFFER (``lora_a``) but renames a
+# plain-``__dict__`` tensor to ``_tensor_constant0`` — and the ``__dict__`` home
+# is deliberate on the plain-bf16 and fp8-hooks lanes, so cast hooks cannot
+# round-trip the branch through fp8. A name scan of ``get_constant_fqns()``
+# therefore returns a FALSE PASS for two of the three branch-capable lanes: the
+# adapter is baked in and no name matches. ``ep.constants`` still carries
+# ``lin.lora_a``, which is why the pack-time gate reads the export.
 # ---------------------------------------------------------------------------
 
 #: Anonymous constants a pack emits when the source tensor had no buffer/param

@@ -118,7 +118,7 @@ def validate_endpoint_lock(lock_dict: Dict[str, Any]) -> EndpointLockValidationR
 def _check_aot_preconditions(
     lock_dict: Dict[str, Any], errors: List[str], warnings: List[str],
 ) -> None:
-    """pgw#996: an image that cannot AOT-compile what it DECLARES is broken.
+    """An image that cannot AOT-compile what it DECLARES is broken.
 
     ``discover_manifest`` stamps ``aot_preconditions`` — the static verdicts
     read off this very image (its C++ toolchain, its torch wheel, its

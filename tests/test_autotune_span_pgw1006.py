@@ -1,13 +1,10 @@
 """pgw#1006: the compile-time autotune benchmark is a NAMED overlay.
 
-Why this test exists rather than a shared autotune cache. pgw#1006 was filed on
-the premise that "a large share of the 92-min `inductor_compile` phase is Triton
-autotuning". The repo's own banked measurement says otherwise — on a real w8a8
-SDXL UNet AOTI entry (L4 sm_89, `aoti_compile_s = 390.3`),
-`CachingAutotuner.benchmark_all_configs` was **12.1 s over 96 calls, 3.1 %** —
-so the whole ceiling of a perfect cross-mint autotune cache is ~3 % of a mint.
-That number was reachable only by reading `metrics_raw` by hand; nothing named
-it, which is how a 3 % term got argued about as a large share.
+Why this test exists rather than a shared autotune cache: Triton autotuning is a
+SMALL share of a mint. On a real w8a8 SDXL UNet AOTI entry (L4 sm_89,
+`aoti_compile_s = 390.3`), `CachingAutotuner.benchmark_all_configs` was **12.1 s
+over 96 calls, 3.1 %** — so the whole ceiling of a perfect cross-mint autotune
+cache is ~3 % of a mint. Unnamed, that term gets argued about as a large share.
 
 It is named now, in both the pooled ledger (`aot_compile_spans`) and the serial
 mint's own table (`aot_mint._phase_delta`), as an OVERLAY: the autotune block

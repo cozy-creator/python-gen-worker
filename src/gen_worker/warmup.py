@@ -1,30 +1,27 @@
-"""Boot-time warm-plan DERIVATION (gw#470 -> pgw#654).
+"""Boot-time warm-plan DERIVATION.
 
-First-call tax on a fresh worker is EAGER cost — allocator-pool growth to
-the activation peak plus cuBLAS/cuDNN heuristic selection (measured 216s vs
-63s warm on LTX/H100 pre-expandable-segments; 0-152s host lottery on B200).
-The worker runs synthetic requests per GPU inference function after
+First-call tax on a fresh worker is EAGER cost — allocator-pool growth to the
+activation peak plus cuBLAS/cuDNN heuristic selection (216s cold vs 63s warm on
+LTX/H100). The worker runs synthetic requests per GPU inference function after
 ``setup()``, BEFORE the function reports READY. Output is discarded (never
 billing/outputs/CAS); a failure is a load failure (loud).
 
-pgw#654: the warm plan is DERIVED, never developer-written — hand-written
-warmup payloads were a coverage CLAIM that drifts (add a guidance class,
-forget warmup, ship an untraced graph that compiles at request time).
-Derivation per handler:
+The warm plan is DERIVED, never developer-written: a hand-written warmup
+payload is a coverage CLAIM that drifts. Derivation per handler:
 
-1. Defaulted payload fields keep their defaults (post-th#1116 those are
-   neutral schema values — deterministic).
+1. Defaulted payload fields keep their defaults (neutral schema values —
+   deterministic).
 2. ``CompileAxis`` fields take each class's ``warm=`` representative,
    CROSS-PRODUCTED — that product IS the graph set, so "fully warmed?" is
    computable. Axes partition fields INDEPENDENTLY, so for an endpoint with
    real INTER-FIELD constraints most of that product is not a servable
-   request (pgw#669: ltx-video-2.3 has 29 legal combinations of 120). Such an
-   endpoint declares the sparsity by raising
+   request (ltx-video-2.3: 29 legal combinations of 120). Such an endpoint
+   declares the sparsity by raising
    :class:`~gen_worker.IllegalCombination` from its payload
    ``__post_init__``; the plan drops exactly those rows and records the
    coverage it achieved. Every OTHER exception during payload construction is
-   still a load failure — that is the whole point of the typed error: a
-   sparse legal set and a synthesis bug are no longer the same event.
+   a load failure — a sparse legal set and a synthesis bug are not the same
+   event.
 3. Required no-default fields synthesize neutral values by type: ``str``
    fills ``"warmup"`` (content never affects the graph; ``text_len`` pins
    the traced shape), ``ImageAsset``/``AudioAsset`` get a tiny generated
@@ -34,26 +31,25 @@ Derivation per handler:
    field that genuinely changes tracing (validated at walk time; needing
    it usually means the field should be an axis).
 
-The graph SET unifies per class via the class-level axis union (pgw#647
-gap #1's fix): the cell CONTRACT digests the union, and the forge traces
-each graph once. Warm RUNS at boot deliberately stay PER FUNCTION — every
-alias proves itself causally through its own handler (a sibling's run
-must never certify an alias whose code path was not exercised; pgw#637's
-whole blindness class). A deduped-away graph re-executes as a cheap cache
+The graph SET unifies per class via the class-level axis union: the cell
+CONTRACT digests the union, and the forge traces each graph once. Warm RUNS at
+boot deliberately stay PER FUNCTION — every alias proves itself causally
+through its own handler, and a sibling's run must never certify an alias whose
+code path was not exercised. A deduped-away graph re-executes as a cheap cache
 hit, never a second trace.
 
 Handlers SHOULD cheapen non-graph work on ``ctx.boot_warmup`` (e.g.
 ``steps = 1 if ctx.boot_warmup else steps``): the allocator peak is
-shape-driven and the traced graph is step-count-independent. The SDK no
-longer trusts that alone: synthesized payloads CLAMP step-count fields
+shape-driven and the traced graph is step-count-independent. The SDK does not
+trust that alone — synthesized payloads CLAMP step-count fields
 (:data:`_STEP_FIELDS`) to their declared floor, so a warm run never pays a
 full recipe's steps even on an endpoint that forgot the clamp.
 
-Warm RUNS are further bounded by :func:`select_runs` (the pgw#654 warm-tax
-fix): eager lanes run one shape representative per guidance class instead
-of the full cross-product, and a checkpoint INSTANCE whose warm contract
-already executed in this process runs a single verification job — juggle
-swaps cost weights transfer + load, never a warm-plan re-run.
+Warm RUNS are further bounded by :func:`select_runs`: eager lanes run one
+shape representative per guidance class instead of the full cross-product,
+and a checkpoint INSTANCE whose warm contract already executed in this process
+runs a single verification job — juggle swaps cost weights transfer + load,
+never a warm-plan re-run.
 
 Remaining class-level surfaces: a class-defined ``warmup()`` method wins
 outright (fully custom — the LTX two-stage synthetic);
@@ -224,7 +220,7 @@ def _present_factory(t: Any, depth: int) -> Optional[_Factory]:
     """A factory that POPULATES a field — never the `None` arm of an option.
 
     `_field_factory` answers `None` for any optional type, which is right for
-    a neutral default and useless for repairing a one-of (th#1771).
+    a neutral default and useless for repairing a one-of.
     """
     t = _unwrap(t)
     if depth > _MAX_DEPTH:
@@ -244,10 +240,10 @@ def _present_factory(t: Any, depth: int) -> Optional[_Factory]:
 
 def _struct_factory(payload_type: type, depth: int = 0) -> Tuple[Optional[_Factory], str]:
     field_factories: List[Tuple[str, _Factory]] = []
-    # th#1771: the one-of repair set. A struct whose fields are ALL optional
-    # but which asserts "exactly one of these is set" (the standard one-of
-    # media shape) is not sparse — it is unconditionally illegal empty, and
-    # required-only synthesis built exactly that.
+    # The one-of repair set. A struct whose fields are ALL optional but which
+    # asserts "exactly one of these is set" (the standard one-of media shape)
+    # is not sparse — it is unconditionally illegal empty, which is what
+    # required-only synthesis would build.
     optional_factories: List[Tuple[str, _Factory]] = []
     for f in msgspec.structs.fields(payload_type):
         if not f.required:
@@ -324,7 +320,7 @@ def _media_value_factory(t: Any) -> Optional[_Factory]:
 def media_variants(
     payload_type: type, base_build: _Factory,
 ) -> List[Tuple[str, _Factory]]:
-    """gw#614: (label, factory) variants adding synthesized media to optional
+    """(label, factory) variants adding synthesized media to optional
     media-capable fields the base payload leaves empty — the modality an
     input-routed sibling lane (e.g. edit needing an input image) requires.
     Each variant differs from the base in EXACTLY one field, so the lane
@@ -355,10 +351,10 @@ class WarmupJob:
 
     ``graph_key`` is the class-scoped graph identity this run traces (the
     dedup key across sibling functions); ``covers`` names every sibling
-    function whose graph set contains this run's class (proof attribution
-    is by GRAPH COVERAGE: an alias is proven once ALL of its graph classes
-    proved — pgw#654/pgw#647 gap #1); ``declared`` is True when a
-    ``@worker_function(warm=...)`` override applied.
+    function whose graph set contains this run's class (proof attribution is by
+    GRAPH COVERAGE: an alias is proven once ALL of its graph classes proved);
+    ``declared`` is True when a ``@worker_function(warm=...)`` override
+    applied.
 
     ``eager_group`` and ``shape_rank`` drive :func:`select_runs`'s
     eager-lane reduction: jobs sharing an ``eager_group`` (function +
@@ -380,9 +376,9 @@ class WarmupSkip:
     """One recorded reason a handler contributes fewer warm runs than the
     naive derivation would.
 
-    ``illegal``/``combos`` are non-zero only for the pgw#669 sparse-legal-set
-    row: they turn "we warmed fewer graphs than the axis product" from a
-    silent degradation into an explicit, countable coverage claim ("29 of 120
+    ``illegal``/``combos`` are non-zero only for the sparse-legal-set row: they
+    turn "we warmed fewer graphs than the axis product" from a silent
+    degradation into an explicit, countable coverage claim ("29 of 120
     combinations are legal; 29 warmed")."""
 
     spec: "EndpointSpec"
@@ -394,14 +390,13 @@ class WarmupSkip:
 # Guidance-class axis fields (mirrors api.compile_axis.warm_guidance_values):
 # a sibling function whose payload LACKS the field cannot be asked for CFG,
 # so its graph falls in the class containing 0 — that mapping is what lets
-# generate's cfg_off trace cover turbo's (pgw#647 gap #1).
+# generate's cfg_off trace cover turbo's.
 _GUIDANCE_FIELDS = ("guidance_scale", "guidance", "cfg", "true_cfg_scale")
 
-# Step-count payload fields (post-gap-#4 family vocabulary). The traced
-# graph and the allocator peak are step-count INDEPENDENT (the denoise loop
-# repeats one graph), so synthesized warm payloads clamp these to the
-# field's declared floor — a warm run must never pay a full recipe's steps
-# (the 0.61.0 ~30-min boot regression; ie#546 canary measurement).
+# Step-count payload fields. The traced graph and the allocator peak are
+# step-count INDEPENDENT (the denoise loop repeats one graph), so synthesized
+# warm payloads clamp these to the field's declared floor — a warm run must
+# never pay a full recipe's steps.
 _STEP_FIELDS = ("num_inference_steps", "steps")
 
 
@@ -532,7 +527,7 @@ def _legal_combos(
     overrides: Any,
     clamps: Optional[dict],
 ) -> Tuple[List[Tuple[Tuple[str, str, Any], ...]], int]:
-    """``(legal combos, illegal count)`` — the pgw#669 sparsity filter.
+    """``(legal combos, illegal count)`` — the sparsity filter.
 
     Axes partition fields independently, so the cross-product can contain
     combinations the endpoint's payload rejects by contract (ltx-video-2.3:
@@ -628,9 +623,9 @@ def select_runs(
     executed: AbstractSet[Tuple] = frozenset(),
 ) -> Tuple[List[WarmupJob], str]:
     """The subset of the derived plan one setup actually EXECUTES, with the
-    mode: ``"full"`` | ``"eager"`` | ``"verify"`` (pgw#654 warm-tax fix; the
-    ie#546 canary measured the full plan re-running per checkpoint
-    INSTANCE: ~30-min first boots and a ~9-min tax on every juggle swap).
+    mode: ``"full"`` | ``"eager"`` | ``"verify"``. Running the full plan per
+    checkpoint INSTANCE costs ~30-min first boots and a ~9-min tax on every
+    juggle swap, which is what this bounds.
 
     - ``tracing=True`` (a compile artifact is armed or minting): the FULL
       plan — every graph class must trace into the capture / prove against
@@ -639,7 +634,7 @@ def select_runs(
       run per (function, guidance class), collapsed to a single shape
       representative (:func:`_shape_rank`). Eager warm cost is allocator-
       pool growth plus kernel-heuristic selection — shape-driven, not
-      coverage-driven (gw#470) — and nothing is being traced, so the class
+      coverage-driven — and nothing is being traced, so the class
       x bucket cross-product buys nothing.
     - ``executed`` covering every selected run's ``graph_key``: ONE clamped
       verification run. Allocator pool, cuBLAS/cuDNN heuristics and
@@ -647,7 +642,7 @@ def select_runs(
       paths were exercised when this contract first warmed — a new
       checkpoint INSTANCE of the same contract shares all of it. The single
       run proves the fresh weights compose and forward end-to-end before
-      READY (and, on compiled lanes, provides the calls>0 the pgw#637
+      READY (and, on compiled lanes, provides the calls>0 the
       in-memory/cache-hit proof needs). The caller passes ``executed``
       non-empty only when inheritance is sound (same contract, proven
       cells, no pending mint).
@@ -677,7 +672,7 @@ def plan(
     has_warmup_method: bool = False,
 ) -> Tuple[List[WarmupJob], List[WarmupSkip]]:
     """The DERIVED warm plan for the GPU inference handlers of ONE instance
-    group (pgw#654): per handler, the cross-product of its axis classes'
+    group: per handler, the cross-product of its axis classes'
     warm representatives over a synthesized base payload — one run per
     (function, graph class), so each alias proves its own code path.
     Per-function ``@worker_function(warm=...)`` overrides apply to
@@ -708,8 +703,8 @@ def plan(
         axes = tuple(getattr(s, "payload_axes", ()) or ())
         combos = _axis_combos(axes)
         if axes:
-            # pgw#669: drop the combinations the endpoint declares illegal
-            # BEFORE they become planned runs, and record the coverage.
+            # Drop the combinations the endpoint declares illegal BEFORE they
+            # become planned runs, and record the coverage.
             combos, illegal = _legal_combos(
                 s.name, base, combos, overrides, clamps)
             if illegal:
@@ -775,10 +770,9 @@ def validate_at_decoration(cls: type, decl: EndpointDecl) -> None:
 
 
 def _refuse_compile_nowarmup(cls: type, decl: EndpointDecl) -> None:
-    """th#959: ``compile=`` + ``NoWarmup`` is a contradiction — compile cells
-    are minted and proven by warmup execution, so a NoWarmup class can never
-    arm one. Live, the combination struck a release broken in 3 pods. A
-    custom ``warmup()`` method resolves it (proof runs through that)."""
+    """``compile=`` + ``NoWarmup`` is a contradiction — compile cells are
+    minted and proven by warmup execution, so a NoWarmup class can never arm
+    one. A custom ``warmup()`` method resolves it (proof runs through that)."""
     if (
         decl.compile is not None
         and isinstance(decl.warmup, NoWarmup)
@@ -825,14 +819,13 @@ def validate_class_warmup(cls: type, decl: EndpointDecl, specs: List["EndpointSp
 
 
 # ---------------------------------------------------------------------------
-# The warm-job RequestContext — ONE construction (pgw#828)
+# The warm-job RequestContext — ONE construction
 # ---------------------------------------------------------------------------
 
 
 def spec_root_slot(spec: "EndpointSpec") -> str:
-    """The declared root slot name (pgw#654 gap #7): ``Slot(root=True)``,
-    else ``"pipeline"``, else the single slot; ``""`` when nothing resolves
-    a root."""
+    """The declared root slot name: ``Slot(root=True)``, else ``"pipeline"``,
+    else the single slot; ``""`` when nothing resolves a root."""
     for name, slot in spec.slots.items():
         if getattr(slot, "root", False):
             return name
@@ -848,18 +841,18 @@ def resolved_slots_kwargs(
     slots: Optional[Mapping[str, "dispatch.SlotOrder"]] = None,
     adapters: Optional[Mapping[str, Tuple["dispatch.AdapterOrder", ...]]] = None,
 ) -> Dict[str, Any]:
-    """``ctx.slots`` resolution chain (pgw#520 / pgw#516): merge each
+    """``ctx.slots`` resolution chain: merge each
     ``Slot``-declared slot's repo-metadata ``inference_defaults`` over its
     code fallback preset, then apply each riding lora's own
-    ``inference_defaults`` as a FIELD-LEVEL override, in lora order (pgw#516
-    composition rule — see ``api.slot._apply_lora_overrides``).
+    ``inference_defaults`` as a FIELD-LEVEL override, in lora order (see
+    ``api.slot._apply_lora_overrides``).
 
     Returns the ``resolved_slots=`` / ``slot_errors=`` / ``root_slot=`` kwargs
     for ``RequestContext.__init__``. A slot that fails to resolve (no metadata
     + no fallback, or no ref) is deferred to a ``ctx.slots[name]`` access
     error instead of failing the whole dispatch.
 
-    ``slots``/``adapters`` are the NEUTRAL per-dispatch orders (pgw#904) —
+    ``slots``/``adapters`` are the NEUTRAL per-dispatch orders —
     never a wire message. ``None`` is the WARM shape: no per-dispatch binding
     metadata, so every slot resolves from the spec's own declaration. That is
     what makes this reachable from the delegated mint child, which has the
@@ -879,9 +872,9 @@ def resolved_slots_kwargs(
         name: tuple(a.inference_defaults for a in advs if a.inference_defaults)
         for name, advs in dict(adapters or {}).items()
     }
-    # pgw#654: the resolved checkpoint's stamped objective/distilled facts
-    # ride the binding; the per-function declaration is the backstop (the
-    # hub gates checkpoint<->function compatibility at deploy/dispatch).
+    # The resolved checkpoint's stamped objective/distilled facts ride the
+    # binding; the per-function declaration is the backstop (the hub gates
+    # checkpoint<->function compatibility at deploy/dispatch).
     objectives = {
         name: so.objective for name, so in slot_orders.items()}
     distilled_facts = {
@@ -890,9 +883,9 @@ def resolved_slots_kwargs(
         name: so.distilled_status for name, so in slot_orders.items()}
     resolved: Dict[str, Any] = {}
     errors: Dict[str, str] = {}
-    # pgw#763/th#1288: a FIXED slot's ref is the RELEASE's own declaration, so
-    # its resolution failure is version-independent origin evidence and gets a
-    # typed label. `selected_by` slots stay untyped — the payload picks there.
+    # A FIXED slot's ref is the RELEASE's own declaration, so its resolution
+    # failure is version-independent origin evidence and gets a typed label.
+    # `selected_by` slots stay untyped — the payload picks there.
     declared: list = []
     for name, slot in spec.slots.items():
         try:
@@ -931,30 +924,20 @@ def warm_context(
 ) -> Any:
     """The ``RequestContext`` a WARM forward runs under — one construction.
 
-    pgw#828: the delegated mint child hand-rolled its own, and the one it
-    rolled had no slots at all. On a real L4 the child LOADED the pipeline in
-    16.45 s (pgw#816's fix holding) and then died in the endpoint's own warm
-    job at ``ctx.slots["pipeline"]`` with ``KeyError: 'pipeline'`` — so the
-    dynamo route published nothing, exactly as the AOT route published
-    nothing, and no mint route on the platform could produce a cell.
-
-    That is the same shape as pgw#816 one stage later, and the same shape as
-    pgw#816/#822/#825/#827: two constructions of one thing, free to drift.
-    The graphs the child traces are the graphs the parent must later hit, so
-    a child whose ctx resolves DIFFERENT slot defaults traces different
+    The delegated mint child MUST use this factory rather than rolling its
+    own: the graphs the child traces are the graphs the parent must later hit,
+    so a child whose ctx resolves DIFFERENT slot defaults traces different
     shapes and the parent's proof misses — the "mint succeeded, no artifact"
-    class. There is one factory now, and both sides call it.
+    class.
 
     It lives in ``warmup`` rather than in ``executor`` on purpose: the child
     already derives its warm plan from here, and it must never import the
     executor's whole arming brain to build a context.
 
-    ``origin`` (pgw#969) names the warm this context belongs to and is
-    prefixed onto every deferred slot-resolution error, so a handler's
-    ``ctx.slots[...]`` failure says WHICH warm it killed. A mint child holds
-    no orchestrator session; the text it raises is its only channel, and
-    ``ValueError: slot 'pipeline': no resolved model ref`` named a symptom
-    and no mint.
+    ``origin`` names the warm this context belongs to and is prefixed onto
+    every deferred slot-resolution error, so a handler's ``ctx.slots[...]``
+    failure says WHICH warm it killed. A mint child holds no orchestrator
+    session; the text it raises is its only channel.
     """
 
     slot_kwargs = resolved_slots_kwargs(spec, None)

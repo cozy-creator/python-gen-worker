@@ -4,11 +4,9 @@ File-selection logic lives in :mod:`gen_worker.convert.classifier`. This module
 answers the downstream metadata question: given a repo_dir + file list, which
 model family / variant is this? The output feeds destination checkpoint tags.
 
-pgw#740 (B14): the four hand-written family ladders that used to live here —
-and the LTX-2 root sentinel that was *duplicated into the te#70 trainer repo
-and hand-synced* — are now :class:`~.layout_spec.LayoutDeclaration` records
-registered by the endpoint that owns the family. This file evaluates them; it
-names no family. The four detection channels run in a fixed order:
+Family ladders are :class:`~.layout_spec.LayoutDeclaration` records registered by
+the endpoint that owns the family. This file evaluates them; it names no family.
+The four detection channels run in a fixed order:
 
 1. ``model_index.json``'s ``_name_or_path`` as a free-text hint
 2. ``model_index.json``'s ``_class_name``
@@ -147,9 +145,8 @@ def _detect_variant_from_paths(paths: list[str]) -> str:
 def _detect_variant_from_sentinels(paths: list[str]) -> str:
     """Root-file sentinels: a repackage layout whose filenames carry no family token.
 
-    The LTX-2 case (``video_vae_encoder.safetensors`` + friends) used to live
-    here as a private frozenset AND as a hand-synced copy in the te#70 trainer.
-    It is now one declaration both sides read.
+    The LTX-2 case (``video_vae_encoder.safetensors`` + friends) is ONE
+    declaration, read by both the worker and the trainer.
     """
     root = _root_files(paths)
     for decl in registered_layouts():

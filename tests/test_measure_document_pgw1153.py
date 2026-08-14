@@ -1,25 +1,18 @@
-"""pgw#1153 — the documented command must work on the artifacts that exist.
+"""The documented command must work on the artifacts that exist.
 
-pgw#1134 shipped ``python -m gen_worker.measure_child <request>.mint.json``,
-wrote that line into ltx-video-2.3's OQ-3 ``resolves_when`` (production endpoint
-source) and into this SDK's own ``MintBlocker`` docstring — and decoded the file
-as a runtime ``MintRequest``. Every ``aot/*.mint.json`` an endpoint repo commits
-is a flattened DECLARATION payload instead, so the documented invocation died on
-``ValidationError: Object missing required field 'function'`` in the first
-millisecond of a rented B200. A documented command that had never been executed
-end to end against a real committed file.
-
-This file is the fence that makes that impossible to reintroduce:
+``python -m gen_worker.measure_child <request>.mint.json`` is documented in
+endpoint sources and in ``MintBlocker``. Every ``aot/*.mint.json`` an endpoint
+repo commits is a flattened DECLARATION payload, NOT a runtime ``MintRequest``;
+decoding it as one raises ``ValidationError: Object missing required field
+'function'`` in the first millisecond of a rented card. The fence:
 
 1. **Every committed ``aot/*.mint.json`` in the fleet parses through the real
    entry** — the corpus under ``tests/fixtures/fleet_mint_requests/`` is a
    verbatim copy of all 24 of them, and each
    one is driven through :func:`measure_child.load_document`, which is the ONE
-   decoder ``main()`` uses. On the pre-fix tree the same corpus raises
-   ``ValidationError`` on file one. The corpus is a SNAPSHOT
-   (inference-endpoints ``dd41755``); the half that cannot go stale is that
-   repo's own ``scripts/lint_mint_requests.py``, which reads the real tree on
-   every PR — and which found sdxl naming a module ie#645 had deleted.
+   decoder ``main()`` uses. The corpus is a SNAPSHOT (inference-endpoints
+   ``dd41755``); the half that cannot go stale is that repo's own
+   ``scripts/lint_mint_requests.py``, which reads the real tree on every PR.
 2. **The derivation is exercised, not asserted** — the three answers a committed
    payload does not spell out (which function, which targets, which checkpoint)
    are taken from the declaration the payload NAMES, on a real endpoint with a

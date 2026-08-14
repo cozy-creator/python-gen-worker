@@ -291,7 +291,7 @@ def test_live_load_names_each_component_to_the_hub(tmp_path, monkeypatch):
     assert "GiB tree" in unet.detail and "test/tiny:latest" in unet.detail
 
     # Every phase that was entered was also closed, exactly once, and the
-    # spans are measured rather than interpolated into the text (th#1322).
+    # spans are measured rather than interpolated into the text.
     assert [ev.phase for ev in done] == entered
     assert all(ev.duration_ms >= 0 for ev in done)
     assert all("GiB" in ev.detail for ev in done)

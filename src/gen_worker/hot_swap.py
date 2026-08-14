@@ -1,8 +1,8 @@
-"""Eager-while-compiling with hot-swap (pgw#622).
+"""Eager-while-compiling with hot-swap.
 
 ``torch.compile(dynamic=False)`` recompiles at every novel input signature,
-which used to stall the first request at a new image shape behind a full
-Dynamo+Inductor compile (30-60s, CPU-dominant). Consumer guards now route a
+which would stall the first request at a new image shape behind a full
+Dynamo+Inductor compile (30-60s, CPU-dominant). Consumer guards route a
 novel signature to the EAGER original immediately and warm the compiled
 callable concurrently in one background thread with a zero-filled dummy
 batch of the same signature (same weights in VRAM); a successful warm
@@ -40,27 +40,24 @@ logger = logging.getLogger(__name__)
 EAGER = "eager"
 COMPILED = "compiled"
 
-# pgw#916: the GPU-turn admission types and the debounced republish are
-# arm-agnostic and now live in `shape_growth`, which BOTH arms reach. They are
-# re-exported here (same names, same objects) so the dynamo arm's call sites
-# and its `except TurnGateBusy` handlers are untouched — one implementation,
-# no second copy to drift.
+# The GPU-turn admission types and the debounced republish are arm-agnostic and
+# live in `shape_growth`, which BOTH arms reach; they are re-exported here (same
+# names, same objects) so there is one implementation and no copy to drift.
 
 
-# pgw#677: the background mint's seed forwards run inside this window. A
-# novel signature seen here must NEVER compile inline — the seed holds the
-# per-instance run gate, and an inline Dynamo+Inductor compile turns a
-# ~seconds eager forward into a minutes-long gate hold (the measured
-# 3.5-7 min warm units that starved every tenant request). Inside the
-# window, route() forces EAGER + background enqueue regardless of the
-# concurrent flag or VRAM headroom.
+# The background mint's seed forwards run inside this window. A novel signature
+# seen here must NEVER compile inline — the seed holds the per-instance run gate,
+# and an inline Dynamo+Inductor compile turns a ~seconds eager forward into a
+# 3.5-7 min gate hold that starves every tenant request. Inside the window,
+# route() forces EAGER + background enqueue regardless of the concurrent flag or
+# VRAM headroom.
 _MINT_SEED: ContextVar[bool] = ContextVar("gw_mint_seed_window", default=False)
 
 
 @contextlib.contextmanager
 def mint_seed_window() -> Iterator[None]:
     """Mark the current context (and its to_thread descendants) as a mint
-    seed forward (pgw#677)."""
+    seed forward."""
     token = _MINT_SEED.set(True)
     try:
         yield
@@ -81,11 +78,11 @@ _SIG_DEPTH = 4
 # routing for that router (back to today's behavior) instead of spamming
 # warm jobs forever.
 _MAX_SIGS = 256
-# pgw#680: how many background heals one signature gets after serve-window
-# guard misses. A signature that keeps missing AFTER its heals compiled is
-# diverging on something dynamo guards but our signature does not capture
-# per REQUEST (not per shape class) — healing cannot converge; route it
-# eager permanently instead of thrashing compile churn.
+# How many background heals one signature gets after serve-window guard misses.
+# A signature that keeps missing AFTER its heals compiled is diverging on
+# something dynamo guards but our signature does not capture per REQUEST (not per
+# shape class) — healing cannot converge, so route it eager permanently instead
+# of thrashing compile churn.
 _GUARD_MISS_HEAL_LIMIT = 2
 
 
@@ -218,7 +215,7 @@ class _WarmJob:
     # requesting thread (every heal would be dead, sigs would go volatile).
     # The warm compile imposes this value first, like grad/autocast.
     num_threads: Optional[int] = None
-    # pgw#677: the executor's background GPU turn — the compile executes
+    # The executor's background GPU turn — the compile executes
     # ONLY inside it (yields to tenant demand; mutually exclusive with
     # tenant forwards on the owning instance). None = ungated legacy.
     turn: Optional[Callable[[str], ContextManager[None]]] = None
@@ -242,7 +239,7 @@ class Router:
         self.warm: set = set()
         self.pending: set = set()
         self.bg_failed: set = set()
-        # pgw#680 guard-miss heal state. ``healing``: sigs with an in-flight
+        # Guard-miss heal state. ``healing``: sigs with an in-flight
         # serve-window heal — routed EAGER (even on non-concurrent routers)
         # until the warm thread marks them warm. ``volatile``: sigs past
         # _GUARD_MISS_HEAL_LIMIT — permanently eager-routed (per-request
@@ -252,16 +249,15 @@ class Router:
         self.healing: set = set()
         self.volatile: set = set()
         self.guard_miss_counts: dict = {}
-        # pgw#677 reopen: seeds that could NOT enqueue their background
-        # compile (vocabulary overflow / dummy failure). A nonzero count
-        # means the mint's capture would be incomplete — the driver aborts
-        # loudly instead of finalizing/publishing a partial cell.
+        # Seeds that could NOT enqueue their background compile (vocabulary
+        # overflow / dummy failure). A nonzero count means the mint's capture
+        # would be incomplete — the driver aborts loudly instead of
+        # finalizing/publishing a partial cell.
         self.seed_dropped = 0
-        # pgw#677: executor-provided background-turn factory. When set,
-        # every warm job for this router executes inside a turn, and
-        # route() stops degrading novel signatures to inline compiles on
-        # tight VRAM headroom (the warm thread ensures headroom inside its
-        # exclusive turn instead).
+        # Executor-provided background-turn factory. When set, every warm job for
+        # this router executes inside a turn, and route() stops degrading novel
+        # signatures to inline compiles on tight VRAM headroom (the warm thread
+        # ensures headroom inside its exclusive turn instead).
         self.turn_gate: Optional[Callable[[str], ContextManager[None]]] = None
 
     def set_turn_gate(
@@ -285,11 +281,10 @@ class Router:
             self.on_warmed = None
 
     def suspend(self) -> None:
-        """Stop concurrent routing WITHOUT discarding warm/pending state
-        (pgw#671): novel signatures go back to today's sequential
-        compile-then-serve until :meth:`enable` is called again. Used
-        around an adoption's proof warmup, whose sequential semantics an
-        eager route would break."""
+        """Stop concurrent routing WITHOUT discarding warm/pending state: novel
+        signatures go back to sequential compile-then-serve until :meth:`enable`
+        is called again. Used around an adoption's proof warmup, whose sequential
+        semantics an eager route would break."""
         with self.lock:
             self.concurrent = False
             self.on_warmed = None
@@ -299,25 +294,23 @@ class Router:
         args: tuple, kwargs: dict,
     ) -> Tuple[str, Optional[Tuple[Any, ...]]]:
         """(verdict, sig): COMPILED routes through the compiled callable
-        (sequential compile on a miss — today's behavior); EAGER serves the
-        original while the background warm compiles this signature."""
+        (sequential compile on a miss); EAGER serves the original while the
+        background warm compiles this signature."""
         sig = (label, signature(args, kwargs))
         seed = _MINT_SEED.get()
         with self.lock:
-            # pgw#680: guard-miss verdicts outrank the concurrent gate — a
-            # sig mid-heal (or proven per-request-volatile) serves eager on
-            # EVERY router, including the never-concurrent mandatory lanes,
-            # instead of re-raising the stance each request.
+            # Guard-miss verdicts outrank the concurrent gate — a sig mid-heal
+            # (or proven per-request-volatile) serves eager on EVERY router,
+            # including the never-concurrent mandatory lanes.
             if sig in self.volatile:
                 return EAGER, sig
             if sig in self.healing:
                 return EAGER, sig
             if self.closed:
                 return COMPILED, sig
-            # pgw#677: a mint seed forward holds the per-instance run gate —
-            # it must never pay an inline compile there. The seed's only job
-            # is vocabulary discovery: EAGER + background enqueue, even when
-            # concurrent routing is off for ordinary requests.
+            # A mint seed forward holds the per-instance run gate and must never
+            # pay an inline compile there. Its only job is vocabulary discovery:
+            # EAGER + background enqueue, even when concurrent routing is off.
             if not self.concurrent and not seed:
                 return COMPILED, sig
             if sig in self.warm:
@@ -332,9 +325,9 @@ class Router:
                     "disabling concurrent routing for this pipeline",
                     _MAX_SIGS)
                 self.concurrent = False
-                # pgw#760: a permanent serving decision (every future novel
-                # signature on this pipeline now pays the inline compile)
-                # must not live only in pod logs.
+                # A permanent serving decision (every future novel signature on
+                # this pipeline now pays the inline compile) must not live only
+                # in pod logs.
                 activity_mod.emit_event(
                     activity_mod.KIND_SERVE_DEGRADE,
                     f"target={label} warm={len(self.warm)} "
@@ -344,17 +337,17 @@ class Router:
                     "is leaking into signatures)",
                     phase="sig_vocab_exceeded",
                 )
-                # pgw#677 reopen: NEVER inline-compile inside a seed — the
-                # seed holds the run gate. The sig stays eager (unwarmed);
-                # the mint driver's convergence loop fails LOUDLY instead.
+                # NEVER inline-compile inside a seed — it holds the run gate. The
+                # sig stays eager (unwarmed) and the mint driver's convergence
+                # loop fails LOUDLY instead.
                 if seed:
                     self.seed_dropped += 1
                     return EAGER, sig
                 return COMPILED, sig
             device = _first_cuda_device(args, kwargs)
-            # pgw#677: with a turn gate the warm thread owns the device while
-            # it compiles (no concurrent transient to protect against) and
-            # ensures headroom itself; only ungated legacy routers keep the
+            # With a turn gate the warm thread owns the device while it compiles
+            # (no concurrent transient to protect against) and ensures headroom
+            # itself; only ungated legacy routers keep the
             # degrade-to-inline-compile fallback — and never for seeds.
             if (self.turn_gate is None and not seed
                     and not _headroom_ok(device)):
@@ -376,9 +369,9 @@ class Router:
             with self.lock:
                 self.pending.discard(sig)
             if seed:
-                # pgw#677 reopen: a seed must never pay the inline compile,
-                # even when its dummy cannot be built — the signature stays
-                # eager and the mint's convergence loop reports it loudly.
+                # A seed must never pay the inline compile, even when its dummy
+                # cannot be built — the signature stays eager and the mint's
+                # convergence loop reports it loudly.
                 with self.lock:
                     self.seed_dropped += 1
                 logger.warning(
@@ -415,14 +408,14 @@ class Router:
         self, sig: Tuple[Any, ...], label: str,
         compiled: Callable[..., Any], args: tuple, kwargs: dict,
     ) -> str:
-        """pgw#680 background heal: schedule the recompile for the exact
-        input class that just guard-missed at serve time.
+        """Background heal: schedule the recompile for the exact input class
+        that just guard-missed at serve time.
 
-        Optimistic rules of the existing warm driver apply unchanged: the
-        one shape-warm thread compiles at nice +10 on its own CUDA stream,
-        no request ever waits, and the job carries a zero-filled dummy of
-        the failing request's own args (never tenant content) so the heal
-        targets the exact class. Dedup by signature; sigs past
+        The warm driver's rules apply unchanged: the one shape-warm thread
+        compiles at nice +10 on its own CUDA stream, no request ever waits, and
+        the job carries a zero-filled dummy of the failing request's own args
+        (never tenant content) so the heal targets the exact class. Dedup by
+        signature; sigs past
         ``_GUARD_MISS_HEAL_LIMIT`` become permanently eager (``volatile``).
         Returns the verdict: healing | volatile | closed | queue_full |
         no_dummy."""
@@ -547,8 +540,8 @@ def _worker_loop() -> None:
             _run_warm(job)
         except Exception as exc:
             logger.warning("hot-swap: warm worker item crashed", exc_info=True)
-            # pgw#760: background-thread exception outside _run_warm_compile's
-            # own catch — without this the crash has no channel at all.
+            # A background-thread exception outside _run_warm_compile's own
+            # catch; without this the crash has no channel at all.
             activity_mod.emit_event(
                 activity_mod.KIND_SERVE_DEGRADE,
                 f"target={job.label}: warm worker item crashed: "
@@ -561,9 +554,9 @@ def _worker_loop() -> None:
 
 def _ensure_headroom(device: Optional[int]) -> None:
     """Best-effort VRAM headroom for the warm forward: inside an exclusive
-    background turn the only reclaimable pressure is allocator cache
-    (pgw#677 — this replaces route()'s degrade-to-inline-compile). A real
-    OOM is still caught per-signature by the caller."""
+    background turn the only reclaimable pressure is allocator cache. This
+    replaces route()'s degrade-to-inline-compile; a real OOM is still caught
+    per-signature by the caller."""
     if device is None:
         return
     try:
@@ -582,12 +575,11 @@ def _run_warm(job: _WarmJob) -> None:
             router.pending.discard(job.sig)
             return
     if job.turn is not None:
-        # pgw#677: the compile + dummy forward execute the SAME modules the
-        # serving path runs (and inductor benchmarks on the same device) —
-        # ungated, that raced live tenant forwards: measured 8.6x tenant
-        # latency during mints and the pgw#676 sm_86 SIGSEGV
-        # (_forward_with_branch concurrent with compile_wrapper). The turn
-        # yields to tenant demand and excludes tenant forwards for the
+        # The compile + dummy forward execute the SAME modules the serving path
+        # runs (and inductor benchmarks on the same device). Ungated, that races
+        # live tenant forwards: 8.6x tenant latency during mints, and an sm_86
+        # SIGSEGV from _forward_with_branch concurrent with compile_wrapper. The
+        # turn yields to tenant demand and excludes tenant forwards for the
         # bounded duration of ONE compile.
         try:
             with job.turn("compile"):
@@ -621,12 +613,10 @@ def _run_warm(job: _WarmJob) -> None:
 
 
 def _run_warm_gated(job: _WarmJob) -> None:
-    # pgw#714: name the background compile before it touches the GPU. A
-    # signal death mid-compile then attributes to THIS compile marker, not
-    # to whatever tenant request was in flight — the misattribution that
-    # refused fn=generate and condemned (release, SKU) pairs for a software
-    # race (th#1226/th#1236).
-
+    # Name the background compile before it touches the GPU, so a signal death
+    # mid-compile attributes to THIS compile marker rather than to whatever
+    # tenant request was in flight (which condemns (release, SKU) pairs for a
+    # software race).
     token = postmortem.note_inflight(
         postmortem.COMPILE_KIND, postmortem.compile_marker(job.label))
     try:
@@ -645,8 +635,8 @@ def _run_warm_compile(job: _WarmJob) -> None:
             # Align this thread's intra-op count with the requesting
             # thread's BEFORE compiling: the entry's GLOBAL_STATE guard
             # snapshots the compiling thread's value, and a mismatch makes
-            # the entry unservable from every serving thread (the CI-only
-            # heal-never-converges failure of test_guard_miss_pgw680).
+            # the entry unservable from every serving thread (heals then never
+            # converge).
             if (job.num_threads is not None
                     and job.num_threads != torch.get_num_threads()):
                 torch.set_num_threads(job.num_threads)
@@ -671,9 +661,9 @@ def _run_warm_compile(job: _WarmJob) -> None:
     except BaseException as exc:  # noqa: BLE001 — contained per-signature
         with router.lock:
             router.pending.discard(job.sig)
-            # pgw#680: a failed guard-miss heal keeps the signature eager
-            # via bg_failed (concurrent routers) — the healing veto must
-            # not outlive its job on the non-concurrent ones.
+            # A failed guard-miss heal keeps the signature eager via bg_failed
+            # (concurrent routers); the healing veto must not outlive its job on
+            # the non-concurrent ones.
             router.healing.discard(job.sig)
             router.bg_failed.add(job.sig)
         try:
@@ -687,19 +677,18 @@ def _run_warm_compile(job: _WarmJob) -> None:
             "hot-swap: background compile for %s failed (%s: %s); that "
             "signature stays eager for this process",
             job.label, type(exc).__name__, exc)
-        # pgw#760: the guard_miss event promised heal=healing; this is the
-        # heal's (or first warm's) terminal outcome — the signature serves
-        # eager for the life of the process. Name it on the wire.
+        # The guard_miss event promised heal=healing; this is the heal's (or
+        # first warm's) terminal outcome — the signature serves eager for the
+        # life of the process. Name it on the wire.
         activity_mod.emit_event(
             activity_mod.KIND_SERVE_DEGRADE,
             f"target={job.label} sig={repr(job.sig)[:400]}: "
             f"{type(exc).__name__}: {exc}",
             phase="warm_compile_failed",
         )
-        # pgw#916: and it is a permanent COVERAGE hole, which is the
-        # arm-agnostic fact — the dynamo arm books it in the same ledger the
-        # AOT arm books an uncovered declared class in, so the hub counts one
-        # population instead of two half-populations.
+        # It is also a permanent COVERAGE hole: the dynamo arm books it in the
+        # same ledger the AOT arm books an uncovered declared class in, so the
+        # hub counts one population instead of two half-populations.
         shape_growth.report(shape_growth.ShapeGap(
             arm=shape_growth.ARM_DYNAMO,
             family="",
@@ -720,8 +709,8 @@ def _run_warm_compile(job: _WarmJob) -> None:
             callback()
         except Exception as exc:
             logger.warning("hot-swap: on_warmed callback failed", exc_info=True)
-            # pgw#760: on_warmed republishes the grown cell — a swallowed
-            # failure means the fleet re-compiles this shape forever.
+            # on_warmed republishes the grown cell — a swallowed failure means
+            # the fleet re-compiles this shape forever.
             activity_mod.emit_event(
                 activity_mod.KIND_SERVE_DEGRADE,
                 f"target={job.label}: on_warmed (cell republish) callback "

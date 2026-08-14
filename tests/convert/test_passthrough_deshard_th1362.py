@@ -1,21 +1,12 @@
-"""th#1362: a produced flavor's PASSTHROUGH components are one file too.
+"""A produced flavor's PASSTHROUGH components are one file too.
 
-The gap this closes, found live on te#137: `build_svdq_flavor_tree` marries our
-4-bit denoiser to the base checkpoint's other components by hardlinking them
-through `copy_non_weight_files`. qwen-image's text_encoder was mirrored before
-th#1362 item 2 landed, so it is still a 9-member shard set — and it rode
-straight into the produced tree, where `publish_flavors`' producer invariant
-refused it:
-
-    ConversionImplementationError: sharded_producer_output:
-    publish_flavors[tensorhub/qwen-image] emitted a shard set (10 file(s), e.g.
-    text_encoder/model-00001-of-00009.safetensors ...)
-
-The guard was RIGHT — a flavor is our artifact whole, not just the component we
-computed. What was missing is the normalization: item 2 wired de-shard into
-clone.py's mirror arms only, so the married-tree producers passed legacy shards
-through untouched. It now happens at the door every passthrough weight enters a
-produced tree.
+`build_svdq_flavor_tree` marries our 4-bit denoiser to the base checkpoint's
+other components by hardlinking them through `copy_non_weight_files`. A base
+component that is still a legacy shard set then rides into the produced tree and
+`publish_flavors`' producer invariant refuses it (`sharded_producer_output`).
+The guard is RIGHT — a flavor is our artifact whole, not just the component we
+computed — so de-sharding happens at the door every passthrough weight enters a
+produced tree, not in the mirror arms alone.
 
 Real trees, real safetensors, real `publish_flavors` over HTTP to the fake hub —
 the assertion is on the FILE LIST THAT GOES ON THE WIRE, not on an internal call.

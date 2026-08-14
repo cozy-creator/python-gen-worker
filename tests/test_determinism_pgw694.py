@@ -165,7 +165,7 @@ class _Pipe:
 def test_a_dtype_flip_in_one_submodule_moves_the_graph_signature() -> None:
     """The pgw#683 class: one submodule left in Half inside a bf16 tree.
 
-    pgw#1181: `composition_fingerprint` and `contract_drift` were the
+    `composition_fingerprint` and `contract_drift` were the
     `torch-inductor-cache` cell's own adoption fence and are deleted with the
     format. The FACT they rested on is `execution_contract`, which is alive and
     is folded into `ck1`'s contract axis — so on the surviving lane the drifted
@@ -191,7 +191,7 @@ def test_a_dtype_flip_in_one_submodule_moves_the_graph_signature() -> None:
 
 
 def test_hook_presence_is_a_composition_fact() -> None:
-    """fp8 layerwise-cast is hook-driven (ie#381): a hooked module tree is
+    """fp8 layerwise-cast is hook-driven: a hooked module tree is
     a DIFFERENT composition than a bare one. Red pre-fix: identical
     signatures with and without hooks."""
     bare, hooked = _Pipe(), _Pipe()
@@ -202,7 +202,7 @@ def test_hook_presence_is_a_composition_fact() -> None:
         sig_bare, _ = cc.execution_contract(bare, cfg)
         sig_hooked, _ = cc.execution_contract(hooked, cfg)
         assert sig_bare != sig_hooked
-        # pgw#1181: the per-module `composition_fingerprint` rows that used to
+        # The per-module `composition_fingerprint` rows that used to
         # localise this to `transformer:lin1` were the deleted format's
         # adoption fence. The hook-presence FACT they digested is the same one
         # `execution_contract` hashes (`_module_hooks`), which is why the
@@ -358,7 +358,7 @@ def test_the_seal_carries_no_operator_settable_recall_salt(
 
     A recall is a recorded operator intent with an actor and a reason; an env
     var on a pod is neither, which is why the config-reads allowlist ruled the
-    read a VIOLATION and named the hub's ``cell_revocations`` (th#1499) as the
+    read a VIOLATION and named the hub's ``cell_revocations`` as the
     real home. The seal is now unmovable from the process environment: the
     ONLY way to disown a cell generation is a ``SEAL_VERSION`` bump in this
     file, which is a diff someone signs.

@@ -3,8 +3,8 @@
 The hub decides how many GPUs a pod gets, how they are packed into execution
 groups, and which parallelism (if any) the platform installs inside a group.
 The worker never invents any of it. The whole contract is
-``WORKER_EXECUTION_TOPOLOGY`` (th#1285, tensorhub ``internal/orchestrator/
-topology/topology.go``)::
+``WORKER_EXECUTION_TOPOLOGY`` (tensorhub ``internal/orchestrator/topology/
+topology.go``)::
 
     WORKER_EXECUTION_TOPOLOGY={"gpu_count":4,"gpus_per_execution_group":2,
                                "execution_groups":2,"parallel":"sequence"}
@@ -20,63 +20,42 @@ gpus_per_execution_group)`` alone::
     G = gpu_count / D                   # execution groups == serving slots
     group g owns devices [g*D, (g+1)*D)
 
-``gpu_count = execution_groups × gpus_per_execution_group`` is not bookkeeping;
-it **encodes a partition invariant**. An execution group exclusively owns its
-devices — no card is in two groups, and no card is idle. Should GPU sharing
-between groups ever be introduced, that arithmetic stops holding and every
-consumer that derives G from it refuses loudly (``topology_degree_not_divisor``,
-``topology_execution_groups_disagree``) instead of quietly serving a packing
-nobody chose. Keep it that way: derive, never store a fourth independent fact.
+``gpu_count = execution_groups × gpus_per_execution_group`` encodes a
+**partition invariant**: an execution group exclusively owns its devices — no
+card is in two groups, and no card is idle. Every consumer that derives G from
+it refuses loudly (``topology_degree_not_divisor``,
+``topology_execution_groups_disagree``) rather than quietly serve a packing
+nobody chose. Derive, never store a fourth independent fact.
 
-``ResolvedCompute.gpu_index`` is unchanged on the job wire and names the
-**rank-0 device of the group** (0, D, 2D, ...), so at D == 1 it is byte-identical
-to what has always shipped.
+``ResolvedCompute.gpu_index`` names the **rank-0 device of the group**
+(0, D, 2D, ...), so at D == 1 it is byte-identical to the single-GPU wire.
 
-An absent ENV VAR is a legal state, never an error: every CPU pod and every pod
-created before the field existed has no topology and keeps the historical
-single slot. An absent FIELD inside a *present* object is the opposite — a
-typed refusal (th#1385), because both producers always write ``gpu_count`` and
-the degree, so an object missing one did not come from a producer this contract
-knows, and defaulting it reads as ONE SLOT. Everything *present but not fully
-recognised* is likewise a typed refusal — never a silent fallback. That covers
-unknown keys (``topology_unknown_field``): the field set is CLOSED, so growing
-the contract is itself a two-release transition, exactly like the th#1375
-rename below. The alternative — ignore what you do not understand — is how a
-hub that believes it bought degree 2 gets served degree 1 in silence.
+An absent ENV VAR is a legal state, never an error: a CPU pod has no topology
+and keeps the single slot. An absent FIELD inside a *present* object is the
+opposite — a typed refusal, because both producers always write ``gpu_count``
+and the degree, and defaulting it reads as ONE SLOT. Everything *present but
+not fully recognised* is likewise a typed refusal, unknown keys included
+(``topology_unknown_field``): the field set is CLOSED, so growing the contract
+is itself a two-release transition. Ignoring what you do not understand is how
+a hub that believes it bought degree 2 gets served degree 1 in silence.
 
-An "execution group" is NOT a PyTorch ``ProcessGroup``
----------------------------------------------------
-They sound identical and appear within a few lines of each other in the process
--split code, and they are different things. An **execution group** is the
-*serving unit*: the set of cards that cooperate on one request, and the thing
-whose count is this worker's slot count. A ``torch.distributed.ProcessGroup``
-is the *communication handle* those ranks collect over. Each execution group
-owns one (non-default, over its own store), so the relationship is
-one-ProcessGroup-per-execution-group — not a synonym.
+An "execution group" is NOT a PyTorch ``ProcessGroup``. An **execution group**
+is the *serving unit*: the set of cards that cooperate on one request, and the
+thing whose count is this worker's slot count. A
+``torch.distributed.ProcessGroup`` is the *communication handle* those ranks
+collect over; each execution group owns exactly one (non-default, over its own
+store).
 
-Translating from another stack
-------------------------------
-The same two numbers exist everywhere; only the names differ. Ours are spelled
-out because a bare ``groups`` collides with process groups, parameter groups
-and co-location groups, all of which live in these files:
-
-===========================  ==================================================
-ours                         theirs
-===========================  ==================================================
-``gpus_per_execution_group``  ``tensor_parallel_size`` (vLLM, SGLang);
-                              ``context_parallel_size`` / ``cp_size``
-                              (Megatron); ``sequence_parallel_size``
-                              (DeepSpeed-Ulysses)
-``execution_groups``          ``data_parallel_size``; ``num_replicas``
-                              (Ray Serve); instance count (Triton)
-===========================  ==================================================
-
-Note what those names do that ours does not: each of them fuses the *width* of
-a group with the *technique* used to fill it, so a stack that wants Ulysses
-instead of tensor parallelism needs a different field. We keep ``parallel`` as
-a separate field precisely so the width is named independently of the mechanism
-— ``gpus_per_execution_group=2`` means two cards serve one request whether the
+Elsewhere ``gpus_per_execution_group`` is spelled ``tensor_parallel_size``
+(vLLM, SGLang), ``context_parallel_size`` (Megatron) or
+``sequence_parallel_size`` (DeepSpeed-Ulysses), and ``execution_groups`` is
+``data_parallel_size`` / ``num_replicas``. Each of those fuses the *width* of a
+group with the *technique* used to fill it; ``parallel`` stays a separate field
+so the width is named independently of the mechanism —
+``gpus_per_execution_group=2`` means two cards serve one request whether the
 sharding is ``sequence``, ``cfg``, or the model's own ``internal`` arrangement.
+A bare ``groups`` is avoided: it collides with process groups, parameter groups
+and co-location groups, all of which live in these files.
 """
 
 from __future__ import annotations
@@ -147,18 +126,15 @@ def group_rank0_device(ordinal: Optional[int] = None) -> int:
 def pin_cuda_device_for_group() -> None:
     """Set THIS THREAD's current CUDA device to the current group's rank-0 card.
 
-    `torch.cuda.set_device` is thread-local and the load path never called it:
-    handler threads did (from ``ResolvedCompute.gpu_index``), but the SETUP and
-    materialization threads did not, so every group's weights were placed by a
-    plain ``.to("cuda")`` onto whatever card that pool thread happened to point
-    at — card 0. Measured live on a 4xL40S pod: `current_device` was correctly
-    cuda:0..3 per group while the WEIGHTS sat on cuda:0,0,0,3 (pgw#748 DP
-    width-4 acceptance). Cheap and idempotent; a no-op without CUDA and for
-    the group whose rank-0 card is 0.
+    `torch.cuda.set_device` is thread-local: handler threads set it from
+    ``ResolvedCompute.gpu_index``, but the SETUP and materialization threads must
+    too, or a plain ``.to("cuda")`` places every group's weights on whatever card
+    that pool thread happens to point at — card 0. Cheap and idempotent; a no-op
+    without CUDA and for the group whose rank-0 card is 0.
 
     The card comes from the delivered topology, never from the ordinal: on a
     ``2x2`` pod group 1 owns cards 2-3, so pinning to device 1 would place
-    group 1's weights on group 0's follower card (pgw#773 residual).
+    group 1's weights on group 0's follower card.
     """
     device = group_rank0_device()
     if device <= 0:
@@ -199,35 +175,14 @@ KEY_GPUS_PER_GROUP = "gpus_per_execution_group"
 KEY_EXECUTION_GROUPS = "execution_groups"
 KEY_PARALLEL = "parallel"
 
-# th#1375's pre-rename spelling. NO LONGER EMITTED (pgw#950) — ``as_dict``
-# writes the canonical names only, which every hub already reads: tensorhub's
-# ``reconcileAlias`` treats an absent legacy key as "not written".
-#
-# Still ACCEPTED, and that is the entire remaining transition. It cannot be
-# deleted from this repo alone: the key set below is CLOSED, so an unrecognised
-# key is a hard ``topology_unknown_field`` refusal, and tensorhub's
-# ``internal/orchestrator/topology/topology.go`` STILL EMITS both spellings
-# (``wireValue.LegacyGroupDegree``/``LegacyGroups``). Dropping these two names
-# here before that changes fails EVERY topology decode on EVERY pod.
-#
-# th#1376 is the deletion, and TENSORHUB GOES FIRST: drop the legacy fields
-# from ``wireValue``, collapse it back into ``ExecutionTopology``, delete
-# ``reconcileAlias`` and the ``LegacyKey*`` constants. Once that ships, delete
-# these two names, ``_aliased``, and the two ``_KNOWN_KEYS`` entries — after
-# which they fall through to ``topology_unknown_field`` by construction.
-LEGACY_KEY_GPUS_PER_GROUP = "group_degree"
-LEGACY_KEY_EXECUTION_GROUPS = "groups"
-
 _KNOWN_KEYS = frozenset({
     KEY_GPU_COUNT, KEY_GPUS_PER_GROUP, KEY_EXECUTION_GROUPS, KEY_PARALLEL,
-    LEGACY_KEY_GPUS_PER_GROUP, LEGACY_KEY_EXECUTION_GROUPS,
 })
 
-# th#1385/pgw#870: a CEILING, not just a floor, and the same number on both
-# sides (tensorhub ``topology.MaxGPUCount``). Without one the decoder accepts
-# any wire integer and ``all_groups()`` / ``group()`` over it is unbounded work
-# on a number no producer could have meant. The largest pod the fleet rents is
-# 8 cards.
+# A CEILING, not just a floor, and the same number on both sides (tensorhub
+# ``topology.MaxGPUCount``). Without one the decoder accepts any wire integer and
+# ``all_groups()`` / ``group()`` over it is unbounded work on a number no
+# producer could have meant. The largest pod the fleet rents is 8 cards.
 MAX_GPU_COUNT = 1024
 
 # The wire integers are int64 on the hub side, so a value outside that range is
@@ -355,9 +310,8 @@ class ExecutionTopology:
         """``group_ordinal`` without the floor: a typed refusal instead.
 
         The floor exists so a single-group pod cannot index off the end. On a
-        wide pod flooring is the silent bug (pgw#779): every dispatch the hub
-        got wrong lands on group 0, which is also the group that is always
-        busiest.
+        wide pod flooring is the silent bug: every dispatch the hub got wrong
+        lands on group 0, which is also the busiest group.
         """
         idx = int(gpu_index)
         if idx < 0 or idx >= self.gpu_count or idx % self.gpus_per_execution_group != 0:
@@ -391,15 +345,14 @@ class ExecutionTopology:
 
     def demoted(self) -> "ExecutionTopology":
         """The hub's ``topology_demoted_fabric_not_nvlink`` re-pack, computed
-        locally: G = gpu_count, D = 1. Both sides read the same measurement —
-        but "agree by construction" holds only while both apply the same
-        PREDICATE over it. pgw#818 is what happened when the hub grew a
-        bandwidth floor and this side kept class-only: in the disagreement
-        band a 2x2 pod refused half of every dispatch forever. The predicate
-        is now shared (``host_canary.sp_admits`` == hub ``topology.SPAdmits``,
-        one constant each side, same number); there is deliberately still no
-        HelloAck demote field — two independent gates over one measurement is
-        the design, and the constants must move together."""
+        locally: G = gpu_count, D = 1. Both sides read the same measurement, but
+        "agree by construction" holds only while both apply the same PREDICATE
+        over it — a hub bandwidth floor against a class-only worker check leaves
+        a disagreement band where a 2x2 pod refuses half of every dispatch
+        forever. The predicate is shared (``host_canary.sp_admits`` == hub
+        ``topology.SPAdmits``, one constant each side, same number); there is
+        deliberately no HelloAck demote field — two independent gates over one
+        measurement is the design, and the constants must move together."""
         return ExecutionTopology(gpu_count=self.gpu_count, gpus_per_execution_group=1)
 
     def as_dict(self) -> dict:
@@ -461,13 +414,12 @@ class ExecutionTopology:
             written"; anything that is not a JSON integer is a TYPED decode
             refusal.
 
-            pgw#870: this used to accept any ``(int, float)`` and then compare
-            ``int(value) != value``, which let an integral float through
-            (``2.0`` -> 2, where the hub refuses) and let ``NaN``/``Infinity``
-            — which ``json.loads`` accepts as non-standard literals — reach
-            ``int()`` and escape as an UNTYPED ``ValueError``/``OverflowError``
-            past every caller that catches ``TopologyError``. A float is not an
-            integer; say so instead of coercing.
+            Deliberately not ``(int, float)`` plus ``int(value) != value``: that
+            admits an integral float (``2.0`` -> 2, where the hub refuses) and
+            lets ``NaN``/``Infinity`` — which ``json.loads`` accepts as
+            non-standard literals — reach ``int()`` and escape as an UNTYPED
+            ``ValueError``/``OverflowError`` past every caller that catches
+            ``TopologyError``. A float is not an integer; say so.
             """
             if key not in obj or obj[key] is None:
                 return None
@@ -482,39 +434,10 @@ class ExecutionTopology:
                 )
             return value
 
-        def _aliased(key: str, legacy_key: str) -> Optional[int]:
-            """One field under either spelling (th#1375/#1376).
-
-            Both present must AGREE. During the transition every hub emits
-            both, so a disagreement is not a stale producer to be tolerated —
-            it is a producer whose two spellings describe two different
-            packings, and picking either one is picking silently.
-            """
-            new_value = _opt(key)
-            legacy_value = _opt(legacy_key)
-            if legacy_value is None:
-                return new_value
-            if new_value is not None and new_value != legacy_value:
-                raise TopologyError(
-                    "topology_alias_disagree",
-                    f"{key}={new_value} but {legacy_key}={legacy_value} — one "
-                    "producer wrote both spellings of the same field with "
-                    "different values; refusing rather than choosing",
-                )
-            if new_value is None:
-                logger.warning(
-                    "topology: %r is the pre-th#1375 spelling of %r and is "
-                    "accepted for this release only (th#1376 removes it)",
-                    legacy_key, key,
-                )
-                return legacy_value
-            return new_value
-
-        # pgw#870: TYPE-CHECK BEFORE DEFAULTING. This was
-        # ``obj.get(KEY_PARALLEL) or ""``, the `or 1` launder in a second
-        # field: every falsy non-string (``false``, ``0``, ``[]``, ``{}``)
-        # became PARALLEL_NONE before the isinstance guard could see it, so
-        # the guard was unreachable for exactly the values it was written for.
+        # TYPE-CHECK BEFORE DEFAULTING. `obj.get(KEY_PARALLEL) or ""` would turn
+        # every falsy non-string (``false``, ``0``, ``[]``, ``{}``) into
+        # PARALLEL_NONE before the isinstance guard could see it, making the
+        # guard unreachable for exactly the values it exists for.
         parallel_raw = obj.get(KEY_PARALLEL)
         if parallel_raw is None:
             parallel = ""
@@ -524,25 +447,23 @@ class ExecutionTopology:
             )
         else:
             parallel = parallel_raw
-        # th#1385: an ABSENT field is a refusal, not a default. The hub and
-        # this worker both always emit gpu_count and the degree (under one
-        # spelling or the other), so an object missing either did not come
-        # from a producer this contract knows — and a default reads it as
-        # ONE SLOT, which is the exact silence th#1375 exists to prevent.
-        # (An absent ENV VAR is still legal and still means one slot; that is
-        # `from_env`, not this.)
+        # An ABSENT field is a refusal, not a default. Both producers always emit
+        # gpu_count and the degree, so an object missing either did not come from
+        # a producer this contract knows — and a default reads it as ONE SLOT,
+        # which is exactly the silence to prevent. (An absent ENV VAR is still
+        # legal and still means one slot; that is `from_env`, not this.)
         gpu_count = _opt(KEY_GPU_COUNT)
         if gpu_count is None:
             raise TopologyError(
                 "topology_gpu_count_invalid",
                 f"{KEY_GPU_COUNT} is absent; a present topology must declare it",
             )
-        degree = _aliased(KEY_GPUS_PER_GROUP, LEGACY_KEY_GPUS_PER_GROUP)
+        degree = _opt(KEY_GPUS_PER_GROUP)
         if degree is None:
             raise TopologyError(
                 "topology_degree_invalid",
-                f"{KEY_GPUS_PER_GROUP} is absent under both spellings; a present "
-                "topology must declare it",
+                f"{KEY_GPUS_PER_GROUP} is absent; a present topology must "
+                "declare it",
             )
         topo = cls(
             gpu_count=gpu_count,
@@ -553,7 +474,7 @@ class ExecutionTopology:
         # it, so a disagreement means the value did not come from the hub.
         # Refuse it rather than pick a winner — a wrong slot count is a wrong
         # fleet capacity, and it is silent.
-        declared = _aliased(KEY_EXECUTION_GROUPS, LEGACY_KEY_EXECUTION_GROUPS)
+        declared = _opt(KEY_EXECUTION_GROUPS)
         if declared is not None and declared != topo.execution_groups:
             raise TopologyError(
                 "topology_execution_groups_disagree",
@@ -589,13 +510,13 @@ def delivered_topology(
     """The topology this worker will actually execute.
 
     Applies the same fabric gate the hub applies at Hello — the SAME two-term
-    predicate (pgw#818): a group the *platform* shards is sold on a proven
+    predicate: a group the *platform* shards is sold on a proven
     interconnect, so unless this pod's own boot canary measures ``nvlink``
     AND ``peer_gbps >= SP_MIN_PEER_GBPS`` the group is demoted to ``G×1``
     rather than served at a promise the hardware cannot keep. Class alone is
-    not enough — a degraded host prints ``nvlink`` at 30 GB/s, and in that
-    band a hub that demoted while the worker did not left half of every 2x2
-    pod's dispatches in a permanent retry loop. ``internal`` groups are never
+    not enough — a degraded host prints ``nvlink`` at 30 GB/s, and in that band a
+    hub that demotes while the worker does not leaves half of every 2x2 pod's
+    dispatches in a permanent retry loop. ``internal`` groups are never
     bandwidth-demoted — the devices are the model's, not the platform's.
 
     One refusal outranks everything on ANY multi-GPU topology: a WEDGED
@@ -659,15 +580,13 @@ def delivered_topology(
 def refuse_unless_groups_can_coexist(topo: ExecutionTopology) -> None:
     """Refuse a multi-device group the worker cannot actually execute, by name.
 
-    ``G>1 ∧ D>1`` is SERVED now (pgw#773 residual, lifted). Both original
-    reasons are closed: each group owns a non-default process group over its
+    ``G>1 ∧ D>1`` is SERVED: each group owns a non-default process group over its
     own store (so two groups cannot corrupt each other's collectives), and
-    placement no longer reads the group ordinal as a device index — every card
-    is derived from this topology, so group 1 of a `2x2` pod places on its own
-    cards 2-3. Live-accepted on 4xH100-80 SXM NVLink: degree 2, degree 4 and
-    two concurrent degree-2 groups, each bit-identical to degree 1.
+    placement never reads the group ordinal as a device index — every card is
+    derived from this topology, so group 1 of a `2x2` pod places on its own cards
+    2-3.
 
-    What is still refused is a degree>1 group whose sharding NOTHING in this
+    What is refused is a degree>1 group whose sharding NOTHING in this
     worker installs — at boot that is ``cfg`` (the other platform-sharded
     mechanism the wire can carry). It would hold D cards for one slot and then
     serve it unsharded: a fraction of the tier that was sold, silently. A boot

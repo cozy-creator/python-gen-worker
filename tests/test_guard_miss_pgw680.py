@@ -1,11 +1,9 @@
-"""pgw#680: guard-miss doctrine — fail-on-recompile at serve time.
+"""Guard-miss doctrine — fail-on-recompile at serve time.
 
-The 187s incident class (ie#546 retag cycle): a tenant request whose inputs
-missed every cached guard set paid dynamo's INLINE recompile inside the
-request, and single-flight stalled everything queued behind it. Paul's
-design, verbatim: "instead of compiling [inline], it should throw an error,
-which we catch, then run in eager mode + compile [in background] and note
-the mismatch."
+A tenant request whose inputs miss every cached guard set must not pay dynamo's
+INLINE recompile inside the request: single-flight then stalls everything queued
+behind it. Instead of compiling inline, throw, catch, serve eager, compile in
+the background, and note the mismatch.
 
 Doctrine under test:
   1. STANCE — tenant requests on compiled lanes run under
@@ -30,11 +28,10 @@ the REAL background warm thread. The executor tape drives the REAL
 ``handle_run_job`` tenant path end-to-end with the torch.compile leaf
 simulated at the same boundary as tests/test_serve_finalize_pgw672.py.
 
-RED (verified before the fix landed): with the serve window neutralized —
-exactly the pre-pgw#680 tree's behavior — the same guard-missing input
-recompiles INLINE inside the request, silently
-(test_outside_serve_window_recompiles_inline is that behavior, kept as the
-permanent contrast tape for the warm/mint windows).
+With the serve window neutralized the same guard-missing input recompiles
+INLINE inside the request, silently —
+``test_outside_serve_window_recompiles_inline`` is that behavior, kept as the
+permanent contrast tape for the warm/mint windows.
 """
 
 from __future__ import annotations
@@ -484,7 +481,7 @@ def _spec(name: str, cls: type) -> EndpointSpec:
 class _Rig:
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                  specs: List[EndpointSpec]) -> None:
-        # pgw#1010: no export declaration is registered, so the miss takes the
+        # No export declaration is registered, so the miss takes the
         # JIT INTAKE arm — the in-process compile the guard-miss doctrine
         # (mint window OFF while compiling, serve window ON while serving) is
         # about. It mints and publishes nothing, which is orthogonal to this
@@ -513,7 +510,7 @@ class _Rig:
 
         def _load_slot(*args: Any, **kwargs: Any) -> Any:
             pipe = _Pipe()
-            # pgw#1010: a PLAIN lane. A mandatory (w8a8/w4a4) lane serves only
+            # a PLAIN lane. A mandatory (w8a8/w4a4) lane serves only
             # from a cell — the dispatch fence pins every request to an active
             # compile incarnation — so a family with no export declaration
             # fails closed there instead of arming JIT intake. The doctrine
@@ -543,7 +540,7 @@ class _Rig:
         monkeypatch.setattr(
             cc, "compile_wall_seconds",
             lambda: self.compile_wall.pop(0) if self.compile_wall else 12.5)
-        # pgw#681 coexistence: when the guard-closure mint gate is present,
+        # When the guard-closure mint gate is present,
         # neutralize it — it audits REAL dynamo graphs, which this rig's
         # simulated torch boundary never creates. Orthogonal to the
         # guard-miss doctrine under test here.
@@ -619,7 +616,7 @@ def test_tenant_guard_miss_end_to_end(
     rig = _Rig(tmp_path, monkeypatch, [spec])
 
     rig.boot(spec)
-    # pgw#1010: JIT intake serves COMPILED CODE and names no artifact, so the
+    # JIT intake serves COMPILED CODE and names no artifact, so the
     # platform tier — which means "serving from a cell" — is eager, and the
     # target advertises active-less. The per-request axis is where the
     # compiled-ness of an intake pod is stated (`serving_mode=jit_cell`).
@@ -631,7 +628,7 @@ def test_tenant_guard_miss_end_to_end(
     (target,) = rig.ex.compile_targets()
     cell_ref = target.active_compile_ref
     assert cell_ref == "", "an intake arm has no cell to advertise"
-    # pgw#1010 / th#1322: and the compile it just paid for is a NUMBER on the
+    # And the compile it just paid for is a NUMBER on the
     # wire. The emitter used to be the mint parent's, and the mint no longer
     # runs JIT — so this boot is the only place an AOT-vs-JIT cost comparison
     # can get its JIT arm from.

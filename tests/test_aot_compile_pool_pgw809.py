@@ -194,7 +194,7 @@ def test_one_failing_entry_fails_the_mint_and_takes_its_siblings(
     # inductor workers and g++ go with it. Waited on PROGRESS — each pid that
     # disappears is an advance — rather than on a clock, because a clock here
     # asserts the runner's speed and a wedged teardown must still FAIL rather
-    # than be outrun (pgw#795).
+    # than be outrun.
     await_progress(
         lambda: tuple(
             sorted(p for p in _descendants(os.getpid()) if p not in before)),
@@ -255,7 +255,7 @@ def test_a_malformed_job_is_a_wiring_defect_not_a_retry(tmp_path: Path) -> None:
 #: A pod fat enough that CPU and host RAM are both out of the way, so a case
 #: can isolate the ONE bound it is about.
 #
-# pgw#1175 / §4.33: the third bound is GONE. K used to divide free VRAM by a
+# The third bound is GONE. K used to divide free VRAM by a
 # per-entry device ask whose only production source was
 # `mint_budget.co_residency().need_bytes` — the mint child's whole
 # co-residency estimate, led by the PARENT's resident weights, for a child
@@ -281,7 +281,7 @@ _ROOMY = dict(vcpus=64, available_bytes=512 * 1024**3, device_lock=True)
         ("3 entries", dict(entries=3), 3),
         # A single-entry cell never pays for a pool.
         ("1 entry", dict(entries=1), 1),
-        # pgw#1175: a MEASURED per-entry RSS narrower than the 3 GiB default
+        # a MEASURED per-entry RSS narrower than the 3 GiB default
         # buys width — the one per-entry footprint that still divides.
         ("measured 1 GiB per entry",
          dict(available_bytes=14 * 1024**3, peak_rss_bytes=1024**3), 8),
@@ -304,7 +304,7 @@ def test_an_unreadable_host_does_not_license_a_wide_pool() -> None:
     width = pool.entry_workers(
         18, vcpus=64, available_bytes=0, device_lock=True)
     assert width.workers == 1
-    # pgw#877: the footprint is supplied so this pins the MEMORY bound alone.
+    # The footprint is supplied so this pins the MEMORY bound alone.
     # Without it the width would be 1 for two reasons at once and the test
     # would pass while proving neither.
     assert width.binding == "host-memory", width.reason
@@ -321,7 +321,7 @@ def test_without_the_gpu_benchmark_lock_a_gpu_cell_stays_serial() -> None:
     """
     kwargs = dict(_ROOMY)
     kwargs["device_lock"] = False
-    # pgw#1175: PRESENCE is the only thing K still asks the card, and it asks
+    # PRESENCE is the only thing K still asks the card, and it asks
     # it for exactly this bound. Stated by the test because this box has no
     # usable driver, and because a bound that silently stops firing when the
     # probe changes is the class of defect the width record exists to prevent.
@@ -357,7 +357,7 @@ def test_the_width_and_its_inputs_ride_the_telemetry() -> None:
                 "available_bytes", "per_entry_rss_bytes",
                 "device_lock", "width_reason"):
         assert key in facts
-    # pgw#1175: and the deleted terms must not creep back as telemetry that
+    # And the deleted terms must not creep back as telemetry that
     # somebody later divides by.
     assert not [k for k in facts if "device" in k and k != "device_lock"]
 
@@ -471,7 +471,7 @@ def test_parallelism_is_not_sealed(tmp_path: Path) -> None:
     than argued. The pool changes WHEN entries compile, never what."""
     from gen_worker import env_seal
 
-    # pgw#929: the loop that used to sit here set GEN_WORKER_AOT_ENTRY_WORKERS
+    # The loop that used to sit here set GEN_WORKER_AOT_ENTRY_WORKERS
     # and asserted the digest was unmoved. NOTHING IN src/ HAS EVER READ THAT
     # NAME — the live width constant is `aot_compile_pool.MAX_ENTRY_WORKERS` —
     # so the assertion held for the one reason that proves nothing (C1: a test

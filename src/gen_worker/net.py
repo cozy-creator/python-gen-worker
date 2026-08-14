@@ -1,4 +1,4 @@
-"""Process-wide HTTP timeout floor for huggingface_hub (gw#456).
+"""Process-wide HTTP timeout floor for huggingface_hub.
 
 huggingface_hub's default HTTP client has NO timeout (httpx.Client(timeout=None)
 on 1.x; requests never times out by default on 0.x), and several HfApi methods
@@ -31,10 +31,10 @@ _installed = False
 class HfHttpFloorError(RuntimeError):
     """The huggingface_hub timeout floor could not be installed or PROVEN.
 
-    pgw#657: this patch is load-bearing and reaches into ``huggingface_hub``'s
-    backend, which has already been reshaped once (requests -> httpx). A silent
-    revert puts the whole fleet back on infinite timeouts — the gw#456 hang —
-    and nothing would say so. So installation ends in a behavioural assertion
+    This patch is load-bearing and reaches into ``huggingface_hub``'s backend,
+    which has already been reshaped once (requests -> httpx). A silent revert
+    puts the whole fleet back on infinite HTTP timeouts and nothing would say
+    so. So installation ends in a behavioural assertion
     on the session huggingface_hub will actually use, and a failure is loud at
     boot instead of a wedge weeks later.
     """
@@ -118,7 +118,7 @@ def _verify_requests_floor() -> None:
 
 def install_hf_http_timeouts() -> None:
     """Idempotent; call before any huggingface_hub network use. Raises
-    :class:`HfHttpFloorError` if the floor cannot be proven (pgw#657)."""
+    :class:`HfHttpFloorError` if the floor cannot be proven."""
     global _installed
     with _lock:
         if _installed:
@@ -170,7 +170,7 @@ def _install_requests_backend() -> None:
 
 
 def hf() -> Any:
-    """THE sanctioned huggingface_hub accessor (gw#467): installs the timeout
+    """THE sanctioned huggingface_hub accessor: installs the timeout
     floor, then returns the module. Every network entry point (HfApi,
     snapshot_download, hf_hub_download, ...) must be reached through here —
     the CI guard (scripts/lint_http_timeouts.py) rejects direct imports

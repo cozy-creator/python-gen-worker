@@ -199,7 +199,7 @@ def test_payload_meta_bounds_compile_into_the_input_schema(tmp_pkg: Path) -> Non
 
 
 def test_discovery_stubs_missing_heavy_deps_but_fails_loud_on_touch(tmp_pkg: Path) -> None:
-    """Absorbed from test_discovery_heavy_deps.py (pgw#506): a module-top
+    """Absorbed from test_discovery_heavy_deps.py: a module-top
     ``import torch`` must be free during discovery (build-time walks never
     have torch installed for CPU-only build images) — imports as a stub —
     but any ACTUAL attribute use at module scope fails loud with an

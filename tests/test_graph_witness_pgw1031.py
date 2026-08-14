@@ -1,16 +1,15 @@
 """pgw#1031 — the cell key is the traced COMPUTATION, and two different
 computations behind one declaration now key APART (option a, Paul-ruled).
 
-The LIVE SIGHTING this file pins, measured 2026-08-10 during pgw#1079: the
-gauntlet's ``micro-pad32`` and ``micro-pad32-branchy`` members are the same
-model with two spellings of the same pad, so every DECLARED fact agrees —
-signature, symbol ranges, pytree spec, constant FQNs, declared envelope —
-while the traced bodies do not (112 nodes vs 102). Before pgw#1031's depth fix
-``class_hash`` folded only the declared/interface facts, so the key could not
-see the body and both minted under ONE ``ck1`` key. The fix folds the
-node-level ``graph_witness`` into ``class_hash`` (facts v3), so the ``graph``
-axis is now the computation: the two members derive DIFFERENT keys and a
-collision is a MISS (eager + mint), the cheap outcome.
+The case this file pins: the gauntlet's ``micro-pad32`` and
+``micro-pad32-branchy`` members are the same model with two spellings of the
+same pad, so every DECLARED fact agrees — signature, symbol ranges, pytree spec,
+constant FQNs, declared envelope — while the traced bodies do not (112 nodes vs
+102). A ``class_hash`` folding only the declared/interface facts cannot see the
+body, and both mint under ONE ``ck1`` key. Folding the node-level
+``graph_witness`` into ``class_hash`` (facts v3) makes the ``graph`` axis the
+computation: the two members derive DIFFERENT keys and a collision is a MISS
+(eager + mint), the cheap outcome.
 
 The rows:
 
@@ -25,8 +24,8 @@ The rows:
   braces beneath the now-sound key.
 
 **No compile anywhere.** ``trace_for_key`` is ``torch.export`` and stops there
-(Paul 2026-08-10: tracing for key derivation is explicitly permitted locally;
-mints are not). The weights are the rig's 1.1 MB generated checkpoint.
+(tracing for key derivation is explicitly permitted locally; mints are not).
+The weights are the rig's 1.1 MB generated checkpoint.
 """
 
 from __future__ import annotations
@@ -53,7 +52,7 @@ PAIR = ("micro-pad32", "micro-pad32-branchy")
 
 @pytest.fixture(scope="module", autouse=True)
 def _gpu_runtime() -> Any:
-    """A key-complete runtime on a card-less box — probes only (pgw#983).
+    """A key-complete runtime on a card-less box — probes only.
 
     Module-scoped because the traces are: ``sm`` is a KEY AXIS, so the fold in
     :func:`_trace` needs it, and that runs inside the module-scoped fixture.
@@ -152,7 +151,7 @@ def test_the_bodies_now_key_apart(traced_pair: Dict[str, Any]) -> None:
         "the pair no longer differs in its computation")
 
     # …and THE FIX: the key now sees the body, so the members key apart.
-    # pgw#1176: the claim is now per GRAPH CLASS, which is what it always
+    # The claim is now per GRAPH CLASS, which is what it always
     # meant — the two declarations trace the same class names with different
     # bodies, so every shared class must key apart. Asserting it per class is
     # strictly stronger than asserting it once over a combined digest, which
@@ -176,7 +175,7 @@ def test_the_witness_backstops_a_residual_collision(
     proves the backstop still holds beneath the sound key: were a witness-blind
     cell ever handed over, the adopt path still refuses on the witness."""
     fixed, branchy = traced_pair[PAIR[0]], traced_pair[PAIR[1]]
-    # pgw#1176: ONE artifact, ONE class — so the witness backstop is asked
+    # ONE artifact, ONE class — so the witness backstop is asked
     # about the class this artifact carries, which is the only thing it could
     # ever honestly answer about.
     name = sorted(fixed["blocks"])[0]
@@ -344,7 +343,7 @@ def test_the_adopt_path_admits_the_pod_whose_graph_it_is(
         family=PAIR[0], precision="", cell_key=fixed["key"][name],
         name=name, entry=fixed["blocks"][name],
         strict_export=True, lora_bucket=0)
-    # pgw#1176: a boot returns ONE outcome per declared class; this fixture
+    # a boot returns ONE outcome per declared class; this fixture
     # traces one, so the unpack ASSERTS that arity.
     (out,) = _attempt(
         monkeypatch, tmp_path, _derived_key(traced_pair, PAIR[0]),

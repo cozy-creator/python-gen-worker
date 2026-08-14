@@ -1,18 +1,16 @@
 """pgw#772: the serving lane is deterministic per (release x declared config).
 
-The gw#534 voluntary bf16-resident upgrade probed LIVE free VRAM
-(`bf16_resident_fits` / BF16_RESIDENT_MARGIN_GB) and made `lane` — the only
-GPU-dependent axis of the ten in the cell key — a function of the
-individual card's headroom: an RTX 4090's ~1.5 GiB surplus over an L4 (same
-release, same image, both sm_89) flipped its base lane to "", a lane nothing
-mints for, so the better card missed all 144 published checkpoints INCLUDING
-its own same-SKU cell and served eager for life (th#1198 CP-D wire evidence;
-the −21% request-level AOT win forfeited). The tax the upgrade dodged is
-+1.9% for the structural fp8 storage lane (pgw#727 re-measure).
+Probing LIVE free VRAM to choose a lane makes `lane` — the only GPU-dependent
+axis of the ten in the cell key — a function of the individual card's headroom.
+An RTX 4090's ~1.5 GiB surplus over an L4 (same release, same image, both
+sm_89) then flips its base lane to "", a lane nothing mints for, so the better
+card misses every published checkpoint INCLUDING its own same-SKU cell and
+serves eager for life. The tax that probe dodges is +1.9%, for the structural
+fp8 storage lane.
 
-Red-verified on the pre-fix tree (probe restored): the headline test fails —
-the high-headroom load lands base lane "" while the low-headroom load lands
-"fp8-hooks", and the two requested cell keys diverge on the `lane` axis.
+Red-verified with the probe restored: the high-headroom load lands base lane ""
+while the low-headroom load lands "fp8-hooks", and the two requested cell keys
+diverge on the `lane` axis.
 
 Standing rule (the pgw#765 `sku` guard, applied to `lane`): no adoption or
 identity path may take a live device measurement as a hash input. A card
@@ -92,7 +90,7 @@ def _load_and_key(
     )
     execution_lane = cc.cell_base_execution_lane(sl.obj)
     cfg = _ContractCfg()
-    # pgw#1059: the pre-trace surface is the obligation identity
+    # The pre-trace surface is the obligation identity
     # (fleet_cells.arm_identity), not a cell key.
     from gen_worker import fleet_cells
     identity = fleet_cells.arm_identity(

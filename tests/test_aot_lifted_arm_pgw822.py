@@ -1,25 +1,18 @@
-"""pgw#822 — the mint must hand ``torch.export`` the module it declared.
+"""The mint must hand ``torch.export`` the module it declared.
 
-Measured on a real L4 (gen-worker 0.82.0, release ``b0b592812227228604c2237f``,
-sdxl 0.2.100, lane ``w8a8``/``lora64``, pod ``2cuc4oituz1wyi``): the delegated
-child loaded the pipeline, reached ``trace_graph``, and was refused —
-
-    aot mint refused: family 'sdxl': declared input(s) ['lora_a', 'lora_b']
-    are not parameters of 'forward' on UNet2DConditionModel — the declaration
-    does not fit this module
-
-The declaration was right. The ``lora64`` bucket lifts the adapter to graph
-INPUTS on purpose (pgw#725 option 2: an adapter that is a call argument can
-never be baked). The MODULE was wrong: the child armed the branch CONTAINERS
-(``compile_cache.apply_lora_lane``, the dynamo lane's end state) and stopped,
-so the object handed to export was the bare denoiser, whose forward takes no
-such parameters.
+The failure it prevents: the delegated child reaches ``trace_graph`` and is
+refused with *"declared input(s) ['lora_a', 'lora_b'] are not parameters of
+'forward'"*. The declaration is right — the ``lora64`` bucket lifts the adapter
+to graph INPUTS on purpose, since an adapter that is a call argument can never
+be baked. The MODULE is wrong: arming the branch CONTAINERS
+(``compile_cache.apply_lora_lane``, the dynamo lane's end state) and stopping
+there hands export the bare denoiser, whose forward takes no such parameters.
 
 Two ends, both here:
 
 * the ARM — one function (``lora_lifted.arm_lifted_lora_lanes``) owned by the
   mint, so an adapter-bearing class is exported from the lifted forward and a
-  branchless one from the plain module (the pgw#790 fork, per class);
+  branchless one from the plain module (per class);
 * the PRE-SPAWN check — ``aot_mint.declaration_module_gaps``, which asks the
   same signature question on the PARENT, before a child is spawned or a pod is
   rented, and declines by name.
@@ -184,7 +177,7 @@ def cell(tmp_path_factory, request) -> Dict[str, Any]:
     result = aot_mint.mint(
         pipe, _spec(), tmp / "out")
     reset_export_declarations()
-    # pgw#1176: the mint yields one independently keyed artifact per graph
+    # The mint yields one independently keyed artifact per graph
     # class. Index them by the class each NAMES — the addressing the atom
     # makes natural, and what keeps a per-class assertion bisectable.
     by_entry = {row.entry: row for row in result.entries}

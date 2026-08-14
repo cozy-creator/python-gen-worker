@@ -1,5 +1,5 @@
-"""pgw#1143 step 4 + 7 (§1.33): the layout converter registry, and the fence
-that keeps conversion out of cell identity.
+"""The layout converter registry (§1.33), and the fence that keeps conversion
+out of cell identity.
 
 What is proven here, in the order the ruling puts it:
 
@@ -96,7 +96,7 @@ DIT_CASE = ConversionCase(
 
 @pytest.fixture(autouse=True)
 def _bare_registry() -> Iterator[None]:
-    """The wheel ships this registry EMPTY (pgw#740); every test declares its
+    """The wheel ships this registry EMPTY; every test declares its
     own edges the way an endpoint does, and leaves it bare again."""
     reset_layout_conversions()
     yield
@@ -468,7 +468,7 @@ def test_the_relation_holds_no_handle_literal() -> None:
 
 def test_the_declared_set_is_canonicalized_so_no_reader_can_recover_an_order(
 ) -> None:
-    """§1.33 point 2 as AMENDED (th#1803): the set is a compatibility filter and
+    """§1.33 point 2 as AMENDED: the set is a compatibility filter and
     preference has exactly ONE authority — the (GPU, lane) ladder. Two authors
     who spell the same set differently state the SAME demand, and storing the
     written order would be a second ordering that can disagree with the first.

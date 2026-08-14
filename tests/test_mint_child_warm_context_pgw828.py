@@ -1,42 +1,18 @@
-"""pgw#828 — the delegated mint child runs the endpoint's warm job with the
-SAME RequestContext the serving path builds.
+"""The delegated mint child runs the endpoint's warm job with the SAME
+RequestContext the serving path builds.
 
-Measured on a real L4 (gen-worker 0.85.0, release ``4f32ea53dd81adc1d8501e14``,
-flag DISARMED so this is the dynamo route, pod ``zs8p1k4x0jlzp5``, lane
-``w8a8-lora64``): the child LOADS the pipeline in **16.45 s** — pgw#816's fix
-holding on this route too — and then dies in the endpoint's own warm job:
+A child that hand-rolls its own ``RequestContext`` gets no slots, no models and
+no root slot, so ``ctx.slots[<declared slot>]`` is a ``KeyError`` and the mint
+dies in the endpoint's warm job. Nothing is missing from the wire: the child
+holds the SPEC, and warm-shape slot resolution (``run=None``) needs only the
+spec.
 
-    jit_compile     child:load  completed  seconds=16.45
-    jit_compile     aborted     attempt=1 status=crashed total_s=16.58
-                                phases={'load': 16.455, 'warmup_forward': 0.0}
-    self_mint_abort delegated_crashed (phase=warmup_forward, deterministic)
-
-      File ".../handler_proof.py", in run_warm_job
-        out = bound(**kwargs)
-      File ".../sdxl/main.py", line 326, in generate
-        resolved = ctx.slots["pipeline"]
-      KeyError: 'pipeline'
-
-The child hand-rolled its own ``RequestContext`` with **no slots, no models
-and no root slot**::
-
-    ctx = RequestContext(request_id=f"mint-child-{spec.name}",
-                         local_output_dir=tmp, boot_warmup=True)
-
-so ``ctx.slots`` was an empty table and the endpoint's one declared slot was
-a ``KeyError``. Nothing was missing from the wire: the child holds the SPEC,
-and warm-shape slot resolution (``run=None``) needs only the spec.
-
-With pgw#827 blocking the AOT route, this blocked the other one — between
-them no mint route on the platform could publish a cell.
-
-The fix is one construction (``warmup.warm_context``) called by the executor's
+There is one construction (``warmup.warm_context``), called by the executor's
 boot-warm path, the executor's background-mint seed, and the child. The
-equivalence test below is the part that stops the next drift: it asserts the
-two are the SAME construction, not merely that both are non-empty. The graphs
-the child traces are the graphs the parent must later hit, so a child that
-resolved DIFFERENT slot defaults would trace different shapes and the parent's
-proof would miss — the "mint succeeded, no artifact" class (pgw#815).
+equivalence test below asserts the two are the SAME construction, not merely
+that both are non-empty: the graphs the child traces are the graphs the parent
+must later hit, so a child resolving DIFFERENT slot defaults traces different
+shapes and the parent's proof misses — the "mint succeeded, no artifact" class.
 """
 
 from __future__ import annotations
@@ -87,7 +63,7 @@ def test_the_childs_warm_job_resolves_the_endpoints_declared_slots(spec) -> None
 
 def test_the_child_and_the_executor_build_the_SAME_context(spec) -> None:
     """The structural pin. Two constructions of one thing were free to drift,
-    and did — four times now (pgw#816, #822, #825, #827) in this exact class.
+    and did — four times now in this exact class.
     """
     with tempfile.TemporaryDirectory() as tmp:
         child = warmup.warm_context(

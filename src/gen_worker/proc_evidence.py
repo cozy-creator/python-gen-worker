@@ -1,14 +1,12 @@
 """Kernel-accounted evidence that another process is doing real work.
 
-The producer every progress-keyed bound over a LOCAL child is built from
-(gw#666, §4.24): a monotonic number that rises while a process tree burns CPU
-or moves bytes, and stops rising the moment it wedges. It needs no cooperation
-from the process being watched, which is what makes it usable against a
-follower that has no protocol of its own between spawn and ready.
+The producer every progress-keyed bound over a LOCAL child is built from: a
+monotonic number that rises while a process tree burns CPU or moves bytes, and
+stops rising the moment it wedges. It needs no cooperation from the process
+being watched, which is what makes it usable against a follower that has no
+protocol of its own between spawn and ready.
 
-One implementation, because the two callers had drifted into being one:
-``procsplit.parent`` grew this to watch a compute child and
-``parallel.group`` needed exactly it to replace two flat wall clocks.
+ONE implementation, shared by ``procsplit.parent`` and ``parallel.group``.
 """
 
 from __future__ import annotations
@@ -32,7 +30,7 @@ def tree_evidence(pid: int) -> Optional[float]:
     be read at all.
 
     CPU seconds for the WHOLE tree — live AND already-reaped descendants
-    (pgw#964) — plus process disk I/O MB, the same combination
+ — plus process disk I/O MB, the same combination
     ``activity._default_evidence`` trusts, measured from ``/proc``. Either
     source advancing on its own proves life: a weights download is CPU-light
     and moves real bytes; an inductor compile burns child CPU with flat I/O;

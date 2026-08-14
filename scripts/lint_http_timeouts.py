@@ -15,7 +15,7 @@ COZY_HTTP_*_TIMEOUT_S floor lives) does one of:
 
 Background: huggingface_hub's default client carries timeout=None (there is
 no hf_hub 2.x to fix it — latest is 1.x; we own the floor). A single bare
-call site reintroduces the gw#456 forever-hang.
+call site reintroduces the forever-hang.
 """
 
 from __future__ import annotations

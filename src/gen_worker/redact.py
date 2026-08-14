@@ -1,6 +1,6 @@
 """Redaction for anything that may reach a tenant or the hub.
 
-pgw#1206 C1: `executor.py` and `models/store.py` both sanitize outbound
+`executor.py` and `models/store.py` both sanitize outbound
 messages, and the store may not import the executor — so the helper lands in
 its own module rather than being duplicated or re-exported.
 """

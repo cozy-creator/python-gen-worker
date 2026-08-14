@@ -9,10 +9,9 @@ Invariants:
 
 * Objects whose ``__module__`` is outside the walked package tree are
   skipped (third-party re-exports stay out) — LOUDLY, at WARNING, naming the
-  class and the fix (subclass it locally). The skip was silent until
-  pgw#689, which is how an SDK-provided diagnostics endpoint, re-exported
-  exactly as its own docstring instructed, vanished from a release with no
-  trace in any log.
+  class and the fix (subclass it locally). A silent skip is how an
+  SDK-provided endpoint, re-exported exactly as its own docstring instructs,
+  vanishes from a release with no trace in any log.
 * Each object is yielded exactly once even when re-exported into multiple
   namespaces (dedup by ``id``).
 * A module that fails to IMPORT is a HARD failure

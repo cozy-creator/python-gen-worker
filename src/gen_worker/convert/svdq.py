@@ -1,4 +1,4 @@
-"""SVDQuant flavor trees (gw#415) — build + mirror.
+"""SVDQuant flavor trees — build + mirror.
 
 A ``#svdq-fp4-rN`` / ``#svdq-int4-rN`` flavor is the base checkpoint's
 diffusers tree with the denoiser's plain weights replaced by ONE
@@ -37,8 +37,8 @@ logger = logging.getLogger(__name__)
 # family except z-image (qwen-image 11.5-13.1 GB, flux.1 6.8-7.0 GB).
 # Sharding a nunchaku checkpoint WOULD strip the __metadata__ its loader needs,
 # which is why it must publish whole — and publishing whole is allowed. The
-# svdq lane never reaches clone.py's resharder: build_svdq_flavor_tree hardlinks
-# the file itself, and publish_flavors goes straight to the hub client. th#1211.
+# svdq lane never reaches clone.py's resharder: build_svdq_flavor_tree
+# hardlinks the file itself, and publish_flavors goes straight to the hub.
 MAX_SVDQ_FILE_BYTES = 64 * 1024**3
 
 

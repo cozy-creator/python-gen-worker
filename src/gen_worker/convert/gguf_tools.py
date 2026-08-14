@@ -20,9 +20,9 @@ logger = logging.getLogger(__name__)
 # runs for hours on a shared conversion pod. Fifteen minutes of total silence is
 # orders of magnitude past any real inter-tensor gap.
 #
-# This replaces a flat ``timeout=7200`` that killed conversions mid-write purely
-# for taking two hours (gw#655's principle: a wall clock cannot tell a healthy
-# long job from a wedge, so it is either useless or it kills real work).
+# Deliberately not a flat wall-clock timeout, which kills conversions mid-write
+# purely for taking hours: a wall clock cannot tell a healthy long job from a
+# wedge, so it is either useless or it kills real work.
 GGUF_TOOLCHAIN_STALL_WINDOW_S = 900.0
 
 _SUPPORTED_ARCH_ALIASES: dict[str, str] = {

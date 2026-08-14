@@ -1,4 +1,4 @@
-"""Video encode backend selection + streaming encoder (gw#476).
+"""Video encode backend selection + streaming encoder.
 
 Software x264 at the PyAV default (preset medium) can dominate request wall
 time on CPU-weak or contended hosts: the B200 gauntlet measured one 10s@1080p
@@ -39,19 +39,16 @@ logger = logging.getLogger(__name__)
 #: probe; ``nvenc`` insists (still falls back with a loud warning rather than
 #: refusing to serve).
 ENCODER_ENV = "GEN_WORKER_VIDEO_ENCODER"
-#: Max concurrent buffered CPU finalize encodes (gw#516 host-RAM bound).
+#: Max concurrent buffered CPU finalize encodes (a host-RAM bound).
 ENCODE_CONCURRENCY_ENV = "GEN_WORKER_VIDEO_ENCODE_CONCURRENCY"
-#: PER EXECUTION GROUP (pgw#782). The bound exists so raw frame buffers do not
-#: pile up in host RAM — and host RAM is bought per pod, not per process. A
-#: flat process-global 2 made a G-group worker's tail serialize across
-#: unrelated cards: at G=4 two of four groups always waited for a sibling's
-#: encode before their own could start. Groups multiply it; a single-group
-#: worker keeps exactly 2.
+#: PER EXECUTION GROUP. The bound exists so raw frame buffers do not pile up in
+#: host RAM — and host RAM is bought per pod, not per process. A flat
+#: process-global 2 makes a G-group worker's tail serialize across unrelated
+#: cards: at G=4 two of four groups always wait for a sibling's encode. Groups
+#: multiply it; a single-group worker keeps exactly 2.
 #:
-#: Scope, measured: immaterial for images (sdxl's whole tail is a 150 ms webp
-#: encode, 0.5 s of a 72 s request — samples/dpfix), material for video, where
-#: the buffered x264 finalize is seconds. This is a cross-group serializer
-#: removed on principle, NOT the width-4 throughput fix (that is pgw#783).
+#: Immaterial for images (a whole image tail is a ~150 ms webp encode); material
+#: for video, where the buffered x264 finalize is seconds.
 DEFAULT_ENCODE_CONCURRENCY_PER_GROUP = 2
 
 # Fast presets tuned for short, high-bitrate-tolerant generated clips.
@@ -83,10 +80,9 @@ def _probe_nvenc() -> bool:
     whose driver grants encode sessions (RunPod SECURE 4090/5090 refuse with
     "OpenEncodeSessionEx failed: unsupported device"; the L4 grants them).
 
-    Probe frame is 256x256: NVENC enforces minimum encode dimensions
-    (H.264 min is 145x49) — a 64x64 probe fails "Frame Dimension less than
-    the minimum supported value" on GENUINELY capable cards (measured live
-    on an L4, gw#476)."""
+    Probe frame is 256x256: NVENC enforces minimum encode dimensions (H.264 min
+    is 145x49) — a 64x64 probe fails "Frame Dimension less than the minimum
+    supported value" on GENUINELY capable cards."""
 
     try:
         import av
@@ -141,7 +137,7 @@ def detect_encoder(*, refresh: bool = False) -> EncoderChoice:
         return _detected
 
 
-# ---- bounded finalize concurrency (gw#516) ---------------------------------
+# ---- bounded finalize concurrency ---------------------------------
 
 _finalize_sem: Optional[threading.BoundedSemaphore] = None
 _finalize_sem_lock = threading.Lock()
@@ -149,9 +145,8 @@ _finalize_sem_lock = threading.Lock()
 
 def finalize_concurrency() -> int:
     """Concurrent buffered CPU encodes this PROCESS allows: two per execution
-    group (pgw#782). The bound is a host-RAM bound and host RAM is bought per
-    pod, so it scales with the number of groups the pod runs — a flat 2 made
-    two of four groups wait on an unrelated card's encode."""
+    group. The bound is a host-RAM bound and host RAM is bought per pod, so it
+    scales with the number of groups the pod runs."""
     raw = os.environ.get(ENCODE_CONCURRENCY_ENV, "").strip()
     if raw:
         try:
@@ -179,7 +174,7 @@ def _finalize_semaphore() -> threading.BoundedSemaphore:
 def finalize_permit() -> Iterator[None]:
     """Bound concurrent buffered CPU encodes. Acquired BEFORE the GPU slot is
     released so back-pressure holds the slot (pausing new decodes) instead of
-    letting raw-frame buffers pile up in host RAM (gw#516)."""
+    letting raw-frame buffers pile up in host RAM."""
     sem = _finalize_semaphore()
     sem.acquire()
     try:
@@ -197,7 +192,7 @@ def frames_to_uint8(frames: Any) -> Any:
     [0, 1] are scaled; anything else is clipped to [0, 255].
 
     CUDA tensors are converted on-device FIRST so only uint8 crosses PCIe
-    (gw#549: 4x fewer bytes than float32, 2x fewer than bf16).
+    (4x fewer bytes than float32, 2x fewer than bf16).
     """
     import numpy as np
 
@@ -234,7 +229,7 @@ def frames_to_uint8(frames: Any) -> Any:
 class StreamingVideoEncoder:
     """Incremental H.264/AAC mp4 encoder — feed frame chunks as they exist.
 
-    Built for the VAE-framewise-decode seam (gw#476): call :meth:`add` with
+    Built for the VAE-framewise-decode seam: call :meth:`add` with
     each decoded chunk instead of buffering the whole clip, then
     :meth:`finish` (optionally with the audio waveform). Dimensions latch
     from the first chunk; odd rows/columns are cropped (yuv420p needs even
@@ -268,9 +263,9 @@ class StreamingVideoEncoder:
         self._audio_stream: Any = None
         self._frames = 0
         self._closed = False
-        # gw#549 zero-copy handoff: wrap contiguous rgb24 arrays with PyAV's
-        # from_numpy_buffer (no intermediate copy into the AVFrame) when the
-        # installed av supports it; one failure disables it for this encode.
+        # Wrap contiguous rgb24 arrays with PyAV's from_numpy_buffer (no
+        # intermediate copy into the AVFrame) when the installed av supports it;
+        # one failure disables it for this encode.
         self._zero_copy = hasattr(av.VideoFrame, "from_numpy_buffer")
 
     @property
@@ -317,10 +312,10 @@ class StreamingVideoEncoder:
         stream.height = height
         stream.pix_fmt = "yuv420p"
         # Open the codec NOW instead of lazily at the first encode() so a
-        # hardware refusal (NVENC session limit / dimension gate — observed
-        # live as "InitializeEncoder failed" only at first encode, gw#476)
-        # lands in _open()'s per-encode fallback instead of failing the
-        # request mid-encode.
+        # hardware refusal (NVENC session limit / dimension gate, which surfaces
+        # as "InitializeEncoder failed" only at first encode) lands in
+        # _open()'s per-encode fallback instead of failing the request
+        # mid-encode.
         stream.codec_context.open(strict=False)
         return stream
 
@@ -350,7 +345,7 @@ class StreamingVideoEncoder:
 
         The wrapped buffer is only read inside ``stream.encode`` (the rgb24
         source is consumed by the yuv420p reformat before encode returns), so
-        reusing the caller's staging buffer afterwards is safe (gw#549).
+        reusing the caller's staging buffer afterwards is safe.
         """
         if self._zero_copy and getattr(frame_array, "flags", None) is not None \
                 and frame_array.flags["C_CONTIGUOUS"]:
@@ -402,7 +397,7 @@ class StreamingVideoEncoder:
             self.abort()
 
 
-# ---- audio mux (moved verbatim from gen_worker.io, gw#387) ------------------
+# ---- audio mux --------------------------------------------------------------
 
 def _prepare_audio_stream(container: Any, sample_rate: int, av: Any) -> Any:
 

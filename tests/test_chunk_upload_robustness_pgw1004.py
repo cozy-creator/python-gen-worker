@@ -1,6 +1,6 @@
 """pgw#1004 / pgw#1005: the chunk-CAS data plane's retry hygiene.
 
-The audit (th#1653) found this module to be the only retry loop in the tree
+The audit found this module to be the only retry loop in the tree
 with none of the protections the rest of the tree has: no backoff at all, no
 liveness beat, no ``expires_at`` awareness, and a semaphore that bounded
 sockets while claiming to bound buffers. Every row below drives the real

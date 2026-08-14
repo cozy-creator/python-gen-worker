@@ -1,33 +1,31 @@
-"""pgw#1080 increment 2: the COMPONENT-LEVEL structure-only builder.
+"""The COMPONENT-LEVEL structure-only builder.
 
-The mint child exports and compiles a family's declared compile targets. Until
-now it reached them by running the endpoint's own ``setup()``, which loads the
-checkpoint — so the process that traces held every byte the process that serves
-holds, and on a two-pipeline family (z-image, 42.53 GiB) the two copies do not
-fit on one card at all (ie#638). Paul's ruling: export and compile must not
-require real weights resident AT ALL.
+The mint child exports and compiles a family's declared compile targets.
+Reaching them through the endpoint's own ``setup()`` loads the checkpoint, so
+the tracing process would hold every byte the serving process holds — and on a
+two-pipeline family the two copies do not fit on one card at all. The ruling:
+export and compile must not require real weights resident AT ALL.
 
-WHY THIS IS PER-COMPONENT AND NOT A ``structure_only=True`` LOADER FLAG
------------------------------------------------------------------------
+PER-COMPONENT, NOT A ``structure_only=True`` LOADER FLAG
+--------------------------------------------------------
 A device context cannot make ``from_pretrained`` structure-only: ``with
 torch.device("meta")`` is a CONSTRUCTION DEFAULT and the weight READ is
 unaffected (safetensors mmaps to CPU; the subsequent ``load_state_dict`` either
 refuses or copies real data in). The pattern that actually skips the state dict
-is ``init_empty_weights()`` + ``from_config`` — which is a per-CLASS capability
-(diffusers' ``ConfigMixin``), and which every quantized loader in this tree
-already uses to build its denoiser (:mod:`.w8a8` , :mod:`.w4a4`,
-:mod:`.svdq_native`). The context manager itself is :mod:`.meta_init`, owned
-here rather than imported from ``accelerate``: see that module for the pods
-that measured what an undeclared import on this path costs (pgw#1123). A
-PIPELINE's config is its component CLASS MAP
+is ``init_empty_weights()`` + ``from_config`` — a per-CLASS capability
+(diffusers' ``ConfigMixin``) that every quantized loader in this tree already
+uses to build its denoiser (:mod:`.w8a8`, :mod:`.w4a4`, :mod:`.svdq_native`).
+The context manager itself is :mod:`.meta_init`, owned here rather than imported
+from ``accelerate`` — an undeclared import on this path strands every family in
+the image. A PIPELINE's config is its component CLASS MAP
 (``model_index.json``), not a weights layout, so ``from_config`` on a pipeline
 builds nothing the export traces. Hence: build the COMPONENT, inject it through
 the ``components=`` seam the loader already has, and let the pipeline class
 compose the rest exactly as it composes a preloaded shared component.
 
-WHY THE PARAMETERS END UP **FAKE** AND THE BUFFERS STAY **REAL**
----------------------------------------------------------------
-Measured on torch 2.13.0, not assumed (four variants, cardless rig):
+PARAMETERS END UP **FAKE**, BUFFERS STAY **REAL**
+-------------------------------------------------
+Measured on torch 2.13.0:
 
 * meta parameters + real inputs → ``torch.export`` refuses: *Tensor device
   mismatch … cpu and meta*. Meta is not a device the compile can target either
@@ -42,8 +40,7 @@ Measured on torch 2.13.0, not assumed (four variants, cardless rig):
   a literal-bearing family ships INSIDE the cell: a fake buffer would make
   ``aot_package.literal_constants`` unpackable. Keeping them real also arms the
   folding fence — a literal derived from a PARAMETER is fake and fails loudly,
-  and a value-dependent fold over a rebindable weight is precisely what
-  pgw#1056 forbids.
+  and a value-dependent fold over a rebindable weight is forbidden.
 
 WHAT IS REFUSED RATHER THAN GUESSED
 -----------------------------------
@@ -112,8 +109,7 @@ class StructureCapabilityMissing(StructureOnlyUnsupported):
     things to whoever reads the boot-adopt event. Its parent is a permanent,
     correct property of some trees (a quantized artifact lane has no
     config-only structure and never will); this one is a broken install, is
-    never normal, and strands EVERY family in the image rather than one — which
-    is exactly how it went unnoticed on two paid pods (pgw#1123).
+    never normal, and strands EVERY family in the image rather than one.
     """
 
     def __init__(self, *, component: str, cls_name: str, lacks: str,
@@ -144,13 +140,12 @@ TOKEN_CAPABILITY_MISSING = "structure_capability_missing"
 def refusal_token(exc: StructureOnlyUnsupported) -> str:
     """Which boot-adopt token a structure-only refusal reports under.
 
-    The distinction is the whole of pgw#1123: ``structure_unsupported`` is a
-    family that is stranded (correct, expected forever on the quantized
-    artifact lanes, and a reason to look at the FAMILY);
-    ``structure_capability_missing`` is an image that cannot do the thing at
-    all (a reason to look at the IMAGE). Reported under one token they are
-    indistinguishable, and the second one looks exactly like a pod that chose
-    to self-mint.
+    ``structure_unsupported`` is a family that is stranded (correct, expected
+    forever on the quantized artifact lanes, and a reason to look at the
+    FAMILY); ``structure_capability_missing`` is an image that cannot do the
+    thing at all (a reason to look at the IMAGE). Reported under one token they
+    are indistinguishable, and the second one looks exactly like a pod that
+    chose to self-mint.
     """
     return (TOKEN_CAPABILITY_MISSING
             if isinstance(exc, StructureCapabilityMissing)
@@ -169,8 +164,7 @@ class StructureNotHonored(StructureOnlyUnsupported):
     pipeline then IGNORED the injected module and rebuilt the target from the
     checkpoint. Falling back there would export ~weight-scale REAL tensors while
     still reporting a weightless child — the exact silent failure this slice
-    exists to prevent (measured on z-image: a ~40 GiB `torch.export` OOM
-    misclassified `retryable`, ie#638). So it must FAIL CLOSED, not fall back.
+    exists to prevent. So it must FAIL CLOSED, not fall back.
     """
 
 
@@ -295,11 +289,9 @@ def _refuse_artifact_lanes(root: Path, component: str, cls: Any) -> None:
 def _init_empty_weights(component: str = "") -> Any:
     """The meta-init seam, PROVEN on this process before it is used.
 
-    pgw#1123: this used to import ``accelerate`` — undeclared, absent from the
-    fleet's own probe image, and refusing under the same token a stranded
-    family refuses under. Both halves are fixed: the mechanism is owned
-    (:mod:`.meta_init`), and if it is ever unavailable anyway the refusal names
-    the missing CAPABILITY under its own token.
+    The mechanism is owned (:mod:`.meta_init`) rather than imported from
+    ``accelerate``, and if it is ever unavailable anyway the refusal names the
+    missing CAPABILITY under its own token.
     """
     from . import meta_init
 
@@ -328,8 +320,7 @@ def build_component(
 
     # FIRST, before anything about this family is inspected: a process that
     # cannot meta-instantiate refuses about ITSELF, not about the tree it was
-    # handed (pgw#1123 — the pod message named component '' and 'unknown
-    # class', which read as a family problem and was an image problem).
+    # handed — otherwise an image defect reads as a family problem.
     init_empty_weights = _init_empty_weights(component)
 
     root = Path(tree)
@@ -341,7 +332,7 @@ def build_component(
     config = dict(cls.load_config(str(src)))
     # A quantization block describes bytes this build will never read, and
     # diffusers reconstructs some of them into configs whose constructors
-    # refuse (pgw#689 defect 1).
+    # refuse.
     config.pop("quantization_config", None)
 
     with mi.observe(f"structure:{component}") as census:
@@ -401,7 +392,7 @@ def _wrapper_parts(tensor: Any) -> Optional[Tuple[List[str], Any]]:
     the SUBCLASS rather than a plain tensor of the outer dtype. Flattening one
     to bf16 traces bf16 Linears for a pod that serves fp8 — a cell for a graph
     the pod never executes, which is the defect ``_refuse_artifact_lanes``
-    exists to prevent, arriving by the other door (pgw#1198).
+    exists to prevent, arriving by the other door.
     """
     try:
         from torch.utils._python_dispatch import is_traceable_wrapper_subclass
@@ -479,11 +470,10 @@ def _freeze_placement(module: Any) -> None:
 
     A virtual structure is ALREADY on the device and dtype it claims — that
     is the whole point of building it there — and torch cannot move a fake
-    parameter anyway: the worker's placement pass dies with
-    ``RuntimeError: _apply(): Couldn't swap Linear.weight`` (measured on the
-    RTX 4070 rig, first GPU cycle). Silently declining the move is the honest
-    behaviour here, because a move that DID happen would re-key the graph the
-    cell is being minted for.
+    parameter anyway (the worker's placement pass dies with
+    ``RuntimeError: _apply(): Couldn't swap Linear.weight``). Silently declining
+    the move is the honest behaviour here, because a move that DID happen would
+    re-key the graph the cell is being minted for.
     """
     import types
 
@@ -560,7 +550,7 @@ def target_module(pipe: Any, target: str) -> Any:
     primary's name).
 
     Resolution is delegated to ``compile_cache.resolve_targets`` — the ONE
-    target authority (§1.29) — rather than re-walked here, because a target is
+    target authority — rather than re-walked here, because a target is
     an ATTRIBUTE PATH and not a component name: ``transformer.denoise`` and
     ``vae.decode`` are both declared on the fleet, and a second walk that only
     understood ``getattr(pipe, name)`` would read every dotted target as "not
@@ -618,7 +608,7 @@ def weight_free_breaches(
     ``place=False`` load that second target sits on the HOST, so the
     off-host walk (:func:`gen_worker.boot_trace_child.off_host_tensors`) reads
     clean too. Both guards can be green while the weight-free premise every
-    VRAM conclusion downstream rests on is false (pgw#1173).
+    VRAM conclusion downstream rests on is false.
 
     BUFFERS ARE NOT COUNTED. A structure-only component's buffers stay real by
     construction — they are config-derived tables and a literal-bearing family
@@ -664,10 +654,9 @@ def weight_free_breaches(
 def assert_weight_free(pipe: Any, targets: Any, *, what: str = "") -> None:
     """Fail closed unless every compile target ``pipe`` carries is weight-free.
 
-    The typed fence pgw#1173 asked for. It raises :class:`StructureNotHonored`
-    — the type that ALREADY means "this composition is holding weights it must
-    not" and that every caller of the structure-only path is required to treat
-    as fatal rather than as a reason to fall back.
+    Raises :class:`StructureNotHonored` — the type that means "this composition
+    is holding weights it must not", which every caller of the structure-only
+    path is required to treat as fatal rather than as a reason to fall back.
 
     Raises when the pipeline carries NONE of its declared targets too: a trace
     with no target is not a weight-free trace, it is a trace of nothing, and
@@ -826,17 +815,16 @@ def under(mode: Optional[Any]) -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
-# pgw#1111: the META round-trip that lets a weight-free program cross the
+# The META round-trip that lets a weight-free program cross the
 # entry-compile pool's process boundary
 # ---------------------------------------------------------------------------
 #
 # The parallel entry pool hands each ExportedProgram to a compile CHILD by
-# ``torch.export.save`` in the parent and ``torch.export.load`` in the child
-# (pgw#809). A structure-only program's PARAMETERS are FAKE tensors, and a fake
-# tensor has no storage to serialize — the child dies deserializing it
-# ("We ran into an error when deserializing the saved file"). So before
-# ``fc77b923`` a weight-free mint could only compile SERIALLY, in the parent,
-# which is K=1 (pgw#1051 regression).
+# ``torch.export.save`` in the parent and ``torch.export.load`` in the child.
+# A structure-only program's PARAMETERS are FAKE tensors, and a fake tensor has
+# no storage to serialize — the child dies deserializing it ("We ran into an
+# error when deserializing the saved file"), which would confine a weight-free
+# mint to compiling SERIALLY in the parent, i.e. K=1.
 #
 # The round-trip: on the way OUT, re-cast the fake params to META — meta
 # tensors carry shape/dtype and serialize (they, too, hold no storage, but the
@@ -970,34 +958,13 @@ def revirtualize_from_meta(program: Any) -> Optional[Any]:
     return mode
 
 
-# ---------------------------------------------------------------------------
-# pgw#1199: what USED to live here, and why it does not any more
-# ---------------------------------------------------------------------------
-#
-# `materialize_random` / `restore_virtual` / `stray_real_tensors` gave every
-# virtual parameter REAL random values so the mint child could run the pgw#984
-# does-it-run proof, then took them away again. That is one full checkpoint at
-# compute dtype, allocated in the process this module exists to keep empty,
-# concurrently with the parent's resident copy — 56.2 GB on wan-2.2 against
-# 15.5 GiB free, measured on pod `729431an6ugbvq`. It is also the number
-# §4.33's "a mint costs ~8 GiB" was really measuring: this walk, for an
-# sdxl-sized family.
-#
-# The proof did not need to be here. §4.33 steps 4-5 put verification on the
-# LIVE pipeline that already holds the weights, and `gen_worker.handler_proof`
-# is that: one warm forward through the endpoint's own handler, on the resident
-# pipeline, with REAL checkpoint values — strictly stronger than a random-value
-# re-run, and free on the fleet path where the executor's boot warm plan has
-# already run every declared handler before a mint is delegated.
-#
-# `stray_real_tensors` went with them, and this is the part worth stating
-# plainly rather than quietly: it hunted a REAL tensor cached on a plain
-# attribute by a lazily-built device-pinned table (ie#628's call-time class).
-# That residue existed *because* a real forward had just run here. With no real
-# values in this process the same lazy build fires inside the export's fake
-# mode and produces a FAKE constant, which `aot_package` cannot pack — the
-# failure is still loud, it just arrives at pack time instead of at a stray
-# walk. Nothing silently ships.
+# DO NOT reintroduce a real-value materialization here. Giving every virtual
+# parameter REAL values to run a does-it-run proof allocates one full checkpoint
+# at compute dtype in the process this module exists to keep empty, concurrently
+# with the parent's resident copy. Verification belongs on the LIVE pipeline
+# that already holds the weights: `gen_worker.handler_proof` runs one warm
+# forward through the endpoint's own handler with REAL checkpoint values —
+# strictly stronger than a random-value re-run, and free on the fleet path.
 
 
 __all__ = [

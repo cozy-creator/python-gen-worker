@@ -574,7 +574,7 @@ def test_mint_probes_every_candidate_and_mints_the_winner_fresh(
     def _load(execution_lane: str):
         loads.append(execution_lane)
         assert kl.pinned()[0] == execution_lane, "the lane must be pinned BEFORE loading"
-        # pgw#984: the endpoint INSTANCE rides out with the pipeline — the AOT
+        # The endpoint INSTANCE rides out with the pipeline — the AOT
         # recipe proves the handler runs before it exports, and the handler is
         # a method on it.
         return f"obj:{execution_lane}", f"pipe:{execution_lane}", f"spec:{execution_lane}"

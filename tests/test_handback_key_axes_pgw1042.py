@@ -1,13 +1,11 @@
 """pgw#1042 — the delegated handback seam.
 
-Attempt 28's 36/36 sdxl mint published nothing, behind two defects this file
-pins:
+A full 36/36 sdxl mint publishing nothing, behind two defects this file pins:
 
 1. The child's returned cell carried a key the parent could not relate to its
-   own (`ck1-8f498f43…` opened, `ck1-886ffbcc…` returned). Since pgw#1059 the
-   obligation identity is not a key at all (`arm1-…`, `fleet_cells.ArmIdentity`)
-   — but every pre-trace FACT the two sides share must be byte-identical
-   across the process boundary, and one measurably was not:
+   own. The obligation identity is not a key at all (`arm1-…`,
+   `fleet_cells.ArmIdentity`) — but every pre-trace FACT the two sides share
+   must be byte-identical across the process boundary, and one was not:
    `torch._inductor.aot_compile` mutates the global `aot_inductor.metadata`
    config entry as a side effect, so a child that has compiled seals a
    different `env_seal` than its own boot (and than every other process on
@@ -15,9 +13,9 @@ pins:
    `adopt_delegated_mint` refuses BY FACT NAME when any shared fact diverges.
 
 2. The artifact failed `update_constant_buffer_func_(... ) API call failed at
-   model_container_runner.cpp:289` on the parent runtime. Reproduced locally
-   byte-for-byte: the per-entry copying bind allocates the target's FULL
-   constant set once per entry, so a 36-entry sdxl cell demanded ~N x 2.6 GB
+   model_container_runner.cpp:289` on the parent runtime: the per-entry copying
+   bind allocates the target's FULL constant set once per entry, so a 36-entry
+   sdxl cell demanded ~N x 2.6 GB
    at arm and the failing cudaMalloc surfaced as that anonymous C++ error.
    Entries now bind BY REFERENCE against one marker-owned pool per target,
    and any residual AOTI failure is a typed `injection_failed` refusal
@@ -145,7 +143,7 @@ def test_adopt_refuses_typed_before_any_arm(
     from gen_worker import artifact_meta
     from gen_worker.models import provision
 
-    # pgw#1098: the adopt reads through `read_metadata` now — an envelope it
+    # The adopt reads through `read_metadata` now — an envelope it
     # CANNOT read is its own refusal (`cell_envelope_unreadable`) rather than
     # a `None` that flows on into a gate it silently disables. This test is
     # about the DIVERGENCE verdict, so it supplies a readable envelope.

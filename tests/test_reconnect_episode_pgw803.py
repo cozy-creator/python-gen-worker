@@ -1,17 +1,10 @@
-"""pgw#803: a disconnect/reconnect episode is a hub row that ACCOUNTS for itself.
+"""A disconnect/reconnect episode is a hub row that ACCOUNTS for itself.
 
-THE INCIDENT (th#1333's tape, verbatim). A serving pod's stream ended at
-17:51:43Z — the hub's own cleanup line says *"the worker PROCESS may well be
-alive"* — and the worker's next connect attempt reached the hub at 18:07:19Z.
-**15m36s.** The hub then condemned it, revoked its credential, and refused the
-reconnect that proved it was alive. The hub half is fixed (two-phase revoke,
-readmission on refutation). The worker half was never explained, and could not
-be: the reconnect loop's entire narration is `logger.info` on RunPod stdout,
-which nothing can read (gw#640's premise).
+A 15-minute reconnect gap gets a pod condemned and its credential revoked, and
+the reconnect loop's entire narration is `logger.info` on RunPod stdout, which
+nothing can read — so the gap must become a NAMEABLE wire fact.
 
-WHAT THIS LANE ESTABLISHED ON `origin/master`, BY READING THE CODE. The loop's
-own constants cannot produce 936 s, so "the backoff grew unbounded" — the
-issue's leading hypothesis — is refuted:
+An unbounded backoff cannot be the cause; the loop's own constants bound it:
 
 * backoff is `random.uniform(0, min(cap, base * 2**attempt))` with
   ``cap = 30 s`` (`Worker.__init__`), i.e. FULL JITTER with a seconds ceiling;
@@ -19,17 +12,13 @@ issue's leading hypothesis — is refuted:
   connectedness, so a long healthy stream's first retry is `uniform(0, 1 s)`;
 * a dead peer is called by h2 keepalive within `keepalive_time_ms` (20 s) plus
   `KEEPALIVE_TIMEOUT_S` (10 s), with `keepalive_permit_without_calls`;
-* a dial that hangs is cut at `_HELLO_ACK_TIMEOUT_S` (30 s);
-* every one of those is older than the incident (all present since 0.56.0).
+* a dial that hangs is cut at `_HELLO_ACK_TIMEOUT_S` (30 s).
 
-So the 936 s was time the reconnect loop WAS NOT RUNNING, and the fix for that
-class is to make it NAMEABLE — not to add another duration. (The most probable
-cause at the incident's 0.78.0 — torch sharing a process with the gRPC stream —
-is separately gone: since 0.84.0 the control/compute split is unconditional and
-the parent that owns the stream never imports torch.)
+A gap that large is therefore time the reconnect loop WAS NOT RUNNING, and the
+fix for that class is to make it nameable — not to add another duration.
 
-These tests fail against the pre-pgw#803 tree, where neither the event nor the
-partition exists.
+These tests fail against a tree where neither the event nor the partition
+exists.
 """
 
 from __future__ import annotations
@@ -46,7 +35,7 @@ from harness.hub_double import hub_double
 
 # The private `activity._sink` restore this file used to carry is now
 # `tests/conftest.py::_fresh_report_sinks` — one authority for the whole suite,
-# not one file remembering (pgw#1024).
+# not one file remembering.
 
 
 def _reconnect_events(msgs: List[pb.WorkerMessage], phase: str) -> List[pb.ActivityUpdate]:
@@ -221,5 +210,5 @@ def test_an_involuntary_drop_and_its_reconnect_both_reach_the_hub() -> None:
             "teardown=", "overshoot=", "unaccounted=", "loop_silent_at_drop=",
         ):
             assert axis in row, f"{axis!r} missing from the reconnect row: {row}"
-        # A measured span, not a number interpolated into prose (th#1322).
+        # A measured span, not a number interpolated into prose.
         assert reconnected[0].duration_ms >= 0

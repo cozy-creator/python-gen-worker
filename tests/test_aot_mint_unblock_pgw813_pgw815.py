@@ -1,34 +1,23 @@
-"""pgw#813 + pgw#815 — the two walls between the fleet and its first AOT cell.
+"""The two walls between the fleet and its first AOT cell.
 
-**pgw#813** (measured, gen-worker 0.80.0, real L4, chaos, pod `149ku1h1pgjq7q`):
+**THE DELEGATABLE GATE.** `fleet_cells.delegatable` must not read
+`mandatory_serving(pipe)` as "cannot serve eager". It can:
+`_Fp8ScaledLinear.forward` is a complete `torch._scaled_mm` forward, the fleet's
+cold-boot ladder measures w8a8 eager serving, and a mandatory lane DEGRADES to
+eager loudly instead of raising. With the plain lane held on dynamo, misreading
+this leaves NO lane on which a serving pod can mint an AOT cell.
 
-    aot_cell_discovery  miss                     family=sdxl lane=w8a8-lora64
-    self_mint_skipped   aot_requires_delegation  "out-of-process minting is
-                        disabled and an AOTI export has no eager tier..."
-    self_mint_started   dynamo                   ... armed an in-process capture
+One layer up, `_eager_first_eligible` must not demand a hot-swap ROUTER on a
+pending pipe. A delegated pending never has one (nothing is armed on its pipe,
+by construction), so every delegated mint fails the test and is discarded — the
+out-of-process route runs on NO lane, quantized or not.
 
-Neither named cause was true on that pod — no env was set. The operative
-refusal was `fleet_cells.delegatable` reading `mandatory_serving(pipe)` as
-"cannot serve eager". It cannot: `_Fp8ScaledLinear.forward` is a complete
-`torch._scaled_mm` forward, the fleet's cold-boot ladder measures w8a8 eager
-serving, and pgw#672/#673 already made mandatory lanes DEGRADE to eager loudly
-instead of raising. With the plain lane held on dynamo by #730, that left NO
-lane on which a serving pod could mint an AOT cell — which is why
-`aot_mint_phases` has zero rows platform-wide.
-
-A second, independent blocker sat one layer up: `_eager_first_eligible`
-demanded a hot-swap ROUTER on every pending pipe. A delegated pending never
-has one (nothing is armed on its pipe, by construction), so every delegated
-mint failed the test and was discarded — pgw#784's out-of-process route could
-not run on ANY lane, quantized or not.
-
-**pgw#815** (same pod): a 24m22s mint walked `seal_publish -> finalize
-completed` and produced zero cells, zero receipts, no local arm, no
-`self_mint_publish`, no abort, no error. Three of those are structural and are
-pinned here: no success event exists at any publish terminus, `publish_self_mint`
-and `withhold_self_mint_publish` both return BARE when nothing was packed, and
-a boot can reach readiness with a mint obligation that touched no terminus at
-all.
+**THE PUBLISH TERMINI.** A mint can walk `seal_publish -> finalize completed`
+and produce zero cells, zero receipts, no local arm, no `self_mint_publish`, no
+abort and no error. Three of those are structural and are pinned here: no
+success event exists at any publish terminus, `publish_self_mint` and
+`withhold_self_mint_publish` both return BARE when nothing was packed, and a
+boot can reach readiness with a mint obligation that touched no terminus at all.
 """
 
 from __future__ import annotations
@@ -187,7 +176,7 @@ def _arm(**kw: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# pgw#813 — the w8a8 lane is eager-serveable, therefore delegatable
+# The w8a8 lane is eager-serveable, therefore delegatable
 # ---------------------------------------------------------------------------
 
 
@@ -246,7 +235,7 @@ def test_a_w8a8_miss_mints_AOT_and_not_dynamo(
 
     pending = outcome.self_mint
     assert pending is not None, "the miss produced no mint at all"
-    # pgw#1010: a pending IS the AOT mint — the JIT recipe opens none — so the
+    # a pending IS the AOT mint — the JIT recipe opens none — so the
     # recipe axis that used to be asserted here cannot disagree any more. The
     # `self_mint_started` phase below is the wire half of the same claim.
     assert pending.delegated is True
@@ -263,13 +252,13 @@ def test_delegation_declines_name_their_TRUE_cause(
     kill switch from a pipeline classification."""
     register_export_declaration(_declaration())
 
-    # pgw#1010: the OPERATOR arm of this test drove
+    # The OPERATOR arm of this test drove
     # `GEN_WORKER_MINT_IN_PROCESS=1`. The env and the shape it selected are
     # deleted (in-process minting existed only to pack a dynamo cell), so the
     # caller-forced seam that replaces it is the one asserted here — the same
     # phase, reached the way a caller can still reach it.
     with pytest.raises(compile_cache.CompiledExecutionLaneUnavailableError):
-        # pgw#1010: this rig's lane is w8a8, which serves only from a cell — so
+        # This rig's lane is w8a8, which serves only from a cell — so
         # the decline is followed by the typed fail-closed rather than by a JIT
         # intake arm. The decline still NAMES ITS CAUSE first, which is the
         # pgw#813 claim under test.
@@ -277,7 +266,7 @@ def test_delegation_declines_name_their_TRUE_cause(
             _Pipe(), _Cfg(), publisher=_Publisher(), delegate=False)  # type: ignore[arg-type]
     assert "aot_mint_forced_in_process" in _phases(_events, "self_mint_skipped")
 
-    # pgw#995: the second arm here drove `GEN_WORKER_EAGER_FIRST_BOOT=0` and
+    # The second arm here drove `GEN_WORKER_EAGER_FIRST_BOOT=0` and
     # asserted the `aot_eager_first_disabled` phase. Both the switch and the
     # phase are deleted — eager-first is unconditional, so that decline cannot
     # arise, and a reason nobody can reach is a cause a reader hunts for and
@@ -287,7 +276,7 @@ def test_delegation_declines_name_their_TRUE_cause(
     _events.clear()
     fleet_cells._PENDING.clear()
 
-    # pgw#846: `Compile.regional` is the dynamo/JIT per-block knob (ie#381)
+    # `Compile.regional` is the dynamo/JIT per-block knob
     # and the AOT mint ignores it — regional EXPORT is retired, the recipe is
     # always whole-graph. A family that declares it must neither decline
     # delegation nor change the mint shape.
@@ -303,14 +292,14 @@ def test_mint_delegate_names_its_own_refusals(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert mint_delegate.delegation_refusal() == ""
-    # pgw#995: eager-first is unconditional, so setting the deleted name is a
+    # eager-first is unconditional, so setting the deleted name is a
     # no-op rather than a second refusal. Asserted, not assumed — a deletion
     # that leaves a live reader somewhere else looks exactly like this test
     # passing for the wrong reason.
     monkeypatch.setenv("GEN_WORKER_EAGER_FIRST_BOOT", "0")
     assert mint_delegate.delegation_refusal() == ""
     assert not hasattr(mint_delegate, "REFUSAL_EAGER_FIRST_DISABLED")
-    # pgw#1010: and the same is now true of the in-process switch — the WORKER
+    # And the same is now true of the in-process switch — the WORKER
     # half of the decision can no longer refuse anything, because there is no
     # in-process mint shape to select.
     monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
@@ -400,7 +389,7 @@ def test_eager_first_still_requires_a_router_for_an_IN_PROCESS_capture(
 
 
 # ---------------------------------------------------------------------------
-# pgw#815 — every publish terminus is typed
+# Every publish terminus is typed
 # ---------------------------------------------------------------------------
 
 
@@ -529,7 +518,7 @@ def test_a_boot_that_resolves_NOTHING_confesses(
         target=tmp_path / "c.tar.gz", mint_root=tmp_path / "root4", publisher=_Publisher())
     pending.mint_root.mkdir(parents=True, exist_ok=True)
 
-    # pgw#1010: every pending is a DELEGATED mint now, so the BOOT sweep
+    # Every pending is a DELEGATED mint now, so the BOOT sweep
     # defers to the driver that owns it — asserted, so a reader cannot mistake
     # the silence for the defect this test exists about...
     ex._assert_mint_termini(spec, [pending])  # type: ignore[arg-type]

@@ -1,11 +1,9 @@
 """gw#627: curated turbo LoRA onto the fp8 w8a8 lane — the live sdxl fatal.
 
-The live failure (th#1037 addendum, request 16205a14, L4, lane
-fp8-w8a8-dynamic+compiled): sdxl generate-turbo pushed its Lightning
-adapter through raw diffusers/peft ``load_lora_weights`` onto a UNet whose
-Linears are ``_Fp8ScaledLinear`` (pertensor) — peft rejects the module
-class fatally. The sanctioned route is the gw#547/558 additive branch via
-``AdapterResidency`` — which until gw#627 could not carry the 49 CONV LoRA
+The failure: pushing a Lightning adapter through raw diffusers/peft
+``load_lora_weights`` onto a UNet whose Linears are ``_Fp8ScaledLinear``
+(pertensor) is fatal — peft rejects the module class. The sanctioned route is
+the additive branch via ``AdapterResidency``, which must carry the 49 CONV LoRA
 pairs every curated sdxl distill adapter ships.
 
 These tests run the REAL codepath end-to-end on CPU: a real (tiny)
@@ -17,7 +15,7 @@ naming: ``lora_unet_*.lora_down.weight`` / ``.lora_up.weight`` /
 asserting the branch carries the adapter and peft is never consulted for
 the denoiser half. Forward numerics for the conv branch run on the plain
 lane (CPU has no ``torch._scaled_mm``; the Fp8ScaledLinear branch addend is
-the pre-existing gw#547 forward, unchanged here).
+unchanged here).
 """
 
 from __future__ import annotations

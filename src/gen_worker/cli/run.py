@@ -28,7 +28,7 @@ from typing import (
 
 import msgspec
 
-if TYPE_CHECKING:  # pgw#1127: the arming import stays deferred at runtime —
+if TYPE_CHECKING:  # the arming import stays deferred at runtime —
     # `gen_worker.local_serve` pulls the whole compile stack, and `cozy run`
     # on a payload-only endpoint must not pay for it.
     from .. import local_serve
@@ -48,7 +48,7 @@ from . import invoke as invoke_mod
 from .local_context import _stderr_emitter
 
 
-# Exit codes — tracked here for one-line reference. Mirrors progress.json #12.
+# Exit codes.
 EXIT_OK = 0
 EXIT_USER_EXCEPTION = 1
 EXIT_USAGE = 2
@@ -237,8 +237,8 @@ class _SelectedFunction:
         self.resources = resources
         self.slots = slots or {}
         self.handles = tuple(handles)
-        # SDK v2: the full EndpointSpec (defaults_type / slot_family /
-        # payload_axes) for the hub-less resolution chain.
+        # The full EndpointSpec (defaults_type / slot_family / payload_axes)
+        # for the hub-less resolution chain.
         self.spec = spec
 
 
@@ -407,10 +407,8 @@ def _decode_payload(
     """Decode the JSON payload into the typed msgspec.Struct.
 
     The decode IS the whole contract: msgspec's own validation is what the
-    live worker runs (`executor` decodes with the same `payload_type`). The
-    old `Clamp` post-decode pass claimed to mirror the worker and did not —
-    it had no serve-path call site at all, and its result was discarded here
-    inside a bare `except`. Deleted with the module (pgw#941 A).
+    live worker runs (`executor` decodes with the same `payload_type`), so
+    there is deliberately no post-decode clamping pass here.
     """
     try:
         decoded: Any = msgspec.json.decode(payload_bytes, type=payload_type)
@@ -483,7 +481,7 @@ class _SigintHandler:
         sys.stderr.flush()
         try:
             # Same entry point the production worker uses for an
-            # orchestrator cancel (#352).
+            # orchestrator cancel.
             self._ctx._cancel()
         except Exception:
             pass
@@ -571,49 +569,46 @@ def run_setup(
     """Call ``instance.setup(...)`` once, passing exactly the resolved model
     slots its signature declares.
 
-    ``arm_compile=False`` loads the slots WITHOUT arming any compiled path
-    (pgw#784): the mint child drives its own cold arm + capture and must not
-    have a cell armed under it. ``return_loaded=True`` returns the loaded slot
-    objects so a caller can reach the pipeline it just built.
+    ``arm_compile=False`` loads the slots WITHOUT arming any compiled path: the
+    mint child drives its own cold arm + capture and must not have a cell armed
+    under it. ``return_loaded=True`` returns the loaded slot objects so a caller
+    can reach the pipeline it just built.
 
-    ``selected`` (pgw#1127) is the routable function these slots belong to. It
-    is what makes ``arm_compile=True`` able to MINT: a delegated child
-    rediscovers the endpoint from its declaring module and re-resolves the
-    parent's slots, so without it this path can only adopt a cell that already
-    exists. Absent, the arm is adopt-only and says so.
+    ``selected`` is the routable function these slots belong to, and it is what
+    makes ``arm_compile=True`` able to MINT: a delegated child rediscovers the
+    endpoint from its declaring module and re-resolves the parent's slots.
+    Absent, the arm is adopt-only and says so.
 
-    ``place=False`` (pgw#1124) loads the slots without running the worker's
-    serving placement ladder at all, while ``device`` still says which device
-    the virtual structure is BUILT on — the two are one knob only for a load
-    that intends to serve. The boot-trace child sets it: it needs shapes and a
-    graph, never a servable pipeline, and the ladder it was running moved the
-    slot's REAL non-target components onto the card its serving parent owns.
+    ``place=False`` loads the slots without running the worker's serving
+    placement ladder at all, while ``device`` still says which device the
+    virtual structure is BUILT on — the two are one knob only for a load that
+    intends to serve. The boot-trace child sets it: it needs shapes and a graph,
+    never a servable pipeline, and the ladder would move the slot's REAL
+    non-target components onto the card its serving parent owns.
 
-    ``structure_only`` (pgw#1080) names the components every slot must build
-    from CODE + CONFIG instead of from the checkpoint — the mint child's
-    compile targets. They are constructed by
-    ``models.structure_only.build_component`` and injected through the same
-    ``components=`` seam a preloaded shared component uses, so the pipeline
-    the endpoint receives is composed by its own loader either way. A
-    component the slot's tree does not declare is skipped (a two-slot family's
-    auxiliary slot has no denoiser); a component that CANNOT be built from
-    config refuses typed (``StructureOnlyUnsupported``) rather than silently
-    loading its weights.
+    ``structure_only`` names the components every slot must build from CODE +
+    CONFIG instead of from the checkpoint — the mint child's compile targets.
+    They are constructed by ``models.structure_only.build_component`` and
+    injected through the same ``components=`` seam a preloaded shared component
+    uses, so the pipeline the endpoint receives is composed by its own loader
+    either way. A component the slot's tree does not declare is skipped (a
+    two-slot family's auxiliary slot has no denoiser); a component that CANNOT
+    be built from config refuses typed (``StructureOnlyUnsupported``) rather
+    than silently loading its weights.
 
-    ``component_paths`` (slot -> component -> local override tree, pgw#816)
-    carries the caller's ALREADY-RESOLVED pgw#617 component overrides. The
-    executor resolves them from the dispatch and injects them into the same
+    ``component_paths`` (slot -> component -> local override tree) carries the
+    caller's ALREADY-RESOLVED component overrides. The executor resolves them
+    from the dispatch and injects them into the same
     ``from_pretrained(components=...)`` seam; the mint child is handed the
     executor's map so it composes the identical pipeline. Without it a slot
     whose base tree was fetched with the overridden component EXCLUDED
-    (th#1330 B2, ``<digest>__x<fp>``) cannot load at all.
+    (``<digest>__x<fp>``) cannot load at all.
 
-    A bare ``def setup(self)`` is legitimate (#337 model-selectable endpoints
-    receive their model per-request in the handler instead), so unclaimed
-    slots are fine. But a setup() that declares parameters we CANNOT satisfy
-    is an authoring error and must fail loudly -- the previous blanket
-    ``except TypeError: setup_fn()`` swallowed signature mismatches and let
-    them resurface as confusing downstream failures.
+    A bare ``def setup(self)`` is legitimate (model-selectable endpoints receive
+    their model per-request in the handler instead), so unclaimed slots are
+    fine. But a setup() that declares parameters we CANNOT satisfy is an
+    authoring error and must fail loudly rather than being swallowed by a
+    blanket ``except TypeError: setup_fn()``.
     """
     setup_fn = getattr(instance, "setup", None)
     if instance is None or setup_fn is None:
@@ -654,26 +649,25 @@ def run_setup(
         )
     # Each claimed slot loads through the production core (provision.load_slot):
     # a setup(pipeline: StableDiffusionXLPipeline) receives a constructed +
-    # placed pipeline, str/Path slots receive the snapshot path (gw#416).
+    # placed pipeline, str/Path slots receive the snapshot path.
     try:
         hints = typing.get_type_hints(setup_fn)
     except (TypeError, ValueError, NameError):
         hints = {}
     decl = getattr(type(instance), _ENDPOINT_ATTR, None)
-    # pgw#1127: the mint context is built from the WHOLE resolution, once,
-    # before any slot loads — the child re-runs setup, so it needs every slot
-    # this endpoint declares and not just the one whose load happens to reach
-    # the arm. Built even when `arm_compile` is False (it costs a dict) so the
-    # two paths cannot drift into resolving slots differently.
+    # The mint context is built from the WHOLE resolution, once, before any slot
+    # loads — the child re-runs setup, so it needs every slot this endpoint
+    # declares and not just the one whose load happens to reach the arm. Built
+    # even when `arm_compile` is False so the two paths cannot drift into
+    # resolving slots differently.
     mint = _local_mint_context(
         instance, resolved_models, wanted,
         component_paths=component_paths, selected=selected)
-    # pgw#1199: a mint this load OWES is collected, not run. Arming from the
-    # local store still happens inside the load (the endpoint's `setup()` must
-    # receive an armed pipeline), but the MINT waits until `setup()` and
-    # `warmup()` have returned — because the mint child no longer proves the
-    # endpoint's handler itself, and proving it needs an instance whose
-    # pipeline is bound. Same order the fleet boots in (pgw#671).
+    # A mint this load OWES is collected, not run. Arming from the local store
+    # still happens inside the load (the endpoint's `setup()` must receive an
+    # armed pipeline), but the MINT waits until `setup()` and `warmup()` have
+    # returned, because proving the endpoint's handler needs an instance whose
+    # pipeline is bound. Same order the fleet boots in.
     deferred: List[Any] = []
     loaded = {
         k: _load_injected_model(
@@ -748,23 +742,20 @@ def _assert_structure_honored(
 
     ``components=`` is a request, and a pipeline class is free to ignore an
     unexpected keyword — ``**kwargs`` swallows it and the class loads the
-    checkpoint itself. That failure is SILENT and it is the exact failure this
-    slice cannot tolerate: the mint would hold every weight and still report a
-    weightless child. So it is checked, on the object that came back, and a
-    miss raises ``StructureNotHonored`` — a DISTINCT type from the buildable
-    strand, because the component WAS built weight-free and the pipeline threw
-    it away. The mint child FAILS CLOSED on it (it does not fall back to a
-    real-weight export, which is how z-image OOM'd ~40 GiB as `retryable`).
+    checkpoint itself. That failure is SILENT: the mint would hold every weight
+    and still report a weightless child. So it is checked, on the object that
+    came back, and a miss raises ``StructureNotHonored`` — a DISTINCT type from
+    the buildable strand, because the component WAS built weight-free and the
+    pipeline threw it away. The mint child FAILS CLOSED on it rather than
+    falling back to a real-weight export.
 
     ``requested`` is what the CALLER asked to be weight-free, and it is checked
-    separately because the loop below could only ever see components that were
-    BUILT (pgw#1173). A target the builder skipped — ``model_index.json`` does
-    not name it, or the tree has no readable index at all, in which case
-    ``model_index_components`` returns the empty set and EVERY target is
-    skipped — never enters ``injected``, so this guard iterated nothing and
-    passed while the pipeline loaded that target's checkpoint. A guard that
-    cannot fire for the case it is named for is worse than no guard, because
-    its silence is read as proof. Such a target is the buildable-strand
+    separately because the loop below can only see components that were BUILT.
+    A target the builder skipped — ``model_index.json`` does not name it, or the
+    tree has no readable index at all, in which case ``model_index_components``
+    returns the empty set and EVERY target is skipped — never enters
+    ``injected``, so the loop would iterate nothing and pass while the pipeline
+    loaded that target's checkpoint. Such a target is the buildable-strand
     refusal (``StructureOnlyUnsupported``), NOT the swallowed one: the mint
     child's fallback to a real-weight export stays correct and stays RECORDED,
     and the boot trace — which may not fall back at all — refuses.
@@ -809,10 +800,9 @@ def _assert_structure_honored(
 def _structure_device(device: str) -> str:
     """Where a structure-only component's VIRTUAL tensors claim to live.
 
-    Faithful device is the whole point (pgw#1080): AOTInductor codegens for
-    the device the traced tensors report, so a structure built as "cpu" on a
-    CUDA pod would compile a CPU cell. Fake tensors allocate nothing, so
-    claiming the card costs nothing.
+    AOTInductor codegens for the device the traced tensors report, so a
+    structure built as "cpu" on a CUDA pod would compile a CPU cell. Fake
+    tensors allocate nothing, so claiming the card costs nothing.
     """
     want = (device or "").strip().lower()
     if want:
@@ -838,9 +828,9 @@ def _load_injected_model(
 
     ``overrides`` (component -> local tree) are loaded from their OWN trees
     and injected through ``from_pretrained(components=...)`` — the same seam
-    and the same loader the executor's setup uses (pgw#617/pgw#816), so a
-    composition assembled here is the composition assembled there."""
-    # The override trees are part of the slot's identity: two loads of the
+    and the same loader the executor's setup uses, so a composition assembled
+    here is the composition assembled there."""
+    # the override trees are part of the slot's identity: two loads of the
     # same base path with different overrides are different pipelines.
     key = (
         str(annotation),
@@ -853,7 +843,7 @@ def _load_injected_model(
            if structure_only else "")
         # ...and an UNPLACED composition is a different object again: handing
         # it to a caller that asked for a servable one would serve from host
-        # memory (pgw#1124).
+        # memory.
         + ("" if place else "|unplaced"),
     )
     if key in _INJECTED_CACHE:
@@ -892,17 +882,16 @@ def _load_injected_model(
             sl.obj, injected, requested=structure_only, slot=slot)
     compile_cfg = getattr(decl, "compile", None) if decl is not None else None
     if compile_cfg is not None:
-        # SDK v2: the compile machinery consumes the enriched CompileCell
+        # The compile machinery consumes the enriched CompileCell
         # (decorator-level lora_bucket + declared shape contract), never the
         # raw Compile. Warm guidance stays empty locally — the local mint
         # and its verify both compute from this same object, so the store
         # is self-consistent.
         from ..registry import CompileCell
 
-        # ONE constructor with the registry's path (pgw#1150): a must-survive
-        # field this site forgot to copy — the declared numerics band was
-        # exactly that — silently judges every locally minted cell at a default
-        # nobody chose.
+        # ONE constructor, shared with the registry's path: a must-survive field
+        # missed here (e.g. the declared numerics band) would silently judge
+        # every locally minted cell at a default nobody chose.
         compile_cfg = CompileCell.from_declaration(
             compile_cfg, lora_bucket=int(getattr(decl, "lora_bucket", 0) or 0))
     if (
@@ -913,15 +902,10 @@ def _load_injected_model(
         from .. import local_serve
         from ..models.cache_paths import tensorhub_cas_dir
 
-        # §4.28 / pgw#1127: the ONE arming brain, with NO sink. Delivered
-        # artifact, then THIS MACHINE's own ck1-keyed cell store, then a
-        # delegated AOT mint whose result lands in that store — so the second
-        # run of this endpoint on this machine arms from disk with no mint, no
-        # hub and no network. Before pgw#1127 this line called
-        # `local_cells.enable_compiled`, the JIT path, which meant the store
-        # pgw#1096 built for exactly this machine was unreachable from it and
-        # pgw#1086 wave 1's deletion of that module would have taken compiled
-        # serving off cozy-local outright.
+        # The ONE arming brain, with NO sink: delivered artifact, then THIS
+        # MACHINE's own ck1-keyed cell store, then a delegated AOT mint whose
+        # result lands in that store — so the second run of this endpoint on
+        # this machine arms from disk with no mint, no hub and no network.
         local_serve.enable_compiled(
             sl.obj, compile_cfg, Path(tensorhub_cas_dir()), mint=mint,
             defer=defer)
@@ -947,7 +931,7 @@ def _handler_kwargs(bound_method: Any, resolved_models: Dict[str, str]) -> Dict[
 
 
 def _resolve_ctx_slots(ctx: Any, selected: "_SelectedFunction") -> None:
-    """Hub-less ``ctx.slots`` (SDK v2): no hub means no catalog recipe JSON
+    """Hub-less ``ctx.slots``: no hub means no catalog recipe JSON
     ever arrives, so every Slot resolves to the NEUTRAL schema defaults of
     the handler's derived config schema (``RequestContext[D]``) — exactly
     the hub's own neutral stamp, so hub-less and production agree."""
@@ -957,7 +941,7 @@ def _resolve_ctx_slots(ctx: Any, selected: "_SelectedFunction") -> None:
     slot_family = getattr(spec, "slot_family", {}) or {}
     resolved: Dict[str, Any] = {}
     errors: Dict[str, str] = {}
-    declared: List[str] = []  # pgw#763: FIXED slots only (see warmup)
+    declared: List[str] = []  # FIXED slots only (see warmup)
     for name, slot in selected.slots.items():
         try:
             resolved[name] = resolve_slot(
@@ -984,9 +968,9 @@ def _resolve_ctx_slots(ctx: Any, selected: "_SelectedFunction") -> None:
 def _local_executing_execution_lane(
     bindings: Dict[str, Any], execution_lane_str: str, handles: Tuple[str, ...]
 ) -> str:
-    """th#1050 ctx.lane for local runs: a --lane the endpoint DECLARES wins
-    (author kernels execute it); otherwise the most-quantized binding's lane
-    (the local twin of Executor._served_lane, eager execution)."""
+    """ctx.lane for local runs: a --lane the endpoint DECLARES wins (author
+    kernels execute it); otherwise the most-quantized binding's lane (the local
+    twin of Executor._served_lane, eager execution)."""
 
     body = ""
     if execution_lane_str and handles:
@@ -1001,20 +985,19 @@ def _local_executing_execution_lane(
             lanespec.execution_lane_body_of_binding(
                 getattr(b, "storage_dtype", "") or "")
             for b in (bindings or {}).values())
-    # ie#655: a local run compiles nothing, so the execution axis is eager —
-    # including for a compiled-only body, whose PLAN is not what happened here.
+    # A local run compiles nothing, so the execution axis is eager — including
+    # for a compiled-only body, whose PLAN is not what happened here.
     return lanespec.execution_lane_id(
         lanespec.observed_execution_lane(body, False))
 
 
 def _apply_execution_lane_to_bindings(bindings: Dict[str, Any], execution_lane_str: str) -> Dict[str, Any]:
-    """th#913/gw#596: fold a --lane choice into the declared bindings.
+    """Fold a --lane choice into the declared bindings.
 
-    bf16 = the declared base (no transform); fp8 family = the local cast
-    lane (per-layer fp8 storage). STORED-quant lanes (fp8-w8a8, 4bit) are
-    refused: they used to fold a `#flavor` onto the binding, and pgw#1148
-    deleted that selector with the flavor system (§1.32(d)). Locally, bind
-    the stored-quant checkpoint by digest instead."""
+    bf16 = the declared base (no transform); fp8 family = the local cast lane
+    (per-layer fp8 storage). STORED-quant lanes (fp8-w8a8, 4bit) are refused —
+    there is no within-tag-group selector; locally, bind the stored-quant
+    checkpoint by digest instead."""
 
     try:
         req = lanespec.parse_execution_lane_spec(execution_lane_str)
@@ -1042,8 +1025,8 @@ def _apply_execution_lane_to_bindings(bindings: Dict[str, Any], execution_lane_s
 
 
 def _discard(_value: Any) -> None:
-    """pgw#784 made ``run_setup`` return the loaded slots; ``on_resolved``'s
-    contract is still a None-returning callback."""
+    """``run_setup`` returns the loaded slots; ``on_resolved``'s contract is a
+    None-returning callback."""
     return None
 
 
@@ -1124,8 +1107,8 @@ def dispatch_request(
 # --------------------------------------------------------------------------
 
 def _handle_run(args: argparse.Namespace) -> int:
-    # pgw#1142 / §4.32 item 4: before anything can arm or mint. `run` does its
-    # setup() per invocation, so the order has to stand before the first one.
+    # Must be applied before anything can arm or mint: `run` does its setup()
+    # per invocation, so the posture has to stand before the first one.
     if bool(getattr(args, "eager_only", False)):
         serve_posture.apply_command(
             True, actor="cozy-local-cli", reason="--eager-only")
@@ -1160,7 +1143,7 @@ def _warm_serve_socket() -> Optional[Path]:
 def _run_via_warm_serve(
     args: argparse.Namespace, sock: Path, raw_bytes: bytes
 ) -> int:
-    """Dispatch one request through a running ``gen-worker serve`` (#340).
+    """Dispatch one request through a running ``gen-worker serve``.
 
     Reuses ``cli/invoke.py``'s socket client. ``run`` addresses by
     class/method, but serve addresses by FUNCTION NAME — so we still import the
@@ -1266,8 +1249,7 @@ def _run_inner(args: argparse.Namespace) -> int:
         default_name=getattr(mod, "__name__", "").split(".", 1)[0],
     )
 
-    # th#913/gw#596: optional human lane choice, mapped onto the bindings
-    # before resolution (the ladder twin's local expansion).
+    # Optional human lane choice, mapped onto the bindings before resolution.
     if getattr(args, "execution_lane", ""):
         selected.bindings = _apply_execution_lane_to_bindings(selected.bindings, args.execution_lane)
 

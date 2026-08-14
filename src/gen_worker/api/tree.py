@@ -1,5 +1,4 @@
-"""Component-tree derivation (SDK v2, pgw#647 / WORKER-RESIDENCY-DESIGN
-"Slots are a TREE").
+"""Component-tree derivation — slots are a TREE.
 
 Bindings form a tree: the root slot is a checkpoint bundle, itself a
 composition (unet, vae, text_encoder(s), scheduler, tokenizers); parts are
@@ -17,7 +16,7 @@ evictable, a memory-pool entry — unet/vae/text encoders) vs CONFIG-ISH
 pool. The derived tree is published at BUILD time into the release manifest
 (``functions[].slots[].components``): the hub needs the path vocabulary for
 per-path policy (``pipeline`` open / ``pipeline.vae`` curated /
-``pipeline.unet`` fixed — th#980/ie#524 vocabulary) and for component-level
+``pipeline.unet`` fixed) and for component-level
 routing; pinning it at publish keeps diffusers version drift deterministic
 (the cell key already carries the diffusers version).
 
@@ -25,7 +24,7 @@ Instance identity = root binding + override map: a swapped part changes
 identity, so the compile cell DERIVES facts like "this cell must not claim
 ``vae.decode``" instead of relying on an author comment.
 
-pgw#667: a part's LOAD DTYPE is part of that identity too. The tree therefore
+A part's LOAD DTYPE is part of that identity too. The tree therefore
 carries a per-component dtype opinion (:func:`component_dtypes`), resolved from
 the component's CLASS against the one facts table
 (``gen_worker.families.facts``) — not declared per endpoint. It is published
@@ -148,7 +147,7 @@ def component_dtypes(
     model_index_classes: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, ComponentDtype]:
     """``{part_name: ComponentDtype}`` — the load-dtype opinions this
-    composition's parts carry (pgw#667). Empty means "loads uniformly at the
+    composition's parts carry. Empty means "loads uniformly at the
     composition's compute dtype", which is the overwhelmingly common case.
 
     ``model_index_classes`` (``{part: class name}`` read from a snapshot's
@@ -170,8 +169,8 @@ def components_manifest(pipeline_cls: type) -> Optional[List[Dict[str, str]]]:
     """The manifest projection of the derived tree: ordered
     ``[{name, kind}, ...]`` rows, or None for non-introspectable classes.
 
-    A part carrying a pgw#667 load-dtype fact also publishes ``dtype`` — the
-    hub needs it in the path vocabulary for the same reason it needs ``kind``:
+    A part carrying a load-dtype fact also publishes ``dtype`` — the hub needs
+    it in the path vocabulary for the same reason it needs ``kind``:
     a component override at ``pipeline.vae`` must be materialized at the same
     precision the base part requires.
     """
@@ -192,7 +191,7 @@ def components_manifest(pipeline_cls: type) -> Optional[List[Dict[str, str]]]:
 def validate_no_sibling_parts(
     owner: str, slots: Dict[str, Any], models: Dict[str, Any],
 ) -> None:
-    """v2 lint: sibling-as-part declarations are DELETED, not migrated.
+    """Sibling-as-part declarations are refused, never migrated.
 
     Two shapes are rejected when the endpoint declares an introspectable
     root pipeline slot:
@@ -200,7 +199,7 @@ def validate_no_sibling_parts(
     1. A sibling slot whose NAME matches a component of the root's derived
        tree (the old ``"vae": Slot(AutoencoderKL)`` hand-wiring) — the part
        is already addressable as ``<root>.<name>``; the override is catalog
-       data (th#1116), not endpoint code.
+       data, not endpoint code.
     2. A sibling ``str``/``Path``/``PurePath`` slot next to a derived-tree
        pipeline slot (the old ``"turbo_lora": Slot(str)`` workaround) —
        modifiers on components are adapters riding the binding, never
@@ -231,9 +230,8 @@ def validate_no_sibling_parts(
         if name in trees:
             continue
         cls = getattr(slot, "pipeline_cls", None)
-        # pgw#654 gap #8: Path counts — the docstring always promised it;
-        # the old test only caught str/bytes, silently re-permitting the
-        # deleted Slot(Path) modifier shape on Tier-A endpoints.
+        # Path counts too, not just str/bytes: a Slot(Path) is the same
+        # deleted modifier shape.
         if isinstance(cls, type) and (
             cls is str or issubclass(cls, (str, bytes, PurePath))
         ):

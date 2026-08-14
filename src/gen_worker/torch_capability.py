@@ -1,23 +1,23 @@
-"""pgw#788: torch is a CAPABILITY, not a precondition for booting.
+"""Torch is a CAPABILITY, not a precondition for booting.
 
 A worker with no torch is a first-class shape, not a degenerate GPU worker
-(`accelerator='none'`, never `'cpu'`; th#721). Three boot-path functions
-bare-imported torch with no guard —
+(`accelerator='none'`, never `'cpu'`). A bare torch import anywhere on the boot
+path —
 
     entrypoint.py -> env_seal.establish()
                   -> settings_authority.impose_torch()
                   -> host_isa.impose()
                   -> guard_closure.establish_posture()
 
-— so from 0.70.3 onward a torchless image died at ``phase=env_seal`` before it
-could advertise a single function, and no env knob skipped it.
+— kills a torchless image at ``phase=env_seal`` before it can advertise a
+single function, and no env knob skips it.
 
 The seal is about REPRODUCIBILITY of the execution environment. On a worker with
 no torch there is no inductor/dynamo config to impose, so the honest behaviour is
 to record that fact: ``torch: "absent"`` is a real, keyable environment fact, and
 a seal that states it is STRONGER than one that cannot be computed. Adding a
-~2-3 GB torch to images whose entire value is being cheap CPU pods would have
-encoded an SDK defect as a fleet requirement instead.
+~2-3 GB torch to images whose entire value is being cheap CPU pods would encode
+an SDK defect as a fleet requirement instead.
 
 Deliberately NOT memoized. The answer after the first call is a ``sys.modules``
 lookup, and a cached verdict is exactly the shape that leaks between tests

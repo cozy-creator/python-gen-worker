@@ -1,7 +1,7 @@
 """pgw#754: host-CPU ISA portability of AOTI cells.
 
-Live incident (2026-07-28, machine hv220gc4f7vu): a worker arming a
-DISCOVERED aot-inductor cell died SIGILL (exit 132) inside
+The failure mode: a worker arming a DISCOVERED aot-inductor cell dies
+SIGILL (exit 132) inside
 ``aoti_load_package`` — the cell's host wrapper ``.so`` was compiled
 ``-march=native`` on an AVX-512 mint host (the shipped kernel.cpp embeds the
 compile command: ``-march=native ... -mavx512f -mavx512vnni``) and carries
@@ -87,7 +87,7 @@ def test_establish_wires_the_clamp(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(inductor_config.cpp, "simdlen", None)
     monkeypatch.setattr(env_seal, "_BOOT_READBACK", None)
     seal = env_seal.establish()
-    # pgw#1049: the clamp is a DECLARED inductor fact in the seal.
+    # The clamp is a DECLARED inductor fact in the seal.
     assert seal["inductor"]["cpp.march"] == host_isa.mint_march()
 
 

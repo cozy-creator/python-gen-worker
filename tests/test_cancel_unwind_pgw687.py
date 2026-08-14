@@ -1,10 +1,8 @@
-"""pgw#687: a cancel that never unwinds must never absorb the next assignment.
+"""A cancel that never unwinds must never absorb the next assignment.
 
-Live shape (chaos, conversion 0.6.9): job A was cancelled mid-modelopt
-calibration; 61 s later the hub assigned job B to the SAME worker, and job B
-produced ZERO events of any kind for 46 minutes while the pod stayed
-connected, heartbeating, and advertising ``modelopt-quantization``. The only
-symptom was ABSENCE.
+The failure shape is ABSENCE: a worker whose cancelled job never unwound stays
+connected, heartbeating and advertising, while the next assignment produces zero
+events of any kind.
 
 Mechanism, reproduced here over the real executor: cancelling a SYNC handler
 is cooperative (``ctx._cancel()`` sets a flag; ``exec_task.cancel()`` is only

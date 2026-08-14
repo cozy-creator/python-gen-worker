@@ -1,25 +1,13 @@
-"""pgw#1158: a declared target that NO Input row reaches is refused.
+"""A declared target that NO Input row reaches is refused.
 
-The unambiguous half of the target-scoping finding. `target_inputs` scopes by
-``not inp.targets or target in inp.targets``, so a target that every row scopes
-AWAY from still gets a mint plan — one with no declared inputs at all, whose
-trace has nothing to feed.
+`target_inputs` scopes by ``not inp.targets or target in inp.targets``, so a
+target that every row scopes AWAY from still gets a mint plan — one with no
+declared inputs at all, whose trace has nothing to feed. The cost is not merely
+a confusing declaration: a whole plan is minted for a target the author gave
+nothing to trace.
 
-Measured on unmodified `origin/master` (c9fb5d4a), two declared targets with
-every Input row scoped to the first:
-
-    origin/master: declaration ACCEPTED
-       target 'transformer': 1 declared input(s)
-       target 'vae.decode': 0 declared input(s)
-       plans minted: ['transformer', 'vae.decode']
-
-So the cost is not merely a confusing declaration: a whole plan is minted for a
-target the author gave nothing to trace.
-
-WHY THIS ONE AND NOT THE OTHER HALF. Whether an UNTARGETED row should fan out
-to every declared target is a defaulting semantic with real cost attached (it
-is one of two leading candidates for sdxl's 36-vs-18 entry discrepancy), and it
-is a design call. This refusal is deliberately independent of it: no defaulting
+Deliberately independent of the OTHER half — whether an UNTARGETED row should
+fan out to every declared target is an open defaulting semantic. No defaulting
 anyone would choose makes an input-less target correct, so refusing it cannot
 freeze that question in either direction.
 """

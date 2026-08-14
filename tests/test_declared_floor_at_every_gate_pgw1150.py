@@ -1,24 +1,19 @@
 """pgw#1150 (second pass) — the DECLARED numerics band reaches every gate that
 judges parity, and ``threshold_source`` never lies about which band decided.
 
-## What the first pass fixed, and the hole it left
+## The two properties
 
-`25f1f190` closed the headline: `registry.CompileCell` gained
-`numerics_floor`/`numerics_warn`, so the object the FLEET mint parent hands the
-gate finally carries the family's declaration. Verified on `88af2c9b`: a
-`spec.compile_cell()` driven through `provision.arm_aot(verify_numerics=True)`
-is judged at 0.995, not 0.98.
+`registry.CompileCell` carries `numerics_floor`/`numerics_warn`, so the object
+the FLEET mint parent hands the gate carries the family's declaration.
 
-What it did NOT close is that the PROVENANCE was answered twice.
-`numerics_probe.probe_cell` re-derived `threshold_source` from
-`cfg.numerics_floor` alone while `numerics_ladder.declared_thresholds` decided
-the band from `floor` **or** `warn` — so a family declaring only
-`numerics_warn` was judged at its DECLARED band while every wire row, every
-`author-ci.toml` `[proof]` record and `Parity.floor_source` reported
-`sdk-default`. A `threshold_source` that can be false about the number beside
-it is the same defect as a floor nobody reads, one level in: the measurement
-is right and the record of it is wrong, and the record is what anyone acts on.
-`declared_thresholds` is now the ONE authority and stamps `Thresholds.source`.
+PROVENANCE is answered ONCE. If `numerics_probe.probe_cell` re-derives
+`threshold_source` from `cfg.numerics_floor` alone while
+`numerics_ladder.declared_thresholds` decides the band from `floor` **or**
+`warn`, a family declaring only `numerics_warn` is judged at its DECLARED band
+while every wire row, every `author-ci.toml` `[proof]` record and
+`Parity.floor_source` report `sdk-default` — the measurement is right and the
+record of it is wrong, and the record is what anyone acts on.
+`declared_thresholds` is the ONE authority and stamps `Thresholds.source`.
 
 ## Why this file exists as well as `test_numerics_gate_pgw868.py`
 

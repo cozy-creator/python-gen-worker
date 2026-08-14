@@ -1,4 +1,4 @@
-"""Small HF repo classifier (replaces gen_worker.conversion.hf_classifier).
+"""Small HF repo classifier.
 
 Given a repo file listing (`HfApi.list_repo_files`) plus a couple of tiny
 config fetches, decide:
@@ -8,8 +8,8 @@ config fetches, decide:
      per component (dtype-variant preference), all configs/tokenizers,
      never pickle/ONNX/TF/demo junk.
 
-One refusal exception (``RepoRefusal(reason=...)``) replaces the old 14-class
-hierarchy; ``reason`` is a stable machine token.
+One refusal exception (``RepoRefusal(reason=...)``); ``reason`` is a stable
+machine token.
 """
 
 from __future__ import annotations
@@ -38,12 +38,10 @@ _DTYPE_TAGS: dict[str, tuple[str, ...]] = {
     "fp8": ("fp8", "fp8_e4m3fn", "fp8-e4m3", "fp8_e5m2"),
 }
 _VARIANT_TAG_RE = re.compile(r"\.([a-z0-9_\-]+)\.safetensors$")
-# gw#593: _VARIANT_TAG_RE alone also matches a plain dotted version number
-# embedded in a filename ("ltx-2.3-22b-dev.safetensors" -> falsely captures
-# "3-22b-dev") — real repos outside the diffusers convention (Lightricks
-# LTX-2.3's root bundle: dev/distilled/distilled-lora/upscaler checkpoints,
-# each with its own "2.3"/"1.0"/"1.1" version token) hit this. Only a KNOWN
-# dtype token is a real variant suffix; every _DTYPE_TAGS value is one.
+# _VARIANT_TAG_RE alone also matches a plain dotted version number embedded in
+# a filename ("ltx-2.3-22b-dev.safetensors" -> falsely captures "3-22b-dev"),
+# which real repos outside the diffusers convention hit. Only a KNOWN dtype
+# token is a real variant suffix; every _DTYPE_TAGS value is one.
 _KNOWN_VARIANT_TAGS = frozenset(t for tags in _DTYPE_TAGS.values() for t in tags)
 _SHARD_SUFFIX_RE = re.compile(r"-\d{5}-of-\d{5}$")
 _OFFICIAL_INDEX_VARIANT_RE = re.compile(
@@ -73,9 +71,9 @@ class RepoRefusal(ValidationError):
     pickle_only | onnx_only | tf_only | flax_only | coreml_only |
     tensorrt_only | unknown_shape | too_large
 
-    A ValidationError (th#1084): a deterministic verdict about the USER'S
-    source repo — the executor maps it INVALID, so it fails only the request
-    and never feeds release-health blame.
+    A ValidationError: a deterministic verdict about the USER'S source repo —
+    the executor maps it INVALID, so it fails only the request and never feeds
+    release-health blame.
     """
 
     def __init__(self, reason: str, *, files_seen: Sequence[str] = (), detail: str = "") -> None:
@@ -88,8 +86,8 @@ class RepoRefusal(ValidationError):
 
 
 class SourceIncludeError(ValidationError):
-    """gw#593 item 2: one or more ``source_include`` globs matched no file in
-    the source repo's listing. Every glob is a REQUIRED selector (the caller
+    """One or more ``source_include`` globs matched no file in the source
+    repo's listing. Every glob is a REQUIRED selector (the caller
     is explicitly pinning a file that must exist) — a typo or stale pattern
     must fail loud here, not silently narrow the candidate set or fall
     through to a generic ``missing_safetensors``/``too_large`` refusal that
@@ -122,7 +120,7 @@ def apply_source_include(paths: Sequence[str], include: Sequence[str]) -> list[s
 
     Every glob must match >=1 path or the whole call fails loud
     (:class:`SourceIncludeError`) — see its docstring. An empty/``None``
-    ``include`` is a no-op (today's heuristic keeps running unrestricted).
+    ``include`` is a no-op (the heuristic runs unrestricted).
     """
     if not include:
         return list(paths)
@@ -151,10 +149,9 @@ class RepoClassification:
     allow_patterns: list[str]
     attrs: dict[str, str] = field(default_factory=dict)
     detection_reason: str = ""
-    # pgw#761: the subfolder the standalone component lives in ("vae" for
-    # PrunaAI/PrunaVAED), empty when the component is at the repo root. Both
-    # shapes are first-class; the subfolder name IS the component's role
-    # declaration, and the mirror preserves it (Paul's ruling, 2026-07-29).
+    # The subfolder the standalone component lives in ("vae"), empty when the
+    # component is at the repo root. Both shapes are first-class; the subfolder
+    # name IS the component's role declaration, and the mirror preserves it.
     component_subfolder: str = ""
 
 
@@ -187,8 +184,8 @@ def _variant_tag(path: str) -> str:
     if m is None:
         return ""
     tag = m.group(1)
-    # gw#593: reject anything that isn't a recognized dtype token — a bare
-    # regex match also fires on a filename's own dotted version number.
+    # Reject anything that isn't a recognized dtype token — a bare regex match
+    # also fires on a filename's own dotted version number.
     return tag if tag in _KNOWN_VARIANT_TAGS else ""
 
 
@@ -202,7 +199,7 @@ def _index_variant_tag(path: str) -> str:
         match = _LEGACY_INDEX_VARIANT_RE.search(name)
         if match is not None:
             tag = match.group(1)
-    # gw#593: same guard as _variant_tag — only a recognized dtype token.
+    # Same guard as _variant_tag — only a recognized dtype token.
     return tag if tag in _KNOWN_VARIANT_TAGS else ""
 
 
@@ -285,7 +282,7 @@ def _subfolder_component_candidates(
 ) -> dict[str, tuple[str, list[str], list[str], str]]:
     """Top-level subdirs that ARE a standalone diffusers component: their own
     ``config.json`` carries ``_class_name`` and they hold a canonical
-    ``diffusion_pytorch_model*`` weight set (pgw#761).
+    ``diffusion_pytorch_model*`` weight set.
 
     Returns ``{subdir: (class_name, weights, indexes, dtype)}`` with paths
     repo-relative. Only the subdir's OWN top level is considered — a deeper
@@ -330,7 +327,7 @@ def classify_repo(
     ``config_json`` is the parsed root ``config.json`` when present (needed
     only to distinguish transformers repos). ``component_configs`` maps a
     top-level subdir to its parsed ``config.json`` — what a component
-    published under its pipeline key needs to be recognized (pgw#761).
+    published under its pipeline key needs to be recognized.
     ``safetensors_metadata`` is the
     ``__metadata__`` block of the largest root safetensors (kohya LoRA
     detection; pass ``huggingface_hub.get_safetensors_metadata`` output).
@@ -428,7 +425,7 @@ def classify_repo(
     # root config with _class_name plus the canonical
     # diffusion_pytorch_model* weight set, but no pipeline model_index.json.
     # They are not transformers models, and convenience root aliases must not
-    # be mirrored as additional logical weights (gw#426).
+    # be mirrored as additional logical weights.
     diffusers_class = str((config_json or {}).get("_class_name") or "").strip()
     component_weights, component_indexes, component_dtype = (
         _pick_diffusers_component_weight_set(root, dtype_pref)
@@ -450,12 +447,11 @@ def classify_repo(
         )
 
     # 3.6 the SAME standalone component, published under its own component
-    # key — PrunaAI/PrunaVAED is vae/config.json + vae/diffusion_pytorch_
-    # model.safetensors with NO root marker of any kind (pgw#761). Both
-    # shapes are first-class (Paul, 2026-07-29): the mirror preserves the
-    # publisher's layout, so the subfolder rides through to the catalog
-    # artifact, where ``load_component``'s ``src = root / component`` reads
-    # it as the component it names. Exactly one candidate or we refuse: two
+    # key — vae/config.json + vae/diffusion_pytorch_model.safetensors with NO
+    # root marker of any kind. Both shapes are first-class: the mirror
+    # preserves the publisher's layout, so the subfolder rides through to the
+    # catalog artifact, where ``load_component``'s ``src = root / component``
+    # reads it as the component it names. Exactly one candidate or we refuse: two
     # component subfolders with no root marker is a shape we will not guess
     # at, and a source_include narrowing the listing to one subfolder IS the
     # caller saying which.

@@ -1,4 +1,4 @@
-"""Mandatory, fused, file-parallel snapshot verification (pgw#769 / pgw#781).
+"""Mandatory, fused, file-parallel snapshot verification.
 
 This is a LOAD-BEARING SECURITY CONTROL, not an optimization. A materialized
 snapshot can come from a volume shared across releases and pods, so "the bytes
@@ -8,14 +8,14 @@ between one release and another's weights. It is therefore:
 *   **MANDATORY** — never sampled, never opt-in, never skipped because the tree
     "looks fine". A file the manifest covers is hashed.
 *   **PREFIX-DISPATCHED** — the algorithm comes from the digest, never from the
-    call site. The old code read ``f.blake3`` and hashed with blake3; under
-    manifest v2 that field is EMPTY and the digest lives in ``f.digest`` as
-    ``sha256:<hex>``, so the check would have silently verified nothing while
-    still reporting a clean tree. That is the same false-clean shape as reading
-    ``manifest["files"]`` when the key is ``entries``.
+    call site. Under manifest v2 ``f.blake3`` is EMPTY and the digest lives in
+    ``f.digest`` as ``sha256:<hex>``, so a call site that picks the algorithm
+    itself verifies nothing while still reporting a clean tree — the same
+    false-clean shape as reading ``manifest["files"]`` when the key is
+    ``entries``.
 *   **FAIL-CLOSED** — a mismatch names the blob to quarantine so
     re-materialization re-downloads instead of re-linking the same bad bytes.
-    Upstream reports stay untrusted hints (pgw#769's ruling).
+    Upstream reports stay untrusted hints.
 *   **FILE-PARALLEL** — hashing is CPU-bound and releases the GIL inside
     ``hashlib``, so N files hash on N cores. At ~2 GB/s per core, 8
     cores put a 40 GiB tree at a few seconds.
@@ -65,7 +65,7 @@ def clear_memo() -> None:
 @dataclass(frozen=True)
 class VerifyTarget:
     """One file to verify. ``ref`` is ALGORITHM-TAGGED — an untagged ref is an
-    unreadable digest, i.e. CORRUPT, not "nothing to check" (pgw#871). ``size``
+    unreadable digest, i.e. CORRUPT, not "nothing to check". ``size``
     of 0 means the manifest declared none."""
 
     path: Path
@@ -190,9 +190,9 @@ def snapshot_verify_targets(
     stays free of the transport). Returns ``(targets, skipped_paths)``.
 
     The digest is read from ``f.digest`` — algorithm-tagged — and from nowhere
-    else. th#1303 S1 removed the legacy ``f.blake3`` fallback: it is EMPTY on
-    every v2 entry, and reading it first was how a whole tree got a clean
-    verdict without being hashed. Files the manifest gives no digest for are
+    else. There is deliberately no legacy ``f.blake3`` fallback: it is EMPTY on
+    every v2 entry, and reading it first is how a whole tree gets a clean verdict
+    without being hashed. Files the manifest gives no digest for are
     returned as SKIPPED so the caller must account for them explicitly instead
     of losing them into a pass.
     """

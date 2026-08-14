@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from gen_worker import receipts
 
-# pgw#1152: the signer + the live hub moved to `tests/harness/receipt_hub.py`.
+# The signer + the live hub moved to `tests/harness/receipt_hub.py`.
 # pgw#1122's identity seam already imported them from here, and the adopt-path
 # rig needs the same real receipt gate. Same objects, one home.
 from harness.receipt_hub import (  # noqa: F401 — fixtures come with it
@@ -43,7 +43,7 @@ class TestVerifyReceiptJWS:
         assert receipt.snapshot_digest == SNAPSHOT
         assert receipt.artifact_digest == "sha256:" + SHA_HEX
         assert receipt.artifact_size_bytes == 4096
-        # pgw#1034: claims nothing checks are not decoded. `make_claims` still
+        # claims nothing checks are not decoded. `make_claims` still
         # signs `axes`/`publisher`/`manifest_digest`/`fingerprint_digest`/`iat`
         # — the hub emits them — and an undecoded claim must be inert, never a
         # parse failure.
@@ -253,7 +253,7 @@ class TestProvisionHook:
 
 
 # ---------------------------------------------------------------------------
-# th#1303 / pgw#807: algorithm-agnostic receipts
+# algorithm-agnostic receipts
 # ---------------------------------------------------------------------------
 
 
@@ -263,7 +263,7 @@ class TestAlgorithmAgnosticReceipts:
     A v2 (chunked sha256 CAS) publish has no blake3 anywhere. If arming still
     reads a blake3-named field, every newly minted cell fails to arm and the
     fleet silently re-mints — a fleet-wide re-mint through the receipt door.
-    pgw#807 finished the job: blake3 is not a second supported arm, it is a
+    blake3 is not a second supported arm, it is a
     refusal, because the protocol that could mint one is gone from this SDK.
     """
 
@@ -275,7 +275,7 @@ class TestAlgorithmAgnosticReceipts:
         receipt = receipts.verify_delivered_artifact(artifact, FAMILY)
         assert receipt.artifact_digest == ref
         # One request carrying the ALGORITHM-TAGGED digest — no per-algorithm
-        # 404 retry chain, and never bare hex (pgw#1034).
+        # 404 retry chain, and never bare hex.
         offered, asked_key = hub.last_query
         assert asked_key == CELL_KEY
         assert receipts.artifact_digest(artifact) in offered
@@ -357,7 +357,7 @@ class TestAlgorithmAgnosticReceipts:
 
 
 # ---------------------------------------------------------------------------
-# th#1657 — the publisher trust boundary at the arm gate (pgw#1008)
+# The publisher trust boundary at the arm gate
 # ---------------------------------------------------------------------------
 
 
@@ -511,7 +511,7 @@ class TestPublisherTrustTh1657:
 
 
 # ---------------------------------------------------------------------------
-# th#1680 / pgw#1021 — the two layers apply ONE rule
+# The two layers apply ONE rule
 # ---------------------------------------------------------------------------
 
 # THE SHARED ADOPTION TABLE. Twin of tensorhub's

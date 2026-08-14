@@ -37,17 +37,16 @@ from .url_fetch import DEFAULT_MAX_BYTES, open_guarded_stream
 
 logger = logging.getLogger(__name__)
 
-# pgw#973 (§4.24): one number for tensorhub's media cap, owned by url_fetch.
-# open_guarded_stream deliberately caps nothing ("the caller owns the read
-# and its byte cap"), so this path really does need its own enforcement —
-# it just must not re-decide the value.
+# ONE number for tensorhub's media cap, owned by url_fetch. open_guarded_stream
+# deliberately caps nothing ("the caller owns the read and its byte cap"), so
+# this path enforces it here — but must not re-decide the value.
 _DEFAULT_MAX_BYTES = DEFAULT_MAX_BYTES
-# pgw#973 (§4.24). Per-CALL socket budgets, not kill decisions: neither ends
-# work that is advancing (gw#666's target), and without them a hub or an origin
-# that accepts a connection and then says nothing pins a request thread for the
-# life of the pod. `_DOWNLOAD_TIMEOUT_S` is the read budget handed to
-# `url_fetch`, which owns the byte cap; `_RESOLVE_TIMEOUT_S` bounds one small
-# JSON round trip to the hub and is deliberately the shorter of the two.
+# Per-CALL socket budgets, not kill decisions: neither ends work that is
+# advancing, and without them a hub or an origin that accepts a connection and
+# then says nothing pins a request thread for the life of the pod.
+# `_DOWNLOAD_TIMEOUT_S` is the read budget handed to `url_fetch`, which owns the
+# byte cap; `_RESOLVE_TIMEOUT_S` bounds one small JSON round trip to the hub and
+# is deliberately the shorter of the two.
 _DOWNLOAD_TIMEOUT_S = 120
 _RESOLVE_TIMEOUT_S = 30
 # The resolver's answer is read into memory whole, so its size is the bound.
@@ -509,10 +508,10 @@ def _download(
                 f"input_asset_too_large: {occurrences[0].path} exceeds its byte cap"
             )
         cap = entry.size_bytes
-    # pgw#663: redirects go through the guarded opener, which re-applies the
-    # SSRF policy to EVERY hop. `urlopen` follows them silently, so the
-    # pre-flight `_validate_transport_url` only ever covered hop 0 — a caller
-    # transport that 302s at the metadata service was reachable. Private
+    # Redirects go through the guarded opener, which re-applies the SSRF policy
+    # to EVERY hop: `urlopen` follows them silently, so the pre-flight
+    # `_validate_transport_url` only covers hop 0 and a caller transport that
+    # 302s at the metadata service would otherwise be reachable. Private
     # (resolver-minted, blake3-attested) units keep their internal-object-host
     # exemption, which is the whole reason that env var exists.
     resolver_minted = entry is not None

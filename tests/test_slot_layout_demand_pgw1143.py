@@ -111,7 +111,7 @@ def test_a_declared_slot_publishes_its_demand_per_component() -> None:
 
 def test_the_published_set_is_canonical_so_no_reader_can_read_a_preference(
 ) -> None:
-    """§1.33 pt 2 as AMENDED (th#1803): the accepted set is a compatibility
+    """§1.33 pt 2 as AMENDED: the accepted set is a compatibility
     FILTER whose order carries no preference — preference has exactly ONE
     authority, the (GPU, lane) ladder. So two authors who spell the same set in
     different orders publish the SAME manifest block. Storing the written order

@@ -1,26 +1,24 @@
-"""pgw#916 — the AOT arm has a shape-gap fact, and growth is ONE module.
+"""The AOT arm has a shape-gap fact, and growth is ONE module.
 
-The gap this issue names: ``hot_swap.enable`` returns False unless the
+The gap: ``hot_swap.enable`` returns False unless the
 pipeline carries a **dynamo** router, and an AOT-armed pipeline never has one
 (``models.provision.enable_compiled`` returns as soon as ``arm_aot`` succeeds,
 so ``compile_cache.enable`` — the only thing that installs a router — is never
 reached).  Every one of the executor's three growth call sites is therefore a
 silent no-op on an AOT arm, the ``_shape_warm_republisher`` closure is built
 and discarded, and ``fleet_cells.republish_after_shape_warm`` has no reachable
-caller.  Measured cost on the standing stack: **16 of 18 declared graph
-classes serve eager**, permanently, on every pod.
+caller — leaving 16 of 18 declared graph classes serving eager, permanently, on
+every pod.
 
 These tests hold the three things that are decidable without a GPU:
 
 1. an AOT ingress refusal NAMES the missing declared class and books a
-   countable ``shape_gap`` (the AOT counterpart of pgw#680's ``guard_miss``,
-   which is dynamo-only);
-2. the absence of a growth backend is LOUD, never silent — the defect was
-   invisible for months precisely because the only observable was a success
-   log line that never printed;
+   countable ``shape_gap`` (the AOT counterpart of the dynamo-only
+   ``guard_miss``);
+2. the absence of a growth backend is LOUD, never silent — a defect whose only
+   observable is a success log line that never prints is invisible;
 3. growth lives in one arm-agnostic module that does NOT import the dynamo
-   router and does NOT implement a second task/device scheduler.  Building one
-   here to close the AOT arm sooner would violate this issue's own acceptance.
+   router and does NOT implement a second task/device scheduler.
 
 Real modules, real events (captured through the activity sink), no mocks of
 the code under test.

@@ -1,4 +1,4 @@
-"""Two defects the SDK genericity audit found (pgw#740).
+"""Two defects the SDK genericity audit found.
 
 (The third — detection/converter signature divergence routing SDXL to the
 SD1.5 converter — is pinned generically in tests/test_repack_engine_pgw740.py:

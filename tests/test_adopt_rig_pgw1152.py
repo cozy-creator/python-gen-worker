@@ -1,28 +1,24 @@
-"""pgw#1152: the adopt-path rig re-finds a bug we already fixed, and the fence
-makes the fixture that hid it unwriteable.
+"""The adopt-path rig re-finds a bug we already fixed, and the fence makes the
+fixture that hid it unwriteable.
 
-THE BUG CLASS, stated once. Four of the six reuse-circle gates — pgw#1108,
-pgw#1122, pgw#1141, pgw#1141b — were ONE defect: the boot-adopt path
-structurally differs from the self-mint path (it arms BEFORE setup, its compute
-child holds no JWT, and it is fed by ``arm_ordered`` rather than by the
-self-produced routes), and every gate was written and validated against
-self-mint. The tests could not see it because their fixtures SIMULATED an
-adoption using self-mint machinery: thirteen rows called
-``aot_serve.note_aot_key(key)`` by hand — production's single missing line.
+THE BUG CLASS. The boot-adopt path structurally differs from the self-mint path
+(it arms BEFORE setup, its compute child holds no JWT, and it is fed by
+``arm_ordered`` rather than by the self-produced routes), so a gate written and
+validated against self-mint alone misses it. Tests cannot see that when their
+fixtures SIMULATE an adoption using self-mint machinery — calling
+``aot_serve.note_aot_key(key)`` by hand, production's single missing line.
 
 Two things close that class, and both are asserted here:
 
-1. :mod:`harness.adopt_rig` — the real vehicle, promoted out of
-   ``test_adopted_arm_lane_pgw1141b.py``. This file proves it by making it
-   RE-FIND pgw#1141b: delete the landed fix and the rig reproduces POD PROOF
-   #4's four-row chain verbatim. A rig that cannot re-find a bug we already
+1. :mod:`harness.adopt_rig` — the real vehicle. This file proves it by making it
+   RE-FIND a fixed bug: delete the landed fix and the rig reproduces the
+   four-row failure chain verbatim. A rig that cannot re-find a bug we already
    fixed proves nothing.
 2. ``scripts/lint_arm_state_feeders.py`` — the fence. Every production feeder of
-   arming/serving process-global state is classified by enclosing function
-   (pgw#1122's ``lint_credential_identity.py`` shape), unclassified is red,
-   stale is red, and a TEST that hand-feeds one is red with no label to write
-   down. The rows below drive the lint over synthetic trees, so proving it goes
-   red never requires writing the bug into this repo.
+   arming/serving process-global state is classified by enclosing function,
+   unclassified is red, stale is red, and a TEST that hand-feeds one is red with
+   no label to write down. The rows below drive the lint over synthetic trees, so
+   proving it goes red never requires writing the bug into this repo.
 
 Run: uv run pytest tests/test_adopt_rig_pgw1152.py -q
 """
@@ -151,7 +147,7 @@ def test_the_arm_receives_the_type_PRODUCTION_builds_not_a_declaration(
 
     assert isinstance(boot.armed_cfg, CompileCell), type(boot.armed_cfg)
     assert not isinstance(boot.armed_cfg, Compile)
-    # …and the declared band really reaches the gate through it (pgw#1150).
+    # …and the declared band really reaches the gate through it.
     assert boot.armed_cfg.numerics_floor == cell868.FLOOR
     assert boot.armed_cfg.numerics_warn == cell868.WARN
 
@@ -226,7 +222,7 @@ def test_a_hub_that_serves_NO_RECEIPT_refuses_the_order(
     assert boot.is_armed() is False
     assert boot.holds_cell() is False, (
         "an unreceipted cell was wrapped onto the pipeline anyway")
-    # pgw#1122: an ordered arm this pod ordered ITSELF degrades to eager rather
+    # An ordered arm this pod ordered ITSELF degrades to eager rather
     # than failing the function, so the boot falls through to the ordinary
     # policy — a target is still registered (active-less, advertising the key
     # for peer adoption), and it must name NO artifact.

@@ -1,17 +1,13 @@
-"""Capability byte-budget back-pressure for worker-side uploads (issue #269).
+"""Capability byte-budget back-pressure for worker-side uploads.
 
-pgw#1004 E: this module used to advertise ``parallel_map_uploads`` as "the
-single source of truth for the worker-side file-level upload fan-out". No
-such function has ever existed — the claim matched only its own docstrings.
-There is NO file-level upload parallelism: files are uploaded serially and
-the fan-out lives *inside* one file (S3 parts in ``presigned_upload.py``,
-CAS chunks in ``models/chunk_upload.py``), each with its own bounded,
-process-wide PUT budget. The claim is deleted rather than reasserted.
+There is NO file-level upload parallelism: files are uploaded serially and the
+fan-out lives *inside* one file (S3 parts in ``presigned_upload.py``, CAS chunks
+in ``models/chunk_upload.py``), each with its own bounded, process-wide PUT
+budget.
 
-What is real here is ``BudgetGate``: the ``max_total_bytes`` /
-``max_bytes_per_file`` back-pressure derived from the worker capability
-token. Library-internal, ``_``-prefixed module name — don't import from
-tenant code.
+What lives here is ``BudgetGate``: the ``max_total_bytes`` /
+``max_bytes_per_file`` back-pressure derived from the worker capability token.
+Library-internal, ``_``-prefixed module name — don't import from tenant code.
 """
 
 from __future__ import annotations
@@ -36,7 +32,7 @@ class BudgetExceededError(RuntimeError):
 
 
 class BudgetGate:
-    """Capability-budget back-pressure for the concurrent upload pool (issue #269).
+    """Capability-budget back-pressure for the concurrent upload pool.
 
     The upload coordinator may run several files in parallel. Tensorhub's
     worker_capability_token caps aggregate in-flight bytes per session via

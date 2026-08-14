@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""pgw#1143 step 3 (§1.33): `Slot(layouts=...)` is READABLE WITHOUT IMPORTING.
+"""§1.33: `Slot(layouts=...)` is READABLE WITHOUT IMPORTING.
 
 The per-slot DEMAND is the one fact the hub's layout gate reads out of the
 manifest, so it has to be legible to BOTH paths that ever look at it:
@@ -7,14 +7,13 @@ manifest, so it has to be legible to BOTH paths that ever look at it:
 * the IMPORT path — `gen_worker.discovery` imports endpoint modules with heavy
   deps stubbed (`discovery/heavy_deps.py`: "that metadata is torch-free by
   design"), and
-* the AST path — the sweep pgw#1107 used to find the eight class-less
-  `Compile(...)` declarations, and this script.
+* the AST path — a source sweep, and this script.
 
 A computed declaration (a comprehension, an f-string, a dict built by a
 helper, a value read from config) is invisible to the second. It would make
-the published manifest the only place the demand can be read, which is exactly
-the dual-declaration hazard pgw#1107 spent a program deleting — and it is
-unreviewable in a diff, which is where a layout demand is actually judged.
+the published manifest the only place the demand can be read — a
+dual-declaration hazard — and it is unreviewable in a diff, which is where a
+layout demand is actually judged.
 
 So: `layouts=` must be a DICT LITERAL whose keys are string literals and whose
 values are tuple/list literals of string literals or of names imported from

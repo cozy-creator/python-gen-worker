@@ -1,4 +1,4 @@
-"""Boot-time CUDA health probe (gw#529).
+"""Boot-time CUDA health probe.
 
 RunPod occasionally allocates a host whose CUDA device is present but wedged
 ("CUDA-capable device(s) is/are busy or unavailable"). Left unchecked, the
@@ -19,11 +19,10 @@ CUDA_PROBE_FAILED_MARKER = "GEN_WORKER_CUDA_PROBE_FAILED"
 #: Wall budget for one `nvidia-smi` subprocess. The exact fault this module
 #: exists for — a wedged CUDA device — is also the fault that makes `nvidia-smi`
 #: hang indefinitely rather than answer, so a call with no timeout turns a
-#: diagnostic into the hang it was diagnosing. Exempt from gw#666 by shape:
-#: `nvidia-smi` emits nothing until it exits, so there is no progress signal to
-#: window over, and expiry kills no work — the caller degrades to an
-#: unmeasured field. One owner (pgw#973 §4.24): `host_canary` and
-#: `hardware_report` each used to declare their own `5.0`.
+#: diagnostic into the hang it was diagnosing. A wall clock rather than a
+#: progress window by shape: `nvidia-smi` emits nothing until it exits, so
+#: there is no progress signal to window over, and expiry kills no work — the
+#: caller degrades to an unmeasured field. ONE owner for the number.
 NVIDIA_SMI_TIMEOUT_S = 5.0
 
 
@@ -57,14 +56,13 @@ def probe_cuda(device_index: int = 0) -> CudaProbeResult:
 
 
 def classify_probe_failure(reason: str) -> str:
-    """Typed vocabulary for ``CudaProbeResult.reason`` (gw#619) — the wire
+    """Typed vocabulary for ``CudaProbeResult.reason`` — the wire
     class the hub's pod_events row and death-taxonomy correlation key on.
     Never free-form: torch_unavailable | cuda_unavailable | driver_too_old |
     cuda_error | unknown. ``driver_too_old`` matches torch's own CUDA
-    initialization message ("driver too old (found version ...)", the exact
-    th#591/th#979 signature) — a strictly stronger, in-container-measured
-    version of the same fact th#979's pre-rent provider-telemetry floor
-    infers from the outside.
+    initialization message ("driver too old (found version ...)") — a strictly
+    stronger, in-container-measured version of what a pre-rent
+    provider-telemetry floor infers from the outside.
     """
     r = (reason or "").strip().lower()
     if not r:

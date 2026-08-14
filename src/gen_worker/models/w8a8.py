@@ -1,8 +1,8 @@
-"""W8A8 fp8-GEMM loader mode (gw#534).
+"""W8A8 fp8-GEMM loader mode.
 
 A ``#fp8-w8a8`` flavor is a normal diffusers tree whose denoiser holds
-calibrated fp8-E4M3 weights WITH scales — the tensor-layout contract (frozen in
-gw#534, consumed verbatim by the conversion side):
+calibrated fp8-E4M3 weights WITH scales — the tensor-layout contract, consumed
+verbatim by the conversion side:
 
 - per quantized Linear ``L``: ``L.weight`` (F8_E4M3, [out, in]),
   ``L.weight_scale`` (F32 DEQUANT multiplier — scalar or [out]/[out, 1]
@@ -16,16 +16,15 @@ gw#534, consumed verbatim by the conversion side):
   (corroborating; the header evidence above is authoritative).
 
 Execution: quantized Linears become :class:`Fp8ScaledLinear` —
-``torch._scaled_mm`` over RESIDENT fp8 weights (no per-layer upcast: the
-whole point, gw#534 measured the cast tax at +44% H100 / +73% B200), dynamic
-activation quant by default, the static scale when present. TWO dispatch
-branches over the ONE artifact, chosen once at load by :func:`w8a8_gemm_mode`
-(gw#564): "rowwise" (scale vectors inside the GEMM — CUTLASS fast, sm_90+)
-and "pertensor" (scalar-scaled cuBLASLt GEMM + per-channel epilogue rescale —
-the Ada/sm_89 fast path; torch's rowwise kernels fall back to ~half rate
-there, ie#498). Hosts where no branch wins the load-time micro-benchmark
-DEQUANT once at load into plain bf16-resident weights — same numerics, no
-speed win, never a refusal.
+``torch._scaled_mm`` over RESIDENT fp8 weights (no per-layer upcast; the cast
+tax measures +44% H100 / +73% B200), dynamic activation quant by default, the
+static scale when present. TWO dispatch branches over the ONE artifact, chosen
+once at load by :func:`w8a8_gemm_mode`: "rowwise" (scale vectors inside the
+GEMM — CUTLASS fast, sm_90+) and "pertensor" (scalar-scaled cuBLASLt GEMM +
+per-channel epilogue rescale — the Ada/sm_89 fast path, where torch's rowwise
+kernels fall back to ~half rate). Hosts where no branch wins the load-time
+micro-benchmark DEQUANT once at load into plain bf16-resident weights — same
+numerics, no speed win, never a refusal.
 """
 
 from __future__ import annotations
@@ -50,7 +49,7 @@ W8A8_FLAVOR = "fp8-w8a8"
 # torch._scaled_mm needs fp8 tensor cores (sm_89 Ada +) and 16-aligned dims.
 W8A8_MIN_SM = 89
 # torch's fast ROWWISE-scaled kernels are CUTLASS sm_90+; sm_89 runs rowwise
-# on a ~half-rate fallback (ie#498) and takes the pertensor branch instead.
+# on a ~half-rate fallback and takes the pertensor branch instead.
 W8A8_ROWWISE_MIN_SM = 90
 _FP8_MAX = 448.0
 _DIM_ALIGN = 16
@@ -67,8 +66,8 @@ class W8a8SnapshotError(W8a8Error):
 @dataclass(frozen=True)
 class W8a8Artifact:
     # Denoiser dir name ("transformer"/"unet") for diffusers trees; "" for a
-    # root-layout snapshot (singlefile/sharded-transformers, gw#562) whose
-    # weight set IS the denoiser.
+    # root-layout snapshot (singlefile/sharded-transformers) whose weight set
+    # IS the denoiser.
     component: str
     files: tuple[Path, ...]   # the weight set's safetensors shards
     quantized: tuple[str, ...]  # module names with weight+weight_scale pairs
@@ -142,8 +141,8 @@ def detect_w8a8_artifacts(model_path: Path) -> tuple[W8a8Artifact, ...]:
     picture-level symptom to catch that, so it is found here or not at all.
 
     Diffusers trees scan the denoiser component dirs; everything else scans
-    the root weight set (singlefile/sharded-transformers layouts, gw#562) and
-    can only ever be one. Cheap: header reads only."""
+    the root weight set (singlefile/sharded-transformers layouts) and can only
+    ever be one. Cheap: header reads only."""
     root = Path(model_path)
     if not root.is_dir():
         return ()
@@ -187,7 +186,7 @@ def _probe_scales(mode: str, m: int, n: int, device: str = "cuda") -> tuple:
     """(scale_a, scale_b) for one ``torch._scaled_mm`` call in ``mode``:
     rowwise = [m,1]x[1,n] vectors consumed inside the GEMM; pertensor =
     scalar [1,1]x[1,1] (the cuBLASLt tensorwise path — per-channel weight
-    scales are applied OUTSIDE as the epilogue rescale, gw#564)."""
+    scales are applied OUTSIDE as the epilogue rescale)."""
     import torch
 
     if mode == "rowwise":
@@ -221,8 +220,8 @@ _BENCH_WARMUP = 3
 _BENCH_ITERS = 10
 # A candidate arms only when the fp8 GEMM beats the bf16 kernel by a real
 # margin. Genuinely fast paths measure ~1.5-2x here; the sm_89 rowwise
-# fallback measures ~0.5x (ie#498's +79% compiled loss) — 1.10 separates
-# them with headroom against timer noise.
+# fallback measures ~0.5x — 1.10 separates them with headroom against timer
+# noise.
 _BENCH_MIN_SPEEDUP = 1.10
 
 
@@ -249,8 +248,8 @@ def _bench_gemm_pair(mode: str) -> tuple[float, float]:
     """(fp8_ms, bf16_ms) medians for one representative square GEMM. The
     activations are PRE-quantized — dynamic-quant overhead fuses away under
     inductor (verdicts are on compiled arms), so the gate times the KERNEL,
-    which is exactly what ie#498 showed can silently be a half-rate
-    fallback. The pertensor arm includes its per-channel epilogue multiply."""
+    which is what can silently be a half-rate fallback. The pertensor arm
+    includes its per-channel epilogue multiply."""
     import torch
 
     m = n = k = _BENCH_DIM
@@ -273,9 +272,9 @@ def _bench_gemm_pair(mode: str) -> tuple[float, float]:
 
 
 def _gemm_profitable(mode: str) -> bool:
-    """Load-time micro-benchmark gate (gw#564): the probe must verify the
-    fast path ENGAGES, not that the call succeeds — ie#498 measured sm_89
-    rowwise probe-pass at ~half the bf16 rate (+79% compiled)."""
+    """Load-time micro-benchmark gate: the probe must verify the fast path
+    ENGAGES, not merely that the call succeeds — sm_89 rowwise passes the probe
+    at ~half the bf16 rate."""
     fp8_ms, bf16_ms = _bench_gemm_pair(mode)
     speedup = bf16_ms / max(fp8_ms, 1e-9)
     logger.info(
@@ -306,14 +305,12 @@ def _choose_gemm_mode(sm: int) -> str:
     logger.warning(
         "w8a8: no fp8 GEMM branch engages a real win on this device (sm_%d); "
         "dequant lane", sm)
-    # pgw#824: this is a LANE decision, taken once per process and silent. The
-    # whole point of the w8a8 artifact is the fused fp8 GEMM; falling to the
-    # dequant lane keeps the memory saving but gives up the speed, so every
+    # A LANE decision, taken once per process and otherwise silent. Falling to
+    # the dequant lane keeps the memory saving but gives up the speed, so every
     # request this pod serves is slower than the lane it advertises — and a
-    # fleet-wide qualification regression (a driver/torch bump that stops the
-    # kernel qualifying) would show up as "everything got slower" with no
-    # cause anywhere. Once per process by construction: `_choose_gemm_mode` is
-    # reached through an lru_cache(1).
+    # fleet-wide qualification regression (a driver/torch bump) would show up
+    # as "everything got slower" with no cause anywhere. Emitted once per
+    # process by construction: `_choose_gemm_mode` sits behind an lru_cache(1).
     activity_mod.emit_event(
         activity_mod.KIND_SERVE_DEGRADE,
         f"sm_{sm}: no fp8 GEMM branch qualified (probe or micro-benchmark "
@@ -330,10 +327,10 @@ def w8a8_gemm_mode() -> str:
     """The fp8 GEMM dispatch for THIS device, chosen once per process:
     ``"rowwise"`` (scale vectors consumed inside ``_scaled_mm`` — CUTLASS
     fast kernels, sm_90+), ``"pertensor"`` (scalar-scaled cuBLASLt GEMM +
-    per-channel epilogue rescale — the Ada/sm_89 fast path, gw#564), or
+    per-channel epilogue rescale — the Ada/sm_89 fast path), or
     ``""`` (dequant lane). Live-probed AND micro-benchmarked: a branch arms
     only when its kernel call succeeds and beats the bf16 reference —
-    probe-pass ≠ profitable (ie#498)."""
+    probe-pass ≠ profitable."""
     try:
         import torch
     except ImportError:
@@ -350,12 +347,10 @@ def _build_quantizer(torch: Any) -> Any:
     Eager, the chain is six full passes over the [M, K] activation (abs, amax,
     reciprocal, mul, clamp, cast). Its cost scales with M*K while the GEMM
     scales with M*K*N, so the overhead fraction goes as 1/N and on a thin-N
-    projection it eats the entire fp8 win. Measured on H100 at H3's shapes
-    (pgw#1156): `attn.to_out.0` and `ff.net.2` served 0.82-0.93x bf16 — the fp8
-    lane LOSING to the precision it replaces, at every duration — while their
-    bare GEMMs won 1.48x and 1.30x. One inductor-fused kernel pair closes it
-    (0.82x -> 1.21x, within 0.1% of the fully-compiled arm) and helps the wide
-    classes too.
+    projection it eats the entire fp8 win: measured on H100, thin-N layers
+    served 0.82-0.93x bf16 — the fp8 lane LOSING to the precision it replaces —
+    while their bare GEMMs won 1.48x and 1.30x. One inductor-fused kernel pair
+    closes it (0.82x -> 1.21x) and helps the wide classes too.
 
     Inside a compiled region the enclosing graph already fuses this, so the
     helper hands back the eager source and nests nothing. Where inductor is
@@ -374,10 +369,10 @@ def _build_quantizer(torch: Any) -> Any:
         else:
             sa = (x2.abs().amax(dim=-1, keepdim=True).float()
                   / _FP8_MAX).clamp(min=1e-12)
-        # Quantize in the COMPUTE dtype (reciprocal multiply) — fp32
-        # intermediates here doubled the eager activation traffic and made eager
-        # w8a8 as slow as the cast hooks it replaces (H100 measured; bf16
-        # mantissa loss is irrelevant next to the fp8 target).
+        # Quantize in the COMPUTE dtype (reciprocal multiply): fp32
+        # intermediates here double the eager activation traffic and make eager
+        # w8a8 as slow as the cast hooks it replaces, while the bf16 mantissa
+        # loss is irrelevant next to the fp8 target.
         xq = (x2 * (1.0 / sa).to(x2.dtype)).clamp(
             -_FP8_MAX, _FP8_MAX).to(torch.float8_e4m3fn)
         return xq, sa
@@ -410,7 +405,7 @@ def _build_quantizer(torch: Any) -> Any:
 def _quant_degrade(exc: BaseException) -> None:
     """Once per process. A pod that quantizes op-by-op keeps the fp8 memory
     saving and loses most of the speed — and on the thin-N classes it is slower
-    than bf16 — so it must not be silent (the pgw#824 shape)."""
+    than bf16 — so it must not be silent."""
     logger.warning(
         "w8a8: the fused activation-quantize did not build (%s); this process "
         "quantizes op-by-op", exc)
@@ -436,7 +431,7 @@ def _build_module_class() -> type:
 
         ``weight_scale`` is the [out, 1] dequant multiplier (per-tensor
         scalars are expanded at load). Two GEMM dispatch branches, chosen
-        ONCE at load by SKU (gw#564; ONE weight artifact serves both):
+        ONCE at load by SKU (ONE weight artifact serves both):
 
         - ``gemm_mode="rowwise"`` (sm_90+): scale vectors consumed inside
           ``_scaled_mm`` (per-row dynamic activation scale x per-channel
@@ -453,16 +448,17 @@ def _build_module_class() -> type:
         module — a dtype cast would upcast the fp8 buffer (device moves are
         fine).
 
-        Optional LoRA side-branch (gw#547): ``lora_a`` [bucket, in] /
+        Optional LoRA side-branch: ``lora_a`` [bucket, in] /
         ``lora_b`` [out, bucket] compute-dtype buffers, rank-padded to a
         fixed bucket so every adapter in the bucket shares one traced graph.
         The branch reads the ORIGINAL bf16 activation and adds onto the bf16
         output — quantized weights are never touched; hot-swap is a buffer
-        copy (see models.w8a8_lora)."""
+        copy (see models.w8a8_lora).
+        """
 
         weight: Any  # fp8 buffer (annotated: Module.__getattr__ unions confuse mypy)
         weight_scale: Any
-        lora_a: Any  # None, or [bucket, in] bf16 branch buffer (gw#547)
+        lora_a: Any  # None, or [bucket, in] bf16 branch buffer
         lora_b: Any  # None, or [out, bucket] with scale folded in
         # Structural marker consumed by compile_cache.execution_contract.
         # Unlike a class-name check it survives refactors and records no
@@ -477,15 +473,11 @@ def _build_module_class() -> type:
             if gemm_mode not in ("rowwise", "pertensor"):
                 raise ValueError(f"invalid gemm_mode {gemm_mode!r}")
             self.gemm_mode = gemm_mode
-            # pgw#1015: RECORD it. `adapter_fidelity.branch_compute_dtype`
-            # probes `mod.compute_dtype` FIRST, then the weight (fp8 here, so
-            # correctly skipped), then the bias — so on a BIAS-FREE layer it
-            # had nothing left and silently fell back to bf16. Measured: in
-            # one denoiser, `mlp_in` (bias) got float32 branches and
-            # `attn.to_q` (no bias) got bfloat16, and the first branch-bearing
-            # forward died with "expected mat1 and mat2 to have the same
-            # dtype". Invisible on sdxl only because its compute dtype IS
-            # bf16; every bias-free projection on any other lane was wrong.
+            # RECORD it: `adapter_fidelity.branch_compute_dtype` probes
+            # `mod.compute_dtype` FIRST, then the weight (fp8 here, so skipped),
+            # then the bias — so on a BIAS-FREE layer it would have nothing
+            # left and fall back to bf16, mixing branch dtypes within one
+            # denoiser and fatalling the first branch-bearing forward.
             self.compute_dtype = compute_dtype
             self.in_features = int(in_features)
             self.out_features = int(out_features)
@@ -504,14 +496,13 @@ def _build_module_class() -> type:
                     out_features, dtype=compute_dtype, device=meta))
             else:
                 self.bias = None
-            # DECLARED slots, not plain attributes (pgw#726): the with-LoRA
-            # graph class must be a structural fact at trace time, and a
-            # plain `None` attribute makes `register_buffer` refuse the name
-            # outright ("attribute 'lora_a' already exists") — the LoRA path
-            # had to pop `__dict__` first to get its buffers in. A declared
-            # None slot accepts the tensor by assignment, keeps the FQN
-            # visible to AOT constant/input binding, and stays out of the
-            # state_dict until it holds something.
+            # DECLARED slots, not plain attributes: the with-LoRA graph class
+            # must be a structural fact at trace time, and a plain `None`
+            # attribute makes `register_buffer` refuse the name outright
+            # ("attribute 'lora_a' already exists"). A declared None slot
+            # accepts the tensor by assignment, keeps the FQN visible to AOT
+            # constant/input binding, and stays out of the state_dict until it
+            # holds something.
             self.register_buffer("lora_a", None, persistent=False)
             self.register_buffer("lora_b", None, persistent=False)
 
@@ -526,7 +517,7 @@ def _build_module_class() -> type:
             xq, sa = quantize(x2, pertensor, self.input_scale)
             scaled_mm: Any = torch._scaled_mm
             if pertensor:
-                # Scalar-scaled GEMM (cuBLASLt's Ada fast path, gw#564); the
+                # Scalar-scaled GEMM (cuBLASLt's Ada fast path); the
                 # per-channel weight_scale rides as a post-GEMM column
                 # multiply — bias joins AFTER the rescale, never inside.
                 y = scaled_mm(
@@ -691,17 +682,16 @@ def load_w8a8_pipeline(cls: Any, path: Path, art: W8a8Artifact, *,
                        fp8_text_encoders: bool = False) -> Any:
     """Build the pipeline with EVERY quantized denoiser wired in (svdq-style
     component injection). Stamps ``_cozy_weight_lane`` ("w8a8" on the
-    scaled_mm lane, "bf16-resident" on the dequant lane) — the compile-cache
-    graph key (lane_drift, gw#534). ``fp8_text_encoders`` (the
-    ``storage_dtype="fp8+te"`` binding, gw#557) arms the gw#460 block-window
-    fp8 storage on the TEXT ENCODERS ONLY — the denoiser already holds fp8
-    scaled-mm modules that cast hooks must never touch.
+    scaled_mm lane, "bf16-resident" on the dequant lane), which the
+    compile-cache graph key reads. ``fp8_text_encoders`` (the
+    ``storage_dtype="fp8+te"`` binding) arms block-window fp8 storage on the
+    TEXT ENCODERS ONLY — the denoiser already holds fp8 scaled-mm modules that
+    cast hooks must never touch.
 
     ``art`` names the entry point; its SIBLINGS are rediscovered from ``path``
     so a mixture-of-experts snapshot lands every expert on the same lane. A
-    caller that passes one expert of a pair does not get half a pipeline: it
-    gets the pair, because half a quantized MoE is unserveable and silent
-    (gw#679's routing lesson, applied to weights instead of adapters)."""
+    caller that passes one expert of a pair gets the pair, because half a
+    quantized MoE is unserveable and silent."""
     import torch
 
     compute = compute_dtype or torch.bfloat16
@@ -738,7 +728,7 @@ def load_w8a8_pipeline(cls: Any, path: Path, art: W8a8Artifact, *,
 
 
 # ---------------------------------------------------------------------------
-# Root-layout serve path (gw#562): pipelines the worker does not assemble
+# Root-layout serve path: pipelines the worker does not assemble
 # (DiffSynth families — hidream-o1's sharded-transformers root, anima's
 # split checkpoint). The pipeline class's OWN from_pretrained constructs the
 # model; its loader runs sanitize_w8a8_state_dict so a quantized snapshot
@@ -813,12 +803,10 @@ def swap_w8a8_linears(
         return fh.get_tensor(name)
 
     swapped = 0
-    # pgw#824: every layer this loop SKIPS stays dequantized — full precision,
-    # in a pipeline that reports the w8a8 lane to placement, billing and every
-    # AOT-vs-eager comparison. One skip was a `logger.warning`; the alignment
-    # skip below had no report of ANY kind. Counted by class and confessed once
-    # after the loop: per-layer events would flood a 300-Linear denoiser, and
-    # coalescing with counts is the pattern (dropping is not).
+    # Every layer this loop SKIPS stays dequantized — full precision, in a
+    # pipeline that reports the w8a8 lane to placement, billing and every
+    # AOT-vs-eager comparison. Counted by class and confessed once after the
+    # loop: per-layer events would flood a 300-Linear denoiser.
     skipped: Dict[str, int] = {}
     samples: List[str] = []
 
@@ -946,9 +934,9 @@ def load_w8a8_root_pipeline(
 
 # ---------------------------------------------------------------------------
 # Data-free producer — contract round-trips in tests + the parity harness.
-# Production calibrated artifacts come from the conversion side (modelopt,
-# te#79); this writes the identical on-disk contract with per-out-channel
-# amax scales and no calibration.
+# Production calibrated artifacts come from the conversion side (modelopt);
+# this writes the identical on-disk contract with per-out-channel amax scales
+# and no calibration.
 # ---------------------------------------------------------------------------
 
 
@@ -959,7 +947,7 @@ def quantize_tree_w8a8(
     exclude: tuple[str, ...] = ("embed", "norm"),
 ) -> Path:
     """Copy a diffusers tree, rewriting the denoiser's eligible 2D weights to
-    fp8 + per-out-channel ``weight_scale`` per the gw#534 contract. Eligible:
+    fp8 + per-out-channel ``weight_scale`` per the module contract. Eligible:
     ``*.weight``, 2D, bf16/fp16/fp32, both dims 16-aligned, name not matching
     ``exclude`` substrings."""
 

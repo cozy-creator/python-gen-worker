@@ -1,4 +1,4 @@
-"""pgw#727: the fp8-storage lane is module STRUCTURE, not a cast hook.
+"""The fp8-storage lane is module STRUCTURE, not a cast hook.
 
 Every assertion here runs the REAL codepath (``loading.apply_fp8_storage`` on
 a real, tiny ``UNet2DConditionModel``) on CPU — no mocks, no weights, no GPU.
@@ -17,9 +17,9 @@ The lane the SDK ships must be:
 6. a DIFFERENT traced graph, visible as a different
    ``compile_cache.execution_contract`` signature (new cell keys — intended)
    while the ``fp8-hooks`` wire lane value is unchanged;
-7. still a LoRA branch target (gw#547/#627 branch machinery), and — pgw#726 —
-   ``_Fp8ScaledLinear``'s ``lora_a``/``lora_b`` are DECLARED buffer slots that
-   ``register_buffer`` accepts without popping ``__dict__`` first.
+7. still a LoRA branch target, with ``_Fp8ScaledLinear``'s
+   ``lora_a``/``lora_b`` as DECLARED buffer slots that ``register_buffer``
+   accepts without popping ``__dict__`` first.
 """
 
 from __future__ import annotations

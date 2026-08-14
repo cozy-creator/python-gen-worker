@@ -1,13 +1,13 @@
-"""Native svdq-fp4 serving — SVDQuant checkpoints without nunchaku (pgw#685).
+"""Native svdq-fp4 serving — SVDQuant checkpoints without nunchaku.
 
 The ``"native"`` svdq ENGINE. `SvdqLinear` is `W4A4Linear` plus the three things
-an SVDQuant checkpoint needs (pgw#682 A3/G-C, the "contract v2" gw#540 named):
+an SVDQuant checkpoint needs:
 
 1. a per-OUTPUT-CHANNEL second-level weight scale (``wcscales``) as well as the
    scalar form (``wtscale``) — free, the epilogue already multiplies;
 2. the low-rank branch ``y += (x @ proj_down) @ proj_up.T``, which is what makes
    4-bit survive qwen-class outliers (plain nvfp4 PTQ measured lpips 0.63-0.69
-   vs the official svdq artifact's 0.105, th#1055/th#1094);
+   vs the official svdq artifact's 0.105);
 3. ``smooth_factor``, which DIVIDES the activation feeding the 4-bit branch
    ONLY — the low-rank branch consumes RAW x, because deepcompressor
    pre-divides ``proj_down`` by the smooth vector at export (nunchaku
@@ -15,8 +15,7 @@ an SVDQuant checkpoint needs (pgw#682 A3/G-C, the "contract v2" gw#540 named):
    corrupts every output.
 
 Everything the module holds arrives fragment-packed: see ``svdq_layout``'s
-header for the per-tensor citations. pgw#770 is what happens when five of the
-seven are read verbatim — the official qwen-image artifact rendered noise
+header for the per-tensor citations. Reading any of them verbatim renders noise
 (lpips 0.82, psnr 4.6 dB) through BOTH the blockwise and the dense lane, because
 both share ``decode_linear``.
 
@@ -27,7 +26,7 @@ SvdqLinear always runs the dynamic path — a real contract difference from
 
 Why this exists: nunchaku's fp4 kernels are ``sm_120a``-only, and its wheels
 couple to one (torch minor, CUDA) build AND one diffusers transformer signature
-window per release (gw#405, th#1211). The native engine is stock
+window per release. The native engine is stock
 ``torch._scaled_mm`` + one triton quantizer, so it needs no nunchaku wheel, no
 diffusers window, no pin-matrix row and no torch downgrade — and it adds
 sm_100/103 coverage nunchaku will never have.
@@ -158,9 +157,9 @@ def _build_svdq_linear_class() -> type:
                      rank: int, bias: bool, compute_dtype: Any,
                      per_channel_scale: bool, smooth: bool) -> None:
             super().__init__()
-            # pgw#1019: record it — the packed weight is uint8 and every
-            # compute-dtype tensor here (smooth_factor, proj_*, bias) is
-            # optional, so a rank-0 bias-free instance states it nowhere else.
+            # Record it: the packed weight is uint8 and every compute-dtype
+            # tensor here (smooth_factor, proj_*, bias) is optional, so a
+            # rank-0 bias-free instance states it nowhere else.
             self.compute_dtype = compute_dtype
             self.in_features = int(in_features)
             self.out_features = int(out_features)
@@ -467,11 +466,10 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
     layers decoded to bf16 Linears, everything else assigned verbatim.
 
     ``device`` is where the DECODE runs and where the result lives. Default:
-    the fragment unpack/repack chain runs on CUDA when the blockwise lane is
-    the target (te#150 — the same transforms measured 223s single-threaded on
-    CPU vs seconds as device-bandwidth permutes; nunchaku loads in ~8s only
-    because its kernels consume the on-disk layout verbatim). ``"cpu"``
-    reproduces the historical path byte-identically."""
+    the fragment unpack/repack chain runs on CUDA when the blockwise lane is the
+    target — the same transforms measure 223s single-threaded on CPU vs seconds
+    as device-bandwidth permutes. ``"cpu"`` reproduces that path
+    byte-identically."""
 
     import torch
     from accelerate import init_empty_weights
@@ -480,8 +478,8 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
     compute = compute_dtype or torch.bfloat16
     meta = _read_safetensors_metadata(art.file)
     model_class = str(meta.get("model_class") or "")
-    # te#148: the metadata flag declares the branch scheme; absent = bf16
-    # (the historical format). decode_linear enforces bytes == declaration.
+    # The metadata flag declares the branch scheme; absent = bf16.
+    # decode_linear enforces bytes == declaration.
     lowrank_quant = str(meta.get(LOWRANK_QUANT_KEY) or "bf16")
     if lowrank_quant not in ("bf16",) + LOWRANK_QUANT_SCHEMES:
         raise SvdqNativeError(
@@ -530,10 +528,10 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
                 splits = adanorm_splits_for(type(model).__name__, prefix)
                 out_f = int(target.out_features)
                 in_f = int(target.in_features)
-                # pgw#864: modulation stays packed-resident (the +6.8 GB
-                # delta was this dequant). pgw#863 split it off the linear
-                # lane — a card can want packed modulation and baseline
-                # linears at once, and sm_100 does. Degrade per-layer.
+                # Modulation stays packed-resident (this dequant is the +6.8 GB
+                # delta). It is a SEPARATE axis from the linear lane — a card can
+                # want packed modulation and baseline linears at once, and sm_100
+                # does. Degrade per-layer.
                 if mod_execution_lane == "packed" and awq_packed_supported(out_f, in_f):
                     _set_module(model, prefix, build_awq_packed_linear(
                         tensors, out_f, in_f, adanorm_splits=splits,

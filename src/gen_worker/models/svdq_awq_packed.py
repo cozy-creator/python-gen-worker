@@ -1,15 +1,15 @@
-"""Packed-resident AWQ W4A16 modulation serving (pgw#864).
+"""Packed-resident AWQ W4A16 modulation serving.
 
 The baseline decodes every ``img_mod``/``txt_mod`` layer to a dense bf16
 ``nn.Linear`` AT LOAD (`svdq_awq.decode_awq_linear`) — the entire measured
-+6.8 GB peak-VRAM delta vs nunchaku (te#137 bench). This module keeps the
-weights RESIDENT at 4 bits and dequantizes per-group in-kernel:
++6.8 GB peak-VRAM delta vs nunchaku. This module keeps the weights RESIDENT at
+4 bits and dequantizes per-group in-kernel:
 
   ``y = x @ (codes * wscales + wzeros).T + bias`` — group-64 asymmetric int4,
   zeros pre-scaled AND pre-negated (the svdq_awq byte contract).
 
-Resident buffers are a load-time swizzle of the on-disk tensors (pgw#861:
-on-disk format untouched, the perf lane owns it):
+Resident buffers are a load-time swizzle of the on-disk tensors (the on-disk
+format is untouched):
 
   weight   uint8 [oc, ic/2]  row-major nibble pairs (element 2j LOW nibble),
                              adanorm row-interleave UNDONE on the codes
@@ -22,8 +22,8 @@ Modulation GEMMs are skinny (x = timestep embedding, M = batch): this is a
 VRAM feature first (tracker: ms priced by the pending per-op profile). The
 kernel rounds the dequantized weight to bf16 before the multiply, so its
 per-element math matches the baseline's bf16 ``nn.Linear`` weight exactly;
-only fp32 accumulation order differs (quantified on the pgw#865 harness).
-Gated by the same pgw#860 probe/env as the fused svdq lane.
+only fp32 accumulation order differs (quantified on the parity harness).
+Gated by the same probe/env as the fused svdq lane.
 """
 
 from __future__ import annotations
@@ -166,7 +166,7 @@ def _build_awq_linear_class() -> type:
         def __init__(self, in_features: int, out_features: int, *,
                      bias: bool, compute_dtype: Any) -> None:
             super().__init__()
-            # pgw#1019: record it (twin of _SvdqLinear).
+            # record it (twin of _SvdqLinear).
             self.compute_dtype = compute_dtype
             self.in_features = int(in_features)
             self.out_features = int(out_features)

@@ -55,7 +55,7 @@ def wired(monkeypatch, tmp_path):
     whether the gate let the derive/resolve leg run — no trace child, no mint."""
     calls: list[Dict[str, Any]] = []
 
-    # pgw#1127: the pre-derive gate now asks whether ANYBODY could answer, and
+    # The pre-derive gate now asks whether ANYBODY could answer, and
     # this machine's own cell store is one of the two answerers. Pin it to an
     # empty tmp root so the gate under test reads a fact about the test and not
     # about whatever the developer's `~/.cache/cozy/compile-cells` happens to
@@ -67,7 +67,7 @@ def wired(monkeypatch, tmp_path):
 
     def _attempt(**kw: Any) -> Any:
         calls.append(kw)
-        # pgw#1176: `attempt` returns ONE outcome per declared graph class.
+        # `attempt` returns ONE outcome per declared graph class.
         # `cell_plans` above sizes exactly one, so the double returns a
         # one-element TUPLE — a double still handing back a bare outcome would
         # let this suite pass against a contract production does not have.
@@ -94,7 +94,7 @@ def wired(monkeypatch, tmp_path):
 
 
 def _run_boot_adopt(ex: Any) -> Any:
-    # pgw#1176: one outcome per declared class, and this suite declares one —
+    # One outcome per declared class, and this suite declares one —
     # so the unpack ASSERTS that arity rather than indexing past a set nobody
     # checked. Every gate below is about the ONE declaration.
     (out,) = ex._boot_adopt(_Spec(), {})
@@ -121,7 +121,7 @@ def test_no_bearer_and_no_seam_degrades_without_deriving(wired):
     no seam AND an empty local cell store means nobody to ask, so no
     derive/resolve, no attempt.
 
-    pgw#1116: it degrades by NAMING itself, never by returning a bare None — a
+    it degrades by NAMING itself, never by returning a bare None — a
     refusal that carries no reason is how three pods refused unattributably.
 
     pgw#1127 narrowed the token from `no_hub` to `no_cell_source`, and the

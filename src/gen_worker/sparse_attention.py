@@ -1,20 +1,20 @@
-"""Block-sparse attention MECHANISM (pgw#1043 §PRODUCTIZATION).
+"""Block-sparse attention MECHANISM.
 
-pgw#740 doctrine: the mechanism lives here, the per-model vocabulary lives in the
-endpoint. This module knows how to turn *block scores* into a FlexAttention
-``BlockMask`` and run the attention; it knows nothing about H3, about where the
-scores came from, or about what a "global prefix" means beyond a row count.
+The mechanism lives here, the per-model vocabulary lives in the endpoint. This
+module knows how to turn *block scores* into a FlexAttention ``BlockMask`` and
+run the attention; it knows nothing about where the scores came from, or about
+what a "global prefix" means beyond a row count.
 
 What it is NOT: it is not a selector. A servable selector needs a trained index
-branch per model (pgw#1043 §INDEXER), and that artifact is minted by the
-conversion route and delivered through a binding slot — never bundled here.
+branch per model, and that artifact is minted by the conversion route and
+delivered through a binding slot — never bundled here.
 
 Two facts this module exists to encode, both measured, both landmines:
 
 1. **There is no eager mode.** Eager ``flex_attention`` silently IGNORES a
-   manually built ``BlockMask``'s block structure and computes dense (§INDEXER
-   rig red/green: eager == dense to 1e-7 under a 54%-kept mask). It also OOMs at
-   video-DiT shapes. Every call here goes through the compiled callable.
+   manually built ``BlockMask``'s block structure and computes dense (measured:
+   eager == dense to 1e-7 under a 54%-kept mask). It also OOMs at video-DiT
+   shapes. Every call here goes through the compiled callable.
 2. **``block_mask`` is a KEYWORD argument.** ``flex_attention``'s fourth
    positional parameter is ``score_mod``; passing the mask positionally runs
    dense and announces itself only as a 299 GiB allocation failure. Measured on
@@ -23,7 +23,7 @@ Two facts this module exists to encode, both measured, both landmines:
 The mask builder is the ``topk``-direct path: ``topk`` already returns indices
 and the forced blocks are known a priori, so the ascending kv index list is built
 by mark -> cumsum -> scatter instead of by a full-width sort over the bool keep
-tensor. It is bit-identical to §INDEXER's sort-based reference (asserted in
+tensor. It is bit-identical to the sort-based reference (asserted in
 ``tests/test_sparse_attention_pgw1043.py``) and materially cheaper.
 """
 
@@ -85,7 +85,7 @@ def _bits() -> dict:
     except Exception as exc:  # noqa: BLE001
         raise SparseUnavailable(f"flex_attention unimportable: {exc}") from exc
     # The recompile ceiling is the SETTINGS AUTHORITY's to raise, never a second
-    # writer's (pgw#1049). Sparse adds one compiled flex callable per distinct
+    # writer's. Sparse adds one compiled flex callable per distinct
     # kernel_options set, so it declares the shape count and asks.
     settings_authority.raise_dynamo_cache_limits(64)
     _FLEX["BlockMask"] = BlockMask
@@ -116,8 +116,8 @@ def build_block_mask(scores: Any, k_blocks: int, geom: BlockGeometry,
 
     ``X`` is the score's own head dimension: ``heads`` for a per-head selector,
     a divisor of it for a grouped one (the group's rows are replicated, which is
-    the honest cost of grouping — pgw#1043 measured the grouping CEILING at
-    0.81/0.84 of per-head, so grouping is a reported control, not a default).
+    the honest cost of grouping — the grouping CEILING measured 0.81/0.84 of
+    per-head, so grouping is a reported control, not a default).
     """
     import torch
 

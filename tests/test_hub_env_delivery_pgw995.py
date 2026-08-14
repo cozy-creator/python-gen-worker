@@ -1,22 +1,16 @@
-"""pgw#995 deliverable 2 — hub-shaped env delivery reaches `Settings`.
+"""Hub-shaped env delivery reaches `Settings`.
 
-The `GEN_WORKER_PREFER_AOT` postmortem was not a bug in any component. The flag
-was declared, the entry was set, the loader worked, the gate worked. What broke
-was the DELIVERY between them: a release rebuild stopped declaring the name, the
-hub withheld the entry silently, and the worker booted without it. Three pod
-attempts.
+The failure class is DELIVERY, not any one component: the flag is declared, the
+entry is set, the loader works and the gate works, but a release rebuild stops
+declaring the name, the hub withholds the entry silently, and the worker boots
+without it.
 
-Nothing in this repo could have caught that, because the local rig constructs
-its own environment — `mint_process.child_env` for the mint child,
-`dict(os.environ)` for the adopting process. Both are shapes a production pod
-never has. So the regression class had exactly one detector: a pod.
-
-These tests give it a second one. They drive the REAL
-`gen_worker.config.load_settings` — the same function `entrypoint._run_main`
-calls — over an environment produced by the hub's resolution rule rather than by
-the test's own convenience.
-
-Run: pytest tests/test_hub_env_delivery_pgw995.py -v
+A local rig cannot see it — it constructs its own environment
+(`mint_process.child_env` for the mint child, `dict(os.environ)` for the
+adopting process), shapes a production pod never has, leaving a pod as the only
+detector. These tests drive the REAL `gen_worker.config.load_settings` — the
+same function `entrypoint._run_main` calls — over an environment produced by
+the hub's resolution rule rather than by the test's own convenience.
 """
 
 from __future__ import annotations

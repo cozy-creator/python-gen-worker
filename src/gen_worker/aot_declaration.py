@@ -1,25 +1,21 @@
-"""Derivation over the pgw#739 export-declaration vocabulary.
+"""Derivation over the export-declaration vocabulary.
 
 :mod:`gen_worker.api.export_contract` defines the vocabulary and holds the
 registry; the endpoint writes the declaration; THIS module derives everything
 the mint needs from it — mint plans, dynamic-shape rows, fork assertions, and
-generic example inputs. No family name appears here (the #740 pattern:
-vocabulary / registration / engine, family-free all three).
+generic example inputs. No family name appears here (vocabulary / registration
+/ engine, family-free all three).
 
-The one derivation rule
------------------------
-**Bounds derive from the declared class rows.** A dim's admissible range is
+THE ONE DERIVATION RULE: **bounds derive from the declared class rows.** A dim's admissible range is
 the hull of its resolved values over the rows an artifact serves, rounded OUT
-to its ``multiple_of`` (rounding in would exclude a declared coordinate from
-the artifact's own contract, and pgw#704 B2 measured that nothing at runtime
-would refuse the difference). This is uniform across plain and RELATIONAL
-dims: a relational dim (``relates_to``) gets a free ranged
-``torch.export.Dim`` from the same hull and the solver unifies the relation
-into the shape env (ie#566 §5, measured on wan ti2v: ``31*s25*s56`` carried
-with 458 asserts, no free symbol surviving). The endpoint never hand-computes
-a bound — that hand-math is exactly what this module exists to prevent.
+to its ``multiple_of`` — rounding in would exclude a declared coordinate from
+the artifact's own contract, and nothing at runtime refuses the difference.
+This is uniform across plain and RELATIONAL dims: a relational dim
+(``relates_to``) gets a free ranged ``torch.export.Dim`` from the same hull and
+the solver unifies the relation into the shape env. The endpoint never
+hand-computes a bound — that hand-math is what this module exists to prevent.
 
-Shape strategy (#730 ratified, per-family declared):
+Shape strategy (per-family declared):
 
 - ``static-rows`` — one mint plan per class row, no dynamic dims (symbolic
   latent H/W costs conv families the channels-last layout opt, +7.2%);
@@ -83,7 +79,7 @@ def target_forks(decl: Compile, target: str) -> Tuple[Fork, ...]:
 
 
 def arg_carriers(decl: Compile, target: str) -> frozenset:
-    """Names of TEMPLATED args a dim may be carried by (pgw#853).
+    """Names of TEMPLATED args a dim may be carried by.
 
     An extent that enters the traced call as a python int inside a container
     — qwen-image's ``img_shapes[b][0] = (frames, H_pat, W_pat)`` — is a real
@@ -132,11 +128,9 @@ def derived_dynamic(
         values = {row.dim_map[dim.name] for row in rows}
         if len(values) <= 1:
             continue  # static across this artifact's rows
-        # pgw#853: an extent carried ONLY by a templated Arg is a python int
-        # in the traced call. It specializes, so collapsing rows that differ
-        # on it would mint ONE artifact that silently serves only the seed
-        # row — the same class of silent-wrongness as the 0/1 refusal below,
-        # and worth refusing for the same reason.
+        # An extent carried ONLY by a templated Arg is a python int in the
+        # traced call. It specializes, so collapsing rows that differ on it
+        # would mint ONE artifact that silently serves only the seed row.
         if all(b.split(".", 1)[0] in by_arg or b in by_arg
                for b, _ in dim.carried_by):
             raise MintRefused(
@@ -165,22 +159,17 @@ def derived_dynamic(
     return tuple(out)
 
 
-# (pgw#1030: `named_dynamic_rows` deleted — zero callers anywhere; the
-# class-bearing path derives ranges via `dynamic_rows_for_plan` and the
-# class-less path never grew a consumer.)
-
-
 def effective_shape_strategy(decl: Compile) -> str:
-    """The declared per-family shape strategy (#730 ratified).
+    """The declared per-family shape strategy.
 
-    One population per family since pgw#846 retired regional cells: the
-    whole-graph ``shape_strategy`` is the only strategy there is.
+    One population per family: the whole-graph ``shape_strategy`` is the only
+    strategy there is.
     """
     return str(decl.shape_strategy or "")
 
 
 def target_classes(decl: Compile, target: str) -> Tuple[GraphClass, ...]:
-    """The graph classes declared for one target (pgw#967).
+    """The graph classes declared for one target.
 
     An unscoped row serves every target — the pre-scoping rule — so a
     single-target family reads exactly as it always did.
@@ -256,8 +245,7 @@ def entry_name(
     class_dims: Tuple[Tuple[str, int], ...] = (),
 ) -> str:
     """The deterministic NAMED-ENTRY label of one graph class inside a
-    multi-graph cell (pgw#758, Paul's ruling: separate graphs per function,
-    combined into one file).
+    multi-graph cell: separate graphs per function, combined into one file.
 
     ``<target>/<fork k=v,...>/<dims k=v,...>`` with empty segments omitted;
     pairs are sorted, bools render lowercase. The name is the AOTI model
@@ -288,7 +276,7 @@ def plan_entry_name(plan: MintPlan) -> str:
 
 def cell_plans(decl: Compile) -> Tuple[MintPlan, ...]:
     """EVERY mint plan of one family's declaration, across ALL declared
-    targets — the whole class set one cell packages (pgw#758). Refuses a
+    targets — the whole class set one cell packages. Refuses a
     declaration whose plans would collide on an entry name (two classes one
     label could not be told apart by a refusal)."""
     if not decl.targets:
@@ -319,10 +307,10 @@ def select_plan(
     """The mint plan for one requested coordinate, refused by name when the
     coordinate is not declared — reading only declared facts, never family
     knowledge."""
-    # pgw#790: the adapter arm is an SDK-synthesized coordinate — the endpoint
-    # never declared it, so it can never select a DECLARED plan. Stripped here
-    # (rather than at each call site) because every reader of a spec's fork
-    # goes through this function.
+    # the adapter arm is an SDK-synthesized coordinate — the endpoint never
+    # declared it, so it can never select a DECLARED plan. Stripped here rather
+    # than at each call site because every reader of a spec's fork goes through
+    # this function.
     want_fork = tuple(sorted(
         (str(k), v) for k, v in dict(fork).items()
         if str(k) != ADAPTER_FORK))
@@ -386,10 +374,10 @@ def fork_gaps(
 
     Two layers: the coordinate must state every declared fork on a SERVED
     arm, and every fork with a ``source`` binding is read off the composed
-    pipeline/module and must agree — a graph exported under the wrong arm
-    is the wrong class wearing the declared class's key (ie#566 G6:
-    ``expand_timesteps`` is a PIPELINE field, invisible to module-config
-    readers, which is why the binding names its source).
+    pipeline/module and must agree — a graph exported under the wrong arm is
+    the wrong class wearing the declared class's key. Some fork fields are
+    PIPELINE fields, invisible to module-config readers, which is why the
+    binding names its source.
     """
     gaps: List[str] = []
     coordinate = {str(k): v for k, v in dict(fork).items()}
@@ -507,13 +495,9 @@ def container_arities(
     """``{input name: element count}`` for every declared LIST input.
 
     ``dynamic_shapes`` must mirror the example feed's container structure or
-    ``torch.export`` refuses by name — z-image measured the exact sentence:
-
-        Detected mismatch between the structure of `inputs` and
-        `dynamic_shapes`: `inputs['x']` is a <class 'list'>, but
-        `dynamic_shapes['x']` is a <class 'dict'>
-
-    so the arity the feed used has to reach the spec builder. Derived from
+    ``torch.export`` refuses ("Detected mismatch between the structure of
+    `inputs` and `dynamic_shapes`"), so the arity the feed used has to reach
+    the spec builder. Derived from
     the same row the feed was built from, never re-guessed.
     """
     rows = [r for r in target_inputs(decl, spec.target) if r.repeat is not None]
@@ -543,22 +527,22 @@ def _container_arity(row: Input, seed: GraphClass, config: Any, family: str) -> 
 def declared_inputs(
     module: Any, spec: ExportSpec, decl: Compile,
 ) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
-    """Example export inputs for ANY declared family — the single generic
-    code path that replaces per-family builder modules (#739: the worker
-    knows how to compile anything; only endpoints know what they are).
+    """Example export inputs for ANY declared family — the single generic code
+    path in place of per-family builder modules (the worker knows how to
+    compile anything; only endpoints know what they are).
 
     Widths come from the module's own config where the declaration says so;
-    sizes come from the SELECTED CLASS ROW (which row seeds the trace
-    decides nothing for a collapsed artifact — the derived range does).
+    sizes come from the SELECTED CLASS ROW (which row seeds the trace decides
+    nothing for a collapsed artifact — the derived range does).
 
-    The returned kwargs dict is ALWAYS empty: all-positional example feeds
-    are a mint obligation (pod 9, pgw#723 residuals — the AOTI package call
-    convention mirrors the traced args/kwargs split and the serve marshal
-    is positional), so every declared row — including nested containers and
-    the lifted-LoRA pair — is bound to its slot in the traced signature and
-    fed positionally, with signature defaults filling undeclared slots in
-    between. A declared name the target only takes keyword-only is refused
-    by name: such a target cannot meet the fleet call convention.
+    The returned kwargs dict is ALWAYS empty: all-positional example feeds are
+    a mint obligation (the AOTI package call convention mirrors the traced
+    args/kwargs split and the serve marshal is positional), so every declared
+    row — including nested containers and the lifted-LoRA pair — is bound to its
+    slot in the traced signature and fed positionally, with signature defaults
+    filling undeclared slots in between. A declared name the target only takes
+    keyword-only is refused by name: such a target cannot meet the fleet call
+    convention.
     """
     import torch
 
@@ -578,12 +562,11 @@ def declared_inputs(
 
     values: Dict[str, Any] = {}
     for row in rows:
-        # pgw#1058: dtype is a REQUIRED declaration — "model" is the explicit
-        # inheritance word, and an empty dtype (only reachable through a
-        # hand-built row that dodged Input's own validation) is refused
-        # rather than guessed. The silent module-dtype default is what minted
-        # sdxl's scalar timestep bfloat16 against float32 traffic: 36 entries,
-        # zero admissible calls, published.
+        # dtype is a REQUIRED declaration — "model" is the explicit inheritance
+        # word, and an empty dtype (only reachable through a hand-built row that
+        # dodged Input's own validation) is refused rather than guessed. A
+        # silent module-dtype default mints entries whose scalar dtype does not
+        # match real traffic, so every call misses.
         if row.dtype == MODEL_DTYPE:
             dtype = mod_dtype
         elif row.dtype:
@@ -616,22 +599,19 @@ def declared_inputs(
         if row.repeat is None:
             _nest(values, row.name, _one())
         else:
-            # pgw#853: a declared LIST parameter. z-image's `x` is a python
-            # list over the CFG-doubled batch, and the #739 vocabulary could
-            # not say so — `_nest` built a DICT from the dotted name, so
-            # `Input('x.0', ...)` yielded {'0': tensor} where the target takes
-            # [tensor]. That is blocker B1, and it is an SDK gap, not a torch
-            # one: the nested form torch wants exports fine (control rc=4).
+            # A declared LIST parameter: some targets take a python list over
+            # the CFG-doubled batch. Without `repeat`, `_nest` would build a
+            # DICT from the dotted name — `Input('x.0', ...)` yields
+            # {'0': tensor} where the target takes [tensor].
             arity = _container_arity(row, seed, config, decl.family)
             _nest(values, row.name, [_one() for _ in range(arity)])
     for arg in target_args(decl, spec.target):
         if arg.template is None:
             _nest(values, arg.name, arg.value)
             continue
-        # pgw#853: a ROW-DERIVED structured argument. qwen-image's
-        # `img_shapes` is the class row restated as python ints, which
-        # `Arg.value` could not express on two counts — a scalar type, and
-        # declaration-GLOBAL where the value is per-row (blocker B1).
+        # A ROW-DERIVED structured argument: the class row restated as python
+        # ints, which `Arg.value` cannot express — it is a scalar and
+        # declaration-GLOBAL, where this value is per-row.
         resolved = _resolve_template(
             arg.template, seed, config, input_name=arg.name,
             family=decl.family)
@@ -658,7 +638,7 @@ def call_signature(module: Any, target: str, family: str) -> Tuple[List[Any], Se
     """``(positional parameters, keyword-only names)`` of the callable
     ``target`` names on ``module``, refused by name when unreadable.
 
-    ONE read for two callers (pgw#822): :func:`_positionalize`, which binds
+    ONE read for two callers: :func:`_positionalize`, which binds
     the declared feed to positional slots at mint time, and
     :func:`gen_worker.aot_mint.declaration_module_gaps`, which asks the same
     question on the PARENT before a child is spawned or a pod is rented.

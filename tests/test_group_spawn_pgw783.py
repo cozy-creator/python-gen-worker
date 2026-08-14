@@ -99,7 +99,7 @@ class G2Harness:
         )
         self.exit_code: Optional[int] = None
         self._thread = threading.Thread(target=self._run, daemon=True)
-        # pgw#960: same two gates as SplitHarness — a dead parent is definitive,
+        # Same two gates as SplitHarness — a dead parent is definitive,
         # and TWO children's spawn-plus-import is what the silence is worth here.
         self.scheduler.worker_alive = lambda: self.alive
         self.scheduler.boot_cost = lambda: measure_child_boot_cost_s(child_env)

@@ -1,4 +1,4 @@
-"""ONE ensure-local path for every model provider (#366).
+"""ONE ensure-local path for every model provider.
 
 ``ensure_local(ref)`` materializes a model ref on disk and returns its local
 path, dispatching on provider:
@@ -49,11 +49,9 @@ ProgressFn = Callable[[int, Optional[int]], None]
 # Provider index: normal-form ref -> provider. Built once at boot from the
 # endpoint.lock manifest (the wire carries bare refs without a provider field).
 #
-# ONE keying function (gw#492) normalizes both index keys and lookups —
-# replacing the old raw/stripped/tag-removed fallback chain and its
-# `_binding_canonical_ref` twin. Keys are (repo, tag)-granular, with a
-# repo-identity fallback so a hub-minted DIGEST pick still routes to its
-# repo's provider.
+# ONE keying function normalizes both index keys and lookups. Keys are
+# (repo, tag)-granular, with a repo-identity fallback so a hub-minted DIGEST
+# pick still routes to its repo's provider.
 # ---------------------------------------------------------------------------
 
 _provider_by_ref: Mapping[str, str] = {}
@@ -201,15 +199,15 @@ async def ensure_local(
     """Materialize ``ref`` on disk; return its local path.
 
     ``snapshot`` is the orchestrator-resolved manifest (the typed
-    ``WorkerResolvedRepo``, gw#497) carrying presigned URLs or transfer
-    grants. The orchestrator is the only resolver: when it ships a
-    snapshot for a ref — including an hf/civitai binding ref resolved through
-    a platform mirror under mirror-first (tensorhub #557) — the snapshot is
-    authoritative and the bytes come from tensorhub-CAS, never the upstream
-    registry. Refs without a snapshot fall back to their provider's direct
-    download (hf/civitai/modelscope) or fail retryably (tensorhub).
+    ``WorkerResolvedRepo``) carrying presigned URLs or transfer grants. The
+    orchestrator is the only resolver: when it ships a snapshot for a ref —
+    including an hf/civitai binding ref resolved through a platform mirror
+    under mirror-first — the snapshot is authoritative and the bytes come from
+    tensorhub-CAS, never the upstream registry. Refs without a snapshot fall
+    back to their provider's direct download (hf/civitai/modelscope) or fail
+    retryably (tensorhub).
 
-    ``components`` (pgw#505) is honored on the HF direct-download branch.
+    ``components`` is honored on the HF direct-download branch.
     It is deliberately NOT applied to the ``snapshot is not None`` branch:
     that snapshot is orchestrator-resolved and the executor's residency
     layer digest-verifies the materialized tree against the FULL
@@ -223,20 +221,19 @@ async def ensure_local(
     (``models/provision.py::_fetch_tensorhub_snapshot``), which owns its own
     resolve+download+materialize loop end to end.
 
-    ``exclude_components`` (th#1330 B2) IS applied to the snapshot branch,
-    and the paragraph above is exactly why it can be: the narrowed tree gets
-    its OWN directory key (``cozy_snapshot.snapshot_dir_key``), so it never
-    occupies the name reserved for the complete snapshot, and
-    ``ensure_snapshot`` verifies it against the SAME filtered manifest it
-    wrote. The executor's cached-path verifier only ever sees a tree named
-    with the bare digest, i.e. a complete one — so the spurious
-    corruption/quarantine loop that blocks ``components`` here cannot occur.
+    ``exclude_components`` IS applied to the snapshot branch, and the
+    paragraph above is exactly why it can be: the narrowed tree gets its OWN
+    directory key (``cozy_snapshot.snapshot_dir_key``), so it never occupies
+    the name reserved for the complete snapshot, and ``ensure_snapshot``
+    verifies it against the SAME filtered manifest it wrote. The executor's
+    cached-path verifier only ever sees a tree named with the bare digest,
+    i.e. a complete one — so the spurious corruption/quarantine loop that
+    blocks ``components`` here cannot occur.
 
-    ``fill_source_dir`` (th#850 managed-tier ruling, gw#599): an
-    endpoint-scoped datacenter-warm CAS mount (RunPod volume) consulted
-    before R2 on the tensorhub-snapshot branch only. ``None`` (the default,
-    and always true for cozy-local / non-tensorhub providers) preserves
-    today's straight-to-R2 behavior exactly.
+    ``fill_source_dir``: an endpoint-scoped datacenter-warm CAS mount (RunPod
+    volume) consulted before R2 on the tensorhub-snapshot branch only.
+    ``None`` (the default, and always true for cozy-local / non-tensorhub
+    providers) goes straight to R2.
     """
     base = Path(cache_dir) if cache_dir is not None else tensorhub_cas_dir()
     prov = provider or lookup_provider_for_ref(ref)
@@ -255,7 +252,7 @@ async def ensure_local(
         )
 
     if parsed.provider == "tensorhub" and parsed.tensorhub is not None:
-        # The worker cannot resolve tensorhub-CAS refs itself (gw#465):
+        # The worker cannot resolve tensorhub-CAS refs itself:
         # typed + terminal so callers fail fast with "missing_snapshot"
         # instead of burning retries on a deterministic local condition.
         from .errors import MissingSnapshotError
@@ -302,7 +299,7 @@ async def ensure_local(
         return Path(await asyncio.to_thread(_ms_download))
 
     # Typed so the executor classifies it INVALID (bad input, never retry) —
-    # a bare ValueError maps FATAL since pgw#514/P9.
+    # a bare ValueError maps FATAL.
     raise ValidationError(f"unsupported model ref {ref!r} (provider={prov!r})")
 
 
@@ -330,8 +327,8 @@ def select_hf_files(repo_files: Sequence[str]) -> Optional[set[str]]:
     - Diffusers-style repos (component dirs): every non-weight file (configs,
       tokenizers) plus ONE weight set per component directory — bf16 > fp16 >
       untagged, safetensors preferred. Root monolithic checkpoints are
-      excluded (redundant). pgw#1148 deleted the ``flavor=`` override: HF has
-      no flavor axis, and an explicit file set is what ``files=`` is for.
+      excluded (redundant). There is no ``flavor=`` override: HF has no flavor
+      axis, and an explicit file set is what ``files=`` is for.
     - Root-weights repos: the root weight files (same variant rule) + sidecars.
     - Anything else: None (download the whole repo).
     """
@@ -390,7 +387,7 @@ def select_component_paths(
     components: Sequence[str],
     exclude: Sequence[str] = (),
 ) -> set[str]:
-    """Narrow a repo file listing to declared pipeline COMPONENTS (pgw#505):
+    """Narrow a repo file listing to declared pipeline COMPONENTS:
     every path under a ``<component>/`` subfolder, plus every root-level
     ``*.json`` (``model_index.json`` and siblings — always kept so
     downstream component-set introspection / pipeline-class detection still
@@ -399,10 +396,10 @@ def select_component_paths(
     the tensorhub CAS snapshot downloader (``cozy_snapshot.py``) — the ONE
     filter both sources apply.
 
-    ``exclude`` (th#1330 B2) is the negative form: drop every path under the
-    named ``<component>/`` subfolders. It applies with or without
-    ``components`` and is how a pgw#617 component OVERRIDE stops the base
-    composition from shipping the component the override replaces — the
+    ``exclude`` is the negative form: drop every path under the named
+    ``<component>/`` subfolders. It applies with or without ``components``
+    and is how a component OVERRIDE stops the base composition from
+    shipping the component the override replaces — the
     worker loads the base with the override object passed to
     ``from_pretrained``, so the base's own copy is downloaded and discarded
     (~1.64 GB per SDXL text-encoder override). Root files are still kept:
@@ -450,20 +447,19 @@ def _match_allow_patterns(repo_files: Sequence[str], patterns: Sequence[str]) ->
     return {f for f in repo_files if any(fnmatch(f, p) for p in pats)}
 
 
-# HF snapshot-download guards (#379): the progress window and the
-# accidental-huge-repo cap (0 = off). No deployment has ever overridden these
-# (pgw#514 dead-config sweep found zero producers for the env vars that used
-# to back them), so they're fixed constants rather than Settings fields.
+# HF snapshot-download guards: the progress window and the
+# accidental-huge-repo cap (0 = off). No deployment has ever overridden these,
+# so they're fixed constants rather than Settings fields.
 #
-# pgw#655: the bound is a PROGRESS-RATE FLOOR, never a wall clock. A wall-clock
-# cap cannot distinguish a healthy 200GB pull from a wedge, so it is either
-# useless (the 0.0 it sat at for its whole life) or it kills real downloads;
-# the honest question is "is this transfer still moving fast enough to ever
-# finish?". A transfer that cannot put _HF_DOWNLOAD_MIN_WINDOW_BYTES on disk
-# within _HF_DOWNLOAD_STALL_TIMEOUT_S is stalled — including the trickle that
-# used to reset the old any-progress watchdog forever with a byte a minute.
-# 8 MiB / 180s ~= 46 KiB/s: three orders of magnitude under any real pod link,
-# and still 60+ hours for a 10GB checkpoint, so nothing healthy is near it.
+# The bound is a PROGRESS-RATE FLOOR, never a wall clock. A wall-clock cap
+# cannot distinguish a healthy 200GB pull from a wedge, so it is either
+# useless or it kills real downloads; the honest question is "is this transfer
+# still moving fast enough to ever finish?". A transfer that cannot put
+# _HF_DOWNLOAD_MIN_WINDOW_BYTES on disk within _HF_DOWNLOAD_STALL_TIMEOUT_S is
+# stalled — including a trickle, which resets an any-progress watchdog forever
+# with a byte a minute. 8 MiB / 180s ~= 46 KiB/s: three orders of magnitude
+# under any real pod link, and still 60+ hours for a 10GB checkpoint, so
+# nothing healthy is near it.
 _HF_DOWNLOAD_STALL_TIMEOUT_S = 180.0
 _HF_DOWNLOAD_MIN_WINDOW_BYTES = 8 * 1024 * 1024
 _HF_MAX_REPO_BYTES = 60_000_000_000
@@ -472,7 +468,7 @@ _HF_MAX_REPO_BYTES = 60_000_000_000
 class DownloadStalledError(RuntimeError):
     """Raised when a blocking snapshot download fails the progress-rate floor
     (less than ``min_window_bytes`` of new bytes within the stall window) — a
-    bounded, observable failure instead of a silent hang (#379, pgw#655)."""
+    bounded, observable failure instead of a silent hang."""
 
 
 def _scan_bytes(root: Path) -> int:
@@ -511,7 +507,7 @@ def _run_with_stall_watchdog(
     progress reporter (scans bytes-on-disk under ``progress_root``) and raises
     :class:`DownloadStalledError` when the transfer falls below the progress
     floor: fewer than ``min_window_bytes`` new bytes within ``stall_timeout``
-    (pgw#655 — a trickle is a stall, and there is no wall-clock cap)."""
+    (a trickle is a stall, and there is no wall-clock cap)."""
     holder: Dict[str, Any] = {}
 
     def _run() -> None:
@@ -526,16 +522,14 @@ def _run_with_stall_watchdog(
     dl_thread.start()
 
     last_bytes = 0
-    # The progress window as two shared values (gw#666): the floor decides
+    # The progress window as two shared values: the floor decides
     # what counts as an advance (a trickle never does), the window decides how
-    # long an unadvanced loop may run. Same pair now guards the CAS fetch.
+    # long an unadvanced loop may run. The same pair guards the CAS fetch.
     floor = ProgressFloor(max(int(min_window_bytes), 1))
-    # DESIGN-RULINGS §4.24 item 4: an unset limit is a REFUSAL, never an
-    # emergent one. This used to read `stall_timeout if stall_timeout > 0 else
-    # math.inf`, which defeated SilenceWindow's own `window_s must be positive`
-    # guard — the guard exists precisely so a zero cannot silently delete the
-    # watchdog and hand a wedged download the unbounded hang gw#456 was filed
-    # for. Let it refuse.
+    # An unset limit is a REFUSAL, never an emergent one: never widen this to
+    # `stall_timeout if stall_timeout > 0 else math.inf`, which defeats
+    # SilenceWindow's own `window_s must be positive` guard and lets a zero
+    # silently delete the watchdog. Let it refuse.
     window = SilenceWindow(stall_timeout)
     while not holder.get("done"):
         dl_thread.join(timeout=poll_interval)
@@ -594,7 +588,7 @@ def download_hf(
     ``asyncio.to_thread``). Transfer, cache, resume and locking are
     huggingface_hub's; this only plans the file selection.
 
-    ``components`` (pgw#505) narrows the repo listing to the named pipeline
+    ``components`` narrows the repo listing to the named pipeline
     component subfolders (+ root config files, via
     :func:`select_component_paths`) BEFORE the existing ``files=``/auto
     variant-selection logic runs — so a component-scoped fetch still gets
@@ -604,7 +598,7 @@ def download_hf(
     from ..net import hf  # lazy: net imports requests; keeps `import gen_worker` light
 
     try:
-        hub = hf()  # gw#456: no HF socket may wait forever
+        hub = hf()  # no HF socket may wait forever
     except Exception as e:  # pragma: no cover
         raise RuntimeError(
             "huggingface_hub is required for hf model refs; install gen-worker with the HF extra."
@@ -646,9 +640,9 @@ def download_hf(
 
     selected: Optional[set[str]]
     if allow_patterns:
-        # Size-guard the MATCHED subset, not the whole repo (ie#355: a 795KB
-        # tokenizer files= subset of google/t5-v1_1-xxl tripped the 60GB cap).
-        # Same fnmatch semantics as huggingface_hub.filter_repo_objects.
+        # Size-guard the MATCHED subset, not the whole repo — a small files=
+        # subset of a huge repo must not trip the repo-size cap. Same fnmatch
+        # semantics as huggingface_hub.filter_repo_objects.
         selected = _match_allow_patterns(repo_files, allow_patterns)
         if not selected:
             raise ValueError(
@@ -836,7 +830,6 @@ def _civitai_select_files(
     Safetensors files win when present. Civitai may publish alternative
     precisions under the same filename; keep the primary/first alternative
     once so a later variant cannot overwrite it on disk. GGUF-only versions
-    (th#611: klein/qwen fine-tunes published only as quants)
     select exactly ONE gguf — civitai reuses a single filename across
     quantType variants, so downloading several would collide on disk:
     ``gguf_quant`` picks it explicitly, else the preference order applies.
@@ -897,16 +890,15 @@ def _civitai_stream_one(
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_suffix(dst.suffix + ".part")
     h = hashlib.sha256()
-    # pgw#1013. This is the THIRD-PARTY origin in the set — civitai chooses
-    # both the byte stream and the `sizeBytes` we would check it against — and
-    # its size check ran only after the whole body was on disk, where it is a
-    # report rather than a bound. Two bounds, because the declaration is
-    # optional here in a way it is not on our own surfaces:
+    # This is the THIRD-PARTY origin in the set — civitai chooses both the byte
+    # stream and the `sizeBytes` we would check it against — so the stream is
+    # bounded in-loop, not merely checked after the body is on disk. Two
+    # bounds, because the declaration is optional here in a way it is not on
+    # our own surfaces:
     #   * declared: the cap is the declaration plus the SAME 1 KiB tolerance
-    #     the post-check has always applied (sizeKB is a rounded float, live:
-    #     wan i2v 19224728441 vs actual ...442, e2e #112). One tolerance, used
-    #     twice — a cap tighter than the acceptance check would refuse files
-    #     the very next line accepts.
+    #     the post-check applies (sizeKB is a rounded float). One tolerance,
+    #     used twice — a cap tighter than the acceptance check would refuse
+    #     files the very next line accepts.
     #   * undeclared: civitai omits `sizeBytes` on real files, so refusing is
     #     not available. The bound is the destination filesystem, which is the
     #     resource an unbounded weights download actually exhausts.
@@ -940,11 +932,11 @@ def _civitai_stream_one(
         tmp.unlink(missing_ok=True)
         raise ValueError(f"civitai sha256 mismatch for {dst.name}")
     tmp.replace(dst)
-    # pgw#939: the OBSERVED digest travels back whether or not civitai
-    # published one to check it against. Refusing an unhashed file is not
-    # available — civitai routinely omits SHA256 for large/GGUF files and this
-    # lane exists to ingest them — so the fix is that the manifest can no
-    # longer say the same thing about a verified and an unverified download.
+    # The OBSERVED digest travels back whether or not civitai published one to
+    # check it against. Refusing an unhashed file is not available — civitai
+    # routinely omits SHA256 for large/GGUF files and this lane exists to
+    # ingest them — so instead the manifest distinguishes a verified from an
+    # unverified download.
     return written, observed
 
 
@@ -970,13 +962,8 @@ def _civitai_adoptable(
     """The manifest row for an existing file that is provably complete, or
     ``None`` to (re)download it.
 
-    pgw#939: this was ``dst.exists() and (not size or st_size == size)`` — the
-    left half of an ``or`` whose short-circuit meant that when civitai
-    declared no size, **any** file already occupying that path was adopted as
-    a finished download. No size, no hash, no read. A truncated prior attempt
-    is exactly the state that produces no declared size and an existing file
-    at once.
-
+    Never adopt on existence alone: a truncated prior attempt is exactly the
+    state that produces an existing file and no declared size at once.
     With nothing declared, the only evidence available is this directory's own
     manifest from a run that COMPLETED — so that is what is required, and its
     absence means "download it", never "assume it".

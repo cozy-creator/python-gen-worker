@@ -1,52 +1,30 @@
-"""pgw#683: pgw#675's lane-aware default is necessary but NOT sufficient — a
-composition can still be handed a foreign-precision component with NO
-component override anywhere on the wire.
+"""Guards compute-dtype uniformity across a composition: a lane-aware dtype
+default is not sufficient on its own, because a composition can be handed a
+foreign-precision component with NO component override anywhere on the wire.
 
-Live, on the release that is currently `prod` (`b266454e92a9000c4c0c13f4`,
-sdxl 0.2.7, gen-worker 0.67.1, NVIDIA L4)::
-
-    activity failed kind=self_mint_compile phase=warmup_forward
-      error=RuntimeError: mat1 and mat2 must have the same dtype,
-                          but got BFloat16 and Half
-    worker_function_unavailable function=generate reason=setup_failed
-
-`comps=None` on both functions, so pgw#675's story ("a component OVERRIDE
-loaded Half into a bf16 composition") cannot apply. Two facts close the gap.
-
-**1. The signature names the operator.** MEASURED on torch 2.13.0 (the fleet's
-version) — the three dtype-mismatch messages are distinct, and only one is
-ours::
+Torch's three dtype-mismatch messages are distinct, and name the operator
+(measured on torch 2.13)::
 
     nn.Linear WITH bias  (addmm) -> mat1 and mat2 must have the same dtype,
-                                    but got BFloat16 and Half      <-- pgw#683
+                                    but got BFloat16 and Half
     bare matmul / no bias        -> expected m1 and m2 to have the same dtype
     conv                         -> Input type (c10::BFloat16) and bias type
-                                    (c10::Half) should be the same  <-- pgw#675
+                                    (c10::Half) should be the same
 
-So pgw#683 is a `nn.Linear` WITH a bias whose weight is Half inside a bf16
-activation flow — not the LoRA side-branch (a bare matmul), not the VAE decode
-conv that pgw#675 was.
+The mechanism under test is IDENTITY, not the dtype decision. The content-keyed
+shared-component cache keys on `LoadedComponentKey`, whose `dtype` field is the
+binding's DECLARED dtype; hub bindings declare none. A quantizer only rewrites
+the DENOISER, so the VAE and text encoders of `X` and its quantized mirror are
+byte-identical — same content digest, same empty declared dtype, therefore ONE
+cache entry — while the two compositions compute at DIFFERENT dtypes. Whichever
+pick loads first wins the entry and the other aliases a foreign-precision module
+into its composition: non-deterministic by ARRIVAL ORDER, needing no override,
+and landing in a LATER window because injection only happens once an entry
+already exists.
 
-**2. Identity, not dtype decision, is what let a Half module in.** The
-content-keyed shared-component cache (gw#479) keys on
-`LoadedComponentKey`, whose `dtype` field is the binding's DECLARED dtype.
-Hub bindings declare none, and prod's binding is flavor-unpinned
-(`ref=tensorhub/wai-illustrious`, `tag=prod`), so the flavor is resolved per
-pod/per pick. A quantizer only rewrites the DENOISER, so the VAE and text
-encoders of `X` and `X#fp8-w8a8` are byte-identical — same content digest,
-same empty declared dtype, therefore ONE cache entry — while the two
-compositions compute at DIFFERENT dtypes (`#fp8-w8a8` -> bf16 by pgw#675's own
-lane rule; a plain fp16-stored mirror -> fp16). Whichever pick loaded first
-won the entry; the other aliased a foreign-precision module into its
-composition. That is per-pod non-deterministic by ARRIVAL ORDER, needs no
-override, and — because injection only happens once an entry already EXISTS —
-lands in a LATER window, which is exactly what the live pod showed: `generate`
-served 3/3 at 11.1s and reached `compiled` BEFORE the mint that died.
-
-The fix is in two parts, both taped here: identity carries the EFFECTIVE
-compute dtype, and a hard post-load invariant refuses a mixed composition at
-LOAD, naming the component and the tensor — instead of torch naming neither at
-warm unit 4/18.
+Two properties are taped here: identity carries the EFFECTIVE compute dtype, and
+a hard post-load invariant refuses a mixed composition at LOAD, naming the
+component and the tensor.
 """
 
 from __future__ import annotations
@@ -288,7 +266,7 @@ def test_invariant_admits_every_legal_composition() -> None:
     assert_uniform_compute_dtype(
         _Pipe(unet=_linear_stack(torch.bfloat16),
               text_encoder=_linear_stack(torch.bfloat16)), "bf16")
-    # pgw#667: the wider part is a DECLARED decision, never a collision.
+    # The wider part is a DECLARED decision, never a collision.
     assert_uniform_compute_dtype(
         _Pipe(unet=_linear_stack(torch.bfloat16),
               vae=_linear_stack(torch.float32)), "bf16")

@@ -1,33 +1,24 @@
-"""pgw#1107 §"exactly one declaration" — the REGISTRATION tightening.
+"""Exactly one declaration — the REGISTRATION tightening.
 
-The dual-declaration hazard is gone: every family in every endpoint repo now
-declares on ``@endpoint(compile=)`` and no ``aot_declaration.py`` survives. The
-gate that made the dual world safe (``decorators.py``: register only if
-``compile.classes and compile.family``) outlived it, and it has a defect the
-dual world hid — a declaration in the export vocabulary that FORGETS its
-classes, or its family, is dropped silently. Nothing registers, nothing mints,
-and on a pod that is indistinguishable from an endpoint which never declared
-AOT at all. Exactly the shape of every silent-coverage defect this codebase
-has paid for.
+Every family declares on ``@endpoint(compile=)``. A "register only if
+``compile.classes and compile.family``" gate silently DROPS a declaration in the
+export vocabulary that forgets its classes or its family: nothing registers,
+nothing mints, and on a pod that is indistinguishable from an endpoint which
+never declared AOT at all.
 
 The naive fix — "a ``compile=`` block must carry classes" — is the other wrong
-answer, and it is the one this file exists to keep out. SIX inference
-endpoints ship a thin, class-less ``compile=`` for the DYNAMO lane and declare
-no export contract at all: ``ernie``, ``flux.1-dev``, ``flux.1-schnell``,
-``krea-2``, ``minimax-h3`` and ``sd15`` (``flux.1-schnell`` and ``sd15``
-declare two families each). Every one would fail a classes-required invariant
-at import. A class-less compile is a DECISION, not an omission.
+answer, and it is the one this file exists to keep out. SIX inference endpoints
+ship a thin, class-less ``compile=`` for the DYNAMO lane and declare no export
+contract at all: ``ernie``, ``flux.1-dev``, ``flux.1-schnell``, ``krea-2``,
+``minimax-h3`` and ``sd15`` (``flux.1-schnell`` and ``sd15`` declare two
+families each). Every one would fail a classes-required invariant at import. A
+class-less compile is a DECISION, not an omission.
 
 So the gate asks about INTENT instead: a ``Compile`` that reaches for the
-pgw#739 export vocabulary (``classes``/``dims``/``forks``/``inputs``/``args``/
+export vocabulary (``classes``/``dims``/``forks``/``inputs``/``args``/
 ``blockers``/``shape_strategy``/``warm_changes_key``) is declaring an export
 contract and is held to carrying classes and a family; a ``Compile`` that
 carries none of it is a dynamo-lane block and is registered nowhere.
-
-RED on origin/master, both directions:
-  * the malformed-declaration tests pass silently on master (the gate drops
-    the declaration, so nothing raises and nothing registers);
-  * the six-endpoint tests are what goes red under the naive flip.
 """
 
 from __future__ import annotations
@@ -97,7 +88,7 @@ CLASS_LESS_DYNAMO: Tuple[Tuple[str, Compile], ...] = (
     ("krea-2", Compile(
         family="krea-2", shapes=((1024, 1024),), targets=("transformer",),
         text_len=512)),
-    # pgw#1107 finding: the prior lane's list said FIVE. minimax-h3 is the
+    # The prior lane's list said FIVE. minimax-h3 is the
     # sixth, and the one with the most export-adjacent-LOOKING declaration —
     # `regional=True` plus a declared dynamic sequence range, and still no
     # export contract. An intent test that mistook either for export intent

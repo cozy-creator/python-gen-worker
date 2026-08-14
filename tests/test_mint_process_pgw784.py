@@ -1,10 +1,8 @@
-"""pgw#784: the mint runs in its OWN OS process, and its death is not the
-worker's.
+"""The mint runs in its OWN OS process, and its death is not the worker's.
 
-th#1299's tape, restated as the contract this file pins (WORKER-CONTRACTS §2):
-a compile-cell MISS must not put long-running GIL-holding Python on the loop
-that carries the 10s beat and eager serving. So the mint becomes a child
-process, and this file proves the SUPERVISOR half:
+WORKER-CONTRACTS §2: a compile-cell MISS must not put long-running GIL-holding
+Python on the loop that carries the 10s beat and eager serving. So the mint is a
+child process, and this file proves the SUPERVISOR half:
 
 * the boundary is files + argv, never a pickled live object (spawn, not fork —
   a CUDA context cannot survive fork, and the child loads what it needs);
@@ -126,13 +124,13 @@ def test_a_minted_cell_comes_back_as_a_path_and_a_digest(tmp_path: Path) -> None
     frames: list = []
     out = asyncio.run(_run(tmp_path, "minted", frames=frames))
     assert out.status == mp.MINTED and out.minted
-    # pgw#1176: the child reports its ENTRY SET, so the outcome carries the
+    # The child reports its ENTRY SET, so the outcome carries the
     # artifacts it produced. This vehicle mints one class, and the unpack
     # asserts that arity rather than indexing past a set nobody checked.
     (only,) = out.artifacts
     assert only == tmp_path / "cell.tar.gz"
     assert only.read_bytes() == b"stub-cell-bytes"
-    # pgw#1176: the digest rides the ENTRY row, beside the key and the path —
+    # The digest rides the ENTRY row, beside the key and the path —
     # a per-artifact fact belongs with its artifact, not on the report.
     assert out.report is not None
     ((_key, _path, digest),) = out.report.entries
@@ -278,7 +276,7 @@ def _fake_card(
         torch.cuda, "max_memory_allocated", lambda dev=0: int(peak_gib * GIB))
 
 
-# pgw#1175 / §4.33: FIVE ROWS DELETED HERE, and what they asserted.
+# FIVE ROWS DELETED HERE, and what they asserted.
 #
 # `co_residency` priced a mint child as `resident weights + one activation set
 # + a 4 GiB inductor workspace + a CUDA context`, and its first term was read

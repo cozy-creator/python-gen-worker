@@ -1,4 +1,4 @@
-"""pgw#971 / pgw#972: fill BOTH stores at once, and back off.
+"""Fill BOTH stores at once, and back off.
 
 Three properties, all driven through the real `download_chunked_file` /
 `ensure_snapshot_async` over a real threaded HTTP server on localhost — real
@@ -9,10 +9,10 @@ property of the concurrency and the IO, so a mock would assert nothing.
     and on the volume in the SAME pass. The volume copy is byte-identical, is
     never observable under the digest name before the whole-file hash passes,
     and the post-fetch re-read (`mode=copy`) does not run for it.
-2.  **Fused hash (pgw#971).** `_copy_verified_blob` still refuses bytes that do
+2.  **Fused hash.** `_copy_verified_blob` still refuses bytes that do
     not hash to their ref — the hash moved into the copy loop, it did not go
     away.
-3.  **Backoff (pgw#972).** A chunk source that delivers NOTHING gets an
+3.  **Backoff.** A chunk source that delivers NOTHING gets an
     exponentially-backed-off retry; one that DELIVERED ITS FLOOR and then died
     is a lemon connection and gets a fresh socket with no sleep. Those are
     different failures and the loop must tell them apart.
@@ -338,7 +338,7 @@ def test_fused_hash_accepts_honest_bytes(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # 3. pgw#972: which retry branch each failure shape takes
 #
-# These assert the DECISION, never the runner's speed (pgw#795): the loop logs
+# These assert the DECISION, never the runner's speed: the loop logs
 # the classification it made and the delay it scheduled, so the branch taken is
 # the work's product and is observable without a clock. Timing the download and
 # comparing to a constant would measure the CI runner, and would go red on a

@@ -6,7 +6,7 @@ the job produces into the destination checkpoint — and calls
 flavor's ``path`` (file OR directory) as one Tensorhub commit and attaches
 the declared ``attributes`` to the commit payload.
 
-Attribute-bag ownership (issue #22 — server-authoritative metadata):
+Attribute-bag ownership (server-authoritative metadata):
   - Tenant declares ONLY tenant-specific attributes (technique config,
     quant_library + family-required keys, human-readable labels).
   - dtype / file_layout / file_type / kind / library are SERVER-INFERRED
@@ -49,13 +49,13 @@ class ProducedFlavor(msgspec.Struct):
       - extra_files: rare escape hatch — sibling artifacts attached to the
         same flavor (e.g. a tokenizer.json next to a non-tree output).
       - flavor: optional PRODUCER-LOCAL label such as ``bf16``, ``fp8`` or
-        ``int4``. pgw#1159: it is NOT published and it names no catalog row —
-        th#1803 deleted the flavor as an address. It classifies the placement
-        stamp (th#697) and names the publish's activity legs; when empty the
+        ``int4``. It is NOT published and it names no catalog row — a flavor
+        is not an address. It classifies the placement
+        stamp and names the publish's activity legs; when empty the
         ``dtype`` attribute is used. What the bytes ARE is stated by the
         ``dtype`` attribute and, when the producer knows it, an
         ``artifact_contract`` attribute (``ns.name@N``, PROVEN hub-side
-        against the safetensors header — th#1580/§1.33).
+        against the safetensors header — §1.33).
 
     A job that emits several artifacts hands over several ``ProducedFlavor``
     entries: N publishes joining ONE tag group. There is no flavor-label set

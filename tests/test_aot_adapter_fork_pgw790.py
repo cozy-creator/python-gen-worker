@@ -1,10 +1,9 @@
-"""pgw#790 — the adapter FORK: one cell, two graph classes, routed by the
-declared ingress contract.
+"""The adapter FORK: one cell, two graph classes, routed by the declared
+ingress contract.
 
-gw#627 gave every branch-capable leaf a canonical zeroed rank-bucket branch so
-a curated attach is a buffer copy instead of a recompile. Measured
-(WARM-INFERENCE-MATRIX §2b; RTX 4090 + RTX 5090, SDXL UNet, batch-2 CFG,
-1024x1024, n=28 warm, gen-worker 0.76.8 / torch 2.13.0+cu130):
+Every branch-capable leaf carries a canonical zeroed rank-bucket branch so a
+curated attach is a buffer copy instead of a recompile. That branch is not free
+(RTX 4090 + RTX 5090, SDXL UNet, batch-2 CFG, 1024x1024, n=28 warm):
 
     card    arm                base w8a8   w8a8-lora64   branch tax
     5090    AOT aoti_static    62.20 ms    90.75 ms      +45.9%
@@ -13,8 +12,7 @@ a curated attach is a buffer copy instead of a recompile. Measured
     launches/fwd (5090)        1,638       3,507         +114%
 
 The branches are ZEROED — every request that names no adapter pays that to
-compute zeros. On the hub's own record (master stack `requests`, 2026-07-30)
-95% of sdxl denoiser forwards name no adapter.
+compute zeros, and ~95% of sdxl denoiser forwards name no adapter.
 
 The fix is a fork, not a flag: a bucket-bearing family mints BOTH classes into
 the one cell, and the serve path routes per request. Real mint (torch.export +
@@ -69,7 +67,7 @@ class TinyUNet(nn.Module):
 
 
 def _declare() -> Any:
-    """The DECLARED path (pgw#739), not the hand-registered escape hatch: the
+    """The DECLARED path, not the hand-registered escape hatch: the
     lifted pair is derived by `aot_declaration.declared_inputs` and bound to
     the positional slots `install_lifted_lora_forward` now appends to the
     denoiser's signature."""
@@ -115,7 +113,7 @@ def _fresh_registry():
 def cell(tmp_path_factory, request) -> Dict[str, Any]:
     """ONE real two-arm mint, shared (an AOTI compile costs ~10s per entry).
 
-    pgw#1176: the mint yields TWO independently keyed artifacts rather than
+    the mint yields TWO independently keyed artifacts rather than
     one two-entry cell. ``by_entry`` indexes them by the class each one names,
     which is the addressing every row below wants — an entry NAMES its class,
     and that is what makes a per-class refusal bisectable.
@@ -305,7 +303,7 @@ def test_identity_is_a_function_of_the_declaration_not_of_adapter_state(
         out = tmp_path / f"active{int(active)}"
         result = aot_mint.mint(
             pipe, _spec(), out)
-        # pgw#1176: the key SET, per entry name. One comparison now carries
+        # The key SET, per entry name. One comparison now carries
         # both halves this row used to assert apart (same classes, same keys),
         # and the length assert is what stops an empty mint passing it
         # vacuously.
@@ -351,7 +349,7 @@ def armed(cell, monkeypatch) -> Dict[str, Any]:
     `aot_serve.arm_entry` — stage -> verify -> load -> bind -> register, ONE
     graph class per call.
 
-    pgw#1176: this is the accretion loop, and it is the production shape
+    this is the accretion loop, and it is the production shape
     rather than a test convenience. Each entry arms whole or not at all and
     JOINS the target's registry, so the two classes below reach the dispatch
     through two independent arms — which is exactly what makes a single

@@ -1,28 +1,18 @@
-"""pgw#962: a counter outlived the phase that fed it, and then confessed.
+"""A counter must not outlive the phase that fed it.
 
-Counters registered through `Activity.counter()` were finished only when the
-whole ACTIVITY ended. `self_mint_compile` spans load -> warmup_forward ->
-load -> ... for every function on the pod, so `infer:steps` (fed one tick per
-warmup ctx event) and `warmup:jobs` stayed open and frozen for the rest of the
-mint. `progress.self_diagnosis()` is a registry-wide min-age query, so once the
-next phase — which has no counter producer of its own; nothing in the SDK emits
-a `load:` or `compile:` family counter — went quiet, the freshest OPEN counter
-was the dead one, and the beat confessed `self_stalled` about work that had
-already finished successfully.
+A counter registered through `Activity.counter()` and finished only when the
+whole ACTIVITY ends is a false-stall generator. `self_mint_compile` spans
+load -> warmup_forward -> load -> ... for every function on the pod, so
+`infer:steps` (fed one tick per warmup ctx event) and `warmup:jobs` stay open
+and frozen for the rest of the mint. `progress.self_diagnosis()` is a
+registry-wide min-age query, so once the next phase goes quiet — and no phase
+after warmup has a counter producer at all; nothing in the SDK emits a `load:`
+or `compile:` family counter — the freshest OPEN counter is the dead one and the
+beat confesses `self_stalled` about work that already finished successfully.
 
 The hub kills on that confession IMMEDIATELY (`legacyWorkerVerdicts`:
 `case freshest.SelfStalled` fires without waiting out the hub's own window), so
 a false confession destroys a healthy pod mid-load.
-
-Observed in production, `master` stack, 2026-07-29 05:44:00Z, pod
-g9f8f3nycoyueh (L4, gen-worker 0.76.5) — the ONLY self_stalled row in 616
-durable activity rows:
-
-    kind=self_mint_compile phase=load counter=infer:steps counter_done=30
-    self_stalled=t stalled_for_ms=303614
-
-phase `load`, counter `infer:steps`: the confession named a counter belonging
-to a phase that had ended.
 """
 
 from __future__ import annotations

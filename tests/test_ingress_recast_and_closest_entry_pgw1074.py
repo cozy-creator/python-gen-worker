@@ -1,17 +1,11 @@
 """pgw#1074 — the sdxl CFG arm's `ingress_refused`, and the refusal that hid it.
 
-**The field observation** (pgw#868 A1 attempt 32, release `3a2a41bbb38b…`, cell
-`ck1-5f421149…`, adopt pod `vf3vwnun17vcwd`, 36/36 parity green): the turbo arm
-served FROM THE CELL; the base arm — same cell, an entry with exactly its dims —
-got `fallback_reason=ingress_refused`::
+**The defect**: from one sdxl cell the turbo arm served FROM THE CELL while the
+base arm — same cell, an entry with exactly its dims — got
+`fallback_reason=ingress_refused` / `no_entry_admits`.
 
-    aot_ingress_refused/no_entry_admits — family=sdxl target=unet:
-      no packaged entry admits this call (36 tried) …
-      class=unet/#0=bfloat16[2,4,128,128],#1=int64[],…
-
-**Root cause, measured off-pod at \\$0** over `gen_worker.view.SAMPLERS` against
-the fleet's own diffusers: the dtype a diffusers denoiser is handed for its
-scalar timestep is a per-request SAMPLER fact, not a family fact.
+**Root cause**: the dtype a diffusers denoiser is handed for its scalar timestep
+is a per-request SAMPLER fact, not a family fact.
 
     euler / euler_a / euler_trailing / heun / flow_euler  -> float32
     ddim / ddim_trailing / ddpm / deis / dpmpp_2m{,_karras,_sde,_sde_karras}
@@ -19,7 +13,7 @@ scalar timestep is a per-request SAMPLER fact, not a family fact.
 
 Four of sdxl's six legal samplers (`SdxlScheduler`) present int64. The turbo arm
 runs `euler_trailing` (float32) and served; the base arm ran an int64 sampler and
-was refused. ie#627's `dtype="float32"` is NOT wrong — it is what the graph is
+was refused. A declared `dtype="float32"` is NOT wrong — it is what the graph is
 specialized on — and CFG/B=2 is a red herring: a `generate` call on `euler_a`
 would have served, and a `dmd2-4step` turbo call (`lcm`) would have been refused.
 The sampler is per-request VIEW state and deliberately not a compile axis, so no
@@ -29,7 +23,7 @@ boundary that knows the contract.
 **And the observability half.** The refusal said "36 tried" and then listed six,
 in iteration order — and the entry whose dims MATCHED was not among them, so its
 actual objection was unavailable and diagnosing it meant pulling the published
-cell apart. That is pgw#1058's lesson repeating in the diagnostics layer.
+cell apart.
 
 Real codepaths: a real `torch.export` + real AOTI compile on CPU, driven through
 the real `ArtifactRunner`/`EntryDispatch`, on the pgw#791 rig.

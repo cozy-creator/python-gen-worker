@@ -1,7 +1,6 @@
 """pgw#1123: an image that cannot meta-instantiate must SAY SO, distinguishably.
 
-The measured defect (pods ``ykwoaiqub6ktt3`` / ``3o09rf9ehnc4ym``, gen-worker
-0.104.0, ``examples/micro-diffusion`` as the repo ships it):
+The defect, on ``examples/micro-diffusion`` as the repo ships it:
 
     boot_adopt[structure_unsupported]: family=micro-diffusion function=generate
       key=- — 3 of 3 boot-trace child(ren) produced no class hashes:
@@ -19,9 +18,9 @@ Two independent failures in one line, and this file holds one row for each:
    genuinely stranded reports, which is a correct and permanent state for the
    quantized artifact lanes. So "this image is broken for everything" and "this
    tree has no config-only structure" were one word, and the first looked
-   exactly like a pod that chose to self-mint. Belt and braces after the fix:
-   a stripped image or a shading family gets its own token,
-   ``structure_capability_missing``, with the capability named.
+   exactly like a pod that chose to self-mint. A stripped image or a shading
+   family gets its own token, ``structure_capability_missing``, with the
+   capability named.
 
 Everything here drives the REAL seams — the real ``structure_only.build_component``
 over micro-diffusion's real generated tree, the real refusal classifier the

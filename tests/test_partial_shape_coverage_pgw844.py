@@ -1,16 +1,11 @@
-"""pgw#844 — one undispatchable aspect bucket must not cost the pod its
-compiled lane.
+"""One undispatchable aspect bucket must not cost the pod its compiled lane.
 
-MEASURED, attempt twelve (L4 pod `o0legpgj5olhic`, 2026-08-01, $0.04): the
-first cross-pod cell adopt in platform history armed all 72 entries of a
-regional sdxl cell, and then served 100 % eager.  A transformer block sees
-``(B, H_lat*W_lat, C)`` — the token PRODUCT — while the entries are keyed on
-the latent H and W separately, so sdxl's nine aspect buckets collapse to four
-distinct token counts and eight of the nine admit more than one entry.  The
-boot warm plan refused them ``aot_ingress_refused / entry_ambiguous`` x12 and
-the boot ended ``self_mint_skipped / boot_ended_uncompiled`` — including for
-1024x1024, whose 128x128 latent is unique and whose entry was armed and
-correct.
+The shape of the hazard: a transformer block sees ``(B, H_lat*W_lat, C)`` — the
+token PRODUCT — while entries are keyed on the latent H and W separately, so
+sdxl's nine aspect buckets collapse to four distinct token counts and eight of
+the nine admit more than one entry, refusing ``entry_ambiguous``. Under the
+all-or-nothing rule that cost even 1024x1024, whose 128x128 latent is unique and
+whose entry was armed and correct.
 
 Two independent defects produced that, and both are asserted here on the real
 paths (:class:`aot_serve.EntryDispatch` for dispatch, the executor's own
@@ -329,7 +324,7 @@ def _boot(
         executor_mod.activity_mod, "emit_event",
         lambda kind, detail, phase="", duration_ms=0, **_kw: events.append(
             (kind, phase, detail)))
-    # pgw#1152: an `aot_serve.note_aot_key(FLAVOR)` stood here, with a comment
+    # An `aot_serve.note_aot_key(FLAVOR)` stood here, with a comment
     # arguing this process is "TOLD the flavor is an AOT cell exactly as a
     # Plan's `Arm.artifact` tells a pod". Production is told no such thing — it
     # LEARNS at the wrap (`arm_entry`, pgw#1141b), and the route that
@@ -361,7 +356,7 @@ def _boot(
     monkeypatch.setattr(
         ex, "_enable_compiled", _arm if exported else _arm_dynamo)
 
-    # pgw#904: the cell is an exact ORDER (Arm.artifact), never a snapshot
+    # The cell is an exact ORDER (Arm.artifact), never a snapshot
     # entry the worker scans for.
     arm_order = executor_mod._ArmOrder(
         backend="aot_cell",
@@ -401,7 +396,7 @@ def test_one_undispatchable_bucket_does_not_cost_the_boot_its_compiled_execution
     assert ("serve_eager_posture", "target_applicability_incomplete") \
         not in kinds
 
-    # pgw#844 defect 2: the exported lane's OWN revocation signal is what
+    # The exported lane's OWN revocation signal is what
     # keeps this target advertisable — nothing installed a dynamo marker.
     assert not hasattr(pipe, cc._MARKER_ATTR)
 

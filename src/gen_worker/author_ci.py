@@ -1,43 +1,41 @@
 """``python -m gen_worker.author_ci`` — the AUTHOR's compile-vs-eager proof, in
-one command (ie#664 tier 2, DESIGN-RULINGS §4.32).
+one command.
 
 An endpoint that declares ``compile=`` claims two things about its own code:
-that the compiled output is CORRECT and that it is FASTER. §4.32 makes both the
-AUTHOR's claims to prove, because every parity failure ever caught (a baked
-``conv_out.bias``, timestep dtype scars) was an endpoint code / model config
-defect that no consumer runtime can fix. ie#664 wrote that down as a two-tier
-standard: tier 1 is the torch-free lint in ``inference-endpoints``
-(``scripts/lint_author_ci.py``, every PR), and tier 2 is a pod runbook —
-``AUTHOR-CI.md``'s checklist, executed by hand. This module is that checklist as
-ONE COMMAND, run on a pod in the endpoint's own image::
+that the compiled output is CORRECT and that it is FASTER. Both are the AUTHOR's
+claims to prove — every parity failure ever caught (a baked ``conv_out.bias``,
+timestep dtype scars) was an endpoint code / model config defect that no
+consumer runtime can fix. Tier 1 is the torch-free lint in
+``inference-endpoints`` (``scripts/lint_author_ci.py``, every PR); this module is
+tier 2 — ``AUTHOR-CI.md``'s checklist as ONE COMMAND, run on a pod in the
+endpoint's own image::
 
     python -m gen_worker.author_ci --payload '{"prompt": "a cat"}'
 
 **IT MEASURES; IT NEVER GATES PUBLISH.** The author's run is advisory and always
 will be: it is self-reported (unverifiable card, wheel, honesty). Promotion is
-the PLATFORM's, on trusted hardware, against the published code — th#1811's
-validation session and its promotability gate, per ie#664 §6. Nothing here
+the PLATFORM's, on trusted hardware, against the published code. Nothing here
 returns a value anything downstream consults, and its exit code is a signal to
 the person who ran it.
 
-WHAT IT ASSEMBLES — every piece already ships; none of them were wired together:
+WHAT IT ASSEMBLES:
 
-1. ``rigcheck.assert_fleet_line`` first (pgw#1114/#1120). A rig off the fleet's
-   torch/CUDA line has produced no evidence. Exits 90/91 in rigcheck's own
-   vocabulary, so a wrapper script reads one exit table and not two.
+1. ``rigcheck.assert_fleet_line`` first. A rig off the fleet's torch/CUDA line
+   has produced no evidence. Exits 90/91 in rigcheck's own vocabulary, so a
+   wrapper script reads one exit table and not two.
 2. The ARM — the endpoint's own ``setup()`` mints (or adopts this machine's
    cell) through the production path. The parity verdict is the MINT-PARENT
-   GATE's (pgw#1141: ``adopt_delegated_mint`` -> ``arm_aot(verify_numerics=
-   True)`` -> ``provision.gate_cell_numerics``, strict), never a comparison
-   re-implemented here. A family with open ``Compile.blockers`` is a LEGAL
-   state — ``blocked-by-declaration`` — and the run continues eager-only.
+   GATE's (``adopt_delegated_mint`` -> ``arm_aot(verify_numerics=True)`` ->
+   ``provision.gate_cell_numerics``, strict), never a comparison re-implemented
+   here. A family with open ``Compile.blockers`` is a LEGAL state —
+   ``blocked-by-declaration`` — and the run continues eager-only.
 3. SPEED, steady-vs-steady, ONE process, compiled arm first. The eager arm is
-   pgw#1142's operator order engaged through its IN-PROCESS api
+   the operator order engaged through its IN-PROCESS api
    (``serve_posture.apply_command``) and released in a ``finally`` — never the
    hub route, because the author's pod may have no hub. N >= 5 per arm with the
    first request of each arm discarded, median AND p95, read off
-   ``stage_ms.<stage>`` and never a round trip (th#1795: the "10.9x" whose
-   corrected figure was 1.3x).
+   ``stage_ms.<stage>`` and NEVER a round trip — round-trip ratios overstate the
+   speedup by nearly an order of magnitude.
 4. The RECORD — the ``[proof]`` block of ``<endpoint>/author-ci.toml``, in
    exactly the schema ``scripts/lint_author_ci.py`` validates. The harness owns
    ``[proof]`` and nothing else: ``[parity]`` and ``[speed]`` are DECLARATIONS
@@ -75,10 +73,9 @@ EXIT_USAGE = 2
 EXIT_RIG_OFF_LINE = 90
 EXIT_HOST_UNUSABLE = 91
 
-#: ie#664's fleet default, with its stated rationale: 1.0 ("not slower") is
-#: unfalsifiable on a rented pod because denoise variance sits in the low
-#: single digits, so a bar there is met by noise. A family raises it once it
-#: has a proof to raise it to.
+#: The fleet default: 1.0 ("not slower") is unfalsifiable on a rented pod
+#: because denoise variance sits in the low single digits, so a bar there is met
+#: by noise. A family raises it once it has a proof to raise it to.
 FLEET_MIN_SPEEDUP = 1.10
 
 #: The standing measurement bar (AUTHOR-CI.md, and `lint_author_ci.py` refuses
@@ -87,7 +84,7 @@ MIN_SAMPLES = 5
 
 #: `stage_ms.<stage>` is the only shape a metric may take here. `slot_held_ms`
 #: and `total_round_trip_ms` are hub-side round-trip terms that do not exist in
-#: this process at all, and the second is the one th#1795 named.
+#: this process at all.
 METRIC_PREFIX = "stage_ms."
 
 ARM_MINTED = "minted"
@@ -131,11 +128,10 @@ class Bar:
 def resolve_bar(declaration: Any, record: Dict[str, Any]) -> Bar:
     """The DECLARATION first, then the record, then the fleet default.
 
-    pgw#1149 moves the bar onto ``Compile.speed_metric`` / ``min_speedup``
-    (the hub cannot read a repo-side toml at discovery). Those fields do not
-    exist yet, so they are read by ``getattr``: the day that lane lands this
-    resolver follows it with no edit here, and until then there is still only
-    one reader per source.
+    The bar is moving onto ``Compile.speed_metric`` / ``min_speedup`` (the hub
+    cannot read a repo-side toml at discovery). Those fields do not exist yet, so
+    they are read by ``getattr``: this resolver follows that lane with no edit
+    here, and there is still only one reader per source.
     """
     metric = str(getattr(declaration, "speed_metric", "") or "").strip()
     declared_speedup = getattr(declaration, "min_speedup", None)
@@ -164,7 +160,7 @@ def resolve_bar(declaration: Any, record: Dict[str, Any]) -> Bar:
 
 
 def _metric(metric: str) -> str:
-    """Refuse a round-trip metric BY NAME (th#1795)."""
+    """Refuse a round-trip metric BY NAME."""
     if not metric.startswith(METRIC_PREFIX) or not metric[len(METRIC_PREFIX):]:
         raise HarnessError(
             f"[speed] metric = {metric!r} is not readable here. This harness "
@@ -506,12 +502,11 @@ def read_parity(subject: _Subject, declaration: Any,
     """The mint-parent gate's verdict — read, or (on an ADOPT) taken.
 
     A cell this process MINTED was already gated strictly on the way to
-    publication (pgw#1141), so its report (``minted``) is simply read back — an
-    armed cell that had failed that gate would not be armed. A cell that came
-    out of this machine's store was gated at ITS mint and adoption runs no
-    quality gate (§4.32 item 3), so there is no verdict to read and this run
-    takes one through the SAME function the mint uses. Never a comparison
-    re-implemented here.
+    publication, so its report (``minted``) is simply read back — an armed cell
+    that had failed that gate would not be armed. A cell that came out of this
+    machine's store was gated at ITS mint and adoption runs no quality gate, so
+    there is no verdict to read and this run takes one through the SAME function
+    the mint uses. Never a comparison re-implemented here.
     """
     from . import numerics_probe
     from .models import provision
@@ -571,7 +566,7 @@ def _commit(root: Path, override: str) -> str:
 
 def run(args: argparse.Namespace) -> Tuple[int, Report]:
     """The whole checklist. Returns ``(exit code, report)``."""
-    # The fleet line is asserted before the endpoint's own code is imported,
+    # the fleet line is asserted before the endpoint's own code is imported,
     # let alone loaded: a rig off the line has produced no evidence, so there
     # is nothing to gain by getting further first.
     root = (Path.cwd().resolve() if args.module
@@ -607,9 +602,9 @@ def run(args: argparse.Namespace) -> Tuple[int, Report]:
     blocker = "ie#664"
     arm_detail = "no compiled arm"
     if blocked:
-        # §4.32 / ie#664 §6: a declared block is a LEGAL state, not a failure.
-        # Engaging the order makes the eager-only run STRUCTURAL rather than
-        # hopeful — nothing adopts, mints or arms behind our back.
+        # A declared block is a LEGAL state, not a failure. Engaging the order
+        # makes the eager-only run STRUCTURAL rather than hopeful — nothing
+        # adopts, mints or arms behind our back.
         arm = ARM_BLOCKED
         blocker = ", ".join(b.id for b in blocked)
         arm_detail = f"{len(blocked)} unresolved Compile.blockers: {blocker}"
@@ -650,9 +645,8 @@ def run(args: argparse.Namespace) -> Tuple[int, Report]:
                 arm = ARM_MINTED if minted is not None else ARM_ADOPTED
                 arm_detail = f"cell {cell_key or '?'}"
                 parity = read_parity(subject, declaration, minted)
-            # pgw#1142 through its IN-PROCESS api: the author's pod may have
-            # no hub, and the order is what makes this the SAME process, the
-            # same weights and the same pipeline answer eager.
+            # The in-process order (the author's pod may have no hub) is what
+            # makes the SAME process, weights and pipeline answer eager.
             serve_posture.apply_command(
                 True, actor="author-ci",
                 reason="the eager arm of the §4.32 speed leg")

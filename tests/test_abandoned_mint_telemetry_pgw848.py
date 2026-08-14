@@ -1,26 +1,18 @@
-"""pgw#848: an ABANDONED mint discarded 29 minutes of measurement.
+"""An ABANDONED mint must not discard what it measured.
 
-Attempt sixteen ran on the `8559140` cap fix and proved it — 29 minutes with
-no memory error, where attempts 14 and 15 died at +11.6 and +11.0 min against
-the 11.09 GiB ceiling. Then the worker's endpoint instances were torn down
-under the drain path and the mint was abandoned, and the ENTIRE phase table
-for those 29 minutes was one row::
+`report.json` is written ONCE, at a terminus the child reaches under its own
+power. A child that is group-killed (endpoint teardown under the drain path)
+reaches no terminus, raises nothing, and writes nothing, so the whole phase
+table collapses to one row::
 
     status=abandoned total_s=1741.33 — no cell produced
 
-**Zero `entry:` rows. No `pool` row.** K, its binding constraint, every
-per-entry timing and every peak were measured and thrown away, and the
-K-and-binding answer had to be re-bought with another pod.
-
-The mechanism: `report.json` is written ONCE, at a terminus the child reaches
-under its own power. A child that is group-killed reaches no terminus, raises
-nothing, and writes nothing — so `f9c1b2d`'s work on the *aborted* path (the
-failed attempt teaches the retry instead of discarding what it measured) never
-applied here. Same code, different exit.
+— zero `entry:` rows, no `pool` row: K, its binding constraint, every per-entry
+timing and every peak measured and thrown away. Work on the *aborted* path does
+not apply here; same code, different exit.
 
 The fix is a snapshot on disk, rewritten atomically on every beat, because a
-file is the only thing that survives a signal — the same principle the pgw#848
-resume design keys on.
+file is the only thing that survives a signal.
 """
 
 from __future__ import annotations
@@ -266,7 +258,7 @@ def test_the_pool_ledger_is_live_not_end_of_run(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# pgw#848 long-fuse sweep: the pod-side reaper's progress signal had no producer
+# The pod-side reaper's progress signal had no producer
 # ---------------------------------------------------------------------------
 
 
@@ -358,7 +350,7 @@ def test_every_mint_beat_feeds_both_survivors(
 
 
 # ---------------------------------------------------------------------------
-# pgw#848 CP10: the worker never looked at its own credential's expiry
+# The worker never looked at its own credential's expiry
 # ---------------------------------------------------------------------------
 
 
@@ -511,7 +503,7 @@ def test_the_unchecked_announcement_is_gone_because_the_gate_landed(
     cfg = type("Cfg", (), {"family": "sdxl", "numerics_floor": 0.995,
                            "numerics_warn": 0.999, "lora_bucket": 0,
                            "targets": ()})()
-    # pgw#1141 / §4.32: the gate runs on the MINT arm now (adoption runs no
+    # The gate runs on the MINT arm now (adoption runs no
     # quality gate at all), so this is the flag the minting pod passes. What
     # this test is about is unchanged: an arm that could not be MEASURED is a
     # refusal, never a silent `unchecked` announcement.

@@ -1,10 +1,10 @@
 """pgw#738: the upload/publish path must never park a job forever.
 
-Death 1 of the incident (62922680 + d0cbf910, one H100, ~$24.6): admission
-took GPU permit -> instance run_lock, but ``save_bytes`` yields the permit
-mid-handler while HOLDING run_lock. The second job packed on the worker took
-the freed permit, blocked on run_lock, and the uploader blocked forever in
-``reacquire()`` — one blob persisted, then 3h51m of heartbeating silence.
+The deadlock: admission takes GPU permit -> instance run_lock, but
+``save_bytes`` yields the permit mid-handler while HOLDING run_lock. The second
+job packed on the worker takes the freed permit, blocks on run_lock, and the
+uploader blocks forever in ``reacquire()`` — one blob persisted, then hours of
+heartbeating silence on a rented H100.
 
 Fix contract driven over the real hub-double + a real local media-upload
 sink (no mocks on the executor path):
@@ -33,7 +33,7 @@ from typing import Any, ClassVar, Optional, Tuple
 import msgspec
 import pytest
 
-# All three clauses have landed: gate-first admission (pgw#954), the typed
+# All three clauses have landed: gate-first admission, the typed
 # re-acquire refusal and the dead-task reaper (pgw#738 remainder). Nothing in
 # this file skips any more.
 #
@@ -177,7 +177,7 @@ def test_reacquire_refuses_typed_when_the_permit_is_unreachable() -> None:
 
 
 def test_a_live_holder_is_waited_out_however_long_it_takes() -> None:
-    """The discriminating half (gw#666): a permit held by a REGISTERED holder
+    """The discriminating half: a permit held by a REGISTERED holder
     is never condemned, no matter how long the re-acquire waits. Same shape as
     the refusal above, but the competing acquire is a ledger-registered hold —
     so the uploader waits, and completes the moment the hold is dropped."""

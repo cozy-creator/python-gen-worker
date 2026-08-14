@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Differential fuzzer for the WORKER_EXECUTION_TOPOLOGY decoders (pgw#867/th#1382).
+"""Differential fuzzer for the WORKER_EXECUTION_TOPOLOGY decoders.
 
 OFF THE MERGE PATH by construction: this is a script, not a test. The merge gate
 runs the checked-in vector fixture (`tests/testdata/topology_wire_vectors.json`,
@@ -10,16 +10,16 @@ so it must never be a gate.
 Why differential at all. `WORKER_EXECUTION_TOPOLOGY` is one grammar with two
 decoders — tensorhub `internal/orchestrator/topology` writes it,
 `gen_worker.topology` reads it. Each side's own tests only ever prove that side
-self-consistent, which is exactly how th#1375/pgw#856 shipped: Go's zero value
-for the degree field is illegal so Go refused for the wrong reason, while
-Python's default of 1 is legal so Python silently served degree 1. The property
-that catches that class is AGREEMENT: same bytes in, both accept with an
-identical derived (gpu_count, gpus_per_execution_group, execution_groups,
-parallel), or both refuse.
+self-consistent, which is how a rename hole ships: Go's zero value for the
+degree field is illegal so Go refuses for the wrong reason, while Python's
+default of 1 is legal so Python silently serves degree 1. The property that
+catches that class is AGREEMENT: same bytes in, both accept with an identical
+derived (gpu_count, gpus_per_execution_group, execution_groups, parallel), or
+both refuse.
 
 Usage:
 
-    python scripts/topology_differential_pgw867.py --tensorhub ~/cozy/tensorhub-chaos
+    python scripts/topology_differential_pgw867.py --tensorhub ~/cozy/tensorhub
     python scripts/topology_differential_pgw867.py -n 20000 --seed 7
 
 Disagreements print as a table and are written to --report as JSON, ready to be
@@ -47,23 +47,25 @@ from gen_worker.topology import (  # noqa: E402
     KEY_GPU_COUNT,
     KEY_GPUS_PER_GROUP,
     KEY_PARALLEL,
-    LEGACY_KEY_EXECUTION_GROUPS,
-    LEGACY_KEY_GPUS_PER_GROUP,
     ExecutionTopology,
     TopologyError,
 )
 
-# The legacy-spelling deprecation warning fires on a large fraction of generated
-# inputs; at fuzz volumes it buries the report.
 logging.getLogger("gen_worker.topology").setLevel(logging.ERROR)
+
+# The pre-rename spellings. Neither side knows them any more, so they stay in
+# the generated key space as the differential's retired-spelling case: both
+# decoders must refuse them, and must refuse them the SAME way.
+RETIRED_KEY_GPUS_PER_GROUP = "group_degree"
+RETIRED_KEY_EXECUTION_GROUPS = "groups"
 
 KEYS = [
     KEY_GPU_COUNT,
     KEY_GPUS_PER_GROUP,
     KEY_EXECUTION_GROUPS,
     KEY_PARALLEL,
-    LEGACY_KEY_GPUS_PER_GROUP,
-    LEGACY_KEY_EXECUTION_GROUPS,
+    RETIRED_KEY_GPUS_PER_GROUP,
+    RETIRED_KEY_EXECUTION_GROUPS,
 ]
 
 
@@ -120,7 +122,7 @@ def go_verdicts(tensorhub: pathlib.Path, wires: list[str]) -> list[dict[str, Any
 # WELL-FORMED JSON objects over this key set whose VALUES sit on the edges the
 # two decoders might read differently — zero (Go's "not written" sentinel vs
 # Python's explicit-present), floats that are integral, non-string `parallel`,
-# case, whitespace, and the th#1375 spelling pairs in every combination.
+# case, whitespace, and the retired/current spelling pairs in every combination.
 
 INTERESTING_NUMBERS: list[Any] = [
     0, 1, 2, 3, 4, 8, -1, -2,
@@ -142,7 +144,7 @@ UNKNOWN_KEYS = ["gpus_per_group", "group_size", "GPU_COUNT", "parallel_mode", ""
 def structured(rng: random.Random) -> str:
     obj: dict[str, Any] = {}
     for key in (KEY_GPU_COUNT, KEY_GPUS_PER_GROUP, KEY_EXECUTION_GROUPS,
-                LEGACY_KEY_GPUS_PER_GROUP, LEGACY_KEY_EXECUTION_GROUPS):
+                RETIRED_KEY_GPUS_PER_GROUP, RETIRED_KEY_EXECUTION_GROUPS):
         if rng.random() < 0.55:
             obj[key] = rng.choice(INTERESTING_NUMBERS)
     if rng.random() < 0.6:
@@ -172,8 +174,8 @@ def coherent(rng: random.Random) -> str:
     obj: dict[str, Any] = {KEY_GPU_COUNT: d * g, KEY_GPUS_PER_GROUP: d,
                            KEY_EXECUTION_GROUPS: g}
     if rng.random() < 0.7:
-        obj[LEGACY_KEY_GPUS_PER_GROUP] = d
-        obj[LEGACY_KEY_EXECUTION_GROUPS] = g
+        obj[RETIRED_KEY_GPUS_PER_GROUP] = d
+        obj[RETIRED_KEY_EXECUTION_GROUPS] = g
     if parallel:
         obj[KEY_PARALLEL] = parallel
     return json.dumps(obj)
@@ -189,14 +191,15 @@ def noise(rng: random.Random) -> str:
 def generate(n: int, rng: random.Random) -> list[str]:
     out: list[str] = []
     # Exhaustive small cross-product first: every legal-shaped payload whose
-    # two th#1375 spellings are written in every combination of present /
-    # absent / zero / disagreeing. That cell is where the rename hole lived.
+    # current and RETIRED degree spellings are written in every combination of
+    # present / absent / zero / disagreeing. That cell is where the rename hole
+    # lived, and it is where a one-sided un-retirement would show up.
     for gc, d, legacy_d in itertools.product([0, 1, 2, 4], [None, 0, 1, 2], [None, 0, 1, 2]):
         obj: dict[str, Any] = {KEY_GPU_COUNT: gc}
         if d is not None:
             obj[KEY_GPUS_PER_GROUP] = d
         if legacy_d is not None:
-            obj[LEGACY_KEY_GPUS_PER_GROUP] = legacy_d
+            obj[RETIRED_KEY_GPUS_PER_GROUP] = legacy_d
         obj[KEY_PARALLEL] = "sequence" if max(d or 0, legacy_d or 0) > 1 else ""
         out.append(json.dumps(obj))
     while len(out) < n:
@@ -206,16 +209,7 @@ def generate(n: int, rng: random.Random) -> list[str]:
 
 
 
-# The recorded divergence CLASSES — EMPTY as of 2026-08-02.
-#
-# th#1385 and pgw#870 closed all nine: the Go decoder now checks its key set
-# case-SENSITIVELY on a raw key map, refuses trailing data, distinguishes an
-# absent field from an explicit zero, and no longer case-folds `parallel`; the
-# Python decoder type-checks `parallel` BEFORE defaulting, refuses non-integer
-# and out-of-int64 numbers (so NaN/Infinity are typed refusals rather than an
-# untyped escape), and both sides refuse an absent gpu_count/degree instead of
-# defaulting one side to a legal single slot. Every witness moved into the
-# fixture's `agreed` block.
+# The recorded divergence CLASSES — currently EMPTY.
 #
 # Suppression is by CLASS, not by exact string, because each class has thousands
 # of concrete witnesses. A non-zero exit from this driver means "a disagreement
@@ -228,7 +222,7 @@ def known_divergence_class(go: dict[str, Any], py: dict[str, Any]) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tensorhub", default=os.environ.get("TENSORHUB_REPO", "~/cozy/tensorhub-chaos"))
+    ap.add_argument("--tensorhub", default=os.environ.get("TENSORHUB_REPO", "~/cozy/tensorhub"))
     ap.add_argument("-n", type=int, default=5000)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--report", default="")

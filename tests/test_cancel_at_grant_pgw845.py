@@ -1,26 +1,20 @@
-"""pgw#845: a cancel that lands around an acquisition's GRANT must not walk away
-holding it.
+"""A cancel that lands around an acquisition's GRANT must not walk away holding
+it.
 
-Live shape (the 0.88.0 CI failure that was read as a timing flake, run
-30695617252): `test_reconcile_busy_pgw654` timed out waiting for a newly desired
-ref to reach ON_DISK. The message trace shows the job finishing and then 30 s of
-lifecycle chatter with no model_event at all, and the captured log carries
-neither a materialization warning nor a phase-error line — the convergence did
-not fail, it never ran. Reproduced 6/12 under single-core contention.
-
-Mechanism: `IntentRegistry.guard_await` wrapped the awaitable in its OWN task.
-When the caller is cancelled in the window where that task has already completed,
-asyncio delivers CancelledError to the caller and the completed result is
-discarded. `ensure_local` therefore never set `acquired = True`, so its
-`finally` never released the per-ref lock — held, forever, by nobody. Every
-later materialization of that ref blocks on it, and because `_reconcile_pass` is
-serialized the worker silently stops converging desired residency for good.
+Mechanism: wrapping the awaitable in its OWN task (as `IntentRegistry.guard_await`
+did) means that when the caller is cancelled in the window where that task has
+already completed, asyncio delivers CancelledError to the caller and the
+completed result is discarded. `ensure_local` then never sets `acquired = True`,
+so its `finally` never releases the per-ref lock — held, forever, by nobody.
+Every later materialization of that ref blocks on it, and because
+`_reconcile_pass` is serialized the worker silently stops converging desired
+residency for good.
 
 The canceller is ordinary: `Lifecycle.on_message` preempts the residency
-reconcile on every run_job. So a tenant job arriving at the instant a reconcile
-was granted the ref lock permanently wedged that worker.
+reconcile on every run_job, so a tenant job arriving at the instant a reconcile
+was granted the ref lock wedges that worker permanently.
 
-Three sibling call sites had the identical shape — `_intent_lock`, the exclusive
+Three sibling call sites have the identical shape — `_intent_lock`, the exclusive
 group permits, and the per-job GPU permit (a leak there costs the worker a GPU
 slot per cancelled job until it can run nothing at all).
 

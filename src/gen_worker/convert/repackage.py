@@ -7,10 +7,9 @@ refusing a converter whose family disagrees with the tree on disk.
 
 It owns **no family knowledge**. Every rename table, component signature,
 pipeline class and config donor arrives as a :class:`~.repack_spec.RepackageFamily`
-declaration registered by the endpoint that owns the family (pgw#740 C3/B15).
-Before that split this file carried ~430 lines of hand-ported per-family tensor
-surgery and two copies of the SDXL signature that disagreed — the SDXL tree was
-handed to the SD1.5 converter with no exception raised.
+declaration registered by the endpoint that owns the family. Hand-ported
+per-family tensor surgery here means two copies of a family signature that can
+disagree, and a tree handed to the wrong converter with no exception raised.
 """
 
 from __future__ import annotations
@@ -30,10 +29,8 @@ from .registry import (
 from .repack_spec import ComponentRepack, DtypePolicy, RepackageFamily
 from .writer import (
     NEVER_SHARD_MAX_SIZE,
-    PICKLE_CACHE_DIR,
     ConversionImplementationError,
     assert_one_file_per_component,
-    materialize_pickle_to_safetensors,
 )
 
 if TYPE_CHECKING:
@@ -106,8 +103,9 @@ def _load_component_state_dict(
       downloads keep the suffix — e.g. diffusion_pytorch_model.fp16.safetensors
       in repo-cas mirrors cloned with a dtype preference)
 
-    Legacy pickle fallback, through the package's ONE pickle reader:
-    - <bin_base>.bin
+    A component that offers only a pickle (``<bin_base>.bin``) is REFUSED:
+    pickles are banned platform-wide, and the remedy is to mirror the source
+    repo without the pickle rather than to unpickle it here.
     """
     for raw_base in safetensors_bases:
         base = str(raw_base or "").strip()
@@ -138,19 +136,18 @@ def _load_component_state_dict(
     if bin_base:
         bin_path = component_dir / f"{bin_base}.bin"
         if bin_path.exists():
-            # pgw#498: the clone lane feeds this ARBITRARY tenant-submitted
-            # repos, so a `.bin` here is an untrusted pickle and unpickling it
-            # is arbitrary code execution inside a pod holding hub credentials
-            # and other tenants' work (cozy_snapshot.py:285-292). This used to
-            # be a bare `torch.load(path, map_location="cpu")`. Its safety then
-            # rested entirely on torch's 2.6 `weights_only` DEFAULT, which
-            # `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1` in the pod env flips back
-            # for exactly the call sites that did not pass the argument
-            # (torch/serialization.py:1496 — "can only override if callsite did
-            # not explicitly set weights_only"). One pickle reader, one
-            # implementation, and it passes `weights_only=True` explicitly.
-            return _st_load(materialize_pickle_to_safetensors(
-                bin_path, component_dir / PICKLE_CACHE_DIR))
+            # The clone lane feeds this ARBITRARY tenant-submitted repos, so a
+            # `.bin` here is an untrusted pickle and reading it is arbitrary
+            # code execution inside a pod holding hub credentials and other
+            # tenants' work (cozy_snapshot.py:285-292). Pickles are banned
+            # platform-wide; `classifier.py` already refuses a pickle-only repo
+            # with `pickle_only`, and this is the same refusal at the component
+            # door.
+            raise ConversionImplementationError(
+                f"pickle_only:{bin_path.name}: this component offers only a "
+                f"pickle, and pickles are refused. Mirror the source repo "
+                f"without the pickle (safetensors) and convert that."
+            )
     raise FileNotFoundError(f"missing weights for {component_dir.name}")
 
 
@@ -208,8 +205,8 @@ def detect_diffusers_family(model_dir: Path) -> str:
 
     There is exactly ONE copy of each family's signature — the one in its
     declaration, which is also what the converter guard checks. That is what
-    makes the pgw#740 wrong-converter divergence structurally impossible rather
-    than merely fixed: detection and the guard cannot disagree, because they
+    makes a wrong-converter divergence structurally impossible rather than
+    merely fixed: detection and the guard cannot disagree, because they
     read the same field.
 
     Two families claiming one tree is a declaration bug and is refused by name,
@@ -266,7 +263,7 @@ def _family_from_pipeline_class(model_dir: Path) -> str:
 def assert_converter_matches_signature(model_dir: Path, spec: RepackageFamily) -> None:
     """Refuse to run a converter whose declared signature disagrees with disk.
 
-    The permanent guard (pgw#740). Whichever way the family arrives — detected
+    The permanent guard. Whichever way the family arrives — detected
     here or passed in by a caller — the component set on disk is ground truth,
     and a mismatch is a named refusal rather than a wrong output file.
     """

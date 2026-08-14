@@ -8,15 +8,9 @@ CONTROL PARENT. The process split is UNCONDITIONAL, and
 clears the field outright when the parent has no measurement), so **only the
 parent's copy ever reaches the hub.**
 
-th#1359 Part 2 taught `worker_mode` to the child's builder only. Every forge
-pod bought after that shipped the protobuf default `""` and was idle-reaped as
-`cold_idle_never_dispatched` — two pods at 391 s each, measured 2026-08-02,
-with `WORKER_MODE=forge` present in the container env the whole time.
-
-`worker_mode` itself is now `reserved 12` (§4.28 / th#1751 W4 + pgw#1092) and
-the field is gone from both builders, but the GUARD it produced is the point
-and is what this file keeps: any field only one builder assigns is dead on the
-wire, and the value-level row below is how that is caught before a pod pays.
+The guard: a field taught to only ONE builder is dead on the wire. A pod then
+ships the protobuf default and is idle-reaped as `cold_idle_never_dispatched`
+while the real value sat in its container env the whole time.
 
 These two rows make that fingerprint a red test instead of a paid pod:
 
@@ -59,7 +53,7 @@ _MEASUREMENT = {
         "gpu_sm": "90",
         "torch_version": "2.13.0+cu130",
         "installed_libs": ["diffusers==0.36.0"],
-        # pgw#1129/th#1798: the HOST driver. 580.159.04 is a real RunPod draw
+        # The HOST driver. 580.159.04 is a real RunPod draw
         # and the tuple-vs-float trap (as floats 580.159 < the 580.65 floor).
         "driver_version": "580.159.04",
     },

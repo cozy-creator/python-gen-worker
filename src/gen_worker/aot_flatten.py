@@ -1,40 +1,24 @@
-"""The ONE flattening rule, for the mint and the serve side alike (pgw#994).
+"""The ONE flattening rule, for the mint and the serve side alike.
 
 ``torch.export`` does not take a call as written: it FLATTENS it. A container
 argument occupies one caller parameter slot and produces one graph input per
 pytree leaf. Every part of this SDK that has to line the two views up — the
 mint building an ingress contract, the serve path binding a real call to it,
 the declared-range gate resolving a declared name against an exported one —
-needs the same answer to "which leaf is this", and each one used to compute it
-for itself:
+needs the same answer to "which leaf is this". Computing it separately in each
+place produces off-by-a-container defects, so the rule lives in exactly one
+place and every consumer reads it from here.
 
-* pgw#790: ``input_contract`` zipped caller-side PARAMETER names against
-  exported inputs, so sdxl's ``added_cond_kwargs`` shifted every later name by
-  one and the recorded contract named the wrong tensors.
-* pgw#993: the declared-range gate resolved ``Dim.carried_by``'s input by its
-  DECLARED name against a program whose inputs were ``x_0``/``x_1``, which
-  made a dim carried by a ``repeat=`` container unsatisfiable by construction.
-  Cost: one rented A100.
-* pgw#994 (this module): the contract recorded ``position`` as the index among
-  FLATTENED inputs while ``bind_call_inputs`` matched it against the caller's
-  PRE-flattening args, so a container family bound the whole list to element 0
-  and shifted every later input.
-
-Three instances of one defect, so the rule lives in exactly one place and
-every consumer reads it from here.
-
-MEASURED, on torch 2.13.0+cu130, because each of these had been assumed wrong
-at least once:
+MEASURED on torch 2.13.0+cu130:
 
 * A sequence leaf is ``<param>_<index>``, for EVERY arity — a one-element
   container is ``x_0``, never ``x``.
 * A mapping leaf is ``<param>_<key>`` (``added_cond_kwargs_text_embeds``).
 * Nesting composes: ``img_shapes_0_0``.
-* **Mappings flatten in INSERTION order, not sorted order.** The pre-pgw#994
-  walk sorted keys "because that is what torch's pytree does"; it does not.
-  ``{"zeta", "alpha", "mid"}`` exports as ``d_zeta, d_alpha, d_mid`` with the
-  matching shapes, so a sorted walk pairs every leaf with another leaf's dtype
-  and shape. sdxl escaped only because ``text_embeds`` < ``time_ids``.
+* **Mappings flatten in INSERTION order, not sorted order** — torch's pytree
+  does NOT sort. ``{"zeta", "alpha", "mid"}`` exports as
+  ``d_zeta, d_alpha, d_mid`` with the matching shapes, so a sorted walk pairs
+  every leaf with another leaf's dtype and shape.
 * Non-tensor leaves still occupy a flat slot (``user_inputs`` carries the
   constants themselves: ``['hidden_states', 1, 4, 6, False, 'extra']``), so a
   walk that skipped them would desynchronise from the exported order.
@@ -70,20 +54,18 @@ class Leaf:
 
     @property
     def name(self) -> str:
-        """The serve-facing name (pgw#790's spelling, kept deliberately).
+        """The serve-facing name — a fixed spelling, kept deliberately.
 
         A mapping leaf takes its BARE KEY because that is the keyword the
         pipeline's own forward uses; a sequence leaf takes ``<param>.<index>``.
-        This is the string the published contracts are keyed by — it rides
-        each entry's ``range_digest``/``class_hash`` and therefore the
-        ``graph`` axis — so it is fixed; pgw#994 adds the identity next to
-        it rather than renaming it on every published cell.
+        This is the string the published contracts are keyed by — it rides each
+        entry's ``range_digest``/``class_hash`` and therefore the ``graph``
+        axis — so renaming it would re-key every published cell.
         """
         name = self.param
         for step in self.path:
             # A mapping level REPLACES the name with the bare key; a sequence
-            # level appends `.index`. Thread-through, which is pgw#790's walk
-            # restated over the identity rather than a second copy of it.
+            # level appends `.index`.
             name = step if isinstance(step, str) else f"{name}.{step}"
         return name
 
@@ -151,8 +133,8 @@ def resolve_leaf(
 
     The serve-side half of :func:`flatten_call`: the mint recorded where a
     leaf lives, this replays it. Keyword first, then the parameter's own
-    position — never a search, because a search is what made sdxl's dict case
-    pass by luck while z-image's list case could not pass at all.
+    position — never a search: a search passes by luck on some shapes and
+    cannot pass at all on others.
     """
     if param in kwargs:
         container: Any = kwargs[param]

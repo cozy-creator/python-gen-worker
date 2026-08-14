@@ -1,4 +1,4 @@
-"""THE single settings authority (pgw#1049, Paul's directive 2026-08-09).
+"""THE single settings authority.
 
 ``us -> pytorch settings``, never ``[us, ambient world] -> pytorch settings``:
 every torch/dynamo/inductor process setting this worker runs under is DECLARED
@@ -6,21 +6,19 @@ in this module's tables, imposed from here, and verified against the
 declaration. Cell identity (``env_seal``) derives from :func:`declaration` —
 the seal digests what WE declared, never a read-back of whatever the process
 happens to hold — so ambient mutation is structurally unable to move identity.
-It can only trip the pgw#719 drift tripwire (kept in ``env_seal`` as the
-runtime detector), which refuses typed before any trace runs under it.
+It can only trip the drift tripwire (kept in ``env_seal`` as the runtime
+detector), which refuses typed before any trace runs under it.
 
-The disease this cures, named by shipped incidents: pgw#1042 (torch's own
-``aot_compile`` mutated global ``aot_inductor.metadata`` mid-mint and the
-read-back seal faithfully recorded the contamination — the child sealed a
-different identity than its own boot) and pgw#754 (``cpp.march=None`` hashed
-identically on every host while the emitted code differed per host). A
-read-back is a mirror; a declaration is an authority.
+A read-back is a mirror; a declaration is an authority. Two failure modes make
+that concrete: torch's own ``aot_compile`` mutates global
+``aot_inductor.metadata`` mid-mint, so a read-back seal records the
+contamination rather than the boot; and ``cpp.march=None`` hashes identically
+on every host while the emitted code differs per host.
 
 Write fence: ``scripts/lint_settings_writers.py`` holds the modules in
 :data:`AUTHORITY_MODULES` to be the ONLY writers of torch settings. A write
 anywhere else in ``src/gen_worker`` is red unless classified in
-``scripts/settings_writers_allowlist.txt`` — a second writer is a defect, the
-same way a stray ``os.environ`` read is under §1.18.
+``scripts/settings_writers_allowlist.txt``.
 """
 
 from __future__ import annotations
@@ -62,28 +60,24 @@ AUTHORITY_MODULES: Tuple[str, ...] = (
 #: value below is what every child (mint child, AOT entry child, torch's own
 #: compile subprocesses) inherits.
 #:
-#: PYTHONHASHSEED=0: the pgw#1034 / HUMAN_MUST_DO decision, EXECUTED here per
-#: Paul's pgw#1049 directive (imposition is the pure-declaration answer; the
-#: cost note said to bundle it with a seal change, and seal v4 is that
-#: change). CPython reads it at interpreter start, so imposition for the
-#: CURRENT interpreter is :func:`ensure_interpreter_env`'s re-exec; children
-#: inherit it from this table. REVERT = delete the entry here and its census
-#: row — nothing else refers to the seed.
+#: PYTHONHASHSEED=0: CPython reads it at interpreter start, so imposition for
+#: the CURRENT interpreter is :func:`ensure_interpreter_env`'s re-exec;
+#: children inherit it from this table.
 #:
-#: PYTORCH_CUDA_ALLOC_CONF: pgw#1049 found the entrypoint's old ``setdefault``
-#: was DEAD — ``scrub_env`` erased it (``PYTORCH`` prefix) before the first
-#: cudaMalloc ever read it, so ``expandable_segments`` was silently off on
-#: every worker. Imposing it post-scrub is what makes it real.
+#: PYTORCH_CUDA_ALLOC_CONF: must be imposed POST-SCRUB. A ``setdefault`` at
+#: entrypoint import is dead — ``scrub_env`` erases the ``PYTORCH`` namespace
+#: before the first cudaMalloc reads it, silently disabling
+#: ``expandable_segments``.
 #:
-#: TORCHINDUCTOR_AUTOGRAD_CACHE=0: gw#608 — the AOTAutogradCache key embeds a
-#: process address (ASLR) and can never hit across pods; cell portability
-#: needs the portable FxGraphCache to be the lookup surface.
+#: TORCHINDUCTOR_AUTOGRAD_CACHE=0: the AOTAutogradCache key embeds a process
+#: address (ASLR) and can never hit across pods; cell portability needs the
+#: portable FxGraphCache to be the lookup surface.
 #:
-#: NCCL_NVLS_ENABLE=0: pgw#929 §1.17 AMBIGUOUS #3 — NVLS multicast cannot be
-#: bound in our containers (measured: CUDA 401 on the first all-to-all of
-#: every group) and Ulysses does not use it. The env survives only as NCCL's
-#: own handoff mechanism; it is nobody's choice (``parallel/group.py`` warns
-#: at communicator creation if an ambient override was dropped).
+#: NCCL_NVLS_ENABLE=0: NVLS multicast cannot be bound in our containers
+#: (measured: CUDA 401 on the first all-to-all of every group) and Ulysses does
+#: not use it. The env survives only as NCCL's own handoff mechanism; it is
+#: nobody's choice (``parallel/group.py`` warns at communicator creation if an
+#: ambient override was dropped).
 DECLARED_ENV: Dict[str, str] = {
     "PYTHONHASHSEED": "0",
     "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
@@ -92,13 +86,12 @@ DECLARED_ENV: Dict[str, str] = {
 }
 
 #: Behavior-affecting torch global flags: ONE canonical value each, imposed by
-#: :func:`impose_torch` and verified by read-back. The canonical values ARE
-#: the ratified SERVING posture, not a preference: pgw#654 sets TF32 ON at
-#: executor bootstrap (bf16 compute path; TF32 touches residual fp32 matmuls
-#: only), and inductor hashes the TF32 state (``cuda_matmul_settings``) into
-#: every inner FX key — so a mint sealed with TF32 off could never HIT in a
-#: pgw#654 serving process. Note the 2.13 coupling: allow_tf32=True implies
-#: float32_matmul_precision "high".
+#: :func:`impose_torch` and verified by read-back. The canonical values ARE the
+#: ratified SERVING posture, not a preference: the executor serves with TF32 ON
+#: (bf16 compute path; TF32 touches residual fp32 matmuls only), and inductor
+#: hashes the TF32 state (``cuda_matmul_settings``) into every inner FX key — so
+#: a mint sealed with TF32 off could never HIT in a serving process. Note the
+#: 2.13 coupling: allow_tf32=True implies float32_matmul_precision "high".
 DECLARED_TORCH: Dict[str, str] = {
     "float32_matmul_precision": "high",
     "cuda_matmul_allow_tf32": "True",
@@ -106,8 +99,7 @@ DECLARED_TORCH: Dict[str, str] = {
     "cudnn_benchmark": "False",
 }
 
-#: The v2 dynamo shape posture (moved from ``compile_cache`` per pgw#1049 —
-#: it was a second writer): nothing becomes dynamic by accident.
+#: The dynamo shape posture: nothing becomes dynamic by accident.
 #: ``automatic_dynamic_shapes=False`` — never promote a dim on change (a novel
 #: signature is a guard miss routed by the consumer guards, never a silent
 #: recompile-to-dynamic); ``assume_static_by_default=True`` — unmarked dims
@@ -127,9 +119,9 @@ def declaration(
     Facts here are what WE state, never what the process reads back: the env
     table, the torch flag table (+ declared knob overrides), the dynamo shape
     posture, the host-ISA codegen clamp (a declared rule of the host —
-    ``min(host level, BASELINE)``, pgw#754 — like ``sm``, not a config
-    read-back), and the canonical process posture. A torchless worker
-    declares the absence itself as the fact (pgw#788)."""
+    ``min(host level, BASELINE)`` — like ``sm``, not a config read-back), and
+    the canonical process posture. A torchless worker declares the absence
+    itself as the fact."""
     from . import guard_closure, host_isa  # lazy: keep this module light
 
     if torch_capability.present():
@@ -144,7 +136,7 @@ def declaration(
     else:
         # Knob names are still validated (torch-free contract); a DECLARED
         # knob on a torchless image refuses — honouring it silently would
-        # fork cell identity (pgw#788).
+        # fork cell identity.
         validated_table(overrides)
         if overrides:
             raise SettingsImpositionError(
@@ -167,7 +159,7 @@ def validated_table(
     overrides: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, str]:
     """:data:`DECLARED_TORCH` with DECLARED knob overrides folded in — the
-    typed-knob surface (pgw#718): keys must exist in the canonical table, so
+    typed-knob surface: keys must exist in the canonical table, so
     the only route to non-canonical behavior is a declared knob, which is
     part of the declaration and therefore keyed. An unknown knob refuses,
     named. One-way door: a scrubbed env var that turns out to be needed
@@ -275,7 +267,7 @@ def impose_torch(
     same-thread read-back is a process-wide proof. Returns the read-back.
 
     On a torchless worker there is nothing to impose; knob names are still
-    validated and a declared knob refuses (pgw#788)."""
+    validated and a declared knob refuses."""
     table = validated_table(overrides)
     torch = torch_capability.torch_or_none()
     if torch is None:
@@ -385,9 +377,9 @@ def impose_dynamo() -> Dict[str, str]:
 
 
 def disable_autograd_cache() -> None:
-    """gw#608: the AOTAutogradCache key hashes ``fx_kwargs[get_decomp_fn]``
-    via the function's REPR — a process memory address (ASLR), so AOT keys
-    can NEVER match across processes/pods. Cell portability requires the
+    """The AOTAutogradCache key hashes ``fx_kwargs[get_decomp_fn]`` via the
+    function's REPR — a process memory address (ASLR), so AOT keys can NEVER
+    match across processes/pods. Cell portability requires the
     (portable) FxGraphCache to be the lookup surface: disable the AOT layer
     symmetrically for producer capture and consumer seeding.
 
@@ -396,8 +388,8 @@ def disable_autograd_cache() -> None:
     and, torch already imported, the installed config entry's
     ``env_value_force`` — user overrides are thread-local ContextVars in
     torch>=2.13, and the entry-level env force is consulted by every thread
-    with top precedence (the 0.40.5 live disproof: the assignment ran on the
-    arming thread while the warmup compile ran on another)."""
+    with top precedence. Measured: a plain assignment runs on the arming thread
+    while the warmup compile runs on another, so it does nothing."""
     os.environ["TORCHINDUCTOR_AUTOGRAD_CACHE"] = (
         DECLARED_ENV["TORCHINDUCTOR_AUTOGRAD_CACHE"])
     if "torch" not in sys.modules:
@@ -429,8 +421,8 @@ def set_compiler_cache_tag(tag: str) -> None:
 
 def raise_dynamo_cache_limits(want: int) -> None:
     """Size dynamo's per-code-object recompile ceiling to the declared shape
-    set (``compile_cache.apply``: LTX declares 12 video graphs against a
-    default of 8, ie#381) — never lower an operator-raised value. Cache
+    set (a family can declare more graphs than torch's default of 8) — never
+    lower an operator-raised value. Cache
     ADMISSION, not codegen: changes whether dynamo keeps compiling, never
     what it emits, so it is not a seal fact."""
     if not torch_capability.present():

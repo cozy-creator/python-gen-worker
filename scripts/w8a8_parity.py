@@ -1,4 +1,4 @@
-"""W8A8 quality-parity + speed harness (gw#534).
+"""W8A8 quality-parity + speed harness.
 
 Same-seed renders of ONE model three ways on the current GPU:
   bf16      — plain bf16-resident (the quality reference)
@@ -6,8 +6,8 @@ Same-seed renders of ONE model three ways on the current GPU:
   w8a8      — data-free fp8-w8a8 artifact served on torch._scaled_mm
 
 Reports pixel-space deltas (MAE / PSNR, + LPIPS when installed) vs the bf16
-reference and the denoise wall per lane. Proves the SERVE path — the
-conversion-time degradation gate is te#79's, on calibrated artifacts.
+reference and the denoise wall per lane. Proves the SERVE path only; the
+conversion-time degradation gate is separate, on calibrated artifacts.
 
 Run on a rented SECURE pod (never a dev box):
   uv run python scripts/w8a8_parity.py --model black-forest-labs/FLUX.2-klein-4B \

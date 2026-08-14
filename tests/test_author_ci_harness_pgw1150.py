@@ -1,11 +1,9 @@
 """pgw#1150 — ie#664's tier-2 checklist as ONE COMMAND.
 
-ie#664 shipped the author-CI standard with its tier-2 leg as a RUNBOOK: a
-checklist a human executes by hand on a rented pod, which is why all 13
-`author-ci.toml` records read `blocker = "ie#664"`. Every primitive it
-assembles already shipped — `rigcheck.assert_fleet_line`, the mint-parent
-parity gate (pgw#1141), `numerics_probe`/`numerics_ladder`, pgw#1142's
-serve-posture eager arm, `stage_ms.*` — and none of them were wired together.
+The author-CI tier-2 leg was a RUNBOOK — a checklist a human executes by hand on
+a rented pod. This wires its already-shipped primitives into one command:
+`rigcheck.assert_fleet_line`, the mint-parent parity gate,
+`numerics_probe`/`numerics_ladder`, the serve-posture eager arm, `stage_ms.*`.
 
 WHAT IS REAL HERE: the endpoint load and function selection (`cli.run`'s own),
 the dispatch, `ctx.stage` -> `stage_ms` timing, the serve-posture order and its
@@ -15,8 +13,8 @@ real ladder, real declared floor), the record's TOML, and — where the sibling
 repo is checked out — `inference-endpoints/scripts/lint_author_ci.py` itself,
 imported and run against what this harness emitted.
 
-WHAT IS FAKED, and why: the COMPILE and the model load. Paul's standing rule
-(2026-08-10) is that no mint, compile or AOTI link runs on the shared dev box.
+WHAT IS FAKED, and why: the COMPILE and the model load. Paul's standing rule is
+that no mint, compile or AOTI link runs on the shared dev box.
 So `run_setup` is stubbed to hand back pgw#868's armed probe pipeline — the
 same seam `test_two_run_reuse_pgw1096.py` fakes — and `assert_fleet_line` is
 stubbed in the rows that are not about the preflight (this box HAS a driver and
@@ -285,7 +283,7 @@ def test_a_healthy_cell_records_the_gates_own_cosine(
     assert report.parity is not None and report.parity.passed
     proof = tomllib.loads(record.read_text(encoding="utf-8"))["proof"]
     assert proof["cosine"] >= 0.999
-    # pgw#1176: the record names the ENTRY KEY that was measured, computed
+    # The record names the ENTRY KEY that was measured, computed
     # from the artifact's own facts. `"cell868"` was a harness placeholder
     # from when the key was a literal; asserting it now would assert the mint
     # failed to key its own product.
@@ -453,7 +451,7 @@ def _lint() -> Any:
 def _through_the_lint(lint: Any, tmp_path: Path, record: Path) -> int:
     """The emitted record, in the tree shape the real gate reads.
 
-    pgw#1170: the synthetic DECORATOR must carry the same bar as the record
+    the synthetic DECORATOR must carry the same bar as the record
     this repo's harness emits. `_tree`'s default is the sibling's own fixture
     value (`min_speedup=1.2`) while our record template declares `1.10`, and
     leaving them to disagree made the gate refuse EVERY record for a reason

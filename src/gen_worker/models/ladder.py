@@ -1,4 +1,4 @@
-"""Precision-ladder spec (th#697) — precision classes + placement requirements.
+"""Precision-ladder spec — precision classes + placement requirements.
 
 A quant token's *precision class* names its quantization lane (``fp8``,
 ``svdq-int4``, ...). A :class:`Placement` states which silicon can run it:
@@ -12,13 +12,9 @@ same defaults the stamping writes, so both paths agree. The ladder WALK
 (rung ordering per arch class) lives hub-side (tensorhub's
 internal/orchestrator/precision resolver) and delivers picks via HelloAck;
 this module is the classification + placement half, plus the family lane
-policy (th#964). The former local walk (``resolve``/``resolve_local_bindings``)
-was deleted with pgw#515 — locally, fit is the loading layer's job (runtime
-fp8 rung + the offload ladder). pgw#1148 deleted the local AUTO fp8
-FOLD on top of it: it selected among sibling FLAVOR rows, and th#1803 deleted
-those rows (`repo_tags` is re-keyed to (repo, tag, checkpoint), the flavor
-column is gone, and selection within a tag group is §1.33 contract
-compatibility).
+policy. There is deliberately no local walk and no local AUTO fp8 fold:
+locally, fit is the loading layer's job (runtime fp8 rung + the offload
+ladder), and selection within a tag group is §1.33 contract compatibility.
 """
 
 from __future__ import annotations
@@ -33,7 +29,7 @@ CLASS_FP8 = "fp8"  # fp8-E4M3 storage; universal (bf16-upcast path needs no fp8 
 CLASS_SVDQ_FP4 = "svdq-fp4"  # nunchaku SVDQuant fp4 — consumer Blackwell only
 CLASS_SVDQ_INT4 = "svdq-int4"  # nunchaku SVDQuant int4 — sm_75-89
 CLASS_NVFP4 = "nvfp4"  # plain nvfp4 artifact — Blackwell datacenter, no serving lane (not a diffusers rung)
-# Calibrated nvfp4 with two-level scales (gw#540): torch fp4 blockwise
+# Calibrated nvfp4 with two-level scales: torch fp4 blockwise
 # scaled_mm serve lane. Blackwell-only (sm_100+ incl. sm_120 consumer) —
 # no fp4 silicon below, and the 4x dequant blow-up erases the fit story.
 CLASS_NVFP4_W4A4 = "nvfp4-w4a4"
@@ -45,12 +41,11 @@ _BASE_TOKENS = ("", "bf16", "fp16", "fp32")
 class Placement:
     """Arch requirements for one flavor. Empty fields = unconstrained.
 
-    pgw#973 censused ``sm_min = 0`` as a §4.24 item-4 absence collapse and it is
-    NOT one: "unconstrained" is this class's STATED meaning for every empty
-    field (`sm_allowed=()` says the same thing), the placement is the flavor's
-    own declaration rather than an operator knob, and a missing floor cannot
-    admit anything ``sm_allowed`` and the engine list do not already admit.
-    Kept as filed, verdict recorded so it is not re-opened.
+    ``sm_min = 0`` is not an absence collapse: "unconstrained" is this class's
+    STATED meaning for every empty field (`sm_allowed=()` says the same thing),
+    the placement is the flavor's own declaration rather than an operator knob,
+    and a missing floor cannot admit anything ``sm_allowed`` and the engine
+    list do not already admit.
     """
 
     precision_class: str
@@ -123,7 +118,7 @@ def placement_to_metadata(p: Placement) -> dict[str, Any]:
 FP8_COMPUTE_MIN_SM = 89
 
 
-# --- Family-root policy (th#964) — twin of tensorhub's modelfamily.Root ----
+# --- Family-root policy — twin of tensorhub's modelfamily.Root ----
 
 # Families whose root is not derivable by normalization alone. Roots collapse
 # fine-tune/scheduler/distillation variants that keep the weight envelope.
@@ -141,8 +136,8 @@ _FAMILY_ROOT_OVERRIDES = {
 
 
 
-# Conv-UNet roots get no fp8-GEMM win (torch scaled_mm is Linear-only;
-# th#927 measured SDXL w8a8 1.9-2.7x slower than bf16): their fp8-w8a8 rows
+# Conv-UNet roots get no fp8-GEMM win (torch scaled_mm is Linear-only, and
+# SDXL w8a8 measured 1.9-2.7x slower than bf16): their fp8-w8a8 rows
 # are AUTO-ineligible and the scale-free #fp8 row is the family table-best
 # on sm_89+; bf16 stays the sub-floor default. Explicit pins still resolve
 # w8a8. Twin of tensorhub precision.convUNetW8A8ExcludedRoots.
@@ -151,13 +146,9 @@ CONV_UNET_W8A8_EXCLUDED_ROOTS = frozenset({"sd1", "sd2", "sdxl"})
 
 
 
-# th#1361/pgw#1065: the flavor-token parses (classify_flavor_token,
-# placement_for_flavor) are package-internal choke points, not public API —
-# the hub unexported its twin under th#1433. They die when th#1721 typed
-# descriptors are backfilled; nothing new may grow on them. pgw#1148 deleted
-# the AUTO family-fp8 SELECTORS (pick_family_fp8_flavor /
-# maybe_rebind_family_fp8): they picked over the resolve's sibling FLAVOR
-# rows, which th#1803 deleted from the hub entirely.
+# The flavor-token parses (classify_flavor_token, placement_for_flavor) are
+# package-internal choke points, not public API. They die when typed
+# descriptors are backfilled; nothing new may grow on them.
 __all__ = [
     "FP8_COMPUTE_MIN_SM",
     "CLASS_BASE",

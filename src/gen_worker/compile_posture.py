@@ -1,93 +1,59 @@
 """WHOSE machine this mint is running on — declared by the entry point.
 
-DESIGN-RULINGS §4.30 (Paul, 2026-08-11), verbatim: *"Be nice, especially on
-cozy-local — never saturate the user's only machine. Compile parallelism K is
-POSTURE-AWARE: aggressive on a dedicated serving pod, gentle/niced/capped on
-cozy-local, accepting a slower local mint to stay polite."*
-
+Compile parallelism K is POSTURE-AWARE: aggressive on a dedicated serving pod,
+gentle/niced/capped on cozy-local, accepting a slower local mint to stay polite.
 Every clamp in :mod:`gen_worker.aot_compile_pool` is written for a SERVING POD
-with a co-resident tenant: ``SERVING_HEADROOM_CPUS`` keeps two cores for an
-asyncio beat and an eager forward, ``ENTRY_RSS_RESERVE_BYTES`` keeps host RAM
-so a tenant request does not meet the OOM killer. Those are the right terms for
-a datacenter box we bought. They are the wrong terms for a desktop, where the
-co-resident workload is a human — who outranks the mint, cannot be scheduled
-around, and will simply stop using the product if their machine stops
-responding.
+with a co-resident tenant; on a desktop the co-resident workload is a human, who
+outranks the mint and cannot be scheduled around.
 
-THE FACT, AND WHY IT IS DECLARED RATHER THAN SNIFFED
-----------------------------------------------------
-The fact is *"a person is sitting at this machine"*, and no process can measure
-it. Three plausible-looking proxies exist in this tree and every one of them is
-a DIFFERENT question:
-
-* ``local_cell_store.trust_class() == "untrusted"`` — the HUB's verdict on
-  whether this hardware may publish a cell. A rented community-cloud pod is
-  untrusted and has no human on it; being polite there would slow work we are
-  paying for by the second. Trust is not tenancy.
-* ``publisher is None`` at ``local_serve``'s call site — a fact about the SINK.
-  ``publish_disarmed`` (a pgw#980 probe) makes an ordinary fleet pod look the
-  same, and that pod should compile flat out.
-* ``worker_goals`` — what the pod was BOUGHT to do. cozy-local was not bought.
-
-pgw#1127 §2 named the failure mode this codebase keeps hitting: *"two
-derivations of one fact"*. So this is not derived at all. It is DECLARED, once,
-by the process entry that knows: :mod:`gen_worker.local_serve` — the cozy-local
+THE FACT IS DECLARED, NOT SNIFFED. *"A person is sitting at this machine"* is
+not measurable, and the three plausible proxies each answer a DIFFERENT
+question: ``local_cell_store.trust_class()`` is the hub's verdict on whether
+this hardware may publish (a rented community pod is untrusted and has no human
+on it); ``publisher is None`` is a fact about the SINK, which
+``publish_disarmed`` makes an ordinary fleet pod share; ``worker_goals`` is what
+the pod was BOUGHT to do. So :mod:`gen_worker.local_serve` — the cozy-local
 CLI's only arming entry — passes :data:`USER_MACHINE`, and everything else gets
 :data:`FLEET` by construction because that is the struct's default.
 
-And it is deliberately not an environment variable. §1.17, verbatim: *"Envs are
-for secrets and configuration, not for logic gates."* Politeness changes what
-the machine DOES, so it travels as a typed value on the parent->child
-``MintRequest`` — the same wire that already carries ``vram_cap_bytes`` and
-``device`` — never as an ambient toggle a stray shell export could flip.
+Deliberately NOT an environment variable: politeness changes what the machine
+DOES, so it travels as a typed value on the parent->child ``MintRequest``, never
+as an ambient toggle a stray shell export could flip.
 
-WHAT POLITENESS MEANS, AND WHY EACH TERM
------------------------------------------
-The policy lives here, as methods, so no caller ever branches on the boolean
-and the four terms cannot drift apart:
+The policy lives here as methods, so no caller branches on the boolean and the
+four terms cannot drift apart:
 
 * :meth:`nice_level` — **the primary CPU lever, and the only one that actually
   preserves interactivity.** Reserving cores does not: the scheduler will still
   put a compile on the core the compositor wants. Priority says who yields, at
-  microsecond granularity, in the kernel. It is also strictly better than a
-  reservation in the other direction — a niced mint uses the WHOLE machine
-  while the user is away and gets out of the way the moment they come back, so
-  politeness costs nothing when nobody is looking.
-* :meth:`cpu_budget_cores` — nice does nothing for the things that are not CPU
-  time. K children mean K concurrent ``cc1plus``, K inductor caches being
-  written, and K working sets in the page cache; that pressure is felt as
-  stutter whatever the priority. ``CPUS_PER_ENTRY_WORKER`` is an AVERAGE (one
-  core for ~71 % of an entry, up to ``compile_threads`` for the rest), so a pod
-  deliberately overcommits: at the burst it asks for ~2x the box, which is
-  correct when the box is ours and otherwise idle. Halving the budget makes the
-  BURST ask for the machine instead of double it.
-* :meth:`entry_ceiling` — the disk and the page cache being contended are the
-  user's own. Half the fleet ceiling.
+  microsecond granularity, in the kernel — so a niced mint uses the WHOLE
+  machine while the user is away and gets out of the way when they return.
+* :meth:`cpu_budget_cores` — nice does nothing for what is not CPU time. K
+  children mean K concurrent ``cc1plus``, K inductor caches and K working sets
+  in the page cache, felt as stutter whatever the priority.
+  ``CPUS_PER_ENTRY_WORKER`` is an AVERAGE (one core for ~71 % of an entry, up to
+  ``compile_threads`` for the rest), so a pod deliberately overcommits to ~2x
+  the box at the burst; halving the budget makes the burst ask for the machine
+  instead of double it.
+* :meth:`entry_ceiling` — the contended disk and page cache are the user's own.
+  Half the fleet ceiling.
 * :meth:`rss_reserve_bytes` — **a mint that OOMs a desktop is worse than a slow
   one.** ``MemAvailable`` counts reclaimable page cache as free, so a pool sized
-  against it will evict the working set of every application the user has open
-  before it meets any limit. The reserve is what stops that, and on a desktop
-  the OOM killer's most attractive target is a browser with forty tabs.
+  against it evicts the working set of every open application before it meets
+  any limit.
 
-WHAT IS DELIBERATELY NOT HERE
-------------------------------
-**No interactivity probe.** "Pause the mint while the user is typing" was
-considered and rejected: it is a cross-platform mess (X11 idle time, Wayland
-has no equivalent, macOS has a third), and it is wrong in the case that matters
-— a developer running a build in a terminal produces no input events at all and
-is exactly the person who needs the CPU. :meth:`nice_level` already IS the
-yield, implemented by the scheduler, for free.
+DELIBERATELY NOT HERE:
 
-**No ionice.** It would be the right instinct — priority for I/O the way nice
-is for CPU — but ``ioprio_set`` has no stdlib wrapper (a ctypes syscall), and
-on the ``none``/``mq-deadline`` schedulers that ship on modern desktops it is a
-no-op. The RAM reserve and the entry ceiling bound the I/O instead, by bounding
-the number of concurrent writers. Revisit only with a measurement showing disk
-contention, not on instinct.
-
-**No third posture.** A community-cloud pod is untrusted hardware that is still
-rented by the second with nobody sitting at it; it compiles as FLEET, and that
-is not an oversight.
+* **No interactivity probe.** Cross-platform mess (X11 idle time, Wayland has no
+  equivalent, macOS a third), and wrong in the case that matters — a developer
+  running a build in a terminal produces no input events at all.
+  :meth:`nice_level` already IS the yield, implemented by the scheduler.
+* **No ionice.** ``ioprio_set`` has no stdlib wrapper, and on the
+  ``none``/``mq-deadline`` schedulers that ship on modern desktops it is a
+  no-op. The RAM reserve and entry ceiling bound I/O by bounding concurrent
+  writers instead. Revisit only on a measurement showing disk contention.
+* **No third posture.** A community-cloud pod is untrusted hardware still rented
+  by the second with nobody sitting at it; it compiles as FLEET.
 """
 
 from __future__ import annotations

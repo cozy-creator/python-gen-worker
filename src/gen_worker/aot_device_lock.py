@@ -1,8 +1,6 @@
-"""pgw#809: one GPU timing at a time, across the whole entry-compile pool.
+"""One GPU timing at a time, across the whole entry-compile pool.
 
-The hazard, stated exactly
--------------------------
-An AOTI compile does not only generate code — it BENCHMARKS on the device.
+THE HAZARD. An AOTI compile does not only generate code — it BENCHMARKS on the device.
 On the pin (torch 2.13.0+cu130) the mint leaves
 ``triton.autotune_at_compile_time`` unset, and ``get_cpp_wrapper_config``
 (``compile_fx.py:2237-2242``) resolves an unset value to ``has_triton() and
@@ -16,12 +14,10 @@ Which makes concurrency a CORRECTNESS problem, not a speed one: two entries
 benchmarking at once measure each other's contention, pick worse configs, and
 bake them into the artifact. Nothing downstream can see it — the cell key
 digests the traced graph, the sm, the toolchain and the env seal, none of
-which move when a kernel config changes. A slower cell would publish under
-the same key as a good one. That is this codebase's worst failure class (a
-silent wrong answer), so the pool must not create it.
+which move when a kernel config changes, so a slower cell would publish under
+the same key as a good one.
 
-The seam is upstream's, not ours
---------------------------------
+THE SEAM IS UPSTREAM'S, NOT OURS.
 torch 2.13 ships ``set_gpu_benchmark_lock_context`` precisely for this, and
 decorates EVERY ``benchmark_gpu`` / ``benchmark_gpu_with_cuda_graph``
 implementation with ``@gpu_benchmark_lock``. Registering a cross-process file
@@ -30,15 +26,14 @@ path inductor takes, with no monkeypatching and no version-specific internals.
 Upstream's own note — "harness contexts should support nested entry from the
 same thread" — is why :class:`DeviceBenchmarkLock` is reentrant.
 
-What this does NOT fix, and must be said
-----------------------------------------
+WHAT THIS DOES NOT FIX.
 The serving tenant is running eager inference on the same card for the whole
-mint — that is pgw#784's contract, not an accident. So autotune timings are
+mint — that is the mint contract, not an accident. So autotune timings are
 ALREADY perturbed by live traffic at K=1, and this lock cannot exclude the
 tenant. The pool is therefore held to a narrower claim: it must not perturb
 ITSELF. Whether a mint taken beside live serving picks the same configs as a
-mint on a quiet card is a PRE-EXISTING, unmeasured question that pgw#809 did
-not introduce and does not close.
+mint on a quiet card is a pre-existing, unmeasured question this does not
+close.
 """
 
 from __future__ import annotations

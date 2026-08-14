@@ -42,8 +42,8 @@ def _hf_access_error_classes() -> tuple[type[Exception], ...]:
 
 
 def _raise_input_refusal(exc: BaseException) -> NoReturn:
-    """th#1084: user-caused repo-access failures are typed INVALID (the class
-    name is preserved for the hub's refusal taxonomy), never FATAL."""
+    """User-caused repo-access failures are typed INVALID (the class name is
+    preserved for the hub's refusal taxonomy), never FATAL."""
     first = str(exc).splitlines()[0] if str(exc) else ""
     msg = f"{type(exc).__name__}: {first}" if first else type(exc).__name__
     raise ValidationError(msg) from exc
@@ -54,7 +54,7 @@ ProgressFn = Callable[[int, Optional[int]], None]
 
 
 class CloneDownloadError(RuntimeError):
-    """Source download failed after bounded retries (gw#456) — the clone job
+    """Source download failed after bounded retries — the clone job
     fails cleanly instead of hanging."""
 
 
@@ -70,8 +70,8 @@ def _download_attempts() -> int:
             pass
     return 3
 
-# pgw#761: how many candidate component subfolders' config.json we will fetch
-# before classification. Real component repos publish one; the cap keeps a
+# How many candidate component subfolders' config.json we fetch before
+# classification. Real component repos publish one; the cap keeps a
 # pathological listing from turning classification into N round-trips.
 _MAX_COMPONENT_CONFIG_FETCHES = 8
 
@@ -79,14 +79,14 @@ _SAFETENSORS_DTYPE_NAMES = {
     "F32": "fp32", "F16": "fp16", "BF16": "bf16",
     "F8_E4M3": "fp8", "F8_E5M2": "fp8:e5m2",
 }
-# pgw#1121: bits per stored element, for weighing a mixed header by BYTES.
+# Bits per stored element, for weighing a mixed header by BYTES.
 _SAFETENSORS_DTYPE_BITS = {
     "F64": 64, "I64": 64, "U64": 64,
     "F32": 32, "I32": 32, "U32": 32,
     "F16": 16, "BF16": 16, "I16": 16, "U16": 16,
     "F8_E4M3": 8, "F8_E5M2": 8, "I8": 8, "U8": 8, "BOOL": 8,
 }
-# pgw#1121: how many of the selected weight files' headers we range-read to
+# How many of the selected weight files' headers we range-read to
 # resolve an untagged source's real dtype. Shards of one set share a dtype,
 # so the largest few are representative; the cap keeps a 100-shard listing
 # from turning plan time into 100 round-trips.
@@ -100,7 +100,7 @@ def _remote_safetensors_width(
     hf_token: str | None,
 ) -> tuple[str, int]:
     """``(dominant dtype, bits per stored parameter)`` of a REMOTE safetensors
-    set, read from the files' HEADERS (pgw#1121). ``("", 0)`` when no header
+    set, read from the files' HEADERS. ``("", 0)`` when no header
     could be read.
 
     ``parse_safetensors_file_metadata`` range-reads the header and nothing
@@ -210,7 +210,7 @@ def _hf_classification_inputs(
 ) -> tuple[list[str], dict[str, int], dict[str, Any], dict[str, str]]:
     """One list_repo_tree walk: paths, sizes, small side signals, and the
     provider's per-file content ids (lfs sha256 / git blob oid) — the
-    latter feed the th#592 download-skip bank key."""
+    latter feed the download-skip bank key."""
     api = hf().HfApi(token=(hf_token or None))
     paths: list[str] = []
     sizes: dict[str, int] = {}
@@ -244,7 +244,7 @@ def _hf_classification_inputs(
             side["config_json"] = None
 
     if "config.json" not in paths and "model_index.json" not in paths:
-        # pgw#761: no root marker at all. A standalone component published
+        # No root marker at all. A standalone component published
         # under the pipeline key it overrides (PrunaAI/PrunaVAED's
         # vae/config.json) is only recognizable from the SUBFOLDER's config —
         # fetch every candidate's (tiny) config so the classifier can re-root
@@ -293,7 +293,7 @@ def _hf_classification_inputs(
 class HFSourcePlan:
     """Pre-download identity of one HF clone source (metadata calls only).
 
-    Feeds the th#592 download-skip: ``content_ids`` carries the provider's
+    Feeds the download-skip bank: ``content_ids`` carries the provider's
     own per-file content hashes (lfs.oid sha256 for LFS files, git blob oid
     for small files), so a bank key derives without downloading a byte.
     """
@@ -305,8 +305,8 @@ class HFSourcePlan:
     side: dict[str, Any]
     classification: RepoClassification
     content_ids: dict[str, str]        # path -> "sha256:<hex>" | "git:<oid>"
-    # pgw#1121: MEASURED bits per stored parameter, off the selected weight
-    # set's safetensors headers. 0 when no header could be read. Lives on the
+    # MEASURED bits per stored parameter, off the selected weight set's
+    # safetensors headers. 0 when no header could be read. Lives on the
     # plan, not in ``classification.attrs``, because it is a sizing fact for
     # the disk preflight — not a checkpoint attribute anyone publishes.
     source_storage_bits: int = 0
@@ -379,12 +379,12 @@ def plan_huggingface(
 ) -> HFSourcePlan:
     """Resolve + classify one HF repo from metadata alone (no weight bytes).
 
-    ``source_include`` (gw#593 item 2): an optional explicit allowlist of
-    globs matched against repo-relative paths. When given, the classifier
-    only ever sees the matching subset — the caller's way of disambiguating
-    a multi-checkpoint-bundle repo (e.g. Lightricks/LTX-2.3's dev/distilled/
-    lora/upscaler root bundle) that today's dtype-variant heuristic cannot
-    resolve on its own. Every glob must match >=1 file (fail loud on a typo).
+    ``source_include``: an optional explicit allowlist of globs matched against
+    repo-relative paths. When given, the classifier only ever sees the matching
+    subset — the caller's way of disambiguating a multi-checkpoint-bundle repo
+    (e.g. a dev/distilled/lora/upscaler root bundle) that the dtype-variant
+    heuristic cannot resolve on its own. Every glob must match >=1 file (fail
+    loud on a typo).
     """
     install_hf_http_timeouts()
     try:
@@ -424,15 +424,12 @@ def resolve_plan_source_width(
 ) -> int:
     """Read the selected weight set's real storage width off its safetensors
     headers; stamp the dtype when the filename heuristic came up empty, and
-    return bits-per-parameter for the disk estimate (pgw#1121). 0 = unreadable.
+    return bits-per-parameter for the disk estimate. 0 = unreadable.
 
     The variant-tag heuristic can only read a dtype off a FILENAME
-    (``model.fp16.safetensors``), and upstream diffusers repos are untagged —
-    ``Wan-AI/Wan2.2-T2V-A14B-Diffusers`` ships plain
-    ``transformer_2/diffusion_pytorch_model-00001-of-00012.safetensors``. It
-    answered ``""``, and everything downstream had to guess: the clone disk
-    preflight modelled a 53.2 GiB fp32 tree as packed 4-bit and refused a bf16
-    cast that needed 82 GiB by asking for 268.1 GiB.
+    (``model.fp16.safetensors``), and upstream diffusers repos are routinely
+    untagged — it then answers ``""`` and everything downstream has to guess,
+    which mis-sizes the clone disk preflight by an order of magnitude.
 
     The width is IN the file — every tensor's dtype sits in the safetensors
     header, which is a range read, not a download. Reading it here also makes
@@ -489,7 +486,7 @@ def _snapshot_download_with_retries(
     progress: ProgressFn | None,
     total_hint: Optional[int],
 ) -> None:
-    """Bounded, resumable ``snapshot_download`` (gw#456): every socket has a
+    """Bounded, resumable ``snapshot_download``: every socket has a
     timeout floor (:mod:`gen_worker.net`), the stall watchdog reports byte
     progress and aborts no-progress downloads, and transient network failures
     retry (hf_hub resumes ``.incomplete`` files via Range). Exhausted retries
@@ -517,7 +514,7 @@ def _snapshot_download_with_retries(
             return
         except (GatedRepoError, RepositoryNotFoundError, RevisionNotFoundError,
                 EntryNotFoundError) as exc:
-            _raise_input_refusal(exc)  # permanent + user-caused (th#1084)
+            _raise_input_refusal(exc)  # permanent + user-caused
         except (ValueError, TypeError):
             raise  # permanent — retrying cannot help
         except Exception as exc:
@@ -584,7 +581,7 @@ def ingest_huggingface(
         "diffusers-lora": "diffusers",
         "llama-cpp": "llama.cpp",
         # No hub-recognized loader library for TRELLIS-style pipeline trees:
-        # publish with library_name unset (validator opt-out, e2e #112).
+        # publish with library_name unset (validator opt-out).
         "trellis2": "",
     }.get(library, library)
     repo_spec = {
@@ -612,23 +609,22 @@ def ingest_huggingface(
         "source_file_count": str(len(paths)),
     }
     if subfolder:
-        # pgw#761 (Paul's ruling, 2026-07-29): the PUBLISHER'S layout is what
-        # we mirror — the component stays under ``<subfolder>/``, which is
-        # its own role declaration and exactly what ``load_component``'s
-        # ``src = root / component`` resolves. tensorhub's diffusers layout
-        # contract is still root-anchored (single-file counts ROOT weight
-        # files; multi-file demands model_index.json), so this shape takes
-        # the same sanctioned validator opt-out as the TRELLIS pipeline tree
-        # and the multi-weight bundles rather than being rewritten flat.
-        # ``class_name`` still rides the repo spec — that is the fact the
-        # hub's component binding check narrows on.
+        # Mirror the PUBLISHER'S layout: the component stays under
+        # ``<subfolder>/``, which is its own role declaration and exactly what
+        # ``load_component``'s ``src = root / component`` resolves. tensorhub's
+        # diffusers layout contract is root-anchored (single-file counts ROOT
+        # weight files; multi-file demands model_index.json), so this shape
+        # takes the same sanctioned validator opt-out as the TRELLIS pipeline
+        # tree and the multi-weight bundles rather than being rewritten flat.
+        # ``class_name`` still rides the repo spec — that is the fact the hub's
+        # component binding check narrows on.
         repo_spec["library_name"] = ""
         metadata["component_subfolder"] = subfolder
     if library == "diffusers-single-file" and _is_multi_weight_bundle(dest_dir):
         # Multi-component bundle (distinct component single-files, e.g.
         # chatterbox t3/s3gen/ve): no library loads it as one artifact —
         # opt out of the layout contract exactly like the civitai branch
-        # (empty library_name skips finalize-side validation; e2e #112).
+        # (empty library_name skips finalize-side validation).
         repo_spec["library_name"] = ""
         metadata["multi_weight_bundle"] = "true"
     return IngestedSource(
@@ -670,9 +666,9 @@ def _is_multi_weight_bundle(dest_dir: Path) -> bool:
     """True when a snapshot carries MULTIPLE distinct top-level weight files
     that are not one HF-convention shard set — e.g. Anima/Ernie civitai
     bundles shipping DiT + text-encoder + VAE as separate single-files.
-    tensorhub's diffusers/single-file layout contract rightly rejects these
-    (multiple_files_for_single_file_layout, found live e2e #112); they must
-    publish with library_name unset (validator opt-out)."""
+    tensorhub's diffusers/single-file layout contract rejects these
+    (multiple_files_for_single_file_layout); they must publish with
+    library_name unset (validator opt-out)."""
     return _is_multi_weight_names(
         p.name for p in dest_dir.iterdir() if p.is_file())
 
@@ -680,9 +676,9 @@ def _is_multi_weight_bundle(dest_dir: Path) -> bool:
 def _resolve_civitai_family(base_family: str, layout_family: str) -> str:
     """Civitai's structured baseModel is authoritative over filename-token
     inference: creator filenames routinely carry other arch names (e.g.
-    'gonzalomoXLFluxPony_v70PhotoXLDMD.safetensors' is an SDXL 1.0 build
-    whose name poisoned the family to flux and broke the repackage — found
-    live, e2e tracker #112). Filename hints are the fallback."""
+    'gonzalomoXLFluxPony_v70PhotoXLDMD.safetensors' is an SDXL 1.0 build whose
+    name would poison the family to flux and break the repackage). Filename
+    hints are the fallback."""
     base_family = str(base_family or "").strip()
     layout_family = str(layout_family or "").strip()
     if base_family and base_family != "other":
@@ -758,10 +754,10 @@ def ingest_civitai(
     if model_kind in {"lora", "locon", "lycoris", "dora"}:
         attrs["runtime_library"] = "diffusers-lora"
 
-    # th#611: gguf-only civitai versions publish AS-IS (single unshardable
-    # artifact; the hub classifies family + flavor from the header). Without
-    # a classification the clone falls into the safetensors repackage path
-    # and dies with "no safetensors entry for repackage".
+    # gguf-only civitai versions publish AS-IS (single unshardable artifact;
+    # the hub classifies family + flavor from the header). Without a
+    # classification the clone falls into the safetensors repackage path and
+    # dies with "no safetensors entry for repackage".
     classification: RepoClassification | None = None
     gguf_names = [f for f in files if f.lower().endswith(".gguf")]
     st_names = [f for f in files if f.lower().endswith(".safetensors")]
@@ -799,7 +795,7 @@ def ingest_civitai(
     if attrs["runtime_library"] != "diffusers-lora" and _is_multi_weight_bundle(dest_dir):
         # Multi-component bundle (distinct DiT/TE/VAE files): no library can
         # load it as one artifact — opt out of the layout contract (an empty
-        # library_name skips finalize-side validation; found live, e2e #112).
+        # library_name skips finalize-side validation).
         repo_spec["library_name"] = ""
         metadata["multi_weight_bundle"] = "true"
     return IngestedSource(

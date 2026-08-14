@@ -1,4 +1,4 @@
-"""Derived guard sources must resolve their EMBEDDED root (pgw#733).
+"""Derived guard sources must resolve their EMBEDDED root.
 
 The fleet-wide P0: `_source_root` prefix-matched `^L\\['name'\\]`, but torch 2.13
 emits class/code-structure guards whose sources CONTAIN a root without starting

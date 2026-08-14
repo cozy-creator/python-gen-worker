@@ -1,9 +1,8 @@
-"""th#1423 pgw half: a mint that outlives its credential must SAY SO.
+"""A mint that outlives its credential must SAY SO.
 
-Measured on the standing master stack: three `self_mint_publish_failed` events,
-all `/v1/worker/cells/publish-intent failed (401): invalid worker token` after a
-28-minute inductor compile, at 32m30s past first activity against a 30m worker
-JWT TTL. Two worker-side defects made that unreadable:
+A 28-minute inductor compile finishes past a 30m worker JWT TTL and publish
+fails `(401): invalid worker token`. Two worker-side defects make that
+unreadable:
 
 * `CellPublisher._post` raised a BARE `RuntimeError`, so `_publish_failure_phase`
   had no `status`/`code` to group by and all three landed under the phase
@@ -16,7 +15,7 @@ These drive the REAL publisher against a localhost server speaking tensorhub's
 real refusal envelope — real sockets, real threads, a real packed cell — because
 what is under test is what the worker does with a live 401, not a mock's idea of
 one. Every wait here is a `Thread.join()` on the publish thread itself: no
-sleeps, no durations (gw#666).
+sleeps, no durations.
 
 Run: pytest tests/test_mint_credential_expiry_th1423.py -q
 """
@@ -40,7 +39,7 @@ from harness.cell_meta import exported_cell_meta
 LAPSE_S = 150  # how far past `exp` the presented credential is, in the JWT
 FAMILY = "sdxl"
 
-# pgw#1046: a real exported-cell envelope. The publish path recomputes the key
+# a real exported-cell envelope. The publish path recomputes the key
 # from the recorded blocks and refuses a cell that cannot state one, so the
 # credential-lapse legs below have to ride a cell that could genuinely publish.
 META = exported_cell_meta(family=FAMILY, gen_worker="0.76.6",
@@ -54,7 +53,7 @@ def _jwt(*, lifetime_s: float) -> str:
 
     `lifetime_s` is the credential's OWN remaining life, a claim the token
     carries. Nothing here waits on it: no row in this file is bounded by a
-    clock (gw#666).
+    clock.
     """
     issued = time.time()
     def seg(obj: dict) -> str:
@@ -125,7 +124,7 @@ def hub():
 
 @pytest.fixture()
 def artifact(tmp_path: Path) -> Path:
-    # pgw#1181: packed by the exported packer. `compile_cache.pack` wrote the
+    # packed by the exported packer. `compile_cache.pack` wrote the
     # `torch-inductor-cache` envelope, whose producer died in pgw#1178 and
     # whose format is deleted; what a pod publishes is an exported cell, and
     # what this file is about is the CREDENTIAL on the publish leg, not the

@@ -1,10 +1,11 @@
-"""pgw#1019 — the pgw#1015 defect class, closed at both ends.
+"""Every quantized leaf records its `compute_dtype`, and the consumer refuses
+to default one.
 
-pgw#1015 was one leaf (`_Fp8ScaledLinear`) accepting `compute_dtype` and
-throwing it away, so `adapter_fidelity.branch_compute_dtype` fell back to
-bf16 on bias-free layers while their bias-bearing siblings in the SAME module
-set got float32 — two dtypes in one module set, and the first branch-bearing
-forward dying inside torch.
+One leaf accepting `compute_dtype` and throwing it away is enough:
+`adapter_fidelity.branch_compute_dtype` then falls back to bf16 on bias-free
+layers while their bias-bearing siblings in the SAME module set get float32 —
+two dtypes in one module set, and the first branch-bearing forward dies inside
+torch.
 
 Two halves here, and neither is a mock: every module below is the real class
 the serving lanes materialize, built through its real accessor.

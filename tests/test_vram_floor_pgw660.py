@@ -1,23 +1,19 @@
-"""pgw#660 — SDK v2 dropped every endpoint's hard VRAM floor; this restores it.
+"""Every endpoint's hard VRAM floor reaches the hub.
 
-v2 deleted `Resources.vram_gb` and `Resources.compute_capability` on purpose
-(pgw#647), on the reasoning that th#683's prove-and-profile would MEASURE the
-real requirement. That reasoning is right about how much VRAM a function
-WANTS and wrong about the card it cannot run on AT ALL — and only the second
-question has an answer before a first build exists.
+Measurement answers how much VRAM a function WANTS; it cannot answer which card
+it cannot run on AT ALL, and only the second question has an answer before a
+first build exists.
 
-The consequence was not theoretical. The builder maps requirements out of the
-manifest's `resources{}` by NAME, and after v2 the intersection it could still
-gate on was `gpu` + `libraries` + `vcpus`. So `min_vram_gb: 80` simply stopped
-being emitted, `req.VRAMGB` fell back to the RELEASE-level envelope (7 GB for
-conversion), and the per-function floor left the selection path with no error,
-no lint and no build failure. The SM twin of this hole was confirmed live six
-times in ten minutes (th#1155: `modelopt-quantization`, which needs
-`torch._scaled_mm` at sm_89+, placed on sm_80 A100s).
+The builder maps requirements out of the manifest's `resources{}` by NAME, so a
+floor that is not emitted does not fail: `min_vram_gb: 80` silently disappears,
+`req.VRAMGB` falls back to the RELEASE-level envelope (7 GB for conversion),
+and the per-function floor leaves the selection path with no error, no lint and
+no build failure. The SM twin of this hole placed sm_89+-only work on sm_80
+A100s.
 
-The SM half shipped as `Resources.compute_capability`. This is its VRAM twin,
-and the tests below are written against the SAME hub keys the builder already
-reads, so a hub-side rename reds here rather than on a rented pod.
+`Resources.compute_capability` is the SM half; this is its VRAM twin. The tests
+below are written against the SAME hub keys the builder reads, so a hub-side
+rename reds here rather than on a rented pod.
 """
 
 from __future__ import annotations

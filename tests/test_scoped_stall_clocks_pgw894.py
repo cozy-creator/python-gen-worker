@@ -9,12 +9,8 @@ whatever activity happened to be current, and the hub advances an activity's
 (`worker_activity.go:323-338`) — which is the timestamp its stall and
 condemnation path reads.
 
-So a request's `infer:steps` deferred a background mint's stall verdict. The
-standing chaos hub's 8,398-line log carried 28 lines reporting `infer:steps`
-under `self_mint_compile`; at line 4534 a request was assigned to a worker, at
-4535 that worker reported `self_mint_compile/trace_graph infer:steps 779/?`
-two seconds later, and at 4542 the hub declined a condemnation because that
-mint activity was "0s ago".
+So a request's `infer:steps` deferred a background mint's stall verdict: the hub
+read the mint activity as "0s ago" and declined the condemnation.
 
 The fix is an OWNER on every counter and an owner-scoped stall question. What
 is deliberately NOT changed: registry-wide `freshest()` still exists and still

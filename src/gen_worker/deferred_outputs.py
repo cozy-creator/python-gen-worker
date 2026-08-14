@@ -1,14 +1,13 @@
 """Deferred output materialization — the image encode+upload tail runs AFTER
-the handler returns, with the GPU permit already released (th#1130, pgw#652
-Phase 0 for images).
+the handler returns, with the GPU permit already released.
 
-Why: 19 of 19 live image endpoints call ``ctx.save_image`` INSIDE the handler,
-so a webp q95 encode (~1.1s for a 1328^2 frame on a loaded host) plus the
-upload ran while the request still held the GPU permit. th#1107's terminal
-``_release_gpu_slot_for_finalize`` could not just be copied onto
-``save_image``: that release is terminal and once-only, while endpoints save
-mid-pipeline and in N-image loops, so the first of N saves would free the
-permit with GPU work still to come.
+Why: image endpoints call ``ctx.save_image`` INSIDE the handler, so a webp q95
+encode (~1.1s for a 1328^2 frame on a loaded host) plus the upload would run
+while the request still held the GPU permit. The terminal
+``_release_gpu_slot_for_finalize`` cannot just be copied onto ``save_image``:
+that release is terminal and once-only, while endpoints save mid-pipeline and in
+N-image loops, so the first of N saves would free the permit with GPU work still
+to come.
 
 The terminality signal this needs already exists: the HANDLER'S RETURN. The
 executor releases the permit right there anyway. So ``save_image`` snapshots

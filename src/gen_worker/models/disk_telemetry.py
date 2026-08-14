@@ -1,4 +1,4 @@
-"""Measured disk telemetry (pgw#610 / th#962).
+"""Measured disk telemetry.
 
 statvfs on the REAL mount points the worker uses (CAS root on the container
 disk; the attached endpoint volume when mounted; a shared NFS mount when one

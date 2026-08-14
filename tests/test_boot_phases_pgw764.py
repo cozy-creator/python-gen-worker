@@ -3,8 +3,8 @@
 The acceptance this file encodes:
 
 * A boot emits an ORDERED series of typed ``BootPhase`` envelopes — the exact
-  messages the stream sink sends, asserted as wired (the pgw#733/pgw#760 test
-  convention), not through a double of the recorder API.
+  messages the stream sink sends, asserted as wired, not through a double of
+  the recorder API.
 * Rows recorded BEFORE the transport exists are not lost. This is the whole
   reason the recorder buffers: ``activity.bind_sink`` is not called until
   ``Executor.ensure_setup``, i.e. after weights are on disk, so every phase of
@@ -12,14 +12,10 @@ The acceptance this file encodes:
   report its own tail and silently drop the expensive part.
 * A REFUSED ARM appears with its classified reason: a real ``AdoptError``
   survives as ``outcome=refused reason=<token>`` — not as a failure, because
-  the worker declined that cell deliberately and goes on serving eager. (The
-  end-to-end assertion through ``aot_serve.enable`` itself lives in
-  ``test_boot_phases_arm_pgw764.py``, which is held out of the commit while a
-  sibling lane holds uncommitted WIP in ``aot_serve.py`` — see tracker
-  pgw#764.)
+  the worker declined that cell deliberately and goes on serving eager.
 * The phases RECONCILE: nested spans charge time to the child, so measured
-  phases plus the residual equal the boot window (th#1111's rule, at boot
-  scale). An instrument that does not close cannot say where the time went.
+  phases plus the residual equal the boot window. An instrument that does not
+  close cannot say where the time went.
 """
 
 from __future__ import annotations
@@ -106,7 +102,7 @@ def test_rows_recorded_before_the_sink_exists_are_flushed_on_bind() -> None:
 
         boot_phases.bind_sink(_send, asyncio.get_running_loop())
         # Phases recorded AFTER the bind ride the same sink.
-        # pgw#797: the boot CLOSE now requires `hello` first — a worker the hub
+        # The boot CLOSE now requires `hello` first — a worker the hub
         # cannot reach is not servable, and closing before the stream existed is
         # what suppressed every span on 0.78.0. Binding the sink is exactly the
         # moment the real `on_hello_ack` records hello, so record it here too.
@@ -135,7 +131,7 @@ def test_nested_phases_charge_the_child_so_the_boot_reconciles() -> None:
     with boot_phases.span(boot_phases.PHASE_PIPELINE_LOAD):
         with boot_phases.span(boot_phases.PHASE_WARMUP):
             pass
-    # pgw#797: `hello` gates the boot close (see the flush test above).
+    # `hello` gates the boot close (see the flush test above).
     boot_phases.mark(boot_phases.PHASE_HELLO, since_process_start=True)
     boot_phases.mark(boot_phases.PHASE_FIRST_REQUEST_SERVABLE,
                      since_process_start=True)
@@ -226,7 +222,7 @@ def test_telemetry_never_breaks_the_boot_it_measures() -> None:
 
 
 # ---------------------------------------------------------------------------
-# pgw#764: the serving-mode dimensions
+# The serving-mode dimensions
 # ---------------------------------------------------------------------------
 
 

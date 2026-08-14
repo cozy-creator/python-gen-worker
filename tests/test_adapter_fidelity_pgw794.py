@@ -1,8 +1,8 @@
-"""pgw#794 P1: the fail-closed adapter-fidelity gate.
+"""The fail-closed adapter-fidelity gate.
 
 An adapter that the serving dtype destroys must be a TYPED REFUSAL, never a
-silently-unadapted image (th#1036's fog incident already shipped one batch of
-those). The hazard is exact, not statistical: the base weight already sits ON
+silently-unadapted image. The hazard is exact, not statistical: the base weight
+already sits ON
 the target grid, so an element moves only if its own delta clears half an ULP,
 and fp8-E4M3's half-ulp is 3.1-6.25% of each weight against bf16's 0.20-0.39%.
 

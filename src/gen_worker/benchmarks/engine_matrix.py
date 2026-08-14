@@ -1,6 +1,6 @@
-"""Acceleration-matrix driver: one arm per technique, one lane per arm (pgw#1011).
+"""Acceleration-matrix driver: one arm per technique, one lane per arm.
 
-pgw#1011 has to answer "which acceleration technique is worth adopting on OUR
+The question is "which acceleration technique is worth adopting on OUR
 silicon" for a model whose every published number was measured on somebody
 else's, on hardware we do not have. That is a MATRIX — technique x cell — and
 the expensive part is not the measurement, it is the pod. Three facts fix the
@@ -13,7 +13,7 @@ shape of this harness:
   have no business existing on the request path at all.
 * **The lane is pluggable, because the candidates do not share a runtime.**
   Some techniques are server CLI flags (SGLang ``--attention-backend``,
-  ``--quantization fp8``); the ones pgw#1011 actually ranks first are
+  ``--quantization fp8``); the ones ranked first are
   in-process diffusers changes (the AdaLN-branch cache, ``cache-dit``, a
   resolution-matched warmup, a sage backend swap). A driver that assumed a
   server subprocess could not measure the techniques we care most about, so it
@@ -108,11 +108,11 @@ class Plan(msgspec.Struct, frozen=True, kw_only=True):
     payload: Dict[str, Any] = msgspec.field(default_factory=dict)
     arms: Tuple[Arm, ...] = ()
     #: Timed repetitions per arm AFTER the warmup reps. MEDIANS, not means:
-    #: ie#612 measured 2.7x warm variance on an identical payload, and a mean
-    #: over that is a number about the tail, not about the technique.
+    #: warm variance measures 2.7x on an identical payload, and a mean over
+    #: that is a number about the tail, not about the technique.
     reps: int = 3
     #: Discarded reps run first. A cold first call is a different measurement
-    #: (ie#612 measured 4.4x cold/warm) and mixing them hides both.
+    #: (measured 4.4x cold/warm) and mixing them hides both.
     warmup_reps: int = 1
     notes: str = ""
 

@@ -1,4 +1,4 @@
-"""pgw#763 layer 1: control/compute process split.
+"""Control/compute process split.
 
 Parent = control plane (gRPC stream, identity, JWT, job accounting) — never
 imports torch. Child = compute plane (executor, CUDA context, models, endpoint
@@ -24,21 +24,19 @@ ENV_CHILD = "GEN_WORKER_COMPUTE_CHILD"
 ENV_SOCKET = "GEN_WORKER_CHILD_SOCKET"
 ENV_CHILD_CMD = "GEN_WORKER_CHILD_CMD"
 ENV_WATCHDOG_PING_S = "GEN_WORKER_CHILD_WATCHDOG_PING_S"
-# pgw#771: the LOOP-INDEPENDENT liveness channel. The frame ping above rides
-# the child's event loop, which a long inductor compile starves — so on its own
-# it turns a live compile into a SIGKILL labelled watchdog_hang (th#1299 one
-# layer down). A thread writes this fd instead, carrying the same kernel-
-# accounted evidence activity.watchdog already trusts.
+# The LOOP-INDEPENDENT liveness channel. The frame ping above rides the child's
+# event loop, which a long inductor compile starves — so on its own it turns a
+# live compile into a SIGKILL labelled watchdog_hang. A thread writes this fd
+# instead, carrying the same kernel-accounted evidence activity.watchdog trusts.
 ENV_LIVENESS_FD = "GEN_WORKER_CHILD_LIVENESS_FD"
-# pgw#783: the PARENT mints the worker session id once and passes it to every
-# child. Child-minted (uuid4 in IntentRegistry) it changes on every respawn —
-# and the hub rejects cross-session shadow state, so a respawned child's shadow
-# state was silently invalidated (a latent defect even at G=1). The parent owns
-# the session, so the parent mints it, and it survives child respawns. At G>1
-# all children share it (the hub sees one worker, one session).
+# The PARENT mints the worker session id once and passes it to every child.
+# Child-minted it changes on every respawn, and the hub rejects cross-session
+# shadow state, so a respawned child's shadow state is silently invalidated. The
+# parent owns the session, so it survives child respawns. At G>1 all children
+# share it (the hub sees one worker, one session).
 ENV_SESSION_ID = "GEN_WORKER_SESSION_ID"
 
-# pgw#783: one child per EXECUTION GROUP. The hub's delivered packing is the
+# One child per EXECUTION GROUP. The hub's delivered packing is the
 # only source of G — there is no new knob to mis-set.
 ENV_TOPOLOGY = "WORKER_EXECUTION_TOPOLOGY"
 # Which group this child owns. It labels logs/dials and selects one-writer
@@ -47,7 +45,7 @@ ENV_TOPOLOGY = "WORKER_EXECUTION_TOPOLOGY"
 # SINGLE-group worker over its own cards (see procsplit.group).
 ENV_GROUP_ORDINAL = "GEN_WORKER_GROUP_ORDINAL"
 # How many compute children share this pod's cgroup. The one fact a child
-# needs about its siblings: the CPU (pgw#782) and host-RAM (pgw#752) budgets
+# needs about its siblings: the CPU and host-RAM budgets
 # are pod-wide quotas that must be divided by it, and the child's own rewritten
 # topology says G == 1.
 ENV_HOST_SIBLINGS = "GEN_WORKER_HOST_SIBLINGS"

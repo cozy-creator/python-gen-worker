@@ -1,27 +1,18 @@
-"""pgw#1071: modular hydration loads every component at ITS OWN checkpoint
-dtype.
+"""Modular hydration loads every component at ITS OWN checkpoint dtype.
 
-ie#615 measured the wall on minimax-h3 (gen-worker 0.96.1, pods
-``zbddo87qmm9e5c``/``0u7so0yxv3ag82``/``qt9ril82eb4t41``): the hydrated
-``MiniMaxH3Transformer3DModel`` weighed **74.9 GiB against a 66.28 GB bf16
-checkpoint** — ``ff.net.0.proj.weight`` at exactly 4 bytes/param. The DiT
-alone landed at 78.0 GiB on a 79.18 GiB H100 (CUDA OOM on every full-canvas
-request, where the correctly-dtyped module lands at 37.5 GiB) and host
-staging anon doubled to ~130 GB, which is the pgw#1041/#1063 pressure.
-
-The mechanism, and BOTH of its halves: the modular lane derived ONE dtype
-from a majority vote over every safetensors header in the snapshot and
-applied it to every component.
+Deriving ONE dtype from a majority vote over every safetensors header in the
+snapshot and applying it to every component breaks both ways:
 
 * vote falls outside the sniff's vocabulary (a tree whose wide parts
   outnumber the stack, or unreadable headers) -> no dtype at all ->
-  diffusers' fp32 default upcasts the narrow stack. The H3 wall.
+  diffusers' fp32 default upcasts the narrow stack. On minimax-h3 that put a
+  66.28 GB bf16 checkpoint at 74.9 GiB resident and OOM'd an H100.
 * vote falls narrow -> a component the checkpoint stores WIDE is silently
   truncated. H3's VAEs carry the opposite instruction in their own source
   ("a pipeline-level torch_dtype=bfloat16 must not downcast the weights").
 
-Real diffusers modular pipelines and real safetensors throughout (the
-pgw#1036 harness), under ``HF_HUB_OFFLINE=1``.
+Real diffusers modular pipelines and real safetensors throughout, under
+``HF_HUB_OFFLINE=1``.
 """
 
 from __future__ import annotations

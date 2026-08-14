@@ -1,29 +1,26 @@
-"""Installed-distribution RECORD manifests — the declared content facts
-(pgw#1095, executing pgw#1050's ruling on the SEAL path).
+"""Installed-distribution RECORD manifests — the declared content facts.
 
 A wheel's ``dist-info/RECORD`` already carries, per installed file, the
 **sha256 the installer verified at install time** and the size it wrote. That
 is the same fact ``sha256(content)`` recomputes, so a boot that needs the
 content identity of ``libtorch_cuda.so`` can READ it instead of re-hashing
 3.96 GB of shipped toolchain (measured: 10.6-17.3 s per process, 68 % of a
-33.7 s cold boot through ``env_seal.establish``, pgw#1087).
+33.7 s cold boot through ``env_seal.establish``).
 
-Two consumers, ONE derivation (the pgw#1059 fence pattern):
+Two consumers, ONE derivation:
 
 * :func:`digest_for` — per-FILE identity for ``env_seal``'s native-library
   manifest (the seal's ``loaded_libs`` fact and the live substitution check).
 * :func:`record_texts` — per-DISTRIBUTION RECORD text for
-  ``compile_cache.toolchain_digest``'s binary half (pgw#710), which has always
-  read exactly these files.
+  ``compile_cache.toolchain_digest``'s binary half, which reads exactly these
+  files.
 
 **The digest is byte-identical to the hash it replaces.** RECORD stores
 ``sha256=<urlsafe-b64 of the 32 raw bytes>``; decoding to hex and truncating
-to 16 chars reproduces ``hashlib.sha256(content).hexdigest()[:16]`` exactly.
-Proven over the whole 36-library manifest on this env (0 disagreements), which
-is what makes this a pure COST move: no seal value changes, no cell re-keys.
+to 16 chars reproduces ``hashlib.sha256(content).hexdigest()[:16]`` exactly. So
+this is a pure COST move: no seal value changes, no cell re-keys.
 
-**What RECORD trust is, precisely** (stated so the trade is ruled on, not
-buried — the honest scope of item (3) in this lane's brief):
+**What RECORD trust is, precisely:**
 
 * The installer verified the hash when it wrote the file. It is NOT re-verified
   at load time, so RECORD trust is a claim about install, extended forward by
@@ -36,11 +33,10 @@ buried — the honest scope of item (3) in this lane's brief):
   RECORD does not describe itself.
 * NOT CAUGHT: an in-place rewrite that preserves the byte SIZE *and* restores
   the original ``mtime_ns``. A full-hash boot would have seen that and moved
-  the seal. This is the one place RECORD trust is weaker than the status quo,
-  and it is the same forge the pgw#832 memo and the ``_lib_digest`` lru_cache
-  (both keyed on ``(path, mtime_ns, size)``) have always been open to — an
-  actor able to do it already holds write access to site-packages, i.e. to
-  ``env_seal.py`` itself.
+  the seal. This is the one place RECORD trust is weaker than hashing, and it is
+  the same forge the memo and the ``_lib_digest`` lru_cache (both keyed on
+  ``(path, mtime_ns, size)``) are open to — an actor able to do it already holds
+  write access to site-packages, i.e. to ``env_seal.py`` itself.
 """
 
 from __future__ import annotations
@@ -165,7 +161,7 @@ def _scan() -> _Scan:
 def record_texts() -> Mapping[str, str]:
     """``{distribution name (lowercased): RECORD text}`` for every installed
     distribution that ships one — ``compile_cache.toolchain_digest``'s
-    per-PACKAGE binary half (pgw#710), reading the same scan the seal's
+    per-PACKAGE binary half, reading the same scan the seal's
     per-FILE half reads."""
     return _scan().texts
 

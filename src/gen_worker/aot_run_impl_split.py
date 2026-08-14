@@ -1,8 +1,7 @@
-"""Split AOTI's generated ``run_impl`` across K translation units (pgw#811).
+"""Split AOTI's generated ``run_impl`` across K translation units.
 
-pgw#793 shipped the constants-constructor half of this problem. This is the
-other, larger half. Two independent compiler profiles of the real banked
-SDXL w8a8 wrapper agree: parse is 3-5% of the compile and
+Two independent compiler profiles of the real banked SDXL w8a8 wrapper
+agree: parse is 3-5% of the compile and
 ``AOTInductorModel::run_impl`` ALONE is 68% of it (clang attributes 128.84 s
 of a 189.6 s compile to one ``OptFunction``). The cost is superlinear in a
 SINGLE function's size — measured n^1.57 — because both compilers burn in
@@ -29,8 +28,8 @@ emitted statements' ``this->device_idx_``, ``this->cubin_dir_``,
 ``constants_->at(n)`` and the verbatim ``kernels`` binding all resolve
 against the ctx unmodified.
 
-FAIL-CLOSED BY CONSTRUCTION, as v1 is. :func:`reconstruct` is a
-self-contained mechanical inverse: reading ONLY the split output, it drops
+FAIL-CLOSED BY CONSTRUCTION. :func:`reconstruct` is a self-contained
+mechanical inverse: reading ONLY the split output, it drops
 every generated line, restores every displaced one, splices the part bodies
 back in order, and must reproduce the input byte for byte. It consumes no
 side table from the transform, so it cannot be fooled by the transform's own
@@ -55,8 +54,8 @@ MARK = "  //@pgw811"
 #: Re-derivations carry their own marker because the inverse must VERIFY
 #: them rather than drop them: they are copies of a declaration that the
 #: reconstruction still contains, so an altered copy has no original and is
-#: caught. (Dropping them blindly was a real hole — a mutated
-#: ``constants_->at(n)`` binding survived the gate until this existed.)
+#: caught. Dropping them blindly lets a mutated ``constants_->at(n)`` binding
+#: through the gate.
 MARK_RD = "  //@pgw811:rederived"
 WAS = "//@pgw811:was:"
 PARTS = "//@pgw811:parts"
@@ -66,7 +65,7 @@ CHUNK_END = "//@pgw811:chunk:end:"
 PREFIX = "_pgw811_"
 CTX = f"{PREFIX}run_ctx"
 
-#: Default K. pgw#793's sweep on the real TU: K=8 is the knee — K=16 buys
+#: Default K. Swept on the real TU: K=8 is the knee — K=16 buys
 #: 0.5 s of wall and costs ~4 s more CPU (8 extra TUs x the 0.8 s per-TU
 #: header floor), and on a 4-vCPU pod parts past K~8 are pure overhead.
 DEFAULT_PARTS = 8

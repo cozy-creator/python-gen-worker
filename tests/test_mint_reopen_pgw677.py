@@ -1,34 +1,27 @@
-"""pgw#677 REOPEN: the live break the 0.70.0 tapes could not see.
-
-The ie#546 final cycle measured, on gen-worker 0.70.0, a cold L4 pod
-holding one tenant `generate` for 26m25s while an 18-unit mint ran
-4-7-minute units back to back, finalizing at unit 8/18 and publishing
-nothing — with the turn gate armed. Root causes, each pinned here:
+"""A background mint must not starve the tenant, oversize a stolen turn, or
+lose its publish outcome. Three failure modes, each pinned here:
 
   1. ELIGIBILITY MISCLASSIFICATION (the starvation): sdxl's mixed
      ``#fp8-w8a8``-storage checkpoint stamps ``_cozy_weight_lane =
      "w8a8-lora64"`` while the hub serves it ``fp8-w8a16+eager``. The
-     eager-first eligibility (and the router's ``fail_closed``) read the
-     weight-lane prefix, classified the boot mandatory-quantized, and
-     silently fell back to the FOREGROUND compile-then-serve mint: the
-     tenant sat inside ensure_setup for the whole inline-compile plan,
-     and the entire pgw#677 gate/preemption machinery never ran.
-     Fix: ONE serveability brain (``compile_cache.mandatory_serving``) —
-     the hub-resolved execution lane outranks the weight-lane stamp.
+     an eligibility check reading the weight-lane prefix classifies the
+     boot mandatory-quantized and silently falls back to the FOREGROUND
+     compile-then-serve mint, so the tenant sits inside ensure_setup for
+     the whole inline-compile plan and the gate/preemption machinery
+     never runs. ONE serveability brain
+     (``compile_cache.mandatory_serving``): the hub-resolved execution
+     lane outranks the weight-lane stamp.
   2. STOLEN-COMPILE SIZING: a stolen turn is not preemptible and a real
      inductor compile is 4-7 unabortable minutes — ~100x the advertised
      30-90s residual. Compile turns now steal only against MINUTES of
      continuous demand (``_BG_COMPILE_STEAL_FLOOR_S``) and announce the
      steal on the wire.
-  3. THE PUBLISH BREAK: every mint-abort / publish-withhold /
-     closure-refusal exit died in unreachable pod logs. All of them now
+  3. THE PUBLISH BREAK: a mint-abort / publish-withhold /
+     closure-refusal exit dying in unreachable pod logs. All of them
      ride the wire as typed events (``self_mint_abort``,
      ``self_mint_publish_withheld``, ``self_mint_publish_failed``), and
-     an OOM-truncated warm plan can no longer converge silently into a
-     partial finalize.
-
-Every tape here is RED on the 0.70.0 tree (this file is self-contained
-so it can be dropped onto that tree to prove it).
+     an OOM-truncated warm plan cannot converge silently into a partial
+     finalize.
 """
 
 from __future__ import annotations
@@ -195,7 +188,7 @@ class _Harness:
         monkeypatch.setattr(store_mod, "ensure_local", _fake_ensure_local)
         monkeypatch.setattr(
             fleet_cells, "enable_compiled", self._fake_enable_compiled)
-        # pgw#1010: every mint is a CHILD mint now (the in-process capture only
+        # Every mint is a CHILD mint now (the in-process capture only
         # ever built a dynamo cell). This harness has no child process, so the
         # child's OUTCOME is stubbed — what it is testing is the serving side
         # around it: eager-first, the tenant never starving, the router, and
@@ -203,7 +196,7 @@ class _Harness:
         # `compiled` wrapper does, on the boot/warm thread, exactly as before.
         monkeypatch.setattr(
             mint_delegate, "build_cell", self._fake_build_cell)
-        # pgw#1181: the pgw#681 mint gate this simmed is deleted.
+        # The pgw#681 mint gate this simmed is deleted.
         # `guard_closure.closure_manifest` classified every compiled graph at
         # the MINT and wrote the result into the cell's metadata; it went with
         # the `torch-inductor-cache` format that carried it, so a rig whose
@@ -231,7 +224,7 @@ class _Harness:
         artifact: Any = None, publisher: Any = None,
     ) -> fleet_cells.ArmOutcome:
         mint_root = self.tmp_path / f"mint-{id(pipe)}"
-        # pgw#1010: OUTSIDE mint_root. The publish gate rmtree's mint_root when
+        # OUTSIDE mint_root. The publish gate rmtree's mint_root when
         # a mint resolves with no sink, and this rig's simulated compile writes
         # its "graphs" long after that.
         capture = self.tmp_path / f"capture-{id(pipe)}"
@@ -437,7 +430,7 @@ def test_w8a8_stamp_without_execution_lane_evidence_stays_foreground(
 # ---------------------------------------------------------------------------
 
 
-# pgw#1010: `test_multi_minute_compile_never_steals_against_live_demand` stood
+# `test_multi_minute_compile_never_steals_against_live_demand` stood
 # here. Its mechanism was the IN-PROCESS mint's background compile turns
 # competing with tenant demand — the mint compiles in a child process now, so
 # there are no in-process mint turns to steal with. The steal floors
@@ -488,7 +481,7 @@ def test_compile_steal_is_announced_on_the_wire(
 # ---------------------------------------------------------------------------
 
 
-# pgw#1010: `test_pack_or_closure_refusal_reaches_the_wire` and
+# `test_pack_or_closure_refusal_reaches_the_wire` and
 # `test_oom_truncated_plan_never_finalizes_partial_capture` stood here. Both
 # assert a PACK — of an in-process inductor capture, into a dynamo cell — and
 # both go with it. The surviving half of "a refusal reaches the wire" is the

@@ -1,7 +1,7 @@
-"""Measured serving-kernel lane selection (pgw#863, pgw#947).
+"""Measured serving-kernel lane selection.
 
-The svdq serving path has TWO independent kernel choices, and pgw#863 is the
-proof they cannot be one switch:
+The svdq serving path has TWO independent kernel choices, and they cannot be
+one switch:
 
     linear      W4A4 matmuls: ``fused`` (our triton kernels) or ``baseline``
                 (the open unfused chain). A THROUGHPUT question.
@@ -12,60 +12,48 @@ proof they cannot be one switch:
 Which COMBINATION wins on a card is a per-card FACT, not a derivable one: a
 custom op is opaque to inductor, so on sm_120 our fusion beats what inductor
 can do with the open chain and on sm_100 it loses to it by 19%, while the
-packed modulation is worth having on both. That used to be two
-hand-maintained SM tuples, informed by ~$12 benchmark campaigns per card and
-one human edit per new card class — and while they were ONE tuple, sm_100
-had to give up either 9.5 GB of residency or 19% of its step time, because a
-single switch cannot express "baseline linears, packed modulation".
+packed modulation is worth having on both. Deliberately NOT a hand-maintained
+SM tuple per axis: a single switch cannot express "baseline linears, packed
+modulation", so sm_100 would have to give up either 9.5 GB of residency or
+19% of its step time.
 
-This module replaces both tuples with a measurement taken on the card the
-cell is being minted for, recorded INTO the cell, and adopted by serving:
+The verdict is a measurement taken on the card the cell is being minted for,
+recorded INTO the cell, and adopted by serving:
 
     mint      probe(candidates, ...) -> Verdict     (every buildable
               combination built, compiled, and timed on the target card, in
-              the pgw#784 mint process)
+              the mint process)
     envelope  metadata.json["kernel_lane"] — the DISCRETE verdict, plus each
               candidate's QUANTIZED peak and the fallback order
     result    metadata["kernel_lane_evidence"] — the numbers, published with
-              the checkpoint, never packed (the #699 double-mint byte-compare
+              the checkpoint, never packed (the double-mint byte-compare
               forbids wall clocks inside the artifact)
     serve     adopt(meta) -> re-apply the fit rule on THIS card -> pin(); the
               load-time swap reads the pin, each axis projecting its own
               value out of it
 
 CELL KEYS ARE KEYED ON SM, AND THE LANE IS DELIBERATELY NOT A KEY AXIS (that
-would fork the namespace and halve reuse). One SM class is therefore many
-cards: a cell minted on a 96 GB RTX PRO 6000 and a 32 GB RTX 5090 share a
-key. Two GPUs of one compute capability cannot be assumed to want the same
-kernels, so a recorded verdict is EVIDENCE, not an instruction — serving
-RE-APPLIES the fit constraint against its own detected total before it
-adopts, and falls to the fastest candidate that does fit here with a typed
-reason when the minting card's winner does not. That is why each candidate's
-peak rides the packed envelope beside the winner: bytes are discrete, wall
-clocks are not, so the fit half of the rule can be re-applied by a worker
-that will never see the timings.
+would fork the namespace and halve reuse), so one SM class is many cards (a
+96 GB RTX PRO 6000 and a 32 GB RTX 5090 share a key) and a recorded verdict is
+EVIDENCE, not an instruction: serving RE-APPLIES the fit constraint against its
+own detected total before it adopts, and falls to the fastest candidate that
+does fit here with a typed reason. That is why each candidate's peak rides the
+packed envelope beside the winner — bytes are discrete, wall clocks are not, so
+the fit half of the rule can be re-applied by a worker that will never see the
+timings.
 
 A lane is therefore a COMBINATION, written ``"<linear>+<modulation>"``
 (``"baseline+packed"``, ``"fused+dense"``, ...). Measuring the combinations
-rather than each axis alone is deliberate: it assumes no independence between
-them, and it is what lets ONE rule price a residency win and a throughput win
-against each other instead of hard-coding which one matters.
+rather than each axis alone assumes no independence between them, and is what
+lets ONE rule price a residency win and a throughput win against each other
+instead of hard-coding which one matters.
 
-THE SELECTION RULE (Paul, 2026-08-03): **fit-constrained speed
-maximization.** Among lanes whose measured peak VRAM fits the target card
-with headroom, pick the FASTEST. VRAM is a CONSTRAINT, not an objective — it
-breaks a tie only when two lanes are within the speed noise margin. On a
-B200 that means baseline linears (228 ms/step) over fused (350 ms/step): the
-card has the room. The packed modulation is speed-NEUTRAL, so it wins its
-axis on exactly that tiebreak — the smaller peak — which is how sm_100 ends
-up on ``baseline+packed`` without anyone writing that down. On a 32 GB card
-the fit constraint does real work and can exclude a faster lane outright.
-
-`models/w4a4.py::_gemm_profitable` is the in-tree precedent — it
-micro-benchmarks fp4 against bf16 at boot and refuses to arm unless it wins
-by a real margin. This is that mechanism one level up: whole compiled graphs
-instead of one GEMM, paid once at mint instead of on every boot, and
-RECORDED instead of re-derived.
+THE SELECTION RULE: **fit-constrained speed maximization.** Among lanes whose
+measured peak VRAM fits the target card with headroom, pick the FASTEST. VRAM is
+a CONSTRAINT, not an objective — it breaks a tie only when two lanes are within
+the speed noise margin. The packed modulation is speed-NEUTRAL, so it wins its
+axis on exactly that tiebreak, the smaller peak. On a 32 GB card the fit
+constraint does real work and can exclude a faster lane outright.
 """
 
 from __future__ import annotations
@@ -160,7 +148,7 @@ FRAGMENTATION_HEADROOM_BYTES = 1 << 30  # 1 GiB
 
 # Peaks recorded in the PACKED envelope are quantized (rounded UP). A raw
 # `max_memory_allocated()` is a MEASUREMENT, and an unrounded measurement in
-# metadata.json is precisely what the #699 double-mint byte-compare forbids —
+# metadata.json is precisely what the double-mint byte-compare forbids —
 # an autotuned kernel picking a different workspace on the second mint would
 # move the number and strand the cell. Rounding to a coarse grain makes the
 # recorded byte count reproducible for the same reason `MARGIN_FRACTION`
@@ -202,7 +190,7 @@ BIND_FIT = "fit"
 BIND_VRAM_TIEBREAK = "vram_tiebreak"
 BIND_SOLE_CANDIDATE = "sole_candidate"
 BIND_NO_FIT = "no_fit"
-#: pgw#1080: the mint held no weights, so no whole-model A/B was run.
+#: The mint held no weights, so no whole-model A/B was run.
 BIND_UNMEASURED = "unmeasured"
 
 
@@ -382,7 +370,7 @@ def select(
 
 def unmeasured(execution_lane: str, detail: str) -> Verdict:
     """The verdict for a mint that COULD have benchmarked and deliberately did
-    not (pgw#1080).
+    not.
 
     The lane A/B is a whole-model benchmark: it loads one full pipeline per
     candidate and times a real step, so it needs weight-scale residency —
@@ -535,9 +523,7 @@ def packed_candidate_gap() -> str:
 
     No SM term at all, deliberately: the W4A16 dequant-GEMM is ordinary
     triton with no block-scaled-MMA dependency, so it builds on any CUDA card
-    triton supports. pgw#863 carried a Blackwell tuple for it purely because
-    it shared a switch with the fused linear; separating the axes removes the
-    reason, and the measurement decides the rest.
+    triton supports. The measurement decides the rest.
     """
     try:
         from .models.svdq_awq_packed import awq_packed_self_check
@@ -673,8 +659,8 @@ def fit_block(verdict: Verdict) -> Dict[str, Any]:
 def envelope_block(verdict: Verdict) -> Dict[str, Any]:
     """The DISCRETE verdict, for ``metadata.json`` inside the packed cell.
 
-    Deliberately carries no wall clocks: the #699 double-mint byte-compare
-    requires the artifact to be reproducible, and milliseconds are not. Peak
+    Deliberately carries no wall clocks: the double-mint byte-compare requires
+    the artifact to be reproducible, and milliseconds are not. Peak
     BYTES are a different kind of number — discrete, quantized here, and
     load-bearing for a card that shares this cell's SM but not its memory —
     so they ride the envelope while the timings stay in

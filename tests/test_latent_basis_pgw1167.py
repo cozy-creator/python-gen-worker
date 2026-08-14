@@ -1,11 +1,9 @@
-"""pgw#1167 — the declared latent divisor is reconciled against the pipeline.
+"""The declared latent divisor is reconciled against the pipeline.
 
 The class rows are derived by dividing declared PIXEL shapes by a latent
-divisor the author passes to `derive.cfg_image_classes(latent_scale=…)`.
-Nothing checked that divisor against the checkpoint, so a wrong one produced a
-whole cell of correctly-shaped, permanently unusable artifacts — silent, and
-paid for at full mint price. On the census of accepted-but-wrong declarations
-it was the only entry that costs a FULL MINT.
+divisor the author passes to `derive.cfg_image_classes(latent_scale=…)`. An
+unchecked divisor produces a whole cell of correctly-shaped, permanently
+unusable artifacts — silent, and paid for at full mint price.
 
 WHY IT IS CHECKED AT `mint()` AND NOWHERE EARLIER
 
@@ -28,9 +26,8 @@ subclass that carries it out with the rows it produced, and
 `Compile.__post_init__` transfers it to `Compile.latent_basis` BEFORE the row
 coercion rebuilds `classes` as a plain tuple. Transport, then a cell-level
 home — never a second declaration by the author, and never a cell-wide scalar
-stamped on every row and read back off `rows[0]` (the shape that produced a P0
-filed on a false premise, because a label written beside a thing cannot be
-told from one describing it).
+stamped on every row and read back off `rows[0]`: a label written beside a thing
+cannot be told from one describing it.
 """
 
 from __future__ import annotations

@@ -1,26 +1,18 @@
-"""ie#655: the EXECUTION axis of `metrics.lane` is reported, not derived.
+"""The EXECUTION axis of `metrics.lane` is reported, not derived.
 
-The live defect (master stack, pod `sbzo69ff5t0l44`, an H100 80GB HBM3, both
-billed wan-2.2 canary requests `774a84f3-…` / `e1baede2-…`, endpoint 0.4.13 on
-gen-worker 0.103.0): the worker declined its own compile mint
-(`self_mint_skipped reason=insufficient_vram headroom=37.68GiB
-needed~=72.54GiB … this worker serves eager for the rest of its life`), said
-`eager` three times in its own boot rows, served eager — and reported
-`metrics.lane = fp8-w8a8-dynamic+compiled` on both requests.
-
-pgw#1104 fixed the WEIGHTS axis by having the recipe REPORT what it applied.
-The EXECUTION axis was left derived, and it erred in the FLATTERING direction:
-`_served_execution_lane` ran the lane table's PLANNING coercion — the
+A DERIVED execution axis errs in the FLATTERING direction: running the lane
+table's PLANNING coercion over an observed eager posture rewrites the fact (the
 `fp8-w8a8-dynamic` body is compiled-only because eager w8a8 is UNMEASURED, not
-because it cannot happen — over an observed eager posture, and rewrote the
-fact. The lane id feeds pricing, quant verdicts, serving floors and cell
-identity, so an over-claim there is the worst direction available.
+because it cannot happen). A worker that declined its own compile mint and
+served eager then reports `fp8-w8a8-dynamic+compiled`. The lane id feeds
+pricing, quant verdicts, serving floors and cell identity, so an over-claim
+there is the worst direction available.
 
 REVERT-TURNS-RED: `test_an_eager_worker_reports_an_eager_lane_on_the_wire`
 reads `fp8-w8a8-dynamic+compiled` on the pre-fix tree, over the real gRPC
 terminal path, with `serving_mode=eager` on the same JobMetrics.
 
-The invariant is now STRUCTURAL rather than checked: the lane's execution axis
+The invariant is STRUCTURAL rather than checked: the lane's execution axis
 IS `ServedIdentity.serving_mode`, the same object `metrics.serving_mode` is
 stamped from, composed at the same instant. There is no second reading left to
 disagree with.
@@ -77,7 +69,7 @@ def test_the_lane_and_the_serving_mode_are_one_reading() -> None:
 
 
 def test_ctx_execution_lane_carries_the_same_string() -> None:
-    """`ctx.lane` is the handler's copy of the reported lane (th#1050), so it
+    """`ctx.lane` is the handler's copy of the reported lane, so it
     must not be the flattering one either — an author kernel that branches on
     `+compiled` would otherwise take the compiled branch on an eager pod."""
     res = _run("r-ie655-ctx")

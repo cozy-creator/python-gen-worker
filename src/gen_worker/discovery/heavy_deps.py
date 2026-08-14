@@ -26,23 +26,20 @@ helper finder is armed transiently inside the retry, so probe results stay
 honest. ``HeavyDepStubError`` subclasses ``AttributeError`` so defaulted
 ``getattr(mod, "__version__", ...)`` probes on a stub degrade gracefully.
 
-**AND THE SAME RULE BINDS THE OTHER PROBE IDIOM — pgw#1197.** The paragraph
-above is right about ``find_spec`` and was blind to its twin: libraries also
-probe with ``try: import X / except ImportError``, and a stub satisfies THAT
-probe too. A root nothing imports at module scope but everything probes must
-therefore not be stubbed at all — see :data:`NEVER_STUB`. Stubbing it buys
-nothing and turns "absent" into "present but landmined".
+**THE SAME RULE BINDS THE OTHER PROBE IDIOM.** ``find_spec`` has a twin:
+libraries also probe with ``try: import X / except ImportError``, and a stub
+satisfies THAT probe too. A root nothing imports at module scope but everything
+probes must therefore not be stubbed at all — see :data:`NEVER_STUB`. Stubbing
+it buys nothing and turns "absent" into "present but landmined".
 
-Why the exception type is not the fix, since it is the obvious first idea and
-it is wrong twice over. (1) ``HeavyDepStubError`` cannot be both an
-``AttributeError`` and an ``ImportError``: CPython refuses the dual base with
-*"multiple bases have instance lay-out conflict"*. (2) Dropping the
-``AttributeError`` base to gain the ``ImportError`` one **breaks
-``from torch import nn``** — the import machinery's submodule fallback catches
-``AttributeError`` on ``torch.__path__``, so an ``ImportError`` there kills the
-very import this module exists to make free. MEASURED both ways. And it would
-not have fixed the reported chain anyway: the fatal
-``triton.language.dtype`` touch is not inside any ``try``.
+Changing the exception type is NOT the fix, twice over. (1)
+``HeavyDepStubError`` cannot be both an ``AttributeError`` and an
+``ImportError``: CPython refuses the dual base with *"multiple bases have
+instance lay-out conflict"*. (2) Dropping the ``AttributeError`` base to gain
+the ``ImportError`` one **breaks ``from torch import nn``** — the import
+machinery's submodule fallback catches ``AttributeError`` on ``torch.__path__``,
+so an ``ImportError`` there kills the very import this module exists to make
+free.
 
 Extension point: the allowlist is ``DEFAULT_HEAVY_ROOTS`` plus per-project
 ``[tool.gen_worker] discovery_heavy_deps = ["my_heavy_lib"]`` entries
@@ -70,7 +67,7 @@ DEFAULT_HEAVY_ROOTS: tuple[str, ...] = (
     "torchaudio",
 )
 
-#: pgw#1197: roots that must NEVER be stubbed, with the reason attached.
+#: Roots that must NEVER be stubbed, with the reason attached.
 #:
 #: These are OPTIONAL ACCELERATORS. No endpoint imports them at module scope —
 #: they are reached inside kernels and handlers — but every major library
@@ -79,16 +76,11 @@ DEFAULT_HEAVY_ROOTS: tuple[str, ...] = (
 #: PRESENT and goes on to use it. Stubbing them therefore buys nothing and
 #: converts a clean "absent" into "present but landmined".
 #:
-#: MEASURED (pgw#1197, torch 2.13.0, triton genuinely absent):
+#: MEASURED (torch 2.13.0, triton genuinely absent):
 #: ``torch.utils._triton.has_triton_package()`` is exactly that idiom, so it
-#: answered **True** with triton absent; ``torch/_dynamo/utils.py:2874-2877``
-#: then ran ``common_constant_types.add(triton.language.dtype)`` — which is
-#: NOT inside any ``try`` — and every module reaching ``torch._dynamo`` died.
-#: The chain killed a conversion build through diffusers' ``PeftAdapterMixin``.
-#:
-#: This is the module docstring's own find_spec rationale, applied to the other
-#: availability-probe idiom. We already refused to fool ``find_spec`` probes;
-#: we were fooling ``import`` probes at the same time.
+#: answers **True** with triton absent; ``torch/_dynamo/utils.py`` then runs
+#: ``common_constant_types.add(triton.language.dtype)`` — which is NOT inside
+#: any ``try`` — and every module reaching ``torch._dynamo`` dies.
 NEVER_STUB: dict[str, str] = {
     "triton": "torch.utils._triton.has_triton_package() probes it by import; "
               "a stub makes torch._dynamo touch triton.language and die",
@@ -175,7 +167,7 @@ def stub_missing_heavy_deps(extra: Iterable[str] = ()) -> Iterator[frozenset[str
     still fails loudly.
     """
     roots = dict.fromkeys((*DEFAULT_HEAVY_ROOTS, *extra))
-    # pgw#1197: the extension point may not re-arm the landmine. A project
+    # The extension point may not re-arm the landmine. A project
     # listing a probed root in `[tool.gen_worker] discovery_heavy_deps` gets it
     # dropped, loudly — silently honouring it would reintroduce the defect
     # with no trace in the build log.

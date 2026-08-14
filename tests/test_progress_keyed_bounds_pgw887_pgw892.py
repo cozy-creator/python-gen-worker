@@ -1,13 +1,11 @@
-"""pgw#887 + pgw#892 — three flat wall clocks that ended REAL WORK.
+"""Three flat wall clocks that ended REAL WORK.
 
-Paul's standing rule, and `stall.py`'s own opening line: *nothing that can END
-REAL WORK may key on a wall clock. A fixed budget cannot tell a healthy
-three-hour transfer from a wedge, so it is either useless or it kills work
-that was about to succeed.* DESIGN-RULINGS §2 states the same thing as a
-boundary: a deadline may bound a COMMAND, never the WORK.
+The rule (also `stall.py`'s opening line): *nothing that can END REAL WORK may
+key on a wall clock. A fixed budget cannot tell a healthy three-hour transfer
+from a wedge, so it is either useless or it kills work that was about to
+succeed.* A deadline may bound a COMMAND, never the WORK.
 
-Three sites violated it, and each already had its replacement primitive
-in-repo:
+Three sites violated it; each replacement primitive already existed in-repo:
 
 * `lifecycle._finish_drain` — `wait_idle(timeout=deadline)` then
   `abort_all()`. A render at step 30/50 and one at step 1/50 aborted alike; a
@@ -39,7 +37,7 @@ from gen_worker.stall import SilenceWindow
 
 
 # ---------------------------------------------------------------------------
-# pgw#887 — the drain aborts on non-advancement, never on elapsed time
+# The drain aborts on non-advancement, never on elapsed time
 # ---------------------------------------------------------------------------
 
 
@@ -60,7 +58,7 @@ class _FakeExecutor:
 def _lifecycle(executor: Any, *, work_deadline_at: Any = None) -> Any:
     from gen_worker.lifecycle import Lifecycle
 
-    # Stubbed Lifecycles skip __init__ by repo convention (pgw#610).
+    # Stubbed Lifecycles skip __init__ by repo convention.
     obj = Lifecycle.__new__(Lifecycle)
     obj.executor = executor
     obj._drain_work_deadline_at = work_deadline_at
@@ -174,7 +172,7 @@ def test_an_explicit_operator_budget_still_binds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A `Drain` that arrives on the wire CARRYING `deadline_ms` is "an
-    explicit operator budget on a specific command" (th#1235), and that is
+    explicit operator budget on a specific command", and that is
     kept. What pgw#887 deletes is the worker INVENTING one: the SIGTERM
     handler's fleet default, which is what abandoned a 29-minute mint as
     `abandoned_shutdown`."""
@@ -207,7 +205,7 @@ def test_a_signal_drain_supplies_no_work_budget() -> None:
 
 def test_the_drain_no_longer_reads_a_deadline_for_the_tenant_wait() -> None:
     """Structural: the wait must not be reachable from `_drain_deadline_at`
-    again. The deadline still bounds the FLUSH (pgw#845), which ships results
+    again. The deadline still bounds the FLUSH, which ships results
     already held — a command, not the work."""
     import inspect
 
@@ -224,7 +222,7 @@ def test_the_drain_no_longer_reads_a_deadline_for_the_tenant_wait() -> None:
 
 
 # ---------------------------------------------------------------------------
-# pgw#892 — the two group-formation bounds
+# The two group-formation bounds
 # ---------------------------------------------------------------------------
 
 

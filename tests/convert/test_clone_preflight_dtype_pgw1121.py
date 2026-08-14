@@ -13,11 +13,10 @@ byte moved:
     (source 53.2 GiB; 1 materialized output tree(s); 2 GiB margin),
     have 199.9 GiB
 
-Live on master 2026-08-11, request `3190bc31-8091-440f-ae0e-413c522d2d8d`. The
-true need is 53.2 + 26.6 + 2 = ~82 GiB, which fits the 200 GB conversion pod
-2.4x over. Every dense fp32 upstream was un-castable at ingest.
+The true need is 53.2 + 26.6 + 2 = ~82 GiB, which fits the 200 GB conversion pod
+2.4x over; unfixed, every dense fp32 upstream is un-castable at ingest.
 
-The numbers below are that request's: 57,154,175,562 B of transformer_2 across
+The numbers below are a real request's: 57,154,175,562 B of transformer_2 across
 12 shards, 199.9 GiB free.
 
     pytest tests/convert/test_clone_preflight_dtype_pgw1121.py -q

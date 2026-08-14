@@ -37,7 +37,7 @@ from gen_worker.request_context import (
 )
 
 BLOB_BYTES = b"real blob bytes"
-# pgw#1013: both addresses are derived from the bytes the rig serves, because
+# Both addresses are derived from the bytes the rig serves, because
 # `_download_blob_by_digest` now verifies that the bytes hash to the digest
 # that named them. The subject of this file is unchanged — which ADDRESSES are
 # well-formed — but a rig serving one blob under an unrelated digest describes

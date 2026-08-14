@@ -178,8 +178,8 @@ class LocalDatasetContext(LocalRequestContextMixin, DatasetContext):
         *, origin: str = REF_ORIGIN_PAYLOAD,
     ) -> Path:
         # Same fallback as ConversionContext (origin is a provenance tag for
-        # the th#1259 breaker classification; the local CAS stub has no
-        # breaker, so it is accepted and unused here).
+        # breaker classification; the local CAS stub has no breaker, so it is
+        # accepted and unused here).
         d = (digest or "").strip()
         if not d:
             raise ValueError("materialize_blob: empty digest")

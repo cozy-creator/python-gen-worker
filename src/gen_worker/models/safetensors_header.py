@@ -1,6 +1,6 @@
 """The one bound on a safetensors declared header length.
 
-pgw#973 (DESIGN-RULINGS §4.24). A safetensors file opens with an 8-byte
+A safetensors file opens with an 8-byte
 little-endian header length taken straight from the file. It is attacker- or
 corruption-controlled, and every reader turns it directly into an allocation
 (``json.loads(f.read(n))``). Unbounded, one crafted file declaring 2**63-1
@@ -13,11 +13,9 @@ sizes a read and a parse before anything has validated it.
 WHY NOTHING ELSE PREVENTS IT: the length is read before any other structure
 exists, so there is nothing earlier to lean on. This bound is load-bearing.
 
-It was previously stated SIX times — ``models/w4a4.py``, ``models/w8a8.py``,
-``models/svdq.py``, ``models/loading.py``, ``convert/ingest.py`` all at
-100 MiB, and ``convert/writer.py`` at 512 MiB. The odd one out was not
-harmless: writer accepted headers loading would refuse, so the re-shard path
-could emit a shard the serving path could not open. Same bytes, two verdicts.
+Stated ONCE, here. A second copy that disagrees means the writer accepts headers
+the loader refuses, so the re-shard path emits a shard the serving path cannot
+open — same bytes, two verdicts.
 
 WHY 100 MiB AND NOT A MEASUREMENT: real safetensors headers are tens of KB;
 the largest sharded checkpoints in the fleet are a few MB of JSON. 100 MiB is

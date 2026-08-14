@@ -1,16 +1,16 @@
-"""pgw#1097 — THE FOLDING FENCE.
+"""THE FOLDING FENCE.
 
 One cell serves every fine-tune of a family because weights rebind BY NAME at
-load (pgw#857). That is sound only while the compiled code holds no weight
-VALUE. With ``constant_folding_fenced`` off — torch's default, and what
-every real-weight mint ran under until this issue — ``GraphLowering.get_attr``
-renders a constant's values straight into the kernel source when its SHAPE
-meets either rule: 0-dim (via ``.item()``), or ``len(shape) == 1 and
-shape[0] <= 8`` (``GraphLowering.can_inline_constant``). Such a weight then
-appears in NO table anyone could rebind, and every other fine-tune of the
-family adopts a cell carrying the minting checkpoint's tensor.
+load. That is sound only while the compiled code holds no weight VALUE. With
+``constant_folding_fenced`` off — torch's default —
+``GraphLowering.get_attr`` renders a constant's values straight into the kernel
+source when its SHAPE meets either rule: 0-dim (via ``.item()``), or
+``len(shape) == 1 and shape[0] <= 8``
+(``GraphLowering.can_inline_constant``). Such a weight then appears in NO table
+anyone could rebind, and every other fine-tune of the family adopts a cell
+carrying the minting checkpoint's tensor.
 
-MEASURED on torch 2.13.0+cu130 (pgw#1097, CPU):
+MEASURED on torch 2.13.0+cu130 (CPU):
 
     module          weight              shape   default   fenced
     ------          ------              -----   -------   ------
@@ -22,15 +22,14 @@ MEASURED on torch 2.13.0+cu130 (pgw#1097, CPU):
     Foldable        logit_scale         ()      GONE      bindable
     MicroDecoder    norm.weight         (128,)  bindable  bindable
 
-The last row is why the fleet never saw this: NO micro-family parameter is
-0-dim or 1-D-with-<=8-elements, so the gauntlet's two-checkpoint sharing proof
-(pgw#1073 scenario 6) passed on an architecture that cannot fold. sdxl can and
-does — its one recorded eliminated constant is ``unet.conv_out.bias``, 4 floats.
+The last row is why a micro-family gauntlet cannot see this: NO micro-family
+parameter is 0-dim or 1-D-with-<=8-elements, so a two-checkpoint sharing proof
+passes on an architecture that cannot fold. sdxl can and does — its one recorded
+eliminated constant is ``unet.conv_out.bias``, 4 floats.
 
 These tests do not compile. They exercise the fence's own logic against
-synthetic packages shaped exactly like AOTInductor's generated wrapper (the
-pgw#793 fixture shape), plus the config and declared-axis halves. The
-compile-side RED proof is a pod run — see pgw#1097's tracker section.
+synthetic packages shaped exactly like AOTInductor's generated wrapper, plus the
+config and declared-axis halves. The compile-side proof is a pod run.
 """
 
 from __future__ import annotations

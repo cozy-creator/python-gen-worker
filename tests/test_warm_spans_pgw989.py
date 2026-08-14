@@ -190,7 +190,7 @@ def test_the_drain_phase_no_longer_calls_itself_a_compile() -> None:
     assert activity.PHASE_INDUCTOR_COMPILE != activity.PHASE_ROUTER_DRAIN
 
 
-# pgw#1010: the parent's warm-ledger emission (`mint_delegate._emit_warm_ledger`
+# The parent's warm-ledger emission (`mint_delegate._emit_warm_ledger`
 # and its `_emit_jit_compile` caller) is deleted with the recipe it measured —
 # the mint child no longer runs a JIT warm plan, so a ledger from one can never
 # reach the parent. `WarmLedger` itself stays: the child still drives the

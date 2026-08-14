@@ -1,15 +1,15 @@
-"""W4A4 quality-parity + speed harness (gw#540).
+"""W4A4 quality-parity + speed harness.
 
 Same-seed renders of ONE model on the current GPU across lanes:
   bf16  — plain bf16-resident (the quality reference)
-  w8a8  — data-free fp8-w8a8 artifact on torch._scaled_mm (gw#534 lane)
+  w8a8  — data-free fp8-w8a8 artifact on torch._scaled_mm
   w4a4  — data-free nvfp4-w4a4 artifact on blockwise fp4 scaled_mm
 
 Reports pixel deltas (MAE/PSNR, + LPIPS when installed) vs bf16, denoise
 wall per lane (eager and, with --compiled, regional-compiled), and the
 denoiser's resident VRAM per lane (expect ~quarter of bf16 on w4a4).
-Proves the SERVE path — calibrated production artifacts + the degradation
-gate are the conversion side's (te#79/te#80).
+Proves the SERVE path — calibrated production artifacts and the degradation
+gate are the conversion side's.
 
 Run on a rented SECURE Blackwell pod (never a dev box):
   uv run python scripts/w4a4_parity.py --model black-forest-labs/FLUX.2-klein-4B \
@@ -89,7 +89,7 @@ def _render(pipe, *, prompt: str, seed: int, steps: int, size: int):
 
 
 def _compiled_wall(pipe, *, prompt: str, seed: int, steps: int, size: int):
-    """Regional compile (ie#381's prod serve mode) timing for the same call."""
+    """Regional-compile (the prod serve mode) timing for the same call."""
     import torch
 
     den = _denoiser(pipe)

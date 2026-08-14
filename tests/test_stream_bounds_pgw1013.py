@@ -1,23 +1,18 @@
-"""pgw#1013 — the size check moves INSIDE the download loop, at four sites.
+"""The size check belongs INSIDE the download loop.
 
-THE DEFECT. Seven downloaders in this repo stream a remote body to disk. Three
-compared the running byte count to the declared size inside the loop and
-aborted at the first excess byte. Four wrote the whole body first and compared
-sizes after the loop had ended, which is not a bound: by the time the
-comparison runs the bytes are on disk, the disk may be full, and the pod may be
-gone. The worst of the four, `RequestContext._download_blob_by_digest`, had
-NEITHER a cap NOR any verification, on the path its own public wrapper
-(`materialize_blob`) documents as "the untrusted case".
+Every downloader that streams a remote body to disk must compare the running
+byte count to the declared size inside the loop and abort at the first excess
+byte. Writing the whole body first and comparing sizes afterwards is not a
+bound: by the time the comparison runs the bytes are on disk, the disk may be
+full, and the pod may be gone.
 
-WHAT THESE TESTS ASSERT, and why it is not just "an error is raised". An error
-after the fact is exactly what the old code produced for three of the four
-sites. So every refusal below is checked for WHEN it happened — and since
-pgw#1204 that is observed as an ORDERING rather than as a byte count: the rig
-records whether it wrote a body to its LAST byte with the client still reading.
-An in-loop bound kills the connection mid-write, so the server never finishes;
-a post-loop check reads all 32 MiB, so it does. That difference is the entire
-issue, and it is a fact about order — unlike "how many bytes got out before the
-abort", which is a fact about the runner's scheduler and flaked five cuts.
+WHAT THESE TESTS ASSERT is not just "an error is raised" — a post-hoc error
+raises too. Every refusal below is checked for WHEN it happened, observed as an
+ORDERING rather than as a byte count: the rig records whether it wrote a body to
+its LAST byte with the client still reading. An in-loop bound kills the
+connection mid-write, so the server never finishes; a post-loop check reads all
+32 MiB, so it does. Order is deterministic; "how many bytes got out before the
+abort" is a fact about the runner's scheduler and flakes.
 
 No mocks: every case runs a real `requests` client against a real
 `ThreadingHTTPServer` over a real socket, through the shipping download
@@ -68,7 +63,7 @@ class _Rig(http.server.ThreadingHTTPServer):
     """Serves scripted bodies and records, per path, whether the response was
     written to COMPLETION before the client hung up.
 
-    ``finished`` is the ordering observation this file turns on (pgw#1204).
+    ``finished`` is the ordering observation this file turns on.
     ``served`` is kept as a DIAGNOSTIC — it makes a failure message concrete —
     and no assertion reads it, because how many bytes a server got onto the
     wire before an abort is a fact about the runner's scheduler, not about the
@@ -206,7 +201,7 @@ def _finished(rig: _Rig, path: str) -> bool:
 def _aborted_early(rig: _Rig, path: str) -> None:
     """The refusal happened DURING the transfer, not after it.
 
-    OBSERVED AS AN ORDERING, NOT AS A BYTE COUNT (pgw#1204). This predicate
+    OBSERVED AS AN ORDERING, NOT AS A BYTE COUNT. This predicate
     used to assert `served < 8 MiB` against a 32 MiB body — a threshold, on a
     quantity nothing in the code under test controls. How far a server gets
     before an abort lands is decided by the runner's scheduler and by kernel
@@ -446,7 +441,7 @@ WEIGHTS_SHA = hashlib.sha256(WEIGHTS).hexdigest()
 def _civitai(url: str, dst: Path, *, expected_size: int, sha: str = "") -> int:
     from gen_worker.models.download import _civitai_stream_one
 
-    # pgw#939: the observed digest now rides back beside the byte count so the
+    # The observed digest now rides back beside the byte count so the
     # manifest can distinguish a verified download from an unverified one.
     written, _observed = _civitai_stream_one(
         url, dst, api_key="", expected_size=expected_size,
@@ -572,7 +567,7 @@ def test_cell_artifact_oversized_stream_is_abandoned_mid_transfer(
 
 
 # ---------------------------------------------------------------------------
-# pgw#1204: the SEVERANCE check — `_aborted_early` must still be able to fail
+# The SEVERANCE check — `_aborted_early` must still be able to fail
 # ---------------------------------------------------------------------------
 
 

@@ -1,22 +1,16 @@
-"""pgw#1087: the per-COMPONENT cold-boot decomposition, off the wire.
+"""The per-COMPONENT cold-boot decomposition, off the wire.
 
-WHY THIS FILE EXISTS
---------------------
-Paul, 2026-08-10: *"you should be measuring per-component of cold-boot, not
-just measuring a granular 'whole cold boot was 6.2 mins for some reason'."*
-The best cold-boot fact the platform held was leg-grade — "the A1 adopt leg =
-6.2 min / $0.102" — with no split, and every finer question asked this session
-(how long is the per-class trace? the toolchain derivation? the memo delta? the
-download-vs-admission split of an adopt?) was unanswerable.
+A leg-grade cold-boot number ("6.2 min") answers nothing: how long is the
+per-class trace, the toolchain derivation, the memo delta, the
+download-vs-admission split of an adopt?
 
 WHY IT LOOKS LIKE THIS
 ----------------------
-Same discipline as `test_boot_span_ladder_pgw797.py`, and for the same reason:
-pgw#789 shipped a boot instrument whose unit tests passed while the production
-path emitted NOTHING, because every assertion called the emitters directly.
-So this file drives a REAL boot — `harness.hub_double` runs an actual `Worker`
-against an actual gRPC server, weights are real bytes over a real HTTP blob
-host — and reads the phase rows OFF THE WIRE. Nothing here calls a boot
+Same discipline as `test_boot_span_ladder_pgw797.py`: a boot instrument whose
+unit tests call the emitters directly passes while the production path emits
+NOTHING. So this file drives a REAL boot — `harness.hub_double` runs an actual
+`Worker` against an actual gRPC server, weights are real bytes over a real HTTP
+blob host — and reads the phase rows OFF THE WIRE. Nothing here calls a boot
 emitter. If a production call site stops reaching one, these go red.
 
 The fixture snapshot is deliberately MULTI-COMPONENT (transformer /

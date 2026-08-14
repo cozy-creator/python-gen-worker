@@ -1,23 +1,12 @@
-"""pgw#797: the boot span ladder, asserted from the REAL boot sequence.
+"""The boot span ladder, asserted from the REAL boot sequence.
 
-WHY THIS FILE EXISTS AND WHY IT LOOKS LIKE THIS
------------------------------------------------
-pgw#789 shipped `weights_fetch`, `pipeline_load` and `warm_complete`, its test
-suite passed, and on gen-worker 0.78.0 in production those spans emitted
-NOTHING. Three real hub-spawned L4 boots on chaos recorded two rows each —
-`first_request_servable` and `hello`, in that order, the boot closing 4s before
-the stream to the hub even existed.
-
-The reason the tests missed it is visible in `test_benchmark_telemetry_pgw789.py`:
-every boot assertion calls the emitters directly —
-`boot_phases.span(PHASE_PIPELINE_LOAD, ...)`, `boot_phases.mark(...)` — or
-constructs a `Lifecycle` and calls one method on it. That proves the RECORDER
-works. It cannot notice that the real boot never reaches the recorder, which was
-the actual defect: a spec declaring `Compile` or `Slot` is routed to `dynamic`
-in `Lifecycle.startup()` and set up later from hub delivery, so it never passed
-either instrumented call site, while the milestone that CLOSES the boot fired at
-the end of `startup()` — which `Worker.arun` runs concurrently with the
-transport — and `in_boot()` then suppressed every span that came after.
+A test that calls the span emitters directly proves the RECORDER works; it
+cannot notice that the real boot never reaches the recorder. That is the defect
+shape: a spec declaring `Compile` or `Slot` is routed to `dynamic` in
+`Lifecycle.startup()` and set up later from hub delivery, so it passes no
+instrumented call site, while the milestone that CLOSES the boot fires at the end
+of `startup()` — which `Worker.arun` runs concurrently with the transport — and
+`in_boot()` then suppresses every span that comes after.
 
 So this file drives the real entrypoint sequence and reads boot rows OFF THE
 WIRE. `harness.hub_double` runs an actual `Worker` against an actual gRPC
@@ -26,8 +15,8 @@ weights are real bytes over a real blob host. Nothing here calls a boot emitter.
 If the production path stops reaching an emitter again, these go red.
 
 The endpoint is deliberately a SLOT endpoint: `spec.slots or spec.compile is not
-None` is the one branch that made the released ladder empty, so the regression
-test has to boot on that branch and not the plain one.
+None` is the branch that empties the ladder, so the test has to boot on that
+branch and not the plain one.
 """
 
 from __future__ import annotations
@@ -214,7 +203,7 @@ def test_weights_fetch_carries_bytes_and_source(ladder) -> None:
 
 
 # --------------------------------------------------------------------------
-# pgw#797 proper: the warmup split
+# The warmup split
 # --------------------------------------------------------------------------
 
 def test_warmup_is_a_span_nested_inside_pipeline_load(ladder) -> None:

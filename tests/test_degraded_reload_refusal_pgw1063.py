@@ -1,30 +1,24 @@
-"""pgw#1063: a degraded reload that cannot fit its own staging REFUSES.
+"""A degraded reload that cannot fit its own staging REFUSES.
 
-ie#615, pod ``nzlrzusxjl8tm1`` (233.76 GiB cgv1 ceiling, gen-worker 0.96.0),
-verbatim off the postmortem dial:
-
-1. a request died CUDA OOM mid-inference (an endpoint defect, fixed there);
-2. the ladder engaged ``rung=off->model_offload``, quarantined the instance
-   "for a clean offloaded reload", and the retry was re-admitted **on the
-   same worker**;
-3. that reload re-staged the 105 GB set in the same process whose prior
-   staging anon was still resident. At the ceiling every fault went through
-   direct reclaim: ``read_bytes`` reached **1.578 TB — a 15x re-read of a
-   105 GB set** — rss_anon 232.9 GiB, for **37 minutes**, until the kernel
-   OOM-killed the child. $2+ of billed H100 to reach a death that was
-   arithmetically certain at minute zero.
+The failure it prevents: a CUDA OOM mid-inference makes the ladder engage
+``rung=off->model_offload`` and quarantine the instance for a clean offloaded
+reload; the retry is re-admitted on the SAME worker and re-stages the whole
+weight set in a process whose prior staging anon is still resident. At the
+cgroup ceiling every fault goes through direct reclaim — measured 1.578 TB of
+``read_bytes`` for a 105 GB set, a 15x re-read, 37 minutes of billed H100 —
+until the kernel OOM-kills the child. The death was arithmetically certain at
+minute zero.
 
 Three defects, one per section below:
 
-* the offload rung was charged pgw#1026's per-component discount, which is
-  the loader's promise that each component LEAVES the host for the card — a
-  promise an offloaded pipeline cannot keep, since offloading IS keeping the
-  weights on the host;
-* the degrade was never priced at decision time, so a reload that could not
-  fit was prescribed anyway;
-* the load dial counted re-reads as progress (1.578 TB of "advancement" for
-  a 105 GB set), so nothing — not the stall clock, not the next component's
-  admission — could see a load that had stopped making any.
+* the offload rung must NOT be charged the per-component discount: that
+  discount is the loader's promise that each component LEAVES the host for the
+  card, and offloading IS keeping the weights on the host;
+* the degrade must be priced at decision time, or a reload that cannot fit is
+  prescribed anyway;
+* the load dial must not count re-reads as progress, or nothing — not the stall
+  clock, not the next component's admission — can see a load that has stopped
+  making any.
 """
 
 from __future__ import annotations
@@ -181,7 +175,7 @@ def test_a_degraded_ref_is_charged_its_tree_and_refuses(
     tmp_path, monkeypatch,
 ) -> None:
     """The incident's admission: 134.1 GiB of tree on a 116.4 GiB host with
-    a card that holds it. Resident, that is a boot (pgw#1026). On the rung
+    a card that holds it. Resident, that is a boot. On the rung
     the OOM degrade just learned, it is a structural refusal — and the
     refusal is what did not happen."""
     tree = _sparse_h3_tree(tmp_path / "h3")

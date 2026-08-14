@@ -1,20 +1,17 @@
-"""pgw#1123: the ONE meta-instantiation seam, owned and proven in-process.
+"""The ONE meta-instantiation seam, owned and proven in-process.
 
-Weight-free instantiation is not an optimization any more — it is step 1 of
-every boot-time adopt (§4.27) and of the zero-download forge (pgw#1080). The
-key a pod derives, and therefore whether it can ASK the hub for a cell at all,
-begins with building a compile target from code + config alone.
+Weight-free instantiation is not an optimization — it is step 1 of every
+boot-time adopt (§4.27) and of the zero-download forge. The key a pod derives,
+and therefore whether it can ASK the hub for a cell at all, begins with
+building a compile target from code + config alone.
 
 WHY THIS IS NOT ``accelerate.init_empty_weights``
 -------------------------------------------------
-It was, and the cost was measured on two real pods (`ykwoaiqub6ktt3`,
-`3o09rf9ehnc4ym`, 2026-08-11): ``structure_only`` imported ``accelerate``
-without anything declaring it, so ``examples/micro-diffusion`` — the fleet's
-cheapest AOT probe vehicle, which deliberately ships no diffusers stack — could
-not derive a key, never issued a resolve, and self-minted forever. Three
-campaigns measured "the worker never asks" without being able to say why.
+Importing ``accelerate`` without anything declaring it means an endpoint that
+deliberately ships no diffusers stack cannot derive a key, never issues a
+resolve, and self-mints forever.
 
-Declaring the dependency instead was considered and rejected on two facts:
+Declaring the dependency instead is rejected on two facts:
 
 * ``accelerate`` hard-requires ``torch>=2.0.0``, and this package's base wheel
   deliberately carries no torch ("the base wheel stays lean for plain-Python

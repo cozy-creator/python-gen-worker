@@ -241,7 +241,7 @@ def test_a_healthy_declaring_image_builds_and_records_its_proof(
 ) -> None:
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.setattr(pre, "_torch_version", lambda: "2.13.0+cu130")
-    # pgw#501: a bucket-bearing image also owes an adapter backend, and the
+    # a bucket-bearing image also owes an adapter backend, and the
     # CI box has no `peft` — that check has its own suite
     # (`test_adapter_backend_preflight_pgw501`), so state the image's answer
     # here rather than letting the box decide what "healthy" means.
@@ -254,7 +254,7 @@ def test_a_healthy_declaring_image_builds_and_records_its_proof(
     assert verdicts == {
         pre.CHECK_DECLARATION_EVALUATES: pre.OK,
         pre.CHECK_CXX_TOOLCHAIN: pre.OK,
-        # pgw#1017: the two the custom-Dockerfile audit added. An exhaustive
+        # The two the custom-Dockerfile audit added. An exhaustive
         # equality, deliberately — a row that stops being stamped is the exact
         # defect this whole issue is about, and `in` would not notice.
         pre.CHECK_CUDA_ROOT: pre.OK,

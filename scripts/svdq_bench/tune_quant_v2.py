@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Candidate: CONTIGUOUS-load activation quantizer for sm_100 (pgw#863).
+"""Candidate: CONTIGUOUS-load activation quantizer for sm_100.
 
 The shipped kernel reads each 16-element block as two stride-2 gathers (even
 lanes, odd lanes) because the packer needs the low/high nibble pair. That

@@ -27,19 +27,16 @@ from .llama import plan_for, resolve_gguf
 
 logger = logging.getLogger(__name__)
 
-# gw#666 (th#1166 finding B): a boot is bounded by SILENCE, never by a clock.
-# The old `_DEFAULT_BOOT_TIMEOUT_S = 600.0` killed the child on a flat deadline
-# whose only liveness check was `proc.poll()` — "has not exited yet", which
-# says nothing about progress — while the engine was printing weight-load
-# progress to a stdout nobody read. A 70B vLLM cold load routinely outlives
-# 600s, and endpoints had already started papering over it with
-# `boot_timeout_s=1800`, which is the same mistake with a bigger number.
+# A boot is bounded by SILENCE, never by a clock. A flat deadline whose only
+# liveness check is `proc.poll()` says nothing about progress, and a 70B vLLM
+# cold load routinely outlives ten minutes — raising the number is the same
+# mistake made bigger.
 #
 # The window below is a SILENCE window over the engine's own output, not a
 # boot budget: an engine that keeps talking boots for as long as it needs, and
 # one that says nothing for 15 minutes is wedged. 900s is orders of magnitude
 # past any real silent phase (CUDA graph capture, torch.compile) and matches
-# the window gw#665 gave the llama.cpp toolchain.
+# the window the llama.cpp toolchain gets.
 _BOOT_STALL_WINDOW_S = 900.0
 _TERM_GRACE_S = 10.0
 
@@ -154,7 +151,7 @@ class ServerProcess:
         """Boot is over when the health URL answers. It has FAILED only when
         the process died or stopped emitting output for its stall window —
         every log line the engine prints is proof it is still loading, so a
-        slow cold load is never a failure (gw#666)."""
+        slow cold load is never a failure."""
         delay = 0.25
         while True:
             code = proc.poll()
@@ -190,7 +187,7 @@ def vllm_server(
 
     There is no boot-duration knob: how long a cold load legitimately takes
     is not something an endpoint can know in advance, and the boot is bounded
-    by engine silence instead (gw#666).
+    by engine silence instead.
     """
     p = port or free_port()
     return ServerProcess(
@@ -219,7 +216,7 @@ class DegradingBoot:
             try:
                 handle = proc.start()
                 if rung > 0:
-                    # pgw#760: the engine is serving on a degraded rung
+                    # The engine is serving on a degraded rung
                     # (fewer GPU layers / CPU-only) — a quality decision the
                     # planned rung's failure would otherwise hide.
                     activity_mod.emit_event(
@@ -254,7 +251,7 @@ def llama_server(
     ``model_source`` may be the ``.gguf`` file or a snapshot dir (the
     Hub()-injected path) — dirs resolve to their single GGUF model. Unless
     the caller pins ``-ngl``/``-c`` in ``extra_args``, ``-ngl`` and context
-    are sized to the free-VRAM budget (gw#402) and the boot degrades
+    are sized to the free-VRAM budget and the boot degrades
     through fewer GPU layers rather than failing.
     """
 

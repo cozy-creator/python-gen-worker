@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Which W4A4 GEMM wins on THIS card, at qwen-image's real shapes (pgw#863).
+"""Which W4A4 GEMM wins on THIS card, at qwen-image's real shapes.
 
 The sm_120 verdict was: cuBLAS block-scaled fp4 (``torch._scaled_mm``) beats
 the pure-triton ``tl.dot_scaled`` kernel by ~2.5x, so the serving path is the
 HYBRID (triton quant -> cuBLAS GEMM -> triton epilogue). That verdict is not
 transferable by assumption: sm_100a issues block-scaled MMA through tcgen05
 rather than sm_120a's mxf4nvf4, and cuBLAS's fp4 path was separately measured
-(pgw#682) at only 1.03x bf16 on sm_100 against 2.04x on sm_120. If the
+ at only 1.03x bf16 on sm_100 against 2.04x on sm_120. If the
 ordering inverts here, the fused pure-triton kernel — which also absorbs the
 low-rank branch and the epilogue — becomes the sm_100 serving path, and the
 "instantiate CUTLASS templates" plan is unnecessary.
@@ -15,8 +15,8 @@ Measures, per shape, with no checkpoint and no model:
   bf16          plain bf16 mm (the roofline everything is judged against)
   cublas        the shipped hybrid: quant + _scaled_mm + fused epilogue
   triton        the fused alternative: quant + dot_scaled GEMM w/ lora epilogue
-plus the quant kernel alone at several warp counts, because _WARPS_BY_SM's
-sm_100 entry (4) was never swept on real sm_100 silicon.
+plus the quant kernel alone at several warp counts, so _WARPS_BY_SM's entry for
+this card is swept on real silicon rather than assumed.
 
   bench_gemm.py --out DIR
 """

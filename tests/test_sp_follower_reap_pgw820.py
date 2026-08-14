@@ -1,7 +1,7 @@
-"""pgw#820: an SP follower must die with rank 0 — including on an ABORT.
+"""An SP follower must die with rank 0 — including on an ABORT.
 
-Under the pgw#783 process split the compute child (rank 0) can die ``rc=-6``
-(the measured NCCL abort), where atexit never runs, so ``daemon=True`` reaps
+Under the process split the compute child (rank 0) can die ``rc=-6``
+(the NCCL abort), where atexit never runs, so ``daemon=True`` reaps
 nothing. The parent then respawns the group onto the same cards in ~1 s while
 the orphaned followers hold a full weight replica for their own 300 s
 collective timeout — a crash loop seeded by its own orphans.

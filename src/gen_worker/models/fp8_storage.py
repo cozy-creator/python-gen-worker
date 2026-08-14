@@ -1,28 +1,15 @@
 """fp8-E4M3 weight storage as module STRUCTURE, not a forward-boundary
-mutation (pgw#727).
+mutation.
 
 The lane's semantics are "weights RESIDE in fp8, compute happens in the
 compute dtype". diffusers expresses that as a MUTATION at the forward
 boundary (``LayerwiseCastingHook``: ``module.to(dtype=compute)`` pre,
-``module.to(dtype=storage)`` post). The identical semantics as structure —
-hold the fp8 tensor, upcast at the use site inside ``forward`` — is strictly
-better on every axis that was measured (pgw#704 S12-c, L4 sm_89, real SDXL
-UNet, 28 steps):
-
-======================  =========  =========  ==============================
-lane                    eager      dynamo     torch.export
-======================  =========  =========  ==============================
-fp8-hooks (mutation)    385.9 ms   386.5 ms   REFUSED (``_apply(): Couldn't
-                                              swap Linear.weight``)
-fp8-storage (structure) 366.1 ms   329.1 ms   OK (6,950 nodes, the upcast
-                                              visible in the graph)
-======================  =========  =========  ==============================
-
-The mutation lane is COMPILE-HOSTILE: dynamo buys it 0.2% — a *regression* —
-for a 38.9s mint, because ``module.to(dtype=...)`` at every leaf boundary
-defeats the compiler. The restructured lane is **14.8% faster under dynamo**
-than the hook lane, so this is a JIT-lane win on its own; exportability
-(pgw#722's AOT migration) is a bonus. It also removes the ``p.data``
+``module.to(dtype=storage)`` post). We deliberately do NOT use that lane: it is
+COMPILE-HOSTILE, because ``module.to(dtype=...)`` at every leaf boundary defeats
+the compiler — dynamo buys it nothing and ``torch.export`` refuses it outright
+(``_apply(): Couldn't swap Linear.weight``). The identical semantics expressed
+as STRUCTURE — hold the fp8 tensor, upcast at the use site inside ``forward`` —
+is faster under dynamo, exportable, and free of the ``p.data``
 mutation-aliasing hazard the offload rung shares.
 
 **Coverage is upstream's, not ours.** Which leaves get fp8 storage is
@@ -35,24 +22,17 @@ coverage set would be a silent VRAM regression AND a silent numerics change.
 ``tests/test_fp8_storage_pgw727.py`` asserts set-equality against the
 installed diffusers, so upstream drift fails loud in CI rather than on a pod.
 
-**Residency.** Two separate facts, both measured, and the first does not
-imply the second:
+**Residency.** Two separate facts, and the first does not imply the second:
 
 1. *Coverage parity*: the same leaves hold the same bytes at the same
-   precision as the hook lane (module walk), and outputs are bitwise equal.
-   Peak transient is one leaf's upcast either way — diffusers hooks per
-   LEAF, not per block.
-2. *No orphaned originals*: a class pun replaces the weight tensor OBJECT,
-   so the bf16 original survives anywhere it is still held. On an L4 that
-   measured **+50.3%** (7.35 GB vs plain 4.89 GB — both copies resident);
-   reproduced on CPU at +49.9%. ``_to_storage_buffer`` rebinds the outgoing
-   Parameter onto the fp8 storage, which restores the hook lane's property
+   precision as the hook lane, and outputs are bitwise equal. Peak transient
+   is one leaf's upcast either way — diffusers hooks per LEAF, not per block.
+2. *No orphaned originals*: a class pun replaces the weight tensor OBJECT, so
+   the bf16 original survives anywhere it is still held, and both copies
+   resident is a ~50% VRAM regression. ``_to_storage_buffer`` rebinds the
+   outgoing Parameter onto the fp8 storage, restoring the hook lane's property
    that every holder follows the cast. A module-only walk cannot see this
-   failure, which is why the first cut of this lane claimed "identical
-   residency" while a pod said otherwise.
-
-pgw#704 S12-c's "+11.6%" number is separately unusable: that prototype
-swapped ``nn.Linear`` ONLY, leaving convs bf16-resident.
+   failure — it reports "identical residency" while a pod says otherwise.
 
 The restructure is a CLASS PUN: the leaf keeps its identity, parameters,
 FQNs and kernel attributes, and only its ``forward`` changes (``nn.Linear``

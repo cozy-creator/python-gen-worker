@@ -1,10 +1,10 @@
-"""Fit an image workload to a family's NATIVE geometry (pgw#664, grown by ie#599).
+"""Fit an image workload to a family's NATIVE geometry.
 
 The library owns the MECHANISM (snap / pad / crop / composite / restore); the
 family declares the DATA (:class:`FamilyGeometry`: native area + the declared
 grid rows). One bucket is chosen for the CONDITION and the OUTPUT together —
-picking them independently is the ie#599 defect (a t2i ~1.7 MP aspect table
-copied onto an edit lane whose native area is 1 MP).
+picking them independently is how a t2i ~1.7 MP aspect table ends up on an
+edit lane whose native area is 1 MP.
 
 Two rules that are not negotiable:
 
@@ -15,12 +15,12 @@ Two rules that are not negotiable:
   returns the exact framing the user submitted.
 
 Geometry rules differ BY MODE (:class:`FitMode`). ``edit`` treats the user's
-framing as the contract; ``compose`` (multi-reference composition, ie#600)
-treats output geometry as a free parameter and only fits the references.
+framing as the contract; ``compose`` (multi-reference composition) treats
+output geometry as a free parameter and only fits the references.
 
 Super-resolution is a DECLARED, PLUGGABLE post-stage (:func:`set_upscaler`).
-No image upscaler exists in the fleet today (ie#599 catalog check: LTX-2.3's
-``upscale_2x`` is a video *latent* upsampler), so the stage is a no-op and
+No image upscaler exists in the fleet today (LTX-2.3's ``upscale_2x`` is a
+video *latent* upsampler), so the stage is a no-op and
 :func:`restore` returns native-bucket-sized pixels at the user's framing.
 :class:`RestoreResult` reports that honestly rather than faking it.
 """
@@ -78,7 +78,7 @@ class OutputSize(StringEnum):
 
 
 # A declared row whose area strays outside this band of the family's native
-# area is the ie#599 defect in table form; refuse it at declaration time.
+# area is a foreign aspect table in disguise; refuse it at declaration time.
 _AREA_BAND = (0.75, 1.25)
 
 
@@ -283,8 +283,8 @@ def fit_to_native(
 
     if mode is FitMode.COMPOSE:
         # References are fitted to native independently; output geometry is a
-        # free parameter the caller supplies (ie#600's reference-composition
-        # shape). Nothing is cropped back — there is no "user's framing".
+        # free parameter the caller supplies. Nothing is cropped back — there
+        # is no "user's framing".
         fitted_refs = []
         for image in images:
             ref_bucket = nearest_bucket(image.size[0], image.size[1], geometry)
@@ -292,9 +292,8 @@ def fit_to_native(
             fitted_refs.append(_edge_pad(image, ref_bucket, box))
         fitted = tuple(fitted_refs)
         if preset is None:
-            # ie#600: compose output geometry is a FREE parameter the caller
-            # supplies. It must NOT silently inherit references[0]'s aspect —
-            # that inheritance is today's undocumented behaviour, not a design.
+            # Compose output geometry is a FREE parameter the caller supplies;
+            # it must NOT silently inherit references[0]'s aspect.
             raise ValidationError(
                 "mode='compose' has no original framing to fit to: the caller "
                 "owns output geometry and must pass an explicit bucket"
@@ -324,11 +323,11 @@ def fit_to_native(
     else:
         bucket = nearest_bucket(source_size[0], source_size[1], geometry)
 
-    # The PRIMARY condition shares the output's bucket — that pairing is the
-    # ie#599 fix. Secondary references are content, not framing: each takes
-    # its OWN nearest native row, so a 16:9 style reference is not padded 44%
-    # into a square. Every row is ~native_area, so all conditions still sit on
-    # the same grid scale as the target latent.
+    # The PRIMARY condition shares the output's bucket. Secondary references
+    # are content, not framing: each takes its OWN nearest native row, so a
+    # 16:9 style reference is not padded 44% into a square. Every row is
+    # ~native_area, so all conditions sit on the same grid scale as the target
+    # latent.
     boxes: list[tuple[int, int, int, int]] = []
     fitted_list = []
     for index, image in enumerate(images):
@@ -352,7 +351,7 @@ def fit_to_native(
         crop_box = boxes[primary]
         # Inputs at or below the bucket default to the native bucket rather
         # than true pixels-in == pixels-out; the below-native variant is
-        # UNPROVEN and is the A/B arm of the re-baseline run (ie#599 §6).
+        # UNPROVEN.
         larger = source_size[0] * source_size[1] > bucket[0] * bucket[1]
         target = source_size if larger else (crop_box[2] - crop_box[0], crop_box[3] - crop_box[1])
         composite = larger
@@ -431,7 +430,7 @@ def restore(
     stage = upscaler if upscaler is not None else _UPSCALER
     enlarged = stage(framed, plan.target_size) if stage is not None else None
     if enlarged is None or enlarged.size != plan.target_size:
-        # ie#599: no image super-resolution capability exists in the fleet.
+        # No image super-resolution capability exists in the fleet.
         return RestoreResult(
             image=framed, size=framed.size, upscaled=False, composited=False,
             note=(

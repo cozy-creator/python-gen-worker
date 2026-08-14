@@ -1,23 +1,15 @@
-"""pgw#1163 — the source-only audit reports on THE WALK, not on its caller.
+"""The source-only audit reports on THE WALK, not on its caller.
 
-Cause C of ie#690. The audit walked all of `sys.modules` looking for top-level
-modules under the project root that the installed wheel does not provide. Run
-from inside pytest, that set includes the RUNNER's own modules — ernie's census
-run named exactly three:
+The audit walks all of `sys.modules` looking for top-level modules under the
+project root that the installed wheel does not provide. Run from inside pytest,
+that set includes the RUNNER's own modules (`conftest`, every `test_*` module)
+— files pytest injected and a pod never imports.
 
-    conftest             (imported from ernie/conftest.py)
-    test_aot_declaration (imported from ernie/tests/test_aot_declaration.py)
-    test_ernie_functions (imported from ernie/tests/test_ernie_functions.py)
-
-Every one is a file pytest injected and a pod never imports. The three named
-endpoints have nothing wrong with their packaging.
-
-THE MESSAGE WAS THE WORSE HALF. It advised *"include the module in the built
-package (e.g. hatch only-include)"* — following it would package `conftest.py`
-and the whole test suite into the shipped wheel, which is strictly worse than
-the failure it claims to fix AND would look like a successful fix. An error
-that misdirects a competent reader into shipping tests to production pods is
-its own defect, so the message is fixed here too and pinned by a test.
+THE MESSAGE IS THE WORSE HALF. Advising *"include the module in the built
+package (e.g. hatch only-include)"* would package `conftest.py` and the whole
+test suite into the shipped wheel — strictly worse than the failure it claims
+to fix, and it would look like a successful fix. The message is pinned by a
+test too.
 
 The scope fix is deliberately NOT "detect pytest": excluding by
 already-loaded-before-the-walk requires no knowledge of the test runner, and a

@@ -1,10 +1,8 @@
 """The source-layout detection schema — declarative matchers the engine runs.
 
-pgw#740 (B14): ``convert/layout.py`` carried four overlapping family ladders
-(12 variants across 9 families) plus a root-file sentinel that was *duplicated
-into the te#70 trainer repo and hand-synced*. Four hand-written ladders that
-must agree, and did not: ``z_image``/``zimage``/``z-image``, ``flux``/``flux1``/
-``flux2``, ``wan``/``wan21``/``wan22``.
+Hand-written family ladders that must agree do not: ``z_image``/``zimage``/
+``z-image``, ``flux``/``flux1``/``flux2``, ``wan``/``wan21``/``wan22``. So the
+matchers are DECLARED here and evaluated generically.
 
 A detection declaration says what a family LOOKS like, in four independent
 channels the engine evaluates in a fixed order. Adding a family means adding
@@ -94,7 +92,7 @@ class LayoutDeclaration:
 
     ``order`` breaks ties within a channel; lower runs first. Declarations that
     are strictly more specific than another (``flux2`` vs ``flux``) MUST order
-    ahead of it, exactly as the hand-written ladder's line order used to.
+    ahead of it.
     """
 
     variant: str
@@ -133,7 +131,7 @@ class LayoutSignals:
     """Generic, family-free evidence that a directory is a diffusers tree at all."""
 
     # default_factory (not a literal default) so the vocabulary is read when a
-    # LayoutSignals is constructed, after endpoint declarations (pgw#740 B5).
+    # LayoutSignals is constructed, after endpoint declarations.
     component_dirs: frozenset[str] = field(
         default_factory=lambda: frozenset(pipeline_component_dirs())
     )

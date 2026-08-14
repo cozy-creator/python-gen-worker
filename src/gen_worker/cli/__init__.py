@@ -68,14 +68,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     without spawning a subprocess. The console_script wrapper turns the
     returned int into the process exit code via ``sys.exit(main())``.
     """
-    # §1.18: the bootstrap-owned load for the STANDALONE CLI process entry.
-    # Acceptance is one load PER PROCESS ENTRY, and this is the third (after
-    # `entrypoint._run_main` and `procsplit.parent.run_parent`). Without it the
-    # `models/` helpers would fall back to their zero-value standalone defaults
-    # and a `gen-worker run` would silently lose TENSORHUB_URL / _TOKEN /
-    # _CACHE_DIR — the exact class of failure a cached lazy loader HID, because
-    # it would have loaded them from env at first touch no matter who was
-    # running.
+    # the bootstrap-owned load for the STANDALONE CLI process entry — one load
+    # PER PROCESS ENTRY, and this is the third (after `entrypoint._run_main`
+    # and `procsplit.parent.run_parent`). Without it the `models/` helpers fall
+    # back to their zero-value standalone defaults and a `gen-worker run`
+    # silently loses TENSORHUB_URL / _TOKEN / _CACHE_DIR.
     config.install(config.load_settings())
     parser = _build_parser()
     args = parser.parse_args(argv)

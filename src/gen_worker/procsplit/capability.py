@@ -1,14 +1,12 @@
-"""Parent-side policy on the per-job capability token (pgw#763 delta 4).
+"""Parent-side policy on the per-job capability token.
 
 A per-job, short-TTL, least-authority grant is the ONE credential shape the
-compute child is allowed to hold — the enumeration in pgw#763 says so
-explicitly, and the child genuinely needs it (inputs it fetches and outputs it
-uploads go child -> object store directly, which is what keeps the data plane
-out of the parent's interpreter).
+compute child is allowed to hold, and the child genuinely needs it: inputs it
+fetches and outputs it uploads go child -> object store directly, which is what
+keeps the data plane out of the parent's interpreter.
 
-That makes this not a leak. It makes it a DECISION, and the parent was not
-making it: ``RunJob.worker_capability_token`` was relayed verbatim, so whatever
-arrived on the stream was handed to tenant code unexamined.
+Relaying ``RunJob.worker_capability_token`` verbatim would hand tenant code
+whatever arrived on the stream, unexamined.
 
 The parent cannot mint or re-mint — the hub holds the key — so "downscope"
 here means the narrowest thing a relay CAN do: forward, or withhold. What it

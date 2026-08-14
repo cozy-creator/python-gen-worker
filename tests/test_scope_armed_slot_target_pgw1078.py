@@ -1,23 +1,21 @@
-"""pgw#1078: a WORKER-loaded slot that only becomes compile-capable during
-`setup()` must end the boot with an INSTALLED compile target.
+"""A WORKER-loaded slot that only becomes compile-capable during `setup()` must
+end the boot with an INSTALLED compile target.
 
-The live failure (ie#632, minimax-h3 0.4.2 on the master stack): the endpoint
-declares `models={"pipeline": Slot(MiniMaxH3ModularPipeline)}` — class
-annotated, so the executor materializes it — but `ModularPipeline` hydrates its
-weight-bearing components lazily. At injection `pipeline.transformer is None`,
-`has_compile_target` is False, the automatic branch skips it and the arm
-declines `no_compile_target`. setup() then hydrates and calls
-`gen_worker.arm_compile(pipeline)`, which ARMS.
+The shape: an endpoint declares `models={"pipeline": Slot(SomeModularPipeline)}`
+— class annotated, so the executor materializes it — but `ModularPipeline`
+hydrates its weight-bearing components lazily. At injection
+`pipeline.transformer is None`, `has_compile_target` is False, the automatic
+branch skips it and the arm declines `no_compile_target`; setup() then hydrates
+and calls `gen_worker.arm_compile(pipeline)`, which ARMS.
 
-The executor attributed that scope-armed pipeline to `self_loaded_slots` — the
-str/Path kwargs — which is EMPTY for a class-annotated slot. So
-`_install_compile_targets` saw a candidate owning no slots, computed no
-bindings, failed `bindings_valid`, and omitted the target. Nothing was left to
-bind the guard to, nothing enabled the hot-swap router, and every request
-reported `lane=…+eager  fallback_reason=no_compile_target` while the pipeline
-was in fact armed. 257.7 s served against a 131.7 s measured compiled wall.
+Attributing that scope-armed pipeline to `self_loaded_slots` (the str/Path
+kwargs) is wrong — that set is EMPTY for a class-annotated slot, so
+`_install_compile_targets` sees a candidate owning no slots, computes no
+bindings, fails `bindings_valid` and omits the target. Nothing binds the guard,
+nothing enables the hot-swap router, and every request reports
+`lane=…+eager  fallback_reason=no_compile_target` while the pipeline is armed.
 
-REVERT-TURNS-RED: both assertions below fail on the pre-fix executor —
+REVERT-TURNS-RED: both assertions below fail without the fix —
 `rec.compile_targets` is empty and `rec.eager_posture` reads
 `no_compile_target`.
 """

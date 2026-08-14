@@ -1,28 +1,23 @@
-"""pgw#1199: the does-it-run proof belongs to the process that HOLDS the weights.
+"""The does-it-run proof belongs to the process that HOLDS the weights.
 
-WHAT THIS REPLACES, AND WHY IT IS A CORRECTION AND NOT A CLEANUP
-----------------------------------------------------------------
-pgw#984 proves the endpoint's own handler RUNS before a cell seals, because
+WHY IT LIVES HERE AND NOT IN THE MINT CHILD
+-------------------------------------------
+The endpoint's own handler must be proven to RUN before a cell seals, because
 ``torch.export`` traces the declared graph classes off the modules directly and
-never enters the handler — so a mint's phase table could read green for an
-endpoint whose handler could not run at all (pgw#969: ``ctx.slots["pipeline"]``,
-0.0 s into ``warmup_forward``).
+never enters the handler — so a mint's phase table can read green for an
+endpoint whose handler cannot run at all.
 
-It ran in the MINT CHILD, which on a weight-free mint holds no weights — so the
-child first materialised REAL random values for every virtual parameter. That is
-one full checkpoint at compute dtype, in the child, **concurrently with the
-parent's resident copy**. Measured on pod ``729431an6ugbvq`` (H100-80, wan-2.2):
-56.2 GB wanted, 15.5 GiB free, `CUDA out of memory` twice, no cell, eager for
-life. §4.33's *"compile weight-free … VRAM cost is negligible"* was true of the
-compile and false of the mint, and the ~8 GiB figure that anchored the subsystem
-was measuring exactly this allocation for an sdxl-sized family.
+Running that proof in the MINT CHILD is wrong: on a weight-free mint the child
+holds no weights, so it would have to materialise REAL random values for every
+virtual parameter — one full checkpoint at compute dtype, **concurrently with
+the parent's resident copy**. On an H100-80 for wan-2.2 that is 56.2 GB wanted
+against 15.5 GiB free: `CUDA out of memory`, no cell, eager for life.
 
 §4.33 steps 4-5 already say where verification goes: *"load the cell into the
 LIVE pipeline — already running eager — and verify it works"*, against weights
-that are resident and are not paid for twice. The proof was in the wrong
-process. This module is that correction, and the SDK had already made the same
-call once: ``mint_child.execution_lane_verdict_for`` skips the kernel-lane A/B
-on a meta mint because *"running it would put weight-scale values back in the
+that are resident and are not paid for twice. The SDK already makes the same
+call in ``mint_child.execution_lane_verdict_for``, which skips the kernel-lane
+A/B on a meta mint because *"running it would put weight-scale values back in the
 one process this slice exists to keep empty"*.
 
 WHAT A PROOF IS
@@ -56,10 +51,9 @@ _LOCK = threading.Lock()
 class HandlerProofFailed(Exception):
     """The endpoint's own handler does not run on the resident pipeline.
 
-    A cell must not seal for a handler that cannot serve — pgw#984's sentence,
-    unchanged. What moved is only WHERE the sentence is spoken: here, in the
-    process that holds the weights, instead of in a child that had to allocate
-    a second copy of them to say it.
+    A cell must not seal for a handler that cannot serve. Spoken here, in the
+    process that holds the weights, rather than in a child that would have to
+    allocate a second copy of them to say it.
     """
 
 
@@ -146,7 +140,7 @@ def run_warm_job(
         payload = job.build(tmp)
         if payload is None:
             return
-        # pgw#828: the SAME construction the executor's warm path uses. This
+        # The SAME construction the executor's warm path uses. This
         # was three hand-rolled contexts, and one of them had no slots at all —
         # `ctx.slots["pipeline"]` raised `KeyError: 'pipeline'` on a real L4
         # after a 16.45 s load.

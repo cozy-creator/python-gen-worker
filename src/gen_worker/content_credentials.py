@@ -1,4 +1,4 @@
-"""C2PA Content Credentials — sign generated media at the finalize seam (th#714).
+"""C2PA Content Credentials — sign generated media at the finalize seam.
 
 EU AI Act Art. 50 (applies 2026-08-02) requires machine-readable marking of
 AI-generated audio/image/video. We embed a signed C2PA manifest (issuer =
@@ -8,12 +8,12 @@ every generated media asset as it passes through ``RequestContext.save_bytes``
 / ``save_file``, i.e. the last point the bytes touch trusted compute before
 upload.
 
-**The private key is NOT here** (th#1307). A pod imports untrusted tenant code
-into this process, so a signing key in pod env or on the pod filesystem is one
-``print(os.environ[...])`` from being exfiltrated — and a leaked platform leaf
-key forges or strips provenance on every asset Cozy ever signed. So the split
-is: the worker builds the claim (it has the bytes) and the HUB signs it. The
-c2pa-rs callback signer sends the claim's COSE to-be-signed octets to
+**The private key is NOT here**. A pod imports untrusted tenant code into this
+process, so a signing key in pod env or on the pod filesystem is one
+``print(os.environ[...])`` from being exfiltrated, and a leaked platform leaf
+key forges or strips provenance on every asset Cozy ever signed. The worker
+builds the claim (it has the bytes) and the HUB signs it: the c2pa-rs callback
+signer sends the claim's COSE to-be-signed octets to
 ``POST /v1/worker/c2pa/sign``, authenticated with this pod's worker JWT, and
 gets back a signature. No media leaves the pod; no key enters it.
 
@@ -26,16 +26,15 @@ Config (Settings / env) — the PUBLIC half only:
 - ``GEN_WORKER_C2PA_TA_URL``   — optional RFC3161 timestamp authority URL.
 
 ``GEN_WORKER_C2PA_KEY_PEM`` / ``_KEY_PATH`` are REFUSED: if either is present
-this module raises instead of using it. That is the ratchet — a hub regression
-that re-injects the key kills the pod loudly rather than quietly re-creating
-the leak.
+this module raises instead of using it, so a hub regression that re-injects the
+key kills the pod loudly rather than quietly re-creating the leak.
 
-The refusal is a property of the POD ENVIRONMENT, not of one call. It is
-therefore evaluated at every read of the signing state (:func:`_active_config`,
-and so :func:`enabled` and both ``sign_media_*``), not only inside
-:func:`configure`. A process that never called ``configure()`` — a library
-embed, a compute child, a test harness — must not be the process where a
-delivered private key goes unnoticed and media then ships unsigned.
+The refusal is a property of the POD ENVIRONMENT, not of one call, so it is
+evaluated at every read of the signing state (:func:`_active_config`, and so
+:func:`enabled` and both ``sign_media_*``), not only inside :func:`configure`.
+A process that never called ``configure()`` — a library embed, a compute child,
+a test harness — must not be the process where a delivered private key goes
+unnoticed and media then ships unsigned.
 
 Signing is ON iff cert material is set. The hub transport is armed at HelloAck
 (``configure_remote_signer``, same wiring moment as the cell-receipt gate).
@@ -169,14 +168,14 @@ class _SignerConfig:
 
 @dataclass(frozen=True)
 class _RemoteSigner:
-    """The hub signing oracle (th#1307). Armed at HelloAck."""
+    """The hub signing oracle. Armed at HelloAck."""
 
     base_url: str
     worker_jwt: Any  # Callable[[], str]
 
 
-# th#1307: env names that would carry a private key INTO the pod. Their
-# presence is a platform regression, not a configuration option.
+# Env names that would carry a private key INTO the pod. Their presence is a
+# platform regression, not a configuration option.
 _REFUSED_KEY_ENVS = ("GEN_WORKER_C2PA_KEY_PEM", "GEN_WORKER_C2PA_KEY_PATH")
 
 SIGN_PATH = "/v1/worker/c2pa/sign"
@@ -194,7 +193,7 @@ def configure(settings: Settings) -> None:
     Called once at worker startup. Raises when signing is configured but
     unusable — a worker that *thinks* it signs but doesn't is a compliance
     hole, so it must not come up — and raises when private-key material was
-    delivered to this pod at all (th#1307). Logs a loud warning when no cert
+    delivered to this pod at all. Logs a loud warning when no cert
     is configured (signing disabled).
     """
     global _configured, _config
@@ -241,7 +240,7 @@ def configure(settings: Settings) -> None:
 
 
 def configure_remote_signer(base_url: str, worker_jwt: Any) -> None:
-    """Arm the hub signing oracle (th#1307).
+    """Arm the hub signing oracle.
 
     Called at HelloAck, the moment the hub wiring exists — the same seam that
     arms the cell-receipt gate. Until this lands, a configured signer FAILS
@@ -342,29 +341,22 @@ def sign_media_file(
 
 
 def _refuse_pod_private_key_material(settings: Any = None) -> None:
-    """Refuse, loudly, any C2PA PRIVATE KEY delivered to this pod (th#1307).
+    """Refuse, loudly, any C2PA PRIVATE KEY delivered to this pod.
 
-    This is a ratchet on the pod's environment, so it is checked at every read
-    of the signing state rather than once at ``configure()``. pgw#931 removed
-    ``_active_config``'s lazy ``configure()`` fallback — correctly, since a
-    signing module must not go and find its own config — but the refusal rode
-    along inside that call, so it became reachable only from the one entry that
-    calls ``configure()``. Anything else (a library embed, a compute child, an
-    endpoint importing the module directly) got a quiet ``enabled() == False``
-    and shipped unsigned media beside a key that was sitting right there in the
-    environment. The presence of the key is the fact; no entry point owns it.
+    This is a ratchet on the pod's ENVIRONMENT, so it is checked at every read
+    of the signing state rather than once at ``configure()``: the presence of
+    the key is the fact, and no entry point owns it. A library embed, a compute
+    child or an endpoint importing this module directly must not get a quiet
+    ``enabled() == False`` beside a key sitting in the environment.
 
     ``settings`` is checked too when supplied, so a field smuggled back into
     Settings is refused on the same breath as the env.
 
-    **This arm covers the ENV only, and that is deliberate** (pgw#884). The
-    other delivery vectors — ``.env``, ``/run/secrets``, yaml — never reach
-    ``os.environ``, and until pgw#884 nothing refused them either: the loader
-    dropped the names as "not a Settings field" and the pod booted green with
-    a private key mounted where tenant code could read it. They are refused
-    where they are READ, in ``config.loader.REFUSED_KEY_MATERIAL``, which is
-    the one component that sees every source and does so once per boot rather
-    than once per signed asset.
+    **This arm covers the ENV only, and that is deliberate**. The other
+    delivery vectors — ``.env``, ``/run/secrets``, yaml — never reach
+    ``os.environ``; they are refused where they are READ, in
+    ``config.loader.REFUSED_KEY_MATERIAL``, the one component that sees every
+    source and does so once per boot rather than once per signed asset.
     """
     for env_name in _REFUSED_KEY_ENVS:
         if str(os.environ.get(env_name, "") or "").strip() or str(
@@ -384,16 +376,11 @@ def _active_config() -> Optional[_SignerConfig]:
     _refuse_pod_private_key_material()
     if _configured:
         return _config
-    # pgw#931 (§1.18): this used to resolve lazily from the cached Settings
-    # loader, i.e. a signing module that could go and find its own signing
-    # config from the environment at first use. It cannot: `configure()` is
+    # Deliberately NO lazy resolve from the cached Settings loader: a signing
+    # module must not go and find its own config at first use. `configure()` is
     # called by the process entry with the entry's `Settings`, and a process
-    # that never configured signing is a process where signing is OFF.
-    #
-    # That is also the honest answer. th#1307 makes cert material's PRESENCE
-    # the gate, so "unconfigured" and "configured with no cert" must not be the
-    # same silent state as "found some env" — see the C2PA disposition in
-    # pgw#929: signing being dark is a reported fact, never an inference.
+    # that never configured signing is a process where signing is OFF —
+    # a reported fact, never an inference.
     with _lock:
         _config = None
         _configured = True
@@ -410,17 +397,17 @@ def _generator_version() -> str:
 
 
 def _hub_sign_claim(remote: _RemoteSigner, alg: str, claim: bytes) -> bytes:
-    """Ask the hub to sign one claim's COSE to-be-signed octets (th#1307).
+    """Ask the hub to sign one claim's COSE to-be-signed octets.
 
     Only the claim travels — a few hundred bytes of hashes and assertions,
     never the media. Any refusal raises, so the request fails instead of
     shipping an asset with a missing or bogus manifest.
     """
-    # pgw#763 delta 5: under the process split this callback runs in the compute
-    # child, which holds no worker JWT — so the ASK is a parent-side IPC action.
-    # The child sends a hash (the COSE to-be-signed octets) and gets a signature
-    # back; the credential that authorizes the oracle, like the key behind it,
-    # is somewhere this process cannot reach. `broker.request` is the same POST
+    # under the process split this callback runs in the compute child, which
+    # holds no worker JWT — so the ASK is a parent-side IPC action. The child
+    # sends a hash (the COSE to-be-signed octets) and gets a signature back;
+    # the credential that authorizes the oracle, like the key behind it, is
+    # somewhere this process cannot reach. `broker.request` is the same POST
     # off the split, so there is one code path either way.
 
     try:
@@ -459,7 +446,7 @@ def _build_signer(cfg: _SignerConfig) -> Any:
     remote = _remote
     if remote is None:
         # Fail CLOSED. A configured worker with no hub signer must fail the
-        # request, not hand back unsigned bytes that look signed (th#1307).
+        # request, not hand back unsigned bytes that look signed.
         raise C2paSigningError(
             "C2PA signing is configured but the hub signer is not armed "
             "(no HelloAck file_base_url yet) — refusing to ship unsigned media"

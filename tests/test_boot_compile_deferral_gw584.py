@@ -1,12 +1,12 @@
 """gw#584: compile-declared endpoints defer from eager boot setup.
 
-The ie#501 run-17 churn: ``worker.py`` starts ``lifecycle.startup()`` and
-``transport.run()`` concurrently, so boot-time ``ensure_setup`` could race
-ahead of HelloAck's ``apply_model_resolutions`` rebind and reach
-``_fetch_compile_snapshot`` with bare authored refs and ``snapshots=None`` —
-a silent ``None`` (no cell selected) while materialization later followed the
-resolved w8a8 lane, fail-closing ``enable()`` generically. A compile cell,
-exactly like a Slot pick (pgw#532), can only arrive via hub delivery, so boot
+The race: ``worker.py`` starts ``lifecycle.startup()`` and ``transport.run()``
+concurrently, so a boot-time ``ensure_setup`` can run ahead of HelloAck's
+``apply_model_resolutions`` rebind and reach ``_fetch_compile_snapshot`` with
+bare authored refs and ``snapshots=None`` — a silent ``None`` (no cell selected)
+while materialization later follows the resolved w8a8 lane, fail-closing
+``enable()`` generically. A compile cell,
+exactly like a Slot pick, can only arrive via hub delivery, so boot
 must defer these functions the same way.
 
 Covered here, over the REAL ``Lifecycle.startup()`` / ``Executor`` machinery
@@ -14,8 +14,8 @@ Covered here, over the REAL ``Lifecycle.startup()`` / ``Executor`` machinery
   1. boot: a compile-declared function with locally present weights (the
      exact pre-fix eager-setup precondition) is NOT set up at boot — no
      ``ensure_setup``, no snapshot-less ``_fetch_compile_snapshot``; it
-     reports loading (awaiting hub delivery, the ie#455-visible state), never
-     failed. A ``Slot`` function's pgw#532 deferral holds.
+     reports loading (awaiting hub delivery), never failed. A ``Slot``
+     function's deferral holds.
   2. hub delivery (DesiredResidency-equivalent): after the HelloAck rebind,
      ``ensure_desired_instance`` with resolved w8a8 bindings + snapshots
      selects the delivered Forge cell — selection and materialization derive
@@ -25,7 +25,7 @@ Covered here, over the REAL ``Lifecycle.startup()`` / ``Executor`` machinery
      silent boot-path bail.
   4. the full w8a8 serve chain over deferral: desired-state warm mints the
      compile target, then a RunJob carrying ``required_compile`` for that
-     live incarnation executes (the th#868 fence holds end to end).
+     live incarnation executes (the fence holds end to end).
   5. a PLAIN-lane compile function (no w8a8 fence) deferred at boot is set
      up cold by its first RunJob — a deferred compile function is never
      orphaned.
@@ -299,7 +299,7 @@ def test_boot_defers_compile_declared_function(tmp_path, monkeypatch, caplog) ->
     assert setup_calls == [] and enables == []
     # Slots stay advertised (per-dispatch serveability); a compile-declared
     # cls function reports loading until hub delivery warms it — the same
-    # visible state as the awaiting_hub bucket (ie#455), never failed.
+    # visible state as the awaiting_hub bucket, never failed.
     assert ex.available_functions() == ["slotted"]
     assert ex.loading_functions() == ["generate"]
     assert "generate" not in ex.unavailable and "slotted" not in ex.unavailable

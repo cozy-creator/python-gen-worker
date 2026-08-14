@@ -5,7 +5,7 @@ event after a tag-move never misattributes to the new identity); a mutable
 tag can move to new bytes under the SAME wire ref.
 
 Not covered here (documented deviation, one line): "adopt-to-self no-op
-re-arm" (gw#604/gw#607) is compile-cell/fleet_cells adoption machinery, not
+re-arm" is compile-cell/fleet_cells adoption machinery, not
 model residency — its worker-side tests live in test_executor_adopt.py,
 currently under a different lane's active dirty WIP per the th#960 tracker
 note ("foreign WIP ... compile_cache/executor/fleet_cells ... left alone").
@@ -183,7 +183,7 @@ def test_mutable_tag_move_fences_events_by_digest_and_generation(tmp_path) -> No
             assert priority_a.status == pb.JOB_STATUS_OK
             assert _decode(priority_a.inline).response == payload_a.decode()
             conn.wait_for_count(resumed_b, b_events_before + 1)
-            # pgw#795: the event and the store update are not the same instant,
+            # The event and the store update are not the same instant,
             # so read the store on PROGRESS rather than sampling it once and
             # hoping. Sampling failed a full-suite run at ('snap-a', 0) — the
             # resumed pass had announced B but not yet rebased the identity.
@@ -312,7 +312,7 @@ def test_setup_failure_emits_fn_unavailable_and_recovers(tmp_path) -> None:
 
 
 def test_host_ram_failure_precedes_retryable_result_on_wire(tmp_path, monkeypatch) -> None:
-    """Absorbed from test_worker_grpc_e2e.py (th#807): host-RAM admission
+    """Absorbed from test_worker_grpc_e2e.py: host-RAM admission
     failure crosses the real worker transport BEFORE the retry result. Only
     the largest staged ref fails; a smaller shared ref stays usable."""
     from gen_worker.models import disk_gc
@@ -371,7 +371,7 @@ def test_structural_host_ram_shortfall_stops_reselling_the_same_pod(
     verdict, not local pressure — an empty host of this size still refuses.
 
     The wan-2.2 turbo failure bounced 5 attempts across 2 identically-sized
-    pods (th#1228) because every refusal claimed to be transient. A structural
+    pods because every refusal claimed to be transient. A structural
     shortfall crosses the wire as a hardware axis carrying required-vs-total,
     and the worker stops advertising the function instead of inviting the
     same dispatch again.

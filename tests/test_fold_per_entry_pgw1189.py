@@ -1,24 +1,16 @@
-"""pgw#1189 — an ABANDONED mint's per-entry partition was dropped, so the one
-question the compile loop kept re-opening was structurally unanswerable.
+"""An ABANDONED mint's per-entry span partition must survive.
 
-pgw#830 measures the child's whole wall (`child_seal_s`, `child_program_load_s`,
-`child_interp_s`, `child_boot_s`, `reap_lag_s`, `parent_stage_s`…) and pgw#832's
-seal split rides the overlays. Both reach the phase table through
-``_fold_pool_results`` — which runs ONLY after ``_drive_pool`` RETURNS. The
-``finally`` above it refreshes only ``progress.pool_ledger``.
+The child's wall-clock timers (`child_seal_s`, `child_program_load_s`,
+`child_interp_s`, `child_boot_s`, `reap_lag_s`, `parent_stage_s`…) and the seal
+split reach the phase table through ``_fold_pool_results``, which runs ONLY
+after ``_drive_pool`` RETURNS, while the ``finally`` above it refreshes only
+``progress.pool_ledger``. A mint killed mid-pool then keeps its LEDGER and loses
+every per-entry SPAN.
 
-So a mint killed mid-pool kept its LEDGER and lost its per-entry SPANS. Verified
-against the standing hub, 2026-08-12: all three recorded gen-worker 0.112.0
-mints carry the six inductor leaf timers and `overlays={}` — not one child span —
-and the two sdxl mints were abandoned at 1/36 and 16/36. **The 16/36 one is the
-run th#1834's P0-E read its figures from**, which is why "what is the ~39 s
-residual" was answered by inference: the split was never on the wire.
-
-pgw#848 had already written the rule this violates, for the ledger, one line
-away: *"A mint killed at entry 30 of 36 then leaves 30 entries' worth of
-measurement on disk instead of one bare 'no cell produced' row."* The fold is
-now per entry, at the same `_tick` that banks the ledger, so an entry's numbers
-are durable the moment the entry finishes.
+The rule is the ledger's: a mint killed at entry 30 of 36 leaves 30 entries'
+worth of measurement behind, not one bare "no cell produced" row. So the fold is
+per entry, at the same `_tick` that banks the ledger, and an entry's numbers are
+durable the moment the entry finishes.
 """
 
 from __future__ import annotations

@@ -5,42 +5,31 @@ Send-queue policy (CONTRACT.md §1): JobResult is NEVER dropped — results
 persist across reconnects until written to a live stream. Under overflow the
 drop order is JobProgress (oldest first); everything else blocks the producer.
 
-pgw#869 — THE EVIDENCE LANE. Results had a durable lane; measurements did not.
-`reset_for_reconnect` cleared `_items` wholesale and restored only
-`_pending_results`, so every queued ActivityUpdate/BootPhase — every
-`self_mint_compile` phase, every `aot_mint phase=pool` ledger, every terminal —
-was destroyed on each disconnect, and any evidence already popped by the sender
-when the write failed had no durable copy at all. That is wall #7's mechanism:
-the pod stayed alive with its numbers, the route to them did not.
-
-Evidence now rides its own durable lane on the same principle as results:
-enqueue-and-return (never blocks a producer), survives reconnect in FIFO order,
-and retires only when a live stream has taken it. Coalescing is deliberately
-asymmetric — detail-free RUNNING beats (`Activity.heartbeat` /
+THE EVIDENCE LANE. Evidence rides its own durable lane on the same principle as
+results: enqueue-and-return (never blocks a producer), survives reconnect in FIFO
+order, and retires only when a live stream has taken it. Coalescing is
+deliberately asymmetric — detail-free RUNNING beats (`Activity.heartbeat` /
 `progress_beat`) collapse to the latest per (kind, phase); anything carrying a
 `detail`, an `error`, or a non-RUNNING state is evidence and is never dropped.
-That split is not a guess: the hub's own upsert conflict key is
+That split mirrors the hub's own upsert conflict key,
 `(worker_id, kind, phase, state, self_stalled, payload_digest)` with
 `payload_digest = sha256(error || 0x00 || detail)`
 (tensorhub `internal/db/gen/worker_activity_events.sql.go`,
-`repository/worker_activity_event_store.go`), so exactly what this coalesces is
-what the hub would itself have folded into one row via `occurrences + 1`, while
+`repository/worker_activity_event_store.go`): exactly what this coalesces is what
+the hub would itself have folded into one row via `occurrences + 1`, while
 everything it preserves is a distinct row hub-side.
 
-In-memory only, deliberately (pgw#869 §1): the worker process did not restart in
-the motivating incident, and a mint is a child of the worker, so a worker restart
-ends the mint anyway. Disk persistence is out of scope and must be argued on its
-own merits, not borrowed from this one.
+In-memory only, deliberately: a mint is a child of the worker, so a worker
+restart ends the mint anyway. Disk persistence is out of scope and must be
+argued on its own merits.
 
-pgw#803 — THE RECONNECT EPISODE IS A HUB ROW. Every duration in this module is
-retry PACING or an RPC deadline, never a kill decision, and none of them can
-produce th#1333's 15m36s reconnect gap: the backoff is `uniform(0, min(30 s,
-2**attempt))` with `attempt` reset after `_BACKOFF_RESET_AFTER_S` of
-connectedness, a dead peer is called by h2 keepalive within
-`KEEPALIVE_INTERVAL_S` + `KEEPALIVE_TIMEOUT_S`, and a hung dial is cut at
-`_HELLO_ACK_TIMEOUT_S`. So the gap was time the reconnect loop was NOT RUNNING — and nothing recorded that,
-because the loop's narration was `logger.info` on RunPod stdout, which is
-unreadable (gw#640). Each episode now emits two evidence rows (`dropped`, then
+THE RECONNECT EPISODE IS A HUB ROW. Every duration in this module is retry
+PACING or an RPC deadline, never a kill decision: the backoff is
+`uniform(0, min(30 s, 2**attempt))` with `attempt` reset after
+`_BACKOFF_RESET_AFTER_S` of connectedness, a dead peer is called by h2 keepalive
+within `KEEPALIVE_INTERVAL_S` + `KEEPALIVE_TIMEOUT_S`, and a hung dial is cut at
+`_HELLO_ACK_TIMEOUT_S`. So a gap larger than those bounds is time the reconnect
+loop was NOT RUNNING. Each episode emits two evidence rows (`dropped`, then
 `reconnected`) partitioning the gap into scheduled backoff, slept wall time,
 dial+Hello, teardown, and the remainder. No new bound is introduced anywhere:
 this measures, it never decides.
@@ -71,52 +60,44 @@ PROTOCOL_VERSION = pb.PROTOCOL_VERSION_CURRENT
 
 #: The full gRPC method path this client dials. Derived from the generated
 #: descriptor rather than written out, so it can never drift from the proto
-#: package that defines the wire-protocol major (th#1597, §1.27(b)).
+#: package that defines the wire-protocol major.
 _CONNECT_METHOD = "/{}/Connect".format(
     pb.DESCRIPTOR.services_by_name["WorkerScheduler"].full_name
 )
 
 _RESULT, _PROGRESS, _EVENT = "result", "progress", "event"
-#: pgw#869: a hub-bound FACT with no live-state replay behind it. Results have
+#: A hub-bound FACT with no live-state replay behind it. Results have
 #: `_pending_results`; state has `LifecycleSnapshot`/`StateDelta`/the capacity
-#: lane. These two carry measurements and terminals and had neither.
+#: lane. These two carry measurements and terminals and have neither.
 _EVIDENCE = "evidence"
 _EVIDENCE_MSGS = ("activity_update", "boot_phase")
 
 _MAX_REDIRECT_HOPS = 3
-# pgw#869 — WHAT THIS LADDER MAY AND MAY NOT JUDGE. A rejected credential is a
-# verdict about US; an ABSENT hub is a verdict about nothing. Before that
-# change the ladder could not tell them apart, and the difference is the whole
-# outbox: a worker that outlives a hub outage ages past its 30 min JWT, redials,
-# is refused because its token expired, and DIES WITH A FULL QUEUE — every
-# property the outbox proves, right up to the moment it matters. See
-# `_auth_rejection_is_fatal`: an expired presented credential never reaches this
-# ladder.
+# WHAT THIS LADDER MAY AND MAY NOT JUDGE. A rejected credential is a verdict
+# about US; an ABSENT hub is a verdict about nothing. An expired presented
+# credential never reaches this ladder — see `_auth_rejection_is_fatal`.
 #
-# pgw#873 — AND THE SURVIVING RULE IS EVIDENCE-KEYED, NOT COUNT-KEYED. The old
-# `3 consecutive over 60 s` pair was the last magic number in the reconnect
-# path, and both premises under it were measured false:
+# The rule is EVIDENCE-KEYED, NOT COUNT-KEYED — deliberately no
+# "N consecutive over T seconds" threshold:
 #
-#   * the "pg blip" it was patient for is unreachable through this code. The
-#     hub returns `codes.Unavailable` for every transient store error and
+#   * the hub returns `codes.Unavailable` for every transient store error and
 #     reserves `Unauthenticated` for genuine credential verdicts
-#     (`connect_worker.go:341-349`, #539). Waiting out a window here only
-#     delays a verdict that cannot change.
+#     (`connect_worker.go:341-349`), so waiting out a window here only delays a
+#     verdict that cannot change.
 #   * on a POD the worker is not the actuator at all. `worker_wedge.go`
 #     terminates the pod on repeated auth rejects from the side that can see
 #     it — it revokes the token and closes the pod-hour ledger, neither of
-#     which a worker can do for itself, and a worker that cannot reach the hub
-#     cannot reap itself anyway. A worker-side exit there is a duplicate that
-#     can only fire EARLIER than the authority, and under th#1384 a MINTING pod
-#     that exits takes its mint with it.
+#     which a worker can do for itself. A worker-side exit is a duplicate that
+#     can only fire EARLIER than the authority, and a MINTING pod that exits
+#     takes its mint with it.
 #
 # So: a pod NEVER self-terminates on auth. A pod-less worker (`worker_wedge.go`
 # returns immediately on an empty `RunpodPodID`, so it has no hub-side actuator
 # at all) escalates on EVIDENCE — the identical verdict on the identical
-# credential, seen twice — which is decidable from the `jti` and the rejection
-# details, with nothing counted and no window waited.
+# credential, seen twice — decidable from the `jti` and the rejection details,
+# with nothing counted and no window waited.
 
-#: pgw#848: how long before its own expiry a worker starts SAYING SO. Wider
+#: How long before its own expiry a worker starts SAYING SO. Wider
 #: than the hub's ~80%-of-TTL rotation point (24 min of a 30 min TTL, i.e.
 #: 6 min of remaining life), so a missed rotation is visible while the stream
 #: is still usable rather than after it is not.
@@ -158,18 +139,11 @@ class FatalTransportError(Exception):
 
 
 class HandlerError(Exception):
-    """A MESSAGE HANDLER raised — this is not a transport failure (gw#640).
+    """A MESSAGE HANDLER raised — this is not a transport failure.
 
-    `_recv_loop` awaits the handlers inline, so a raise while handling (say) a
-    RunJob used to propagate into `run()`'s catch-all and be logged as
-    "connection to <addr> failed" — a handler bug wearing a dropped socket's
-    clothes. The worker then reconnected forever while the hub, whose only
-    death signal is a closed stream, reported `young worker death` and
-    `workers kept dying mid-job`. Ten live th#1085 runs and two prior
-    instrument releases (0.56.1 fatals, 0.56.2 post-mortem supervisor) found
-    nothing because the process never died and nothing ever escaped to them.
-
-    Carries which message was being handled so the report names it.
+    `_recv_loop` awaits the handlers inline, so without this type a handler bug
+    reaches `run()`'s catch-all and is logged as a dropped connection. Carries
+    which message was being handled so the report names it.
     """
 
     def __init__(self, kind: str, cause: BaseException) -> None:
@@ -214,11 +188,8 @@ def _msg_kind(msg: pb.WorkerMessage) -> str:
 #: derives its bound from this rather than inventing one.
 KEEPALIVE_TIMEOUT_S = 10.0
 
-#: How often the channel pings an idle stream. pgw#973 (§4.24): the asymmetry
-#: this fixes is that the keepalive TIMEOUT was a named constant with reach
-#: while the INTERVAL beside it was a bare `20000` inside the options list —
-#: two halves of one liveness bound, only one of them findable. Together they
-#: are the worker's detection budget for a peer that has stopped reading:
+#: How often the channel pings an idle stream. With KEEPALIVE_TIMEOUT_S this is
+#: the worker's detection budget for a peer that has stopped reading:
 #: interval + timeout = 30 s, and everything downstream (the reconnect
 #: accounting at `RECONNECT_EVENT`, the send-loop wait) derives from that sum
 #: rather than restating either half.
@@ -228,33 +199,25 @@ KEEPALIVE_INTERVAL_S = 20.0
 #: a graceful close. Unchanged value, named so both close paths share it.
 _PEER_CLOSE_WAIT_S = 5.0
 
-#: pgw#803: the typed disconnect/reconnect record. th#1333's tape has a worker
-#: whose stream ended at 17:51:43Z and whose next connect attempt reached the
-#: hub at 18:07:19Z — 15m36s — and NOTHING on either side can say what the pod
-#: did in between. The reconnect loop's own narration is `logger.info` on RunPod
-#: stdout, which is unreadable (gw#640's whole premise), so every investigation
-#: of that gap has been speculation.
-#:
-#: The loop's own constants cannot produce it, and that is the point: the delay
-#: is `uniform(0, min(30s, 2**attempt))` (full jitter, ceiling
-#: :attr:`Transport._backoff_cap` = 30 s), `attempt` resets to 0 after
-#: :data:`_BACKOFF_RESET_AFTER_S` of connectedness, a dead peer is called by
-#: h2 keepalive within :data:`KEEPALIVE_INTERVAL_S` + :data:`KEEPALIVE_TIMEOUT_S`,
-#: and a dial that hangs is cut at :data:`_HELLO_ACK_TIMEOUT_S`. A 936 s gap is
-#: therefore time the reconnect loop WAS NOT RUNNING — a starved event loop, a
-#: frozen process, a drop the socket never surfaced — and the fix for that class
-#: is to make it nameable, not to add another duration.
+#: The typed disconnect/reconnect record. The loop's own constants bound the
+#: gap it can produce: the delay is `uniform(0, min(30s, 2**attempt))` (full
+#: jitter, ceiling :attr:`Transport._backoff_cap` = 30 s), `attempt` resets to 0
+#: after :data:`_BACKOFF_RESET_AFTER_S` of connectedness, a dead peer is called
+#: by h2 keepalive within :data:`KEEPALIVE_INTERVAL_S` +
+#: :data:`KEEPALIVE_TIMEOUT_S`, and a dial that hangs is cut at
+#: :data:`_HELLO_ACK_TIMEOUT_S`. Anything beyond that is time the reconnect loop
+#: WAS NOT RUNNING — a starved event loop, a frozen process, a drop the socket
+#: never surfaced.
 #:
 #: So an episode ACCOUNTS for itself: the gap from drop to reconnect is
 #: partitioned into what the loop can prove it spent (backoff sleep, dial+Hello
 #: attempts, teardown) and the remainder. `unaccounted_s` is the diagnostic —
-#: ~0 on a healthy reconnect, ~890 s on the incident — and it introduces no
-#: bound of any kind.
+#: ~0 on a healthy reconnect — and it introduces no bound of any kind.
 RECONNECT_EVENT = "worker_reconnect"
 
 
 class _ReconnectEpisode:
-    """One disconnect -> reconnect episode, measured (pgw#803).
+    """One disconnect -> reconnect episode, measured.
 
     Coalescing is by COUNT, never by dropping: an hour-long hub outage is two
     hub rows (`dropped`, then `reconnected` carrying the attempt histogram),
@@ -317,7 +280,7 @@ class _ReconnectEpisode:
 
 
 class SenderQuiesced(Exception):
-    """The send loop was asked to stop and the queue is empty (pgw#845).
+    """The send loop was asked to stop and the queue is empty.
 
     Ending the sender BETWEEN writes is not cosmetic: in grpc.aio a cancelled
     ``write()`` cancels the whole RPC (``_call._write`` calls ``self.cancel()``
@@ -327,33 +290,25 @@ class SenderQuiesced(Exception):
     """
 
 
-#: pgw#869 §5: how many undelivered evidence facts the outbox holds before it
-#: shortens itself. Sized against the motivating outage rather than guessed: a
-#: whole-graph sdxl mint emits O(10^2) phase/measurement facts per hour, so this
-#: is hours of a real mint's evidence. Growth is bounded by SHEDDING, and a shed
-#: is itself a reported fact — silence about a loss is the thing this issue
-#: exists to delete.
+#: How many undelivered evidence facts the outbox holds before it shortens
+#: itself. Derived: a whole-graph sdxl mint emits O(10^2) phase/measurement
+#: facts per hour, so this is hours of a real mint's evidence. Growth is bounded
+#: by SHEDDING, and a shed is itself a reported fact — a loss is never silent.
 EVIDENCE_MAX = 4096
 
 #: The shed report's own slot. Exempt from shedding: the one fact that must
 #: never be lost is the fact that facts were lost.
 _SHED_KEY = ("shed",)
 
-#: pgw#869: how many just-shipped facts are re-offered after a DIRTY reconnect.
+#: How many just-shipped facts are re-offered after a DIRTY reconnect.
 #:
-#: `stream.write()` returning means BUFFERED, not delivered — the codebase
-#: already knows this and says so in `_close_sender`: cancelling a write "RSTs
-#: the call and throws away everything buffered behind it". So retiring a fact
-#: the instant its write returns loses exactly the tail of facts produced in the
-#: moments around a stream death, which is the window this whole issue is about.
-#: MEASURED: the acceptance test below fails without this — three measurements
-#: emitted immediately after the hub died were written into a socket that was
-#: already gone, retired, and never replayed.
-#:
-#: A trailing ring makes that window recoverable at bounded cost. Re-offering is
-#: safe by construction: the hub folds an identical redelivery into
-#: `occurrences + 1` on one row (see the module docstring), so the choice is
-#: between a duplicate and a hole, and a hole is not a choice.
+#: `stream.write()` returning means BUFFERED, not delivered (cancelling a write
+#: RSTs the call and throws away everything buffered behind it — see
+#: `_close_sender`). So retiring a fact the instant its write returns loses the
+#: tail of facts produced around a stream death. A trailing ring makes that
+#: window recoverable at bounded cost, and re-offering is safe by construction:
+#: the hub folds an identical redelivery into `occurrences + 1` on one row (see
+#: the module docstring), so the choice is between a duplicate and a hole.
 RESHIP_WINDOW = 256
 
 #: Largest single gRPC message, either direction. See `_channel_options`.
@@ -371,16 +326,14 @@ class SendQueue:
     def __init__(
         self, maxsize: int = DEFAULT_QUEUE_MAXSIZE, evidence_max: int = EVIDENCE_MAX,
     ) -> None:
-        # pgw#973 §4.24 item 4: `maxsize <= 0` used to reach the enqueue path's
-        # `while self._maxsize > 0 and ...` and delete the bound outright — an
+        # A non-positive `maxsize` would delete the bound outright — an
         # unbounded outbound queue in a pod whose producer (progress, events)
-        # never blocks, i.e. the pod OOMs instead of shedding. `maxsize` is a
-        # public `Transport`/`worker` parameter, so that value is one caller
-        # away. Absence is the stated default; a stated non-positive is refused.
+        # never blocks, i.e. the pod OOMs instead of shedding. Absence is the
+        # stated default; a stated non-positive is refused.
         if int(maxsize) <= 0:
             raise ValueError("maxsize must be positive")
         self._maxsize = int(maxsize)
-        # pgw#869: the durable evidence lane. Ordered (dict preserves insertion
+        # The durable evidence lane. Ordered (dict preserves insertion
         # order), so replay is FIFO. A coalescible beat REPLACES its slot in
         # place, which keeps a phase's beat where the phase began rather than
         # letting liveness chatter reorder the record.
@@ -428,7 +381,7 @@ class SendQueue:
         # (request_id, attempt) -> JobResult WorkerMessage, until written to a
         # live stream. Survives reconnects; drives Hello.in_flight.
         self._pending_results: dict[Tuple[str, int], pb.WorkerMessage] = {}
-        # pgw#845: set when this stream's sender must end. It ends only once
+        # Set when this stream's sender must end. It ends only once
         # nothing is left to write, so quiescing never drops a queued message.
         self._quiescing = False
 
@@ -450,15 +403,15 @@ class SendQueue:
         # Durable JobResults are explicitly exempt from the queue bound. They
         # must not consume event/progress capacity merely because they share
         # the same deque (especially after reconnect requeues several results).
-        # pgw#869: evidence is exempt for the same reason and one stronger —
-        # it has its own bound (`_evidence_max`) with its own shed policy, and
-        # a producer that just MEASURED something must never block on a dead
-        # connection to report it.
+        # Evidence is exempt for the same reason and one stronger — it has its
+        # own bound (`_evidence_max`) with its own shed policy, and a producer
+        # that just MEASURED something must never block on a dead connection to
+        # report it.
         return sum(
             1 for kind, _msg in self._items if kind not in (_RESULT, _EVIDENCE)
         )
 
-    # ---- pgw#869: the evidence lane ---------------------------------------
+    # ---- the evidence lane -------------------------------------------------
 
     @staticmethod
     def _is_coalescible_beat(msg: pb.WorkerMessage) -> bool:
@@ -511,7 +464,7 @@ class SendQueue:
         self._shed_evidence()
 
     def _shed_evidence(self) -> None:
-        """Bound the lane. Coalescible first, evidence last (pgw#869 §5)."""
+        """Bound the lane. Coalescible first, evidence last."""
         if len(self._pending_evidence) <= self._evidence_max:
             return
         shed = 0
@@ -529,7 +482,7 @@ class SendQueue:
             self._record_shed(shed)
 
     def _record_shed(self, shed: int) -> None:
-        """Shedding evidence must itself emit a fact (pgw#869 §5).
+        """Shedding evidence must itself emit a fact.
 
         Built here rather than through `activity.emit_event` so it cannot
         recurse into the queue it is reporting on. It occupies the reserved
@@ -574,9 +527,9 @@ class SendQueue:
         exempt from the queue bound, and it must never be folded with anything.
         So it deliberately has no content key, and **every keyed structure here
         is therefore a structure results do not belong in** — `_in_flight`, the
-        reconnect fences, and the pgw#869 evidence map all key on this and all
-        exclude results by construction. A consumer that treats this map as
-        covering every message has an unhandled case, not a typing nuisance.
+        reconnect fences, and the evidence map all key on this and all exclude
+        results by construction. A consumer that treats this map as covering
+        every message has an unhandled case, not a typing nuisance.
         """
         if msg.WhichOneof("msg") == "job_result":
             return None
@@ -586,22 +539,13 @@ class SendQueue:
     def _evidence_bytes(msg: pb.WorkerMessage) -> bytes:
         """`_message_key` for a message already classified as `_EVIDENCE`.
 
-        pgw#869 semantics, decided rather than defaulted. The two candidate
-        answers for "what does the evidence map do with a keyless message" are
-        both wrong, because **the question cannot arise**: `_msg_kind` admits
-        exactly `activity_update` and `boot_phase` to this lane, and the only
-        keyless message is `job_result`.
-
-        * *Skip it* would make the map silently lossy — in the one module whose
-          entire purpose is that facts are not silently lost.
-        * *Give results their own evidence key* would put them in two durable
-          lanes at once (`_pending_results` and `_pending_evidence`), which
-          double-ships a result on reconnect and coalesces something the queue
-          contract says is never coalesced.
-
-        So this is total by precondition, and it says so here — at the boundary
-        where the invariant could be violated — instead of narrowing an
-        Optional at five call sites and leaving the reason nowhere.
+        Total by precondition: `_msg_kind` admits exactly `activity_update` and
+        `boot_phase` to this lane, and the only keyless message is `job_result`.
+        Both alternatives are wrong — skipping a keyless message would make the
+        map silently lossy, and giving results their own evidence key would put
+        them in two durable lanes at once (`_pending_results` and
+        `_pending_evidence`), double-shipping a result on reconnect and
+        coalescing something the queue contract says is never coalesced.
         """
         return msg.SerializeToString(deterministic=True)
 
@@ -699,7 +643,7 @@ class SendQueue:
                 self._cond.notify_all()
                 return
             if kind == _EVIDENCE:
-                self._put_evidence(msg)               # pgw#869: never blocks
+                self._put_evidence(msg)               # never blocks
                 self._cond.notify_all()
                 return
             if self._host_capacity_key(msg) is not None:
@@ -837,9 +781,9 @@ class SendQueue:
             return
         async with self._cond:
             self._in_flight.discard(key)
-            # pgw#869: a fact retires from the durable lane only once a LIVE
-            # stream has taken it. `_evidence_key` holds only the currently
-            # stored copy, so a superseded beat can never retire the newer one.
+            # A fact retires from the durable lane only once a LIVE stream has
+            # taken it. `_evidence_key` holds only the currently stored copy, so
+            # a superseded beat can never retire the newer one.
             slot = self._evidence_key.pop(key, None)
             if slot is not None:
                 shipped = self._pending_evidence.pop(slot, None)
@@ -863,12 +807,10 @@ class SendQueue:
     async def reset_for_reconnect(self) -> None:
         """Drop transient lanes; executor state replays capacity after HelloAck.
 
-        pgw#869: DURABLE lanes are requeued, not dropped. Results were already;
-        evidence now is, in the order it was produced. Anything a live stream
-        took but never confirmed (`mark_event_shipped` did not run because the
-        write failed) is still in `_pending_evidence` and comes back with it —
-        which is the second of the two loss sites this closes, and the one no
-        amount of queueing would have covered on its own.
+        DURABLE lanes are requeued, not dropped: results, and evidence in the
+        order it was produced. Anything a live stream took but never confirmed
+        (`mark_event_shipped` did not run because the write failed) is still in
+        `_pending_evidence` and comes back with it.
         """
         async with self._cond:
             self._quiescing = False   # the quiesce belonged to the dead stream
@@ -908,7 +850,7 @@ class SendQueue:
                 or self._in_flight
                 or self._capacity_in_flight
                 or self._pending_results
-                or self._pending_evidence   # pgw#869: a drain flushes facts too
+                or self._pending_evidence   # a drain flushes facts too
             ):
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
@@ -929,8 +871,8 @@ class Transport:
 
     handlers must provide:
       build_hello() -> pb.Hello | Awaitable[pb.Hello]  (fresh full snapshot;
-        awaitable form serves the pgw#763 split parent, which fetches the
-        Hello from its compute child)
+        awaitable form serves the split parent, which fetches the Hello from
+        its compute child)
       on_hello_ack(ack: pb.HelloAck) -> Awaitable   (also mid-stream re-sends)
       on_message(msg: pb.SchedulerMessage) -> Awaitable  (MUST NOT block)
       on_message_shipped(msg: pb.WorkerMessage) -> Awaitable (optional)
@@ -956,29 +898,28 @@ class Transport:
         self._connected = asyncio.Event()
         self._clean_close = False
         self.reconnect_delays: List[float] = []  # observability + tests
-        #: pgw#873: the (jti, details) verdicts this worker has already been
-        #: handed. A pod-less worker escalates when one REPEATS — same
-        #: credential, same answer — because that is the evidence that the
-        #: verdict cannot change. A rotation retires the old key with the old
-        #: credential, so nothing has to be reset by hand.
+        #: The (jti, details) verdicts this worker has already been handed. A
+        #: pod-less worker escalates when one REPEATS — same credential, same
+        #: answer — because that is the evidence that the verdict cannot change.
+        #: A rotation retires the old key with the old credential.
         self._auth_verdicts: set = set()
         #: Credentials whose expired-rejection has already been confessed.
         self._expired_rejection_reported: set = set()
-        #: pgw#848: the last remaining-lifetime this worker reported, so a
-        #: reconnect storm does not emit one event per attempt.
+        #: The last remaining-lifetime this worker reported, so a reconnect
+        #: storm does not emit one event per attempt.
         self._last_credential_left: Optional[float] = None
         self._connected_at: Optional[float] = None  # set on each HelloAck
-        #: pgw#803: last proven scheduling instant (see `_send_loop`).
+        #: Last proven scheduling instant (see `_send_loop`).
         self._last_send_at: Optional[float] = None
-        #: pgw#803: the open disconnect->reconnect episode, if any.
+        #: The open disconnect->reconnect episode, if any.
         self._episode: Optional["_ReconnectEpisode"] = None
         self._dial_started: float = 0.0
-        # gw#640: (message kind, exception class) already dialed to the hub.
+        # (message kind, exception class) already dialed to the hub.
         self._reported_handler_failures: set = set()
-        # pgw#763: a supervisor-requested stream cycle (compute child respawn
-        # needs a fresh Hello). Cleared at the start of each connection, so a
-        # request set BEFORE a connection is satisfied by that connection's
-        # own fresh Hello.
+        # A supervisor-requested stream cycle (compute child respawn needs a
+        # fresh Hello). Cleared at the start of each connection, so a request
+        # set BEFORE a connection is satisfied by that connection's own fresh
+        # Hello.
         self._cycle = asyncio.Event()
 
     # ---- send API --------------------------------------------------------
@@ -997,14 +938,9 @@ class Transport:
     def current_worker_jwt(self) -> str:
         """Newest worker credential: hub-rotated token, else the boot token.
 
-        pgw#893 §2 / pgw#881 A: ONE source, and it is the process-wide one.
-        This stream used to keep its own `_worker_jwt` cache and read it
-        FIRST, which inverted the precedence pgw#848 exists to establish: the
-        rotation handler assigned the cache and only then published to
-        `worker_credential` — inside a swallowing `except` — so a publish
-        that failed left this stream authenticating happily with a token no
-        other dial in the process could see. That is precisely the split that
-        wedged attempts 16 and 17, restored one level down.
+        ONE source, and it is the process-wide one: never a stream-local cache,
+        or a failed publish leaves this stream authenticating with a token no
+        other dial in the process can see.
         """
         return (worker_credential.current() or "").strip()
 
@@ -1027,8 +963,8 @@ class Transport:
 
     def cycle_connection(self) -> None:
         """Drop the current stream (if any) and let the reconnect loop redial
-        with a fresh Hello (pgw#763: the compute child was respawned, so the
-        hub must re-sync desired state against the new process)."""
+        with a fresh Hello: the compute child was respawned, so the hub must
+        re-sync desired state against the new process."""
         self._cycle.set()
 
     # ---- connection loop ---------------------------------------------------
@@ -1039,24 +975,19 @@ class Transport:
             ("grpc.keepalive_timeout_ms", int(KEEPALIVE_TIMEOUT_S * 1000)),
             ("grpc.keepalive_permit_without_calls", 1),
             ("grpc.http2.max_pings_without_data", 0),
-            # pgw#973 (§4.24): the frame cap on ONE WorkerMessage, both
-            # directions. grpc-python's own default is 4 MiB receive, which
-            # this raises — the bound that matters is the one that must not be
-            # ABSENT. Nothing else bounds a single message: the queue caps the
-            # COUNT in flight (`DEFAULT_QUEUE_MAXSIZE`), never the size of one,
-            # and a peer sending an unbounded frame is a heap the worker cannot
-            # refuse otherwise. Generous relative to real traffic (control
-            # messages and metadata; artifact bytes travel over HTTP to the
-            # CAS, never on this stream) precisely so it never binds on
-            # legitimate traffic and only ever catches a runaway.
+            # The frame cap on ONE WorkerMessage, both directions. Nothing else
+            # bounds a single message: the queue caps the COUNT in flight
+            # (`DEFAULT_QUEUE_MAXSIZE`), never the size of one. Generous
+            # relative to real traffic (control messages and metadata; artifact
+            # bytes travel over HTTP to the CAS, never on this stream) so it
+            # never binds on legitimate traffic and only catches a runaway.
             ("grpc.max_send_message_length", _MAX_MESSAGE_BYTES),
             ("grpc.max_receive_message_length", _MAX_MESSAGE_BYTES),
         ]
 
     def _make_channel(self, target: str, use_tls: bool) -> grpc.aio.Channel:
         if use_tls:
-            # System trust roots. The custom-CA-bundle knob (GRPC_CA_BUNDLE)
-            # was deleted in pgw#514 — no deployment ever set it.
+            # System trust roots; no custom-CA-bundle knob by design.
             return grpc.aio.secure_channel(
                 target,
                 grpc.ssl_channel_credentials(),
@@ -1072,7 +1003,7 @@ class Transport:
         self._report_credential_age(token)
         return [("authorization", f"Bearer {token}")]
 
-    # ---- pgw#869: which auth rejections are a verdict about US ------------
+    # ---- which auth rejections are a verdict about US ----------------------
 
     def _presented_credential(self) -> str:
 
@@ -1111,32 +1042,21 @@ class Transport:
           fully heals the worker.
 
         So retrying with an expired token is not a doomed loop — it is the
-        documented recovery path, and the ONLY thing that was preventing the
-        heal was this worker killing itself first. `_report_credential_age`
-        already said as much ("the hub has a boot-grace admission for exactly
-        that case — so shortcutting the reconnect here would break a path that
-        legitimately heals"); the ladder shortcut it anyway.
-
-        And the billing risk that motivated the ladder is owned by the party
-        that can actually see the pod: `grpc/worker_wedge.go` terminates a pod
-        after `wedgeAuthRejectThreshold` consecutive auth rejects through the
-        tracked provider path. A worker cannot reap itself when it cannot reach
-        the hub, and it does not have to.
+        documented recovery path. The billing risk is owned by the party that
+        can actually see the pod: `grpc/worker_wedge.go` terminates a pod after
+        `wedgeAuthRejectThreshold` consecutive auth rejects through the tracked
+        provider path.
 
         A LIVE (or absent) credential refused by an answering hub IS about us —
-        revoked, superseded, misconfigured.
-
-        **pgw#873: what happens then depends on whether anyone ELSE can act.**
-        On a pod, `worker_wedge.go` is the actuator and this worker is not: it
-        revokes and terminates from the side that can see the pod, so the
-        worker keeps retrying and lets the authority decide (a minting pod that
-        exits early takes its mint with it). A pod-less worker has no such
-        authority — `noteWedgeStreak` returns immediately on an empty
-        `RunpodPodID` — so it is the only actuator there is, and it escalates
-        on EVIDENCE rather than on a count: the same `jti` handed the same
-        verdict twice cannot be waited out. There is no threshold and no
-        window; a rotation retires the evidence with the credential it was
-        about.
+        revoked, superseded, misconfigured. **What happens then depends on
+        whether anyone ELSE can act.** On a pod, `worker_wedge.go` is the
+        actuator and this worker is not, so the worker keeps retrying and lets
+        the authority decide (a minting pod that exits early takes its mint with
+        it). A pod-less worker has no such authority — `noteWedgeStreak` returns
+        immediately on an empty `RunpodPodID` — so it is the only actuator there
+        is, and it escalates on EVIDENCE rather than on a count: the same `jti`
+        handed the same verdict twice cannot be waited out. No threshold, no
+        window; a rotation retires the evidence with the credential.
         """
         token = self._presented_credential()
         exp = float(self._credential_claims(token).get("exp") or 0.0)
@@ -1157,7 +1077,7 @@ class Transport:
         )
         if pod:
             # The hub owns the actuator for a pod. Say so once per verdict so
-            # the silence is attributable off-pod (pgw#824).
+            # the silence is attributable off-pod.
             if not repeated:
                 self._report_auth_verdict_deferred(cred, details, pod)
             return False
@@ -1167,7 +1087,7 @@ class Transport:
         self, cred: str, details: str, pod: str,
     ) -> None:
         """A refusal this worker deliberately does NOT act on is still a fact
-        the hub should hold — a swallowed one is pgw#824's defect class."""
+        the hub should hold."""
         try:
             activity_mod.emit_event(
                 "worker_credential",
@@ -1213,33 +1133,16 @@ class Transport:
     def _report_credential_age(self, token: str) -> None:
         """Say something BEFORE the credential dies, not after the pod does.
 
-        pgw#848. The worker has never looked at its own token's ``exp``. It
-        learns of expiry only by being rejected — and by then it cannot
-        recover, because the refresh arrives ONLY as a ``token_refresh`` down
-        the stream (see the handler below) and the stream is the thing it can
-        no longer open. A credential deliverable solely over the connection it
-        authenticates cannot be delivered once that connection stops
-        authenticating.
-
-        MEASURED, hub `pod_events`, two consecutive whole-graph mints:
-
-            attempt 16  T+32.4 min  worker_token_expired
-                        T+42.9 min  "stream dropped involuntarily and never
-                                     reconnected (10m13s of silence) — silent
-                                     death mid-activity"
-            attempt 17  T+31.2 min  worker_token_expired -> auth wedge
-
-        ``DefaultWorkerJWTTTL`` is 30 minutes from POD CREATE, so this fires on
-        any pod that lives past half an hour — which, until the pgw#848 cap
-        fix, no mint ever did. Both runs destroyed a self-mint the hub's own
-        record describes as "reporting fresh progress".
+        The refresh arrives ONLY as a ``token_refresh`` down the stream (see the
+        handler below), so a credential deliverable solely over the connection
+        it authenticates cannot be delivered once that connection stops
+        authenticating. ``DefaultWorkerJWTTTL`` is 30 minutes from POD CREATE,
+        so this fires on any pod that lives past half an hour.
 
         DIAGNOSIS ONLY, deliberately: it changes no behaviour and refuses
         nothing. An expired token is not always fatal — the hub has a
         boot-grace admission for exactly that case — so shortcutting the
-        reconnect here would break a path that legitimately heals. What was
-        missing is not a decision, it is that ten minutes of silence carried
-        no name.
+        reconnect here would break a path that legitimately heals.
         """
         try:
             from .request_context._helpers import _decode_unverified_jwt_claims
@@ -1278,14 +1181,13 @@ class Transport:
             logger.debug("credential-age event failed", exc_info=True)
 
     def _report_handler_failure(self, err: HandlerError) -> None:
-        """Log a handler failure as ITSELF and dial it to the hub (gw#640).
+        """Log a handler failure as ITSELF and dial it to the hub.
 
         Reuses the `worker_fatal` carrier, so this lands as a durable
-        `pod_events` row on every hub pin already deployed — no proto change,
-        no hub redeploy. Deduped per (message kind, exception class): the
-        reconnect loop would otherwise re-dial the same fault every cycle.
-        The reconnect itself is unchanged — this release unmasks the fault, it
-        does not change liveness policy.
+        `pod_events` row with no proto change. Deduped per (message kind,
+        exception class): the reconnect loop would otherwise re-dial the same
+        fault every cycle. Liveness policy is unchanged — this only unmasks the
+        fault.
         """
         logger.error(
             "HANDLER FAILURE while handling %s (this is NOT a connection "
@@ -1309,7 +1211,7 @@ class Transport:
         except Exception:
             logger.warning("handler-failure report raised unexpectedly", exc_info=True)
 
-    # ---- pgw#803: the disconnect/reconnect episode ledger ------------------
+    # ---- the disconnect/reconnect episode ledger ---------------------------
 
     def _open_episode(
         self, *, dropped_at: float, cause: str, uptime_s: float,
@@ -1317,9 +1219,8 @@ class Transport:
         """A stream that HAD reached HelloAck ended: the episode starts here.
 
         Emitted immediately rather than only at reconnect: the evidence lane
-        survives the disconnect (pgw#869), so the drop is a durable fact even
-        for a pod that dies before it ever gets back — which is the shape
-        th#1333's tape had, and the shape that produced no worker-side row.
+        survives the disconnect, so the drop is a durable fact even for a pod
+        that dies before it ever gets back.
         """
         last_send = self._last_send_at
         loop_silent_s = (
@@ -1353,11 +1254,10 @@ class Transport:
             f"loop_silent_at_drop={ep.loop_silent_s:.1f}s; "
             f"attempt outcomes: {ep.histogram()}"
         )
-        # `overshoot` and `unaccounted` are the whole reason this row exists:
-        # together they are the part of the gap the reconnect loop cannot
-        # account for, i.e. time it was not running at all. Named on the row so
-        # the next 15-minute gap is read as "the process was not scheduling"
-        # rather than re-litigated as "the backoff must be wrong".
+        # `overshoot` + `unaccounted` is the part of the gap the reconnect loop
+        # cannot account for, i.e. time it was not running at all. Named on the
+        # row so a long gap is read as "the process was not scheduling" rather
+        # than re-litigated as "the backoff must be wrong".
         starved = overshoot + unaccounted
         if starved > 0:
             detail += (
@@ -1391,8 +1291,7 @@ class Transport:
         own start would leave that time in `unaccounted` forever, and reading a
         constant offset there as loop starvation is exactly the wrong answer.
 
-        The episode stays None while this worker has never been connected — a
-        boot dial that has not landed yet is gw#618's subject, not this one.
+        The episode stays None while this worker has never been connected.
         """
         connected_at = self._connected_at
         if connected_at is not None:
@@ -1429,9 +1328,9 @@ class Transport:
                 target, use_tls = normalize_grpc_addr(self._settings.orchestrator_public_addr)
             self._connected_at = None
             self._dial_started = time.monotonic()
-            # pgw#803: the classified outcome of THIS attempt. Default names
-            # the clean case — `_connect_once` returning is a stream that ended
-            # without raising.
+            # The classified outcome of THIS attempt. Default names the clean
+            # case — `_connect_once` returning is a stream that ended without
+            # raising.
             outcome = "stream_ended"
             try:
                 await self._connect_once(target, use_tls)
@@ -1462,20 +1361,19 @@ class Transport:
                     else:
                         logger.error("protocol violation: %s", details)
                 elif code == grpc.StatusCode.UNIMPLEMENTED:
-                    # th#1597 / DESIGN-RULINGS §1.27(b): the wire-protocol MAJOR
-                    # is the proto package, so it is in the service path
-                    # (/cozy.scheduler.v1.WorkerScheduler/Connect). A hub that
-                    # does not serve our major never registers that path and
-                    # gRPC answers UNIMPLEMENTED before any hub code runs.
+                    # The wire-protocol MAJOR is the proto package, so it is in
+                    # the service path (/cozy.scheduler.v1.WorkerScheduler/
+                    # Connect). A hub that does not serve our major never
+                    # registers that path and gRPC answers UNIMPLEMENTED before
+                    # any hub code runs.
                     #
-                    # This is FATAL and unretryable, and that is load-bearing
-                    # HUB-side, not merely tidy here: the worker's exit is what
-                    # makes the pod die before Hello, which leaves
-                    # `everConnected` false, which is how th#874's death
+                    # FATAL and unretryable, and that is load-bearing HUB-side:
+                    # the worker's exit is what makes the pod die before Hello,
+                    # leaving `everConnected` false, which is how the hub's death
                     # taxonomy marks the release `boot_crashing` and fails its
                     # queued requests. Retrying would reconnect-loop forever
                     # against a hub that can never answer, producing NO durable
-                    # mark and no operator signal — strictly worse than dying.
+                    # mark and no operator signal.
                     raise FatalTransportError(
                         f"hub does not serve this wire-protocol major "
                         f"(UNIMPLEMENTED on {_CONNECT_METHOD}): {details}"
@@ -1485,7 +1383,7 @@ class Transport:
             except FatalTransportError:
                 raise
             except HandlerError as e:
-                # gw#640: NEVER let this look like a dropped socket again.
+                # NEVER let this look like a dropped socket again.
                 outcome = f"handler_{e.kind}_{type(e.cause).__name__}"
                 self._report_handler_failure(e)
             except Exception as e:
@@ -1547,15 +1445,14 @@ class Transport:
             stub = pb_grpc.WorkerSchedulerStub(channel)
 
             async def _handshake() -> Any:
-                # The Hello is built BEFORE the RPC opens. grpc.aio turns the
+                # The Hello is built BEFORE the RPC opens: grpc.aio turns the
                 # first write into `InvalidStateError: RPC already finished`
                 # whenever the call terminated during any await between
-                # `Connect()` and that write — which erases the status run()
+                # `Connect()` and that write, which erases the status run()
                 # classifies on (UNAUTHENTICATED's fatal-exit ladder,
                 # not_leader redirects, permanent registration refusals).
-                # pgw#763 made build_hello awaitable (in split mode it is a
-                # seam round-trip to the child), so that await was always
-                # present and every refusal degraded to a nameless retry loop.
+                # `build_hello` is awaitable (in split mode a seam round-trip to
+                # the child), so such an await is always present.
                 hello = self._handlers.build_hello()
                 if inspect.isawaitable(hello):
                     hello = await hello
@@ -1590,8 +1487,8 @@ class Transport:
             self._connected_at = time.monotonic()
             self._last_send_at = self._connected_at
             self._note_connected(self._connected_at)
-            self._auth_verdicts.clear()               # pgw#873: healed
-            self._expired_rejection_reported.clear()   # pgw#869: healed
+            self._auth_verdicts.clear()               # healed
+            self._expired_rejection_reported.clear()   # healed
             self._connected.set()
             logger.info("connected to %s (HelloAck ok)", target)
             await self._handlers.on_hello_ack(ack)
@@ -1639,9 +1536,8 @@ class Transport:
                             # Nothing here was cancelled by us — `pending` was,
                             # and `pending` is not `done` — so this is a dead
                             # stream, and it reconnects like any other. Left to
-                            # propagate it rode out of run() -> arun() ->
-                            # Worker.run() and killed the process with no exit
-                            # code (pgw#845).
+                            # propagate it would ride out of run() and kill the
+                            # process with no exit code.
                             raise ConnectionError(
                                 "stream cancelled by the transport layer"
                             ) from None
@@ -1657,16 +1553,14 @@ class Transport:
             await channel.close()
 
     async def _close_sender(self, send_task: "asyncio.Task[None]") -> bool:
-        """End this stream's sender BETWEEN writes, never inside one (pgw#845).
+        """End this stream's sender BETWEEN writes, never inside one.
 
-        Measured: `send_task.cancel()` here dropped a COMPLETED job's result
-        about one drain in six. The sender had already written that result
-        (so `mark_result_shipped` had retired the only durable copy) and was
-        inside `stream.write()` of the next event when the cancel landed —
-        and grpc.aio answers a cancelled write by cancelling the whole RPC,
-        which RSTs the call and throws away everything buffered behind it,
-        the result included. The half-close that follows then had nothing
-        left to flush, and `read()` raised CancelledError past every handler.
+        `send_task.cancel()` here drops a COMPLETED job's result: the sender may
+        already have written that result (so `mark_result_shipped` retired the
+        only durable copy) and be inside `stream.write()` of the next event when
+        the cancel lands — and grpc.aio answers a cancelled write by cancelling
+        the whole RPC, which RSTs the call and throws away everything buffered
+        behind it, the result included.
 
         So: ask the queue to end the sender once it has nothing left to write,
         and give it the peer-alive window to get there. Cancelling remains the
@@ -1692,7 +1586,7 @@ class Transport:
 
         `asyncio.wait` rather than `wait_for(shield(...))`: it neither cancels
         the receiver nor re-raises what it ended with, so an RPC-level
-        cancellation cannot escape a graceful close (pgw#845). The `finally`
+        cancellation cannot escape a graceful close. The `finally`
         in `_connect_once` retrieves the outcome.
         """
         try:
@@ -1710,10 +1604,9 @@ class Transport:
             if not await self.queue.should_ship_capacity(msg):
                 continue
             await stream.write(msg)
-            # pgw#803: the last instant this process is PROVEN to have been
-            # scheduling. A write into a dead socket still succeeds, so this is
-            # not peer liveness — it is OUR liveness, and that is exactly the
-            # axis th#1333's 15m36s gap turns on. The heartbeat loop forces a
+            # The last instant this process is PROVEN to have been scheduling.
+            # A write into a dead socket still succeeds, so this is not peer
+            # liveness — it is OUR liveness. The heartbeat loop forces a
             # StateDelta every beat in every state, so on a healthy worker this
             # is never more than one beat stale.
             self._last_send_at = time.monotonic()
@@ -1747,20 +1640,13 @@ class Transport:
                 # rotation also clears any stale-token auth strikes.
                 token = (msg.token_refresh.token or "").strip()
                 if token:
-                    # pgw#848: publish where EVERY hub dial reads. The
-                    # attestation carrier opens its own Connect and used to
-                    # authenticate with the frozen boot token — which is what
-                    # wedged attempts 16 and 17.
-                    #
-                    # pgw#893 §2: this is the ONLY place the rotation lands.
-                    # It used to be preceded by a stream-local assignment and
-                    # wrapped in `except Exception: pass`, so a failed publish
-                    # was invisible AND survivable — this stream would carry
-                    # on with a credential nothing else in the process held.
-                    # `install` is an assignment under a lock and cannot fail;
-                    # if it ever does, the rotation genuinely did not happen
-                    # and the transport's own error path is the honest place
-                    # to learn it.
+                    # Publish where EVERY hub dial reads — the attestation
+                    # carrier opens its own Connect and must not authenticate
+                    # with the frozen boot token. This is the ONLY place the
+                    # rotation lands, and it is deliberately NOT wrapped in a
+                    # swallowing `except`: `install` is an assignment under a
+                    # lock, so a raise means the rotation genuinely did not
+                    # happen and must reach the transport's error path.
                     worker_credential.install(
                         token, float(msg.token_refresh.expires_at_unix or 0))
                     self._auth_verdicts.clear()
@@ -1769,13 +1655,11 @@ class Transport:
                         "worker JWT rotated by hub (exp=%d)",
                         msg.token_refresh.expires_at_unix,
                     )
-                    # pgw#763 delta 1: the rotation is OFFERED to the handler,
-                    # which is NOT the same as forwarded to the compute child
-                    # — `ParentControl.on_token_refresh` deliberately does
-                    # nothing with it, because the child holds no credential
-                    # and renews through `procsplit.broker` instead. The old
-                    # comment here said the parent "forwards rotations to the
-                    # compute child"; it never has (pgw#876 §2).
+                    # The rotation is OFFERED to the handler, which is NOT the
+                    # same as forwarded to the compute child —
+                    # `ParentControl.on_token_refresh` deliberately does nothing
+                    # with it, because the child holds no credential and renews
+                    # through `procsplit.broker` instead.
                     refreshed = getattr(self._handlers, "on_token_refresh", None)
                     if refreshed is not None:
                         try:

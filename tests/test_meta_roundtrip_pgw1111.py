@@ -1,27 +1,18 @@
 """pgw#1111: the META round-trip that lets a WEIGHT-FREE program cross the
 entry-compile pool's process boundary.
 
-Why this exists, measured rather than asserted
-----------------------------------------------
-``fc77b923`` (pgw#1080) made every production mint weight-free, and
-``aot_mint`` then FORCED ``parallel = False`` for exactly those mints because a
-fake-parameter ``ExportedProgram`` could not survive ``torch.export.save`` ->
-``load``. So the entry pool became dead code fleet-wide and every mint ran K=1,
-in-process, with export and compile strictly sequential.
-
-The cost is on the record, hub-side: the sdxl A40 mint
-(release ``6ee9b4d4df2697a53da6f43a``, pod ``bgmdxhazxsugmk``, gen-worker
-0.112.0) reported ``export_s`` 1378.52 + ``compile_s`` 2065.36 = 3443.88 s
+Why this exists
+---------------
+Production mints are weight-free, and a fake-parameter ``ExportedProgram`` that
+cannot survive ``torch.export.save`` -> ``load`` forces ``parallel = False`` for
+exactly those mints: the entry pool becomes dead code fleet-wide and every mint
+runs K=1, in-process, with export and compile strictly sequential. A measured
+sdxl A40 mint spent ``export_s`` 1378.52 + ``compile_s`` 2065.36 = 3443.88 s
 against ``total_s`` 3463.84 s — **0.6 % apart**, which is what "no overlap at
-all" looks like. Its ``pool`` row said ``entry_workers=3`` and carried NO
-ledger (no ``pool_wall_s``, no ``pool_efficiency``, no ``peak_concurrency``),
-because ``progress.width`` is recorded whether or not the width is used: the
-3 was the width the override threw away.
+all" looks like.
 
-The tests below prove the premise the override rested on is fixable, not that
-it was imaginary — ``test_a_FAKE_param_program_CANNOT_round_trip`` reproduces
-the original ``RuntimeError`` verbatim, and is the RED half of every other test
-in this file.
+``test_a_FAKE_param_program_CANNOT_round_trip`` reproduces the original
+``RuntimeError`` verbatim and is the RED half of every other test in this file.
 
 Everything here exports only. No inductor, no autotune, no card.
 """

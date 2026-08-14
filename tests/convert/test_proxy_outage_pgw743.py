@@ -144,7 +144,7 @@ def test_keepalive_measures_recovery(fake_hub: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# th#1303: the PUBLISH envelope is a second hub shape, and missing it converted
+# The PUBLISH envelope is a second hub shape, and missing it converted
 # a diagnosable refusal into a different, later error.
 # ---------------------------------------------------------------------------
 
@@ -167,7 +167,7 @@ def test_the_publish_error_envelope_is_recognised_as_a_hub_verdict() -> None:
     """`publishError.body()` (tensorhub `internal/api/repo_publish.go`) emits
     `{"error": "<code>", "message": ...}` — the code as a STRING, not an object.
 
-    MEASURED LIVE on a v2 publish (th#1303): a 422 from
+    MEASURED LIVE on a v2 publish: a 422 from
     `/publishes/{id}/complete` was classified proxy-shaped, retried under the
     silence window, and the retry hit the now-terminal session and returned 409
     `publish_repudiated`. The original 422 — the only response that said WHY —

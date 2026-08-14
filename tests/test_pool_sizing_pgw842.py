@@ -1,15 +1,14 @@
-"""pgw#842: the entry pool's width must be EXPLAINABLE and MONOTONE.
+"""The entry pool's width must be EXPLAINABLE and MONOTONE.
 
-Two real L4 mints of the same 72-entry sdxl regional cell, back to back, are
-the specimen this file is written against:
+Two L4 mints of the same 72-entry sdxl regional cell are the specimen:
 
-    attempt ten  (0.86.0, 16 vcpu / 62 GB): K=5, compile_s 1314.94, wall 347.94
-    attempt eleven (0.89.0, 21 vcpu / 83 GB): K=3, compile_s 1327.23, wall 554.78
+    16 vcpu / 62 GB: K=5, compile_s 1314.94, wall 347.94
+    21 vcpu / 83 GB: K=3, compile_s 1327.23, wall 554.78
 
 Identical compile work (+0.9 %), 59 % more wall, on a BIGGER host — the whole
-regression is the width. And nothing hub-side recorded why: `entry_workers`
-was the only pool number that ever reached a hub row, so the binding
-constraint on those two pods is unrecoverable and the pods are gone.
+regression is the width. And nothing hub-side records why when `entry_workers`
+is the only pool number that reaches a hub row, so the binding constraint dies
+with the pod.
 
 So the tests here are of two kinds:
 
@@ -106,7 +105,7 @@ def test_the_ram_bound_is_monotone_in_the_pods_ram(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The VRAM reading — DELETED WITH ITS BOUND (pgw#1175)
+# The VRAM reading — DELETED WITH ITS BOUND
 # ---------------------------------------------------------------------------
 #
 # pgw#842's third bound divided free VRAM by a per-entry device ask, and this
@@ -180,7 +179,7 @@ def test_the_width_names_its_binding_constraint_and_its_readings() -> None:
                 "cgroup_reclaimable_bytes", "host_available_bytes",
                 "os_cpu_count", "affinity_cpus", "quota_cores"):
         assert key in facts, f"{key} missing from {sorted(facts)}"
-    # pgw#877's three DEVICE provenances died with the axis (pgw#1175). The
+    # pgw#877's three DEVICE provenances died with the axis. The
     # one per-entry footprint left still says whether it was measured or
     # defaulted, because a default must never read like a measurement.
     common: Dict[str, Any] = dict(

@@ -48,7 +48,7 @@ class RefIndex:
     def _save_locked(self) -> None:
         """Write the index through, atomically.
 
-        pgw#945: ``self._lock`` is a THREAD lock, so it orders the writers in
+        ``self._lock`` is a THREAD lock, so it orders the writers in
         one process and says nothing about the others. The index lives in the
         model cache dir — a path a mounted cache can share between processes
         (procsplit members, a second container on the same volume) — and the
@@ -275,10 +275,10 @@ def sweep_stale_writer_temp(
     """Remove abandoned writer-unique temp artifacts: blob downloads stage to
     ``.<name>.part-<writer-id>`` and snapshot builds stage to
     ``<key>.building-<writer-id>`` (writer-unique so concurrent writers on a
-    SHARED CAS root — several pods on one RunPod volume, th#850 — never
-    collide). A writer that dies mid-transfer leaves its temp behind; on
-    pod-local disk that vanished with the pod, but a persistent volume keeps
-    it forever unless swept. Call at boot (`ModelStore.rescan_disk`) — safe
+    SHARED CAS root — several pods on one RunPod volume — never collide). A
+    writer that dies mid-transfer leaves its temp behind; on pod-local disk that
+    vanishes with the pod, but a persistent volume keeps it forever unless
+    swept. Call at boot (`ModelStore.rescan_disk`) — safe
     at any time since only artifacts idle past ``older_than_s`` are removed.
     """
     removed = 0

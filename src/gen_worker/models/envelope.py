@@ -1,16 +1,9 @@
-"""pgw#1117 / th#1777: the pre-stage envelope precondition.
+"""The pre-stage envelope precondition.
 
-THE INCIDENT (ie#642, 2026-08-11). A release declaring ``vram_gb = 22`` with
-``strict_vram`` was bound to a repo's bare ``prod`` head that the th#1754 wipe
-had repointed at the fp32 archive clone. The worker printed
-
-    load_phase :: pipeline:tensorhub/hidream-o1-image: load; staged 0.67 GiB of 32.81 GiB
-
-— it KNEW the artifact weighed 32.81 GiB and it KNEW the declaration said 22 —
-staged anyway, OOMed 192 MiB short of a 23.52 GiB card inside ``setup()``,
-disabled every function in its lane, tripped the hub's
-``model_load_failure_streak`` and darkened a live endpoint. Cost: a billed
-4090 per attempt for a fact that was on disk before the first byte moved.
+Without it a worker that KNOWS an artifact outweighs the declared envelope
+stages anyway, OOMs inside ``setup()``, disables every function in its lane,
+trips the hub's ``model_load_failure_streak`` and darkens a live endpoint — a
+billed GPU per attempt for a fact that was on disk before the first byte moved.
 
 THE PRECONDITION. Before staging, weigh the artifact AS IT WILL LOAD and
 compare it against the envelope the release declares. A clear breach is a
@@ -73,8 +66,8 @@ _GIB = float(1 << 30)
 #: any true excess is already a breach. This covers what the estimator can get
 #: wrong — which variant twin the loader opens, non-parameter buffers, a
 #: component that never reaches the card. 10% of a 22 GB envelope is 2.2 GB,
-#: which is far wider than any of those and still leaves the ie#642 artifact
-#: (32.81 vs 22) refused by a factor of 1.36.
+#: far wider than any of those, and still refuses a 32.81 GiB artifact against
+#: a 22 GB envelope by a factor of 1.36.
 ENVELOPE_ERROR_BAND = 0.10
 
 #: Bytes per element for every safetensors dtype token we can weigh. A token
@@ -260,7 +253,7 @@ def estimate_resident_bytes(
     ``cast_dtype`` is the binding's ``dtype`` directive. Empty means the loader
     passes no ``torch_dtype`` for an fp32/unknown tree and honors the sniffed
     precision for a bf16/fp16 one — either way the tensors land at their stored
-    width, which is exactly what happened in ie#642: an fp32 tree loaded fp32.
+    width, so an fp32 tree loads fp32.
     """
     files: List[Path] = []
     for tree in trees:

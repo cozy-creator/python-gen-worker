@@ -1,29 +1,19 @@
-"""P3 (th#960/pgw#609 design table): Slot model-resolution precedence over a
-real hub-double gRPC boundary — real Worker/Lifecycle/Executor, real blake3
-blob host, no mocking of gen_worker internals (design principle #1: the hub
-scheduler is the only legal double).
+"""Slot model-resolution precedence over a real hub-double gRPC boundary — real
+Worker/Lifecycle/Executor, real blake3 blob host, no mocking of gen_worker
+internals (the hub scheduler is the only legal double).
 
-Pins two absorbed contracts:
+Pins two contracts:
 
-  * pgw#606/th#938 (PR #353): boot NEVER sets up a Slot fn from the
-    image-baked code default; the hub-stamped binding (delivered via Hot
-    DesiredInstance) is the ONLY setup source once hub-connected, and this
-    holds even when every slot default is tensorhub-sourced (not just the
-    mixed Civitai+Hub live-incident shape — see the harness endpoint
-    docstring for why a Hub-only fixture is used here instead of a real
-    Civitai() ref: it keeps this suite hermetic with zero real network
-    reachability, which the original ie#518/th#938 repro didn't need to
-    prove the precedence rule itself).
-  * pgw#583 (PR #307): a FIXED slot dispatched a DIFFERENT repo than
-    declared refuses, naming the slot and both refs; a hub-resolved
-    same-repo flavor pick still serves; a selected_by= catalog slot's
-    different-repo pick is a legitimate surface, not a mismatch; an
-    undeclared model slot in the dispatch map warns and does not block.
-
-Revert-verify (per th#960 task instructions): reverting lifecycle.py's
-pgw#606/th#938 fix (commit 38887c0) turns
-``test_slot_boot_precedence_outranks_code_default`` red — see the th#960
-tracker checkpoint for the exact repro transcript.
+  * Boot NEVER sets up a Slot fn from the image-baked code default; the
+    hub-stamped binding (delivered via Hot DesiredInstance) is the ONLY setup
+    source once hub-connected, and this holds even when every slot default is
+    tensorhub-sourced. A Hub-only fixture is used rather than a real Civitai()
+    ref so the suite stays hermetic with zero network reachability.
+  * A FIXED slot dispatched a DIFFERENT repo than declared refuses, naming the
+    slot and both refs; a hub-resolved same-repo flavor pick still serves; a
+    selected_by= catalog slot's different-repo pick is a legitimate surface, not
+    a mismatch; an undeclared model slot in the dispatch map warns and does not
+    block.
 """
 
 from __future__ import annotations
@@ -60,7 +50,7 @@ def _decode(data: bytes) -> EchoOut:
 
 
 # ---------------------------------------------------------------------------
-# pgw#606/th#938: boot precedence.
+# boot precedence.
 # ---------------------------------------------------------------------------
 
 
@@ -113,7 +103,7 @@ def test_slot_boot_precedence_outranks_code_default(tmp_path) -> None:
     try:
         pipeline_payload = b"hub-stamped-pipeline-bytes"
         vae_payload = b"hub-stamped-vae-bytes"
-        # A FIXED slot's identity gate (pgw#583) is keyed on repo identity,
+        # A FIXED slot's identity gate is keyed on repo identity,
         # not tag/flavor — the hub-stamped delivery names the SAME declared
         # repo (only the code default's TAG differs), exactly like the live
         # th#938 incident (code default `wai-illustrious` unqualified, hub
@@ -168,7 +158,7 @@ def test_slot_boot_precedence_outranks_code_default(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# pgw#583: model-slot identity gate.
+# model-slot identity gate.
 # ---------------------------------------------------------------------------
 
 
@@ -218,7 +208,7 @@ def test_fixed_slot_same_repo_tag_pick_serves(tmp_path) -> None:
             out = _decode(res.inline)
             # The harness echo interpolates ref.tag UNCONDITIONALLY (it is not
             # the normal form), so the resolved tag shows even though the
-            # normal form would elide it (th#1276).
+            # normal form would elide it.
             assert out.response == f"tensorhub:{DECLARED_PIPELINE.path}:canary"
     finally:
         blobs.shutdown()

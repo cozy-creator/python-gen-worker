@@ -1,20 +1,19 @@
-"""pgw#858 / th#1380: the compute child runs as an UNPRIVILEGED uid.
+"""The compute child runs as an UNPRIVILEGED uid.
 
-The parent/child split (pgw#763) already separates the process that holds the
-worker's identity from the process that imports tenant code. Until this module
-both processes ran as **root, in one PID namespace**, which made the separation
-polite rather than enforced: `_CHILD_FORBIDDEN_ENVS` deletes ``WORKER_JWT`` from
-the child's environment, and tenant code read it straight back out of
-``/proc/<ppid>/environ``. The same mechanism handed it RunPod's injected
-``RUNPOD_API_KEY`` from ``/proc/1/environ`` — a key th#1380 verified is
-**account-scoped in authority** (it enumerates our whole fleet, reads our
-balance, and lists 90 container-registry credential records) and which RunPod
-gives us no way to suppress at the source.
+The parent/child split separates the process that holds the worker's identity
+from the process that imports tenant code, but with both as **root in one PID
+namespace** that separation is polite rather than enforced:
+`_CHILD_FORBIDDEN_ENVS` deletes ``WORKER_JWT`` from the child's environment and
+tenant code reads it straight back out of ``/proc/<ppid>/environ``. The same
+mechanism hands it RunPod's injected ``RUNPOD_API_KEY`` from ``/proc/1/environ``
+— an **account-scoped** key (it enumerates the whole fleet, reads the balance
+and lists container-registry credential records) that RunPod gives us no way to
+suppress at the source.
 
-A uid boundary closes it without the provider's cooperation. th#1380 verified
-the end state on a real pod: an unprivileged uid got ``PermissionError`` on
-``/proc/1/environ`` (mode 0400, root-owned), ``PermissionError`` on root's home,
-an empty environment, and **401** from the RunPod API.
+A uid boundary closes it without the provider's cooperation. Verified on a real
+pod: an unprivileged uid gets ``PermissionError`` on ``/proc/1/environ`` (mode
+0400, root-owned), ``PermissionError`` on root's home, an empty environment,
+and **401** from the RunPod API.
 
 **Why the drop happens here — in the parent, at spawn — and not as a ``USER``
 directive in the images.** A ``USER`` line must be written correctly in 9
@@ -27,7 +26,6 @@ including images we do not build.
 
 **What this is not.** It defends against *tenant code*, not against *container
 escape*: GPU workloads need ``--gpus``, which rules out most syscall sandboxes.
-See th#1380 §"Recommended design" item 6 before mistaking one for the other.
 """
 
 from __future__ import annotations
@@ -385,16 +383,16 @@ def _prctl(option: int, arg2: int = 0) -> None:
 
 
 def set_pdeathsig() -> None:
-    """pgw#783: SIGKILL this process when its parent dies, so a crashed control
-    parent never strands G children each holding tens of GB of VRAM.
+    """SIGKILL this process when its parent dies, so a crashed control parent
+    never strands G children each holding tens of GB of VRAM.
 
     Called AFTER the credential change: the property must survive the drop, and
     establishing it second is how that is guaranteed rather than assumed."""
     try:
         _prctl(_PR_SET_PDEATHSIG, int(signal.SIGKILL))
     except Exception:
-        # Best-effort: a platform without prctl keeps the pre-pgw#783 behaviour
-        # (the container's own death took the child with it at G == 1).
+        # Best-effort: on a platform without prctl the container's own death
+        # takes the child with it at G == 1.
         pass
 
 
@@ -412,7 +410,8 @@ def preexec(plan: Optional[DropPlan]) -> Callable[[], None]:
     3. **assert it worked.** A silent no-op drop is worse than no drop, so a
        failed check raises here — which aborts the spawn before ``exec``, so
        tenant code never runs at all rather than running as root.
-    4. ``PR_SET_PDEATHSIG`` last, re-establishing pgw#783 after the change.
+    4. ``PR_SET_PDEATHSIG`` last, re-establishing parent-death kill after the
+       credential change.
     """
 
     def _run() -> None:

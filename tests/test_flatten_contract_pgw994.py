@@ -1,37 +1,24 @@
-"""pgw#994 — the ingress contract records WHERE a leaf lives, and the serve
-side replays that identity instead of guessing.
+"""The ingress contract records WHERE a leaf lives, and the serve side replays
+that identity instead of guessing.
 
-THE DEFECT. `aot_package.input_contract` numbers `position` over the EXPORTED
-(flattened) graph inputs, while `aot_serve.bind_call_inputs` matched that
-number against the caller's args, which are the call BEFORE flattening. A
-container argument occupies ONE caller slot and produces N graph inputs, so
-for the z-image shape `x.0` bound the whole list, `x.1` bound the next
-argument, and `t` then refused `input_missing` — measured off-GPU:
+Three facts the guessing version got wrong, all asserted here:
 
-    row x.0  position 0 | row x.1  position 1 | row t  position 2
-    marshal_positional(contract, (x_list, t), {}) ->
-      IngressContractError: declared input 't' (position 2) is absent
-
-sdxl escaped only because diffusers passes its dict by KEYWORD (so the
-positional branch never fired) and a nested search then found `text_embeds`
-inside `added_cond_kwargs`. Two accidents, not a rule.
-
-TWO MORE THINGS THAT WERE LUCK, both measured here rather than argued:
-
-* `flat_input_names` sorted mapping keys "because that is what torch's pytree
-  does". It does NOT — torch flattens dicts in INSERTION order. A dict whose
-  insertion order is not alphabetical had every leaf recorded with another
-  leaf's dtype and shape. sdxl's `text_embeds` < `time_ids` hid it.
-* A plain input sitting AFTER a container has a flat position its argument
-  does not have, so even a container-free row cannot always be resolved from
+* A `position` numbered over the EXPORTED (flattened) graph inputs cannot be
+  matched against the caller's args, which are the call BEFORE flattening: a
+  container argument occupies ONE caller slot and produces N graph inputs.
+* **torch's pytree flattens dicts in INSERTION order, not sorted order.** A dict
+  whose insertion order is not alphabetical otherwise has every leaf recorded
+  with another leaf's dtype and shape.
+* A plain input sitting AFTER a container has a flat position its argument does
+  not have, so even a container-free row cannot always be resolved from
   `position` alone.
 
-THE FIX. `aot_flatten` owns the walk and the naming, and every consumer reads
-it: the mint flattens the example feed with it, the contract records each
-row's `(param, param_position, path)`, the serve side resolves by replaying
-that identity, and pgw#993's `exported_input_names` is a special case of the
-same naming rule. The nested search is DELETED — nothing needs to hunt for a
-value whose location the contract states.
+`aot_flatten` owns the walk and the naming, and every consumer reads it: the
+mint flattens the example feed with it, the contract records each row's
+`(param, param_position, path)`, the serve side resolves by replaying that
+identity, and `exported_input_names` is a special case of the same naming rule.
+There is no nested search — nothing hunts for a value whose location the
+contract states.
 
 No GPU: every export below is a tiny CPU trace.
 """
@@ -169,7 +156,7 @@ def test_dict_leaves_pair_with_their_own_tensors() -> None:
 
 
 def test_the_dict_case_binds_because_the_contract_says_where() -> None:
-    """The nested search is gone (pgw#994): a decoy kwarg carrying the same
+    """The nested search is gone: a decoy kwarg carrying the same
     key must not be able to decide the bind, and the real one still resolves
     because its identity names its argument."""
     module = _DictModule()

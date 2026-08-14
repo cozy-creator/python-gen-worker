@@ -1,4 +1,4 @@
-"""Per-group host-CPU budget (pgw#782).
+"""Per-group host-CPU budget.
 
 torch sizes its intra-op thread pool from the HOST's logical processors. It
 knows nothing about (a) the container's cpu quota or (b) how many execution
@@ -7,14 +7,11 @@ teams (from 96 host processors) against a 32.3-core quota — and the boot
 window really does get CFS-throttled under it (``nr_throttled`` 4,
 ``throttled_usec`` 9.5 s in a 146-period window, before a single request).
 
-WHAT THIS DOES **NOT** FIX, measured (samples/dpfix, sdxl 1024^2/28 steps,
-4xA40, width-4 burst): 37.1 s with torch's 48-thread default vs 36.7 s pinned
-to 8 — within noise. The width-4 collapse is the shared interpreter (pgw#783),
-not thread oversubscription: at width 4 the process uses 2.3 of its 32.3
-allowed cores, so CPU was never the scarce resource on THIS pod. An earlier
-run appeared to show 74.0 s -> 42.3 s from this change; that was the probe's
-own per-thread /proc sampler getting cheaper as the thread count fell, not the
-workload getting faster. The claim is retracted.
+WHAT THIS DOES **NOT** FIX, measured (sdxl 1024^2/28 steps, 4xA40, width-4
+burst): 37.1 s with torch's 48-thread default vs 36.7 s pinned to 8 — within
+noise. This is NOT a throughput fix. The width-4 collapse is the shared
+interpreter, not thread oversubscription: at width 4 the process uses 2.3 of
+its 32.3 allowed cores, so CPU was never the scarce resource on that pod.
 
 It is kept because 192 threads on a 32.3-core quota is a misconfiguration on
 its own terms, it is de-escalation-only (so it can never slow anything down),
@@ -29,10 +26,10 @@ Three rules:
   what torch already gets wrong.
 * The **divisor is the delivered topology's group count** — the number of
   requests this process runs at once.
-* The imposition is **CODE**, never an env var: pgw#718 scrubs ``OMP_*`` and
-  ``MKL_*`` wholesale precisely so that no base image and no operator decides
-  this, and it then left the decision to a library default reading the wrong
-  CPU count. This closes that gap.
+* The imposition is **CODE**, never an env var: the env seal scrubs ``OMP_*``
+  and ``MKL_*`` wholesale precisely so that no base image and no operator
+  decides this, which otherwise leaves the decision to a library default
+  reading the wrong CPU count.
 
 De-escalation only: the imposed value is ``min(torch's own default, budget)``,
 so a pod whose allowance already exceeds torch's default is untouched and a
@@ -104,15 +101,14 @@ def impose_intra_op_threads(groups: int) -> Dict[str, Any]:
     ONE group's share of this process. Returns the recorded facts; never
     raises — a host that will not answer keeps torch's default.
 
-    pgw#783: the divisor is the number of execution groups sharing this CPU
-    cgroup, which is ``groups`` (this process's own) TIMES the compute-child
-    sibling count. Under the process split each child rewrites its own
+    The divisor is the number of execution groups sharing this CPU cgroup,
+    which is ``groups`` (this process's own) TIMES the compute-child sibling
+    count. Under the process split each child rewrites its own
     ``WORKER_EXECUTION_TOPOLOGY`` to a single local group, so ``groups`` reads 1
     in every child — but G of them share one cgroup, and without the sibling
-    multiplier each would claim the whole allowance and reinstate exactly the
-    192-threads-on-32-cores oversubscription pgw#782 removed. ``host_siblings()``
-    is 1 for every pod that is not running the split, so this is unchanged for
-    them (byte-identical at G=1)."""
+    multiplier each would claim the whole allowance and reinstate a
+    192-threads-on-32-cores oversubscription. ``host_siblings()`` is 1 for every
+    pod that is not running the split, so this is byte-identical at G=1."""
 
     siblings = host_siblings()
     effective = max(1, int(groups)) * siblings

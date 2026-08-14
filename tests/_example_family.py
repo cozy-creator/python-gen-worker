@@ -1,6 +1,6 @@
 """A family vocabulary declared the way an ENDPOINT declares one.
 
-pgw#740 (B1): the SDK used to ship `SdxlDefaults` / `WanDefaults`, so its own
+the SDK used to ship `SdxlDefaults` / `WanDefaults`, so its own
 tests reached for a real family whenever they needed a `GenerationDefaults`
 subclass. Family vocabularies now live in the endpoint that owns the family, so
 the SDK's tests declare their own — which is also the point being proven: the

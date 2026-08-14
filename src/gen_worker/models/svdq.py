@@ -1,4 +1,4 @@
-"""SVDQuant/nunchaku 4-bit loader mode (gw#415).
+"""SVDQuant/nunchaku 4-bit loader mode.
 
 A ``#svdq-fp4-*`` / ``#svdq-int4-*`` flavor is a normal diffusers tree whose
 denoiser directory holds ONE nunchaku-format single-file checkpoint instead of
@@ -10,7 +10,7 @@ the standard pipeline — same pipeline class, same handler, no new endpoint.
 
 Hardware: fp4 kernels exist ONLY on consumer Blackwell (sm_120/121); int4 on
 sm_75–89. No sm_90/100 (no datacenter SVDQ kernels). Version coupling is
-HARD (gw#405, live-hit): nunchaku wheels are per-(torch minor, CUDA) and each
+HARD (live-hit): nunchaku wheels are per-(torch minor, CUDA) and each
 nunchaku release calls diffusers transformer forwards positionally against one
 diffusers signature window — 1.2.x/1.3.x require diffusers 0.36/0.37 and crash
 on 0.38+. The pin matrix below is enforced with typed errors both at variant
@@ -61,8 +61,8 @@ class SvdqSnapshotError(SvdqError):
 #
 # nunchaku calls ``super().forward(...)`` POSITIONALLY against the diffusers
 # transformer signatures it was released against; a newer diffusers inserts
-# arguments and the call crashes mid-denoise (gw#405: 1.2.1 on 0.38.0.dev0 and
-# 0.39.0 -> "TypeError: argument of type 'int' is not iterable"). Torch/CUDA
+# arguments and the call crashes mid-denoise (1.2.1 on 0.38.0.dev0 and 0.39.0
+# -> "TypeError: argument of type 'int' is not iterable"). Torch/CUDA
 # coupling is carried in the wheel's local version tag (e.g.
 # ``1.2.1+cu13.0torch2.11``) and checked against the running interpreter.
 # Re-verify and extend this table on every nunchaku release.
@@ -76,20 +76,18 @@ class SvdqPin:
 
 
 _PIN_MATRIX: tuple[SvdqPin, ...] = (
-    # 1.2.x: CI-pinned to diffusers 0.36 (verified live in gw#405).
+    # 1.2.x: CI-pinned to diffusers 0.36 (verified live).
     SvdqPin((1, 2), (0, 36), (0, 37)),
     # 1.3.x <-> diffusers 0.39: UNVERIFIED — static signature check only, live
-    # A/B still owed (th#1211 G4/G4a). Admitted add-then-verify per gw#405's own
-    # precedent; inert until a nunchaku 1.3 wheel is actually installed, which
-    # today is only th#1211's benchmark-only serve variant.
+    # A/B still owed; inert until a nunchaku 1.3 wheel is actually installed.
     # Static basis: nunchaku's forward and diffusers 0.39's HAVE drifted
     # positionally (nunchaku keeps txt_seq_lens, 0.39 dropped it and added
     # additional_t_cond, so position 6+ misbinds on a positional call), BUT
     # diffusers 0.39's QwenImagePipeline calls the transformer with keyword
-    # arguments only and never passes either drifted param — so the gw#405
-    # positional hazard is void and no unexpected-kwarg error can fire on the
-    # t2i path. Numerical equivalence is NOT established by that check.
-    # t2i only: QwenImageEditPlusPipeline was not checked.
+    # arguments only and never passes either drifted param — so the positional
+    # hazard is void and no unexpected-kwarg error can fire on the t2i path.
+    # Numerical equivalence is NOT established by that check, and
+    # QwenImageEditPlusPipeline was not checked at all.
     SvdqPin((1, 3), (0, 39), (0, 40)),
 )
 
@@ -203,8 +201,7 @@ def svdq_precision_for_sm(gpu_sm: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Engine selection (pgw#685) — nunchaku is no longer the only way to serve an
-# svdq artifact.
+# Engine selection: an svdq artifact serves on the native lane or on nunchaku.
 # ---------------------------------------------------------------------------
 
 SVDQ_ENGINES = ("native", "nunchaku")
@@ -227,8 +224,8 @@ def svdq_engine_candidates(precision: str) -> tuple[str, ...]:
     """Engines that could serve this precision, best first.
 
     NATIVE is preferred for fp4: no nunchaku wheel, no diffusers signature
-    window, no pin-matrix row, no torch downgrade (gw#405 / th#1211's whole
-    blocker class), it compiles, and it covers sm_100/103 which nunchaku never
+    window, no pin-matrix row, no torch downgrade, it compiles, and it covers
+    sm_100/103 which nunchaku never
     will. int4 has no native implementation — the native module is nvfp4
     block-scaled ``_scaled_mm``, and int4 svdq is a different (single-level,
     group-64) scale path."""
@@ -403,7 +400,7 @@ def load_svdq_nunchaku_pipeline(cls: Any, path: Path, art: SvdqArtifact) -> Any:
     """Build the pipeline with the nunchaku transformer swapped in.
 
     Compute dtype is pinned to bf16 — nunchaku's kernels and the surrounding
-    scales are bf16-oriented (every upstream example and the gw#405 probe used
+    scales are bf16-oriented (every upstream example and our own probe used
     bf16); honoring an fp16 binding here would change numerics silently."""
     check_svdq_loadable(art)
     import nunchaku

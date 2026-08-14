@@ -1,27 +1,17 @@
-"""pgw#1013: the one in-loop implementation of "a stream may not exceed its
-declared size", so there is not a fifth hand-rolled copy of it.
+"""The one in-loop implementation of "a stream may not exceed its declared
+size", so no downloader hand-rolls a fifth copy of it.
 
-THE DEFECT CLASS THIS CLOSES. Seven downloaders in this repo stream a remote
-body to disk. Three checked the running byte count INSIDE the loop and aborted
-at the first excess byte (`models/chunk_cas._fetch_chunk_to_offset`,
-`models/cozy_cas._stream`, `input_assets._download`, `url_fetch._read_capped`).
-Four wrote the whole body first and compared sizes AFTER the loop ended
-(`request_context._download_blob_by_digest`, the cell-fetch whole-file branch,
-`models/download._civitai_stream_one`, `request_context/_datasets.
-_download_url_streamed`). Same threat, two verdicts.
-
-A check after the loop is not a bound. It is a report on how far past the bound
+A check AFTER the loop is not a bound. It is a report on how far past the bound
 the process already went: the bytes are on disk, the disk may be full, and the
 pod may be dead before the comparison is reached. The declared size is known
 before the first byte arrives, so the only place the check belongs is the loop.
 
-WHY `limit_bytes` HAS NO DEFAULT AND MAY NOT BE ZERO. The sibling that was
-already in-loop but written `if expected_size and downloaded > expected_size`
-shows what a defaultable bound decays into: a manifest that omits its size
-yields 0, the guard evaluates false, and the site is unbounded again while
-still reading as guarded. Here the caller must produce a positive bound — from
-the declaration when it has one, from :func:`free_space_bound` when it does
-not, or by refusing the transfer. There is no spelling of "unbounded".
+WHY `limit_bytes` HAS NO DEFAULT AND MAY NOT BE ZERO. A defaultable bound
+decays into `if expected_size and downloaded > expected_size`: a manifest that
+omits its size yields 0, the guard evaluates false, and the site is unbounded
+again while still reading as guarded. The caller must produce a positive bound
+— from the declaration when it has one, from :func:`free_space_bound` when it
+does not, or by refusing the transfer. There is no spelling of "unbounded".
 """
 
 from __future__ import annotations

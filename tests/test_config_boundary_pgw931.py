@@ -1,22 +1,19 @@
-"""pgw#931 (§1.18) — one config pipeline in, and the struct is passed.
+"""§1.18 — one config pipeline in, and the struct is passed.
 
-Paul, 2026-08-02: *"we should NEVER be loading random envs in the middle of
-code; we should only load it from our config pipeline and then pass it around."*
+Never load envs in the middle of code; load from the config pipeline and pass
+the value around. Three properties:
 
-Three properties, each of which was previously true of nothing:
-
-1. `config.current()` RAISES when no process entry published `Settings`. The
-   deleted `get_settings()` answered this case by reading the environment there
-   and then, which is how a module running before bootstrap got config nobody
-   had validated — and why nothing in the tree could say what a process was
-   actually configured as.
+1. `config.current()` RAISES when no process entry published `Settings`. A
+   fallback that reads the environment there and then hands a module running
+   before bootstrap config nobody validated, and leaves nothing in the tree able
+   to say what a process was actually configured as.
 2. A key inside a namespace we OWN, in an operator-authored source, is refused
-   rather than accepted and ignored. `_normalize_key` used to return `None` and
-   every source layer silently skipped it, so a typo'd `TENSORHUB_CHACE_DIR`
-   evaporated with no diagnostic anywhere.
+   rather than accepted and ignored. A `_normalize_key` returning `None` makes
+   every source layer silently skip it, so a typo'd `TENSORHUB_CHACE_DIR`
+   evaporates with no diagnostic anywhere.
 3. That refusal deliberately does NOT extend to the process environment, and
-   the asymmetry is the whole design. Measured 2026-08-03: Tensorhub injects
-   owned-namespace names this worker has no reader for (`GEN_WORKER_OOM_PROBE`,
+   the asymmetry is the whole design. Tensorhub injects owned-namespace names
+   this worker has no reader for (`GEN_WORKER_OOM_PROBE`,
    `GEN_WORKER_PROCESS_SPLIT`), so refusing there turns a hub-side addition
    into a fleet of dead pods. It is REPORTED instead.
 """

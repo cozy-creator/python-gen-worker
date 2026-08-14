@@ -1,24 +1,23 @@
-"""th#1580 A4 (§1.30 declaration 2+3): a decoder declares WHICH TENSOR-LAYOUT
-CONTRACT it implements, beside the code that implements it.
+"""§1.30 declaration 2+3: a decoder declares WHICH TENSOR-LAYOUT CONTRACT it
+implements, beside the code that implements it.
 
-The tensor-layout contract (th#1721; was "the artifact contract") is how
-tensors exist ON DISK — byte packing, scale layout, swizzle, key-naming
-convention, file topology — named by a descriptor handle
-``<producer>.<format>@<major>``. Its sibling, the tensor-binding contract
-(pgw#857, ``docs/endpoint-authoring.md``), is how a tensor is ADDRESSED at
-load: bound by name, or baked as a literal.
+The tensor-layout contract is how tensors exist ON DISK — byte packing, scale
+layout, swizzle, key-naming convention, file topology — named by a descriptor
+handle ``<producer>.<format>@<major>``. Its sibling, the tensor-binding contract
+(``docs/endpoint-authoring.md``), is how a tensor is ADDRESSED at load: bound by
+name, or baked as a literal.
 
 The endpoint half of §1.30's compatibility intersection is DERIVED at image
 build (``gen_worker.discovery.execution_lanes``) from these markers. A
-hand-maintained capability list is a second trusted string — the defect class
-th#1580 exists to remove — so there is no list: the declaration is a property
-of the decoder function, and it ships or fails to ship with it.
+hand-maintained capability list would be a second trusted string, so there is no
+list: the declaration is a property of the decoder function, and it ships or
+fails to ship with it.
 
 The vocabulary lives in tensorhub's ``internal/tensorlayout`` (A2: contracts
 are CODE). This module carries only the handles a decoder may name and refuses
 anything else; it does not re-specify the descriptors.
 
-**No exclusion marker exists, deliberately** (A4 corollary, Paul 2026-08-04).
+**No exclusion marker exists, deliberately** (A4 corollary).
 Exclusions are DERIVED from declared traits — ``composes_lora`` crossed with a
 function's ``lora_bucket`` is computable at build — or they do not exist.
 """
@@ -40,7 +39,7 @@ CONTRACT_COZY_FP8_ROWWISE = "cozy.fp8-rowwise@1"
 CONTRACT_NUNCHAKU_V1 = "nunchaku.v1@1"
 CONTRACT_COZY_SVDQ_NVFP4_LR8 = "cozy.svdq-nvfp4-lr8@1"
 CONTRACT_BFL_NVFP4_PRESWIZZLED = "bfl.nvfp4-preswizzled@1"
-# th#1803: transformers' FineGrainedFP8 / DeepSeek-style 128x128 block scales.
+# transformers' FineGrainedFP8 / DeepSeek-style 128x128 block scales.
 # NOT cozy.fp8-rowwise@1 — same element type and activation scheme, different
 # scale leaf, rank and span (`models/hf_fp8_blockwise.py`).
 CONTRACT_HF_FP8_BLOCKWISE = "hf.fp8-blockwise@1"
@@ -117,7 +116,7 @@ def implements_contract(
     """Mark a decode entrypoint as implementing ``contract``.
 
     Stackable: one function may implement several contracts (``decode_linear``
-    implements both the nunchaku layout and te#148's quantized-branch major).
+    implements both the nunchaku layout and the quantized-branch major).
     """
 
     def deco(fn: F) -> F:
@@ -149,7 +148,7 @@ def contract_decoders_of(obj: Any) -> tuple[ContractDecoder, ...]:
     return tuple(d for d in marked if isinstance(d, ContractDecoder))
 
 
-# ── §1.33 / pgw#1143: the DEMAND side of the same vocabulary ──────────────────
+# ── §1.33: the DEMAND side of the same vocabulary ─────────────────────────────
 #
 # `@implements_contract` above is the SUPPLY-adjacent census — "which decoders
 # does this IMAGE contain". The DEMAND is what `Slot(layouts=...)` declares:
@@ -158,7 +157,7 @@ def contract_decoders_of(obj: Any) -> tuple[ContractDecoder, ...]:
 # than transcribed twice.
 #
 # The SDK emits HANDLES and never digests: descriptors are Go, in tensorhub
-# (th#1580 A2). The hub resolves handle -> `Contract.Digest()` at MANIFEST
+# (A2). The hub resolves handle -> `Contract.Digest()` at MANIFEST
 # INGEST against its own registry and stores both; a handle its registry does
 # not know fails the manifest there, not at rebind. So `KNOWN_CONTRACTS` is
 # honestly what it is — a transcription that is allowed to be stale and is
@@ -168,7 +167,7 @@ def contract_decoders_of(obj: Any) -> tuple[ContractDecoder, ...]:
 #: more specific declaration.
 LAYOUT_KEY_ANY_COMPONENT = "*"
 
-# ── The TWO AXES (§1.33 `d01ed428`; pgw#1143 Q2) ─────────────────────────────
+# ── The TWO AXES (§1.33) ─────────────────────────────────────────────────────
 #
 # TOPOLOGY is SHALLOW — keys/nesting/file layout, "essentially just different
 # keys". It constrains the LOADER, and a conversion between two topologies is
@@ -188,9 +187,9 @@ LAYOUT_AXES: tuple[str, ...] = (AXIS_TOPOLOGY, AXIS_QUANT)
 #: evaluated, which is a different fact.
 LAYOUT_AXIS_ANY = "any"
 
-# The topology axis, transcribed from code we already run (pgw#1143 Q2 /
-# th#1809 T3): tensorhub's `catalog/layout_contract.go` (library_name x
-# file_layout) and training-endpoints' `conversion/comfyui.py`
+# The topology axis, transcribed from code we already run: tensorhub's
+# `catalog/layout_contract.go` (library_name x file_layout) and
+# training-endpoints' `conversion/comfyui.py`
 # `_SPLIT_COMPONENT_MAP`. Same transcription posture as KNOWN_CONTRACTS above —
 # allowed to be stale, CHECKED at the hub's manifest ingest, never authoritative.
 TOPOLOGY_DIFFUSERS_MULTIFILE = "diffusers.multifile@1"
@@ -232,10 +231,10 @@ def validate_layout_handle(
 
     `Slot(layouts=...)` declares the QUANT axis alone: §1.33's rendered
     `"<topology>+<quant>"` pair needs the hub's topology REGISTRY to resolve
-    against (th#1809 T3), and until that exists a composite in the manifest is
-    half a pair stored as if it were exact. The SDK-internal converter registry
-    names the topology axis explicitly (`axis=AXIS_TOPOLOGY`) — that vocabulary
-    is real here and inert hub-side until T3 lands.
+    against, and until that exists a composite in the manifest is half a pair
+    stored as if it were exact. The SDK-internal converter registry names the
+    topology axis explicitly (`axis=AXIS_TOPOLOGY`) — that vocabulary is real
+    here and inert hub-side.
     """
     if not isinstance(handle, str):
         raise LayoutDeclarationError(
@@ -271,8 +270,7 @@ def normalize_layout_demand(
     """`Slot(layouts=...)` -> `{component_path: accepted handle SET}`.
 
     **The set is a compatibility FILTER; its order carries NO preference**
-    (§1.33 point 2 as amended 2026-08-11 by the tag-separability ruling,
-    th#1803). Preference has exactly ONE authority — the author-configured
+    (§1.33 point 2). Preference has exactly ONE authority — the author-configured
     ordered ladder of (GPU, lane) pairs — and "one filter, one order, never two
     orderings that can disagree" is the property that keeps it that way. So the
     handles are returned in CANONICAL order, not as written: two authors who
@@ -371,8 +369,8 @@ def parse_layout_id(text: object, *, where: str) -> LayoutId:
     """`"<topology>+<quant>"`, or a bare handle meaning the QUANT axis alone.
 
     A bare handle is quant because that is what `Slot(layouts=...)` publishes
-    (th#1809 T3 has not shipped the topology registry), so one spelling has one
-    meaning across the wire and this parser.
+    (there is no topology registry yet), so one spelling has one meaning across
+    the wire and this parser.
     """
     if isinstance(text, LayoutId):
         return text

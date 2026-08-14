@@ -1,17 +1,17 @@
-"""Host CPU ISA portability for compiled artifacts (pgw#754).
+"""Host CPU ISA portability for compiled artifacts.
 
 An AOTI ``.pt2`` ships host-side machine code (the wrapper ``.so`` plus any
 CPU kernels). torch compiles that code ``-march=native`` when
 ``inductor.config.cpp.march`` is None and vectorizes CPU kernels with
 ``cpu_vec_isa.pick_vec_isa()`` — both resolve to the MINT host's CPU. A cell
 minted on an AVX-512 host therefore carries EVEX-encoded instructions that
-SIGILL any serving host without AVX-512 (observed live 2026-07-28: machine
-``hv220gc4f7vu``, exit 132 inside ``aoti_load_package``, five crash loops).
-GPU compatibility is keyed (``sm``); host CPU compatibility was not — and
-``cpp.march=None`` hashes identically into the env seal on every host while
-the emitted code differs per host, so the key could not see the difference.
+SIGILL any serving host without AVX-512 (exit 132 inside ``aoti_load_package``,
+in a crash loop). GPU compatibility is keyed (``sm``); host CPU compatibility is
+not keyed by anything upstream — ``cpp.march=None`` hashes identically into the
+env seal on every host while the emitted code differs per host, so the key
+cannot see the difference.
 
-Fix: at boot (``env_seal.establish``) the effective codegen target is clamped
+So: at boot (``env_seal.establish``) the effective codegen target is clamped
 to ``min(host level, BASELINE)`` — psABI micro-architecture levels, baseline
 ``x86-64-v3`` (AVX2/FMA/BMI2; every GPU host SKU family we rent is >= v3).
 Measured on the live artifact this costs nothing: the ``-march=native``
@@ -134,8 +134,8 @@ def mint_simdlen(march: Optional[str]) -> Optional[int]:
 
 def _impose_default(inductor_config: object, key: str, value: object) -> None:
     """Process-wide fallback write, via the ONE shared mechanism
-    (``settings_authority.impose_config_default`` — pgw#1049), wrapped so
-    this module's callers keep their typed :class:`HostIsaError`."""
+    (``settings_authority.impose_config_default``), wrapped so this module's
+    callers keep their typed :class:`HostIsaError`."""
     from . import settings_authority
 
     try:
@@ -156,7 +156,7 @@ def impose() -> Dict[str, str]:
     verify the read-back ON A FOREIGN THREAD. Called from
     ``env_seal.establish`` at boot, before any compile. No-op (empty dict) on
     non-x86 machines, and on a torchless worker — there is no inductor
-    codegen to clamp (pgw#788).
+    codegen to clamp.
 
     The foreign-thread read-back is the whole point, not belt-and-braces.
     torch's ``user_override`` layer — the one a plain attribute assignment
@@ -164,11 +164,9 @@ def impose() -> Dict[str, str]:
     documentation. Boot imposes on the boot thread; every host compile that
     happens anywhere else does not inherit it. Those are not hypothetical
     threads: ``hot_swap``'s process-global background shape-warm/heal worker
-    and pgw#811's K-way ``run_impl`` splitter pool both host-compile off the
-    boot thread, so both were emitting ``-march=native`` — unclamped,
-    unportable, the exact pgw#754 SIGILL class — and, once pgw#811's
-    ``assert_command_is_clamped`` landed, failing outright instead. A
-    same-thread read-back could never see any of it.
+    and the K-way ``run_impl`` splitter pool both host-compile off the boot
+    thread, and an unclamped ``-march=native`` object there is the SIGILL
+    class this exists to prevent. A same-thread read-back could never see it.
     """
     if not torch_capability.present():
         return {}
@@ -209,10 +207,9 @@ def impose() -> Dict[str, str]:
 def assert_command_is_clamped(argv: Sequence[str]) -> None:
     """Refuse a host compile whose ARGV still carries ``-march=native``.
 
-    :func:`impose` asserts the clamp at the *config* level and nothing has
-    ever asserted it at the argv level — and pgw#793's research harness is a
-    live example of a path that mints unclamped objects, because it never
-    booted through ``env_seal.establish``. torch builds the flag in
+    :func:`impose` asserts the clamp at the *config* level only; a harness
+    that never booted through ``env_seal.establish`` mints unclamped objects.
+    torch builds the flag in
     ``cpp_builder._get_cpu_arch_cflags``, which falls through to
     ``march=native`` whenever ``config.cpp.march`` is None, so this reads
     what was actually built rather than what was intended.
@@ -236,7 +233,7 @@ def assert_command_is_clamped(argv: Sequence[str]) -> None:
 
 def effective() -> Dict[str, str]:
     """Read-back of the live codegen target (seal fact; never assumed).
-    Empty on a torchless worker: no codegen target exists to read (pgw#788)."""
+    Empty on a torchless worker: no codegen target exists to read."""
     if not torch_capability.present():
         return {}
     import torch._inductor.config as inductor_config

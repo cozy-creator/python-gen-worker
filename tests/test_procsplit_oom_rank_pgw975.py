@@ -77,7 +77,7 @@ def test_a_real_compute_child_outranks_the_control_parent(split):
 
 @linux_only
 def test_the_whole_compute_subtree_inherits_it(tmp_path):
-    """The mint child (pgw#784) and the AOT pool's entry children are spawned
+    """The mint child and the AOT pool's entry children are spawned
     BELOW a compute child and get no call of their own. That is only correct if
     the value survives fork and exec, so prove it on a real grandchild rather
     than asserting the man page."""

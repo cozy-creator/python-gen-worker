@@ -1,31 +1,28 @@
-"""The verdict ladder, shared (pgw#817, lifting pgw#800; requested by pgw#814).
+"""The verdict ladder, shared.
 
-pgw#800 built ONE fail-closed fidelity gate — cosine as the gated quantity,
+ONE fail-closed fidelity gate — cosine as the gated quantity,
 ``HEALTHY / DEGRADED / DESTROYED``, a typed refusal to the caller AND a typed
-activity event to the hub — and calibrated it for adapter deltas. pgw#814 then
-measured a second, unrelated population through the same ladder (a compiled
-artifact's output against eager's) and found the ladder itself transfers
-exactly while the low-rank machinery around it does not:
+activity event to the hub. The LADDER transfers between populations; the
+low-rank machinery around it does not:
 
 * ``_gram_cosine`` / ``evaluate_branch`` / ``evaluate_fuse`` exploit ``D = BA``
   to get ``tr(D'^T D)`` from two ``r x r`` Grams. Comparing two OUTPUT tensors
   is ``O(n)`` and needs none of it.
 * ``TargetGrid`` is a weight-grid concept with no output-comparison meaning.
 * ``FIDELITY_FLOOR`` / ``FIDELITY_WARN`` are calibrated for adapter deltas and
-  must NOT be inherited by an output comparison (pgw#814's explicit warning).
+  must NOT be inherited by an output comparison.
 
 So this module owns the parts that are population-independent — the verdict
 ladder, the aggregate rule, the evidence formatting and the gate shape — and
 each caller brings its own :class:`Thresholds` and its own evaluator.
 :mod:`gen_worker.models.adapter_fidelity` is one caller; the compiled-cell
-assembled-vs-eager population (whose calibrated defaults live below, moved
-here from the retired regional module by pgw#846) is the other.
+assembled-vs-eager population (whose calibrated defaults live below) is the
+other.
 
-**The aggregate rule, kept verbatim from pgw#800 because it is the whole
-point:** one norm-weighted number over every row, never a per-row median. A
-median lets a handful of destroyed high-norm rows hide behind many intact
-low-norm ones, which is precisely the shape of an artifact that diverges in
-its last blocks.
+**The aggregate rule:** one norm-weighted number over every row, never a
+per-row median. A median lets a handful of destroyed high-norm rows hide behind
+many intact low-norm ones, which is precisely the shape of an artifact that
+diverges in its last blocks.
 """
 
 from __future__ import annotations
@@ -49,13 +46,13 @@ _ORDER = {VERDICT_HEALTHY: 0, VERDICT_DEGRADED: 1, VERDICT_DESTROYED: 2}
 #: Typed event phases. A DEGRADED subject is served and confesses; a DESTROYED
 #: subject is refused and confesses. Both reach the hub, because the error
 #: reaches only the caller of one request while a fleet-wide rate is only
-#: countable from activity records (pgw#800).
+#: countable from activity records.
 PHASE_DEGRADED = "degraded"
 PHASE_REFUSED = "refused"
 
-#: pgw#1141 (§4.31/§4.32) — an armed exported cell took no warm dispatch this
-#: boot, which is the NORMAL state of every adopted cell (the arm precedes
-#: setup) and is no longer a verdict about it. Carried on this kind so one
+#: An armed exported cell took no warm dispatch this boot, which is the
+#: NORMAL state of every adopted cell (the arm precedes setup) and is NOT a
+#: verdict about it. Carried on this kind so one
 #: query (`?kind=cell_numerics`) still answers what happened to every cell that
 #: armed on a pod, and emitted because an unannounced posture is
 #: indistinguishable from a gate that never ran.
@@ -83,8 +80,8 @@ class Thresholds:
     serving a systematically dimmer image. The band is symmetric in the log:
     ``retention`` outside ``[retention_floor, 1 / retention_floor]`` is at
     least DEGRADED. ``0.0`` disables it (the adapter population gates cosine
-    only — pgw#800 measured retention 15.3 on a DESTROYED adapter, so there
-    the number is evidence, not a bound).
+    only — a DESTROYED adapter measures retention 15.3, so there the number is
+    evidence, not a bound).
     """
 
     floor: float
@@ -98,12 +95,10 @@ class Thresholds:
     #: declaration supplied a number, :data:`SOURCE_SDK_DEFAULT` when it did
     #: not. It rides the object rather than being re-derived at the reader,
     #: because a second reader of the declaration is exactly the defect this
-    #: field closes: `numerics_probe` used to answer the question again from
-    #: `cfg.numerics_floor` alone, so a family declaring only `numerics_warn`
-    #: was judged at its DECLARED band while every wire row, every
-    #: `author-ci.toml` `[proof]` record and `Parity.floor_source` said
-    #: `sdk-default`. "" for populations that are not family-declared at all
-    #: (the pgw#800 adapter ladder).
+    #: field closes: answering the question again from `cfg.numerics_floor`
+    #: alone judges a family that declared only `numerics_warn` at its DECLARED
+    #: band while every wire row says `sdk-default`. "" for populations that are
+    #: not family-declared at all (the adapter ladder).
     source: str = ""
 
     def __post_init__(self) -> None:
@@ -207,7 +202,7 @@ class Comparison:
 
 
 # ---------------------------------------------------------------------------
-# The O(n) output evaluator (pgw#814's "give the numerics gate its own")
+# The O(n) output evaluator
 # ---------------------------------------------------------------------------
 
 
@@ -377,29 +372,23 @@ def gate(
 
 
 # ---------------------------------------------------------------------------
-# The compiled-cell (assembled-vs-eager) calibration — pgw#814's measured band
+# The compiled-cell (assembled-vs-eager) calibration — the measured band
 # ---------------------------------------------------------------------------
-# Moved here from the retired regional module (pgw#846): the calibration is
-# family-GENERAL — it reads `Compile.numerics_floor` / `numerics_warn`, which
-# whole-graph families (sdxl: 0.995/0.999) declare too, and the adoption
-# numerics gate is the mechanism that should have caught the regional serve
-# regression.
+# The calibration is family-GENERAL: it reads `Compile.numerics_floor` /
+# `numerics_warn`, which whole-graph families (sdxl: 0.995/0.999) declare too.
 
 #: Cosine floor for an ASSEMBLED-vs-EAGER comparison — below it the cell is
 #: DESTROYED and refuses to arm.
 #:
-#: Derived from pgw#814's measured band on the production toolchain (torch
-#: 2.13.0+cu130, L4/sm_89), NOT inherited from pgw#800's adapter floors —
-#: pgw#814 says in as many words that those are calibrated for adapter deltas
-#: and must not be assumed here:
+#: Derived from the measured band on the production toolchain (torch
+#: 2.13.0+cu130, L4/sm_89), NOT inherited from the adapter floors, which are
+#: calibrated for adapter deltas and must not be assumed here:
 #:
 #:   worst configuration we ACCEPT   0.9890  flux2 w8a8 pertensor vs eager at
 #:                                           T_img=4096 (0.9926 at 8160)
 #:   best configuration we REFUSE    0.9730  flux2 w8a8 ROWWISE whole-graph vs
-#:                                           eager — pgw#814's "do not adopt a
-#:                                           flux2 w8a8 cell until this
-#:                                           closes", i.e. the artifact the
-#:                                           platform decided is not servable.
+#:                                           eager — the artifact the platform
+#:                                           decided is not servable.
 #:
 #: 0.98 is that band's geometric midpoint (sqrt(0.9890 * 0.9730) = 0.98097),
 #: 1.0092x of headroom below the worst accepted case and 1.0072x above the
@@ -419,9 +408,9 @@ NUMERICS_WARN = 0.999
 
 #: Magnitude band. Cosine is scale-invariant, so an artifact that reproduces
 #: eager's direction exactly at 0.9x the magnitude scores a PERFECT cosine
-#: while serving a systematically dimmer image; nothing in pgw#800's ladder
-#: could see that, because an adapter's retention is evidence rather than a
-#: bound (a destroyed one measures 15.3).
+#: while serving a systematically dimmer image. The adapter population cannot
+#: gate on it (there retention is evidence, not a bound — a destroyed adapter
+#: measures 15.3); this one can.
 #:
 #: Derived from the same measured band: worst accepted 0.997 (bf16 control),
 #: best refused 0.905 (flux2 w8a8 pertensor whole-graph; rowwise 0.902).
@@ -453,10 +442,9 @@ def declared_thresholds(cfg: Any) -> Thresholds:
     band above — a default with evidence, not a guess.
 
     THE ONE PLACE that decides declared-vs-default, and it stamps its own
-    answer onto :attr:`Thresholds.source`. Nobody may re-derive it: the whole
-    class of defect here is a declaration read by a second party that drifts
-    from the authority, which is how ``Compile.numerics_floor`` spent its
-    first 300 commits reaching no gate at all (pgw#1150).
+    answer onto :attr:`Thresholds.source`. Nobody may re-derive it: the defect
+    class here is a declaration read by a second party that drifts from the
+    authority.
 
     ``cfg`` is duck-typed on purpose — it is a raw ``Compile`` on the author-CI
     path and a ``registry.CompileCell`` on every fleet path, and both carry the

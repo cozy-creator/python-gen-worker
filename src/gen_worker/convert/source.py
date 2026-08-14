@@ -44,10 +44,9 @@ from ..component_vocab import (
     quant_candidate_components,
     weight_components,
 )
-# Components that are candidates for quantization. text_encoder_3 is in here
-# because flux.2-klein-9b / SD3 use three text encoders; older tenants that
-# hardcoded ('transformer', 'unet', 'text_encoder', 'text_encoder_2', 'vae')
-# silently skipped text_encoder_3.
+# Components that are candidates for quantization. text_encoder_3 is included
+# because flux.2-klein-9b / SD3 use three text encoders; a hardcoded list that
+# stops at text_encoder_2 silently skips it.
 def _default_quant_candidate_components() -> frozenset[str]:
     return frozenset(quant_candidate_components())
 
@@ -338,7 +337,7 @@ class Source:
              ``from_single_file``) is refused here, typed: use
              ``Source.as_hf_model()`` and quantize the resulting pipeline
              yourself. Nothing in the fleet converts that layout through this
-             API, and a half-wired branch reads as support (pgw#657).
+             API, and a half-wired branch reads as support.
 
           3. **Passthrough vs quant decision.** Components matching
              ``quant_only`` are loaded + quantized; the rest are yielded
@@ -547,9 +546,7 @@ def _iter_singlefile_components(
         )
         return
 
-    # pgw#657: this was a NotImplementedError plus docs promising the layout
-    # worked — a dispatchable branch nobody wired, with no tracker item. It is
-    # a REFUSAL, not a gap: no fleet conversion uses this layout through this
+    # A REFUSAL, not a gap: no fleet conversion uses this layout through this
     # API, and the documented alternative is one call away.
     raise ValidationError(
         f"iter_hf_components: {snapshot_path.name} is a diffusers-singlefile "

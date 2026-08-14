@@ -1,27 +1,16 @@
-"""pgw#981 — every module must import when it is the FIRST module imported.
+"""Every module must import when it is the FIRST module imported.
 
 An import cycle is invisible to any harness that imports the package once and
 then walks it in a single process: the first entry order pre-warms the package,
-and every later import is a cache hit. pgw#976's first sweep did exactly that,
-passed 0/230, and hid two real cycles. Only one fresh interpreter PER MODULE
+and every later import is a cache hit. Only one fresh interpreter PER MODULE
 sees them, so that is what this does.
 
-The cycle this file was written for::
-
-    cli/serve.py:56   from . import run as run_mod
-    cli/run.py:38     from .serve import DEFAULT_SOCKET_PATH
-
-`serve` legitimately depends on `run` — it reuses its dispatch, its exit codes
-and its errors — so the back-edge was the defect. `import gen_worker.cli.serve`
-as a first import raised ``ImportError: cannot import name
-'DEFAULT_SOCKET_PATH' from partially initialized module``, and it was masked
-only because ``cli/__init__.py`` happens to reach `run` before `serve`. Fixed by
-moving the constant DOWN to `cli/sockaddr.py`, a leaf, not by deferring the
-import: a deferred import keeps the cycle and hides it again.
+The repair for a cycle is to move the shared name DOWN to a leaf module, never
+to defer the import: a deferred import keeps the cycle and hides it again.
 
 A module that cannot import because an OPTIONAL EXTRA is absent is not a cycle
 and is reported as such — 429 of this package's function-body imports exist
-precisely so `import gen_worker` works without torch (pgw#976).
+precisely so `import gen_worker` works without torch.
 """
 
 from __future__ import annotations

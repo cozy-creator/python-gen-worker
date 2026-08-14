@@ -1,43 +1,37 @@
-"""The thing that MEASURES (pgw#868 cross-cutting; pgw#848 CP12).
+"""The thing that MEASURES: does an armed cell reproduce the eager forward it
+replaces?
 
-Everything this program built refuses a cell for being UNUSABLE — wrong `sm`,
-wrong torch, unbound constants, ingress outside the declared envelope. Nothing refused one
-for being WRONG. :mod:`gen_worker.numerics_ladder` has owned the verdict since
-pgw#817 and `Compile.numerics_floor` has declared the bar since pgw#812, but
-``compare_outputs`` had zero consumers: no code anywhere ran the armed cell and
-the eager forward it replaces on the same inputs. So the gate could not be
-"wired" — ``gate()`` opens ``if comparison is None: return None``, and calling
-it with nothing to compare passes every cell, always, while looking correct in
-the diff AND in the call graph.
+Every other gate refuses a cell for being UNUSABLE — wrong `sm`, wrong torch,
+unbound constants, ingress outside the declared envelope. This one refuses it
+for being WRONG. :mod:`gen_worker.numerics_ladder` owns the verdict and
+`Compile.numerics_floor` declares the bar, but ``gate()`` opens ``if comparison
+is None: return None``, so calling it with nothing to compare passes every cell
+while looking correct in the diff AND in the call graph. This module is the
+measurement that makes it real.
 
-This module is that missing measurement, and it is built to ONE constraint
-first: **bisectability**. Three confident diagnoses in this program were wrong
-because two fuses were burning at once, so a whole-cell "fail" nobody can split
-is the artifact that produces the fourth. Every number here is taken against a
-single named :class:`ProbeAxis` — one packaged ENTRY, one shape ROW, one LANE,
-one recorded SEED — and every verdict carries the axis, the thresholds and
-their source with it, the way :class:`~gen_worker.aot_compile_pool.PoolWidth`
-carries its readings.
+It is built to ONE constraint first: **bisectability**. A whole-cell "fail"
+nobody can split is how two fuses burn at once and the diagnosis goes wrong.
+Every number here is taken against a single named :class:`ProbeAxis` — one
+packaged ENTRY, one shape ROW, one LANE, one recorded SEED — and every verdict
+carries the axis, the thresholds and their source with it.
 
-**Placement: MINT time, and nowhere else** (DESIGN-RULINGS §4.32, landed as
-pgw#1141). This module was written for adopt time and said so — *"what must
-never exist is a mint-only gate"* — and Paul overruled it: every failure it has
-ever caught (a baked ``conv_out.bias``, timestep dtype scars) was an AUTHOR
-defect in endpoint code or config, so re-measuring on every adopter taxes the
-whole fleet forever for one author's one-time mistake. The single caller is
-``provision.arm_aot(verify_numerics=True)``, set by ``adopt_delegated_mint`` on
-the pod that compiled the bytes, before they publish. Adoption materializes,
-arms and serves. That the measurement moved without a new implementation is the
-property :func:`measure_axis`'s signature was built for: it takes the two
-callables and a contract, never a pipeline.
+**Placement: MINT time, and nowhere else** (DESIGN-RULINGS §4.32). Every
+failure this has ever caught (a baked ``conv_out.bias``, timestep dtype scars)
+was an AUTHOR defect in endpoint code or config, so re-measuring on every
+adopter would tax the whole fleet forever for one author's one-time mistake.
+The single caller is ``provision.arm_aot(verify_numerics=True)``, set by
+``adopt_delegated_mint`` on the pod that compiled the bytes, before they
+publish. Adoption materializes, arms and serves. :func:`measure_axis` takes the
+two callables and a contract, never a pipeline, which is what lets the
+measurement move without a new implementation.
 
 **Parity by construction.** The probe feed comes from
 :func:`gen_worker.aot_inputs.builder_for` — the mint's OWN input builder,
 driven by an :class:`~gen_worker.aot_contract.ExportSpec` reconstructed from
 the cell's own recorded entry coordinate. A probe that built its inputs some
-other way would be measuring a call the artifact was never traced for, which is
-the gw#391 / ie#381 bug in a third hat. It comes from ``aot_contract`` and not
-``aot_mint`` for a measured reason — see :func:`build_feed`.
+other way would measure a call the artifact was never traced for. It comes from
+``aot_contract`` and not ``aot_mint`` for a measured reason — see
+:func:`build_feed`.
 
 **Fail closed.** A probe that cannot run is NOT a pass. Every failure path
 raises :class:`ProbeUnavailable` with a named reason, and the arm treats it
@@ -64,7 +58,7 @@ from .aot_contract import ExportSpec
 logger = logging.getLogger(__name__)
 
 #: The lifted-adapter call inputs. An entry whose contract does not declare
-#: them is a BRANCHLESS graph class (pgw#790) and must be probed with
+#: them is a BRANCHLESS graph class and must be probed with
 #: ``lora_bucket=0``, or the feed carries a pair the class refuses.
 _ADAPTER_INPUTS = ("lora_a", "lora_b")
 
@@ -147,14 +141,12 @@ class ProbeAxis:
 def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
     """Every probeable axis of one cell, read off its own metadata.
 
-    ONE axis, because pgw#1176 made one artifact one graph class: the mint
-    parity gate runs per entry, at the moment that entry exists, against the
-    eager callable it was traced from — never "after all 36". That is what
-    makes §4.33's ~8 GiB true by construction: exactly ONE compiled runner is
-    resident beside the already-resident weights while the probe runs.
-
-    The signature stays a TUPLE so every caller's shape is unchanged; what
-    changed is that its length is now one by construction rather than by luck.
+    ONE axis, because one artifact is one graph class: the mint parity gate
+    runs per entry, at the moment that entry exists, against the eager callable
+    it was traced from — never after the whole set. That is what makes §4.33's
+    ~8 GiB true by construction: exactly ONE compiled runner is resident beside
+    the already-resident weights while the probe runs. The return stays a TUPLE
+    whose length is one by construction rather than by luck.
     """
 
     entry = aot_serve.entry_from_meta(dict(meta))
@@ -166,10 +158,10 @@ def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
         block = entries[name]
         contract = aot_serve.contract_from_meta(block)
         declared = {spec.name for spec in contract.inputs}
-        # pgw#790: the branchless class declares no adapter inputs and REFUSES
-        # them. Feeding it the lifted pair would be refused at ingress, which
-        # reads as an unmeasurable axis when it is really a probe that built
-        # the wrong call. The contract discriminates; nothing here guesses.
+        # The branchless class declares no adapter inputs and REFUSES them, and
+        # a refusal at ingress reads as an unmeasurable axis when it is really
+        # a probe that built the wrong call. The contract discriminates;
+        # nothing here guesses.
         bucket = cell_bucket if all(
             n in declared for n in _ADAPTER_INPUTS) else 0
         axes.append(ProbeAxis(
@@ -196,17 +188,17 @@ def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
 class _EagerView:
     """The module as it was BEFORE the wrap, for signature purposes only.
 
-    MEASURED the first time this probe ran end to end: the arm has already
-    swapped ``module.<attr>`` for the cell's dispatch by the time the gate
-    runs, so ``aot_declaration._positionalize`` — which binds the declared feed
-    to slots by reading ``inspect.signature`` of that attribute — sees the
-    wrapper's ``(*args, **kwargs)`` and refuses every declared name as "not a
-    parameter". The feed must be built against the signature the artifact was
-    TRACED against, which is the eager callable the wrap retained.
+    The arm has already swapped ``module.<attr>`` for the cell's dispatch by
+    the time the gate runs, so ``aot_declaration._positionalize`` — which binds
+    the declared feed to slots by reading ``inspect.signature`` of that
+    attribute — would see the wrapper's ``(*args, **kwargs)`` and refuse every
+    declared name as "not a parameter". The feed must be built against the
+    signature the artifact was TRACED against, which is the eager callable the
+    wrap retained.
 
     A facade rather than a temporary restore: un-swapping a live module to run
     a probe would hand the cell's traffic back to eager for the duration, on a
-    pod that is concurrently serving (pgw#784). Everything except ``attr``
+    pod that is concurrently serving. Everything except ``attr``
     delegates to the real module, so config, parameters, buffers and dtype all
     come off the thing actually being measured.
     """
@@ -232,9 +224,9 @@ def build_feed(module: Any, family: str, axis: ProbeAxis) -> Tuple[Any, ...]:
     builds it.
 
     The RNG is forked, not reseeded: a serving pod's tenant traffic owns the
-    global generator (pgw#784 — the tenant keeps being served throughout an
-    arm), and a probe that shifted it would change a paying request's output
-    to check a cell.
+    global generator (the tenant keeps being served throughout an arm), and a
+    probe that shifted it would change a paying request's output to check a
+    cell.
     """
     import torch
 
@@ -245,14 +237,12 @@ def build_feed(module: Any, family: str, axis: ProbeAxis) -> Tuple[Any, ...]:
             "no_input_contract",
             f"{axis}: no export-input contract to build a probe feed from "
             f"({type(exc).__name__}: {exc})") from exc
-    # `aot_contract`, NEVER `aot_mint` — MEASURED (pgw#793/#811 guards, red on
-    # the first run of this module): `provision` is a `static_code_closure`
-    # entrypoint, the closure walk is an AST walk that follows function-level
-    # imports, and the closure memo records it on every artifact.
-    # Importing the mint DRIVER here dragged `aot_wrapper_split` /
-    # `aot_run_impl_split` into cell identity, which both issues forbid: a
-    # compile-time transform must re-key nothing. The vocabulary now lives in a
-    # leaf module and the driver stays out.
+    # `aot_contract`, NEVER `aot_mint`: `provision` is a `static_code_closure`
+    # entrypoint, the closure walk follows function-level imports, and the
+    # closure memo records it on every artifact. Importing the mint DRIVER here
+    # would drag `aot_wrapper_split` / `aot_run_impl_split` into cell identity,
+    # and a compile-time transform must re-key nothing. The vocabulary lives in
+    # a leaf module so the driver stays out.
     spec = ExportSpec(
         family=str(family), target=axis.target,
         lora_bucket=int(axis.lora_bucket),
@@ -377,18 +367,11 @@ class CellNumerics:
     def measured(self) -> bool:
         """True only when every axis of THIS report produced a comparison.
 
-        pgw#1176 DELETED the all-axes-of-the-cell rule this used to state
-        ("partial coverage is not a pass; a cell arming on a subset of its own
-        graph classes is a silent subset of what the cell key advertises").
-        That rule was the verification half of the wrong atom: it made one
-        unmeasurable class condemn 35 measured ones. A report is now one graph
-        class, so the predicate below says exactly what it always meant —
+        A report is one graph class, so this says exactly what it means —
         absent evidence is never a pass — without a collection to be partial
-        about.
-
-        Both remaining clauses are load-bearing and stay: a report short of
-        its own axis count has lost a verdict somewhere, and an errored axis
-        is not a measured one.
+        about. Both clauses are load-bearing: a report short of its own axis
+        count has lost a verdict somewhere, and an errored axis is not a
+        measured one.
         """
         return (bool(self.verdicts)
                 and len(self.verdicts) == self.axes_total
@@ -448,11 +431,9 @@ def probe_cell(
 
     family = str(getattr(cfg, "family", "") or meta.get("family") or "")
     thresholds = numerics_ladder.declared_thresholds(cfg)
-    # READ, never re-derive. This used to ask `cfg.numerics_floor` again and
-    # so could disagree with the band it was reporting on: a family declaring
-    # only `numerics_warn` was judged at its DECLARED band while this said
-    # `sdk-default`. `declared_thresholds` is the one authority and stamps its
-    # own answer (pgw#1150).
+    # READ, never re-derive: asking `cfg.numerics_floor` again can disagree
+    # with the band actually being reported on. `declared_thresholds` is the
+    # one authority and stamps its own answer.
     source = thresholds.source
     targets = aot_serve.armed_targets(pipeline)
     if not targets:
@@ -523,8 +504,8 @@ def last_report() -> Optional[CellNumerics]:
 
     The GATE (``provision.gate_cell_numerics``) answers yes/no and confesses
     the numbers to the activity wire; a caller in the same process that needs
-    the NUMBER — pgw#1150's author-CI harness, which has to write the measured
-    cosine into an ``author-ci.toml`` ``[proof]`` block — would otherwise have
+    the NUMBER — the author-CI harness, which has to write the measured cosine
+    into an ``author-ci.toml`` ``[proof]`` block — would otherwise have
     to re-run the probe and record a second measurement of a different moment,
     or parse the number back out of an event string. Neither is the gate's own
     verdict. Read-only: nothing here changes what the gate decides.

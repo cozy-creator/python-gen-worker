@@ -1,6 +1,6 @@
 """The repackage declaration schema — typed maps the SDK engine executes.
 
-pgw#740 (C3/B14/B15): ``convert/`` used to be the one package with no
+``convert/`` used to be the one package with no
 registration hook, so every family's layout knowledge lived as a module-level
 private constant inside the SDK — ~430 lines of hand-ported per-family tensor
 surgery, four overlapping detection ladders, and two copies of the SDXL
@@ -139,9 +139,10 @@ class ComponentRepack:
 class LayoutSignature:
     """The component set a tree MUST look like for this family's converter to run.
 
-    This is the permanent guard. pgw#740's wrong-converter bug was two copies of
-    the SDXL signature disagreeing; with the signature declared beside the
-    converter there is only one copy, and the engine refuses by name when the
+    This is the permanent guard: two copies of a family's signature can
+    disagree and route a tree to the wrong converter. With the signature
+    declared beside the converter there is only one copy, and the engine
+    refuses by name when the
     tree on disk does not match — whether the family was auto-detected or passed
     in by a caller.
     """

@@ -43,7 +43,7 @@ def _executor() -> Executor:
     return Executor([_spec()], _send)
 
 
-#: th#1803: the ladder's pick is a DIGEST, never a `#flavor` (pgw#1148).
+#: th#1803: the ladder's pick is a DIGEST, never a `#flavor`.
 _DIGEST_PICK = "acme/z-image@sha256:" + "1a" * 32
 
 
@@ -75,7 +75,7 @@ def test_apply_model_resolutions_rejects_non_roundtrip() -> None:
 
 def test_hello_ack_shape_applies() -> None:
     ex = _executor()
-    # th#1597: HelloAck.keep was a dead "legacy v2 field; ignored by current
+    # HelloAck.keep was a dead "legacy v2 field; ignored by current
     # workers" and the v1 cut reclaimed its slot. It was never read here — the
     # assertion below is entirely about `resolutions`.
     ack = pb.HelloAck(

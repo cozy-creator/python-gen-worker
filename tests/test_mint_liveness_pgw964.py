@@ -1,23 +1,18 @@
-"""pgw#964: finishing an entry is not dying.
+"""Finishing an entry is not dying.
 
-The mint stall monitor sampled its child's process-tree CPU by summing
+The mint stall monitor must not sample its child's process-tree CPU by summing
 ``user + system`` over the LIVE members of the tree. On Linux a process's CPU
 leaves its own ``utime/stime`` and enters its parent's ``cutime/cstime`` the
 instant the parent reaps it, so that sum goes DOWN by a whole child's lifetime
 every time a child finishes — and ``_observe`` compares against a high-water
-mark. An AOT mint whose compile pool completes one ~390-second entry therefore
-falls into a hole one entry deep and is SIGTERMed for making progress.
-
-Not hypothetical: it killed pgw#868 attempt eighteen twice, on two independent
-L40S pods 2.5 h apart, with a byte-identical abort string — while the very
-pool ledger the dying process was writing recorded ``peak_concurrency: 2`` and
-``idle_other_s: 0.069``, i.e. two live entry compile children and essentially
-zero free slots across the whole 301-second "no process-tree CPU" window.
+mark. An AOT mint whose compile pool completes one ~390-second entry then falls
+into a hole one entry deep and is SIGTERMed for making progress, while the pool
+ledger it is writing records full concurrency and zero idle slots.
 
 Both tapes below run REAL processes and a REAL grandchild that burns REAL CPU
 and then exits, because the property under test is exactly what ``/proc`` says
 after a ``wait()`` — which no mock can tell you. No wait here is a clock: they
-key on markers the children write and on measured advances (gw#666).
+key on markers the children write and on measured advances.
 """
 
 from __future__ import annotations
@@ -158,7 +153,7 @@ async def _await(
 
     ``watch`` finishing is a DEFINITIVE end, not a stall: the monitor issued
     its kill verdict, so there is nothing left to wait for and the caller's
-    assertion gets to report it verbatim. No duration bounds this (gw#666).
+    assertion gets to report it verbatim. No duration bounds this.
     """
     cadence = Cadence(floor_s=60.0)
     window = SilenceWindow(cadence.window_s)

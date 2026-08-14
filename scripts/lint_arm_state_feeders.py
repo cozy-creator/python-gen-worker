@@ -1,29 +1,20 @@
 #!/usr/bin/env python3
-"""pgw#1152: a process-global fact about an ARMED cell is fed at a SEAM, never
-by a caller who remembered — and a TEST may not feed one at all.
+"""A process-global fact about an ARMED cell is fed at a SEAM, never by a
+caller who remembered — and a TEST may not feed one at all.
 
-THE DEFECT CLASS. ``aot_serve._KNOWN_AOT_KEYS`` decides which failure detector
-applies to a serving object: the DYNAMO lane's per-class cache-hit ledger (which
-an AOTI artifact can never move, so it reads every honest adoption as a disproof)
-or §4.31's serve-first rule. pgw#1033 wrote its feeding rule as a CONVENTION —
-*"whoever reads a `cell_key` off an aot-inductor envelope registers it"* — and it
-had exactly two feeders, ``fleet_cells.arm_from_local_store`` and
-``adopt_delegated_mint``, **both SELF-PRODUCED routes**. ``arm_ordered`` (every
-hub Plan arm and every §4.27 boot-adopt) fed it nothing. Measured on a real pod
-(pgw#1141b, POD PROOF #4): a cell that resolved, materialized and armed was
-scored on the dynamo ledger, disarmed, and the pod served eager for life.
+``aot_serve._KNOWN_AOT_KEYS`` decides which failure detector applies to a
+serving object: the DYNAMO lane's per-class cache-hit ledger (which an AOTI
+artifact can never move, so it reads every honest adoption as a disproof) or
+§4.31's serve-first rule. A feeding rule written as a CONVENTION —
+*"whoever reads a `cell_key` off an aot-inductor envelope registers it"* — is
+taken by the SELF-PRODUCED routes and skipped by the adopt routes, and a cell
+that resolved, materialized and armed is then scored on the dynamo ledger,
+disarmed, so the pod serves eager for life.
 
-That was the FOURTH gate in a row with the same shape (pgw#1108, pgw#1122,
-pgw#1141, pgw#1141b): a rule written against the self-mint path, and an adopt
-path that does not take it. So the rule is now structural — the registration
-happens inside ``aot_serve.arm_entry``, the one function every arm route
-passes — and this script keeps it that way.
-
-pgw#1176 MOVED that seam and did not weaken it. ``load_and_wrap`` armed a whole
-36-entry cell; ``arm_entry`` arms ONE graph class, and every arm route still
-passes through it exactly once per class. The convention is unchanged: the
-registration is a property of the function that arms, never of a caller
-remembering to announce.
+So the rule is structural: the registration happens inside
+``aot_serve.arm_entry``, which arms ONE graph class and which every arm route
+passes exactly once per class. The registration is a property of the function
+that arms, never of a caller remembering to announce.
 
 TWO SCOPES, TWO RULES.
 
@@ -44,29 +35,26 @@ a habit).
 
 **There is deliberately NO ``CONVENTION`` classification, and no ``RELAY``.**
 A feeder called because a docstring asked the caller to remember is exactly the
-bug, twice. It has no label to write down: move the call to the seam, or delete
-it and ask the OBJECT instead (``aot_serve.holds_exported_cell``, pgw#1141b).
+bug. It has no label to write down: move the call to the seam, or delete it and
+ask the OBJECT instead (``aot_serve.holds_exported_cell``).
 
-**tests/** — a hand-feed is RED, and so is stubbing a lane ACCESSOR. pgw#1141
-shipped thirteen green rows whose fleet-policy stand-ins called
-``aot_serve.note_aot_key(key)`` BY HAND — production's single missing line — and
-another suite stubbed ``is_aot_ref`` outright. Those fixtures answered the
-question the gate was supposed to ask, so the tests entered one gate east of the
-bug and RED-first prevented nothing. A test that needs an armed, boot-adopted
-object drives ``tests/harness/adopt_rig.py``, which arms a real packed cell
-through the real ordered path.
+**tests/** — a hand-feed is RED, and so is stubbing a lane ACCESSOR. A
+stand-in calling ``aot_serve.note_aot_key(key)`` BY HAND, or a suite that stubs
+``is_aot_ref`` outright, answers the question the gate is supposed to ask, so
+RED-first prevents nothing. A test that needs an armed, boot-adopted object
+drives ``tests/harness/adopt_rig.py``, which arms a real packed cell through the
+real ordered path.
 
 There is exactly ONE test classification, ``RECOGNIZER``, and **the lint checks
 the claim instead of trusting it**: the row is accepted only when the enclosing
 function DRIVES no arm and the module REPLACES no arm driver. A unit test of the
-recognizer itself (no pipeline anywhere, the classifier is the subject) qualifies
-structurally; a fixture standing in for an adoption cannot, whatever it writes in
-the file. So a simulated arm still has no label to write down.
+recognizer itself qualifies structurally; a fixture standing in for an adoption
+cannot, whatever it writes in the file.
 
-Same enforcement shape as ``lint_credential_identity.py`` (pgw#1122),
-``lint_settings_writers.py`` (pgw#1049) and ``lint_config_reads.py`` (§1.18).
+Same enforcement shape as ``lint_credential_identity.py``,
+``lint_settings_writers.py`` and ``lint_config_reads.py`` (§1.18).
 Sites are keyed ``<path>::<enclosing scope>::<name>``, never by line number: a
-line is a fact other people change (pgw#931).
+line is a fact other people change.
 """
 
 from __future__ import annotations
@@ -142,8 +130,7 @@ FEEDERS: Tuple[Feeder, ...] = (
 )
 
 #: Reading these is how a frame asks WHICH LANE an object serves on. A test that
-#: replaces one has answered the gate's question for it — the pgw#1141 fixture
-#: sin, in its second form.
+#: replaces one has answered the gate's question for it.
 #: Scoped to the LANE-IDENTITY question — "is this the exported lane, and has
 #: this process served this cell?" — not to the broader "is anything armed"
 #: (``is_armed`` / ``is_compile_armed``), which is a different and much older
@@ -162,17 +149,13 @@ RIG = "tests/harness/adopt_rig.py"
 class OneConstructor:
     """A production object that must have exactly ONE map into it.
 
-    THE THIRD VARIANT of the same bug class (pgw#1150, second pass). Two sites
-    mapped a ``Compile`` onto a ``CompileCell`` — the registry's
-    ``compile_cell()`` and ``cli.run``'s §4.28 desktop arm — and the
-    ``numerics_floor``/``numerics_warn`` fields reached one and not the other,
-    so a whole serving path was judged at an SDK default nobody chose while
-    every record said ``declared``. The instance was a missing field; the CAUSE
-    is that the same object had two independent constructors. Any place two
-    constructors build one production object is a latent divergence of exactly
-    that kind — and on the arming path the two constructors are usually "the
-    self-mint/plan route" and "the adopt route", which is how four gates
-    shipped.
+    Two sites mapping a ``Compile`` onto a ``CompileCell`` — the registry's
+    ``compile_cell()`` and ``cli.run``'s §4.28 desktop arm — let the
+    ``numerics_floor``/``numerics_warn`` fields reach one and not the other, so
+    a whole serving path was judged at an SDK default nobody chose while every
+    record said ``declared``. The instance was a missing field; the CAUSE is
+    that the same object had two independent constructors. On the arming path
+    those two are usually "the self-mint/plan route" and "the adopt route".
     """
 
     #: the type name as it is CALLED
@@ -243,7 +226,7 @@ class _Calls(ast.NodeVisitor):
         #: enclosing scopes that call an arm driver
         self.arming_scopes: set = set()
         #: True when this module REPLACES an arm driver (a fixture standing in
-        #: for the arm, which is how every one of these fixtures was built)
+        #: for the arm)
         self.replaces_arm = False
         self.defined_scopes: set = set()
         self._scope: List[str] = []
@@ -275,7 +258,7 @@ class _Calls(ast.NodeVisitor):
             # where the name is too generic to be one: the receiver is
             # `aot_serve`, `aot`, `cc`, `fleet_cells.aot_serve` or a module
             # alias at different sites, and a fence that only catches the
-            # spellings we thought of is not a fence (pgw#1122's rule).
+            # spellings we thought of is not a fence.
             if tail != bare:
                 continue
             receiver = path.rpartition(".")[0].rpartition(".")[2]

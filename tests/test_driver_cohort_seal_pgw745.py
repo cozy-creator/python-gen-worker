@@ -1,5 +1,5 @@
 """pgw#745: the loaded-lib identity manifest must enumerate USERSPACE
-TOOLCHAIN libs only — driver-side objects are NEVER identity (gw#577). The
+TOOLCHAIN libs only — driver-side objects are NEVER identity. The
 host-mounted driver userspace half (libcuda.so.<driver-version>,
 libnvidia-*) varies per machine and driver rollout, invisible to the image
 digest; sealing it fractures cell keys per driver cohort (live:
@@ -71,7 +71,7 @@ def test_seal_identical_across_driver_cohorts_when_userspace_matches(
     """The pgw#745 live shape: same image (same toolchain content on disk),
     two RunPod machines with different host drivers — the seal (and hence
     the cell key's env_seal axis) must be IDENTICAL. Driver identity stays
-    a recorded-only metadata axis (gw#577), and even a driver lib FILE
+    a recorded-only metadata axis, and even a driver lib FILE
     smuggled into a toolchain dir is excluded by name."""
     driver_a = (("libcuda.so.580.126.16", b"driver-cohort-a"),)
     driver_b = (("libcuda.so.580.159.04", b"driver-cohort-b"),)

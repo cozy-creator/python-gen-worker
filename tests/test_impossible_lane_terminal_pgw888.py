@@ -1,18 +1,15 @@
-"""pgw#888 — a refusal whose cause CANNOT change must not be retryable.
+"""A refusal whose cause CANNOT change must not be retryable.
 
-pgw#888 observed 11 real requests each exhausting five retries on a selected
-W8A8 lane with no cell. The design question it hung on — serve eager, or fail
-closed? — is settled the pgw#1010 way: a MANDATORY quantized lane fails closed,
-because DESIGN-RULINGS §4.31's in-request eager fallback governs the case where
-eager is a valid POSTURE, and an author who declared the lane mandatory has not
-sanctioned eager numerics.
+A MANDATORY quantized lane with no cell fails closed: §4.31's in-request eager
+fallback governs the case where eager is a valid POSTURE, and an author who
+declared the lane mandatory has not sanctioned eager numerics.
 
-That settles WHETHER to refuse. It does not make the refusal retryable, and it
-was: `CompiledExecutionLaneUnavailableError` extends `RetryableError`, so
-"this family declares no export, so no cell can be minted for it" — a fact that
-cannot change for the life of the release — was spending the orchestrator's
-whole attempt budget re-deriving one answer, and the user waited five times as
-long for the identical refusal.
+That settles WHETHER to refuse, not whether the refusal is retryable.
+`CompiledExecutionLaneUnavailableError` extending `RetryableError` means "this
+family declares no export, so no cell can be minted for it" — a fact that cannot
+change for the life of the release — spends the orchestrator's whole attempt
+budget re-deriving one answer, and the user waits five times as long for the
+identical refusal.
 
 The distinction this pins is PERMANENCE, not severity:
 

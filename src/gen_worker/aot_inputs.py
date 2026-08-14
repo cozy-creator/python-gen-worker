@@ -1,32 +1,26 @@
-"""Generic export-input machinery for the AOT mint (#723, #739).
+"""Generic export-input machinery for the AOT mint.
 
 ``torch.export`` needs example inputs with the exact structure the target's
 forward takes. That structure is FAMILY knowledge — and per Paul's SDK-generic
-rule (pgw#739) it is a DECLARATION in the endpoint spec, never worker code:
-the endpoint declares ``Compile(dims=..., forks=..., classes=..., inputs=...)``
-and :func:`gen_worker.aot_declaration.declared_inputs` derives the example
-inputs generically. This module carried the sdxl contract as per-family SDK
-code during bootstrap; that family knowledge is deleted (it lives in the sdxl
-endpoint's declaration now) and what remains is generic: composition, the
-lifted-LoRA kwargs, dtype/device introspection, and a registration hook for
-callers that need a hand-written builder while a family's declaration is
-still being written.
+rule it is a DECLARATION in the endpoint spec, never worker code: the endpoint
+declares ``Compile(dims=..., forks=..., classes=..., inputs=...)`` and
+:func:`gen_worker.aot_declaration.declared_inputs` derives the example inputs
+generically. What lives here is generic only: composition, the lifted-LoRA
+kwargs, dtype/device introspection, and a registration hook for callers that
+need a hand-written builder while a family's declaration is still being written.
 
 Composition itself is NOT family-specific and mirrors the SERVING path's own
-composition: ``load_from_pretrained`` -> ``place_pipeline``. (It used to say
-"mirrors ``compile_cache.build``"; that whole-pipeline dynamo mint had no caller
-and pgw#1035 deleted it — the requirement it named is unchanged.) That is a
-parity requirement, not tidiness — the placement/low-VRAM flags are traced
-INTO the graph, so a cell composed differently from the serving path is a cell
-the serving path can never use (gw#391, ie#381 are both that bug).
+composition: ``load_from_pretrained`` -> ``place_pipeline``. That is a parity
+requirement, not tidiness — the placement/low-VRAM flags are traced INTO the
+graph, so a cell composed differently from the serving path is a cell the
+serving path can never use.
 
 The ONE deliberate divergence is the LoRA lane: the dynamo mint stops at
 ``compile_cache.apply_lora_lane``, which allocates zeroed branch BUFFERS —
 module state that export would bake. The exported lane goes one step further
-through ``lora_lifted.arm_lifted_lora_lanes``, which wraps those same
-containers in the lifted forward so the adapter arrives as call arguments
-(#725 option 2). Same bucket, one extra step, because the two lanes disagree
-about what "dynamic" means — and skipping that step is pgw#822.
+through ``lora_lifted.arm_lifted_lora_lanes``, which wraps those same containers
+in the lifted forward so the adapter arrives as call arguments. Same bucket, one
+extra step, because the two lanes disagree about what "dynamic" means.
 """
 
 from __future__ import annotations
@@ -48,12 +42,12 @@ logger = logging.getLogger(__name__)
 
 InputBuilder = Callable[[Any, "ExportSpec"], Tuple[Tuple[Any, ...], Dict[str, Any]]]
 
-#: Keyed by ``(family, target)`` — NOT by family (ie#566 G1). A family's compile
+#: Keyed by ``(family, target)`` — NOT by family. A family's compile
 #: targets are unrelated modules with unrelated call contracts: wan's span the
 #: denoiser AND the VAE, and a family-only key made ``vae.decode`` unmintable for
 #: EVERY family, not just wan. ``target=""`` registers a family-wide fallback.
 #: This registry is the ESCAPE HATCH while a family's declaration is being
-#: written; a registered export DECLARATION (pgw#739) always wins over it.
+#: written; a registered export DECLARATION always wins over it.
 _BUILDERS: Dict[Tuple[str, str], InputBuilder] = {}
 
 
@@ -111,13 +105,12 @@ def builder_for(family: str, target: str = "") -> InputBuilder:
 
 def lifted_lora_values(module: Any, spec: "ExportSpec") -> Dict[str, Any]:
     """The mandatory ``lora_a``/``lora_b`` call values for a LoRA-bucket mint,
-    keyed by parameter NAME — the builder binds them to their POSITIONAL
-    slots (all-positional example feeds are a mint obligation: pod 9's
-    kwarg-traced package armed and silently revoked to eager on first call,
-    pgw#723 residuals).
+    keyed by parameter NAME — the builder binds them to their POSITIONAL slots
+    (all-positional example feeds are a mint obligation: a kwarg-traced package
+    arms and then silently revokes to eager on first call).
 
-    #725 option 2: the adapter rides as a flat 1-D pair with static per-layer
-    offsets, passed as CALL ARGUMENTS. The pair must be present at trace time —
+    The adapter rides as a flat 1-D pair with static per-layer offsets, passed
+    as CALL ARGUMENTS. The pair must be present at trace time —
     tracing without it traces the branchless graph and bakes the absence, which
     is the "missing FQN is the same bug in a different hat" case — and it must be
     NON-ZERO, because a zeroed B lets constant folding erase the branch and
@@ -213,7 +206,7 @@ def compose(
     load_cls: Any = DiffusionPipeline
     pipeline_class = str(request.get("pipeline_class") or "").strip()
     if pipeline_class:
-        # gw#586 call-path parity: trace through the SERVING pipeline class.
+        # trace through the SERVING pipeline class.
         load_cls = resolve_pipeline_class(pipeline_class)
     pipe = load_from_pretrained(
         load_cls, str(model),
@@ -223,11 +216,11 @@ def compose(
     )
     place_pipeline(pipe)
     if int(spec.lora_bucket or 0):
-        # #725 option 2 through pgw#822's ONE arm: containers then lifted
-        # signature. The dynamo lane stops after the containers (module state
-        # export would bake); the exported lane lifts the adapter to call
-        # arguments ON TOP of them — `install_lifted_lora_execution_lanes` alone has no
-        # container to lay its flat pair out over.
+        # ONE arm: containers then lifted signature. The dynamo lane stops after
+        # the containers (module state export would bake); the exported lane
+        # lifts the adapter to call arguments ON TOP of them —
+        # `install_lifted_lora_execution_lanes` alone has no container to lay its
+        # flat pair out over.
         lora_lifted.arm_lifted_lora_execution_lanes(pipe, int(spec.lora_bucket))
     if callable(getattr(pipe, "set_progress_bar_config", None)):
         pipe.set_progress_bar_config(disable=True)

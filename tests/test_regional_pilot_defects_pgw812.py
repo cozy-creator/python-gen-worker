@@ -1,7 +1,6 @@
 """pgw#812 D1 + D2 — the two defects that block flux2's mint outright.
 
-Both were found on CPU for $0 by the regional-compilation pilot's dry run,
-before any pod was rented, and both are REAL-EXPORT reproductions here: every
+Both are REAL-EXPORT reproductions here: every
 test below drives ``torch.export`` over a module whose traced algebra matches
 the one flux2 produces, then asserts on the shipped mint functions. Nothing is
 stubbed except the direct :func:`_is_tautology` discrimination check, which
@@ -14,9 +13,9 @@ D1  ``dynamic_shapes_spec`` minted one torch symbol per (input, axis), so a
     strict export died. flux2 declares
     ``Dim("T_img", carried_by=(("hidden_states", 1), ("img_ids", 1)))``
     deliberately, so the most careful declaration in the fleet was the one
-    that could not mint. ie#571 recorded it "READY — no open mint blockers".
+    that could not mint.
 
-D2  the ie#566 G3 range gate refused flux2 on
+D2  the G3 range gate refused flux2 on
     ``Eq(Mod(3072*s + 1572864, 48*s + 24576), 0)``, which is
     ``Mod(64*X, X) == 0`` — identically true. A gate that cannot tell "pinned"
     from "trivially true" refuses correct mints.

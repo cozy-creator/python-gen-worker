@@ -1,26 +1,19 @@
 """Mint CONTRACT types — the vocabulary, with none of the mint driver.
 
-Extracted from :mod:`gen_worker.aot_mint` (pgw#868) for one measured reason:
+Separate from :mod:`gen_worker.aot_mint` for one measured reason:
 ``compile_cache``'s local re-trace memo records ``code_closure``, the CONTENT
-digest of the static import-graph closure of the compile entrypoints — and
-that walk is an AST walk, so it follows function-level imports too.
-``models.provision`` is one of those entrypoints, so anything the ARM reaches
-statically enters that recorded closure fleet-wide. (The closure left cell
-IDENTITY in pgw#990 — and the pre-trace cell key itself is gone since
-pgw#1059 — but the memo and the layering rule both stand.)
+digest of the static import-graph closure of the compile entrypoints, and that
+walk follows function-level imports too. ``models.provision`` is one of those
+entrypoints, so anything the ARM reaches statically enters the recorded closure
+fleet-wide — and the numerics gate must build a probe feed the way the MINT
+builds one, which means the arm reaches ``aot_declaration.declared_inputs``.
+Through ``aot_mint`` that would drag ``aot_wrapper_split`` and
+``aot_run_impl_split`` into the closure, and a compile-time transform must
+re-key NOTHING.
 
-The numerics gate (pgw#868) has to build a probe feed the way the MINT builds
-one — that is its whole parity argument — which means the arm now reaches
-``aot_declaration.declared_inputs``. Through ``aot_mint`` that dragged
-``aot_wrapper_split`` and ``aot_run_impl_split`` into the closure, which
-pgw#793 and pgw#811 both forbid in as many words: a compile-time transform must
-re-key NOTHING. Their guards caught it, red, on the first run.
-
-So the DECLARATION layer no longer depends on the mint DRIVER. These four names
-are the whole of what ``aot_declaration`` and ``aot_inputs`` needed from
-``aot_mint``; everything here is types, constants and a label, with no compile,
-no export and no pool. ``aot_mint`` re-exports all four, so every existing
-``from .aot_mint import ...`` keeps working.
+So the DECLARATION layer does not depend on the mint DRIVER: everything here is
+types, constants and a label, with no compile, no export and no pool.
+``aot_mint`` re-exports all four names.
 """
 
 from __future__ import annotations
@@ -39,7 +32,7 @@ class MintRefused(RuntimeError):
     say what went wrong is the silent-failure path the doctrine forbids.
 
     ``mint_phases`` carries the PARTIAL phase table of the mint that refused
-    (pgw#825): the entries that did export and compile before the refusal
+: the entries that did export and compile before the refusal
     spent real minutes on a real pod, and a terminus that reports only a
     wall-clock total is a measurement lost to a pod that no longer exists.
     Populated by :func:`mint`; empty for a refusal raised before any entry.
@@ -50,17 +43,15 @@ class MintRefused(RuntimeError):
         self.mint_phases: Dict[str, Any] = dict(mint_phases or {})
 
 
-#: pgw#790: the SDK-owned fork coordinate of a LoRA-bucket family — one graph
-#: class WITH the lifted adapter inputs and one WITHOUT.
+#: The SDK-owned fork coordinate of a LoRA-bucket family — one graph class
+#: WITH the lifted adapter inputs and one WITHOUT.
 #:
-#: gw#627 gave every branch-capable leaf a canonical zeroed rank-bucket branch
-#: so a curated attach is a buffer copy instead of a recompile. Measured
-#: (WARM-INFERENCE-MATRIX §2b, 4090+5090, n=28 warm): those zeroed branches
-#: cost **+31.8% / +44.9% of the compiled per-forward** and roughly DOUBLE the
-#: kernel-launch count, and adapter-free traffic pays all of it to compute
-#: zeros. On the hub's own record 95% of sdxl denoiser forwards name no
-#: adapter, so the branch-bearing graph was the minority case wearing the
-#: majority's clothes.
+#: A canonical zeroed rank-bucket branch on every branch-capable leaf makes a
+#: curated attach a buffer copy instead of a recompile, but measured
+#: (WARM-INFERENCE-MATRIX §2b, 4090+5090, n=28 warm) those zeroed branches cost
+#: **+31.8% / +44.9% of the compiled per-forward** and roughly DOUBLE the
+#: kernel-launch count — which adapter-free traffic (95% of sdxl denoiser
+#: forwards) pays entirely to compute zeros.
 #:
 #: This is a FORK, not a flag: both classes are exported, compiled, keyed and
 #: shipped in the same cell (Paul: "worst case compile 2x more graphs, one with
@@ -82,7 +73,7 @@ class DynamicDim:
     headline quietly stops holding.
 
     ``dim`` is the DECLARED ``Compile.Dim`` this row came from, and it is what
-    makes a multi-carrier dim expressible (pgw#812 D1). A declaration may bind
+    makes a multi-carrier dim expressible. A declaration may bind
     ONE logical axis to several inputs — flux2 declares
     ``Dim("T_img", carried_by=(("hidden_states", 1), ("img_ids", 1)))``
     precisely so the edit lane cannot let ``img_ids`` specialize while
@@ -120,26 +111,24 @@ class ExportSpec:
     family: str
     target: str
     weight_lane: str = ""
-    #: pgw#1076: EMPTY, not "bf16". This field is a MEASUREMENT — what the
-    #: traced modules actually compute in — and it is stamped into the cell's
-    #: `metadata.json` and printed on every arm line. Defaulting it made an
-    #: fp32 cell say `precision: bf16`, which cost a debugging cycle chasing a
-    #: cast that never happened (the real cause was TF32 conv kernels). A
-    #: caller that KNOWS the lane sets it; a caller that does not leaves it
-    #: absent and `aot_mint._mint_cell` derives it from the modules in hand.
-    #: Unmeasurable stays "" — an absent fact beats a plausible wrong one.
+    #: Defaults EMPTY, never "bf16". This field is a MEASUREMENT — what the
+    #: traced modules actually compute in — stamped into the cell's
+    #: `metadata.json` and printed on every arm line, so a default makes an
+    #: fp32 cell claim `precision: bf16`. A caller that KNOWS the lane sets it;
+    #: a caller that does not leaves it absent and `aot_mint._mint_cell`
+    #: derives it from the modules in hand. Unmeasurable stays "" — an absent
+    #: fact beats a plausible wrong one.
     precision: str = ""
     lora_bucket: int = 0
     shapes: Tuple[Tuple[int, ...], ...] = ()
-    # (pgw#1030: `batch` deleted — zero readers. The traced batch is a
-    # declared GraphClass coordinate since pgw#739, not a spec field.)
+    # No `batch` field: the traced batch is a declared GraphClass coordinate.
     text_lens: Tuple[int, ...] = ()
     guidance_scales: Tuple[float, ...] = ()
     dynamic: Tuple[DynamicDim, ...] = ()
-    #: pgw#739 declaration coordinate: the fork arm values and (for a
-    #: static-rows family) the class row this artifact is minted at. Both
-    #: KEY (a fork is a distinct graph class in #716's hash) — see
-    #: :func:`cell_identity`. Sorted (name, value) pairs.
+    #: Declaration coordinate: the fork arm values and (for a static-rows
+    #: family) the class row this artifact is minted at. Both KEY — a fork is a
+    #: distinct graph class — see :func:`cell_identity`. Sorted (name, value)
+    #: pairs.
     fork: Tuple[Tuple[str, Any], ...] = ()
     class_dims: Tuple[Tuple[str, int], ...] = ()
     specialization: Dict[str, Any] = field(default_factory=dict)
@@ -151,7 +140,7 @@ class ExportSpec:
 
     def execution_lane_label(self) -> str:
         """This spec's lane label — ONE implementation, shared with the
-        cell-key axis it has to agree with (pgw#1040)."""
+        cell-key axis it has to agree with."""
         return _execution_lane_label(self.weight_lane, self.lora_bucket)
 
 

@@ -1,24 +1,12 @@
-"""pgw#1075 — a declared value this SDK's own vocabulary rejects is a REFUSAL.
+"""A declared value this SDK's own vocabulary rejects is a REFUSAL.
 
 ``api.errors.ValidationError`` means, verbatim, *bad user input; do not retry*.
 Inside the mint child the "user input" IS the declaration, so every property
 the parent's retry policy reads off a refusal already holds for it: it is
-deterministic, identical on the next card, and fixed by editing the
-declaration and by nothing else. It nonetheless took the one exit that says
-none of that — an unclassified crash.
-
-**Measured on the rig, 2026-08-09.** A vehicle declaring ``lora_bucket=8``
-(``RANK_BUCKETS = (16, 32, 64, 128)``) makes ``enable_lora_branches`` raise its
-typed ``ValidationError`` — the refusal is CORRECT — and the rig reported
-``mint-child crashed: the mint process exited 1`` with a truncated traceback
-tail. Two things died at the process boundary: the class (crash, so RETRYABLE
-— a second billed pod for a fact the first one settled) and the sentence
-carrying the author's fix.
-
-pgw#999's rule is that refusals carry a class. pgw#1062's is that a refusal's
-message IS the authoring contract and is carried whole — that is why
-``export_program`` hands torch's own ``register_fake`` guidance through
-unedited. This is the same wrapper, one layer down.
+deterministic, identical on the next card, and fixed by editing the declaration
+and by nothing else. Escaping as an unclassified crash loses both the class
+(crash means RETRYABLE — a second billed pod for a fact the first one settled)
+and the sentence carrying the author's fix, which is carried whole.
 
 **RED VERIFICATION.** Delete the ``except ValidationError`` branch from
 ``mint_child.main``:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Turn a banked run directory into the reportable tables (pgw#865).
+"""Turn a banked run directory into the reportable tables.
 
 Every row carries its shape/steps/CFG, because the whole reason the
 "how do we compare to fal / to the 5090" question was unanswerable is that

@@ -1,28 +1,8 @@
-"""pgw#1198: virtuality is a question about STORAGE, never about TYPE.
+"""Virtuality is a question about STORAGE, never about TYPE.
 
-THE BOUNDARY THIS FILE FIXES IN PLACE
--------------------------------------
-§4.33 rests on "the compile is weight-free", and pod ``729431an6ugbvq``
-(H100-80, wan-2.2, 0.113.0) refused it:
-
-    structure-only build of component 'transformer,transformer_2' (WanPipeline)
-    is not possible: 2 of 2 declared compile target(s) hold REAL parameters
-    totalling 56_203_673_600 bytes
-
-The forge had NOT failed. Both experts were built from code + config, stamped,
-injected through ``components=`` and carried by the pipeline. What ran next was
-the ENDPOINT's own ``setup()`` — which ``run_setup`` calls after composition —
-and ``wan_2_2.main._quantize_fp8`` swapped every in-scope ``nn.Linear.weight``
-for a torchao ``Float8Tensor``: a traceable wrapper subclass whose inner
-``qdata``/``scale`` are the original FAKE tensors and whose OUTER dtype stays
-bf16. Every virtuality test in the tree asked ``isinstance(t, FakeTensor)``,
-which that object is not, and then priced ``numel * element_size`` at the outer
-dtype — the ENTIRE bf16 checkpoint, for storage that did not exist.
-
-So the boundary of the structure-only forge is NOT a list of pipeline classes,
-and a survey of families would have gone stale the day one of them added a
-quantizer. It is two properties, and this file tests the second one because the
-first was already fenced:
+The boundary of the structure-only forge is not a list of pipeline classes — a
+family survey goes stale the day one of them adds a quantizer. It is two
+properties, and this file tests the second because the first is already fenced:
 
 1. the declared compile target must be buildable from code + config
    (``load_config`` + ``from_config``, named in ``model_index.json``) — refused
@@ -31,7 +11,10 @@ first was already fenced:
 2. **whatever the endpoint's own ``setup()``/``warmup()`` then does to that
    module must remain visible AS virtual.** A quantizer that re-wraps a fake
    parameter in a tensor subclass is the shape the fleet actually ships
-   (``wan-2.2``, ``minimax-h3``), and nothing fenced it.
+   (``wan-2.2``, ``minimax-h3``): torchao's ``Float8Tensor`` is not a
+   ``FakeTensor``, its inner ``qdata``/``scale`` are, and pricing
+   ``numel * element_size`` at the OUTER bf16 dtype charges an entire checkpoint
+   for storage that does not exist.
 
 Torchao is not in this image, so the subclass here is written to torch's own
 wrapper-subclass contract — ``__tensor_flatten__`` / ``__tensor_unflatten__``,
@@ -40,12 +23,9 @@ contract ``Float8Tensor`` implements and precisely what the fix consults. The
 test drives the REAL seams: ``structure_only.build_component`` on the micro
 family's real tree, then the real fences.
 
-NOTHING HERE WEAKENS A FENCE
-----------------------------
-``StructureNotHonored`` behaved exactly as designed on that pod — it refused
-rather than mint garbage. The rows below pin both directions: a subclass over
-FAKE data is weight-free, and a subclass over REAL data (or over a MIX) is a
-breach, still, by the same walk.
+The rows below pin both directions: a subclass over FAKE data is weight-free,
+and a subclass over REAL data (or over a MIX) is still a breach, by the same
+walk.
 """
 
 from __future__ import annotations

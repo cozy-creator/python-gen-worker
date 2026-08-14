@@ -143,8 +143,8 @@ def _collect_payload_moderation_metadata(payload_type: type) -> Dict[str, Any]:
             return
 
         if origin in (set, frozenset):
-            # th#886: input-asset manifests are ordered; unordered containers
-            # have no stable occurrence order, so an Asset here is a build error.
+            # Input-asset manifests are ordered; unordered containers have no
+            # stable occurrence order, so an Asset here is a build error.
             args = typing.get_args(ann)
             if args and _annotation_carries_asset(args[0]):
                 raise ValueError(
@@ -176,7 +176,7 @@ def _collect_payload_moderation_metadata(payload_type: type) -> Dict[str, Any]:
                 return
             if issubclass(ann, Asset):
                 # Base Asset/MediaAsset = kind "media"; typed subclasses carry
-                # their exact kind (th#886 manifest vocabulary).
+                # their exact kind.
                 out["media"].append({"field": path, "kind": _media_kind(ann)})
                 return
             if _is_msgspec_struct(ann):
@@ -354,16 +354,15 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
         "ref": binding.path,
     }
     if binding.source == "tensorhub":
-        # Normal form (gw#492): the default tag ('prod', th#1276) is elided
-        # at the manifest boundary so hub-minted keep/routing refs stay
-        # byte-equal to worker-minted wire refs (Go folds a non-empty tag
-        # verbatim). An explicit 'latest' is stamped, never elided.
+        # Normal form: the default tag is elided at the manifest boundary so
+        # hub-minted keep/routing refs stay byte-equal to worker-minted wire
+        # refs (Go folds a non-empty tag verbatim). An explicit 'latest' is
+        # stamped, never elided.
         if binding.tag and binding.tag != DEFAULT_REF_TAG:
             out["tag"] = binding.tag
         if binding.components:
-            # pgw#505: the hub's desired-snapshot scoping (platform-side,
-            # not yet built) reads this to resolve only the named pipeline
-            # component subfolders instead of the whole repo.
+            # The hub's desired-snapshot scoping reads this to resolve only the
+            # named pipeline component subfolders instead of the whole repo.
             out["components"] = list(binding.components)
     elif binding.source == "huggingface":
         for k in ("revision", "dtype", "subfolder"):
@@ -386,22 +385,20 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
 
 
 def _stamp_family(binding_manifest: Dict[str, Any], family: str) -> None:
-    """Stamp a binding manifest with the endpoint's architecture family
-    (pgw#523: unconditional-when-known, never gated on a declaration) so
-    tensorhub's th#586 gate can family-police any LoRA overlay attached at
-    this slot. Identity (the binding) and permission (whether a LoRA may
-    attach here — the slot-policy ``loras`` axis, th#772) are separate
-    concerns; this only carries the family fact through. No-op when the
-    family isn't known — nothing to police."""
+    """Stamp a binding manifest with the endpoint's architecture family —
+    unconditional-when-known, never gated on a declaration — so the hub can
+    family-police any LoRA overlay attached at this slot. Identity (the
+    binding) and permission (whether a LoRA may attach here — the slot-policy
+    ``loras`` axis) are separate concerns; this only carries the family fact
+    through. No-op when the family isn't known — nothing to police."""
     if not family:
         return
     binding_manifest["family"] = family
 
 
 def _model_ref_to_manifest(ref: Any) -> Dict[str, Any]:
-    """``default_checkpoint`` ref shape used by the slots
-    block: ``{source, path, tag?, revision?, version?, components?}``
-    — a structured ModelRef (pgw#511; ``components`` added pgw#505)."""
+    """``default_checkpoint`` ref shape used by the slots block:
+    ``{source, path, tag?, revision?, version?, components?}``."""
     out: Dict[str, Any] = {"source": ref.source, "path": ref.path}
     if ref.tag and ref.tag != DEFAULT_REF_TAG:
         out["tag"] = ref.tag
@@ -418,17 +415,16 @@ def _slot_to_manifest(
     name: str, slot: Slot[Any], *, family: str,
     components: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
-    """One ``functions[].slots[]`` entry (pgw#520 / th#767, SDK v2): the
-    hub-side mapping/resolution contract for a Slot-declared model slot.
+    """One ``functions[].slots[]`` entry: the hub-side mapping/resolution
+    contract for a Slot-declared model slot.
 
-    v2 publishes the DERIVED component tree (``components``: ordered
+    Publishes the DERIVED component tree (``components``: ordered
     ``[{name, kind}]`` rows, kind ``weights`` | ``config``) — the path
     vocabulary the hub needs for per-path policy (``pipeline`` open /
-    ``pipeline.vae`` curated / ``pipeline.unet`` fixed, th#980/ie#524) and
-    component-level routing. Pinned at publish so diffusers drift stays
-    deterministic. ``default_config`` is gone: recipe values are catalog
-    data (th#1116); the schema derives from the handler's
-    ``RequestContext[D]`` annotation."""
+    ``pipeline.vae`` curated / ``pipeline.unet`` fixed) and component-level
+    routing. Pinned at publish so diffusers drift stays deterministic. There is
+    deliberately no ``default_config``: recipe values are catalog data, and the
+    schema derives from the handler's ``RequestContext[D]`` annotation."""
     out: Dict[str, Any] = {
         "name": name,
         "pipeline_class": f"{slot.pipeline_cls.__module__}.{slot.pipeline_cls.__qualname__}",
@@ -449,12 +445,11 @@ def _slot_to_manifest(
             {"name": part, "kind": kind}
             for part, kind in sorted(components.items())
         ]
-    # §1.33 / pgw#1143: the per-component DEMAND. Absent means UNDECLARED —
-    # the hub's gate falls back to the image-wide decoder census for this
-    # slot, and never reads absence as "accepts everything". Handles only:
-    # the hub resolves each to its descriptor DIGEST at ingest, against its
-    # own registry, which is the only moment one wheel and one hub are both
-    # pinned.
+    # The per-component DEMAND. Absent means UNDECLARED — the hub's gate falls
+    # back to the image-wide decoder census for this slot, and never reads
+    # absence as "accepts everything". Handles only: the hub resolves each to
+    # its descriptor DIGEST at ingest, against its own registry, which is the
+    # only moment one wheel and one hub are both pinned.
     if slot.layouts:
         out["layouts"] = {
             path: list(handles) for path, handles in slot.layouts.items()
@@ -477,9 +472,8 @@ def _assert_unique_function_names(functions: List[Dict[str, Any]]) -> None:
     ``invoke <name>`` / ``serve --function <name>`` key), so they MUST be
     unique within an endpoint. A collision is an author error — e.g. two
     classes each exposing a generic ``name="generate"`` without an explicit
-    override. The worker historically only logged ``Handler name conflict;
-    skipping`` and silently dropped one route; fail loudly at
-    discovery/endpoint.lock build time instead.
+    override. Fails loudly at discovery/endpoint.lock build time rather than
+    silently dropping one route at runtime.
     """
     by_name: Dict[str, List[Dict[str, Any]]] = {}
     for fn in functions:
@@ -535,12 +529,9 @@ def discover_functions(
         sys.path.insert(0, src_str)
 
     top_level = main_module.split(".", 1)[0]
-    # pgw#1163: the audit below is about what THE WALK imported, so the set it
-    # compares against has to be taken before the walk runs. Scanning all of
-    # `sys.modules` instead attributes the CALLER's imports to discovery — and
-    # when the caller is pytest, that is its own `conftest` and test modules,
-    # which live under `root` and are not in the wheel, so they read as
-    # offenders. A pod never imports them.
+    # The audit below is about what THE WALK imported, so the set it compares
+    # against has to be taken before the walk runs. Scanning all of
+    # `sys.modules` instead attributes the CALLER's imports to discovery.
     preloaded = frozenset(sys.modules)
     with stub_missing_heavy_deps(extra_heavy_deps):
         try:
@@ -576,17 +567,16 @@ def discover_functions(
 
 
 class SourceOnlyModuleError(ValueError):
-    """pgw#833: the bake imported a module the installed package won't have.
+    """The bake imported a module the installed package won't have.
 
     ``discover_functions`` injects ``root`` and ``root/src`` into ``sys.path``
     so discovery also works in an uninstalled source tree. In a BUILT image
-    that injection is a trap: a module the wheel forgot to package (wan-2.2
-    1.6.0's ``src/cozy_finish.py``, absent from hatch ``only-include``) still
-    imports at bake time from the source tree, the gate passes, and the
-    worker then dies at boot with ``ModuleNotFoundError`` on every pod the
-    release ever staffs — untyped, pre-Hello, fleet-wide. The gate must run
-    the runtime's predicate: when the walked project is INSTALLED, everything
-    the walk imported must resolve without the source tree.
+    that injection is a trap: a module the wheel forgot to package still
+    imports at bake time from the source tree, the gate passes, and the worker
+    then dies at boot with ``ModuleNotFoundError`` on every pod the release
+    staffs — untyped, pre-Hello, fleet-wide. So the gate runs the runtime's
+    predicate: when the walked project is INSTALLED, everything the walk
+    imported must resolve without the source tree.
     """
 
 
@@ -604,13 +594,11 @@ def _audit_source_only_imports(
     depend on the directory it happens to start in).
 
     ``preloaded`` is ``sys.modules`` as it stood BEFORE the walk, and the scan
-    considers only what the walk ADDED (pgw#1163). Without it the audit reports
-    on its CALLER's imports: run from inside pytest it flagged the runner's own
-    ``conftest`` and test modules, which sit under ``root``, are absent from the
-    wheel, and are imported by no pod that ever exists. Excluding by
-    already-loaded rather than by name keeps this free of any knowledge of the
-    test runner — a scan that has to recognise pytest would have to recognise
-    the next tool too.
+    considers only what the walk ADDED — otherwise the audit reports on its
+    CALLER's imports (a test runner's own ``conftest`` and test modules sit
+    under ``root``, are absent from the wheel, and are imported by no pod).
+    Excluding by already-loaded rather than by name keeps this free of any
+    knowledge of the test runner.
     """
 
     root_str = str(root)
@@ -647,7 +635,7 @@ def _audit_source_only_imports(
     offenders: List[str] = []
     for name, mod in list(sys.modules.items()):
         if name in preloaded:
-            continue  # the caller's import, not the walk's (pgw#1163)
+            continue  # the caller's import, not the walk's
         if "." in name:
             continue  # submodules resolve with their package
         filename = getattr(mod, "__file__", None)
@@ -675,9 +663,9 @@ def _audit_source_only_imports(
 
 
 def _validate_variant_targets(functions: List[Dict[str, Any]]) -> None:
-    """th#1004: every ``@variant_of`` must target another discovered function
-    on this endpoint, and the target must not itself be a variant (no
-    chains). Build-time gate — a dangling pairing never ships."""
+    """Every ``@variant_of`` must target another discovered function on this
+    endpoint, and the target must not itself be a variant (no chains).
+    Build-time gate — a dangling pairing never ships."""
     by_name = {str(f.get("name") or ""): f for f in functions}
     for f in functions:
         target = str(f.get("variant_of") or "")
@@ -709,7 +697,7 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
     for es in extract_specs(obj, walked_module=module_name):
         res_dict: Dict[str, Any] = {}
         try:
-            # pgw#670: Resources owns its own manifest projection (the one
+            # Resources owns its own manifest projection (the one
             # declaration -> wire-name mapping lives there, not here).
             project = getattr(es.resources, "manifest_dict", None)
             raw = project() if callable(project) else msgspec.to_builtins(es.resources)
@@ -721,13 +709,12 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             key: _binding_to_manifest(binding, key)
             for key, binding in es.models.items()
         }
-        # Every binding carries the endpoint's architecture family, when
-        # known, so the hub's th#586 gate can family-police any LoRA
-        # overlay attached at that slot (pgw#523: unconditional-when-known,
-        # never gated on a declaration). For Slot-declared bindings the map is
-        # AUTHORITATIVE: it already reconciles the function family with the
-        # slot's explicit intent. Bare bindings have no slot declaration and
-        # retain the function-level compile family fallback.
+        # Every binding carries the endpoint's architecture family, when known,
+        # so the hub can family-police any LoRA overlay attached at that slot.
+        # For Slot-declared bindings the map is AUTHORITATIVE: it already
+        # reconciles the function family with the slot's explicit intent. Bare
+        # bindings have no slot declaration and retain the function-level
+        # compile family fallback.
         compile_family = es.compile.family if es.compile is not None else ""
         for key, block in bindings_block.items():
             family = (
@@ -737,13 +724,13 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             )
             _stamp_family(block, family)
 
-        # pgw#747: `es.slot_family` is AUTHORITATIVE per slot — it already
-        # folds in Compile(family=...), and it deliberately holds "" for an
-        # auxiliary bare-typed slot that never opted into the family
-        # vocabulary. Re-defaulting to `compile_family` here would put the
-        # function's family back on exactly those slots, which is the bug:
-        # the hub's th#586 gate then demands a family-agnostic artifact
-        # classify as wan22 and fails the whole manifest closed.
+        # `es.slot_family` is AUTHORITATIVE per slot — it already folds in
+        # Compile(family=...), and it deliberately holds "" for an auxiliary
+        # bare-typed slot that never opted into the family vocabulary.
+        # Re-defaulting to `compile_family` here would put the function's family
+        # back on exactly those slots, making the hub's gate demand that a
+        # family-agnostic artifact classify as that family and fail the whole
+        # manifest closed.
         slots_block = [
             _slot_to_manifest(
                 name, slot,
@@ -797,57 +784,55 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             "incremental_output": incremental,
             "is_async": es.is_async,
         }
-        # th#826: the child-call declaration — the hub mints the invoke_child
+        # The child-call declaration — the hub mints the invoke_child
         # capability grant only for declaring functions. Omitted when false.
         if es.child_calls:
             fn["child_calls"] = True
-        # SDK v2 (pgw#647): payload compile axes (equivalence classes) —
-        # catalog recipes validate against the declared class names at
-        # publish time; the warm plan derives from classes x buckets.
+        # Payload compile axes (equivalence classes) — catalog recipes validate
+        # against the declared class names at publish time; the warm plan
+        # derives from classes x buckets.
         if es.payload_axes:
             fn["compile_axes"] = [a.to_manifest() for a in es.payload_axes]
         if es.lora_bucket:
             fn["lora_bucket"] = int(es.lora_bucket)
-        # SDK v2: the derived config schema (RequestContext[D]) — names the
-        # family vocabulary the catalog's recipe values are validated
-        # against (th#1116).
+        # The derived config schema (RequestContext[D]) — names the family
+        # vocabulary the catalog's recipe values are validated against.
         if es.defaults_type is not None:
             fn["config_schema"] = es.defaults_type.__name__
             fam = str(getattr(es.defaults_type, "__gen_worker_family__", "") or "")
             if fam:
                 fn["config_family"] = fam
-        # th#1004 @variant_of: the base<->variant pairing rides into the
-        # manifest so the hub's public endpoint info can advertise it.
+        # The base<->variant pairing rides into the manifest so the hub's public
+        # endpoint info can advertise it.
         if es.variant_of:
             fn["variant_of"] = es.variant_of
             fn["variant"] = es.variant_kind
-        # pgw#654: per-function objective contract (@worker_function) —
-        # objectives omitted = unrestricted; distilled omitted = either.
+        # Per-function objective contract: objectives omitted = unrestricted;
+        # distilled omitted = either.
         if es.objectives is not None:
             fn["objectives"] = list(es.objectives)
         if es.distilled is not None:
             fn["distilled"] = bool(es.distilled)
-        # th#1257: declared serving tasks — the axis the hub's lane-verdict
-        # store keys on. Omitted = undeclared, and every quant lane then
-        # resolves unmeasured (serves at base precision).
+        # Declared serving tasks — the axis the hub's lane-verdict store keys
+        # on. Omitted = undeclared, and every quant lane then resolves
+        # unmeasured (serves at base precision).
         if es.tasks is not None:
             fn["tasks"] = list(es.tasks)
-        # th#1757: the opt-in reference contract. Omitted = this function
-        # never sees the concept; the hub refuses a ref_text sent to it.
+        # The opt-in reference contract. Omitted = this function never sees the
+        # concept; the hub refuses a ref_text sent to it.
         if es.accepts_references is not None:
             fn["accepts_references"] = es.accepts_references.to_manifest()
-        # th#1050: opt-in declared lane bodies (behavioral divergence marker).
+        # Opt-in declared lane bodies (behavioral divergence marker).
         if es.handles:
             fn["handles"] = list(es.handles)
-        # th#1087: declared config parameters + env names — the hub persists
-        # these as the release's declared surface and 422s config writes
-        # outside it.
+        # Declared config parameters + env names — the hub persists these as the
+        # release's declared surface and 422s config writes outside it.
         if es.config:
             fn["config_params"] = [p.to_manifest() for p in es.config]
         if es.env:
             fn["env"] = list(es.env)
-        # th#1051: declared compute-time formula — the hub learns the
-        # constants per physics cell; the source string is the contract.
+        # Declared compute-time formula — the hub learns the constants per
+        # physics cell; the source string is the contract.
         if es.runtime_formula is not None:
             fn["runtime_formula"] = es.runtime_formula.source
         if slots_block:
@@ -858,23 +843,22 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             fn["delta_output_schema"] = delta_schema
         ccell = es.compile_cell()
         if es.compile is not None and ccell is not None:
-            # Hub keys family-cache lookups off this block (th#569).
+            # Hub keys family-cache lookups off this block.
             fn["compile"] = {
                 "family": es.compile.family,
                 "shapes": [[int(v) for v in s] for s in es.compile.shapes],
                 "targets": list(es.compile.targets),
             }
-            # SDK v2 shape contract: the declared text axis and dynamic
-            # ranges ride to the hub's cell producer, and the contract
-            # digest is the ck2 cell-key axis (pgw#647).
+            # Shape contract: the declared text axis and dynamic ranges ride to
+            # the hub's cell producer, and the contract digest is the ck2
+            # cell-key axis.
             if ccell.text_len is not None:
                 # THIS function's effective pin (a @worker_function
                 # text_len= override wins over the class Compile's).
                 fn["compile"]["text_len"] = int(ccell.text_len)
             if ccell.contract_text_lens():
-                # pgw#654 gap #6: the CLASS's per-lane pin union — what the
-                # shared cell contract digests (dual-pin classes describe
-                # both lanes).
+                # The CLASS's per-lane pin union — what the shared cell contract
+                # digests (dual-pin classes describe both lanes).
                 fn["compile"]["text_lens"] = [
                     int(v) for v in ccell.contract_text_lens()
                 ]
@@ -884,42 +868,38 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
                     for d in es.compile.dynamic
                 ]
             if ccell.guidance_scales:
-                # Warm representatives derived from the payload's
-                # CompileAxis classes (the v2 replacement for the deleted
-                # Compile(guidance_scales=...) decorator tuple).
+                # Warm representatives derived from the payload's CompileAxis
+                # classes.
                 fn["compile"]["guidance_scales"] = list(ccell.guidance_scales)
             fn["compile"]["shape_contract_digest"] = ccell.contract_digest()
-            # ie#381: the primary binding's weight-storage lane (gw#389 fp8
-            # layerwise casting) rides along so the hub's cell producer
-            # builds from an identically-loaded pipeline — the cast hooks
-            # are traced INTO the FX graphs; a bf16-built cell for an
-            # fp8-served model misses on every request.
+            # The primary binding's weight-storage lane (fp8 layerwise casting)
+            # rides along so the hub's cell producer builds from an
+            # identically-loaded pipeline — the cast hooks are traced INTO the
+            # FX graphs; a bf16-built cell for an fp8-served model misses on
+            # every request.
             primary = next(iter(es.models.values()), None)
             storage = str(getattr(primary, "storage_dtype", "") or "")
             if storage:
                 fn["compile"]["storage_dtype"] = storage
             if getattr(es.compile, "regional", False):
                 fn["compile"]["regional"] = True
-            # gw#561: dynamic-LoRA endpoints trace the branch-bearing graph
-            # family; the hub's producer must build `-lora<bucket>` cells.
-            # SDK v2: declared at the decorator (`@endpoint(lora_bucket=)`).
+            # Dynamic-LoRA endpoints trace the branch-bearing graph family; the
+            # hub's producer must build `-lora<bucket>` cells.
             if es.lora_bucket:
                 fn["compile"]["lora_bucket"] = int(es.lora_bucket)
-            # pgw#1149 / th#1811 (ie#664 §6): the AUTHOR's declared bar and
-            # refusals, so the hub's publish-time validation session judges a
-            # release against a DECLARATION instead of a number the platform
-            # picked. Absent when undeclared — the hub reports `bar_undeclared`
-            # by name, and a default emitted here would make the SDK the author
-            # of the bar the platform verifies.
+            # The AUTHOR's declared bar and refusals, so the hub's publish-time
+            # validation session judges a release against a DECLARATION instead
+            # of a number the platform picked. Absent when undeclared — the hub
+            # reports `bar_undeclared` by name, and a default emitted here would
+            # make the SDK the author of the bar the platform verifies.
             if es.compile.speed_metric:
                 fn["compile"]["speed_metric"] = es.compile.speed_metric
             if es.compile.min_speedup is not None:
                 fn["compile"]["min_speedup"] = float(es.compile.min_speedup)
-            # OPEN blockers only (pgw#1115): the hub reads a non-empty list as
-            # "the author refuses to mint" and marks the mint check
-            # blocked-by-declaration, so a RESOLVED id would park the family in
-            # that state forever. Ids, not prose — open-vs-resolved is the
-            # whole of what the hub decides on.
+            # OPEN blockers only: the hub reads a non-empty list as "the author
+            # refuses to mint" and marks the mint check blocked-by-declaration,
+            # so a RESOLVED id would park the family in that state forever. Ids,
+            # not prose — open-vs-resolved is all the hub decides on.
             open_ids = [b.id for b in es.compile.open_blockers]
             if open_ids:
                 fn["compile"]["blockers"] = open_ids
@@ -960,23 +940,23 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
             )
         seen_fn[fn_name] = py_name
 
-    # th#1580 A4: the endpoint half of §1.30's intersection, DERIVED from the
-    # decoders this image actually carries — never a hand-maintained list.
-    # Runs inside the same heavy-dep stubbing the endpoint walk used, so a
-    # torch-less manifest build derives the same set an in-image build does.
+    # The endpoint half of the lane intersection, DERIVED from the decoders this
+    # image actually carries — never a hand-maintained list. Runs inside the
+    # same heavy-dep stubbing the endpoint walk used, so a torch-less manifest
+    # build derives the same set an in-image build does.
     with stub_missing_heavy_deps(cfg.discovery_heavy_deps) as stubbed:
         derived = derive_execution_lanes()
-        # pgw#996: the AOT lane's STATIC preconditions, decided in the image
-        # that will run them. `validate_endpoint_lock` turns a refusal into a
-        # build error, so an endpoint that declares an export it cannot
-        # compile never reaches a pod to downgrade there.
+        # The AOT lane's STATIC preconditions, decided in the image that will
+        # run them. `validate_endpoint_lock` turns a refusal into a build error,
+        # so an endpoint that declares an export it cannot compile never reaches
+        # a pod to downgrade there.
         declared_families = declared_compile_families(functions)
         preconditions = static_mint_preconditions(
             declared_families, torch_available="torch" not in stubbed)
-        # pgw#501: and the ADAPTER capability, which is not an AOT question —
-        # an endpoint declaring `lora_bucket > 0` serves adapters whether or
-        # not it compiles, and `peft` is honest under the heavy-dep stubbing
-        # (it is deliberately not a stubbed root), so this decides here too.
+        # And the ADAPTER capability, which is not an AOT question — an endpoint
+        # declaring `lora_bucket > 0` serves adapters whether or not it
+        # compiles, and `peft` is honest under the heavy-dep stubbing (it is
+        # deliberately not a stubbed root), so this decides here too.
         preconditions = preconditions + adapter_backend_preconditions(
             declared_families)
     for fn in functions:
@@ -1009,12 +989,11 @@ def _census_unbacked_layouts(
 ) -> List[str]:
     """Declared handles no `@implements_contract` decoder in this image backs.
 
-    **NOT a refusal**, deliberately (§1.33: the census is a LOWER-bound sanity
-    check, and a lower bound that refuses is an upper bound). The ruling's own
-    worked example is decoded natively by `transformers` via
-    `quantization_config` with zero cozy markers, so refusing here would make
-    the design's motivating case illegal. It lands on the manifest and in the
-    build log so an author can see the gap and judge it.
+    **NOT a refusal**, deliberately: the census is a LOWER-bound sanity check,
+    and a lower bound that refuses is an upper bound. A layout decoded natively
+    by `transformers` via `quantization_config` carries zero cozy markers, so
+    refusing here would make that legal case illegal. It lands on the manifest
+    and in the build log so an author can see the gap and judge it.
     """
     backed = {c.contract for c in derived.contracts}
     unbacked: List[str] = []
@@ -1035,15 +1014,11 @@ def _strip_none(obj: Any) -> Any:
     return obj
 
 
-#: pgw#1017 GAP D. Tensorhub classifies a build failure carrying this marker as
+#: Tensorhub classifies a build failure carrying this marker as
 #: ``ErrBuildInput`` → ``river.JobCancel``: the same source bytes are never
-#: retried. It used to be emitted by a shell wrapper the hub wrote into the
-#: SYNTHESIZED Dockerfile, so a family shipping its OWN Dockerfile got the
-#: opposite classification for an identical failure — and that included
-#: pgw#996's precondition refusals, whose entire value is deciding once, at
-#: build. The whole image build re-ran on every River attempt to reach the same
-#: verdict. The knowledge lives here: discovery is what knows the failure is
-#: about immutable endpoint source, so discovery says so, on both paths.
+#: retried. Emitted here rather than by the build wrapper because discovery is
+#: what knows the failure is about immutable endpoint source — so it says so on
+#: both the synthesized-Dockerfile and bring-your-own-Dockerfile paths.
 BUILD_INPUT_FAILURE_MARKER = "TENSORHUB_BUILD_INPUT_FAILURE:discovery"
 
 
@@ -1058,11 +1033,9 @@ def _fail_build_input(*messages: str) -> None:
 def main() -> None:
     """Write the build-time endpoint manifest to stdout.
 
-    #328: bake-time validation gate. After ``discover_manifest`` produces
-    the ``functions`` list, ``validate_endpoint_lock`` confirms every entry
-    is a class-shape declaration (post-#322). An old function-shape entry
-    that slipped past the discovery refactor hard-fails the build with a
-    pointer to the migration guide.
+    Bake-time validation gate: after ``discover_manifest`` produces the
+    ``functions`` list, ``validate_endpoint_lock`` confirms every entry is a
+    class-shape declaration.
 
     Every refusal below is about the endpoint SOURCE, which no retry can
     change, so each one carries ``BUILD_INPUT_FAILURE_MARKER``. A death that
@@ -1082,11 +1055,8 @@ def main() -> None:
             traceback.print_exc(file=sys.stderr)
         _fail_build_input(f"error: {e}")
 
-    # #328 bake-time validation gate. Old function-shape entries trip the
-    # missing-class_name check; same-class slug collisions trip the route
-    # uniqueness check; non-class shapes (an entry without archetype/kind)
-    # are caught by the required-field check. All errors flow out at once
-    # so the build surfaces every problem rather than one-at-a-time.
+    # All errors flow out at once so the build surfaces every problem rather
+    # than one-at-a-time.
 
     val = validate_endpoint_lock(manifest)
     for w in val.warnings:

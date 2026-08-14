@@ -3,7 +3,7 @@
 pgw#1017's audit walked `tensorhub/internal/builder/generate_dockerfile.go` line
 by line and asked, of each invariant it writes into the generated file, whether
 anything asks it of a Dockerfile an author wrote. Four did not. These are the
-rows that close three of them; GAP C lives in the hub (th#1683), because
+rows that close three of them; GAP C lives in the hub, because
 `system_dependencies` never reaches this process.
 
 The lesson the audit recorded, and the reason these tests are shaped this way:

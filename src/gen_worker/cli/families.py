@@ -1,10 +1,10 @@
-"""``gen-worker families`` — the pgw#520 family-vocabulary CLI surface.
+"""``gen-worker families`` — the family-vocabulary CLI surface.
 
 ``export-schemas <dir>`` writes one ``<family>[.lora].schema.json`` per
 registered ``(family, kind)`` :class:`~gen_worker.families.GenerationDefaults`
 subclass — the JSON Schema (draft 2020-12, ``additionalProperties: false``)
 tensorhub validates repo inference-defaults metadata against at PUT time
-(th#767c checkpoint kind; th#767b lora kind — see
+(checkpoint kind and lora kind — see
 :func:`gen_worker.families.schema_filename` for the naming convention both
 sides share).
 

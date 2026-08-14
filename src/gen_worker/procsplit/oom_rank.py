@@ -1,22 +1,22 @@
-"""pgw#975: declare the OOM victim order the pgw#763 split silently depends on.
+"""Declare the OOM victim order the process split silently depends on.
 
 The split's reporting guarantee is that the control parent OUTLIVES the compute
 child it supervises, so a kernel kill of the child is reported as ``WTERMSIG`` /
-``oom_kill`` over the wire instead of vanishing with the pod. Nothing anywhere
-told the kernel that. The parent survived because a bare interpreter (44.4 MiB,
-397 modules) happens to be smaller than one that has imported torch (493.0 MiB,
-1181) — an accident that erodes with every dependency the control plane gains,
-and that is INVERTED for the 9.5-11.7s (pgw#833, measured on a hub-launched pod)
-a freshly spawned child spends at 43.0 MiB before it reaches ``import torch``.
+``oom_kill`` over the wire instead of vanishing with the pod. Nothing otherwise
+tells the kernel that: the parent survives only because a bare interpreter
+(44.4 MiB, 397 modules) happens to be smaller than one that has imported torch
+(493.0 MiB, 1181) — an accident that erodes with every dependency the control
+plane gains, and that is INVERTED for the 9.5-11.7 s a freshly spawned child
+spends at 43.0 MiB before it reaches ``import torch``.
 
 The compute child raises its OWN score. Direction is load-bearing: raising is
 unprivileged, lowering needs ``CAP_SYS_RESOURCE`` and returns ``EACCES`` in a
 hardened container (``__set_oom_adj``, ``fs/proc/base.c``). Placement follows
 ``aot_compile_pool.arm_parent_death_signal``: the child does it to itself, not
-through the parent's ``preexec_fn`` — that hook is async-signal-unsafe territory,
-forces ``fork()`` over ``posix_spawn()``, and pgw#932 is removing it.
+through the parent's ``preexec_fn`` — that hook is async-signal-unsafe
+territory and forces ``fork()`` over ``posix_spawn()``.
 
-The mint child (pgw#784) and the AOT pool's entry children are descendants of a
+The mint child and the AOT pool's entry children are descendants of a
 compute child, and ``oom_score_adj`` is inherited across fork and preserved
 across exec — so the whole compute subtree is covered by this one call. There is
 deliberately no second knob for them (§4.24 item 1): the fattest process is
@@ -49,8 +49,8 @@ __all__ = [
 ]
 
 #: Stable token for the degradation. Grep-able in a pod log, and the child's
-#: stderr is teed to the container log AND ring-buffered into the parent's death
-#: dial by the pgw#833 pump, so an ERROR here already reaches the wire.
+#: stderr is teed to the container log AND ring-buffered into the parent's
+#: death dial, so an ERROR here already reaches the wire.
 DEGRADE_PHASE = "procsplit_oom_rank_unset"
 
 #: The control parent with every control module imported, measured (44.4 MiB /

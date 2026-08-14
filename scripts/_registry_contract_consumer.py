@@ -1,6 +1,6 @@
 """A representative CONSUMER declaration module for the registry-contract gate.
 
-pgw#740: the SDK ships registry MECHANISMS; every vocabulary is declared by the
+the SDK ships registry MECHANISMS; every vocabulary is declared by the
 endpoint that owns it. This module declares a synthetic family the way a real
 endpoint does, across all six decorator/registration surfaces. The gate
 (`check_registry_contract.py`) imports it via the documented
@@ -60,7 +60,7 @@ register_layout(
 
 declare_foreign_family_map(CIVITAI, {"ContractCheck 1.0": FAMILY})
 
-# The SIXTH registry (§1.33 / pgw#1143). A topology edge is DATA — declared
+# The SIXTH registry (§1.33). A topology edge is DATA — declared
 # rename passes plus their inverse — and registration runs the round-trip
 # admission proof over the declared corpus before the edge exists.
 register_layout_conversion(

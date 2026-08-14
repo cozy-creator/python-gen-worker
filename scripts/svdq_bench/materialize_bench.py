@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""te#137 bench: materialize ON THE POD — bf16 reference tree (R2 blobs) +
+"""svdq bench: materialize ON THE POD — bf16 reference tree (R2 blobs) +
 nunchaku svdq-fp4_r128 qwen-image checkpoint (public HF, pinned revision).
 Reads refs_map.json next to this file. Weights never touch the control box."""
 from __future__ import annotations
@@ -108,7 +108,7 @@ def fp8_from_manifest(manifest: Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.exists() and dest.stat().st_size == f["size_bytes"]:
             return dest, f["size_bytes"], "cached"
-        # Big objects are chunk-CAS (th#1310): one presigned URL per chunk,
+        # Big objects are chunk-CAS: one presigned URL per chunk,
         # in order. Small ones carry a single "url".
         urls = f.get("chunk_urls") or ([f["url"]] if f.get("url") else [])
         if not urls:
@@ -175,8 +175,8 @@ def main() -> int:
               f"{Path(fn).stat().st_size / 1e9:.2f} GB", flush=True)
         print("NUN_FILE=" + str(fn), flush=True)
     else:
-        # No 4-bit qwen-image-edit artifact exists (te#137's edit produce is
-        # planned, not run). Absence is recorded, never fabricated.
+        # No 4-bit qwen-image-edit artifact exists. Absence is recorded, never
+        # fabricated.
         print("NUN_FILE=none", flush=True)
 
     man = Path("/root/fp8_manifest.json")

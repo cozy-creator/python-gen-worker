@@ -1,30 +1,22 @@
-"""pgw#1161 — a RE-IMPORT of a family declaration is not a collision.
+"""A RE-IMPORT of a family declaration is not a collision.
 
-Cause A of ie#690: 66 of the 136 failures the endpoint declaration suites
-surfaced once they stopped silently skipping. SDK-owned.
+`@family` registration is an IMPORT SIDE EFFECT. A duplicate guard comparing by
+IDENTITY (`existing is not cls`) therefore refuses a re-import, which builds a
+NEW class object for the same declaration — and endpoint suites re-import their
+declaration modules between tests.
 
-`@family` registration is an IMPORT SIDE EFFECT, and the duplicate guard
-compared by IDENTITY (`existing is not cls`). Re-importing a declaration module
-builds a NEW class object for the same declaration, so the second registration
-raised `family 'X' kind 'checkpoint' already registered by ...` — the endpoint
-suites re-import their declaration modules between tests and hit it on their
-own declarations.
+DO NOT "FIX" THIS BY CLEARING THE REGISTRY. Making
+`reset_export_declarations()` clear `families.base._REGISTRY` is wrong: because
+registration is an import side effect, a cleared registry can only be refilled
+by a re-import, and a module already in `sys.modules` re-imports as a NO-OP. So
+clearing permanently wipes every module-level registration for all tests running
+after any reset — a module imported exactly once has `family_for(...)` return
+None thereafter.
 
-THE FIX THAT LOOKED OBVIOUS AND IS WRONG. The first attempt made
-`reset_export_declarations()` also clear `families.base._REGISTRY`. CI proved
-it wrong within one run: registration being an import side effect means a
-cleared registry can only be refilled by a re-import, and a module already in
-`sys.modules` re-imports as a NO-OP. So clearing permanently wipes every
-module-level registration for all tests that run after any reset —
-`test_family_wire_names_pgw692` imports `_example_family` exactly once, and
-`family_for("example")` returned None thereafter. Three tests died that way.
-That is pgw#1031's lesson one registry along, and it applies to the cure as
-much as to the disease.
-
-So the collision guard is fixed at its own end instead: a re-import (same
-module, same qualname) REPLACES; anything else still refuses. Nothing needs
-clearing for a re-import to succeed, and nothing that was registered once and
-cannot re-register ever gets wiped.
+The collision guard is fixed at its own end instead: a re-import (same module,
+same qualname) REPLACES; anything else still refuses. Nothing needs clearing for
+a re-import to succeed, and nothing that was registered once and cannot
+re-register ever gets wiped.
 """
 
 from __future__ import annotations

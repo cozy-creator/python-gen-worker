@@ -1,10 +1,9 @@
-"""pgw#998 — the export handoff carries the ShapeEnv's symbol values.
+"""The export handoff carries the ShapeEnv's symbol values.
 
-THE DEFECT, measured by the micro-mint rig's first grid-shaped cycle (CPU,
-torch 2.13.0+cu130, $0). ``aot_compile_pool`` saves each ``ExportedProgram``
-and ``aot_compile_child`` loads it in another interpreter. The round trip
-rebuilds ``ShapeEnv.var_to_val`` keyed by the size EXPRESSIONS instead of by
-the free symbols::
+``aot_compile_pool`` saves each ``ExportedProgram`` and ``aot_compile_child``
+loads it in another interpreter. Left alone, the round trip rebuilds
+``ShapeEnv.var_to_val`` keyed by the size EXPRESSIONS instead of by the free
+symbols (torch 2.13.0+cu130)::
 
     parent   {s11: 32, s37: 32, s18: 16, s57: 16}  replacements {s11: 2*s18, …}
     child    {2*s18: 32, 2*s57: 32, 4*s18*s57: 1024}   replacements {}
@@ -21,11 +20,10 @@ this file's first test. A dim declared with ``multiple_of`` exports as
 no key. The SAME graph with the SAME product extent and no ``multiple_of``
 survives the round trip, because there its keys are the bare symbols.
 
-WHY IT MATTERS BEYOND THE RIG. z-image declares ``H_lat``/``W_lat`` with
-``multiple_of=2`` on a 4-D latent under ``dynamic-collapse``. Any patch-embed
-or attention reshape that folds the spatial extents into one matmul M is this
-shape exactly, which is why pgw#998 is a prerequisite for that family's next
-mint rather than a rig curiosity.
+This is a real fleet shape, not a rig curiosity: z-image declares
+``H_lat``/``W_lat`` with ``multiple_of=2`` on a 4-D latent under
+``dynamic-collapse``, and any patch-embed or attention reshape that folds the
+spatial extents into one matmul M is exactly this.
 
 No GPU and no compile: every row here is an export plus a save/load, which is
 the whole of the contract under test. The compiled proof is the rig

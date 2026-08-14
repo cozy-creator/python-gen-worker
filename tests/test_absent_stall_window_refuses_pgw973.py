@@ -1,22 +1,19 @@
-"""pgw#973 / DESIGN-RULINGS §4.24 item 4 — an unset limit is a REFUSAL.
+"""An unset limit is a REFUSAL.
 
-`_run_with_stall_watchdog` built its silence window as::
+A silence window built as::
 
     window = SilenceWindow(stall_timeout if stall_timeout > 0 else math.inf)
 
-`SilenceWindow.__init__` raises ``ValueError("window_s must be positive")``
-precisely so a zero cannot delete the watchdog. That expression caught the
-refusal and substituted an infinite window instead — so a caller passing 0 (or
-a computed budget that came out 0) got a download with *no stall detection at
-all*: the unbounded DOWNLOADING_MODELS hang gw#456/pgw#655 exist to prevent,
-reached through the very guard written to prevent it.
+defeats itself: `SilenceWindow.__init__` raises
+``ValueError("window_s must be positive")`` precisely so a zero cannot delete
+the watchdog, and that expression catches the refusal and substitutes an
+infinite window — a download with *no stall detection at all*, reached through
+the very guard written to prevent the unbounded DOWNLOADING_MODELS hang.
 
-This is the th#1615 shape — absence collapsing to "unlimited" — one keyword
-argument away from live. Both production call sites
+Absence must never collapse to "unlimited". Both production call sites
 (``download.py`` HF snapshot, ``convert/ingest.py``) pass
-``_HF_DOWNLOAD_STALL_TIMEOUT_S``, so nothing changes for them; what changes is
-that a future caller that forgets is told, at the call, instead of silently
-running unbounded.
+``_HF_DOWNLOAD_STALL_TIMEOUT_S``; what this pins is that a future caller that
+forgets is told, at the call, instead of silently running unbounded.
 
 No sleeps, no fixed durations: the stall assertion below drives the watchdog's
 own progress signal to a standstill and reads its verdict.

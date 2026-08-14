@@ -1,25 +1,23 @@
-"""Residency v2 program suite (pgw#641 umbrella; design of record:
-WORKER-RESIDENCY-DESIGN.md). One designed home for the program's rows —
-new stages add rows here, not new per-issue files (pgw#645).
+"""Residency v2 program suite (design of record: WORKER-RESIDENCY-DESIGN.md).
+One designed home for the program's rows — new stages add rows here, not new
+per-issue files.
 
-Covered trains, all REAL planner/admission/eviction logic; fakes only at the
-torch/CUDA boundary per th#1105:
+Covered, all REAL planner/admission/eviction logic; fakes only at the
+torch/CUDA boundary:
 
-A. pgw#648 — DeviceGroup accounting. VRAM is never summed across groups: a
-   3x24GB pod is three 24GB pools, not one 72GB pool (the live admission
-   bug that admitted a 30GB model fitting on no single card).
-B. pgw#641 Stage 2 — admission leases. A job's refs are victim-protected
-   from admission (including refs with no entry yet — the executing() pin
-   no-op'd on those), and not-yet-loaded bytes are RESERVED so concurrent
-   admissions cannot double-book free VRAM. ``fits`` is the cheap honest
-   "can this worker serve this now?" query.
-C. pgw#647 — concurrency contract. Handlers on ONE live instance are
-   single-flight by default (mutable graph buffers); ``reentrant=True`` is
-   the explicit opt-in, classes only.
-D. pgw#652 — activation-aware admission. Concurrency costs transient VRAM
-   (latents + attention workspace), not only weights. The claim is LEARNED
-   from measured peaks and SUMS across concurrent leases; nothing is
-   declared by an endpoint.
+A. DeviceGroup accounting. VRAM is never summed across groups: a 3x24GB pod is
+   three 24GB pools, not one 72GB pool, so a 30GB model fitting on no single
+   card is not admissible.
+B. Admission leases. A job's refs are victim-protected from admission
+   (including refs with no entry yet), and not-yet-loaded bytes are RESERVED so
+   concurrent admissions cannot double-book free VRAM. ``fits`` is the cheap
+   honest "can this worker serve this now?" query.
+C. Concurrency contract. Handlers on ONE live instance are single-flight by
+   default (mutable graph buffers); ``reentrant=True`` is the explicit opt-in,
+   classes only.
+D. Activation-aware admission. Concurrency costs transient VRAM (latents +
+   attention workspace), not only weights. The claim is LEARNED from measured
+   peaks and SUMS across concurrent leases; nothing is declared by an endpoint.
 """
 
 from __future__ import annotations
@@ -42,7 +40,7 @@ _GiB = 1024 ** 3
 
 
 # ---------------------------------------------------------------------------
-# A. DeviceGroup: per-group accounting, never a cross-card sum (pgw#648).
+# A. DeviceGroup: per-group accounting, never a cross-card sum.
 # ---------------------------------------------------------------------------
 
 
@@ -146,7 +144,7 @@ def _plentiful_host_ram(monkeypatch: pytest.MonkeyPatch):
     """Demote-to-RAM consults the REAL host RAM probe (residency.py's
     get_available_ram_gb floor guard). On this shared box available RAM
     rides sibling load, flipping demote() verdicts test-to-test — fake the
-    HOST boundary (th#1105) so the accounting under test is deterministic."""
+    HOST boundary so the accounting under test is deterministic."""
     from gen_worker.models import residency as residency_mod
 
     monkeypatch.setattr(residency_mod, "get_available_ram_gb", lambda: 256.0)
@@ -247,7 +245,7 @@ def test_two_leases_on_one_ref_claim_max_not_sum() -> None:
 
 
 # ---------------------------------------------------------------------------
-# C. Single-flight per instance (pgw#647) — real Executor, real dispatch.
+# C. Single-flight per instance — real Executor, real dispatch.
 # ---------------------------------------------------------------------------
 
 
@@ -370,7 +368,7 @@ def test_reentrant_is_a_class_only_declaration() -> None:
 
 
 # ---------------------------------------------------------------------------
-# D. Activation-aware admission (pgw#652).
+# D. Activation-aware admission.
 # ---------------------------------------------------------------------------
 
 

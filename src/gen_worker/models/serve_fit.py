@@ -1,4 +1,4 @@
-"""Serve-time adaptive fit (th#683 P3).
+"""Serve-time adaptive fit.
 
 The worker NEVER hard-refuses a function on the recommended-VRAM hint. On
 whatever card it is actually on, it serves the function by the best available
@@ -20,20 +20,17 @@ A function is UNSERVEABLE only when a genuine incompatibility bars it (compute
 capability / required quant library / a stored flavor outside its SM window)
 OR the author opted out of the CPU-touching rungs with
 ``Resources(strict_vram=True)`` (a binding that cannot tolerate CPU-resident
-weights — compiled fixed-shape graphs — and would rather refuse
-than serve slowly). It is never refused on hardware inadequacy alone: gen
-workers don't offload to CPU because we want them to, they do it out of
-necessity — better to run degraded than not run at all (Paul's ruling,
-2026-07-10). The orchestrator hears about every degraded serve (FnDegraded)
-and owns moving the workload to a bigger card.
+weights — compiled fixed-shape graphs — and would rather refuse than serve
+slowly). It is never refused on hardware inadequacy alone: better to run
+degraded than not run at all. The orchestrator hears about every degraded serve
+(FnDegraded) and owns moving the workload to a bigger card.
 
 Selection ACROSS stored flavors stays upstream: this planner marks each
-function serveable/unserveable + how-it-runs, and the hub's routing (th#597
-ranking) picks the highest-quality fitting flavor. bf16 -> fp8 -> nvfp4 ->
-int4 falls out of that ranking over the serveable set; this planner adds the
-RUNTIME rungs (fp8 storage / offload / cpu) for the one function it
-was given, plus an honest hint when a stored flavor would have served
-natively.
+function serveable/unserveable + how-it-runs, and the hub's routing ranking
+picks the highest-quality fitting flavor. bf16 -> fp8 -> nvfp4 -> int4 falls out
+of that ranking over the serveable set; this planner adds the RUNTIME rungs (fp8
+storage / offload / cpu) for the one function it was given, plus an honest hint
+when a stored flavor would have served natively.
 
 Every degraded plan carries ``wanted`` (what the function declares) and
 ``ran`` (what actually runs) so the worker can report the degradation
@@ -57,8 +54,8 @@ from .hub_policy import (
     variant_fit,
 )
 
-# Run modes and prices are the One Rung ladder's (pgw#1206 A2); re-exported
-# here because this module is the hub-vocabulary projection.
+# Run modes and prices are the One Rung ladder's; re-exported here because
+# this module is the hub-vocabulary projection.
 from .rung import (
     RUN_CPU as RUN_CPU,
     RUN_FP8_STORAGE as RUN_FP8_STORAGE,
@@ -89,7 +86,7 @@ class ServePlan:
     @property
     def degraded(self) -> bool:
         """True when it runs, but not as planned: non-native placement,
-        or (th#737) a precision pick that could not be applied
+        or a precision pick that could not be applied
         (``ran`` != ``wanted``, e.g. a dropped fp8 cast serving bf16)."""
         if not self.serveable:
             return False
@@ -100,13 +97,12 @@ class ServePlan:
 
 def _wanted(binding: Any) -> str:
     """The precision the (post-resolution) binding plans to run: its cast
-    directive (storage_dtype — a hub pick folds in as one, gw#491), else base
+    directive (storage_dtype — a hub pick folds in as one), else base
     bf16. Counting the cast here makes a SUCCESSFUL cast visible (wanted=fp8
     ran=fp8) instead of masquerading as bf16.
 
-    pgw#1148 dropped the STORED half: it read `binding.flavor`, and §1.32(d)
-    deleted that field. What the stored bytes are is the checkpoint's
-    tensor-layout contract, not a token on the binding."""
+    What the stored bytes are is the checkpoint's tensor-layout contract, not a
+    token on the binding (§1.32(d))."""
     storage = str(getattr(binding, "storage_dtype", "") or "").strip().lower()
     return storage or "bf16"
 
@@ -183,7 +179,7 @@ def plan_serve(
 
     # Runs, but degraded: runtime fp8 storage or the offload ladder. Offload
     # is the PRIMARY lever whenever the weights exceed VRAM — fit over speed.
-    # Only offload is CPU-touching. Nothing quantizes at runtime (pgw#1206 D).
+    # Only offload is CPU-touching. Nothing quantizes at runtime.
     run_mode = RUN_FP8_STORAGE if verdict == FIT_EMERGENCY_FP8 else RUN_OFFLOAD
     if run_mode == RUN_OFFLOAD and strict_vram:
         return ServePlan(
@@ -218,8 +214,8 @@ def replan(
     ran: str = "",
     detail: str,
 ) -> ServePlan:
-    """The ONE runtime re-projection (pgw#1206 A2; folds gw#463 demotion,
-    gw#491 load-rung engagement and th#737 cast-drop into one seam).
+    """The ONE runtime re-projection: demotion, load-rung engagement and
+    cast-drop all fold into this seam.
 
     A runtime ladder transition re-prices the plan at ``run_mode`` and reports
     it structurally (FnDegraded) with the SAME vocabulary as plan-time.

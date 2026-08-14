@@ -1,4 +1,4 @@
-"""pgw#663 (ie#554): one guarded URL fetch, and it survives the redirect bypass.
+"""pgw#663: one guarded URL fetch, and it survives the redirect bypass.
 
 Real HTTP servers on loopback, real policy — the only thing stubbed is the
 address classifier, because a test cannot make a public IP appear on this box.

@@ -1,5 +1,5 @@
-"""th#1597 / DESIGN-RULINGS §1.27(b),(g): the wire-protocol MAJOR is the proto
-package, so it is in the gRPC service path.
+"""DESIGN-RULINGS §1.27(b),(g): the wire-protocol MAJOR is the proto package,
+so it is in the gRPC service path.
 
 Two halves, and the second is the safety one:
 
@@ -10,10 +10,10 @@ Two halves, and the second is the safety one:
 * a hub that does NOT serve this major answers ``UNIMPLEMENTED`` at the routing
   layer, and the worker must treat that as FATAL and exit. That exit is
   load-bearing hub-side: it is what makes the pod die before Hello, leaving
-  ``everConnected`` false, which is how th#874's death taxonomy marks the release
-  ``boot_crashing`` and fails its queued requests. A worker that retried instead
-  would reconnect-loop forever with no durable mark and no operator signal —
-  strictly worse than dying.
+  ``everConnected`` false, which is how the hub's death taxonomy marks the
+  release ``boot_crashing`` and fails its queued requests. A worker that retried
+  instead would reconnect-loop forever with no durable mark and no operator
+  signal — strictly worse than dying.
 
 The negative case is driven by a REAL gRPC server registered under the
 pre-v1 unversioned service name, which is exactly the production shape of "new

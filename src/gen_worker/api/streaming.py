@@ -82,7 +82,7 @@ class Error(msgspec.Struct, frozen=True, kw_only=True):
 
 
 # ============================================================================
-# Terminal stream output (gw#475): live deltas are droppable by contract, so
+# Terminal stream output: live deltas are droppable by contract, so
 # the executor folds them into a StreamResult and serializes it as the
 # completed request's authoritative output.
 # ============================================================================

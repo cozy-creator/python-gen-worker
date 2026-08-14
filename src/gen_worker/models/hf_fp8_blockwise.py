@@ -1,11 +1,11 @@
-"""``hf.fp8-blockwise@1`` — the consumer half of th#1803's layout gate.
+"""``hf.fp8-blockwise@1`` — the consumer half of the layout gate.
 
 The artifact side of the tensor-layout contract shipped in tensorhub
 (`internal/tensorlayout/seed_fp8_blockwise_th1803.go`, transcribed from the
-real header bytes of `tensorhub/minimax-h3`'s fp8 conditioner). Nothing
-DECLARED it, so the hub correctly refused every rebind onto that artifact:
-no decoder in any image said it could read those bytes. This module is the
-declaration, and the loader that makes it true.
+real header bytes of `tensorhub/minimax-h3`'s fp8 conditioner). Without a
+DECLARATION the hub refuses every rebind onto that artifact, because no decoder
+in any image says it can read those bytes. This module is the declaration, and
+the loader that makes it true.
 
 **The layout, stated once.** fp8 e4m3 weights `[out, in]`, each carrying a
 `weight_scale_inv` F32 twin shaped `[out/128, in/128]` — one scale per
@@ -29,10 +29,10 @@ re-blocking rowwise scales into a 128x128 grid is a RE-QUANTIZATION with new
 numerics, so the pair is PRODUCIBLE-not-CONVERTIBLE — a priced production job
 from a named higher-precision source, never a silent load-time repack.
 
-**No quantization happens here** (Paul, 2026-08-11): quantization is done
+**No quantization happens here**: quantization is done
 ahead of time by a conversion endpoint and served as an artifact. This module
-only READS a pre-quantized tree. There is deliberately no
-quantize-if-missing fallback — that path is what th#1803 deleted.
+only READS a pre-quantized tree. There is deliberately no quantize-if-missing
+fallback.
 """
 
 from __future__ import annotations

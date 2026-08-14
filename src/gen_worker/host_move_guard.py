@@ -1,15 +1,15 @@
-"""pgw#763: refuse host-RAM module moves that cannot fit the cgroup budget.
+"""Refuse host-RAM module moves that cannot fit the cgroup budget.
 
-te#138: endpoint code called ``model.to("cpu")`` on a ~57 GB composed
-pipeline. Container-RAM exhaustion is a cgroup SIGKILL — no exception, no
-finally, process gone mid-instruction — so nothing downstream of the
-allocation can save the worker; the only honest place to fail is BEFORE the
-copy. A move of a module of known size is checkable: this guard patches
+Endpoint code calling ``model.to("cpu")`` on a tens-of-GB composed pipeline
+exhausts container RAM, and that is a cgroup SIGKILL — no exception, no
+finally, process gone mid-instruction — so nothing downstream of the allocation
+can save the worker; the only honest place to fail is BEFORE the copy. A move of
+a module of known size is checkable: this guard patches
 ``torch.nn.Module.to``/``.cpu()`` so any move landing >= ``_MIN_GUARDED_GIB``
-of non-CPU-resident weights into host RAM first asks the pgw#752
-cgroup-truthful probe, and raises a typed :class:`HostRamMoveRefusedError`
-when the budget cannot hold it. Small moves (offload-ladder leaf hops,
-schedulers, tiny encoders) never pay the probe.
+of non-CPU-resident weights into host RAM first asks the cgroup-truthful probe,
+and raises a typed :class:`HostRamMoveRefusedError` when the budget cannot hold
+it. Small moves (offload-ladder leaf hops, schedulers, tiny encoders) never pay
+the probe.
 
 Framework-level by construction: it covers endpoint-authored ``.to("cpu")``,
 ``.cpu()``, and every per-component move inside ``DiffusionPipeline.to``,
@@ -35,7 +35,7 @@ _MIN_GUARDED_GIB = 1.0
 _DISABLE_ENV = "GEN_WORKER_HOST_MOVE_GUARD"
 
 _installed = False
-# Test seam: point the probe at synthetic cgroup files (pgw#752 test style).
+# Test seam: point the probe at synthetic cgroup files.
 _probe_root: Optional[Path] = None
 _probe_self: Optional[Path] = None
 
@@ -63,17 +63,17 @@ def _target_is_cpu(args: tuple, kwargs: dict) -> bool:
 
 
 class _Unmeasurable(RuntimeError):
-    """This module's incoming byte count could not be computed (pgw#940)."""
+    """This module's incoming byte count could not be computed."""
 
 
 def _incoming_bytes(module: Any) -> int:
     """Bytes this module would newly land in host RAM: parameters + buffers
     not already CPU-resident.
 
-    Raises :class:`_Unmeasurable` rather than returning 0 (pgw#940). The 0
-    flowed straight into ``incoming < _MIN_GUARDED_GIB`` and returned, so the
-    guard silently no-opped — on precisely the shapes most likely to be huge,
-    since ``module.parameters()`` raises on meta-device modules, on
+    Raises :class:`_Unmeasurable` rather than returning 0: a 0 flows straight
+    into ``incoming < _MIN_GUARDED_GIB`` and returns, silently no-opping the
+    guard on precisely the shapes most likely to be huge —
+    ``module.parameters()`` raises on meta-device modules, on
     accelerate-hooked modules mid-dispatch, and on custom ``nn.Module``
     subclasses that override ``parameters``.
     """
@@ -96,10 +96,10 @@ def _incoming_bytes(module: Any) -> int:
 def _refuse_if_over_budget(incoming: int, **probe_kwargs: Any) -> None:
     """The budget decision, separated from the torch module it came from.
 
-    pgw#783: ``probe_host_ram`` now reports THIS process's share of a cgroup it
-    may split with G-1 sibling compute children, so the same 20 GiB move that
-    fits a solo worker on a 64 GiB pod is correctly refused for one of four.
-    The guard needs no group logic of its own — the share is in the probe.
+    ``probe_host_ram`` reports THIS process's share of a cgroup it may split
+    with G-1 sibling compute children, so the same 20 GiB move that fits a solo
+    worker on a 64 GiB pod is correctly refused for one of four. The guard needs
+    no group logic of its own — the share is in the probe.
     """
     ram = probe_host_ram(**probe_kwargs)
     available = int(ram.available_gb * _GIB)
@@ -124,13 +124,11 @@ def check_host_ram_move(module: Any) -> None:
     try:
         incoming = _incoming_bytes(module)
     except _Unmeasurable as exc:
-        # pgw#940, §1.22: the guard's whole reason to exist is that the
-        # failure it prevents is UNCATCHABLE — "no exception, no finally,
-        # process gone mid-instruction" (module docstring). A move it cannot
-        # size is therefore the one it must not wave through; it is checked
-        # against the host's own headroom instead, which is the conservative
-        # reading of an unknown size that still lets a small move on a roomy
-        # host proceed.
+        # The failure this guard prevents is UNCATCHABLE (see the module
+        # docstring), so a move it cannot size is the one it must NOT wave
+        # through. It is checked against the host's own headroom instead — the
+        # conservative reading of an unknown size that still lets a small move
+        # on a roomy host proceed.
         logger.warning("host-RAM move guard: %s — checking the floor anyway", exc)
         kwargs = {}
         if _probe_root is not None and _probe_self is not None:

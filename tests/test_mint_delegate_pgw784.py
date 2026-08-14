@@ -6,16 +6,15 @@ Three claims, each with the fact that would break it:
    in-process shape the serving pipe carries guarded wrappers, LoRA branch
    containers and a process-global ``TORCHINDUCTOR_CACHE_DIR`` move for the
    whole mint; delegated, it carries none of that and keeps serving plain
-   eager. (pgw#1010 deleted the in-process shape outright, so this is now the
-   only shape a mint has — and the restriction it carried is gone with it.)
+   eager. (The in-process shape is gone; delegated is the only shape a mint
+   has.)
 2. **The child exports the declaration the PARENT stated.** The parent states
    the compile contract on the wire because the class-scoped unions live on
    the spec, not the decorator: a child re-deriving from ``@endpoint`` alone
-   would export a different declaration than the parent asked for. (pgw#1034:
-   this used to be phrased as key parity — "the child computes the same key" —
-   which stopped being true at pgw#758. The child computes no key; the parent
-   stamps one from the returned envelope. What the wire owes is the DECLARED
-   EXPORT, and that is what is checked below.)
+   would export a different declaration than the parent asked for. (This is NOT
+   key parity: the child computes no key; the parent stamps one from the
+   returned envelope. What the wire owes is the DECLARED EXPORT, and that is
+   what is checked below.)
 3. **Failure inversion.** A dead mint process is a FAILED MINT reported by a
    LIVE worker. Every branch returns a typed result, the retry is bounded and
    class-driven, and a card with no room for a co-resident child DECLINES
@@ -92,7 +91,7 @@ def test_the_delegated_arm_never_touches_the_live_pipeline(
     armed: List[str] = []
     monkeypatch.setattr(
         cc, "arm_jit_intake", lambda *a, **k: armed.append("arm_jit_intake"))
-    # pgw#1010: WHICH recipe a miss runs has its own coverage; a test box
+    # WHICH recipe a miss runs has its own coverage; a test box
     # registers no export declarations, so state the answer this test is about.
     monkeypatch.setattr(
         fleet_cells, "mint_recipe", lambda *a, **k: fleet_cells.RECIPE_AOT)
@@ -152,7 +151,7 @@ def test_the_wire_form_preserves_the_declared_export_exactly() -> None:
             == fleet_cells.aot_export_spec(pipe, parent))
     assert cc.resolve_targets(pipe, wire) == cc.resolve_targets(pipe, parent)
 
-    # No child reads these, so they do not ride (pgw#1034).
+    # No child reads these, so they do not ride.
     for dead in ("regional", "text_len", "dynamic"):
         assert not hasattr(wire, dead), dead
 
@@ -177,7 +176,7 @@ def test_the_request_carries_the_execution_lane_and_the_effective_config(
     assert req.configs == {"gen": {"steps": 28}}
     assert req.slots["pipeline"].path == "/cas/sdxl"
     assert req.device == 3
-    # pgw#1010: the child's WORK ROOT — the tree it actually writes into, and
+    # The child's WORK ROOT — the tree it actually writes into, and
     # the byte-growth half of the parent's progress evidence. It used to be
     # the inductor capture dir, which an AOT mint never touched.
     assert req.work_root == str(tmp_path / "w")
@@ -231,7 +230,7 @@ def test_a_minted_child_is_adopted_through_the_delivered_cell_path(
     adopted: List[Path] = []
 
     def _adopt(pipe: Any, pending: Any, artifacts: Any) -> Any:
-        # pgw#1176: the adopt takes the SET the child produced, one artifact
+        # The adopt takes the SET the child produced, one artifact
         # per graph class. A double taking a single Path models a call
         # production does not make.
         rows = [Path(a) for a in artifacts]
@@ -431,6 +430,6 @@ def test_delegation_is_unconditional_and_has_no_kill_switch(
     monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
     assert mint_delegate.delegation_refusal() == ""
     assert not hasattr(mint_delegate, "ENV_IN_PROCESS")
-    # pgw#1030: the `delegated()` bool wrapper is deleted with the switch it
+    # The `delegated()` bool wrapper is deleted with the switch it
     # once negated; `delegation_refusal` is the predicate.
     assert not hasattr(mint_delegate, "delegated")

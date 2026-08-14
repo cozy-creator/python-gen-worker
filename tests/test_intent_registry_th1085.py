@@ -298,7 +298,7 @@ def test_config_classes_converge_separately_and_boot_change_stays_stale() -> Non
 
 
 def test_first_command_cannot_infer_a_stale_boot_generation() -> None:
-    # gw#668: the stamp is now passed EXPLICITLY. `boot_config_generation=0`
+    # The stamp is now passed EXPLICITLY. `boot_config_generation=0`
     # means "a boot-only environment WAS injected, at generation 0" — genuinely
     # ancient, so the first command must not infer convergence from it and the
     # th#1087 rollout replaces the pod. (A pod-LESS worker, which never

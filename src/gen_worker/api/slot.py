@@ -1,4 +1,4 @@
-"""``Slot`` — a hub-resolved model slot (SDK v2, pgw#647).
+"""``Slot`` — a hub-resolved model slot (SDK v2).
 
 The model SET is catalog, not code: tensorhub owns the mapping from a
 ``models={}`` slot to the checkpoint(s) it may resolve to. Under SDK v2 the
@@ -21,13 +21,13 @@ Component parts (``pipeline.unet`` / ``pipeline.vae`` /
 ``pipeline.text_encoder`` / ``pipeline.scheduler``) are DERIVED from the
 pipeline class and addressable by path — never declared as sibling slots
 (``gen_worker.api.tree``). Component overrides (the SDXL VAE fix) are
-CATALOG DATA (th#1116), not endpoint code. Explicit multi-slot declaration
+CATALOG DATA, not endpoint code. Explicit multi-slot declaration
 survives only as the escape hatch for runtimes the SDK cannot introspect
 (llama/gguf, custom engines).
 
 The per-model CONFIG SCHEMA is derived from the handler's context
 annotation (``ctx: RequestContext[SdxlDefaults]``), never declared on the
-Slot: code owns the schema, the catalog owns the values (th#1116 stamps one
+Slot: code owns the schema, the catalog owns the values (the hub stamps one
 resolved recipe per slot). ``Slot(default_config=...)`` and
 ``Slot(share_components=...)`` are DELETED (v2 hard cut): code-side recipe
 values are gone, and component sharing is automatic by content address.
@@ -45,9 +45,8 @@ from ..models.tensor_layout_contract import normalize_layout_demand
 
 D = TypeVar("D", bound=GenerationDefaults)
 
-# pgw#654 objective split (retires th#1017's 3-value regime enum): two
-# ORTHOGONAL checkpoint-level facts, both hub-classified at ingest; the SDK
-# only consumes.
+# The objective split: two ORTHOGONAL checkpoint-level facts, both
+# hub-classified at ingest; the SDK only consumes.
 #
 # ``objective`` — what the network predicts (the training objective).
 # Drives scheduler math at VIEW construction: prediction_type (+ zero-SNR
@@ -62,7 +61,7 @@ D = TypeVar("D", bound=GenerationDefaults)
 # LoRA onto already-distilled weights).
 OBJECTIVES = ("epsilon", "v_prediction", "flow")
 
-# th#1257 SERVING TASKS — what a handler asks the model to DO, as opposed to
+# SERVING TASKS — what a handler asks the model to DO, as opposed to
 # what the model IS. Orthogonal to both facts above: qwen-image-edit and
 # qwen-image share one objective (flow) and one architecture, but an edit path
 # must PRESERVE an input image while a text-to-image path has nothing to
@@ -119,15 +118,14 @@ class Slot(Generic[D]):
     a live hub mapping always wins when present. ``None`` means this slot
     has no code-side bootstrap ref: it only resolves against a hub mapping.
 
-    ``root=True`` (pgw#654, gap #7) marks THE root slot of a multi-slot
+    ``root=True`` marks THE root slot of a multi-slot
     class: the slot ``ctx.defaults`` / ``ctx.for_request`` resolve when no
     explicit ``slot=`` is passed. A single-slot class needs no marker, and
     a slot literally named ``"pipeline"`` is the implicit root; any OTHER
     multi-slot shape must mark exactly one root — ambiguity is a
     decoration-time error, never a silent fallback.
 
-    ``layouts`` is the slot's per-component DEMAND (§1.33, pgw#1143): a
-    mapping from component path to the SET of tensor-layout contract handles
+    ``layouts`` is the slot's per-component DEMAND (§1.33): a mapping from component path to the SET of tensor-layout contract handles
     this slot's code can execute. ``"*"`` is the whole-tree default; a
     component key overrides it for that component only::
 
@@ -137,7 +135,7 @@ class Slot(Generic[D]):
         })
 
     **The set is a compatibility FILTER; its order carries NO preference**
-    (§1.33 point 2 as amended by th#1803). Preference has exactly one
+    (§1.33 point 2). Preference has exactly one
     authority — the author-configured ordered ladder of (GPU, lane) pairs —
     so the handles are stored and published in CANONICAL order, not as
     written. Two authors who spell the same set differently state the same
@@ -150,8 +148,8 @@ class Slot(Generic[D]):
     — a tri-state, neither "accepts everything" nor "accepts nothing": the
     hub's gate has no teeth on a slot that declares nothing and falls back to
     the image-wide decoder census. An empty mapping or an empty tuple is a
-    decoration-time error, because collapsing the tri-state is th#1580's
-    fail-open defect wearing a new name.
+    decoration-time error, because collapsing the tri-state is a fail-open
+    defect.
 
     This lives on ``Slot`` and NOT on ``Compile``: ``Compile``'s fields feed
     ``contract_axes()``, a cell-key input, and §1.33 point 5 is that
@@ -163,7 +161,7 @@ class Slot(Generic[D]):
     its ``setup()`` parameter carries a default (``edit: Pipe | None =
     None``). The signature is the single source of truth, so the two can
     never disagree. An optional slot may be left unbound at deploy time —
-    the deploy chooses which lanes a release serves (th#980/ie#524) — and
+    the deploy chooses which lanes a release serves — and
     ``setup()`` then runs with the parameter's own default.
     """
 
@@ -225,7 +223,7 @@ class ResolvedSlot(Generic[D]):
     Explicit PAYLOAD values still win over ``.defaults`` — that precedence
     is handler logic; this object only carries the resolved catalog recipe.
 
-    ``objective``/``distilled`` (pgw#654) are the resolved checkpoint's
+    ``objective``/``distilled`` are the resolved checkpoint's
     hub-stamped values. ``distilled_status`` distinguishes an evidenced false
     value from an unclassified or inconclusive one. An empty status means an
     older hub omitted the additive field. ``ctx.for_request`` applies the
@@ -258,7 +256,7 @@ class ResolvedSlot(Generic[D]):
 def _apply_lora_overrides(
     name: str, base: D, fam: str, lora_metadata_json: Sequence[str],
 ) -> D:
-    """pgw#516 composition rule: apply each lora's non-``None`` fields onto
+    """Composition rule: apply each lora's non-``None`` fields onto
     ``base`` (the checkpoint's already-resolved recipe) FIELD BY FIELD, in
     ``lora_metadata_json`` order (a later lora's non-``None`` field wins over
     an earlier one's on the same field).
@@ -307,14 +305,10 @@ def _apply_lora_overrides(
 def _finish_resolved(
     name: str,
     ref: ModelRef,
-    # pgw#1202: NOT `D`, and not `Optional[D]` either. `ResolvedSlot.__init__`
-    # declares `defaults: D` (bound to GenerationDefaults) but `resolve_slot`
-    # passes None on the no-schema path below, and nothing in the tree guards
-    # `.defaults is None`. So the declared type already disagrees with runtime;
-    # this helper cannot honestly promise `ResolvedSlot[D]` until that is
-    # settled, and settling it is an API decision about what an endpoint author
-    # is handed, not a typing sweep. The PUBLIC `resolve_slot` below is still
-    # `-> ResolvedSlot[D]`, which is where the propagation is worth having.
+    # NOT `D`, and not `Optional[D]` either: `ResolvedSlot.__init__` declares
+    # `defaults: D` but `resolve_slot` passes None on the no-schema path below,
+    # so this helper cannot honestly promise `ResolvedSlot[D]`. The PUBLIC
+    # `resolve_slot` below still is `-> ResolvedSlot[D]`.
     defaults: Any,
     *,
     objective: str,
@@ -390,18 +384,18 @@ def resolve_slot(
     FIELD-LEVEL overrides — shared by the production executor and the
     hub-less CLI path.
 
-    th#1116 moved recipe VALUES to the catalog: the hub stamps ONE resolved
-    recipe per slot, so in production the metadata branch always runs. With
+    Recipe VALUES live in the catalog: the hub stamps ONE resolved recipe per
+    slot, so in production the metadata branch always runs. With
     no metadata (hub-less ``cozy run``, hermetic tests, a family the hub has
     not stamped) the NEUTRAL SCHEMA DEFAULTS (``defaults_cls()``) apply —
     exactly the hub's neutral stamp, so both paths agree. There is no
     code-side recipe fallback (v2 deleted ``Slot(default_config=...)``):
     code owns the schema only.
 
-    ``lora_metadata_json`` (pgw#516, in lora-ride order) applies LAST, field
+    ``lora_metadata_json`` (in lora-ride order) applies LAST, field
     by field — see :func:`_apply_lora_overrides`.
 
-    ``objective``/``distilled`` (pgw#654) are the resolved checkpoint's
+    ``objective``/``distilled`` are the resolved checkpoint's
     hub-stamped values; ``distilled_status`` distinguishes an evidenced false
     from unknown evidence (empty means an older sender).
     ``allowed_objectives``/``allowed_distilled``, when given, are the

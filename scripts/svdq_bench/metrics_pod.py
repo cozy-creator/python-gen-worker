@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LPIPS/PSNR between rendered arms (pgw#865 quality gate).
+"""LPIPS/PSNR between rendered arms — the quality gate.
 
 Same metric stack as the banked 0.246/0.460 anchors: torchmetrics LPIPS
 net_type=alex normalize=True on /255 tensors; PSNR data_range=255 capped 99.

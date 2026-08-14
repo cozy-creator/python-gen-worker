@@ -1,4 +1,4 @@
-"""``.pt2`` introspection and the B1 code-only gate (pgw#704; #723 produce half).
+"""``.pt2`` introspection and the B1 code-only gate.
 
 ``aot_serve`` owns the ENVELOPE — the metadata contract, ``pack``/``unpack``,
 ``verify``, and the serve-time gates that read the declared manifest. This
@@ -24,8 +24,7 @@ What is NOT here: the no-baked-adapter gate. ``lora_lifted.assert_no_baked_adapt
 owns it and must be called on the **ExportedProgram**, never on a package —
 packing renames a plain-``__dict__`` adapter to ``_tensor_constant0``, so a
 package-side FQN scan is a false PASS on the plain-bf16 and fp8-hooks lanes
-(pgw#725, measured). ``constant_names`` below is the advisory package-side read
-only.
+(measured). ``constant_names`` below is the advisory package-side read only.
 """
 
 from __future__ import annotations
@@ -120,7 +119,7 @@ class DeclaredConstant:
 def _entry_member(name: str, entry: str) -> bool:
     """Whether a zip member belongs to one named model of a multi-graph
     package. AOTI packages every model under ``data/aotinductor/<name>/``
-    (verified on the pin, pgw#758); entry names may carry ``/`` so the
+    (verified on the pin); entry names may carry ``/`` so the
     whole segment run is matched, not a single path component."""
     marker = f"data/aotinductor/{entry}/"
     return f"/{marker}" in name or name.startswith(marker)
@@ -274,7 +273,7 @@ def constant_names(package: Path, entry: str = "") -> Tuple[str, ...]:
 
     Packing erases the FQN of a plain-``__dict__`` tensor (it becomes
     ``_tensor_constant0``), so an absence here proves nothing — which is why
-    pgw#725's adapter gate takes the ExportedProgram instead. Present for
+    the adapter gate takes the ExportedProgram instead. Present for
     diagnostics and for the cross-check against the declared manifest.
     """
     return tuple(c.fqn for c in declared_constants(Path(package), entry))
@@ -355,7 +354,7 @@ def code_only_violations(package: Path, entry: str = "") -> List[str]:
     ``down_blocks.0...``" is. Callers turn a non-empty list into a red refusal,
     never a warning. ``entry`` scopes the gate to one named model; the multi-
     graph mint runs it once per entry so a refusal names BOTH the entry and
-    the cause (pgw#758).
+    the cause.
     """
     package = Path(package)
     reasons: List[str] = []
@@ -414,7 +413,7 @@ def program_literal_fqns(program: Any) -> Tuple[str, ...]:
 
 def literal_values_digest(program: Any) -> str:
     """Digest of the VALUES of every ``source=literal`` constant — ``""`` when
-    there are none (pgw#857).
+    there are none.
 
     **Why values, and only for literals.** A cell's identity folds constant
     NAMES but deliberately not their bytes, because a weight is rebound from
@@ -498,12 +497,12 @@ def unbindable_program_constants(
 ) -> List[str]:
     """:func:`unbindable_constants`, asked BEFORE the compile is paid for.
 
-    pgw#825: the packed gate fires per entry AFTER that entry's 4-6 minute
-    AOTI compile, so a declaration/module mismatch cost a whole L4 rental to
-    learn. The exported program already names every parameter and buffer it
-    lifted, and AOTInductor's constant table is a function of exactly that —
-    so the same refusal is knowable in milliseconds, off the program, before
-    a kernel is built.
+    The packed gate fires per entry AFTER that entry's 4-6 minute AOTI
+    compile, so a declaration/module mismatch costs a whole rental to learn.
+    The exported program already names every parameter and buffer it lifted,
+    and AOTInductor's constant table is a function of exactly that — so the
+    same refusal is knowable in milliseconds, off the program, before a kernel
+    is built.
 
     The packed gate is NOT replaced by this one: it reads the artifact's own
     generated wrapper, which is the only proof of what actually shipped.
@@ -529,38 +528,35 @@ def program_package_drift(
 ) -> List[str]:
     """Named reasons the package's constant table cannot be served.
 
-    **The check is ASYMMETRIC, and first light is what taught us why.** The two
-    sets are derived independently — one from the ``ExportedProgram``, one from
-    the compiled artifact's own generated wrapper — but they are not required to
-    be EQUAL, because the two directions mean opposite things:
+    **The check is ASYMMETRIC.** The two sets are derived independently — one
+    from the ``ExportedProgram``, one from the compiled artifact's own
+    generated wrapper — but they are not required to be EQUAL, because the two
+    directions mean opposite things:
 
     * **package-only** (the artifact declares a constant the program did not
       lift) is FATAL. Nothing would bind it, and invoking a code-only package
       with an unbound constant segfaults inside ``AOTICompiledModel.__call__``,
       killing the worker rather than failing the request.
     * **program-only** (the program lifted a constant the compiled artifact does
-      not want) is BENIGN and routine: the compiler fused or folded it away, so
-      the artifact genuinely has no use for it. Measured on the first real SDXL
-      w8a8 mint — program 2423, package 2422, the difference being
-      ``unet.conv_out.bias``, which AOTI fused into the convolution epilogue.
+      not want) is BENIGN and routine: the compiler folded or inlined it away,
+      so the artifact genuinely has no use for it. Measured on a real SDXL w8a8
+      mint — program 2423, package 2422. Demanding equality refuses EVERY real
+      mint.
 
-    An earlier version of this gate demanded equality and therefore refused
-    EVERY real mint, which is why it is written down here rather than quietly
-    relaxed. The manifest is built FROM the package, so program-only drift never
+    The manifest is built FROM the package, so program-only drift never
     threatens the manifest's fidelity — it is recorded for observability by
     :func:`eliminated_constants` and is not an error.
 
-    The pgw#728 concern (strict and non-strict traces lift different constant
-    sets) is still covered: a mode mix shows up as package-only entries, because
-    the package would want constants the recorded program never lifted.
+    A strict/non-strict trace mix (the two lift different constant sets) is
+    still covered: it shows up as package-only entries, because the package
+    would want constants the recorded program never lifted.
     """
     want = set(program_constant_fqns(program))
     have = {c.fqn for c in declared_constants(Path(package), entry)
             if c.source != SOURCE_COMPUTED}
-    # pgw#1080: a COMPUTED constant is package-only by design — the runtime
-    # fold produces it from the bound constants at load, so "the program never
-    # lifted it" is the expected state and not the segfault precondition this
-    # gate exists for.
+    # A COMPUTED constant is package-only by design — the runtime fold produces
+    # it from the bound constants at load, so "the program never lifted it" is
+    # the expected state and not the segfault precondition this gate exists for.
     package_only = sorted(have - want)
     if not package_only:
         return []
@@ -582,11 +578,9 @@ def eliminated_constants(
     silently discarded — the count is stable for a given recipe.
 
     **A WEIGHT here is never routine** — that is :func:`folded_weights`, which
-    refuses. This docstring used to call the sdxl case ("program 2423, package
-    2422, the difference being ``unet.conv_out.bias``") *routine compiler
-    fusion into the convolution epilogue*. It is not fusion (pgw#1097): a 1-D
-    constant of 4 elements meets ``GraphLowering.can_inline_constant``, so
-    inductor rendered that checkpoint's four floats into the kernel source.
+    refuses. The mechanism is INLINING, not fusion: a small 1-D constant meets
+    ``GraphLowering.can_inline_constant``, so inductor renders that
+    checkpoint's own values straight into the kernel source.
     """
     want = set(program_constant_fqns(program))
     have = {c.fqn for c in declared_constants(Path(package), entry)}
@@ -599,8 +593,8 @@ def folded_weights(
 ) -> List[str]:
     """Weights the program lifted that the artifact will NOT let anyone bind.
 
-    THE folding fence (pgw#1097, pgw#1056's guard, enforcing pgw#857's
-    tensor-binding contract). One cell serves every fine-tune of a family
+    THE folding fence, enforcing the tensor-binding contract. One cell serves
+    every fine-tune of a family
     because weights rebind BY NAME at load — which is sound only while the
     compiled code holds no weight VALUE. Where a lifted weight is missing
     from the artifact's own constant table, its value is not missing: it was
@@ -612,7 +606,7 @@ def folded_weights(
     turns fleet-wide cell sharing into a per-checkpoint compile without
     anything saying why. So it is refused HERE, once, on the mint pod.
 
-    Mechanism, read off torch 2.13.0 and MEASURED (pgw#1097): with
+    Mechanism, read off torch 2.13.0 and MEASURED: with
     ``aot_inductor.use_runtime_constant_folding`` and
     ``always_keep_tensor_constants`` both off, ``GraphLowering.get_attr``
     inlines a constant whose SHAPE meets either rule — 0-dim (rendered via
@@ -666,7 +660,7 @@ def unbindable_constants(
 
 
 # ---------------------------------------------------------------------------
-# The generated input guards — the artifact's OWN admission facts (pgw#1058)
+# The generated input guards — the artifact's OWN admission facts
 # ---------------------------------------------------------------------------
 #
 # AOTInductor renders, per user input, a `check_input_<i>` function into the
@@ -676,10 +670,10 @@ def unbindable_constants(
 # package-side reading of the ingress contract that cannot drift from the
 # artifact. `input_guard_drift` compares them against the declared manifest
 # rows, making the manifest a VERIFIED ECHO of the artifact rather than a
-# carried-alongside label (pgw#1058: attempt 30 published a cell whose every
-# entry was specialized on a dtype real traffic never presents; the label was
-# honest about the program, so only a reading of the artifact's own guards —
-# or a real call — can rule on what the program admits).
+# carried-alongside label: a label can be honest about the PROGRAM while the
+# artifact is specialized on a dtype real traffic never presents, so only a
+# reading of the artifact's own guards — or a real call — can rule on what it
+# admits.
 
 _INPUT_GUARD_FN = re.compile(r"static\s+void\s+check_input_(\d+)\s*\(")
 _GUARD_DTYPE = re.compile(r"expected_dtype\s*=\s*aoti_torch_dtype_(\w+)\s*\(")
@@ -711,7 +705,7 @@ def input_guards(package: Path, entry: str = "") -> Tuple[InputGuard, ...]:
     exactly like the constant table above. Refuses (never returns empty) when
     the wrapper declares no input checks: the pinned toolchain demonstrably
     emits them, so their absence means the parse went blind, and a gate that
-    silently sees no guards is the pgw#1058 hole reopened.
+    silently sees no guards is no gate.
     """
     source = _wrapper_source(Path(package), entry)
     return guards_from_wrapper_source(source, where=str(package))
@@ -721,8 +715,7 @@ def guards_from_wrapper_source(
     source: str, where: str = "",
 ) -> Tuple[InputGuard, ...]:
     """:func:`input_guards` on wrapper SOURCE — split out so the gate can be
-    asserted against captured wrapper bytes (the pgw#1058 evidence fixture)
-    without a whole ``.pt2``."""
+    asserted against captured wrapper bytes without a whole ``.pt2``."""
     starts = [(int(m.group(1)), m.start()) for m in _INPUT_GUARD_FN.finditer(source)]
     if not starts:
         raise PackageIntrospectionError(
@@ -761,7 +754,7 @@ def input_guard_drift(
     """Named reasons the declared manifest rows do NOT describe the program
     whose guards these are; empty when they agree.
 
-    The comparison that makes an entry's label a verified echo (pgw#1058):
+    The comparison that makes an entry's label a verified echo:
     rows come from the ``ExportedProgram`` (or a packed ``metadata.json``),
     guards from the artifact's own generated wrapper — two independent
     readings that must agree, the same doctrine as the constant manifest.
@@ -820,7 +813,7 @@ def admission_drift(
 ) -> List[str]:
     """:func:`input_guard_drift` against one named model of a ``.pt2``.
 
-    ONE function, two call sites, per the pgw#1058 ruling: the mint's
+    ONE function, two call sites: the mint's
     package gate (a divergent cell is never published) and the arm's
     per-entry verification (a corrupted one is never served) must be the
     same derivation, or the gate models the arm and drifts from it.
@@ -844,9 +837,9 @@ def input_contract(
     scoped to one artifact and only ever resolved through that same artifact's
     ``symbols`` map.
 
-    Recording bounds at all is the whole point of B2: pgw#704 measured
-    2048x2048 running clean through an artifact declaring max=160 latent units,
-    because the exported graph carries ZERO symbolic range assertions.
+    Recording bounds at all is the whole point of B2: 2048x2048 runs clean
+    through an artifact declaring max=160 latent units, because the exported
+    graph carries ZERO symbolic range assertions.
     ``ep.range_constraints`` is metadata only, so unless the mint writes it
     down the consumer has nothing to assert against.
 
@@ -854,7 +847,7 @@ def input_contract(
     off the example inputs, so what is recorded is what export actually
     committed to — which is what the consumer will be checked against.
 
-    ``leaves`` are ``aot_flatten`` leaves, not names (pgw#994): each row
+    ``leaves`` are ``aot_flatten`` leaves, not names: each row
     records WHERE IN THE CALL its input lives — parameter, that parameter's
     position, and the path into it — because a name cannot tell the serve side
     that ``x.0`` is element 0 of the single argument ``x`` rather than the
@@ -898,10 +891,9 @@ def input_contract(
             # second half is the half that bites: a plain tensor sitting after
             # a container has a flat position its ARGUMENT does not have, and
             # a serve-side bind reading `position` would fetch the wrong one
-            # (measured — it is how pgw#994's `t` went missing). Every cell
-            # published before pgw#994 has no containers at all, so every row
-            # is derivable and no live artifact's metadata (or cell key) moves
-            # — see `aot_serve.range_digest`.
+            # (measured). A container-free declaration keeps every row
+            # derivable, so its metadata and cell key are unchanged — see
+            # `aot_serve.range_digest`.
             row["param"] = leaf.param
             row["param_position"] = leaf.param_position
             row["path"] = [

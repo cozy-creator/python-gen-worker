@@ -1,4 +1,4 @@
-"""Cross-language formula limits and canonicalization contract (th#1534).
+"""Cross-language formula limits and canonicalization contract.
 
 The fixture is vendored byte-identically in Tensorhub under
 ``internal/formula/testdata`` because each repository must validate in

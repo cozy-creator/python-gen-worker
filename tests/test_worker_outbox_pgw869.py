@@ -1,10 +1,8 @@
 """pgw#869: the worker outbox — losing the hub must not lose the evidence.
 
-THE INCIDENT. This box rebooted mid-mint. The pod did NOT restart: the provider
-reported it RUNNING throughout and the worker process was alive the whole time,
-and another session had the hub back 60-90 s later. Every measurement the worker
-had queued for the hub was destroyed anyway, because `SendQueue` had a durable
-lane for RESULTS and none for FACTS:
+THE DEFECT. When the hub connection drops while the worker process stays alive,
+every measurement queued for the hub was destroyed, because `SendQueue` had a
+durable lane for RESULTS and none for FACTS:
 
 * `reset_for_reconnect()` did `self._items.clear()` and restored only
   `_pending_results` — so every queued ActivityUpdate/BootPhase died on each
@@ -33,8 +31,7 @@ So N identical deliveries are ONE row with `occurrences = N`. `_hub_row_key`
 below is that key, verbatim; the tests assert against it rather than against a
 wire count, and that is the property the acceptance actually wants.
 
-Scope, per the issue: in-memory only. The worker process did not restart in the
-motivating incident and a mint is a child of the worker, so a worker restart ends
+Scope: in-memory only. A mint is a child of the worker, so a worker restart ends
 the mint anyway. No disk persistence is built or tested here.
 """
 
@@ -422,7 +419,7 @@ def test_an_expired_credential_refused_by_the_hub_is_never_fatal() -> None:
         for _ in range(50):
             assert t._auth_rejection_is_fatal("invalid worker token state") is False
         # and the ladder is not merely out-run — it is UNREACHABLE: an
-        # expired credential never even records a verdict (pgw#873).
+        # expired credential never even records a verdict.
         assert t._auth_verdicts == set()
     finally:
         worker_credential.reset()
@@ -478,7 +475,7 @@ def test_a_POD_never_self_terminates_on_auth_and_says_why() -> None:
     pod. A worker-side exit can only fire EARLIER than the authority, and a
     minting pod that exits takes its mint with it. The refusal is still a hub
     ROW, because a refusal nobody acts on is not a refusal nobody records
-    (pgw#824)."""
+."""
     worker_credential.reset()
     captured: List[pb.ActivityUpdate] = []
     prior = activity_mod._sink

@@ -1,13 +1,11 @@
-"""pgw#1077 — a REFUTED equality is not a pin.
+"""A REFUTED equality is not a pin.
 
-``_pinning_guards`` iterated ``ShapeEnv.axioms`` by KEY. That map is
-``{relation: sympy.true | sympy.false}`` and torch's
+``ShapeEnv.axioms`` is ``{relation: sympy.true | sympy.false}`` and torch's
 ``symbolic_shapes.get_implications`` deposits ``Eq(a, b) => false`` plus its
-commuted mirror for every ``Ne(a, b)`` the graph PROVES — so every inequality
-the graph settled was reported as an equality guard PINNING the declared
-symbols, in mirrored pairs. Measured cost: six such keys refused z-image on the
-endpoint ie#637 had already fixed (`Eq(Mod(1, s18*s57), 0) => False` and
-friends), with A2 blocked behind it.
+commuted mirror for every ``Ne(a, b)`` the graph PROVES. Iterating that map by
+KEY therefore reports every inequality the graph settled as an equality guard
+PINNING the declared symbols, in mirrored pairs, and refuses a correct
+declaration.
 
 Every test here drives a real ``torch.export`` and asserts on the shipped gate.
 The controls matter as much as the repro: a genuine ``Eq(h*w, N)`` pin must

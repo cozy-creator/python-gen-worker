@@ -1,28 +1,16 @@
-"""pgw#989: what a dynamo mint's ``warmup_forward`` hour is actually made of.
+"""What a dynamo mint's ``warmup_forward`` hour is actually made of.
 
-The number this deletes
------------------------
-The sdxl w8a8-lora64 mint of 2026-08-06 (cell
-``ck5-a53e02a7885f9312fb1fa7df…``, L40S, gen-worker 0.93.1, pod
-``wz4g1ya8a4khne``) reported this phase table, and the hub stored it verbatim::
-
-    {'load': 13.87, 'warmup_forward': 4416.91, 'inductor_compile': 0.0,
-     'seal_publish': 96.809, 'finalize': 0.155}
-
-**97.6 % of the mint is one row, and the row named after the work is zero.**
-The zero is not a bug in the clock: ``mint_child`` opens the
-``inductor_compile`` frame around ``_drain_router``, and the fleet mint arms
-COLD with no router (gw#587), so that phase measures an empty queue. Every
-compile happens INLINE inside the warm forwards, i.e. inside
-``warmup_forward``, which is therefore a bucket holding compile AND execution
-AND everything else with no way to tell them apart.
+Nearly all of a dynamo mint lands in ``warmup_forward``, while the phase named
+after the work (``inductor_compile``) measures zero: ``mint_child`` opens that
+frame around ``_drain_router``, and the fleet mint arms COLD with no router, so
+it measures an empty queue. Every compile happens INLINE inside the warm
+forwards — so ``warmup_forward`` is a bucket holding compile AND execution AND
+everything else with no way to tell them apart.
 
 A mint hour with one name on it cannot be optimised — you cannot tell a
 compile-bound mint from a warm plan that is simply running too many diffusion
 steps. This module measures the split.
 
-How, and why these keys
------------------------
 Same instrument as the AOT path (:mod:`gen_worker.aot_compile_spans`): deltas
 of dynamo's process-global ``compilation_time_metrics`` across a span. The KEY
 SET is different and that difference is the whole point — the AOT partition
@@ -39,7 +27,7 @@ MEASURED on the pin (torch 2.13.0+cu130) over one ``torch.compile`` call,
 So the JIT total is ``_compile.compile_inner`` — the whole of ``torch.compile``,
 front-end through kernel load — and the members below partition it. Anything
 they do not claim lands in ``compile_other_s`` rather than vanishing, exactly
-as pgw#830 established for the AOT ledger.
+as in the AOT ledger.
 
 Overlays (reported, never summed into the partition): ``triton_s`` and
 ``parallel_kernel_cpu_s`` nest inside ``kernel_compile_s``, and
@@ -58,9 +46,8 @@ from . import aot_compile_spans
 #: Bump when the partition changes shape, so a reader never mixes two ledgers.
 WARM_SPANS_V = 1
 
-#: The honest name for the phase the dynamo mint used to call
-#: ``inductor_compile``. It waits out a hot-swap router's queue — which the
-#: fleet mint arms empty — and it never once measured a compile. Defined in
+#: The phase that waits out a hot-swap router's queue — which the fleet mint
+#: arms empty, so it never measures a compile. Defined in
 #: this leaf module rather than in :mod:`gen_worker.activity` because the mint
 #: CHILD needs it and deliberately imports neither protobuf nor psutil;
 #: ``activity`` re-exports it, so the phase vocabulary still has one home.
@@ -99,7 +86,7 @@ JIT_PARTITION_KEYS: Dict[str, Tuple[str, ...]] = {
 
 #: Reported under their own names, never summed with the partition — each is
 #: known to nest inside a member above, and adding them would inflate
-#: "attributed" while leaving the residual unexplained (pgw#830's second bug).
+#: "attributed" while leaving the residual unexplained.
 JIT_OVERLAY_KEYS: Dict[str, Tuple[str, ...]] = {
     # Inside kernel_compile_s.
     "async_wait_s": ("async_compile.wait",),

@@ -1,27 +1,22 @@
 """Who actually answered — the hub, or a proxy standing in front of it?
 
-te#125/th#1238: a status code is not one condition. It is two, with opposite
-handling:
+A status code is not one condition. It is two, with opposite handling:
 
   * The HUB answering 404 means "this route/resource does not exist". Fatal.
   * A PROXY answering 404 (ngrok, an ingress, a load balancer with no healthy
     backend) means "the hub is not reachable right now". Transient.
 
-pgw#743 generalises this from 404 to EVERY status. Two 58-minute clones died
-byte-identically on `upload complete failed (503) ... <!DOCTYPE html>` — the
-same proxy, the same HTML page, a different number. The question a caller
+This holds for EVERY status, not just 404 — a proxy 503 carrying an HTML page
+is the same condition wearing a different number. The question a caller
 actually needs answered is never "was it a 404?" but "did the hub ITSELF
 answer?", so that is the question this module exposes
-(:func:`is_definite_hub_answer`).
-
-Conflating them cost a 116-minute H100 producer run: the hub restarted for a
-few seconds mid-job, the in-flight upload got ngrok's 404 page, and the worker
-classified it `retryable=False` and killed the job at the last mile. The gRPC
-worker stream reconnects across a hub restart; HTTP calls in flight did not.
+(:func:`is_definite_hub_answer`). Conflating them costs whole GPU runs: a hub
+restarting for a few seconds mid-job hands the in-flight upload a proxy page,
+and a worker classifying that `retryable=False` kills the job at the last mile.
 
 The two are trivially separable in practice, and we verify it rather than
 assume it: the hub answers `application/json` carrying its `{"error": {...}}`
-envelope, while ngrok's offline page is `text/html`. Measured 2026-07-27:
+envelope, while ngrok's offline page is `text/html`:
 
     hub 404   -> content-type: application/json; {"error":{"code":"not_found",...}}
     ngrok 404 -> content-type: text/html
@@ -48,18 +43,16 @@ __all__ = [
     "REQUEST_DETERMINED_STATUSES",
 ]
 
-# pgw#987: statuses whose cause is a property of the REQUEST WE SENT, not of
-# who answered. The same bytes earn the same refusal from the hub, from a
-# proxy, and from anything else in the path, forever — so "did the hub itself
-# answer?" is not the question, and the retry-biased default below (which
-# rests on retrying being the cheap direction) does not hold: retrying is
-# pure cost with a guaranteed identical outcome.
+# Statuses whose cause is a property of the REQUEST WE SENT, not of who
+# answered. The same bytes earn the same refusal from the hub, from a proxy and
+# from anything else in the path, forever — so "did the hub itself answer?" is
+# not the question, and the retry-biased default below does not hold: retrying
+# is pure cost with a guaranteed identical outcome.
 #
-# 413 only, deliberately. A 404 can be a proxy with no healthy backend
-# (pgw#743, two 58-minute clones), a 403 can be a token that will be rotated,
-# a 409 can be a race — none of those are determined by our own bytes. A
-# Content-Length refusal is: `Content-Length` is byte-identical on every
-# retry.
+# 413 only, deliberately. A 404 can be a proxy with no healthy backend, a 403
+# can be a token that will be rotated, a 409 can be a race — none of those are
+# determined by our own bytes. A Content-Length refusal is: `Content-Length` is
+# byte-identical on every retry.
 REQUEST_DETERMINED_STATUSES = frozenset({413})
 
 
@@ -93,7 +86,7 @@ def response_is_from_hub(resp: Any) -> bool:
     # `publishError.body()` (tensorhub `internal/api/repo_publish.go`) emits the
     # code as a STRING, not an object — so every publish refusal was read as
     # proxy-shaped and RETRIED under the silence window. Measured live on a v2
-    # publish (th#1303): a 422 from `/publishes/{id}/complete` was retried, the
+    # publish: a 422 from `/publishes/{id}/complete` was retried, the
     # retry hit the now-terminal session and returned 409 `publish_repudiated`,
     # and the ORIGINAL 422 — the only response that said WHY — was discarded.
     # A retry loop that converts a diagnosable refusal into a different, later
@@ -117,8 +110,8 @@ def is_proxy_outage(resp: Any) -> bool:
 def is_definite_hub_answer(resp: Any) -> bool:
     """True when this response is the hub's own verdict and may end a loop.
 
-    pgw#743. A retry loop needs exactly one bit: did we HEAR from the hub? Two
-    answers are definite:
+    A retry loop needs exactly one bit: did we HEAR from the hub? Two answers
+    are definite:
 
       * 2xx/3xx — nothing in front of us fabricates a success for a route it
         cannot reach, so the body does not need inspecting.
@@ -132,9 +125,8 @@ def is_definite_hub_answer(resp: Any) -> bool:
 
     The asymmetry that justifies the conservative default (an unrecognised
     body counts as proxy-shaped): mis-retrying a real refusal costs a bounded
-    backoff and then fails anyway, while mis-terminating an outage throws
-    away work that has already been paid for — two 58-minute clones, in the
-    case that motivated this.
+    backoff and then fails anyway, while mis-terminating an outage throws away
+    work that has already been paid for.
     """
     try:
         code = int(getattr(resp, "status_code", 0))
@@ -143,13 +135,9 @@ def is_definite_hub_answer(resp: Any) -> bool:
     if 200 <= code < 400:
         return True
     if code in REQUEST_DETERMINED_STATUSES:
-        # pgw#987. The measured failure: the hub refused 32 cell publishes with
-        # `413 request_body_too_large` in 25 microseconds each, and this
-        # function answered False every time — because gin's
-        # `AbortWithStatusJSON` envelope carries a STRING `error` with no
-        # `message`, matching neither shape below. Ten minutes of a paid pod
-        # re-sending a body that could never be accepted, and the typed event
-        # that reached the hub said "network" while the hub's own log said
-        # `413`. That mislabelled error produced a wrong P0 (th#1644).
+        # A 413 is definite even when the body does not match either envelope
+        # shape below: gin's `AbortWithStatusJSON` carries a STRING `error`
+        # with no `message`, so without this a paid pod re-sends a body that
+        # can never be accepted and reports it as "network".
         return True
     return response_is_from_hub(resp)

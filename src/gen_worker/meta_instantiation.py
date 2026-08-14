@@ -1,4 +1,4 @@
-"""pgw#1080 (pgw#1056 authoring corollary 2): the META-INSTANTIATION GATE.
+"""The META-INSTANTIATION GATE.
 
 The zero-download forge instantiates a model's STRUCTURE on the meta device and
 exports it there — no checkpoint values ever enter the process that traces and
@@ -12,19 +12,13 @@ succeeds.
 trace inside :func:`guard`, and any tensor that lands on a real device is a
 typed refusal naming the site that allocated it.
 
-WHY THE SCOPE IS "INSTANTIATION *OR* TRACE" (ie#628's widening)
----------------------------------------------------------------
-An ``__init__``-inspecting gate is not enough, and z-image is the measured
-counterexample that made the point: upstream's ``RopeEmbedder`` is not an
-``nn.Module`` at all, holds ``self.freqs_cis = None``, and builds its tables on
-FIRST CALL inside ``with torch.device("cpu")`` — a pin that overrides any
-ambient meta context. Nothing happens at ``__init__``; the violation happens
-mid-trace. (z-image's endpoint has since bound those tables as buffers with no
-device pin — ie#630 — so it is the family this gate must stay SILENT on. The
-gate exists for the NEXT one.)
+WHY THE SCOPE IS "INSTANTIATION *OR* TRACE." An ``__init__``-inspecting gate is
+not enough: an upstream rope embedder that is not an ``nn.Module`` at all, holds
+``self.freqs_cis = None``, and builds its tables on FIRST CALL inside
+``with torch.device("cpu")`` — a pin that overrides any ambient meta context —
+does nothing at ``__init__`` and violates mid-trace.
 
-WHY A ``TorchFunctionMode`` AND NOT A DEVICE CONTEXT
----------------------------------------------------
+WHY A ``TorchFunctionMode`` AND NOT A DEVICE CONTEXT.
 ``with torch.device("meta")`` is a DEFAULT, and a default is exactly what model
 code overrides — explicitly (``torch.device("cpu")``) or implicitly
 (``device=`` / ``.to("cuda")`` / ``.cpu()``). A mode sits above the factory
@@ -32,9 +26,7 @@ functions themselves, so it observes the tensor that was actually produced
 rather than the default that was requested, and an override is therefore
 visible instead of authoritative.
 
-WHAT IS DELIBERATELY *NOT* REFUSED
-----------------------------------
-Fake tensors. ``FakeTensorMode`` produces tensors whose ``.device`` reads as a
+WHAT IS DELIBERATELY *NOT* REFUSED: fake tensors. ``FakeTensorMode`` produces tensors whose ``.device`` reads as a
 real device by design (that is what makes them faithful to trace against) while
 allocating nothing. Refusing them would refuse the very mechanism this gate
 protects, so :func:`is_virtual` treats a fake tensor as virtual regardless of
@@ -57,7 +49,7 @@ VIRTUAL_DEVICES: Tuple[str, ...] = ("meta",)
 class MetaMaterializationError(WorkerError):
     """A real-device tensor was materialized under the meta-instantiation gate.
 
-    Named-axis refusal (the gw#577 pattern): the message carries WHAT was
+    Named-axis refusal: the message carries WHAT was
     allocated (op, shape, dtype, device), WHERE in the endpoint's own code it
     happened, and the authoring rule that was broken — because the fix is
     always an authoring change, never a knob.
@@ -117,17 +109,14 @@ def is_virtual(tensor: Any, _depth: int = 0) -> bool:
     Meta tensors by device; fake tensors by TYPE, because a fake tensor
     deliberately reports a real device while backing it with no storage.
 
-    AND WRAPPER SUBCLASSES BY THEIR CONTENTS (pgw#1198), which is the whole
-    reason this is a function and not an ``isinstance``. A quantizer run inside
-    ``setup()`` — torchao's ``quantize_``, which ``wan-2.2`` and ``minimax-h3``
-    both call on their denoisers — replaces a parameter with a traceable
-    wrapper subclass (``Float8Tensor``) whose inner ``qdata``/``scale`` are the
-    original FAKE tensors and whose OUTER dtype stays bf16. That object is not
-    a ``FakeTensor``, reports ``cuda:0``, and answers ``numel * element_size``
-    at the high-precision dtype — so a type-only test read a structure holding
-    nothing as the entire bf16 checkpoint: 56_203_673_600 bytes across
-    ``WanPipeline``'s two experts, which is exactly the whole model, for
-    storage that did not exist. Measured on pod ``729431an6ugbvq``.
+    AND WRAPPER SUBCLASSES BY THEIR CONTENTS, which is the whole reason this is
+    a function and not an ``isinstance``. A quantizer run inside ``setup()``
+    (torchao's ``quantize_``) replaces a parameter with a traceable wrapper
+    subclass (``Float8Tensor``) whose inner ``qdata``/``scale`` are the original
+    FAKE tensors and whose OUTER dtype stays bf16. That object is not a
+    ``FakeTensor``, reports ``cuda:0``, and answers ``numel * element_size`` at
+    the high-precision dtype — so a type-only test reads a structure holding
+    nothing as an entire bf16 checkpoint.
 
     Every inner tensor must be virtual, never any: a subclass over real data,
     or over a mix (fake ``qdata``, real ``scale``), is REAL here. Widening the
@@ -195,11 +184,9 @@ def _endpoint_site(skip: int = 0) -> str:
             continue
         if path.startswith("<"):
             # `<frozen runpy>`, `<frozen importlib._bootstrap>`, `<string>`:
-            # interpreter scaffolding, not a line anyone can edit. Treating
-            # one as the cause is how a torch-internal allocation gets
-            # reported as an authoring violation (measured on the micro rig:
-            # a 380-byte `empty` inside `torch.export` attributed to
-            # `<frozen runpy>:88`).
+            # interpreter scaffolding, not a line anyone can edit. Treating one
+            # as the cause is how a torch-internal allocation gets reported as
+            # an authoring violation.
             continue
         return f"{frame.filename}:{frame.lineno} in {frame.name}"
     return ""
@@ -247,9 +234,9 @@ def guard(phase: str, *, actionable_only: bool = False) -> Iterator[Census]:
 
     ``actionable_only`` refuses only an allocation this gate can NAME a
     file:line for — i.e. one made by the endpoint's own code. It exists for
-    the TRACE window (pgw#1080), where ``torch.export`` legitimately allocates
-    small real tensors of its own inside the fake mode: measured on the micro
-    rig, a 380-byte ``empty`` with no endpoint frame anywhere on the stack.
+    the TRACE window, where ``torch.export`` legitimately allocates small real
+    tensors of its own inside the fake mode (measured: a 380-byte ``empty``
+    with no endpoint frame anywhere on the stack).
     Refusing that would fail every mint for something no author can fix,
     while the class the gate exists for — a device pin inside model code —
     always has a frame. Unattributable events stay in the census, so they are

@@ -1,4 +1,4 @@
-"""The exported lane proves adoption its OWN way (pgw#735).
+"""The exported lane proves adoption its OWN way.
 
 `executor.py`'s adoption gates required an FX cache hit. That is the right proof
 for a dynamo cell — a hit means the delivered graph was reused rather than
@@ -38,7 +38,7 @@ def _dispatch(calls: int, failed: bool) -> aot_serve.EntryDispatch:
 def _arm(pipe, *, calls: int, failed: bool = False) -> None:
     """The marker shape `arm_entry` ACTUALLY publishes.
 
-    pgw#1176: this used to build a bare pipeline-level ``state``, a shape no
+    this used to build a bare pipeline-level ``state``, a shape no
     production path has ever written — `arm_entry` writes ``targets`` and
     `wrap_module` writes the bare ``state`` on the MODULE. `_marker_states`
     carried a fallback for it whose own docstring said "the legacy
@@ -52,7 +52,7 @@ def _arm(pipe, *, calls: int, failed: bool = False) -> None:
             "module": None, "attr": "forward",
             "state": {
                 "successful_calls": calls, "failed": failed,
-                # pgw#1176: `is_armed` asks the REGISTRY what is armed rather
+                # `is_armed` asks the REGISTRY what is armed rather
                 # than reading a boolean, so a fixture that wants to model an
                 # armed pipeline has to carry one. That is the point: there is
                 # no longer a flag that can claim more than the pod serves.

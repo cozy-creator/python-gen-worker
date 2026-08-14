@@ -1,18 +1,16 @@
-"""pgw#1168 — the adopt's device cost is measured at the ONE seam every arm
-route passes, and its two terms are reported apart.
+"""The adopt's device cost is measured at the ONE seam every arm route passes,
+and its two terms are reported apart.
 
-pgw#1164 put the measurement in `fleet_cells.adopt_delegated_mint`, i.e. on the
-SELF-MINT adopt only. The boot adopt, the local-store adopt and the re-arm run
-the identical `aot_serve.enable` -> `arm_entry` and reported nothing — the
-"emitter wired on one of N paths" shape this program keeps producing. It lives
-in `provision.arm_aot` now, which owns both the load and the §4.32 gate.
+The measurement lives in `provision.arm_aot`, which owns both the load and the
+§4.32 gate. Putting it in `fleet_cells.adopt_delegated_mint` covers the
+SELF-MINT adopt only — the boot adopt, the local-store adopt and the re-arm run
+the identical `aot_serve.enable` -> `arm_entry` and would report nothing.
 
-Why the SPLIT matters (th#1825): `load` is what EVERY adopting pod pays for the
-life of the arm and is the term that decides whether a cell fits the fleet it
-was built for; `verify` is the parity gate's two forwards and is paid only by
-the minting pod. A boot-adopt row on a 48 GB card is therefore the EMPIRICAL
-answer to "does this cell fit", where before there was only arithmetic over a
-single blended number.
+Why the SPLIT matters: `load` is what EVERY adopting pod pays for the life of
+the arm and is the term that decides whether a cell fits the fleet it was built
+for; `verify` is the parity gate's two forwards and is paid only by the minting
+pod. A boot-adopt row on a 48 GB card is therefore the EMPIRICAL answer to "does
+this cell fit", not arithmetic over a single blended number.
 
 These rows drive the REAL `arm_aot` and the REAL banking registry. The doubles
 are the CUDA reading and `aot_serve.enable`/`gate_cell_numerics` — the GPU work
@@ -192,7 +190,7 @@ def test_the_row_is_keyed_by_the_cell_s_OWN_recorded_lane(
     line these rows up per (family, lane) without provision importing
     compile_cache.
 
-    pgw#1175: this row USED to feed `mint_budget._ADOPT_PEAKS`, which was then
+    this row USED to feed `mint_budget._ADOPT_PEAKS`, which was then
     divided into free VRAM to refuse the next adopt. The bank is deleted; the
     ROW is not. It is the only instrument that answers where a loaded cell's
     device memory goes, which is exactly what §4.33's ~8 GiB target has to be

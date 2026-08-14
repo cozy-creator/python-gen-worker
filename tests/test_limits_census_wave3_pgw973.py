@@ -5,7 +5,7 @@ Three shapes are proven here, all on the real code paths:
 1. **Absence must be explicit** (§4.24 item 4). A limit that is not stated may
    become a stated default or a refusal; it may never become "unlimited", and
    it may certainly never INVERT into a purge.
-2. **Nothing that can end real work keys on a wall clock** (gw#666). The lane
+2. **Nothing that can end real work keys on a wall clock**. The lane
    gate polls free VRAM four times a second — free VRAM IS the progress
    signal — and used to give up on a flat 45 s deadline anyway.
 3. **A duplicated bound has one owner.** Four verbatim pairs collapse; the
@@ -220,7 +220,7 @@ def test_a_card_that_keeps_returning_memory_is_never_given_up_on(
     with gate.ensure_resident():
         pass
     assert res.attempts == 40
-    # The property, not the runner's speed (pgw#795): at the loop's DECLARED
+    # The property, not the runner's speed: at the loop's DECLARED
     # cadence the window covers only a handful of polls, and the promote took
     # far more — so a wall budget would have fired here. No clock is read.
     polls_the_window_could_cover = gate.wait_s / gated._POLL_S
@@ -380,10 +380,10 @@ def test_the_mint_reap_grace_is_named_and_argues_its_exemption() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6. mint_child.cap_vram — DELETED WITH ITS INPUT (pgw#1175)
+# 6. mint_child.cap_vram — DELETED WITH ITS INPUT
 # ---------------------------------------------------------------------------
 #
-# pgw#973 §4.24 item 4 was right: "uncapped" is a state to STATE, not an
+# "uncapped" is a state to STATE, not an
 # absence to infer. The state it named is gone — §4.33 deleted the budget that
 # computed `vram_cap_bytes`, so there is no ceiling to apply and no silence to
 # distinguish from one. The RULE survives everywhere else in this census.

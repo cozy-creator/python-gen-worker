@@ -1,8 +1,7 @@
-"""pgw#672: the minted/attached ck2 compile object must serve its own warmup.
+"""The minted/attached ck2 compile object must serve its own warmup.
 
-Live signature this closes (ie#546 burst rerun #2, gen-worker 0.64.0, L4):
-a worker MINTS its cell (publish-intent 200, armed, obligation discharged),
-then fails its own finalize —
+The signature this closes: a worker MINTS its cell (publish-intent 200, armed,
+obligation discharged), then fails its own finalize —
 
     CompiledLaneUnavailableError: 1 attached compile object(s) did not serve
     their own warmup graph (warmups=18, calls=18, cache_hits=0,
@@ -13,8 +12,8 @@ consulted: dynamo's in-memory code cache (keyed on the class-shared
 ``__code__``; torch 2.13 inlined-module guards match any same-class
 instance) served the warmup that a LATER same-family arm in the same warm
 process was supposed to compile/look up. The pending capture stays empty,
-finalize disproves it, the mandatory lane raised, both functions disabled,
-pod retired, replacement re-mints the same key — 5 cycles, 4 dead workers.
+finalize disproves it, the mandatory lane raises, both functions are disabled
+and the pod retires — whose replacement re-mints the same key, in a loop.
 
 These tests run the REAL executor ensure_setup codepath and the REAL
 fleet_cells miss policy (miss -> `compile_cache.arm_jit_intake` -> executor
@@ -22,7 +21,7 @@ proof), faking only the torch boundary: ``compile_cache.apply``'s torch.compile 
 simulator with dynamo-in-memory-code semantics, ``inductor_counters`` reads
 the simulator, and ``torch._dynamo.reset_code`` drops simulator entries.
 
-Fix under test (pgw#672):
+Fix under test:
   (a) honesty — a scoped per-code dynamo reset before every proof window
       forces the warmup through the real lookup path (mint: real capture;
       re-arm of an in-process finalized cell: real FX HIT);
@@ -220,7 +219,7 @@ class _Rig:
 
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                  specs: List[EndpointSpec]) -> None:
-        # pgw#1010: no export declaration is registered, so this rig's miss
+        # No export declaration is registered, so this rig's miss
         # takes the JIT INTAKE arm — the in-process compile whose honesty
         # (requirement (a)) and degrade posture (requirement (c)) are what
         # survives here. It mints nothing, which is the point.
@@ -240,7 +239,7 @@ class _Rig:
 
         def _load_slot(*args: Any, **kwargs: Any) -> Any:
             pipe = _Pipe()
-            # pgw#1010: a PLAIN lane. A mandatory (w8a8/w4a4) lane serves only
+            # a PLAIN lane. A mandatory (w8a8/w4a4) lane serves only
             # from a cell — the dispatch fence pins every request to an active
             # compile incarnation — so a family with no export declaration
             # fails closed there instead of arming JIT intake. The doctrine
@@ -261,7 +260,7 @@ class _Rig:
         # pgw#681 gate at its torch boundary, simmed like apply's compile
         # leaf: _Sim never touches dynamo, so extraction would honestly
         # report closure unprovable and refuse every finalize.
-        # pgw#1181: the pgw#681 mint gate this simmed is deleted.
+        # The pgw#681 mint gate this simmed is deleted.
         # `guard_closure.closure_manifest` classified every compiled graph at
         # the MINT and wrote the result into the cell's metadata; it went with
         # the `torch-inductor-cache` format that carried it, so a rig whose
@@ -292,7 +291,7 @@ class _Rig:
             spec, {model_ref: pb.Snapshot(digest=MODEL_DIGEST)}))
 
 
-# pgw#1010: requirement (b) — "finalize succeeds for the second same-family
+# requirement (b) — "finalize succeeds for the second same-family
 # arm (its own graphs)" — is deleted with the finalize it named. Both tests
 # that carried it (`test_second_same_family_arm_mints_its_own_graphs_and_
 # finalizes`, `test_same_key_rearm_reuses_finalized_cell_with_a_real_fx_hit`)
@@ -303,7 +302,7 @@ class _Rig:
 # live route still has, and they are asserted below.
 
 
-# pgw#1010: `test_genuinely_unservable_execution_lane_degrades_to_eager_not_death`
+# `test_genuinely_unservable_execution_lane_degrades_to_eager_not_death`
 # stood here. Its mechanism was the MINT proof: an in-process capture whose
 # warmup was served counter-silently disproved itself, the identity was
 # quarantined, and the pod degraded instead of dying. An intake arm has no
@@ -341,7 +340,7 @@ def test_a_mandatory_lane_without_a_declaration_fails_closed_before_it_compiles(
             "a mandatory lane must not compile an intake arm it cannot serve"))
 
     pipe = _Pipe()
-    # pgw#888: this family declares NO export, so the refusal is PERMANENT —
+    # This family declares NO export, so the refusal is PERMANENT —
     # no pod can ever hold a cell for it — and it is therefore the terminal
     # class, not the retryable one. Retrying it was pgw#888's own observation
     # (11 requests, five attempts each, one answer).
@@ -370,7 +369,7 @@ def test_compile_failure_on_a_compiled_lane_degrades_per_sku(
 
     assert "generate" not in rig.ex.unavailable
     assert rig.ex.serving_tiers()["generate"] == "eager"
-    # pgw#1010: active-LESS, not absent — see the note in the test above.
+    # active-LESS, not absent — see the note in the test above.
     assert all(not t.active_compile_ref for t in rig.ex.compile_targets())
     assert any(
         "CantSplit" in r.getMessage() and "eager" in r.getMessage()

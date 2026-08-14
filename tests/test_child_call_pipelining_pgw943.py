@@ -1,25 +1,17 @@
 """pgw#943: a worker YIELDS its GPU permit while awaiting a child call.
 
-Paul named the first real consumer of ``ctx.call_endpoint``:
+The defect: ``_run_job`` takes the group permit before the handler and holds it
+until the handler returns, so a ``call_endpoint`` that never enters
+``_gpu_slot_yielded`` makes every pipelining handler serialize at
+``gpu_slots=1``, renting an accelerator to wait on a network round trip. Every
+child-call wait (``wait=True`` and the ``wait=False`` handle's ``.result()``)
+therefore routes through ``ctx._child_call_wait``, which yields the GPU-slot
+lease for the park and re-acquires before returning to tenant code.
 
-    *"an endpoint with cozy-eval that evaluates the results of like, model
-    training and quantization, and then our quantization functions can call
-    this and get the results back. It can process more requests (pipelining)
-    while it's waiting for the results of the previous request."*
-
-PR #455 measured the defect: ``_run_job`` took the group permit before the
-handler and held it until the handler returned, and ``call_endpoint`` never
-entered ``_gpu_slot_yielded`` — so at ``gpu_slots=1`` every cozy-eval-shaped
-pipeline serialized while renting an accelerator to wait on a network round
-trip. The fix routes every child-call wait (``wait=True`` and the
-``wait=False`` handle's ``.result()``) through ``ctx._child_call_wait``,
-which yields the #382 GPU-slot lease for the park and re-acquires before
-returning to tenant code.
-
-pgw#954 then inverted the worker's lock order to instance gate -> permit at
-every acquirer, which deleted the hold-and-wait cycle that had scoped the
-yield away from class endpoints; §4 below pins the widened scope and the
-inversion at its own seam. What stays scoped out is a job carrying
+The worker's lock order is instance gate -> permit at every acquirer, which
+deletes the hold-and-wait cycle that would scope the yield away from class
+endpoints; §4 below pins the widened scope and the inversion at its own seam.
+What stays scoped out is a job carrying
 per-request adapters — a follower on the shared pipeline would clobber this
 request's adapter state mid-handler, which is a data race no lock order
 fixes.
@@ -29,7 +21,7 @@ Everything runs on the real executor, over the real ``@endpoint`` ->
 on the other end speaking the documented callout wire contract. No model is
 loaded and no inference runs.
 
-pgw#949: every wait here is progress-gated and every assertion is about a
+Every wait here is progress-gated and every assertion is about a
 property — an ordering, or a share of a baseline measured in the same run —
 never about the runner's speed.
 """

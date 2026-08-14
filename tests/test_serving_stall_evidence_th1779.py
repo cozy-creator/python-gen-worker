@@ -8,16 +8,11 @@ endpoint is, not whether it was working. An endpoint whose render is one long
 silent library call froze the counter at its opening `ctx.log` and the `infer`
 family's 300 s window condemned it mid-render.
 
-Measured in production, request `790f6145-5f38-4f1a-b4b7-48836c34f3c4`
-(minimax-h3 0.4.10, four attempts on pod `ptndxsdsy5ws1u`): `job.log` at
-05:40:41.173 -> `request.requeued reason=worker_retryable` at 05:45:41.112;
-05:45:45.161 -> 05:50:45.320; 05:50:49.154 -> 05:55:49.358. Exactly 300 s,
-three times, and `timeout_ms: 2400000` on the request moved none of it.
-`generate` on the SAME endpoint completed with compute_ms 126926 / 188730 /
-207588 / 208320 / 212132 / 219639 / 228918 — the identical silence, just short
-enough to fit.
+The request's own `timeout_ms` moves none of it: the requeue lands at exactly
+300 s, every time, on an endpoint whose successful calls take 127-229 s of the
+identical silence — just short enough to fit.
 
-Two defects, one incident:
+Two defects:
 
 1. the gate had no evidence but the endpoint's chatter -> `_HandlerEvidence`
 2. `_reap_stuck_thread` watched the task the caller had just CANCELLED, so it
@@ -119,7 +114,7 @@ def test_evidence_is_scoped_to_the_request_and_closed_after(
 ) -> None:
     """pgw#894's rule, applied to the in-call loop it left registry-wide: a
     neighbour's counter can neither save nor condemn this request, and the
-    counter dies with the handler (pgw#962)."""
+    counter dies with the handler."""
     other = progress_mod.counter("infer:steps", progress_mod.UNIT_STEPS, owner="request:other")
     other.add(1)
     with executor_mod._HandlerEvidence(OWNER, interval_s=0.01, evidence=lambda: 0.0):

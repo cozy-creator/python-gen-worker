@@ -195,7 +195,7 @@ def test_the_eager_phase_values_are_a_wire_contract() -> None:
         "MANDATORY_LANE_NEEDS_A_CELL": "mandatory_lane_needs_a_cell",
         "CELL_QUARANTINED": "cell_quarantined",
         "MINT_IN_PROGRESS": "mint_in_progress",
-        # pgw#904: the hub's ExecutionSpec ordered eager — the arm obeyed.
+        # The hub's ExecutionSpec ordered eager — the arm obeyed.
         "HUB_ORDERED_EAGER": "hub_ordered_eager",
         "MINT_UNAVAILABLE": "mint_unavailable",
         # pgw#1035 folded the SECOND posture vocabulary in. These four rode the
@@ -209,14 +209,14 @@ def test_the_eager_phase_values_are_a_wire_contract() -> None:
         "NO_COMPILE_DECLARED": "no_compile_declared",
         "UNCOMPILED": "uncompiled",
         "BOOT_ENDED_UNCOMPILED": "boot_ended_uncompiled",
-        # pgw#1082: the two AUTHORING defects a compiled lane can die of, each
+        # The two AUTHORING defects a compiled lane can die of, each
         # named. Before them, a regional target that degraded on its first
         # call recorded NOTHING (the guard-failure path returns early for a
         # JIT intake arm, which names no artifact) and the pod served eager
         # for its whole life reporting `serving_mode=jit_cell`.
         "GRAPH_BREAK": "graph_break",
         "DECLARED_RANGE_EXCEEDED": "declared_range_exceeded",
-        # pgw#1093: the three tokens that separate TWO defects the wire could
+        # The three tokens that separate TWO defects the wire could
         # not tell apart. A target that armed and then broke, and a target
         # that was never installed at all, both left `is_compile_armed` False
         # and every reader falling through to `uncompiled` — same
@@ -228,13 +228,13 @@ def test_the_eager_phase_values_are_a_wire_contract() -> None:
         "COMPILED_DEGRADED": "compiled_degraded",
         "ARMED_TARGET_UNRESOLVED": "armed_target_unresolved",
         "NO_COMPILE_CANDIDATES": "no_compile_candidates",
-        # pgw#1122: a cell this pod resolved BY ITS OWN derived key (§4.27
+        # a cell this pod resolved BY ITS OWN derived key (§4.27
         # boot-adopt) would not arm. Nothing ordered it, so the pod boots as it
         # booted yesterday — where before this token the refusal escaped setup
         # as `worker_function_unavailable reason=compile_cell_failed` and the
         # pod was reaped and replaced (three pods, 2026-08-11).
         "ADOPTED_CELL_REFUSED": "adopted_cell_refused",
-        # pgw#1142 / §4.32 item 4: an OPERATOR ordered this worker eager-only.
+        # An OPERATOR ordered this worker eager-only.
         # The only member of this vocabulary that is a reversible DECISION
         # rather than a condition, and the reason it needs its own value:
         # counting it with `hub_ordered_eager` would merge a standing order

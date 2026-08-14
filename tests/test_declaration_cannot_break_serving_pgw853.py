@@ -1,26 +1,19 @@
-"""pgw#853 — A COMPILE FEATURE MUST NEVER BE ABLE TO BREAK SERVING.
+"""A COMPILE FEATURE MUST NEVER BE ABLE TO BREAK SERVING.
 
-The defect, found by pgw#834: the ONLY mechanism the platform has for making
-an export declaration visible to a pod is importing a module that calls
-``register_export_declaration`` at module scope — and ltx-2.3, qwen-image and
-z-image expressed their mint blockers by RAISING ``MintRefused`` at that same
-module scope. So wiring those three to the AOT lane the way sdxl is wired
-would take the endpoint DOWN AT BOOT. A refusal to MINT was being expressed
-as a refusal to IMPORT; the two have different blast radii, and conflating
-them is the bug.
+An export declaration becomes visible to a pod by importing a module at module
+scope, so a mint refusal RAISED at that same scope takes the endpoint DOWN AT
+BOOT. A refusal to MINT expressed as a refusal to IMPORT conflates two different
+blast radii, and that is the bug.
 
-The invariant this file exists to establish, and the reason it boots a real
-worker rather than asserting on a function: a declaration that refuses must
-cost the AOT lane and NOTHING ELSE. It is written so a FUTURE declaration
-that raises at import cannot take an endpoint down.
+The invariant this file establishes, and the reason it boots a real worker
+rather than asserting on a function: a declaration that refuses must cost the
+AOT lane and NOTHING ELSE, so a FUTURE declaration that raises at import cannot
+take an endpoint down.
 
-pgw#1107 retired the mechanism, not the invariant. The refusal used to be a
-THUNK evaluated when the mint asked; every family is now folded onto
-``@endpoint(compile=)``, which takes a ``Compile`` and never a callable, so
-the refusal is DATA (``Compile.blockers``, pgw#1115) and the registry accessor
-cannot raise at all. What survives from the thunk is its construction check —
-an export declaration that names no graph classes has nothing to derive from —
-and that check is asserted here, on the path the decorator actually walks.
+Refusals are DATA (``Compile.blockers``) and the registry accessor cannot raise
+at all. The construction check that survives — an export declaration naming no
+graph classes has nothing to derive from — is asserted here, on the path the
+decorator actually walks.
 
 Deliberately real: ``harness.blocked_declaration`` still raises at module
 scope (the OTHER failure, a declaration file that throws for any reason),

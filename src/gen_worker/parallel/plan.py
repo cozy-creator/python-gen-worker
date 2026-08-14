@@ -2,14 +2,14 @@
 
 Every collective is a rendezvous. gen-worker is full of per-rank adaptive
 decisions that read *this card's* measured free VRAM: the fit ladder, degraded
-mode (ie#468), residency LRU, compile arm/disarm, ``gate_functions``. Any
+mode, residency LRU, compile arm/disarm, ``gate_functions``. Any
 control-flow difference between ranks either
 
 - **hangs** — a different number of collectives, or
 - **silently corrupts** — the same collectives over different weights. This is
   the nastier one (the LoRA attach case fails quietly, not loudly).
 
-**Ruling (pgw#748 §5.4): rank 0 decides, broadcasts the decision, and every
+**Ruling: rank 0 decides, broadcasts the decision, and every
 rank obeys it unconditionally — including obeying a decision that is wrong for
 its own card. A rank that cannot honour the broadcast fails the WHOLE GROUP
 loudly; it never adapts locally.**
@@ -62,7 +62,7 @@ class GroupPlan:
     # quantize the same logical tensor differently. Rowwise scales are
     # per-token, hence shard-invariant.
     gemm_mode: str = ""
-    # The ie#468 degraded-mode plan, or "" for the undegraded ladder rung.
+    # The degraded-mode plan, or "" for the undegraded ladder rung.
     degraded_plan: str = ""
     # Compile arm/disarm must be collective: a group where rank 0 armed and
     # rank 1 fell back to eager runs two different graphs.
@@ -105,13 +105,12 @@ class GroupPlan:
     def assert_agrees(self, other: "GroupPlan", *, rank: int) -> None:
         """A follower's locally-derived view against rank 0's delivered plan.
 
-        Live in production since pgw#774: every follower derives its own
-        group facts from its own materialized pipeline and holds them against
-        the plan the arm command carried — a disagreement (mismatched card,
-        different toolchain) fails the group loudly. The old
-        ``broadcast_plan`` collective is gone: the plan rides the command
-        channel with the BootPlan, so plan delivery can neither hang nor
-        desynchronize a process group.
+        Every follower derives its own group facts from its own materialized
+        pipeline and holds them against the plan the arm command carried — a
+        disagreement (mismatched card, different toolchain) fails the group
+        loudly. There is deliberately no ``broadcast_plan`` collective: the plan
+        rides the command channel with the BootPlan, so plan delivery can
+        neither hang nor desynchronize a process group.
         """
         mine, theirs = asdict(self), asdict(other)
         for key in sorted(mine):

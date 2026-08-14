@@ -1,11 +1,9 @@
-"""``CompileAxis`` — compile-graph equivalence classes on PAYLOAD FIELDS
-(SDK v2, pgw#647).
+"""``CompileAxis`` — compile-graph equivalence classes on PAYLOAD FIELDS.
 
 What selects a compiled graph is a payload field's equivalence CLASS, not
 its value: CFG==0 traces a batch-1 UNet graph, CFG!=0 traces batch-2
-(cond+uncond). v2 therefore annotates the FIELD with its partition instead
-of duplicating a value list onto the decorator
-(``Compile(guidance_scales=...)`` is deleted)::
+(cond+uncond). The FIELD is annotated with its partition, rather than a value
+list being duplicated onto the decorator::
 
     class In(msgspec.Struct):
         guidance_scale: Annotated[float, CompileAxis(classes=(
@@ -23,8 +21,7 @@ lambdas).
 
 ``classes="enum"`` derives the partition from the field's type: every
 member of a ``Literal[...]``/``StringEnum`` field is its own class, warm ==
-the member value (``aspect_ratio`` was always such an axis; now it is
-labeled as one).
+the member value.
 """
 
 from __future__ import annotations

@@ -15,8 +15,6 @@ Connects to the running serve via ``./.gen-worker.sock`` (override ``--socket``)
 sends one NDJSON request ``{"function": ..., "payload": ...}``, reads one NDJSON
 response, and prints the result to stdout. Exits non-zero with a clear stderr
 message if no serve is running or the request errored.
-
-The full design lives in ``progress.json`` issue #340.
 """
 
 from __future__ import annotations
@@ -340,7 +338,7 @@ def _send_request(
             if not chunk:
                 break
             if len(buf) + len(chunk) > sockaddr.MAX_NDJSON_LINE_BYTES:
-                # pgw#1013: the same bound the server applies to the request
+                # The same bound the server applies to the request
                 # line, applied to the response — a serve process that never
                 # sends `\n` must not grow this buffer without end.
                 raise run_mod._UsageError(

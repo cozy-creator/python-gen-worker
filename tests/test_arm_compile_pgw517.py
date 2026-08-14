@@ -386,7 +386,7 @@ def test_self_loaded_w8a8_pipeline_emits_exact_target_and_requires_cell_fence(
 
     def _mint_enable(pipe, cfg, cache_dir=None, artifact=None, publisher=None,
                      delegate=None, delivered_ref="", delivered_digest=""):
-        # pgw#904: the advertised identity comes from the worker's OWN mint
+        # The advertised identity comes from the worker's OWN mint
         # (delivered-cell selection is deleted).
         _fake_enable(pipe, cfg, cache_dir, artifact)
         return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
@@ -407,7 +407,7 @@ def test_self_loaded_w8a8_pipeline_emits_exact_target_and_requires_cell_fence(
 
     async def _go() -> Executor:
         ex = _executor(spec, tmp_path, sent, monkeypatch)
-        # pgw#1148: the w8a8 MANDATE comes from the hub-resolved lane now —
+        # The w8a8 MANDATE comes from the hub-resolved lane now —
         # §1.32(d) deleted the `#fp8-w8a8` ref token that used to assert it.
         ex._model_resolutions = {
             model_ref: (model_ref, "", "fp8-w8a8-dynamic+compiled")}

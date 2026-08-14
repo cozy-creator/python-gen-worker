@@ -10,8 +10,8 @@ Three properties, each previously true on at most ONE of the upload paths:
    part PUT was TERMINAL there (`ArtifactTransferError`), while chunk-CAS had
    re-planned since pgw#1004. Now the media path re-creates the session once.
 3. `fetch_verified` refuses to fetch what it cannot verify — absent, untagged
-   (pgw#871), or disallowed-algorithm digests raise before a byte moves
-   (th#1303 S1), and the in-loop byte cap raises `StreamTooLarge` (pgw#1013).
+, or disallowed-algorithm digests raise before a byte moves
+   (th#1303 S1), and the in-loop byte cap raises `StreamTooLarge`.
 
 The dead credentialed lane is also pinned dead: the hub has ZERO
 `transfer_grant` producers, so `gen_worker.s3_transfer` and the boto3
@@ -41,7 +41,7 @@ from gen_worker.hubio.transport import (
 def test_put_verdict_is_the_one_table() -> None:
     assert put_verdict(200) == PUT_OK
     assert put_verdict(204) == PUT_OK
-    # pgw#1004 C: 403 past expires_at is a re-plan, never a repudiation.
+    # 403 past expires_at is a re-plan, never a repudiation.
     assert put_verdict(403, presign_expired=True) == PUT_EXPIRED
     assert put_verdict(403) == PUT_TERMINAL
     assert put_verdict(400) == PUT_TERMINAL

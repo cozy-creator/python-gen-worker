@@ -1,10 +1,10 @@
 """pgw#1026: a modular tree the CARD holds but the HOST does not must boot.
 
-ie#615's H3 bring-up: a 134.1 GiB tree plus the 8 GiB staging floor against
-116.4 GiB of host RAM refused structurally (``HostRamCapacityError``) on a
-pod whose card story te#171 had already proved. Host RAM bound ~26 GiB
-tighter than VRAM purely because staging was all-or-nothing while the load
-was already component-sequential (pgw#1041). Two halves, both here:
+A 134.1 GiB tree plus the 8 GiB staging floor against 116.4 GiB of host RAM
+refuses structurally (``HostRamCapacityError``) on a pod whose card holds it
+fine. Host RAM binds ~26 GiB tighter than VRAM purely because staging is
+all-or-nothing while the load is already component-sequential. Two halves, both
+here:
 
 * the LOADER places each component as it lands and drops the host copy, so
   the host-RAM high-water mark is one component instead of the tree;
@@ -12,7 +12,7 @@ was already component-sequential (pgw#1041). Two halves, both here:
   refused before the loader gets to run.
 
 Real trees throughout. The loader tests hydrate REAL diffusers modular
-pipelines (the pgw#1036 harness). The admission tests need ie#615's
+pipelines (the pgw#1036 harness). The admission tests need those
 magnitudes, so their trees are real directories of SPARSE files — real
 ``st_size``, real ``os.walk``, real index parsing, no disk cost.
 

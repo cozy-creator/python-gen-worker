@@ -1,10 +1,9 @@
-"""The symbolic-shape facts the export handoff must carry (pgw#998).
+"""The symbolic-shape facts the export handoff must carry.
 
-THE DEFECT, measured on torch 2.13.0+cu130, CPU, by the micro-mint rig.
-``aot_compile_pool`` saves each ``ExportedProgram`` and ``aot_compile_child``
-loads it in another interpreter — the process boundary is the pool's whole
-point. The round trip does not preserve the ShapeEnv's symbol VALUES in the
-form inductor reads them:
+THE DEFECT (torch 2.13.0+cu130). ``aot_compile_pool`` saves each
+``ExportedProgram`` and ``aot_compile_child`` loads it in another interpreter —
+the process boundary is the pool's whole point. The round trip does not
+preserve the ShapeEnv's symbol VALUES in the form inductor reads them:
 
     parent   var_to_val   {s11: 32, s37: 32, s18: 16, s57: 16}
              replacements {s11: 2*s18, s37: 2*s57}
@@ -21,24 +20,21 @@ those keys still resolves — and every other one silently cannot::
 
 **The trigger is a DERIVED symbol, not nonlinearity.** A declaration whose
 dims carry ``multiple_of`` exports each axis as ``2*s18``; a matmul M that
-multiplies two such axes is ``512*s18*s57``, which appears in no key. Measured
-both ways: the same graph with the same product extent and NO ``multiple_of``
-compiles fine across the same round trip (its keys are the bare symbols), and
-the same declaration WITH ``multiple_of`` fails. Nonlinearity is what makes an
-extent stop being a key; the coefficient is what makes the keys wrong.
+multiplies two such axes is ``512*s18*s57``, which appears in no key. The same
+graph with the same product extent and NO ``multiple_of`` compiles fine across
+the same round trip (its keys are the bare symbols). Nonlinearity is what makes
+an extent stop being a key; the coefficient is what makes the keys wrong.
 
-THE FIX, and why it is shaped this way. The parent's ShapeEnv is the ONE
-authority for these values — it is the process that traced the graph. So the
-parent sends them (:func:`symbol_values`) and the child restores them
+THE FIX. The parent's ShapeEnv is the ONE authority for these values — it is
+the process that traced the graph. The parent sends them
+(:func:`symbol_values`) and the child restores them
 (:func:`restore_symbol_values`); nothing re-derives a value, and nothing
 infers one from the serialized expressions. Every save/load site in the mint
-uses this module, so the handoff contract has one spelling — the same
-invariant pgw#993 and pgw#994 settled for the flattening contract.
+uses this module, so the handoff contract has one spelling.
 
 :func:`unhinted_extents` is the safety net: if an extent is still unrealizable
 after the restore, the mint refuses NAMING THE INPUT, THE AXIS AND THE
-DECLARED DIM. ``512*s18*s57`` cost an hour of bisection because it names
-nothing an author wrote.
+DECLARED DIM — ``512*s18*s57`` names nothing an author wrote.
 """
 
 from __future__ import annotations

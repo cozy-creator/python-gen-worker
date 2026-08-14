@@ -36,7 +36,7 @@ T_DISCONNECTED = 6   # empty
 T_FLUSH_ACK = 8      # msgpack {"flushed": bool}
 T_ACTION_RESP = 9    # msgpack {"id": int, "ok": bool, "status": int,
                      #          "body": str, "error": str}
-# pgw#833 (pgw#826 follow-on): written by the parent as soon as it has
+# written by the parent as soon as it has
 # RECORDED a T_BOOT_FATAL verdict. The dying child waits (bounded) for this
 # before exiting, so the parent's respawn decision can never race the frame
 # still sitting in the socket buffer.
@@ -48,7 +48,7 @@ T_WORKER_MSG = 21    # pb.WorkerMessage bytes
 T_PREPEND = 22       # msgpack [pb.WorkerMessage bytes, ...]
 T_FLUSH_REQ = 23     # msgpack {"timeout": float | None}
 T_WATCHDOG = 24      # msgpack {}  (event-loop liveness: the loop is turning)
-# pgw#771: which activity is open, written by a THREAD over a dedicated pipe so
+# Which activity is open, written by a THREAD over a dedicated pipe so
 # a starved event loop cannot silence it. Evidence is NOT carried here — the
 # parent measures the child's CPU/IO itself, because a GIL-starved thread
 # cannot be the decider of its own process's liveness.
@@ -59,7 +59,7 @@ T_LIVENESS = 25      # msgpack {"act": bool, "kind": str}
 # result. msgpack {"id": int, "method": str, "path": str, "query": {..},
 #                  "json": {..}, "timeout": float}
 T_ACTION_REQ = 26
-# pgw#826: a TERMINAL typed boot verdict, sent pre-transport by a child that is
+# a TERMINAL typed boot verdict, sent pre-transport by a child that is
 # about to exit (e.g. the CUDA probe failed). The parent propagates the report
 # on its credential and exits 1 instead of respawning.
 # msgpack {"kind": str, "terminal": bool, "report": {..HardwareReport fields..}}
@@ -99,7 +99,7 @@ class FrameWriter:
 
 def frame_bytes(ftype: int, payload: bytes = b"") -> bytes:
     """One frame as a single buffer — for callers that must write it with one
-    atomic ``os.write`` from a thread (pgw#771's liveness pipe)."""
+    atomic ``os.write`` from a thread (the liveness pipe)."""
     return _HEADER.pack(ftype, len(payload)) + payload
 
 

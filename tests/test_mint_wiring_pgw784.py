@@ -1,26 +1,22 @@
-"""pgw#784: the executor wiring — the delegated route actually runs.
+"""The executor wiring — the delegated mint route actually runs.
 
-Everything else in pgw#784 is reachable in isolation; this is the file that
-proves the serving worker CALLS it, and that the exception contract the
-existing ``_background_mint`` wrapper depends on is preserved exactly.
-
-Four claims, and one of them is a bug this wiring had to fix:
+Proves the serving worker CALLS it, and that the exception contract
+``_background_mint`` depends on is preserved exactly. Four claims:
 
 1. A DELEGATED pending is recorded even though the arm reports ``armed=False``.
-   That is not a detail — the recording gate was `if armed and selection is not
-   None`, so a delegated pending was silently DROPPED and no mint ever ran. The
-   pipe serves eager, so nothing is armed, so `armed` is honestly False; the
-   obligation is still real, it is just owed to a child process.
+   A recording gate of `if armed and selection is not None` silently DROPS it
+   and no mint ever runs: the pipe serves eager, so nothing is armed and
+   `armed` is honestly False, but the obligation is real — owed to a child
+   process.
 2. `_BackgroundMint` carries the two facts a child cannot rediscover — the
    declaring module(s) to walk, and the already-materialized local snapshot
    path per slot (a mint is compute; the child never touches the network).
-3. `_delegated_mint_run` drives a child, adopts, publishes on gw#612's
+3. `_delegated_mint_run` drives a child, adopts, publishes on the
    sibling-coverage rule, and advertises through the SAME phase-4 code the
    in-process route uses.
-4. Its failure modes map onto the wrapper's existing vocabulary:
-   `_MintAbandoned` (stop asked) or plain `Exception` (a failed mint).
-   Serving continues in either. (pgw#1175 deleted `_MintDeclined`: nothing
-   refuses a mint in advance any more — §4.33.)
+4. Its failure modes map onto the wrapper's vocabulary: `_MintAbandoned` (stop
+   asked) or plain `Exception` (a failed mint). Serving continues in either;
+   nothing refuses a mint in advance.
 """
 
 from __future__ import annotations
@@ -57,7 +53,7 @@ SDXL_REF = ModelRef(source="tensorhub", path="harness/sdxl", tag="prod")
 
 
 def _slot(path: str) -> child_contract.MintSlot:
-    """One resolved slot. ``ref`` has no default (pgw#974), so a test cannot
+    """One resolved slot. ``ref`` has no default, so a test cannot
     describe bytes without saying whose they are either."""
     return child_contract.MintSlot(ref=SDXL_REF, path=path)
 
@@ -238,7 +234,7 @@ def test_the_delegated_route_mints_in_a_child_adopts_and_advertises(
     published: List[Any] = []
 
     def _adopt(pipe: Any, pending: Any, artifacts: Any) -> Any:
-        # pgw#1176: the adopt takes the SET the child produced, one artifact
+        # The adopt takes the SET the child produced, one artifact
         # per graph class. A double taking a single Path models a call
         # production does not make — and `Path(a_tuple)` is how that surfaces.
         rows = [Path(a) for a in artifacts]
@@ -261,7 +257,7 @@ def test_the_delegated_route_mints_in_a_child_adopts_and_advertises(
     # A real child produced real bytes, and they were adopted through the
     # delivered-cell path rather than trusted.
     assert adopted and adopted[0].read_bytes() == b"stub-cell-bytes"
-    # gw#612: every sharer is covered, so the cell ships.
+    # Every sharer is covered, so the cell ships.
     assert published == [pending]
     # Phase 4, shared with the in-process route: the target now advertises the
     # worker's OWN key (th#910's self-attested fence).
@@ -319,7 +315,7 @@ def test_shared_holders_mint_one_cell_between_them(
         "installed on one pipeline and only that pipeline serves it")
 
 
-# pgw#1175 / §4.33: `test_a_decline_raises_MintDeclined_so_the_tier_stays_eager`
+# `test_a_decline_raises_MintDeclined_so_the_tier_stays_eager`
 # is DELETED with the exception it named. `_MintDeclined` existed so the
 # wrapper could read "the card had no room" off an EXCEPTION TYPE — a verdict
 # reached before any child ran, from `mint_budget.co_residency`, whose leading
@@ -352,7 +348,7 @@ def test_a_dead_child_raises_a_plain_exception_and_never_advertises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """th#1299 inverted at the wiring level: the mint dies, the worker keeps
-    serving, and nothing unproven is ever advertised (gw#586)."""
+    serving, and nothing unproven is ever advertised."""
     monkeypatch.setenv("MINT_STUB_MODE", "sigkill")
     ex, rec, bg, _pending, _objs = _wired(tmp_path, monkeypatch)
     with pytest.raises(Exception) as err:

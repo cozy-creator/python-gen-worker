@@ -1,4 +1,4 @@
-"""ck6 canonical graph identity (pgw#716).
+"""ck6 canonical graph identity.
 
 The load-bearing test in this file is the RANGE-COLLISION one: pgw#704 measured
 three sdxl exports differing ONLY in declared dynamic range collapsing to one

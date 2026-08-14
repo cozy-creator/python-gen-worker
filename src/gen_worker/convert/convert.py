@@ -1,4 +1,4 @@
-"""Inline conversion dispatch for clone_huggingface / clone_civitai (issue #73).
+"""Inline conversion dispatch for clone_huggingface / clone_civitai.
 
 When the user requests an output dtype the source repo doesn't ship, the
 clone path runs the conversion in-process — the same library code paths
@@ -124,8 +124,8 @@ _INLINE_GGUF_ENCODINGS: frozenset[str] = frozenset({
 # Calibration-required quants. We refuse these inline — they need a calibration
 # dataset and a GPU; running them silently as part of clone would either hang
 # or produce garbage. nvfp4 in particular is NOT producible weight-only: the
-# te#44 quality verdict (sd15, real forward passes through a generic prompt
-# pool) was a hard FAIL, so there is no honest calibration-free nvfp4 path.
+# quality verdict (sd15, real forward passes through a generic prompt pool)
+# was a hard FAIL, so there is no honest calibration-free nvfp4 path.
 # The caller renders any product-specific follow-up guidance from the
 # structured requirement.
 _CALIBRATED_DTYPES: dict[str, DeferredConversionRequirement] = {

@@ -1,18 +1,18 @@
-"""pgw#691: guard-closure classifier fixes, red-verified on real dynamo trees.
+"""Guard-closure classifier fixes, red-verified on real dynamo trees.
 
-The offline audit (tracker 4b37ee8) drove the shipped classifier against 546
-real torch-2.13.0 guard rows and proved the closed world was not closed:
+Three ways the classifier's "closed world" of torch-2.13.0 guard rows was not
+closed:
 
-* P0 — the RelationalGuard family (NO_TENSOR_ALIASING, OBJECT_ALIASING,
+* the RelationalGuard family (NO_TENSOR_ALIASING, OBJECT_ALIASING,
   STORAGE_OVERLAPPING) is attached to INPUT guard managers, but the
-  classifier dispatched on source root first, so every graph with >=2
-  tensor inputs leaked — i.e. every sdxl mint refused.
-* P1 — the enumerated vocabulary mixed python GuardBuilder names into the
-  C++ leaf-class universe the walk yields: 7 real classes unnameable,
-  2 phantoms, SYMBOLIC_SHAPE_GUARD (torch 2.13's shape-env facts) always a
-  LEAK so declared dynamic dims were unmintable.
-* P1 — EQUALS_MATCH against torch singletons (``L['dt'] == torch.float32``)
-  failed ``ast.literal_eval`` and false-positive leaked.
+  classifier must not dispatch on source root first, or every graph with >=2
+  tensor inputs leaks.
+* the enumerated vocabulary must not mix python GuardBuilder names into the
+  C++ leaf-class universe the walk yields: that leaves 7 real classes
+  unnameable, 2 phantoms, and SYMBOLIC_SHAPE_GUARD (torch 2.13's shape-env
+  facts) always a LEAK, so declared dynamic dims are unmintable.
+* EQUALS_MATCH against torch singletons (``L['dt'] == torch.float32``)
+  fails ``ast.literal_eval`` and false-positive leaks.
 
 All probes here are CPU ``backend="eager"`` (dynamo's guard machinery is
 production-identical; only inductor codegen is skipped) — no GPU, no

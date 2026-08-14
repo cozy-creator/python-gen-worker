@@ -55,7 +55,7 @@ def _is_struct(t: Any) -> bool:
 @dataclass(frozen=True)
 class CompileCell:
     """The complete compile-cell configuration one endpoint function
-    declares (SDK v2): the ``Compile`` block enriched with the spec-level
+    declares: the ``Compile`` block enriched with the spec-level
     facts that shape the traced graph family — the decorator-level
     ``lora_bucket`` and the warm guidance representatives derived from the
     payload's ``CompileAxis`` classes. This is the object the compile
@@ -66,27 +66,23 @@ class CompileCell:
     targets: Tuple[str, ...]
     family: str
     regional: bool
-    # This FUNCTION's effective text pin (per-lane, gap #6: a
+    # This FUNCTION's effective text pin (per-lane: a
     # @worker_function(text_len=) override wins over the class Compile's).
     text_len: Optional[int]
     dynamic: Tuple[DynamicDim, ...]
     lora_bucket: int
-    # CLASS-scoped unions (pgw#654 / pgw#647 gap #1): every sibling
-    # function on one class shares one cell family, so the contract facts
-    # digest the UNION across the class's functions — never one function's
-    # own view (per-function digests split the cell: turbo fails closed on
-    # w8a8 lanes). Union is per CLASS only; sibling @endpoint classes keep
-    # their own contracts (two checkpoints = two instances = two cells).
+    # CLASS-scoped unions: every sibling function on one class shares one cell
+    # family, so the contract facts digest the UNION across the class's
+    # functions — never one function's own view (per-function digests split the
+    # cell: turbo fails closed on w8a8 lanes). Union is per CLASS only; sibling
+    # @endpoint classes keep their own contracts (two checkpoints = two
+    # instances = two cells).
     guidance_scales: Tuple[float, ...]
     text_lens: Tuple[int, ...] = ()
-    # pgw#1150: the family's DECLARED numerics band, carried through to the
-    # gate. `numerics_ladder.declared_thresholds` has one caller
-    # (`numerics_probe.probe_cell`) and its `cfg` is always this object, so
-    # before these two fields existed `Compile(numerics_floor=…)` was read by
-    # nobody: every gate on every path scored against the SDK default and
-    # every `threshold_source` said `sdk-default`, sdxl's measured 0.995/0.999
-    # (pgw#812/#814) included. Deliberately NOT in `contract_facts()` below —
-    # a numerics band is not a graph axis and must never move a cell key.
+    # The family's DECLARED numerics band, carried through to the gate — it is
+    # read from this object, so a band that stops here is a band nothing
+    # applies. Deliberately NOT in `contract_facts()` below: a numerics band is
+    # not a graph axis and must never move a cell key.
     numerics_floor: Optional[float] = None
     numerics_warn: Optional[float] = None
 
@@ -98,14 +94,12 @@ class CompileCell:
         """THE ``Compile`` -> ``CompileCell`` map, in one place.
 
         Two call sites build this object — the registry's per-spec
-        :meth:`EndpointSpec.compile_cell` and the local CLI's §4.28 desktop arm
-        — and they differ only in the four enrichments above, which are
-        spec-scoped facts the raw declaration cannot know. Everything else is a
-        straight carry, so a field ADDED to ``Compile`` that one site copied and
-        the other forgot is a whole path silently judged at a default nobody
-        chose. That is not hypothetical: it is exactly what
-        ``numerics_floor``/``numerics_warn`` were before pgw#1150, and one
-        constructor is the fence that keeps the next one from repeating it.
+        :meth:`EndpointSpec.compile_cell` and the local CLI's desktop arm — and
+        they differ only in the enrichments above, which are spec-scoped facts
+        the raw declaration cannot know. Everything else is a straight carry, so
+        a field ADDED to ``Compile`` that one site copied and the other forgot
+        is a whole path silently judged at a default nobody chose. One
+        constructor is the fence against that.
         """
         return cls(
             shapes=tuple(cfg.shapes),
@@ -127,12 +121,10 @@ class CompileCell:
         return (int(self.text_len),) if self.text_len is not None else ()
 
     def contract_facts(self) -> Dict[str, Any]:
-        """Canonical DECLARED compile-contract facts (pgw#647). Since
-        pgw#1059 this is NOT a key-axis input — the exported-cell key reads
-        recorded artifact blocks only. Its one serialized consumer is the
-        SDK v2 manifest's opaque ``shape_contract_digest`` (the wire field
-        name is hub-consumed and deliberately unchanged; the digest value is
-        opaque hub-side)."""
+        """Canonical DECLARED compile-contract facts. NOT a key-axis input —
+        the exported-cell key reads recorded artifact blocks only. Its one
+        serialized consumer is the manifest's opaque
+        ``shape_contract_digest``."""
         return {
             "v": 1,
             "shapes": sorted([int(v) for v in row] for row in self.shapes),
@@ -173,7 +165,7 @@ class EndpointSpec:
     payload_param: str = "payload"
     resources: Resources = field(default_factory=Resources)
     models: Dict[str, Binding] = field(default_factory=dict)  # slot -> binding
-    # Slot-declared entries in `models` (pgw#520): slot -> Slot metadata
+    # Slot-declared entries in `models`: slot -> Slot metadata
     # (selected_by/default_checkpoint). A subset of `models`'s keys — bare
     # bindings have no entry here.
     slots: Dict[str, Slot[Any]] = field(default_factory=dict)
@@ -181,71 +173,71 @@ class EndpointSpec:
     # the handler's derived config schema's @family registration) —
     # precomputed once here so ctx.slots doesn't need EndpointDecl.compile.
     slot_family: Dict[str, str] = field(default_factory=dict)
-    # SDK v2 (pgw#647): the handler's DERIVED config schema — the D in
-    # `ctx: RequestContext[D]`. None when the handler annotates a bare
-    # context. Catalog recipe metadata decodes against this type; code owns
-    # the schema, the catalog owns the values (th#1116).
+    # The handler's DERIVED config schema — the D in `ctx: RequestContext[D]`.
+    # None when the handler annotates a bare context. Catalog recipe metadata
+    # decodes against this type; code owns the schema, the catalog owns the
+    # values.
     defaults_type: Optional[type] = None
-    # SDK v2: DERIVED component tree per introspectable pipeline slot —
+    # DERIVED component tree per introspectable pipeline slot —
     # {slot: {part_name: "weights"|"config"}}. Published into the release
     # manifest at build time (path vocabulary for per-path policy and
     # component-level routing).
     slot_components: Dict[str, Dict[str, str]] = field(default_factory=dict)
-    # SDK v2: compile-graph equivalence classes declared on payload fields
-    # (CompileAxis annotations) — replaces Compile(guidance_scales=...).
+    # Compile-graph equivalence classes declared on payload fields
+    # (CompileAxis annotations).
     payload_axes: Tuple[PayloadAxis, ...] = ()
-    # SDK v2: resident traced LoRA rank bucket (decorator-level; 0 = branchless).
+    # Resident traced LoRA rank bucket (decorator-level; 0 = branchless).
     lora_bucket: int = 0
     runtime: Optional[str] = None
-    compile: Optional[Compile] = None  # opt-in torch.compile spec (#384)
-    # th#826: the function makes endpoint-to-endpoint child calls; emitted
-    # into the discovery manifest so the hub mints the invoke_child grant.
+    compile: Optional[Compile] = None  # opt-in torch.compile spec
+    # The function makes endpoint-to-endpoint child calls; emitted into the
+    # discovery manifest so the hub mints the invoke_child grant.
     child_calls: bool = False
-    # pgw#647: handlers on one live instance run single-flight unless the
-    # class explicitly declared itself re-entrant (mutates no instance state).
+    # Handlers on one live instance run single-flight unless the class
+    # explicitly declared itself re-entrant (mutates no instance state).
     reentrant: bool = False
-    # th#1004 @variant_of: this function is the variant_kind variant of the
-    # sibling function variant_of (both slugs). Empty = not a variant.
+    # @variant_of: this function is the variant_kind variant of the sibling
+    # function variant_of (both slugs). Empty = not a variant.
     variant_of: str = ""
     variant_kind: str = ""
-    # pgw#654: this handler's declared objective contract (from
-    # @worker_function). None = unrestricted / serves either.
+    # This handler's declared objective contract (from @worker_function).
+    # None = unrestricted / serves either.
     objectives: Optional[Tuple[str, ...]] = None
-    # th#1257: this handler's declared serving tasks (@worker_function).
+    # This handler's declared serving tasks (@worker_function).
     # None = undeclared, which resolves NO quant approval hub-side.
     tasks: Optional[Tuple[str, ...]] = None
     distilled: Optional[bool] = None
-    # th#1757: this handler's opt-in reference contract (@worker_function).
+    # This handler's opt-in reference contract (@worker_function).
     # None = it never participates in the platform reference layer.
     accepts_references: Optional[Any] = None
-    # pgw#654 gap #6: this handler's effective text pin
+    # This handler's effective text pin
     # (@worker_function(text_len=) else the class Compile.text_len).
     text_len: Optional[int] = None
-    # pgw#654 derived warm plan: per-function non-axis warm overrides
+    # Per-function non-axis warm overrides
     # (validated at walk time; require a recorded warm_reason).
     warm_overrides: Dict[str, Any] = field(default_factory=dict)
     warm_reason: str = ""
-    # pgw#748 phase 1: which EXECUTION GROUP this dispatch runs on (th#1285
-    # `G×D` packing). Never authored and never discovered — the executor
-    # derives it from the delivered topology and the job's rank-0 device, then
-    # clones the spec so the group rides the identity every downstream
-    # consumer already threads. Two groups are two cards, so they are two
-    # resident instances; folding the ordinal into ``instance_key`` is what
-    # makes the whole per-group registry fall out of machinery that already
-    # keys one record per (class, resolved binding set). Omitted from the key
-    # at 0 so every single-group pod's keys stay byte-identical.
+    # Which EXECUTION GROUP this dispatch runs on. Never authored and never
+    # discovered — the executor derives it from the delivered topology and the
+    # job's rank-0 device, then clones the spec so the group rides the identity
+    # every downstream consumer already threads. Two groups are two cards, so
+    # they are two resident instances; folding the ordinal into
+    # ``instance_key`` is what makes the whole per-group registry fall out of
+    # machinery that already keys one record per (class, resolved binding set).
+    # Omitted from the key at 0 so every single-group pod's keys stay
+    # byte-identical.
     device_group_ordinal: int = 0
-    # pgw#654 CLASS-scoped unions (set by extract_specs over the class's
-    # sibling specs; a function-shaped endpoint unions with itself).
+    # CLASS-scoped unions (set by extract_specs over the class's sibling specs;
+    # a function-shaped endpoint unions with itself).
     guidance_union: Tuple[float, ...] = ()
     text_lens: Tuple[int, ...] = ()
-    # th#1050: declared lane bodies this endpoint's code branches on
-    # (ctx.lane). Empty = platform-managed only.
+    # Declared lane bodies this endpoint's code branches on (ctx.lane).
+    # Empty = platform-managed only.
     handles: Tuple[str, ...] = ()
-    # th#1051: declared compute-time formula for this handler; None =
-    # undeclared (scalar EWMA fall-through hub-side).
+    # Declared compute-time formula for this handler; None = undeclared
+    # (scalar EWMA fall-through hub-side).
     runtime_formula: Optional["RuntimeFormula"] = None
-    # th#1087: declared config parameters (ctx.config) + declared env names.
+    # Declared config parameters (ctx.config) + declared env names.
     config: Tuple[ConfigParam, ...] = ()
     env: Tuple[str, ...] = ()
     module: str = ""              # declaring module
@@ -256,8 +248,8 @@ class EndpointSpec:
         return bool(self.resources.gpu)
 
     def compile_cell(self) -> Optional[CompileCell]:
-        """The enriched compile-cell configuration (SDK v2), or None for
-        uncompiled functions. This — never the raw ``Compile`` — is what the
+        """The enriched compile-cell configuration, or None for uncompiled
+        functions. This — never the raw ``Compile`` — is what the
         executor hands the compile machinery."""
         cfg = self.compile
         if cfg is None:
@@ -280,7 +272,7 @@ class EndpointSpec:
         """Specs sharing this key share one class instance (same class + same
         resolved binding set + same execution group). The group ordinal is
         elided at 0, so a single-group worker's keys are byte-identical to
-        every key this worker has ever computed (pgw#748)."""
+        every key this worker has ever computed."""
         base = (self.cls, tuple(sorted(self.models.items())))
         return base if not self.device_group_ordinal else (
             base + (("device_group", int(self.device_group_ordinal)),)
@@ -290,11 +282,10 @@ class EndpointSpec:
 def _derive_defaults_type(
     owner: str, method: Callable[..., Any], ctx_param: str
 ) -> Optional[type]:
-    """SDK v2 (pgw#647): the D in ``ctx: RequestContext[D]`` — the handler's
-    derived per-model config schema (``GenerationDefaults`` subclass).
-    ``None`` for a bare/unannotated context parameter. The annotation is the
-    ONLY declaration site: ``Slot(default_config=...)`` is deleted; the
-    catalog owns values (th#1116), code owns this schema."""
+    """The D in ``ctx: RequestContext[D]`` — the handler's derived per-model
+    config schema (``GenerationDefaults`` subclass). ``None`` for a
+    bare/unannotated context parameter. The annotation is the ONLY declaration
+    site; the catalog owns values, code owns this schema."""
     try:
         hints = typing.get_type_hints(method, include_extras=False)
     except Exception:
@@ -346,7 +337,7 @@ def _inspect_return(owner: str, ret: Any) -> tuple[str, Optional[type], Optional
 
 
 def _is_selected_by_annotation(ann: Any) -> bool:
-    """pgw#524 item 5: a ``selected_by`` payload field must type as plain
+    """A ``selected_by`` payload field must type as plain
     ``str``, or as ``str | ModelRef`` — the wire also accepts a structured
     :class:`~gen_worker.api.binding.ModelRef` object (a client-supplied
     BYOM pick), which the hub resolves to a concrete ref before the worker
@@ -363,14 +354,13 @@ def _is_selected_by_annotation(ann: Any) -> bool:
 def _validate_slot_selected_by(
     owner: str, slots: Dict[str, Slot[Any]], payload_type: type
 ) -> None:
-    """pgw#520: a Slot's ``selected_by`` must name a plain-``str`` (or
-    ``str | ModelRef``, pgw#524 item 5) field on THIS handler's payload —
-    validated per-handler (not per-class) because one ``models=`` decl can
-    be shared by methods with different payload types. ``selected_by``
-    slots may omit ``default_checkpoint`` (pgw#617: deploy-time bindings
-    seed the hub mapping — tensorhub relaxed the mirrored registration
-    rule in th#980). Fails at spec-construction time (discovery walk /
-    CLI collection / executor boot), never at first invoke."""
+    """A Slot's ``selected_by`` must name a plain-``str`` (or
+    ``str | ModelRef``) field on THIS handler's payload — validated
+    per-handler (not per-class) because one ``models=`` decl can be shared by
+    methods with different payload types. ``selected_by`` slots may omit
+    ``default_checkpoint`` (deploy-time bindings seed the hub mapping). Fails
+    at spec-construction time (discovery walk / CLI collection / executor
+    boot), never at first invoke."""
     if not slots:
         return
     try:
@@ -402,7 +392,7 @@ def _validate_compile_arms(
     compile: Optional[Compile],
     models: Dict[str, Binding],
 ) -> None:
-    """pgw#517: ``compile=`` only ever arms automatically on a setup() slot
+    """``compile=`` only ever arms automatically on a setup() slot
     the WORKER loads itself (a pipeline-class annotation exposing
     ``from_pretrained`` — mirrors the executor's annotation branch in
     ``_injection_kwargs``). An endpoint whose setup() model slots are ALL
@@ -489,34 +479,26 @@ def _validate_slot_layout_keys(
 def _slot_is_family_agnostic(
     name: str, slot: Slot[Any], slots: Dict[str, Slot[Any]],
 ) -> bool:
-    """pgw#747: has this slot opted into the family vocabulary at all?
+    """Has this slot opted into the family vocabulary at all?
 
     An AUXILIARY slot declared as a bare type — ``Slot(RifeInterpolatorPipeline)``
     with no ``Hub(...)``, no ref — says nothing about architecture. A frame
     interpolator and an upscaler consume decoded RGB frames and know nothing
     about the model that produced them; ONE mirror is meant to serve every
-    consumer. Stamping such a slot with the FUNCTION's family (which is what
-    happened, unconditionally, to every slot) makes an assertion the endpoint
-    never made — and the hub's th#586 gate then fails closed against it,
-    because a family-agnostic artifact classifies as nothing:
-
-        binding_incompatible: image-to-video/interpolator: slot declares family
-        "wan-2.2-i2v-a14b" but the artifact's family is undeterminable
-
-    That blocked every wan-2.2 and ltx-video-2.3 release carrying the `fps` or
-    `resolution` preset — manifest-wide, so it also blocked the functions that
-    do not use them. No catalog-side stamp fixes it honestly: `Compatible`
-    compares architecture ROOTS, so stamping `rife-4.25` as `wan22` would be
-    FALSE and would break the moment ltx shares the same mirror, which is the
-    design. The gate already no-ops on an empty slot family, so emitting "" is
-    the whole fix.
+    consumer. Stamping such a slot with the FUNCTION's family makes an
+    assertion the endpoint never made, and the hub's compatibility gate then
+    fails closed against it because a family-agnostic artifact classifies as
+    nothing. No catalog-side stamp fixes it honestly: compatibility compares
+    architecture ROOTS, so stamping `rife-4.25` as `wan22` would be FALSE and
+    would break the moment ltx shares the same mirror, which is the design.
+    The gate no-ops on an empty slot family, so emitting "" is the fix.
 
     TWO conditions, not one. "No ref" alone would also empty the family of a
     deliberately DEFAULTLESS root slot — a real model slot bound at deploy time
-    through `?bindings=` (krea-2 ships exactly that shape) — silently dropping
-    the LoRA-overlay policing pgw#523 added it for. The root slot is the
-    function's own model and keeps the function's family whether or not it
-    names a ref; only a non-root, ref-less slot is family-agnostic.
+    through `?bindings=` — silently dropping the LoRA-overlay policing. The
+    root slot is the function's own model and keeps the function's family
+    whether or not it names a ref; only a non-root, ref-less slot is
+    family-agnostic.
     """
     if slot.default_checkpoint is not None:
         return False
@@ -561,10 +543,10 @@ def _spec_for_handler(
         )
     _validate_slot_selected_by(owner, slots, payload_type)
     _validate_compile_arms(owner, cls, decl.compile, models)
-    # SDK v2 lint: sibling-as-part declarations are deleted, not migrated.
+    # Sibling-as-part declarations are refused, not migrated.
     validate_no_sibling_parts(owner, slots, models)
-    # SDK v2: the config schema derives from the handler's context
-    # annotation (`ctx: RequestContext[D]`), never from a Slot kwarg.
+    # The config schema derives from the handler's context annotation
+    # (`ctx: RequestContext[D]`), never from a Slot kwarg.
     defaults_type = _derive_defaults_type(owner, method, ctx_param)
     defaults_family = str(
         getattr(defaults_type, "__gen_worker_family__", "") or ""
@@ -583,16 +565,16 @@ def _spec_for_handler(
         )
         for name, slot in slots.items()
     }
-    # SDK v2: derive each introspectable pipeline slot's component tree.
+    # Derive each introspectable pipeline slot's component tree.
     slot_components = {
         name: tree for name, tree in (
             (name, derive_components(slot.pipeline_cls))
             for name, slot in slots.items()
         ) if tree
     }
-    # §1.33 / pgw#1143: the DEMAND's component keys are checked against the
-    # tree that was just derived. A key matching nothing is the failure mode
-    # to prevent — it reads as a declaration and gates nothing.
+    # The DEMAND's component keys are checked against the tree just derived. A
+    # key matching nothing is the failure mode to prevent — it reads as a
+    # declaration and gates nothing.
     _validate_slot_layout_keys(owner, slots, slot_components)
     payload_axes = extract_payload_axes(owner, payload_type)
     ret = hints.get("return")
@@ -622,16 +604,15 @@ def _spec_for_handler(
         if variant_of_slug == slug:
             raise ValueError(f"{owner}: @variant_of cannot target itself")
 
-    # th#1051: resolve + validate this handler's declared compute-time
-    # formula now that the payload type is known. pgw#654 gap #4: fields
-    # may resolve against the derived defaults schema (catalog recipe),
-    # not only numeric wire defaults.
+    # Resolve + validate this handler's declared compute-time formula now that
+    # the payload type is known. Fields may resolve against the derived
+    # defaults schema (catalog recipe), not only numeric wire defaults.
     runtime_formula = decl.runtime_formula.get(attr_name)
     if runtime_formula is not None:
         runtime_formula.validate_for_payload(
             payload_type, owner, defaults_type=defaults_type)
 
-    # pgw#654: per-function facts declared at the definition site.
+    # Per-function facts declared at the definition site.
     wf: Optional[WorkerFunctionDecl] = getattr(method, WF_ATTR, None)
     warm_overrides: Dict[str, Any] = {}
     if wf is not None and wf.warm:
@@ -742,20 +723,20 @@ def extract_specs(obj: Any, *, walked_module: str = "") -> List[EndpointSpec]:
             resources=decl.resources, walked_module=walked,
         ))
     out = _apply_class_unions(out)
-    # gw#470: boot warmup is default-on for GPU inference classes — fail at
-    # walk time (discovery/CI/boot), never at first request.
+    # Boot warmup is default-on for GPU inference classes — fail at walk time
+    # (discovery/CI/boot), never at first request.
 
     validate_class_warmup(cls, decl, out)
     return out
 
 
 def _apply_class_unions(specs: List[EndpointSpec]) -> List[EndpointSpec]:
-    """pgw#654 / pgw#647 gap #1: sibling functions of ONE class share one
-    cell family, so the class's compile-contract warm facts are the UNION
-    across its functions — the guidance warm set (a distilled sibling with
-    no guidance field contributes nothing yet consumes the same cell) and
-    the per-lane text pins (gap #6: qwen t2i 512 / edit 1024 digest as one
-    dual-pin contract). Scope is exactly one class — sibling @endpoint
+    """Sibling functions of ONE class share one cell family, so the class's
+    compile-contract warm facts are the UNION across its functions — the
+    guidance warm set (a distilled sibling with no guidance field contributes
+    nothing yet consumes the same cell) and the per-lane text pins (qwen t2i
+    512 / edit 1024 digest as one dual-pin contract). Scope is exactly one
+    class — sibling @endpoint
     CLASSES keep divergent contracts by design (ernie's base/turbo are two
     checkpoints, two instances, two cells). Compile-less classes pass
     through untouched."""
@@ -782,19 +763,15 @@ def _apply_class_unions(specs: List[EndpointSpec]) -> List[EndpointSpec]:
 
 
 def register_declared_exports(specs: Sequence[EndpointSpec]) -> Tuple[str, ...]:
-    """pgw#805: a ``compile=`` block that declares an EXPORT CONTRACT *is* its
-    family's export declaration — register it at collection time.
+    """A ``compile=`` block that declares an EXPORT CONTRACT *is* its family's
+    export declaration — register it at collection time.
 
     Without this, ``export_declaration(family)`` resolves only when somebody
     imports a separate declaration module by name, which is a MINT-REQUEST
     concept (``aot_declaration.load_declaration``). A serving pod loads the
-    endpoint and nothing else, so `aot_mint.mint` refused every family on
-    "no registered export declaration" before it could export a single graph
-    — one half of why no serving pod has ever produced an AOT cell. The
-    declaration now travels with the endpoint that owns it, which is the
-    end state `sdxl/aot/declaration.py`'s own docstring names ("the
-    endpoint's SDK-bump lane folds these fields into the ``@endpoint
-    compile=`` block and deletes this file").
+    endpoint and nothing else, so `aot_mint.mint` would refuse every family on
+    "no registered export declaration" before exporting a single graph. The
+    declaration travels with the endpoint that owns it.
 
     Never raises: a conflicting registration is a real defect, but it is the
     AOT lane's defect and must not take down endpoint collection (which every
@@ -809,7 +786,7 @@ def register_declared_exports(specs: Sequence[EndpointSpec]) -> Tuple[str, ...]:
             continue
         seen.add(id(compile_decl))
         family = str(getattr(compile_decl, "family", "") or "").strip()
-        # pgw#1107: the same INTENT question the decorator asks — a dynamo-only
+        # The same INTENT question the decorator asks — a dynamo-only
         # `compile=` block declares no export contract and is registered
         # nowhere; anything reaching for the export vocabulary is held to
         # carrying classes by `register_export_declaration`.

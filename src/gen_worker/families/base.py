@@ -1,6 +1,6 @@
-"""Shared per-family inference-defaults vocabulary (pgw#520 / th#767 / th#767b).
+"""Shared per-family inference-defaults vocabulary.
 
-The MODEL SET is catalog, not code (th#767) — but the SHAPE of a family's
+The MODEL SET is catalog, not code — but the SHAPE of a family's
 inference defaults/constraints (scheduler choices, step counts, guidance
 clamps, ...) is still a code-side contract: it is what lets tensorhub
 validate REPO METADATA at PUT time (fail at config, not at invoke) and what
@@ -19,15 +19,11 @@ endpoint that serves it::
         negative: str = ""
         max_guidance: float | None = None  # a CLAMP, never a wire reshape
 
-``@family(...)`` self-registers the class in the module-level registry
-(keyed by ``(name, kind)`` — see below) — :func:`family_for` /
-:func:`family_registry` look it up by name/kind, the way
-:class:`~gen_worker.api.slot.Slot`'s resolution chain does when repo
-metadata JSON arrives with no code fallback to decode against.
+``@family(...)`` self-registers the class in the module-level registry keyed by
+``(name, kind)``; :func:`family_for` / :func:`family_registry` look it up.
 
-**Kind axis (th#767b / pgw#516 settled foundation).** A family name has (up
-to) two vocabularies: the CHECKPOINT recipe (``kind="checkpoint"``, the
-default — every existing ``@family("sdxl")`` call is unaffected) and the
+**Kind axis.** A family name has (up to) two vocabularies: the CHECKPOINT
+recipe (``kind="checkpoint"``, the default) and the
 LORA overlay's recipe OPINIONS (``kind="lora"``), a separate typed struct
 sharing the same family name::
 
@@ -38,20 +34,18 @@ sharing the same family name::
         steps: int | None = None
         ...
 
-Same family, separate KIND axis rather than a second family namespace
-(``"sdxl-lora"``) — a LoRA targets the SAME architecture root as its base
-checkpoint (``modelfamily.Root`` on the tensorhub side), so keying the
-vocabulary registry by ``(family, kind)`` keeps that identity explicit
-instead of inventing a parallel family name per kind. tensorhub's schema
-registry mirrors this: ``<root>.schema.json`` (checkpoint) vs
-``<root>.lora.schema.json`` (lora) — see ``export_json_schema``.
+A separate KIND axis rather than a second family namespace (``"sdxl-lora"``):
+a LoRA targets the SAME architecture root as its base checkpoint
+(``modelfamily.Root`` on the tensorhub side), so keying by ``(family, kind)``
+keeps that identity explicit. tensorhub's schema registry mirrors this:
+``<root>.schema.json`` (checkpoint) vs ``<root>.lora.schema.json`` (lora) —
+see ``export_json_schema``.
 
 A DECORATOR, not a ``class X(GenerationDefaults, family="sdxl")`` class kwarg:
-msgspec's own ``StructMeta`` does not forward unrecognized class keywords to
-``__init_subclass__`` (verified: it raises ``TypeError`` on an unknown
-kwarg), and mypy cannot type-check a metaclass computed at runtime
-(``type(msgspec.Struct)``) as a valid base for a wrapping metaclass either —
-both dead ends given the "mypy 0" gate, hence the decorator.
+msgspec's ``StructMeta`` does not forward unrecognized class keywords to
+``__init_subclass__`` (it raises ``TypeError`` on an unknown kwarg), and mypy
+cannot type-check a metaclass computed at runtime (``type(msgspec.Struct)``) as
+a base for a wrapping metaclass.
 
 ``forbid_unknown_fields=True`` on the base is what makes
 :func:`export_json_schema` emit ``additionalProperties: false`` — the
@@ -67,8 +61,8 @@ from typing import Any, Callable, Dict, Optional, Tuple, Type, TypeVar
 import msgspec
 
 # Keyed (family_name, kind) — "checkpoint" | "lora" (see module docstring's
-# kind-axis section). Kind is normalized/defaulted to "checkpoint" so every
-# pre-th#767b ``@family("sdxl")`` call site is unaffected.
+# kind-axis section). Kind is normalized/defaulted to "checkpoint", so a bare
+# ``@family("sdxl")`` registers the checkpoint recipe.
 _REGISTRY: Dict[Tuple[str, str], Type["GenerationDefaults"]] = {}
 
 KIND_CHECKPOINT = "checkpoint"
@@ -100,7 +94,7 @@ class GenerationDefaults(
     exported JSON schema is closed (``additionalProperties: false``): a
     contract, not a suggestion.
 
-    **Positional construction (pgw#524):** this base's own ``kw_only=True``
+    **Positional construction:** this base's own ``kw_only=True``
     only marks ITS field (``schema_version``) keyword-only — msgspec's
     ``kw_only`` does not propagate to a subclass's own fields. A preset row
     like ``SdxlDefaults("euler_a", 28, 6.0)`` (declaration order) works
@@ -122,8 +116,7 @@ class GenerationDefaults(
     @property
     def kind(self) -> str:
         """This instance's registered kind (``"checkpoint"`` | ``"lora"``);
-        ``"checkpoint"`` for a subclass that never got a kind (the default,
-        and every pre-th#767b family)."""
+        ``"checkpoint"`` for a subclass that never got a kind."""
         return str(getattr(type(self), "__gen_worker_kind__", "") or KIND_CHECKPOINT)
 
 
@@ -133,8 +126,8 @@ def family(name: str, *, kind: str = KIND_CHECKPOINT) -> Callable[[Type[F]], Typ
     validation / a :class:`~gen_worker.api.slot.Slot`'s ``Compile(family=)``
     reconciliation all look it up by.
 
-    ``kind`` defaults to ``"checkpoint"`` — every existing ``@family("sdxl")``
-    call is unaffected. A LoRA overlay's vocabulary registers under the SAME
+    ``kind`` defaults to ``"checkpoint"``. A LoRA overlay's vocabulary
+    registers under the SAME
     family name with ``kind="lora"`` (see the module docstring's kind-axis
     section) — it is a separate struct, not a merge of the checkpoint one.
     """
@@ -152,14 +145,12 @@ def family(name: str, *, kind: str = KIND_CHECKPOINT) -> Callable[[Type[F]], Typ
         key = (fam, knd)
         existing = _REGISTRY.get(key)
         if existing is not None and existing is not cls:
-            # pgw#1161: a RE-IMPORT is not a collision. Registration is an
-            # import side effect, so re-importing a declaration module builds a
-            # NEW class object for the same declaration — same module, same
-            # qualname — and an identity check alone reads that as two families
-            # fighting over one name. It is the same one, twice, and the
-            # replacement is what the caller asked for. This was 66 of ie#690's
-            # failures: endpoint suites re-import their declaration modules
-            # between tests and hit "already registered" on their own.
+            # A RE-IMPORT is not a collision. Registration is an import side
+            # effect, so re-importing a declaration module builds a NEW class
+            # object for the same declaration — same module, same qualname —
+            # and an identity check alone reads that as two families fighting
+            # over one name. It is the same one, twice, and the replacement is
+            # what the caller asked for.
             #
             # A different module, or a different class in the same module, is
             # still a genuine collision and still refused: that is two

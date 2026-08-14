@@ -1,31 +1,26 @@
-"""Per-phase BOOT telemetry (pgw#764 / th#1293).
+"""Per-phase BOOT telemetry.
 
-Cold-boot time is the number the hub prices every capacity buy against and the
-number every "why was TTFR five minutes" investigation has had to hand-derive
-from log archaeology. The hub can already see the boot from OUTSIDE — pod
-create -> worker hello -> first assignment — but those bounds say nothing about
-which of weights fetch, cell fetch, cell load or warmup owns the seconds
-INSIDE. Only the worker knows that, and today it dies with the pod.
+The hub can see a boot from OUTSIDE — pod create -> worker hello -> first
+assignment — but those bounds say nothing about which of weights fetch, cell
+fetch, cell load or warmup owns the seconds INSIDE. Only the worker knows.
 
 This module is the boot-time analogue of :mod:`gen_worker.stage_timing` (the
-per-REQUEST measurement spine, th#1111), and it deliberately copies that
-module's two trustworthiness properties:
+per-REQUEST measurement spine), and it deliberately copies that module's two
+trustworthiness properties:
 
 * **It reconciles.** Spans nest, and a nested span's time is charged to the
   CHILD, never twice. So measured phases + named segments + ``residual`` ==
-  the whole boot window. A boot instrument that reports 120s of phases inside
-  a 190s boot cannot answer the question it exists for.
+  the whole boot window.
 
-  pgw#1087 made that a UNION rather than a sum. Once phases decompose per
+  The reconciliation is a UNION, not a sum: once phases decompose per
   component they run concurrently, and a summing reconciliation "explains"
   3,338 ms of a 909 ms fetch — closing the ladder by over-counting, which is
   worse than visibly not closing it. ``measured_ms`` is the wall time covered
   by at least one span; the gap between that and the exclusive sum is reported
-  as ``concurrency_ms``, because "how parallel was this boot" is the question
-  the per-component split exists to answer.
+  as ``concurrency_ms``.
 * **It classifies.** Every phase is FETCH, COMPILE, LOAD or SETUP, so
   "this release's boots are network-bound" is a query, not a hunch.
-* **It NAMES its residual** (pgw#1087). Two windows no span can cover — the
+* **It NAMES its residual**. Two windows no span can cover — the
   interpreter+import wall before the recorder exists, and the hub handshake in
   which the worker deliberately does no local work — are named segments, not
   an unexplained lump. What survives both is the honest hole.
@@ -40,9 +35,9 @@ events on every reconnect. So this module holds its rows and flushes them once
 a sink is bound; rows recorded before that survive, in order, and a phase
 recorded during a disconnect is still delivered on the next connect.
 
-Rows are OPENED at phase start and CLOSED at phase end (th#1269's build-phase
-shape), so a pod that dies mid-boot still shows exactly where its time went —
-an open row with no terminal is itself the finding.
+Rows are OPENED at phase start and CLOSED at phase end, so a pod that dies
+mid-boot still shows exactly where its time went — an open row with no
+terminal is itself the finding.
 """
 
 from __future__ import annotations
@@ -64,52 +59,37 @@ from .pb import worker_scheduler_pb2 as pb
 logger = logging.getLogger(__name__)
 
 # --- phase vocabulary (wire-shared with tensorhub's bootphase.go) -----------
-# pgw#924: EXACTLY eight values, and every one of them has a production
-# producer on the shipping path. The previous vocabulary declared seventeen;
-# eight of those (`process_start`, `env_seal`, `manifest_load`,
-# `cache_preflight`, `cuda_probe`, `cell_load`, `first_request`, and — as a
-# phase — `cell_arm`) were constructed only by unit tests, and
-# `warmup_iteration` was wired to a body that never ran. A declared phase with
-# no producer is not "coverage we have not gotten to": every reader of the
-# ladder saw a name that could only ever report nothing, which is a default
-# read as a fact. `warm_complete` is deleted for a different and stronger
-# reason — live rows reach 4,863,664 ms, i.e. eighty minutes after the boot it
-# was supposedly a phase of. It is a serving-tier disposition, not a boot
-# phase, and it now lives only where it belongs (the mint-goal latch and the
-# `self_mint_skipped` backstop).
+# Every name here has a production producer on the shipping path. A declared
+# phase with no producer is not "coverage we have not gotten to": every reader
+# of the ladder sees a name that can only ever report nothing, which is a
+# default read as a fact.
 PHASE_HELLO = "hello"
 PHASE_WEIGHTS_FETCH = "weights_fetch"
 PHASE_PIPELINE_LOAD = "pipeline_load"
-#: pgw#797: the warmup forwards, split OUT of `pipeline_load` and nested under
-#: it, so `pipeline_load` becomes weights->VRAM by subtraction and "what does a
-#: cell save on warmup" is a column instead of an estimate.
+#: The warmup forwards, split OUT of `pipeline_load` and nested under it, so
+#: `pipeline_load` becomes weights->VRAM by subtraction and "what does a cell
+#: save on warmup" is a column instead of an estimate.
 #:
-#: pgw#924: emitted ONLY when warm work actually runs. It used to bracket the
-#: warm call unconditionally, and on the shipping path — where most setup slots
-#: plan no warm units at all — that produced 240 live rows of `duration_ms=0`.
-#: A skipped warmup now emits no row, because "nobody warmed" and "warming was
-#: free" are different answers and only one of them was ever true.
+#: Emitted ONLY when warm work actually runs: a skipped warmup emits no row,
+#: because "nobody warmed" and "warming was free" are different answers.
 PHASE_WARMUP = "warmup"
 PHASE_CELL_FETCH = "cell_fetch"
-#: pgw#923/#924: the arm of ONE delivered or discovered cell. Its duration is
-#: the same quantity the hub stores as the adoption's `duration_ms`, measured
-#: once, in the one place that does the arming.
+#: The arm of ONE delivered or discovered cell. Its duration is the same
+#: quantity the hub stores as the adoption's `duration_ms`, measured once, in
+#: the one place that does the arming.
 PHASE_CELL_ARM = "cell_arm"
 PHASE_FIRST_REQUEST_SERVABLE = "first_request_servable"
 
-# --- pgw#1087: the per-COMPONENT decomposition -----------------------------
-# Paul, 2026-08-10: "you should be measuring per-component of cold-boot, not
-# just measuring a granular 'whole cold boot was 6.2 mins for some reason'."
-# The eight phases above are LEG-grade: they answer "fetch or compile" and
-# nothing finer, which is why "the adopt leg took 6.2 min" was the finest fact
-# the platform held. Each name below is one question that was asked this
-# session and could not be answered, and each has exactly one production
-# producer — the pgw#924 rule is not relaxed for being new.
+# --- the per-COMPONENT decomposition ---------------------------------------
+# The phases above are LEG-grade: they answer "fetch or compile" and nothing
+# finer. Each name below answers one question leg-grade phases cannot, and each
+# has exactly one production producer — the rule above is not relaxed for being
+# new.
 
 #: Process start -> the SDK is usable (interpreter + torch import + endpoint
-#: discovery + executor construction). CUMULATIVE. Names the window that
-#: previously arrived as an unexplained residual: no span could start before
-#: the code that opens spans had been imported.
+#: discovery + executor construction). CUMULATIVE. Names a window no span can
+#: cover: nothing can start a span before the code that opens spans is
+#: imported.
 PHASE_SDK_READY = "sdk_ready"
 #: One component of one ref's weights. Child of `weights_fetch`, opened at the
 #: component's first byte and closed at its last, so CONCURRENCY IS VISIBLE:
@@ -135,9 +115,8 @@ PHASE_TRACE_FOR_KEY = "trace_for_key"
 PHASE_KEY_FOLD = "key_fold"
 #: One worker->hub cell control-plane round trip (publish-intent /
 #: publish-complete). `function` names the leg. NOTE: there is no worker-side
-#: key LOOKUP to time — pgw#904 made the hub resolve the arm and pgw#1032
-#: deleted `StateDelta.cell_lookups` — so this is the whole of the hub RTT the
-#: cell path actually pays on a boot.
+#: key LOOKUP to time (the hub resolves the arm), so this is the whole of the
+#: hub RTT the cell path actually pays on a boot.
 PHASE_CELL_HUB_RTT = "cell_hub_rtt"
 #: Staging + contract verification of a downloaded cell, before the first
 #: dlopen. The first half of admission.
@@ -184,12 +163,11 @@ _CLASS_BY_PHASE: Dict[str, str] = {
     PHASE_CELL_FETCH: CLASS_FETCH,
     PHASE_CELL_ARM: CLASS_LOAD,
     PHASE_PIPELINE_LOAD: CLASS_LOAD,
-    # pgw#797: an UNARMED warm pays the compile; an ARMED one pays only the
-    # call. The default is the expensive reading; `span(..., klass=)` overrides
-    # per row, which is why classification is a lookup and not a constant.
+    # An UNARMED warm pays the compile; an ARMED one pays only the call. The
+    # default is the expensive reading; `span(..., klass=)` overrides per row,
+    # which is why classification is a lookup and not a constant.
     PHASE_WARMUP: CLASS_COMPILE,
     PHASE_FIRST_REQUEST_SERVABLE: CLASS_SETUP,
-    # pgw#1087
     PHASE_SDK_READY: CLASS_SETUP,
     PHASE_COMPONENT_FETCH: CLASS_FETCH,
     PHASE_ENV_ESTABLISH: CLASS_SETUP,
@@ -204,17 +182,8 @@ _CLASS_BY_PHASE: Dict[str, str] = {
     PHASE_COMPILED_SWAP: CLASS_SETUP,
 }
 
-#: The complete vocabulary (pgw#924). Exported so a test can assert the
-#: declaration and the production producers are the SAME set — the property
-#: that failed here, silently, for seventeen names.
-#:
-#: pgw#1087 removed `cell_discover`. It was declared by pgw#924 as one of the
-#: "eight the shipping path PRODUCES", and it never had a producer: pgw#904
-#: replaced worker-side fetch-and-filter discovery with a hub-RESOLVED
-#: `Arm.artifact`, so there is nothing left to discover. Grep confirms it
-#: appeared only in this module and in tests. Same defect class pgw#924 was
-#: closing, missed once because the audit checked the COUNT and not the
-#: producers.
+#: The complete vocabulary. Exported so a test can assert the declaration and
+#: the production producers are the SAME set.
 PHASES: frozenset = frozenset(_CLASS_BY_PHASE)
 
 
@@ -222,7 +191,7 @@ def phase_class(phase: str, ordinal: int = 0) -> str:
     """Classification for ``phase``; unknown phases classify as "" and are
     reported unattributed rather than guessed into a bucket.
 
-    A row may override its phase's default class (pgw#797) — passing its
+    A row may override its phase's default class — passing its
     ``ordinal`` consults that override.
     """
     if ordinal:
@@ -262,21 +231,20 @@ _rows: List[pb.BootPhase] = []
 _sink: Optional[Callable[[pb.BootPhase], None]] = None
 _truncated = False
 _servable_ms: Optional[int] = None
-#: pgw#797 ordering contract. `hello` and `first_request_servable` are both
-#: CUMULATIVE milestones off the same origin, so `servable - hello` is a phase
-#: of the boot and must be >= 0. On 0.78.0 it was NEGATIVE on every real boot
-#: (servable 8.9s, hello 13.2s) because `Lifecycle.startup()` runs concurrently
-#: with the transport and closed the boot before the stream existed. A worker
-#: the hub cannot reach is not servable BY DEFINITION, so the recorder holds a
-#: servable close that arrives before `hello` and emits it when `hello` lands.
-#: The inversion is then not merely unlikely, it is unrepresentable.
+#: Ordering contract. `hello` and `first_request_servable` are both CUMULATIVE
+#: milestones off the same origin, so `servable - hello` is a phase of the boot
+#: and must be >= 0. `Lifecycle.startup()` runs concurrently with the transport
+#: and can close the boot before the stream exists; a worker the hub cannot
+#: reach is not servable BY DEFINITION, so the recorder HOLDS a servable close
+#: that arrives before `hello` and emits it when `hello` lands. The inversion is
+#: then not merely unlikely, it is unrepresentable.
 _hello_seen = False
 _pending_servable: Optional[Dict[str, Any]] = None
-#: Per-ordinal classification override (pgw#797: an armed warm is LOAD, an
-#: unarmed one is COMPILE — same phase name, different resource).
+#: Per-ordinal classification override (an armed warm is LOAD, an unarmed one
+#: is COMPILE — same phase name, different resource).
 _class_override: Dict[int, str] = {}
-#: pgw#1087: every CUMULATIVE milestone's ms-from-process-start, first write
-#: wins. Read by :func:`reconciliation` and :func:`completeness`.
+#: Every CUMULATIVE milestone's ms-from-process-start, first write wins. Read
+#: by :func:`reconciliation` and :func:`completeness`.
 _milestone_ms: Dict[str, int] = {}
 
 _process_start_unix: float = 0.0
@@ -325,7 +293,7 @@ def _stack() -> tuple:
     span is open is recorded as A's CHILD — which does not merely mislabel the
     row, it makes the ladder stop reconciling (B's time is subtracted from A's
     exclusive total). A ContextVar is copied per task, so each task nests
-    against its own creator (pgw#797).
+    against its own creator.
     """
     return _stack_var.get()
 
@@ -432,13 +400,13 @@ class BootSpan:
             self._source = source
 
     def note(self, detail: str) -> None:
-        """Attach identifiers (ref=/key=/fn=/lane=) per the pgw#760 doctrine."""
+        """Attach identifiers (ref=/key=/fn=/lane=)."""
         self._detail = detail[:2000]
 
     def classify(self, reason: str, detail: str = "") -> None:
         """Attach the countable reason token WITHOUT calling this a refusal.
 
-        pgw#1087: `memo hit` / `memo miss` and `cell cached` / `cell fetched`
+        `memo hit` / `memo miss` and `cell cached` / `cell fetched`
         are the two branches of a SUCCESSFUL phase, and both are the fact worth
         counting. Before this the only way to put a token on a row was
         :meth:`refused`, which sets ``outcome=refused`` — so a hub-side count of
@@ -513,7 +481,7 @@ def open_span(
     nesting across ``await`` boundaries where sibling tasks share the thread —
     and a boot ladder whose parent links are wrong stops reconciling silently
     (a child charged to the wrong parent inflates one phase and deflates
-    another). Pass it wherever the parent is actually known (pgw#797).
+    another). Pass it wherever the parent is actually known.
     """
     ordinal = _next_ordinal()
     stack = _stack()
@@ -575,7 +543,7 @@ def span(
 
 class ComponentSpans:
     """Per-component fetch spans that open on the first byte and close on the
-    last (pgw#1087).
+    last.
 
     Weights download is the biggest slice of most cold boots and the platform
     could only ever say how long the WHOLE ref took. A per-component span is
@@ -689,20 +657,20 @@ def mark(
 
     ``parent`` names the enclosing span's ordinal EXPLICITLY, for the same
     reason :func:`open_span` takes one: a phase measured across an ``await``
-    boundary cannot read its parent off the implicit stack. pgw#924's `warmup`
-    is exactly that shape — it is decided and measured around the warm call but
-    only recorded once its cost is known to be real.
+    boundary cannot read its parent off the implicit stack. `warmup` is exactly
+    that shape — it is decided and measured around the warm call but only
+    recorded once its cost is known to be real.
 
     A boot-CLOSING milestone (:data:`SERVABLE_PHASES`) recorded before ``hello``
     is HELD, not emitted: see the ``_hello_seen`` note. It is released, with its
     time re-read at release, by :func:`note_hello`.
     """
-    # pgw#1087: a milestone is cumulative BY NAME, not by the caller passing
-    # the flag. `eager_ready` is marked from a setup task that runs inside the
+    # A milestone is cumulative BY NAME, not by the caller passing the flag.
+    # `eager_ready` is marked from a setup task that runs inside the
     # `pipeline_load` span, so a caller who forgot the flag would charge a
     # whole-boot duration against a sub-second parent and drive its exclusive
-    # time to zero — the exact pgw#797 defect, one vocabulary later. Making it
-    # structural means the flag can only ever be redundant, never wrong.
+    # time to zero. Making it structural means the flag can only ever be
+    # redundant, never wrong.
     if phase in CUMULATIVE_PHASES:
         since_process_start = True
     if phase in SERVABLE_PHASES:
@@ -728,9 +696,7 @@ def mark(
     # of any span and must never be recorded as one's child: `reconciliation`
     # and every hub-side reader subtract a child's duration from its parent's
     # exclusive time, and a whole-boot number charged against an 870ms
-    # `pipeline_load` drives that to zero. Seen live while authoring pgw#797 —
-    # the servable mark rides a StateDelta task created inside the setup span,
-    # so it INHERITED that span's context. Cumulative rows are top-level, by
+    # `pipeline_load` drives that to zero. Cumulative rows are top-level by
     # construction rather than by the caller remembering.
     if since_process_start:
         parent = 0
@@ -742,11 +708,10 @@ def mark(
     if since_process_start:
         duration_ms = process_uptime_ms()
     if since_process_start:
-        # pgw#1087: every cumulative milestone is remembered, not just the
-        # servable one. `eager_ready` and `compiled_swap` are the two
-        # user-visible timestamps and the interval between them is how long a
-        # pod served eager while its cell arrived — a subtraction nobody could
-        # do while only one milestone was retained.
+        # Every cumulative milestone is remembered, not just the servable one:
+        # `eager_ready` and `compiled_swap` are the two user-visible timestamps
+        # and the interval between them is how long a pod served eager while
+        # its cell arrived.
         with _lock:
             _milestone_ms.setdefault(phase, duration_ms)
     if phase in SERVABLE_PHASES:
@@ -756,8 +721,8 @@ def mark(
                 _servable_ms = process_uptime_ms()
         if not detail:
             # The recorder owns its own reconciliation string. A caller that
-            # formatted it BEFORE the milestone was actually released (pgw#797
-            # holds one) would ship a reconciliation for a different instant.
+            # formatted it BEFORE the milestone was actually released (a
+            # servable close can be held) would ship one for a different instant.
             detail = " ".join(
                 f"{k}={v}" for k, v in sorted(reconciliation().items()))
     _emit(pb.BootPhase(
@@ -782,15 +747,14 @@ def mark(
     ))
     if phase == PHASE_HELLO:
         # The gate opens on the hello ROW existing, not on which helper wrote
-        # it. Hooking this to `mark_once` instead left `mark(PHASE_HELLO)` — a
-        # real call shape, used in the committed pgw#764 suite — recording hello
-        # without opening the gate, so a later close stayed held forever.
+        # it: a bare `mark(PHASE_HELLO)` must open it too, or a later close
+        # stays held forever.
         note_hello()
 
 
 def note_hello() -> None:
     """The worker->hub stream is up. Releases any boot close held by
-    :func:`mark` (pgw#797).
+    :func:`mark`.
 
     Called from the ``hello`` milestone itself, so "hello was recorded" and
     "the ordering gate is open" cannot drift apart.
@@ -845,7 +809,7 @@ def in_boot() -> bool:
     """True until :data:`PHASE_FIRST_REQUEST_SERVABLE` is marked.
 
     The gate for instrumenting a call site that runs BOTH during boot and in
-    steady state — the weights materializer is the load-bearing case (pgw#789):
+    steady state — the weights materializer is the load-bearing case:
     it owns the ~230s of a cold boot, and it also runs every time the hub
     delivers a new ref hours later. Recording the steady-state calls would put
     non-boot spans in a boot ladder (so `residual_ms` stops reconciling) and
@@ -873,9 +837,7 @@ def _deduped(rows: List[pb.BootPhase]) -> List[pb.BootPhase]:
     A ladder read off the wire carries duplicates by design: `bind_sink`
     re-flushes every buffered row on each RECONNECT so a boot that lost its
     stream still delivers, and the hub upserts. A reader that does not dedupe
-    counts a reconnecting boot's phases twice, which is a measurement error
-    caused entirely by a delivery guarantee (observed on the first real
-    decomposition: `sdk_ready` and `hello` each appeared twice).
+    counts a reconnecting boot's phases twice.
     """
     seen: Dict[Tuple[int, bool], pb.BootPhase] = {}
     for row in rows:
@@ -886,17 +848,16 @@ def _deduped(rows: List[pb.BootPhase]) -> List[pb.BootPhase]:
 def reconciliation(
     rows: Optional[List[pb.BootPhase]] = None,
 ) -> Dict[str, int]:
-    """Boot totals, per the th#1111 rule that an instrument must close.
+    """Boot totals, per the rule that an instrument must close.
 
     ``residual`` is the boot window no phase explained. It is REPORTED, never
     smeared across the measured phases: "unmeasured" and "zero" are different
     answers, and the residual is the honest hint about where the next
     instrument belongs.
 
-    ``rows`` overrides this process's recorded ladder. It exists so a test can
-    ask the SAME arithmetic about a modified ladder — the RED proof for
-    pgw#1087 removes one phase's rows from a real boot and observes the verdict
-    go red, which is impossible if the only input is a module global.
+    ``rows`` overrides this process's recorded ladder, so a test can ask the
+    SAME arithmetic about a modified ladder (delete one phase's rows from a
+    real boot and the verdict must go red).
     """
     given = rows is not None
     with _lock:
@@ -931,26 +892,21 @@ def reconciliation(
         per_class["class." + (kind or "unattributed")] = (
             per_class.get("class." + (kind or "unattributed"), 0) + own
         )
-    # pgw#1087: `measured_ms` is the UNION of the span intervals, not the sum
-    # of their exclusive times. The two differ the moment anything runs
-    # concurrently, and per-component fetch made concurrency the normal case:
-    # on the first real decomposition four component spans totalling 3,338 ms
-    # sat inside a 909 ms `weights_fetch`, and a summing reconciliation
-    # "explained" 3.3 s of a 0.9 s window — a ladder that closes by
-    # over-counting is worse than one that visibly does not close. The
-    # difference is itself the answer to "how much of this boot was
+    # `measured_ms` is the UNION of the span intervals, not the sum of their
+    # exclusive times: the two differ the moment anything runs concurrently,
+    # and a ladder that closes by over-counting is worse than one that visibly
+    # does not close. The difference answers "how much of this boot was
     # parallel", so it is reported rather than discarded.
     measured = _union_ms(intervals)
     out: Dict[str, int] = {"measured_ms": measured}
     out.update(per_class)
     if exclusive > measured:
         out["concurrency_ms"] = exclusive - measured
-    # pgw#1087: NAME the residual instead of reporting one lump. Two named
-    # segments cover what no span can: the interpreter+import window (no span
-    # can open before the module that opens spans is imported) and the
-    # post-servable tail a compiled swap lands in. What survives both is the
-    # only honest `residual_ms`, and it is now small enough to be a finding
-    # rather than the majority of the boot.
+    # NAME the residual instead of reporting one lump. Two named segments cover
+    # what no span can: the interpreter+import window (no span can open before
+    # the module that opens spans is imported) and the post-servable tail a
+    # compiled swap lands in. What survives both is the only honest
+    # `residual_ms`.
     if given:
         milestones = {
             r.phase: r.duration_ms for r in rows
@@ -975,9 +931,8 @@ def reconciliation(
         # the wait for a DesiredResidency — real boot seconds in which the
         # worker deliberately does no local work, so no span can cover them and
         # leaving them in `residual_ms` reads as an instrument hole rather than
-        # as the hub round trip it is. Measured on a real in-process boot at
-        # 1,238 ms of a 23,208 ms boot — 5.3%, i.e. on its own enough to fail
-        # the ~5% acceptance while nothing was actually unmeasured.
+        # as the hub round trip it is. It is big enough to matter: 1,238 ms of a
+        # 23,208 ms boot, i.e. on its own enough to fail the ~5% acceptance.
         starts = [
             max(0, row.process_uptime_ms - row.duration_ms)
             for row in rows
@@ -1039,11 +994,10 @@ def phase_table(
 ) -> List[PhaseRow]:
     """The boot decomposition, in emission order, with children subtracted.
 
-    The thing pgw#1087 exists to produce: one call, one readable table, no
-    log archaeology. Open (non-terminal) rows are EXCLUDED — a phase with no
-    close has no duration, and a table that silently rendered it as 0 would be
-    the "default read as a fact" defect this vocabulary keeps closing. The open
-    row itself still ships on the wire, where it is the finding.
+    Open (non-terminal) rows are EXCLUDED — a phase with no close has no
+    duration, and a table that silently rendered it as 0 would be the "default
+    read as a fact" defect this vocabulary keeps closing. The open row itself
+    still ships on the wire, where it is the finding.
     """
     if rows is None:
         with _lock:
@@ -1091,9 +1045,8 @@ def render_phase_table(rows: Optional[List[pb.BootPhase]] = None) -> str:
 
     ``rows`` is a captured ladder (off the wire, or another process's), not a
     pre-rendered table: the reconciliation footer must be computed from the
-    SAME rows as the body, and a signature that took a rendered table made it
-    possible — and, the first time it was used, actual — to print one boot's
-    phases under another boot's totals.
+    SAME rows as the body, or one boot's phases print under another boot's
+    totals.
     """
     table = phase_table(rows)
     lines = [
@@ -1145,7 +1098,7 @@ SHAPE_SELF_MINT: frozenset = SHAPE_ADOPT | frozenset({
 }) - frozenset({PHASE_CELL_FETCH})
 
 #: A boot whose phases explain less of the wall than this is not decomposed.
-#: pgw#1087's acceptance: "the phases sum to within ~5% of wall".
+#: The acceptance bar: the phases sum to within ~5% of wall.
 DEFAULT_RESIDUAL_TOLERANCE_PCT = 5.0
 
 
@@ -1157,7 +1110,7 @@ class BootCompleteness:
     fixes: a phase that never emitted (``missing`` — an instrument hole) and a
     boot whose measured phases do not add up to its wall clock (``residual_pct``
     — an unmeasured window). A table can be missing nothing and still explain
-    half the boot, which is exactly the state pgw#1087 was filed against.
+    half the boot.
     """
 
     shape: Tuple[str, ...]
@@ -1203,8 +1156,8 @@ def completeness(
     """Verdict on this boot's decomposition against the shape it drove.
 
     ``rows`` reads a ladder captured off the wire instead of this process's
-    own — which is how a test asserts the PRODUCTION boot's table rather than
-    the recorder's memory of it, and how the RED proof deletes a phase.
+    own — how a test asserts the PRODUCTION boot's table rather than the
+    recorder's memory of it.
     """
     expect = tuple(sorted(shape))
     seen = {row.phase for row in phase_table(rows)}

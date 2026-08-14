@@ -8,8 +8,7 @@ and ``_refresh_config_application`` reported BOOT_STALE for the process's whole
 life. Since the protocol forbids a boot-stale config from advertising a READY
 capability, every ``FunctionCapability`` projected BOOT_STALE and the hub's
 exact-capability dispatch gate refused the worker for every request — with a
-remedy (pod replacement) that does not exist for a pod-less worker. That was
-th#1172: every local-worker e2e journey starved.
+remedy (pod replacement) that does not exist for a pod-less worker.
 
 Both directions are pinned here, on the real ``IntentRegistry`` and the real
 ``Settings`` loader:
@@ -17,7 +16,7 @@ Both directions are pinned here, on the real ``IntentRegistry`` and the real
   * a worker booted with NO ``WORKER_CONFIG_GENERATION`` converges its config
     application and advertises READY capabilities;
   * a worker booted with a STALE one (an injected, genuinely ancient
-    generation) still reports BOOT_STALE, so the th#1087 rollout replaces it.
+    generation) still reports BOOT_STALE, so the rollout replaces it.
 """
 
 from __future__ import annotations

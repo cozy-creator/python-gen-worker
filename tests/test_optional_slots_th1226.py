@@ -1,6 +1,6 @@
 """th#1226: an endpoint may declare a slot the deploy is free to leave unbound.
 
-Which lanes a release serves is deploy config (th#980/ie#524) — but before
+Which lanes a release serves is deploy config — but before
 this, every declared Slot was force-resolved at dispatch (``RetryableError``)
 and a partial Hot ``DesiredInstance`` was refused outright, so a two-lane
 endpoint could only ever be deployed with BOTH lanes bound. That is what made

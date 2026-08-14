@@ -1,4 +1,4 @@
-"""SDK v2 surface (pgw#647): derived component tree, sibling-as-part lint,
+"""SDK v2 surface: derived component tree, sibling-as-part lint,
 CompileAxis payload classes, the text-sequence lint, Resources v2, derived
 config schema, per-request views, and the text pin helper.
 
@@ -242,7 +242,7 @@ def test_compile_with_dynamic_sequence_passes_and_batch_axis_supported():
 
 
 def test_dynamic_dim_min_must_respect_01_specialization():
-    # torch's 0/1 specialization is not overridable (ie#543): min >= 2.
+    # torch's 0/1 specialization is not overridable: min >= 2.
     with pytest.raises(ValueError, match="min must be >= 2"):
         DynamicDim("batch", min=1, max=8)
 
@@ -273,7 +273,7 @@ def test_contract_digest_changes_with_the_contract():
 
 def test_resources_v2_deleted_fields_raise():
     # `vram_gb` and `ram_gb` stay deleted; their successors are the explicitly
-    # non-binding `vram_gb_hint` / `ram_gb_hint` (pgw#670).
+    # non-binding `vram_gb_hint` / `ram_gb_hint`.
     for kw in ({"vram_gb": 12}, {"ram_gb": 48}, {"min_compute_capability": 8.0}):
         with pytest.raises(TypeError):
             Resources(**kw)
@@ -438,7 +438,7 @@ def test_for_request_sampler_swap_with_real_diffusers():
 def test_pad_text_sequence_is_canonically_strided():
     torch = pytest.importorskip("torch")
     # dim 0 of size 1 — exactly the case where .contiguous() is a no-op and
-    # a size-only pin is not a pin (ie#544).
+    # a size-only pin is not a pin.
     embeds = torch.randn(1, 33, 8)[:, :, :]
     mask = torch.ones(1, 33, dtype=torch.long)
     out, out_mask = pad_text_sequence(embeds, 77, mask=mask)

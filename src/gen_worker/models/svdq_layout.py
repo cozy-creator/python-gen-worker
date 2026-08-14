@@ -1,13 +1,12 @@
-"""nunchaku "v1 single-file" svdq layout -> our SvdqLinear buffers (pgw#685).
+"""nunchaku "v1 single-file" svdq layout -> our SvdqLinear buffers.
 
 Converts an official SVDQuant checkpoint's per-Linear tensors into the layout
 ``torch._scaled_mm`` wants, so ONE module serves svdq-fp4 on every Blackwell
 part instead of nunchaku's sm_120a-only kernels.
 
-EVERY tensor in the file is swizzled, not just ``qweight``/``wscales`` (pgw#770 —
-reading five of them verbatim was the defect that made the official qwen-image
-artifact render noise). Each inverse below replays ONE named deepcompressor
-forward packer backwards; the citations are exact, at
+EVERY tensor in the file is swizzled, not just ``qweight``/``wscales``; reading
+any of them verbatim renders noise. Each inverse below replays ONE named
+deepcompressor forward packer backwards; the citations are exact, at
 ``nunchaku-ai/deepcompressor@main``:
 
   deepcompressor/backend/utils.py
@@ -34,7 +33,7 @@ forward packer backwards; the citations are exact, at
   smooth_factor_orig BF16 [in]  provenance only — never read at runtime
   bias      BF16 [out]          pack_scale swizzled
 
-te#148 QUANTIZED LOW-RANK BRANCH (cozy extension, LoRaQ arXiv 2604.18117):
+QUANTIZED LOW-RANK BRANCH (cozy extension, LoRaQ arXiv 2604.18117):
 the ``__metadata__`` key ``lowrank_quant`` = ``"int8"`` | ``"fp8_e4m3"``
 declares that the branch pair is stored quantized. Per-block scales, block=32
 along each factor's CONTRACTION dim (LoRaQ §4.3 quantizes by MX blocks of 32;
@@ -105,7 +104,7 @@ _LR_UNPACK_PERM = (0, 1, 4, 2, 6, 5, 3, 7)  # inverse, L208
 E2M1_LUT = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
             -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
 
-# te#148 quantized low-rank branch.
+# Quantized low-rank branch.
 LOWRANK_QUANT_KEY = "lowrank_quant"          # __metadata__ flag
 LOWRANK_QUANT_SCHEMES = ("int8", "fp8_e4m3")
 LOWRANK_QUANT_BLOCK = 32                     # LoRaQ MX block size
@@ -175,9 +174,9 @@ def unpack_qweight(qweight: Any, out_features: int, in_features: int) -> Any:
     g = _FRAG
     n, k = int(out_features), int(in_features)
     # pack_weight asserts k % (mem_k * num_k_unrolls) with num_k_unrolls = 2
-    # (nunchaku/utils.py L26-29), and pad_weight pads to that (L221), so a
-    # real checkpoint is always [%128, %128]. We accepted k % 64, which admits
-    # a shape the exporter cannot emit and the vector swizzles cannot express.
+    # (nunchaku/utils.py L26-29), and pad_weight pads to that (L221), so a real
+    # checkpoint is always [%128, %128]. A looser k % 64 would admit a shape the
+    # exporter cannot emit and the vector swizzles cannot express.
     if n % g["mem_n"] or k % (g["mem_k"] * _NUM_K_UNROLLS):
         raise SvdqLayoutError(
             f"svdq qweight [{n}, {k}] is not a multiple of the padded "
@@ -212,11 +211,9 @@ def unpack_wscales(wscales: Any, out_features: int, in_features: int) -> Any:
     upstream store-order table at L136-148 is the check: stored 32-bit word j
     holds channel ``(j%4)*32 + ((j//4)%4)*8 + (j//16)``.
 
-    pgw#770: we used (4, 8, 4) here, which reshapes without error and permutes
-    output channels within every 128-row tile — each channel then gets another
-    channel's block scales. The dense fold shares this function, so it was
-    equally wrong there; only the round-trip against our own ``pack_wscales``
-    (same wrong dims) hid it."""
+    (4, 8, 4) reshapes without error and silently permutes output channels
+    within every 128-row tile, giving each channel another channel's block
+    scales; a round trip against our own ``pack_wscales`` cannot catch it."""
     ng = int(in_features) // BLOCK
     out_f = int(out_features)
     if out_f % _WARP_N or ng % 4:
@@ -264,9 +261,8 @@ def unpack_lowrank(weight: Any, *, down: bool) -> Any:
     before ``pack_lowrank_weight`` rearranged them into the mma fragment layout
     and re-viewed the result as ``[in, rank]`` / ``[out, rank]``.
 
-    pgw#770: reading the stored tensors as plain matrices scrambles the rank-128
-    branch that carries SVDQuant's entire outlier budget — measured alone, it
-    was the single largest contributor to the noise."""
+    Reading the stored tensors as plain matrices scrambles the rank-128 branch
+    that carries SVDQuant's entire outlier budget."""
     c, r = int(weight.shape[0]), int(weight.shape[1])
     if down:
         if r % _LR_PACK_N or c % _LR_PACK_K:
@@ -290,14 +286,14 @@ def unpack_lowrank(weight: Any, *, down: bool) -> Any:
     return w.permute(0, 2, 1, 3).contiguous().reshape(c, r)
 
 
-# Forward packers — the encode side of the same contract. Used by the te#137
-# producer to emit nunchaku-readable artifacts, and by the tests to synthesize
+# Forward packers — the encode side of the same contract. Used by the producer
+# to emit nunchaku-readable artifacts, and by the tests to synthesize
 # checkpoints in THEIR layout. Serving only ever unpacks.
 #
-# A round trip through these proves BIJECTIVITY, not agreement with nunchaku
-# (pgw#770: the wscales pair agreed with each other and with nothing else for
-# three weeks). Anything asserting the CONVENTION must check against real
-# upstream bytes — see tests/test_svdq_official_layout_pgw770.py.
+# A round trip through these proves BIJECTIVITY, not agreement with nunchaku: a
+# pack/unpack pair can agree with each other and with nothing else. Anything
+# asserting the CONVENTION must check against real upstream bytes — see
+# tests/test_svdq_official_layout_pgw770.py.
 
 
 def pack_qweight(codes: Any) -> Any:
@@ -362,7 +358,7 @@ def pack_lowrank(weight: Any, *, down: bool) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Quantized low-rank branch (te#148). Plain row-major on disk — see header.
+# Quantized low-rank branch. Plain row-major on disk — see header.
 # ---------------------------------------------------------------------------
 
 
@@ -411,9 +407,9 @@ def quantize_lowrank(w: Any, *, scheme: str,
     """One low-rank factor -> (quantized tensor, fp32 per-block scales).
 
     Symmetric absmax per block of :data:`LOWRANK_QUANT_BLOCK` along
-    ``block_dim`` (the factor's contraction dim: 0 for ``proj_down`` [in,
-    rank], 1 for ``proj_up`` [out, rank]). Encode side for the te#137
-    producer and the tests; serving only dequantizes."""
+    ``block_dim`` (the factor's contraction dim: 0 for ``proj_down`` [in, rank],
+    1 for ``proj_up`` [out, rank]). Encode side for the producer and the tests;
+    serving only dequantizes."""
     import torch
 
     qdtype = _lowrank_qdtype(scheme)
@@ -559,7 +555,7 @@ def decode_linear(tensors: dict[str, Any], out_features: int,
                 f"artifact declares lowrank_quant={lowrank_quant!r} but the "
                 f"branch is stored as {scheme!r}")
         if scheme != "bf16":
-            # te#148 quantized branch: plain row-major on disk (see header).
+            # Quantized branch: plain row-major on disk (see header).
             down, up, rank, scheme = _decode_quantized_lowrank(
                 tensors, out_features, in_features)
         else:

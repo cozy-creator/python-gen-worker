@@ -1,31 +1,27 @@
-"""pgw#671 eager-first boot (worker half of th#1187).
+"""Eager-first boot.
 
-The startup ladder no longer serializes pipeline_loading ->
-self_mint_compile -> ready on eager-compatible lanes: after weights load
-and the derived warm plan's eager pass, the record goes READY at the EAGER
-tier while the self-mint runs as a background task through the pgw#622
-routers; the record hot-swaps to compiled when the mint arms. Proven here
-through the REAL executor ensure_setup codepath (fakes only at the
-download and compile-arm leaves):
+The startup ladder does not serialize pipeline_loading -> self_mint_compile ->
+ready on eager-compatible lanes: after weights load and the derived warm plan's
+eager pass, the record goes READY at the EAGER tier while the self-mint runs as
+a background task through the hot-swap routers; the record hot-swaps to compiled
+when the mint arms. Proven here through the REAL executor ensure_setup codepath
+(fakes only at the download and compile-arm leaves):
 
-  1. READY is reached BEFORE the graph compiles finish (the 30-min block
-     is gone); the background driver seeds the FULL plan, proves, packs,
-     publishes and flips the tier to compiled with no capability-state
-     flap. The self_mint_compile activity stays RUNNING past READY and
-     terminates from the driver.
-  2. RED-VERIFICATION via the kill switch: GEN_WORKER_EAGER_FIRST_BOOT=0
-     restores today's sequential gate — every compile completes BEFORE
-     READY. The elapsed-time split is the eager-vs-compiled boot latency
-     evidence.
+  1. READY is reached BEFORE the graph compiles finish; the background
+     driver seeds the FULL plan, proves, packs, publishes and flips the
+     tier to compiled with no capability-state flap. The self_mint_compile
+     activity stays RUNNING past READY and terminates from the driver.
+  2. GEN_WORKER_EAGER_FIRST_BOOT=0 restores the sequential gate — every
+     compile completes BEFORE READY. The elapsed-time split is the
+     eager-vs-compiled boot latency evidence.
   3. Clean abandonment (adopt-on-arm shape): mid-build abandonment
      discards the capture wholesale, keeps serving eager, suspends
      concurrent routing, and completes (never fails) the activity.
   4. A failed background compile keeps the function serving eager and
      reports the typed activity failure — a mint failure never un-serves.
-  5. Mandatory-quantized lanes are ineligible (gw#586: eager is not a
-     production lane there).
-  6. The capability projection carries serving_tier on READY only
-     (th#1187 wire contract).
+  5. Mandatory-quantized lanes are ineligible — eager is not a production
+     lane there.
+  6. The capability projection carries serving_tier on READY only.
 """
 
 from __future__ import annotations
@@ -164,14 +160,14 @@ class _Harness:
         monkeypatch.setattr(store_mod, "ensure_local", _fake_ensure_local)
         monkeypatch.setattr(
             fleet_cells, "enable_compiled", self._fake_enable_compiled)
-        # pgw#1010: every mint is a CHILD mint now. This rig has no child
+        # Every mint is a CHILD mint now. This rig has no child
         # process — without a stub it spawns a REAL one per attempt and the
         # test spends minutes importing torch to watch it fail. The serving
         # side is what pgw#671 is about: READY at eager tier first, the tier
         # flipping only when the mint lands.
         monkeypatch.setattr(
             mint_delegate, "build_cell", self._fake_build_cell)
-        # pgw#1181: the pgw#681 mint gate this simmed is deleted with the
+        # The pgw#681 mint gate this simmed is deleted with the
         # `torch-inductor-cache` format whose metadata carried its manifest.
         self.ex = Executor(self.specs, _send, store=store)
 
@@ -310,7 +306,7 @@ def test_eager_first_boot_ready_before_compile_then_hot_swaps(
     the background driver builds the cell and flips the tier — state never
     flaps.
 
-    pgw#1010: the driver's compile is a CHILD PROCESS's now (the in-process
+    the driver's compile is a CHILD PROCESS's now (the in-process
     seed/prove/pack phases only ever built a dynamo cell), so the assertions
     that counted this rig's own simulated compiles and its inherited warm
     memory are gone with them. What pgw#671 actually claims — READY does not
@@ -488,7 +484,7 @@ def test_failed_background_compile_stays_eager_and_reports_typed_failure(
     asyncio.run(_run())
 
 
-# pgw#1010: `test_mandatory_quantized_execution_lane_keeps_the_sequential_gate`
+# `test_mandatory_quantized_execution_lane_keeps_the_sequential_gate`
 # stood here — "eager is not a production lane for w8a8, so the boot keeps the
 # foreground proof". Two rulings retired it: pgw#813 (a delegated pending arms
 # NOTHING, so its eager tier is the untouched pipeline and a mandatory lane may

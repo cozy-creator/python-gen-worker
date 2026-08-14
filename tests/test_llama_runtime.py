@@ -153,7 +153,7 @@ def test_auto_fit_builds_degrade_ladder(tmp_path, monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# StreamAccumulator / terminal StreamResult (gw#475)
+# StreamAccumulator / terminal StreamResult
 # ---------------------------------------------------------------------------
 
 
@@ -247,7 +247,7 @@ def test_stream_mode_terminal_output_retrievable() -> None:
 # Integration: real llama-server, tiny real GGUF, CPU inference.
 # ---------------------------------------------------------------------------
 
-# pgw#966: the model is VENDORED, not fetched.
+# The model is VENDORED, not fetched.
 #
 # Until this issue this fixture ran `hf_hub_download("ggml-org/models-moved",
 # "tinyllamas/stories15M-q4_0.gguf")` on every CI run, and PR #483's `tests` job
@@ -256,7 +256,7 @@ def test_stream_mode_terminal_output_retrievable() -> None:
 # check — the same property a silently-skipped row breaks, from the other side.
 #
 # Why vendoring and not a cache: an `actions/cache` restore only sees caches
-# from the run's own ref or the DEFAULT branch (th#1114). This repo's PRs target
+# from the run's own ref or the DEFAULT branch. This repo's PRs target
 # `dev`, which is neither, so the cache would never once be warm without a
 # scheduled master-side seeding job — machinery, for an immutable 1.1 MB file.
 # Our own object storage means credentials in a public repo's CI; a release

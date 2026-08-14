@@ -1,7 +1,7 @@
 """pgw#1053 — 25.7 GiB of the L40S was held by two residents that did NOTHING
 through the 97-minute compile phase.
 
-The two residents, measured (attempts 24/26/30):
+The two residents:
 
 * the serving PARENT's eager pipeline — 9.54 GiB, now always a live tenant's
   and therefore never parked (see the last section);
@@ -13,7 +13,7 @@ What is asserted here:
 * the mint-child release is a code-only PROJECTION: weights go to meta,
   literals keep their bytes, and every identity fact the parent-side gates
   read (FQN sets, graph hash, literal digest) is unchanged — so no gate is
-  dropped and the cell key cannot move (pgw#846);
+  dropped and the cell key cannot move;
 * a full mint with ``release_residents=True`` still packs, still keys
   identically, and provably released the pipeline;
 * the pool REGRANTS K when the residents come back — through the same
@@ -202,7 +202,7 @@ def test_full_mint_with_release_packs_and_keys_identically(
     released = aot_mint.mint(
         surrendered, spec, tmp_path / "released", release_residents=True)
 
-    # pgw#1176: a mint produces N independently keyed artifacts, not "a cell",
+    # a mint produces N independently keyed artifacts, not "a cell",
     # so the pgw#846 claim is now per ENTRY. The declaration above traces two
     # graph classes; the length assert is what stops an empty `entries` from
     # making the comparison below pass vacuously.
@@ -222,7 +222,7 @@ def test_full_mint_with_release_packs_and_keys_identically(
 
 
 # ---------------------------------------------------------------------------
-# The pool REGRANT — DELETED WITH THE BUDGET IT REGRANTED (pgw#1175)
+# The pool REGRANT — DELETED WITH THE BUDGET IT REGRANTED
 # ---------------------------------------------------------------------------
 #
 # Four rows stood here. They drove the incident pod's real numbers (44.39 GiB

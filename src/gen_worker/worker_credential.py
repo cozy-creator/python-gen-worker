@@ -1,34 +1,24 @@
-"""pgw#848: ONE authoritative worker credential, for every path that dials the hub.
+"""ONE authoritative worker credential, for every path that dials the hub.
 
-The defect this exists to delete is a SPLIT, not a value. The worker held two
-credentials with different lifetimes:
+The defect this exists to delete is a SPLIT, not a value: a stream-local cache
+rotated by the hub at ~80 % of TTL, beside ``Settings.bootstrap_worker_jwt`` —
+the boot token, frozen at pod create and never updated, reachable from a code
+path that runs forever. The transport reads and writes THIS module only, so
+there is no second home left to diverge.
 
-* ``transport._worker_jwt`` — rotated by the hub at ~80 % of TTL over the
-  scheduler stream, and therefore current (that stream-local cache is DELETED
-  as of pgw#893 §2: the transport now reads and writes this module only, so
-  there is no second home left to diverge);
-* ``Settings.bootstrap_worker_jwt`` — the boot token, **frozen at pod create and never
-  updated by anything**, and reachable from a code path that runs forever.
-
-MEASURED (hub ``pod_events``, pgw#846 attempts 16 and 17). The scheduler stream
-never dropped — the lease and the beats were healthy the whole way. What killed
-both pods was the *diagnostic* carrier: the post-mortem/attestation reporter
-opens a BRAND-NEW gRPC Connect every
-``hardware_report._ATTESTATION_REPORT_MIN_INTERVAL_S`` (300 s, a throttle, not
-a reconnect cadence) and authenticated it with the FROZEN token. Past T+30 min
-every one of those dials is a fresh ``worker_token_expired`` -> three strikes ->
-``worker_auth_wedge`` -> pod terminated. One dial per five minutes puts death
-~15 minutes after first expiry; attempt sixteen's 00:30:05 -> 00:40:39 fits
-exactly.
+Measured consequence of the split: the scheduler stream stays healthy while the
+attestation carrier — which opens a BRAND-NEW gRPC Connect every
+``hardware_report._ATTESTATION_REPORT_MIN_INTERVAL_S`` — authenticates with the
+frozen token. Past the TTL every one of those dials is a fresh
+``worker_token_expired`` -> strikes -> ``worker_auth_wedge`` -> pod terminated.
 
 So the credential is not a transport detail. **Anything that dials the hub must
 read from one refreshable place**, or a long-lived pod eventually authenticates
-some of its calls with a dead token while the rest work fine — which is the
-worst diagnostic shape there is, because the healthy paths mask it.
-
-NOT a mint-only concern, and it should not be filed as one: *any* worker that
-emits an attestation report past its TTL burns strikes toward a wedge. A mint
-is simply the first workload that reliably lives past 30 minutes.
+some of its calls with a dead token while the rest work fine — the worst
+diagnostic shape there is, because the healthy paths mask it. This is NOT a
+mint-only concern: any worker that emits an attestation report past its TTL
+burns strikes toward a wedge; a mint is simply the first workload that reliably
+lives past the TTL.
 """
 
 from __future__ import annotations
@@ -66,13 +56,10 @@ def install(token: str, expires_at_unix: float = 0.0) -> None:
 def install_bootstrap(settings: "Settings") -> None:
     """Hand this module the boot token, from the process entry's `Settings`.
 
-    pgw#931 (§1.18): `current()` used to reach for `get_settings()` itself,
-    inside `getattr(..., "bootstrap_worker_jwt", "")` inside a bare
-    `except Exception: return ""`. That is the DEFECT-TAXONOMY C8 shape on the
-    field pgw#848 renamed precisely so a stale reader would raise: a getattr
-    default plus a swallowed exception restores the silence the rename existed
-    to break. Direct attribute access here means a rename fails loudly at the
-    one site that feeds it.
+    Deliberately NOT `getattr(get_settings(), "bootstrap_worker_jwt", "")`
+    inside a swallowing `except`: a getattr default plus a swallowed exception
+    makes a stale reader silent. Direct attribute access here means a rename
+    fails loudly at the one site that feeds it.
     """
     global _BOOTSTRAP
     with _LOCK:

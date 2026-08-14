@@ -1,31 +1,18 @@
-"""Serve-window shape growth — ONE module, reached by both execution arms
-(pgw#916).
+"""Serve-window shape growth — ONE module, reached by both execution arms.
 
 §1.12's contract has two halves: *serve eager* and *compile in the background
-and adopt*.  The second half only ever existed on the dynamo arm.
+and adopt*.  The second half only ever existed on the dynamo arm:
 ``hot_swap.enable`` returns False unless the pipeline carries a dynamo router
 (``compile_cache._MARKER_ATTR`` -> ``failure_signal.router``), and an AOT-armed
 pipeline never has one — ``models.provision.enable_compiled`` returns as soon
-as ``arm_aot`` succeeds and stamps ``aot_serve._MARKER_ATTR`` instead.  So on
-every AOT arm the executor's three growth call sites are no-ops, the
-``_shape_warm_republisher`` closure is constructed and discarded, and
-and pgw#1010 deleted the republish backend outright (a grown JIT cache is
-this pod's, and its cell had no consumer).
+as ``arm_aot`` succeeds and stamps ``aot_serve._MARKER_ATTR`` instead.  There
+is no republish backend: a grown JIT cache is this pod's, and its cell has no
+consumer.
 
 What that costs: a declared class outside the armed cell's envelope stays
-eager for the life of the pod, every pod, forever.  Under dynamo it would be
-routed eager once, warmed in one background thread and republished so the fleet
-never pays it again — but the ratified reuse strategy is *AOT cells only, JIT
-demotes to intake mode*, with pgw#731 deleting the very apparatus the growth
-system lives inside.  "It heals on the JIT path" is therefore not an answer.
-
-pgw#1184 DELETED THE BOOT-TIME CENSUS this paragraph used to quote (a
-``compiled_shape_coverage`` row reading "2 of 18 declared graph classes served
-compiled at boot").  It was an OBSERVATION: it could only name a class a warm
-run happened to dispatch, and on sdxl the warm plan it depended on cost 18 full
-generates per handler where the eager plan needs 2.  :data:`activity.
-KIND_SHAPE_GAP` — reported per request at the ingress that refuses the class BY
-NAME — is the same fact, measured on the traffic that actually asks for it.
+eager for the life of the pod, every pod, forever.  The ratified reuse strategy
+is *AOT cells only, JIT demotes to intake mode*, so "it heals on the JIT path"
+is not an answer.
 
 What this module owns
 ---------------------
@@ -33,23 +20,20 @@ What this module owns
   cell's ENVELOPE — the declared serving region, not a dynamo input signature —
   so it is arm-agnostic by construction;
 * the **countable fact**: :data:`activity.KIND_SHAPE_GAP`, the AOT counterpart
-  of pgw#680's ``guard_miss``, so the hub can count coverage holes on either
-  arm with one grouped query;
-* the **admission primitives** pgw#916 names as the parts of ``hot_swap`` to
-  keep and lift: :class:`TurnGateBusy` / :class:`TurnGateClosed` (the pgw#677
-  background GPU turn).  They live here and ``hot_swap`` imports them, so
-  there is exactly one implementation.  ``Debounce`` and the submission seam
-  (``register_backend``/``submit``) were deleted by pgw#1180 — nothing ever
-  registered a growth backend
-  registered for its arm.
+  of dynamo's ``guard_miss``, so the hub can count coverage holes on either
+  arm with one grouped query.  It is reported per request at the ingress that
+  refuses the class BY NAME — measured on the traffic that actually asks for
+  it, not on whatever a warm run happened to dispatch;
+* the **admission primitives** lifted out of ``hot_swap``:
+  :class:`TurnGateBusy` / :class:`TurnGateClosed` (the background GPU turn).
+  They live here and ``hot_swap`` imports them, so there is exactly one
+  implementation.
 
 What this module deliberately does NOT own
 ------------------------------------------
 A task queue, a GPU-turn scheduler, or a device executor.  Growth submits
-through the sole owners (pgw#910 Reconciler, pgw#911 DeviceExecutor); building
-a second scheduler here to close the AOT arm sooner would violate this issue's
-own acceptance, which forbids exactly that.  ``tests/test_shape_growth_pgw916``
-holds that line with a dependency test.
+through the sole owners (the Reconciler and the DeviceExecutor); a second
+scheduler here to close the AOT arm sooner is forbidden.
 """
 
 from __future__ import annotations
@@ -63,14 +47,14 @@ from . import activity as activity_mod
 
 logger = logging.getLogger(__name__)
 
-#: The execution arms a cell can be served on (pgw#891/th#1408 vocabulary).
+#: The execution arms a cell can be served on.
 #: The arm selects the COMPILER, never whether growth happens at all.
 ARM_AOT = "aot"
 ARM_DYNAMO = "dynamo"
 
 #: Ingress reasons that mean "this class is not covered". ``no_entry_admits``
 #: is a genuine coverage hole; ``entry_ambiguous`` is a DECLARATION defect
-#: (pgw#917) that growth must never try to compile its way out of — it is
+#: that growth must never try to compile its way out of — it is
 #: recorded and reported, never submitted.
 REASON_UNCOVERED = "no_entry_admits"
 REASON_AMBIGUOUS = "entry_ambiguous"
@@ -78,14 +62,14 @@ REASON_AMBIGUOUS = "entry_ambiguous"
 
 class TurnGateClosed(Exception):
     """The executor's background-turn gate is gone (shutdown/drain); the
-    growth job is dropped and its class stays eager (pgw#677)."""
+    growth job is dropped and its class stays eager."""
 
 
 class TurnGateBusy(Exception):
     """No background turn within the bounded admission window (live tenant
     demand). The job re-queues instead of blocking the growth thread — a
     blocked compile for one instance must never head-of-line delay every
-    other instance's jobs (pgw#677)."""
+    other instance's jobs."""
 
 
 @dataclass(frozen=True)
@@ -93,8 +77,8 @@ class ShapeGap:
     """One request that arrived at a graph class the armed cell does not
     serve.
 
-    ``declared_class`` is the point of the type: pgw#622's healing keyed on a
-    dynamo input SIGNATURE, which is a concept the AOT arm does not have.  A
+    ``declared_class`` is the point of the type: dynamo healing keys on an
+    input SIGNATURE, which is a concept the AOT arm does not have.  A
     declared class is what both arms have and what a mint can be asked to add,
     so it is the only key a growth path can be arm-agnostic on.
     """
@@ -115,8 +99,8 @@ class ShapeGap:
     @property
     def growable(self) -> bool:
         """An ambiguous dispatch is a declaration defect, not a coverage hole:
-        compiling another entry cannot fix it and pgw#917 already refuses it
-        at mint."""
+        compiling another entry cannot fix it, and the mint already refuses
+        it."""
         return self.reason != REASON_AMBIGUOUS
 
 
@@ -193,9 +177,8 @@ def report(gap: ShapeGap) -> bool:
 def report_and_submit(gap: ShapeGap) -> bool:
     """The one call a serving path makes: count the gap once.
 
-    The serve-window growth-backend seam (register_backend/submit) was deleted
-    by pgw#1180 — nothing ever registered a backend, so submission was a
-    permanent warning-and-False. A gap is recorded and the class stays eager.
+    There is no growth-backend seam: a gap is recorded and the class stays
+    eager.
     """
     return report(gap)
 

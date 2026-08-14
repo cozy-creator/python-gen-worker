@@ -89,13 +89,13 @@ def test_fp8_execution_lane_holds_with_and_without_group_forcing(tmp_path):
     assert getattr(sl.obj, "_cozy_weight_lane", "") == "fp8-hooks"
     assert getattr(sl.obj, "_cozy_fp8_storage_requested", False) is True
 
-    # Forced group fp8 (th#1043): identical lane outcome, reported
+    # Forced group fp8: identical lane outcome, reported
     # structurally as the group-fit downgrade it is.
     sl = load_slot(DDPMPipeline, str(root), slot="t2i", device="cpu",
                    force_storage_dtype="fp8")
     assert getattr(sl.obj, "_cozy_weight_lane", "") == "fp8-hooks"
     assert getattr(sl.obj, "_cozy_fp8_storage_requested", False) is True
-    # th#1043 (0.48.2): the forced downgrade is reported structurally, not
+    # The forced downgrade is reported structurally, not
     # served silently as a native bf16 plan.
     assert sl.rung == "fp8"
     assert "shared-lane" in sl.rung_detail

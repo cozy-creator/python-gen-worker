@@ -1,14 +1,11 @@
-"""pgw#1041: byte-level progress for the model load path.
+"""Byte-level progress for the model load path.
 
-The ie#615 attempt-4 load ran 94 minutes with ZERO progress telemetry and
-died to an unattributable SIGKILL. The activity/beat machinery (gw#621,
-th#1451) was already in place — what was missing is a PRODUCER during the
-load: fetch feeds counters, but staging/hydration is one long blocking
-diffusers call with nothing ticking, so the hub's stall clock had nothing
-to hold the worker to and the death dial had no "where".
+Staging/hydration is one long blocking diffusers call with nothing ticking, so
+without a PRODUCER during the load the hub's stall clock has nothing to hold
+the worker to and a SIGKILL has no "where".
 
-One reporter fixes both, riding the EXISTING channels (WORKER-CONTRACTS §1:
-no parallel heartbeat systems):
+One reporter fixes both, riding the EXISTING channels (no parallel heartbeat
+systems):
 
 * a sampler thread ticks a byte counter from ``/proc/self/io`` read_bytes
   plus anonymous-RSS growth — real external evidence of staging progress,
@@ -21,13 +18,12 @@ no parallel heartbeat systems):
 * every phase transition emits a typed, DURABLE activity event naming the
   component — ``load_phase`` on entry, ``load_phase_done`` on exit with the
   measured span in ``duration_ms``. The counter says a number is moving; the
-  events say WHAT the worker is doing, which is the half WORKER-CONTRACTS §1
-  asks for and the half a 94-minute load needs while it is still ALIVE. The
-  breadcrumb only reaches the hub through a death, and a slow load that
-  eventually succeeds leaves no death to read.
+  events say WHAT the worker is doing, which is what a long load needs while it
+  is still ALIVE. The breadcrumb only reaches the hub through a death, and a
+  slow load that eventually succeeds leaves no death to read.
 
 Why events and not the counter name or the activity's phase: the hub makes a
-RUNNING update durable only on a phase transition (th#1250), and this load
+RUNNING update durable only on a phase transition, and this load
 does not own the phase of the activity it runs under — ``ensure_setup``'s
 ``self_mint_compile`` does. ``emit_event`` sends a COMPLETED update, which is
 always durable, and deliberately does not touch the open activity.
@@ -57,28 +53,28 @@ COUNTER_NAME = "load:staged_bytes"
 #: A load phase STARTED (``duration_ms`` 0 — nothing is measured yet). This
 #: is the row that names the component a hung load is hung on.
 EVENT_PHASE = "load_phase"
-#: A load phase FINISHED, carrying its measured span (th#1322: the number
-#: goes in the column, never interpolated into the detail).
+#: A load phase FINISHED, carrying its measured span (the number goes in the
+#: column, never interpolated into the detail).
 EVENT_PHASE_DONE = "load_phase_done"
-#: pgw#1063: this phase is RE-READING its own set instead of staging it —
-#: the direct-reclaim crawl, confessed while the worker is still alive.
+#: This phase is RE-READING its own set instead of staging it — the
+#: direct-reclaim crawl, confessed while the worker is still alive.
 EVENT_PHASE_THRASH = "load_phase_thrash"
 
 _INTERVAL_S = 5.0
 _GIB = float(1 << 30)
 
 #: How many full passes over a phase's own bytes count as staging before the
-#: reads are re-reads (pgw#1063). THREAT (§4.24): a staging admitted against
-#: an estimate that turned out low crawls in direct reclaim — ie#615 read
-#: 1.578 TB for a 105 GB set (a 15x re-read) across 37 minutes of billed
-#: H100 before the kernel OOM-killed it. Derivation: a cold load reads each
-#: byte ONCE (1x) and a page-cache-warm load reads ~0; 3x is three full
-#: passes, which no legitimate staging shape reaches. Conjunctive with the
-#: ceiling fraction below, so a merely large load cannot trip it.
+#: reads are re-reads. THREAT: a staging admitted against an estimate that
+#: turned out low crawls in direct reclaim (measured: 1.578 TB read for a 105 GB
+#: set, a 15x re-read, across 37 minutes of billed H100 before the kernel
+#: OOM-killed it). Derivation: a cold load reads each byte ONCE (1x) and a
+#: page-cache-warm load reads ~0; 3x is three full passes, which no legitimate
+#: staging shape reaches. Conjunctive with the ceiling fraction below, so a
+#: merely large load cannot trip it.
 _REREAD_MULTIPLE = 3.0
 #: Fraction of the cgroup limit anon RSS must occupy for the re-reads to be
-#: attributable to reclaim pressure rather than to a big tree. Measured at
-#: the incident: 232.9 GiB anon of a 233.76 GiB cgv1 ceiling = 99.6%.
+#: attributable to reclaim pressure rather than to a big tree. Measured at the
+#: incident: 232.9 GiB anon of a 233.76 GiB cgv1 ceiling = 99.6%.
 _CEILING_FRACTION = 0.9
 
 _lock = threading.Lock()
@@ -133,9 +129,9 @@ class LoadProgressReporter:
         self._phase_bytes = 0
         self._phase_started = time.monotonic()
         self._staged = 0
-        # pgw#1063 thrash detection: this phase's own read/anon baselines and
-        # the verdict once it has been reached (sticky — the regime does not
-        # un-happen, and the loader reads it between components).
+        # This phase's own read/anon baselines and the verdict once it has been
+        # reached (sticky — the regime does not un-happen, and the loader reads
+        # it between components).
         self._phase_read0 = 0
         self._phase_anon0 = 0
         self._thrash = ""
@@ -180,9 +176,9 @@ class LoadProgressReporter:
         try:
             span_ms = int(max(0.0, time.monotonic() - self._phase_started) * 1000)
             # "ended", never "complete": `load_slot` stops the reporter from a
-            # `finally`, so this row also closes a phase that RAISED (a typed
-            # pgw#752 refusal). The span is the honest fact either way; the
-            # outcome is the raised error's to report.
+            # `finally`, so this row also closes a phase that RAISED. The span
+            # is the honest fact either way; the outcome is the raised error's
+            # to report.
             activity_mod.emit_event(
                 EVENT_PHASE_DONE,
                 f"{self.label}: {self._phase} ended; staged "
@@ -238,7 +234,7 @@ class LoadProgressReporter:
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         self.stop(clean=exc_type is None)
 
-    # -- the re-read (direct-reclaim) verdict (pgw#1063) ---------------------
+    # -- the re-read (direct-reclaim) verdict ---------------------
 
     @property
     def thrash(self) -> str:
@@ -256,12 +252,12 @@ class LoadProgressReporter:
     def _check_thrash(self, read: Optional[int], anon: int) -> None:
         """Decide whether this phase is STAGING or RE-READING.
 
-        THREAT (§4.25): a staging admitted against an estimate that turned
-        out low does not fail — it crawls. Every fault goes through direct
-        reclaim, the process reads its own set over and over, and the only
-        thing that ends it is the kernel's OOM killer, tens of minutes and
-        tens of dollars later (ie#615: 1.578 TB read for a 105 GB set, 37
-        minutes, rss_anon 232.9 GiB of a 233.76 GiB ceiling).
+        THREAT: a staging admitted against an estimate that turned out low
+        does not fail — it crawls. Every fault goes through direct reclaim, the
+        process reads its own set over and over, and the only thing that ends
+        it is the kernel's OOM killer, tens of minutes and tens of dollars
+        later (measured: 1.578 TB read for a 105 GB set, 37 minutes, rss_anon
+        232.9 GiB of a 233.76 GiB ceiling).
 
         The observable that decides it correctly is a CONJUNCTION, because
         each half alone has an innocent explanation: a big tree reads a lot,
@@ -270,10 +266,9 @@ class LoadProgressReporter:
         cgroup limit — there is no innocent reading left: a healthy load
         reads each byte about once and a page-cache-warm one reads ~none.
 
-        Anon GROWTH is deliberately not treated as proof of progress. In the
-        incident it grew the whole time (130 -> 232.9 GiB): the estimate was
-        simply wrong about what the set weighed, and "it is still staging"
-        is exactly the story that ran 37 minutes into a kernel kill.
+        Anon GROWTH is deliberately not treated as proof of progress: in the
+        incident it grew the whole time (130 -> 232.9 GiB) while the estimate
+        was simply wrong about what the set weighed.
 
         The verdict is a confession, not a kill: the counter above already
         stopped crediting re-reads, so the existing stall authority sees a
@@ -323,11 +318,10 @@ class LoadProgressReporter:
             rss_anon_kb = _proc_rss_anon_kb() or 0
             # Bytes STAGED is evidenced by whichever is further along:
             # cold reads show in io, page-cache-warm loads show as anon RSS.
-            # pgw#1063: reads BEYOND the set's own size are re-reads, not
-            # progress — crediting them is what let a 37-minute direct-
-            # reclaim crawl report 1.578 TB of "advancement" for a 105 GB
-            # set, so the stall clock never saw a stalled load. Cap the
-            # read-derived credit at what there is to read; anon growth
+            # Reads BEYOND the set's own size are re-reads, not progress —
+            # crediting them lets a direct-reclaim crawl report TB of
+            # "advancement" so the stall clock never sees a stalled load. Cap
+            # the read-derived credit at what there is to read; anon growth
             # (real staged bytes) still advances it honestly.
             readable = self.total_bytes or read
             done = max(0, min(read, readable), rss_anon_kb * 1024)
@@ -335,8 +329,8 @@ class LoadProgressReporter:
             # ABSOLUTE counters: the phase baselines are absolute too, and a
             # delta-from-load-start would silently zero the comparison.
             self._check_thrash(io_now, rss_anon_kb * 1024)
-            # pgw#894: activity-owned, so a load advances the clock of the
-            # phase doing it and not whatever else is open on this pod.
+            # Activity-owned, so a load advances the clock of the phase doing it
+            # and not whatever else is open on this pod.
             c = activity_mod.scoped_counter(
                 COUNTER_NAME, "bytes",
                 max(self.total_bytes, done),
@@ -368,7 +362,7 @@ def set_phase(phase: str, nbytes: int = 0) -> None:
 
 
 def thrash_verdict() -> str:
-    """The active load's re-read verdict, or ``""`` (pgw#1063).
+    """The active load's re-read verdict, or ``""``.
 
     Non-empty means THIS process has been measured re-reading a set it
     cannot hold instead of staging it. The loader refuses the next

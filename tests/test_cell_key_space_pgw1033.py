@@ -1,8 +1,7 @@
-"""pgw#1033 (re-cut by pgw#1059) — the STAMPED key is the cell's identity;
-the ARM TOKEN names an obligation. Three live protections were comparing one
-against the other.
+"""The STAMPED key is the cell's identity; the ARM TOKEN names an obligation.
+Comparing one against the other silently disarms a protection.
 
-Since pgw#1059 the two spaces are disjoint BY SPELLING, not just by formula:
+The two spaces are disjoint BY SPELLING, not just by formula:
 
 * the **arm token** (``fleet_cells.arm_identity``, ``arm1-<56 hex>``) — the
   pre-trace obligation identity. It exists before anything is compiled,
@@ -12,23 +11,22 @@ Since pgw#1059 the two spaces are disjoint BY SPELLING, not just by formula:
   four-axis graph x envelope x sm x toolchain digest) — what the exported
   cell actually IS. It does not exist until the export finishes.
 
-Every protection below was written on one side and fed from the other, so each
-one silently stopped firing. The three tests that matter are RED on
-``origin/master`` ``872f16e5``:
+Each protection below was written on one side and fed from the other, and so
+silently stopped firing. The three that matter:
 
-1. ``finalized_in_process`` (the pgw#672 no-second-mint memo) read the computed
-   key while ``adopt_delegated_mint`` wrote the stamped one — the memo could
-   never hit, and every same-key re-arm in a process paid a second full export;
-2. the pgw#672 quarantine gate read the computed ref while the two writers that
-   fire on a real proof failure (``executor``'s runtime guard and boot proof)
-   record the STAMPED ref of the armed cell — so the churn-loop gate was blind
-   to the refs that actually fail;
+1. ``finalized_in_process`` (the no-second-mint memo) read the computed key
+   while ``adopt_delegated_mint`` wrote the stamped one — the memo could never
+   hit, and every same-key re-arm in a process paid a second full export;
+2. the quarantine gate read the computed ref while the two writers that fire on
+   a real proof failure (``executor``'s runtime guard and boot proof) record the
+   STAMPED ref of the armed cell — so the churn-loop gate was blind to the refs
+   that actually fail;
 3. ``aot_serve.note_aot_key`` had ONE caller, discovery — so a SELF-MINTED cell
-   was never registered and the pgw#734/#735 kind dispatch scored this pod's own
-   ``.pt2`` by FX cache hits it cannot produce.
+   was never registered and the kind dispatch scored this pod's own ``.pt2`` by
+   FX cache hits it cannot produce.
 
 Plus the dead-attribute guard: ``_selection_for`` tested ``mint.recipe ==
-"aot"``, an attribute pgw#1010 deleted from every mint object.
+"aot"``, an attribute no mint object carries.
 """
 
 from __future__ import annotations
@@ -50,7 +48,7 @@ from gen_worker.cell_adopt import AdoptOutcome, EagerPhase
 
 FAMILY = "sdxl"
 #: What this runtime's facts COMPUTE — the arm token, known before any
-#: compile has run. NOT ck-shaped (pgw#1059): an obligation is not a cell.
+#: compile has run. NOT ck-shaped: an obligation is not a cell.
 ARM_KEY = "arm1-" + "a" * 56
 #: What the child's envelope is STAMPED with — the cell identity, unknowable
 #: until the export finishes. A different digest, always.
@@ -156,7 +154,7 @@ def _adopt(
 ) -> Any:
     """Run the real ``adopt_delegated_mint`` over a child cell stamped with a
     key of the cell's OWN space — the production shape, in one line."""
-    # pgw#1098: a REAL readable envelope carrying the stamp. This used to be
+    # a REAL readable envelope carrying the stamp. This used to be
     # `b"packed-cell"` plus a `_packed_metadata` patch, which worked only
     # because the pre-arm read swallowed its own failure into `None`. An
     # unreadable envelope is now refused before the arm, so the cell has to

@@ -39,8 +39,8 @@ from ..component_vocab import weight_components
 _WEIGHT_EXTS: tuple[str, ...] = (".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".gguf")
 
 # Component subdirs that are weight-bearing — read from the ONE vocabulary at
-# call time (pgw#740 B5), so a component an endpoint declares is sized too
-# rather than silently contributing zero bytes.
+# call time, so a component an endpoint declares is sized too rather than
+# silently contributing zero bytes.
 def _diffusers_weight_component_dirs() -> frozenset[str]:
     return frozenset(weight_components())
 

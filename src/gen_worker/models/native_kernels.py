@@ -1,43 +1,39 @@
-"""Native-kernel dispatch (pgw#860, pgw#863, pgw#947).
+"""Native-kernel dispatch.
 
-TWO decisions, each made once per process at LOAD time and each INDEPENDENT
-of the other (pgw#863 — binding them to one switch cost sm_100 either 9.5 GB
-of residency or 19% of its step time, with no way to take both):
+TWO decisions, each made once per process at LOAD time and each INDEPENDENT of
+the other — binding them to one switch costs sm_100 either 9.5 GB of residency
+or 19% of its step time, with no way to take both:
 
-- ``svdq_linear_lane()`` — FUSED W4A4 linears (pgw#862 triton kernels;
-  `_cozy_kernels` C++ ops if/when a lane needs them) or the baseline unfused
-  chain. A throughput question.
-- ``svdq_modulation_lane()`` — PACKED W4A16 AdaLN modulation (pgw#864) or
-  dense bf16. A residency question.
+- ``svdq_linear_lane()`` — FUSED W4A4 linears (triton kernels; `_cozy_kernels`
+  C++ ops if/when a lane needs them) or the baseline unfused chain. A
+  throughput question.
+- ``svdq_modulation_lane()`` — PACKED W4A16 AdaLN modulation or dense bf16. A
+  residency question.
 
-**Neither decision is made here, and neither is derived from the SM
-(pgw#947).** Which combination of the two wins on a card is a per-card FACT,
-not a derivable one — a custom op is opaque to inductor, so our fusion beats
-inductor's own on sm_120 and loses to it on sm_100 — and it used to live in
-hand-maintained SM tuples informed by ~$12 benchmark campaigns per card. It
-is now MEASURED at mint on the card the cell is being minted for, ranked by
-fit-constrained speed (which prices the residency axis and the throughput
-axis in one comparison instead of hard-coding either), recorded into the cell
-as ONE combined lane, and read back here: see ``gen_worker.kernel_lane``.
-This module's whole job is to project the pin onto its axis, prove that
-axis's kernels still self-check, and say loudly what it did.
+**Neither decision is made here, and neither is derived from the SM.** Which
+combination of the two wins on a card is a per-card FACT, not a derivable one —
+a custom op is opaque to inductor, so our fusion beats inductor's own on sm_120
+and loses to it on sm_100. It is MEASURED at mint on the card the cell is being
+minted for, ranked by fit-constrained speed (which prices the residency axis and
+the throughput axis in one comparison instead of hard-coding either), recorded
+into the cell as ONE combined lane, and read back here (``gen_worker.kernel_lane``).
+This module projects the pin onto its axis, proves that axis's kernels still
+self-check, and says loudly what it did.
 
 Order of decision, PER AXIS, each step typed and never silent-wrong:
 
 - env kill-switch first: ``GEN_WORKER_NATIVE_KERNELS=0`` forces baseline.
-  Rollout is still env-GATED (pgw#859 G0: unset means OFF, ``=1`` opts in)
-  because flipping that gate belongs to pgw#865, not to this mechanism. The
-  env is on th#1445's elimination list and MUST NOT grow new meanings — it
-  gates the ROLLOUT, it never picks a lane.
+  Rollout is env-GATED (unset means OFF, ``=1`` opts in). The env is on the
+  elimination list and MUST NOT grow new meanings — it gates the ROLLOUT, it
+  never picks a lane.
 - the recorded verdict: ``kernel_lane.pinned()``, set by the executor from
-  the delivered cell before ``setup()`` runs. No pin (eager boot, pre-pgw#947
-  cell, unreadable envelope) => the declared conservative default with the
-  typed reason that says which of those it was.
-- numerics self-check, per axis: an armed value still has to pass THIS
-  axis's check on THIS box (fused: activation-quant BIT-IDENTITY vs the
-  pgw#685 reference chain; packed: output vs the decoded bf16 Linear). A gap
-  degrades that axis ALONE — the other keeps its verdict, which is the whole
-  point of the pgw#863 split.
+  the delivered cell before ``setup()`` runs. No pin (eager boot, a cell minted
+  before the mechanism, unreadable envelope) => the declared conservative
+  default with the typed reason that says which of those it was.
+- numerics self-check, per axis: an armed value still has to pass THIS axis's
+  check on THIS box (fused: activation-quant BIT-IDENTITY vs the reference
+  chain; packed: output vs the decoded bf16 Linear). A gap degrades that axis
+  ALONE — the other keeps its verdict, which is the whole point of the split.
 - contract mismatches inside an armed lane raise typed errors; they are bugs,
   not degrade paths.
 

@@ -1,12 +1,11 @@
-"""The publish journal — "never redo the cast to redo the upload" (pgw#1003).
+"""The publish journal — "never redo the cast to redo the upload".
 
-A 2h16m fp8 cast on an H100 costs about $10 of GPU plus the wall time. If the
-upload of its ~37 GB output fails, the honest cost is "re-upload". Before this
-module the cost was "re-run the cast", for two reasons that hid each other:
-``publish_id`` lived only as a local variable inside ``publish_v2``, so no
-successor could name the session whose staged bytes it should resume; and
-``clone.py``'s ``finally`` rmtree'd the produced tree on every exit path, so
-there were no bytes left to re-upload anyway.
+A multi-hour fp8 cast on an H100 costs GPU dollars plus the wall time. If the
+upload of its tens of GB of output fails, the honest cost is "re-upload" — which
+needs two things the naive shape lacks: a ``publish_id`` that outlives
+``publish_v2``'s stack frame, so a successor can name the session whose staged
+bytes it should resume, and a produced tree that is not rmtree'd on the failure
+path.
 
 **What this is.** A tiny append-and-rewrite JSON file living NEXT TO the
 produced tree, recording for each in-flight publish: the ``publish_id``, the
@@ -19,21 +18,20 @@ cleared on success, and LEFT BEHIND on failure.
 session-scoped (``staging/sha256/<publish_id>/``), so resuming means reusing
 the id — which is exactly what the journal restores. A successor re-plans that
 same session through ``POST .../publishes/:id/grants`` and uploads only what
-the need set still names. Note the dependency, honestly: until th#1654 lands
-hub-side, ``Plan`` decides residency off ``blobs/`` alone and the need set does
-not shrink for staged-but-unpromoted objects, so re-planning re-uploads the
-tree. The client is built to exploit the shrink the moment it exists, and
-costs nothing extra before then — one extra ``/grants`` round trip.
+the need set still names. Note the dependency, honestly: while the hub's
+``Plan`` decides residency off ``blobs/`` alone, the need set does not shrink
+for staged-but-unpromoted objects, so re-planning re-uploads the tree. The
+client is built to exploit the shrink the moment it exists, and costs nothing
+extra before then — one extra ``/grants`` round trip.
 
 **Scope, stated rather than implied.** This is a SAME-POD durability record.
 The retained tree and the journal live on pod-local disk; if the pod dies the
-disk dies with it and neither survives. It therefore covers exactly the case
-that motivated pgw#1003 — a transport blip, a hub restart, a completion
-timeout, an orchestrator requeue onto the same worker — and deliberately not
-cross-pod resume, which needs the id to travel through the hub (th#1654's own
-open question). What it must NOT do is let a session's staged bytes be
-destroyed by a failure a retry could have survived; that half is enforced in
-``hub.py``, which now aborts only on a terminal repudiation.
+disk dies with it and neither survives. It covers a transport blip, a hub
+restart, a completion timeout, an orchestrator requeue onto the same worker —
+and deliberately NOT cross-pod resume, which needs the id to travel through the
+hub. What it must NOT do is let a session's staged bytes be destroyed by a
+failure a retry could have survived; that half is enforced in ``hub.py``, which
+aborts only on a terminal repudiation.
 """
 
 from __future__ import annotations

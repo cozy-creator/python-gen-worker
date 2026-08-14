@@ -4,10 +4,10 @@
 plan is the cross-product of those partitions. For an endpoint with real
 inter-field constraints (ltx-video-2.3: 4K is 16:9 and B200-only, ultrawide is
 1080p-class and frame-capped, 48 fps caps at 10 s -> **29 legal of 120**) most
-of that product is not a servable request, and every illegal row used to fail
-the WORKER LOAD while the plan built its payloads. Declaring axes at all was
-therefore a boot hazard, which is why ltx kept a hand-written ``warmup()``
-carve-out and forfeited the computable "fully warmed?" property.
+of that product is not a servable request. An illegal row that fails the WORKER
+LOAD while the plan builds its payloads makes declaring axes at all a boot
+hazard, forcing a hand-written ``warmup()`` carve-out that forfeits the
+computable "fully warmed?" property.
 
 Tapes here use a payload whose ``__post_init__`` really does reject the
 illegal combinations (the ltx shape, scaled down to the same 120-vs-sparse

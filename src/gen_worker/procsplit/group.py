@@ -1,9 +1,9 @@
-"""pgw#783: the execution GROUP as an OS process — the child plan.
+"""The execution GROUP as an OS process — the child plan.
 
-pgw#782 measured it: four execution groups in ONE interpreter serve 0.94x of
-serial (21% on every card); four PROCESSES with one group each serve **4.00x**
-at 91-93% util, same pod, same weights. So the child of pgw#763's split is not
-one process — it is one process PER EXECUTION GROUP.
+Measured: four execution groups in ONE interpreter serve 0.94x of serial (21%
+on every card); four PROCESSES with one group each serve **4.00x** at 91-93%
+util, same pod, same weights. So the child of the process split is not one
+process — it is one process PER EXECUTION GROUP.
 
 This module is the pure half of that: given the delivered topology, what
 children exist and what env does each one get. No spawning, no I/O, no torch.
@@ -15,19 +15,18 @@ topology rewritten to ``D x D`` (locally ``G == 1``), so inside the child:
 
 * ``current_device_group()`` is 0 and ``group_cuda_device()`` is plain
   ``"cuda"`` — the placement path every single-group pod has always used;
-* ``Executor._gpu_slots`` is 1, so pgw#779's "the slot semaphore is a count,
-  not a per-group permit" dissolves: the count IS the permit when the process
-  is the group;
-* pgw#748's multi-group hazards (thread device pinning, the group ordinal in
+* ``Executor._gpu_slots`` is 1, so "the slot semaphore is a count, not a
+  per-group permit" dissolves: the count IS the permit when the process is the
+  group;
+* the multi-group hazards (thread device pinning, the group ordinal in
   ``instance_key``, the refusal to serve async handlers on a wide worker) have
   nothing left to be about;
-* pgw#777's process-global compile plane stops having G concurrent users, and
-  pgw#784's mint delegate works per child by construction.
+* the process-global compile plane stops having G concurrent users, and the
+  mint delegate works per child by construction.
 
 **At G == 1 the env delta is EMPTY** — no ``CUDA_VISIBLE_DEVICES``, no topology
-rewrite, no per-group anything — so a one-child worker is byte-identical to
-what pgw#763 stage 1 shipped and measured. That is asserted, not asserted-ish:
-see ``tests/test_group_processes_pgw783.py``.
+rewrite, no per-group anything — so a one-child worker is byte-identical to the
+unsplit shape.
 
 A ``D > 1`` group stays ONE process. Its devices are one logical accelerator —
 the model's own arrangement (``parallel="internal"``) or a platform collective
@@ -93,8 +92,8 @@ class GroupPlan:
 
         Single-group pods keep the historical behaviour exactly (there is only
         one group to mean). At G>1 a non-rank-0 or missing index is the same
-        typed refusal the executor now raises (pgw#779, security-deltas base):
-        flooring a hub/worker packing disagreement onto group 0 is the silent
+        typed refusal the executor raises: flooring a hub/worker packing
+        disagreement onto group 0 is the silent
         bug that piles every mis-dispatch onto the busiest card.
         """
         if self.topology.execution_groups <= 1:
@@ -176,12 +175,11 @@ def _child_env(
         # never selects serving behaviour.
         ENV_GROUP_ORDINAL: str(ordinal),
         # The ONE thing a child must know about its siblings: how many
-        # processes share this pod's cgroup. Without it pgw#782's cpu_budget
-        # divisor (the delivered group count, now rewritten to 1) would let
-        # every child take the whole CPU quota and reinstate exactly the
-        # 192-threads-on-32-cores misconfiguration pgw#782 removed; and
-        # pgw#752's host-RAM probe would tell each child the whole pod's RAM
-        # is its own, making pgw#763's move guard G-times too permissive on
+        # processes share this pod's cgroup. Without it the cpu_budget divisor
+        # (the delivered group count, rewritten to 1 here) lets every child
+        # take the whole CPU quota — a 192-threads-on-32-cores
+        # oversubscription — and the host-RAM probe tells each child the whole
+        # pod's RAM is its own, making the move guard G-times too permissive on
         # precisely the pods most likely to OOM.
         ENV_HOST_SIBLINGS: str(int(topology.execution_groups)),
     }

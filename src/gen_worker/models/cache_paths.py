@@ -18,8 +18,7 @@ def tensorhub_cache_dir() -> Path:
     the ONE knob for where the CAS lives: the cozy-local runner points it at
     a persistent ``~/.cache/tensorhub`` (weights survive reboots). The CAS
     root ALWAYS stays on local/pod-local storage — a managed, bounded LRU
-    tier (th#850 managed-tier ruling, gw#599: supersedes the earlier
-    CAS-root-on-volume shape). A mounted RunPod endpoint volume, when
+    tier, never on a volume. A mounted RunPod endpoint volume, when
     attached, is a FILL SOURCE consulted before R2 (see
     ``tensorhub_fill_source_dir``) — it is never the CAS root itself. Falls
     back to the ``/tmp`` default when unset. The CAS implementation itself is
@@ -37,18 +36,17 @@ def tensorhub_cas_dir() -> Path:
 
 
 def tensorhub_fill_source_dir() -> Path | None:
-    """Endpoint-scoped datacenter-warm fill source (th#850 managed-tier
-    ruling), or ``None`` when no volume is attached.
+    """Endpoint-scoped datacenter-warm fill source, or ``None`` when no volume
+    is attached.
 
     Honors ``TENSORHUB_FILL_SOURCE_DIR``, set by tensorhub only when this
     pod's endpoint has a RunPod network volume attached. Guarded by
     ``os.path.ismount`` — a plain directory baked into the image or left on
     the container disk must never be mistaken for the real per-endpoint
-    volume (same defensive pattern the removed ``endpoint_shared_cas_dir``
-    used). This is FILL SOURCE #1 in the CAS layer's fetch order (volume,
+    volume. This is FILL SOURCE #1 in the CAS layer's fetch order (volume,
     then R2); it is never the CAS root. cozy-local and any pod without a
-    volume leave this unset, which is the degenerate case: fetch goes
-    straight to R2, byte-identical to pre-th#850 behavior.
+    volume leave this unset, which is the degenerate case: fetch goes straight
+    to R2.
     """
     configured = current_or(_STANDALONE).tensorhub_fill_source_dir.strip()
     if not configured:

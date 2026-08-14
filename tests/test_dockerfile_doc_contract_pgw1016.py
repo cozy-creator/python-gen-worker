@@ -1,12 +1,11 @@
-"""The Dockerfile the docs teach must be one the hub will accept (pgw#1016).
+"""The Dockerfile the docs teach must be one the hub will accept.
 
 `docs/dockerfile.md` presents the canonical org Dockerfile — the file an
-endpoint author is told to copy. It taught a BuildKit cache mount, and
-tensorhub's publish validator refuses one outright
-(`builder/validation.go`: `ErrBuildKitCache`), so an org that followed the
-documentation could not publish: `400 invalid_tarball`. The doc had no
-first-party consumer — every `inference-endpoints` family lets the hub
-synthesize its Dockerfile — so nothing ever exercised it.
+endpoint author is told to copy. tensorhub's publish validator refuses a
+BuildKit cache mount outright (`builder/validation.go`: `ErrBuildKitCache`), so
+a doc that teaches one leaves an org unable to publish (`400 invalid_tarball`),
+and the doc has no first-party consumer to catch it — every
+`inference-endpoints` family lets the hub synthesize its Dockerfile.
 
 This is the guard that keeps the two sides from drifting apart again from
 THIS repo, which is where the doc lives. It mirrors the hub's pattern rather
@@ -18,13 +17,12 @@ these checks deliberately do not strip comments either: a file that merely
 mentions the directive while explaining the ban is refused exactly like one
 that uses it.
 
-pgw#1023 folded this defect into the general table: the ban is now the
-``buildkit_cache_mount`` row of ``gen_worker.build_guarantees``, checked over
-every example and every documented block alongside the four other steps a
-hand-written Dockerfile owes. What stays HERE is what is specific to this
-instance — the doc's prose surviving its own copy-paste, and the size argument
-for ``g++`` over ``build-essential`` — and it reads the pattern from the
-registry rather than keeping a second spelling of it.
+The ban itself is the ``buildkit_cache_mount`` row of
+``gen_worker.build_guarantees``, checked over every example and every documented
+block alongside the other steps a hand-written Dockerfile owes. What stays HERE
+is specific to this instance — the doc's prose surviving its own copy-paste, and
+the size argument for ``g++`` over ``build-essential`` — read from the registry
+rather than kept as a second spelling of the pattern.
 """
 
 from __future__ import annotations

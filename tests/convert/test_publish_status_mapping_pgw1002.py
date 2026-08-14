@@ -104,7 +104,7 @@ def test_the_detail_is_bounded_and_never_leaks_a_stack():
 
 
 # ---------------------------------------------------------------------------
-# pgw#1003: the writer's durable finalize
+# The writer's durable finalize
 # ---------------------------------------------------------------------------
 
 

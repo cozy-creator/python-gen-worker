@@ -1,6 +1,6 @@
-"""Parent-side attestation of billable job metrics (pgw#763 delta 3).
+"""Parent-side attestation of billable job metrics.
 
-th#1309: ``JobMetrics`` is the sole billing source and it is produced by the
+``JobMetrics`` is the sole billing source and it is produced by the
 code being billed. Under the split that code runs in the compute child, so the
 child's numbers arrive at the parent as a claim — and the parent is the one
 component that watched the whole job from outside it.
@@ -18,7 +18,7 @@ never inflates what it cannot.**
 * ``concurrency_at_start`` is REPLACED with the parent's in-flight count at
   dispatch. The parent dispatches every job, so this is not an estimate.
 * ``rss_at_end_bytes`` is REPLACED with the parent's ``/proc`` reading of the
-  child at result time — the same discipline as pgw#771's liveness evidence: a
+  child at result time — the same discipline as the liveness evidence: a
   process is not the witness for its own resource use.
 
 What is NOT attested here, and why it is a scoped follow-up rather than a gap
@@ -26,9 +26,9 @@ this file pretends to close: ``output_media_duration_s``, the token counts,
 ``output_count`` and ``peak_vram_bytes``. Measuring media seconds or token
 counts parent-side would mean routing the OUTPUT through the parent, which is
 precisely the "seam carries CONTROL, not DATA" invariant the multi-GPU 4x
-depends on. Those stay child-reported and need hub-side plausibility bounds
-(th#1309's half). This module NAMES them in the attestation record so the
-divergence is visible instead of implicit.
+depends on. Those stay child-reported and need hub-side plausibility bounds.
+This module NAMES them in the attestation record so the divergence is visible
+instead of implicit.
 """
 
 from __future__ import annotations
@@ -99,7 +99,7 @@ def attest(
             )
         metrics.rss_at_end_bytes = int(child_rss_bytes)
 
-    # th#1364: the `output_media_duration_s == 0` divergence is DELETED, and
+    # The `output_media_duration_s == 0` divergence is DELETED, and
     # deleting it is the fix rather than relabelling what it emitted.
     #
     # `_scan_output_assets` sums `Asset.duration_s`, which only a TEMPORAL asset
@@ -110,24 +110,18 @@ def attest(
     # comment said as much: the parent cannot see the output without pulling the
     # data plane through its own interpreter.
     #
-    # It was not merely noisy. Each divergence dials the post-mortem carrier,
-    # which opens a SEPARATE Connect; at the time this was found that carrier
-    # authenticated with `settings.worker_jwt` — the boot token, which rotation
-    # never updated — so past pod-create + TTL every dial was
-    # `worker_token_expired`, and three of them terminate the pod
-    # (`worker_auth_wedge`). pgw#846 attempt sixteen died exactly there, 35
-    # minutes into the longest AOT mint in the program's history. **A false
-    # positive in a billing attestation became the proximate cause of a pod
-    # death.** The carrier now reads `worker_credential.current()` (pgw#848
-    # `7fa4eeb`) and a diagnostic dial can no longer condemn a pod (th#1359
-    # `705c316a`); this removes the false positive that fired it. Three
-    # independent layers — keep all three.
+    # Not merely noisy: each divergence dials the post-mortem carrier over a
+    # SEPARATE Connect, and a false positive in a billing attestation once
+    # became the proximate cause of a pod death. Three independent layers now
+    # prevent that (the carrier reads `worker_credential.current()`, a
+    # diagnostic dial cannot condemn a pod, and this check is gone) — keep all
+    # three.
     #
-    # th#1309 keeps the property, on the side that can actually hold it: the HUB
-    # knows the endpoint's settlement model, so it alone can say whether a zero
-    # duration is meaningful (`per_output_second` — fail closed) or expected
-    # (`per_output` on images). Re-adding a worker-side version of this check
-    # needs a temporal-asset count on the wire, not a heuristic over `output_count`.
+    # The property lives on the side that can hold it: the HUB knows the
+    # endpoint's settlement model, so it alone can say whether a zero duration
+    # is meaningful (`per_output_second` — fail closed) or expected
+    # (`per_output` on images). Re-adding a worker-side version needs a
+    # temporal-asset count on the wire, not a heuristic over `output_count`.
     return found
 
 

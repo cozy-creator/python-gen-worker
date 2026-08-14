@@ -16,7 +16,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-# pgw#802: point the postmortem carriers off the HOST before anything imports
+# point the postmortem carriers off the HOST before anything imports
 # `gen_worker.postmortem`, which resolves BOOT_RECORD_PATH (and its in-flight /
 # crash-registry / fault-dump siblings) ONCE at import from this variable.
 #
@@ -31,7 +31,7 @@ os.environ.setdefault(
     str(Path(tempfile.mkdtemp(prefix="pgw-postmortem-")) / "boot-record.json"),
 )
 
-# pgw#848: put THIS directory on `sys.path` before any test module is
+# put THIS directory on `sys.path` before any test module is
 # imported, so `from harness import ...` cannot depend on import ORDER.
 #
 # pytest's `prepend` import mode inserts a test file's rootdir into `sys.path`
@@ -55,7 +55,7 @@ if str(Path(__file__).parent) not in sys.path:
 
 import gen_worker  # noqa: E402
 
-# pgw#1049: the suite runs under the DECLARED interpreter env — the exact
+# The suite runs under the DECLARED interpreter env — the exact
 # imposition the entrypoint performs at boot (PYTHONHASHSEED=0; env_seal.
 # establish refuses without it). CPython read the seed at interpreter start,
 # so a pytest launched without it gets ONE re-exec, in pytest_configure
@@ -77,7 +77,7 @@ def pytest_configure(config):
         capman.stop_global_capturing()
     ensure_interpreter_env()  # execs; never returns (or raises for -E)
 
-# Deterministic CPU encode wherever the suite runs (gw#476): never probe or
+# Deterministic CPU encode wherever the suite runs: never probe or
 # engage NVENC from tests — CI has no GPU, and dev boxes that have one must
 # not do GPU work from the unit suite. Selection tests override + refresh
 # the cache explicitly.

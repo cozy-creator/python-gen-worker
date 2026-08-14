@@ -1,19 +1,16 @@
-"""pgw#1076 — ``precision`` is a MEASUREMENT, and nothing may default it.
+"""``precision`` is a MEASUREMENT, and nothing may default it.
 
-``ExportSpec.precision`` defaulted to ``"bf16"`` and both spec builders
-repeated the default (``fleet_cells.aot_export_spec``:
-``precision=execution_lane or "bf16"``; ``aot_mint._load_spec``:
-``str(body.get("precision") or "bf16")``). So micro-conv — fp32 weights,
-``dtype="float32"`` inputs, an fp32 traced graph whose own ``input_contract``
-records ``float32``/``int64`` CORRECTLY — packaged ``metadata.json
-precision: "bf16"``, and every arm line printed ``precision=bf16, constants
-bound from resident weights``.
+There are three places a ``"bf16"`` default can creep back in:
+``ExportSpec.precision``, ``fleet_cells.aot_export_spec``
+(``precision=execution_lane or "bf16"``) and ``aot_mint._load_spec``
+(``str(body.get("precision") or "bf16")``). With any of them, an fp32 mint
+packages ``metadata.json precision: "bf16"`` even though its own
+``input_contract`` records ``float32``/``int64`` correctly.
 
-Nothing miscomputes: ``precision`` is metadata-only and is not a ``cell_key``
-axis. What it cost was a debugging cycle. A reader chasing a 1.2e-3 GPU parity
-delta reads that line as "the mint cast to bf16" and spends the cycle
-disproving it; the real cause was TF32 conv kernels. **A recorded fact that
-defaults to a plausible-but-wrong value is worse than an absent one.**
+Nothing miscomputes — ``precision`` is metadata-only and is not a ``cell_key``
+axis — but **a recorded fact that defaults to a plausible-but-wrong value is
+worse than an absent one**: a reader chasing a parity delta reads that line as
+"the mint cast to bf16" and spends a cycle disproving it.
 
 So: a caller that KNOWS the lane keeps its word (every real family, via
 ``weight_lane`` — their behaviour is unchanged), an ABSENT stamp is derived

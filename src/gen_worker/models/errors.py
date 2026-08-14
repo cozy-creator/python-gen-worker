@@ -14,7 +14,7 @@ class UrlExpiredError(RuntimeError):
 
 class MissingSnapshotError(RuntimeError):
     """A tensorhub-CAS ref cannot be materialized: no orchestrator-resolved
-    snapshot was provided, cached, or previously seen (gw#465). Deterministic
+    snapshot was provided, cached, or previously seen. Deterministic
     local condition — never retried worker-side; the orchestrator re-mints and
     re-sends DOWNLOAD on ``ModelEvent{FAILED, error:"missing_snapshot"}``."""
 
@@ -26,7 +26,7 @@ class PickleWeightRefused(RuntimeError):
     refused at resolve time and its bytes are never downloaded.
 
     Terminal, never retried: the artifact must be republished as safetensors.
-    tensorhub refuses these at publish (th#1313); this is the defence in depth
+    tensorhub refuses these at publish; this is the defence in depth
     for blobs that predate that refusal or reach a worker by another path."""
 
 

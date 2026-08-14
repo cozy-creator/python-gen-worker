@@ -1,11 +1,11 @@
-"""Fused native execution lane for SvdqLinear (pgw#862 phase B0).
+"""Fused native execution lane for SvdqLinear.
 
-The serving path is the HYBRID settled by the first 5090 iteration (evidence
-in pgw#862): the baseline's ~8-op unfused chain per unit becomes
+The serving path is the HYBRID measured on the 5090: the baseline's ~8-op
+unfused chain per unit becomes
 
   1. ``svdq_quant`` — one pass over RAW x: smooth-divide fused in-register
      (bf16-rounded to match the aten reference) + per-16-block e4m3
-     quantization BIT-IDENTICAL to the pgw#685 chain, storing scales in
+     quantization BIT-IDENTICAL to the reference chain, storing scales in
      either the cuBLAS blocked layout (serving) or plain flat [M, K/16].
   2. the PROVEN cuBLAS block-scaled fp4 GEMM (``_gemm_w4a4`` — measured
      107us vs 265us for the best pure-triton ``tl.dot_scaled`` tile at qwen
@@ -16,15 +16,15 @@ in pgw#862): the baseline's ~8-op unfused chain per unit becomes
 
 ``svdq_gemm_w4a4_lora`` (pure-triton block-scaled MMA GEMM with the low-rank
 epilogue fused; native ``kind::mxf4nvf4`` on sm_120a, tcgen05 on sm_100a) is
-kept registered as the measured alternative and the sm_100 seed for pgw#863,
-but is NOT the serving path on sm_120.
+kept registered as the measured alternative and the sm_100 seed, but is NOT
+the serving path on sm_120.
 
 Numerics vs the baseline lane: activation quantization is bit-identical by
 construction (same formulas, ``div_rn``, ties-up e2m1, same s2 — the arming
 self-check enforces it), and the GEMM is literally the same kernel; the
 epilogue accumulates in fp32 with ONE final bf16 round where the baseline
-rounds at every op boundary. Divergence is quantified per shape on the
-pgw#865 harness, never assumed.
+rounds at every op boundary. Divergence is quantified per shape on the parity
+harness, never assumed.
 """
 
 from __future__ import annotations
@@ -53,20 +53,18 @@ _RANK_ALIGN = 16
 
 _SELF_CHECK_PROBES = ((128, 512, 256), (77, 3072, 384))
 
-# Warps for the fused quant kernel, per SM — module level so a sweep can
-# rebind it (scripts/svdq_bench/bench_gemm.py) instead of editing source.
 # Quantizer launch config per SM. Module level so scripts/svdq_bench/
 # tune_quant.py can sweep it per card instead of anyone editing source.
-# sm_120: 8 warps (pgw#862, strided kernel). sm_100: 1 warp on the contiguous
+# sm_120: 8 warps on the strided kernel. sm_100: 1 warp on the contiguous
 # kernel — a whole-sweep optimum on B200, where more warps only add
-# contention on an already memory-bound kernel (pgw#863).
+# contention on an already memory-bound kernel.
 _QUANT_WARPS_BY_SM = {100: 1, 103: 1, 120: 8, 121: 8}
 _QUANT_WARPS_DEFAULT = 4
 # 16-element blocks handled per program, per SM.
 _QBPP = 128
 _QBPP_BY_SM = {100: 128, 103: 128, 120: 128, 121: 128}
-# SMs served by the contiguous-load quantizer (pgw#863). sm_120 keeps the
-# strided kernel: register re-layout measured SLOWER there (pgw#862).
+# SMs served by the contiguous-load quantizer. sm_120 keeps the
+# strided kernel: register re-layout measured SLOWER there.
 _CONTIG_QUANT_SMS = (100, 103)
 
 
@@ -116,25 +114,22 @@ def _build_fused_ops() -> Optional[tuple[Any, Any, Any]]:
 
     # Structure mirrors nvfp4_quant's proven fused kernel (27.6us at qwen
     # shapes): one row x BLOCKS_PER_PROG 16-elem groups per program, even/odd
-    # strided loads. Two 5090-banked lessons (pgw#862): fusing the rank-R
-    # lora_down here reloads its tile per M-tile (~16x slower — it stays a
-    # cuBLAS mm); and a 2-D [BM, BK] tile with tl.split/reshape re-layout ran
-    # 179us vs this structure. Differences vs pgw#685: optional in-register
-    # smooth divide (bf16-rounded to match the aten reference) and FLAT
-    # [M, K/16] scale stores (dot_scaled's native layout) instead of the
-    # cuBLAS blocked swizzle.
+    # strided loads. Two 5090-measured constraints: fusing the rank-R lora_down
+    # here reloads its tile per M-tile (~16x slower — it stays a cuBLAS mm);
+    # and a 2-D [BM, BK] tile with tl.split/reshape re-layout ran 179us vs this
+    # structure. Differences vs the reference chain: optional in-register smooth
+    # divide (bf16-rounded to match the aten reference) and FLAT [M, K/16] scale
+    # stores (dot_scaled's native layout) instead of the cuBLAS blocked swizzle.
     #
     # The stride-2 pair of loads is why there are TWO kernels below. It costs
     # nothing on sm_120, but on sm_100 it leaves the quantizer at 9-21% of
     # B200's own measured 6.0 TB/s copy roofline, and no (blocks-per-program,
-    # warps) combination moves it — the whole sweep lands in one band
-    # (pgw#863, scripts/svdq_bench/tune_quant.py). `_quant_contig_kernel`
-    # loads the block as ONE contiguous [BPP, 16] tile and de-interleaves in
-    # registers instead; measured 1.10-1.73x on B200 across the real qwen
-    # shapes, bit-identical output in both scale layouts. It is NOT made the
-    # sm_120 path: the 5090 lesson above is that re-layout in registers loses
-    # there, and a shared "improvement" that regresses the card we actually
-    # ship on is not an improvement.
+    # warps) combination moves it — the whole sweep lands in one band.
+    # `_quant_contig_kernel` loads the block as ONE contiguous [BPP, 16] tile
+    # and de-interleaves in registers instead; measured 1.10-1.73x on B200
+    # across the real qwen shapes, bit-identical output in both scale layouts.
+    # It is NOT made the sm_120 path: re-layout in registers loses there, and an
+    # "improvement" that regresses the card we ship on is not an improvement.
     @triton.jit
     def _quant_smooth_kernel(  # type: ignore[no-untyped-def]
         x_ptr, sm_ptr, s2_ptr, q_ptr, s_ptr,
@@ -175,7 +170,7 @@ def _build_fused_ops() -> Optional[tuple[Any, Any, Any]]:
         offs_p = offs_b[:, None] * 8 + tl.arange(0, 8)[None, :]
         tl.store(q_ptr + row * (K // 2) + offs_p, packed, mask=m2)
         if BLOCKED:
-            # cuBLAS blocked layout (pgw#685 addressing) — the scaled_mm path.
+            # cuBLAS blocked layout — the scaled_mm path.
             rb = row // 128
             rr = row % 128
             tile = rb * NCB + (offs_b // 4)
@@ -477,13 +472,14 @@ def fused_ops() -> Optional[tuple[Any, Any, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Self-check — the arming gate the dispatch probe calls (pgw#860).
+# Self-check — the arming gate the dispatch probe calls.
 # ---------------------------------------------------------------------------
 
 
 def _reference_quant_flat(xs: Any, s2: Any) -> tuple[Any, Any]:
-    """The pgw#685 reference chain with FLAT [M, K/16] scales (the fused lane
-    consumes plain scales; flat->blocked bijectivity is proven separately)."""
+    """The reference quantization chain with FLAT [M, K/16] scales (the fused
+    lane consumes plain scales; flat->blocked bijectivity is proven
+    separately)."""
     import torch
 
     in_f = int(xs.shape[1])
@@ -512,8 +508,8 @@ def _dyn_s2(x2: Any, smooth: Optional[Any]) -> Any:
 
 def fused_self_check() -> Optional[str]:
     """Arm gate for the serving (hybrid) path: quantization BIT-IDENTICAL to
-    the pgw#685 reference chain in BOTH scale layouts, and the fused epilogue
-    within tolerance of its torch reference. Returns None when armed."""
+    the reference chain in BOTH scale layouts, and the fused epilogue within
+    tolerance of its torch reference. Returns None when armed."""
     import torch
 
     ops = fused_ops()
@@ -578,7 +574,6 @@ def _build_fused_linear_class() -> type:
                      rank: int, bias: bool, compute_dtype: Any,
                      per_channel_scale: bool, smooth: bool) -> None:
             super().__init__()
-            # pgw#1019: record it (twin of _SvdqLinear).
             self.compute_dtype = compute_dtype
             self.in_features = int(in_features)
             self.out_features = int(out_features)

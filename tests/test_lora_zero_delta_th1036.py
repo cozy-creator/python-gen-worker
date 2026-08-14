@@ -1,4 +1,4 @@
-"""th#1036 zero-delta refusal lives in ``load_adapter_state_dict`` (ie#552).
+"""th#1036 zero-delta refusal lives in ``load_adapter_state_dict``.
 
 One implementation of the attach-but-invisible rule: an adapter whose
 low-rank product is provably zero is refused at PARSE time, typed, before it

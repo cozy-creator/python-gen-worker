@@ -1,15 +1,12 @@
-"""th#1055: desired-hot warm on slot-only endpoints + loud failures.
+"""Desired-hot warm on slot-only endpoints + loud failures.
 
-Live root cause (master fleet, 2026-07-23): ``ensure_desired_instance``
-demanded ``set(bindings) == set(spec.models)``, but every fleet endpoint now
-declares deploy-bound Slots with NO code default (ie#524/th#980), so
-``spec.models`` is EMPTY and every hub hot intent — gw#587 self-mint
-prewarm, th#912 slot-default seeding, #567 compile-cell reload — was refused
-with ``ValidationError("must bind exactly []")``, swallowed by
-``_reconcile_pass`` as one pod-local warning. Zero events, zero VRAM, no
-retry signal: the th#868 w8a8 fence never opened (qwen H100 rigs, sdxl
-ie529.r2, ltx B200 all deadlocked) and precompiled cells never armed
-fleet-wide.
+A fleet endpoint declares deploy-bound Slots with NO code default, so
+``spec.models`` is EMPTY. An ``ensure_desired_instance`` that demands
+``set(bindings) == set(spec.models)`` therefore refuses every hub hot intent
+(self-mint prewarm, slot-default seeding, compile-cell reload) with
+``ValidationError("must bind exactly []")``, swallowed by ``_reconcile_pass``
+as one pod-local warning: zero events, zero VRAM, no retry signal, and
+precompiled cells never arm fleet-wide.
 
 Pinned here:
   1. a slot-only (default-less) compile endpoint warms + arms from a
@@ -282,7 +279,7 @@ def test_declared_space_hot_bindings_remap_through_picks(tmp_path, monkeypatch) 
     specs through the resolutions map", hello_ack.go th#697) — the warm
     instance must derive the RESOLVED binding, never silently undo the pick.
 
-    pgw#1148: the pick's visible half is now the CAST (the flavor that used
+    the pick's visible half is now the CAST (the flavor that used
     to re-address the binding is deleted), so that is what must survive."""
     setup_calls: List[str] = []
     ex, _sent, _enables = _harness(tmp_path, monkeypatch,

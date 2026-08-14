@@ -203,7 +203,7 @@ def test_drain_finishes_in_flight_then_closes_and_rejects_new_work() -> None:
             request_id="r-last", attempt=1, function_name="sleepy",
             input_payload=_msgpack("marco")))
         conn.wait_for(is_accept_for("r-last"))
-        # pgw#845: `deadline_ms=5000` made the runner a party to the property.
+        # `deadline_ms=5000` made the runner a party to the property.
         # Zero means "wait without a cutoff" (Lifecycle.drain), which is exactly
         # what "finishes in-flight work, THEN closes" asserts — and it holds no
         # matter how slow the box is. The deadline-expiry half of the contract
@@ -293,7 +293,7 @@ def test_protocol_mismatch_is_failed_precondition() -> None:
 
 
 # ---------------------------------------------------------------------------
-# th#960/pgw#609 Phase 2b: auth-rejection/precondition/redirect family,
+# auth-rejection/precondition/redirect family,
 # absorbed from test_worker_grpc_e2e.py (#372) before that file's deletion —
 # the worker's handshake-failure taxonomy (transient vs permanent, redirect
 # vs exit) is squarely P1's boundary.
@@ -323,7 +323,7 @@ def test_auth_rejection_NEVER_exits_a_POD(monkeypatch) -> None:
     with custom_scheduler_server(
         lambda: FakeScheduler(reject_unauthenticated=True),
     ) as (_scheduler, harness, _port):
-        # pgw#795: retries are counted as PROGRESS, not raced against a clock.
+        # retries are counted as PROGRESS, not raced against a clock.
         await_count(
             lambda: len(harness.worker.transport.reconnect_delays),
             6,
@@ -418,7 +418,7 @@ def test_worker_survives_hub_restart_and_reconnects(tmp_path, monkeypatch) -> No
         before = len(worker.transport.reconnect_delays)
         assert server.stop(grace=0).wait(_TIMEOUT)
 
-        # pgw#845: this was a 15s deadline hiding behind a name — the exact
+        # This was a 15s deadline hiding behind a name — the exact
         # pgw#795 shape, invisible to the source guard because the digit was
         # spelled `_TIMEOUT`. The property is that the worker KEEPS retrying
         # while the hub is down, so wait on the retries and give up only when

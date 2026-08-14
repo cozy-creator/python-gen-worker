@@ -1,13 +1,10 @@
-"""pgw#1095: the seal's library identity is DERIVED from the installing
-wheel's RECORD, and re-hashed only where no RECORD covers the file.
+"""The seal's library identity is DERIVED from the installing wheel's RECORD,
+and re-hashed only where no RECORD covers the file.
 
-WHY THIS FILE EXISTS
---------------------
-pgw#1087's first real cold-boot decomposition found `env_establish` at 23.1 s
-of a 33.7 s boot, 17.3 s of which was `lib_memo` re-SHA-256ing every toolchain
-`.so` the image ships (36 files, 3.96 GB) on EVERY serving boot. A wheel's
-`dist-info/RECORD` already carries the sha256 the installer verified for each
-of those files, so the boot can read the fact instead of recomputing it.
+Re-SHA-256ing every toolchain `.so` an image ships (36 files, 3.96 GB) costs
+17.3 s of a 33.7 s serving boot. A wheel's `dist-info/RECORD` already carries
+the sha256 the installer verified for each of those files, so the boot reads the
+fact instead of recomputing it.
 
 WHAT IT HOLDS THE DERIVATION TO
 -------------------------------
@@ -17,13 +14,12 @@ WHAT IT HOLDS THE DERIVATION TO
 2. **A claim is honoured only for the file it describes.** Size guard, and a
    staleness guard against the RECORD's own mtime.
 3. **Anything no RECORD covers is HASHED, never trusted** — that is what keeps
-   the pgw#719 LD_PRELOAD hole closed, because a preloaded object is in no
-   wheel's manifest.
+   the LD_PRELOAD hole closed, because a preloaded object is in no wheel's
+   manifest.
 4. **The blind spot is asserted, not hidden** (the last test). Tamper that
-   preserves size AND restores mtime is served from RECORD, exactly as the
-   pgw#832 memo and the `_lib_digest` lru_cache have always served it. A
-   full-hash boot would have caught that one; this is the trade, in a test,
-   where a future reader can find it.
+   preserves size AND restores mtime is served from RECORD, exactly as the memo
+   and the `_lib_digest` lru_cache serve it. A full-hash boot would catch that
+   one; this is the trade, in a test, where a future reader can find it.
 """
 
 from __future__ import annotations

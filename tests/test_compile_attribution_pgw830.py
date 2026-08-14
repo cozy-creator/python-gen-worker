@@ -160,7 +160,7 @@ def test_pool_idle_is_accounted_separately_from_compile_seconds(
     ``compile_s`` is compile work on the critical path — the target of
     instrumentation and then optimization. Pool idle is workers with nothing
     to run; it shrinks when the entry count or the straggler spread changes
-    (pgw#829) and not at all when the compiler gets faster. A table that adds
+ and not at all when the compiler gets faster. A table that adds
     them into one "dark" figure aims the next lane at the wrong term.
     """
     entries = _entries(4)
@@ -208,7 +208,7 @@ def test_check_names_the_partition_that_broke() -> None:
     the same defect this issue is closing."""
     good = {
         "compile_s": 10.0, "child_boot_s": 1.0, "child_wall_s": 8.5,
-        # pgw#1099: the outer partition has its own residual now, so a
+        # The outer partition has its own residual now, so a
         # measured span never doubles as the catch-all. Zero here because the
         # named members already close the level — which is the normal case.
         "reap_lag_s": 0.5, "parent_other_s": 0.0,

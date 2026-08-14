@@ -1,13 +1,10 @@
-"""The AOT mint's STATIC preconditions — asked at IMAGE BUILD, once (pgw#996).
+"""The AOT mint's STATIC preconditions — asked at IMAGE BUILD, once.
 
 A precondition is static when the endpoint IMAGE decides it: the C++ toolchain
 apt installed into it, the torch wheel pinned into it, the declaration module
-baked into it. ``fleet_cells.mint_recipe`` used to ask those questions on a
-rented pod, and a "no" there is a silent downgrade with a rental bill attached
-— the fleet serves eager forever and the evidence is one ``self_mint_skipped``
-event nobody queries. The generated Dockerfile said so out loud: *"Absent it a
-mint declines (typed, cheap) and the pod serves eager forever — not fatal, just
-never fast."*
+baked into it. Asking those questions on a rented pod instead makes a "no" a
+silent downgrade with a rental bill attached — the fleet serves eager forever
+and the evidence is one ``self_mint_skipped`` event nobody queries.
 
 The ruling: a release whose image cannot AOT-compile the endpoints it DECLARES
 is a broken build, and must refuse to publish naming the precondition. An
@@ -16,16 +13,15 @@ mode (ruled), and it keeps the dynamo lane.
 
 This module is the ONE spelling of those rows. ``discovery.discover`` stamps
 them into ``endpoint.lock`` and ``discovery.validation`` turns a refusal into a
-build error. pgw#914: this is now the ONLY place the torch floor is decided —
-the mint's second spelling (``aot_mint.lifted_torch_gap``) is deleted, so a
-build cannot prove one thing and a pod discover another.
+build error. This is the ONLY place the torch floor is decided: there is no
+second spelling, so a build cannot prove one thing and a pod discover another.
 
 Four verdicts, and the difference between the last three is the whole point:
 
 ``ok``         the precondition holds on this image.
 ``refused``    it does not, and nothing on a pod can fix it — FAIL THE BUILD.
 ``blocked``    the declaration carries unresolved ``Compile.blockers``
-               (pgw#1115). The family said why; it is a DECLARED block, not a
+. The family said why; it is a DECLARED block, not a
                broken image, and it does not need a pod to repeat the
                sentence.
 ``abstained``  this environment cannot decide (a torch-less manifest build).
@@ -57,8 +53,8 @@ logger = logging.getLogger(__name__)
 
 #: torch below this cannot trace the lifted-LoRA fork: 2.9 strict export
 #: refuses ``bind_views``' in-trace setattr ("Mutating module attribute lora_a
-#: during export") that 2.13 traces fine — measured on pod 8 (pgw#723
-#: residuals). A mint PRECONDITION for the bucket-bearing lane, not a taste.
+#: during export") that 2.13 traces fine — measured. A mint PRECONDITION for
+#: the bucket-bearing lane, not a taste.
 LIFTED_LORA_TORCH_FLOOR: Tuple[int, int] = (2, 13)
 
 CHECK_DECLARATION_IMPORT = "declaration_import"
@@ -73,13 +69,13 @@ CHECK_ADAPTER_BACKEND = "adapter_backend"
 #: one ``models/fp8_storage`` imports three layer modules from at overlay
 #: time. gen-worker does NOT declare it: an endpoint that serves adapters
 #: declares that in ITS image, and this check is what makes the declaration
-#: PROVABLE at build instead of discoverable on a paid pod (pgw#501).
+#: PROVABLE at build instead of discoverable on a paid pod.
 ADAPTER_BACKEND_DIST = "peft"
 
 #: Distributions that must appear at most once. A second copy of any of them
 #: silently doubles the image by ~7 GB and desyncs the CUDA runtime — the
-#: synthesized Dockerfile asserts this in-image (`torchInvariantLine`), and
-#: until pgw#1017 nothing asked it of a custom Dockerfile.
+#: synthesized Dockerfile asserts this in-image (`torchInvariantLine`); this
+#: check is what asks it of a custom Dockerfile too.
 TORCH_FAMILY: Tuple[str, ...] = ("torch", "torchvision", "torchaudio", "triton")
 
 OK = "ok"
@@ -111,7 +107,7 @@ def torch_version_gap(version: str) -> str:
     Pure string arithmetic, and the ONE implementation: the floor is decided
     at image build (``static_mint_preconditions`` -> ``endpoint.lock``), never
     again per mint. Two spellings of a floor is how a build proves one thing
-    and a pod discovers another (pgw#914).
+    and a pod discovers another.
     """
     parts = version.split("+")[0].split(".")
     floor = ".".join(map(str, LIFTED_LORA_TORCH_FLOOR))
@@ -195,8 +191,8 @@ def static_mint_preconditions(
                     "the registered export declaration evaluated to None — "
                     "there is no Compile to derive graph classes from")))
             continue
-        # pgw#1115: the declared block, read as DATA — the one form since
-        # pgw#1107 retired the thunk that used to say it by raising.
+        # The declared block, read as DATA — never a thunk that says it by
+        # raising.
         blocked = open_blockers(decl)
         if blocked:
             rows.append(Precondition(
@@ -259,13 +255,11 @@ def _torch_is_cuda_build() -> bool:
 
 
 def _cuda_root_row(aot_declaring: list[str]) -> Precondition:
-    """pgw#1017 GAP A: `g++` is necessary and NOT sufficient on a CUDA image.
+    """`g++` is necessary and NOT sufficient on a CUDA image.
 
-    The third instance of this issue's own defect class, and the most expensive
-    of the three: the cxx gap refused at build for $0.00, while this one refused
-    NOWHERE. The pod booted, loaded and EXPORTED — the expensive part — before
-    `cpp_extension` said "CUDA_HOME environment variable is not set". Free
-    refusal, paid failure; that asymmetry is the whole reason this row exists.
+    Unasked, this refuses NOWHERE: the pod boots, loads and EXPORTS — the
+    expensive part — before `cpp_extension` says "CUDA_HOME environment
+    variable is not set". Free refusal here, paid failure there.
     """
     from . import cuda_root as cr
 
@@ -295,7 +289,7 @@ def _cuda_root_row(aot_declaring: list[str]) -> Precondition:
 
 
 def _torch_singleton_row() -> Precondition:
-    """pgw#1017 GAP B: one torch-family install, not two.
+    """One torch-family install, not two.
 
     `torchInvariantLine` fails the SYNTHESIZED build when a second copy of a
     torch-family distribution lands — *"silently doubles the image by ~7GB and
@@ -309,7 +303,7 @@ def _torch_singleton_row() -> Precondition:
     image's pin" — reads `/tmp/torch-constraints.txt`, which is written and
     deleted inside the generated Dockerfile and does not exist here. That half
     is decidable only where the base image is known, so it belongs to the hub
-    (th#1686) and is not faked here.
+ and is not faked here.
     """
     import importlib.metadata as md
 
@@ -354,7 +348,7 @@ def adapter_backend_present() -> bool:
 def adapter_backend_preconditions(
     declared: Mapping[str, int], *, present: Optional[bool] = None,
 ) -> Tuple[Precondition, ...]:
-    """One verdict per family that declares adapter serving (pgw#501).
+    """One verdict per family that declares adapter serving.
 
     ``lora_bucket > 0`` is the author declaring the unknowable — *this
     endpoint serves adapters*. The platform's job is then to PROVE the
@@ -405,7 +399,7 @@ def declared_compile_families(functions: Any) -> Dict[str, int]:
     """family -> largest declared ``lora_bucket``, over manifest functions.
 
     Reads the same ``functions[].compile`` block the hub keys its family-cache
-    lookups off (th#569), so "which families does this image declare" has one
+    lookups off, so "which families does this image declare" has one
     answer at build time and no second derivation.
     """
     out: Dict[str, int] = {}

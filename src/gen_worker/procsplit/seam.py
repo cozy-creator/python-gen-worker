@@ -1,11 +1,11 @@
-"""pgw#783 THE INVARIANT: the seam carries CONTROL, not DATA.
+"""THE INVARIANT: the seam carries CONTROL, not DATA.
 
-This is the constraint that decides whether pgw#782's measured 4.00x survives
-the split. If G children's job DATA — tensors, images, video, chunk
-reassembly, fused hashing — routes through the PARENT's single interpreter,
-the GIL bottleneck is recreated one layer up and the whole exercise becomes a
-rewrite of the bottleneck's address. Data goes child -> object store directly
-(per-job scoped grants) or via shared memory. Never through the parent.
+This is the constraint that decides whether the split's measured 4.00x
+survives. If G children's job DATA — tensors, images, video, chunk reassembly,
+fused hashing — routes through the PARENT's single interpreter, the GIL
+bottleneck is recreated one layer up and the whole exercise becomes a rewrite
+of the bottleneck's address. Data goes child -> object store directly (per-job
+scoped grants) or via shared memory. Never through the parent.
 
 **A job whose result crosses the parent's interpreter is a BUG, not a slow
 path.** Three enforcements:
@@ -13,9 +13,9 @@ path.** Three enforcements:
 1. STRUCTURAL, already true and to be kept true: results >64KB leave the child
    as presigned R2 PUTs and ``JobResult`` carries ``blob_ref``; inputs arrive
    as refs/URLs that ``input_assets``/``url_fetch`` resolve child-side; the
-   pgw#769/pgw#781 fused hash and chunk reassembly are DATA-plane and stay in
-   the child. The parent grows no upload path, no hashing, no reassembly —
-   ever, as policy, not as an accident of the current code.
+   fused hash and chunk reassembly are DATA-plane and stay in the child. The
+   parent grows no upload path, no hashing, no reassembly — ever, as policy,
+   not as an accident of the current code.
 2. MEASURED, here: every relayed frame is accounted by type, and a relayed
    ``job_result`` above a hard control ceiling is recorded as a violation and
    dialed typed. **Reported, never refused** — refusing in production turns a

@@ -1,10 +1,10 @@
 """Split AOTI's generated wrapper constructor so g++ stops paying a
-superlinear price for a data table written as code (pgw#793).
+superlinear price for a data table written as code.
 
-pgw#793 measured, per host invocation, that an AOTI mint's entire host cost
-is ONE ``g++ -O1 -c wrapper.cpp`` — 180.6 s of a 390 s AOTI compile (46%);
-linking is 2.0 s (0.5%), so every classic build lever (mold/lld, ccache,
-PCH, parallel host builds) is measured null or already exhausted. That one
+Measured, per host invocation: an AOTI mint's entire host cost is ONE
+``g++ -O1 -c wrapper.cpp`` — 180.6 s of a 390 s AOTI compile (46%); linking is
+2.0 s (0.5%), so every classic build lever (mold/lld, ccache, PCH, parallel
+host builds) is measured null or already exhausted. That one
 translation unit is 6.3 MB / 61k lines and is dominated by TWO functions,
 the larger of which is ``AOTInductorModel::AOTInductorModel`` — 26,642
 ``constants_info_[i].field = ...;`` statements (2,422 constants x 11
@@ -21,9 +21,9 @@ inductor emitted it.
 Why a mint-path transform and not an inductor config: torch 2.13 exposes no
 knob for constants emission or per-function optimization, and the only
 config that moves this cost (``compile_wrapper_opt_level='O0'``) is DEAD —
-pgw#793 measured it at +1.7% per forward, which exceeds AOT's whole 1.4%
-serving margin, and it also re-keys every cell. This transform re-keys
-nothing (see :func:`install`).
+measured at +1.7% per forward, which exceeds AOT's whole 1.4% serving margin,
+and it also re-keys every cell. This transform re-keys nothing (see
+:func:`install`).
 
 FAIL-CLOSED BY CONSTRUCTION. The transform only ever fires when it can
 prove, by textual reconstruction, that it is a pure statement-preserving
@@ -53,9 +53,9 @@ logger = logging.getLogger(__name__)
 #: wrapper compile (18 per sdxl cell), each naming applied/declined and why.
 EVENT = "aot_wrapper_split"
 
-#: Statements per generated helper. 250 is pgw#793's measured chunk; the
-#: win is flat across a wide band (the point is "not one 26k-statement
-#: function", not any particular size).
+#: Statements per generated helper. 250 is the measured chunk; the win is flat
+#: across a wide band (the point is "not one 26k-statement function", not any
+#: particular size).
 CHUNK = 250
 
 #: Below this the TU is not the pathological shape this exists for, and the
@@ -101,7 +101,8 @@ class SplitOutcome:
     bytes_in: int = 0
     bytes_out: int = 0
     source: str = ""
-    #: Set by the pgw#811 path, whose shape v1's wording does not describe.
+    #: Set by the run_impl path, whose shape the ctor-split wording cannot
+    #: describe.
     summary: str = ""
 
     def detail(self) -> str:
@@ -166,12 +167,10 @@ def _helper_attrs(opt_none: bool) -> str:
     # into the constructor at -O1 (-finline-functions-called-once).
     #
     # ``optimize("O0")`` resets OPTIMIZATION options for the marked function,
-    # which is exactly the intent and is harmless here twice over: these
-    # statements are integer/pointer/vector assignments, so the wrapper
-    # command's math flags (-ffp-contract, -fmath-errno, ...) have nothing to
-    # act on; and -fPIC is a code-generation option the attribute does not
-    # touch, which tests/test_aot_wrapper_split_pgw793.py proves by linking a
-    # transformed object into a shared library.
+    # which is the intent and is harmless twice over: these statements are
+    # integer/pointer/vector assignments, so the wrapper command's math flags
+    # (-ffp-contract, -fmath-errno, ...) have nothing to act on; and -fPIC is a
+    # code-generation option the attribute does not touch.
     attrs = "__attribute__((noinline))"
     if opt_none:
         attrs += ' __attribute__((optimize("O0")))'
@@ -296,44 +295,34 @@ def _reinline(source: str) -> str:
 # Mint-path installation
 # ---------------------------------------------------------------------------
 
-#: pgw#995: ``GEN_WORKER_AOT_WRAPPER_SPLIT_OFF`` is GONE. It defaulted ON, no
-#: release ever declared it and no endpoint ever set it, so deleting it makes
-#: the shape every pod already ran unconditional. An env that selects which
-#: program runs is the class that took `GEN_WORKER_PREFER_AOT` dark for three
-#: pod attempts; a switch nobody has ever thrown carries none of the safety it
-#: appears to and all of the silent-disarm risk.
+#: There is deliberately NO kill switch for the ctor split: an env that selects
+#: which program runs carries none of the safety it appears to and all of the
+#: silent-disarm risk.
 
-#: Kill switch for the pgw#811 ``run_impl`` split alone, so the (much older,
-#: much better travelled) ctor split can stay on if run_impl ever goes off.
-#: pgw#995 KEEPS this one, and the asymmetry with its deleted sibling above is
-#: the finding rather than an oversight: this name is LIVE — five SDXL releases
-#: (0.2.111/112/113/116/117) declare it and one endpoint carries a non-deleted
-#: `endpoint_env_entries` row (verified on the standing hub 2026-08-03). Deleting
-#: a live switch changes a running endpoint's behaviour; deleting a never-thrown
-#: one cannot. "Zero declarations" is the fact that licenses a deletion, and it
-#: is a fact you MEASURE, not one you assume from the code.
+#: Kill switch for the ``run_impl`` split alone, so the older, better-travelled
+#: ctor split can stay on if run_impl ever goes off. This name is LIVE —
+#: releases declare it and an endpoint carries an `endpoint_env_entries` row —
+#: and deleting a live switch changes a running endpoint's behaviour. "Zero
+#: declarations" is the fact that licenses a deletion, and it is a fact you
+#: MEASURE, not one you assume from the code.
 DISABLE_V2_ENV = "GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF"
 
-#: How many of the K+1 part compiles may run at once. pgw#809's pool owns
+#: How many of the K+1 part compiles may run at once. The compile pool owns
 #: the pod's CPU budget ACROSS entries; it sets this to its per-entry share
 #: so the two levers compose (split-within-entry x pool-across-entries)
 #: instead of oversubscribing. Unset: derive from the pod's own budget.
 JOBS_ENV = "GEN_WORKER_AOT_HOST_COMPILE_JOBS"
 
-#: Left for serving even when nothing else has claimed the box. Matches
-#: pgw#809's `SERVING_HEADROOM_CPUS`; a mint never starves the tenant.
+#: Left for serving even when nothing else has claimed the box; a mint never
+#: starves the tenant.
 #:
-#: pgw#973 (§4.24) censused this as a verbatim duplicate of
-#: `aot_compile_pool.SERVING_HEADROOM_CPUS` and DEFERRED the collapse
-#: deliberately, rather than leaving the question open. This module is an
-#: INDUCTOR HOOK — it is imported from inside torch's compile path and its only
-#: in-repo imports are `host_isa` and `aot_run_impl_split`. Importing the pool
-#: to share one number would drag `aot_resume`, `env_seal` and
-#: `worker_goals` — the whole mint driver — into that hook, which is a far
-#: worse defect than two copies of `2`. A third module owning the constant
-#: would be the clean answer and is not worth a new module for one integer.
-#: The duplication is therefore INTENTIONAL and stated; the numbers are pinned
-#: together by `test_serving_headroom_is_one_number_pgw973`.
+#: A verbatim duplicate of `aot_compile_pool.SERVING_HEADROOM_CPUS`, and the
+#: duplication is INTENTIONAL: this module is an INDUCTOR HOOK, imported from
+#: inside torch's compile path, and its only in-repo imports are `host_isa` and
+#: `aot_run_impl_split`. Importing the pool to share one number would drag
+#: `aot_resume`, `env_seal` and `worker_goals` — the whole mint driver — into
+#: that hook, which is a far worse defect than two copies of `2`. The numbers
+#: are pinned together by a test.
 SERVING_HEADROOM_CPUS = 2
 
 _installed = False
@@ -361,16 +350,15 @@ def host_compile_jobs(tus: int) -> int:
     return max(1, min(tus, budget))
 
 
-#: Phase-label prefix for the pgw#811 run_impl lever (pgw#958: a name,
-#: never a version number).
+#: Phase-label prefix for the run_impl lever — a name, never a version number.
 _RUNIMPL = "runimpl"
 
 
 def _emit(outcome: SplitOutcome, lever: str = "") -> None:
     """One typed row per wrapper compile. ``lever`` names WHICH split fired:
-    the pgw#811 ``run_impl`` split (``runimpl_applied`` / ``runimpl_declined``)
-    versus the original ctor split (bare ``applied`` / ``declined``). A phase
-    label, deliberately non-numeric — it is not a version counter."""
+    the ``run_impl`` split (``runimpl_applied`` / ``runimpl_declined``) versus
+    the ctor split (bare ``applied`` / ``declined``). A phase label,
+    deliberately non-numeric — it is not a version counter."""
     try:
         from . import activity as activity_mod
 
@@ -544,8 +532,7 @@ def install() -> bool:
     ``env_seal.effective_seal()`` and therefore the ``env_seal`` key axis
     are untouched. This module is imported only from the mint path, which
     is outside ``compile_cache.static_code_closure``'s entrypoints, so the
-    ``code_closure`` axis is untouched too. No cell is re-keyed. (Both
-    facts are asserted by tests/test_aot_wrapper_split_pgw793.py.)
+    ``code_closure`` axis is untouched too. No cell is re-keyed.
 
     Returns True when installed, False when already installed.
     """
@@ -560,12 +547,11 @@ def install() -> bool:
     original: Callable[..., None] = cpp_builder.run_compile_cmd
 
     def _patched(cmd_line: str, cwd: str) -> None:
-        # pgw#754's clamp is asserted at the CONFIG level by
-        # host_isa.impose(); this is the argv-level assertion nothing had.
-        # `run_compile_cmd` is torch's single host-compile funnel, so every
-        # object a mint produces passes through here exactly once. It raises
-        # rather than degrading: an unclamped object is not slower, it is
-        # unportable, and pgw#754 is a SIGILL-class defect.
+        # The ISA clamp is asserted at the CONFIG level by host_isa.impose();
+        # this is the argv-level assertion. `run_compile_cmd` is torch's single
+        # host-compile funnel, so every object a mint produces passes through
+        # here exactly once. It raises rather than degrading: an unclamped
+        # object is not slower, it is unportable — a SIGILL-class defect.
         try:
             host_isa.assert_command_is_clamped(shlex.split(cmd_line))
         except ValueError:
@@ -585,9 +571,9 @@ def install() -> bool:
             return
         _emit(outcome)
 
-        # pgw#811 splits run_impl out of whatever source the ctor split left
-        # — inductor's own when v1 declined, v1's regrouped one when it did
-        # not. It subsumes the single compile: when it fires it drives every
+        # The run_impl split works on whatever source the ctor split left —
+        # inductor's own when the ctor split declined, its regrouped one when it
+        # did not. It subsumes the single compile: when it fires it drives every
         # compile itself and there is no monolith left to run.
         if not os.environ.get(DISABLE_V2_ENV, "").strip():
             try:

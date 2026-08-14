@@ -1,46 +1,34 @@
-"""pgw#784 — THE liveness proof. Paul's contract, measured on the real loop.
+"""THE liveness proof, measured on the real loop.
 
     "THE WORKER IS AVAILABLE THE ENTIRE TIME WHILE IT IS MINTING!"
     "Workers report every 10 seconds, and get killed after 5 or 6 heartbeat
      misses. Hard stop." (WORKER-CONTRACTS.md §1-2)
 
-th#1299's tape: an sd15 pod entered ``self_mint_compile phase=warmup_forward``,
-went 72s without an app heartbeat, and the hub terminated it mid-mint —
-correctly. Read at source, that pod was never hung: at 12:30:02/03/11 it
-reported again with an evidence counter advancing at 500/s. It was STARVED. The
-hub's information was genuinely absent, so the fix cannot be hub patience; a
-worker whose reporting its own compute can mute is a broken worker.
+A worker whose own compute can mute its reporting is a broken worker: the hub's
+information is genuinely absent, so the fix is structural — get the compile out
+of the interpreter — never hub patience.
 
-This file measures the thing the incident measured, on a REAL worker (real
-``Lifecycle._heartbeat_loop``, real ``Executor``, real gRPC socket to the
-hub-double) with a REAL mint child:
+Measured on a REAL worker (real ``Lifecycle._heartbeat_loop``, real
+``Executor``, real gRPC socket to the hub-double) with a REAL mint child:
 
 * **the green arm** — the mint in its own OS process: every beat gap stays
   inside the hub's tolerance and eager jobs complete THROUGHOUT;
 * **the red arm** — the same work on the worker's loop: gaps blow past the
   6-miss window, which is what proves this instrument can see the defect.
 
-MEASURED at Paul's literal numbers (``PGW784_REAL_CADENCE=1``, 10.00s beat,
-140s mint, 60.00s kill line)::
+At the literal contract numbers (``PGW784_REAL_CADENCE=1``, 10.00s beat, 140s
+mint, 60.00s kill line)::
 
     GREEN  beats=229  worst_gap=10.16s   eager_completed=14
     RED    beats=13   worst_gap=90.02s   eager_completed=0
 
 The green arm's worst gap is one nominal interval plus 160ms across a mint more
-than twice the kill window. The red arm reproduces th#1299 to the second — the
-incident measured 72s of silence; this measures 90s — and shows the half the
-incident also reported: jobs did not merely crawl, none finished at all.
+than twice the kill window; the red arm loses 90s and completes NO eager job.
 
-A measurement worth recording, taken while authoring this (32-core box, CPython
-3.12): a pure-Python GIL-holding burn in ONE thread stretches a 0.25s nominal
-beat to 0.256s — no starvation at all — and it takes ~16 contending threads to
-reach 1.17s (4.7x). The real incident lost 72-126s. So the live mechanism is
-strictly worse than any pure-Python synthetic reproduces (inductor's codegen
-and its own compile-worker processes), and that is precisely why the fix is
-structural — get the compile out of the interpreter — instead of "make the
-compile yield more often". It also means the red arm has to burn ON the loop to
-be deterministic; a thread-shaped red arm would be flaky on this hardware and
-is deliberately not asserted.
+The red arm must burn ON the loop to be deterministic. A thread-shaped red arm
+is deliberately not asserted: a pure-Python GIL-holding burn in one thread
+stretches a 0.25s beat only to 0.256s, and needs ~16 contending threads to reach
+1.17s, so it cannot reproduce what inductor's codegen does to the loop.
 """
 
 from __future__ import annotations
@@ -196,7 +184,7 @@ def test_beats_never_miss_and_eager_serving_continues_through_a_long_mint(
         f"only {len(stamps)} beats arrived across a {mint_s:.0f}s mint at a "
         f"{interval_s:.2f}s cadence")
     worst = max(gaps)
-    # pgw#795: the property is that the HUB would never kill this worker, so
+    # The property is that the HUB would never kill this worker, so
     # the hub's own kill line is the bound. The tighter 2.0-interval margin was
     # a claim about the runner's scheduler: it failed a full-suite run at 0.51s
     # against a 0.50s margin, while the kill line sat at 1.50s — three times

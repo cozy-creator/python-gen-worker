@@ -1,11 +1,7 @@
 """The serve-path output-integrity floor: nothing is uploaded unlooked-at.
 
-WHY THIS EXISTS (ie#615 / ie#634 / pgw#1094). Production minimax-h3 0.3.8
-VAE-decoded pure NOISE and uploaded it, on requests that were billed and
-settled. Every check we had passed, because the "proof" was ffprobe container
-metadata plus a billing row. Metadata is not pixels. This module is the one
-place on the worker that looks at the PIXELS before an output can be banked as
-a success.
+Container metadata is not pixels: this module is the one place on the worker
+that looks at the PIXELS before an output can be banked as a success.
 
 WHAT IT IS. Two numbers over the frames the endpoint already holds in memory:
 
@@ -28,26 +24,26 @@ about, at the one seam that sees every endpoint.
 WHAT IT COSTS. Single-digit milliseconds on a full 121-frame 1344x768 clip,
 because only ~2*``pairs`` frames are ever touched and each is decimated to
 ~96 rows BEFORE the float conversion (the expensive pass then runs on ~1/s^2
-of the pixels). Naive full-resolution was 555 ms on the same clip. The
-decimation is free in ACCURACY because the statistic is a coarse whole-frame
-correlation — cheap and blind are one fact (see the scope note).
+of the pixels; naive full-resolution was 555 ms). The decimation is free in
+ACCURACY because the statistic is a coarse whole-frame correlation — cheap and
+blind are one fact (see the scope note).
 
-SCOPE — READ THIS BEFORE QUOTING A PASS. This floor catches NOISE and BLANK.
-It is NOT a quality gate, and it is specifically blind to the melt class:
-smearing REMOVES high-frequency temporal variation, so a melted/over-smoothed
-render scores HIGHER here than a clean one (cozy-eval measured 0.956 melted vs
-0.916 clean). ``tests/test_output_integrity_pgw1094.py`` pins that inversion as
-an executable assertion so nobody re-reads this gate as a quality verdict.
+SCOPE. This floor catches NOISE and BLANK. It is NOT a quality gate, and it is
+specifically blind to the melt class: smearing REMOVES high-frequency temporal
+variation, so a melted/over-smoothed render scores HIGHER here than a clean one
+(0.956 melted vs 0.916 clean). ``tests/test_output_integrity_pgw1094.py`` pins
+that inversion as an executable assertion so nobody re-reads this gate as a
+quality verdict.
 
-WHO IT JUDGES (th#1771). SERVED outputs, and only those — see :func:`judged`.
+WHO IT JUDGES. SERVED outputs, and only those — see :func:`judged`.
 A boot-warmup / mint warm forward uploads nothing and banks nothing, and its
 input is the derived warm payload (``WARMUP_TEXT`` + a flat mid-gray 128px
 PNG), so a flat output there is the expected answer to a flat question.
 
-REFERENCE IMPLEMENTATION. ``cozy_eval.integrity`` / ``cozy_eval.metrics.temporal``
-(ce#10). The numbers, the floors and the decimation are shared with it
-deliberately: the eval half judges candidates offline, this half refuses them
-online, and a disagreement between the two would be a bug in one of them.
+The numbers, floors and decimation are shared deliberately with
+``cozy_eval.integrity`` / ``cozy_eval.metrics.temporal``: the eval half judges
+candidates offline, this half refuses them online, and a disagreement between
+the two would be a bug in one of them.
 """
 
 from __future__ import annotations
@@ -61,7 +57,7 @@ import msgspec
 INTEGRITY_PAIRS = 5
 
 #: Median adjacent-frame grey correlation below this reads as NOISE. MEASURED
-#: (ie#615/ie#634): VAE-decoded noise 0.29, real renders 0.92-0.99.
+#:: VAE-decoded noise 0.29, real renders 0.92-0.99.
 NOISE_CORR_FLOOR = 0.6
 
 #: Per-frame grey standard deviation (on [0, 1] greys) below this reads as
@@ -313,7 +309,7 @@ def check_image(
 class StreamCollector:
     """Judge a clip that arrives in CHUNKS, without ever rebuffering it.
 
-    The streaming encode seam (gw#476) hands the encoder one decoded chunk at
+    The streaming encode seam hands the encoder one decoded chunk at
     a time and the total length is unknown until the producer is done, so the
     buffered "spread five pairs over the clip" sampling cannot be used. This
     collector instead takes the full buffered spread from the FIRST chunk
@@ -425,7 +421,7 @@ def enforce(result: OutputIntegrity, *, ref: str, kind: str) -> None:
     maps FATAL: the request never reaches ``succeeded`` and nothing is
     uploaded. UNMEASURED serves — a screen that could not run is a confession,
     not a verdict — but it still emits its event, because a fail-soft outcome
-    that a hub decision may depend on must never be only a log line (pgw#760).
+    that a hub decision may depend on must never be only a log line.
     PASS is silent: one event per served request would be a row per render for
     no decision.
     """
@@ -450,7 +446,7 @@ def enforce(result: OutputIntegrity, *, ref: str, kind: str) -> None:
 def judged(ctx: Any) -> bool:
     """Whether this context's outputs are subject to the floor.
 
-    th#1771: this is the SERVE-path floor — its whole contract is that nothing
+    this is the SERVE-path floor — its whole contract is that nothing
     is UPLOADED unlooked-at and that a bad render cannot BANK as a success. A
     boot-warmup / mint warm forward uploads nothing and banks nothing: its
     output is discarded by construction, and its INPUT is the derived warm

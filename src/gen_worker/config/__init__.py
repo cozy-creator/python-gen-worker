@@ -1,9 +1,9 @@
 """Worker config — the ONE component in this process that reads the environment.
 
-Ruling §1.18. `load_settings()` is called exactly once per process entry and the
-resulting `Settings` is passed by parameter. There is no cached accessor: pgw#931
-deleted `get_settings()` because a `lru_cache`d process-global is the same defect
-as a raw env read, only harder to see.
+`load_settings()` is called exactly once per process entry and the resulting
+`Settings` is passed by parameter. There is deliberately no cached accessor: a
+`lru_cache`d process-global is the same defect as a raw env read, only harder to
+see.
 """
 from .loader import (
     UnknownSettingError,

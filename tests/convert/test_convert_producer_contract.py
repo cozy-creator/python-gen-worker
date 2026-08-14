@@ -5,7 +5,7 @@ contract, which stays in test_p8_convert_publish_contract.py).
 
 Absorbed from (all deleted after this file lands): test_clone_concurrency.py
 (gw#442, e2e J19 double-clone), test_clone_hygiene.py (gw#462, J24 ENOSPC),
-test_download_skip.py (th#592), test_publish_resilience.py (gw#462, J24
+test_download_skip.py, test_publish_resilience.py (gw#462, J24
 lost-staged-object). Their other tests (disk-budget arithmetic variants,
 GGUF intermediate-peak sizing, sweep/lock edge cases) have no distinct
 incident pin beyond what's kept here and are git-history-archived.
@@ -21,7 +21,7 @@ from pathlib import Path
 from fake_hub import _FakeHub
 
 # ---------------------------------------------------------------------------
-# gw#442 (e2e J19): concurrent duplicate clones must serialize on the keyed
+# concurrent duplicate clones must serialize on the keyed
 # workdir — a crash-recovery re-queue put two clones of the same source on
 # one worker; unserialized, hf_hub's local-dir download unlinked files a
 # peer clone was mid-read on.

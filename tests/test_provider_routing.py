@@ -63,7 +63,7 @@ def _manifest(*binding_blocks: dict) -> dict:
     "block,expect",
     [
         (
-            # pgw#1148: a manifest `flavor` field is DEAD (§1.32(d)) — the key
+            # a manifest `flavor` field is DEAD (§1.32(d)) — the key
             # is the repo, and an entry that still carries one is not a
             # second address.
             {"pipeline": {"kind": "fixed", "provider": "hf",
@@ -77,7 +77,7 @@ def _manifest(*binding_blocks: dict) -> dict:
             {"acme/flux:canary": "tensorhub"},
         ),
         (
-            # th#928: retired dispatch-kind entries are ignored, not parsed.
+            # retired dispatch-kind entries are ignored, not parsed.
             {"pipeline": {"kind": "dispatch", "field": "variant", "table": {
                 "bf16": {"provider": "hf", "ref": "owner/flux"},
             }}},
@@ -136,7 +136,7 @@ def test_lookup_exact_tag_beats_repo_fallback() -> None:
 @pytest.mark.parametrize(
     "wire_ref",
     [
-        "bfl/FLUX.2-klein-4B:latest#bf16",  # non-default tag (th#1276)
+        "bfl/FLUX.2-klein-4B:latest#bf16",  # non-default tag
         "bfl/FLUX.2-klein-4B:prod#bf16",    # the grammar default, stamped
         "bfl/FLUX.2-klein-4B#bf16",         # bare form (no regression)
     ],
@@ -197,7 +197,7 @@ def test_civitai_ref_routes_to_civitai_branch(tmp_path: Path, monkeypatch) -> No
 def test_tensorhub_refs_require_a_snapshot(tmp_path: Path, monkeypatch, ref, index) -> None:
     """Workers never resolve tensorhub refs themselves — the orchestrator
     pre-resolves and ships a Snapshot. Without one, the tensorhub branch
-    raises the typed terminal MissingSnapshotError (gw#465) and the
+    raises the typed terminal MissingSnapshotError and the
     HF branch is NOT touched."""
     from gen_worker.models.errors import MissingSnapshotError
 

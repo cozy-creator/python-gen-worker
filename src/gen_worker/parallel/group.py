@@ -1,10 +1,7 @@
 """RankGroup — the D−1 rank siblings that execute ONE execution sequence.
 
-Paul's ruling (2026-07-28), and the frame this lives inside:
-
-> I'm thinking it'll be seen as one worker, which is multiplexing 4x or 8x
-> execution sequences separately. It only needs one connection to the
-> orchestrator to get jobs and send results back.
+The ruling this lives inside: a pod is ONE worker multiplexing G execution
+sequences, with one connection to the orchestrator for jobs and results.
 
 The rank siblings are **not workers**. They hold no hub connection, no store,
 no output path, no lifecycle, no heartbeat, no capability tokens, no receipts.
@@ -17,7 +14,7 @@ register with the hub, each claim a worker identity, each own a store, each
 report residency — and every hub-facing invariant we have is
 one-worker-per-pod.
 
-**Process-group discipline (pgw#773).** The worker process is rank 0 of EVERY
+**Process-group discipline.** The worker process is rank 0 of EVERY
 group, so no group may ever touch the default torch.distributed process
 group: two groups would collide in one world and corrupt each other's
 collectives. Every group therefore gets its own NON-default ProcessGroup —
@@ -26,7 +23,7 @@ race-free), a unique group name, and an explicit handle passed to every
 collective. Teardown destroys exactly that handle; a sibling group and the
 process-local default are untouchable by construction.
 
-**Command channel (pgw#774).** Rank-0 -> follower commands ride per-follower
+**Command channel.** Rank-0 -> follower commands ride per-follower
 mp queues, NOT collectives: an idle follower parks on ``queue.get`` (no
 collective timeout to trip), teardown is a queue put + join/terminate (no
 collective that can block the event loop), and command payloads are pickled
@@ -56,18 +53,11 @@ from ..stall import SilenceWindow
 
 logger = logging.getLogger(__name__)
 
-# pgw#892 / gw#666 / §4.24. Both group-formation bounds below used to be flat
-# WALL CLOCKS that condemned WORK: 180 s for a follower to reach the store
-# rendezvous and 1800 s for it to finish arming, where arming "covers a
-# follower's full pipeline materialization (a cold model load)". The first
-# self-mint measured ~28 min (ie#546) and pgw#846 projects 47 min - 6.26 h for
-# sdxl, so `_ARM_TIMEOUT_S` was a mint-killer of exactly the shape
-# `runtimes/server.py` already rejects by name — and a follower wedged in a
-# cold `import torch` at 181 s failed the group under the other one.
-#
-# What actually distinguishes a wedged follower from a slow one is whether it
-# is still doing work, and `check_alive()` already covers the DEAD case
-# typed-and-immediately. So both are now SILENCE windows over
+# Group formation is bounded by SILENCE, never by a wall clock: a flat deadline
+# condemns WORK, and a cold pipeline materialization legitimately runs for hours.
+# What distinguishes a wedged follower from a slow one is whether it is still
+# doing work, and `check_alive()` already covers the DEAD case typed-and-
+# immediately. So the bound is a silence window over
 # `proc_evidence.tree_evidence` — the follower's own kernel-accounted CPU and
 # I/O, which needs no cooperation from a process that has no protocol between
 # spawn and ready. A follower that keeps advancing runs as long as its work
@@ -93,8 +83,8 @@ _COLLECTIVE_TIMEOUT_S = 300.0
 # A follower's wait for rank 0's FIRST command. Rank 0 sends `arm` within
 # milliseconds of `form()` returning, so this bounds nothing anyone does; the
 # threat it names is a follower parked forever because rank 0 died in a way
-# `_die_with_rank0`'s PR_SET_PDEATHSIG could not cover (non-Linux hosts, and
-# the pre-prctl spawn window). It bounds a WAIT ON A PEER, never work.
+# `_die_with_rank0`'s PR_SET_PDEATHSIG cannot cover (non-Linux hosts, and the
+# pre-prctl spawn window). It bounds a WAIT ON A PEER, never work.
 _FIRST_COMMAND_WAIT_S = 1800.0
 
 # The TCPStore's own socket-connect budget. This bounds a CONNECT to a
@@ -167,9 +157,9 @@ def arrive_key(spec: RankSpec) -> str:
     """The store key a rank sets the moment it is ready to join the group.
 
     Rank 0 waits on these keys (pollable, so it can check follower liveness
-    between polls) instead of entering the backend rendezvous blind: a
-    follower that dies BEFORE joining used to park rank 0 inside the
-    backend's connect for the whole collective timeout.
+    between polls) instead of entering the backend rendezvous blind: a follower
+    that dies BEFORE joining would otherwise park rank 0 inside the backend's
+    connect for the whole collective timeout.
     """
     return f"{spec.group_name or 'gwsp'}/arrive/{int(spec.rank)}"
 
@@ -197,26 +187,20 @@ def _refuse_nvls_multicast() -> None:
     NVLS accelerates switch-side reductions (all-reduce/reduce-scatter), not
     all-to-all.
 
-    pgw#929 (§1.17), AMBIGUOUS #3: this used to write ``0`` only when the
-    variable was UNSET, so an image or an operator could turn NVLS back on and
-    take every Ulysses arm down with CUDA 401 — a logic gate carried by an env,
-    on a failure that is total rather than gradual. The write is now
-    UNCONDITIONAL and immediately precedes communicator creation. The env
-    survives only as NCCL's own handoff mechanism (it reads env at init and
-    offers no other API); it is no longer anybody's choice.
-
-    A future collective that can benefit from NVLS needs a measured capability
-    and its own issue. It may not revive this as a gate.
+    The write is UNCONDITIONAL and immediately precedes communicator creation —
+    never "only when unset", or an image or operator could turn NVLS back on
+    and take every Ulysses arm down with CUDA 401. The env survives only as
+    NCCL's own handoff mechanism (it reads env at init and offers no other
+    API); it is nobody's choice. A future collective that can benefit from NVLS
+    needs a measured capability, and may not revive this as a gate.
 
     Removing an override removes an escape hatch, so the override is never
-    silently discarded: whoever set it is TOLD, at the moment it is dropped,
-    what was dropped and where the real route runs. A hard override that
-    reports itself is recoverable; one that does not is the thing worth
-    refusing.
+    silently discarded: whoever set it is TOLD what was dropped, at the moment
+    it is dropped.
     """
     previous = os.environ.get(_NVLS_ENV)
-    # pgw#1049: the write is the settings authority's (NCCL_NVLS_ENABLE=0 is
-    # in DECLARED_ENV); this site keeps the drop-an-override warning below.
+    # The write is the settings authority's (NCCL_NVLS_ENABLE=0 is in
+    # DECLARED_ENV); this site keeps the drop-an-override warning below.
     settings_authority.impose_process_env()
     if previous not in (None, "0"):
         logger.warning(
@@ -278,17 +262,17 @@ _PR_SET_PDEATHSIG = 1
 
 
 def _die_with_rank0(rank0_pid: int) -> None:
-    """pgw#820: a follower is a GRANDCHILD of the pgw#783 parent — the split's
+    """A follower is a GRANDCHILD of the process-split parent, whose
     ``PR_SET_PDEATHSIG`` covers parent -> compute child and does not cascade.
-    ``daemon=True`` only reaps through ``multiprocessing``'s atexit hook, and
-    the measured rank-0 death is ``rc=-6`` (NCCL abort) where atexit never
-    runs: the followers would keep a full weight replica on cards 1..D-1 for
-    their own 300 s collective timeout while the parent respawns the group
-    onto those same cards in ~1 s — a crash loop seeded by its own orphans.
+    ``daemon=True`` only reaps through ``multiprocessing``'s atexit hook, which
+    an abort (``rc=-6``, NCCL) never runs: the followers would keep a full
+    weight replica on cards 1..D-1 for their own 300 s collective timeout while
+    the parent respawns the group onto those same cards in ~1 s — a crash loop
+    seeded by its own orphans.
 
     So every follower asks the kernel for the same contract the compute child
     has: SIGKILL when its parent (rank 0) dies, abort included. Linux-only;
-    elsewhere the pre-split behaviour (container death reaps) remains.
+    elsewhere container death reaps.
     """
     try:
         import ctypes
@@ -313,7 +297,7 @@ def _follower_main(
     """A follower's whole life: join, run the narrow loop, report a fatal.
 
     Nothing here talks to the hub, and nothing here decides anything — every
-    adaptive choice arrives from rank 0 over the channel (pgw#748 §5.4).
+    adaptive choice arrives from rank 0 over the channel.
     """
     _die_with_rank0(rank0_pid)
     try:
@@ -350,7 +334,7 @@ class RankGroup:
         self._entry = entry
         self._collective_timeout_s = float(collective_timeout_s)
         self._procs: List[Any] = []
-        #: pid -> high-water evidence mark (pgw#892).
+        #: pid -> high-water evidence mark.
         self._staging_peaks: dict[int, float] = {}
         self._channels: List[FollowerChannel] = []
         self._error_q: Any = None
@@ -412,9 +396,9 @@ class RankGroup:
             channel = FollowerChannel(commands=ctx.Queue(), ready=self._ready_q)
             proc = ctx.Process(
                 target=_follower_main,
-                # pgw#820: the follower's death is tied to THIS process (rank
-                # 0) in its own bootstrap — daemon=True cannot survive an
-                # abort, and the pgw#783 parent must not know about ranks.
+                # The follower's death is tied to THIS process (rank 0) in its
+                # own bootstrap — daemon=True cannot survive an abort, and the
+                # process-split parent must not know about ranks.
                 args=(spec, self._entry, channel, self._error_q, os.getpid()),
                 name=f"sp-{group_name}-rank{spec.rank}",
                 daemon=True,
@@ -446,9 +430,9 @@ class RankGroup:
         Rank 0 must never enter the backend rendezvous blind: gloo/NCCL block
         in ``connect`` for the whole collective timeout when a peer is absent,
         so a follower that crashed on import (bad card, missing wheel, OOM
-        during spawn) turned "the group cannot form" into a multi-minute stall
-        inside ``form()``. Polling the store's arrive keys makes it a bounded,
-        TYPED failure that names the dead rank.
+        during spawn) would turn "the group cannot form" into a multi-minute
+        stall inside ``form()``. Polling the store's arrive keys makes it a
+        bounded, TYPED failure that names the dead rank.
         """
         keys = [arrive_key(s) for s in specs[1:]]
         silence = self._staging_silence()
@@ -494,7 +478,7 @@ class RankGroup:
 
     def _staging_silence(self) -> SilenceWindow:
         """A fresh silence window over follower work, with the high-water
-        marks it compares against reset (pgw#892)."""
+        marks it compares against reset."""
         self._staging_peaks = {}
         return SilenceWindow(_STAGING_SILENCE_WINDOW_S)
 
@@ -527,11 +511,9 @@ class RankGroup:
         dead or SILENT follower. Queue-based — never a collective, so a
         follower that dies mid-materialization cannot park us.
 
-        pgw#892: this took a `timeout_s=1800.0` and raised "followers not
-        armed after 1800s" at 30:01 for a follower that was still legitimately
-        loading. `check_alive()` already fails a DEAD follower typed and
-        immediately, so the duration added nothing death detection did not
-        give and subtracted every slow cold load.
+        Deliberately NOT a wall-clock timeout: `check_alive()` already fails a
+        DEAD follower typed and immediately, so a duration adds nothing death
+        detection does not give and subtracts every slow cold load.
         """
         if self.degree == 1:
             return
@@ -595,7 +577,7 @@ class RankGroup:
         group whose followers are stuck in a collective (they are killed and
         their peers' collectives time out typed). Destroys only this group's
         process-group handle; the process-local default and every sibling
-        group are untouched (pgw#773)."""
+        group are untouched."""
         for channel in self._channels:
             try:
                 channel.commands.put(pickle.dumps({"op": _OP_CLOSE}))

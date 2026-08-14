@@ -1,12 +1,11 @@
-"""pgw#791 — the AOT serve path must satisfy the artifact's ALIGNED-input
-contract at ingress, once, instead of letting AOTInductor copy per call.
+"""The AOT serve path must satisfy the artifact's ALIGNED-input contract at
+ingress, once, instead of letting AOTInductor copy per call.
 
-Measured on an RTX 4090 (WARM-INFERENCE-MATRIX §2c, production `w8a8-lora64`,
-gw 0.76.8 / torch 2.13.0+cu130, real StableDiffusionXLPipeline, 28 steps): the
-armed `.pt2` is 2.8% FASTER per forward than the equivalent dynamo cell and
-0.9% SLOWER per request, because its residual over 28x(per-forward) is 196 ms
-against the dynamo cell's 77 ms. The cause names itself 28+ times per request
-on the worker's stderr — a surface hub-spawned pods do not expose:
+Without it the armed `.pt2` is FASTER per forward than the equivalent dynamo
+cell and SLOWER per request (measured on an RTX 4090, sdxl, 28 steps: 2.8% and
+0.9%) — the per-call copy lands in the residual. The cause names itself 28+
+times per request on the worker's stderr, a surface hub-spawned pods do not
+expose:
 
     Input 1 was compiled as 16-bytes aligned, but it is not aligned at run
     time. Copying to an aligned tensor to guarantee correctness, but expect a

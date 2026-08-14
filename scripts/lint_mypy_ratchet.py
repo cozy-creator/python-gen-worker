@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""pgw#1202: the mypy strictness ratchet only turns one way.
+"""The mypy strictness ratchet only turns one way.
 
 `[tool.mypy] strict = true` makes every module strict by DEFAULT — a module
 added tomorrow is born strict and nobody has to remember anything. The 101
@@ -10,9 +10,7 @@ Those lists are the whole risk. `strict = true` cannot silently stop being
 true — it is one line, present or absent — but a list can grow one name at a
 time until the gate means nothing, and each individual addition looks
 reasonable in review. This script is the mechanism that refuses that, because
-the alternative is remembering, and remembering demonstrably fails: pgw#718
-found a sixth instance of a defect class in a file whose author had already
-fixed it once, in the same session.
+the alternative is remembering, and remembering demonstrably fails.
 
 So each list carries a HIGH-WATER MARK here. A list may shrink freely (that is
 the burn-down, and the shrunk number is committed with it). A list that grows,
@@ -60,7 +58,7 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # third-party stub gaps and are not debt). The remaining 5 are blocked on
     # open lanes owning their importers, not on difficulty.
     "implicit_reexport": (16, 34),
-    # pgw#1202 PR 2: test modules still dirty at the relaxed test posture.
+    # test modules still dirty at the relaxed test posture.
     # 170 of 486 were already clean and are checked from that commit on.
     # 314 -> 312: PR 8 took the two HARNESS doubles — `tests.harness.cell_hub`
     # and `tests.harness.adopt_rig`. These are the modules the "Protocols for

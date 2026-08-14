@@ -1,9 +1,9 @@
-"""pgw#1173: the weight-free premise is FENCED on the trace path.
+"""The weight-free premise is FENCED on the trace path.
 
 The whole compile-loop design rests on one sentence — *compilation is
 weight-free* — and every VRAM number downstream is unsound if the trace path
-can silently materialise real tensors. Before this, three guards stood on that
-path and each could read clean on a composition holding a real checkpoint:
+can silently materialise real tensors. Three guards stand on that path and each
+can read clean on a composition holding a real checkpoint:
 
 * ``off_host_tensors`` walks for tensors that are NOT on the host, and the boot
   trace loads ``place=False``, so a real target sits on the host and the walk
@@ -19,19 +19,8 @@ path and each could read clean on a composition holding a real checkpoint:
 The third one is the defect class this whole redesign is about: a guard that
 cannot fire for the case it is named for, whose silence is then read as proof.
 
-**The fleet evidence that opened pgw#1173 is NOT this hole**, and the rows say
-so: the four `A100 80GB` `child_error` rows carrying `CUDA OOM left the
-pipeline mixed-device and CPU rollback failed` are all `gen_worker_version
-0.104.0`, recorded 2026-08-11 11:00-11:21Z, and pgw#1124's fix shipped in
-0.106.0, tagged 16:46Z the same day. Nothing on 0.106.0 or later has ever
-reported that failure. The `transformer…weight` tensors the dump listed on
-`cuda:0` were the compile target's FAKE parameters, which `device_mismatches`
-counted as misplaced (pgw#1124 defect 2) so the CPU rollback could never be
-satisfied; the OOM itself was the serving placement ladder pushing the slot's
-REAL non-target components onto the parent's card (defect 1). So
-``StructureNotHonored`` was silent because the structure WAS honored. These
-rows fence the premise for the holes that are still open, on the path where
-§4.27 step 1 forbids weights outright.
+These rows fence the premise on the path where §4.27 step 1 forbids weights
+outright.
 """
 
 from __future__ import annotations

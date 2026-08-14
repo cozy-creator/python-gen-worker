@@ -81,7 +81,7 @@ def _armed_pipe() -> _Pipe:
 def test_inmemory_probe_reports_dynamo_truth_not_the_registry() -> None:
     """The in-memory credit needs DIRECT dynamo evidence — the proven-cell
     registry alone would let one object's hit certify another's silence
-    (gw#603/gw#611). Nothing here is compiled, so the probe says no."""
+. Nothing here is compiled, so the probe says no."""
     pytest.importorskip("torch")
     assert cc.has_inmemory_compiled_code(object()) is False
     pipe = _armed_pipe()

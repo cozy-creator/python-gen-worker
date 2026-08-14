@@ -1,10 +1,9 @@
-"""Progress-based give-up for retry and poll loops (gw#666).
+"""Progress-based give-up for retry and poll loops.
 
-Paul's standing rule, and the whole point of the th#1166 audit: nothing that
-can END REAL WORK may key on a wall clock. A fixed budget cannot tell a
-healthy three-hour transfer from a wedge, so it is either useless or it
-kills work that was about to succeed. The honest question is always "has
-anything advanced lately?".
+Standing rule: nothing that can END REAL WORK may key on a wall clock. A fixed
+budget cannot tell a healthy three-hour transfer from a wedge, so it is either
+useless or it kills work that was about to succeed. The honest question is
+always "has anything advanced lately?".
 
 Two tiny values answer it, and every long loop in the SDK is built from
 them:
@@ -17,9 +16,9 @@ them:
     work does.
 
 :class:`ProgressFloor`
-    A monotonic total that must GROW BY A FLOOR to count as an advance
-    (gw#655's rule: a trickle is a stall). Without it, a byte a minute
-    keeps an any-progress watchdog alive forever.
+    A monotonic total that must GROW BY A FLOOR to count as an advance (a
+    trickle is a stall). Without it, a byte a minute keeps an any-progress
+    watchdog alive forever.
 
 Both take their clock by injection so tests drive them deterministically
 rather than by sleeping.
@@ -84,7 +83,7 @@ class ProgressFloor:
 
     ``cleared(total)`` rebases and returns True only once ``total`` has grown
     by at least ``floor`` since the last clearance — so a transfer that
-    trickles can never masquerade as a healthy one (gw#655).
+    trickles can never masquerade as a healthy one.
     """
 
     __slots__ = ("floor", "_base")

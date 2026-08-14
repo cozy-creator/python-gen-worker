@@ -1,37 +1,22 @@
-"""pgw#1127 / §4.28 — the cozy-local serve entry: the fleet arming brain, no sink.
+"""The cozy-local serve entry: the fleet arming brain, no sink.
 
-DESIGN-RULINGS §4.28 (Paul, 2026-08-10): *"Untrusted hardware (community
-cloud, cozy-local) mints for ITSELF: local cell, local repo-CAS, reused
-across its own boots — never uploaded, never requested."*
+Untrusted hardware (community cloud, cozy-local) mints for ITSELF: local cell,
+local repo-CAS, reused across its own boots — never uploaded, never requested.
 
-pgw#1096 built the store that clause needs (``local_cell_store``) and wired it
-into ``fleet_cells._arming_policy``, local-first, before any mint is opened.
-It left ONE thing owed, and the omission made the whole build unreachable from
-the machine it was written for: ``cli/run.py`` still armed through
-``local_cells`` — the JIT path — so ``_arming_policy`` was never entered from
-``cozy serve`` and cozy-local got compile-once-run-forever on JIT only, on the
-recipe pgw#1086 wave 1 deletes.
+This is deliberately a MODULE rather than a line in ``cli/run.py``, because
+the never-publish property has to be STRUCTURAL: ``publisher=None`` at one
+call site is a convention, whereas this module — the ONLY arming entry the
+local CLI has — contains no ``CellPublisher`` construction, no publish call
+and no transport import at all, which a test reads out of the source tree. The
+obligation's terminus is ``fleet_cells.keep_self_mint_local``, which takes no
+publisher and therefore cannot grow into one.
 
-This module is that re-point, and it is deliberately a MODULE rather than a
-line in ``cli/run.py``: the never-publish property has to be structural.
-
-WHAT IS STRUCTURAL HERE, and what merely happens to be true
------------------------------------------------------------
-``publisher=None`` at one call site is a convention. What pins the property is
-that this module — the ONLY arming entry the local CLI has — contains no
-``CellPublisher`` construction, no publish call and no transport import at all,
-and ``tests/test_local_serve_no_publisher_pgw1127.py`` reads that out of the
-source tree. The obligation's terminus is ``fleet_cells.keep_self_mint_local``,
-which takes no publisher and therefore cannot grow into one.
-
-WHAT THIS DOES NOT ADD
-----------------------
-No mint code (the delegated ``mint_delegate`` -> ``mint_process`` ->
-``mint_child`` chain is used unchanged, weight-free since pgw#1080), no second
-key scheme, no coordinator, no mint-request in any address form, no trust
-self-declaration, and no env behaviour switch. A cozy-local box learns it keeps
-its own cells from ``no_publish_sink_reason``'s ``no_publish_sink`` — a fact
-the SINK, never a claim about itself.
+It adds no mint code (the delegated ``mint_delegate`` -> ``mint_process`` ->
+``mint_child`` chain is used unchanged), no second key scheme, no coordinator,
+no mint-request in any address form, no trust self-declaration and no env
+behaviour switch. A cozy-local box learns it keeps its own cells from
+``no_publish_sink_reason``'s ``no_publish_sink`` — a fact about the SINK,
+never a claim about itself.
 """
 
 from __future__ import annotations
@@ -65,8 +50,8 @@ class LocalMintContext:
 
     The same three facts the executor hands ``mint_delegate.MintTask``: WHICH
     routable function, WHICH modules to rediscover it in, and the parent's own
-    resolution of every setup slot (identity + bytes + pgw#617 composition, as
-    one value — see ``child_contract.MintSlot``). A context with no function or
+    resolution of every setup slot (identity + bytes + composition, as one
+    value — see ``child_contract.MintSlot``). A context with no function or
     no modules cannot be minted from and is declared ``incomplete``: the child
     re-runs discovery, so a module list it cannot import is a silent
     "compiles nothing, forever".
@@ -90,18 +75,18 @@ class LocalMintContext:
 class DeferredMint:
     """A mint this machine owes, held until the endpoint's handler has RUN.
 
-    pgw#1199: the mint child no longer proves the handler itself, because on a
-    weight-free mint proving it meant materialising a whole checkpoint in a
-    process that holds none. The proof belongs to the resident parent — but on
-    cozy-local the parent reaches ``enable_compiled`` from inside the SLOT
-    LOAD, before ``setup()`` has bound the pipeline to the endpoint instance,
+    The mint child does not prove the handler itself: on a weight-free mint
+    that would mean materialising a whole checkpoint in a process that holds
+    none. The proof belongs to the resident parent — but on cozy-local the
+    parent reaches ``enable_compiled`` from inside the SLOT LOAD, before
+    ``setup()`` has bound the pipeline to the endpoint instance,
     so there is no handler to run yet. So the mint waits: arm from the local
     store now (that must stay in the load, or the endpoint's ``setup()`` sees
     an unarmed pipeline), and mint after ``setup()`` and ``warmup()`` have
     returned, when one real forward can be run on the resident weights.
 
     This is the same ORDER the fleet already boots in — eager-first, setup
-    complete, handler warmed, then the background mint (pgw#671).
+    complete, handler warmed, then the background mint.
     """
 
     pipe: Any
@@ -144,9 +129,9 @@ def enable_compiled(
         # family, a quarantined identity). `fleet_cells` already named it.
         return False
     if mint is None or mint.incomplete:
-        # A pending nobody can drive is the pgw#815 shape: an obligation with
-        # no terminus. End it here rather than leaving the capture dir and the
-        # ledger entry behind for a run that will never come.
+        # A pending nobody can drive is an obligation with no terminus. End it
+        # here rather than leaving the capture dir and the ledger entry behind
+        # for a run that will never come.
         fleet_cells.abandon_self_mint(pending)
         logger.warning(
             "local-serve: %s opened a mint this process cannot drive (%s); "
@@ -154,7 +139,7 @@ def enable_compiled(
             mint.incomplete if mint is not None else "no mint context")
         return False
     if defer is not None:
-        # pgw#1199: the handler cannot run yet — see `DeferredMint`.
+        # The handler cannot run yet — see `DeferredMint`.
         defer.append(DeferredMint(pipe=pipe, pending=pending, mint=mint))
         return False
     return _mint_here(pipe, pending, mint)
@@ -166,15 +151,15 @@ def run_deferred(
 ) -> None:
     """Prove the handler on the resident pipeline, then mint what is owed.
 
-    pgw#1199's cozy-local half. ``setup()`` and ``warmup()`` have returned, so
-    the endpoint instance is bound to the pipeline this machine will serve
-    from, and ONE warm forward through its own handler discharges pgw#984 —
-    on real checkpoint values, in the process that already holds them, for the
-    price of one forward instead of a second copy of the model.
+    ``setup()`` and ``warmup()`` have returned, so the endpoint instance is
+    bound to the pipeline this machine will serve from, and ONE warm forward
+    through its own handler proves it — on real checkpoint values, in the
+    process that already holds them, for the price of one forward instead of a
+    second copy of the model.
 
-    A handler that does not run mints NOTHING and says so. That is the same
-    disposition the child had (`a cell must not seal for a handler that cannot
-    serve`), reached before a compile is paid for rather than after.
+    A handler that does not run mints NOTHING and says so: a cell must not
+    seal for a handler that cannot serve, and that is reached before a compile
+    is paid for rather than after.
     """
     if not deferred:
         return
@@ -294,13 +279,13 @@ def _mint_here(
     boot, and it blocks), there is nowhere to publish, so the obligation ends
     at ``keep_self_mint_local`` instead of at the publish gate, and there is a
     PERSON on the machine — so §4.30's posture is declared here, and what the
-    compile is doing to their computer is said out loud (pgw#1137).
+    compile is doing to their computer is said out loud.
     """
     result: Optional[mint_delegate.DelegatedResult] = None
     family = str(pending.family)
     proof = handler_proof.provenance(mint.function)
-    # §4.30 / pgw#1137: the ONE site in the tree that declares a user-machine
-    # posture. It is stated here, not derived from `publisher is None` or from
+    # §4.30: the ONE site in the tree that declares a user-machine posture. It
+    # is stated here, never derived from `publisher is None` or from
     # `local_cell_store.trust_class()` — both are facts about the SINK, and a
     # community-cloud pod matches them while having no human on it.
     posture = compile_posture.USER_MACHINE
@@ -317,7 +302,7 @@ def _mint_here(
                     slots=dict(mint.slots),
                     # Cell IDENTITY's lane, the same probe the mint's own
                     # `stamp_lane` memoizes — so what this machine looks up on
-                    # its next boot is what this mint stamps (pgw#686).
+                    # its next boot is what this mint stamps.
                     weight_lane=cc.cell_base_execution_lane(pipe),
                     device=mint.device,
                     posture=posture,
@@ -340,13 +325,13 @@ def _mint_here(
     if result is not None and result.ok:
         # The cell is ALREADY in this machine's store — `adopt_delegated_mint`
         # put it there before any publish could be attempted, which is what
-        # makes a process killed here cost nothing (th#1643's SUNK case).
+        # makes a process killed here cost nothing.
         fleet_cells.keep_self_mint_local(pending)
         return True
     if not fleet_cells.terminus_of(pending):
-        # pgw#815: every obligation ends somewhere nameable. `build_cell`
-        # abandons its own failures; a DECLINED one (no room on the card) it
-        # deliberately leaves open for a caller that might have another.
+        # Every obligation ends somewhere nameable. `build_cell` abandons its
+        # own failures; a DECLINED one (no room on the card) it deliberately
+        # leaves open for a caller that might have another.
         fleet_cells.abandon_self_mint(pending)
     logger.info(
         "local-serve: %s has no cell on this machine yet (%s); serving eager",

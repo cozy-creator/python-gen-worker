@@ -11,7 +11,7 @@ class ValidationError(WorkerError):
 
 class IllegalCombination(ValidationError, ValueError):
     """This combination of payload field VALUES is outside the endpoint's
-    contract, even though each field is individually legal (pgw#669).
+    contract, even though each field is individually legal.
 
     Raise it from a payload struct's ``__post_init__`` for inter-field
     constraints — ltx-video-2.3's 4K is 16:9 and B200-only, its ultrawide is
@@ -50,14 +50,14 @@ class CanceledError(WorkerError):
 
 
 class GpuSlotUnreachable(RetryableError):
-    """A mid-handler GPU-permit re-acquire (#382) can never be satisfied.
+    """A mid-handler GPU-permit re-acquire can never be satisfied.
 
-    pgw#738: the #382 lease yields the permit across a blob upload and takes
-    it back before returning to tenant code. That wait has NO honest progress
+    The lease yields the permit across a blob upload and takes it back before
+    returning to tenant code. That wait has NO honest progress
     signal of its own — FIFO position does not move while a healthy holder
     computes for four hours, and a holder's silence is not the waiter's fault
     (the publish phase is log-silent and GPU-idle by construction). So the
-    wait is bounded by REACHABILITY, never by a clock (gw#666): it is refused
+    wait is bounded by REACHABILITY, never by a clock: it is refused
     only when the permit ledger proves an outstanding permit belongs to no
     live holder — a raw acquirer outside the ledger, or a hold whose owning
     task already finished. Neither state resolves itself.
@@ -127,7 +127,7 @@ class OutputTooLargeError(ValidationError):
 
 
 class PayloadRefError(ValidationError):
-    """A ref the REQUEST PAYLOAD named could not be resolved (th#1259).
+    """A ref the REQUEST PAYLOAD named could not be resolved.
 
     PROVENANCE decides the class, not the status code or the message: an
     address the caller supplied is the caller's to get right, so this is a
@@ -164,7 +164,7 @@ class BlobDigestMalformedError(PayloadRefError):
     The hub's `storage.ParseDigest` refuses bare hex outright, so guessing an
     algorithm here would only turn a local contract error into a remote 400 —
     or, worse, silently address the wrong one of the two live CAS namespaces
-    (repo-CAS is sha256 since th#1303; dataset-CAS is blake3).
+    (repo-CAS is sha256; dataset-CAS is blake3).
     """
 
     def __init__(self, digest: str, detail: str) -> None:
@@ -201,20 +201,12 @@ class DatasetNotFoundError(PayloadRefError):
 class EndpointSetupFailed(WorkerError):
     """The pod's OWN warm / compile pass failed. No request participates.
 
-    pgw#1118 / th#1773. A warm forward runs a payload the WORKER synthesized
-    from the endpoint's own schema and calls the endpoint's own handler with
-    it; the same is true of the trace and inductor passes. Nothing about any
-    caller reaches those boundaries — which is exactly what the untyped
-    version of this failure hid.
-
-    Measured (th#1771's tape, request 3d1b9c6a on minimax-h3 0.4.6): the
-    synthesizer raised a bare ``ValueError`` about ``references[]`` 3 ms into
-    ``self_mint_compile phase=warmup_forward``, the setup boundary re-raised it
-    verbatim, the job path mapped it through the generic FATAL tail, and the
-    hub booked ``error_type='fatal'`` with that exception against the paying
-    request that happened to wake the pod — whose own ``references[]`` were
-    perfectly formed. It read as a payload verdict to every human and every
-    machine downstream and cost hours of investigation in the dispatch path.
+    A warm forward runs a payload the WORKER synthesized from the endpoint's
+    own schema and calls the endpoint's own handler with it; the same is true
+    of the trace and inductor passes. Nothing about any caller reaches those
+    boundaries. Untyped, such a failure maps through the generic FATAL tail and
+    the hub books it against whichever paying request happened to wake the pod
+    — a payload verdict on a payload that was perfectly formed.
 
     The label is the whole point: it is the worker's ORIGIN claim, made at the
     boundary that knows it, so the hub can route the blame to the RELEASE at
@@ -240,11 +232,10 @@ class EndpointSetupFailed(WorkerError):
 
 
 class ModelSlotIdentityError(WorkerError):
-    """Dispatched model slot's repo differs from the function's declared ref
-    (gw#583, the ie#518 silence).
+    """Dispatched model slot's repo differs from the function's declared ref.
 
-    Fail-closed, named-axis refusal (the gw#577 pattern: every refusal names
-    the exact axis plus both conflicting values). ``@endpoint(models={...})``
+    Fail-closed, named-axis refusal: every refusal names the exact axis plus
+    both conflicting values. ``@endpoint(models={...})``
     fixes a slot's repo identity unless the slot declares
     ``Slot(selected_by=...)`` (a hub-owned catalog the endpoint explicitly
     opted into) — for a fixed slot, a dispatch naming a DIFFERENT repo is
@@ -267,7 +258,7 @@ class ModelSlotIdentityError(WorkerError):
 
 class ComponentSubstitutionError(WorkerError):
     """A dispatched component substitution cannot apply to the slot's base
-    composition (pgw#617/th#980 hierarchical bindings).
+    composition (hierarchical bindings).
 
     Named-axis refusal: the message carries function, slot, component name
     and the base's known component vocabulary (or the failing override ref).
@@ -290,7 +281,7 @@ class ComponentSubstitutionError(WorkerError):
 
 
 class DeclaredSlotResolutionError(WorkerError, ValueError):
-    """A FIXED release-declared model slot failed to resolve (pgw#763/th#1288).
+    """A FIXED release-declared model slot failed to resolve.
 
     The failing ref is the RELEASE'S OWN declaration — no payload field
     participates — so the label is the worker's origin claim and the hub
@@ -349,11 +340,11 @@ class RefCompatibilitySurprise(ValidationError):
 
 
 class AdapterFidelityRefused(RefCompatibilitySurprise):
-    """pgw#794: the adapter's delta does not SURVIVE the grid it would serve
-    through, so attaching or fusing it would render something that looks
-    adapted and is not.
+    """The adapter's delta does not SURVIVE the grid it would serve through,
+    so attaching or fusing it would render something that looks adapted and is
+    not.
 
-    Distinct from th#1036's zero-delta refusal, which catches an EMPTY
+    Distinct from the zero-delta refusal, which catches an EMPTY
     adapter. This one catches an INERT (or actively corrupting) adapter: fully
     populated, arithmetically real, and destroyed by the target dtype. The
     measured shape is qwen Lightning fused into fp8-E4M3 — surviving-delta
@@ -379,7 +370,7 @@ class AdapterFidelityRefused(RefCompatibilitySurprise):
 
 
 class ChildCallError(WorkerError):
-    """Base class for th#826 call-out primitive failures (ctx.call_endpoint)."""
+    """Base class for call-out primitive failures (ctx.call_endpoint)."""
 
 
 class ChildCallRefusedError(ChildCallError):
@@ -433,11 +424,10 @@ class ChildCallTimeoutError(ChildCallError):
 
 
 class HostRamMoveRefusedError(WorkerError):
-    """pgw#763: a ``module.to("cpu")`` that cannot fit the container's RAM
-    budget, refused BEFORE allocating. Host-RAM exhaustion is a cgroup SIGKILL
-    (uncatchable — te#138 lost a worker to one endpoint line), so the only
-    honest failure is this typed error before the copy starts. Maps FATAL on
-    the wire under this class label."""
+    """A ``module.to("cpu")`` that cannot fit the container's RAM budget,
+    refused BEFORE allocating. Host-RAM exhaustion is an uncatchable cgroup
+    SIGKILL, so the only honest failure is this typed error before the copy
+    starts. Maps FATAL on the wire under this class label."""
 
     def __init__(
         self, *, incoming_bytes: int, available_bytes: int,
@@ -459,17 +449,16 @@ class HostRamMoveRefusedError(WorkerError):
 
 
 class OutputIntegrityError(WorkerError):
-    """pgw#1094: the decoded output failed the NOISE/BLANK floor, so the
-    request must NOT bank as a clean success (ie#615/ie#634).
+    """The decoded output failed the NOISE/BLANK floor, so the request must NOT
+    bank as a clean success.
 
-    Production minimax-h3 0.3.8 uploaded VAE-decoded noise on billed, settled
-    requests. Nothing on the worker looked at the pixels; the "proof" was
-    ffprobe container metadata plus a billing row. Raised from the shared save
-    path (:mod:`gen_worker.output_integrity`) BEFORE any encode or upload, so
-    the garbage never reaches storage and the request reaches the hub as a
+    Container metadata plus a billing row is not proof that pixels were
+    rendered. Raised from the shared save path
+    (:mod:`gen_worker.output_integrity`) BEFORE any encode or upload, so the
+    garbage never reaches storage and the request reaches the hub as a
     deterministic worker-side failure carrying the measured statistic.
 
-    BLAME (th#1259 / th#1288 / pgw#1088). A rendered output is produced by the
+    BLAME. A rendered output is produced by the
     release's code, the model's runtime state AND the request's payload
     together, so this label is NOT version-independent evidence about the
     release and must never be added to the hub's `declaredFaultLabels`: that
@@ -479,11 +468,11 @@ class OutputIntegrityError(WorkerError):
     CODE answering a REQUEST", the strongest honest class a job result can
     carry — which is exactly right and needs no hub change.
 
-    NOT retryable, deliberately. The measured cause (ie#634) was persistent
-    model state on one pod, and a retry there re-renders noise at full GPU
-    cost. The blame ladder's distinct-worker machinery is what moves a request
-    off a bad pod; a self-declared RETRYABLE would only spend the attempt
-    budget rendering the same garbage.
+    NOT retryable, deliberately. The measured cause is persistent model state
+    on one pod, and a retry there re-renders noise at full GPU cost. The blame
+    ladder's distinct-worker machinery is what moves a request off a bad pod; a
+    self-declared RETRYABLE would only spend the attempt budget rendering the
+    same garbage.
     """
 
     def __init__(

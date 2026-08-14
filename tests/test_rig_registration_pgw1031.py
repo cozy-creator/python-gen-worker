@@ -1,13 +1,11 @@
 """The rig's declaration registration must survive a registry reset.
 
-This closes a RECURRENT CI flake, not a hypothetical. `test_graph_witness_pgw1031`
-errored at setup on all five of its rows — `AttributeError: 'NoneType' object has
-no attribute 'targets'`, from `aot_mint.export_declaration(family)` returning
-`None` — on two unrelated PRs (#689, #692), while the SAME commit passed on a
-plain re-run and a `workflow_dispatch` baseline on master was green. Each hit
-cost a 17-minute `tests` job, for whichever lane happened to draw it.
+This closes a recurrent CI flake: `test_graph_witness_pgw1031` errors at setup
+with `AttributeError: 'NoneType' object has no attribute 'targets'`, from
+`aot_mint.export_declaration(family)` returning `None`, while the SAME commit
+passes on a plain re-run.
 
-THE MECHANISM, measured rather than guessed:
+THE MECHANISM:
 
     [1] after first compile_cell : True
     [2] after reset              : False
@@ -22,7 +20,7 @@ nothing has declared any more, and the failure surfaces later and elsewhere.
 Whether the two land in the same worker is a function of shard split, which is
 why adding five unrelated test rows to a PR could summon it.
 
-It is the same defect class the arm-state fence exists for (pgw#1152): a
+It is the same defect class the arm-state fence exists for: a
 process-global registry fed by a convention the caller has to remember. The fix
 is the same shape — ask the registry, do not trust the convention.
 """

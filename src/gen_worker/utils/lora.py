@@ -1,4 +1,4 @@
-"""Per-request LoRA adapter overlays with adapter residency (gw#393 + gw#399).
+"""Per-request LoRA adapter overlays with adapter residency.
 
 ``RunJob.models[].loras`` reaches the executor, which materializes each
 adapter snapshot via the normal ``ensure_local`` path and parses + validates
@@ -45,9 +45,7 @@ LORA_WEIGHT_BOUND = 4.0
 ADAPTER_CACHE_MAX_BYTES = 1 * _GiB
 
 # Residency caps for adapters left attached to a pipeline between requests.
-# No deployment has ever overridden these (pgw#514 dead-config sweep found
-# zero producers for the env vars that used to back them as Settings
-# fields), so they're fixed constants.
+# No deployment has ever overridden these, so they're fixed constants.
 MAX_ATTACHED_ADAPTERS = 8
 MAX_ATTACHED_ADAPTER_BYTES = 2 * _GiB
 
@@ -119,17 +117,17 @@ _KOHYA_TE_ALIASES = (
 
 def _te_prefix_to_component() -> tuple[tuple[str, str], ...]:
     """Component prefix -> pipe attribute, longest first so ``text_encoder_2``
-    wins over ``text_encoder``. Read at call time (pgw#740 B5)."""
+    wins over ``text_encoder``. Read at call time."""
     dotted = tuple(
         (c, c) for c in sorted(text_encoder_components(), key=len, reverse=True)
     )
     return dotted + _KOHYA_TE_ALIASES
 
 
-# Config fields that DISCRIMINATE denoiser structure. The UNet set alone
-# (pgw#740) made every DiT fingerprint to "|||" — a transformer has none of
-# those fields — so two structurally different DiTs shared one normalized-split
-# cache entry. The fingerprint is generic: it takes whatever the module
+# Config fields that DISCRIMINATE denoiser structure. It must cover DiTs as
+# well as UNets: a UNet-only set fingerprints every transformer to the same
+# empty value, so two structurally different DiTs would share one
+# normalized-split cache entry. The fingerprint takes whatever the module
 # actually declares, and says so when it declares nothing.
 _FINGERPRINT_FIELDS = (
     # UNet-shaped
@@ -148,10 +146,10 @@ def _denoiser_fingerprint(pipe: Any) -> str:
     checkpoints sharing a pipeline class but differing in block layout must
     not share a normalized-split cache entry.
 
-    pgw#740: the field list must cover DiTs, not only UNets. A fingerprint that
-    resolves to nothing is NOT a cache key — it is a collision — so a module
-    whose config declares none of these fields falls back to its class name
-    plus its parameter shape signature rather than to an empty string.
+    A fingerprint that resolves to nothing is NOT a cache key — it is a
+    collision — so a module whose config declares none of these fields falls
+    back to its class name plus its parameter shape signature rather than to
+    an empty string.
     """
     for name in denoiser_components():
         module = getattr(pipe, name, None)
@@ -188,12 +186,12 @@ def _split_adapters(
     """(peft-path adapters with denoiser keys stripped, branch set BY
     COMPONENT) for a branch-capable pipeline. Each adapter is first
     normalized through the pipeline class's own ``lora_state_dict`` converter
-    (zero drift with the boot-time path, te#81 pattern), then split: denoiser
-    keys ride the additive branch, the rest (text-encoder halves) keep peft.
-    Branch entries are (state_dict, weight, ref) — the
+    (zero drift with the boot-time path), then split: denoiser keys ride the
+    additive branch, the rest (text-encoder halves) keep peft. Branch entries
+    are (state_dict, weight, ref) — the
     models.w8a8_lora.apply_branch_adapter_set contract.
 
-    gw#679: the denoiser half is ROUTED to the component its keys name, so a
+    The denoiser half is ROUTED to the component its keys name, so a
     dual-expert MoE lands each half of a distillation on ITS expert. The
     routed slices are cached with the split (not rebuilt per request) —
     the branch staging cache keys on ``id(sd)``, and a fresh dict every
@@ -214,11 +212,11 @@ def _split_adapters(
             )
             den, rest = w8a8_lora.split_state_dict(sd)
             if den:
-                # RAW keys decide routability on a multi-expert pipeline —
-                # the converter above rewrites every non-diffusers key onto
-                # the high-noise prefix whatever expert it came from
-                # (gw#679). Only adapters that HAVE a denoiser half owe a
-                # declaration; a text-encoder-only overlay is unaffected.
+                # RAW keys decide routability on a multi-expert pipeline — the
+                # converter above rewrites every non-diffusers key onto the
+                # high-noise prefix whatever expert it came from. Only adapters
+                # that HAVE a denoiser half owe a declaration; a
+                # text-encoder-only overlay is unaffected.
                 w8a8_lora.require_component_declaration(
                     components, a.state_dict, ref=a.ref)
             cached = (
@@ -245,10 +243,9 @@ def _reject_te_keys_on_cast_te(
     pipe: Any, adapters: Sequence["PreparedAdapter"],
 ) -> None:
     """Typed refusal for text-encoder adapter halves TARGETING a cast TE
-    (the ``fp8+te`` lane): peft module wrapping under the block-window/
-    layerwise cast is the exact ie#374 breakage — fail loud, never fight
-    the hooks. Keys targeting an UNCAST encoder in a mixed setup stay on
-    the peft path."""
+    (the ``fp8+te`` lane): peft module wrapping breaks under the
+    block-window/layerwise cast — fail loud, never fight the hooks. Keys
+    targeting an UNCAST encoder in a mixed setup stay on the peft path."""
     def component_of(key: str) -> str:
         for prefix, comp in _te_prefix_to_component():
             if key.startswith(prefix):
@@ -329,7 +326,7 @@ _LORA_PAIR_RE = re.compile(
 
 
 def _reject_zero_delta(state_dict: Dict[str, Any], *, ref: str = "") -> None:
-    """th#1036 attach-but-invisible rule, ONE implementation (ie#552): the
+    """The attach-but-invisible rule, ONE implementation: the
     adapter's low-rank product must be provably nonzero, or attaching it
     silently serves the bare base model (e.g. undistilled output labeled
     turbo). Delta per module is ``up @ down`` — a pair with EITHER half
@@ -367,7 +364,7 @@ def load_adapter_state_dict(path: Path, *, ref: str = "") -> Dict[str, Any]:
     """Parse + validate one adapter file. Injects missing kohya ``alpha``
     keys (alpha = rank) so diffusers doesn't error. Zero-delta extractions
     are refused here — every consumer (executor overlays, BYO per-request
-    loras, endpoint code) inherits th#1036's guard from this one seam."""
+    loras, endpoint code) inherits the guard from this one seam."""
     from safetensors.torch import load_file as load_safetensors
     import torch
 
@@ -473,7 +470,7 @@ class _PipeAttachments:
 
 
 class AdapterResidency:
-    """Per-pipeline attachment registry (gw#399), keyed by model ref.
+    """Per-pipeline attachment registry, keyed by model ref.
 
     ``activate`` attaches missing adapters (load_lora_weights — the ~1s step,
     paid once per adapter per pipeline), toggles the active set, and LRU-evicts
@@ -506,15 +503,15 @@ class AdapterResidency:
         """Make exactly *adapters* the pipeline's active set. Attach failure
         rolls back to a fully-deactivated pipeline.
 
-        Branch-capable pipelines (gw#547 w8a8, gw#558 all lanes): denoiser
-        keys go to the additive side-branch (peft can't target
-        Fp8ScaledLinear and fights the layerwise-cast hooks — ie#374);
-        text-encoder keys keep the peft path below. Plain-bf16 pipelines
-        whose adapter cannot map onto branch-capable Linears (e.g. conv-
-        targeting LoCon) fall back to the whole-adapter peft path when the
-        pipeline supports it — capability preserved, branch primary.
+        Branch-capable pipelines: denoiser keys go to the additive
+        side-branch (peft can't target Fp8ScaledLinear and fights the
+        layerwise-cast hooks); text-encoder keys keep the peft path below.
+        Plain-bf16 pipelines whose adapter cannot map onto branch-capable
+        Linears (e.g. conv-targeting LoCon) fall back to the whole-adapter
+        peft path when the pipeline supports it — capability preserved,
+        branch primary.
 
-        gw#679: a pipeline's denoiser is a SET. Each adapter half is routed
+        A pipeline's denoiser is a SET. Each adapter half is routed
         to the expert its keys name and the set is applied atomically; the
         peft fallback is refused outright on a multi-expert pipeline
         (diffusers expresses the second expert as a ``load_lora_weights(...,
@@ -545,13 +542,11 @@ class AdapterResidency:
         with self._lock:
             st = self._state(ref, pipe)
             try:
-                # pgw#722 F3: a lifted binding exists only when the AOT arm
-                # installed it (flag-gated F2) — its presence IS the routing
-                # fact. An armed exported artifact reads the adapter from the
-                # lifted flat pair (call inputs); a buffer copy would be
-                # invisible to it, so every attach/clear on a lifted denoiser
-                # writes through the binding views instead. No binding =>
-                # byte-identical to today's paths.
+                # A lifted binding exists only when the AOT arm installed it —
+                # its presence IS the routing fact. An armed exported artifact
+                # reads the adapter from the lifted flat pair (call inputs); a
+                # buffer copy would be invisible to it, so every attach/clear
+                # on a lifted denoiser writes through the binding views instead.
                 lifted = any(
                     lora_lifted.lifted_binding(m) is not None
                     for m in targets.values()) if targets else False
@@ -597,7 +592,7 @@ class AdapterResidency:
                     # Adapter set has no denoiser half: make sure a previous
                     # request's branches are off. Lifted denoisers clear
                     # through their binding (zero-B lands in the flat pair
-                    # the artifact reads — pgw#722 F3).
+                    # the artifact reads).
                     if lifted:
                         for model in targets.values():
                             binding = lora_lifted.lifted_binding(model)
@@ -612,9 +607,9 @@ class AdapterResidency:
                     # No peft half — make sure a previous request's peft
                     # adapters are off, then we're done. Only touch the peft
                     # surface when THIS registry attached something there:
-                    # diffusers' disable_lora raises on peft-less images
-                    # (the LTX serving image ships no peft — ie#493), and a
-                    # branch-only pipeline never needs it.
+                    # diffusers' disable_lora raises on peft-less images (some
+                    # serving images ship no peft), and a branch-only pipeline
+                    # never needs it.
                     if st.attached and hasattr(pipe, "disable_lora"):
                         pipe.disable_lora()
                     st.active = True
@@ -682,9 +677,9 @@ class AdapterResidency:
             try:
                 targets = w8a8_lora.branch_targets(pipe)
                 if targets:
-                    # pgw#722 F3: a lifted denoiser deactivates through its
-                    # binding — zero-B must land in the flat pair the armed
-                    # artifact reads, not in the orphaned canonical buffers.
+                    # A lifted denoiser deactivates through its binding —
+                    # zero-B must land in the flat pair the armed artifact
+                    # reads, not in the orphaned canonical buffers.
                     for model in targets.values():
                         binding = lora_lifted.lifted_binding(model)
                         if binding is not None:
@@ -697,9 +692,9 @@ class AdapterResidency:
                     "[request_id=%s] lora branch clear failed", request_id,
                     exc_info=True,
                 )
-                # pgw#760: adapter deltas may still be live in the branch
-                # buffers — the NEXT tenant's request can render with THIS
-                # request's LoRA. Serving-correctness, never log-only.
+                # Adapter deltas may still be live in the branch buffers — the
+                # NEXT tenant's request can render with THIS request's LoRA.
+                # Serving-correctness, never log-only.
                 activity_mod.emit_event(
                     activity_mod.KIND_LORA_HYGIENE,
                     f"ref={ref} request={request_id}: branch clear failed; "
@@ -710,7 +705,7 @@ class AdapterResidency:
             try:
                 # Peft-surface teardown only when peft attachments exist —
                 # diffusers raises "PEFT backend is required" otherwise on
-                # peft-less serving images (branch-only lanes, ie#493).
+                # peft-less serving images (branch-only lanes).
                 if not st.attached:
                     pass
                 elif hasattr(pipe, "disable_lora"):
@@ -753,8 +748,8 @@ class AdapterResidency:
                 from ..models import w8a8_lora
 
                 targets = w8a8_lora.branch_targets(pipe)
-                # bucket guard: never-lora pipelines skip the module walk
-                # entirely — this runs on EVERY demote (gw#551 swaps).
+                # Bucket guard: never-lora pipelines skip the module walk
+                # entirely — this runs on EVERY demote.
                 if targets and w8a8_lora.pipeline_branch_bucket(pipe):
                     w8a8_lora.disable_branch_execution_lanes(pipe)
                     w8a8_lora.stamp_execution_lane(pipe, targets)
@@ -799,8 +794,8 @@ class AdapterResidency:
                 logger.info("lora attachment evicted (LRU): %s", victim)
             except Exception as exc:
                 logger.warning("lora eviction failed for %s", victim, exc_info=True)
-                # pgw#760: the attachment is dropped from bookkeeping but its
-                # tensors stay on the pipeline — repeated failures creep VRAM.
+                # The attachment is dropped from bookkeeping but its tensors
+                # stay on the pipeline — repeated failures creep VRAM.
                 activity_mod.emit_event(
                     activity_mod.KIND_LORA_HYGIENE,
                     f"adapter={victim}: LRU eviction failed; adapter tensors "

@@ -1,22 +1,15 @@
-"""pgw#840: the entry child must BE the parent's own gen_worker.
+"""The entry child must BE the parent's own gen_worker.
 
-The defect this closes was found through pgw#830's attribution invariant going
-red on a tree nobody had changed. The failing entry's table had no child spans
-at all — the whole compile fell into ``reap_lag_s`` — while the compile itself
-had succeeded and returned files that exist. Nothing in the pool was wrong; the
-CHILD was a different gen_worker, old enough to predate the span table.
+``python -m gen_worker.aot_compile_child`` does not mean "this gen_worker" —
+same venv, same interpreter, and the child can still resolve to a DIFFERENT
+gen_worker off ``sys.path``. The visible symptom is attribution (an entry table
+with no child spans, the whole compile falling into ``reap_lag_s``) while the
+compile itself succeeds and returns files that exist.
 
-MEASURED on the box that filed it: 236 preserved entry reports, 150 of them
-written by a pre-pgw#830 child, several under a parent that had pgw#832 (its
-pool workdir holds the ``seal-lib-memo.json`` only such a parent writes). Same
-venv, same interpreter — ``python -m gen_worker.aot_compile_child`` simply does
-not mean "this gen_worker".
-
-Attribution is the symptom. The defect is that the process which compiles the
-files a cell publishes was chosen by ``sys.path``, while every gate runs in the
-parent against the parent's program. So there are two assertions here: the
-child RESOLVES to the parent's code, and a child that did not is REFUSED by
-name rather than believed.
+The defect is that the process which compiles the files a cell publishes was
+chosen by ``sys.path``, while every gate runs in the parent against the
+parent's program. Two assertions: the child RESOLVES to the parent's code, and
+a child that did not is REFUSED by name rather than believed.
 """
 
 from __future__ import annotations

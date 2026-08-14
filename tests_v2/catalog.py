@@ -1,10 +1,9 @@
-"""The declarative endpoint catalog — endpoints as DATA (pgw#808).
+"""The declarative endpoint catalog — endpoints as DATA.
 
-This single module replaces the old per-issue harness endpoint modules
-(`mint_endpoints_pgw784.py`, `shape_endpoints_pgw789.py`, ...). Scenarios never
-declare their own endpoints: they SELECT rows from :data:`CATALOG`, and the
-worker loads this one module (:data:`MODULE`). A new behavior is a new row —
-a small endpoint method plus one `Row` entry — never a new module.
+Scenarios never declare their own endpoints: they SELECT rows from
+:data:`CATALOG`, and the worker loads this one module (:data:`MODULE`). A new
+behavior is a new row — a small endpoint method plus one `Row` entry — never a
+new module.
 
 Contract (kept stable for every later suite):
 

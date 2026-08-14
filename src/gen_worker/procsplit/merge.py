@@ -1,29 +1,25 @@
-"""pgw#783 fan-in: G children produce G views; the hub sees ONE worker.
+"""Fan-in: G children produce G views; the hub sees ONE worker.
 
 Pure functions over the wire protobufs — no I/O, no torch, no state. Every
 rule here has a plausible wrong answer that would be silently harmful on a wide
 pod, so each carries the reason it is not that answer.
 
-**The orchestrator sees ONE worker, never N sub-units** (Paul, 2026-07-30):
-*"from the orchestrator's point of view, they should be thinking of a worker as
-one unit they can assign work to. The worker worries about the sub-execution
-units, but from the orchestrator's point of view, they are one worker. This
-keeps the system boundaries intact."* So the hub must not learn that groups
-exist at all — no group-keyed wire field, ever. The parent is a genuine
+**The orchestrator sees ONE worker, never N sub-units.** The hub assigns work
+to a worker; the worker worries about its sub-execution units. So the hub must
+not learn that groups exist at all — no group-keyed wire field, ever. The
+parent is a genuine
 AGGREGATOR, not a relay: it reconciles G children into one coherent worker view
 (one function set, one activity stream, one liveness claim, one capacity
 picture) BEFORE anything reaches the stream.
 
-**A function is advertised while ANY group can serve it** (Paul, 2026-07-30):
-*"The worker should advertise any function it can serve. If it has 4 execution
-groups, and only one of them can serve function-X, then it should advertise
-function-X as serveable."* So availability UNIONS. The hub dispatches to the
-worker; the worker routes to a group that can serve (procsplit.group.route),
-and a dispatch landing on a group that cannot serve is the worker's problem to
-re-home internally, not the hub's to avoid. Whether the scheduler should ALSO
-know staffing depth (1 group vs 4 can serve X) is deliberately left open and
-filed separately (th#, "does the scheduler benefit from knowing how many groups
-can serve X") — NOT built speculatively here.
+**A function is advertised while ANY group can serve it.** Availability
+UNIONS: if four execution groups exist and only one can serve function-X, the
+worker still advertises function-X. The hub dispatches to the worker; the
+worker routes to a group that can serve (procsplit.group.route), and a dispatch
+landing on a group that cannot serve is the worker's problem to re-home
+internally, not the hub's to avoid. Whether the scheduler should ALSO know
+staffing depth (1 group vs 4 can serve X) is deliberately left open — NOT built
+speculatively here.
 
 **At G == 1 every function returns its single input UNCHANGED** (the same
 object, so the serialized bytes are trivially identical). The N-child path is
@@ -77,7 +73,7 @@ def merge_phase(phases: Sequence["pb.WorkerPhase"]) -> "pb.WorkerPhase":
 def merge_state_deltas(deltas: Sequence[pb.StateDelta]) -> pb.StateDelta:
     """One worker-level StateDelta from G per-group ones.
 
-    ``deltas`` carries only LIVE groups (pgw#937). A down group contributes no
+    ``deltas`` carries only LIVE groups. A down group contributes no
     function to the union, no free VRAM to the sum, and no vote to the phase
     min — otherwise the worker keeps advertising a dead group's functions and
     every dispatch onto it is answered "compute process restarting".
@@ -128,7 +124,7 @@ def merge_state_deltas(deltas: Sequence[pb.StateDelta]) -> pb.StateDelta:
             d.observed_residency_generation for d in deltas
         ),
         observed_config_generation=min(d.observed_config_generation for d in deltas),
-        # pgw#1032: no `cell_lookups` — no child produces them any more.
+        # No `cell_lookups` — no child produces them any more.
         compile_targets=targets,
     )
     # THE TRAP: disk is NOT summable. All G children share ONE container
@@ -221,7 +217,7 @@ def reconcile_activity_kind(
       is); it is terminal only when EVERY group's latest is terminal, and FAILED
       then only if any of those terminals failed;
     * carries the AGGREGATE progress — summed counters, the furthest step — so
-      the hub's counter-advancement liveness (gw#621) sees the union of the
+      the hub's counter-advancement liveness sees the union of the
       groups' work advancing, never one group's stall masking three groups'
       progress;
     * is re-stamped with the PARENT's monotonic ``seq``. Children have
@@ -283,7 +279,7 @@ def worker_fn_unavailable(
     does the worker report unavailable, carrying one representative reason (the
     admin availability view is per-worker, not per-group).
 
-    **THE CONTRACT THE CALLER MUST NOT GET BACKWARDS (pgw#937): a value of
+    **THE CONTRACT THE CALLER MUST NOT GET BACKWARDS: a value of
     ``None`` means "this group SERVES it", so a group whose child is DOWN is
     EXCLUDED from the mapping — never entered as ``None``.** Popping a dead
     group's entry without also dropping the group would make the dead group read
@@ -317,7 +313,7 @@ def worker_fn_degraded(
     it wants a bigger one". Under ruling 1 the worker routes a dispatch to a
     group that can serve, so if ANY group serves the function NATIVE the worker
     is not degraded: report nothing. ``served_native_somewhere`` and
-    ``per_group`` are both computed over LIVE groups only (pgw#937): absence
+    ``per_group`` are both computed over LIVE groups only: absence
     means "serves it native" here too, so a down group left in the scan would
     veto a live group's degradation report. The worker is degraded only when it serves
     the function AND the best any group can do is degraded — then report the
@@ -358,9 +354,7 @@ def merge_hello(
     if len(hellos) == 1 and not worker_session_id and not extra_in_flight:
         return hellos[0]
 
-    # Group 0 is the template: protocol version, identity, and (until pgw#763
-    # delta 2 moves hardware measurement to the parent) `resources`. Delta 2
-    # replaces exactly this line and nothing else.
+    # Group 0 is the template: protocol version, identity and `resources`.
     merged = pb.Hello()
     merged.CopyFrom(hellos[0])
 

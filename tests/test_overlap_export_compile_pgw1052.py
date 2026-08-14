@@ -1,11 +1,10 @@
-"""pgw#1052 — export and compile were sequential by CODE, not by necessity.
+"""Export and compile OVERLAP; they are sequential by code, not by necessity.
 
-Attempt 26/30 measured the two phases at 65-68 min (export, one core, serial
-in the mint parent) and 92-97 min (compile, K=2 children) with ZERO overlap:
-the pool was constructed only after the last row exported. Producer ~113 s/row
-against a pool consuming ~127 s/row means the phases almost perfectly shadow
-each other, so handing each row to the pool AS IT EXPORTS collapses the mint
-wall toward max(export, compile).
+Measured, sdxl: export 65-68 min (one core, serial in the mint parent) and
+compile 92-97 min (K=2 children). Producer ~113 s/row against a pool consuming
+~127 s/row means the phases almost perfectly shadow each other, so handing each
+row to the pool AS IT EXPORTS collapses the mint wall toward
+max(export, compile).
 
 What must hold, and is asserted here for real (real ``torch.export``, real
 ``aot_compile`` children, CPU):
@@ -13,12 +12,11 @@ What must hold, and is asserted here for real (real ``torch.export``, real
 * entries REACH the pool while the export source is still open — proven
   structurally (the producer refuses to yield its last row until the pool has
   completed an earlier one), never by wall clock;
-* pgw#917's merge/refuse decision moves to ARRIVAL: a duplicate class row is
+* the merge/refuse decision happens at ARRIVAL: a duplicate class row is
   aliased before any compile is spent on it, and a same-ingress
   different-identity collision refuses at row N (bounded waste, stated);
-* the overlapped mint and the serial mint produce the SAME cell key — the
-  overlap is a PROCESS change under pgw#846's rule, byte-invisible in the
-  artifact;
+* the overlapped mint and the serial mint produce the SAME cell key — a PROCESS
+  change must be byte-invisible in the artifact;
 * the phase books stay honest: ``export_all_s`` still exists, and the pool
   ledger charges producer time to its own named bucket (``idle_source_s``).
 """
@@ -136,7 +134,7 @@ def test_a_sequence_still_compiles_exactly_as_before(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# pgw#917 at ARRIVAL: alias before a compile is spent; refuse at row N
+# alias before a compile is spent; refuse at row N
 # ---------------------------------------------------------------------------
 
 XATTN = 128
@@ -285,7 +283,7 @@ def test_overlapped_and_serial_mints_share_one_cell_key(
     serial = _mint(tmp_path / "serial", entry_workers=1)
     overlapped = _mint(tmp_path / "overlapped")
 
-    # pgw#1176: a mint produces a KEY SET, so "same cell key" becomes "the
+    # a mint produces a KEY SET, so "same cell key" becomes "the
     # same classes, keyed identically" — which is the stronger claim the row
     # always meant. An overlapped mint that agreed on a combined digest while
     # one class differed would have passed the old assertion.
@@ -298,7 +296,7 @@ def test_overlapped_and_serial_mints_share_one_cell_key(
     assert "export_all_s" in overlapped.timings, (
         "the export phase's own wall must survive the overlap (the pgw#1052 "
         "acceptance names it)")
-    # pgw#1176: the phase table is a property of the MINT RUN, carried on
+    # The phase table is a property of the MINT RUN, carried on
     # every entry's metadata. Read it off one entry rather than off a result
     # that no longer has a single metadata.
     pool_block = ((overlapped.entries[0].metadata.get("mint_phases") or {})

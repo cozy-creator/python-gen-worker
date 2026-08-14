@@ -1,8 +1,8 @@
-"""pgw#1143 step 4 (§1.33): the layout converter registry — the CONVERTIBLE rung.
+"""The layout converter registry — the CONVERTIBLE rung.
 
 The tensor-layout contract is ONE vocabulary with TWO sides: the code side
 DEMANDS (`Slot(layouts=...)`), the artifact side SUPPLIES. When the two do not
-match exactly, §1.33's ladder decides what happens next:
+match exactly, the ladder decides what happens next:
 
     COMPATIBLE   the supply's LayoutId is in the demand set
     CONVERTIBLE  a registered LOSSLESS mapping reaches an accepted LayoutId
@@ -34,11 +34,11 @@ sweep and by the hub, not only by a Python interpreter.
 **3. The relation never grows a special case.** Registering a converter adds an
 EDGE. :func:`plan_layout_conversions` and :func:`classify_layout` are fixed
 logic — membership, then reachability — and must never gain a per-format
-branch, a similarity score or a "close enough" fallback (§1.33's extensibility
-invariant, `f6f95736`). Neither function contains a literal handle string, and
+branch, a similarity score or a "close enough" fallback. Neither function
+contains a literal handle string, and
 `scripts/lint_cell_key_layout_fence.py` fails if one appears.
 
-**4. Preference is NOT here.** §1.33 point 2 as amended (th#1803): the accepted
+**4. Preference is NOT here.** The accepted
 set is a compatibility FILTER whose order carries no preference, and preference
 has exactly one authority — the author-configured ordered ladder of (GPU, lane)
 pairs. So the planner returns EVERY reachable accepted target and orders the
@@ -46,7 +46,7 @@ result deterministically for reproducibility; the caller that owns a ladder
 chooses. A planner that picked "the earliest accepted layout" would be a second
 ordering that can disagree with the first.
 
-The wheel ships this registry EMPTY, like the other five (pgw#740): converters
+The wheel ships this registry EMPTY, like the other five: converters
 are declared by the endpoint that owns the format, registered through
 `load_declaration_module`, and asserted bare by `scripts/check_registry_contract.py`.
 """
@@ -118,7 +118,7 @@ class ConversionProofError(DeclarationError):
 
 
 class LayoutRung(str, Enum):
-    """§1.33's four-valued ladder. The only verdict vocabulary — do not fork it."""
+    """The four-valued ladder. The only verdict vocabulary — do not fork it."""
 
     COMPATIBLE = "compatible"
     CONVERTIBLE = "convertible"
@@ -156,8 +156,8 @@ class CorpusTensor:
 class ConversionCase:
     """One corpus case: the KEYS, dtypes and shapes of a real artifact.
 
-    §4.25 / th#1580's corpus method, at header granularity — the part of a real
-    checkpoint a key map and a repack actually act on. Nothing multi-GB touches
+    The corpus method at header granularity — the part of a real checkpoint a
+    key map and a repack actually act on. Nothing multi-GB touches
     CI or a developer box; payloads are synthesized deterministically from the
     case name so a proof is reproducible.
     """
@@ -382,8 +382,8 @@ class QuantRepack:
     """A QUANT-axis SAME-NUMERICS repack: different packing, identical values.
 
     Unlike topology, this axis genuinely rewrites payload bytes, so the
-    transform is code. `equivalence` is the obligation §1.33 names — the target
-    contract's own reference dequant applied to both shards — and it runs over
+    transform is code. `equivalence` is the obligation — the target contract's
+    own reference dequant applied to both shards — and it runs over
     the corpus at registration alongside the round trip. It is required, not
     optional: a quant-axis edge with nothing proving the values survived is
     exactly the re-quantization this registry must not hold.
@@ -411,8 +411,8 @@ class LayoutProduction:
     """The PRODUCIBLE rung: re-quantization from a named higher-precision source.
 
     An EDGE DECLARATION and nothing else — no transform lives here. Producing
-    new numerics is a priced job with a quality gate (§4.32, th#1809 T7), and
-    putting an `apply` on this class is how it would quietly become automatic.
+    new numerics is a priced job with a quality gate, and putting an `apply` on
+    this class is how it would quietly become automatic.
     """
 
     axis: str
@@ -476,11 +476,10 @@ _productions: Dict[Tuple[str, str, str], LayoutProduction] = {}
 def _module_content_digest(fn: Callable[..., object]) -> str:
     """Content identity of the module a repack's code lives in.
 
-    pgw#990's primitive, reused rather than reinvented: there is ONE
-    code-identity mechanism in this SDK and a second one would be a second
-    answer to "did the bytes change". Content, not mtime — the digest must be
-    identical on the hub and on a laptop or the derived-artifact identity
-    stops deduping (§1.33 point 4).
+    Reuses the SDK's one code-identity primitive rather than reinventing it: a
+    second mechanism would be a second answer to "did the bytes change".
+    Content, not mtime — the digest must be identical on the hub and on a laptop
+    or the derived-artifact identity stops deduping.
     """
     module = sys.modules.get(getattr(fn, "__module__", ""), None)
     path = getattr(module, "__file__", None)
@@ -526,7 +525,7 @@ def derived_artifact_identity(
     ONE identity function, shipped here and called by every producer of a
     converted artifact — the hub's convert-once-into-the-CAS and cozy-local's
     derived store — so a machine that later pulls the hub's copy recognizes it
-    as the same object instead of converting again (§4.28, th#1809 T6).
+    as the same object instead of converting again.
     """
     payload = "\x00".join(
         [str(source_digest), *[str(d) for d in chain_digests], target.render()])
@@ -612,8 +611,8 @@ def register_layout_production(
 def registered_layout_conversions() -> Tuple[ConversionHop, ...]:
     """Every registered EDGE, both directions, in a deterministic order.
 
-    This is the edge table the hub reads to compute the CONVERTIBLE rung
-    (th#1809 T5) — data, never code.
+    This is the edge table the hub reads to compute the CONVERTIBLE rung —
+    data, never code.
     """
     with _lock:
         return tuple(sorted(
@@ -843,8 +842,8 @@ def plan_layout_conversions(
     Per axis, independently, then paired — which is what makes N+M
     registrations cover what a composite vocabulary would need N*M for.
 
-    **The result carries no preference.** §1.33 point 2 as amended: the demand
-    is a filter, and the one authority on preference is the (GPU, lane) ladder.
+    **The result carries no preference.** The demand is a filter, and the one
+    authority on preference is the (GPU, lane) ladder.
     The order here is (hop count, rendered target) — determinism so two runs
     agree, not a ranking. A caller that must pick one and holds no ladder takes
     the first and is choosing arbitrarily, honestly.
@@ -870,8 +869,8 @@ def _reachable_productions(
     source: LayoutId, accepts: Sequence[LayoutId],
 ) -> Tuple[LayoutProduction, ...]:
     """PRODUCIBLE: one declared recipe edge from the supply to an accepted
-    layout. One hop, deliberately — a chain of re-quantizations is a quality
-    decision nobody made."""
+    layout. One hop, deliberately — a chain of re-quantizations would be a
+    quality decision nobody made."""
     with _lock:
         productions = list(_productions.values())
     out: List[LayoutProduction] = []
@@ -890,7 +889,7 @@ def _reachable_productions(
 def classify_layout(
     source: LayoutId, accepts: Sequence[LayoutId],
 ) -> LayoutVerdict:
-    """§1.33's ladder for ONE (component, supply, demand): the whole verdict.
+    """The ladder for ONE (component, supply, demand): the whole verdict.
 
     Three relations, all fixed forever, all extended only by DATA: membership,
     lossless-edge reachability, production-edge reachability. If a new format
@@ -943,8 +942,8 @@ def classify_layout(
 #: self-describe, so anyone can re-derive the identity without the hub.
 CONVERSION_PROVENANCE_KEY = "cozy.conversion"
 
-#: `produced_by` value the publish path REFUSES (§4.28): a conversion done on
-#: an untrusted machine is for that machine's own store, forever.
+#: `produced_by` value the publish path REFUSES: a conversion done on an
+#: untrusted machine is for that machine's own store, forever.
 PRODUCED_BY_LOCAL = "local_conversion"
 
 
@@ -964,7 +963,7 @@ def run_layout_conversion(
 
     Upstream of compute, always: this runs before the tree is materialized for
     `setup()`, so the endpoint observes only its own declared layout and the
-    traced graph — hence the cell key — cannot move (§1.33 point 5).
+    traced graph — hence the cell key — cannot move.
     """
     if not str(produced_by or "").strip():
         raise DeclarationError(

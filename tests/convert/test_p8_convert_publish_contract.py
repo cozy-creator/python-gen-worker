@@ -1,23 +1,21 @@
-"""P8 (th#960/pgw#609 design table): convert/publish contract, hermetic
-(fake tensorhub HTTP server, no torch/GPU, no real weight downloads).
+"""The convert/publish contract, hermetic (fake tensorhub HTTP server, no
+torch/GPU, no real weight downloads).
 
-  * pgw#589/th#901: an explicit dtype mismatch on a publish_as_is
-    (dense-safetensors) source casts for real — never silent passthrough
-    under a correct-looking label; a matching dtype is genuinely zero-work;
-    non-cast-eligible strategies (gguf) still refuse loud.
-  * pgw#593: classifier variant-tag selection against a real-world-shaped
-    filename corpus (a table, not a one-off regression case).
-  * pgw#566 (test-first — fix open): kohya-SGM SDXL adapter normalization
-    must pass ``unet_config`` through **kwargs-only converters (the real
-    diffusers ``StableDiffusionXLPipeline.lora_state_dict`` shape) so the
-    SGM block remap actually runs — currently it only checks for a NAMED
-    parameter and silently skips it.
-  * pgw#569: not covered here — the W8A8 source verifier's one-ULP gate
-    (writer.py's ``verify_w8a8_byte_gate``) operates on real safetensors
-    artifact files with no factored-out standalone comparator; building a
-    hermetic fixture for it needs a real (if tiny) w8a8 production
-    round-trip, out of scope for this pass. Flagged as an open follow-up in
-    the th#960 tracker checkpoint rather than faked or skipped silently.
+  * an explicit dtype mismatch on a publish_as_is (dense-safetensors) source
+    casts for real — never silent passthrough under a correct-looking label; a
+    matching dtype is genuinely zero-work; non-cast-eligible strategies (gguf)
+    still refuse loud.
+  * classifier variant-tag selection against a real-world-shaped filename
+    corpus (a table, not a one-off regression case).
+  * TEST-FIRST, FIX OPEN: kohya-SGM SDXL adapter normalization must pass
+    ``unet_config`` through **kwargs-only converters (the real diffusers
+    ``StableDiffusionXLPipeline.lora_state_dict`` shape) so the SGM block remap
+    actually runs — it currently only checks for a NAMED parameter and silently
+    skips it.
+  * NOT COVERED: the W8A8 source verifier's one-ULP gate (writer.py's
+    ``verify_w8a8_byte_gate``) operates on real safetensors artifact files with
+    no factored-out standalone comparator; a hermetic fixture for it needs a
+    real (if tiny) w8a8 production round-trip.
 """
 
 from __future__ import annotations
@@ -79,7 +77,7 @@ def _stub_build_flavor_tree(monkeypatch: pytest.MonkeyPatch, calls: list) -> Non
 
 
 # ---------------------------------------------------------------------------
-# pgw#589/th#901: dtype passthrough honesty.
+# dtype passthrough honesty.
 # ---------------------------------------------------------------------------
 
 
@@ -155,7 +153,7 @@ def test_non_cast_eligible_strategy_refuses_mismatch_loudly(
 
 
 # ---------------------------------------------------------------------------
-# pgw#593: classifier corpus (real-world-shaped filenames).
+# classifier corpus (real-world-shaped filenames).
 # ---------------------------------------------------------------------------
 
 
@@ -204,7 +202,7 @@ def test_classifier_refuses_oversized_unclassifiable_repo() -> None:
         classify_repo(["random_blob.bin"] * 3, sizes={"random_blob.bin": 200 * 1024**3})
 
 
-# th#960/pgw#609 Phase 2b: distinct classifier bug-classes with real incident
+# distinct classifier bug-classes with real incident
 # history, absorbed from tests/convert/test_classifier.py before its deletion
 # (its ~20 other tests cover shapes with no incident pin — collapsed here to
 # the ones that map to a real production failure or refusal-path regression).
@@ -288,7 +286,7 @@ def test_classifier_refuses_non_safetensors_only_repos(files: list, reason: str)
 
 
 # ---------------------------------------------------------------------------
-# pgw#566 (test-first, fix open): kohya-SGM SDXL adapter normalization.
+# kohya-SGM SDXL adapter normalization.
 # ---------------------------------------------------------------------------
 
 

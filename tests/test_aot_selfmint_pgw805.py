@@ -1,31 +1,18 @@
-"""pgw#805 — an AOT cell-discovery MISS must start a mint, or refuse BY NAME.
+"""An AOT cell-discovery MISS must start a mint, or refuse BY NAME.
 
-The defect this pins, measured on five real 0.78.0 L4 pods (hub-dispatched,
-`Compile(family="sdxl",
-targets=("unet",))` declared, compile target advertised, discovery working
-through a 200 listing, `cell_mint_hold_granted` on every pod, trickle traffic
-earning pgw#677 background turns):
+A miss that produces no mint, no `self_mint_abort` and no `self_mint_skipped`
+is the failure this pins. Three wires make it possible, and each gets a test:
 
-    self_mint_compile  load            running
-    aot_cell_discovery miss            completed   family=sdxl lane=lora64
-    self_mint_compile  warmup_forward  running
-    self_mint_compile  warmup_forward  completed
-    (nothing further, ever)
-
-No mint, no `self_mint_abort`, no `self_mint_skipped` — no refusal of ANY
-kind. Three separate wires were missing, and each gets a test here:
-
-1. **No producer.** `aot_mint.mint` was reachable only from
-   `python -m gen_worker.aot_mint`; nothing on the serving path imported it.
-   A miss could only fall through to the DYNAMO self-mint, whose artifact
-   kind `aot_cells._candidates` rejects — so the next pod missed identically,
+1. **No producer.** If `aot_mint.mint` is reachable only from
+   `python -m gen_worker.aot_mint` and nothing on the serving path imports it,
+   a miss falls through to the DYNAMO self-mint, whose artifact kind
+   `aot_cells._candidates` rejects — so the next pod misses identically,
    forever.
 2. **No declaration.** `aot_mint.mint` refuses a family with no registered
-   export declaration, and registration only happened when a mint REQUEST
-   named a declaration module. A serving pod loads its endpoint and nothing
-   else.
-3. **Silence.** Every not-mint exit was a `logger.info`, and a serve pod
-   exposes no logs (pgw#760).
+   export declaration. Registration must not depend on a mint REQUEST naming a
+   declaration module: a serving pod loads its endpoint and nothing else.
+3. **Silence.** A not-mint exit written as a `logger.info` is invisible — a
+   serve pod exposes no logs.
 """
 
 from __future__ import annotations
@@ -175,7 +162,7 @@ def test_aot_discovery_miss_enqueues_an_aot_mint(
 
     pending = outcome.self_mint
     assert pending is not None, "a discovery miss produced no mint at all"
-    # pgw#1010: a pending IS an AOT mint — the dynamo recipe opens none at all,
+    # a pending IS an AOT mint — the dynamo recipe opens none at all,
     # so the recipe axis this used to assert cannot disagree any more.
     assert pending.delegated is True, (
         "an AOTI export holds the GPU with no router to yield through; it "
@@ -222,7 +209,7 @@ def test_a_family_with_no_export_declaration_refuses_by_name(
 
 
 def test_the_endpoints_own_compile_block_registers_the_declaration() -> None:
-    """The declaration travels with the endpoint that owns it (pgw#805).
+    """The declaration travels with the endpoint that owns it.
 
     Before this, `export_declaration` resolved only when a MINT REQUEST named
     a declaration module — a concept a serving pod has no access to.
@@ -332,7 +319,7 @@ def test_an_in_process_only_pod_declines_the_aot_recipe_by_name(
     assert outcome.self_mint is None, (
         "a pod that cannot delegate cannot mint an AOT cell — and pgw#1010 "
         "leaves it nothing else to mint, so it serves JIT intake")
-    # pgw#813 sharpened the vocabulary: the generic `aot_requires_delegation`
+    # The generic `aot_requires_delegation`
     # carried a hand-written either/or sentence and could not distinguish an
     # operator kill switch from a pipeline classification. Each cause now
     # declines under its own phase; this arm is the forced in-process one.
@@ -350,9 +337,9 @@ def test_degrading_to_eager_is_never_silent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """RED at HEAD: `_fail_closed`'s plain-lane arm was a bare `logger.info`,
-    and a serve pod exposes no logs (pgw#760).
+    and a serve pod exposes no logs.
 
-    pgw#824 tightened the assertion: the phase is the CLASSIFIED cause, not the
+    the phase is the CLASSIFIED cause, not the
     constant `mint_unavailable` that all nine `_fail_closed` exits used to
     share. The cause lived only in the free-text detail, so counting "how much
     of this fleet is eager for want of a C++ compiler" meant substring-matching
@@ -411,7 +398,7 @@ def test_the_parent_reemits_the_childs_aot_phase_table(
     assert ("aot_mint_phases", "minted") in kinds
     assert ("aot_mint_phases", "entry:unet/cfg") in kinds
     assert ("aot_mint_phases", "entry:unet/nocfg") in kinds
-    # Durations are NUMERIC (th#1322), never interpolated prose.
+    # Durations are NUMERIC, never interpolated prose.
     assert dict(((k, p), ms) for k, p, ms in rows)[
         ("aot_mint_phases", "minted")] == 900_000
 
@@ -442,7 +429,7 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
     from gen_worker import mint_child
 
     target = tmp_path / "cell.tar.gz"
-    # pgw#1176: a `ck1` key names a 36-entry all-or-nothing cell, which this
+    # a `ck1` key names a 36-entry all-or-nothing cell, which this
     # runtime cannot arm at all — `cell_key.is_key` refuses the prefix
     # deliberately, so a fixture keyed that way tests a shape nothing produces.
     key = "cg-key-v1-" + "a" * 56
@@ -455,7 +442,7 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
         seen["lifted"] = spec.lifted_inputs
         packed.parent.mkdir(parents=True, exist_ok=True)
         packed.write_bytes(b"packed-cell")
-        # pgw#1176: a mint returns N independently keyed entry artifacts plus a
+        # a mint returns N independently keyed entry artifacts plus a
         # manifest digest, never "a cell". This declaration traces one class.
         return aot_mint.MintResult(
             entries=(aot_mint.MintedArtifact(
@@ -482,7 +469,7 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
         started=0.0, sha256_file=lambda p: "deadbeef")
 
     assert report.status == "minted"
-    # pgw#1176: the child moves EVERY entry it packed into the parent's
+    # The child moves EVERY entry it packed into the parent's
     # directory, one file per graph class NAMED BY ITS OWN `cg-key-v1` key — so the
     # parent addresses each by identity rather than by position, and `target`
     # names the directory rather than the single file it used to be. The
@@ -545,7 +532,7 @@ def test_a_self_minted_aot_cell_arms_through_the_aot_gates(
     monkeypatch.setattr(
         fleet_cells.cc, "enable",
         lambda *a, **k: (calls.append("dynamo"), True)[1])
-    # pgw#1010: `cc.enable` is not merely unused on this path — the branch that
+    # `cc.enable` is not merely unused on this path — the branch that
     # called it is deleted, so a "dynamo" entry below would mean an inductor
     # seed adopt has grown back for an exported cell.
     monkeypatch.setattr(
@@ -554,7 +541,7 @@ def test_a_self_minted_aot_cell_arms_through_the_aot_gates(
     monkeypatch.setattr(fleet_cells, "sha256_file", lambda p: "beef")
     monkeypatch.setattr(fleet_cells, "_unregister", lambda p: None)
 
-    # pgw#1098: a READABLE envelope. This used to be `b"cell"` and worked only
+    # a READABLE envelope. This used to be `b"cell"` and worked only
     # because `try_read_metadata` swallowed the error into `None`; an
     # unreadable envelope is now its own refusal before the arm, so a test
     # about the ARM has to supply one the adopt can read.

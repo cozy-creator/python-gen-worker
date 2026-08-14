@@ -1,17 +1,15 @@
-"""Text-sequence pinning helper (SDK v2, pgw#647 — absorbs ie#544's
-endpoint-side pins).
+"""Text-sequence pinning helper.
 
-qwen-image / z-image / hidream-o1 feed a prompt-length-dependent SEQUENCE
-dim into a statically compiled denoiser, so every distinct prompt length
-minted a new graph — unbounded and un-warmable, every paid request missing
-the shipped graph (ie#544). The v2 contract declares the axis
-(``Compile(text_len=...)``); this helper is how the handler HONORS it.
+qwen-image / z-image / hidream-o1 feed a prompt-length-dependent SEQUENCE dim
+into a statically compiled denoiser, so every distinct prompt length would mint
+a new graph — unbounded and un-warmable, with every paid request missing the
+shipped graph. The contract declares the axis (``Compile(text_len=...)``); this
+helper is how the handler HONORS it.
 
-ie#544's hard-won detail: dynamo guards on STRIDES, and ``.contiguous()``
-is a no-op when dim 0 is size 1 — **a pin that fixes only the size is not a
-pin**. This helper therefore always returns FRESH canonically-strided
-allocations (``torch.zeros`` + ``copy_``), never a view or a
-maybe-contiguous alias of the input.
+Dynamo guards on STRIDES, and ``.contiguous()`` is a no-op when dim 0 is size 1
+— **a pin that fixes only the size is not a pin**. This helper therefore always
+returns FRESH canonically-strided allocations (``torch.zeros`` + ``copy_``),
+never a view or a maybe-contiguous alias of the input.
 """
 
 from __future__ import annotations

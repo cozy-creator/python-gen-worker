@@ -1,9 +1,6 @@
-"""Registration hooks for ``convert/`` — the missing third registry.
-
-pgw#740 (C3): ``@family`` (serving defaults), ``@inputs_for`` (export inputs) and
-``cli/families.py --module`` (schema export) already implement the endpoint-owned
-split. ``convert/`` had no hook at all, which is the single reason its family
-knowledge had to live in the SDK.
+"""Registration hooks for ``convert/`` — the third registry, beside ``@family``
+(serving defaults) and ``@inputs_for`` (export inputs). Without it, ``convert/``
+family knowledge would have to live in the SDK.
 
 Two registries, one refusal doctrine: an unknown family is refused **by name**,
 listing what IS registered. Nothing here ever guesses, and nothing here falls

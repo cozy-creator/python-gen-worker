@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""svdq runtime bench, EDIT family: ONE arm per process (pgw#865 instrument).
+"""svdq runtime bench, EDIT family: ONE arm per process.
 
 The image+text-conditioned twin of ``bench_arm.py``. Same shapes, same
 timing/reporting contract, same executed-lane recording — so the qwen-image
@@ -7,8 +7,8 @@ table and the qwen-image-edit table are read side by side.
 
 Arms: ``bf16`` (unquantized reference transformer) and ``fp8`` (the PUBLISHED
 ``#fp8-w8a8`` flavor through the production w8a8 loader). There is no nvfp4
-arm: no 4-bit qwen-image-edit artifact exists (te#137's edit produce is
-planned, not run), and this instrument never fabricates one.
+arm: no 4-bit qwen-image-edit artifact exists, and this instrument never
+fabricates one.
 
 Inputs are the REAL gate inputs (see edit_prompts.json provenance), verified
 by sha256 at load: a benchmark whose conditioning image is synthetic noise is

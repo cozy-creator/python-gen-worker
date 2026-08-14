@@ -1,17 +1,13 @@
-"""th#1563 §2: the FnUnavailable reason vocabulary is a CONTRACT, and it drifts.
+"""The FnUnavailable reason vocabulary is a CONTRACT, and it drifts.
 
 The wire contract carries a list of the reason tokens this worker may put in
-``FnUnavailable.reason``. The hub branches on those tokens — th#1100 gives each
-one a lifetime, and the ones it treats as hardware facts are never re-probed at
-all — so a reason the list forgets is a reason nobody checked the hub's
-handling of. That is not hypothetical: the list has been provably wrong twice.
+``FnUnavailable.reason``. The hub branches on those tokens — each has a
+lifetime, and the ones it treats as hardware facts are never re-probed at all —
+so a reason the list forgets is a reason nobody checked the hub's handling of.
+The list has been provably wrong more than once, including for reasons the hub
+deliberately never decays.
 
-* th#1562: the hub's copy had dropped ``host_ram_capacity``, which
-  ``capability.py`` genuinely emits.
-* th#1563: ``hardware_unmet`` and ``native_crash_streak`` were both absent, and
-  both are reasons the hub deliberately never decays.
-
-So the list stops being maintained by memory. This test DERIVES the vocabulary
+The list is therefore not maintained by memory. This test DERIVES the vocabulary
 from the source that emits it — every literal that can reach the reason slot of
 ``ExecutorState.unavailable``, which ``lifecycle._emit_unavailable`` puts on the
 wire verbatim — and requires the vendored ``.proto`` to document each token.
@@ -38,7 +34,7 @@ _PROTO = _ROOT / "proto" / "worker_scheduler.proto"
 _SOURCES = (
     _ROOT / "src" / "gen_worker" / "executor.py",
     _ROOT / "src" / "gen_worker" / "capability.py",
-    # pgw#1117: the third file declaring a reason token on an exception class.
+    # The third file declaring a reason token on an exception class.
     # `_mark_setup_failed` writes `exc.reason` for it exactly the way it does
     # for the capability gates, so leaving this file out would have made the
     # NEW token the one case the contract test cannot see — which is precisely

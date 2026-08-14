@@ -1,10 +1,9 @@
-"""pgw#1062 — the escape hatch (pgw#1059 amendment 7), asserted where CI can see it.
+"""The custom-op escape hatch, asserted where CI can see it.
 
-The full escape-hatch cycle — a custom op, a ``triton_op`` kernel and a raw
-``@triton.jit`` call minted, published, adopted and parity-checked — is the
-``micro-escape`` gauntlet member and is LOCAL-ONLY (Triton has no CPU
-backend). What does NOT need a card is every claim about the SURFACE itself,
-and those are the ones that would rot silently:
+The full cycle — a custom op, a ``triton_op`` kernel and a raw ``@triton.jit``
+call minted, published, adopted and parity-checked — is the ``micro-escape``
+gauntlet member and is LOCAL-ONLY (Triton has no CPU backend). What does NOT
+need a card is every claim about the SURFACE itself:
 
 * a custom op without a fake kernel must refuse at export with GUIDANCE, not
   crash obscurely — that refusal text is the authoring contract;
@@ -12,10 +11,9 @@ and those are the ones that would rot silently:
   exact property pgw#1056's fake-weight mint stands on;
 * an exported program carrying a custom op must survive the mint's own
   ``torch.export.save``/``load`` process hand-off;
-* flex_attention does NOT survive that hand-off on torch 2.13 — the pinned
-  upstream break behind pgw#1062's flex verdict. The pin is written to go
-  red the day upstream fixes it, so the verdict gets revisited instead of
-  fossilizing.
+* flex_attention does NOT survive that hand-off on torch 2.13 — a pinned
+  upstream break. The pin is written to go red the day upstream fixes it, so
+  the verdict gets revisited instead of fossilizing.
 
 Each test is written so it goes RED if the property it names stops holding.
 """

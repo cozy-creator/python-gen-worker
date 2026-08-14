@@ -1,5 +1,5 @@
-"""Parent (control-plane) side of the pgw#763 split, generalised to N execution
-groups (pgw#783).
+"""Parent (control-plane) side of the process split, generalised to N execution
+groups.
 
 Owns: the ONE gRPC stream + identity/JWT (the real ``Transport``), the durable
 SendQueue, the parent-side security boundary (deltas 0-5: JWT never in a child,
@@ -7,39 +7,35 @@ mediated hub actions, parent-measured hardware, billing attestation, per-job
 capability decisions), and the supervision of a GROUP of compute children — one
 ``_ChildSlot`` per execution group. Never imports torch.
 
-pgw#782 measured why there is one child PER GROUP and not one child total: four
-groups in ONE interpreter serve 0.94x of serial (21% per card); four PROCESSES
-one group each serve **4.00x** at 91-93%. So the child of the split is the
-EXECUTION GROUP, and this parent supervises G of them.
+The child of the split is the EXECUTION GROUP, not the worker: four groups in
+ONE interpreter serve 0.94x of serial (21% per card); four PROCESSES one group
+each serve **4.00x** at 91-93%.
 
 **At G == 1 this is byte-identical to the single-child parent the security
 deltas shipped.** Every worker-level aggregation point (Hello assembly, the
 frame relay, the dispatch rewrite) takes an explicit ``groups == 1`` fast path
-that runs the original code verbatim; the per-child supervision machinery
-(``_ChildSlot``) is the same code for one child or four. That identity is the
-whole safety property and it is a regression test (``test_group_processes``).
+that runs the original code verbatim; that identity is the whole safety property
+and it is a regression test (``test_group_processes``). At G>1 one child's death
+is attributed to ITS request and respawns ITS group; siblings never see it (**a
+group where one of four children dies is not a dead group**).
 
-Supervision primitives are deliberately systemd's (Paul, 2026-07-29):
-``Restart=on-failure``, ``StartLimitBurst``/``StartLimitIntervalSec``,
-``WatchdogSec``+``sd_notify`` (child frames are the liveness
-pings; loop silence ARMS a hang verdict the child's accounted work DECIDES —
-pgw#771), socket activation (the hub connection outlives the process doing the
-work). What systemd cannot do — job attribution — needs the stream, the JWT and
-the in-flight table in the survivor, which is this parent. At G>1 one child's
-death is attributed to ITS request and respawns ITS group; siblings never see
-it (**a group where one of four children dies is not a dead group**).
+Supervision primitives are deliberately systemd's: ``Restart=on-failure``,
+``StartLimitBurst``/``StartLimitIntervalSec``, ``WatchdogSec``+``sd_notify`` (child frames are the liveness pings; loop silence
+ARMS a hang verdict the child's accounted work DECIDES), socket activation (the
+hub connection outlives the process doing the work). What systemd cannot do —
+job attribution — needs the stream, the JWT and the in-flight table in the
+survivor, which is this parent.
 
-pgw#826 — WHICH DEATHS ARE RETRYABLE. Respawn is for a child that PROVED it
-can boot (reached Hello): its death may be payload-driven, so it respawns with
-backoff and post-Hello loops stay typed DETECTION (the hub's liveness/stall
-clocks own a sick-but-serving pod). A child that dies before Hello has served
-nothing and can owe nothing: after ``boot_death_limit`` consecutive pre-Hello
-deaths — or ONE terminal typed boot verdict (``T_BOOT_FATAL``, e.g. a
-HardwareUnsuitable CUDA-probe refusal, true for every child this pod could
-ever spawn) — the parent propagates the report and exits 1. Before this, a
-hardware-unsuitable pod crash-looped its child forever: every respawn emitted
-output, so no silence window (pgw#795) could bound it, and the pod billed
-indefinitely while the hub never saw the typed refusal.
+WHICH DEATHS ARE RETRYABLE. Respawn is for a child that PROVED it can boot
+(reached Hello): its death may be payload-driven, so it respawns with backoff and
+post-Hello loops stay typed DETECTION (the hub's liveness/stall clocks own a
+sick-but-serving pod). A child that dies before Hello has served nothing and can
+owe nothing: after ``boot_death_limit`` consecutive pre-Hello deaths — or ONE
+terminal typed boot verdict (``T_BOOT_FATAL``, e.g. a HardwareUnsuitable
+CUDA-probe refusal, true for every child this pod could ever spawn) — the parent
+propagates the report and exits 1. Without that bound a hardware-unsuitable pod
+crash-loops forever: every respawn emits output, so no silence window bounds it,
+and the pod bills indefinitely while the hub never sees the typed refusal.
 """
 
 from __future__ import annotations
@@ -87,27 +83,25 @@ from .seam import SeamAccountant
 
 logger = logging.getLogger(__name__)
 
-# The typed death label. Deliberately NOT in the hub's th#1288
-# declaredFaultLabels allowlist: a child death can be payload-driven (an OOM
-# this payload caused), so it must not classify as release-declared evidence.
-# The hub's per-request blame-probe ladder handles it correctly as a FATAL.
+# The typed death label. Deliberately NOT in the hub's declaredFaultLabels
+# allowlist: a child death can be payload-driven (an OOM this payload caused), so
+# it must not classify as release-declared evidence. The hub's per-request
+# blame-probe ladder handles it correctly as a FATAL.
 DEATH_LABEL = "ComputeProcessDied"
 
 _DEFAULT_START_LIMIT_BURST = 3          # StartLimitBurst
 _DEFAULT_START_LIMIT_INTERVAL_S = 600.0  # StartLimitIntervalSec
-# pgw#826: consecutive pre-Hello deaths before the parent gives up and exits 1.
+# consecutive pre-Hello deaths before the parent gives up and exits 1.
 _DEFAULT_BOOT_DEATH_LIMIT = 3
-_DEFAULT_WATCHDOG_BUDGET_S = 60.0        # WatchdogSec (matches th#965's reap budget)
+_DEFAULT_WATCHDOG_BUDGET_S = 60.0        # WatchdogSec (matches the hub's reap budget)
 _DEFAULT_RESPAWN_BACKOFF_BASE_S = 1.0
 _DEFAULT_RESPAWN_BACKOFF_CAP_S = 60.0
 _BACKOFF_RESET_AFTER_ALIVE_S = 60.0
 _CRASH_LOOP_REPORT_MIN_INTERVAL_S = 300.0
-# "no report has ever been sent" — NOT 0.0. Every throttle below compares
-# against time.monotonic(), which on Linux is time since BOOT, so a 0.0
-# sentinel means "reported at boot" and silently swallows the FIRST report of
-# each class on any host whose uptime is under the interval. That is every
-# freshly-started worker pod, and the first five minutes is exactly when a
-# crash loop or an allowlist probe most needs to reach the hub.
+# "no report has ever been sent" — NOT 0.0. The throttles below compare against
+# time.monotonic(), which on Linux is time since BOOT, so a 0.0 sentinel means
+# "reported at boot" and swallows the FIRST report of each class on any host
+# whose uptime is under the interval — i.e. every freshly-started worker pod.
 _NEVER_REPORTED = float("-inf")
 _DEATH_FLUSH_GRACE_S = 2.0
 # TimeoutStopSec: after the parent forwards SIGTERM, a child that has not
@@ -127,54 +121,40 @@ _REPORTED_DEAD_CAP = 512
 # Minimum evidence advance that counts as life, mirroring activity._EVIDENCE_EPS
 # (not imported: the parent's import graph stays minimal and torch-free).
 _EVIDENCE_EPS = 0.05
-# delta 1: pod-launch envs that must not survive into the compute child. Every
-# one of them is a platform credential or the platform's identity claim, and
-# the child imports tenant code — so `os.environ` in that process is a public
-# noticeboard. WORKER_JWT is the signing identity; RUNPOD_API_KEY is injected by
-# RunPod into every pod and th#1380 verified it is ACCOUNT-scoped in authority
-# (it enumerates our fleet, reads our balance, lists 90 registry credential
-# records) and cannot be suppressed at the create call; PUBLIC_KEY is our
+# delta 1: pod-launch envs that must not survive into the compute child. Each is
+# a platform credential or identity claim, and the child imports tenant code — so
+# `os.environ` in that process is a public noticeboard. WORKER_JWT is the signing
+# identity; RUNPOD_API_KEY is injected by RunPod into every pod, is ACCOUNT-scoped
+# in authority and cannot be suppressed at the create call; PUBLIC_KEY is our
 # operator SSH key. HF_TOKEN is the endpoint author's OWN credential and
 # legitimately belongs to the code that pulls weights, so it deliberately stays.
-#
-# This list only became load-bearing with pgw#858: until the child ran as its
-# own uid, deleting a name here was cosmetic — tenant code read the same value
-# out of `/proc/<ppid>/environ` (WORKER_JWT) or `/proc/1/environ` (the RunPod
-# key). Both, and the strip, are guarded by test_pod_privilege_isolation_pgw858.
+# The strip only holds because the child runs as its own uid: otherwise tenant
+# code reads the same values out of `/proc/<ppid>/environ` or `/proc/1/environ`.
 _CHILD_FORBIDDEN_ENVS = ("WORKER_JWT", "RUNPOD_API_KEY", "PUBLIC_KEY")
 _ACTION_REFUSAL_REPORT_MIN_INTERVAL_S = 300.0
 # A mediated hub call runs on a parent thread-pool slot, and the CHILD supplies
-# the request's `timeout` field — so without a ceiling tenant code pins slots
-# for as long as it likes and the mediation surface dies for everything else.
-# `HubAction.timeout_s` in the allowlist IS that ceiling (`_perform_action`
-# min()s the child's number against it), which is why pgw#973 deleted the
-# separate `_ACTION_HARD_TIMEOUT_S = 120.0` that sat beside it: every declared
-# action is 30 s or 60 s, so a third term 60 s above the highest declared value
-# could only ever reject nothing (§4.24 item 1 — say which bound is
-# load-bearing and delete the rest). The count axis is bounded here:
+# the request's `timeout` field — so without a ceiling tenant code pins slots for
+# as long as it likes and the mediation surface dies for everything else.
+# `HubAction.timeout_s` in the allowlist IS the time ceiling (`_perform_action`
+# min()s the child's number against it); the count axis is bounded here:
 _MAX_CONCURRENT_ACTIONS = 16
-# pgw#973 (§4.24 item 4): the parent beat's cadence when NOBODY declared one —
-# `beat_interval_s=0.0` means "adopt the child's" and every child Hello may
-# carry `heartbeat_interval_ms=0`. The fallback used to be a bare `10.0` at the
-# loop, i.e. a real bound reachable only by reading the loop body. It is the
-# hub's own liveness expectation (a worker silent for a multiple of this is
-# called dead), so it is a DECLARED default, not a guess.
+# The parent beat's cadence when NOBODY declared one — `beat_interval_s=0.0`
+# means "adopt the child's" and every child Hello may carry
+# `heartbeat_interval_ms=0`. It is the hub's own liveness expectation (a worker
+# silent for a multiple of this is called dead), so it is a DECLARED default.
 _BEAT_INTERVAL_FALLBACK_S = 10.0
 # The host canary is a real benchmark (memcpy/D2H/CPU); on a cold pod with a
-# large card it is seconds, not milliseconds.
-#
-# gw#666 exemption, stated rather than assumed (§4.24): the measure subprocess
-# reports through `communicate()` — one write, at the end — so it emits NO
-# progress signal a SilenceWindow could key on, and giving up here KILLS NO
-# WORK: the Hello ships without parent-measured resources and the pod serves.
-# A progress signal would have to be invented in the canary's own protocol,
-# which is a change to it and not to this bound.
+# large card it is seconds, not milliseconds. Deliberately exempt from a
+# SilenceWindow: the measure subprocess reports through `communicate()` — one
+# write, at the end — so it emits no progress signal to key on, and giving up
+# here KILLS NO WORK (the Hello ships without parent-measured resources and the
+# pod serves).
 _MEASURE_TIMEOUT_S = 180.0
 _MEASURE_BEFORE_SPAWN_S = 60.0
 _ATTESTATION_REPORT_MIN_INTERVAL_S = 300.0
 _CAPABILITY_REPORT_MIN_INTERVAL_S = 300.0
 # Bounded: an observation is dropped when its result passes back OR when the
-# death path attributes its job (pgw#937), so nothing but a live job holds one.
+# death path attributes its job, so nothing but a live job holds one.
 _OBSERVATION_CAP = 512
 # The WorkerMessage kinds the fan-in reconciles across groups into one worker
 # view. Everything else is per-request or per-object and forwards verbatim.
@@ -182,15 +162,14 @@ _OBSERVATION_CAP = 512
 _WORKER_SCOPED_MSGS = frozenset(
     {"state_delta", "activity_update", "fn_unavailable", "fn_degraded"}
 )
-# pgw#833: the child's stderr is captured by the parent (teed through to the
-# container log unchanged) so a pre-Hello death carries its OWN crash text in
-# the post-mortem dial. RunPod exposes no container-logs API (gw#640), so a
-# child that dies before it can dial — and it never can, it holds no JWT —
-# was a bare `exit:1` on the wire; diagnosing pgw#833 took three paid probe
-# pods for want of these bytes. Ring-buffered, bounded, reset per spawn.
+# The child's stderr is captured by the parent (teed through to the container log
+# unchanged) so a pre-Hello death carries its OWN crash text in the post-mortem
+# dial. RunPod exposes no container-logs API, and a child that dies before it can
+# dial — it never can, it holds no JWT — is otherwise a bare `exit:1` on the
+# wire. Ring-buffered, bounded, reset per spawn.
 _STDERR_TAIL_CAP_BYTES = 32768
 _STDERR_TAIL_DIAL_CHARS = 3000
-# pgw#858: the compute uid's home — HF cache, ~/.triton, ~/.nv, TMPDIR and the
+# The compute uid's home — HF cache, ~/.triton, ~/.nv, TMPDIR and the
 # .pyc prefix all hang off it. On disk, not in the world-writable /tmp, and
 # owned by the compute uid rather than shared with the control parent.
 _COMPUTE_HOME = "/var/lib/gen-worker/compute"
@@ -220,12 +199,10 @@ def _tee_stderr_chunk(chunk: bytes) -> None:
 def _close_transport(proc: asyncio.subprocess.Process) -> None:
     """Tear a reaped child's transport down while its loop is still alive.
 
-    pgw#833 gave the child a stderr PIPE, which gave BaseSubprocessTransport a
-    pipe protocol to close in ``__del__``. If GC reaches it after the loop has
-    closed, ``__del__`` calls ``call_soon`` on a dead loop and raises
-    "RuntimeError: Event loop is closed" as an unraisable — cosmetic, but it
-    surfaced in CI's warnings summary against unrelated passing tests. Closing
-    it here, with the child already reaped, removes the GC race entirely.
+    The child's stderr PIPE gives BaseSubprocessTransport a pipe protocol to
+    close in ``__del__``; if GC reaches it after the loop has closed, ``__del__``
+    calls ``call_soon`` on a dead loop and raises "RuntimeError: Event loop is
+    closed" as an unraisable. Closing here removes that GC race.
     """
     transport = getattr(proc, "_transport", None)
     if transport is None:
@@ -260,11 +237,9 @@ def _http_call(
     return resp.status_code, resp.text
 
 
-# pgw#783: PR_SET_PDEATHSIG — make every compute child die with the parent.
-# pgw#858 moved the implementation into privdrop, which owns the whole
-# post-fork/pre-exec sequence: the parent-death signal must be re-established
-# AFTER the credential change, not before, so the two cannot be set in the
-# wrong order by accident. This name stays as the module's export of it.
+# PR_SET_PDEATHSIG — make every compute child die with the parent. Implemented in
+# privdrop, which owns the whole post-fork/pre-exec sequence: the parent-death
+# signal must be re-established AFTER the credential change, never before.
 _set_pdeathsig = privdrop.set_pdeathsig
 
 
@@ -277,8 +252,7 @@ class _ChildLink:
 
 class _ChildSlot:
     """One execution group's compute child, plus every per-child supervision
-    fact. At G == 1 there is exactly one slot and every field here was a
-    ``ParentControl`` field before pgw#783 — the single-slot path is unchanged.
+    fact. At G == 1 there is exactly one slot.
 
     A slot is a CONTAINMENT boundary (delta security): the child holds no worker
     JWT, no identity credential, no signing key. It owns its group's cards
@@ -303,7 +277,7 @@ class _ChildSlot:
             postmortem.group_fault_dump_path(group.ordinal, parent._postmortem_dir)
             if parent._topology.execution_groups > 1 else None
         )
-        # pgw#1041: the load path's breadcrumb — consumed on a signal death
+        # The load path's breadcrumb — consumed on a signal death
         # so a SIGKILL mid-load names its phase/component and byte counts.
         self.load_progress_path = (
             postmortem.group_load_progress_path(
@@ -322,9 +296,9 @@ class _ChildSlot:
         self.death_times: collections.deque = collections.deque(maxlen=64)
         self.deaths_before_hello = 0
         self.child_saw_hello = False
-        # pgw#826: a terminal typed boot verdict from the dying child.
+        # a terminal typed boot verdict from the dying child.
         self.boot_fatal: Optional[Dict[str, Any]] = None
-        # pgw#833: ring buffer of THIS child's most recent stderr bytes.
+        # ring buffer of THIS child's most recent stderr bytes.
         self.stderr_tail: collections.deque = collections.deque()
         self.stderr_tail_len = 0
         self.stderr_task: Optional[asyncio.Task] = None
@@ -332,7 +306,7 @@ class _ChildSlot:
         self.last_frame_at = time.monotonic()
         self.relaying = False
         self.watchdog_fired = False
-        # pgw#771 liveness (thread-sourced, loop-independent), per child.
+        # Liveness (thread-sourced, loop-independent), per child.
         self.liveness_task: Optional[asyncio.Task] = None
         self.last_liveness_at = 0.0
         self.liveness_evidence: Optional[float] = None
@@ -345,18 +319,15 @@ class _ChildSlot:
         # re-sends the merge of all groups'.
         self.last_state_delta: Optional[pb.WorkerMessage] = None
         self.last_state_delta_at = 0.0
-        # pgw#937 / DESIGN-RULINGS §4.15: a respawn is a NEW GENERATION of this
-        # same group. `generation` counts the incarnations that have spoken; it
-        # is stamped into the retirement dial so a fact attributed to the wrong
-        # incarnation is visible rather than inferred.
+        # A respawn is a NEW GENERATION of this same group; `generation` counts
+        # the incarnations that have spoken and is stamped into the retirement
+        # dial, so a fact attributed to the wrong incarnation is visible.
         self.generation = 0
-        # PARTICIPATION is the fan-in's liveness predicate: do this group's
-        # facts count as the worker's? It goes False when an incarnation stops
-        # being able to speak and True again when the next one connects. A group
-        # that has not spoken YET starts True — it has no facts to be wrong
-        # about, and its absence from the dicts is the live-group default. The
-        # defect is only ever a group that HAS spoken and then died. See
-        # "down-group semantics" in the fan-in section.
+        # PARTICIPATION is the fan-in's liveness predicate: do this group's facts
+        # count as the worker's? False when an incarnation stops being able to
+        # speak, True again when the next one connects. A group that has not
+        # spoken YET starts True — it has no facts to be wrong about, and its
+        # absence from the dicts is the live-group default.
         self.participating = True
         self.last_crash_loop_report_at = _NEVER_REPORTED
         # Set once the link read loop has finished (EOF drained), so death
@@ -376,7 +347,7 @@ class _ChildSlot:
         return f"g{self.ordinal}"
 
     def begin_generation(self) -> None:
-        """A NEW incarnation of this group starts speaking (pgw#937, §4.15).
+        """A NEW incarnation of this group starts speaking.
 
         It enters the merge with EMPTY fan-in state — the death path retired the
         previous generation's — so "absent" once again means the live-group
@@ -395,10 +366,9 @@ class _ChildSlot:
         self.server = await asyncio.start_unix_server(
             self._on_child_connect, path=self.socket_path
         )
-        # pgw#858: connecting to a unix socket needs WRITE on its inode, so a
-        # root-created socket under the default umask is unreachable by the
-        # compute child's uid. Handing it to that uid at 0600 is also strictly
-        # tighter than the 0755 the split shipped with.
+        # Connecting to a unix socket needs WRITE on its inode, so a root-created
+        # socket under the default umask is unreachable by the compute child's
+        # uid; hand it to that uid at 0600.
         if self.p._drop_plan is not None:
             privdrop.grant_socket(self.p._drop_plan, self.socket_path)
 
@@ -428,13 +398,12 @@ class _ChildSlot:
         self.link_ready.set()
         self.begin_generation()
         logger.info("compute child %s connected on %s", self.label, self.socket_path)
-        # pgw#783: at G>1 a RESPAWNED child (not the first boot) comes up empty
-        # and needs the hub to re-drive its desired residency. The death path
-        # deliberately did NOT cycle the shared stream (siblings kept serving);
-        # now that this group's link is back and every slot is connected, cycle
-        # to re-sync the whole worker via a fresh, re-aggregated Hello. The
-        # hub's reconcile is idempotent, so the siblings are undisturbed. (At
-        # G==1 the death path already cycled — never double-cycle here.)
+        # At G>1 a RESPAWNED child comes up empty and needs the hub to re-drive
+        # its desired residency. The death path deliberately did NOT cycle the
+        # shared stream (siblings kept serving); now that this group's link is
+        # back, cycle to re-sync the whole worker via a fresh, re-aggregated
+        # Hello — the hub's reconcile is idempotent. At G==1 the death path
+        # already cycled; never double-cycle here.
         if (self.p.execution_groups > 1 and self.spawn_count > 1
                 and not (self.p._draining or self.p._terminating
                          or self.p._stopping.is_set())):
@@ -454,11 +423,11 @@ class _ChildSlot:
             if self.link is link:
                 self.link = None
                 self.link_ready.clear()
-                # pgw#937: participation ends the moment this generation stops
-                # being able to speak, not when the OS finally reaps it. A group
-                # the parent already answers RETRYABLE for must not still be
-                # voting in the worker's merged view. (`self.link is link` keeps
-                # a superseded link's teardown from retiring the live one.)
+                # Participation ends the moment this generation stops being able
+                # to speak, not when the OS finally reaps it: a group the parent
+                # already answers RETRYABLE for must not still vote in the merged
+                # view. (`self.link is link` keeps a superseded link's teardown
+                # from retiring the live one.)
                 self.participating = False
                 self.p._note_state_delta()
             waiter = self.hello_waiter
@@ -487,9 +456,9 @@ class _ChildSlot:
                 # that watched this job from outside the process doing it.
                 await self.p._attest_result(r, self)
             elif which == "state_delta" and self.participating:
-                # pgw#937: a retired generation's late frame is a dead process's
-                # claim about a worker it has left. Recording it would put the
-                # group back into the merge without a live child behind it.
+                # A retired generation's late frame is a dead process's claim
+                # about a worker it has left; recording it would put the group
+                # back into the merge without a live child behind it.
                 self.last_state_delta = msg
                 self.last_state_delta_at = time.monotonic()
                 self.p._note_state_delta()
@@ -524,7 +493,7 @@ class _ChildSlot:
             await self.p.transport.prepend_reconnect(msgs)
             return
         if ftype == frames.T_BOOT_FATAL:
-            # pgw#826: consumed by child_loop after the child is reaped.
+            # consumed by child_loop after the child is reaped.
             self.boot_fatal = frames.unpack_meta(payload)
             report = (self.boot_fatal or {}).get("report") or {}
             logger.error(
@@ -532,10 +501,9 @@ class _ChildSlot:
                 "reason_class=%s", self.label,
                 (self.boot_fatal or {}).get("kind"), report.get("reason_class"),
             )
-            # pgw#833 (the pgw#826 follow-on race): ack AFTER the verdict is
-            # recorded, so a child that waits for this ack can only exit once
-            # the parent has consumed the frame — the respawn decision can no
-            # longer race the socket buffer on a slow host.
+            # Ack AFTER the verdict is recorded, so a child that waits for this
+            # ack can only exit once the parent has consumed the frame — the
+            # respawn decision must not race the socket buffer on a slow host.
             try:
                 await link.writer.frame(frames.T_BOOT_FATAL_ACK, frames.pack_meta({}))
             except Exception:
@@ -565,18 +533,17 @@ class _ChildSlot:
     async def _spawn_child(self) -> asyncio.subprocess.Process:
         env = dict(os.environ)
         env.update(self.p._child_env)
-        # pgw#783: the per-GROUP env delta — CUDA_VISIBLE_DEVICES scoping the
-        # child to its own cards, the DxD topology rewrite (locally G==1), the
-        # sibling count. Empty at G==1.
+        # The per-GROUP env delta — CUDA_VISIBLE_DEVICES scoping the child to its
+        # own cards, the DxD topology rewrite, the sibling count. Empty at G==1.
         env.update(self.group_env)
         # delta 1: the compute child gets NO signing identity. Deleting the
         # T_TOKEN frame is only half of it — the JWT also arrives at pod-launch
         # in WORKER_JWT, and `os.environ` is the first place tenant code looks.
         for name in _CHILD_FORBIDDEN_ENVS:
             env.pop(name, None)
-        # pgw#858: the uid the child is about to exec as has no account of its
-        # own to inherit these from, and `~`, getpass.getuser(), TMPDIR and the
-        # .pyc path all resolve through them.
+        # The uid the child execs as has no account of its own to inherit these
+        # from, and `~`, getpass.getuser(), TMPDIR and the .pyc path all resolve
+        # through them.
         if self.p._drop_plan is not None:
             env.update(privdrop.child_env(self.p._drop_plan))
         # ...but the child still needs its IDENTITY, which is not a credential.
@@ -587,13 +554,12 @@ class _ChildSlot:
             env["WORKER_RELEASE_ID"] = release_id
         env[ENV_CHILD] = "1"
         env[ENV_SOCKET] = self.socket_path
-        # pgw#783: the parent's stable session id, so a respawned child keeps the
-        # worker's shadow-state session instead of minting a fresh uuid the hub
-        # would reject.
+        # The parent's stable session id, so a respawned child keeps the worker's
+        # shadow-state session instead of minting a fresh uuid the hub rejects.
         env[ENV_SESSION_ID] = self.p._worker_session_id
-        # The gw#640 flight-recorder fork is redundant under this parent.
+        # The flight-recorder fork is redundant under this parent.
         env["GEN_WORKER_SUPERVISOR"] = "0"
-        # pgw#771: a dedicated pipe for THREAD-sourced process liveness.
+        # A dedicated pipe for THREAD-sourced process liveness.
         read_fd, write_fd = os.pipe()
         env[ENV_LIVENESS_FD] = str(write_fd)
         self.spawn_count += 1
@@ -607,16 +573,15 @@ class _ChildSlot:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *self.p._child_cmd, env=env, pass_fds=(write_fd,),
-                # pgw#833: capture the child's stderr so its death carries its
-                # own last words in the post-mortem dial. The pump tees every
-                # byte straight back to the parent's stderr, so the container
-                # log (and the pgw#639 SIGUSR2 stack dumps) are unchanged.
+                # Capture the child's stderr so its death carries its own last
+                # words in the post-mortem dial. The pump tees every byte back to
+                # the parent's stderr, so the container log is unchanged.
                 stderr=asyncio.subprocess.PIPE,
-                # pgw#858 + pgw#783, in that order and in ONE hook: drop to the
-                # unprivileged compute uid, prove the drop took, then re-arm
-                # PR_SET_PDEATHSIG so a crashed group never strands its VRAM as
-                # an orphaned torch process. Post-fork/pre-exec, so tenant code
-                # has never run in this process when the credential changes.
+                # In this order and in ONE hook: drop to the unprivileged compute
+                # uid, prove the drop took, then re-arm PR_SET_PDEATHSIG so a
+                # crashed group never strands its VRAM as an orphaned torch
+                # process. Post-fork/pre-exec, so tenant code has never run in
+                # this process when the credential changes.
                 preexec_fn=(
                     privdrop.preexec(plan) if sys.platform == "linux" else None
                 ),
@@ -627,7 +592,7 @@ class _ChildSlot:
         await self._start_liveness_reader(read_fd)
         return proc
 
-    # ---- child stderr capture (pgw#833) ----------------------------------
+    # ---- child stderr capture ----------------------------------
 
     def _start_stderr_pump(self, proc: asyncio.subprocess.Process) -> None:
         old = self.stderr_task
@@ -656,12 +621,10 @@ class _ChildSlot:
                 return
             if not chunk:
                 return
-            # The tee write happens OFF the event loop: the parent's own
-            # stderr can be a pipe whose consumer stalls (pytest capture, a
-            # throttled container-log collector), and a blocking flush() on
-            # the loop thread freezes signal handling and the shutdown path —
-            # measured as test_sigterm_is_forwarded_to_the_worker timing out
-            # on a contended host (2-core repro; CI 2/2).
+            # The tee write happens OFF the event loop: the parent's own stderr
+            # can be a pipe whose consumer stalls (pytest capture, a throttled
+            # container-log collector), and a blocking flush() on the loop thread
+            # freezes signal handling and the shutdown path.
             await asyncio.to_thread(_tee_stderr_chunk, chunk)
             self.stderr_tail.append(chunk)
             self.stderr_tail_len += len(chunk)
@@ -782,7 +745,7 @@ class _ChildSlot:
                 )
                 await p._finish_shutdown_flush(reason="death_during_drain")
                 return
-            # pgw#826: terminal boot outcomes never respawn (module docstring).
+            # terminal boot outcomes never respawn (module docstring).
             fatal = self.boot_fatal
             if fatal is not None and fatal.get("terminal"):
                 await p._fail_boot_fatal(self, fatal)
@@ -797,10 +760,10 @@ class _ChildSlot:
 
     async def _settle_link(self) -> None:
         """Let the reaped child's buffered frames finish relaying, then close."""
-        # pgw#833: drain the stderr pipe to EOF first (bounded) so the death
-        # dial below carries the child's actual last words, not a prefix. A
-        # grandchild holding the fd open cannot stall the death path: on
-        # timeout the ring simply keeps what has arrived so far.
+        # Drain the stderr pipe to EOF first (bounded) so the death dial below
+        # carries the child's actual last words, not a prefix. A grandchild
+        # holding the fd open cannot stall the death path: on timeout the ring
+        # keeps what has arrived so far.
         task = self.stderr_task
         if task is not None and not task.done():
             try:
@@ -821,7 +784,7 @@ class _ChildSlot:
             self.link = None
             self.link_ready.clear()
             self.link_closed.set()
-        # pgw#937: whatever route got us here, this generation is done speaking.
+        # whatever route got us here, this generation is done speaking.
         self.participating = False
 
     async def await_exit(self, timeout: float) -> bool:
@@ -859,11 +822,11 @@ class _ChildSlot:
         try:
             for (rid, att), fn in sorted(died_jobs.items()):
                 self.reported_dead[(rid, att)] = fn
-                # pgw#937: the death path is the OTHER exit from the parent's
+                # The death path is the OTHER exit from the parent's
                 # dispatch-time observation. `_attest_result` pops it on the
                 # child's JobResult; a job whose child died never produces one,
-                # and 512 orphans FIFO-evict LIVE jobs' observations — which
-                # silently stops billing attestation on a crash-looping pod.
+                # and orphans would FIFO-evict LIVE jobs' observations, silently
+                # stopping billing attestation on a crash-looping pod.
                 self.p._observations.pop((rid, att), None)
                 while len(self.reported_dead) > _REPORTED_DEAD_CAP:
                     self.reported_dead.popitem(last=False)
@@ -905,7 +868,7 @@ class _ChildSlot:
                 "compute child %s exited cleanly (rc=%s)", self.label, rc,
             )
         # Nothing of this child may attribute the next generation. At G>1 the
-        # explicit path cannot unlink a live sibling's marker (pgw#938).
+        # explicit path cannot unlink a live sibling's marker.
         postmortem.clear_inflight(path=self.inflight_marker_path)
         await p._finish_shutdown_flush(
             reason="terminating" if p._terminating else "drain"
@@ -950,18 +913,18 @@ class _ChildSlot:
             sorted(r for r, _ in died_jobs) or "none",
         )
 
-        # 1b) pgw#937: RETIRE this generation from the worker view before
-        # anything else ships. Until this runs, the dead child's last frame is
-        # still a vote — it can pin an activity RUNNING, retire a function a
-        # live group serves, and (merge.py's `all(...)`) veto a live group's
-        # `self_stalled` confession, which is the one that costs money.
+        # 1b) RETIRE this generation from the worker view before anything else
+        # ships. Until this runs, the dead child's last frame is still a vote —
+        # it can pin an activity RUNNING, retire a function a live group serves,
+        # and (merge.py's `all(...)`) veto a live group's `self_stalled`
+        # confession, which is the one that costs money.
         for out in p._retire_group_generation(self):
             try:
                 await p.transport.send(out)
             except Exception:
                 logger.debug("retirement message send failed", exc_info=True)
 
-        # 2) Post-mortem dial (gw#640 typed exit capture; pgw#676/714 parity).
+        # 2) Post-mortem dial (typed exit capture).
         extra: Dict[str, Any] = {"group": self.ordinal, "generation": self.generation}
         if verdict.get("signaled"):
             try:
@@ -975,9 +938,9 @@ class _ChildSlot:
                 logger.warning("signal-death attribution failed", exc_info=True)
         else:
             postmortem.clear_inflight(path=self.inflight_marker_path)
-        # pgw#833: the dying child's own stderr tail rides the dial — the only
-        # forensic channel that survives a pre-Hello death on a provider with
-        # no container-logs API.
+        # The dying child's own stderr tail rides the dial — the only forensic
+        # channel that survives a pre-Hello death on a provider with no
+        # container-logs API.
         stderr_tail = self.stderr_tail_text()
         detail = postmortem.format_detail(
             phase="compute_process_exit",
@@ -998,7 +961,7 @@ class _ChildSlot:
 
         # 3) StartLimitBurst / StartLimitIntervalSec: DETECT the loop for THIS
         # group and report it typed. Post-Hello loops keep respawning; pre-Hello
-        # loops are bounded by child_loop's boot_death_limit check (pgw#826).
+        # loops are bounded by child_loop's boot_death_limit check.
         recent = [t for t in self.death_times if now - t <= p._start_limit_interval]
         looping = len(recent) >= p._start_limit_burst or self.deaths_before_hello >= 2
         if looping and now - self.last_crash_loop_report_at >= _CRASH_LOOP_REPORT_MIN_INTERVAL_S:
@@ -1037,7 +1000,7 @@ class _ChildSlot:
     # ---- watchdog (WatchdogSec), per child -------------------------------
 
     async def watchdog_loop(self) -> None:
-        """Missed beats ARM the verdict; the open activity DECIDES it (pgw#771).
+        """Missed beats ARM the verdict; the open activity DECIDES it.
 
         Per child: the parent witnesses THIS child's /proc, because a child
         starved of the GIL cannot witness for itself. The parent kills only what
@@ -1099,7 +1062,7 @@ class _ChildSlot:
     def _child_evidence(self, pid: int) -> Optional[float]:
         """This child tree's kernel-accounted work — see
         :func:`gen_worker.proc_evidence.tree_evidence`, which this grew into
-        and which `parallel.group` now shares (pgw#892)."""
+        and which `parallel.group` now shares."""
         return proc_evidence.tree_evidence(pid)
 
     def _sample_child_evidence(self, pid: int, now: float) -> None:
@@ -1177,18 +1140,12 @@ class ParentControl:
         transport_backoff_cap_s: float = 30.0,
     ) -> None:
         self._settings = settings
-        # pgw#931 follow-up: the CONTROL PARENT is the process that holds the
-        # worker credential — the compute child is deliberately stripped of it
-        # (`_CHILD_FORBIDDEN_ENVS`) and signs through this process. So the boot
-        # token is installed HERE, where the parent's `Settings` arrive, not
-        # only in `run_parent`.
-        #
-        # It was in `run_parent` alone, and that was wrong: every other way of
-        # building a control parent — the split harness, the group-process
-        # tests, any embedder — got a parent with no credential, and the
-        # mediated C2PA sign refused with "this pod holds no worker JWT".
-        # Deriving a fact at ONE of several entry points is the §4.22 defect:
-        # the fact and its carrier have to be established together.
+        # The CONTROL PARENT is the process that holds the worker credential —
+        # the compute child is deliberately stripped of it
+        # (`_CHILD_FORBIDDEN_ENVS`) and signs through this process. The boot
+        # token is installed HERE, where the parent's `Settings` arrive, and not
+        # only in `run_parent`: every other way of building a control parent (the
+        # split harness, the group-process tests, an embedder) must get one too.
         worker_credential.install_bootstrap(settings)
         env_cmd = os.environ.get(ENV_CHILD_CMD, "").strip()
         self._child_cmd = list(
@@ -1197,10 +1154,8 @@ class ParentControl:
             else (shlex.split(env_cmd) if env_cmd else [sys.executable, "-m", "gen_worker.entrypoint"])
         )
         self._child_env = dict(child_env or {})
-        # pgw#931: was `child_env or os.environ or default` — the same env read
-        # through two doors, neither of which was the loader. `Settings` owns the
-        # value now; the child_env override stays because it is this parent
-        # deliberately pointing THIS child somewhere else.
+        # `Settings` owns the value; the child_env override stays because it is
+        # this parent deliberately pointing THIS child somewhere else.
         record_path = (
             self._child_env.get("GEN_WORKER_BOOT_RECORD")
             or self._settings.boot_record_path
@@ -1223,26 +1178,25 @@ class ParentControl:
             backoff_cap_s=transport_backoff_cap_s,
         )
 
-        # pgw#783: the delivered packing decides how many children exist. Pure
-        # env parse — no torch, no CUDA (the parent stays a control plane). The
-        # plan gives each group its devices, socket, and env delta; at G==1 the
-        # plan is one slot with an EMPTY env delta and the original socket path.
+        # The delivered packing decides how many children exist. Pure env parse —
+        # no torch, no CUDA (the parent stays a control plane). The plan gives
+        # each group its devices, socket and env delta; at G==1 it is one slot
+        # with an EMPTY env delta and the original socket path.
         self._topology = topology if topology is not None else ExecutionTopology.from_env()
         self._plan = GroupPlan.for_topology(self._topology, socket_path=self._socket_path)
 
-        # pgw#858: decide the compute uid and grant it what it needs BEFORE any
-        # slot exists, so no child is ever spawned into a half-prepared pod.
+        # Decide the compute uid and grant it what it needs BEFORE any slot
+        # exists, so no child is ever spawned into a half-prepared pod.
         self._drop_plan = self._prepare_privilege_drop()
 
         self._slots: List[_ChildSlot] = [
             _ChildSlot(self, group) for group in self._plan.children
         ]
 
-        # pgw#783: the worker session id is minted ONCE, here, and passed to
-        # every child — so it survives child respawns (child-minted it changed
-        # on each respawn and the hub rejected the cross-session shadow state, a
-        # latent defect even at G=1) and is shared across groups (one worker,
-        # one session).
+        # The worker session id is minted ONCE, here, and passed to every child:
+        # it must survive child respawns (a child-minted id changes on each
+        # respawn and the hub rejects the cross-session shadow state) and be
+        # shared across groups — one worker, one session.
         self._worker_session_id = uuid.uuid4().hex
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -1270,16 +1224,13 @@ class ParentControl:
         self._child_exited_clean = False
         self._shutdown_flushed = False
         self.crash_loop_reports = 0  # observability + tests
-        # pgw#826: set when a terminal boot outcome makes the parent exit 1.
+        # Set when a terminal boot outcome makes the parent exit 1.
         self._terminal_exit = False
         self.terminal_exit_reason = ""  # observability + tests
         self._stop_deadline_task: Optional[asyncio.Task] = None
         self._reported_unretired = False
         self.unretired_results_at_exit = 0  # observability + tests
         # delta 1: parent-mediated action accounting (observability + tests).
-        # pgw#876 §2: `_jwt_rotations` and `actions_performed` lived here too
-        # and were WRITE-ONLY — incremented, never logged, never asserted.
-        # Deleted rather than wired: nothing wanted them.
         self.actions_refused = 0
         self._last_action_refusal_report_at = _NEVER_REPORTED
         self._action_slots = asyncio.Semaphore(_MAX_CONCURRENT_ACTIONS)
@@ -1302,23 +1253,23 @@ class ParentControl:
         self._measurement: Optional[Dict[str, Any]] = None
         self._measured = asyncio.Event()
         self._measure_task: Optional[asyncio.Task] = None
-        # pgw#771 fan-in: per-group activity + fn signals, reconciled to ONE
-        # worker view before the stream (Paul: the hub sees one worker).
+        # Per-group activity + fn signals, reconciled to ONE worker view before
+        # the stream (Paul: the hub sees one worker).
         self._group_activities: Dict[int, Dict[str, pb.ActivityUpdate]] = {}
         self._activity_seq = 0
         self._group_fn_unavail: Dict[int, Dict[str, pb.FnUnavailable]] = {}
         self._group_fn_degraded: Dict[int, Dict[str, pb.FnDegraded]] = {}
-        # pgw#783 THE INVARIANT: account every relayed frame so a job whose DATA
-        # crosses the parent's interpreter is VISIBLE (a control ceiling on
-        # job_result bytes). If the seam ever carries data the GIL bottleneck
-        # pgw#782 measured reappears one layer up. Reported, never fatal.
+        # Account every relayed frame so a job whose DATA crosses the parent's
+        # interpreter is VISIBLE (a control ceiling on job_result bytes). If the
+        # seam ever carries data, the GIL bottleneck the split exists to avoid
+        # reappears one layer up. Reported, never fatal.
         self.seam = SeamAccountant()
 
     @property
     def execution_groups(self) -> int:
         return len(self._slots)
 
-    # ---- pgw#858: the compute uid ----------------------------------------
+    # ---- the compute uid --------------------------------------------------
 
     def _prepare_privilege_drop(self) -> Optional[privdrop.DropPlan]:
         """Decide the compute child's uid, then hand that uid everything it
@@ -1344,12 +1295,6 @@ class ParentControl:
             # a cold pod so the chown is free, metadata-only when warm. Read
             # from env/Settings rather than models.cache_paths — importing that
             # package pulls the model layer, and this process never imports torch.
-            # pgw#931 VIOLATION-A #1: `_settings.tensorhub_cache_dir` and a raw
-            # read of the SAME env sat in adjacent lines of this expression —
-            # four sources for one fact, two of them the same variable through
-            # different doors. `Settings` also loads from yaml, /run/secrets and
-            # `.env`, so the raw read could only ever WIN where the loader had
-            # already lost. Deleted.
             self._child_env.get("TENSORHUB_CACHE_DIR", "")
             or self._settings.tensorhub_cache_dir
             or _DEFAULT_TENSORHUB_CACHE_DIR,
@@ -1365,7 +1310,7 @@ class ParentControl:
                 self._child_env.get("GEN_WORKER_BOOT_RECORD", "")
                 or self._settings.boot_record_path
             ),
-            # th#1087's mutable-config snapshot: the CHILD atomically rewrites
+            # The mutable-config snapshot: the CHILD atomically rewrites
             # it on every config-generation push (tmp file in the SAME dir plus
             # os.replace, so the directory itself must be writable), and unlike
             # the post-mortem markers that writer RAISES on failure. It lives
@@ -1393,9 +1338,9 @@ class ParentControl:
         )
         return plan
 
-    # Single-slot conveniences: the per-child process/spawn state moved into
-    # _ChildSlot (pgw#783), but at G==1 there is exactly one, and the G=1
-    # identity suite reads these. They intentionally name slot 0.
+    # Single-slot conveniences: per-child process/spawn state lives on
+    # _ChildSlot, but at G==1 there is exactly one and the G==1 identity suite
+    # reads these. They intentionally name slot 0.
     @property
     def _proc(self) -> Optional[asyncio.subprocess.Process]:
         return self._slots[0].proc if self._slots else None
@@ -1424,7 +1369,7 @@ class ParentControl:
     def _route_slot(self, run: pb.RunJob) -> Optional[_ChildSlot]:
         """Which slot serves this dispatch. At G==1 always the one slot; at G>1
         route by the hub-picked rank-0 device, refusing a mis-dispatch (never
-        flooring onto group 0 — pgw#779)."""
+        flooring onto group 0)."""
         if self.execution_groups == 1:
             return self._slots[0]
         gpu_index = run.compute.gpu_index if run.HasField("compute") else None
@@ -1506,9 +1451,8 @@ class ParentControl:
             gpu_name=str(hw.get("gpu_name") or ""),
             gpu_sm=str(hw.get("gpu_sm") or ""),
             torch_version=str(hw.get("torch_version") or ""),
-            # pgw#1129/th#1798: the host driver, so the hub can answer
-            # "can the host we landed on run this pod's CUDA line?" from a
-            # SUCCESSFUL boot instead of only from a corpse.
+            # The host driver, so the hub can answer "can the host we landed on
+            # run this pod's CUDA line?" from a SUCCESSFUL boot, not only a corpse.
             driver_version=str(hw.get("driver_version") or ""),
             installed_libs=[str(x) for x in (hw.get("installed_libs") or [])],
             gen_worker_version=str(m.get("gen_worker_version") or ""),
@@ -1524,9 +1468,9 @@ class ParentControl:
             return self._identity_cache
         worker_id = (self._settings.worker_id or "").strip()
         release_id = ""
-        # pgw#848: IDENTITY claims (sub / release_id), which rotation never
-        # changes — the bootstrap copy is correct here and is cached anyway.
-        # Anything AUTHENTICATING must read `worker_credential.current()`.
+        # IDENTITY claims (sub / release_id), which rotation never changes, so
+        # the bootstrap copy is correct here. Anything AUTHENTICATING must read
+        # `worker_credential.current()`.
         token = (self._settings.bootstrap_worker_jwt or "").strip()
         if token:
             try:
@@ -1565,8 +1509,8 @@ class ParentControl:
 
     async def build_hello(self) -> pb.Hello:
         """Assemble the worker's Hello. delta 2: never before the parent's own
-        measurement has had its chance. pgw#783: at G>1 merge every group's
-        child Hello into one worker view (Paul: the hub sees one worker)."""
+        measurement has had its chance. At G>1 merge every group's child Hello
+        into one worker view (Paul: the hub sees one worker)."""
         try:
             await asyncio.wait_for(self._measured.wait(), _MEASURE_TIMEOUT_S + 5.0)
         except asyncio.TimeoutError:
@@ -1575,13 +1519,13 @@ class ParentControl:
         if self.execution_groups == 1:
             # BYTE-IDENTICAL to the single-child parent: request the one child's
             # Hello and apply the delta identity/resources overrides + in-flight
-            # merge inline, exactly as before pgw#783.
+            # merge inline.
             hello = await self._request_slot_hello(self._slots[0])
             if hello is None:
                 return pb.Hello()
             self._apply_identity_and_resources(hello)
-            # pgw#783: the parent owns the session id (the child reads it from
-            # env, but assert it here too so a stale child can never regress it).
+            # The parent owns the session id (the child reads it from env, but
+            # assert it here too so a stale child can never regress it).
             hello.worker_session_id = self._worker_session_id
             if self._beat_interval <= 0 and hello.heartbeat_interval_ms > 0:
                 self._beat_interval = hello.heartbeat_interval_ms / 1000.0
@@ -1679,9 +1623,8 @@ class ParentControl:
             return
         # hello_ack handled above; everything else (model_op, token_refresh,
         # serve_posture, …) is worker-wide desired state: broadcast to every
-        # group. pgw#1142's eager-only order is worker-wide by definition —
-        # the compiled serving it suppresses lives in the CHILDREN, and every
-        # one of them has to hear it, so it takes this path unchanged.
+        # group. The eager-only order is worker-wide by definition — the compiled
+        # serving it suppresses lives in the CHILDREN and every one must hear it.
         payload = msg.SerializeToString()
         delivered = False
         for slot in self._slots:
@@ -1718,9 +1661,9 @@ class ParentControl:
         while len(self._observations) > _OBSERVATION_CAP:
             self._observations.popitem(last=False)
         slot.in_flight[key] = run.function_name
-        # pgw#783: at G>1 the child's world starts at cuda:0 under
-        # CUDA_VISIBLE_DEVICES, so rewrite the dispatched rank-0 device to the
-        # child-local 0. At G==1 there is no rewrite (identity).
+        # At G>1 the child's world starts at cuda:0 under CUDA_VISIBLE_DEVICES,
+        # so rewrite the dispatched rank-0 device to the child-local 0. At G==1
+        # there is no rewrite (identity).
         relay = msg
         if self.execution_groups > 1 and run.HasField("compute"):
             relay = pb.SchedulerMessage()
@@ -1765,21 +1708,13 @@ class ParentControl:
         where the parent presents `worker_credential.current()`.
         """
 
-    # ---- fan-in: N children -> ONE worker view (pgw#783, Paul ruling 2) ----
+    # ---- fan-in: N children -> ONE worker view (Paul ruling 2) ------------
     #
-    # DOWN-GROUP SEMANTICS (pgw#937 ruling; the rule `_handle_child_death`'s
-    # crash-loop dial has always claimed in prose and nothing implemented).
-    #
-    # **A group without a live child is not a participant in the worker view,
-    # and its facts are UNKNOWN — which is neither "still true" nor the
-    # live-group default.** Every fan-in structure here is generation-scoped:
-    # it holds what the CURRENT incarnation of that group said, and it is
-    # dropped the moment that incarnation ends (§4.15 — a respawn is a new
-    # generation of the same group, under the same worker session).
-    #
-    # The vocabulary has three states per (group, function/kind), and the bug
-    # class this fixes is the §4.22 one — a *default* being made to carry a
-    # missing *fact*:
+    # DOWN-GROUP SEMANTICS. **A group without a live child is not a participant
+    # in the worker view, and its facts are UNKNOWN — neither "still true" nor
+    # the live-group default.** Every fan-in structure here is
+    # generation-scoped: it holds what the CURRENT incarnation of that group
+    # said and is dropped the moment that incarnation ends.
     #
     #   present entry -> a fact the live incarnation reported
     #   absent entry  -> the live-group DEFAULT (serves it / no activity open)
@@ -1803,16 +1738,15 @@ class ParentControl:
     #                         group can no longer pin a kind RUNNING or veto a
     #                         live group's `self_stalled` confession.
     #
-    # Exclusion is chosen over inserting an explicit "unknown" sentinel because
-    # it carries the same information without teaching four merge functions a
-    # third case and without touching the wire vocabulary.
+    # Exclusion is deliberately chosen over an explicit "unknown" sentinel: same
+    # information without teaching four merge functions a third case and without
+    # touching the wire vocabulary.
     #
-    # A down group is not silently forgotten, though — that would replace one
-    # missing fact with another. `_retire_group_generation` EMITS the
-    # consequences: a terminal for every activity kind the dead generation held
-    # open that no live group still runs, and the recomputed worker StateDelta.
-    # The hub learns the capacity dropped; it never has to infer it from an
-    # update that stopped arriving.
+    # A down group is not silently forgotten: `_retire_group_generation` EMITS
+    # the consequences — a terminal for every activity kind the dead generation
+    # held open that no live group still runs, plus the recomputed worker
+    # StateDelta — so the hub never has to infer capacity loss from an update
+    # that stopped arriving.
 
     def _live_slots(self) -> List["_ChildSlot"]:
         """The groups whose facts are the worker's, i.e. the participating ones."""
@@ -1908,7 +1842,7 @@ class ParentControl:
         """The message to actually put on the stream for one child frame.
 
         At G==1 this is the child's message VERBATIM — byte-identical to the
-        pre-pgw#783 relay. At G>1 the hub must see one worker, so worker-scoped
+        single-child relay. At G>1 the hub must see one worker, so worker-scoped
         signals (state_delta, activity_update, fn_(un)available) are reconciled
         across groups here and per-request signals (job_result/progress/accepted,
         model_event) forward verbatim.
@@ -1917,11 +1851,10 @@ class ParentControl:
             return msg
         which = msg.WhichOneof("msg")
         if which in _WORKER_SCOPED_MSGS and not slot.participating:
-            # pgw#937: a retired generation cannot speak for the worker. Its
-            # per-request frames still forward (they are about a job, and the
-            # death path has already attributed the ones it knows about); its
-            # WORKER-scoped claims are a dead process's view of a worker it has
-            # left, and re-recording them would resurrect it into the merge.
+            # A retired generation cannot speak for the worker. Its per-request
+            # frames still forward (they are about a job, already attributed by
+            # the death path); its WORKER-scoped claims are a dead process's view
+            # of a worker it has left, and would resurrect it into the merge.
             return None
         if which == "state_delta":
             merged = self._last_state_delta
@@ -1946,7 +1879,7 @@ class ParentControl:
             by_kind[act.kind] = act
         # Only LIVE groups vote. A dead group's last frame must not pin the kind
         # RUNNING, and must not outvote a live group's `self_stalled` confession
-        # (merge.py's `all(...)`) — pgw#937.
+        # (merge.py's `all(...)`).
         live_ordinals = {s.ordinal for s in self._live_slots()}
         per_group = {
             ordinal: kinds[act.kind]
@@ -1972,10 +1905,10 @@ class ParentControl:
         by_fn = self._group_fn_unavail.setdefault(slot.ordinal, {})
         by_fn[fu.function_name] = fu
         # THE CONVENTION, stated at the call site because writing it backwards
-        # is the pgw#937 defect: `merge.worker_fn_unavailable` reads a `None`
-        # value as "this group SERVES the function". So a group is put in the
-        # mapping only while it is live — a down group is EXCLUDED, never
-        # entered as `None`, which would make it read as serving everything.
+        # is a live defect: `merge.worker_fn_unavailable` reads a `None` value as
+        # "this group SERVES the function". So a group is put in the mapping only
+        # while it is live — a down group is EXCLUDED, never entered as `None`,
+        # which would make it read as serving everything.
         per_group: Dict[int, Optional[pb.FnUnavailable]] = {}
         for s in self._live_slots():
             per_group[s.ordinal] = self._group_fn_unavail.get(
@@ -2002,7 +1935,7 @@ class ParentControl:
         # A group serves this function NATIVE when it reports neither degraded
         # nor unavailable for it. Absence means native here too, so a DOWN group
         # is excluded rather than scanned — otherwise a dead group would veto a
-        # live group's degradation report (pgw#937).
+        # live group's degradation report.
         served_native = any(
             fd.function_name not in self._group_fn_degraded.get(s.ordinal, {})
             and fd.function_name not in self._group_fn_unavail.get(s.ordinal, {})
@@ -2186,14 +2119,13 @@ class ParentControl:
         return self._post_action(action, status, text)
 
     def _viewer_identity(self) -> Dict[str, str]:
-        """pgw#1122: name this pod for the child — the CLAIMS, not the token.
+        """Name this pod for the child — the CLAIMS, not the token.
 
         The compute child holds no credential by construction, so it cannot
-        decode its own identity; the receipt trust gate that tried refused
-        every org-tier cell on every real serving pod. The parent holds the
-        credential and answers from it, exactly as it does for the resolve and
-        the publish. Nothing in the request is read: the child names no field
-        here, so it cannot ask to be somebody else.
+        decode its own identity; the parent holds the credential and answers from
+        it, exactly as it does for the resolve and the publish. Nothing in the
+        request is read: the child names no field here, so it cannot ask to be
+        somebody else.
         """
         token = (self.transport.current_worker_jwt or "").strip()
         if not token:
@@ -2263,7 +2195,7 @@ class ParentControl:
             "for authority outside the allowlisted action table"
         )
 
-    # ---- terminal boot outcomes (pgw#826) --------------------------------
+    # ---- terminal boot outcomes --------------------------------
 
     async def _fail_boot_fatal(self, slot: _ChildSlot, fatal: Dict[str, Any]) -> None:
         """A terminal typed boot verdict: relay the child's HardwareUnsuitable
@@ -2327,7 +2259,7 @@ class ParentControl:
         except Exception:
             logger.warning("compute post-mortem wire report failed", exc_info=True)
 
-    # ---- the app beat (pgw#771) ------------------------------------------
+    # ---- the app beat ------------------------------------------
 
     async def _beat_loop(self) -> None:
         """The PARENT originates the app heartbeat — one for the whole worker.
@@ -2461,10 +2393,9 @@ class ParentControl:
                 self._loop.add_signal_handler(sig, self._forward_signal, sig)
             except (NotImplementedError, RuntimeError):
                 pass
-        # pgw#639 under the split: SIGUSR2 dumps every process's stacks and
-        # kills none. The forward is installed first, then faulthandler with
-        # chain=True, so one signal yields parent + children stacks in the pod
-        # log (children inherit stderr and register their own dump handler).
+        # SIGUSR2 dumps every process's stacks and kills none. The forward is
+        # installed first, then faulthandler with chain=True, so one signal
+        # yields parent + children stacks in the pod log.
         def _forward_usr2(signum: int, _frame: object) -> None:
             for slot in self._slots:
                 proc = slot.proc
@@ -2530,7 +2461,7 @@ class ParentControl:
                 except Exception:
                     pass
             if self._terminal_exit:
-                return 1   # pgw#826: a terminal boot outcome, already reported
+                return 1   # a terminal boot outcome, already reported
             return 0 if (
                 self._child_exited_clean
                 or self._draining
@@ -2593,13 +2524,13 @@ def run_parent() -> int:
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
-    # Carry forward the gw#640 previous-container-death report + boot record.
+    # Carry forward the previous-container-death report + boot record.
     from ..supervisor import report_previous_container_death
 
     report_previous_container_death()
     postmortem.clear_all_inflight()
     postmortem.write_boot_record()
-    # §1.18: the bootstrap-owned load for the CONTROL-PARENT process entry.
+    # The bootstrap-owned load for the CONTROL-PARENT process entry.
     settings = config.install(config.load_settings())
     # The boot credential is installed by ParentControl.__init__, which is the
     # seam every parent goes through — not just this entry point.

@@ -1,7 +1,6 @@
 """pgw#823 — AOTInductor needs a C++ compiler; the endpoint images have none.
 
-Measured on a real L4 (gen-worker 0.84.0, sdxl 0.2.102, release `39ac3726`,
-pod `d0l6455n9nifo3`): the mint loaded the pipeline, exported the
+Measured on a real L4: the mint loaded the pipeline, exported the
 adapter-bearing graph class, reached the linker and refused —
 
     entry 'unet/adapter=true,cfg=true/B=2,H_lat=80,T_txt=77,W_lat=192':
@@ -130,7 +129,7 @@ def test_the_parent_no_longer_second_guesses_the_image(
         inputs=(Input("sample", shape=("B", 4), dtype="model"),),
         shape_strategy="static-rows", warm_changes_key=False)
     # Patch the caller's binding too: fleet_cells imports the name at module
-    # scope (pgw#976), so patching only export_contract leaves the real one bound.
+    # scope, so patching only export_contract leaves the real one bound.
     monkeypatch.setattr(ec, "export_declaration", lambda _f: decl)
     monkeypatch.setattr(fleet_cells, "export_declaration", lambda _f: decl)
 
@@ -167,7 +166,7 @@ def test_the_child_refuses_the_AOT_recipe_before_reading_weights(
         mint_child.mint(req)
 
 
-# pgw#1010: `test_the_dynamo_recipe_is_NOT_refused_by_the_cxx_gate` stood here.
+# `test_the_dynamo_recipe_is_NOT_refused_by_the_cxx_gate` stood here.
 # The child mints ONE artifact kind now, and AOTInductor links a shared object,
 # so the C++ compiler is an unconditional precondition rather than a per-recipe
 # one. The finding it recorded (leg 2's dynamo mints ran 24-47 minutes on an

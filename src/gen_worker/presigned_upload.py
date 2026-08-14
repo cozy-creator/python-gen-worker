@@ -2,69 +2,49 @@
 
 Upload flow (one file):
   1. Client computes BLAKE3 hash of the file (and declares sha256 at create —
-     th#1795 — so the hub can presign into the final content-addressed key).
+     so the hub can presign into the final content-addressed key).
   2. POST {base_url}{endpoint_path} with {path, blake3, size_bytes, sha256}.
-  3. TensorHub answers dedup, a store-enforced single PUT (th#1795), or
+  3. TensorHub answers dedup, a store-enforced single PUT, or
      presigned multipart part URLs uploaded part-by-part and completed with
-     part ETags. The worker NEVER holds store credentials (pgw#1206 B: the
-     credentialed grant lane had zero hub producers and is gone, boto3 with
-     it); an expired presign is a RE-PLAN, never terminal.
+     part ETags. The worker NEVER holds store credentials; an expired presign
+     is a RE-PLAN, never terminal.
 
 Used by worker callers via ctx.save_file / ctx.save_checkpoint. Tensorhub also
-exposes the same upload protocol to
-other authenticated clients; the caller authenticates with either a worker
-capability token or a user JWT. The orchestrator is NOT in the upload path:
-clients talk directly to tensorhub, and bytes go straight to R2/S3.
+exposes the same upload protocol to other authenticated clients; the caller
+authenticates with either a worker capability token or a user JWT. The
+orchestrator is NOT in the upload path: clients talk directly to tensorhub, and
+bytes go straight to R2/S3.
 
 This is the standard tensorhub upload client. The same control-plane shape is
 used at different route prefixes for datasets
 (/api/v1/datasets/:dataset_id/upload-sessions/:session_id/uploads),
 endpoint source (/api/v1/endpoints/:owner/:endpoint/releases/uploads),
 and user media (/api/v1/media/uploads — org-less, the hub derives the org
-from the credential; th#1722 §C). Repo checkpoints do NOT use
-this client anymore — they publish via the /commits API (gw#471,
-gen_worker.hubio.client).
+from the credential). Repo checkpoints do NOT use this client — they publish
+via the /commits API (gen_worker.hubio.client).
 
-# HTTP stack (issues #13 / #385 / pgw#1125)
+# HTTP stack
 
 The two planes have DIFFERENT connection scopes, and the boundary is a
 ratified safety property — do not blur it:
 
   * control plane (create / complete / abort, worker -> tensorhub) — one
-    PROCESS-scoped ``requests.Session`` per hub origin, reused across
-    saves (th#1795 candidate 3). Measured 2026-08-11 on the standing
-    stack: ``upload.create`` is 589 ms worker-side against a 4.5 ms hub
-    handler, i.e. ~584 ms of pure control-plane network, of which one
-    fresh TCP+TLS handshake through the tunnel is 109-155 ms — paid on
-    every single save because the session used to die with it. Auth
-    headers are passed per-request, so worker JWT rotation never forces a
-    new connection, and the session carries SOCKETS ONLY: cookies are
-    refused so no server state crosses saves.
-    Reuse buys a new failure mode — a socket the peer closed while the
-    pod was denoising — so a control-plane POST that fails to CONNECT on
-    a REUSED session evicts it and retries once on a fresh one. On a
-    session this call just built there is no retry: that error is the hub
-    being down, not staleness, and inventing a retry there would change a
-    behaviour nobody measured.
-  * data plane (part PUTs, worker -> R2) — one
-    ``hubio.transport.PutPool`` per save, torn down with it, NEVER
-    process-scoped. Retry attempts always get a fresh
-    ``urllib3.PoolManager`` — the structural guard against the
-    stale-socket ``SSLV3_ALERT_BAD_RECORD_MAC`` R2 incident (see
-    ``hubio.transport``). That incident is why per-save scoping exists
-    at all; it was an R2 edge behaviour, and the control plane is a
-    different peer with a different failure history.
-
-**What the saving is CONDITIONAL on, so the next pod leg measures the
-right thing.** A handshake is only avoided when the hub (and anything
-between, ngrok included) still holds the socket open across the gap
-between two saves — a gap that is one whole generation long. If the peer
-drops it every time, urllib3's dropped-connection check replaces it
-silently, this costs nothing and buys nothing, and THAT is the finding:
-it would mean create's remaining ~430 ms is one tunnel round trip that
-only topology (th#1795 candidate 6) can remove. Read `upload.create` on
-saves 2..N of a pod's life, never on the first — the first save of a
-process builds the session and pays the handshake exactly as before.
+    PROCESS-scoped ``requests.Session`` per hub origin, reused across saves.
+    One fresh TCP+TLS handshake through the tunnel is 109-155 ms, and without
+    reuse it is paid on every single save. Auth headers are passed
+    per-request, so worker JWT rotation never forces a new connection, and the
+    session carries SOCKETS ONLY: cookies are refused so no server state
+    crosses saves. Reuse buys a new failure mode — a socket the peer closed
+    while the pod was denoising — so a control-plane POST that fails to
+    CONNECT on a REUSED session evicts it and retries once on a fresh one. On
+    a session this call just built there is no retry: that error is the hub
+    being down, not staleness.
+  * data plane (part PUTs, worker -> R2) — one ``hubio.transport.PutPool``
+    per save, torn down with it, NEVER process-scoped. Retry attempts always
+    get a fresh ``urllib3.PoolManager`` — the structural guard against the
+    stale-socket ``SSLV3_ALERT_BAD_RECORD_MAC`` R2 edge behaviour (see
+    ``hubio.transport``), which is why per-save scoping exists at all. The
+    control plane is a different peer with a different failure history.
 """
 
 from __future__ import annotations
@@ -98,15 +78,13 @@ from .stall import SilenceWindow
 
 logger = logging.getLogger(__name__)
 
-# pgw#973 (§4.24), completing wave 2's KEEP-BUT-DOCUMENT verdict. These are
-# per-CALL socket budgets on the two hub round trips, not give-up decisions:
-# the give-up is `_COMPLETE_SILENCE_WINDOW_S` below, over the hub's own
-# answers (gw#666). Without them a hub that accepts a connection and never
-# replies wedges a publish forever. `/complete` gets ten times `/create`'s
-# budget because it VERIFIES the object synchronously (streams it back from R2
-# and hashes it) while `/create` only mints presigns — and it is the DERIVATION
-# BASIS for the silence window, which is two full finalize-length attempts.
-# Deleting it deletes that basis.
+# Per-CALL socket budgets on the two hub round trips, not give-up decisions:
+# the give-up is `_COMPLETE_SILENCE_WINDOW_S` below, over the hub's own answers.
+# Without them a hub that accepts a connection and never replies wedges a publish
+# forever. `/complete` gets ten times `/create`'s budget because it VERIFIES the
+# object synchronously (streams it back from R2 and hashes it) while `/create`
+# only mints presigns — and it is the DERIVATION BASIS for the silence window,
+# which is two full finalize-length attempts. Deleting it deletes that basis.
 _FINALIZE_TIMEOUT_S = 600
 _CREATE_TIMEOUT_S = 60
 #: Attempts at `/complete` for a NON-definite answer only (a definite hub
@@ -121,18 +99,17 @@ _FINALIZE_RETRY_BACKOFF_S = 0.5
 # large single files this can run past whatever timeout an intermediary in
 # front of tensorhub enforces (~100-120s observed live), so the CLIENT sees a
 # transient 5xx/timeout on an attempt that is still running server-side. Our
-# own retry then races the first attempt and gets 409 upload_complete_in_progress
-# — a false negative (found live: e2e tracker #110, a ~6.94GB singlefile
-# mirror). Poll on that specific 409 rather than treating it as fatal: once
+# own retry then races the first attempt and gets 409
+# upload_complete_in_progress — a false negative. Poll on that specific 409
+# rather than treating it as fatal: once
 # the in-flight attempt finishes, /complete's `sess.Finalized` fast path
 # returns the same 200 success payload to the next poll, no data lost.
 _COMPLETE_IN_PROGRESS_POLL_S = 5.0
 
-# gw#666 (th#1166 finding E): the old `_COMPLETE_IN_PROGRESS_MAX_WAIT_S = 600`
-# FAILED THE JOB after 10 minutes of wall time — the worker had already
-# uploaded every byte and then discarded the result because the hub was still
-# stitching a large multipart object. A clock cannot distinguish "assembly is
-# taking a while" from "nothing is happening"; the hub's own answer can.
+# Deliberately a SILENCE window, not a wall-clock cap: a clock cannot
+# distinguish "assembly is taking a while" from "nothing is happening", and
+# failing after N minutes discards every byte the worker already uploaded while
+# the hub is still stitching a large multipart object.
 #
 # Each `409 upload_complete_in_progress` is a DEFINITE answer: the hub is up
 # and holds the completion lock. The hub sets that lock NX with a TTL and
@@ -145,23 +122,13 @@ _COMPLETE_SILENCE_WINDOW_S = 2.0 * _FINALIZE_TIMEOUT_S
 # Default part size sent by server, but we read it from the response.
 _FALLBACK_PART_SIZE = 64 * 1024 * 1024  # 64 MiB
 
-# pgw#973 (§4.24) — KEEP, but the old justification was false and is replaced.
-#
-# It read: "File-level fan-out is fixed at 4 and per-file part fan-out is fixed
-# at 4, so this semaphore is the authoritative cap that keeps the two axes from
-# multiplying." Both halves were wrong. The module that owned file-level
-# fan-out (``_concurrent_upload.py``) NO LONGER EXISTS; the only in-repo caller
-# of this path (``request_context/_stream.py:_finalize_presigned_upload``) is
-# sequential, with no pool and no gather. So the file axis is 1, in-flight PUTs
-# are capped at 4 by ``optimal_part_concurrency``, and this semaphore of 8 is
-# never the binding constraint on any in-repo path.
-#
-# THE THREAT IT ACTUALLY COVERS, which nothing else does: an endpoint author
-# calling ``ctx.save()`` from their own threads. That is the one axis
-# ``optimal_part_concurrency`` cannot see, because it bounds ONE file's parts
-# and knows nothing about how many files are in flight beside it. Without this,
+# THE THREAT THIS COVERS, which nothing else does: an endpoint author calling
+# ``ctx.save()`` from their own threads. That is the one axis
+# ``optimal_part_concurrency`` cannot see, because it bounds ONE file's parts and
+# knows nothing about how many files are in flight beside it. Without this,
 # N author threads x 4 parts is unbounded and rebuilds the 100+ PUT retry storm
-# that broke R2 mirrors.
+# that broke R2 mirrors. In-repo callers are sequential, so this is never the
+# binding constraint on any in-repo path.
 #
 # NOT DERIVED. 8 is round. What would change it: one measured author workload
 # whose concurrent saves exceed 2 files.
@@ -178,10 +145,9 @@ __all__ = [
 
 
 # --------------------------------------------------------------------------
-# Control-plane keepalive (th#1795 candidate 3) — see the module docstring for
-# the boundary this must not cross. One session per HUB ORIGIN, not one
-# global: an eviction then drops the poisoned peer's pool and leaves every
-# other peer's connections alone.
+# Control-plane keepalive — see the module docstring for the boundary this must
+# not cross. One session per HUB ORIGIN, not one global: an eviction then drops
+# the poisoned peer's pool and leaves every other peer's connections alone.
 # --------------------------------------------------------------------------
 #: Matches ``_PRESIGNED_PUT_BUDGET``: an endpoint author saving from N threads
 #: can have at most that many control-plane POSTs in flight beside each other.
@@ -324,10 +290,9 @@ def _presigned_put_slot() -> Iterator[None]:
 def _phase(on_phase: Optional[Any], name: str) -> Iterator[None]:
     """Time one leg of the three-leg protocol and hand it to ``on_phase``.
 
-    pgw#1125 / th#1795: ``stage_ms.upload`` is ONE bracket around create ->
-    PUT -> complete, and it is 98.6% of a fast request's finalize tail. The
-    split across the three legs decides which fix is worth building, so it has
-    to be measured rather than budgeted. The callback fires on the way out of
+    ``stage_ms.upload`` is ONE bracket around create -> PUT -> complete, and it
+    is 98.6% of a fast request's finalize tail; the split across the three legs
+    has to be measured rather than budgeted. The callback fires on the way out of
     the leg, failure included — a leg that raised still cost its time.
     """
     started = time.monotonic()
@@ -378,23 +343,22 @@ def presigned_upload_file(
         on_progress: Optional callback(parts_done, total_parts, bytes_uploaded).
         cancel_check: Optional callable that returns True if canceled.
         on_phase: Optional callback(phase_name, seconds) invoked as each leg
-            of the protocol finishes — "create", "put", "complete". th#1795:
-            without it ``stage_ms.upload`` is one opaque number and every
-            attribution inside it is a guess.
+            of the protocol finishes — "create", "put", "complete". Without it
+            ``stage_ms.upload`` is one opaque number.
         complete_extra: Optional extra fields merged into the /complete POST
-            body (after the `parts` array). NOTE (gw#401/th#606): tensorhub's
+            body (after the `parts` array). NOTE: tensorhub's
             per-file /complete is parts-only and does NOT persist lineage
             metadata; step/epoch/quant identity reach the catalog via the
             commit body's `provenance` object (worker-addable stamp fields),
             not through this seam.
     """
-    # Two scopes, deliberately different (see the module docstring): the R2
+    # two scopes, deliberately different (see the module docstring): the R2
     # PUT pool lives exactly as long as this save and then closes, while the
     # hub control-plane session is process-scoped and survives it.
     #
-    # pgw#1206 B — ONE grant-expiry behavior: an expired presign is a
-    # RE-PLAN, never terminal (the policy chunk-CAS has had since pgw#1004).
-    # The media create response carries no expires_at, so the discrimination
+    # ONE grant-expiry behavior: an expired presign is a RE-PLAN, never
+    # terminal. The media create response carries no expires_at, so the
+    # discrimination
     # here is behavioral: on a terminal 403 from the PUT leg, re-create the
     # session ONCE (fresh presigns) and re-drive; a substituted-claim 403
     # recurs on the fresh presigns and stays terminal. A duplicate create is
@@ -450,14 +414,13 @@ def _post_create(
     leg opens an upload session and mints presigns; it writes no media row and
     publishes nothing — the object only exists once ``/complete`` runs, and
     this save completes exactly one of the two sessions. A duplicate is an
-    unfinished session the hub GCs, and the direct-final path (th#1795) makes
+    unfinished session the hub GCs, and the direct-final path makes
     it emptier still: the bytes go straight to the content-addressed key the
     digest names, so two sessions for the same save even name the same key.
     The one real charge is the capability grant's budget, which tensorhub
-    debits AT CREATE (`media_presigned.go` `enforceCapabilityGrantBudget(…, 1,
-    size)`): a duplicate spends 1 of the request's `upload_media` `max_count`,
-    minted at 64 (`scheduler_dispatch.go:3003`) against the 1-4 assets a
-    request actually saves. That is what bounds this to ONE retry.
+    debits AT CREATE: a duplicate spends 1 of the request's `upload_media`
+    `max_count`, minted at 64 against the 1-4 assets a request actually saves.
+    That is what bounds this to ONE retry.
     ``/complete`` is a different question and is handled where it lives —
     ``_complete_upload_session`` already retries it, on the hub contract that
     a finalized session answers the same payload again.
@@ -465,8 +428,7 @@ def _post_create(
     **Why only on a REUSED session.** Process-scoped keepalive is what
     introduced the dead-socket case; a session this call just built has no
     pooled socket to be stale, so a connection error on it is the hub being
-    unreachable. Retrying that would be a behaviour change nobody measured —
-    create had no retry before this, and still has none for that case.
+    unreachable, and create deliberately has no retry for that case.
     """
     try:
         return session.post(url, headers=headers, data=body, timeout=_CREATE_TIMEOUT_S), session
@@ -532,12 +494,10 @@ def _presigned_upload_file_scoped(
     if code in (401, 403):
         raise AuthError(f"file save unauthorized ({code})")
     if code == 404:
-        # te#125/th#1238: a 404 here has two very different causes. The HUB
-        # saying 404 means the route does not exist -> fatal. A PROXY saying
-        # 404 (ngrok with no healthy backend, i.e. the hub is restarting)
-        # means "try again shortly" -> retryable. Treating the second as the
-        # first destroyed a 116-minute H100 producer run at its last step,
-        # because the hub blipped for seconds while this upload was in flight.
+        # A 404 here has two very different causes. The HUB saying 404 means the
+        # route does not exist -> fatal. A PROXY saying 404 (ngrok with no
+        # healthy backend, i.e. the hub is restarting) means "try again
+        # shortly" -> retryable.
         from .http_origin import is_proxy_outage
 
         if is_proxy_outage(resp):
@@ -580,13 +540,12 @@ def _presigned_upload_file_scoped(
             retryable=False,
         )
 
-    # th#1795: a store-enforced single PUT straight into the FINAL
-    # content-addressed key. The hub can only mint this when the create
-    # declared `sha256` — given the digest it knows where the bytes belong, so
-    # there is nothing to assemble and nothing to promote, and it drops five
-    # serialized object-store round trips from a path measured at 1060 ms
-    # server-side per image. The headers carry `x-amz-checksum-sha256` INSIDE
-    # the signature: sent verbatim or the store answers 403.
+    # A store-enforced single PUT straight into the FINAL content-addressed key.
+    # The hub can only mint this when the create declared `sha256` — given the
+    # digest it knows where the bytes belong, so there is nothing to assemble and
+    # nothing to promote, dropping five serialized object-store round trips. The
+    # headers carry `x-amz-checksum-sha256` INSIDE the signature: sent verbatim
+    # or the store answers 403.
     put_url = str(parsed.get("put_url") or "").strip()
     if put_url:
         put_headers = parsed.get("put_headers") or {}
@@ -695,10 +654,9 @@ def _poll_until_finalized(
     once finalized (`sess.Finalized` fast path returns the same success
     payload), so re-POST it instead of treating the race as fatal.
 
-    The wait is bounded by SILENCE, never by a clock (gw#666): a hub that
-    keeps answering 409 is a hub actively assembling the object we just
-    uploaded, and failing the job at that moment throws the whole upload
-    away for nothing."""
+    The wait is bounded by SILENCE, never by a clock: a hub that keeps answering
+    409 is actively assembling the object we just uploaded, and failing the job
+    at that moment throws the whole upload away for nothing."""
     contact = SilenceWindow(_COMPLETE_SILENCE_WINDOW_S)
     while True:
         if cancel_check and cancel_check():
@@ -774,13 +732,10 @@ def _complete_upload_session(
                 retryable=True,
                 cause_type=type(e).__name__,
             )
-            # pgw#1125: `/complete` was ALREADY retried here on a connection
-            # failure, and the hub contract that makes that safe is unchanged
-            # (a finalized session answers the same success payload again —
-            # `_poll_until_finalized`). What keepalive adds is a pool that can
-            # hand the retry the same dead socket, so evict it by identity and
-            # take a fresh session for the next attempt. No new retry, no new
-            # idempotency assumption.
+            # Retrying `/complete` on a connection failure is safe by the hub
+            # contract: a finalized session answers the same success payload
+            # again. Keepalive adds a pool that can hand the retry the same dead
+            # socket, so evict it by identity and take a fresh session.
             if _is_connection_error(e):
                 _evict_control_session(complete_url, session)
                 session, _ = control_plane_session(complete_url)
@@ -832,7 +787,7 @@ def _put_whole_object(
     cancel_check: Optional[Any],
     put_pool: Optional[PutPool],
 ) -> None:
-    """PUT the whole object to one presigned URL (th#1795 direct-to-final).
+    """PUT the whole object to one presigned URL (direct-to-final).
 
     Shares the part transport — the same retry classification, the same
     stale-socket isolation on retry — because a single-shot PUT is a part
@@ -867,18 +822,17 @@ def _upload_parts_to_s3(
 ) -> List[Tuple[int, str]]:
     """Upload file parts to S3 using presigned URLs. Returns list of (part_number, etag).
 
-    Each part PUT is dispatched through ``hubio.transport`` which
-    owns the pool lifecycle (save-scoped keepalive pool for first
-    attempts, fresh pool per retry), exponential-backoff retry
-    classification, and TLS-pool isolation. This function just fans
-    out across parts and aggregates ETags.
+    Each part PUT is dispatched through ``hubio.transport``, which owns the pool
+    lifecycle (save-scoped keepalive pool for first attempts, fresh pool per
+    retry), exponential-backoff retry classification, and TLS-pool isolation.
+    This function just fans out across parts and aggregates ETags.
     """
     etags: List[Tuple[int, str]] = []
     file_size = os.path.getsize(file_path)
 
     def _feed(n: int) -> None:
-        # gw#621: uploaded bytes are visible on the 10s beat while a
-        # seal_publish-class activity is open, and proof-of-life either way.
+        # Uploaded bytes are visible on the beat while a seal_publish-class
+        # activity is open, and proof-of-life either way.
         act = _activity.current()
         if act is not None:
             act.counter("upload:bytes", _progress.UNIT_BYTES).add(n)

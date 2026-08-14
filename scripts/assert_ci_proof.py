@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
-"""pgw#1191: a tag publishes only against a CI run that BUILT the tagged tree.
+"""A tag publishes only against a CI run that BUILT the tagged tree.
 
-pgw#795 closed the "published a tree no CI ever saw" hole (v0.78.0) by matching
-the tag's tree against a green `ci.yml` run. The match key is the run's
-`head_sha` -- and that is where the hole reopened through a different door.
-
-`ci.yml` checks out with `actions/checkout@v4` and no `ref:`. On a
-`pull_request` event GitHub therefore builds `refs/pull/<n>/merge` -- the PR
-head merged with whatever `master` is at that moment -- while still recording
-the PR BRANCH HEAD as the run's `head_sha`. So a green PR run names a commit it
-never built, and whenever master moves under a cut (the normal case: master
-moved four times during the 0.113.0 cut) the certified tree and the executed
-tree differ by exactly the work that landed underneath.
+Matching the tag's tree against a green `ci.yml` run by `head_sha` is not
+enough. `ci.yml` checks out with `actions/checkout@v4` and no `ref:`, so on a
+`pull_request` event GitHub builds `refs/pull/<n>/merge` -- the PR head merged
+with whatever `master` is at that moment -- while still recording the PR BRANCH
+HEAD as the run's `head_sha`. A green PR run therefore names a commit it never
+built, and whenever master moves under a cut (the normal case) the certified
+tree and the executed tree differ by exactly the work that landed underneath.
 
 Only events whose checkout IS the commit they name are admissible as proof:
 `workflow_dispatch` and `push` check out the ref itself. A `pull_request` run

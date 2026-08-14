@@ -1,24 +1,17 @@
-"""pgw#993 — a ``Dim`` carried by a ``repeat=`` container is RESOLVABLE.
+"""A ``Dim`` carried by a ``repeat=`` container is RESOLVABLE.
 
-THE FIELD RECORD. gen-worker 0.93.2, pod `7evvazd2xplzml` (A100-SXM4-80GB),
-\\$0.4655: the z-image AOT mint passed every earlier gate, entered the AOT
-recipe, and then refused in `trace_graph` — exit=2, `deterministic`, four
-identical attempts::
+THE MECHANISM — two SDK features that each work and could not compose.
+`Input.repeat` containers are FLATTENED by `torch.export` into one
+positional user input per element, suffixed `_0`, `_1`, …; `Dim.carried_by`
+names its input by the DECLARED name. A declared-range gate that resolves the
+declared name against the exported program refuses on the miss::
 
-    aot mint refused: entry 'transformer/adapter=true,cfg=true':
     declared-range gate: declared dynamic dim names input 'x', which is not a
     user input of the exported program (inputs: ['cap_feats_0',
     'cap_feats_1', 'lora_a', 'lora_b', 't', 'x_0', 'x_1'])
 
-THE MECHANISM — two SDK features that each work and could not compose.
-`Input.repeat` containers (pgw#853) are FLATTENED by `torch.export` into one
-positional user input per element, suffixed `_0`, `_1`, …; `Dim.carried_by`
-names its input by the DECLARED name. The declared-range gate resolved the
-declared name against the exported program and refused on the miss, which
-made a `Dim` carried by a repeated container unsatisfiable by construction —
-no declaration edit inside the vocabulary could fix it. z-image is the only
-family in the fleet using the list vocabulary, so a rented GPU was the only
-thing that could find it.
+— which makes a `Dim` carried by a repeated container unsatisfiable by
+construction: no declaration edit inside the vocabulary can fix it.
 
 THE INVARIANT. `carried_by` resolves through the SAME flattening
 `dynamic_shapes_spec` mirrors the structure with:

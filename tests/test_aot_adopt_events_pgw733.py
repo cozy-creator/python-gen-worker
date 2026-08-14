@@ -1,22 +1,14 @@
 """pgw#733 (arm half) + pgw#923: every AOT adopt/arm outcome is TYPED and MEASURED.
 
-The verdict lane's blocker (tracker CP5, 2026-07-29): a cross-pod adopt fails
-inside stage/bind/arm with a classified ``AdoptError`` reason, and v0.76.5
-reduced ALL of them to ``logger.warning`` — hub-spawned workers expose no
-stdout, so the reason was structurally invisible. pgw#733 fixed that with a
-free-text ``aot_adopt`` activity event.
+A cross-pod adopt fails inside stage/bind/arm with a classified ``AdoptError``
+reason. Reducing those to ``logger.warning`` makes the reason structurally
+invisible, because hub-spawned workers expose no stdout.
 
-pgw#923 replaced that spelling. The event carried a reason and no numbers,
-while the MEASURED lane it duplicated (``compile_cache_adopt``, fed by
-``ModelEvent{ADOPTED}``) had zero rows on both live stacks because its only
-sender was a hub operation nothing dispatches. So the arm now RETURNS its
-outcome, the arming policy MEASURES it, and one ledger — ``ArmOutcome.
-adoptions`` — carries every attempt with its identity, its classified reason
-and its wall time to the executor, which puts it on the wire the hub already
-stores.
-
-The acceptance is unchanged and strictly stronger: every classified refusal is
-still named, and now it is also timed and bound to the candidate's ref+digest.
+So the arm RETURNS its outcome, the arming policy MEASURES it, and one ledger —
+``ArmOutcome.adoptions`` — carries every attempt with its identity, its
+classified reason and its wall time to the executor, which puts it on the wire
+the hub already stores. Every classified refusal is named, and also timed and
+bound to the candidate's ref+digest.
 """
 
 from __future__ import annotations
@@ -31,7 +23,7 @@ from gen_worker import cell_key as cell_key_mod
 from gen_worker import activity, aot_serve
 
 #: The arm is INDUCED to take this long, and the floor asserted against it is a
-#: share of that induced quantity rather than a bare constant (pgw#795). This is
+#: share of that induced quantity rather than a bare constant. This is
 #: a LOWER bound on work the test itself produced: a slow runner only raises the
 #: measured value, so nothing here can fail because the machine was busy.
 
@@ -106,7 +98,7 @@ class Cfg:
 
 def _entry(**over: Any) -> Dict[str, Any]:
     e: Dict[str, Any] = {
-        # pgw#1176: an entry block NAMES its class — that is what makes a
+        # An entry block NAMES its class — that is what makes a
         # refusal bisectable to the thing that failed.
         "name": ENTRY,
         "target": "unet", "fork": [], "class_dims": [],
@@ -123,7 +115,7 @@ def _entry(**over: Any) -> Dict[str, Any]:
 
 
 def _meta(**over: Any) -> Dict[str, Any]:
-    # pgw#1176: ONE entry per artifact. No `entries=` override, because a
+    # ONE entry per artifact. No `entries=` override, because a
     # multi-entry envelope is a shape production cannot produce.
     entry = over.pop("entry", None) or _entry()
     m: Dict[str, Any] = {
@@ -132,17 +124,17 @@ def _meta(**over: Any) -> Dict[str, Any]:
         "cell_key": KEY, cell_key_mod.ENTRY_BLOCK_KEY: entry,
         "strict_export": True, "lora_bucket": 0,
         "package_constants_in_so": False,
-        # pgw#1097: no weight BYTES in the .so (above) and no weight VALUES in
+        # No weight BYTES in the .so (above) and no weight VALUES in
         # its kernels (here). Both are declared axes; a cell silent on either
         # is refused before a byte moves.
         "constant_folding_fenced": True,
         "source_ref": "", "source_digest": "",
-        # pgw#950: every mint stamps a host-ISA requirement, and a cell that
+        # Every mint stamps a host-ISA requirement, and a cell that
         # stamps none is refused rather than sniffed from the .pt2. Satisfiable
         # anywhere: this host's machine, no ISA level.
         "host_isa": {"machine": platform.machine(), "march": "", "simdlen": 0,
                      "level": ""},
-        # pgw#1059: the identity blocks the four-axis key restates from —
+        # The identity blocks the four-axis key restates from —
         # verify_contract refuses a stamp the artifact cannot restate.
         "env_seal": {"seal_v": 4, "env": {"PYTHONHASHSEED": "0"}},
         "toolchain": {"torch": "t" * 16, "settings_declaration": "d" * 16,
@@ -201,7 +193,7 @@ def test_successful_arm_returns_an_armed_outcome_naming_the_cell(
 def test_key_mismatch_named_on_the_wire(
     tmp_path: Path, events: List[Any], stub_runtime: None,
 ) -> None:
-    # pgw#765: an sm mismatch is the key mismatch; a SKU difference alone is
+    # An sm mismatch is the key mismatch; a SKU difference alone is
     # adopted (same-sm cross-SKU cells are the point of the pgw#691 collapse).
     art = _tar(tmp_path, _meta(sm="sm_80"))
     out = aot_serve.enable(FakePipeline(), Cfg(), artifact=art)

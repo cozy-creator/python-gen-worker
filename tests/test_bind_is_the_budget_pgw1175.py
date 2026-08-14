@@ -1,56 +1,34 @@
-"""pgw#1175 / §4.33: the ADOPT'S device cost is ATTEMPTED, never predicted.
+"""§4.33: the ADOPT'S device cost is ATTEMPTED, never predicted.
 
-WHAT WAS DELETED, AND WHAT STANDS IN ITS PLACE.
+There is no pre-arm headroom prediction; what refuses is the bind itself.
+``aot_serve.arm_entry`` attempts every entry inside ``_bind_headroom``; a real
+CUDA OOM comes back as a typed ``insufficient_adopt_vram`` ``AdoptError`` that
+NAMES the entry, before the first live mutation, so the pod serves eager and
+stays up.
 
-``mint_budget.adopt_headroom`` refused an arm before it ran, on
-``need = 2 * activation`` where ``activation`` was
-``max(measured_high_water, 0.25 * allocated)`` — a quarter of the RESIDENT SET
-whenever no forward had run yet, compared against a ``free_bytes`` those very
-weights are already outside of. Its own docstring conceded the arithmetic
-"CANNOT refuse a card that merely cannot hold 36 runners", i.e. it could not
-refuse the failure it was written for (th#1825), and it COULD refuse cards that
-were fine — stickily, for the life of the process. Two call sites ran it:
-``provision.arm_aot`` (every arm route) and ``fleet_cells.adopt_delegated_mint``
-(the self-mint route). Both are gone.
+Three claims:
 
-What refuses now is the bind itself. ``aot_serve.arm_entry`` attempts every
-entry inside ``_bind_headroom``; a real CUDA OOM comes back as a typed
-``insufficient_adopt_vram`` ``AdoptError`` that NAMES the entry, before the
-first live mutation, so the pod serves eager and stays up.
-
-Three claims, and each is a DIFFERENT thing the deleted gate got wrong:
-
-1. the refusal is CLASSIFIED (the deleted gate's token, on evidence);
-2. it NAMES the entry that did not fit (the gate could not — it never got far
-   enough to know, which is why th#1825 read as "1.9 MB free of 47.7 GB" with
-   nothing to attribute it to);
+1. the refusal is CLASSIFIED, on evidence;
+2. it NAMES the entry that did not fit;
 3. it is NOT STICKY — a second arm of the same family re-attempts and succeeds
-   when the card has room, where ``note_adopt_declined`` made the first refusal
-   final for the process.
+   when the card has room.
 
 And the control: an adopt that fits still arms, so the guard is not a blanket
 refusal wearing a classification.
+
+The load-bearing fence is claim 1: ``ArtifactRunner.bind`` re-labels every
+``RuntimeError`` out of ``load_constants``, and ``torch.OutOfMemoryError`` is
+one. If the bind-time OOM is allowed to surface as ``constants_injection_failed``
+a FULL CARD condemns a CORRECT cell and the pod records the cell's identity as
+the culprit.
 
 The vehicle is :mod:`harness.adopt_rig` — the real boot-adopt chain onto a real
 packed cell. The OOM is forced by BREAKING A REAL INPUT (the packaged entry's
 constant load really raises ``torch.OutOfMemoryError``, which is the device
 work an adopt does), never by supplying a fact.
 
-RED ON ``origin/master`` — the assertions below grafted onto master's UNMODIFIED
-``src/`` (only this file and the harness's ``bind_oom_on`` input were copied
-across), 5 of 7 fail:
-
-* rows 1, 2, 4 and 6 — master turns a bind-time CUDA OOM into
-  ``constants_injection_failed``, a CONTRACT verdict: ``ArtifactRunner.bind``
-  re-labels every ``RuntimeError`` out of ``load_constants`` and
-  ``torch.OutOfMemoryError`` is one. So on master a FULL CARD condemns a
-  CORRECT cell, and the pod records the cell's identity as the culprit;
-* row 6 also proves ``mint_budget`` is still importable there.
-
-Row 3 (not-sticky) PASSES on master, and that is stated rather than hidden:
-``adopt_headroom`` never declines on a cardless box, so ``note_adopt_declined``
-never fires off-pod and the stickiness cannot be exhibited here. It is a
-REGRESSION FENCE on the deletion, not a re-found bug.
+Row 3 (not-sticky) cannot be exhibited on a cardless box; it is a regression
+fence, not a re-found bug.
 
 Run: uv run pytest tests/test_bind_is_the_budget_pgw1175.py -q
 """

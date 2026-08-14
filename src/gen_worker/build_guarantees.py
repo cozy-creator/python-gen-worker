@@ -4,27 +4,13 @@ Tensorhub builds an endpoint image one of two ways. Dockerfile-LESS families get
 a Dockerfile the hub SYNTHESIZES, and every platform invariant is established
 there by writing a layer. A family that ships its own Dockerfile gets none of
 those layers: its file is author-owned content and the platform never injects
-into it (pgw#1017's settled contract). So on that path the platform can only
-VERIFY — and each invariant it forgets to verify is a guarantee that quietly
-holds on one path and not the other.
+into it. So on that path the platform can only VERIFY — and each invariant it
+forgets to verify is a guarantee that quietly holds on one path and not the
+other.
 
-That gap produced four filed instances in this repo, all the same shape:
-
-* pgw#1016 — the docs taught a BuildKit cache mount the publish validator
-  refuses, because no first-party family exercised the doc.
-* pgw#1017 — the AOT host toolchain (``g++``) was installed by the synthesized
-  file only, so a custom-Dockerfile family could never AOT-mint.
-* pgw#1017 GAP A — the composed ``/usr/local/cuda`` root: worse than the first
-  two, because nothing refused ANYWHERE. The pod booted, loaded, exported — the
-  expensive part — and died at ``CUDA_HOME``.
-* pgw#1068 — a family shipping its own Dockerfile missed the ``cuda_root`` step
-  live, and was fixed one-off. The fleet was then swept BY HAND, eight
-  Dockerfiles at a time.
-
-Four one-off patches and a manual sweep are not a mechanism. This module is the
-mechanism: ONE enumerated registry of the steps a hand-written Dockerfile owes,
-each row naming where the platform itself refuses if the author skips it, and a
-checker any repo can run over its own endpoints::
+This module is the mechanism: ONE enumerated registry of the steps a
+hand-written Dockerfile owes, each row naming where the platform itself refuses
+if the author skips it, and a checker any repo can run over its own endpoints::
 
     python -m gen_worker.build_guarantees path/to/endpoint [more...]
 
@@ -33,13 +19,12 @@ the same division as ``python -m gen_worker.cuda_root``, and for the same
 reason: three spellings of one platform requirement drift the moment a base
 image changes.
 
-**Scope, stated rather than implied.** This is a STATIC pre-flight over a source
-tree. It is not the authority — ``aot_preconditions`` (in-image, at build) and
-tensorhub's post-build image inspection are, and every row here names which one.
-Its value is where it runs: in CI, on a diff, before a build exists, for $0.00.
-The audit's own standing instruction is what it encodes — *enumerate what the
-synthesized file DOES, line by line, not what it INSTALLS* — which is why two of
-these five rows are not packages at all.
+SCOPE: a STATIC pre-flight over a source tree, not the authority —
+``aot_preconditions`` (in-image, at build) and tensorhub's post-build image
+inspection are, and every row here names which one. Its value is where it runs:
+in CI, on a diff, before a build exists. The registry enumerates what the
+synthesized file DOES, line by line, not what it INSTALLS — which is why some
+rows are not packages at all.
 """
 
 from __future__ import annotations
@@ -62,11 +47,10 @@ DECLARES_AOT_EXPORT = "aot_export"
 #: unwired is the very defect this registry exists to stop.
 PRECONDITION = "precondition:"
 
-#: `compile=Compile(...)` on an `@endpoint` is the AOT declaration, and matching
-#: it is exactly how pgw#1068's fleet sweep was done by hand. Conservative by
-#: construction: a family that hides the object behind an alias reads as no-AOT
-#: here and is still caught in-image by `aot_preconditions`, which asks the
-#: registered declaration rather than the source text.
+#: `compile=Compile(...)` on an `@endpoint` is the AOT declaration. Conservative
+#: by construction: a family that hides the object behind an alias reads as
+#: no-AOT here and is still caught in-image by `aot_preconditions`, which asks
+#: the registered declaration rather than the source text.
 RE_AOT_DECLARATION = re.compile(r"compile\s*=\s*Compile\s*\(")
 
 # tensorhub/internal/builder/validation.go: reBuildKitCacheMount
@@ -205,8 +189,7 @@ def _instructions(text: str) -> str:
     """The Dockerfile with comment lines removed.
 
     A `require` row asks what the file DOES. A comment explaining a step — or
-    explaining why a step is missing, which is how pgw#1017's example read for
-    two days — is not the step.
+    explaining why a step is missing — is not the step.
     """
     return "\n".join(
         line for line in text.splitlines() if not line.lstrip().startswith("#")

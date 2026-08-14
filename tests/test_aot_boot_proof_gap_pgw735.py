@@ -1,30 +1,23 @@
-"""Pure-AOT boot arms run the boot warmup proof (pgw#722 finding 2 — the
-#735 boot-proof gap).
+"""Pure-AOT boot arms run the boot warmup proof.
 
-The shipped #735 executor proof scored EXPORTED arms inside a loop gated on
-``proves_inductor`` — it ran only when SOME dynamo selection coexisted. A
-worker whose ONLY arm is an adopted AOT cell (the prod flip shape: F1
-adopts, the delivered dynamo artifact is skipped) skipped the boot proof
-entirely and stayed armed UNPROVEN: an artifact that never executed — or
-executed and revoked — kept advertising itself. Same fail-closed rule as
-the dynamo lane, through the REAL executor setup path (fakes only at the
-download + arming boundaries):
+An executor proof that scores EXPORTED arms inside a loop gated on
+``proves_inductor`` runs only when SOME dynamo selection coexists. A worker
+whose ONLY arm is an adopted AOT cell then skips the boot proof entirely and
+stays armed UNPROVEN. Same fail-closed rule as the dynamo lane, through the
+REAL executor setup path (fakes only at the download + arming boundaries):
 
   1. an exercised pure-AOT arm is PROVEN — stays armed, cell recorded
      proven in-process (the pgw#637 registry);
   2. an unexercised pure-AOT arm KEEPS SERVING and banks no proof;
   3. the same on the MANDATORY (w8a8) lane does not kill the boot.
 
-**Rows 2 and 3 were the opposite assertion until pgw#1141** (Paul's ruling,
-2026-08-11): an unexercised arm was unwrapped, quarantined and dropped. That
-barrier is deleted — an ADOPTED cell arms before setup, so nothing has
-dispatched through it by construction, and two real pods threw away artifacts
-they had just verified at `cos=1.00000` because of it. The fail-closed property
-this file was written to defend now lives where it belongs: the pgw#868
-numerics gate refuses a cell that does not reproduce eager, and a
-cell-attributable failure at SERVE time revokes the arm in-request. What an
-absent measurement still decides is the PUBLISH — which is what rows 2 and 3
-now pin.
+An unexercised arm must NOT be unwrapped, quarantined or dropped: an ADOPTED
+cell arms before setup, so nothing has dispatched through it by construction,
+and pods threw away artifacts they had just verified at `cos=1.00000`. The
+fail-closed property lives elsewhere — the numerics gate refuses a cell that
+does not reproduce eager, and a cell-attributable failure at SERVE time revokes
+the arm in-request. What an absent measurement still decides is the PUBLISH,
+which is what rows 2 and 3 pin.
 """
 
 from __future__ import annotations
@@ -98,7 +91,7 @@ class AotFamily:
         # the rig says so — the unexercised direction models an armed .pt2
         # the warm plan never actually invoked.
         if RIG.get("exercise"):
-            # pgw#1176: `execution_count` sums the RUNNERS' own calls, so
+            # `execution_count` sums the RUNNERS' own calls, so
             # "the artifact ran" means an artifact's counter moved — not a
             # state field production no longer reads. Bumping the old field
             # would model an exercise that never happened.
@@ -118,7 +111,7 @@ def _fake_arm(key: str, ref: str):
     def _enable(pipe: Any, cfg: Any, cache_dir: Any, artifact: Any,
                 publisher: Any = None) -> "fleet_cells.ArmOutcome":
         unet = pipe.unet
-        # pgw#1176: production wraps a REGISTRY; `is_armed` reads it.
+        # production wraps a REGISTRY; `is_armed` reads it.
         _runner = aot_serve.ArtifactRunner(
             package=None,
             contract=aot_serve.ArtifactContract(inputs=(), symbols={}),
@@ -127,7 +120,7 @@ def _fake_arm(key: str, ref: str):
         _dispatch.add("unet/main", _runner)
         state = {"successful_calls": 0, "failed": False,
                  "original": unet.forward, "runner": _dispatch}
-        # pgw#1176: the two markers are DIFFERENT SHAPES in production and
+        # The two markers are DIFFERENT SHAPES in production and
         # this rig now models that honestly. `wrap_module` writes a bare
         # `state` on the MODULE; `arm_entry` writes `targets` (+ `entries`) on
         # the PIPELINE. Sharing one dict between them was what kept a
@@ -141,7 +134,7 @@ def _fake_arm(key: str, ref: str):
             "entries": {"unet/main": {"key": ""}},
         })
         marker = getattr(pipe, aot_serve._MARKER_ATTR)
-        # pgw#1152: an `aot_serve.note_aot_key(key)` stood here — the ONE line no
+        # An `aot_serve.note_aot_key(key)` stood here — the ONE line no
         # production arm route ever called, which is why these rows were green
         # while the pod served eager (pgw#1141b). It is DELETED, not moved: the
         # marker set above is what `arm_entry` publishes, so
@@ -254,7 +247,7 @@ def test_mandatory_execution_lane_without_a_dispatch_does_not_kill_the_boot(
     _key, ref = _rig(monkeypatch, seed="c", exercise=False,
                      weight_lane="w8a8-lora64")
     ex = _executor(tmp_path, monkeypatch)
-    _boot(ex)  # pgw#672: never a load failure
+    _boot(ex)  # never a load failure
     pipe = RIG["pipe"]
     assert aot_serve.is_armed(pipe)
     assert not compile_cache.cell_proven_in_process(ref)

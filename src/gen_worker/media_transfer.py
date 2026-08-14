@@ -1,7 +1,7 @@
-"""GPU->host frame staging for the video encode path (gw#549).
+"""GPU->host frame staging for the video encode path.
 
 The finalize wall and the D2H stall inside the compute wall are CPU/PCIe
-bound (ie#484: identical GPU step-ms, 4-10x spread in decode/encode tails).
+bound (measured: identical GPU step-ms, 4-10x spread in decode/encode tails).
 Three levers live here, all behind the stable ``write_video`` surface:
 
 - **uint8 on-GPU before D2H**: a float32 frame chunk crossing PCIe costs 4x
@@ -30,9 +30,8 @@ logger = logging.getLogger(__name__)
 #: Staging buffers above this stay pageable. THE bound on how much pinned host
 #: memory this worker may hold: pinned pages are non-swappable and shared with
 #: every other process on the pod, so an unbounded pin is a host-RAM leak the
-#: OOM killer resolves. Owned here (pgw#973 §4.24) and imported by
-#: `models.w8a8_lora`, which stages LoRA adapters under the same rule — the two
-#: used to declare `512 << 20` separately and could drift apart silently.
+#: OOM killer resolves. Owned here and imported by `models.w8a8_lora`, which
+#: stages LoRA adapters under the same rule, so the two cannot drift.
 PIN_MAX_BYTES = 512 << 20
 
 

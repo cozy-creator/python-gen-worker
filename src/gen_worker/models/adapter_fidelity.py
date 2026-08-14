@@ -1,7 +1,7 @@
 """Fail-closed adapter-fidelity gate: does the delta SURVIVE the target grid?
 
-pgw#794 §3 measured what nobody was measuring: an adapter fused into fp8-E4M3
-weights does not merely vanish, it CORRUPTS. fp8-E4M3's half-ulp is 3.1-6.25%
+An adapter fused into fp8-E4M3 weights does not merely vanish, it CORRUPTS.
+fp8-E4M3's half-ulp is 3.1-6.25%
 of each weight (3 mantissa bits) against bf16's 0.20-0.39% — 16x coarser — so
 ``Q(W + BA) == Q(W)`` for every element whose own delta is below half an ulp,
 while the few elements that happen to sit near a cell boundary jump a FULL ulp.
@@ -9,15 +9,11 @@ The qwen Lightning row is the shape of the hazard: surviving-delta cosine
 **0.074** with **15x the norm** of the true delta, i.e. the served weights carry
 a perturbation larger than the adapter and 99.7% orthogonal to it.
 
-The guards that existed could not see this:
-
-* ``utils.lora._reject_zero_delta`` (th#1036) catches an EMPTY adapter — no
-  down/up pair with both halves nonzero. An INERT adapter is fully populated;
-  it dies in the cast, not in the file.
-* te#86's produce-time detector (``conversion/fuse_checks.py``) is advisory by
-  construction, speaks only above a 50%-of-tensors threshold, and diffs in the
-  SOURCE dtype — the fp8 cast is a separate later step, so the 16x-larger loss
-  is measured by nothing.
+Neither existing guard sees this: ``utils.lora._reject_zero_delta`` catches an
+EMPTY adapter (no down/up pair with both halves nonzero), while an INERT adapter
+is fully populated and dies in the cast; and the produce-time
+``conversion/fuse_checks.py`` is advisory, speaks only above a 50%-of-tensors
+threshold, and diffs in the SOURCE dtype, before the separate fp8 cast.
 
 So gen-worker owns the SERVE-side gate, and this module is it. The rule is one
 sentence: **evaluate the delta against the grid it will actually serve
@@ -33,7 +29,7 @@ load-bearing:
 2. **An adapter is refused only on the path that destroys it.** The resident
    branch keeps A and B as separate bf16 tensors and never touches the base
    grid, so the same qwen/sdxl adapters that fuse at cosine 0.07-0.35 ride the
-   branch at cosine 1.000000 (measured, this lane) — and even a hypothetical
+   branch at cosine 1.000000 — and even a hypothetical
    fp8 BRANCH measures 0.9998, because rounding the two low-rank FACTORS is
    nothing like rounding their sum onto an occupied grid. Over-refusal is its
    own failure and the evaluator's shape prevents it.
@@ -42,21 +38,18 @@ Coverage: every path in this worker where an adapter reaches weights or
 arithmetic.
 
 * resident-branch buffer copy (rank buckets) — gated in ``w8a8_lora._stage_for``,
-  which is the single seam BOTH the plain buffer path and the lifted-binding
-  path funnel through (``apply_branch_adapters`` / ``apply_branch_adapter_set``
-  / ``LiftedLoraBinding.swap`` / ``swap_lifted_lane_set``). It is the pure pass
+  the single seam BOTH the plain buffer path and the lifted-binding path funnel
+  through (``apply_branch_adapters`` / ``apply_branch_adapter_set`` /
+  ``LiftedLoraBinding.swap`` / ``swap_lifted_lane_set``). It is the pure pass
   that runs before any module is touched, so a refusal leaves the pipeline
   exactly as it was.
 * fuse — :func:`gate_fuse` is the seam any fuse must call. gen-worker ships no
-  fuse today (pgw#794 §8's platform ruling: never fuse into a denoiser that
-  serves quantized), so this is the gate that makes the ruling enforceable
-  rather than remembered, and the entry point for the produce-time fuse in
-  ``training-endpoints`` (te#86) to adopt.
-* peft — the remaining adapter surface (text-encoder halves, and the plain-lane
-  whole-adapter fallback) stores A/B as separate module parameters exactly like
-  the branch, and is already refused outright against a cast text encoder
-  (``utils.lora._reject_te_keys_on_cast_te``, ie#374). It never lands on a
-  quantized grid, so it carries no instance of this hazard class.
+  fuse today (the platform ruling: never fuse into a denoiser that serves
+  quantized), so this gate makes the ruling enforceable rather than remembered.
+* peft — text-encoder halves and the plain-lane whole-adapter fallback store
+  A/B as separate module parameters exactly like the branch, and are already
+  refused outright against a cast text encoder
+  (``utils.lora._reject_te_keys_on_cast_te``). Never lands on a quantized grid.
 """
 
 from __future__ import annotations
@@ -74,14 +67,14 @@ from ..api.errors import AdapterFidelityRefused
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Policy (pgw#794). Named and derived, never a buried constant.
+# Policy. Named and derived, never a buried constant.
 # ---------------------------------------------------------------------------
 
 #: The gated quantity is the **norm-weighted whole-adapter cosine** between the
 #: delta that SURVIVES the target grid and the delta the adapter actually
 #: encodes. 1.0 = the served arithmetic is the adapter; 0.0 = what survived is
-#: orthogonal noise. Cosine, not retention: pgw#794's qwen row has retention
-#: 15.3 *because* it is destroyed, so a norm ratio cannot tell "intact" from
+#: orthogonal noise. Cosine, not retention: the qwen row has retention 15.3
+#: *because* it is destroyed, so a norm ratio cannot tell "intact" from
 #: "replaced by something bigger and unrelated".
 
 #: Hard floor — below this the attach/fuse is REFUSED, typed.
@@ -89,16 +82,14 @@ logger = logging.getLogger(__name__)
 #: Derived from the measured empty band, not chosen:
 #:
 #:   worst configuration we ACCEPT     0.900  sdxl lightning-4step, bf16 fuse,
-#:                                            whole adapter, 788 real modules
-#:                                            (this lane; pgw#794 §3 reports
-#:                                            0.918 on its 53-module sample).
+#:                                            whole adapter, 788 real modules.
 #:                                            This is the configuration that
 #:                                            circulates publicly as a merged
 #:                                            fp16 checkpoint and renders.
 #:   best configuration we REFUSE      0.689  z-image fun-distill-8step, fp8
 #:                                            fuse — the STRONGEST adapter we
 #:                                            ship (rel |D|/|W| = 2.5%) and
-#:                                            still half destroyed (pgw#794 §3).
+#:                                            still half destroyed.
 #:
 #: Nothing was measured between them. 0.80 is the geometric midpoint of that
 #: band (sqrt(0.900 * 0.689) = 0.787) rounded to two figures: 1.13x of headroom
@@ -119,9 +110,9 @@ FIDELITY_FLOOR = 0.80
 #: honest verdict for them.
 FIDELITY_WARN = 0.99
 
-#: Typed hub-visible event phases for :data:`~gen_worker.activity.KIND_LORA_FIDELITY`
-#: (pgw#760 doctrine: a decision that changes what this worker serves rides an
-#: event, never a log line).
+#: Typed hub-visible event phases for :data:`~gen_worker.activity.KIND_LORA_FIDELITY`.
+#: A decision that changes what this worker serves rides an event, never a log
+#: line.
 PHASE_REFUSED = numerics_ladder.PHASE_REFUSED
 PHASE_DEGRADED = numerics_ladder.PHASE_DEGRADED
 
@@ -129,7 +120,7 @@ VERDICT_HEALTHY = numerics_ladder.VERDICT_HEALTHY
 VERDICT_DEGRADED = numerics_ladder.VERDICT_DEGRADED
 VERDICT_DESTROYED = numerics_ladder.VERDICT_DESTROYED
 
-#: pgw#817: this population's calibration of the SHARED ladder
+#: This population's calibration of the SHARED ladder
 #: (:mod:`gen_worker.numerics_ladder`). ``retention_floor=0`` deliberately —
 #: a destroyed adapter's retention is 15.3, so here the norm ratio is evidence
 #: and never a bound. The output-comparison population gates it; this one
@@ -180,24 +171,23 @@ def _dtype_name(dtype: Any) -> str:
 class UnknownComputeDtypeError(RuntimeError):
     """A branch-capable module cannot state the dtype its arithmetic lands in.
 
-    pgw#1019's ruling on pgw#1015. The branch-capable universe is CLOSED —
-    ``w8a8_lora.branch_modules`` admits exactly ``_Fp8ScaledLinear`` and
-    modules whose ``fp8_storage.structural_base`` is ``nn.Linear``/
-    ``nn.Conv2d`` — and every member of it can state a compute dtype:
+    The branch-capable universe is CLOSED — ``w8a8_lora.branch_modules``
+    admits exactly ``_Fp8ScaledLinear`` and modules whose
+    ``fp8_storage.structural_base`` is ``nn.Linear``/``nn.Conv2d`` — and every
+    member of it can state a compute dtype:
 
     * a plain ``nn.Linear``/``nn.Conv2d`` computes in its weight's dtype, by
       definition;
-    * a pgw#727 fp8-storage leaf records ``compute_dtype`` at restructure
+    * an fp8-storage leaf records ``compute_dtype`` at restructure
       (``fp8_storage.restructure_fp8_storage``), because its own ``forward``
       upcasts to it;
-    * ``_Fp8ScaledLinear`` records it in ``__init__`` (pgw#1015).
+    * ``_Fp8ScaledLinear`` records it in ``__init__``.
 
     So there is no dtype-less caller left, and a default here can only be a
-    module that FORGOT to record the fact — which is exactly what pgw#1015
-    was: a bias-free fp8 layer silently taking bf16 while its bias-bearing
-    siblings in the same module set took float32, and the first
-    branch-bearing forward dying on ``expected mat1 and mat2 to have the same
-    dtype``. "Nobody could tell" is not "bf16".
+    module that FORGOT to record the fact: a bias-free fp8 layer silently
+    taking bf16 while its bias-bearing siblings in the same module set take
+    float32, and the first branch-bearing forward dying on ``expected mat1 and
+    mat2 to have the same dtype``. "Nobody could tell" is not "bf16".
     """
 
 
@@ -207,10 +197,10 @@ def branch_compute_dtype(mod: Any) -> Any:
     THE definition — ``w8a8_lora.alloc_branch_buffers`` calls it, so the gate
     and the allocator can never disagree about what grid the branch is. Branch
     tensors compute in the module's COMPUTE dtype, never its storage dtype: on
-    the fp8-storage lane weight AND bias rest in fp8, and a pgw#727 leaf
+    the fp8-storage lane weight AND bias rest in fp8, and an fp8-storage leaf
     declares ``compute_dtype`` for exactly this question.
 
-    REFUSES rather than defaulting (pgw#1019) — see
+    REFUSES rather than defaulting — see
     :class:`UnknownComputeDtypeError` for why every legitimate caller can
     answer.
     """
@@ -265,8 +255,8 @@ def _has_weight_scale(mod: Any) -> bool:
 
 def grid_of_module(mod: Any, *, path: str) -> TargetGrid:
     """The REAL grid this module's arithmetic lands on — read off the module,
-    never supplied by the caller. That is the whole correction to te#86's
-    detector, which diffed in the source dtype and so could not see the cast.
+    never supplied by the caller. A detector that diffs in the SOURCE dtype
+    cannot see the cast.
     """
     import torch
 
@@ -328,17 +318,17 @@ class ModuleSurvival:
 
     module: str
     elements: int
-    #: ``|D| / |W|`` — the ratio that PREDICTS every row in pgw#794 §3, read
-    #: against the grid's half-ulp. 0.0 on the branch path (no base involved).
+    #: ``|D| / |W|`` — the predictive ratio, read against the grid's half-ulp.
+    #: 0.0 on the branch path (no base involved).
     rel_delta: float
     #: ``|D'| / |D|``. Above 1.0 means the grid substituted something BIGGER
     #: than the adapter — see the qwen row (15.3).
     retention: float
     #: ``cos(D', D)`` — the honest fidelity number.
     cosine: float
-    #: Fraction of elements the write actually moved. On a fuse this is
-    #: pgw#794's ``above-half-ulp``: the elements whose own delta cleared half
-    #: an ulp of their own weight. 0.0 on the branch path.
+    #: Fraction of elements the write actually moved. On a fuse this is the
+    #: above-half-ulp set: the elements whose own delta cleared half an ulp of
+    #: their own weight. 0.0 on the branch path.
     moved_fraction: float
 
     def __str__(self) -> str:
@@ -364,7 +354,7 @@ class AdapterSurvival:
 
     @property
     def verdict(self) -> str:
-        # pgw#817: ONE ladder, calibrated per population. The rungs and the
+        # ONE ladder, calibrated per population. The rungs and the
         # ordering live in `numerics_ladder`; only the numbers are ours.
         return ADAPTER_THRESHOLDS.verdict(self.cosine, self.retention)
 
@@ -393,7 +383,7 @@ class AdapterSurvival:
 
 def _as_2d(t: Any) -> Any:
     """A [r, ...] or [out, r(, 1, 1)] adapter half as a 2-D matrix. Conv pairs
-    (gw#627) fold the kernel into the input axis — the delta's element set is
+ fold the kernel into the input axis — the delta's element set is
     unchanged, and the Gram identities below only need consistent shapes."""
     return t.reshape(t.shape[0], -1) if t.dim() != 2 else t
 
@@ -504,9 +494,8 @@ def evaluate_fuse(
     """Survival of a mapped adapter FUSED into the base weights, per element.
 
     For each module: ``W' = Q(W + D)`` against ``W0 = Q(W)`` on the module's
-    real grid, exactly pgw#794 §3's protocol. ``retention``, ``cosine`` and the
-    moved-element fraction are the three numbers that lane measured, so a
-    refusal here is directly comparable to its table.
+    real grid. ``retention``, ``cosine`` and the moved-element fraction are the
+    three measured numbers a refusal reports.
 
     Unlike the branch evaluator this materializes ``D`` — a fuse materializes
     ``W + D`` anyway, so there is nothing cheaper to be had and nothing to
@@ -644,9 +633,9 @@ def gate_fuse(
 ) -> Optional[AdapterSurvival]:
     """Gate one mapped adapter against a FUSE into ``modules``' weights.
 
-    The seam every fuse must call BEFORE writing a single weight. pgw#794 §8's
-    platform ruling is "never fuse an adapter into a denoiser that serves
-    quantized"; this is the enforcement, and it is per-adapter evidence rather
+    The seam every fuse must call BEFORE writing a single weight. The platform
+    ruling is "never fuse an adapter into a denoiser that serves quantized";
+    this is the enforcement, and it is per-adapter evidence rather
     than a blanket dtype ban, so a genuinely fuse-safe adapter (rel |D|/|W|
     well above the grid's half-ulp) is not refused for its neighbours' sake.
     """

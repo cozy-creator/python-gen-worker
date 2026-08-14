@@ -137,7 +137,7 @@ def function_entries(
             entry["fit"] = fit
             if reason:
                 entry["fit_reason"] = reason
-            # th#683 P3 honest-guidance: how it will actually run on this card +
+            # How it will actually run on this card +
             # the realistic latency trade + the ideal hardware.
             plan = plan_serve(resources, caps, free_gb, binding=primary)
             entry["serveable"] = plan.serveable

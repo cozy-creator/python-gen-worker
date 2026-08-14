@@ -1,19 +1,12 @@
-"""pgw#678: a `components.*` deploy override must not make the deploy-bound
-LoRA unattachable — the lane's RESIDENCY handle is not the PIPELINE.
+"""A `components.*` deploy override must not make the deploy-bound LoRA
+unattachable — the lane's RESIDENCY handle is not the PIPELINE.
 
-The live A/B was exact: same release `b266454e92a9000c4c0c13f4`, same
-gen-worker 0.67.1 image, same `wai-illustrious#fp8-w8a8` base, same
-`sdxl-lightning-4step-lora` deploy adapter, same L4 —
+Without the fix, a pipeline slot with one overridden component refuses every
+request with "model slot does not support LoRA adapters" while the same release
+with no override attaches normally. It is an OBJECT IDENTITY defect in the
+executor, not an adapter-code defect:
 
-  | deploy binding                          | generate-turbo picks |
-  |-----------------------------------------|----------------------|
-  | `pipeline.components.vae = fp16-fix vae` | **0/6**, `compute_ms=7`, "model slot does not support LoRA adapters" |
-  | no components at all                     | 4/4, 1.9 s |
-
-`utils/lora.py` is byte-identical across 0.66.0 and 0.67.1, so the defect was
-never in the adapter code. It is an OBJECT IDENTITY defect in the executor:
-
-  * sharing is automatic by content address (pgw#647), so every component of a
+  * sharing is automatic by content address, so every component of a
     Slot-declared pipeline slot enters the share plan;
   * an OVERRIDDEN component is popped OUT of that plan (its bytes differ from
     the base's), so the lane acquires a non-empty EXCLUSIVE module set;
@@ -27,10 +20,9 @@ never in the adapter code. It is an OBJECT IDENTITY defect in the executor:
     on EVERY request, on the eager lane AND after `compiled_armed=true`.
 
 With no override, `exclusive` is empty and `_register_lane` returns the pipe
-itself — which is exactly why the same release was 4/4 without the override
-and 0/6 with it. The fix keeps BOTH facts and stops conflating them: the
-record owns the pipeline identity (`slot_pipelines`), residency owns the
-movement handle.
+itself, which is why the defect is invisible until a component is overridden.
+The fix keeps BOTH facts and stops conflating them: the record owns the
+pipeline identity (`slot_pipelines`), residency owns the movement handle.
 
 Real path throughout: a real diffusers pipeline carrying a real (tiny)
 transformer, the real `Residency`, the real `_register_lane` /
@@ -157,7 +149,7 @@ def _key(component: str, digest: str) -> Any:
 
 def _register(pipe: Any, *, override: bool) -> _ExecStub:
     """Book the lane exactly as setup injection does. `override=True` is the
-    th#980 shape: the overridden component is popped out of the share plan, so
+    the overridden component is popped out of the share plan, so
     it becomes the lane's EXCLUSIVE module."""
     ex = _ExecStub()
     shared = {"transformer": _key("transformer", "d-transformer")}

@@ -1,18 +1,15 @@
-"""pgw#788: a worker with NO torch boots, and seals the absence as a fact.
+"""A worker with NO torch boots, and seals the absence as a fact.
 
-This is the test that did not exist. `env_seal.establish()` is called by
-`entrypoint.py` on every boot regardless of `accelerator`, and from 0.70.3
-onward it bare-imported torch three times over
-(`establish_config` -> `host_isa.impose()` -> `guard_closure.establish_posture()`),
-so every torchless CPU endpoint died at `phase=env_seal` before advertising a
-single function — and `task e2e`'s marco-polo journeys with them. No CPU-only
-boot smoke existed to catch it.
+`env_seal.establish()` is called by `entrypoint.py` on every boot regardless of
+`accelerator`, and a bare torch import anywhere under it (`establish_config` ->
+`host_isa.impose()` -> `guard_closure.establish_posture()`) kills every
+torchless CPU endpoint at `phase=env_seal`, before it advertises a single
+function.
 
 torch is import-BLOCKED with a `sys.meta_path` finder rather than uninstalled:
 same failure at the same call sites, no second venv. The finder is installed and
 removed per test, and `torch_capability` deliberately does not memoize its
-verdict, so nothing leaks into the rest of the session (the th#1307 fixture leak
-is the cautionary tale).
+verdict, so nothing leaks into the rest of the session.
 
 The other half of the guarantee is asserted here too: with torch PRESENT the
 seal must be byte-identical to the pre-fix seal, because the seal is a cell-key
@@ -65,7 +62,7 @@ def test_torchless_worker_completes_the_boot_seal(torchless, monkeypatch):
     seal = env_seal.establish()
 
     assert seal["config"]["torch"] == torch_capability.ABSENT
-    # pgw#1049: torchless declares NO codegen clamp — an empty declared
+    # torchless declares NO codegen clamp — an empty declared
     # inductor block, same as a non-x86 host (absence rides `config`).
     assert seal["inductor"] == {}
     assert seal["posture"] == {"torch": torch_capability.ABSENT}

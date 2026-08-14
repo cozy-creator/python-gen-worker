@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Roofline + shape sweep for the fused activation quantizer (pgw#863).
+"""Roofline + shape sweep for the fused activation quantizer.
 
 The quantizer is pure memory traffic: read [M, K] bf16, write [M, K/2] nibbles
 plus [M, K/16] e4m3 scales. So it has an honest ceiling — bytes / HBM

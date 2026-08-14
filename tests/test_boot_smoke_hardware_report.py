@@ -36,13 +36,13 @@ def test_probe_failure_boot_dials_hub_sends_report_and_exits_cleanly(tmp_path: P
         assert_no_unhandled_crash(result, phases)
         assert result.returncode == 1
 
-        # pgw#783/pgw#826: the probe fails in the compute child, which holds no
+        # The probe fails in the compute child, which holds no
         # credential — it hands the typed report to the control parent, which
         # relays it to the hub and exits 1.
         report_phase = next(p for p in phases if p.get("phase") == "cuda_probe_boot_fatal")
         assert report_phase.get("relayed") is True, report_phase
 
-        # pgw#795: no explicit bound — this message MUST arrive, and the boot
+        # No explicit bound — this message MUST arrive, and the boot
         # that produces it was measured taking 25.11s on a loaded runner while
         # 5.0 was the number here.
         servicer.wait_for_message()
@@ -77,7 +77,7 @@ def test_probe_failure_hub_unreachable_still_exits_without_hanging(tmp_path: Pat
     assert_no_unhandled_crash(result, phases)
     assert result.returncode == 1
 
-    # pgw#783/pgw#826: the child's verdict reaches the parent, whose relay to
+    # The child's verdict reaches the parent, whose relay to
     # the unreachable hub fails — and the parent still exits 1, no respawn.
     report_phase = next(p for p in phases if p.get("phase") == "cuda_probe_boot_fatal")
     assert report_phase.get("relayed") is True, report_phase
@@ -106,7 +106,7 @@ def test_probe_failure_silent_hub_exits_on_the_report_budget_not_a_hang(
     ``run_entrypoint``'s ``timeout`` is the hang bound: if the budget ever stops
     bounding the dial, this fails as a timeout rather than passing quietly.
 
-    pgw#796: this property used to be covered by accident — every
+    this property used to be covered by accident — every
     ``run_entrypoint`` caller dialled the blackhole and paid ~7s for it, three
     times in ``test_p7_boot_smoke`` alone, where the subject is the phase
     contract and the hub is irrelevant. It is asserted once, here, on purpose.
@@ -122,7 +122,7 @@ def test_probe_failure_silent_hub_exits_on_the_report_budget_not_a_hang(
     assert_no_unhandled_crash(result, phases)
     assert result.returncode == 1
 
-    # pgw#783/pgw#826: the parent's relay to the blackholed hub is what the
+    # The parent's relay to the blackholed hub is what the
     # report budget must bound; it fails undelivered and the pod still ends.
     report_phase = next(p for p in phases if p.get("phase") == "cuda_probe_boot_fatal")
     assert report_phase.get("relayed") is True, report_phase
