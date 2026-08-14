@@ -73,24 +73,20 @@ class FakeTensor:
 
 
 class FakePackage:
-    """Stands in for ``AOTICompiledModel``; records every invocation."""
+    """Stands in for one bound TCG runner; records every invocation."""
 
     def __init__(self) -> None:
         self.invocations: List[Any] = []
-        self.loaded: Dict[str, Any] | None = None
+        self.bound = True
+        self.calls = 0
+        self.declared_fqns = ("conv_in.weight",)
         self.raises = False
-
-    def get_constant_fqns(self) -> List[str]:
-        return ["conv_in.weight"]
-
-    def load_constants(self, values: Any, check_full_update: bool = False,
-                       user_managed: bool = False) -> None:
-        self.loaded = dict(values)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         self.invocations.append((args, kwargs))
         if self.raises:
             raise RuntimeError("cuda kernel launch failed")
+        self.calls += 1
         return "ARTIFACT_OUTPUT"
 
 
@@ -124,9 +120,7 @@ META: Dict[str, Any] = {
     "kind": aot_serve.ARTIFACT_KIND,
     "family": "sdxl-base", "precision": "w8a8", "sku": "l4", "sm": "sm_89",
     "torch": "2.13.0+cu130", "cuda": "13.0",
-    # This is now an ENTRY key and rides the marker's `entries` row,
-    # so it is spelled in the grammar `cell_key.is_key` actually admits.
-    "cell_key": "cg-key-v1-" + "d" * 56,
+    "compiled_graph_key": "cg-key-v1-" + "d" * 56,
     "lora_bucket": 0,
 }
 
@@ -139,8 +133,6 @@ ENTRY = {
     "inputs": [{"name": "sample", "position": 0, "dtype": "bfloat16",
                 "shape": [2, 4, "h", "w"]}],
     "symbols": {"h": [64, 160], "w": [64, 160]},
-    "constants": [{"fqn": "conv_in.weight", "source": aot_serve.SOURCE_STATE_DICT,
-                   "dtype": "bfloat16", "shape": [320, 4, 3, 3]}],
     "graph": {},
     "pytree": {"ingress": CallIngress(
         parameters=("sample",),
@@ -155,22 +147,20 @@ ENTRY = {
 
 
 def _armed_module() -> tuple[FakeModule, FakePackage, FakePipeline]:
-    """A module wrapped by the real ``aot_serve`` swap, ONE entry armed.
+    """A module wrapped by the real worker dispatch, one TCG graph armed.
 
     the PIPELINE marker carries ``targets`` + ``entries`` — the shape
-    :func:`aot_serve.arm_entry` writes. It used to be a bare ``state``, which
-    no production path has ever written on a pipeline and which
-    ``armed_entries`` does not recognise, so leaving it would have made
-    ``is_armed`` answer False on a pipeline this fixture calls armed.
+    :func:`aot_serve.arm_compiled_graph` writes.
     """
     module, package = FakeModule(), FakePackage()
     pipeline = FakePipeline(module)
-    runner = aot_serve.ArtifactRunner(
-        package=package,
+    runner = aot_serve.TCGEntryRunner(
+        runner=package,  # type: ignore[arg-type]
         contract=CallIngress.from_graph(ENTRY),
-        constants=aot_serve.constants_from_meta(ENTRY),
-        module_name="unet", entry=ENTRY_NAME)
-    runner.bind(module.state_dict(), {})
+        module_name="unet",
+        entry=ENTRY_NAME,
+        family="sdxl-base",
+    )
     dispatch = aot_serve.EntryDispatch(((ENTRY_NAME, runner),))
     aot_serve.wrap_module(module, dispatch, META, target="unet")
     setattr(pipeline, "_cozy_aot", {
@@ -179,13 +169,14 @@ def _armed_module() -> tuple[FakeModule, FakePackage, FakePipeline]:
             "module": module, "attr": "forward",
             "state": getattr(module, "_cozy_aot")["state"]}},
         "entries": {ENTRY_NAME: {
-            "key": META["cell_key"], "target": "unet",
-            "class_hash": "", "manifest_digest": ""}},
-        "bound_constants": {"pools": {}, "literals": {}},
+            "compiled_graph_key": META["compiled_graph_key"],
+            "target": "unet", "class_hash": ""}},
     })
     # The fixture's own claim, checked once here rather than in five rows: this
     # pipeline really is serving the class it says it is.
-    assert aot_serve.armed_entries(pipeline) == {ENTRY_NAME: META["cell_key"]}
+    assert aot_serve.armed_entries(pipeline) == {
+        ENTRY_NAME: META["compiled_graph_key"]
+    }
     return module, package, pipeline
 
 
@@ -384,12 +375,7 @@ def test_the_two_triggers_report_different_reasons() -> None:
 
 
 def test_a_suppressed_request_is_not_reported_as_compiled() -> None:
-    ref = "root/family-sdxl-base#cg-key-v1-abc"
-    # The noted key must be the key the ref NAMES — `is_aot_ref` recognises an
-    # AOT cell by exactly that match, so a `ck1`-stamped note against an `cg-key-v1`
-    # ref resolves `jit_cell` and this row would assert the suppression
-    # vocabulary on the wrong serving mode.
-    aot_serve.note_aot_key("cg-key-v1-abc")
+    ref = "root/family-sdxl-base#cg-key-v1-" + "a" * 56
     armed = serving_mode.resolve(active_compile_ref=ref, sm="89")
     assert armed.serving_mode == serving_mode.MODE_AOT_CELL
 

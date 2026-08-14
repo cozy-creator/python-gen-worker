@@ -1,23 +1,13 @@
 # pgw#1152 — every writer of arming/serving process-global state, classified.
 # Enforced by scripts/lint_arm_state_feeders.py: an unclassified feed is red, a
-# row matching nothing is red, and a SEAM that stops feeding is red. Keyed
+# row matching nothing is red, and the exact-key bind-before-marker authority
+# is structural. Keyed
 # <path>::<scope>::<name>, never a line.
 #
-# WHY THIS FILE EXISTS. `aot_serve._KNOWN_AOT_KEYS` decides which failure
-# detector applies to a serving object — the DYNAMO lane's cache-hit ledger,
-# which an AOTI artifact can never move, or §4.31's serve-first rule. pgw#1033
-# wrote its feeding rule as a CONVENTION ("whoever reads a cell_key off an
-# aot-inductor envelope registers it") with two feeders, BOTH self-produced
-# routes. `arm_ordered` — every hub Plan arm and every §4.27 boot-adopt — kept
-# nothing, so on a real pod (pgw#1141b, POD PROOF #4) a cell that resolved,
-# materialized and armed was scored on the dynamo ledger, disarmed, and the pod
-# served eager for life. That was the FOURTH gate in a row with the same shape:
-# a rule written against the self-mint path, and an adopt path that does not
-# take it.
-#
-# THE SEAM. `aot_serve.load_and_wrap` registers the key at the wrap — the one
-# function every arm route passes, and the moment the fact becomes true. It is
-# never written here; the lint asserts the call still exists.
+# Exported-lane identity now lives on the serving object. The lint proves that
+# `aot_serve.arm_compiled_graph` resolves the declared compiled_graph_key and
+# completes TCG binding before `_marker`/`wrap_module` mutate that object. No
+# process-global learned-key registry or caller-fed convention remains.
 #
 # THERE IS NO `CONVENTION` CLASSIFICATION, AND NO `RELAY`. A feeder called
 # because a docstring asked the caller to remember is the bug itself, twice
@@ -53,7 +43,6 @@ src/gen_worker/fleet_cells.py::arm_from_local_store::local_cell_store.note_memo 
 # ---------------------------------------------------------------------------
 tests/test_compile_proof_pgw637.py::test_proven_cell_registry_roundtrip::compile_cache.record_cell_proven  RECOGNIZER  the proven-cell registry's own roundtrip; no pipeline exists in this row
 tests/test_compile_proof_pgw637.py::test_inmemory_probe_reports_dynamo_truth_not_the_registry::compile_cache.record_cell_proven  RECOGNIZER  pgw#637's point exactly: the registry alone must NOT certify, and the row proves it by feeding it and getting False
-tests/test_eager_only_command_pgw1142.py::test_a_suppressed_request_is_not_reported_as_compiled::aot_serve.note_aot_key  RECOGNIZER  a serving_mode.resolve dimension row — a ref and a posture, no object and no arm
 tests/test_boot_phases_pgw764.py::test_serving_mode_distinguishes_aot_from_jit_from_eager::aot_serve.is_aot_ref  RECOGNIZER  classify_mode's discrimination asserted over bare refs; nothing is armed anywhere in the row
 
 # ---------------------------------------------------------------------------

@@ -126,22 +126,6 @@ def _fresh_process_settings():
 
 
 @pytest.fixture(autouse=True)
-def _fresh_learned_aot_keys():
-    """`aot_serve.note_aot_key` learns into a process-global set. A key one
-    test teaches must never reclassify another test's dynamo refs as AOT —
-    the pgw#722 discovery suite's `ck1-999…` collided with the adopt suite's
-    stubbed mint digest and silently flipped its whole proof lane."""
-    from gen_worker import aot_serve
-
-    with aot_serve._KNOWN_AOT_KEYS_LOCK:
-        before = set(aot_serve._KNOWN_AOT_KEYS)
-    yield
-    with aot_serve._KNOWN_AOT_KEYS_LOCK:
-        aot_serve._KNOWN_AOT_KEYS.clear()
-        aot_serve._KNOWN_AOT_KEYS.update(before)
-
-
-@pytest.fixture(autouse=True)
 def _fresh_delivered_seed_flag():
     """The gw#608 delivered-cell seed latch is process-lifetime in
     production; tests seeding artifacts must not leak it into later

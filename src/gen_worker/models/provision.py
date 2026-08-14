@@ -25,12 +25,12 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
-    Any, Callable, Dict, Mapping, Optional, Sequence,
+    Any, Callable, Dict, Mapping, Optional,
     Tuple,
 )
 
-from .. import artifact_meta
-from .. import cell_key
+from torch_compiled_graphs import is_compiled_graph_key
+
 from ..cell_adopt import AdoptOutcome
 from ..component_vocab import denoiser_components
 from ..api.binding import ModelRef, wire_ref
@@ -51,7 +51,6 @@ from .loading import (
 from .memory import place_pipeline
 from .refs import DEFAULT_REF_TAG, parse_model_ref
 from .. import activity as activity_mod
-from .. import mint_workers
 
 __all__ = ["model_index_components"]  # re-export: single source in loading.py (gw#521)
 
@@ -245,293 +244,6 @@ def load_slot(
     return out
 
 
-def arm_route(mode: str) -> Optional[str]:
-    """The name of the arm that serves cells of ``mode``, or ``None``.
-
-    ONE registry, asked by :func:`arm_aot` when it arms and by the mint
-    BEFORE it spends anything (``fleet_cells.mint_recipe``). pgw#827 is the
-    fourth defect in the "a gate that models the arm differently from the
-    arm" class (pgw#816, #822, #825): the regional recipe minted 72 entries
-    in 354 s of L4 and only then discovered that this runtime had no arm
-    that could adopt the kind of cell it had just built. "Can this runtime
-    adopt the kind of cell I am about to mint?" is answerable at
-    ``self_mint_started``, and it is answerable HERE, from the same table
-    the arm dispatches on.
-
-    pgw#846: regional cells are RETIRED, so the whole-graph arm is the only
-    row. A cell whose metadata still says ``mode='regional'`` is declined BY
-    NAME (``arm_aot`` stays eager and says why) — never handed to the
-    whole-graph arm, whose denoiser-scope bind table it cannot use (pgw#827).
-    """
-    return {
-        "": "aot_serve.enable",
-    }.get(str(mode or ""))
-
-
-def arm_aot(
-    pipe: Any, cfg: Any, cache_dir: Optional[Path], artifact: Path,
-    bucket: int, meta: Optional[Dict[str, Any]] = None,
-    *, verify_numerics: bool = False,
-    declared: Sequence[str] = (),
-) -> AdoptOutcome:
-    """Arm ONE exported ``.pt2`` ENTRY on ``pipe``. The whole AOT arm, in one
-    place, for every source of such an artifact.
-
-    pgw#1176: the unit is one graph class. ``declared`` is every class name
-    this pod's declaration traces to, threaded to the dispatch so a call no
-    ARMED entry admits reads as "declared, pending compile" (silent eager)
-    rather than as an undeclared shape.
-
-    ``verify_numerics`` (DESIGN-RULINGS §4.32, pgw#1141) runs the parity gate,
-    and exactly ONE caller sets it: the pod that MINTED these bytes, before it
-    publishes them. Adoption runs no quality gate at all — see
-    :func:`gate_cell_numerics` for why re-measuring an adopted cell was taxing
-    every adopter forever for an author's one-time mistake.
-
-    pgw#805 extracted this from :func:`enable_compiled`'s kind dispatch: a
-    cell this pod MINTED ITSELF has to arm through exactly the same gates a
-    hub-delivered one does (that is the point of the delegated split — a
-    child-built cell EARNS adoption), but it must not re-enter
-    ``enable_compiled``, whose pgw#709 receipts gate would drop an artifact
-    that by construction carries no hub signature yet.
-
-    pgw#721: an exported cell rides the branch-bearing lane too — LoRA
-    adapters are lifted to graph INPUTS, so one artifact serves the whole
-    bucket. A lifted cell refuses an unlifted module
-    (``lifted_inputs_unbindable``), so for a bucket-bearing endpoint the
-    lifted binding is installed on the artifact's target module NOW — after
-    ``apply_lora_lane`` allocated the canonical branch containers, BEFORE
-    ``aot_serve.enable`` runs ``assert_lifted_contract`` (the exact C2 pod-10
-    proven order). Rolled back on a failed arm so a dynamo fallthrough never
-    traces a lifted forward it did not ask for.
-    """
-    # Deferred: hoisting drags aot_serve onto the `import gen_worker` path
-    # (+39 modules).
-    from .. import aot_serve
-
-    if meta is None:
-        meta = artifact_meta.try_read_metadata(artifact)
-    lifted_target: Any = None
-    lifted_installed = False
-    #: pgw#999: why the lifted-binding install failed, if it did. Carried into
-    #: the refusal instead of dying in a logger no pod exposes.
-    lifted_install_error = ""
-    mode = str((meta or {}).get("mode") or "")
-    if arm_route(mode) is None:
-        # A cell whose mode this runtime has no arm for must decline BY NAME
-        # rather than be handed to whichever arm happens to be the default —
-        # pgw#827 was exactly that: a regional cell routed into the
-        # whole-graph arm, which built ONE bind table at denoiser scope.
-        # Since pgw#846 retired regional, `mode='regional'` cells land here
-        # and stay eager, which is the correct retirement semantics.
-        logger.warning(
-            "aot arm: artifact declares mode=%r, which this runtime has no "
-            "arm for; staying eager", mode)
-        return AdoptOutcome.miss(
-            "no_arm_for_mode",
-            f"artifact declares mode={mode!r}, which this runtime has no arm for")
-    if bucket:
-        from . import lora_lifted
-
-        # The target module comes from the ARTIFACT's own recorded facts
-        # ("module", else its first compile target) — never a hardcoded
-        # component name (pgw#740: the vocabulary is not repeated in live
-        # code; a guessed name on a non-UNet family would silently skip the
-        # install and waste the arm).
-        targets = [str(t) for t in ((meta or {}).get("targets") or ())]
-        if not targets:
-            # pgw#1001: a packed multi-entry cell records its targets PER
-            # ENTRY and carries no top-level `targets`/`module` (measured:
-            # both None on a real 5-entry lora64 cell). Without this the name
-            # resolved to "" and the lifted install was silently skipped.
-            # pgw#1176: one artifact, one entry, one target.
-            name = str(
-                ((meta or {}).get("entry") or {}).get("target") or "").strip()
-            targets = [name] if name else []
-        # ...and among them the BRANCH-CAPABLE one: `decoder` sorts first
-        # among entry names, and a lifted forward on a module with no branch
-        # container fails by name. `branch_targets` is the authority.
-        branch_capable = lora_lifted.branch_targets(pipe)
-        module_name = str((meta or {}).get("module") or "")
-        if not module_name:
-            module_name = next(
-                (t for t in targets if t in branch_capable),
-                targets[0] if targets else "")
-        lifted_target = (
-            getattr(pipe, module_name, None) if module_name else None)
-        if lifted_target is None:
-            # pgw#1098: a declared bucket whose lifted target cannot be
-            # RESOLVED is a refusal, never a skip. Falling through leaves the
-            # module unlifted and hands `assert_lifted_contract` a guaranteed
-            # `lifted_inputs_unbindable` — the gate then names itself and the
-            # real cause (an envelope with no readable targets, a pipeline
-            # missing the named component) is nowhere on the wire. That is
-            # exactly how row 7 read as a LoRA-contract defect when the
-            # envelope had simply not been read. pgw#1001 closed this hole for
-            # its two known causes; this closes it for every future one, by
-            # refusing to leave the branch silently.
-            lifted_install_error = (
-                f"no lifted target resolved: metadata names module="
-                f"{str((meta or {}).get('module') or '') or '<absent>'} "
-                f"targets={targets or '<absent>'}, branch-capable="
-                f"{sorted(branch_capable) or '<none>'}"
-                + ("; the cell envelope was unreadable" if meta is None else ""))
-            logger.warning(
-                "aot arm: bucket=%d declared but no lifted target resolved "
-                "(%s); a lifted artifact will refuse at "
-                "assert_lifted_contract", bucket, lifted_install_error)
-        elif lora_lifted.lifted_binding(lifted_target) is None:
-            try:
-                lora_lifted.install_lifted_lora_forward(lifted_target, bucket)
-                lifted_installed = True
-            except Exception as exc:  # noqa: BLE001 — arm decides
-                # pgw#999: KEPT, not merely logged. This branch predicted its
-                # own downstream symptom ("will refuse at
-                # assert_lifted_contract") and then discarded the cause, so
-                # the refusal that follows names the gate that noticed rather
-                # than the install that failed. Same discard as the one this
-                # issue is closing, one frame deeper, on exactly the
-                # bucket-bearing path a w8a8-lora64 family takes.
-                lifted_install_error = f"{type(exc).__name__}: {exc}"
-                logger.warning(
-                    "aot arm: lifted-binding install failed on %r (%s); a "
-                    "lifted artifact will refuse at assert_lifted_contract",
-                    module_name, exc)
-    # pgw#1168: THE ADOPT'S DEVICE COST, MEASURED AT THE ONE SEAM EVERY ARM
-    # ROUTE PASSES. pgw#1164 measured this in `fleet_cells.adopt_delegated_mint`
-    # — the SELF-MINT adopt only — so the boot adopt, the local-store adopt and
-    # the re-arm ran the identical `aot_serve.enable` -> `load_and_wrap` and
-    # reported nothing. That is this program's most common defect shape (an
-    # emitter wired on one of N paths), and the fix is one emitter here rather
-    # than a second call site there.
-    #
-    # The two terms are measured SEPARATELY because they answer different
-    # questions, and the split is what decides whether the CELL or the GATE is
-    # the problem (th#1825):
-    #   load   — every loaded entry runner, which EVERY serving pod pays for the
-    #            life of the arm. This is the term that decides whether a cell
-    #            fits on the fleet it was built for.
-    #   verify — the §4.32 parity gate's two forwards, paid ONLY on the minting
-    #            pod (`verify_numerics=True`), never by an adopter.
-    # A boot adopt therefore reports `verify=0` by construction, and that row —
-    # taken on the card the fleet actually serves on — is the empirical answer
-    # to "does this cell fit", where before there was only arithmetic.
-    _budget_device = mint_workers.device_of(pipe)
-    _resident_before, _ = mint_workers.adopt_watermark(_budget_device)
-    _load_bytes = 0
-    _emitted = False
-
-    def _emit_adopt_budget(verify_bytes: int, armed: bool) -> None:
-        """One `cell_adopt_budget` row per arm attempt, whatever the outcome.
-
-        Emitted even for a REFUSED arm: the device high-water was paid either
-        way, and a refusal is exactly when the number is most worth having.
-        """
-        nonlocal _emitted
-        if _emitted:
-            return
-        _emitted = True
-        total = int(_load_bytes) + max(0, int(verify_bytes))
-        if total <= 0:
-            return
-        family = str((meta or {}).get("family") or getattr(cfg, "family", "") or "")
-        # The cell's OWN recorded lane.
-        lane = str((meta or {}).get("weight_lane") or "")
-        # pgw#1176: one artifact, one graph class — so this row is always
-        # `entries=1`, and that is the point rather than a degenerate case.
-        # pgw#1175: it MEASURES and sizes nothing; no bank reads it.
-        entries = 1 if (meta or {}).get("entry") else 0
-        gib = 1 << 30
-        activity_mod.emit_event(
-            "cell_adopt_budget",
-            f"family={family} lane={lane or '(plain)'} entries={entries} "
-            f"adopt_device_peak={total / gib:.3f}GiB "
-            f"load={_load_bytes / gib:.3f}GiB "
-            f"verify={max(0, int(verify_bytes)) / gib:.3f}GiB "
-            f"resident_before={_resident_before / gib:.3f}GiB "
-            f"verified={bool(verify_numerics)} armed={bool(armed)} "
-            f"basis=measured — `load` is what EVERY adopting pod pays and is "
-            f"the term that decides whether this cell fits its serving fleet; "
-            f"`verify` is the §4.32 gate and is paid only by the minting pod.",
-            phase="measured",
-        )
-
-    # §4.33 / pgw#1175: THE HEADROOM GATE IS GONE, and the ATTEMPT replaces it.
-    # `mint_budget.adopt_headroom` refused an arm here on `2 * activation`,
-    # where `activation` was a quarter of the RESIDENT SET whenever no forward
-    # had run — a fraction its own docstring called unmeasured — and its
-    # refusal was STICKY for the life of the process. Its own text conceded it
-    # "CANNOT refuse a card that merely cannot hold 36 runners", i.e. it could
-    # not refuse the failure it was written for (th#1825) and could refuse
-    # cards that were fine. The honest gate is the bind itself:
-    # `aot_serve.arm_entry` attempts THIS entry and returns a typed
-    # `insufficient_adopt_vram` miss on a real device OOM, before any live
-    # mutation, and this pod serves eager exactly as it did — on evidence.
-    #
-    # pgw#1176 makes that refusal cheaper still: the attempt is ONE graph
-    # class, so a card that cannot hold it costs that class and no other.
-    outcome = aot_serve.enable(
-        pipe, cfg, cache_dir, artifact, declared=declared)
-    _, _peak_after_load = mint_workers.adopt_watermark(_budget_device)
-    _load_bytes = max(0, _peak_after_load - _resident_before)
-    if not outcome.armed and lifted_install_error:
-        # The refusal is real; its ROOT is one frame up. Both, in the order a
-        # reader needs them: what refused, and what made it refuse.
-        outcome = AdoptOutcome.miss(
-            outcome.reason or "lifted_install_failed",
-            f"{outcome.detail} [root: the lifted binding was never installed"
-            + (f" on {module_name!r}" if module_name else "")
-            + f" — {lifted_install_error}]".strip(),
-            outcome.identity)
-    if outcome.armed:
-        # §4.32: quality is proven at MINT and in author CI, never at adoption.
-        # An adopting pod materializes, arms and serves.
-        gate_ok = not verify_numerics or gate_cell_numerics(pipe, cfg, strict=True)
-        _, _peak_after_verify = mint_workers.adopt_watermark(_budget_device)
-        if gate_ok:
-            _emit_adopt_budget(_peak_after_verify - _peak_after_load, True)
-            return outcome
-        _emit_adopt_budget(_peak_after_verify - _peak_after_load, False)
-        # A refused cell is UNARMED, not merely reported: the whole point is
-        # that it must not serve. Staying eager is the ordinary miss policy
-        # every other adopt gate uses, so the tenant keeps being served.
-        #
-        # pgw#923: and the ADOPT ledger agrees with it by CONSTRUCTION now.
-        # `enable` used to announce `aot_adopt phase=armed` before the gate
-        # ran, so a reader counting armed adoptions over-counted every numerics
-        # refusal and a second closing row existed only to correct the first.
-        # Nothing is announced until the arm is final, so the refusal is simply
-        # what this function returns; the numbers still ride `cell_numerics`.
-        meta = aot_serve.armed_metadata(pipe)
-        # pgw#1176: THE PARITY REFUSAL IS PER ENTRY. This used to `unwrap` the
-        # whole pipeline, which was correct while the gate's subject was a
-        # 36-class cell and is wrong now: the probe measures ONE graph class
-        # against the eager callable it was traced from, so a divergence
-        # condemns that class and says nothing about its siblings. The refused
-        # entry de-arms sticky, its siblings keep serving compiled, and it is
-        # not published.
-        entry = str((meta.get(cell_key.ENTRY_BLOCK_KEY) or {}).get("name") or "")
-        aot_serve.disarm_entry(pipe, entry, "numerics_refused")
-        outcome = AdoptOutcome.miss(
-            "numerics_refused",
-            f"family={meta.get('family')} key={meta.get('cell_key')} "
-            f"entry={entry}: this pod MINTED these bytes and they do not "
-            f"reproduce the eager forward they were traced from — this CLASS "
-            f"is not published and serves eager; sibling classes are "
-            f"unaffected (pgw#868, §4.32). Serve state now: "
-            f"{aot_serve.entry_states(pipe)}",
-            outcome.identity)
-    # An arm that never reached the gate (refused at `enable`) still paid the
-    # load, so it still reports — `_emit_adopt_budget` dedupes, so the armed
-    # paths above have already had their say.
-    _emit_adopt_budget(0, bool(outcome.armed))
-    if lifted_installed:
-        from . import lora_lifted
-
-        lora_lifted.remove_lifted_lora_forward(lifted_target)
-    return outcome
-
-
 def gate_cell_numerics(pipe: Any, cfg: Any, *, strict: bool = False) -> bool:
     """THE numerics gate (pgw#868): does this cell reproduce the eager forward
     it replaces? Returns False when it must not serve — and, on the only path
@@ -668,19 +380,21 @@ def _refuse_unmeasurable(family: str, reason: str, detail: str) -> bool:
 
 def enable_compiled(
     pipe: Any, cfg: Any, cache_dir: Optional[Path] = None,
-    artifact: Optional[Path] = None,
+    compiled_graph_key: str = "",
 ) -> AdoptOutcome:
-    """Arm the best available compiled path for a freshly loaded pipeline:
-    an AOTI export swaps the module (fail-soft), anything else goes
-    through the torch.compile cache policy (which also covers the no-
-    artifact and ALLOW_COLD lanes).
+    """Arm one exact TCG graph, else run the JIT/eager fallback policy.
+
+    This seam accepts a compiled-graph key, never an artifact path. TCG and
+    :mod:`compiled_graph_store` own resolution, admission, quarantine, package
+    loading, and binding for that key.
 
     ``Compile.lora_bucket`` (gw#561) puts the pipeline on the branch-bearing
     graph family BEFORE arming, so only matching ``-lora<bucket>`` cells
     adopt. Staying eager rolls the branches back — canonical zeroed slots
     cost +21-32% eager (gw#547); the eager adapter path re-enables sparse
     placement per request."""
-    from .. import aot_serve, compile_cache  # lazy: keeps `import gen_worker` off the compile/pb stack
+    from .. import aot_serve, compile_cache
+
     refused: Optional[AdoptOutcome] = None
     bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
     if bucket and not compile_cache.has_compile_target(pipe, cfg):
@@ -691,32 +405,25 @@ def enable_compiled(
         bucket = 0
     if bucket:
         compile_cache.apply_lora_execution_lane(pipe, bucket)
-    if artifact is not None:
-        # ONE kind sniff for every non-inductor backend. `metadata.json` is
-        # the shared envelope member across all artifact kinds (the pgw#709
-        # receipts gate above reads it from the same place), so `kind` is the
-        # dispatch key: absent/unknown falls through to the inductor lane.
-        meta = artifact_meta.try_read_metadata(artifact)
-        kind = str((meta or {}).get("kind") or "")
-        if kind == aot_serve.ARTIFACT_KIND:
-            aot = arm_aot(pipe, cfg, cache_dir, Path(artifact), bucket, meta)
-            if aot.armed:
-                return aot
-            refused = aot
-            artifact = None  # unusable artifact: fall through to eager policy
-    # pgw#1181: `compile_cache.enable` no longer takes an artifact — the
-    # `torch-inductor-cache` format it seeded has had no writer since pgw#1178
-    # and is deleted. Everything delivered is dispatched above by
-    # `metadata.json`'s `kind`; what reaches here is the JIT lane.
+    key = compiled_graph_key.strip() if isinstance(compiled_graph_key, str) else ""
+    if compiled_graph_key and not is_compiled_graph_key(key):
+        refused = AdoptOutcome.miss(
+            "compiled_graph_key_required",
+            "compiled graph provisioning accepts an exact compiled_graph_key, "
+            "not an artifact path or metadata envelope",
+        )
+    elif key:
+        outcome = aot_serve.enable_compiled_graph(pipe, cfg, key, cache_dir)
+        if outcome.armed:
+            return outcome
+        refused = outcome
+
     armed = compile_cache.enable(pipe, cfg)
     if bucket and not armed:
         compile_cache.drop_lora_execution_lane(pipe)
     if armed:
         return AdoptOutcome.hit()
-    # The inductor lane declines without a classified token of its own — "no
-    # delivered cell for this identity" is the whole answer. A prior typed
-    # refusal from the exported arm is the more specific one and survives.
-    return refused if refused is not None else AdoptOutcome.miss("no_cell")
+    return refused if refused is not None else AdoptOutcome.miss("no_compiled_graph")
 
 
 # ---------------------------------------------------------------------------
@@ -730,7 +437,7 @@ def enable_compiled(
 # "worker-owned policy, endpoint invokes it directly" pattern for self-
 # loaded pipelines (`gen_worker.models.memory.place_pipeline`).
 #
-# The (Compile, cache_dir, compile-artifact) triple `enable_compiled` needs
+# The (Compile, cache_dir, compiled_graph_key) triple `enable_compiled` needs
 # are executor/CLI internals an endpoint has no business constructing
 # itself — a `contextvars.ContextVar` carries them instead, scoped by the
 # caller (executor/CLI) to exactly the `setup()` call, so `arm_compile(pipe)`
@@ -742,7 +449,7 @@ def enable_compiled(
 class _ArmingContext:
     compile: Any
     cache_dir: Optional[Path]
-    artifact: Optional[Path]
+    compiled_graph_key: str
     # The executor owns this list and reads it only after setup() returns.
     # Capturing the exact objects passed to arm_compile() is what lets
     # self-loading endpoints participate in object-scoped compile targets;
@@ -751,10 +458,10 @@ class _ArmingContext:
     # gw#587: the scope owner's arming policy. The executor routes the fleet
     # policy (delivered cell first, self-mint on miss) here so an endpoint's
     # own arm_compile() call gets the SAME behavior as a worker-loaded slot;
-    # None keeps the bare delivered-artifact policy (CLI / unit rigs). The
+    # None keeps the exact-key/JIT policy in this module (CLI / unit rigs). The
     # callable may return a bool or an object with `.armed`/`.self_mint`
     # (fleet_cells.ArmOutcome) — provision cannot import fleet_cells (cycle).
-    enable: Optional[Callable[[Any, Any, Optional[Path], Optional[Path]], Any]]
+    enable: Optional[Callable[[Any, Any, Optional[Path], str], Any]]
     # id(pipe) -> self-mint identity (fleet_cells.SelfMint) for pipes the
     # scope's policy armed from their OWN mint rather than a delivered cell.
     self_mints: dict[int, Any]
@@ -772,15 +479,15 @@ _ARMING_CTX: "contextvars.ContextVar[Optional[_ArmingContext]]" = contextvars.Co
 class ArmingScope:
     """Context manager the executor/CLI holds open around one ``setup()``
     call so ``arm_compile()`` can reach the active ``Compile`` spec, compile
-    cache dir, and any hub-attached artifact. Re-entrant-safe (a nested
+    cache dir, and any hub-selected compiled-graph key. Re-entrant-safe (a nested
     scope restores the outer one on exit); a no-op when ``compile`` is
     ``None`` so callers can open it unconditionally."""
 
     def __init__(
         self, compile: Any, cache_dir: Optional[Path] = None,
-        artifact: Optional[Path] = None,
+        compiled_graph_key: str = "",
         enable: Optional[
-            Callable[[Any, Any, Optional[Path], Optional[Path]], Any]
+            Callable[[Any, Any, Optional[Path], str], Any]
         ] = None,
     ) -> None:
         self._objects: list[tuple[Any, bool]] = []
@@ -790,7 +497,7 @@ class ArmingScope:
             _ArmingContext(
                 compile=compile,
                 cache_dir=cache_dir,
-                artifact=artifact,
+                compiled_graph_key=str(compiled_graph_key or ""),
                 objects=self._objects,
                 enable=enable,
                 self_mints=self._self_mints,
@@ -831,10 +538,9 @@ def arm_compile(pipe: Any) -> bool:
     """Arm ``@endpoint(compile=Compile(...))`` on a pipeline the endpoint
     loaded and placed itself (a str/Path-annotated ``setup()`` slot the
     executor never materializes — pgw#517). Call once per pipeline object,
-    at the end of ``setup()``, after placement. Same cache-artifact-gated
-    policy as the automatic worker-loaded path: arms only when a verified
-    compiled artifact for (family, SKU, torch, triton) is seeded, otherwise
-    stays eager. Returns whether a compiled path was armed.
+    at the end of ``setup()``, after placement. The scope carries an exact
+    compiled-graph key when the hub selected one; otherwise the ordinary JIT
+    or eager policy applies. Returns whether a compiled path was armed.
 
     ie#522 (Paul's ruling, 2026-07-22): the endpoint's own ``setup()`` call
     is a fixed declaration of intent ("this pipeline is compile-eligible");
@@ -856,7 +562,7 @@ def arm_compile(pipe: Any) -> bool:
         )
         return False
     enable = ctx.enable if ctx.enable is not None else enable_compiled
-    outcome = enable(pipe, ctx.compile, ctx.cache_dir, ctx.artifact)
+    outcome = enable(pipe, ctx.compile, ctx.cache_dir, ctx.compiled_graph_key)
     armed = bool(getattr(outcome, "armed", outcome))
     mint = getattr(outcome, "self_mint", None)
     if mint is not None:

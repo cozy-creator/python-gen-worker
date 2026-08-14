@@ -1,60 +1,14 @@
 #!/usr/bin/env python3
-"""A process-global fact about an ARMED cell is fed at a SEAM, never by a
-caller who remembered — and a TEST may not feed one at all.
+"""Fence worker arm-state writers and the exact-key TCG arm authority.
 
-``aot_serve._KNOWN_AOT_KEYS`` decides which failure detector applies to a
-serving object: the DYNAMO lane's per-class cache-hit ledger (which an AOTI
-artifact can never move, so it reads every honest adoption as a disproof) or
-§4.31's serve-first rule. A feeding rule written as a CONVENTION —
-*"whoever reads a `cell_key` off an aot-inductor envelope registers it"* — is
-taken by the SELF-PRODUCED routes and skipped by the adopt routes, and a cell
-that resolved, materialized and armed is then scored on the dynamo ledger,
-disarmed, so the pod serves eager for life.
+The exported-lane fact lives on the armed object, never in a process-global
+key registry. ``aot_serve.arm_compiled_graph`` must resolve the exact
+``compiled_graph_key``, complete TCG constant binding, and only then install
+the object marker through ``wrap_module``. The structural check below enforces
+that order. Existing verdict/owner feeders remain classified; tests may not
+stub lane accessors or hand-feed those registries.
 
-So the rule is structural: the registration happens inside
-``aot_serve.arm_entry``, which arms ONE graph class and which every arm route
-passes exactly once per class. The registration is a property of the function
-that arms, never of a caller remembering to announce.
-
-TWO SCOPES, TWO RULES.
-
-**src/gen_worker** — every call to a listed feeder must be either the declared
-SEAM itself, or a row in ``scripts/arm_state_feeders_allowlist.txt`` under one of
-the classifications below. Unclassified is red; a stale row is red; and a SEAM
-that stops calling its feeder is red (the registration is an asserted fact, not
-a habit).
-
-    SEAM      the one function every route passes; declared in FEEDERS below and
-              exempt because it IS the structure. Never written in the allowlist.
-    VERDICT   the site records a decision only this frame can know, and it sits
-              AT that decision — no seam can derive it (a proof pass concluding
-              a cell served its own graph; a disarm concluding one did not).
-    OWNER     the module that owns the state, writing it from its own primary
-              write path (a mint finalize putting its own bytes in its own
-              store).
-
-**There is deliberately NO ``CONVENTION`` classification, and no ``RELAY``.**
-A feeder called because a docstring asked the caller to remember is exactly the
-bug. It has no label to write down: move the call to the seam, or delete it and
-ask the OBJECT instead (``aot_serve.holds_exported_cell``).
-
-**tests/** — a hand-feed is RED, and so is stubbing a lane ACCESSOR. A
-stand-in calling ``aot_serve.note_aot_key(key)`` BY HAND, or a suite that stubs
-``is_aot_ref`` outright, answers the question the gate is supposed to ask, so
-RED-first prevents nothing. A test that needs an armed, boot-adopted object
-drives ``tests/harness/adopt_rig.py``, which arms a real packed cell through the
-real ordered path.
-
-There is exactly ONE test classification, ``RECOGNIZER``, and **the lint checks
-the claim instead of trusting it**: the row is accepted only when the enclosing
-function DRIVES no arm and the module REPLACES no arm driver. A unit test of the
-recognizer itself qualifies structurally; a fixture standing in for an adoption
-cannot, whatever it writes in the file.
-
-Same enforcement shape as ``lint_credential_identity.py``,
-``lint_settings_writers.py`` and ``lint_config_reads.py`` (§1.18).
-Sites are keyed ``<path>::<enclosing scope>::<name>``, never by line number: a
-line is a fact other people change.
+Sites are keyed by path and enclosing scope, never line number.
 """
 
 from __future__ import annotations
@@ -64,7 +18,7 @@ import ast
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -73,8 +27,8 @@ CLASSIFICATIONS = {"VERDICT", "OWNER", "RECOGNIZER", "PROJECTION"}
 #: Calling one of these means this frame ARMS something. A test that both arms
 #: and hand-feeds is standing in for an adoption, which is the bug class.
 ARM_DRIVERS = frozenset({
-    "ensure_setup", "arm_aot", "arm_ordered", "enable_compiled",
-    "_enable_compiled", "arm_entry", "adopt_delegated_mint",
+    "ensure_setup", "arm_compiled_graph", "arm_ordered", "enable_compiled",
+    "_enable_compiled", "adopt_delegated_mint",
     "arm_from_local_store", "self_mint",
 })
 
@@ -83,7 +37,8 @@ ARM_DRIVERS = frozenset({
 class Feeder:
     """One production-owned writer of arming/serving process state."""
 
-    #: dotted spelling as other modules call it, e.g. ``aot_serve.note_aot_key``
+    #: dotted spelling as other modules call it, e.g.
+    #: ``compile_cache.record_cell_proven``
     dotted: str
     #: the module that owns it, so a bare call inside that file counts too
     owner: str
@@ -101,11 +56,6 @@ class Feeder:
 
 
 FEEDERS: Tuple[Feeder, ...] = (
-    Feeder(
-        dotted="aot_serve.note_aot_key", owner="aot_serve.py",
-        state="aot_serve._KNOWN_AOT_KEYS (which lane a cell ref is on)",
-        seam=("aot_serve.py", "arm_entry"),
-    ),
     Feeder(
         dotted="compile_cache.record_cell_proven", owner="compile_cache.py",
         state="compile_cache._PROVEN_CELLS (this process served this cell)",
@@ -216,11 +166,11 @@ class _Calls(ast.NodeVisitor):
         self.builds: List[Tuple[int, str, OneConstructor]] = []
         #: every function/class scope defined in this module, dotted
         #: enclosing scopes that call an arm driver
-        self.arming_scopes: set = set()
+        self.arming_scopes: Set[str] = set()
         #: True when this module REPLACES an arm driver (a fixture standing in
         #: for the arm)
         self.replaces_arm = False
-        self.defined_scopes: set = set()
+        self.defined_scopes: Set[str] = set()
         self._scope: List[str] = []
 
     def _where(self) -> str:
@@ -298,10 +248,72 @@ def _rel(path: Path) -> str:
         return str(path)
 
 
+def _compiled_graph_arm_problems(path: Path) -> List[str]:
+    """Structural proof that TCG bind precedes the live object marker."""
+
+    if not path.is_file():
+        return []
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    arm = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "arm_compiled_graph"
+        ),
+        None,
+    )
+    if arm is None:
+        return [
+            "ARM AUTHORITY BROKEN: aot_serve.py::arm_compiled_graph is "
+            "missing; exact-key TCG arming has no structural owner"
+        ]
+    parameters = {argument.arg for argument in arm.args.args}
+    if "compiled_graph_key" not in parameters or "artifact" in parameters:
+        return [
+            "ARM AUTHORITY BROKEN: arm_compiled_graph must accept "
+            "compiled_graph_key and must not accept an artifact path"
+        ]
+
+    calls = [node for node in ast.walk(arm) if isinstance(node, ast.Call)]
+    loads = [
+        node for node in calls
+        if _dotted(node.func) == "compiled_graph_store.load_runner"
+    ]
+    binds = [
+        node for node in calls
+        if _dotted(node.func).endswith(".runner.bind")
+    ]
+    markers = [node for node in calls if _dotted(node.func) == "_marker"]
+    wraps = [node for node in calls if _dotted(node.func) == "wrap_module"]
+    if len(loads) != 1 or len(binds) != 1 or len(markers) != 1 or len(wraps) != 1:
+        return [
+            "ARM AUTHORITY BROKEN: arm_compiled_graph must contain exactly "
+            "one exact-key load_runner, TCG runner.bind, pipeline _marker, "
+            "and wrap_module call"
+        ]
+    load = loads[0]
+    if (
+        not load.args
+        or not isinstance(load.args[0], ast.Name)
+        or load.args[0].id != "compiled_graph_key"
+    ):
+        return [
+            "ARM AUTHORITY BROKEN: load_runner must receive the declared "
+            "compiled_graph_key directly"
+        ]
+    if not (load.lineno < binds[0].lineno < markers[0].lineno <= wraps[0].lineno):
+        return [
+            "ARM AUTHORITY BROKEN: exact-key load and TCG bind must complete "
+            "before _marker/wrap_module can mutate the serving object"
+        ]
+    return []
+
+
 def scan_src(root: Path) -> Tuple[Dict[Tuple[str, str], int], List[str]]:
     """Feeder sites outside the declared seams, plus seam-integrity problems."""
     sites: Dict[Tuple[str, str], int] = {}
-    problems: List[str] = []
+    problems = _compiled_graph_arm_problems(root / "aot_serve.py")
     seams_seen = {f.seam: False for f in FEEDERS if f.seam}
     constructors_seen = {o.name: False for o in ONE_CONSTRUCTOR}
     for path in _iter_modules(root):
@@ -508,9 +520,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if problems:
         print("\n".join(problems), file=sys.stderr)
         return 1
-    print(f"arm-state fence: {len(sites)} classified production feed(s), "
-          f"{len([f for f in FEEDERS if f.seam])} structural seam(s) intact, "
-          f"{len(test_sites)} RECOGNIZER row(s); no test simulates an arm")
+    print(
+        f"arm-state fence: exact-key TCG bind-before-marker authority intact; "
+        f"{len(sites)} classified production feed(s), "
+        f"{len(test_sites)} RECOGNIZER row(s); no test simulates an arm"
+    )
     return 0
 
 
