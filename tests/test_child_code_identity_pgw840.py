@@ -75,32 +75,31 @@ def test_the_child_resolves_the_parents_own_gen_worker(tmp_path: Path) -> None:
 
 
 _STALE_CHILD = '''#!{python}
-"""A pre-pgw#840 entry child: compiles nothing, reports the OLD shape."""
+"""A pre-pgw#840 compile child: compiles nothing, reports the OLD shape."""
 import json, sys
 from pathlib import Path
 
 job = json.loads(Path(sys.argv[-1]).read_bytes())
-loose = Path(job["report"]).parent / "fake.wrapper.cpp"
-loose.write_text("// as far as the parent can tell, a compiled entry\\n")
+artifact = Path(job["report"]).parent / "fake.tar.gz"
+artifact.write_text("// as far as the parent can tell, a packed graph class\\n")
 Path(job["report"]).write_text(json.dumps({{
-    "entry": job["entry"], "status": "compiled", "files": [str(loose)],
-    "detail": "1 loose file(s)", "elapsed_s": 0.01, "peak_rss_bytes": 1,
+    "entry": job["share"], "status": "compiled",
+    "classes": [{{"name": "unet/adapter=true/dim=0", "key": "ek1-fake",
+                 "artifact": str(artifact)}}],
+    "declared_classes": 1,
+    "detail": "1 packed graph class", "elapsed_s": 0.01, "peak_rss_bytes": 1,
     "phases": {{}},
 }}))
 sys.exit(0)
 '''
 
 
-def _program() -> Any:
-    class Tiny(torch.nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.a = torch.nn.Linear(8, 8)
-
-        def forward(self, x: Any) -> Any:
-            return torch.relu(self.a(x))
-
-    return torch.export.export(Tiny(), (torch.randn(2, 8),))
+def _template(tmp_path: Path) -> pool.EntryJob:
+    """The recipe half of a job — never reached, because this child is refused
+    on its code identity before anything it produced is believed."""
+    return pool.EntryJob(
+        function="txt2img", modules=("nowhere",),
+        out_dir=str(tmp_path / "artifacts"))
 
 
 def test_a_child_from_other_code_is_refused_by_name(tmp_path: Path) -> None:
@@ -124,15 +123,15 @@ def test_a_child_from_other_code_is_refused_by_name(tmp_path: Path) -> None:
         python=str(stale))
 
     with pytest.raises(pool.EntryCompileFailed) as caught:
-        box.compile([("unet/adapter=true/dim=0", _program())])
+        box.compile(_template(tmp_path))
 
-    assert caught.value.entry == "unet/adapter=true/dim=0"
+    assert caught.value.entry == "share-000"
     detail = str(caught.value)
     assert "DIFFERENT" in detail and "too old to report one" in detail, detail
     assert pool.CODE_DIGEST in detail, detail
-    # And it never became an attribution puzzle: the entry has no table at all
+    # And it never became an attribution puzzle: the share has no table at all
     # rather than one whose members quietly do not add up.
-    assert "unet/adapter=true/dim=0" not in box.entry_phases
+    assert "share-000" not in box.entry_phases
 
 
 def test_the_reports_identity_survives_the_wire(tmp_path: Path) -> None:
@@ -143,13 +142,16 @@ def test_the_reports_identity_survives_the_wire(tmp_path: Path) -> None:
     digest is a REFUSAL, never a pass.
     """
     encoded = msgspec.json.encode(pool.EntryReport(
-        entry="unet/dim=0", status=pool.COMPILED, files=["/dev/null"],
+        entry="share-000", status=pool.COMPILED,
+        classes=[pool.PackedGraphClass(
+            name="unet/dim=0", key="ek1-x", artifact="/dev/null")],
         code_digest=pool.CODE_DIGEST, code_dir=pool.PACKAGE_ROOT))
     back = msgspec.json.decode(encoded, type=pool.EntryReport)
     assert back.code_digest == pool.CODE_DIGEST and back.code_digest
     assert back.code_dir == pool.PACKAGE_ROOT
+    assert [c.name for c in back.classes] == ["unet/dim=0"]
 
     old = msgspec.json.decode(
-        b'{"entry":"unet/dim=0","status":"compiled","files":["/dev/null"]}',
+        b'{"entry":"share-000","status":"compiled"}',
         type=pool.EntryReport)
     assert old.code_digest == "" and old.spans == {}

@@ -143,9 +143,30 @@ def test_a_real_oom_killed_entry_child_is_a_retryable_shortfall_that_teaches_the
         # concluding anything: no OOM means no OOM to classify, which is a
         # missing capability (skip), not a wrong verdict (fail).
         try:
-            box.compile([("probe/entry", program)])
+            box.compile(pool.EntryJob(
+                function="probe",
+                modules=("gen_worker_no_such_endpoint_module",),
+                out_dir=str(tmp_path / "artifacts")))
         except pool.EntryCompileFailed as exc:
             failure = exc
+            # ⚠️ pgw#1215: the kernel counter arbitrates the RAISING branch
+            # too, and it did not before. A non-enforcing box now lands HERE
+            # rather than in the `else` below: the child composes its own
+            # compile target instead of loading a staged program, so a probe
+            # job that never resolves an endpoint refuses in its preflight
+            # instead of calmly compiling. Same environment gap, opposite
+            # branch — and the arbiter is the same either way. No OOM in the
+            # kernel's own counter means there is no OOM to classify, whichever
+            # way the pool returned. Everything below still runs, unchanged, on
+            # every box that really does enforce the cap.
+            if _oom_kills(cgroup) == kills_before:
+                pytest.skip(
+                    "the memory cap did not OOM-kill the child: this box has "
+                    "a delegated cgroup v2 memory controller but it did not "
+                    "enforce memory.max on this process tree, so the child "
+                    f"failed for an unrelated reason ({failure.basis}: "
+                    f"{failure.detail[:200]}) and there is no OOM here to "
+                    "classify")
         else:
             if _oom_kills(cgroup) == kills_before:
                 pytest.skip(
@@ -189,12 +210,12 @@ def test_a_real_oom_killed_entry_child_is_a_retryable_shortfall_that_teaches_the
 
         # 4. the aborted phase table carries the actionable half
         facts = aot_mint._pool_facts(box)
-        assert facts["oom_entry"] == "probe/entry"
+        assert facts["oom_entry"] == "share-000"
         assert facts["oom_basis"] == failure.basis
         assert facts["peak_child_rss_bytes"] == box.peak_rss_bytes > 0
         table = aot_mint._mint_phase_table([], {"total_s": 1.0}, None, width,
                                            facts)
-        assert table["pool"]["oom_entry"] == "probe/entry"
+        assert table["pool"]["oom_entry"] == "share-000"
 
         # 5. ...and the parent banks it, so the RETRY is narrower
         fam, execution_lane = "pgw848-oom", "w8a8-lora64"

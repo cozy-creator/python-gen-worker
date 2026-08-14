@@ -436,10 +436,16 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
     packed = tmp_path / "aot" / f"{key}.tar.gz"
     seen: Dict[str, Any] = {}
 
-    def _fake_mint(pipe: Any, spec: Any, out_dir: Path, **kw: Any) -> Any:
+    def _fake_mint(template: Any, **kw: Any) -> Any:
+        # pgw#1215: the K-wide driver takes a RECIPE, not a pipeline, and the
+        # ExportSpec it is handed is the caller's own — the same object the
+        # serial driver used to take positionally.
+        spec = kw["spec"]
         seen["family"] = spec.family
         seen["lane"] = spec.weight_lane
         seen["lifted"] = spec.lifted_inputs
+        seen["function"] = template.function
+        seen["modules"] = template.modules
         packed.parent.mkdir(parents=True, exist_ok=True)
         packed.write_bytes(b"packed-cell")
         # a mint returns N independently keyed entry artifacts plus a
@@ -452,7 +458,15 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
             manifest="c0ffee0000000000",
             timings={"total_s": 1.0})
 
-    monkeypatch.setattr(aot_mint, "mint", _fake_mint)
+    monkeypatch.setattr(aot_mint, "mint_graph_classes", _fake_mint)
+    # The class ENUMERATION is the mint child's own job now (only a composed
+    # pipeline can resolve the adapter fork), so the declaration has to exist
+    # for this recipe. Two classes declared, one packed by the fake driver —
+    # the arity assertion below is about what the CHILD moved, not about how
+    # many the declaration holds.
+    monkeypatch.setattr(aot_mint, "export_declaration", lambda family: object())
+    monkeypatch.setattr(
+        aot_mint, "declared_class_rows", lambda pipe, spec, decl: [1, 2])
     monkeypatch.setattr(
         fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
 
@@ -479,9 +493,11 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
     assert Path(moved_path) == target.parent / f"{key}.tar.gz"
     assert Path(moved_path).read_bytes() == b"packed-cell"
     assert report.mint_phases == {"totals": {"total_s": 1.0}}
-    # The spec the exporter got describes the LIVE pipeline, not a re-compose.
+    # The spec the exporter got describes the LIVE pipeline, not a re-compose
+    # — and the RECIPE the children get is the request's own.
     assert seen == {"family": FAMILY, "lane": "w8a8",
-                    "lifted": ("lora_a", "lora_b")}
+                    "lifted": ("lora_a", "lora_b"),
+                    "function": "generate", "modules": ("sdxl.main",)}
 
 
 def test_a_named_export_refusal_is_a_refusal_not_a_crash(
@@ -494,7 +510,10 @@ def test_a_named_export_refusal_is_a_refusal_not_a_crash(
     def _refuse(*a: Any, **k: Any) -> Any:
         raise aot_mint.MintRefused("lane held on dynamo")
 
-    monkeypatch.setattr(aot_mint, "mint", _refuse)
+    monkeypatch.setattr(aot_mint, "mint_graph_classes", _refuse)
+    monkeypatch.setattr(aot_mint, "export_declaration", lambda family: object())
+    monkeypatch.setattr(
+        aot_mint, "declared_class_rows", lambda pipe, spec, decl: [1])
     monkeypatch.setattr(
         fleet_cells.loading, "pipeline_weight_lane", lambda pipe: "w8a8")
 

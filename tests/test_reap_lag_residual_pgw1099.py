@@ -34,7 +34,6 @@ def _running(entry: str = "unet", *, spawn_epoch: float = 1000.0) -> _Running:
         entry=entry,
         proc=None,  # type: ignore[arg-type]  # never touched by this seam
         job=None,  # type: ignore[arg-type]
-        program_path=Path("/nonexistent/program.pt2"),
         started=0.0,
         stderr_path=Path("/nonexistent/stderr.log"),
     )

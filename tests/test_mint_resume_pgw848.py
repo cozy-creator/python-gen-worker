@@ -91,245 +91,50 @@ def _pool_with_root(workdir: Path, count: int, root: str) -> pool.EntryCompilePo
 
 
 # ---------------------------------------------------------------------------
-# The crash, for real: a child process running a real pool, SIGKILLed mid-run
-# ---------------------------------------------------------------------------
-
-#: Both attempts run as SEPARATE PROCESSES, which is the production shape (two
-#: mint children across a crash) and not merely convenient. It is also
-#: MEASURED to matter: ``env_seal``'s ``loaded_libs`` fact is frozen at boot
-#: from the process's own loaded shared objects, so a pytest process and a bare
-#: driver produce different seal digests (observed: 5fbe7ce945c21b80 vs
-#: 5f7c63e14ef3ec36) and the bank correctly refuses across them. Two identical
-#: bare processes agree — verified by running the same seal twice. Attempt 2
-#: therefore has to be a peer of attempt 1, not the test runner.
-_DRIVER = textwrap.dedent(
-    """
-    import json, sys
-    from pathlib import Path
-    sys.path.insert(0, {tests!r})
-    from test_mint_resume_pgw848 import _entries, _width
-    from gen_worker import aot_compile_pool as pool, aot_resume, env_seal
-
-    cfg = json.loads(Path(sys.argv[1]).read_text())
-    landed = Path(cfg["landed"])
-    count = int(cfg["count"])
-    # What `mint_child.mint` does before it exports anything: freeze the seal
-    # at the same point in the same code path, in every attempt.
-    env_seal.establish()
-
-    # The production wiring (mint_child._mint_aot): the bank root is a
-    # process global, not a constructor argument (pgw#1030).
-    aot_resume.set_root(cfg["resume"])
-    box = pool.EntryCompilePool(
-        Path(cfg["workdir"]), width=_width(count, 1),
-        inductor_configs={{"compile_threads": 2}})
-
-    def tick(name, done, total):
-        with landed.open("a") as fh:
-            fh.write(json.dumps({{"entry": name, "done": done}}) + "\\n")
-            fh.flush()
-
-    out = box.compile(_entries(count), on_entry=tick)
-    Path(cfg["summary"]).write_text(json.dumps({{
-        "files": {{name: list(files) for name, files in out.items()}},
-        "compiled": sorted(box.entry_seconds),
-        "resumed": list(box.bank.resumed) if box.bank else [],
-        "outcomes": dict(box.bank.outcomes) if box.bank else {{}},
-        "cache_dir": str(box.cache_dir),
-        "ledger": box.ledger.facts(),
-    }}, sort_keys=True))
-    """
-)
-
-
-def _driver(tmp_path: Path, name: str, *, count: int, resume_dir: str) -> Path:
-    cfg = tmp_path / f"{name}.json"
-    cfg.write_text(json.dumps({
-        "landed": str(tmp_path / f"{name}-landed.jsonl"),
-        "workdir": str(tmp_path / name / "entry-pool"),
-        "summary": str(tmp_path / f"{name}-summary.json"),
-        "resume": resume_dir,
-        "count": count,
-    }))
-    (tmp_path / f"{name}-landed.jsonl").touch()
-    driver = tmp_path / "driver.py"
-    if not driver.exists():
-        driver.write_text(_DRIVER.format(
-            tests=str(Path(__file__).resolve().parent)))
-    return cfg
-
-
-def _spawn(cfg: Path) -> "subprocess.Popen[bytes]":
-    return subprocess.Popen(
-        [sys.executable, str(cfg.parent / "driver.py"), str(cfg)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-        start_new_session=True)
-
-
-def _landed(cfg: Path) -> List[str]:
-    path = Path(json.loads(cfg.read_text())["landed"])
-    return [
-        str(json.loads(line)["entry"])
-        for line in path.read_text().splitlines() if line.strip()]
-
-
-def _run_until_killed(
-    tmp_path: Path, *, count: int, kill_after: int, resume_dir: str,
-) -> List[str]:
-    """Run a real pool in a child process and SIGKILL it after N entries land.
-
-    Returns the entry names that finished before the kill. ``SIGKILL`` because
-    a mint that dies on a pod dies that way: the OOM killer and a drain do not
-    deliver a handler, so anything a bank did at exit is exactly what the crash
-    would take with it.
-    """
-    cfg = _driver(tmp_path, "attempt-1", count=count, resume_dir=resume_dir)
-    proc = _spawn(cfg)
-
-    def gone() -> Any:
-        if proc.poll() is None:
-            return None
-        return (
-            f"the pool process exited {proc.returncode} before {kill_after} "
-            f"entries landed: {(proc.stderr.read() or b'')[-2000:]!r}")
-
-    try:
-        await_count(
-            lambda: len(_landed(cfg)), kill_after, what="compiled entries",
-            cadence=Cadence(floor_s=300.0), gone=gone, poll_s=0.25)
-    finally:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-        proc.wait()
-        if proc.stderr is not None:
-            proc.stderr.close()
-    return _landed(cfg)
-
-
-def _run_to_completion(
-    tmp_path: Path, name: str, *, count: int, resume_dir: str,
-) -> dict:
-    cfg = _driver(tmp_path, name, count=count, resume_dir=resume_dir)
-    proc = _spawn(cfg)
-    _, err = proc.communicate()
-    assert proc.returncode == 0, (err or b"")[-4000:].decode(errors="replace")
-    return json.loads(
-        Path(json.loads(cfg.read_text())["summary"]).read_text())
-
-
-# ---------------------------------------------------------------------------
-# RED: what a crash costs with no bank
-# ---------------------------------------------------------------------------
-
-
-def test_without_a_bank_a_killed_mint_shares_nothing_with_the_next_attempt(
-    tmp_path: Path,
-) -> None:
-    """The loss, reproduced. This is the pre-fix behaviour, pinned.
-
-    Attempt 1 finishes an entry and is killed. Attempt 2 — a fresh
-    ``child-<n>`` workdir, exactly as ``mint_delegate.build_cell`` builds one —
-    recompiles EVERY entry, including the finished one, and cannot even get an
-    inductor cache hit because the cache lived inside the dead attempt's
-    directory.
-    """
-    finished = _run_until_killed(tmp_path, count=2, kill_after=1, resume_dir="")
-    assert finished, "attempt 1 must finish at least one entry to have a loss"
-
-    summary = _run_to_completion(tmp_path, "attempt-2", count=2, resume_dir="")
-
-    assert set(summary["files"]) == {_name(0), _name(1)}
-    assert summary["resumed"] == [] and summary["outcomes"] == {}, (
-        "no resume root was given, so the pool must behave exactly as it did "
-        "before pgw#848 item 5 — no bank at all")
-    assert summary["compiled"] == sorted(summary["files"]), (
-        "every entry was recompiled — including the one attempt 1 had already "
-        "finished, which is the ~626 s/entry this issue exists to stop paying "
-        "twice")
-    assert not Path(summary["cache_dir"]).is_relative_to(
-        tmp_path / "attempt-1"), (
-        "attempt 2's inductor cache is a different directory from attempt 1's, "
-        "so there is not even an incidental cache hit to recover on")
-    assert "resumed" not in summary["ledger"], (
-        "a pod with no resume root reads exactly as it did before on the wire")
-
-
-# ---------------------------------------------------------------------------
-# GREEN: the same crash, with the bank
-# ---------------------------------------------------------------------------
-
-
-def test_a_killed_mint_re_admits_its_finished_entries(tmp_path: Path) -> None:
-    """The recovery, and the proof that it is content-verified.
-
-    Same real SIGKILL. Attempt 2 gets a fresh workdir and the STABLE resume
-    root, re-exports (which is what produces the independent graph hash), and
-    the finished entry comes back without a child being spawned for it — with
-    the same bytes.
-    """
-    resume = tmp_path / "resume"
-    finished = _run_until_killed(
-        tmp_path, count=3, kill_after=1, resume_dir=str(resume))
-    assert finished, "attempt 1 must finish at least one entry"
-    assert len(finished) < 3, "the kill must land before the pool completes"
-
-    # The bank survived a SIGKILL: nothing here ran a `finally`.
-    slots = list((resume / aot_resume.ENTRIES_DIR).iterdir())
-    assert len(slots) == len(finished), (
-        "every entry that FINISHED must be banked before the crash, and "
-        "nothing else — a slot per finished entry, written as it landed")
-
-    summary = _run_to_completion(
-        tmp_path, "attempt-2", count=3, resume_dir=str(resume))
-
-    assert set(summary["files"]) == {_name(i) for i in range(3)}
-    assert set(summary["resumed"]) == set(finished), (
-        f"the finished entries {finished!r} must be re-admitted; "
-        f"outcomes={summary['outcomes']!r}")
-    assert set(summary["compiled"]) == set(summary["files"]) - set(finished), (
-        "a re-admitted entry must not spawn a compile child (the recovered "
-        "compile is the whole point), and every entry the bank did NOT hold "
-        "must still be compiled normally")
-    for banked in finished:
-        for path in summary["files"][banked]:
-            assert Path(path).is_file()
-            assert Path(path).is_relative_to(resume), (
-                "a re-admitted entry is served from the bank's own copy — the "
-                "copy whose sha256 was just re-verified")
-
-    facts = summary["ledger"]
-    assert facts["resumed"] == len(finished), facts
-    assert facts["resume_cold"] == 3 - len(finished), facts
-    assert facts["resume_root"] == str(resume)
-    assert facts.get("resume_banked_bytes", 0) > 0, facts
-
-
-# ---------------------------------------------------------------------------
 # The refusals. These are the tests that matter.
 # ---------------------------------------------------------------------------
 
 
 def _bank_one(tmp_path: Path, index: int = 0) -> Tuple[Path, str, Any]:
-    """Compile one entry for real and bank it. Returns (root, entry, program)."""
+    """Bank one entry's compiled files. Returns ``(root, entry, program)``.
+
+    Driven straight at :class:`aot_resume.EntryBank` since pgw#1215. It used to
+    run a real ``EntryCompilePool`` over a real four-linear program, because
+    the pool was the bank's production driver — it is not any more: a compile
+    child builds and traces its own share, so the parent holds no
+    ExportedProgram to re-derive a graph hash from and can neither admit nor
+    put. ⚠️ THE BANK CURRENTLY HAS NO PRODUCTION DRIVER AT ALL (see
+    ``EntryCompilePool.__init__``); re-homing crash-resume at the packed
+    graph-class artifact is owed by pgw#1215 step 3/4. The refusals below are
+    the bank's own and are exercised unchanged — they are what a re-homed
+    driver has to keep.
+    """
+    from gen_worker import graph_hash as graph_hash_mod
+
     resume = tmp_path / "resume"
     entry, program = _name(index), _program(index)
-    box = _pool_with_root(tmp_path / "first" / "entry-pool", 1, str(resume))
-    box.compile([(entry, program)])
-    assert box.bank is not None and box.bank.banked_bytes > 0
+    bank = aot_resume.open_bank(
+        str(resume), inductor_configs={"compile_threads": 2})
+    assert bank is not None
+    assert bank.admit(entry, program).reason == aot_resume.MISS, (
+        "a fresh bank must MISS, or the rows below prove nothing")
+    loose = tmp_path / f"wrapper-{index}.so"
+    loose.write_bytes(b"compiled bytes for " + entry.encode())
+    bank.put(entry, graph_hash_mod.graph_hash(program), [str(loose)])
+    assert bank.banked_bytes > 0
     return resume, entry, program
 
 
-def test_a_tampered_banked_artifact_is_refused_and_recompiled(
-    tmp_path: Path,
-) -> None:
-    """The banked bytes are re-hashed, so an edited artifact cannot serve.
+def _reopen(resume: Path, **kw: Any) -> Any:
+    bank = aot_resume.open_bank(
+        str(resume), inductor_configs=kw.pop("inductor_configs",
+                                             {"compile_threads": 2}))
+    assert bank is not None
+    return bank
 
-    Driven through the real pool: the refusal must reach the COMPILE, not just
-    the bank's return value — a refusal that still handed back the tampered
-    path would be worse than no bank at all.
-    """
+
+def test_a_tampered_banked_artifact_is_refused(tmp_path: Path) -> None:
+    """The banked bytes are re-hashed, so an edited artifact cannot serve."""
     resume, entry, program = _bank_one(tmp_path)
     files = sorted((resume / aot_resume.ENTRIES_DIR).glob(
         f"*/{aot_resume.FILES_DIR}/*"))
@@ -345,17 +150,12 @@ def test_a_tampered_banked_artifact_is_refused_and_recompiled(
         "the tamper must not change the SIZE — otherwise this test proves "
         "only that a size check works, and the sha256 is never exercised")
 
-    second = _pool_with_root(tmp_path / "second" / "entry-pool", 1, str(resume))
-    out = second.compile([(entry, program)])
-
-    assert second.bank is not None
-    assert second.bank.resumed == [], "a tampered artifact must NOT be admitted"
-    assert second.bank.outcomes[entry] == aot_resume.REFUSE_FILE_CONTENT
-    assert entry in second.entry_seconds, (
-        "the refusal must fall through to a real compile — a bank may cost a "
-        "mint time, never a cell")
-    assert out[entry], "the entry is served, from freshly compiled files"
-    assert second.ledger.facts()["resume_refused"] == {
+    second = _reopen(resume)
+    admission = second.admit(entry, program)
+    assert not admission.ok, "a tampered artifact must NOT be admitted"
+    assert admission.reason == aot_resume.REFUSE_FILE_CONTENT
+    assert second.resumed == []
+    assert second.facts()["resume_refused"] == {
         aot_resume.REFUSE_FILE_CONTENT: 1}, (
         "a refusal is hub-visible on the pool row; a bank that silently "
         "refuses every entry looks exactly like a slow mint")
@@ -380,14 +180,13 @@ def test_a_stale_entry_is_refused_by_a_re_derived_graph_hash(
         original), (
         "the two programs must genuinely differ, or this test cannot fail")
 
-    second = _pool_with_root(tmp_path / "second" / "entry-pool", 1, str(resume))
-    out = second.compile([(entry, other)])
-
-    assert second.bank is not None
-    assert second.bank.resumed == []
-    assert second.bank.outcomes[entry] == aot_resume.REFUSE_GRAPH
-    assert entry in second.entry_seconds, "it must be compiled for real instead"
-    assert out[entry]
+    second = _reopen(resume)
+    admission = second.admit(entry, other)
+    assert not admission.ok and admission.reason == aot_resume.REFUSE_GRAPH
+    assert second.resumed == []
+    # ...and the ORIGINAL graph still admits, so the refusal is about the
+    # graph and not about the bank being unusable.
+    assert _reopen(resume).admit(entry, original).ok
 
 
 def test_the_context_axes_are_fail_closed(tmp_path: Path) -> None:

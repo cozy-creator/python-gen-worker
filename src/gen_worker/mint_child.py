@@ -429,27 +429,39 @@ def _mint_aot(
     footprint: Optional[Dict[str, Any]] = None,
 ) -> MintReport:
     """pgw#805: the AOT recipe — torch.export + AOTInductor over the family's
-    whole declared graph-class set, packed as ONE multi-graph cell (pgw#758).
+    whole declared graph-class set, one independently keyed artifact per class
+    (pgw#758/pgw#1176).
 
-    This is the wire that never existed. ``aot_mint.mint`` has been complete
-    and operator-driven since pgw#723/#758, and discovery filtered for its
-    artifact kind since pgw#722 — but no serving-pod code
-    path imported ``aot_mint``, so a discovery MISS could only ever fall
-    through to the dynamo recipe, whose cell that filter rejects. Every pod
-    missed, "re-minted" the wrong kind, and the next pod missed identically.
+    This is the wire that never existed. ``aot_mint`` has been complete and
+    operator-driven since pgw#723/#758, and discovery filtered for its artifact
+    kind since pgw#722 — but no serving-pod code path imported it, so a
+    discovery MISS could only ever fall through to the dynamo recipe, whose
+    cell that filter rejects. Every pod missed, "re-minted" the wrong kind, and
+    the next pod missed identically.
 
-    Runs against the pipeline the child ALREADY loaded through the endpoint's
-    own ``setup()``, so the exported graphs are the serving graphs.
+    pgw#1215 (th#1834 Phase 3 keystone) changed WHERE the export happens. This
+    process used to trace every declared class itself and ship each
+    ``ExportedProgram`` to a compile child on disk — 36.04 s of
+    ``torch.export.load`` per class (pgw#1216). It now hands the compile
+    children the RECIPE and they trace their own share, so nothing is
+    serialized. What this process still owes the mint is everything only it can
+    do: the kernel-lane A/B on a real card (pgw#947), the traceable-as-loaded
+    refusal, the declared-blocker gate, the class ENUMERATION (the adapter fork
+    depends on the composed pipeline), and moving the packed artifacts into the
+    parent's directory.
     """
-    from . import aot_mint, aot_resume, fleet_cells
+    from . import aot_compile_pool, aot_mint, aot_resume, fleet_cells
 
-    # pgw#848 item 5: install the cross-attempt resume bank before anything is
-    # exported. Process-global rather than a parameter threaded through
-    # `aot_mint.mint` -> `_mint_cell` -> `_compile_entries_parallel`: the bank
-    # is opened by the entry pool, three call frames down, and the intervening
-    # signatures describe WHAT to compile rather than where a previous attempt
-    # left its work. Empty request field = no bank, and the mint runs exactly
-    # as it did before.
+    # pgw#848 item 5: install the cross-attempt resume root before the pool is
+    # constructed. Process-global rather than a parameter threaded through
+    # `aot_mint.mint_graph_classes` -> `EntryCompilePool`: the bank is opened
+    # two call frames down and the intervening signatures describe WHAT to
+    # compile rather than where a previous attempt left its work. Empty request
+    # field = no bank.
+    # ⚠️ pgw#1215 NARROWED what this buys: file-level admission is gone with
+    # the parent-side export it re-derived its graph hash from, so the root now
+    # scopes the INDUCTOR cache to the mint (still a real cross-attempt win)
+    # and nothing else. Re-homing resume at the packed artifact is owed.
     aot_resume.set_root(request.resume)
 
     frame(phase="trace_graph", note=f"export declaration for {cfg.family!r}")
@@ -469,26 +481,80 @@ def _mint_aot(
     def _progress(phase: str, step: int, total: int, note: str) -> None:
         frame(phase=phase, step=step, total=total, note=note)
 
+    # pgw#1215 (th#1834 Phase 3 keystone): the compile children TRACE their
+    # own share. This process no longer exports anything — it holds the
+    # pipeline only to have measured the kernel lane on it and to have proven
+    # it traceable — so it hands each child the recipe instead of a program.
+    # Every field below is one this child already holds on `MintRequest` and
+    # already passed to `run_setup`; nothing new is derived here.
+    #
+    # ⚠️ K+1 weight-free pipeline loads (this one, plus one per child) is an
+    # ACCEPTED TEMPORARY COST: step 4 deletes this middle tier entirely and
+    # the serving parent supervises the children directly. Do not "optimise"
+    # it by making the parent export again — that is the boundary this issue
+    # exists to delete.
+    template = aot_compile_pool.EntryJob(
+        function=request.function,
+        modules=tuple(request.modules),
+        cfg=request.cfg,
+        slots=dict(request.slots),
+        # pgw#947: the MEASURED serving-kernel lane for this card. The
+        # discrete verdict lands in the packed envelope (serving reads it
+        # instead of an SM tuple); the numbers ride the result metadata. Only
+        # this process could measure it — a child composes structure-only and
+        # runs no forward — so it crosses on the job.
+        execution_lane=execution_lane_verdict,
+        out_dir=str(out_dir))
+    # How wide this pod may compile. Derived from the pod's REAL budget
+    # (cgroup-aware vCPUs minus serving headroom, and available host RAM over
+    # the measured per-entry peak) — never os.cpu_count, never a constant.
+    # The class COUNT is enumerated here because this is the last process that
+    # holds a pipeline, and the fork depends on the composed pipeline: a child
+    # cannot be told how many classes exist, it can only be told which share
+    # of them is its own (`aot_mint.declared_class_rows`).
+    decl = aot_mint.export_declaration(str(spec.family or ""))
+    if decl is None:
+        raise PreflightRefused(
+            f"family {spec.family!r} has no registered export declaration — "
+            f"a multi-graph cell derives its class set from it")
+    class_count = len(aot_mint.declared_class_rows(pipe, spec, decl))
+    width = aot_compile_pool.entry_workers(
+        class_count,
+        # pgw#848: the HOST ask, measured on this pod by a previous mint of
+        # this (family, lane) and banked by the serving parent. 0 keeps the
+        # constant, and keeps saying so.
+        peak_rss_bytes=int(
+            getattr(request, "compiled_graph_peak_rss_bytes", 0) or 0))
+    frame(phase="trace_graph", note=(
+        f"{class_count} declared graph class(es), K={width.workers} "
+        f"({width.reason})"))
+    # pgw#1053, preserved across the keystone: from here on this process
+    # neither exports nor serves — the children compose their own targets —
+    # so its residents are dead weight on the card the children are about to
+    # compile on. It used to be `aot_mint.mint(release_residents=True)`, whose
+    # release fired when the parent's export producer was exhausted; there is
+    # no parent-side producer any more, so the same release is stated here at
+    # the same moment: after the last read of `pipe` (the class enumeration
+    # above) and before the first child spawns. It matters most on the
+    # REAL-WEIGHT FALLBACK path, where this process is holding a whole
+    # checkpoint.
+    released = aot_mint.release_mint_residents(pipe)
+    if released:
+        frame(phase="trace_graph", note=(
+            "released mint residents: "
+            + ", ".join(f"{k}={v}" for k, v in sorted(released.items()))))
     try:
-        result = aot_mint.mint(
-            pipe, spec, out_dir, on_progress=_progress,
-            # pgw#848: banked by the parent from a previous mint on this pod.
-            # 0 on a pod that has never minted this (family, lane).
-            compiled_graph_peak_rss_bytes=int(
-                getattr(request, "compiled_graph_peak_rss_bytes", 0) or 0),
+        result = aot_mint.mint_graph_classes(
+            template,
+            workdir=out_dir.parent / "compile-pool",
+            width=width,
+            spec=spec,
+            on_progress=_progress,
             # pgw#848: rewritten on every beat, so a mint this process is
-            # KILLED in still leaves its measurements on disk for the parent.
+            # KILLED still leaves its measurements on disk for the parent.
             phase_snapshot=(
                 Path(request.phases_snapshot)
-                if request.phases_snapshot else None),
-            # pgw#947: the MEASURED serving-kernel lane for this card. The
-            # discrete verdict lands in the packed envelope (serving reads it
-            # instead of an SM tuple); the numbers ride the result metadata.
-            execution_lane_verdict=execution_lane_verdict,
-            # pgw#1053: this process exits when the mint ends — its pipeline
-            # serves nobody after the last export, so surrender it and let
-            # the compile pool re-derive K against the freed card.
-            release_residents=True)
+                if request.phases_snapshot else None))
     except aot_mint.MintRefused as exc:
         # A named export refusal is a REFUSAL, not a crash: the parent must
         # not retry it, and the sentence is the whole diagnostic on a pod

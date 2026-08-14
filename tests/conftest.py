@@ -272,6 +272,34 @@ def _fresh_receipt_gate():
     _receipts.reset()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _inductor_cache_per_worker(tmp_path_factory):
+    """pgw#1215: one inductor cache directory per test PROCESS.
+
+    Two xdist workers compiling the same graph into one
+    ``TORCHINDUCTOR_CACHE_DIR`` race on the loose files, and the loser packages
+    a ZERO-BYTE ``.so`` — surfacing as
+    ``PackageIntrospectionError: packaged .so is not an ELF image`` from a gate
+    that is working perfectly. It went unnoticed because the mints that used to
+    trip it took the pooled path, and ``EntryCompilePool`` gives every pool its
+    own cache dir; the keystone made those mints serial, which uses the ambient
+    one. The pool's dir is a LOCATION and not a recipe (asserted by
+    ``test_parallelism_is_not_sealed``), so this changes nothing any test
+    measures — it stops two processes sharing one compiler's scratch.
+
+    Not restricted to xdist: a single-process run gets a private dir too, so a
+    developer's ambient cache can never make the suite pass or fail.
+    """
+    root = tmp_path_factory.mktemp("inductor-cache")
+    before = os.environ.get("TORCHINDUCTOR_CACHE_DIR")
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(root)
+    yield
+    if before is None:
+        os.environ.pop("TORCHINDUCTOR_CACHE_DIR", None)
+    else:
+        os.environ["TORCHINDUCTOR_CACHE_DIR"] = before
+
+
 @pytest.fixture(scope="session")
 def _postmortem_root(tmp_path_factory):
     """One private carrier directory per test process (per xdist worker)."""

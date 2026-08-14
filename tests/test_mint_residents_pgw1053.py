@@ -95,7 +95,7 @@ def test_release_projects_programs_code_only() -> None:
     assert literal_digest_before, "the fixture must actually lift a literal"
 
     pipe = types.SimpleNamespace(unet=module)
-    facts = aot_mint._release_mint_residents(pipe, [row])
+    facts = aot_mint.release_mint_residents(pipe, [row])
 
     # The weights are GONE from residency...
     for fqn in weights_before:
@@ -187,9 +187,17 @@ def _wide_pool(monkeypatch) -> None:
 def test_full_mint_with_release_packs_and_keys_identically(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    """The whole path: overlapped mint, release at producer exhaustion, every
+    """The whole path: mint, release once every row has exported, every
     package gate runs against the projection, the artifact keys identically —
-    and the pipeline is PROVABLY released (weights on meta afterwards)."""
+    and the pipeline is PROVABLY released (weights on meta afterwards).
+
+    pgw#1215: the release used to be reachable only on the OVERLAPPED pooled
+    path (it fired when that path's producer was exhausted), which meant a
+    serial mint held its residents through packaging for no reason. The
+    overlapped path is gone — a compile child traces its own share, so the
+    parent no longer exports at all when it is K-wide — and the release now
+    runs at the same point on the one path there is: after the last row
+    exports, before anything packs."""
     _fake_sm(monkeypatch)
     _wide_pool(monkeypatch)
     _declare()
@@ -216,9 +224,11 @@ def test_full_mint_with_release_packs_and_keys_identically(
         p.device.type == "meta" for p in surrendered.unet.parameters()), (
         "release_residents=True did not release the pipeline")
     assert "residents_release_s" in released.timings
-    assert released.timings.get("entry_workers", 0) > 1, (
-        "the release path only runs on the pooled path; this mint went "
-        "serial and proved nothing")
+    # ...and the mint that did NOT ask for it kept its weights, so the row
+    # above is a property of `release_residents=True` and not of minting.
+    assert all(
+        p.device.type != "meta" for p in keeper.unet.parameters()), (
+        "the mint released a pipeline whose owner never surrendered it")
 
 
 # ---------------------------------------------------------------------------
