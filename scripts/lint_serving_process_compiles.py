@@ -84,16 +84,6 @@ CHILD_ONLY: Dict[str, str] = {
         "`pack_graph_classes` only — supervision and packaging, never a "
         "compile."
     ),
-    "aot_compile_pool": (
-        "the K-wide compile driver: it SPAWNS children and stages their "
-        "programs. `torch.export.save` here is the parent half of the pool's "
-        "process boundary (pgw#784) and pgw#1215's keystone is deleting it — "
-        "the child traces its own share."
-    ),
-    "aot_compile_child": (
-        "`python -m gen_worker.aot_compile_child` — the pool's child half: it "
-        "`torch.export.load`s the staged program and AOTI-compiles it."
-    ),
 }
 
 
