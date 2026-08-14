@@ -254,6 +254,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("FAIL: the fence covers NO module — the axis-producer probe is "
               "stale, which makes this gate green for the wrong reason")
         return 1
+    # pgw#1214: A SEED THAT MATCHES NOTHING IS A SILENT DEMOTION.
+    #
+    # `FENCE_SEED` names its modules by FILENAME, and the walk above tests
+    # membership against the files that exist — so a seed entry whose file has
+    # been renamed simply stops matching. No error, no warning, and the module
+    # that DEFINES the key drops from "always fenced" to whatever the
+    # axis-producer heuristic happens to notice. The `not fenced` guard above
+    # cannot see it: the other seeds still match, so the gate stays green while
+    # its most important subject walks out.
+    #
+    # Not hypothetical — this sweep renames `cell_key.py` to
+    # `compiled_graph_key.py`, and the key surface is where a silent gap is
+    # least affordable (the same surface on which a stale `KEY_SCHEME` would
+    # have unaddressed every published graph). The fence now asserts its own
+    # REACH, which is the discipline tensorhub's glob fences already hold for
+    # themselves: "a fence that scanned nothing would pass forever."
+    seen = {path.name for path in fenced}
+    unmatched = [name for name in FENCE_SEED if name not in seen]
+    if unmatched:
+        print(
+            "FAIL: these FENCE_SEED modules matched no file: "
+            + ", ".join(unmatched)
+            + "\n  The seed names files by NAME, so a rename that leaves this "
+              "list behind demotes the key-defining module from FENCED to "
+              "heuristic, silently. Update FENCE_SEED in the same change that "
+              "renames the file.")
+        return 1
     print(f"fence 1: {len(fenced)} cell-key module(s)")
     for path, why in sorted(fenced.items()):
         rel = path.relative_to(REPO) if path.is_relative_to(REPO) else path
