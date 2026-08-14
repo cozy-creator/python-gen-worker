@@ -1,0 +1,9 @@
+# pgw#1226: fragments a cut has already assembled, and the version whose TREE
+# contains them. Written by scripts/assemble_changelog.py; lanes never edit it.
+# <version>\t<fragment stem>
+0.114.3	pgw1244
+0.115.0	pgw1224
+0.115.0	pgw1226
+0.115.0	pgw1232
+0.115.0	pgw1243
+0.115.0	pgw1247
