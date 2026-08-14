@@ -1,40 +1,13 @@
-"""Hub-signed compiled-graph receipt verification.
+"""Verify hub-signed compiled-graph receipts before bytes can execute.
 
-A ``cell_store`` row (cell_key -> artifact) is a Nix *realisation*: fetch
-verifies the BYTES against the hub's recorded digest, but nothing signs the
-RECORD binding the key to those bytes. Under "bucket is truth, DB is a
-rebuildable index" that makes bucket write access equivalent to arbitrary cell
-delivery after any index rebuild.
+Resolve embeds one compact JWS per compiled graph.  The worker verifies that
+receipt before transport, then verifies the materialized bytes against the
+same typed receipt before TCG imports them.  There is no receipt lookup,
+revocation lookup, legacy claim spelling, or unsigned projection of claims.
 
-The hub signs a ``cell-receipt-v1`` compact JWS at publish-finalize binding:
-cell_key + owning endpoint + the publisher-trust rung + the snapshot digest
-(the derivation binding Nix's fingerprint omits) + the packed tarball's
-ALGORITHM-TAGGED digest AND integral size (Bazel REv2: size is part of the
-digest). This module is the WORKER half: before arming any hub-delivered
-artifact the worker fetches the receipt, verifies the signature against
-the hub's public artifact-signing JWKS, checks every binding against the
-local bytes, and re-checks the operator revocation list — the targeted
-recall, and the ONLY recall lever.
-
-Refusal semantics: a failed receipt DISCARDS the delivered artifact with a
-loud typed ``cell_receipt_refused`` activity event and falls through to
-the ordinary miss policy (fleet workers self-mint their own replacement —
-their own bytes need no receipt; the copy they publish gets one from the
-publish gate). A receipt failure never kills serving.
-
-SHA-256 ONLY. The receipt's canonical binding is
-``artifact.digest``, always tagged (``sha256:<hex>``), and verification
-dispatches on that tag. An untagged bare-hex digest is REFUSED rather than
-read as some assumed algorithm, and a receipt with no usable digest at all is
-REFUSED rather than compared against nothing. There is no bare-hex
-``artifact.blake3`` arm: a worker meeting one refuses it, self-mints, and
-publishes a replacement whose receipt is sha256-bound — the designed miss
-policy, not a new failure.
-
-Configuration happens at the HelloAck site in ``lifecycle`` (the same
-moment ``file_base_url`` arrives). cozy-local and the CLI never configure
-this module, so the gate is a no-op there — user-controlled stores keep
-their local trust model.
+The signed object is deliberately the compiled graph, never a resolve batch or
+manifest.  Its identity axes derive its key through TCG's authority, while the
+artifact digest and integral size bind the exact transported bytes.
 """
 
 from __future__ import annotations
@@ -46,100 +19,81 @@ import json
 import logging
 import threading
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Dict, Mapping, Optional
+from pathlib import Path, PurePosixPath
+from typing import Any, Mapping, Optional
 
 import requests
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from torch_compiled_graphs import IdentityError
+from torch_compiled_graphs.identity import from_artifact_metadata, from_axes
 
-from . import artifact_meta
-from . import worker_identity
+from . import artifact_meta, worker_identity
 
 logger = logging.getLogger(__name__)
 
-# `publisher_tier` and `publisher_org_id` are LOAD-BEARING at the arm gate
-# below, so an older receipt must never be read as a v2 one with the trust
-# fields missing: the version check refuses outright rather than defaulting.
 RECEIPT_VERSION = "compiled-graph-receipt-v1"
-
-# Publisher tiers. `platform` means the platform vouches for the
-# publishing org's endpoint code, so the cell is adoptable fleet-wide within its
-# family. Anything else — including an absent or unrecognised value — is `org`,
-# and an org-scoped cell is adoptable only by pods of the endpoint that minted
-# it. There is deliberately no third value and no "unknown" branch: every
-# unparseable tier must land on the NARROWER rule.
-CELL_PUBLISHER_TIER_PLATFORM = "platform"
-CELL_PUBLISHER_TIER_ORG = "org"
-# The algorithm this worker can actually recompute from local bytes. A receipt
-# naming anything else is refused, never assumed.
-# There is deliberately no multi-algorithm ceremony for a second algorithm
-# that does not exist. The tag stays on the wire (a bare hex string silently
-# acquires whatever algorithm the reader assumed), so adding an algorithm
-# later is still a local change — it is just not pre-paid here.
+RECEIPT_TYPE = "compiled-graph-receipt-v1+jws"
+PUBLISHER_TIER_PLATFORM = "platform"
+PUBLISHER_TIER_ORG = "org"
 ARTIFACT_DIGEST_ALGORITHM = "sha256"
 JWKS_PATH = "/api/v1/artifacts/.well-known/jwks.json"
-
-# Per-CALL socket budget on the three small control-plane round trips this
-# module makes (JWKS, receipt, revocations). Not a kill — none of them can be
-# "making progress" in any observable sense and expiry ends no work — but
-# without it a hub that accepts a connection and says nothing wedges the arm
-# gate every cell adoption waits behind. Shorter than `callout`'s 60 s because
-# these are constant-size answers, not a child request the hub may
-# legitimately take time to admit.
+# A JWKS response is constant-size control data: 30 seconds bounds a silent
+# socket without guessing how long compilation, transfer, or import may take.
 _HTTP_TIMEOUT_S = 30
+# Production RSA signing keys are 2048-4096 bits. 8192 accepts a full size
+# class of rotation headroom while refusing modulus/exponent inputs large
+# enough to make every cached-key verification super-linear.
+MAX_RSA_MODULUS_BITS = 8192
+
+_CLAIM_FIELDS = frozenset({
+    "crv",
+    "family",
+    "compiled_graph_key",
+    "identity_axes",
+    "owning_endpoint_id",
+    "publisher",
+    "publisher_tier",
+    "publisher_org_id",
+    "snapshot_digest",
+    "artifact",
+    "iat",
+})
+_ARTIFACT_FIELDS = frozenset({"path", "digest", "size_bytes"})
 
 
 class ReceiptError(RuntimeError):
-    """Typed receipt refusal. ``reason`` is the stable, greppable class."""
+    """Typed refusal whose ``reason`` is stable wire/debug vocabulary."""
 
     def __init__(self, reason: str, detail: str = "") -> None:
         self.reason = reason
         super().__init__(f"{reason}: {detail}" if detail else reason)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Receipt:
-    """Decoded, signature-verified cell receipt claims — the ones something
-    CHECKS.
-
-    Decoded: ``axes``, ``publisher``, ``artifact_path``, ``manifest_digest``,
-    ``fingerprint_digest`` and ``issued_at_unix``. The signature still covers the whole payload, so a
-    claim this worker does not decode is neither trusted nor forgeable — it is
-    simply not a promise anyone here relies on. Two notes worth keeping:
-
-    * ``manifest_digest``/``fingerprint_digest`` are additive ``omitempty``
-      claims the hub hashes in (``api/cell_receipts.go``); the content they
-      cover is already bound by ``snapshot_digest``, and removing an additive
-      claim does not move ``RECEIPT_VERSION``.
-    * ``issued_at_unix`` had NO freshness check anywhere, and adding one would
-      be a fixed-duration condemn — the thing the no-magic-timeouts rule
-      forbids. Receipt currency is the REVOCATION list (:data:`REVOCATIONS_PATH`,
-      fail-closed when unreadable), which is an authority answering, not a
-      clock guessing.
-
-    A claim added back must arrive with the code that refuses on it.
-    """
+    """Every decoded claim is verified and consumed by an admission gate."""
 
     version: str
     family: str
     compiled_graph_key: str
+    identity_axes: tuple[tuple[str, str], ...]
     owning_endpoint_id: str
-    # The publisher-trust boundary, inside the signature.
+    publisher: str
     publisher_tier: str
     publisher_org_id: str
     snapshot_digest: str
-    # Canonical, ALGORITHM-TAGGED ("<algo>:<hex>"). Never bare hex.
+    artifact_path: str
     artifact_digest: str
     artifact_size_bytes: int
+    issued_at_unix: int
 
 
 @dataclass
 class _Config:
     base_url: str
-    # kid -> RSA public key, lazily fetched from the hub JWKS.
-    jwks: Dict[str, rsa.RSAPublicKey] = field(default_factory=dict)
+    jwks: dict[str, rsa.RSAPublicKey] = field(default_factory=dict)
 
 
 _LOCK = threading.Lock()
@@ -147,15 +101,13 @@ _CONFIG: Optional[_Config] = None
 
 
 def configure(base_url: str) -> None:
-    """Arm the receipt gate. Called from the HelloAck site; idempotent
-    (re-configuration replaces the base URL and drops the JWKS cache so a
-    hub bounce with rotated keys re-fetches)."""
+    """Arm the gate and discard cached keys on hub reconfiguration."""
     global _CONFIG
     base = str(base_url or "").strip().rstrip("/")
     if not base:
         return
     with _LOCK:
-        _CONFIG = _Config(base_url=base)
+        _CONFIG = _Config(base)
     logger.info("receipts: gate configured against %s", base)
 
 
@@ -165,272 +117,132 @@ def configured() -> bool:
 
 
 def reset() -> None:
-    """Disarm the gate (test seam)."""
+    """Disarm the gate and its JWKS cache (test/process-reset seam)."""
     global _CONFIG
     with _LOCK:
         _CONFIG = None
 
 
-# -- crypto -----------------------------------------------------------------
-
-
 def _b64url_decode(segment: str) -> bytes:
-    pad = "=" * (-len(segment) % 4)
     try:
-        return base64.urlsafe_b64decode(segment + pad)
+        return base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4))
     except (binascii.Error, ValueError) as exc:
-        raise ReceiptError("receipt_malformed", f"base64url decode failed: {exc}") from exc
-
-
-# -- publisher trust --------------------------------------------------------
-
-
-def _normalize_publisher_tier(raw: object) -> str:
-    """Anything that is not exactly ``platform`` is ``org``.
-
-    No error return and no third value on purpose: a caller forced to branch on
-    an error eventually gets the branch wrong, and every wrong branch here ends
-    in ``dlopen``.
-    """
-    if str(raw or "").strip() == CELL_PUBLISHER_TIER_PLATFORM:
-        return CELL_PUBLISHER_TIER_PLATFORM
-    return CELL_PUBLISHER_TIER_ORG
-
-
-def _self_viewer() -> "worker_identity.ViewerIdentity":
-    """WHO THIS POD IS, from the one resolver that can answer.
-
-    Never decode ``cell_read_endpoint_id``/``cell_read_org_id`` out of
-    ``cfg.worker_jwt()`` — *this process's* credential. The gate is armed at
-    HelloAck inside the COMPUTE CHILD, which holds no credential by
-    construction, so both claims are ``""`` on every real serving pod and
-    every org-tier cell would be refused ``publisher_untrusted``.
-
-    ``worker_identity.viewer`` asks this process's own credential when it has
-    one and the control PARENT when it does not — the same seam the resolve
-    itself uses. Its refusal is typed, so "the hub stamped no claims" (a legal
-    narrowing) never wears the same face as "nobody could be asked".
-    """
-    return worker_identity.viewer()
-
-
-def needs_viewer_identity(receipt: Receipt) -> bool:
-    """Whether the trust rule will consult WHO THIS POD IS.
-
-    One spelling, two readers: :func:`refuse_untrusted_publisher` opens with
-    it, and the caller asks it BEFORE resolving an identity — a platform-tier
-    cell is adoptable by any pod, so demanding an identity to arm one would
-    turn a resolver outage into a refusal of the one cell class that never
-    needed a resolver.
-    """
-    return receipt.publisher_tier != CELL_PUBLISHER_TIER_PLATFORM
-
-
-def refuse_untrusted_publisher(
-    receipt: Receipt, self_endpoint_id: str, self_org_id: str = "",
-) -> None:
-    """Raise unless this pod may adopt ``receipt``'s cell.
-
-    THE RULE: a cell must have come from THIS endpoint, from THIS pod's OWN ORG,
-    or from a publisher the platform vouches for.
-
-    Paul's ruling is literally endpoint-scoped (*"must have come from endpoint-A
-    itself, or from a publisher that is us or a trusted party"*); the ORG arm
-    matches the rule the hub's listing applies (``authz.CellAdoptable``), so
-    the two layers agree instead of the listing showing an org its own cell
-    from a sibling endpoint and this function refusing it.
-
-    THREAT: cross-tenant native-code execution. The artifact is a ``.so`` this
-    process is about to ``dlopen``. Nothing else prevents it — the digest
-    proves the bytes are the ones the hub signed, not that the hub meant them
-    for US; the cell key proves nothing at all, because the hub cannot verify
-    artifact-to-graph correspondence without recompiling; and the hub's own
-    listing filter only covers the ONE path that goes through a listing. This
-    runs on every path, and it is the last check before the load.
-    """
-    if not needs_viewer_identity(receipt):
-        return
-    owner = str(receipt.owning_endpoint_id or "").strip()
-    mine = str(self_endpoint_id or "").strip()
-    owner_org = str(receipt.publisher_org_id or "").strip()
-    my_org = str(self_org_id or "").strip()
-
-    # Same endpoint: the narrowest match.
-    if owner and mine and owner == mine:
-        return
-    # Same org. BOTH sides must be non-empty: an empty-equals-empty match is a
-    # vacuous guard — two cells neither of which can be attributed must not
-    # match each other.
-    if owner_org and my_org and owner_org == my_org:
-        return
-
-    if not owner and not owner_org:
         raise ReceiptError(
-            "publisher_untrusted",
-            "org-tier receipt names neither an owning endpoint nor a publisher "
-            "org, so no pod may adopt it")
-    if not mine and not my_org:
+            "receipt_malformed", f"base64url decode failed: {exc}"
+        ) from exc
+
+
+def _required_string(block: Mapping[str, Any], name: str) -> str:
+    value = block.get(name)
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ReceiptError("receipt_claim_missing", f"{name} must be a canonical string")
+    return value
+
+
+def _required_positive_int(
+    block: Mapping[str, Any], name: str, reason: str,
+) -> int:
+    value = block.get(name)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ReceiptError(reason, f"{name} must be a positive integer")
+    return value
+
+
+def _canonical_artifact_path(raw: object) -> str:
+    if not isinstance(raw, str) or not raw or raw != raw.strip():
         raise ReceiptError(
-            "publisher_untrusted",
-            "this pod cannot name its own endpoint or org (no cell_read_* claim "
-            "on the worker credential), so it may adopt platform-tier cells only")
-    raise ReceiptError(
-        "publisher_untrusted",
-        f"cell was minted for endpoint {owner or '<unnamed>'} "
-        f"(org {owner_org or '<unnamed>'}) and this pod serves "
-        f"{mine or '<unnamed>'} (org {my_org or '<unnamed>'})")
+            "receipt_artifact_path_invalid", "artifact path must be a canonical string"
+        )
+    value = raw
+    path = PurePosixPath(value)
+    if not value or path.is_absolute() or ".." in path.parts or value != path.as_posix():
+        raise ReceiptError(
+            "receipt_artifact_path_invalid",
+            f"artifact path {value!r} must be canonical and relative",
+        )
+    return value
 
 
-#: THREAT: the JWKS `n` is base64url off the network with no
-#: declared length, so a multi-MB modulus makes EVERY later receipt
-#: verification super-linear for the life of the cached key — and nothing
-#: downstream refuses it, because the signatures still check out. Real keys are
-#: 2048-4096 bits. Bounded here because this is the only place the bytes become
-#: a key.
-MAX_RSA_MODULUS_BITS = 8192
+def _canonical_artifact_digest(raw: object) -> str:
+    if not isinstance(raw, str) or not raw or raw != raw.strip() or raw != raw.lower():
+        raise ReceiptError(
+            "receipt_digest_malformed", "artifact digest must be a canonical string"
+        )
+    value = raw
+    algorithm, separator, hexadecimal = value.partition(":")
+    if not separator:
+        raise ReceiptError(
+            "receipt_digest_untagged", "artifact digest has no algorithm tag"
+        )
+    if algorithm != ARTIFACT_DIGEST_ALGORITHM:
+        raise ReceiptError(
+            "receipt_digest_algorithm_unsupported", f"algorithm={algorithm!r}"
+        )
+    if len(hexadecimal) != 64 or any(c not in "0123456789abcdef" for c in hexadecimal):
+        raise ReceiptError(
+            "receipt_digest_malformed", "sha256 digest must be 64 lowercase hex characters"
+        )
+    return value
 
 
 def _rsa_key_from_jwk(jwk: Mapping[str, object]) -> Optional[rsa.RSAPublicKey]:
-    if str(jwk.get("kty") or "") != "RSA":
+    if jwk.get("kty") != "RSA":
         return None
-    n_raw, e_raw = str(jwk.get("n") or ""), str(jwk.get("e") or "")
-    if not n_raw or not e_raw:
+    modulus = str(jwk.get("n") or "")
+    exponent = str(jwk.get("e") or "")
+    if not modulus or not exponent:
         return None
-    n_bytes, e_bytes = _b64url_decode(n_raw), _b64url_decode(e_raw)
-    # RSA requires 1 < e < n, so ONE bound covers both operands of the modexp
-    # whose cost is the threat. A key this big is refused, not skipped: the hub
-    # publishing one is a fact about the hub, and quietly dropping it would
-    # leave a pod verifying against whichever key happened to parse.
-    oversized = max(len(n_bytes), len(e_bytes)) * 8
-    if oversized > MAX_RSA_MODULUS_BITS:
+    n_bytes = _b64url_decode(modulus)
+    e_bytes = _b64url_decode(exponent)
+    bits = max(len(n_bytes), len(e_bytes)) * 8
+    if bits > MAX_RSA_MODULUS_BITS:
         raise ReceiptError(
             "jwks_modulus_oversized",
-            f"hub JWKS key {str(jwk.get('kid') or '<unnamed>')!r} carries a "
-            f"{oversized}-bit modulus/exponent, over the "
-            f"{MAX_RSA_MODULUS_BITS}-bit bound")
-    n = int.from_bytes(n_bytes, "big")
-    e = int.from_bytes(e_bytes, "big")
-    return rsa.RSAPublicNumbers(e=e, n=n).public_key()
-
-
-def canonical_artifact_digest(digest: str) -> str:
-    """Resolve the receipt's algorithm-tagged artifact digest.
-
-    Every route to "nothing to compare against" is a typed REFUSAL, because
-    that is the shape this whole migration keeps producing: an absent field
-    makes a guard vacuously true and the integrity check silently disappears.
-    A bare hex string is refused for the same reason a bare CAS ref is —
-    it silently acquires whatever algorithm the reader assumed.
-    """
-    d = str(digest or "").strip().lower()
-    if not d:
-        raise ReceiptError("receipt_no_artifact_digest", "receipt binds no artifact digest")
-    algo, sep, hex_part = d.partition(":")
-    if not sep:
-        raise ReceiptError(
-            "receipt_digest_untagged",
-            f"artifact digest {d[:16]}… carries no algorithm tag")
-    if algo != ARTIFACT_DIGEST_ALGORITHM:
-        raise ReceiptError("receipt_digest_algorithm_unsupported", f"algo={algo!r}")
-    if not _is_hex64(hex_part):
-        raise ReceiptError(
-            "receipt_digest_malformed",
-            f"{algo} digest must be 64 hex characters")
-    return f"{algo}:{hex_part}"
-
-
-def _is_hex64(value: str) -> bool:
-    return len(value) == 64 and all(c in "0123456789abcdef" for c in value)
-
-
-def verify_receipt_jws(jws: str, keys: Mapping[str, rsa.RSAPublicKey]) -> Receipt:
-    """Verify a compact JWS against ``keys`` (kid -> RSA public key) and
-    return the decoded claims. Raises :class:`ReceiptError` with a named
-    reason on ANY failure — malformed, unknown kid, alg downgrade, bad
-    signature, wrong version."""
-    parts = str(jws or "").strip().split(".")
-    if len(parts) != 3 or not all(parts[:2]):
-        raise ReceiptError("receipt_malformed", "not a compact JWS")
+            f"key {str(jwk.get('kid') or '<unnamed>')!r} is {bits} bits",
+        )
     try:
-        header = json.loads(_b64url_decode(parts[0]).decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise ReceiptError("receipt_malformed", f"header: {exc}") from exc
-    if not isinstance(header, dict):
-        raise ReceiptError("receipt_malformed", "header is not an object")
-    alg = str(header.get("alg") or "")
-    kid = str(header.get("kid") or "").strip()
-    if alg != "RS256":
-        # Fail closed on every non-RS256 alg, including "none".
-        raise ReceiptError("receipt_alg_unsupported", f"alg={alg!r}")
-    key = keys.get(kid)
-    if key is None:
-        raise ReceiptError("receipt_unknown_kid", f"kid={kid!r}")
-    signature = _b64url_decode(parts[2])
-    signing_input = (parts[0] + "." + parts[1]).encode("ascii")
-    try:
-        key.verify(signature, signing_input, padding.PKCS1v15(), hashes.SHA256())
-    except InvalidSignature as exc:
-        raise ReceiptError("receipt_signature_invalid", "signature check failed") from exc
-    try:
-        payload = json.loads(_b64url_decode(parts[1]).decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise ReceiptError("receipt_malformed", f"payload: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ReceiptError("receipt_malformed", "payload is not an object")
-    version = str(payload.get("crv") or "")
-    if version != RECEIPT_VERSION:
-        raise ReceiptError("receipt_version_unsupported", f"crv={version!r}")
-    artifact = payload.get("artifact")
-    if not isinstance(artifact, dict):
-        raise ReceiptError("receipt_malformed", "no artifact binding")
-    try:
-        size_bytes = int(artifact.get("size_bytes") or 0)
-    except (TypeError, ValueError) as exc:
-        raise ReceiptError("receipt_malformed", f"numeric claim: {exc}") from exc
-    return Receipt(
-        version=version,
-        family=str(payload.get("family") or ""),
-        compiled_graph_key=str(payload.get("compiled_graph_key") or ""),
-        owning_endpoint_id=str(payload.get("owning_endpoint_id") or ""),
-        publisher_tier=_normalize_publisher_tier(payload.get("publisher_tier")),
-        publisher_org_id=str(payload.get("publisher_org_id") or ""),
-        snapshot_digest=str(payload.get("snapshot_digest") or ""),
-        artifact_digest=canonical_artifact_digest(str(artifact.get("digest") or "")),
-        artifact_size_bytes=size_bytes,
-    )
-
-
-# -- hub fetches ------------------------------------------------------------
-
-
-def _fetch_jwks(cfg: _Config) -> Dict[str, rsa.RSAPublicKey]:
-    resp = requests.get(cfg.base_url + JWKS_PATH, timeout=_HTTP_TIMEOUT_S)
-    if resp.status_code != 200:
-        raise ReceiptError("jwks_unavailable", f"{JWKS_PATH} -> {resp.status_code}")
-    try:
-        doc = resp.json()
+        return rsa.RSAPublicNumbers(
+            e=int.from_bytes(e_bytes, "big"), n=int.from_bytes(n_bytes, "big")
+        ).public_key()
     except ValueError as exc:
-        raise ReceiptError("jwks_unavailable", f"jwks parse: {exc}") from exc
-    keys: Dict[str, rsa.RSAPublicKey] = {}
-    for jwk in doc.get("keys") or []:
-        if not isinstance(jwk, dict):
+        raise ReceiptError("jwks_unavailable", f"invalid RSA key: {exc}") from exc
+
+
+def _fetch_jwks(cfg: _Config) -> dict[str, rsa.RSAPublicKey]:
+    try:
+        response = requests.get(cfg.base_url + JWKS_PATH, timeout=_HTTP_TIMEOUT_S)
+    except requests.RequestException as exc:
+        raise ReceiptError("jwks_unavailable", str(exc)) from exc
+    if response.status_code != 200:
+        raise ReceiptError("jwks_unavailable", f"{JWKS_PATH} -> {response.status_code}")
+    try:
+        document = response.json()
+    except ValueError as exc:
+        raise ReceiptError("jwks_unavailable", f"JWKS parse failed: {exc}") from exc
+    if not isinstance(document, Mapping):
+        raise ReceiptError("jwks_unavailable", "JWKS is not an object")
+    keys: dict[str, rsa.RSAPublicKey] = {}
+    rows = document.get("keys")
+    if not isinstance(rows, list):
+        raise ReceiptError("jwks_unavailable", "JWKS carries no key list")
+    for row in rows:
+        if not isinstance(row, Mapping):
             continue
-        kid = str(jwk.get("kid") or "").strip()
+        kid = str(row.get("kid") or "").strip()
         if not kid:
             continue
-        key = _rsa_key_from_jwk(jwk)
+        key = _rsa_key_from_jwk(row)
         if key is not None:
             keys[kid] = key
     if not keys:
-        raise ReceiptError("jwks_unavailable", "no usable RSA keys in the hub JWKS")
+        raise ReceiptError("jwks_unavailable", "JWKS carries no usable RSA key")
     return keys
 
 
-def _jwks_for(cfg: _Config, kid_hint: str) -> Dict[str, rsa.RSAPublicKey]:
-    """The cached JWKS; refetched when the hinted kid is unknown (rotation)."""
+def _jwks_for(cfg: _Config, kid: str) -> dict[str, rsa.RSAPublicKey]:
     with _LOCK:
         cached = dict(cfg.jwks)
-    if cached and (not kid_hint or kid_hint in cached):
+    if cached and kid in cached:
         return cached
     fresh = _fetch_jwks(cfg)
     with _LOCK:
@@ -438,32 +250,183 @@ def _jwks_for(cfg: _Config, kid_hint: str) -> Dict[str, rsa.RSAPublicKey]:
     return fresh
 
 
-def _kid_of(jws: str) -> str:
-    parts = str(jws or "").split(".")
-    if len(parts) != 3:
-        return ""
+def _header(jws: str) -> tuple[list[str], dict[str, Any]]:
+    if not isinstance(jws, str) or not jws or jws != jws.strip():
+        raise ReceiptError("receipt_malformed", "compact JWS must be a canonical string")
+    parts = jws.split(".")
+    if len(parts) != 3 or not all(parts):
+        raise ReceiptError("receipt_malformed", "not a compact JWS")
     try:
-        header = json.loads(_b64url_decode(parts[0]).decode("utf-8"))
-    except (ReceiptError, ValueError, UnicodeDecodeError):
-        return ""
-    return str(header.get("kid") or "").strip() if isinstance(header, dict) else ""
+        raw = json.loads(_b64url_decode(parts[0]).decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ReceiptError("receipt_malformed", f"header: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ReceiptError("receipt_malformed", "header is not an object")
+    if set(raw) != {"alg", "kid", "typ"}:
+        raise ReceiptError("receipt_header_shape", "header must contain only alg, kid, typ")
+    if raw.get("alg") != "RS256":
+        raise ReceiptError("receipt_alg_unsupported", f"alg={raw.get('alg')!r}")
+    if raw.get("typ") != RECEIPT_TYPE:
+        raise ReceiptError("receipt_type_unsupported", f"typ={raw.get('typ')!r}")
+    _required_string(raw, "kid")
+    return parts, raw
 
 
-# -- local bindings ---------------------------------------------------------
+def _verify_jws(
+    parts: list[str],
+    header: Mapping[str, Any],
+    keys: Mapping[str, rsa.RSAPublicKey],
+) -> Receipt:
+    kid = str(header["kid"])
+    key = keys.get(kid)
+    if key is None:
+        raise ReceiptError("receipt_unknown_kid", f"kid={kid!r}")
+    try:
+        signing_input = f"{parts[0]}.{parts[1]}".encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ReceiptError("receipt_malformed", "JWS segments must be ASCII") from exc
+    try:
+        key.verify(
+            _b64url_decode(parts[2]),
+            signing_input,
+            padding.PKCS1v15(),
+            hashes.SHA256(),
+        )
+    except InvalidSignature as exc:
+        raise ReceiptError("receipt_signature_invalid", "signature check failed") from exc
+    try:
+        payload = json.loads(_b64url_decode(parts[1]).decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ReceiptError("receipt_malformed", f"payload: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ReceiptError("receipt_malformed", "payload is not an object")
+    if set(payload) != _CLAIM_FIELDS:
+        missing = sorted(_CLAIM_FIELDS - set(payload))
+        unknown = sorted(set(payload) - _CLAIM_FIELDS)
+        raise ReceiptError(
+            "receipt_claim_shape", f"missing={missing!r} unknown={unknown!r}"
+        )
+    version = _required_string(payload, "crv")
+    if version != RECEIPT_VERSION:
+        raise ReceiptError("receipt_version_unsupported", f"crv={version!r}")
+    artifact = payload.get("artifact")
+    if not isinstance(artifact, Mapping) or set(artifact) != _ARTIFACT_FIELDS:
+        raise ReceiptError(
+            "receipt_artifact_shape", "artifact must contain exactly path, digest, size_bytes"
+        )
+    axes = payload.get("identity_axes")
+    if not isinstance(axes, Mapping):
+        raise ReceiptError("receipt_identity_invalid", "identity_axes is not an object")
+    try:
+        identity = from_axes(axes)
+    except IdentityError as exc:
+        raise ReceiptError("receipt_identity_invalid", str(exc)) from exc
+    compiled_graph_key = _required_string(payload, "compiled_graph_key")
+    if identity.value != compiled_graph_key:
+        raise ReceiptError(
+            "receipt_identity_mismatch",
+            f"identity axes derive {identity.value}, receipt names {compiled_graph_key}",
+        )
+    publisher_tier = _required_string(payload, "publisher_tier")
+    if publisher_tier not in {PUBLISHER_TIER_PLATFORM, PUBLISHER_TIER_ORG}:
+        raise ReceiptError("receipt_publisher_tier_invalid", publisher_tier)
+    artifact_size = _required_positive_int(
+        artifact, "size_bytes", "receipt_artifact_size_invalid"
+    )
+    issued_at = _required_positive_int(payload, "iat", "receipt_issuance_invalid")
+    return Receipt(
+        version=version,
+        family=_required_string(payload, "family"),
+        compiled_graph_key=compiled_graph_key,
+        identity_axes=identity.axes,
+        owning_endpoint_id=_required_string(payload, "owning_endpoint_id"),
+        publisher=_required_string(payload, "publisher"),
+        publisher_tier=publisher_tier,
+        publisher_org_id=_required_string(payload, "publisher_org_id"),
+        snapshot_digest=_required_string(payload, "snapshot_digest"),
+        artifact_path=_canonical_artifact_path(artifact.get("path")),
+        artifact_digest=_canonical_artifact_digest(artifact.get("digest")),
+        artifact_size_bytes=artifact_size,
+        issued_at_unix=issued_at,
+    )
 
 
-def artifact_digest(path: Path) -> str:
-    """This worker's ALGORITHM-TAGGED digest of ``path`` (``sha256:<hex>``)."""
-    hasher = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            hasher.update(chunk)
-    return f"{ARTIFACT_DIGEST_ALGORITHM}:{hasher.hexdigest()}"
+def _refuse_untrusted_publisher(receipt: Receipt) -> None:
+    if receipt.publisher_tier == PUBLISHER_TIER_PLATFORM:
+        return
+    try:
+        viewer = worker_identity.viewer()
+    except worker_identity.IdentityUnavailable as exc:
+        raise ReceiptError("identity_unavailable", str(exc)) from exc
+    if receipt.owning_endpoint_id == viewer.endpoint_id:
+        return
+    if receipt.publisher_org_id == viewer.org_id and viewer.org_id:
+        return
+    raise ReceiptError(
+        "publisher_untrusted",
+        f"publisher endpoint/org {receipt.owning_endpoint_id}/{receipt.publisher_org_id} "
+        f"does not match viewer {viewer.endpoint_id}/{viewer.org_id}",
+    )
 
 
-def _embedded_meta(artifact: Path) -> Dict[str, object]:
-    """The artifact's packed ``metadata.json``, through the one stdlib-only
-    reader — so this module still never imports the compile stack."""
+def verify_receipt(
+    receipt_jws: str,
+    *,
+    family: str,
+    compiled_graph_key: str,
+    snapshot_digest: str,
+    artifact_path: str,
+    artifact_digest: str,
+    artifact_size_bytes: int,
+) -> Receipt:
+    """Verify every signed resolve/transport binding before download."""
+    with _LOCK:
+        cfg = _CONFIG
+    if cfg is None:
+        raise ReceiptError("gate_unconfigured", "receipt gate has no hub wiring")
+    parts, header = _header(receipt_jws)
+    kid = str(header["kid"])
+    receipt = _verify_jws(parts, header, _jwks_for(cfg, kid))
+    expected = {
+        "family": _required_string({"family": family}, "family"),
+        "compiled_graph_key": _required_string(
+            {"compiled_graph_key": compiled_graph_key}, "compiled_graph_key"
+        ),
+        "snapshot_digest": _required_string(
+            {"snapshot_digest": snapshot_digest}, "snapshot_digest"
+        ),
+        "artifact_path": _canonical_artifact_path(artifact_path),
+        "artifact_digest": _canonical_artifact_digest(artifact_digest),
+    }
+    for name, wanted in expected.items():
+        if getattr(receipt, name) != wanted:
+            raise ReceiptError(
+                f"receipt_{name}_mismatch",
+                f"receipt={getattr(receipt, name)!r} expected={wanted!r}",
+            )
+    expected_size = _required_positive_int(
+        {"artifact_size_bytes": artifact_size_bytes},
+        "artifact_size_bytes",
+        "receipt_expected_artifact_size_invalid",
+    )
+    if receipt.artifact_size_bytes != expected_size:
+        raise ReceiptError(
+            "receipt_artifact_size_bytes_mismatch",
+            f"receipt={receipt.artifact_size_bytes} expected={artifact_size_bytes}",
+        )
+    _refuse_untrusted_publisher(receipt)
+    return receipt
+
+
+def _artifact_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while block := source.read(4 << 20):
+            digest.update(block)
+    return f"{ARTIFACT_DIGEST_ALGORITHM}:{digest.hexdigest()}"
+
+
+def _embedded_meta(artifact: Path) -> dict[str, object]:
     try:
         return dict(artifact_meta.read_metadata(artifact))
     except artifact_meta.ArtifactMetadataError as exc:
@@ -471,115 +434,56 @@ def _embedded_meta(artifact: Path) -> Dict[str, object]:
 
 
 def verify_delivered_artifact(
-    artifact: Path, family: str, receipt_jws: str,
+    artifact: Path, family: str, receipt: Receipt,
 ) -> Receipt:
-    """Full verification of one hub-delivered artifact. Raises
-    :class:`ReceiptError` (named reason) on any failure; returns the
-    verified receipt on success.
-
-    Chain of trust: receipt signature (hub key via JWKS) -> local bytes
-    (the receipt's OWN algorithm + integral size) -> embedded metadata
-    (inside the digested bytes) -> ``meta.cell_key == receipt.cell_key`` ->
-    **the PUBLISHER** (platform tier, or this pod's own endpoint/org) ->
-    the runtime's own computed key (enforced downstream by the selection
-    brain).
-
-    The publisher link is last because it is the only one that asks a question
-    about US rather than about the bytes: every other link proves the artifact
-    is the one the hub signed, none asks whether it was signed for this pod.
-    """
-    with _LOCK:
-        cfg = _CONFIG
-    if cfg is None:
-        raise ReceiptError("gate_unconfigured", "receipt gate has no hub wiring")
-
-    artifact = Path(artifact)
-    meta = _embedded_meta(artifact)
-    meta_key = str(meta.get("compiled_graph_key") or "").strip()
-    meta_family = str(meta.get("family") or "").strip()
-    if not meta_key:
+    """Bind downloaded bytes to a pre-verified receipt before TCG import."""
+    if not isinstance(receipt, Receipt):
+        raise ReceiptError("receipt_unverified", "expected a verified Receipt object")
+    path = Path(artifact)
+    expected_family = _required_string({"family": family}, "family")
+    if receipt.family != expected_family:
+        raise ReceiptError("receipt_family_mismatch", receipt.family)
+    size = path.stat().st_size
+    if size != receipt.artifact_size_bytes:
         raise ReceiptError(
-            "artifact_unkeyed",
-            f"{artifact.name} metadata has no compiled_graph_key",
+            "receipt_size_mismatch", f"receipt={receipt.artifact_size_bytes} local={size}"
         )
-
-    local = artifact_digest(artifact)
-    size = artifact.stat().st_size
-
-    jws = str(receipt_jws or "").strip()
-    if not jws:
-        raise ReceiptError(
-            "receipt_missing", "resolve returned no embedded compiled-graph receipt"
-        )
-    receipt = verify_receipt_jws(jws, _jwks_for(cfg, _kid_of(jws)))
-
-    # Both sides are ALGORITHM-TAGGED and `canonical_artifact_digest` has
-    # already refused any tag this worker cannot recompute, so this is one
-    # comparison with no untagged branch to fall into and nothing compared
-    # against an empty string.
-    if local != receipt.artifact_digest:
+    local_digest = _artifact_digest(path)
+    if local_digest != receipt.artifact_digest:
         raise ReceiptError(
             "receipt_digest_mismatch",
-            f"receipt={receipt.artifact_digest[:23]} local={local[:23]}")
-    if receipt.artifact_size_bytes != size:
-        raise ReceiptError(
-            "receipt_size_mismatch",
-            f"receipt={receipt.artifact_size_bytes} local={size}")
-    if receipt.compiled_graph_key != meta_key:
-        raise ReceiptError(
-            "receipt_key_mismatch",
-            f"receipt={receipt.compiled_graph_key} artifact={meta_key}")
-    want_family = str(family or "").strip()
-    if want_family and receipt.family != want_family:
-        raise ReceiptError(
-            "receipt_family_mismatch",
-            f"receipt={receipt.family} arming={want_family}")
-    if meta_family and receipt.family != meta_family:
-        raise ReceiptError(
-            "receipt_family_mismatch",
-            f"receipt={receipt.family} artifact={meta_family}")
-    if not receipt.snapshot_digest:
-        raise ReceiptError("receipt_unbound", "no snapshot_digest (derivation binding)")
-
-    # LAST: who published this, and may we run it. Deliberately after the
-    # signature — the tier is only meaningful once the claims are proven — and
-    # deliberately before the return, because the caller's next act is to arm
-    # the cell and dlopen it.
-    if not needs_viewer_identity(receipt):
-        # A platform-tier cell is adoptable by every pod, so nothing here has
-        # to know who we are — and asking anyway would make a seam hiccup
-        # refuse the one class that never needed an identity.
-        refuse_untrusted_publisher(receipt, "", "")
-        return receipt
+            f"receipt={receipt.artifact_digest[:24]} local={local_digest[:24]}",
+        )
+    metadata = _embedded_meta(path)
     try:
-        viewer = _self_viewer()
-    except worker_identity.IdentityUnavailable as exc:
-        # Fail CLOSED, and say WHICH failure this is: `identity_unavailable`
-        # (nobody could be asked) is a wiring defect on our side, while
-        # `publisher_untrusted` (we asked and the answer refuses) is a trust
-        # decision. They must never share a reason string.
+        identity = from_artifact_metadata(metadata)
+    except IdentityError as exc:
+        raise ReceiptError("artifact_identity_invalid", str(exc)) from exc
+    stamped = str(metadata.get("compiled_graph_key") or "").strip()
+    if stamped != identity.value:
         raise ReceiptError(
-            "identity_unavailable",
-            f"this pod cannot be named by anything in reach ({exc}), so no "
-            f"org-tier cell can be shown to be adoptable here") from exc
-    refuse_untrusted_publisher(receipt, viewer.endpoint_id, viewer.org_id)
-
+            "artifact_key_mismatch", f"metadata={stamped!r} derived={identity.value!r}"
+        )
+    if identity.axes != receipt.identity_axes or identity.value != receipt.compiled_graph_key:
+        raise ReceiptError(
+            "receipt_identity_mismatch",
+            "artifact identity axes do not match the signed receipt",
+        )
     return receipt
 
 
 __all__ = [
     "ARTIFACT_DIGEST_ALGORITHM",
-    "CELL_PUBLISHER_TIER_ORG",
-    "CELL_PUBLISHER_TIER_PLATFORM",
+    "JWKS_PATH",
+    "PUBLISHER_TIER_ORG",
+    "PUBLISHER_TIER_PLATFORM",
+    "RECEIPT_TYPE",
+    "RECEIPT_VERSION",
     "Receipt",
     "ReceiptError",
-    "artifact_digest",
-    "canonical_artifact_digest",
     "configure",
     "configured",
-    "needs_viewer_identity",
-    "refuse_untrusted_publisher",
     "reset",
     "verify_delivered_artifact",
-    "verify_receipt_jws",
+    "verify_receipt",
 ]
