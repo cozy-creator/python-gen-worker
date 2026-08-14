@@ -28,7 +28,7 @@ dependencies = [
     "psutil>=7.0.0",
     "pyyaml>=6.0.0",
     "blake3>=1.0.0",
-    "hashrepo>=0.1.1,<0.2",
+    "hashrepo>=0.3,<0.4",
     "huggingface-hub>=0.26.0",
     # gen_worker.convert (GGUF quantization tooling; small, pure-python)
     "gguf>=0.10.0",

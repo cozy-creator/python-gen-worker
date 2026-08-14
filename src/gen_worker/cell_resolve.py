@@ -195,7 +195,6 @@ class TransportFile:
     digest: str
     url: str
     chunks: Tuple[Any, ...] = ()
-    chunk_size_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -293,7 +292,6 @@ def _transport_from(body: Mapping[str, Any]) -> Transport:
             digest=str(row.get("digest") or ""),
             url=str(row.get("url") or ""),
             chunks=chunks,
-            chunk_size_bytes=int(row.get("chunk_size_bytes") or 0),
         ))
     return Transport(
         snapshot_digest=str(raw.get("snapshot_digest") or ""),

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from hashrepo import CHUNK_SIZE, CASRef, FileEntry, LocalCAS, RepositoryManifest
+from hashrepo import CASRef, FileEntry, LocalCAS, RepositoryManifest
 
 import gen_worker.models.cozy_snapshot as snapshot_mod
 from gen_worker.models.cozy_snapshot import NetworkBytesScope, ensure_snapshot_async
@@ -22,6 +22,8 @@ from gen_worker.models.hub_client import (
     WorkerResolvedRepoFile,
 )
 from gen_worker.models.refs import TensorhubRef
+from gen_worker.models.store import _snapshot_to_resolved
+from gen_worker.pb import worker_scheduler_pb2 as pb
 
 
 def _sha(data: bytes) -> str:
@@ -71,6 +73,30 @@ class BlobServer:
 
 def _ref() -> TensorhubRef:
     return TensorhubRef(owner="acme", repo="model", tag="latest")
+
+
+def test_grpc_adapter_keeps_ordered_lengths_and_drops_fixed_layout_scalar() -> None:
+    snapshot = pb.Snapshot(
+        digest="sha256:" + "ff" * 32,
+        files=[
+            pb.SnapshotFile(
+                path="weights.safetensors",
+                size_bytes=60,
+                digest="sha256:" + "ee" * 32,
+                chunk_size_bytes=64 * 1024 * 1024,
+                chunks=[
+                    pb.ChunkRef(sha256="aa" * 32, url="https://cas/0", len=3),
+                    pb.ChunkRef(sha256="bb" * 32, url="https://cas/1", len=56),
+                    pb.ChunkRef(sha256="cc" * 32, url="https://cas/2", len=1),
+                ],
+            )
+        ],
+    )
+
+    file = _snapshot_to_resolved(snapshot).files[0]
+
+    assert [chunk.length for chunk in file.chunks] == [3, 56, 1]
+    assert not hasattr(file, "chunk_size_bytes")
 
 
 class _BarrierCAS(LocalCAS):
@@ -346,9 +372,9 @@ def test_same_snapshot_key_in_two_scoped_roots_does_not_crosstalk(
     assert (right / "config.json").read_bytes() == body
 
 
-def test_chunked_file_uses_hashrepo_v1_manifest(tmp_path: Path) -> None:
-    first = b"a" * CHUNK_SIZE
-    second = b"tail"
+def test_chunked_file_uses_manifest_recorded_variable_lengths(tmp_path: Path) -> None:
+    first = b"header"
+    second = b"tensor-body"
     chunks = (first, second)
     whole = hashlib.sha256(first + second).hexdigest()
     blobs = {_sha(chunk): chunk for chunk in chunks}
@@ -359,14 +385,13 @@ def test_chunked_file_uses_hashrepo_v1_manifest(tmp_path: Path) -> None:
             files=[
                 WorkerResolvedRepoFile(
                     "weights.safetensors",
-                    CHUNK_SIZE + len(second),
+                    len(first) + len(second),
                     None,
                     digest="sha256:" + whole,
                     chunks=tuple(
                         WorkerResolvedChunk(_sha(chunk), server.url(_sha(chunk)), len(chunk))
                         for chunk in chunks
                     ),
-                    chunk_size_bytes=CHUNK_SIZE,
                 )
             ],
         )
@@ -374,7 +399,7 @@ def test_chunked_file_uses_hashrepo_v1_manifest(tmp_path: Path) -> None:
             ensure_snapshot_async(base_dir=tmp_path, ref=_ref(), resolved=resolved)
         )
         output = path / "weights.safetensors"
-        assert output.stat().st_size == CHUNK_SIZE + len(second)
+        assert output.stat().st_size == len(first) + len(second)
         assert hashlib.sha256(output.read_bytes()).hexdigest() == whole
         assert all(server.hits(digest) == 1 for digest in blobs)
     finally:

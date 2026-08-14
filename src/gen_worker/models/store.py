@@ -134,7 +134,6 @@ def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
                     )
                     for c in f.chunks
                 ),
-                chunk_size_bytes=int(f.chunk_size_bytes or 0),
             )
             for f in snap.files
         ],

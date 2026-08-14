@@ -640,7 +640,7 @@ requires-dist = [
     { name = "gguf", specifier = ">=0.10.0" },
     { name = "grpcio", specifier = ">=1.82.1" },
     { name = "grpcio-tools", marker = "extra == 'dev'", specifier = ">=1.82.1" },
-    { name = "hashrepo", specifier = ">=0.1.1,<0.2" },
+    { name = "hashrepo", specifier = ">=0.3,<0.4" },
     { name = "huggingface-hub", specifier = ">=0.26.0" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.100" },
     { name = "msgspec", specifier = ">=0.18.6" },
@@ -780,11 +780,11 @@ wheels = [
 
 [[package]]
 name = "hashrepo"
-version = "0.1.1"
+version = "0.3.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/d9/e1/c268607bd64bee8d7ec19683aececd173ad827776152421e9e8bf989fa8d/hashrepo-0.1.1.tar.gz", hash = "sha256:e3fd83ead91496c738a1aacbf7e60a9583f3948480ee05b5cd95c766540ea71b", size = 19184, upload-time = "2026-08-14T02:13:11.224Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/dc/5a/50245200737dea160cf162de44ce3aeaa100084a9dfc429f14befabe72fd/hashrepo-0.3.1.tar.gz", hash = "sha256:b08f5c8c31427d5a0aa981002c50e4d601041e5031c145ffaa22ffe720e5eab4", size = 23520, upload-time = "2026-08-14T09:24:23.029Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5d/dc/0efab9caf2701a0b64a204a6a7721d6de8eeda58c1b4ef5dc304f83ec936/hashrepo-0.1.1-py3-none-any.whl", hash = "sha256:2dd065fbc6763f3102b37ed6267038d3058d32a495de09ed45aaff062da4dc49", size = 19545, upload-time = "2026-08-14T02:13:10.127Z" },
+    { url = "https://files.pythonhosted.org/packages/34/67/61fb63a28e7ea6243d6a3bc4e520850f59afdf794d7c41631f02ba5a503d/hashrepo-0.3.1-py3-none-any.whl", hash = "sha256:c9450e07c96b0a060db5ab420b9202f0e1efabaa1690c66f03f56ff7b7b3847a", size = 23348, upload-time = "2026-08-14T09:24:21.734Z" },
 ]
 
 [[package]]

@@ -40,9 +40,9 @@ class WorkerResolvedRepoFile:
     #: Algorithm-tagged whole-file digest ("sha256:<hex>"). Every resolved
     #: entry carries one; an entry that does not is refused, not skipped.
     digest: str = ""
-    #: Present only when the file is stored as chunks (size > chunk_size).
+    #: Present whenever the manifest stores an ordered object list; file size
+    #: does not determine whether tensor-aligned chunks exist.
     chunks: tuple["WorkerResolvedChunk", ...] = ()
-    chunk_size_bytes: int = 0
 
     def cas_ref(self) -> str:
         """The algorithm-tagged digest of this entry.
@@ -270,7 +270,6 @@ def resolve_repo(
         files.append(WorkerResolvedRepoFile(
             path=path, size_bytes=int(ent.get("size_bytes") or 0), url=u,
             digest=tagged, chunks=chunks,
-            chunk_size_bytes=int(ent.get("chunk_size_bytes") or 0),
         ))
     if not digest or not files:
         raise HubResolveError(
