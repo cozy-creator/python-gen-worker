@@ -133,16 +133,16 @@ REFUSAL_CODES = (
     "cell_resolve_incomplete",
     "cell_resolve_transport_unavailable",
     "cell_resolve_client_supplied_field",
-    "cell_resolve_too_many_keys",
-    "cell_resolve_duplicate_key",
+    "compiled_graph_resolve_too_many_keys",
+    "compiled_graph_resolve_duplicate_key",
     # Answered, but not to the question that was asked. Local verdicts, and
     # they are refusals rather than misses for the usual reason: a pod that
     # read a mangled batch as misses would pay for a full cold mint per key.
-    "cell_resolve_short_answer",
-    "cell_resolve_answer_out_of_order",
-    "cell_resolve_batch_signature",
-    "cell_resolve_shared_receipt",
-    "cell_resolve_unknown_status",
+    "compiled_graph_resolve_short_answer",
+    "compiled_graph_resolve_answer_out_of_order",
+    "compiled_graph_resolve_batch_signature",
+    "compiled_graph_resolve_shared_receipt",
+    "compiled_graph_resolve_unknown_status",
 )
 
 #: Every field an accepted answer must NAME, and why. An answer omitting one
@@ -356,7 +356,7 @@ def _require_batch(family: str, keys: Sequence[str]) -> Tuple[str, Tuple[str, ..
             # against its request, and answering it twice is work nobody asked
             # for.
             raise CellResolveRefused(
-                "cell_resolve_duplicate_key",
+                "compiled_graph_resolve_duplicate_key",
                 f"keys[{i}] repeats {key}; answers come back in REQUEST ORDER "
                 f"and a collapsed duplicate would shift every later answer "
                 f"against its request")
@@ -367,7 +367,7 @@ def _require_batch(family: str, keys: Sequence[str]) -> Tuple[str, Tuple[str, ..
             "invalid_request", "resolve requires a non-empty key set")
     if len(asked) > MAX_RESOLVE_KEYS:
         raise CellResolveRefused(
-            "cell_resolve_too_many_keys",
+            "compiled_graph_resolve_too_many_keys",
             f"this batch names {len(asked)} keys and the bound is "
             f"{MAX_RESOLVE_KEYS}; split it rather than receiving a short "
             f"answer that reads as misses")
@@ -393,7 +393,7 @@ def _answer_from(
             detail=str(raw.get("detail") or ""))
     if status != STATUS_HIT or not bool(raw.get("found")):
         raise CellResolveRefused(
-            "cell_resolve_unknown_status",
+            "compiled_graph_resolve_unknown_status",
             f"the answer for {key} carries status {status!r} "
             f"(found={raw.get('found')!r}), which this worker cannot act on; "
             f"reading it as a miss would send this pod to a full cold mint "
@@ -489,7 +489,7 @@ def _answers_of(
     for field in _BATCH_SIGNATURE_FIELDS:
         if raw.get(field):
             raise CellResolveRefused(
-                "cell_resolve_batch_signature",
+                "compiled_graph_resolve_batch_signature",
                 f"the batch carries a top-level {field!r}; every answer is "
                 f"signed on its own and there is deliberately no signature "
                 f"over the collection, so a batch-level one would make the "
@@ -497,14 +497,14 @@ def _answers_of(
     rows = raw.get("answers")
     if not isinstance(rows, list):
         raise CellResolveRefused(
-            "cell_resolve_short_answer",
+            "compiled_graph_resolve_short_answer",
             f"asked {len(asked)} keys and the reply names no answers[] at all")
     if len(rows) != len(asked):
         # An omission is indistinguishable from a truncation, and the pod
         # answers a missing answer by paying for a full cold mint. So a short
         # batch is not a smaller reply — it is a wrong one.
         raise CellResolveRefused(
-            "cell_resolve_short_answer",
+            "compiled_graph_resolve_short_answer",
             f"asked {len(asked)} keys, got {len(rows)} answers; answers are "
             f"positional and a batch that does not answer every key is "
             f"indistinguishable from one truncated in transit")
@@ -514,14 +514,14 @@ def _answers_of(
         row = rows[i]
         if not isinstance(row, Mapping):
             raise CellResolveRefused(
-                "cell_resolve_short_answer",
+                "compiled_graph_resolve_short_answer",
                 f"answers[{i}] is {type(row).__name__}, not an answer")
         echoed = str(row.get("cell_key") or "").strip()
         if echoed != key:
             # POSITION and ECHO both, because either alone admits a batch
             # transposed by something that preserved the other.
             raise CellResolveRefused(
-                "cell_resolve_answer_out_of_order",
+                "compiled_graph_resolve_answer_out_of_order",
                 f"answers[{i}] answers {echoed!r} and keys[{i}] asked {key}; "
                 f"answers are consumed positionally, so a transposed batch "
                 f"would arm every class with a sibling's kernels")
@@ -535,7 +535,7 @@ def _answers_of(
                 # means at least one answer is being vouched for by the other's
                 # proof.
                 raise CellResolveRefused(
-                    "cell_resolve_shared_receipt",
+                    "compiled_graph_resolve_shared_receipt",
                     f"{key} and {seen_for} were answered with the SAME "
                     f"receipt; a receipt signs one compiled graph, and reusing "
                     f"it makes the collection the unit of trust")

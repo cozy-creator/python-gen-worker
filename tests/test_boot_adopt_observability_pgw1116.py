@@ -505,7 +505,7 @@ class _ResolveHub(BaseHTTPRequestHandler):
         # exercises the arity and order checks on a real socket.
         keys = list(body.get("keys") or [])
         out = json.dumps({
-            "object": "cell_resolve_batch",
+            "object": "compiled_graph_resolve_batch",
             "family": body.get("family"),
             "answers": [{"cell_key": k, "status": "miss", "found": False}
                         for k in keys],
