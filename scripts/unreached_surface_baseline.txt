@@ -159,7 +159,6 @@
 #
 gen_worker.aot_inputs.inputs_for()
 gen_worker.aot_inputs.latent_dims()
-gen_worker.aot_package.package_entry_names()
 gen_worker.aot_serve.EntryDispatch.refusal_counts()
 gen_worker.aot_serve.realigned_inputs()
 gen_worker.aot_serve.served_entry_calls()

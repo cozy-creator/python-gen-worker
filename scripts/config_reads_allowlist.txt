@@ -113,8 +113,6 @@ src/gen_worker/parallel/group.py::NCCL_NVLS_ENABLE LIBRARY reads the prior NCCL_
 src/gen_worker/env_seal.py::$name LIBRARY scrub_env() ERASES the behaviour namespaces before torch imports. The one place §1.18 is already mechanically enforced in either repo - copy it, do not weaken it.
 src/gen_worker/env_seal.py::PYTHONHASHSEED LIBRARY PYTHONHASHSEED is a CPython interpreter fact the seal must record.
 src/gen_worker/models/native_kernels.py::GEN_WORKER_NATIVE_KERNELS_LIB LIBRARY GEN_WORKER_NATIVE_KERNELS_LIB, explicit .so path override for the loader.
-src/gen_worker/aot_wrapper_split.py::GEN_WORKER_AOT_HOST_COMPILE_JOBS LIBRARY GEN_WORKER_AOT_HOST_COMPILE_JOBS, per-entry host-compile fan-out; derived from the pod budget when unset.
-src/gen_worker/aot_wrapper_split.py::GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF LIBRARY GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF. LIVE: five SDXL releases (0.2.111/112/113/116/117) declare it in `release_env_declarations` and one endpoint has a non-deleted `endpoint_env_entries` row. Verified on the standing hub 2026-08-03. NOT a deletion candidate.
 
 # ---------------------------------------------------------------------------
 # STANDALONE — CLI / convert paths that load no app config.
@@ -173,8 +171,7 @@ src/gen_worker/aot_mint.py::PODGUARD_STATE TRIPWIRE External watchdog adapter wi
 #
 # ...but only together with a MEASURED declaration count. Zero fleet
 # declarations is what licenses a deletion, and it is a fact you query, not one
-# you infer from the code — `GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF` looks identical
-# to its deleted sibling in this file and is LIVE on the standing hub.
+# you infer from the code.
 #
 # VERDICTS (declaration counts measured on the standing hub 2026-08-03):
 #
@@ -189,10 +186,14 @@ src/gen_worker/aot_mint.py::PODGUARD_STATE TRIPWIRE External watchdog adapter wi
 #     GEN_WORKER_EAGER_FIRST_BOOT       pgw#671 eager-first is now unconditional
 #     GEN_WORKER_AOT_WRAPPER_SPLIT_OFF  v1 ctor-split is now unconditional
 #
+#   DELETED by pgw#1270 with the duplicate worker runner implementation:
+#     GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF current authoritative standing state
+#             has zero release declarations and zero endpoint entries. The
+#             five historical SDXL releases recorded on 2026-08-03 are absent
+#             from the rebuilt stack; any separately retained old fleet must
+#             be retired or migrated before deploying this hard cut.
+#
 #   NOT DELETED, and each for a stated reason:
-#     GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF LIVE: 5 SDXL releases declare it, 1
-#             endpoint carries a non-deleted entry. Deleting it changes a
-#             running endpoint.
 #     GEN_WORKER_HOST_MOVE_GUARD        ruled exception: safety guard, on by
 #             default, named threat, documented. Do not touch.
 #     GEN_WORKER_PROBE / _PUBLISH_ARMED security boundary; deliberately NOT a

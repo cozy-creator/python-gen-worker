@@ -63,7 +63,7 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import (
     Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple)
@@ -72,8 +72,8 @@ import msgspec
 
 from torch_compiled_graphs.spans import check as check_spans
 
-from . import aot_device_lock, aot_resume, env_seal
-from . import compile_posture, kernel_path
+from . import aot_device_lock, env_seal
+from . import compile_posture
 from .child_contract import CompileSpec, MintSlot
 from .compile_posture import (
     USER_MACHINE_RSS_RESERVE_BYTES, CompilePosture)
@@ -615,10 +615,9 @@ class EntryJob(msgspec.Struct, frozen=True, kw_only=True):
     modules: Tuple[str, ...] = ()
     cfg: CompileSpec = msgspec.field(default_factory=CompileSpec)
     slots: Dict[str, MintSlot] = {}
-    #: pgw#947's measured serving-kernel lane, stamped into every artifact this
-    #: child packs. The parent measures it (only the loader can swap the
-    #: linears) and the child cannot re-derive it, so it crosses.
-    execution_lane: Optional[kernel_path.Verdict] = None
+    #: The parent states whose machine this is. The child installs the same
+    #: posture before any compile so local work is niced and pod work is not.
+    posture: CompilePosture = compile_posture.FLEET
 
     #: WHICH classes. ``rows[i::K]`` over ``aot_mint.declared_class_rows`` —
     #: by INDEX and never by name, because the adapter fork is decided by the
@@ -643,7 +642,6 @@ class EntryJob(msgspec.Struct, frozen=True, kw_only=True):
     out_dir: str = ""
     work: str = ""
     report: str = ""
-    inductor_configs: Dict[str, Any] = {}
     cache_dir: str = ""
     device_lock: str = ""
 
@@ -861,15 +859,6 @@ class PoolLedger:
     #: which is the pass every CHILD used to pay.
     seal_seed_s: float = 0.0
     entries: int = 0
-    #: pgw#848 item 5: the resume bank's own row (``resume_root``, ``resumed``,
-    #: ``resume_cold``, ``resume_refused`` by reason, ``resume_admit_s``).
-    #: Empty on every mint that runs without a bank, so a pod with no resume
-    #: root reads exactly as it did before. It rides the LEDGER rather than a
-    #: second event because "N of 36 entries were recovered" is the first thing
-    #: that explains a pool wall, and a reader who has to join two rows to
-    #: learn it will price a resumed mint as a fast compile.
-    resume: Dict[str, Any] = field(default_factory=dict)
-
     @property
     def idle_s(self) -> float:
         return round(
@@ -1170,7 +1159,6 @@ class EntryCompilePool:
         workdir: Path,
         *,
         width: PoolWidth,
-        inductor_configs: Optional[Mapping[str, Any]] = None,
         cache_dir: str = "",
         python: str = "",
         entry_silence_window_s: float = _ENTRY_SILENCE_WINDOW_S,
@@ -1186,28 +1174,12 @@ class EntryCompilePool:
         #: happens only when they actually moved.
         self._emitted_width_facts: Optional[Dict[str, Any]] = None
         self._emit_width("construction")
-        self.inductor_configs = dict(inductor_configs or {})
-        # pgw#848 item 5, NARROWED by pgw#1215 to the one half that survives
-        # the keystone: the bank is opened for its CACHE DIRECTORY and its
-        # ledger row, never for file admission any more. Admission was
-        # `bank.admit(entry, program)` — it re-derived the graph hash from the
-        # ExportedProgram THIS attempt exported, and the parent no longer
-        # exports anything, so the identity it compared against cannot be
-        # computed here. What survives is strictly the better half: the
-        # inductor cache stays scoped to the MINT rather than the attempt, so
-        # a killed mint's next attempt still hits torch's own FX graph cache.
-        # ⚠️ OWED (step 3/4): re-home file-level resume at the graph-class
-        # artifact, which is where pgw#1176 already made durability live.
-        self.bank = aot_resume.open_bank(
-            inductor_configs=self.inductor_configs)
-        # The inductor cache follows the bank when there is one. A per-attempt
-        # cache dir is why a killed mint got not even a cache hit on retry;
-        # inductor's key is the graph, not the process (measured — see this
-        # module's header), so widening the scope from one attempt to one mint
-        # cannot change what is produced.
+        # TCG's canonical CAS owns completed-class reuse. A killed class is the
+        # sole allowed loss in flight; the next attempt gets this pool's
+        # explicit cache directory or fresh scratch and never consults the
+        # deleted ExportedProgram resume bank.
         self.cache_dir = str(
             cache_dir
-            or (self.bank.cache_dir if self.bank is not None else "")
             or (self.workdir / "inductor-cache"))
         # pgw#809: ONE lock file for the whole pool. Every entry child routes
         # its inductor GPU benchmarks through it, so no two entries ever time
@@ -1298,7 +1270,6 @@ class EntryCompilePool:
             out_dir=str(template.out_dir or (self.workdir / "artifacts")),
             work=str(slot / "work"),
             report=str(slot / ENTRY_REPORT_NAME),
-            inductor_configs=dict(self.inductor_configs),
             cache_dir=self.cache_dir,
             device_lock=str(self.device_lock_path),
         )
@@ -1525,18 +1496,6 @@ class EntryCompilePool:
                 + f"but every child reported {want} declared — "
                 f"rows[i::{width}] did not partition the declaration and this "
                 f"cell would be short")
-
-    def _refresh_resume_facts(self) -> None:
-        """Keep the LIVE ledger carrying the bank's row.
-
-        pgw#848 refreshes `progress.pool_ledger` on every completed entry, so
-        the phase snapshot an abandoned mint leaves behind already carries K
-        and its binding. The resume row belongs in the same place for the same
-        reason: an abandoned attempt's most useful fact is how much of it the
-        NEXT one will not have to repeat.
-        """
-        if self.bank is not None:
-            self.ledger.resume = self.bank.facts()
 
     def _seed_seal_memo(self) -> None:
         """pgw#832: write the parent's toolchain digests where every entry
@@ -1798,7 +1757,6 @@ class EntryCompilePool:
                 "aot-pool: %s packed %d graph class(es) in %.1fs spans=%s",
                 row.entry, len(report.classes), elapsed,
                 self.entry_phases[row.entry])
-            self._refresh_resume_facts()
             return list(report.classes)
         # pgw#1215: a share that REFUSED at class k still packed k-1
         # artifacts, and they are on disk. Their measurement is banked before

@@ -392,7 +392,6 @@ def execution_lane_verdict_for(
 def _mint_aot(
     request: MintRequest, pipe: Any, cfg: Any, target: Path, *,
     started: float, sha256_file: Any,
-    execution_lane_verdict: Any = None,
     spec: Any = None,
     footprint: Optional[Dict[str, Any]] = None,
 ) -> MintReport:
@@ -418,19 +417,7 @@ def _mint_aot(
     depends on the composed pipeline), and moving the packed artifacts into the
     parent's directory.
     """
-    from . import aot_compile_pool, aot_mint, aot_resume, fleet_cells
-
-    # pgw#848 item 5: install the cross-attempt resume root before the pool is
-    # constructed. Process-global rather than a parameter threaded through
-    # `aot_mint.mint_graph_classes` -> `EntryCompilePool`: the bank is opened
-    # two call frames down and the intervening signatures describe WHAT to
-    # compile rather than where a previous attempt left its work. Empty request
-    # field = no bank.
-    # ⚠️ pgw#1215 NARROWED what this buys: file-level admission is gone with
-    # the parent-side export it re-derived its graph hash from, so the root now
-    # scopes the INDUCTOR cache to the mint (still a real cross-attempt win)
-    # and nothing else. Re-homing resume at the packed artifact is owed.
-    aot_resume.set_root(request.resume)
+    from . import aot_compile_pool, aot_mint, fleet_cells
 
     frame(phase="trace_graph", note=f"export declaration for {cfg.family!r}")
     if spec is None:
@@ -451,8 +438,8 @@ def _mint_aot(
 
     # pgw#1215 (th#1834 Phase 3 keystone): the compile children TRACE their
     # own share. This process no longer exports anything — it holds the
-    # pipeline only to have measured the kernel lane on it and to have proven
-    # it traceable — so it hands each child the recipe instead of a program.
+    # pipeline only to have proven it traceable — so it hands each child the
+    # recipe instead of a program.
     # Every field below is one this child already holds on `MintRequest` and
     # already passed to `run_setup`; nothing new is derived here.
     #
@@ -466,12 +453,7 @@ def _mint_aot(
         modules=tuple(request.modules),
         cfg=request.cfg,
         slots=dict(request.slots),
-        # pgw#947: the MEASURED serving-kernel lane for this card. The
-        # discrete verdict lands in the packed envelope (serving reads it
-        # instead of an SM tuple); the numbers ride the result metadata. Only
-        # this process could measure it — a child composes structure-only and
-        # runs no forward — so it crosses on the job.
-        execution_lane=execution_lane_verdict,
+        posture=request.posture,
         out_dir=str(out_dir))
     # How wide this pod may compile. Derived from the pod's REAL budget
     # (cgroup-aware vCPUs minus serving headroom, and available host RAM over
@@ -808,7 +790,7 @@ def mint(request: MintRequest) -> MintReport:
     # cannot adopt.
     return _mint_aot(
         request, pipe, cfg, target, started=started,
-        sha256_file=sha256_file, execution_lane_verdict=verdict, spec=aot_spec,
+        sha256_file=sha256_file, spec=aot_spec,
         footprint=footprint)
 
 

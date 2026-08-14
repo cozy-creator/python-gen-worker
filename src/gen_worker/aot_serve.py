@@ -96,11 +96,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
     Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional,
-    Sequence, Tuple, Union,
+    Sequence, Tuple,
 )
 
+from torch_compiled_graphs import CallIngress, CallInput, IngressError
+
 from . import activity as activity_mod
-from . import aot_flatten
 from . import aot_identity
 from . import artifact_meta
 from . import boot_phases
@@ -338,76 +339,6 @@ def is_aot_ref(ref: str, family: str = "") -> bool:
 
 
 @dataclass(frozen=True)
-class InputContract:
-    """One declared graph input.
-
-    ``shape`` entries are either an ``int`` (statically specialized — the
-    call must match EXACTLY) or a ``str`` naming a symbol whose range lives
-    in :attr:`ArtifactContract.symbols`. ``position`` is the positional
-    index in the exported call convention; ``name`` is the keyword the
-    pipeline's own forward uses, so a call can be matched either way.
-
-    :attr:`param` / :attr:`param_position` / :attr:`path` are the input's
-    IDENTITY IN THE CALL (pgw#994): which argument it lives in, where that
-    argument sits, and the path into it. ``position`` counts FLATTENED graph
-    inputs and a container argument occupies one caller slot while producing
-    N of them, so position alone binds the wrong value the moment any input is
-    a list or a dict. Defaults are the trivial identity — an input that IS its
-    argument — which is what every row published before pgw#994 declares.
-    """
-
-    name: str
-    position: int
-    dtype: str
-    shape: Tuple[Any, ...]
-    optional: bool = False
-    param: str = ""
-    param_position: int = -1
-    path: Tuple[Union[int, str], ...] = ()
-
-    @property
-    def call_param(self) -> str:
-        """The argument this input lives in (itself, when trivial)."""
-        return self.param or self.name
-
-    @property
-    def call_position(self) -> int:
-        """The argument's own position (this input's, when trivial)."""
-        return self.position if self.param_position < 0 else self.param_position
-
-    @property
-    def trivial_identity(self) -> bool:
-        """True when the identity says exactly what its absence would say.
-
-        Defined on the RESOLVED identity, not on which fields were written, so
-        a row that spells its trivial identity out and one that omits it are
-        the same contract — which is what ``range_digest`` needs in order to
-        key the field without re-keying anything already published.
-        """
-        return (not self.path and self.call_param == self.name
-                and self.call_position == self.position)
-
-
-@dataclass(frozen=True)
-class ArtifactContract:
-    """The complete ingress contract of one artifact."""
-
-    inputs: Tuple[InputContract, ...]
-    #: symbol -> (min, max), inclusive. Mint packs this from
-    #: ``ep.range_constraints``.
-    symbols: Mapping[str, Tuple[int, int]]
-    #: Inputs this graph class REFUSES to be given (pgw#790). The positive
-    #: contract says what a graph takes; a multi-class cell also needs the
-    #: negative one, because "input absent" is what discriminates a
-    #: BRANCHLESS class from a branch-bearing one whose extra inputs a
-    #: name-keyed bind would simply ignore. Without it both classes admit an
-    #: adapter-bearing call and :class:`EntryDispatch` refuses
-    #: ``entry_ambiguous`` — a declaration that cannot discriminate two graph
-    #: classes by ingress, which its own contract calls a defect.
-    excluded: Tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
 class ConstantSpec:
     """One declared constant of a code-only artifact."""
 
@@ -415,96 +346,6 @@ class ConstantSpec:
     source: str
     dtype: str
     shape: Tuple[int, ...]
-
-
-def contract_from_meta(meta: Mapping[str, Any]) -> ArtifactContract:
-    """Parse the packed ingress contract. Raises :class:`ValueError` on a
-    malformed declaration — an unparseable contract must never degrade into
-    an unasserted one (that is B2 all over again)."""
-    inputs: List[InputContract] = []
-    raw_inputs = meta.get("inputs")
-    if not isinstance(raw_inputs, list) or not raw_inputs:
-        raise ValueError("metadata declares no inputs")
-    for idx, row in enumerate(raw_inputs):
-        if not isinstance(row, dict):
-            raise ValueError(f"input {idx} is not an object")
-        name = str(row.get("name") or "").strip()
-        if not name:
-            raise ValueError(f"input {idx} has no name")
-        dtype = str(row.get("dtype") or "").strip()
-        if not dtype:
-            raise ValueError(f"input {name!r} has no dtype")
-        raw_shape = row.get("shape")
-        if not isinstance(raw_shape, list):
-            raise ValueError(f"input {name!r} has no shape list")
-        shape: List[Any] = []
-        for dim in raw_shape:
-            if isinstance(dim, bool):
-                raise ValueError(f"input {name!r} has a bool dim")
-            if isinstance(dim, int):
-                shape.append(int(dim))
-            elif isinstance(dim, str) and dim.strip():
-                shape.append(dim.strip())
-            else:
-                raise ValueError(f"input {name!r} has a malformed dim {dim!r}")
-        raw_path = row.get("path", [])
-        if not isinstance(raw_path, list):
-            raise ValueError(f"input {name!r} has a malformed path {raw_path!r}")
-        path: List[Union[int, str]] = []
-        for step in raw_path:
-            if isinstance(step, bool) or not isinstance(step, (int, str)):
-                raise ValueError(
-                    f"input {name!r} has a malformed path step {step!r}")
-            path.append(int(step) if isinstance(step, int) else str(step))
-        inputs.append(InputContract(
-            name=name,
-            position=int(row.get("position", idx)),
-            dtype=dtype,
-            shape=tuple(shape),
-            optional=bool(row.get("optional", False)),
-            param=str(row.get("param") or ""),
-            param_position=int(row.get("param_position", -1)),
-            path=tuple(path),
-        ))
-
-    symbols: Dict[str, Tuple[int, int]] = {}
-    raw_symbols = meta.get("symbols") or {}
-    if not isinstance(raw_symbols, dict):
-        raise ValueError("symbols is not an object")
-    for sym, bounds in raw_symbols.items():
-        if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
-            raise ValueError(f"symbol {sym!r} range is not a [min, max] pair")
-        lo, hi = int(bounds[0]), int(bounds[1])
-        if hi < lo:
-            raise ValueError(f"symbol {sym!r} range {lo}..{hi} is inverted")
-        symbols[str(sym)] = (lo, hi)
-
-    # Every symbol a shape references must be bounded. An unbounded symbol
-    # is the B2 hole with extra steps: it would admit any value.
-    for spec in inputs:
-        for pos, dim in enumerate(spec.shape):
-            if isinstance(dim, str) and dim not in symbols:
-                raise ValueError(
-                    f"input {spec.name!r} dim {pos} references symbol "
-                    f"{dim!r} with no declared range")
-
-    raw_excluded = meta.get("excluded_inputs") or []
-    if not isinstance(raw_excluded, (list, tuple)):
-        raise ValueError("excluded_inputs is not a list")
-    excluded: List[str] = []
-    declared_names = {spec.name for spec in inputs}
-    for value in raw_excluded:
-        name = str(value or "").strip()
-        if not name:
-            raise ValueError("excluded_inputs carries an empty name")
-        if name in declared_names:
-            raise ValueError(
-                f"input {name!r} is declared AND excluded — a graph class "
-                f"cannot both take an input and refuse it")
-        excluded.append(name)
-    return ArtifactContract(
-        inputs=tuple(inputs), symbols=symbols,
-        excluded=tuple(sorted(set(excluded))))
 
 
 def constants_from_meta(meta: Mapping[str, Any]) -> Tuple[ConstantSpec, ...]:
@@ -544,57 +385,14 @@ def constants_from_meta(meta: Mapping[str, Any]) -> Tuple[ConstantSpec, ...]:
 
 
 def range_digest(meta: Mapping[str, Any]) -> str:
-    """Canonical digest of one entry's DECLARED ENVELOPE slice — the input
-    ranges the entry admits.
-
-    Owed to the exact-identity lane (pgw#716/#717): declared dim ranges live
-    in ``ep.range_constraints``, NOT in the graph nodes — three exports
-    differing only in declared range produced the identical node-only
-    digest. A node-only ``graph_hashes`` therefore collides artifacts whose
-    declared envelopes differ. Folding THIS digest into the per-class hash
-    closes it. Exposed here (not in ``cell_key``) because this module owns
-    the contract's canonical form.
-    """
-    contract = contract_from_meta(meta)
-
-    def _row(s: InputContract) -> Dict[str, Any]:
-        row: Dict[str, Any] = {
-            "name": s.name,
-            "position": s.position,
-            "dtype": s.dtype,
-            "shape": list(s.shape),
-            "optional": s.optional,
-        }
-        if not s.trivial_identity:
-            # pgw#994, on the `excluded` precedent below: the call identity is
-            # part of the declared envelope (two classes that take the same
-            # tensors in different argument structures are different graphs),
-            # but it is keyed only when it is not the trivial identity. Every
-            # row published before pgw#994 is trivial, so no live cell is
-            # re-keyed by this field existing.
-            row["param"] = s.call_param
-            row["param_position"] = s.call_position
-            row["path"] = list(s.path)
-        return row
-
-    canon = {
-        "inputs": [
-            _row(s)
-            for s in sorted(contract.inputs, key=lambda s: (s.position, s.name))
-        ],
-        "symbols": {k: list(v) for k, v in sorted(contract.symbols.items())},
-    }
-    # pgw#790: the NEGATIVE half of the declared envelope. Two
-    # classes that differ only in what they REFUSE declare different envelopes,
-    # so the digest must see it or the collision this function exists to
-    # close reopens for adapter forks. Keyed only when non-empty: a contract
-    # that excludes nothing is the contract every already-published cell
-    # declares, and re-keying the fleet's 144 live checkpoints to add a field
-    # that says "unchanged" would strand every one of them.
-    if contract.excluded:
-        canon["excluded"] = list(contract.excluded)
-    blob = json.dumps(canon, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(blob).hexdigest()[:32]
+    """Return TCG's canonical digest of ``graph.pytree.ingress``."""
+    graph = meta.get("graph")
+    if not isinstance(graph, Mapping):
+        raise ValueError("graph class records no graph interface")
+    try:
+        return str(CallIngress.from_graph(graph).digest())
+    except IngressError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def class_hash(
@@ -693,7 +491,10 @@ def stamp_entry(
     row = copy.deepcopy(dict(block))
     row["name"] = label
     try:
-        contract_from_meta(row)
+        graph = row.get("graph")
+        if not isinstance(graph, Mapping):
+            raise ValueError("graph class records no graph interface")
+        CallIngress.from_graph(graph)
         constants_from_meta(row)
     except ValueError as exc:
         raise ValueError(f"entry {label!r}: {exc}") from exc
@@ -727,7 +528,10 @@ def entry_from_meta(meta: Mapping[str, Any]) -> Dict[str, Any]:
     if not str(raw.get("target") or "").strip():
         raise ValueError(f"entry {label!r} declares no target")
     try:
-        contract_from_meta(raw)
+        graph = raw.get("graph")
+        if not isinstance(graph, Mapping):
+            raise ValueError("graph class records no graph interface")
+        CallIngress.from_graph(graph)
         constants_from_meta(raw)
     except ValueError as exc:
         raise ValueError(f"entry {label!r}: {exc}") from exc
@@ -1259,7 +1063,7 @@ def _dtype_name(value: Any) -> str:
 
 
 def bind_call_inputs(
-    contract: ArtifactContract, args: Sequence[Any], kwargs: Mapping[str, Any],
+    contract: CallIngress, args: Sequence[Any], kwargs: Mapping[str, Any],
 ) -> Dict[str, Any]:
     """Match one call's actual arguments to the declared inputs by REPLAYING
     each input's recorded identity in the call. Missing non-optional input =>
@@ -1267,9 +1071,8 @@ def bind_call_inputs(
 
     THE RULE (pgw#994): an input is found at ``kwargs[param]`` — or at
     ``args[param_position]`` — followed by its ``path`` into that argument.
-    The mint recorded that identity with ``aot_flatten.flatten_call``; this
-    replays it with ``aot_flatten.resolve_leaf``, so the two sides of the
-    flattening are one rule and not two spellings that agree by luck.
+    TCG built and identity-hashed that mapping from the exported call, and the
+    same :class:`CallIngress` value resolves it here.
 
     WHAT THIS REPLACES, because both halves were luck. The old resolution
     tried ``kwargs[name]``, then ``args[position]``, then a SEARCH inside any
@@ -1286,29 +1089,14 @@ def bind_call_inputs(
       the contract now SAYS where the value is, so nothing needs to hunt for
       it, and a dict that carries a colliding key can no longer decide a bind.
     """
-    out: Dict[str, Any] = {}
-    for spec in contract.inputs:
-        found, value = aot_flatten.resolve_leaf(
-            spec.call_param, spec.call_position, spec.path, args, kwargs)
-        if found:
-            out[spec.name] = value
-        elif spec.optional:
-            continue
-        else:
-            where = f"argument {spec.call_param!r}"
-            if spec.path:
-                where += " path " + "".join(
-                    f"[{step!r}]" for step in spec.path)
-            raise IngressContractError(
-                "input_missing",
-                f"declared input {spec.name!r} ({where}, position "
-                f"{spec.call_position}) is absent from the call "
-                f"({len(args)} positional, kwargs {sorted(kwargs)[:8]!r})")
-    return out
+    try:
+        return dict(contract.bind(args, kwargs))
+    except IngressError as exc:
+        raise IngressContractError(exc.reason, str(exc)) from exc
 
 
 def marshal_positional(
-    contract: ArtifactContract,
+    contract: CallIngress,
     args: Sequence[Any],
     kwargs: Mapping[str, Any],
 ) -> List[Any]:
@@ -1339,22 +1127,14 @@ def marshal_positional(
     one cannot be skipped without silently shifting every later argument
     into the wrong slot. That is a named refusal, not a best effort.
     """
-    bound = bind_call_inputs(contract, args, kwargs)
-    feeds: List[Any] = []
-    for spec in sorted(contract.inputs, key=lambda s: s.position):
-        if spec.name not in bound:
-            raise IngressContractError(
-                "input_missing",
-                f"declared input {spec.name!r} (position {spec.position}) is "
-                "absent; an AOTI package has a fixed flat arity and takes "
-                "positional inputs only, so a missing input would shift "
-                "every later argument into the wrong graph slot")
-        feeds.append(bound[spec.name])
-    return feeds
+    try:
+        return list(contract.feeds(args, kwargs))
+    except IngressError as exc:
+        raise IngressContractError(exc.reason, str(exc)) from exc
 
 
 def excluded_inputs_present(
-    contract: ArtifactContract, kwargs: Mapping[str, Any],
+    contract: CallIngress, kwargs: Mapping[str, Any],
 ) -> Tuple[str, ...]:
     """The contract's EXCLUDED inputs this call actually carries (pgw#790).
 
@@ -1372,10 +1152,10 @@ def excluded_inputs_present(
     nested (``cross_attention_kwargs``), and a branchless class that missed it
     would silently serve the base model.
     """
-    if not contract.excluded:
+    if not contract.excluded_inputs:
         return ()
     found: List[str] = []
-    for name in contract.excluded:
+    for name in contract.excluded_inputs:
         value = kwargs.get(name, None)
         if value is None:
             value = next(
@@ -1402,7 +1182,7 @@ RECAST_TARGETS = ("float32", "float64")
 _INTEGER_DTYPES = ("int8", "int16", "int32", "int64", "uint8")
 
 
-def recast_gap(spec: InputContract, value: Any) -> str:
+def recast_gap(spec: CallInput, value: Any) -> str:
     """The named dtype normalization this feed needs, or ``''`` (pgw#1074).
 
     ``''`` means either "already in contract" or "must be REFUSED" — this
@@ -1521,7 +1301,7 @@ class FeedAligner:
 
 
 def aligned_feeds(
-    contract: ArtifactContract,
+    contract: CallIngress,
     feeds: Sequence[Any],
     aligner: FeedAligner,
     report: Optional[Callable[[str, str, str], None]] = None,
@@ -1616,7 +1396,7 @@ def miss_distance(misses: Sequence[IngressMiss]) -> Tuple[int, ...]:
 
 
 def ingress_report(
-    contract: ArtifactContract,
+    contract: CallIngress,
     args: Sequence[Any],
     kwargs: Mapping[str, Any],
     *,
@@ -1657,6 +1437,7 @@ def ingress_report(
     misses: List[IngressMiss] = []
     symbols: Dict[str, int] = {}
     owner: Dict[str, str] = {}
+    bounds = contract.symbol_bounds
     for spec in contract.inputs:
         if first_only and misses:
             break
@@ -1692,7 +1473,7 @@ def ingress_report(
                         f"input {spec.name!r} dim {pos} = {got} != "
                         f"statically specialized {declared}", spec.name))
                 continue
-            lo, hi = contract.symbols[declared]
+            lo, hi = bounds[declared]
             if not (lo <= got <= hi):
                 misses.append(IngressMiss(
                     "range_violation",
@@ -1713,7 +1494,7 @@ def ingress_report(
 
 
 def assert_ingress(
-    contract: ArtifactContract,
+    contract: CallIngress,
     args: Sequence[Any],
     kwargs: Mapping[str, Any],
 ) -> Dict[str, int]:
@@ -1967,7 +1748,7 @@ class ArtifactRunner:
     """
 
     package: Any
-    contract: ArtifactContract
+    contract: CallIngress
     constants: Tuple[ConstantSpec, ...]
     module_name: str = ""
     entry: str = ""
@@ -1995,7 +1776,7 @@ class ArtifactRunner:
     def excludes(self, names: Sequence[str]) -> bool:
         """True when this class refuses every one of ``names`` (pgw#790)."""
         wanted = set(str(n) for n in names)
-        return bool(wanted) and wanted <= set(self.contract.excluded)
+        return bool(wanted) and wanted <= set(self.contract.excluded_inputs)
 
     def bind(
         self, state_dict: Mapping[str, Any], literals: Mapping[str, Any],
@@ -2406,7 +2187,7 @@ class EntryDispatch:
         wanted = set(str(n) for n in names)
         if not wanted:
             return False
-        return any(wanted <= set(runner.contract.excluded)
+        return any(wanted <= set(runner.contract.excluded_inputs)
                    for _n, runner in self.runners)
 
 
@@ -2510,7 +2291,7 @@ def adapter_call_kwargs(
     return {}, lifted
 
 
-def assert_lifted_contract(module: Any, contract: ArtifactContract) -> None:
+def assert_lifted_contract(module: Any, contract: CallIngress) -> None:
     """The module's lifted state and the artifact's signature must AGREE.
 
     Either mismatch is the pgw#704 S9 defect in one direction or the other:
@@ -2523,7 +2304,7 @@ def assert_lifted_contract(module: Any, contract: ArtifactContract) -> None:
     declared = {spec.name for spec in contract.inputs}
     wanted = set(lora_lifted.LIFTED_INPUT_NAMES)
     lifted = lora_lifted.lifted_binding(module) is not None
-    if lifted and wanted <= set(contract.excluded):
+    if lifted and wanted <= set(contract.excluded_inputs):
         # pgw#790: the BRANCHLESS arm of an adapter-forked cell. It says so
         # explicitly — the adapter inputs are refused, not forgotten — so the
         # dispatch can never route adapter-bearing traffic to it and "the
@@ -2830,29 +2611,6 @@ def _target_owner(pipeline: Any, target: str) -> Tuple[Any, str]:
     return module, attr
 
 
-def _entry_admission_drift(
-    package_path: Path, entry: str, inputs_rows: Sequence[Mapping[str, Any]],
-) -> None:
-    """The pgw#1058 arm-side identity check: one entry's declared manifest
-    rows verified against the artifact's OWN generated input guards, through
-    the SAME ``aot_package.admission_drift`` the mint's package gate ran.
-
-    A module attribute (like :func:`_load_package`) so unit rigs serving
-    fake package bytes can substitute it; the import is function-local
-    because ``aot_package`` imports this module's SOURCE_* vocabulary at
-    its top."""
-    from . import aot_package
-
-    try:
-        drift = aot_package.admission_drift(
-            Path(package_path), entry, inputs_rows)
-    except aot_package.PackageIntrospectionError as exc:
-        raise AdoptError("admission_drift", f"entry {entry!r}: {exc}") from exc
-    if drift:
-        raise AdoptError(
-            "admission_drift", f"entry {entry!r}: " + "; ".join(drift[:6]))
-
-
 #: The classified refusal a bind that ran out of device memory produces. Same
 #: token the two deleted `mint_budget.adopt_headroom` gates used, so every
 #: downstream reader (the `cell_adopt_declined` event, `fleet_cells`' abort
@@ -3056,7 +2814,10 @@ def arm_entry(
                 raise AdoptError("contract_invalid", str(exc)) from exc
 
         try:
-            contract = contract_from_meta(block)
+            graph = block.get("graph")
+            if not isinstance(graph, Mapping):
+                raise ValueError("graph class records no graph interface")
+            contract = CallIngress.from_graph(graph)
             constants = constants_from_meta(block)
             # pgw#725: the lifted-adapter signature must match the module's
             # actual lifted state.
@@ -3064,14 +2825,6 @@ def arm_entry(
         except ValueError as exc:
             raise AdoptError(
                 "contract_invalid", f"entry {name!r}: {exc}") from exc
-        # pgw#1058: the admission contract this dispatch will enforce must BE
-        # the one the artifact's own generated guards enforce — the same
-        # derivation the mint's package gate ran, re-run where the bytes
-        # arrive, so a label that drifted between publish and adopt is a named
-        # refusal here and never an opaque per-call admission miss.
-        _entry_admission_drift(
-            staged.root / PACKAGE_NAME, name, list(block.get("inputs") or []))
-
         # The target's by-reference pool, ACCRETED (pgw#1176/pgw#1177): this
         # entry's state-dict constants join whatever earlier entries already
         # registered. The pool rides the marker because user_managed binds
@@ -3501,7 +3254,6 @@ __all__ = [
     "COMPILED_GRAPH_FORMAT",
     "COMPILED_GRAPH_FORMAT_KEY",
     "ARTIFACT_KIND",
-    "ArtifactContract",
     "ArtifactRunner",
     "ConstantSpec",
     "ConstantsUnboundError",
@@ -3509,7 +3261,6 @@ __all__ = [
     "EntryDispatch",
     "IDENTITY_AXES",
     "IngressContractError",
-    "InputContract",
     "LITERAL_SEP",
     "LITERALS_NAME",
     "METADATA_NAME",
@@ -3527,7 +3278,6 @@ __all__ = [
     "bind_call_inputs",
     "class_hash",
     "constants_from_meta",
-    "contract_from_meta",
     "enable",
     "entry_from_meta",
     "entry_metadata",

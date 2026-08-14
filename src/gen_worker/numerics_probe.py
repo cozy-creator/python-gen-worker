@@ -27,10 +27,10 @@ measurement move without a new implementation.
 
 **Parity by construction.** The probe feed comes from
 :func:`gen_worker.aot_inputs.builder_for` — the mint's OWN input builder,
-driven by an :class:`~gen_worker.aot_contract.ExportSpec` reconstructed from
+driven by an :class:`~gen_worker.aot_inputs.ExportSpec` reconstructed from
 the cell's own recorded entry coordinate. A probe that built its inputs some
 other way would measure a call the artifact was never traced for. It comes from
-``aot_contract`` and not ``aot_mint`` for a measured reason — see
+``aot_inputs`` and not ``aot_mint`` for a measured reason — see
 :func:`build_feed`.
 
 **Fail closed.** A probe that cannot run is NOT a pass. Every failure path
@@ -49,11 +49,12 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, List, Mapping, Optional, Sequence, Tuple
 
+from torch_compiled_graphs import CallIngress
+
 from . import numerics_ladder
 from .numerics_ladder import Comparison, Thresholds
 from . import aot_serve
 from . import aot_inputs
-from .aot_contract import ExportSpec
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +157,7 @@ def axes_from_meta(meta: Mapping[str, Any]) -> Tuple[ProbeAxis, ...]:
     axes: List[ProbeAxis] = []
     for name in sorted(entries):
         block = entries[name]
-        contract = aot_serve.contract_from_meta(block)
+        contract = CallIngress.from_graph(block)
         declared = {spec.name for spec in contract.inputs}
         # The branchless class declares no adapter inputs and REFUSES them, and
         # a refusal at ingress reads as an unmeasurable axis when it is really
@@ -237,13 +238,13 @@ def build_feed(module: Any, family: str, axis: ProbeAxis) -> Tuple[Any, ...]:
             "no_input_contract",
             f"{axis}: no export-input contract to build a probe feed from "
             f"({type(exc).__name__}: {exc})") from exc
-    # `aot_contract`, NEVER `aot_mint`: `provision` is a `static_code_closure`
+    # `aot_inputs`, NEVER `aot_mint`: `provision` is a `static_code_closure`
     # entrypoint, the closure walk follows function-level imports, and the
     # closure memo records it on every artifact. Importing the mint DRIVER here
     # would drag `aot_wrapper_split` / `aot_run_impl_split` into cell identity,
     # and a compile-time transform must re-key nothing. The vocabulary lives in
     # a leaf module so the driver stays out.
-    spec = ExportSpec(
+    spec = aot_inputs.ExportSpec(
         family=str(family), target=axis.target,
         lora_bucket=int(axis.lora_bucket),
         fork=axis.fork, class_dims=axis.class_dims)
@@ -352,11 +353,11 @@ class AxisVerdict:
 
 
 @dataclass(frozen=True)
-class CellNumerics:
-    """The whole cell's verdict, and every axis it is made of."""
+class CompiledGraphNumerics:
+    """The compiled graph's verdict, and every axis it is made of."""
 
     family: str
-    cell_key: str
+    compiled_graph_key: str
     thresholds: Thresholds
     threshold_source: str
     verdicts: Tuple[AxisVerdict, ...]
@@ -402,7 +403,7 @@ class CellNumerics:
         """Everything a reader needs to re-run this verdict, in one line."""
         worst = self.worst()
         head = (
-            f"family={self.family} key={self.cell_key or '?'} "
+            f"family={self.family} key={self.compiled_graph_key or '?'} "
             f"axes={len(self.verdicts)}/{self.axes_total} "
             f"thresholds={self.thresholds} source={self.threshold_source} "
             f"took={self.elapsed_ms}ms")
@@ -418,7 +419,7 @@ def probe_cell(
     meta: Mapping[str, Any],
     *,
     only: str = "",
-) -> CellNumerics:
+) -> CompiledGraphNumerics:
     """Measure an ARMED pipeline against the eager forward it replaced.
 
     ``only`` names one axis (``ProbeAxis.name``, i.e. the packaged entry name)
@@ -484,8 +485,9 @@ def probe_cell(
         verdicts.append(AxisVerdict(
             axis=axis, comparison=comparison,
             elapsed_ms=int((time.monotonic() - t0) * 1000)))
-    report = CellNumerics(
-        family=family, cell_key=str(meta.get("cell_key") or ""),
+    report = CompiledGraphNumerics(
+        family=family,
+        compiled_graph_key=str(meta.get("compiled_graph_key") or ""),
         thresholds=thresholds, threshold_source=source,
         verdicts=tuple(verdicts), axes_total=len(axes),
         elapsed_ms=int((time.monotonic() - started) * 1000))
@@ -496,10 +498,10 @@ def probe_cell(
 
 
 _LAST_LOCK = threading.Lock()
-_LAST: Optional[CellNumerics] = None
+_LAST: Optional[CompiledGraphNumerics] = None
 
 
-def last_report() -> Optional[CellNumerics]:
+def last_report() -> Optional[CompiledGraphNumerics]:
     """The most recent :func:`probe_cell` report in this process, or None.
 
     The GATE (``provision.gate_cell_numerics``) answers yes/no and confesses
@@ -516,7 +518,7 @@ def last_report() -> Optional[CellNumerics]:
 
 __all__ = [
     "AxisVerdict",
-    "CellNumerics",
+    "CompiledGraphNumerics",
     "CellNumericsRefused",
     "ProbeAxis",
     "ProbeUnavailable",

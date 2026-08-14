@@ -5,42 +5,90 @@ forward takes. That structure is FAMILY knowledge — and per Paul's SDK-generic
 rule it is a DECLARATION in the endpoint spec, never worker code: the endpoint
 declares ``Compile(dims=..., forks=..., classes=..., inputs=...)`` and
 :func:`gen_worker.aot_declaration.declared_inputs` derives the example inputs
-generically. What lives here is generic only: composition, the lifted-LoRA
-kwargs, dtype/device introspection, and a registration hook for callers that
-need a hand-written builder while a family's declaration is still being written.
-
-Composition itself is NOT family-specific and mirrors the SERVING path's own
-composition: ``load_from_pretrained`` -> ``place_pipeline``. That is a parity
-requirement, not tidiness — the placement/low-VRAM flags are traced INTO the
-graph, so a cell composed differently from the serving path is a cell the
-serving path can never use.
-
-The ONE deliberate divergence is the LoRA lane: the dynamo mint stops at
-``compile_cache.apply_lora_lane``, which allocates zeroed branch BUFFERS —
-module state that export would bake. The exported lane goes one step further
-through ``lora_lifted.arm_lifted_lora_lanes``, which wraps those same containers
-in the lifted forward so the adapter arrives as call arguments. Same bucket, one
-extra step, because the two lanes disagree about what "dynamic" means.
+generically. What lives here is the minimal worker-owned input vocabulary,
+lifted-LoRA values, dtype/device introspection, and the temporary registration
+hook for families whose declaration is still being written. Pipeline
+composition belongs to the compile child and serving loader, not this contract.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Dict, Mapping, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
-from .compile_cache import resolve_pipeline_class
+from .compile_cache import execution_lane_label as _execution_lane_label
 from .models import lora_lifted
-from .models.loading import load_from_pretrained
-from .models.memory import place_pipeline
 from .api.export_contract import export_declaration
-from .aot_contract import DynamicDim
-
-if TYPE_CHECKING:  # pragma: no cover — typing only, no runtime import cycle
-    from .aot_contract import DynamicDim, ExportSpec
 
 logger = logging.getLogger(__name__)
 
-InputBuilder = Callable[[Any, "ExportSpec"], Tuple[Tuple[Any, ...], Dict[str, Any]]]
+
+class MintRefused(RuntimeError):
+    """A named, terminal refusal to produce or publish a compiled graph."""
+
+    def __init__(
+        self,
+        *args: Any,
+        mint_phases: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        super().__init__(*args)
+        self.mint_phases: Dict[str, Any] = dict(mint_phases or {})
+
+
+# The SDK-owned fork coordinate of a LoRA-bucket family: one class with the
+# lifted adapter inputs and one without. This is worker declaration policy,
+# not compiled-graph identity or artifact metadata.
+ADAPTER_FORK = "adapter"
+
+
+@dataclass(frozen=True)
+class DynamicDim:
+    """One declared symbolic dimension of one export input."""
+
+    input_name: str
+    axis: int
+    min: int
+    max: int
+    multiple_of: int = 1
+    dim: str = ""
+
+    def as_row(self) -> Dict[str, Any]:
+        return {
+            "input": self.input_name,
+            "axis": self.axis,
+            "min": self.min,
+            "max": self.max,
+            "multiple_of": self.multiple_of,
+        }
+
+
+@dataclass
+class ExportSpec:
+    """Worker-only tracing inputs for one declared compiled graph class."""
+
+    family: str
+    target: str
+    weight_lane: str = ""
+    precision: str = ""
+    lora_bucket: int = 0
+    shapes: Tuple[Tuple[int, ...], ...] = ()
+    text_lens: Tuple[int, ...] = ()
+    guidance_scales: Tuple[float, ...] = ()
+    dynamic: Tuple[DynamicDim, ...] = ()
+    fork: Tuple[Tuple[str, Any], ...] = ()
+    class_dims: Tuple[Tuple[str, int], ...] = ()
+    specialization: Dict[str, Any] = field(default_factory=dict)
+    lora_fqns: Tuple[str, ...] = ()
+    lifted_inputs: Tuple[str, ...] = ()
+    strict: bool = True
+    source_ref: str = ""
+    source_digest: str = ""
+
+    def execution_lane_label(self) -> str:
+        return _execution_lane_label(self.weight_lane, self.lora_bucket)
+
+InputBuilder = Callable[[Any, ExportSpec], Tuple[Tuple[Any, ...], Dict[str, Any]]]
 
 #: Keyed by ``(family, target)`` — NOT by family. A family's compile
 #: targets are unrelated modules with unrelated call contracts: wan's span the
@@ -86,7 +134,7 @@ def builder_for(family: str, target: str = "") -> InputBuilder:
     if decl is not None and decl.inputs:
         from . import aot_declaration
 
-        def declared(module: Any, spec: "ExportSpec") -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+        def declared(module: Any, spec: ExportSpec) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
             return aot_declaration.declared_inputs(module, spec, decl)
 
         return declared
@@ -103,7 +151,7 @@ def builder_for(family: str, target: str = "") -> InputBuilder:
         f"before it can be exported")
 
 
-def lifted_lora_values(module: Any, spec: "ExportSpec") -> Dict[str, Any]:
+def lifted_lora_values(module: Any, spec: ExportSpec) -> Dict[str, Any]:
     """The mandatory ``lora_a``/``lora_b`` call values for a LoRA-bucket mint,
     keyed by parameter NAME — the builder binds them to their POSITIONAL slots
     (all-positional example feeds are a mint obligation: a kwarg-traced package
@@ -145,12 +193,12 @@ def module_dtype_device(module: Any) -> Tuple[Any, Any]:
 
 
 def latent_dims(
-    spec: "ExportSpec",
+    spec: ExportSpec,
     *,
     input_name: str = "sample",
     vae_scale: int = 8,
     downsamples: int = 8,
-) -> Tuple["DynamicDim", ...]:
+) -> Tuple[DynamicDim, ...]:
     """Declared symbolic latent H/W dims spanning ``spec.shapes``.
 
     Generic derivation for REQUEST-level dynamic rows (a family without a
@@ -185,51 +233,13 @@ def latent_dims(
     )
 
 
-# ---------------------------------------------------------------------------
-# Composition
-# ---------------------------------------------------------------------------
-
-
-def compose(
-    model: str, spec: "ExportSpec", request: Mapping[str, Any],
-) -> Tuple[Any, Callable[[Any], Tuple[Tuple[Any, ...], Dict[str, Any]]]]:
-    """Compose the pipeline for a mint; return it with its input builder.
-
-    The sequence mirrors the serving path's composition exactly (see the
-    module docstring for why that is a requirement rather than a convention). The
-    returned builder takes the RESOLVED target module — not the pipeline — so
-    widths and dtypes come off the thing actually being exported.
-    """
-    from diffusers import DiffusionPipeline
-
-    builder = builder_for(spec.family, spec.target)
-    load_cls: Any = DiffusionPipeline
-    pipeline_class = str(request.get("pipeline_class") or "").strip()
-    if pipeline_class:
-        # trace through the SERVING pipeline class.
-        load_cls = resolve_pipeline_class(pipeline_class)
-    pipe = load_from_pretrained(
-        load_cls, str(model),
-        dtype=str(request.get("dtype") or "bf16"),
-        storage_dtype=str(request.get("storage_dtype") or ""),
-    )
-    place_pipeline(pipe)
-    if int(spec.lora_bucket or 0):
-        # ONE arm: containers then lifted signature. The dynamo lane stops after
-        # the containers (module state export would bake); the exported lane
-        # lifts the adapter to call arguments ON TOP of them —
-        # `install_lifted_lora_execution_lanes` alone has no container to lay its
-        # flat pair out over.
-        lora_lifted.arm_lifted_lora_execution_lanes(pipe, int(spec.lora_bucket))
-    if callable(getattr(pipe, "set_progress_bar_config", None)):
-        pipe.set_progress_bar_config(disable=True)
-    return pipe, lambda module: builder(module, spec)
-
-
 __all__ = [
+    "ADAPTER_FORK",
+    "DynamicDim",
+    "ExportSpec",
     "InputContractError",
+    "MintRefused",
     "builder_for",
-    "compose",
     "inputs_for",
     "latent_dims",
     "lifted_lora_values",
