@@ -24,11 +24,9 @@ from pathlib import Path
 
 import pytest
 
-from gen_worker import executor as executor_mod
-from gen_worker.models.store import ModelStore
-from gen_worker.models import volume_verify
-from gen_worker.models.volume_verify import clear_memo
 from gen_worker.models import store as store_mod
+from gen_worker.models import volume_verify
+from gen_worker.models.store import ModelStore
 
 
 def sha(b: bytes) -> str:
@@ -55,13 +53,6 @@ def verify(tree: Path, files):
     # _verify_snapshot_tree never touches `self`; calling it unbound keeps the
     # test on the real code path without standing up a whole ModelStore.
     return ModelStore._verify_snapshot_tree(None, tree, _Snap(files))
-
-
-@pytest.fixture(autouse=True)
-def _clear():
-    clear_memo()
-    yield
-    clear_memo()
 
 
 @pytest.fixture
@@ -129,6 +120,26 @@ def test_a_corrupt_v2_file_is_caught_and_named_for_quarantine(tmp_path, counted)
     assert bad == [ref], bad  # the DIGEST, so the bad blob is quarantinable
     assert counted[-1].bytes_hashed == 0  # a failed hash reports no clean bytes
     assert counted[-1].examined == 1
+
+
+def test_each_materialized_copy_is_hashed_before_it_is_trusted(tmp_path, counted):
+    good = b"same-size-copy" * 1024
+    ref = "sha256:" + sha(good)
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "model.safetensors").write_bytes(good)
+    corrupt = bytearray(good)
+    corrupt[len(corrupt) // 2] ^= 0xFF
+    (second / "model.safetensors").write_bytes(corrupt)
+    manifest = [_File("model.safetensors", len(good), digest=ref)]
+
+    assert verify(first, manifest) == (True, [])
+    assert verify(second, manifest) == (False, [ref])
+    assert counted[-2].hashed == 1
+    assert counted[-1].examined == 1
+    assert counted[-1].hashed == 0
 
 
 def test_an_entry_carrying_only_the_legacy_mirror_is_SKIPPED_not_passed(tmp_path, counted):

@@ -145,7 +145,6 @@ CI-SKIPPED tests/test_flavor_deletion_pgw1148.py|no origin/master to diff agains
 
 # ─── LOCAL-ONLY ───────────────────────────────────────────────────────────────
 LOCAL-ONLY tests/test_lora_lifted_pgw725.py|set gen_worker_aot_pack_tests=# (packs a real .pt#; needs g++)
-LOCAL-ONLY tests/test_chunk_cas_parallel_th1362.py|multi-gb throughput measurement; set chunk_cas_bench=#
 LOCAL-ONLY tests/test_aot_run_impl_split_pgw811.py|banked pgw#793 wrapper not present
 # pgw#1150. Four rows put the author-CI harness's emitted `author-ci.toml`
 # record through `inference-endpoints/scripts/lint_author_ci.py` ITSELF —

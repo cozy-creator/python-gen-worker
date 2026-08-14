@@ -19,55 +19,18 @@ from __future__ import annotations
 
 import hashlib
 import os
-from pathlib import Path
 
 import pytest
 
-from fake_hub import _FakeHub, _client
-from gen_worker.hubio.client import CommitFile, HubPublishError
 from gen_worker.executor import _map_exception
+from gen_worker.hubio.client import HubPublishError
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
-CS = 4096
 
-
-def payload(n: int, seed: int = 1) -> bytes:
-    out = bytearray(n)
-    x = (seed * 2654435761 + 1) & 0xFFFFFFFF
-    for i in range(n):
-        x = (x * 1664525 + 1013904223) & 0xFFFFFFFF
-        out[i] = (x >> 24) & 0xFF
-    return bytes(out)
-
-
-def write(tmp: Path, name: str, data: bytes) -> CommitFile:
-    p = tmp / name
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_bytes(data)
-    return CommitFile(path=name, local_path=p, size_bytes=len(data))
-
-
-@pytest.fixture()
-def small_chunks(monkeypatch):
-    monkeypatch.setattr("gen_worker.models.chunk_upload.CAS_CHUNK_SIZE_BYTES", CS)
-
-
-def _publish_and_capture(fake_hub, tmp_path, verdict) -> HubPublishError:
-    _FakeHub.state["complete_failure"] = verdict
-    with pytest.raises(HubPublishError) as err:
-        _client(fake_hub).publish_v2(
-            destination_repo="acme/model",
-            files=[write(tmp_path, "w.safetensors", payload(CS * 2))])
-    return err.value
-
-
-def test_a_hub_tagged_RETRYABLE_publish_failure_is_reported_RETRYABLE(
-    fake_hub, tmp_path, small_chunks,
-):
-    exc = _publish_and_capture(fake_hub, tmp_path, {
-        "code": "verification_backlog", "retryable": True,
-        "message": "verifier is behind; retry",
-    })
+def test_a_hub_tagged_RETRYABLE_publish_failure_is_reported_RETRYABLE():
+    exc = HubPublishError(
+        "verifier is behind; retry", code="verification_backlog", retryable=True
+    )
     status, detail = _map_exception(exc)
     assert status == pb.JOB_STATUS_RETRYABLE
     # The hub's own code LEADS the detail, so the refusal groups by a stable
@@ -75,11 +38,12 @@ def test_a_hub_tagged_RETRYABLE_publish_failure_is_reported_RETRYABLE(
     assert detail.startswith("verification_backlog: ")
 
 
-def test_a_hub_tagged_REPUDIATION_stays_FATAL(fake_hub, tmp_path, small_chunks):
-    exc = _publish_and_capture(fake_hub, tmp_path, {
-        "code": "invalid_manifest_for_kind", "retryable": False,
-        "message": "missing_diffusers_single_file_safetensors",
-    })
+def test_a_hub_tagged_REPUDIATION_stays_FATAL():
+    exc = HubPublishError(
+        "missing_diffusers_single_file_safetensors",
+        code="invalid_manifest_for_kind",
+        retryable=False,
+    )
     status, detail = _map_exception(exc)
     assert status == pb.JOB_STATUS_FATAL
     assert detail.startswith("invalid_manifest_for_kind: ")
@@ -116,8 +80,8 @@ def test_the_incremental_writer_finalizes_ATOMICALLY_and_fsyncs(tmp_path, monkey
     from gen_worker.convert import writer as w
 
     synced: list[str] = []
-    monkeypatch.setattr(w, "fsync_file", lambda p: synced.append(f"file:{p.name}"))
-    monkeypatch.setattr(w, "fsync_dir", lambda p: synced.append("dir"))
+    monkeypatch.setattr(w, "_fsync_file", lambda p: synced.append(f"file:{p.name}"))
+    monkeypatch.setattr(w, "_fsync_dir", lambda p: synced.append("dir"))
 
     out = tmp_path / "model.safetensors"
     seen: list[bool] = []

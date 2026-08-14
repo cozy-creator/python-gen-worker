@@ -51,11 +51,12 @@ import pytest
 GUARD_MANIFEST_BLOCK = "guard_manifest"
 
 
+from harness.cell_meta import exported_cell_meta
+from hashrepo import CHUNK_SIZE
+
 from gen_worker import fleet_cells as fc
 from gen_worker import http_origin
 from gen_worker.hubio.client import HubPublishError
-from gen_worker.models import chunk_upload as cu
-from harness.cell_meta import exported_cell_meta
 
 FAMILY = "sdxl"
 # pgw#1046: computed from `_meta()`'s identity blocks, never invented — the
@@ -411,7 +412,7 @@ def test_a_real_200mb_cell_publishes_through_the_real_cap(hub, artifact, monkeyp
     # ...and the DATA still moved, all of it, over presigned PUTs, every
     # object refused unless it hashed to the digest signed into its grant.
     assert hub.httpd.put_bytes == ARTIFACT_BYTES
-    expected_chunks = -(-ARTIFACT_BYTES // cu.CAS_CHUNK_SIZE_BYTES)
+    expected_chunks = -(-ARTIFACT_BYTES // CHUNK_SIZE)
     assert len(hub.httpd.objects) == expected_chunks
 
     assert hub.httpd.completes[-1]["ok"] is True

@@ -257,9 +257,9 @@ def test_a_len_reading_of_a_drained_buffer_counts_as_the_bound():
 
 
 def test_a_progress_log_is_not_mistaken_for_a_bound():
-    """`cozy_cas` compares `downloaded - last_log >= log_every` to decide when
-    to log. A rule that accepted a counter anywhere inside a comparison would
-    have read that as the bound and passed an unbounded loop."""
+    """A progress logger may compare ``downloaded - last_log``. A rule that
+    accepted a counter anywhere inside a comparison would read that as the
+    bound and pass an unbounded loop."""
     findings = _scan(
         "def fetch(resp, dest, log_every):\n"
         "    total = 0\n"
@@ -300,7 +300,7 @@ def test_rule_2_takes_the_justification_comment_too():
 
 
 @pytest.mark.parametrize("src", [
-    # A budget loop: the loop's own test is the bound (`chunk_cas._take`,
+    # A budget loop: the loop's own test is the bound (for example,
     # `procsplit.child._recv_exact`).
     "def take(src, fd, remaining):\n"
     "    buf = bytearray()\n"

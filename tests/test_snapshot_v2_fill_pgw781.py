@@ -1,35 +1,21 @@
-"""The worker can FILL a manifest-v2 (sha256 / chunked) snapshot, and every
-integrity check on that path actually runs.
-
-Nothing resolves to a blake3 manifest any more, so a v1 entry is a stale pointer
-and is REFUSED, not filled.
-
-These drive the REAL ``ensure_snapshot_async`` over a real localhost HTTP
-server: sockets, threads, files, the actual reassembly. The assertions are
-about BYTES and about HOW MANY BYTES WERE HASHED, never about "ok" — a
-verifier that examines nothing returns a result byte-identical to one that
-passes, which is the exact defect class this whole program keeps finding.
-
-Run: pytest tests/test_snapshot_v2_fill_pgw781.py -q
-"""
+"""Tensorhub's resolved-manifest adapter over the public HashRepo API."""
 
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import http.server
+import multiprocessing
 import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
+from hashrepo import CHUNK_SIZE, CASRef, FileEntry, LocalCAS, RepositoryManifest
 
-import gen_worker.models.cozy_snapshot as snap_mod
-from gen_worker.models.chunk_cas import DigestMismatch
-from gen_worker.models.cozy_snapshot import (
-    NetworkBytesScope,
-    _verify_materialized_tree,
-    ensure_snapshot_async,
-)
+import gen_worker.models.cozy_snapshot as snapshot_mod
+from gen_worker.models.cozy_snapshot import NetworkBytesScope, ensure_snapshot_async
 from gen_worker.models.hub_client import (
     WorkerResolvedChunk,
     WorkerResolvedRepo,
@@ -37,486 +23,294 @@ from gen_worker.models.hub_client import (
 )
 from gen_worker.models.refs import TensorhubRef
 
-# Small enough that the tests move kilobytes; the production constant is
-# asserted elsewhere. What matters here is the ARITHMETIC and the dispatch.
-CS = 4096
-_SNAPSHOT = "sha256:" + "a1" * 32
 
-
-def body(total: int, seed: int = 7) -> bytes:
-    out = bytearray(total)
-    x = (seed * 2654435761 + 1) & 0xFFFFFFFF
-    for i in range(total):
-        x = (x * 1664525 + 1013904223) & 0xFFFFFFFF
-        out[i] = (x >> 24) & 0xFF
-    return bytes(out)
-
-
-def sha(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
-
-# ---------------------------------------------------------------------------
-# A real HTTP server. Chunks are served by digest, so a URL is genuinely
-# content-addressed and a permuted chunk list still fetches real chunks.
-# ---------------------------------------------------------------------------
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
-    def log_message(self, *args):  # noqa: D102
+    def log_message(self, *_args: object) -> None:
         pass
 
-    def do_GET(self):  # noqa: N802
-        srv = self.server
+    def do_GET(self) -> None:  # noqa: N802
+        server = self.server
         key = self.path.rsplit("/", 1)[-1]
-        with srv.lock:
-            srv.hits[key] = srv.hits.get(key, 0) + 1
-            blob = srv.blobs.get(key)
-        if blob is None:
+        with server.lock:  # type: ignore[attr-defined]
+            server.hits[key] = server.hits.get(key, 0) + 1  # type: ignore[attr-defined]
+            body = server.blobs.get(key)  # type: ignore[attr-defined]
+        if body is None:
             self.send_error(404)
             return
         self.send_response(200)
-        self.send_header("Content-Length", str(len(blob)))
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(blob)
+        self.wfile.write(body)
 
 
-@pytest.fixture()
-def store():
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-    srv.blobs, srv.hits, srv.lock = {}, {}, threading.Lock()
-    t = threading.Thread(target=srv.serve_forever, daemon=True)
-    t.start()
-    srv.base = f"http://127.0.0.1:{srv.server_address[1]}"
+class BlobServer:
+    def __init__(self, blobs: dict[str, bytes]) -> None:
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self.server.blobs = blobs  # type: ignore[attr-defined]
+        self.server.hits = {}  # type: ignore[attr-defined]
+        self.server.lock = threading.Lock()  # type: ignore[attr-defined]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def url(self, digest: str) -> str:
+        host, port = self.server.server_address
+        return f"http://{host}:{port}/{digest}"
+
+    def hits(self, digest: str) -> int:
+        return int(self.server.hits.get(digest, 0))  # type: ignore[attr-defined]
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join()
+
+
+def _ref() -> TensorhubRef:
+    return TensorhubRef(owner="acme", repo="model", tag="latest")
+
+
+class _BarrierCAS(LocalCAS):
+    def __init__(self, root: Path, barrier: Any) -> None:
+        super().__init__(root)
+        self._barrier = barrier
+
+    def materialize_repository(
+        self, manifest: RepositoryManifest, destination: str | Path
+    ) -> Path:
+        if Path(destination).exists():
+            raise FileExistsError(destination)
+        self._barrier.wait(30)
+        return super().materialize_repository(manifest, destination)
+
+
+def _materialize_process(
+    root: str, target: str, digest: str, size: int, barrier: Any, results: Any
+) -> None:
+    cas = _BarrierCAS(Path(root), barrier)
+    manifest = RepositoryManifest(
+        (FileEntry("config.json", size, CASRef(digest)),)
+    )
     try:
-        yield srv
+        path = snapshot_mod._materialize_repository(cas, manifest, Path(target))
+        results.put(("ok", (path / "config.json").read_bytes()))
+    except BaseException as exc:
+        results.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
+def test_whole_file_downloads_into_hashrepo_and_reuses_it(tmp_path: Path) -> None:
+    body = b"hashrepo-worker-adapter"
+    digest = _sha(body)
+    server = BlobServer({digest: body})
+    try:
+        resolved = WorkerResolvedRepo(
+            snapshot_digest="sha256:" + "1" * 64,
+            files=[
+                WorkerResolvedRepoFile(
+                    "config.json",
+                    len(body),
+                    server.url(digest),
+                    digest="sha256:" + digest,
+                )
+            ],
+        )
+        with NetworkBytesScope() as scope:
+            path = asyncio.run(
+                ensure_snapshot_async(base_dir=tmp_path, ref=_ref(), resolved=resolved)
+            )
+        assert (path / "config.json").read_bytes() == body
+        assert scope.network_bytes == len(body)
+        assert LocalCAS(tmp_path).contains(CASRef(digest), size=len(body))
+
+        again = asyncio.run(
+            ensure_snapshot_async(base_dir=tmp_path, ref=_ref(), resolved=resolved)
+        )
+        assert again == path
+        assert server.hits(digest) == 1
     finally:
-        srv.shutdown()
-        srv.server_close()
-        t.join(timeout=5)
+        server.close()
 
 
-def put(store, blob: bytes) -> str:
-    """Store bytes under their sha256 and return the URL."""
-    d = sha(blob)
-    with store.lock:
-        store.blobs[d] = blob
-    return f"{store.base}/{d}"
-
-
-def chunked_entry(store, path: str, data: bytes, chunk_size: int = CS):
-    """Publish `data` as chunks and return the v2 resolved entry."""
-    chunks = []
-    for off in range(0, len(data), chunk_size):
-        piece = data[off : off + chunk_size]
-        chunks.append(
-            WorkerResolvedChunk(sha256=sha(piece), url=put(store, piece), length=len(piece))
+def test_two_processes_converge_on_the_same_materialized_tree(tmp_path: Path) -> None:
+    body = b"cross-process-winner"
+    cas = LocalCAS(tmp_path)
+    digest = cas.put_bytes(body)
+    target = tmp_path / "snapshots" / "same"
+    context = multiprocessing.get_context("fork")
+    barrier = context.Barrier(2)
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_materialize_process,
+            args=(str(tmp_path), str(target), digest.digest, len(body), barrier, results),
         )
-    return WorkerResolvedRepoFile(
-        path=path,
-        size_bytes=len(data),
-        url=None,  # and a chunked file has NO whole-file URL
-        digest="sha256:" + sha(data),
-        chunks=tuple(chunks),
-        chunk_size_bytes=chunk_size,
-    )
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=30)
+        assert process.exitcode == 0
+    assert [results.get(timeout=5) for _ in processes] == [
+        ("ok", body),
+        ("ok", body),
+    ]
 
 
-def whole_entry(store, path: str, data: bytes):
-    return WorkerResolvedRepoFile(
-        path=path,
-        size_bytes=len(data),
-        url=put(store, data),
-        digest="sha256:" + sha(data),
-    )
+def test_materialization_collision_refuses_an_invalid_winner(tmp_path: Path) -> None:
+    good = b"expected"
+    digest = CASRef.digest_bytes(good)
+    manifest = RepositoryManifest((FileEntry("config.json", len(good), digest),))
+    target = tmp_path / "snapshot"
 
+    class _DivergentCAS(LocalCAS):
+        def materialize_repository(
+            self, _manifest: RepositoryManifest, destination: str | Path
+        ) -> Path:
+            winner = Path(destination)
+            winner.mkdir(parents=True)
+            (winner / "config.json").write_bytes(b"diverged")
+            raise OSError(errno.ENOTEMPTY, "another process published")
 
-def fill(tmp_path: Path, files, sub: str = "local") -> Path:
-    return asyncio.run(
-        ensure_snapshot_async(
-            base_dir=tmp_path / sub,
-            ref=TensorhubRef(owner="org", repo="model"),
-            resolved=WorkerResolvedRepo(snapshot_digest=_SNAPSHOT, files=list(files)),
+    with pytest.raises(OSError) as caught:
+        snapshot_mod._materialize_repository(
+            _DivergentCAS(tmp_path / "cas"), manifest, target
         )
-    )
+    assert caught.value.errno == errno.ENOTEMPTY
+    assert (target / "config.json").read_bytes() == b"diverged"
 
 
-# ---------------------------------------------------------------------------
-# The outcome: a v2 snapshot materializes, byte-identically
-# ---------------------------------------------------------------------------
-
-
-def test_v2_chunked_snapshot_materializes_byte_identically(tmp_path, store):
-    big = body(CS * 3 + 17)  # 4 chunks, last one short
-    small = body(200, seed=2)  # under the threshold: stored whole
-    snap = fill(
-        tmp_path,
-        [
-            chunked_entry(store, "transformer/weights.safetensors", big),
-            whole_entry(store, "config.json", small),
+def test_same_snapshot_key_in_two_scoped_roots_does_not_crosstalk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = b"root-scoped-snapshot"
+    digest = CASRef.digest_bytes(body)
+    roots = (tmp_path / "left", tmp_path / "right")
+    for root in roots:
+        LocalCAS(root).put_bytes(body, expected=digest)
+    resolved = WorkerResolvedRepo(
+        snapshot_digest="sha256:" + "9" * 64,
+        files=[
+            WorkerResolvedRepoFile(
+                "config.json",
+                len(body),
+                "http://127.0.0.1:1/must-not-fetch",
+                digest=str(digest),
+            )
         ],
     )
+    real_ensure = snapshot_mod.CozySnapshotDownloader._ensure_objects
 
-    assert (snap / "transformer" / "weights.safetensors").read_bytes() == big
-    assert (snap / "config.json").read_bytes() == small
-    # Every chunk fetched exactly once — reassembly is not re-downloading.
-    assert sorted(store.hits.values()) == [1, 1, 1, 1, 1]
+    async def scenario() -> tuple[Path, Path]:
+        started = asyncio.Event()
+        release = asyncio.Event()
 
+        async def delayed(self: Any, cas: LocalCAS, *args: Any, **kwargs: Any) -> None:
+            if cas.root == roots[0]:
+                started.set()
+                await release.wait()
+            await real_ensure(self, cas, *args, **kwargs)
 
-def test_chunks_land_under_the_sha256_root_not_the_blake3_one(tmp_path, store):
-    """The algorithm is a PATH SEGMENT. A sha256 blob under blobs/blake3/ would
-    collide with a blake3 blob of different bytes at the same hex."""
-    data = body(CS * 2)
-    fill(tmp_path, [chunked_entry(store, "w.safetensors", data)])
-    blobs = tmp_path / "local" / "blobs"
-    assert (blobs / "sha256").is_dir()
-    assert not (blobs / "blake3").exists()
-    d = sha(data)
-    assert (blobs / "sha256" / d[:2] / d[2:4] / d).read_bytes() == data
-
-
-
-
-
-
-# ---------------------------------------------------------------------------
-# The checks must actually RUN — revert-turns-red
-# ---------------------------------------------------------------------------
-
-
-def test_lying_whole_file_digest_on_a_chunked_file_refuses_to_install(tmp_path, store):
-    """Only the CHUNKS are store-enforced. The whole-file label is the one
-    thing the store cannot vouch for, so the fused reassembly hash is the only
-    place a wrong label is caught — and it must fail closed."""
-    data = body(CS * 2 + 3)
-    entry = chunked_entry(store, "w.safetensors", data)
-    lying = WorkerResolvedRepoFile(
-        path=entry.path, size_bytes=entry.size_bytes, url=None,
-        digest="sha256:" + sha(b"something else entirely"),
-        chunks=entry.chunks, chunk_size_bytes=CS,
-    )
-    with pytest.raises(DigestMismatch):
-        fill(tmp_path, [lying])
-    # And nothing was published under the lie.
-    d = sha(b"something else entirely")
-    assert not (tmp_path / "local" / "blobs" / "sha256" / d[:2] / d[2:4] / d).exists()
-
-
-def test_wrong_whole_file_digest_on_a_SMALL_v2_file_refuses(tmp_path, store):
-    """The ≤64 MiB path has no chunk enforcement at all. Before pgw#781 the
-    whole-file transports only knew blake3, so a sha256 file went through them
-    with an EMPTY expectation and was accepted unverified; th#1303 S1 removed
-    the algorithm choice from the call site entirely, so there is no expectation
-    a transport can be handed that it will not check."""
-    data = body(500, seed=3)
-    url = put(store, data)
-    lying = WorkerResolvedRepoFile(
-        path="config.json", size_bytes=len(data), url=url,
-        digest="sha256:" + sha(b"not these bytes"),
-    )
-    with pytest.raises(DigestMismatch):
-        fill(tmp_path, [lying])
-
-
-def test_a_permuted_chunk_list_is_caught(tmp_path, store):
-    """Every chunk individually verifies — only the fused whole-file hash can
-    catch an order swap. This is the test that a per-chunk check is not
-    mistaken for a whole-file check."""
-    data = body(CS * 3)
-    entry = chunked_entry(store, "w.safetensors", data)
-    swapped = (entry.chunks[1], entry.chunks[0]) + tuple(entry.chunks[2:])
-    permuted = WorkerResolvedRepoFile(
-        path=entry.path, size_bytes=entry.size_bytes, url=None,
-        digest=entry.digest, chunks=swapped, chunk_size_bytes=CS,
-    )
-    with pytest.raises(DigestMismatch):
-        fill(tmp_path, [permuted])
-
-
-def test_reuse_verification_hashes_a_v2_tree(tmp_path, store):
-    """``_verify_materialized_tree`` guarded on ``f.blake3`` being non-empty.
-    Under v2 it always is empty, so a v2 tree was reported CLEAN having hashed
-    zero bytes. Assert the opposite direction: a same-size one-byte corruption
-    must be caught, which is only possible if the bytes were read."""
-    data = body(CS * 2)
-    entry = chunked_entry(store, "w.safetensors", data)
-    snap = fill(tmp_path, [entry])
-
-    ok, bad = _verify_materialized_tree(snap, [entry])
-    assert ok and not bad
-
-    target = snap / "w.safetensors"
-    raw = bytearray(target.read_bytes())
-    raw[len(raw) // 2] ^= 0xFF  # same size, one byte different
-    target.unlink()  # break the hardlink; corrupt the tree copy only
-    target.write_bytes(bytes(raw))
-
-    ok, bad = _verify_materialized_tree(snap, [entry])
-    assert not ok
-    assert bad == [entry.digest]  # ALGORITHM-TAGGED, so quarantine can find it
-
-
-def test_quarantine_unlinks_the_sha256_blob(tmp_path, store):
-    """A stripped tag would aim the unlink at blobs/blake3/<sha256hex> — at
-    nothing — leaving the corrupt blob to be re-linked by the next fill."""
-    data = body(CS * 2, seed=11)
-    entry = chunked_entry(store, "w.safetensors", data)
-    snap = fill(tmp_path, [entry])
-    blobs = tmp_path / "local" / "blobs"
-    d = sha(data)
-    blob = blobs / "sha256" / d[:2] / d[2:4] / d
-    assert blob.exists()
-
-    snap_mod._quarantine_materialized(snap, blobs, [entry.digest])
-    assert not blob.exists()
-
-
-def test_an_entry_with_no_readable_digest_is_refused(tmp_path, store):
-    """Fail closed. An unreadable manifest must never degrade into an
-    unverified download — that is how "no digest" becomes "no check"."""
-    data = body(100)
-    entry = WorkerResolvedRepoFile(
-        path="x.json", size_bytes=len(data), url=put(store, data),
-    )
-    with pytest.raises(ValueError, match="no digest"):
-        fill(tmp_path, [entry])
-
-
-def test_untagged_v2_digest_is_a_hard_error(tmp_path, store):
-    """A bare hex in the `digest` field must not be guessed at. Guessing is how
-    a sha256 gets hashed with blake3."""
-    data = body(100, seed=4)
-    entry = WorkerResolvedRepoFile(
-        path="x.json", size_bytes=len(data), url=put(store, data),
-        digest=sha(data),  # untagged
-    )
-    with pytest.raises(ValueError, match="untagged"):
-        fill(tmp_path, [entry])
-
-
-def test_chunk_lengths_must_sum_to_the_declared_size(tmp_path, store):
-    """Refused BEFORE any byte moves — a shape lie costs zero transfer."""
-    data = body(CS * 2)
-    entry = chunked_entry(store, "w.safetensors", data)
-    lying = WorkerResolvedRepoFile(
-        path=entry.path, size_bytes=len(data) + 1000, url=None,
-        digest=entry.digest, chunks=entry.chunks, chunk_size_bytes=CS,
-    )
-    with pytest.raises(ValueError, match="chunk lengths sum"):
-        fill(tmp_path, [lying])
-    assert store.hits == {}  # nothing was fetched
-
-
-def test_network_bytes_counts_chunked_transfer(tmp_path, store):
-    """The volume-attached-boot assertion reads this counter; a
-    chunked fill that reported zero would make a cold boot look warm."""
-    data = body(CS * 3 + 11)
-    with NetworkBytesScope() as scope:
-        fill(tmp_path, [chunked_entry(store, "w.safetensors", data)])
-    assert scope.network_bytes == len(data)
-
-
-# ---------------------------------------------------------------------------
-# The REST wire shape, as the hub actually serializes it. These exist because
-# the first version of this parser was written from a prose contract instead of
-# from the hub's serializer, shipped in 0.78.0, and made every real chunked
-# checkpoint unparseable — a v2 publish that looked fine on the hub and was
-# unreachable to every standalone client. Unit tests all passed: they encoded
-# the same wrong assumption.
-# ---------------------------------------------------------------------------
-
-
-def _entry(n_chunks=2, **over):
-    e = {
-        "path": "model.safetensors", "size_bytes": 100,
-        "digest": "sha256:" + "a" * 64,
-        "chunk_size_bytes": 64,
-        "chunks": [{"digest": f"{i:02d}" + "b" * 62, "len": 50} for i in range(n_chunks)],
-        "chunk_urls": [f"https://r2.invalid/{i}" for i in range(n_chunks)],
-    }
-    e.update(over)
-    return e
-
-
-def _parse(entry):
-    from gen_worker.models.hub_client import parse_chunk_list
-    return parse_chunk_list("tensorhub resolve for o/r", entry["path"],
-                            entry.get("chunks"), entry.get("chunk_urls"))
-
-
-def test_chunk_urls_is_a_SEPARATE_index_aligned_array():
-    """`catalog.SnapshotManifestFile` cannot put URLs inside `chunks` — those
-    bytes ARE the content-addressed identity. The URLs ride alongside."""
-    got = _parse(_entry())
-    assert [c.url for c in got] == ["https://r2.invalid/0", "https://r2.invalid/1"]
-    assert [c.sha256[:2] for c in got] == ["00", "01"]
-    assert [c.length for c in got] == [50, 50]
-
-
-def test_a_nested_url_still_works_for_the_grpc_shape():
-    """The proto's ChunkRef carries sha256/url/len together, so both forms
-    must parse — one client library, two transports."""
-    e = _entry()
-    e["chunk_urls"] = None
-    for i, c in enumerate(e["chunks"]):
-        c["url"] = f"https://grpc.invalid/{i}"
-    got = _parse(e)
-    assert [c.url for c in got] == ["https://grpc.invalid/0", "https://grpc.invalid/1"]
-
-
-def test_a_MISALIGNED_url_list_is_fatal():
-    """Index alignment is the only thing binding a URL to its digest. A short
-    list must never silently mean 'fetch fewer chunks'."""
-    from gen_worker.models.hub_client import HubResolveError
-    e = _entry(n_chunks=3)
-    e["chunk_urls"] = ["https://r2.invalid/0"]
-    with pytest.raises(HubResolveError, match="index alignment"):
-        _parse(e)
-
-
-def test_a_chunk_with_no_url_anywhere_is_fatal():
-    """Unreachable bytes must fail loudly at parse, not at byte 0 of a fetch."""
-    from gen_worker.models.hub_client import HubResolveError
-    e = _entry()
-    e["chunk_urls"] = None
-    with pytest.raises(HubResolveError, match="missing digest/url/len"):
-        _parse(e)
-
-
-# ---------------------------------------------------------------------------
-# The generated stubs must actually carry v2. This is the guard for the defect
-# that made the PRODUCTION path silently non-functional: the hub's proto grew
-# `digest`/`chunk_size_bytes`/`chunks` at th#1303 checkpoint 3 and only the GO
-# side was regenerated, so the worker's vendored copy still described the v1
-# message. Every v2 snapshot then arrived over gRPC with no digest and no
-# chunks — fail-closed, but entirely dark, and no test noticed because the
-# tests built the dataclass directly and never crossed the wire.
-# ---------------------------------------------------------------------------
-
-
-def test_the_generated_snapshotfile_stub_carries_v2():
-    from gen_worker.pb import worker_scheduler_pb2 as pb
-
-    names = [f.name for f in pb.SnapshotFile().DESCRIPTOR.fields]
-    for want in ("digest", "chunk_size_bytes", "chunks"):
-        assert want in names, (
-            f"SnapshotFile has no {want!r} — proto/worker_scheduler.proto is stale "
-            f"against the hub. Run `task proto`. Fields: {names}"
+        monkeypatch.setattr(
+            snapshot_mod.CozySnapshotDownloader, "_ensure_objects", delayed
         )
+        left = asyncio.create_task(
+            ensure_snapshot_async(base_dir=roots[0], ref=_ref(), resolved=resolved)
+        )
+        await started.wait()
+        right = asyncio.create_task(
+            ensure_snapshot_async(base_dir=roots[1], ref=_ref(), resolved=resolved)
+        )
+        await asyncio.sleep(0)
+        release.set()
+        return await asyncio.gather(left, right)
+
+    left, right = asyncio.run(scenario())
+    assert (left / "config.json").read_bytes() == body
+    assert (right / "config.json").read_bytes() == body
 
 
-def test_the_chunk_message_carries_digest_url_and_len():
-    from gen_worker.pb import worker_scheduler_pb2 as pb
-
-    chunks = next(f for f in pb.SnapshotFile().DESCRIPTOR.fields if f.name == "chunks")
-    names = [f.name for f in chunks.message_type.fields]
-    assert names == ["sha256", "url", "len"], names
-
-
-def test_the_grpc_conversion_carries_chunks_through():
-    """Drive the REAL wire-boundary conversion on a REAL protobuf message.
-
-    `_snapshot_to_resolved` is the only place production snapshots are typed,
-    and it is exactly where a stale stub is invisible."""
-    from gen_worker.models.store import _snapshot_to_resolved
-    from gen_worker.pb import worker_scheduler_pb2 as pb
-
-    snap = pb.Snapshot(digest="sha256:" + "c" * 64)
-    f = snap.files.add()
-    f.path, f.size_bytes, f.digest, f.chunk_size_bytes = (
-        "w.safetensors", 130, "sha256:" + "d" * 64, 64)
-    for i, (h, n) in enumerate(((("a" * 64), 64), (("b" * 64), 64), (("c" * 64), 2))):
-        c = f.chunks.add()
-        c.sha256, c.url, c.len = h, f"https://r2.invalid/{i}", n
-
-    out = _snapshot_to_resolved(snap)
-    got = out.files[0]
-    assert got.digest == "sha256:" + "d" * 64
-    assert got.cas_ref() == "sha256:" + "d" * 64
-    assert [c.length for c in got.chunks] == [64, 64, 2]
-    assert [c.url for c in got.chunks] == [f"https://r2.invalid/{i}" for i in range(3)]
-    assert got.chunk_size_bytes == 64
-
-
-# ---------------------------------------------------------------------------
-# th#1303 S1 — the blake3 ARM is gone, and its absence must REFUSE
-#
-# These are the revert-turns-red guards for S1's deletions. Each one passes
-# today because the v1 arm raises; each one goes RED the moment somebody
-# restores a `blake3` fallback, because the fallback makes the refusal
-# disappear and the fill succeed.
-# ---------------------------------------------------------------------------
+def test_chunked_file_uses_hashrepo_v1_manifest(tmp_path: Path) -> None:
+    first = b"a" * CHUNK_SIZE
+    second = b"tail"
+    chunks = (first, second)
+    whole = hashlib.sha256(first + second).hexdigest()
+    blobs = {_sha(chunk): chunk for chunk in chunks}
+    server = BlobServer(blobs)
+    try:
+        resolved = WorkerResolvedRepo(
+            snapshot_digest="sha256:" + "2" * 64,
+            files=[
+                WorkerResolvedRepoFile(
+                    "weights.safetensors",
+                    CHUNK_SIZE + len(second),
+                    None,
+                    digest="sha256:" + whole,
+                    chunks=tuple(
+                        WorkerResolvedChunk(_sha(chunk), server.url(_sha(chunk)), len(chunk))
+                        for chunk in chunks
+                    ),
+                    chunk_size_bytes=CHUNK_SIZE,
+                )
+            ],
+        )
+        path = asyncio.run(
+            ensure_snapshot_async(base_dir=tmp_path, ref=_ref(), resolved=resolved)
+        )
+        output = path / "weights.safetensors"
+        assert output.stat().st_size == CHUNK_SIZE + len(second)
+        assert hashlib.sha256(output.read_bytes()).hexdigest() == whole
+        assert all(server.hits(digest) == 1 for digest in blobs)
+    finally:
+        server.close()
 
 
-def test_a_v1_blake3_entry_is_now_REFUSED_not_filled(tmp_path, store):
-    """The corpus is repointed: a blake3 ref can only be a stale pointer.
-
-    WHICH ARM THIS PINS, stated because a guard whose claim is untested is this
-    program's own defect one level up. It pins `cozy_cas`'s ALGORITHM PRE-CHECK
-    (`hash_algo != "sha256"`, before the retry loop) and NOT `hash_file`'s
-    deleted arm — verified by execution: restoring `hash_file`'s arm alone
-    leaves this GREEN, because the pre-check refuses first. `hash_file` has its
-    own guard (`test_hash_file_refuses_blake3_instead_of_hashing_it`). Two
-    independent arms refuse a v1 entry and each is pinned separately; this
-    replaces the deleted `test_v1_blake3_snapshot_still_fills_unchanged`.
-    """
-    data = body(900, seed=5)
-    entry = WorkerResolvedRepoFile(
-        path="model.safetensors",
-        size_bytes=len(data),
-        url=put(store, data),
-        digest="blake3:" + "b" * 64,
+def test_endpoint_volume_is_a_verified_fill_source(tmp_path: Path) -> None:
+    body = b"warm-volume"
+    digest = CASRef.digest_bytes(body)
+    volume = tmp_path / "volume"
+    LocalCAS(volume).put_bytes(body, expected=digest)
+    resolved = WorkerResolvedRepo(
+        snapshot_digest="sha256:" + "3" * 64,
+        files=[
+            WorkerResolvedRepoFile(
+                "config.json",
+                len(body),
+                "http://127.0.0.1:1/must-not-fetch",
+                digest=str(digest),
+            )
+        ],
     )
-    with pytest.raises(ValueError, match="no longer\n?\\s*verifiable|blake3"):
-        fill(tmp_path, [entry], sub="v1")
-    # The path may be staged, but no BYTES were published under a name this
-    # worker cannot verify.
-    root = tmp_path / "v1" / "blobs" / "blake3"
-    assert [q for q in root.rglob("*") if q.is_file()] == []
+    with NetworkBytesScope() as scope:
+        path = asyncio.run(
+            ensure_snapshot_async(
+                base_dir=tmp_path / "local",
+                ref=_ref(),
+                resolved=resolved,
+                fill_source_dir=volume,
+            )
+        )
+    assert (path / "config.json").read_bytes() == body
+    assert scope.network_bytes == 0
 
 
-def test_an_entry_carrying_ONLY_the_legacy_mirror_is_refused(tmp_path, store):
-    """The empty-guard shape, driven end to end.
-
-    ``resolved_entry_digest`` used to fall back to ``ent["blake3"]``. With the
-    fallback gone, a raw manifest entry that names only the legacy mirror
-    carries NO digest — and "no digest" must be a refusal, never a skip.
-    """
-    from gen_worker.models.hub_client import resolved_entry_digest
-
-    with pytest.raises(ValueError, match="carries no digest"):
-        resolved_entry_digest({"blake3": "c" * 64, "size_bytes": 10})
-
-
-def test_hash_file_refuses_blake3_instead_of_hashing_it(tmp_path):
-    """`chunk_cas.hash_file` is the single dispatcher. Its blake3 arm is the
-    one S1 deleted; nothing else may quietly grow one."""
-    from gen_worker.models.chunk_cas import hash_file, verify_file_digest
-
-    f = tmp_path / "b.bin"
-    f.write_bytes(b"abc")
-    with pytest.raises(ValueError, match="unsupported hash algorithm"):
-        hash_file(f, "blake3")
-    # And through the dispatcher a v1 ref is a refusal, never a silent pass.
-    with pytest.raises(ValueError, match="unsupported hash algorithm"):
-        verify_file_digest(f, "blake3:" + "a" * 64)
-
-
-def test_the_downloader_refuses_an_ABSENT_digest_before_fetching(tmp_path, store):
-    """The vacuous guard, pinned at the transport itself.
-
-    `_download_one_file` used to take `expected_blake3: str = ""` and compare
-    only `if expected_blake3:` — so an entry naming no digest was downloaded
-    and published with no check at all. The precondition is now mandatory and
-    fires BEFORE a byte moves. Deleting it turns this red.
-    """
-    import asyncio
-
-    from gen_worker.hubio.fetch import afetch_verified
-
-    data = body(64)
-    url = put(store, data)
-    dst = tmp_path / "x.bin"
-    with pytest.raises(ValueError, match="no expected digest"):
-        asyncio.run(afetch_verified(url, dst, expected_size=len(data), expected_digest=""))
-    assert not dst.exists(), "nothing may be published under no digest at all"
+@pytest.mark.parametrize("legacy", ["weights.parts.json", "weights.part0000"])
+def test_legacy_split_snapshots_are_refused(tmp_path: Path, legacy: str) -> None:
+    resolved = WorkerResolvedRepo(
+        snapshot_digest="sha256:" + "4" * 64,
+        files=[
+            WorkerResolvedRepoFile(
+                legacy,
+                1,
+                "http://127.0.0.1:1/unused",
+                digest="sha256:" + "a" * 64,
+            )
+        ],
+    )
+    with pytest.raises(ValueError, match="legacy split-file"):
+        asyncio.run(
+            ensure_snapshot_async(base_dir=tmp_path, ref=_ref(), resolved=resolved)
+        )

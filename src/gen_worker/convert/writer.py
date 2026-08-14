@@ -20,23 +20,36 @@ import hashlib
 import json
 import logging
 import math
+import os
+import random
 import re
 import shutil
 import struct
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Mapping, Optional, Sequence
-import os
-from gen_worker.models.cozy_cas import fsync_dir, fsync_file
-from gen_worker.models.loading import (_fp8_block_windows, _fp8_block_windows_whole)
-from fnmatch import fnmatch
-import random
-from gen_worker.models.w8a8 import detect_w8a8_artifact
+
+from gen_worker.models.loading import _fp8_block_windows, _fp8_block_windows_whole
 from gen_worker.models.safetensors_header import header_len_ok
+from gen_worker.models.w8a8 import detect_w8a8_artifact
 
 if TYPE_CHECKING:
     import torch
 
 logger = logging.getLogger(__name__)
+
+
+def _fsync_file(path: Path) -> None:
+    with path.open("rb") as handle:
+        os.fsync(handle.fileno())
+
+
+def _fsync_dir(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 class ConversionImplementationError(RuntimeError):
@@ -198,9 +211,9 @@ class IncrementalSafetensorsWriter:
                     len(self._written), len(self._meta), self._output_path)
             self._discard()
             return
-        fsync_file(self._temp_path)
+        _fsync_file(self._temp_path)
         os.replace(self._temp_path, self._output_path)
-        fsync_dir(self._output_path.parent)
+        _fsync_dir(self._output_path.parent)
 
     def _discard(self) -> None:
         try:
@@ -222,6 +235,7 @@ from ..component_vocab import (
     text_encoder_components,
     weight_components,
 )
+
 # Tensor iteration (single / sharded / pickle inputs)
 # ---------------------------------------------------------------------------
 

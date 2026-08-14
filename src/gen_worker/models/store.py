@@ -29,10 +29,7 @@ from ..lifecycle_intents import IntentRegistry
 from ..pb import worker_scheduler_pb2 as pb
 from ..redact import sanitize as _sanitize
 from ..topology import current_device_group
-from .refs import WireRef
-from . import cozy_snapshot
-from . import disk_gc
-from . import disk_telemetry
+from . import cozy_snapshot, disk_gc, disk_telemetry
 from . import residency as residency_mod
 from . import staging as staging_mod
 from .cache_paths import tensorhub_cas_dir, tensorhub_fill_source_dir
@@ -46,6 +43,7 @@ from .hub_client import (
     WorkerResolvedRepoFile,
 )
 from .loading import safetensors_file_valid
+from .refs import WireRef
 from .residency import Residency
 from .volume_verify import snapshot_verify_targets, verify_files
 
@@ -635,45 +633,17 @@ class ModelStore:
         a dispatch gate on its own)."""
         return self._cached_disk_usage_report
 
-    def _ref_blob_sizes(self, ref: WireRef) -> Dict[str, int]:
-        """CAS digest -> bytes for ``ref``'s banked snapshot, or ``{}`` when
-        the worker has no manifest for it. The digest is the identity the CAS
-        dedups on: ``blobs/`` is hardlinked into every snapshot tree, so a
-        blob two refs share occupies the disk ONCE."""
-        snap = self._snapshots.get(ref)
-        if snap is None or not snap.files:
-            return {}
-        sizes: Dict[str, int] = {}
-        for f in snap.files:
-            # The tagged digest and nothing else. The legacy
-            # `blake3` fallback was empty on every v2 entry, so this used to
-            # bail to {} — sizes unknown — on exactly the manifests it was
-            # written for. Zero entries is a REFUSAL ({}), never a silent 0.
-            digest = str(getattr(f, "digest", "") or "").strip()
-            if not digest:
-                return {}
-            sizes[digest.lower()] = int(f.size_bytes)
-        return sizes
-
     def _reclaimable_entries(
         self, keep: Set[str], entries: Dict[str, Any],
     ) -> List[Tuple[str, int]]:
-        """(path, bytes) the disk GC could ACTUALLY free (th#1330 B4).
+        """Materialized tree bytes the disk GC can certainly free.
 
-        The previous figure summed each evictable ref's whole indexed tree
-        size, which over-reports twice: two evictable refs sharing a blob had
-        it counted in both, and a blob an evictable ref shares with a RETAINED
-        one is not reclaimable at all — ``sweep_orphan_blobs`` only unlinks
-        blobs at ``st_nlink == 1``, so deleting that tree frees nothing.
-        The hub sizes every capacity decision off this number.
-
-        A ref with no banked manifest keeps its full indexed size: an unknown
-        manifest is not a claim that the ref is free."""
-        retained: Set[str] = set()
-        for ref in self.disk_refs():
-            if ref in keep or self.disk_ref_in_use(ref):
-                retained.update(self._ref_blob_sizes(ref))
-        counted: Set[str] = set()
+        HashRepo owns content deduplication under ``objects/`` and materializes
+        independent snapshot trees. Deleting an inactive tree therefore frees
+        its indexed bytes even when another manifest references the same
+        objects. Any newly unreachable objects are an additional conservative
+        gain once HashRepo collects them; they are not counted here.
+        """
         out: List[Tuple[str, int]] = []
         for ref in self.disk_refs():
             if ref in keep or self.disk_ref_in_use(ref):
@@ -682,18 +652,7 @@ class ModelStore:
             if not ent:
                 continue
             path = str(ent.get("path") or "")
-            blobs = self._ref_blob_sizes(ref)
-            if not blobs:
-                out.append((path, int(ent.get("bytes") or 0)))
-                continue
-            freed = 0
-            for digest, size in blobs.items():
-                if digest in retained or digest in counted:
-                    continue
-                counted.add(digest)
-                freed += size
-            if freed > 0:
-                out.append((path, freed))
+            out.append((path, int(ent.get("bytes") or 0)))
         return out
 
     def _measure_disk_usage_report(self) -> pb.DiskUsageReport:
@@ -713,10 +672,8 @@ class ModelStore:
         loop (boothang: 0.40.7's post-seal_publish LTX hang)."""
         keep = set(self.keep)
         entries = self._index.entries()
-        # The CAS is ONE tree with one page cache, hardlinked
-        # across every group, so the preserve set is the UNION across groups —
-        # dropping clean pages one group is done with would drop the pages a
-        # sibling group is still mmapping (§4.3 caveat 3).
+        # Preserve decisions are unioned across groups: a sibling may still
+        # mmap the same materialized tree even though one group is done.
         reclaimable = self._reclaimable_entries(keep, entries)
         mounts = [disk_telemetry.MountSpec(
             tier=disk_telemetry.TIER_CONTAINER, path=str(self._cache_dir),
@@ -752,9 +709,8 @@ class ModelStore:
         return report
 
     def local_path(self, ref: WireRef) -> Optional[Path]:
-        # Union across groups (pgw#748): the CAS is ONE hardlinked tree. A
-        # group that has not yet booked this ref must still SEE the bytes a
-        # sibling group already materialized.
+        # Union across groups (pgw#748): a group that has not yet booked this
+        # ref must still see the tree a sibling group already materialized.
         return self.disk_local_path(ref)
 
     def has_snapshot(self, ref: WireRef) -> bool:
@@ -1657,7 +1613,7 @@ class ModelStore:
                         source = boot_mod.SOURCE_R2
                     elif known_total > 0:
                         # A CAS snapshot materialized with zero network bytes:
-                        # every blob was already under blobs_root (local CAS) or
+                        # every object was already in HashRepo (local CAS) or
                         # came off the endpoint's warm datacenter volume.
                         source = (
                             boot_mod.SOURCE_VOLUME if self._fill_source_dir
@@ -1759,29 +1715,27 @@ class ModelStore:
             for t in targets:
                 covered.add(t.path)
             if targets:
-                rep = verify_files(targets, blobs_root=str(p.parent))
+                rep = verify_files(targets)
                 bad.extend(rep.bad)
                 for finding in rep.findings:
                     logger.warning("snapshot %s: %s", p.name, finding)
                 # DENOMINATOR GUARD, and it applies only to an otherwise-CLEAN
                 # report: a verdict that found nothing wrong is trustworthy only
                 # if it actually read the bytes. `examined` must cover every
-                # target handed in, and a clean run that neither hashed nor
-                # memo-hit anything read nothing at all. (A report that already
-                # names bad files is not vacuous -- it did its job, and folding
-                # it in here would double-report the same digest.)
+                # target handed in, and a clean run that hashed nothing read
+                # nothing at all. (A report that already names bad files is not
+                # vacuous -- it did its job, and folding it in here would
+                # double-report the same digest.)
                 vacuous = (
                     not rep.bad
                     and not rep.findings
                     and rep.hashed == 0
-                    and rep.memo_hits == 0
                 )
                 if rep.examined != rep.expected or vacuous:
                     logger.error(
                         "snapshot %s verification is not trustworthy: examined=%d "
-                        "expected=%d hashed=%d memo=%d bytes=%d -- treating as corrupt",
-                        p.name, rep.examined, rep.expected, rep.hashed,
-                        rep.memo_hits, rep.bytes_hashed,
+                        "expected=%d hashed=%d bytes=%d -- treating as corrupt",
+                        p.name, rep.examined, rep.expected, rep.hashed, rep.bytes_hashed,
                     )
                     already = set(bad)
                     bad.extend(t.ref for t in targets if t.ref not in already)

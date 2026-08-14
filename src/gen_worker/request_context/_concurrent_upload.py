@@ -2,7 +2,7 @@
 
 There is NO file-level upload parallelism: files are uploaded serially and the
 fan-out lives *inside* one file (S3 parts in ``presigned_upload.py``, CAS chunks
-in ``models/chunk_upload.py``), each with its own bounded, process-wide PUT
+in HashRepo), each with its own bounded, process-wide PUT
 budget.
 
 What lives here is ``BudgetGate``: the ``max_total_bytes`` /
@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import threading
 from typing import Any
+
 from gen_worker.request_context._helpers import _decode_unverified_jwt_claims
 
 logger = logging.getLogger(__name__)
@@ -156,4 +157,3 @@ def budget_gate_from_capability_jwt(token: str) -> BudgetGate:
         max_total_bytes=_int_claim("max_total_bytes"),
         max_bytes_per_file=_int_claim("max_bytes_per_file"),
     )
-

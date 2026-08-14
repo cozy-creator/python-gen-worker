@@ -1294,8 +1294,7 @@ def resolve_local_path(
     ``download.select_component_paths`` / ``cozy_snapshot.snapshot_dir_key``.
     """
 
-    configured_cas = current_or(_STANDALONE).tensorhub_cas_dir.strip()
-    cache_dir = Path(configured_cas) if configured_cas else Path(tensorhub_cas_dir())
+    cache_dir = Path(tensorhub_cas_dir())
 
     # Decode the bare ref into typed parts using the explicit provider.
     # No string-prefix sniffing — provider is the source of truth.
@@ -1403,8 +1402,8 @@ def resolve_local_path(
             raise ModelResolutionError(
                 f"--offline: tensorhub ref {parsed.tensorhub.canonical()} not in local "
                 f"CAS ({cache_dir}); warm the cache by running without "
-                "--offline once (or set TENSORHUB_CAS_DIR to a path with the "
-                "snapshot pre-seeded)."
+                "--offline once (or set TENSORHUB_CACHE_DIR to a cache root "
+                "with the snapshot pre-seeded)."
             )
         return _fetch_tensorhub_snapshot(
             parsed.tensorhub, cache_dir=cache_dir, emit=emit, components=components,

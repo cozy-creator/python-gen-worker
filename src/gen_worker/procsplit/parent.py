@@ -1298,8 +1298,6 @@ class ParentControl:
             self._child_env.get("TENSORHUB_CACHE_DIR", "")
             or self._settings.tensorhub_cache_dir
             or _DEFAULT_TENSORHUB_CACHE_DIR,
-            self._child_env.get("TENSORHUB_CAS_DIR", "")
-            or self._settings.tensorhub_cas_dir,
             # post-mortem markers: the CHILD writes inflight/fault-dump/streaks
             # and this parent takes them, so the dir is genuinely shared. Both
             # sides of it, because the pod points the child at a durable

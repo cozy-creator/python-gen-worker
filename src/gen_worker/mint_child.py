@@ -65,8 +65,7 @@ import msgspec
 
 from . import compile_posture, handler_proof, warm_spans
 from .api.errors import ValidationError
-from .api.export_contract import (
-    blocker_refusal, export_declaration, open_blockers)
+from .api.export_contract import blocker_refusal, export_declaration, open_blockers
 from .child_contract import MintSlot, frame_line
 from .child_preflight import (
     PreflightRefused,
@@ -75,6 +74,7 @@ from .child_preflight import (
     pick_compile_target,
     select_specs,
 )
+from .file_hash import sha256_file
 from .mint_process import (
     EXIT_BAD_REQUEST,
     EXIT_MINTED,
@@ -637,7 +637,6 @@ def mint(request: MintRequest) -> MintReport:
     from . import compile_cache as cc
     from . import env_seal
     from .cli.run import run_setup
-    from .models.chunk_cas import sha256_file
     from .registry import collect_endpoints
 
     started = time.monotonic()
@@ -704,8 +703,10 @@ def mint(request: MintRequest) -> MintReport:
         from . import fleet_cells
         from .models import structure_only
         from .models.structure_only import (
-            StructureCapabilityMissing, StructureNotHonored,
-            StructureOnlyUnsupported)
+            StructureCapabilityMissing,
+            StructureNotHonored,
+            StructureOnlyUnsupported,
+        )
 
         obj = spec.cls()
         try:

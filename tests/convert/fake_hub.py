@@ -149,6 +149,16 @@ class _FakeHub(BaseHTTPRequestHandler):
             return
         if "/publishes/" in self.path and self.path.endswith("/complete"):
             pid = self.path.split("/publishes/")[1].split("/")[0]
+            st.setdefault("complete_attempts", []).append(pid)
+            completed = st.setdefault("v2_completed", {})
+            if pid in completed:
+                self._send(200, {
+                    "publish_id": pid,
+                    "stage": "promoted",
+                    "terminal": True,
+                    "checkpoint_id": completed[pid],
+                })
+                return
             req = st["publishes"][pid]
             plan = self._v2_plan(req)
             if plan["need"]:
@@ -167,9 +177,15 @@ class _FakeHub(BaseHTTPRequestHandler):
                 }})
                 return
             st.setdefault("v2_manifests", {})[pid] = req.get("files") or []
+            checkpoint_id = "sha256:" + "ab" * 32
+            completed[pid] = checkpoint_id
+            if st.get("lose_complete_responses", 0) > 0:
+                st["lose_complete_responses"] -= 1
+                self.close_connection = True
+                return
             self._send(200, {
                 "status": {"publish_id": pid, "stage": "promoted", "terminal": True},
-                "checkpoint": {"checkpoint_id": "sha256:" + "ab" * 32},
+                "checkpoint": {"checkpoint_id": checkpoint_id},
                 "checks_unavailable": ["15", "16", "17", "18", "19"],
             })
             return
