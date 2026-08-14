@@ -72,7 +72,9 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # `tests.test_overlap_export_compile_pgw1052` with the save/load round trip
     # and the overlapped export/compile shape they pinned.
     # 309 -> 302: pgw#1235 deleted seven duplicate generic CAS test modules.
-    "ignore_errors": (302, 2016),
+    # 302 -> 295: pgw#1246 deleted the seven component-substitution test
+    # modules with the apparatus they pinned.
+    "ignore_errors": (295, 2016),
 }
 
 #: WILDCARD patterns are structural policy, not debt, so they are not counted
