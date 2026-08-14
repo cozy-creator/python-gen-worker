@@ -1,0 +1,3 @@
+# sha256 of ref_grammar_vectors.json. Independent from KEY_GRAMMAR_DIGEST,
+# which pins only compiled_graph_key_vectors.json.
+3a3be7f94f38dac2c7e38f7527984f6f3e4da701810b99797565dbc05fb9f97b
