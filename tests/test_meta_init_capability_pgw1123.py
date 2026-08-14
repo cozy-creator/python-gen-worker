@@ -111,7 +111,7 @@ def test_a_structure_only_build_needs_no_accelerate(micro_tree: Path) -> None:
 
 
 def test_the_seam_keeps_the_invariant_the_key_depends_on() -> None:
-    """Parameters on meta, buffers REAL — the property ``aot_package``'s
+    """Parameters on meta, buffers REAL — the property the TCG declaration's
     literal constants and the folding fence both rest on. Upstream's version of
     this context manager reads ``ACCELERATE_INIT_INCLUDE_BUFFERS`` from the
     ambient environment and would move the buffers too; owning it is what makes

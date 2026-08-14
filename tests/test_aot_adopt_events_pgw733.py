@@ -21,6 +21,7 @@ import pytest
 
 from gen_worker import cell_key as cell_key_mod
 from gen_worker import activity, aot_serve
+from torch_compiled_graphs import CallIngress, CallInput
 
 #: The arm is INDUCED to take this long, and the floor asserted against it is a
 #: share of that induced quantity rather than a bare constant. This is
@@ -97,13 +98,22 @@ class Cfg:
 
 
 def _entry(**over: Any) -> Dict[str, Any]:
+    ingress = CallIngress(
+        parameters=("sample",),
+        flat_arity=1,
+        inputs=(CallInput(
+            "sample", 0, "sample", 0, (), "sample", "bfloat16",
+            (2, 4, 128, 128),
+        ),),
+    )
     e: Dict[str, Any] = {
         # An entry block NAMES its class — that is what makes a
         # refusal bisectable to the thing that failed.
         "name": ENTRY,
         "target": "unet", "fork": [], "class_dims": [],
         "inputs": [dict(r) for r in INPUTS], "symbols": {},
-        "constants": [dict(r) for r in CONSTANTS], "graph": {},
+        "constants": [dict(r) for r in CONSTANTS],
+        "graph": {}, "pytree": {"ingress": ingress.as_dict()},
     }
     e.update(over)
     try:
@@ -172,8 +182,6 @@ def events(monkeypatch: pytest.MonkeyPatch) -> List[Any]:
 @pytest.fixture()
 def stub_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(aot_serve, "runtime_key", lambda: dict(RUNTIME))
-    monkeypatch.setattr(
-        aot_serve, "_entry_admission_drift", lambda *a, **k: None)
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +233,7 @@ def test_artifact_invalid_named_on_the_wire(
     malformed = _tar(tmp_path, _meta(entry={"name": ENTRY, "target": "unet"}))
     out = aot_serve.enable(FakePipeline(), Cfg(), artifact=malformed)
     assert not out.armed and out.reason == "artifact_invalid"
-    assert "declares no inputs" in out.detail
+    assert "graph pytree must be an object" in out.detail
 
 
 def test_constants_refusal_named_on_the_wire(
@@ -247,13 +255,22 @@ def test_constants_refusal_named_on_the_wire(
 
 
 def _nested_contract() -> Any:
-    entry = _entry(inputs=[
-        {"name": "sample", "position": 0, "dtype": "bfloat16",
-         "shape": [2, 4, 128, 128]},
-        {"name": "text_embeds", "position": 3, "dtype": "bfloat16",
-         "shape": [2, 1280]},
-    ])
-    return aot_serve.contract_from_meta(entry)
+    return CallIngress(
+        parameters=(
+            "sample", "timestep", "encoder_hidden_states", "added_cond_kwargs"
+        ),
+        flat_arity=2,
+        inputs=(
+            CallInput(
+                "sample", 0, "sample", 0, (), "sample", "bfloat16",
+                (2, 4, 128, 128),
+            ),
+            CallInput(
+                "text_embeds", 1, "added_cond_kwargs", 3, ("text_embeds",),
+                "added_cond_kwargs_text_embeds", "bfloat16", (2, 1280),
+            ),
+        ),
+    )
 
 
 def test_missing_nested_input_still_refuses_by_name() -> None:

@@ -11,9 +11,8 @@ Red-verified here through the REAL paths:
 
 * the boot clamp (``env_seal.establish`` -> ``host_isa.impose``) pins
   ``cpp.march``/``cpp.simdlen`` to the portable target, seal-visibly;
-* the mint's compile path (``aot_mint.compile_entry_files`` +
-  ``package_cell`` — the clamp is process-global inductor config, so it
-  binds every entry of a multi-graph cell identically) emits NO
+* TCG's worker compile path (the clamp is process-global inductor config, so
+  it binds every graph class identically) emits NO
   instruction above the target (objdump assertion on the produced ``.so``)
   and the package still loads via ``aoti_load_package`` — portable by
   construction;
@@ -37,7 +36,9 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from gen_worker import aot_mint, aot_serve, env_seal, host_isa
+from gen_worker import aot_compile_child, aot_mint, aot_serve, env_seal, host_isa
+from torch_compiled_graphs import CallIngress, CallInput, build_call_ingress
+import torch_compiled_graphs.host_isa as tcg_host_isa
 
 pytestmark = pytest.mark.skipif(
     host_isa.machine() != "x86_64", reason="x86-64 ISA-level semantics")
@@ -123,12 +124,34 @@ def test_clamped_compile_package_is_portable_and_loads(
     # Clamp BELOW this host's level (any host running this suite is >= v2):
     # every instruction the compile emits above the clamp would be exactly
     # the live SIGILL class, just one level down.
+    v2 = tcg_host_isa._Requirement(
+        "x86_64",
+        "x86-64-v2",
+        tcg_host_isa._required_flags("x86-64-v2"),
+        "x86-64-v2",
+        "128",
+    )
+    monkeypatch.setattr(tcg_host_isa, "_host_requirement", lambda: v2)
     monkeypatch.setattr(inductor_config.cpp, "march", "x86-64-v2")
     monkeypatch.setattr(inductor_config.cpp, "simdlen", 128)
 
-    program = torch.export.export(_Glue(), (torch.randn(4, 8),))
-    files = aot_mint.compile_entry_files(program, "model")
-    package = aot_mint.package_cell({"model": files}, tmp_path / "model.pt2")
+    inputs = (torch.randn(4, 8),)
+    program = torch.export.export(_Glue(), inputs)
+    ingress = build_call_ingress(program, ("x",), inputs, {})
+    export_spec = aot_mint.ExportSpec(family="host-isa", target="model")
+    traced = aot_mint.TracedClass(
+        name="model/default",
+        block=aot_mint.keying_block(program, ingress, export_spec),
+        nodes=1,
+        program=program,
+    )
+    engine, runtime = aot_compile_child._tcg_runtime(tmp_path / "cas")
+    compiled = engine.compile(
+        aot_compile_child._graph_class_spec(traced, export_spec),
+        runtime,
+        tmp_path / "materialized",
+    )
+    package = compiled.compiled_graph.package
 
     with zipfile.ZipFile(package) as zf:
         so_names = [n for n in zf.namelist() if n.endswith(".so")]
@@ -157,6 +180,13 @@ def test_clamped_compile_package_is_portable_and_loads(
 
 
 def _artifact(tmp_path: Path, pt2_bytes: bytes) -> tuple[Path, dict]:
+    ingress = CallIngress(
+        parameters=("x",),
+        flat_arity=1,
+        inputs=(CallInput(
+            "x", 0, "x", 0, (), "x", "float32", (1, 4),
+        ),),
+    )
     meta = aot_serve.entry_metadata(
         family="sdxl", precision="bf16", cell_key="",
         name="unet/main", entry={
@@ -166,6 +196,7 @@ def _artifact(tmp_path: Path, pt2_bytes: bytes) -> tuple[Path, dict]:
                 "shape": [1, 4], "optional": False,
             }],
             "symbols": {}, "constants": [],
+            "pytree": {"ingress": ingress.as_dict()},
         },
     )
     content = tmp_path / "content"

@@ -189,9 +189,10 @@ def _arm(
     from gen_worker.models import provision
 
     monkeypatch.setattr(aot, "runtime_key", lambda: dict(rig.RUNTIME))
-    monkeypatch.setattr(aot, "_entry_admission_drift", lambda *a, **k: None)
     monkeypatch.setattr(
         aot, "_load_package", lambda path, entry="model": packages[entry])
+    monkeypatch.setattr(
+        aot, "_entry_admission_drift", lambda *a, **k: None, raising=False)
     module = rig.ProbeDenoiser()
     pipeline = rig.ProbePipeline(module)
     outcomes = []
@@ -209,7 +210,7 @@ def _arm(
 
 
 def test_a_failing_entry_does_not_un_arm_its_siblings(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: Any,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: Any,  # noqa: F811
 ) -> None:
     """THE RED, closed. On master ``arm_entry`` bound every entry before
     any wrap — "a cell that cannot arm one of its graph classes arms none of
@@ -240,7 +241,7 @@ def test_a_failing_entry_does_not_un_arm_its_siblings(
 
 
 def test_entries_accrete_into_one_registry_and_one_pool(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: Any,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: Any,  # noqa: F811
 ) -> None:
     """Coverage accretes: a second arm joins the SAME live wrap, the same
     target pool and the same dispatch. There is no complete state to wait
@@ -261,7 +262,7 @@ def test_entries_accrete_into_one_registry_and_one_pool(
 
 
 def test_the_pool_binds_by_reference_and_never_clones(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: Any,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: Any,  # noqa: F811
 ) -> None:
     """§4.33 step 4, enforced. ``update_constant_buffer(user_managed=True)``
     makes no copy of its own, so the pool's ``.clone()`` was the ONLY copy in
@@ -292,7 +293,7 @@ def test_a_noncontiguous_resident_is_made_contiguous_not_left_dangling() -> None
 
 
 def test_a_serve_failure_de_arms_ONE_class_and_the_siblings_keep_serving(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: Any,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: Any,  # noqa: F811
 ) -> None:
     """§4.31 per entry. The old wrapper set ``state['failed']`` for the whole
     target on any artifact error, so one bad graph class took every sibling
@@ -318,7 +319,7 @@ def test_a_serve_failure_de_arms_ONE_class_and_the_siblings_keep_serving(
 
 
 def test_a_de_armed_class_is_not_re_armed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: Any,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: Any,  # noqa: F811
 ) -> None:
     """§4.31's de-arm is STICKY for the boot. Per entry that has to be
     enforced where the registry is, or a background compile would cheerfully
@@ -337,7 +338,7 @@ def test_a_de_armed_class_is_not_re_armed(
 
 
 def test_a_declared_but_uncompiled_class_reports_pending_not_a_shape_gap(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: Any,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: Any,  # noqa: F811
 ) -> None:
     """Under accretion the commonest reason nothing admits a call is that its
     class has not been compiled YET. Reporting that as a shape gap would ask

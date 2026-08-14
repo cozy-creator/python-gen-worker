@@ -747,7 +747,7 @@ def execution_lane_label(weight_lane: str, lora_bucket: int = 0) -> str:
 
     pgw#1040: this body existed twice, byte for byte, as
     ``cell_key._canonical_execution_lane`` and
-    ``aot_contract.ExportSpec.execution_lane_label``; both were folded here.
+    ``aot_inputs.ExportSpec.execution_lane_label``; both were folded here.
     Since pgw#1059 the lane is store METADATA + discovery scoping, never a
     key axis — but the one-derivation rule stands for the same reason: a
     lane stamped under one spelling and scoped under another is a cell

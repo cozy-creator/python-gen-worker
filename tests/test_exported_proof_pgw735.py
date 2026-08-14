@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 
 from gen_worker import aot_serve, cell_key
+from torch_compiled_graphs import CallIngress, CallInput
 
 
 class _Pipe:
@@ -25,7 +26,14 @@ def _dispatch(calls: int, failed: bool) -> aot_serve.EntryDispatch:
     """One armed entry, or a de-armed one — the registry state `is_armed`
     and `execution_count` actually read."""
     runner = aot_serve.ArtifactRunner(
-        package=None, contract=aot_serve.ArtifactContract(inputs=(), symbols={}),
+        package=None,
+        contract=CallIngress(
+            parameters=("sample",),
+            flat_arity=1,
+            inputs=(CallInput(
+                "sample", 0, "sample", 0, (), "sample", "float32", (1,),
+            ),),
+        ),
         constants=(), module_name="unet", entry="unet/main")
     runner.calls = calls
     dispatch = aot_serve.EntryDispatch(declared=("unet/main",))

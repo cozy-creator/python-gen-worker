@@ -22,7 +22,6 @@ from pathlib import Path
 
 import pytest
 
-from gen_worker import child_preflight
 from gen_worker import aot_preconditions as pre
 from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells
@@ -393,27 +392,6 @@ def test_the_retired_phases_are_gone_from_the_mint_path() -> None:
     assert "cxx_toolchain_present" not in source
 
 
-def test_the_CHILD_still_refuses_a_toolchainless_AOT_mint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """What is deleted is the parent's silent DOWNGRADE, not the child's typed
-    refusal. A refusal is loud and terminal; a downgrade bills the fleet for
-    eager serving and says nothing."""
-    from gen_worker import mint_child
-
-    monkeypatch.setattr(mint_child, "assert_composable", lambda *a, **k: None)
-    monkeypatch.setattr(cc, "toolchain_present", lambda: True)
-    monkeypatch.setattr(cc, "cxx_toolchain_present", lambda: False)
-
-    req = types.SimpleNamespace(
-        slots={}, recipe=mint_child.RECIPE_AOT,
-        target="/tmp/x", capture="/tmp/y", device=0,
-        modules=[], function="generate", cfg=None, configs={},
-        execution_lane="", report="/tmp/r", arm_token="")
-    with pytest.raises(child_preflight.PreflightRefused, match="no C\\+\\+ compiler"):
-        mint_child.mint(req)
-
-
 def test_ONE_floor_AND_THE_MINT_NO_LONGER_SPELLS_IT(clean_registry) -> None:
     """pgw#914 RED: two spellings of a precondition is how a build proves one
     thing and a pod discovers another, so the mint keeps NONE. The floor is an
@@ -423,7 +401,7 @@ def test_ONE_floor_AND_THE_MINT_NO_LONGER_SPELLS_IT(clean_registry) -> None:
     (DESIGN-RULINGS §4.28)."""
     from gen_worker import aot_mint
 
-    assert aot_mint.LIFTED_LORA_TORCH_FLOOR is pre.LIFTED_LORA_TORCH_FLOOR
+    assert not hasattr(aot_mint, "LIFTED_LORA_TORCH_FLOOR")
     assert not hasattr(aot_mint, "lifted_torch_gap")
     assert not hasattr(aot_mint, "torch_version_gap")
     source = Path(aot_mint.__file__).read_text()

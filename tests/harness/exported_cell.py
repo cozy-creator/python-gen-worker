@@ -35,6 +35,7 @@ from gen_worker.api.export_contract import (
     Dim, GraphClass, Input, register_export_declaration,
     reset_export_declarations,
 )
+from torch_compiled_graphs import CallIngress, CallInput
 
 FAMILY = "pgw868-probe"
 RUNTIME = {"sku": "l4", "sm": "sm_89", "torch": "2.13.0+cu130", "cuda": "13.0"}
@@ -156,6 +157,18 @@ def entry_name(h: int, w: int) -> str:
 
 
 def _entry(h: int, w: int) -> Dict[str, Any]:
+    ingress = CallIngress(
+        parameters=("sample", "timestep"),
+        flat_arity=2,
+        inputs=(
+            CallInput(
+                "sample", 0, "sample", 0, (), "sample", "float32", (h, w),
+            ),
+            CallInput(
+                "timestep", 1, "timestep", 1, (), "timestep", "float32", (),
+            ),
+        ),
+    )
     block = {
         "target": TARGET,
         "fork": [],
@@ -170,6 +183,7 @@ def _entry(h: int, w: int) -> Dict[str, Any]:
         "constants": [{"fqn": "weight", "source": aot.SOURCE_STATE_DICT,
                        "dtype": "float32", "shape": [16, 16]}],
         "graph": {},
+        "pytree": {"ingress": ingress.as_dict()},
     }
     block["range_digest"] = aot.range_digest(block)
     block["class_hash"] = aot.class_hash(block, strict=True, lora_bucket=0)
@@ -347,8 +361,6 @@ def arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
     from gen_worker.models import provision
 
     monkeypatch.setattr(aot, "runtime_key", lambda: dict(RUNTIME))
-    monkeypatch.setattr(
-        aot, "_entry_admission_drift", lambda *a, **k: None)
     monkeypatch.setattr(
         aot, "_load_package", lambda path, entry="model": packages[entry])
     module = ProbeDenoiser()

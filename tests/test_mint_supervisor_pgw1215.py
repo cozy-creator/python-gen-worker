@@ -416,9 +416,9 @@ def test_a_declared_blocker_REFUSES_on_the_parent_and_never_spawns(
     that now decides to mint. A reroute that dropped it would publish compiled
     graphs for a class set the declaration says it cannot yet claim.
 
-    The name matters as much as the gate: ``MintRefused`` is live in
-    ``aot_contract`` for *"every declared class refused"*, so reusing it would
-    make the two indistinguishable at the terminus with nothing going red.
+    The name matters as much as the gate: ``MintRefused`` is live in the
+    declaration collector for *"every declared class refused"*, so reusing it
+    would make the two indistinguishable at the terminus with nothing going red.
     """
     _events(monkeypatch)
     monkeypatch.setattr(
@@ -584,7 +584,7 @@ def test_a_HELD_class_is_dropped_from_the_share_BEFORE_it_is_exported(
         return SimpleNamespace(
             program=SimpleNamespace(graph_module=SimpleNamespace(
                 graph=SimpleNamespace(nodes=()))),
-            flat_leaves=(), spec=spec, timings={}, files=())
+            ingress=object(), spec=spec, timings={})
 
     monkeypatch.setattr(aot_mint, "_export_entry", _export)
     spec = SimpleNamespace(lora_bucket=0)

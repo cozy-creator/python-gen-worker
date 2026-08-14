@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 import pytest
 
 from gen_worker import Compile, Dim, GraphClass, Input
-from gen_worker.aot_contract import DynamicDim, ExportSpec
+from gen_worker.aot_inputs import DynamicDim, ExportSpec
 from gen_worker.aot_declaration import (
     cell_plans, container_arities, declared_inputs,
 )

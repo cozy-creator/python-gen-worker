@@ -92,7 +92,7 @@ GRAPH_DIRNAME = "graphs"
 class DeclaredBlockerRefusal(RuntimeError):
     """This family declares an OPEN mint blocker (pgw#1115).
 
-    Deliberately NOT ``MintRefused``: that name is live in ``aot_contract``
+    Deliberately NOT ``MintRefused``: that name is live in ``aot_inputs``
     and the atom raises it for *"every declared class refused"*
     (``aot_mint``, "absence is a verdict"). Both are terminal, so sharing the
     name would make the two indistinguishable at the terminus with no test

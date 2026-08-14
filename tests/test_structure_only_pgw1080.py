@@ -65,7 +65,7 @@ def test_the_structure_claims_the_TARGET_device_not_meta(tree: Path) -> None:
 
 def test_buffers_stay_REAL_because_literals_ship_from_them(tree: Path) -> None:
     """A config-derived table is what a literal-bearing cell packs. Faking it
-    would make ``aot_package.literal_constants`` unpackable — and keeping it
+    would make TCG's literal-constant declaration unpackable — and keeping it
     real is also the folding fence: a literal derived from a PARAMETER stays
     fake and fails loudly instead of baking one checkpoint into a shared
     cell."""
@@ -107,8 +107,12 @@ def test_a_component_the_tree_does_not_declare_REFUSES_by_name(
 # ---------------------------------------------------------------------------
 
 
-def test_the_structure_EXPORTS_and_AOT_COMPILES(tree: Path) -> None:
-    from gen_worker import aot_mint
+def test_the_structure_EXPORTS_and_AOT_COMPILES(
+    tree: Path, tmp_path: Path,
+) -> None:
+    from torch_compiled_graphs import build_call_ingress
+
+    from gen_worker import aot_compile_child, aot_mint
 
     module, _facts = so.build_component(tree, "decoder", device="cpu")
     mode = so.fake_mode_of(module)
@@ -120,8 +124,23 @@ def test_the_structure_EXPORTS_and_AOT_COMPILES(tree: Path) -> None:
     assert so.fake_mode_of_program(program) is mode, (
         "the compile has to find the program's own mode — `aot_compile` "
         "asserts every input belongs to ONE mode")
-    files = aot_mint.compile_entry_files(program, "decoder")
-    assert files, "AOTInductor produced no loose files for the fake structure"
+    ingress = build_call_ingress(program, ("latent",), (latent,), {})
+    export_spec = aot_mint.ExportSpec(family="micro", target="decoder")
+    traced = aot_mint.TracedClass(
+        name="decoder/default",
+        block=aot_mint.keying_block(program, ingress, export_spec),
+        nodes=1,
+        program=program,
+    )
+    engine, runtime = aot_compile_child._tcg_runtime(tmp_path / "cas")
+    compiled = engine.compile(
+        aot_compile_child._graph_class_spec(traced, export_spec),
+        runtime,
+        tmp_path / "materialized",
+    )
+    assert compiled.compiled_graph.package.is_file(), (
+        "TCG produced no AOTI package for the fake structure"
+    )
 
 
 # ---------------------------------------------------------------------------

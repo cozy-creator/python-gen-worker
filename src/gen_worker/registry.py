@@ -766,12 +766,10 @@ def register_declared_exports(specs: Sequence[EndpointSpec]) -> Tuple[str, ...]:
     """A ``compile=`` block that declares an EXPORT CONTRACT *is* its family's
     export declaration — register it at collection time.
 
-    Without this, ``export_declaration(family)`` resolves only when somebody
-    imports a separate declaration module by name, which is a MINT-REQUEST
-    concept (``aot_declaration.load_declaration``). A serving pod loads the
-    endpoint and nothing else, so `aot_mint.mint` would refuse every family on
-    "no registered export declaration" before exporting a single graph. The
-    declaration travels with the endpoint that owns it.
+    A serving pod and compile child both collect the endpoint package, so the
+    declaration must travel with the endpoint that owns it. A separate
+    request-side declaration loader would create a second registration path
+    and let serving and compilation observe different contracts.
 
     Never raises: a conflicting registration is a real defect, but it is the
     AOT lane's defect and must not take down endpoint collection (which every

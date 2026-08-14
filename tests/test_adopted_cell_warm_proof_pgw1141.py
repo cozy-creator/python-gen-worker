@@ -53,7 +53,7 @@ import pytest
 import gen_worker
 import gen_worker.executor as ex_mod
 from gen_worker import RequestContext, Resources, Slot, endpoint, worker_function
-from gen_worker import activity, aot_serve, cell_adopt, cell_key, compile_cache, fleet_cells
+from gen_worker import activity, aot_serve, cell_adopt, compile_cache, fleet_cells
 from gen_worker import numerics_ladder
 from gen_worker.api.decorators import Compile
 from gen_worker.executor import Executor
@@ -65,6 +65,7 @@ from gen_worker.registry import extract_specs
 import test_numerics_gate_pgw868 as rig868  # noqa: E402
 from test_numerics_gate_pgw868 import ROWS, ProbePackage, arm, entry_name  # noqa: E402
 from gen_worker.models import store as store_mod
+from torch_compiled_graphs import CallIngress, CallInput
 
 #: pgw#868's fixtures, re-exported so this module collects them: `declared`
 #: registers the real export declaration the probe feed is built from, and
@@ -138,90 +139,6 @@ def test_the_MINT_gate_refuses_a_cell_below_its_floor(
     # so the vocabulary repeats rather than aggregating.
     assert [p for k, _d, p in events
             if k == activity.KIND_CELL_NUMERICS] == ["refused", "refused"]
-
-
-def _pending(tmp_path: Path, decl: Any, publisher: Any = None):
-    """A real `PendingSelfMint` pointing at a real packed cell."""
-    target = tmp_path / "mint" / "cell.tar.gz"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    return fleet_cells.PendingSelfMint(
-        family=rig868.FAMILY, arm_token="arm1-" + "a" * 24,
-        ref=f"root/family-{rig868.FAMILY}#cell868",
-        cfg=decl, target=target, mint_root=tmp_path / "mint",
-        publisher=publisher, cache_dir=tmp_path / "cache")
-
-
-def _delegated_mint(tmp_path, monkeypatch, decl, packages, events):
-    """Drive the REAL `adopt_delegated_mint` — the mint's publish gate — with
-    the REAL `arm_aot` and the REAL numerics gate underneath it."""
-    from gen_worker import aot_serve as aot
-
-    monkeypatch.setattr(aot, "runtime_key", lambda: dict(rig868.RUNTIME))
-    monkeypatch.setattr(aot, "_entry_admission_drift", lambda *a, **k: None)
-    monkeypatch.setattr(aot, "_load_package", lambda path, entry="model": packages[entry])
-    monkeypatch.setattr(fleet_cells, "arm_axis_divergence", lambda a, m, **_kw: "")
-    monkeypatch.setattr(fleet_cells.activity_mod, "emit_event",
-                        lambda kind, detail="", **kw: events.append(
-                            (kind, detail, str(kw.get("phase", "")))))
-    pending = _pending(tmp_path, decl)
-    built = rig868.artifact(tmp_path)
-    pending.target.write_bytes(Path(built).read_bytes())
-    module = rig868.ProbeDenoiser()
-    pipeline = rig868.ProbePipeline(module)
-    return fleet_cells.adopt_delegated_mint(pipeline, pending, [pending.target])
-
-
-def test_a_DIVERGENT_cell_is_not_published_by_the_pod_that_minted_it(
-        tmp_path, monkeypatch, declared, events):
-    """§4.32 item 2, end to end through the REAL publish gate.
-
-    `publish_self_mint` can only ship what `adopt_delegated_mint` marked
-    minted, so a refusal here IS the publish refusal.
-
-    HONEST STATUS: this row is GREEN on master too, and that is the point of
-    writing it. The move is a MOVE — the property "a divergent cell does not
-    publish" must survive it unbroken, because §4.32's sequencing rule is that
-    at no commit may zero parity gates exist. Master satisfied it by accident
-    of placement (the gate lived in `arm_aot`, and a mint arms too, so the
-    mint path inherited a check that was really aimed at adopters); this commit
-    satisfies it on purpose, with the check aimed at the mint and nothing left
-    on the adopt path. The rows that go RED are the ones that distinguish those
-    two worlds: the gray band (master ships it), and every adopt row."""
-    packages = {rig868.entry_name(h, w): ProbePackage(cosine=0.99)
-                for h, w in ROWS}
-    minted = _delegated_mint(tmp_path, monkeypatch, declared, packages, events)
-
-    assert minted is None, "a cell that does not reproduce eager was published"
-    # Typed, and the hub can count it: the ladder's own refusal plus the mint's
-    # abort, which is the row that says nothing shipped.
-    assert ("refused" in [p for k, _d, p in events
-                          if k == activity.KIND_CELL_NUMERICS])
-    aborts = [(d, p) for k, d, p in events if k == "self_mint_abort"]
-    assert aborts, "the mint published nothing and said nothing"
-    assert aborts[-1][1] == "numerics_refused"
-    assert "nothing is published" in aborts[-1][0]
-
-
-def test_a_FAITHFUL_cell_passes_the_mint_gate_and_is_publishable(
-        tmp_path, monkeypatch, declared, events):
-    """The control, without which the row above could pass for the wrong
-    reason (an unreadable envelope, a divergence gate, a missing stamp)."""
-    packages = {rig868.entry_name(h, w): ProbePackage() for h, w in ROWS}
-    minted = _delegated_mint(tmp_path, monkeypatch, declared, packages, events)
-
-    assert minted is not None, "a faithful cell was refused by the mint gate"
-    # The key is COMPUTED from the artifact's own recorded facts, not
-    # a fixture placeholder. `"cell868"` was a stand-in from when the harness
-    # stamped a literal; asserting it now would assert that the mint FAILED to
-    # key its own product.
-    assert cell_key.is_key(minted.cell_key), minted.cell_key
-    # ONE gate row here, and the count is load-bearing rather than
-    # incidental — the DELEGATED mint adopts a single entry artifact, so one
-    # class is gated. (My own "one row per class" sweep over-applied to this
-    # row and expected two; the rows that DO see two arm two artifacts. A
-    # blanket edit is a sweep, and sweeps damage the case that is different.)
-    assert [p for k, _d, p in events
-            if k == activity.KIND_CELL_NUMERICS] == ["checked"]
 
 
 # ---------------------------------------------------------------------------
@@ -356,7 +273,13 @@ def _fake_adopt_arm(key: str, ref: str, *, revoke: bool = False):
         # against it is testing a shape that does not exist.
         _runner = aot_serve.ArtifactRunner(
             package=None,
-            contract=aot_serve.ArtifactContract(inputs=(), symbols={}),
+            contract=CallIngress(
+                parameters=("sample",),
+                flat_arity=1,
+                inputs=(CallInput(
+                    "sample", 0, "sample", 0, (), "sample", "float32", (1,),
+                ),),
+            ),
             constants=(), module_name="unet", entry="unet/main")
         _runner.calls = PROBE_CALLS
         _dispatch = aot_serve.EntryDispatch(declared=("unet/main",))
@@ -376,7 +299,6 @@ def _fake_adopt_arm(key: str, ref: str, *, revoke: bool = False):
                 "module": unet, "attr": "forward", "state": state}},
             "entries": {"unet/main": {"key": key, "target": "unet"}},
         })
-        marker = getattr(pipe, aot_serve._MARKER_ATTR)
         # An `aot_serve.note_aot_key(key)` stood here — the ONE line no
         # production arm route ever called, which is why these rows were green
         # while the pod served eager (pgw#1141b). It is DELETED, not moved: the

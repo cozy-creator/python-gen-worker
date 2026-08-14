@@ -43,6 +43,7 @@ from gen_worker import serving_mode
 from gen_worker.cell_adopt import EagerPhase
 from gen_worker.cli import serve as serve_cli
 from gen_worker.pb import worker_scheduler_pb2 as pb
+from torch_compiled_graphs import CallIngress, CallInput
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +142,15 @@ ENTRY = {
     "constants": [{"fqn": "conv_in.weight", "source": aot_serve.SOURCE_STATE_DICT,
                    "dtype": "bfloat16", "shape": [320, 4, 3, 3]}],
     "graph": {},
+    "pytree": {"ingress": CallIngress(
+        parameters=("sample",),
+        flat_arity=1,
+        inputs=(CallInput(
+            "sample", 0, "sample", 0, (), "sample", "bfloat16",
+            (2, 4, "h", "w"),
+        ),),
+        symbols=(("h", (64, 160)), ("w", (64, 160))),
+    ).as_dict()},
 }
 
 
@@ -157,7 +167,7 @@ def _armed_module() -> tuple[FakeModule, FakePackage, FakePipeline]:
     pipeline = FakePipeline(module)
     runner = aot_serve.ArtifactRunner(
         package=package,
-        contract=aot_serve.contract_from_meta(ENTRY),
+        contract=CallIngress.from_graph(ENTRY),
         constants=aot_serve.constants_from_meta(ENTRY),
         module_name="unet", entry=ENTRY_NAME)
     runner.bind(module.state_dict(), {})

@@ -38,7 +38,7 @@ class PreflightRefused(RuntimeError):
     before refusing are real minutes and must reach the hub.
 
     ⚠️ Deliberately NOT named ``MintRefused``: that name is live in
-    ``aot_contract`` for "every declared graph class refused", and one name for
+    ``aot_inputs`` for "every declared graph class refused", and one name for
     both would make "this subject cannot be built here" and "nothing compiled"
     indistinguishable at the exit-code boundary, with no test going red
     (th#1834's census names this exact trap).

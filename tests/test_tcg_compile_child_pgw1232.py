@@ -13,12 +13,14 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from torch_compiled_graphs import spans
+from torch_compiled_graphs import CallIngress, CallInput, build_call_ingress, spans
 
 from gen_worker import aot_compile_child as child
 from gen_worker import aot_compile_pool as pool
 from gen_worker import aot_mint
 from gen_worker.aot_compile_pool import EntryJob
+
+torch = pytest.importorskip("torch")
 
 
 class _Traced:
@@ -29,24 +31,33 @@ class _Traced:
         self.declared = 1
         self.timings = {"export_s": 0.25}
         self.releases = 0
+        ingress = CallIngress(
+            parameters=("sample",),
+            flat_arity=1,
+            inputs=(CallInput(
+                name="sample",
+                position=0,
+                param="sample",
+                param_position=0,
+                path=(),
+                exported_name="sample",
+                dtype="float32",
+                shape=(1, 4),
+            ),),
+        )
         self.block = {
             "target": "denoiser",
             "fork": [["adapter", False]],
             "class_dims": [["batch", 1]],
-            "inputs": [{
-                "name": "sample",
-                "position": 0,
-                "dtype": "float32",
-                "shape": [1, 4],
-                "optional": False,
-            }],
-            "symbols": {},
-            "constants": [],
             "graph": {
                 "v": 3,
-                "constant_fqns": [],
                 "lifted_inputs": [],
-                "pytree": {"in": "leaf", "out": "leaf"},
+                "pytree": {
+                    "user_inputs": ["sample"],
+                    "in_spec": "leaf",
+                    "out_spec": "leaf",
+                    "ingress": ingress.as_dict(),
+                },
                 "specialization": {},
             },
         }
@@ -103,9 +114,69 @@ def test_exported_row_maps_to_one_tcg_graph_class_spec() -> None:
     assert spec.graph == traced.block["graph"]
     assert spec.fork == (("adapter", False),)
     assert spec.class_dims == (("batch", 1),)
-    assert len(spec.range_digest) == 32
+    assert len(CallIngress.from_graph(spec.graph).digest()) == 32
+    assert not hasattr(spec, "range_digest")
     assert spec.strict is True
     assert spec.lora_bucket == 0
+
+
+def test_real_nested_call_uses_one_tcg_ingress_and_rekeys_on_change() -> None:
+    class Nested(torch.nn.Module):
+        def forward(self, sample: Any, cond: dict[str, Any]) -> Any:
+            return sample + cond["bias"]
+
+    module = Nested().eval()
+    args = (torch.randn(2, 4), {"bias": torch.randn(2, 4)})
+    program = torch.export.export(module, args, strict=True)
+    ingress = build_call_ingress(program, ("sample", "cond"), args, {})
+    export_spec = aot_mint.ExportSpec(family="micro", target="denoiser")
+    block = aot_mint.keying_block(program, ingress, export_spec)
+    traced = aot_mint.TracedClass(
+        name="denoiser/b=2",
+        block=block,
+        nodes=1,
+        program=program,
+    )
+
+    declared = child._graph_class_spec(traced, export_spec).declare()
+
+    assert block["graph"]["pytree"]["ingress"] == ingress.as_dict()
+    assert not ({"inputs", "symbols", "range_digest"} & set(block))
+    assert declared.range_digest == ingress.digest()
+
+    changed = CallIngress(
+        ingress.parameters,
+        ingress.flat_arity,
+        ingress.inputs,
+        ingress.symbols,
+        ("unused",),
+    )
+    changed_block = aot_mint.keying_block(program, changed, export_spec)
+    changed_spec = child._graph_class_spec(
+        aot_mint.TracedClass(
+            name=traced.name,
+            block=changed_block,
+            nodes=1,
+            program=program,
+        ),
+        export_spec,
+    ).declare()
+
+    assert changed_spec.range_digest != declared.range_digest
+    assert changed_spec.class_hash != declared.class_hash
+
+
+def test_worker_carries_no_second_package_or_ingress_implementation() -> None:
+    package = Path(aot_mint.__file__).resolve().parent
+    removed = ("aot_package", "aot_flatten", "aot_contract")
+
+    assert all(not (package / f"{name}.py").exists() for name in removed)
+    production = "\n".join(
+        path.read_text() for path in package.rglob("*.py")
+    )
+    for name in removed:
+        assert f"from . import {name}" not in production
+        assert f"from .{name} import" not in production
 
 
 def test_tcg_result_is_the_unchanged_minimal_pool_wire(tmp_path: Path) -> None:

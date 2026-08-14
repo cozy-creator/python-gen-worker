@@ -14,10 +14,10 @@ same and still missed pgw#969, because its slot had a declared default. Here the
 dereference is over a catalog slot, so the warm forward the mint child runs is
 the exact call that crashed on two L40S pods.
 
-The export declaration is registered at IMPORT time, which is how a real endpoint
-package does it — the mint child imports this module by name off
-``MintRequest.modules`` and the declaration has to already exist when
-``aot_declaration.load_declaration`` looks for the family.
+The export declaration is registered at IMPORT time, which is how a real
+endpoint package does it — the mint child imports this module from
+``MintRequest.modules`` and collection registers the declaration before the
+family is traced.
 """
 
 from __future__ import annotations

@@ -26,6 +26,7 @@ import types
 
 import pytest
 
+from gen_worker import aot_compile_child
 from gen_worker import child_preflight
 from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells
@@ -150,20 +151,15 @@ def test_the_parent_no_longer_second_guesses_the_image(
 def test_the_child_refuses_the_AOT_recipe_before_reading_weights(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The child's own belt-and-braces: the parent may be an older SDK."""
-    from gen_worker import mint_child
-
-    monkeypatch.setattr(mint_child, "assert_composable", lambda *a, **k: None)
+    """The compile child refuses before endpoint collection or weight load."""
     monkeypatch.setattr(cc, "toolchain_present", lambda: True)
     monkeypatch.setattr(cc, "cxx_toolchain_present", lambda: False)
-
-    req = types.SimpleNamespace(
-        slots={},
-        target="/tmp/x", work_root="/tmp/y", device=0,
-        modules=[], function="generate", cfg=None, configs={}, execution_lane="",
-        report="/tmp/r", arm_token="")
+    monkeypatch.setattr(
+        "gen_worker.registry.collect_endpoints",
+        lambda *args, **kwargs: pytest.fail("toolchain refusal read endpoints"),
+    )
     with pytest.raises(child_preflight.PreflightRefused, match="no C\\+\\+ compiler"):
-        mint_child.mint(req)
+        aot_compile_child.build_pipeline(types.SimpleNamespace())
 
 
 # `test_the_dynamo_recipe_is_NOT_refused_by_the_cxx_gate` stood here.

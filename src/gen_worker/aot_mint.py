@@ -23,9 +23,16 @@ from pathlib import Path
 from typing import (
     Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple)
 
+from torch_compiled_graphs import (
+    CallIngress,
+    IngressError,
+    build_call_ingress,
+    exported_input_name,
+)
+
 from . import activity as activity_mod
-from . import aot_compile_pool, aot_package, aot_serve, boot_phases, graph_hash
-from .aot_contract import (  # re-exported: the declaration layer's vocabulary
+from . import aot_compile_pool, aot_serve, boot_phases
+from .aot_inputs import (  # re-exported: the declaration layer's vocabulary
     ADAPTER_FORK,
     DynamicDim,
     ExportSpec,
@@ -35,7 +42,6 @@ from .compile_cache import _resolve_target
 from dataclasses import replace
 import inspect
 from .models.memory import is_cuda_oom
-from . import aot_flatten
 from . import aot_inputs
 from . import aot_declaration as _decl
 from . import meta_instantiation
@@ -139,15 +145,15 @@ def exported_input_names(
 
     The arity comes from the SAME class row the example feed was built from
     (``aot_declaration.container_arities``), never re-guessed, and the spelling
-    comes from ``aot_flatten.exported_name`` — the ONE naming rule the ingress
+    comes from TCG's ``exported_input_name`` — the ONE naming rule the ingress
     contract and the serve-side bind also read (pgw#994). A declared container
     is the leaf path ``(0,), (1,), …`` of its parameter, so this function is a
     special case of that rule rather than a second copy of it.
     """
     arity = (containers or {}).get(name)
     if arity is None:
-        return (aot_flatten.exported_name(name),)
-    return tuple(aot_flatten.exported_name(name, (index,))
+        return (exported_input_name(name),)
+    return tuple(exported_input_name(name, (index,))
                  for index in range(int(arity)))
 
 
@@ -289,8 +295,8 @@ def _probe_prop_s(program: Any) -> Optional[float]:
 
     Probe only: it mutates a FRESH `program.module()` (never the program), no
     decision reads it, and any failure records nothing rather than touching a
-    mint. `.module()` is excluded from the timing because the current path
-    pays it too (`compile_entry_files`), so the comparison stays like-for-like.
+    mint. `.module()` is excluded from the timing because TCG's compiler path
+    pays it too, so the comparison stays like-for-like.
     """
     global _PROP_PROBE_DONE
     if _PROP_PROBE_DONE:
@@ -704,7 +710,7 @@ class _MintedEntry:
     owner: Any
     program: Any
     input_names: Tuple[str, ...]
-    flat_leaves: Tuple[aot_flatten.Leaf, ...]
+    ingress: CallIngress
     timings: Dict[str, Any]
 
 
@@ -936,7 +942,6 @@ def _export_entry_body(
         timings["warm_s"] = _run_declared_warm(module, args, entry)
 
     input_names = _input_names(module, args, kwargs)
-    flat_leaves = flat_input_leaves(module, args, kwargs)
     # ONE arity map for this arm: the spec builder mirrors the container
     # structure with it and the gates below resolve declared names against
     # the exported ones with it (pgw#993).
@@ -1009,9 +1014,28 @@ def _export_entry_body(
                 f"entry {entry!r}: no-baked-adapter gate (#725 G3): "
                 f"{exc}") from exc
 
+    excluded = (
+        lora_lifted.LIFTED_INPUT_NAMES
+        if adapter_arm(espec.fork) is False
+        else ()
+    )
+    try:
+        ingress = build_call_ingress(
+            program,
+            input_names,
+            args,
+            kwargs,
+            excluded_inputs=excluded,
+        )
+    except IngressError as exc:
+        raise MintRefused(
+            f"entry {entry!r}: TCG call-ingress declaration refused "
+            f"({exc.reason}: {exc})"
+        ) from exc
+
     return _MintedEntry(
         name=entry, spec=espec, module=module, owner=owner, program=program,
-        input_names=input_names, flat_leaves=flat_leaves,
+        input_names=input_names, ingress=ingress,
         timings=timings)
 
 
@@ -1029,8 +1053,8 @@ def adapter_arm_plans(
     bucket-0 family forks into nothing either — its cell IS the branchless
     class already.
 
-    Adapter-bearing rows come FIRST so the composed pipeline, which arrives
-    lifted from :func:`aot_inputs.compose`, is disarmed exactly once.
+    Adapter-bearing rows come FIRST so the compile child's already-lifted
+    pipeline is disarmed exactly once.
     """
     if not int(spec.lora_bucket or 0):
         return [(plan, None) for plan in plans]
@@ -1189,8 +1213,8 @@ def _arm_branches(pipeline: Any, bucket: int) -> None:
     Owned HERE rather than left to the caller because this function already
     owns the other half of the fork (:func:`_disarm_branches`): an arm state
     machine with one end enforced and the other a convention is how the
-    convention gets skipped. Idempotent, so a caller that already composed
-    lifted (:func:`aot_inputs.compose`) pays nothing.
+    convention gets skipped. Idempotent, so a caller that already armed the
+    lifted execution lane pays nothing.
 
     Also the RE-arm after the branchless exports: the mint process may go on
     to serve or re-mint, and a pipeline left branchless would silently be a
@@ -1834,7 +1858,7 @@ class _DeclaredArg:
 
 
 
-def _representative_calls(contract: Any) -> Tuple[Dict[str, Any], ...]:
+def _representative_calls(contract: CallIngress) -> Tuple[Dict[str, Any], ...]:
     """One call per corner of an entry's symbol hull — all symbols at their
     lower bound, all at their upper, all at the midpoint — deduplicated.
 
@@ -1851,7 +1875,7 @@ def _representative_calls(contract: Any) -> Tuple[Dict[str, Any], ...]:
             spec.name: _DeclaredArg(
                 tuple(
                     dim if isinstance(dim, int)
-                    else pick(*contract.symbols[dim])
+                    else pick(*contract.symbol_bounds[dim])
                     for dim in spec.shape),
                 spec.dtype,
             )
@@ -1901,48 +1925,24 @@ def _differing_axes(
 
 
 
-#: The identity axes :func:`_class_identity` folds, addressed in the PACKED
-#: envelope instead of in the ``_MintedEntry`` it was projected from. Every
-#: axis is present — the fold loses nothing — which is what makes the sharded
-#: path's merge exactly as strict as the whole-declaration path's:
-#:
-#: ===================  ==========================================
-#: ``_class_identity``  packed envelope
-#: ===================  ==========================================
-#: ``target``           ``entry.target``
-#: ``fork``             ``entry.fork``
-#: ``graph``            ``entry.graph_witness`` (the same
-#:                      ``graph_hash.graph_hash`` of the program)
-#: ``ingress``          ``entry.range_digest``
-#: ``pytree``           ``entry.graph.pytree``
-#: ``literal_values``   ``entry.graph.literals``
-#: ``specialization``   ``entry.graph.specialization``
-#: ``lifted_inputs``    ``entry.graph.lifted_inputs``
-#: ``precision``        ``metadata.precision``
-#: ``lora_bucket``      ``metadata.lora_bucket``
-#: ``strict``           ``metadata.strict_export``
-#: ``source_digest``    ``metadata.source_digest``
-#: ===================  ==========================================
-#:
-#: ``class_dims`` is deliberately ABSENT: it is the class-row COORDINATE, the
-#: one axis two mergeable rows are allowed to differ on.
 def _packed_class_identity(
     block: Mapping[str, Any], meta: Mapping[str, Any],
 ) -> Dict[str, Any]:
-    graph = dict(block.get("graph") or {})
+    """TCG identity excluding the class-row coordinate being merged.
+
+    The child returns TCG's closed graph-class declaration. The worker may
+    merge two dispatch-equivalent rows only when every TCG identity fact other
+    than ``name``/``class_dims``/their derived ``class_hash`` agrees, and the
+    artifact compatibility axes agree too. Re-deriving a subset here would
+    create a second identity contract beside TCG.
+    """
+    declaration = {
+        str(key): value
+        for key, value in block.items()
+        if key not in {"name", "class_dims", "class_hash"}
+    }
     return {
-        "target": str(block.get("target") or ""),
-        "fork": [[str(n), v] for n, v in (block.get("fork") or [])],
-        "graph": str(block.get("graph_witness") or ""),
-        "ingress": str(block.get("range_digest") or ""),
-        "pytree": graph.get("pytree"),
-        "literal_values": graph.get("literals"),
-        "specialization": graph.get("specialization"),
-        "lifted_inputs": sorted(
-            str(n) for n in (graph.get("lifted_inputs") or ())),
-        "lora_bucket": int(block.get("lora_bucket") or 0),
-        "strict": bool(block.get("strict")),
-        "placement": list(block.get("placement") or ()),
+        **declaration,
         "sm": str(meta.get("sm") or ""),
         "toolchain": dict(meta.get("toolchain") or {}),
     }
@@ -1973,7 +1973,7 @@ def canonicalize_packed_classes(
     never sees this pair.
 
     This is the same gate at the only seam the supervisor can reach: the
-    packed envelope. It is asked of ``aot_serve.contract_from_meta`` and
+    packed envelope. It is asked of TCG's ``CallIngress.from_graph`` and
     ``aot_serve.assert_ingress`` — the serve path's own parser and its own
     admission — so it cannot drift from what dispatch will do, and its
     identity axes are ``_class_identity``'s, complete (see
@@ -2010,8 +2010,8 @@ def canonicalize_packed_classes(
                 graph = blocks[name].get("graph")
                 if not isinstance(graph, Mapping):
                     raise ValueError("graph class records no graph interface")
-                contract = aot_serve.contract_from_meta(graph)
-            except ValueError as exc:
+                contract = CallIngress.from_graph(graph)
+            except IngressError as exc:
                 # An unreadable declaration is not "probably fine": it is an
                 # artifact whose dispatchability nobody can prove.
                 raise MintRefused(
@@ -2232,7 +2232,7 @@ def trace_for_key(
                 span.note(f"nodes={nodes}")
             yield TracedClass(
                 name=entry,
-                block=keying_block(row.program, row.flat_leaves, row.spec),
+                block=keying_block(row.program, row.ingress, row.spec),
                 nodes=nodes,
                 program=row.program,
                 declared=declared,
@@ -2244,66 +2244,21 @@ def trace_for_key(
 
 
 def keying_block(
-    program: Any, flat_leaves: Sequence[Any], spec: ExportSpec,
+    program: Any, ingress: CallIngress, spec: ExportSpec,
 ) -> Dict[str, Any]:
-    """The entry-envelope fields that reach an entry's ``class_hash`` — built
-    from the EXPORTED PROGRAM and the declaration, and from nothing else.
+    """Worker coordinates plus TCG's canonical exported graph interface.
 
-    ONE construction, shared by the mint (:func:`_entry_block`, which adds the
-    package-side ``constants`` manifest afterwards) and by the boot-side
-    derivation (``boot_key``, which has no package and carries the manifest
-    empty). Two constructions of the same block would be exactly the
-    attempt-28 phantom in a new hat: a declared-facts key beside a traced-facts
-    key under one axis name.
-
-    ``constants`` is present-but-empty rather than absent because
-    ``aot_serve.entries_from_meta`` validates every block as a full contract,
-    and an entry that cannot be parsed cannot be keyed.
-
-    ``graph_witness`` (pgw#1031) is the node-level digest of the traced
-    program (``graph_hash.graph_hash``). It is recorded as a top-level SIBLING
-    of ``graph`` AND folded into the key: since pgw#1031 (option a, Paul-ruled)
-    ``aot_serve.class_hash`` (facts v3) folds it, so the ``graph`` axis is the
-    traced COMPUTATION, not merely the traced ingress. It was measured that the
-    interface alone could not separate two bodies — 2026-08-10, ``micro-pad32``
-    and ``micro-pad32-branchy`` produced a byte-identical keying block
-    (identical signature, symbol ranges, pytree spec, constant FQNs and
-    declared envelope) from 112- and 102-node graphs, one key, two artifacts.
-    The witness closes that at the key: two bodies key apart, a collision is a
-    MISS (eager + mint). It stays a top-level field so TCG admission can refuse
-    artifact metadata that does not restate the selected graph-class identity.
+    TCG derives graph witness, constant/literal identity, placement and range
+    digest from ``program`` and the exact ``graph.pytree.ingress`` value. The
+    worker carries only the declaration coordinates TCG cannot know.
     """
-    inputs, symbols = aot_package.input_contract(program, flat_leaves)
-    block: Dict[str, Any] = {
+    return {
         "target": spec.target,
         "fork": [[str(n), v] for n, v in sorted(spec.fork)],
         "class_dims": [
             [str(n), int(v)] for n, v in sorted(spec.class_dims)],
-        "inputs": inputs,
-        "symbols": symbols,
-        "constants": [],
-        "graph": entry_graph_block(program, spec),
-        "graph_witness": graph_hash.graph_hash(program),
+        "graph": entry_graph_block(program, spec, ingress),
     }
-    placement = graph_hash.device_placement(program)
-    if len(placement) > 1:
-        # pgw#1113 / pgw#819: the program's own device map put its modules on
-        # more than one card, and inductor bakes that placement into the
-        # artifact. Recorded — and keyed, in `aot_serve.class_hash` — ONLY
-        # here, on the `excluded_inputs` precedent above: a single-device
-        # program states nothing, so no published cell's block moves and no
-        # published cell re-keys.
-        block["placement"] = list(placement)
-    if adapter_arm(spec.fork) is False:
-        # pgw#790: the NEGATIVE half of this class's contract. Without it the
-        # branchless entry silently ADMITS an adapter-bearing call (a
-        # name-keyed bind ignores inputs it does not declare), the dispatch
-        # sees two admitting entries and refuses `entry_ambiguous` — and the
-        # cell serves the whole attach lane eagerly. Declared, so the refusal
-        # is the right one and it names the input.
-
-        block["excluded_inputs"] = list(lora_lifted.LIFTED_INPUT_NAMES)
-    return block
 
 
 def _mint_phase_table(
@@ -2496,70 +2451,28 @@ def emit_phase_events(
         logger.debug("aot-mint: phase event emission failed", exc_info=True)
 
 
-def entry_graph_block(program: Any, spec: ExportSpec) -> Dict[str, Any]:
-    """The per-entry graph-interface facts (fold into that entry's
-    ``class_hash``): the lifted constant FQN set, the lifted inputs, the
-    pytree spec, and the python branches export FROZE at trace time.
-    Constant BYTE SIZES are deliberately absent — they are a property of the
-    resident weights, and a fine-tune of one family must keep sharing
-    cells, which is the premise of family-scoped cells.
+def entry_graph_block(
+    program: Any, spec: ExportSpec, ingress: CallIngress,
+) -> Dict[str, Any]:
+    """The worker-owned declaration inside TCG's graph-class identity.
 
-    **v3 (pgw#1089): every fact here comes from the EXPORTED PROGRAM, never
-    from the compiled package.** v2 read ``constant_fqns`` off the packaged
-    artifact and carried ``fused_constants`` (the constants the compiler folded
-    away), so an entry's identity could not be stated until after its compile.
-    Two consequences, one of which was already live:
-
-    * **A weightless mint and a real-weight mint of the IDENTICAL graph keyed
-      differently.** pgw#1080 compiles structure-only entries with
-      ``aot_inductor.use_runtime_constant_folding`` (it must — a compile-time
-      fold bakes fake values), which keeps every parameter bindable and adds
-      ``_FOLDED_CONST_*`` rows. Both package-side sets therefore move, so the
-      same traced graph produced two different ``ck1`` keys depending on how
-      its mint happened to obtain its weights. That is precisely the fused-axis
-      failure the membership axiom forbids.
-    * **The key could not be derived before the artifact existed**, which makes
-      §4.27 step 1 (derive on boot, from code alone) impossible by
-      construction.
-
-    Both facts are a FUNCTION of (graph x toolchain x sm) — the same program
-    compiled by the same toolchain on the same architecture folds the same
-    constants — so they carry zero information the key does not already hold,
-    and the axiom admits nothing that does. They are not lost: the mint still
-    PROVES them (``aot_package.program_package_drift`` refuses a package whose
-    constant set disagrees with its program; ``eliminated_constants`` is still
-    logged per entry). Proven, not keyed.
-
-    pgw#857: that exclusion is right for a WEIGHT and wrong for a LITERAL, and
-    both were excluded. A weight is rebound from the resident ``state_dict``
-    at load, so two fine-tunes should share a cell. A literal ships INSIDE the
-    artifact and is never rebound — *"nothing outside the artifact knows its
-    value"* — so for a literal the VALUE IS THE ARTIFACT, and two checkpoints
-    needing different literals were sharing a key. ``literal_values`` closes
-    that and nothing else: state_dict-sourced constants are still keyed by
-    NAME only, so fine-tune sharing is untouched.
-
-    **Emitted ONLY when the program lifts a literal.** A family with none
-    (sdxl: measured zero across five real mints) produces a byte-identical
-    block and does not re-key — the discipline ``range_digest`` already uses
-    for ``excluded``, and for the same reason: a field that says "unchanged"
-    must not strand already-published cells."""
-    block: Dict[str, Any] = {
+    The exported program itself is the sole authority for graph witness,
+    constants, literals and placement. TCG derives those facts directly when
+    it constructs :class:`GraphClassSpec`; repeating any of them here would
+    create two copies of one identity. The worker contributes only its frozen
+    branch declaration and TCG's canonical call-ingress value.
+    """
+    return {
         "v": 3,
-        "constant_fqns": sorted(aot_package.program_constant_fqns(program)),
         "lifted_inputs": sorted(str(n) for n in spec.lifted_inputs),
-        "pytree": _pytree_facts(program),
+        "pytree": _pytree_facts(program, ingress),
         "specialization": _specialization_facts(spec),
     }
-    literals = aot_package.literal_values_digest(program)
-    if literals:
-        block["literal_values"] = literals
-    return block
 
 
 
 
-def _pytree_facts(program: Any) -> Dict[str, Any]:
+def _pytree_facts(program: Any, ingress: CallIngress) -> Dict[str, Any]:
     """The flattened call spec the package expects.
 
     An AOTI package takes FLAT tensors while the pipeline calls the module with
@@ -2574,6 +2487,7 @@ def _pytree_facts(program: Any) -> Dict[str, Any]:
             str(n) for n in getattr(signature, "user_inputs", ()) or ()],
         "in_spec": _treespec_text(getattr(call_spec, "in_spec", None)),
         "out_spec": _treespec_text(getattr(call_spec, "out_spec", None)),
+        "ingress": ingress.as_dict(),
     }
 
 
@@ -2621,48 +2535,6 @@ def _input_names(
     positional = params[:len(args)]
     keyword = [name for name in kwargs if name not in positional]
     return tuple(positional) + tuple(keyword)
-
-
-def flat_input_leaves(
-    module: Any, args: Tuple[Any, ...], kwargs: Mapping[str, Any],
-) -> Tuple[aot_flatten.Leaf, ...]:
-    """ONE leaf per EXPORTED user input — containers FLATTENED the way export
-    flattens them, each carrying WHERE IN THE CALL it came from.
-
-    MEASURED (pgw#790 lane, real sdxl UNet, torch 2.13): `aot_package.
-    input_contract` zips the caller-side parameter names against the exported
-    program's user inputs positionally, and a container argument occupies ONE
-    parameter slot but produces N placeholders. sdxl's `added_cond_kwargs`
-    ({text_embeds, time_ids}) therefore shifted every later name by one and the
-    recorded contract came out as
-
-        position 7  name 'added_cond_kwargs'                shape [2, 1280]
-        position 8  name 'down_block_additional_residuals'  shape [2, 6]
-
-    i.e. text_embeds and time_ids wearing the names of the parameters that
-    follow them. At serve time `bind_call_inputs` then binds the pipeline's
-    `added_cond_kwargs` DICT to a declared tensor input (`input_not_tensor`)
-    and cannot find `down_block_additional_residuals` at all
-    (`input_missing`) — every request refuses by name and the armed cell
-    serves eager for life. That is the field symptom `bind_call_inputs`'
-    own docstring records from pod ae2uc81yub0gyq; the nested-lookup patch
-    treated the symptom, but a nested lookup cannot help when the NAMES it
-    searches for are the wrong ones.
-
-    THE NAMES ARE NOT ENOUGH (pgw#994). A name says which leaf this is; it
-    does not say where the leaf LIVES in a call, and the serve side has only
-    the call. So each leaf carries its identity — parameter, that parameter's
-    position, and the path into it — and ``aot_serve.bind_call_inputs``
-    replays that identity instead of guessing. The walk itself lives in
-    ``aot_flatten``, which every consumer of the flat view reads, mint and
-    serve alike: three separate spellings of this one mapping is exactly what
-    pgw#790, pgw#993 and pgw#994 each were.
-
-    ``_input_names`` is deliberately left alone: `dynamic_shapes_spec` keys on
-    top-level PARAMETER names and mirrors containers structurally.
-    """
-    return aot_flatten.flatten_call(
-        _input_names(module, args, kwargs), args, kwargs)
 
 
 def _specialization_facts(spec: ExportSpec) -> Dict[str, Any]:

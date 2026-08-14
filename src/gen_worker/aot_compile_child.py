@@ -231,6 +231,14 @@ def build_pipeline(job: EntryJob) -> Tuple[Any, Any, Any]:
     from .models import structure_only
     from .registry import collect_endpoints
 
+    # AOTInductor always links a C++ wrapper. Refuse before endpoint
+    # collection or either pipeline-composition path can read weights; the
+    # generic C-compiler predicate is insufficient on images that carry only
+    # cc/gcc (pgw#823's measured 336-second late refusal).
+    if not cc.cxx_toolchain_present():
+        raise PreflightRefused(
+            "no C++ compiler for the AOTI compile child")
+
     cfg = job.cfg
     specs = collect_endpoints(list(job.modules))
     chosen, siblings = select_specs(specs, job.function)
@@ -301,8 +309,6 @@ def _graph_class_spec(traced: Any, export_spec: Any) -> Any:
     """Translate the export-only worker row into TCG's one public spec."""
     from torch_compiled_graphs import GraphClassSpec
 
-    from . import aot_serve
-
     if traced.program is None:
         raise ValueError(f"graph class {traced.name!r} carries no exported program")
     block = dict(traced.block or {})
@@ -322,7 +328,6 @@ def _graph_class_spec(traced: Any, export_spec: Any) -> Any:
         target=target,
         program=traced.program,
         graph=dict(graph),
-        range_digest=aot_serve.range_digest(block),
         fork=fork,
         class_dims=class_dims,
         strict=bool(export_spec.strict),

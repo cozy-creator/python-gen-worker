@@ -51,7 +51,6 @@ src/gen_worker/fleet_cells.py::arm_from_local_store::local_cell_store.note_memo 
 # is verified structurally: no arm driven in the function, none replaced in the
 # module. Anything that arms goes through tests/harness/adopt_rig.py.
 # ---------------------------------------------------------------------------
-tests/test_aot_serve_pgw721.py::test_an_aot_ref_is_recognized_only_by_a_REGISTERED_stamped_key::aot_serve.note_aot_key  RECOGNIZER  the recognizer's own unit row — pgw#1035's deleted label sniff, asserted directly on is_aot_ref
 tests/test_compile_proof_pgw637.py::test_proven_cell_registry_roundtrip::compile_cache.record_cell_proven  RECOGNIZER  the proven-cell registry's own roundtrip; no pipeline exists in this row
 tests/test_compile_proof_pgw637.py::test_inmemory_probe_reports_dynamo_truth_not_the_registry::compile_cache.record_cell_proven  RECOGNIZER  pgw#637's point exactly: the registry alone must NOT certify, and the row proves it by feeding it and getting False
 tests/test_eager_only_command_pgw1142.py::test_a_suppressed_request_is_not_reported_as_compiled::aot_serve.note_aot_key  RECOGNIZER  a serving_mode.resolve dimension row — a ref and a posture, no object and no arm

@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Annotated, Any, Dict, List, Tuple
+from typing import Annotated, Any, List, Tuple
 
 import msgspec
 import pytest
@@ -49,6 +49,7 @@ from gen_worker import (  # noqa: E402
     endpoint,
 )
 from gen_worker import aot_serve  # noqa: E402
+from torch_compiled_graphs import CallIngress, CallInput  # noqa: E402
 from gen_worker import compile_cache as cc  # noqa: E402
 from gen_worker import serving_mode  # noqa: E402
 import gen_worker.executor as executor_mod  # noqa: E402
@@ -82,31 +83,44 @@ def _entry_name(h: int, w: int, *, cfg: bool = False) -> str:
             f"/B=1,H_lat={h},T_txt={TEXT_LEN},W_lat={w}")
 
 
-def _entry_meta(h: int, w: int) -> Dict[str, Any]:
+def _entry_contract(h: int, w: int) -> CallIngress:
     """One entry block exactly as the regional mint packs it: keyed on H_lat
     and W_lat, but the BLOCK's own input carries only their product."""
-    return {
-        "inputs": [
-            {"name": "hidden_states", "position": 0, "dtype": "bfloat16",
-             "shape": [1, h * w, CHANNELS]},
-            {"name": "encoder_hidden_states", "position": 1,
-             "dtype": "bfloat16", "shape": [1, TEXT_LEN, 2048]},
-        ],
-        "symbols": {},
-    }
+    return CallIngress(
+        parameters=("hidden_states", "encoder_hidden_states"),
+        flat_arity=2,
+        inputs=(
+            CallInput(
+                "hidden_states", 0, "hidden_states", 0, (), "hidden_states",
+                "bfloat16", (1, h * w, CHANNELS),
+            ),
+            CallInput(
+                "encoder_hidden_states", 1, "encoder_hidden_states", 1, (),
+                "encoder_hidden_states", "bfloat16", (1, TEXT_LEN, 2048),
+            ),
+        ),
+    )
 
 
-def _runner(h: int, w: int) -> aot_serve.ArtifactRunner:
-    """A real :class:`aot_serve.ArtifactRunner` over the real parsed contract.
-    Only the compiled package itself is a stub — the gates, the marshal and
-    the ingress assertion are production code."""
-    return aot_serve.ArtifactRunner(
-        package=lambda *feeds: feeds[0],
-        contract=aot_serve.contract_from_meta(_entry_meta(h, w)),
-        constants=(),
+class _BoundRunner:
+    bound = True
+    declared_fqns: Tuple[str, ...] = ()
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, *feeds: Any) -> Any:
+        self.calls += 1
+        return feeds[0]
+
+
+def _runner(h: int, w: int) -> aot_serve.TCGEntryRunner:
+    """The worker's real TCG ingress wrapper over a bound-runner test double."""
+    return aot_serve.TCGEntryRunner(
+        runner=_BoundRunner(),  # type: ignore[arg-type]
+        contract=_entry_contract(h, w),
         module_name="unet",
         entry=_entry_name(h, w),
-        bound=True,
         family=FAMILY,
     )
 
@@ -131,10 +145,9 @@ def _call(h: int, w: int) -> Tuple[Any, ...]:
 def test_sdxl_nine_buckets_collapse_to_four_token_counts_at_real_dispatch():
     """The pod's own table, reproduced through ``EntryDispatch.select``.
 
-    This is the reproduction, not an illustration: the entries are parsed by
-    :func:`aot_serve.contract_from_meta` and admitted by
-    :func:`aot_serve.assert_ingress`, the same two functions the armed pod
-    ran.  One bucket dispatches; eight are ``entry_ambiguous``.
+    This is the reproduction, not an illustration: entries use TCG's closed
+    :class:`CallIngress` and the worker's real admission path. One bucket
+    dispatches; eight are ``entry_ambiguous``.
     """
     dispatch = _dispatch(SDXL_BUCKETS)
 
@@ -158,21 +171,26 @@ def test_the_collapsed_declaration_dispatches_every_bucket_uniquely():
         h * w for h, w in SDXL_BUCKETS)
     collapsed = aot_serve.EntryDispatch(((
         "unet/block=BasicTransformerBlock#0,cfg=false",
-        aot_serve.ArtifactRunner(
-            package=lambda *feeds: feeds[0],
-            contract=aot_serve.contract_from_meta({
-                "inputs": [
-                    {"name": "hidden_states", "position": 0,
-                     "dtype": "bfloat16", "shape": [1, "s_tok", CHANNELS]},
-                    {"name": "encoder_hidden_states", "position": 1,
-                     "dtype": "bfloat16", "shape": [1, TEXT_LEN, 2048]},
-                ],
-                "symbols": {"s_tok": list(hull)},
-            }),
-            constants=(),
+        aot_serve.TCGEntryRunner(
+            runner=_BoundRunner(),  # type: ignore[arg-type]
+            contract=CallIngress(
+                parameters=("hidden_states", "encoder_hidden_states"),
+                flat_arity=2,
+                inputs=(
+                    CallInput(
+                        "hidden_states", 0, "hidden_states", 0, (),
+                        "hidden_states", "bfloat16", (1, "s_tok", CHANNELS),
+                    ),
+                    CallInput(
+                        "encoder_hidden_states", 1, "encoder_hidden_states", 1,
+                        (), "encoder_hidden_states", "bfloat16",
+                        (1, TEXT_LEN, 2048),
+                    ),
+                ),
+                symbols=(("s_tok", hull),),
+            ),
             module_name="unet",
             entry="unet/block=BasicTransformerBlock#0,cfg=false",
-            bound=True,
             family=FAMILY,
         )),))
 

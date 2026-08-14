@@ -37,7 +37,6 @@
 #
 #   Measured and then dropped (the pgw#848 CP1 shape)
 #     boot_phases.servable_ms — "THE cold-boot number", computed, never read.
-#     aot_compile_spans.dark_fraction — unattributed compile time, never emitted.
 #     aot_serve.realigned_inputs / served_entry_calls / EntryDispatch.refusal_counts
 #       — the pgw#790/#791 adapter-fork and realignment tax, measured "rather
 #       than inferred from a stderr line nobody can read", and never reported.
@@ -62,7 +61,7 @@
 #       live ones). `torch_maj_min` went with `flavor_label`, its only caller,
 #       and `is_aot_ref`'s `aot-` label branch went with the label's only
 #       producer.
-#     aot_package.package_entry_names, guard_closure.manifest_digest.
+#     compiled-graph declaration names, guard_closure.manifest_digest.
 #     aot_serve.unpack_metadata — ✅ DELISTED 2026-08-10 (pgw#1098) by
 #       DELEGATION to `artifact_meta.read_metadata`. It was listed 2026-08-08
 #       (pgw#1035) as "the AOT lane's own reader of its own packed envelope",
@@ -139,10 +138,8 @@
 #     They stay listed rather than exempted: an exemption rule broad enough to
 #     clear them would also clear real hits.
 #
-gen_worker.aot_compile_spans.dark_fraction()
 gen_worker.aot_inputs.inputs_for()
 gen_worker.aot_inputs.latent_dims()
-gen_worker.aot_package.package_entry_names()
 gen_worker.aot_serve.EntryDispatch.refusal_counts()
 gen_worker.aot_serve.realigned_inputs()
 gen_worker.aot_serve.served_entry_calls()
