@@ -25,6 +25,7 @@ from pathlib import Path
 
 from .layout_spec import LayoutSignals, normalize_letters_digits
 from .registry import registered_layouts
+from .file_layout import MULTI_FILE, SINGLE_FILE
 
 _DEFAULT_SIGNALS = LayoutSignals()
 
@@ -164,11 +165,14 @@ def detect_huggingface_source_layout(*, repo_dir: Path, files: list[str]) -> Sou
     """
     signals = _DEFAULT_SIGNALS
     normalized = _normalize_paths(files)
+    # Annotated `str`, not inferred: the ruled tokens are `Final[Literal[...]]`
+    # so an inferred type here would narrow to the first branch's literal.
+    source_layout: str
     if _has_diffusers_layout_signals(normalized, signals):
-        source_layout = "diffusers"
+        source_layout = MULTI_FILE
         reason = "diffusers_layout_signals_present"
     elif any(p.lower().endswith(signals.weight_suffixes) for p in normalized):
-        source_layout = "singlefile"
+        source_layout = SINGLE_FILE
         reason = "single_file_weight_signals_present"
     else:
         source_layout = "unknown"
@@ -177,7 +181,7 @@ def detect_huggingface_source_layout(*, repo_dir: Path, files: list[str]) -> Sou
     variant = _detect_variant_from_model_index(repo_dir)
     if variant == "unknown":
         variant = _detect_variant_from_components(normalized)
-    if variant == "unknown" and source_layout == "singlefile":
+    if variant == "unknown" and source_layout == SINGLE_FILE:
         variant = _detect_variant_from_paths(normalized)
     if variant == "unknown":
         variant = _detect_variant_from_sentinels(normalized)

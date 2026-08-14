@@ -418,7 +418,7 @@ def test_root_sentinels_detect_a_layout_with_no_family_token(tmp_path: Path) -> 
         ],
     )
     assert (info.model_family_variant, info.model_family) == ("beta2", "beta")
-    assert info.source_layout == "singlefile"
+    assert info.source_layout == "single-file"
 
 
 def test_component_dirs_detect_the_variant(tmp_path: Path) -> None:
@@ -429,7 +429,7 @@ def test_component_dirs_detect_the_variant(tmp_path: Path) -> None:
         files=["model_index.json", "unet/config.json", "text_encoder/config.json"],
     )
     assert info.model_family_variant == "alpha1"
-    assert info.source_layout == "diffusers"
+    assert info.source_layout == "multi-file"
 
     dual = layout.detect_huggingface_source_layout(
         repo_dir=tmp_path,
@@ -460,7 +460,7 @@ def test_nothing_is_detected_when_nothing_is_declared(tmp_path: Path) -> None:
     info = layout.detect_huggingface_source_layout(
         repo_dir=tmp_path, files=["unet/config.json", "model_index.json"])
     assert (info.model_family, info.model_family_variant) == ("unknown", "unknown")
-    assert info.source_layout == "diffusers"  # layout shape is family-free
+    assert info.source_layout == "multi-file"  # layout shape is family-free
 
 
 # --------------------------------------------------------------------------

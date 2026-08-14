@@ -72,7 +72,7 @@ def test_a_real_cast_of_a_sharded_source_emits_one_file_per_component(tmp_path):
 
     out = tmp_path / "out"
     streaming_cast_snapshot(src, out, target_dtype=torch.bfloat16,
-                            file_layout="diffusers")
+                            file_layout="multi-file")
 
     assert find_producer_shards(out) == []
     for comp, prefix in (("unet", "diffusion_pytorch_model"), ("text_encoder", "model")):
@@ -100,7 +100,7 @@ def test_a_cast_of_an_unsharded_source_stays_one_file(tmp_path):
 
     out = tmp_path / "out"
     streaming_cast_snapshot(src, out, target_dtype=torch.float16,
-                            file_layout="diffusers")
+                            file_layout="multi-file")
     assert find_producer_shards(out) == []
     assert sorted(p.name for p in (out / "transformer").glob("*.safetensors")) \
         == ["diffusion_pytorch_model.safetensors"]

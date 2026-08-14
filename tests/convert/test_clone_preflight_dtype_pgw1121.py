@@ -158,7 +158,7 @@ def _with_free(monkeypatch: pytest.MonkeyPatch, free: int) -> None:
             total=free * 2, used=free, free=free))
 
 
-BF16 = OutputSpec(dtype="bf16", file_layout="diffusers", file_type="safetensors")
+BF16 = OutputSpec(dtype="bf16", file_layout="multi-file", file_type="safetensors")
 
 
 def test_untagged_fp32_source_resolves_its_dtype_at_plan_time(

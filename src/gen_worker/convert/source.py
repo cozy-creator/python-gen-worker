@@ -24,7 +24,7 @@ from .writer import iter_source_tensors
 if TYPE_CHECKING:
     import torch
 
-FileLayout = Literal["singlefile", "diffusers"]
+from .file_layout import MULTI_FILE, SINGLE_FILE, FileLayout  # noqa: F401  (re-exported)
 
 
 # Default set of component subdirs that the iter_hf_components passthrough
@@ -71,10 +71,10 @@ def _weight_component_dirs() -> frozenset[str]:
 
 
 def _detect_file_layout(path: Path) -> FileLayout:
-    """Return 'diffusers' if the snapshot has a model_index.json, else 'singlefile'."""
+    """MULTI_FILE when the snapshot has a model_index.json, else SINGLE_FILE."""
     if (path / "model_index.json").exists():
-        return "diffusers"
-    return "singlefile"
+        return MULTI_FILE
+    return SINGLE_FILE
 
 
 def _enumerate_components(path: Path) -> dict[str, Component]:
@@ -98,7 +98,7 @@ class Source:
 
     Public surface:
       path              -- root of materialized snapshot (filesystem escape hatch)
-      file_layout       -- "singlefile" | "diffusers"
+      file_layout       -- "single-file" | "multi-file" (th#1937 vocabulary)
       attributes        -- full resolved variant attribute map (provenance)
       ref               -- the wire ref string (e.g. "owner/repo") for logging
       components        -- dict[str, Component] for diffusers; {} for singlefile
@@ -147,7 +147,7 @@ class Source:
     def components(self) -> dict[str, Component]:
         """Diffusers component map. Empty for singlefile sources."""
         if self._components is None:
-            if self._file_layout == "diffusers":
+            if self._file_layout == MULTI_FILE:
                 self._components = _enumerate_components(self._path)
             else:
                 self._components = {}
@@ -162,7 +162,7 @@ class Source:
         always have one but we don't want to crash the tenant on odd sources).
         """
         if self._config is None:
-            if self._file_layout == "diffusers":
+            if self._file_layout == MULTI_FILE:
                 candidate = self._path / "model_index.json"
             else:
                 candidate = self._path / "config.json"
@@ -189,7 +189,7 @@ class Source:
         (e.g. ``unet/diffusion_pytorch_model.fp16.safetensors`` → ``"fp16"``).
         Mirrors gen_worker.models.loading.detect_diffusers_variant — repo-cas
         mirrors cloned with a dtype preference keep HF's variant suffix."""
-        if self._file_layout != "diffusers":
+        if self._file_layout != MULTI_FILE:
             return None
         candidates = ("bf16", "fp8", "fp16", "int8", "int4")
         try:
@@ -210,12 +210,12 @@ class Source:
         Override by passing an explicit ``model_cls=SomeClass`` kwarg.
         """
         model_cls = kwargs.pop("model_cls", None)
-        if self._file_layout == "diffusers" and "variant" not in kwargs:
+        if self._file_layout == MULTI_FILE and "variant" not in kwargs:
             if v := self.diffusers_variant():
                 kwargs["variant"] = v
         if model_cls is not None:
             return model_cls.from_pretrained(str(self._path), **kwargs)
-        if self._file_layout == "diffusers":
+        if self._file_layout == MULTI_FILE:
             from diffusers import DiffusionPipeline
             return DiffusionPipeline.from_pretrained(str(self._path), **kwargs)
         from transformers import AutoModelForCausalLM
@@ -287,7 +287,7 @@ class Source:
         """
         weight_exts = (".safetensors", ".bin", ".pt", ".pth", ".ckpt")
         total = 0
-        if self._file_layout == "diffusers":
+        if self._file_layout == MULTI_FILE:
             for comp_name in _weight_component_dirs():
                 comp_path = self._path / comp_name
                 if not comp_path.is_dir():
@@ -391,7 +391,7 @@ class Source:
         if offload_path is not None:
             offload_path.mkdir(parents=True, exist_ok=True)
 
-        if self._file_layout == "diffusers":
+        if self._file_layout == MULTI_FILE:
             yield from _iter_diffusers_components(
                 self._path,
                 quant_set=quant_set,

@@ -43,7 +43,7 @@ def test_concurrent_same_source_clones_serialize(fake_hub, tmp_path: Path, monke
     def _fake_source(dest_dir: Path) -> IngestedSource:
         return IngestedSource(
             provider="huggingface", source_ref="org/tiny", source_revision="sha-1",
-            dir=dest_dir, layout="diffusers", model_family="", model_family_variant="",
+            dir=dest_dir, layout="multi-file", model_family="", model_family_variant="",
             classification=None, attrs={"dtype": "bf16"},
             metadata={"source_provider": "huggingface"},
             repo_spec={"kind": "model", "library_name": "diffusers"},

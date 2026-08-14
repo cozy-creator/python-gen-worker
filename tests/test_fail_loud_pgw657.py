@@ -140,7 +140,7 @@ def test_diffusers_singlefile_is_a_typed_refusal(tmp_path) -> None:
 
     (tmp_path / "model.safetensors").write_bytes(b"\x00")
     src = Source(tmp_path)
-    assert src.file_layout == "singlefile"
+    assert src.file_layout == "single-file"
     with pytest.raises(ValidationError) as exc:
         list(src.iter_hf_components())
     assert "as_hf_model" in str(exc.value)
