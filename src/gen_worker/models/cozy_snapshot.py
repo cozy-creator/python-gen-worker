@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Sequence
 
 from hashrepo import (
-    CHUNK_SIZE,
     CASRef,
     Chunk,
     DigestMismatch,
@@ -110,11 +109,6 @@ def _manifest_entry(file: WorkerResolvedRepoFile) -> FileEntry:
         Chunk(CASRef.parse(f"sha256:{chunk.sha256}"), int(chunk.length))
         for chunk in file.chunks
     )
-    if chunks and int(file.chunk_size_bytes or CHUNK_SIZE) != CHUNK_SIZE:
-        raise ValueError(
-            f"resolved model file {file.path}: chunk size {file.chunk_size_bytes} "
-            f"does not match HashRepo v1 ({CHUNK_SIZE})"
-        )
     return FileEntry(
         _norm_rel_path(file.path),
         int(file.size_bytes),
@@ -149,7 +143,9 @@ def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> Worke
                 url=str(file.url or "").strip() or None,
                 digest=str(entry.digest),
                 chunks=tuple(file.chunks),
-                chunk_size_bytes=CHUNK_SIZE if entry.chunks else 0,
+                # The ordered chunk lengths are authoritative. Preserve this
+                # transport ceiling as metadata; never infer a layout from it.
+                chunk_size_bytes=int(file.chunk_size_bytes or 0),
             )
         )
 

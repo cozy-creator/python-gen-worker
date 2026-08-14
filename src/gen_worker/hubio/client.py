@@ -461,10 +461,10 @@ class HubClient:
         A claimed digest stops being assertable, which kills the
         inherit/overwrite class structurally rather than by guard.
 
-        Files > 64 MiB become an ordered list of enforced chunks, so a retry
-        costs one chunk instead of a 2 GB shard and progress is monotone across
-        retries — a lemon host is bounded by the unit of work rather than by a
-        new watchdog.
+        Files may become an ordered list of enforced chunks at any size. Each
+        manifest length is authoritative, so a retry costs one bounded object
+        and progress is monotone across retries — a lemon host is bounded by
+        the unit of work rather than by a new watchdog.
 
         THERE IS NO PROTOCOL AUTO-SELECT AND NO ENV KNOB. The caller names the
         protocol, so flipping a producer class to sha256 is a code change and a
@@ -514,7 +514,7 @@ class HubClient:
         manifest_ref = manifest.digest()
 
         def _tensorhub_file(entry: Any) -> dict[str, object]:
-            """Adapt HashRepo v1 to Tensorhub's fixed-sha256 request shape."""
+            """Adapt HashRepo v1 to Tensorhub's ordered-sha256 request shape."""
             raw = cast(dict[str, object], entry.to_dict())
             chunks = raw.get("chunks")
             if isinstance(chunks, list):

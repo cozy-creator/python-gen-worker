@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from hashrepo import CHUNK_SIZE, CASRef, FileEntry, LocalCAS, RepositoryManifest
+from hashrepo import CASRef, FileEntry, LocalCAS, RepositoryManifest
 
 import gen_worker.models.cozy_snapshot as snapshot_mod
 from gen_worker.models.cozy_snapshot import NetworkBytesScope, ensure_snapshot_async
@@ -346,9 +346,9 @@ def test_same_snapshot_key_in_two_scoped_roots_does_not_crosstalk(
     assert (right / "config.json").read_bytes() == body
 
 
-def test_chunked_file_uses_hashrepo_v1_manifest(tmp_path: Path) -> None:
-    first = b"a" * CHUNK_SIZE
-    second = b"tail"
+def test_chunked_file_uses_manifest_recorded_variable_lengths(tmp_path: Path) -> None:
+    first = b"header"
+    second = b"tensor-body"
     chunks = (first, second)
     whole = hashlib.sha256(first + second).hexdigest()
     blobs = {_sha(chunk): chunk for chunk in chunks}
@@ -359,14 +359,16 @@ def test_chunked_file_uses_hashrepo_v1_manifest(tmp_path: Path) -> None:
             files=[
                 WorkerResolvedRepoFile(
                     "weights.safetensors",
-                    CHUNK_SIZE + len(second),
+                    len(first) + len(second),
                     None,
                     digest="sha256:" + whole,
                     chunks=tuple(
                         WorkerResolvedChunk(_sha(chunk), server.url(_sha(chunk)), len(chunk))
                         for chunk in chunks
                     ),
-                    chunk_size_bytes=CHUNK_SIZE,
+                    # This scalar is deliberately unrelated to either chunk;
+                    # consumers must trust the ordered recorded lengths.
+                    chunk_size_bytes=2048,
                 )
             ],
         )
@@ -374,7 +376,7 @@ def test_chunked_file_uses_hashrepo_v1_manifest(tmp_path: Path) -> None:
             ensure_snapshot_async(base_dir=tmp_path, ref=_ref(), resolved=resolved)
         )
         output = path / "weights.safetensors"
-        assert output.stat().st_size == CHUNK_SIZE + len(second)
+        assert output.stat().st_size == len(first) + len(second)
         assert hashlib.sha256(output.read_bytes()).hexdigest() == whole
         assert all(server.hits(digest) == 1 for digest in blobs)
     finally:

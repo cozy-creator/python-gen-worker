@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 from hashrepo import (
-    CHUNK_SIZE,
     CASRef,
     Chunk,
     DigestMismatch,
@@ -134,11 +133,6 @@ def _materialize_named_artifact(
             f"{what}: transport for {cell_ref!r} declares no size_bytes")
 
     try:
-        if remote_chunks and int(entry.chunk_size_bytes or CHUNK_SIZE) != CHUNK_SIZE:
-            raise ValueError(
-                f"chunk size {entry.chunk_size_bytes} does not match "
-                f"HashRepo v1 ({CHUNK_SIZE})"
-            )
         chunks = tuple(
             Chunk(CASRef.parse(f"sha256:{chunk.sha256}"), int(chunk.len))
             for chunk in remote_chunks

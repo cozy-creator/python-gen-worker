@@ -40,7 +40,8 @@ class WorkerResolvedRepoFile:
     #: Algorithm-tagged whole-file digest ("sha256:<hex>"). Every resolved
     #: entry carries one; an entry that does not is refused, not skipped.
     digest: str = ""
-    #: Present only when the file is stored as chunks (size > chunk_size).
+    #: Present whenever the manifest stores an ordered object list; file size
+    #: does not determine whether tensor-aligned chunks exist.
     chunks: tuple["WorkerResolvedChunk", ...] = ()
     chunk_size_bytes: int = 0
 

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
 from fake_hub import _client, _FakeHub
-from hashrepo import CHUNK_SIZE
+from hashrepo import MAX_CHUNK_SIZE
 
 from gen_worker.hubio.client import CommitFile, HubPublishError
 
@@ -36,16 +37,44 @@ def test_small_file_publishes_as_one_hashrepo_object(fake_hub, tmp_path: Path) -
     assert result.uploaded == 1
 
 
-def test_large_file_uses_fixed_hashrepo_v1_chunks(fake_hub, tmp_path: Path) -> None:
-    data = b"a" * CHUNK_SIZE + b"tail"
+def test_non_safetensors_file_uses_bounded_hashrepo_chunks(fake_hub, tmp_path: Path) -> None:
+    data = b"a" * MAX_CHUNK_SIZE + b"tail"
     result = _client(fake_hub).publish_v2(
         destination_repo="acme/model",
         files=[_write(tmp_path, "weights.safetensors", data)],
         tags=["prod"],
     )
     declaration = next(iter(_FakeHub.state["publishes"].values()))["files"][0]
-    assert [chunk["len"] for chunk in declaration["chunks"]] == [CHUNK_SIZE, 4]
+    assert [chunk["len"] for chunk in declaration["chunks"]] == [MAX_CHUNK_SIZE, 4]
     assert all("sha256:" not in chunk["digest"] for chunk in declaration["chunks"])
+    assert result.uploaded == 2
+
+
+def test_valid_safetensors_publishes_header_and_tensor_chunks_at_small_size(
+    fake_hub, tmp_path: Path
+) -> None:
+    body = b"tensor-bytes"
+    header = json.dumps(
+        {
+            "weight": {
+                "dtype": "U8",
+                "shape": [len(body)],
+                "data_offsets": [0, len(body)],
+            }
+        },
+        separators=(",", ":"),
+    ).encode()
+    header += b" " * (-len(header) % 8)
+    data = len(header).to_bytes(8, "little") + header + body
+
+    result = _client(fake_hub).publish_v2(
+        destination_repo="acme/model",
+        files=[_write(tmp_path, "weights.safetensors", data)],
+        tags=["prod"],
+    )
+
+    declaration = next(iter(_FakeHub.state["publishes"].values()))["files"][0]
+    assert [chunk["len"] for chunk in declaration["chunks"]] == [8 + len(header), len(body)]
     assert result.uploaded == 2
 
 

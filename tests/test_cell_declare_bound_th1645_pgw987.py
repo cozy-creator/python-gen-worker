@@ -52,7 +52,7 @@ GUARD_MANIFEST_BLOCK = "guard_manifest"
 
 
 from harness.cell_meta import exported_cell_meta
-from hashrepo import CHUNK_SIZE
+from hashrepo import MAX_CHUNK_SIZE
 
 from gen_worker import fleet_cells as fc
 from gen_worker import http_origin
@@ -412,7 +412,7 @@ def test_a_real_200mb_cell_publishes_through_the_real_cap(hub, artifact, monkeyp
     # ...and the DATA still moved, all of it, over presigned PUTs, every
     # object refused unless it hashed to the digest signed into its grant.
     assert hub.httpd.put_bytes == ARTIFACT_BYTES
-    expected_chunks = -(-ARTIFACT_BYTES // CHUNK_SIZE)
+    expected_chunks = -(-ARTIFACT_BYTES // MAX_CHUNK_SIZE)
     assert len(hub.httpd.objects) == expected_chunks
 
     assert hub.httpd.completes[-1]["ok"] is True
