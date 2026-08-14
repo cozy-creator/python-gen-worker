@@ -188,6 +188,16 @@ def on_path(monkeypatch: pytest.MonkeyPatch, micro_src: None) -> None:
     monkeypatch.setenv("PYTHONPATH", ":".join(
         [str(REPO / "src"), str(REPO / "tests"), str(MICRO_SRC)]))
 
+    # Test modules deliberately reset the process-global declaration registry.
+    # Python still caches this endpoint module afterward, so importing it again
+    # cannot replay the declaration's module-scope registration. Restore the
+    # real endpoint-owned declaration for every test that exercises this image;
+    # production workers never call the test-only reset.
+    from gen_worker.api.export_contract import register_export_declaration
+    from micro_diffusion.aot_declaration import DECLARATION
+
+    register_export_declaration(DECLARATION, replace=True)
+
 
 def _resolve(body: Dict[str, Any], **kw: Any) -> measure_child.MeasureJob:
     raw = json.dumps(body).encode()
