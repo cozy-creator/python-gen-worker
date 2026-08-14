@@ -16,15 +16,13 @@ Red-verified here through the REAL paths:
   instruction above the target (objdump assertion on the produced ``.so``)
   and the package still loads via ``aoti_load_package`` — portable by
   construction;
-* an artifact whose requirement this host genuinely lacks (this box has no
-  AVX-512) is refused BY NAME (``adopt_failed:host_isa_unsupported``)
-  before any dlopen — including legacy cells via the ``.pt2``'s own
-  ``AOTI_CPU_ISA`` stamp — and never SIGILLs the worker.
+* TCG stamps and enforces the artifact's host requirement before loading; its
+  library suite owns those closed-schema admission cases, while this worker
+  suite proves the process-wide compiler clamp that supplies that stamp.
 """
 
 from __future__ import annotations
 
-import json
 import re
 import shutil
 import subprocess
@@ -36,8 +34,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from gen_worker import aot_compile_child, aot_mint, aot_serve, env_seal, host_isa
-from torch_compiled_graphs import CallIngress, CallInput, build_call_ingress
+from gen_worker import aot_compile_child, aot_mint, env_seal, host_isa
+from torch_compiled_graphs import build_call_ingress
 import torch_compiled_graphs.host_isa as tcg_host_isa
 
 pytestmark = pytest.mark.skipif(
@@ -172,113 +170,6 @@ def test_clamped_compile_package_is_portable_and_loads(
     # The live crash site: loading must succeed for a portable package.
     loaded = torch._inductor.aoti_load_package(str(package))
     assert loaded is not None
-
-
-# ---------------------------------------------------------------------------
-# Red-verify 2: refusal by name, never a SIGILL
-# ---------------------------------------------------------------------------
-
-
-def _artifact(tmp_path: Path, pt2_bytes: bytes) -> tuple[Path, dict]:
-    ingress = CallIngress(
-        parameters=("x",),
-        flat_arity=1,
-        inputs=(CallInput(
-            "x", 0, "x", 0, (), "x", "float32", (1, 4),
-        ),),
-    )
-    meta = aot_serve.entry_metadata(
-        family="sdxl", precision="bf16", cell_key="",
-        name="unet/main", entry={
-            "target": "unet",
-            "inputs": [{
-                "name": "x", "position": 0, "dtype": "float32",
-                "shape": [1, 4], "optional": False,
-            }],
-            "symbols": {}, "constants": [],
-            "pytree": {"ingress": ingress.as_dict()},
-        },
-    )
-    content = tmp_path / "content"
-    content.mkdir(exist_ok=True)
-    (content / aot_serve.PACKAGE_NAME).write_bytes(pt2_bytes)
-    return content, meta
-
-
-def _requires_avx512() -> None:
-    if "avx512f" in host_isa.host_flags():
-        pytest.skip("host has AVX-512; the genuine-lack refusal needs a "
-                    "host without it")
-
-
-def test_stamped_requirement_refused_by_name(tmp_path: Path) -> None:
-    _requires_avx512()
-    content, meta = _artifact(tmp_path, b"not-a-real-pt2")
-    meta["host_isa"] = {
-        "machine": "x86_64", "march": "", "simdlen": 0,
-        "level": "x86-64-v4",
-    }
-    artifact = aot_serve.pack(content, tmp_path / "cell.tar.gz", meta)
-    with pytest.raises(aot_serve.AdoptError) as exc_info:
-        aot_serve.stage_artifact(artifact, "sdxl")
-    assert exc_info.value.reason == "host_isa_unsupported"
-    assert "avx512f" in str(exc_info.value)
-
-
-def test_discovery_filter_drops_stamped_requirement(tmp_path: Path) -> None:
-    """The metadata-only check reaches ``aot_serve.verify`` — discovery
-    (aot_cells._candidates) skips unexecutable cells BEFORE downloading."""
-    _requires_avx512()
-    _, meta = _artifact(tmp_path, b"")
-    meta["host_isa"] = {
-        "machine": "x86_64", "march": "", "simdlen": 0,
-        "level": "x86-64-v4",
-    }
-    reason = aot_serve.verify(meta)
-    assert "avx512f" in reason
-
-
-def test_an_unstamped_cell_is_refused_from_metadata_alone(
-    tmp_path: Path,
-) -> None:
-    """pgw#950: a cell carrying no ``host_isa`` stamp used to be waved past
-    the metadata gate and sniffed at stage time from the ``.pt2``'s own
-    ``AOTI_CPU_ISA``. That sniff is gone. An unstamped cell states no
-    requirement, so it is refused where the metadata is read — BEFORE any
-    download — and the miss policy re-mints one that does stamp.
-    """
-    pt2 = tmp_path / "unstamped.pt2"
-    with zipfile.ZipFile(pt2, "w") as zf:
-        zf.writestr(
-            "model/data/aotinductor/model/abc.wrapper_metadata.json",
-            json.dumps({
-                "AOTI_CPU_ISA": "AVX512 AVX512_VNNI",
-                "AOTI_MACHINE": "x86_64",
-            }))
-    content, meta = _artifact(tmp_path, pt2.read_bytes())
-    meta.pop("host_isa")
-    # Discovery rules on it without fetching a byte.
-    reason = aot_serve.host_isa_reason(meta)
-    assert aot_serve.NO_HOST_ISA_STAMP in reason
-    assert aot_serve.NO_HOST_ISA_STAMP in aot_serve.verify(meta)
-    # And staging names the same refusal, on the same class.
-    artifact = aot_serve.pack(content, tmp_path / "unstamped.tar.gz", meta)
-    with pytest.raises(aot_serve.AdoptError) as exc_info:
-        aot_serve.stage_artifact(artifact, "sdxl")
-    assert exc_info.value.reason == "host_isa_unsupported"
-    assert aot_serve.NO_HOST_ISA_STAMP in str(exc_info.value)
-
-
-def test_satisfiable_stamp_stages(tmp_path: Path) -> None:
-    content, meta = _artifact(tmp_path, b"pt2-bytes-never-read")
-    # artifact_metadata stamped this host's own mint target — executable
-    # here by construction.
-    staged = aot_serve.stage_artifact(
-        aot_serve.pack(content, tmp_path / "ok.tar.gz", meta), "sdxl")
-    try:
-        assert staged.metadata["host_isa"]["machine"] == "x86_64"
-    finally:
-        staged.close()
 
 
 def test_cross_machine_artifact_refused() -> None:
