@@ -63,8 +63,17 @@ from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
 from .tensor_layout_contract import (
+    BAKE_LOW_RANK_BRANCH,
     CONTRACT_COZY_SVDQ_NVFP4_LR8,
     CONTRACT_NUNCHAKU_V1,
+    ELEMENT_BF16,
+    ELEMENT_FP8_E4M3,
+    ELEMENT_INT4,
+    ELEMENT_NVFP4,
+    SCALE_GROUP_16,
+    SCALE_PER_CHANNEL_OUT,
+    SCALE_PER_TENSOR,
+    DecodeDimensions,
     implements_contract,
 )
 from .nvfp4_quant import BLOCK, pack_e2m1, to_blocked_scales
@@ -485,6 +494,18 @@ def _decode_quantized_lowrank(
     contract=CONTRACT_NUNCHAKU_V1,
     serves=("svdq-fp4-w4a4",),
     composes_lora=False,
+    decodes=DecodeDimensions(
+        elements=(ELEMENT_NVFP4, ELEMENT_INT4, ELEMENT_BF16),
+        # `wscales` are group-of-16; the second level is per-channel
+        # (`wcscales`) or per-tensor (`wtscale`) and the decoder branches on
+        # which is present, so both are decoded shapes of ONE handle.
+        scales=(SCALE_GROUP_16, SCALE_PER_CHANNEL_OUT, SCALE_PER_TENSOR),
+        # UNCONSTRAINED, and that is a statement: the nunchaku descriptor
+        # fixes the keys, so the fact lives on the HANDLE and a synonym for it
+        # here would be a second home (th#1937 declined `contract.native`).
+        key_topologies=(),
+        bakes=(BAKE_LOW_RANK_BRANCH,),
+    ),
     why="pgw#685: this is THE decoder of the nunchaku v1 single-file layout. "
         "The decoded SvdqLinear has no additive adapter branch (w8a8_lora is "
         "branch-capable on w8a8 / fp8-storage / plain bf16 only).",
@@ -493,6 +514,15 @@ def _decode_quantized_lowrank(
     contract=CONTRACT_COZY_SVDQ_NVFP4_LR8,
     serves=("svdq-fp4-w4a4",),
     composes_lora=False,
+    decodes=DecodeDimensions(
+        elements=(ELEMENT_NVFP4, ELEMENT_INT4, ELEMENT_FP8_E4M3, ELEMENT_BF16),
+        scales=(SCALE_GROUP_16, SCALE_PER_CHANNEL_OUT, SCALE_PER_TENSOR),
+        key_topologies=(),
+        # The QUANTIZED low-rank branch is what separates this handle from
+        # nunchaku.v1@1, and the handle is where that fact lives — the ruled
+        # tensor-set registry names the SET, not the scheme it is stored in.
+        bakes=(BAKE_LOW_RANK_BRANCH,),
+    ),
     why="te#148's quantized low-rank branch is a distinct MAJOR and this "
         "decoder branches on it (`lowrank_quant`), which is what makes the "
         "claim true rather than inherited from nunchaku.v1@1.",

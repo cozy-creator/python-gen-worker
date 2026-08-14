@@ -39,7 +39,17 @@ from pathlib import Path
 from .. import activity as activity_mod
 from ..component_vocab import denoiser_components
 from .safetensors_header import header_len_ok
-from .tensor_layout_contract import CONTRACT_COZY_FP8_ROWWISE, implements_contract
+from .tensor_layout_contract import (
+    CONTRACT_COZY_FP8_ROWWISE,
+    ELEMENT_BF16,
+    ELEMENT_FP8_E4M3,
+    KEYS_DIFFUSERS_SPLIT_QKV,
+    KEYS_TRANSFORMERS_SPLIT_QKV,
+    SCALE_PER_CHANNEL_OUT,
+    SCALE_STATIC_ACTIVATION,
+    DecodeDimensions,
+    implements_contract,
+)
 from typing import Any, Dict, List, Optional
 import shutil
 
@@ -585,6 +595,18 @@ def _denoiser_class(root: Path, component: str) -> Any:
     contract=CONTRACT_COZY_FP8_ROWWISE,
     serves=("fp8-w8a8-dynamic",),
     composes_lora=True,
+    decodes=DecodeDimensions(
+        elements=(ELEMENT_FP8_E4M3, ELEMENT_BF16),
+        # The optional `input_scale` leaf is DECODED, not ignored:
+        # `Fp8ScaledLinear` registers the buffer and the GEMM reads it
+        # (:489, :517), so a statically-calibrated tree is in the set.
+        scales=(SCALE_PER_CHANNEL_OUT, SCALE_STATIC_ACTIVATION),
+        # It rebuilds the tree's own class from its config and assigns by
+        # NAME, so the key convention it can ingest is whichever one that
+        # class declares — the diffusers repackaging or a transformers tree.
+        key_topologies=(KEYS_DIFFUSERS_SPLIT_QKV, KEYS_TRANSFORMERS_SPLIT_QKV),
+        bakes=(),
+    ),
     why="gw#547: Fp8ScaledLinear reads lora_a/lora_b non-persistent buffers "
         "in its own forward, so the w8a8 lane composes runtime adapters "
         "natively.",

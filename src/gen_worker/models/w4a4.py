@@ -48,6 +48,7 @@ from pathlib import Path
 from .. import activity as activity_mod
 from ..component_vocab import denoiser_components
 from .safetensors_header import header_len_ok
+from .tensor_layout_contract import unregistered_decode_path
 from typing import Any, Dict, List, Optional
 import shutil
 
@@ -492,11 +493,17 @@ def _dequant_into(sd: Dict[str, Any], name: str, compute: Any) -> None:
         sd.pop(f"{name}{suffix}", None)
 
 
-# NO `@implements_contract` HERE, deliberately: this flat nvfp4 layout has no
-# registry entry yet, and it is NOT `bfl.nvfp4-preswizzled@1` — that one is
-# HIGH-nibble with pre-swizzled scales, and conflating them measures LPIPS 1.11.
-# Registering ours needs a real artifact to read; none has ever passed the
-# publish gate, so this decoder contributes no execution lane.
+# NO `@implements_contract` HERE, deliberately — the marker below records WHY
+# in the derived decode-set rather than only in this comment, so a refusal can
+# name it (pgw#1245).
+@unregistered_decode_path(
+    reason="the flat nvfp4 layout this reads has no registry entry, and it is "
+           "NOT bfl.nvfp4-preswizzled@1 — that one is HIGH-nibble with "
+           "pre-swizzled scales, and conflating them measures LPIPS 1.11. "
+           "Registering ours needs a real artifact to read; none has ever "
+           "passed the publish gate, so this decoder contributes no contract "
+           "and no execution lane.",
+)
 def load_w4a4_denoiser(root: Path, art: W4a4Artifact, *,
                        compute_dtype: Any = None, mode: str = "",
                        cls: Any = None) -> Any:

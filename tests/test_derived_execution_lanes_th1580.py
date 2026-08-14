@@ -29,14 +29,24 @@ from gen_worker.discovery.execution_lanes import (
 from gen_worker.models.tensor_layout_contract import (
     CONTRACT_COZY_FP8_ROWWISE,
     CONTRACT_NUNCHAKU_V1,
+    DecodeDimensions,
     implements_contract,
 )
 
+_DIMS = DecodeDimensions(
+    elements=("bf16",), scales=("none",),
+    key_topologies=("diffusers.split-qkv@1",), bakes=())
+
 _GOOD_A = '''
-from gen_worker.models.tensor_layout_contract import implements_contract
+from gen_worker.models.tensor_layout_contract import (
+    DecodeDimensions, implements_contract,
+)
 
 @implements_contract(
     contract="nunchaku.v1@1", serves=("svdq-fp4-w4a4",), composes_lora=False,
+    decodes=DecodeDimensions(
+        elements=("nvfp4",), scales=("group_16",), key_topologies=(),
+        bakes=()),
     why="fake svdq decoder",
 )
 def decode_svdq(tensors):
@@ -44,11 +54,17 @@ def decode_svdq(tensors):
 '''
 
 _GOOD_B = '''
-from gen_worker.models.tensor_layout_contract import implements_contract
+from gen_worker.models.tensor_layout_contract import (
+    DecodeDimensions, implements_contract,
+)
 
 @implements_contract(
     contract="cozy.fp8-rowwise@1", serves=("fp8-w8a8-dynamic",),
-    composes_lora=True, why="fake fp8 decoder",
+    composes_lora=True,
+    decodes=DecodeDimensions(
+        elements=("fp8_e4m3",), scales=("per_channel_out",),
+        key_topologies=("diffusers.split-qkv@1",), bakes=()),
+    why="fake fp8 decoder",
 )
 def decode_fp8(tensors):
     return tensors
@@ -59,11 +75,17 @@ def decode_fp8(tensors):
 _BROKEN = '''
 import a_dependency_this_image_does_not_have  # noqa: F401
 
-from gen_worker.models.tensor_layout_contract import implements_contract
+from gen_worker.models.tensor_layout_contract import (
+    DecodeDimensions, implements_contract,
+)
 
 @implements_contract(
     contract="bfl.nvfp4-preswizzled@1", serves=("nvfp4-w4a4-static",),
-    composes_lora=False, why="never reached",
+    composes_lora=False,
+    decodes=DecodeDimensions(
+        elements=("nvfp4",), scales=("per_tensor",), key_topologies=(),
+        bakes=()),
+    why="never reached",
 )
 def decode_nvfp4(tensors):
     return tensors
@@ -155,13 +177,15 @@ def test_unregistered_contract_fails_the_build():
             contract="acme.secret-format@1",
             serves=("bf16-w16a16",),
             composes_lora=False,
+            decodes=_DIMS,
         )
         def _decode(x):
             return x
 
     with pytest.raises(ValueError, match="not a contract handle"):
         @implements_contract(
-            contract="nvfp4", serves=("bf16-w16a16",), composes_lora=False
+            contract="nvfp4", serves=("bf16-w16a16",), composes_lora=False,
+            decodes=_DIMS,
         )
         def _decode2(x):
             return x
@@ -171,6 +195,7 @@ def test_unregistered_contract_fails_the_build():
             contract=CONTRACT_NUNCHAKU_V1,
             serves=("svdq-fp4-w4a4+eager",),  # execution axis is not a body
             composes_lora=False,
+            decodes=_DIMS,
         )
         def _decode3(x):
             return x
