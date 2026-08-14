@@ -15,7 +15,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from hashrepo import LocalCAS
@@ -26,7 +26,7 @@ from torch_compiled_graphs import (
 from torch_compiled_graphs.artifact import build_metadata, pack_artifact
 from torch_compiled_graphs.host_isa import _host_requirement
 
-from gen_worker import compiled_graph_store
+from gen_worker import compiled_graph_store, fleet_cells
 
 
 KEY = "cg-key-v1-" + "1" * 56
@@ -273,6 +273,32 @@ def test_root_parent_output_is_readable_after_privilege_drop(tmp_path: Path) -> 
     assert not list(path.parent.glob("*.lock"))
 
 
+def test_sidecar_is_readable_by_a_real_unprivileged_process(tmp_path: Path) -> None:
+    image = "nginx:alpine"
+    available = subprocess.run(
+        ["docker", "image", "inspect", image],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if available.returncode != 0:
+        pytest.skip(f"cached {image} image is unavailable")
+    path = _write_record(tmp_path, _record(KEY))
+
+    completed = subprocess.run(
+        [
+            "docker", "run", "--rm", "--user", "65534:65534",
+            "--volume", f"{path.parent}:/sidecar:ro",
+            image, "cat", "/sidecar/record.json",
+        ],
+        check=False,
+        capture_output=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr.decode()
+    assert json.loads(completed.stdout) == _record(KEY)
+
+
 def test_existing_root_parent_tree_requires_no_child_chmod(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -373,7 +399,8 @@ def test_sidecar_schema_rejects_invalid_recursive_fields(
     else:
         path = _write_record(tmp_path, record)
 
-    assert compiled_graph_store._read_record(path) is None
+    with pytest.raises(compiled_graph_store._PersistedStateError):
+        compiled_graph_store._read_record(path)
     assert compiled_graph_store.lookup(KEY, tmp_path) is None
 
 
@@ -383,7 +410,8 @@ def test_persisted_json_rejects_duplicate_keys_recursively(tmp_path: Path) -> No
     encoded = json.dumps(_record(KEY))
     path.write_text(encoded[:-1] + ',"sink":"owed"}')
 
-    assert compiled_graph_store._read_record(path) is None
+    with pytest.raises(compiled_graph_store._PersistedStateError):
+        compiled_graph_store._read_record(path)
     nested = tmp_path / "nested.json"
     nested.write_text('{"outer":{"key":1,"key":2}}')
     with pytest.raises(ValueError, match="duplicate JSON key 'key'"):
@@ -420,17 +448,21 @@ def test_owed_scan_filters_sidecars_before_exporting_artifacts(
     other_path = _record_path(tmp_path, OTHER_KEY)
     other = _record(OTHER_KEY)
     compiled_graph_store._write_json_atomic(other_path, other)
-    exported: list[str] = []
-
-    def local(record: dict[str, Any], root: Path | None) -> Any:
-        exported.append(str(record["compiled_graph_key"]))
-        return SimpleNamespace(compiled_graph_key=record["compiled_graph_key"])
-
-    monkeypatch.setattr(compiled_graph_store, "_local", local)
+    monkeypatch.setattr(
+        compiled_graph_store,
+        "_engine",
+        lambda _root=None: pytest.fail("owed scan resolved TCG"),
+    )
+    monkeypatch.setattr(
+        compiled_graph_store,
+        "_export",
+        lambda *_args: pytest.fail("owed scan exported artifact bytes"),
+    )
 
     rows = compiled_graph_store.graphs_owed_to_sink(tmp_path)
     assert [row.compiled_graph_key for row in rows] == [KEY]
-    assert exported == [KEY]
+    assert rows[0].content_digest == owed["content_digest"]
+    assert rows[0].bytes == owed["bytes"]
 
 
 def test_sidecar_key_must_equal_its_directory_key(
@@ -453,10 +485,26 @@ def test_load_runner_refuses_a_runner_for_another_exact_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    graph = SimpleNamespace(key=KEY, metadata={})
+    record = _record(KEY)
+    _write_record(tmp_path, record)
+    graph = SimpleNamespace(
+        key=KEY,
+        manifest=record["manifest"],
+        metadata={},
+    )
     wrong_runner = SimpleNamespace(key=OTHER_KEY)
 
+    class FakeCAS:
+        def load_manifest(self, manifest: object) -> Any:
+            assert str(manifest) == record["manifest"]
+            return SimpleNamespace(files=(SimpleNamespace(
+                digest=record["content_digest"], size_bytes=record["bytes"]
+            ),))
+
     class FakeEngine:
+        def __init__(self, _cas: object) -> None:
+            pass
+
         def resolve(self, key: str, destination: Path) -> Any:
             assert key == KEY
             assert destination.name == KEY
@@ -467,7 +515,8 @@ def test_load_runner_refuses_a_runner_for_another_exact_key(
             assert destination.name == KEY
             return wrong_runner
 
-    monkeypatch.setattr(compiled_graph_store, "_engine", lambda _root=None: FakeEngine())
+    monkeypatch.setattr(compiled_graph_store, "_cas", lambda _root=None: FakeCAS())
+    monkeypatch.setattr(compiled_graph_store, "Engine", FakeEngine)
 
     assert compiled_graph_store.load_runner(KEY, tmp_path) is None
 
@@ -482,3 +531,280 @@ def test_malformed_key_never_reaches_tcg(
         lambda _root=None: pytest.fail("malformed key reached TCG"),
     )
     assert compiled_graph_store.load_runner("cell-not-a-key", tmp_path) is None
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_store_never_overwrites_present_invalid_sidecar(
+    duplicate: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact, key = _real_artifact(tmp_path)
+    root = tmp_path / "cas"
+    path = _record_path(root, key)
+    path.parent.mkdir(parents=True)
+    if duplicate:
+        encoded = json.dumps(_record(key))
+        original = (encoded[:-1] + ',"sink":"owed"}').encode()
+    else:
+        original = b'{"format":1,"verdict":"banana"}'
+    path.write_bytes(original)
+
+    class NoImport:
+        def __init__(self, _cas: object) -> None:
+            pass
+
+        def import_artifact(self, _key: str, _artifact: Path) -> object:
+            pytest.fail("present-invalid worker state mutated TCG")
+
+    monkeypatch.setattr(compiled_graph_store, "Engine", NoImport)
+
+    assert compiled_graph_store.store(
+        artifact, key=key, family="micro", root=root
+    ) is None
+    assert path.read_bytes() == original
+
+
+def test_store_refuses_contextually_wrong_key_before_tcg_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact, key = _real_artifact(tmp_path)
+    root = tmp_path / "cas"
+    path = _record_path(root, key)
+    compiled_graph_store._write_json_atomic(path, _record(OTHER_KEY))
+    original = path.read_bytes()
+
+    class NoImport:
+        def __init__(self, _cas: object) -> None:
+            pass
+
+        def import_artifact(self, _key: str, _artifact: Path) -> object:
+            pytest.fail("wrong-key worker state mutated TCG")
+
+    monkeypatch.setattr(compiled_graph_store, "Engine", NoImport)
+    assert compiled_graph_store.store(
+        artifact, key=key, family="micro", root=root
+    ) is None
+    assert path.read_bytes() == original
+
+
+def test_persisted_json_is_bounded_and_schema_predicate_is_total(
+    tmp_path: Path,
+) -> None:
+    path = _record_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'{"padding":"' + b"x" * compiled_graph_store._MAX_JSON_BYTES)
+
+    with pytest.raises(compiled_graph_store._PersistedStateError, match="exceeds"):
+        compiled_graph_store._read_record(path)
+    assert not compiled_graph_store._valid_record([])
+    for field, value in (("verdict", []), ("sink", {})):
+        record = _record(KEY)
+        record[field] = value
+        assert not compiled_graph_store._valid_record(record)
+
+
+@pytest.mark.parametrize("state", ["missing", "quarantined", "wrong-key"])
+def test_load_runner_requires_matching_nonquarantined_sidecar_before_tcg(
+    state: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if state != "missing":
+        record = _record(OTHER_KEY if state == "wrong-key" else KEY)
+        if state == "quarantined":
+            record["verdict"] = compiled_graph_store.VERDICT_QUARANTINED
+        compiled_graph_store._write_json_atomic(_record_path(tmp_path), record)
+
+    class NoEngine:
+        def __init__(self, _cas: object) -> None:
+            pytest.fail("refused sidecar reached TCG")
+
+    monkeypatch.setattr(compiled_graph_store, "Engine", NoEngine)
+    assert compiled_graph_store.load_runner(KEY, tmp_path) is None
+
+
+@pytest.mark.parametrize("field", ["manifest", "content_digest", "bytes"])
+def test_load_and_lookup_bind_sidecar_to_resolved_manifest_content(
+    field: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actual = _record(KEY)
+    record = dict(actual)
+    record[field] = {
+        "manifest": "sha256:" + "5" * 64,
+        "content_digest": "sha256:" + "6" * 64,
+        "bytes": 8,
+    }[field]
+    _write_record(tmp_path, record)
+
+    class FakeCAS:
+        def load_manifest(self, manifest: object) -> Any:
+            assert str(manifest) == actual["manifest"]
+            return SimpleNamespace(files=(SimpleNamespace(
+                digest=actual["content_digest"], size_bytes=actual["bytes"]
+            ),))
+
+    class FakeEngine:
+        def __init__(self, _cas: object) -> None:
+            pass
+
+        def resolve(self, key: str, _destination: Path) -> Any:
+            assert key == KEY
+            return SimpleNamespace(
+                key=KEY, manifest=actual["manifest"], metadata={}
+            )
+
+        def runner(self, _key: str, _destination: Path) -> object:
+            pytest.fail("mismatched sidecar reached package load")
+
+        def export_artifact(self, _key: str, _destination: Path) -> Path:
+            pytest.fail("mismatched sidecar reached artifact export")
+
+    monkeypatch.setattr(compiled_graph_store, "_cas", lambda _root=None: FakeCAS())
+    monkeypatch.setattr(compiled_graph_store, "Engine", FakeEngine)
+
+    assert compiled_graph_store.lookup(KEY, tmp_path) is None
+    assert compiled_graph_store.load_runner(KEY, tmp_path) is None
+
+
+def test_tcg_corruption_can_be_repaired_without_worker_quarantine_resurrection(
+    tmp_path: Path,
+) -> None:
+    artifact, key = _real_artifact(tmp_path)
+    root = tmp_path / "cas"
+    assert compiled_graph_store.store(
+        artifact, key=key, family="micro", root=root
+    ) is not None
+    path = _record_path(root, key)
+    record = compiled_graph_store._read_record(path)
+    assert record is not None
+    LocalCAS(root).object_path(str(record["content_digest"])).write_bytes(b"corrupt")
+
+    assert compiled_graph_store.lookup(key, root) is None
+    after_failure = compiled_graph_store._read_record(path)
+    assert after_failure is not None
+    assert after_failure["verdict"] == compiled_graph_store.VERDICT_ADMITTED
+    assert compiled_graph_store.store(
+        artifact, key=key, family="micro", root=root
+    ) is not None
+    assert compiled_graph_store.lookup(key, root) is not None
+
+    compiled_graph_store.drop(key, root)
+    assert compiled_graph_store.store(
+        artifact, key=key, family="micro", root=root
+    ) is None
+    quarantined = compiled_graph_store._read_record(path)
+    assert quarantined is not None
+    assert quarantined["verdict"] == compiled_graph_store.VERDICT_QUARANTINED
+
+
+def test_store_requires_arm_memo_and_preserves_all_aliases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact, key = _real_artifact(tmp_path)
+    refused_root = tmp_path / "refused"
+    monkeypatch.setattr(compiled_graph_store, "note_memo", lambda *_args: False)
+    assert compiled_graph_store.store(
+        artifact,
+        key=key,
+        family="micro",
+        arm_token="arm-v1-refused",
+        root=refused_root,
+    ) is None
+
+    monkeypatch.undo()
+    root = tmp_path / "aliases"
+    for token in ("arm-v1-first", "arm-v1-second"):
+        assert compiled_graph_store.store(
+            artifact, key=key, family="micro", arm_token=token, root=root
+        ) is not None
+        assert compiled_graph_store.lookup_for_arm(token, root) is not None
+    record = compiled_graph_store._read_record(_record_path(root, key))
+    assert record is not None and record["arm_token"] == "arm-v1-first"
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def test_arm_memo_collision_or_invalid_state_is_never_overwritten(
+    invalid: bool,
+    tmp_path: Path,
+) -> None:
+    path = compiled_graph_store.memo_path("arm-v1-alias", tmp_path)
+    if invalid:
+        path.parent.mkdir(parents=True)
+        original = b'{"format":1,"compiled_graph_key":"broken"}'
+        path.write_bytes(original)
+    else:
+        assert compiled_graph_store.note_memo("arm-v1-alias", KEY, tmp_path)
+        original = path.read_bytes()
+
+    assert not compiled_graph_store.note_memo(
+        "arm-v1-alias", OTHER_KEY, tmp_path
+    )
+    assert path.read_bytes() == original
+
+
+def test_duplicate_trust_state_is_never_overwritten(tmp_path: Path) -> None:
+    path = compiled_graph_store.sidecars_root(tmp_path) / compiled_graph_store.TRUST_CLASS_NAME
+    path.parent.mkdir(parents=True)
+    original = (
+        b'{"format":1,"class":"untrusted","code":'
+        b'"compiled_graph_publish_untrusted_tier","detail":"a",'
+        b'"detail":"b","learned_at":1}'
+    )
+    path.write_bytes(original)
+
+    assert not compiled_graph_store.note_refusal(
+        compiled_graph_store.UNTRUSTED_REFUSAL_CODE, root=tmp_path
+    )
+    assert path.read_bytes() == original
+
+
+def test_resume_filters_inflight_before_resolve_and_export(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owed = [
+        compiled_graph_store.OwedCompiledGraph(
+            key, "sha256:" + "4" * 64, "micro", "arm-v1-a", 7
+        )
+        for key in (KEY, OTHER_KEY)
+    ]
+    looked_up: list[str] = []
+    published: list[tuple[Path, dict[str, object]]] = []
+    thread = SimpleNamespace()
+
+    monkeypatch.setattr(compiled_graph_store, "graphs_owed_to_sink", lambda: owed)
+    monkeypatch.setattr(fleet_cells, "publishes_in_flight", lambda: [KEY])
+
+    def lookup(key: str) -> Any:
+        looked_up.append(key)
+        assert key == OTHER_KEY
+        return compiled_graph_store.LocalCompiledGraph(
+            key,
+            tmp_path / "resolved.tar.gz",
+            "sha256:" + "4" * 64,
+            "micro",
+            "arm-v1-b",
+            7,
+            compiled_graph_store.SINK_OWED,
+            {"compiled_graph_key": key},
+        )
+
+    def publish(_publisher: object, _family: str, artifact: Path, meta: Any,
+                **_kwargs: object) -> object:
+        published.append((artifact, dict(meta)))
+        return thread
+
+    monkeypatch.setattr(compiled_graph_store, "lookup", lookup)
+    monkeypatch.setattr(fleet_cells, "_publish_async", publish)
+    publisher = SimpleNamespace(enabled=lambda: True)
+
+    assert fleet_cells.resume_owed_publishes(cast(Any, publisher)) == [thread]
+    assert looked_up == [OTHER_KEY]
+    assert published == [(tmp_path / "resolved.tar.gz", {
+        "compiled_graph_key": OTHER_KEY,
+    })]

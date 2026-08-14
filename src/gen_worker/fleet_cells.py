@@ -1292,17 +1292,17 @@ def resume_owed_publishes(
         # too. A key whose upload is already running is owed nothing more.
         if cell.compiled_graph_key in in_flight:
             continue
-        graph = compiled_graph_store.describe(cell.compiled_graph_key)
-        if graph is None:
+        resolved = compiled_graph_store.lookup(cell.compiled_graph_key)
+        if resolved is None:
             logger.warning(
                 "fleet-cells: owed graph %s no longer resolves through TCG",
                 cell.compiled_graph_key,
             )
             continue
-        meta = dict(graph.metadata)
+        meta = dict(resolved.metadata or {})
         threads.append(_publish_async(
             publisher, cell.family or str(meta.get("family") or ""),
-            cell.artifact, dict(meta),
+            resolved.artifact, meta,
             cell_key_digest=cell.compiled_graph_key,
             arm_token=cell.arm_token))
     if threads:

@@ -1,9 +1,10 @@
 """Worker policy sidecars over the one TCG/HashRepo compiled-graph store.
 
-Artifact bytes, exact-key refs, verification and quarantine belong exclusively
-to :mod:`torch_compiled_graphs`.  This module records only worker facts that do
-not belong in the closed artifact schema: family, mint obligation, admission
-verdict and the remote-publish obligation.
+Artifact bytes, exact-key refs, verification and integrity quarantine belong
+exclusively to :mod:`torch_compiled_graphs`.  This module records only worker
+facts that do not belong in the closed artifact schema: family, mint
+obligation, admission verdict (including policy quarantine), and the
+remote-publish obligation.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import math
 import os
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, cast
@@ -55,6 +56,10 @@ SINK_DELIVERED = "delivered"
 SINK_REFUSED = "refused"
 
 _FORMAT = 1
+# A record has ten bounded scalar fields; memo and trust rows are smaller. 16
+# KiB is over 8x their largest canonical encoding while making every persisted
+# read independent of a hostile file's size.
+_MAX_JSON_BYTES = 16 << 10
 # One PiB is far beyond a deployable compiled graph while still bounding hostile
 # persisted integers before they reach filesystem or transport accounting.
 _MAX_BYTES = 1 << 50
@@ -112,6 +117,18 @@ class LocalCompiledGraph:
     arm_token: str
     bytes: int
     sink: str = SINK_NONE
+    metadata: Optional[dict[str, object]] = None
+
+
+@dataclass(frozen=True)
+class OwedCompiledGraph:
+    """Publish obligation metadata; resolving/exporting is deliberately lazy."""
+
+    compiled_graph_key: str
+    content_digest: str
+    family: str
+    arm_token: str
+    bytes: int
 
 
 @dataclass(frozen=True)
@@ -134,6 +151,19 @@ _SIDECAR_FIELDS = frozenset({
     "verdict",
     "sink",
 })
+_MEMO_FIELDS = frozenset({"format", "compiled_graph_key", "noted_at"})
+_TRUST_FIELDS = frozenset({"format", "class", "code", "detail", "learned_at"})
+_IMMUTABLE_RECORD_FIELDS = (
+    "compiled_graph_key",
+    "family",
+    "bytes",
+    "content_digest",
+    "manifest",
+)
+
+
+class _PersistedStateError(ValueError):
+    """A named state file exists but is not one value this worker may replace."""
 
 
 def _fsync_directory(path: Path) -> None:
@@ -167,6 +197,8 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+    if len(encoded) > _MAX_JSON_BYTES:
+        raise ValueError(f"persisted JSON exceeds {_MAX_JSON_BYTES} bytes")
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.tmp-",
         dir=path.parent,
@@ -216,7 +248,11 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _read_json(path: Path) -> Any:
-    return json.loads(path.read_text(), object_pairs_hook=_reject_duplicate_keys)
+    with path.open("rb") as source:
+        encoded = source.read(_MAX_JSON_BYTES + 1)
+    if len(encoded) > _MAX_JSON_BYTES:
+        raise ValueError(f"persisted JSON exceeds {_MAX_JSON_BYTES} bytes")
+    return json.loads(encoded, object_pairs_hook=_reject_duplicate_keys)
 
 
 def _valid_text(value: object, *, maximum: int, allow_empty: bool) -> bool:
@@ -273,8 +309,36 @@ def _valid_record(value: object) -> bool:
         and _canonical_ref(value.get("content_digest"))
         and _positive_finite_number(stored_at)
         and _canonical_ref(value.get("manifest"))
-        and value.get("verdict") in _VERDICTS
-        and value.get("sink") in _SINKS
+        and isinstance(value.get("verdict"), str)
+        and value["verdict"] in _VERDICTS
+        and isinstance(value.get("sink"), str)
+        and value["sink"] in _SINKS
+    )
+
+
+def _valid_memo(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and frozenset(value) == _MEMO_FIELDS
+        and type(value.get("format")) is int
+        and value["format"] == _FORMAT
+        and isinstance(value.get("compiled_graph_key"), str)
+        and is_compiled_graph_key(value["compiled_graph_key"])
+        and _positive_finite_number(value.get("noted_at"))
+    )
+
+
+def _valid_trust(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and frozenset(value) == _TRUST_FIELDS
+        and type(value.get("format")) is int
+        and value["format"] == _FORMAT
+        and value.get("class") == TRUST_UNTRUSTED
+        and value.get("code") == UNTRUSTED_REFUSAL_CODE
+        and isinstance(value.get("detail"), str)
+        and len(value["detail"]) <= 500
+        and _positive_finite_number(value.get("learned_at"))
     )
 
 
@@ -292,36 +356,116 @@ def _allows_sink(current: str, requested: str) -> bool:
     )
 
 
-def _read_record(path: Path) -> Optional[dict[str, Any]]:
+def _read_state(
+    path: Path,
+    valid: Callable[[object], bool],
+    label: str,
+) -> Optional[dict[str, Any]]:
     try:
         value = _read_json(path)
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return None
-    if not _valid_record(value):
-        return None
+    except (OSError, ValueError) as exc:
+        raise _PersistedStateError(f"invalid persisted {label} {path}: {exc}") from exc
+    if not valid(value):
+        raise _PersistedStateError(f"invalid persisted {label} {path}")
     return cast(dict[str, Any], value)
 
 
-def _export(key: str, root: Optional[Path]) -> Path:
+def _read_record(path: Path) -> Optional[dict[str, Any]]:
+    return _read_state(path, _valid_record, "compiled-graph sidecar")
+
+
+def _read_memo(path: Path) -> Optional[dict[str, Any]]:
+    return _read_state(path, _valid_memo, "compiled-graph arm memo")
+
+
+def _read_trust(path: Path) -> Optional[dict[str, Any]]:
+    return _read_state(path, _valid_trust, "compiled-graph trust class")
+
+
+def _export(key: str, engine: Engine, root: Optional[Path]) -> Path:
     destination = (
         sidecars_root(root) / EXPORTS_DIRNAME / key / "compiled_graph.tar.gz"
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    return Path(_engine(root).export_artifact(key, destination))
+    return Path(engine.export_artifact(key, destination))
 
 
-def _local(record: dict[str, Any], root: Optional[Path]) -> LocalCompiledGraph:
+def _local(
+    record: dict[str, Any],
+    graph: StoredCompiledGraph,
+    engine: Engine,
+    root: Optional[Path],
+) -> LocalCompiledGraph:
     key = str(record["compiled_graph_key"])
-    artifact = _export(key, root)
     return LocalCompiledGraph(
         compiled_graph_key=key,
-        artifact=artifact,
+        artifact=_export(key, engine, root),
         content_digest=str(record["content_digest"]),
         family=str(record["family"]),
         arm_token=str(record["arm_token"]),
         bytes=int(record["bytes"]),
         sink=str(record["sink"]),
+        metadata=dict(graph.metadata),
     )
+
+
+def _selected_record(
+    key: str,
+    allowed_verdicts: frozenset[str],
+    root: Optional[Path],
+) -> Optional[dict[str, Any]]:
+    try:
+        record = _read_record(sidecar_dir(key, root) / RECORD_NAME)
+    except (OSError, ValueError):
+        return None
+    if (
+        record is None
+        or record["compiled_graph_key"] != key
+        or record["verdict"] not in allowed_verdicts
+    ):
+        return None
+    return record
+
+
+def _resolve_selected(
+    key: str,
+    record: dict[str, Any],
+    engine: Engine,
+    cas: LocalCAS,
+    destination: Path,
+) -> Optional[StoredCompiledGraph]:
+    graph = engine.resolve(key, destination)
+    if graph is None or graph.key != key or str(graph.manifest) != record["manifest"]:
+        return None
+    manifest = cas.load_manifest(graph.manifest)
+    if len(manifest.files) != 1:
+        return None
+    stored = manifest.files[0]
+    if (
+        str(stored.digest) != record["content_digest"]
+        or stored.size_bytes != record["bytes"]
+    ):
+        return None
+    return graph
+
+
+def _merge_record(
+    existing: Optional[dict[str, Any]],
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    if existing is None:
+        return candidate
+    if any(existing[field] != candidate[field] for field in _IMMUTABLE_RECORD_FIELDS):
+        raise StorageError("worker sidecar disagrees with the selected compiled graph")
+    candidate["stored_at"] = existing["stored_at"]
+    candidate["arm_token"] = existing["arm_token"] or candidate["arm_token"]
+    if not _allows_verdict(str(existing["verdict"]), str(candidate["verdict"])):
+        candidate["verdict"] = existing["verdict"]
+    if not _allows_sink(str(existing["sink"]), str(candidate["sink"])):
+        candidate["sink"] = existing["sink"]
+    return candidate
 
 
 def store(
@@ -347,56 +491,57 @@ def store(
         return None
     try:
         cas = _cas(root)
-        result = Engine(cas).import_artifact(key, artifact)
-        if result.outcome == StoreOutcome.DIVERGENT:
-            logger.error(
-                "compiled-graph-store: divergent bytes for %s were quarantined", key
-            )
-            return None
-        manifest = cas.load_manifest(result.manifest)
-        if len(manifest.files) != 1:
-            raise StorageError("compiled graph CAS manifest is not one artifact")
-        stored_file = manifest.files[0]
-        now = time.time()
-        record = {
-            "format": _FORMAT,
-            "compiled_graph_key": str(result.key),
-            "family": family,
-            "arm_token": arm_token,
-            "bytes": int(stored_file.size_bytes),
-            "content_digest": str(stored_file.digest),
-            "stored_at": now,
-            "manifest": str(result.manifest),
-            "verdict": verdict,
-            "sink": sink,
-        }
-        path = sidecar_dir(str(result.key), root) / RECORD_NAME
+        engine = Engine(cas)
+        path = sidecar_dir(key, root) / RECORD_NAME
         with _record_lock(path):
+            # Present-invalid is an operator fact, never permission to replace
+            # it. Read it before importing so corrupt policy state cannot
+            # mutate TCG as a side effect of a refused worker operation.
             existing = _read_record(path)
-            if existing is not None:
-                immutable = (
-                    "compiled_graph_key",
-                    "family",
-                    "bytes",
-                    "content_digest",
-                    "manifest",
+            if existing is not None and existing["compiled_graph_key"] != key:
+                raise _PersistedStateError(
+                    "compiled-graph sidecar is stored under a different key"
                 )
-                if any(existing[field] != record[field] for field in immutable):
-                    raise StorageError(
-                        "worker sidecar disagrees with the selected compiled graph"
-                    )
-                record["stored_at"] = existing["stored_at"]
-                record["arm_token"] = arm_token or existing["arm_token"]
-                if not _allows_verdict(str(existing["verdict"]), verdict):
-                    record["verdict"] = existing["verdict"]
-                if not _allows_sink(str(existing["sink"]), sink):
-                    record["sink"] = existing["sink"]
+            result = engine.import_artifact(key, artifact)
+            if result.outcome == StoreOutcome.DIVERGENT:
+                logger.error(
+                    "compiled-graph-store: divergent bytes for %s were quarantined",
+                    key,
+                )
+                return None
+            if str(result.key) != key:
+                raise StorageError("TCG import returned a different exact key")
+            manifest = cas.load_manifest(result.manifest)
+            if len(manifest.files) != 1:
+                raise StorageError("compiled graph CAS manifest is not one artifact")
+            stored_file = manifest.files[0]
+            record = _merge_record(existing, {
+                "format": _FORMAT,
+                "compiled_graph_key": str(result.key),
+                "family": family,
+                "arm_token": arm_token,
+                "bytes": int(stored_file.size_bytes),
+                "content_digest": str(stored_file.digest),
+                "stored_at": time.time(),
+                "manifest": str(result.manifest),
+                "verdict": verdict,
+                "sink": sink,
+            })
             if not _valid_record(record):
                 raise StorageError("worker sidecar failed its strict schema")
             _write_json_atomic(path, record)
-        if arm_token:
-            note_memo(arm_token, str(result.key), root)
-        return _local(record, root)
+            if arm_token and not note_memo(arm_token, str(result.key), root):
+                raise StorageError("arm memo was not durably persisted")
+        if record["verdict"] == VERDICT_QUARANTINED:
+            return None
+        graph = _resolve_selected(
+            key,
+            record,
+            engine,
+            cas,
+            sidecars_root(root) / ".resolved" / key,
+        )
+        return None if graph is None else _local(record, graph, engine, root)
     except (OSError, QuarantinedArtifact, StorageError, ValueError) as exc:
         logger.warning("compiled-graph-store: could not import %s (%s)", key, exc)
         return None
@@ -432,30 +577,27 @@ def mark(
             if not _valid_record(record):
                 return False
             _write_json_atomic(path, record)
-    except OSError:
+    except (OSError, ValueError):
         return False
     return True
 
 
 def lookup(key: str, root: Optional[Path] = None) -> Optional[LocalCompiledGraph]:
-    try:
-        record = _read_record(sidecar_dir(key, root) / RECORD_NAME)
-    except ValueError:
+    record = _selected_record(key, frozenset({VERDICT_ADMITTED}), root)
+    if record is None:
         return None
-    if (
-        record is None
-        or record["compiled_graph_key"] != key
-        or record["verdict"] != VERDICT_ADMITTED
-    ):
-        return None
-    destination = sidecars_root(root) / ".resolved" / key
     try:
-        graph = _engine(root).resolve(key, destination)
-        if graph is None:
-            return None
-        return _local(record, root)
-    except (OSError, QuarantinedArtifact, StorageError):
-        mark(key, verdict=VERDICT_QUARANTINED, root=root)
+        cas = _cas(root)
+        engine = Engine(cas)
+        graph = _resolve_selected(
+            key,
+            record,
+            engine,
+            cas,
+            sidecars_root(root) / ".resolved" / key,
+        )
+        return None if graph is None else _local(record, graph, engine, root)
+    except (OSError, QuarantinedArtifact, StorageError, ValueError):
         return None
 
 
@@ -470,21 +612,31 @@ def load_runner(
     and replay the declared call contract before invoking the runner.
     """
 
-    if not is_compiled_graph_key(key):
+    record = _selected_record(
+        key,
+        frozenset({VERDICT_UNVERIFIED, VERDICT_ADMITTED}),
+        root,
+    )
+    if record is None:
         return None
-    engine = _engine(root)
-    destination = sidecars_root(root) / ".resolved" / key
-    runner_destination = sidecars_root(root) / ".runners" / key
     try:
-        graph = engine.resolve(key, destination)
+        cas = _cas(root)
+        engine = Engine(cas)
+        graph = _resolve_selected(
+            key,
+            record,
+            engine,
+            cas,
+            sidecars_root(root) / ".resolved" / key,
+        )
         if graph is None:
             return None
+        runner_destination = sidecars_root(root) / ".runners" / key
         runner = engine.runner(key, runner_destination)
         if runner is None or runner.key != key or graph.key != key:
             return None
         return LoadedCompiledGraph(graph, runner)
-    except (OSError, QuarantinedArtifact, StorageError):
-        mark(key, verdict=VERDICT_QUARANTINED, root=root)
+    except (OSError, QuarantinedArtifact, StorageError, ValueError):
         return None
 
 
@@ -512,11 +664,16 @@ def note_memo(arm_token: str, key: str, root: Optional[Path] = None) -> bool:
     ):
         return False
     try:
-        _write_json_atomic(memo_path(arm_token, root), {
-            "format": _FORMAT,
-            "compiled_graph_key": key,
-            "noted_at": time.time(),
-        })
+        path = memo_path(arm_token, root)
+        with _record_lock(path):
+            existing = _read_memo(path)
+            if existing is not None:
+                return str(existing["compiled_graph_key"]) == key
+            _write_json_atomic(path, {
+                "format": _FORMAT,
+                "compiled_graph_key": key,
+                "noted_at": time.time(),
+            })
         return True
     except (OSError, ValueError):
         return False
@@ -526,19 +683,10 @@ def lookup_for_arm(
     arm_token: str, root: Optional[Path] = None,
 ) -> Optional[LocalCompiledGraph]:
     try:
-        value = _read_json(memo_path(arm_token, root))
+        value = _read_memo(memo_path(arm_token, root))
     except (OSError, ValueError):
         return None
-    noted_at = value.get("noted_at") if isinstance(value, dict) else None
-    if (
-        not isinstance(value, dict)
-        or set(value) != {"format", "compiled_graph_key", "noted_at"}
-        or type(value.get("format")) is not int
-        or value["format"] != _FORMAT
-        or not isinstance(value.get("compiled_graph_key"), str)
-        or not is_compiled_graph_key(value["compiled_graph_key"])
-        or not _positive_finite_number(noted_at)
-    ):
+    if value is None:
         return None
     return lookup(value["compiled_graph_key"], root)
 
@@ -572,24 +720,30 @@ def has_graphs(root: Optional[Path] = None) -> bool:
     directory = sidecars_root(root)
     if not directory.is_dir():
         return False
-    return any(
-        path.is_dir()
-        and not path.name.startswith(".")
-        and (record := _read_record(path / RECORD_NAME)) is not None
-        and record["compiled_graph_key"] == path.name
-        for path in directory.iterdir()
-    )
+    for path in directory.iterdir():
+        if not path.is_dir() or path.name.startswith("."):
+            continue
+        try:
+            record = _read_record(path / RECORD_NAME)
+        except (OSError, ValueError):
+            continue
+        if record is not None and record["compiled_graph_key"] == path.name:
+            return True
+    return False
 
 
-def graphs_owed_to_sink(root: Optional[Path] = None) -> list[LocalCompiledGraph]:
+def graphs_owed_to_sink(root: Optional[Path] = None) -> list[OwedCompiledGraph]:
     directory = sidecars_root(root)
     if not directory.is_dir():
         return []
-    rows: list[LocalCompiledGraph] = []
+    rows: list[OwedCompiledGraph] = []
     for path in sorted(directory.iterdir()):
         if not path.is_dir() or path.name.startswith("."):
             continue
-        record = _read_record(path / RECORD_NAME)
+        try:
+            record = _read_record(path / RECORD_NAME)
+        except (OSError, ValueError):
+            continue
         if (
             record is None
             or record["compiled_graph_key"] != path.name
@@ -597,10 +751,13 @@ def graphs_owed_to_sink(root: Optional[Path] = None) -> list[LocalCompiledGraph]
             or record["sink"] != SINK_OWED
         ):
             continue
-        try:
-            rows.append(_local(record, root))
-        except (OSError, QuarantinedArtifact, StorageError):
-            continue
+        rows.append(OwedCompiledGraph(
+            compiled_graph_key=str(record["compiled_graph_key"]),
+            content_digest=str(record["content_digest"]),
+            family=str(record["family"]),
+            arm_token=str(record["arm_token"]),
+            bytes=int(record["bytes"]),
+        ))
     return rows
 
 
@@ -608,37 +765,31 @@ def note_refusal(code: str, detail: str = "", root: Optional[Path] = None) -> bo
     if str(code or "").strip() != UNTRUSTED_REFUSAL_CODE:
         return False
     try:
-        _write_json_atomic(sidecars_root(root) / TRUST_CLASS_NAME, {
-            "format": _FORMAT,
-            "class": TRUST_UNTRUSTED,
-            "code": UNTRUSTED_REFUSAL_CODE,
-            "detail": str(detail or "")[:500],
-            "learned_at": time.time(),
-        })
+        path = sidecars_root(root) / TRUST_CLASS_NAME
+        with _record_lock(path):
+            if _read_trust(path) is not None:
+                return True
+            record = {
+                "format": _FORMAT,
+                "class": TRUST_UNTRUSTED,
+                "code": UNTRUSTED_REFUSAL_CODE,
+                "detail": str(detail or "")[:500],
+                "learned_at": time.time(),
+            }
+            if not _valid_trust(record):
+                return False
+            _write_json_atomic(path, record)
         return True
-    except OSError:
+    except (OSError, ValueError):
         return False
 
 
 def trust_class(root: Optional[Path] = None) -> str:
     try:
-        value = _read_json(sidecars_root(root) / TRUST_CLASS_NAME)
+        value = _read_trust(sidecars_root(root) / TRUST_CLASS_NAME)
     except (OSError, ValueError):
         return ""
-    learned_at = value.get("learned_at") if isinstance(value, dict) else None
-    if (
-        not isinstance(value, dict)
-        or set(value) != {"format", "class", "code", "detail", "learned_at"}
-        or type(value.get("format")) is not int
-        or value["format"] != _FORMAT
-        or value.get("class") != TRUST_UNTRUSTED
-        or value.get("code") != UNTRUSTED_REFUSAL_CODE
-        or not isinstance(value.get("detail"), str)
-        or len(value["detail"]) > 500
-        or not _positive_finite_number(learned_at)
-    ):
-        return ""
-    return TRUST_UNTRUSTED
+    return TRUST_UNTRUSTED if value is not None else ""
 
 
 def keeps_graphs_locally(root: Optional[Path] = None) -> bool:
