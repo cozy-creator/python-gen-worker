@@ -15,12 +15,11 @@ pod had just serialized. So the program is not serialized at all any more:
 this child builds the weight-free pipeline itself, exports its own share, and
 compiles the program it is still holding.
 
-That is not a new capability. ``aot_mint.trace_for_key(compile_now=True)``
-already runs the inductor half off the in-memory program, and ``measure_child``
-(pgw#1134) is a shipped child that does exactly it. What this adds on top is
-PACKAGING — ``aot_mint.pack_graph_classes``, the mint's own tail, lifted out
-in step 2a precisely so a child could call it — and handing the artifact paths
-back.
+The worker now stops at the exported program. ``torch-compiled-graphs`` owns
+graph identity, AOTInductor policy, packaging, HashRepo storage and exact-key
+reuse. The child supplies one ``GraphClassSpec`` and one sealed
+``RuntimeCompatibility`` per class; it does not restate that library's
+metadata or key derivation.
 
 Three things died with the round trip, and none of them is a loss:
 
@@ -60,10 +59,13 @@ import time
 #: monotonic) because the span it closes is measured across two processes.
 MODULE_IMPORT_EPOCH = time.time()
 
+import hashlib
+import json
 import logging
 import os
 import resource
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -267,6 +269,149 @@ def build_pipeline(job: EntryJob) -> Tuple[Any, Any, Any]:
     return pipeline, spec, decl
 
 
+@dataclass(frozen=True)
+class _TCGClassResult:
+    """One TCG result before it is projected onto the existing pool wire."""
+
+    packed: PackedGraphClass
+    compile_s: float
+    reuse_s: float
+    pack_s: float
+
+
+def _graph_class_spec(traced: Any, export_spec: Any) -> Any:
+    """Translate the export-only worker row into TCG's one public spec."""
+    from torch_compiled_graphs import GraphClassSpec
+
+    from . import aot_serve
+
+    if traced.program is None:
+        raise ValueError(f"graph class {traced.name!r} carries no exported program")
+    block = dict(traced.block or {})
+    graph = block.get("graph")
+    if not isinstance(graph, dict):
+        raise ValueError(f"graph class {traced.name!r} carries no graph interface")
+    try:
+        fork = tuple((str(name), value) for name, value in block["fork"])
+        class_dims = tuple((str(name), int(value)) for name, value in block["class_dims"])
+        target = str(block["target"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"graph class {traced.name!r} carries incomplete coordinates: {exc}"
+        ) from exc
+    return GraphClassSpec(
+        graph_class=str(traced.name),
+        target=target,
+        program=traced.program,
+        graph=dict(graph),
+        range_digest=aot_serve.range_digest(block),
+        fork=fork,
+        class_dims=class_dims,
+        strict=bool(export_spec.strict),
+        lora_bucket=int(export_spec.lora_bucket or 0),
+    )
+
+
+def _tcg_runtime() -> Tuple[Any, Any]:
+    """Open TCG on the worker's sole CAS and sealed compiler-content facts."""
+    from torch_compiled_graphs import Engine, RuntimeCompatibility
+
+    from . import compile_cache
+    from .models.cache_paths import open_worker_cas
+
+    runtime = compile_cache.runtime_key()
+    target = str(runtime.get("sm") or "cpu")
+    compatibility = RuntimeCompatibility(
+        target,
+        toolchain=dict(compile_cache.toolchain_digest()),
+    )
+    return Engine(open_worker_cas()), compatibility
+
+
+def _compile_traced_class(
+    traced: Any,
+    export_spec: Any,
+    engine: Any,
+    runtime: Any,
+    *,
+    work: Path,
+    out_dir: Path,
+) -> _TCGClassResult:
+    """Compile/reuse and export exactly one TCG-owned artifact."""
+    spec = _graph_class_spec(traced, export_spec)
+    token = hashlib.sha256(str(traced.name).encode()).hexdigest()[:16]
+    materialized = work / "tcg-materialized" / token
+    started = time.monotonic()
+    ensured = engine.compile(spec, runtime, materialized)
+    elapsed = time.monotonic() - started
+    stored = ensured.compiled_graph
+    key = str(stored.key)
+    metadata = dict(stored.metadata)
+    if metadata.get("compiled_graph_key") != key:
+        raise ValueError(
+            f"TCG result for {traced.name!r} records key "
+            f"{metadata.get('compiled_graph_key')!r}, not selected ref {key!r}"
+        )
+    graph_class = metadata.get("graph_class")
+    if not isinstance(graph_class, dict) or graph_class.get("name") != traced.name:
+        raise ValueError(
+            f"TCG result for {traced.name!r} records the wrong graph_class"
+        )
+    t_pack = time.monotonic()
+    artifact = engine.export_artifact(key, out_dir / f"{key}.tar.gz")
+    pack_s = time.monotonic() - t_pack
+    reused = str(getattr(ensured.outcome, "value", ensured.outcome)) == "reused"
+    return _TCGClassResult(
+        packed=PackedGraphClass(
+            name=str(traced.name),
+            key=key,
+            artifact=str(artifact),
+            metadata=json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+        ),
+        compile_s=0.0 if reused else elapsed,
+        reuse_s=elapsed if reused else 0.0,
+        pack_s=pack_s,
+    )
+
+
+def _compile_and_release(
+    traced: Any,
+    export_spec: Any,
+    engine: Any,
+    runtime: Any,
+    *,
+    work: Path,
+    out_dir: Path,
+) -> _TCGClassResult:
+    try:
+        return _compile_traced_class(
+            traced, export_spec, engine, runtime, work=work, out_dir=out_dir
+        )
+    finally:
+        # One in-flight class is the loss bound. Release even when spec
+        # derivation, admission, compilation, storage or export refuses.
+        traced.release()
+
+
+def _trace_share(
+    aot_mint: Any,
+    pipeline: Any,
+    export_spec: Any,
+    declaration: Any,
+    job: EntryJob,
+) -> Any:
+    """Apply the retry filter before export and request no worker compile."""
+    return aot_mint.trace_for_key(
+        pipeline,
+        export_spec,
+        declaration,
+        share_index=int(job.share_index),
+        share_count=int(job.share_count),
+        compile_now=False,
+        have_classes=tuple(job.have_classes),
+    )
+
+
 def run(job: EntryJob) -> int:
     from . import aot_mint, env_seal
 
@@ -349,84 +494,57 @@ def run(job: EntryJob) -> int:
     # th#1825 spent 1 h 37 m on and pgw#1183 fixed. Packed means ON DISK, so a
     # crash costs the ONE class in flight.
     packed: List[PackedGraphClass] = []
-    class_spans: Dict[str, Dict[str, float]] = {}
     trace_s = 0.0
     compile_s = 0.0
     pack_s = 0.0
     declared = 0
     refusal = ""
-    t_mint = time.monotonic()
+    current_class = job.share
     try:
-        for traced in aot_mint.trace_for_key(
-                pipeline, spec, decl,
-                share_index=int(job.share_index),
-                share_count=int(job.share_count),
-                compile_now=True,
-                inductor_configs=job.inductor_configs,
-                have_classes=tuple(job.have_classes)):
-            if traced.row is None:
-                # `trace_for_key` projects `_MintedEntry` down to a
-                # `TracedClass`; the row is what `pack_graph_classes` needs and
-                # what makes one address space worth having. Absent means the
-                # projection dropped it — refuse rather than pack a class
-                # whose provenance nobody can state.
-                raise aot_mint.MintRefused(
-                    f"graph class {traced.name!r} came back without its "
-                    f"minted row, so it cannot be packed here")
+        engine, runtime = _tcg_runtime()
+        for traced in _trace_share(aot_mint, pipeline, spec, decl, job):
+            current_class = traced.name
             declared = int(traced.declared) or declared
             timings = dict(traced.timings or {})
             row_trace = float(timings.get("export_s", 0.0))
-            row_compile = float(timings.get("compile_s", 0.0))
             trace_s += row_trace
-            compile_s += row_compile
-            spans = {"export_s": round(row_trace, 3),
-                     "compile_s": round(row_compile, 3),
-                     "nodes": float(traced.nodes)}
-            phases = timings.get("phases") or {}
-            if isinstance(phases, dict):
-                spans.update({str(k): float(v) for k, v in phases.items()})
-            class_spans[traced.name] = spans
-
-            t_pack = time.monotonic()
-            result = aot_mint.pack_graph_classes(
-                [traced.row],
-                spec=spec,
+            class_before = aot_compile_spans.phase_snapshot()
+            result = _compile_and_release(
+                traced,
+                spec,
+                engine,
+                runtime,
                 work=Path(job.work),
                 out_dir=Path(job.out_dir),
-                # pgw#917's dispatch-class merge is a WHOLE-declaration
-                # question and this process holds one share of it, so nothing
-                # is aliased here. The parent runs it over every share's keys
-                # (`aot_mint.mint_graph_classes`) — it is the only process
-                # that sees every class.
-                class_aliases={},
-                timings={},
-                t_mint=t_mint,
-                inductor_configs=job.inductor_configs,
-                execution_lane_verdict=job.execution_lane,
-                # This process holds ONE SHARE and cannot state a
-                # declaration-wide coverage label. Empty is the honest answer
-                # and the publish path already treats it as one; the parent
-                # folds the real manifest across every share.
-                manifest="")
-            pack_s += time.monotonic() - t_pack
-            for artifact in result.entries:
-                packed.append(PackedGraphClass(
-                    name=artifact.entry,
-                    key=artifact.key,
-                    artifact=str(artifact.artifact),
-                    metadata=msgspec.json.encode(artifact.metadata).decode(),
-                    spans=class_spans.get(artifact.entry, {})))
-            # The compiled program and its minted row are the largest objects
-            # this process holds and the artifact is already on disk. Dropped
-            # HERE so the child holds one class at a time rather than its
-            # whole share.
-            traced.release()
+            )
+            partition, _overlays, _raw = aot_compile_spans.phase_delta(
+                class_before, aot_compile_spans.phase_snapshot())
+            compile_s += result.compile_s
+            pack_s += result.pack_s
+            spans = {
+                "export_s": round(row_trace, 3),
+                "compile_s": round(result.compile_s, 3),
+                "reuse_s": round(result.reuse_s, 3),
+                "nodes": float(traced.nodes),
+                **{str(k): float(v) for k, v in partition.items()},
+            }
+            packed.append(PackedGraphClass(
+                name=result.packed.name,
+                key=result.packed.key,
+                artifact=result.packed.artifact,
+                metadata=result.packed.metadata,
+                spans=spans,
+            ))
     except aot_mint.MintRefused as exc:
         # NOT a discard. Every class this child already packed is on disk and
         # is named in the report — a share is not all-or-nothing, which is the
         # whole point of the per-graph-class atom. The refusal rides beside
         # them so the parent can say WHICH class stopped the share.
         refusal = str(exc)
+    except Exception as exc:  # noqa: BLE001 — classified before reporting
+        aot_mint.raise_if_device_oom(
+            exc, f"TCG compile of {current_class!r}")
+        refusal = f"TCG refused {type(exc).__name__}: {exc}"
 
     if not declared:
         # A share can legitimately yield NOTHING — every class in it is
@@ -513,6 +631,12 @@ def _span_fields(
     waited = _device_lock_wait_s()
     if waited:
         overlay["device_lock_wait_s"] = waited
+    violations = aot_compile_spans.check(spans)
+    if violations:
+        logger.warning(
+            "aot-compile: child span partition does not close: %s",
+            "; ".join(violations),
+        )
     return {
         "spans": spans,
         "overlays": overlay,
