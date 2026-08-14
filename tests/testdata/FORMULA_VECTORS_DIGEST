@@ -1,0 +1,5 @@
+# sha256 of formula_vectors.json — the shared Tensorhub/python-gen-worker
+# formula grammar, limit and canonicalization corpus (th#1914 / pgw#1236).
+# A corpus change is a coupled cross-repo contract change: PGW lands first,
+# then Tensorhub copies the corpus and this digest verbatim.
+3e9d1cbe2b1e319b0ec86994a3e2809d0073bdfcda508fee141423800d862291

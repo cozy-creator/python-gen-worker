@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -22,9 +24,9 @@ from gen_worker.api.formula import (
     RuntimeFormula,
 )
 
-_DOCUMENT = json.loads(
-    (Path(__file__).parent / "testdata" / "formula_vectors.json").read_text()
-)
+_DEFAULT_CORPUS = Path(__file__).parent / "testdata" / "formula_vectors.json"
+_CORPUS = Path(os.environ.get("FORMULA_VECTOR_CORPUS", _DEFAULT_CORPUS))
+_DOCUMENT = json.loads(_CORPUS.read_text())
 _BASE_LIMITS = FormulaLimits(**_DOCUMENT["limits"])
 
 
@@ -71,3 +73,73 @@ def test_formula_conformance_vector(vector: dict[str, Any]) -> None:
         assert got is None
     else:
         assert got == vector["term_values"]
+
+
+def test_formula_corpus_digest_gate_can_go_red(tmp_path: Path) -> None:
+    corpus = tmp_path / "formula_vectors.json"
+    digest = tmp_path / "FORMULA_VECTORS_DIGEST"
+    corpus.write_bytes((Path(__file__).parent / "testdata" / "formula_vectors.json").read_bytes())
+    digest.write_bytes((Path(__file__).parent / "testdata" / "FORMULA_VECTORS_DIGEST").read_bytes())
+    corpus.write_bytes(corpus.read_bytes() + b"\n")
+
+    got = subprocess.run(
+        [
+            os.fspath(Path(__file__).parents[1] / "scripts" / "check_formula_corpus_digest.py"),
+            "--corpus",
+            os.fspath(corpus),
+            "--digest",
+            os.fspath(digest),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert got.returncode == 1
+    assert "changed without its digest" in got.stdout
+
+
+def test_formula_semantic_fence_can_go_red(tmp_path: Path) -> None:
+    document = json.loads(_DEFAULT_CORPUS.read_text())
+    document["vectors"][0]["term_values"]["x"] = 4
+    corpus = tmp_path / "formula_vectors.json"
+    corpus.write_text(json.dumps(document))
+
+    got = subprocess.run(
+        [
+            "uv",
+            "run",
+            "pytest",
+            "-q",
+            os.fspath(Path(__file__)),
+            "-k",
+            "test_formula_conformance_vector",
+        ],
+        env={**os.environ, "FORMULA_VECTOR_CORPUS": os.fspath(corpus)},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert got.returncode == 1
+    assert "ordinary evaluation" in got.stdout
+    assert "4" in got.stdout
+
+
+def test_formula_peer_drift_gate_can_go_red(tmp_path: Path) -> None:
+    peer = tmp_path / "peer"
+    peer.mkdir()
+    testdata = Path(__file__).parent / "testdata"
+    for name in ("formula_vectors.json", "FORMULA_VECTORS_DIGEST"):
+        (peer / name).write_bytes((testdata / name).read_bytes())
+    (peer / "formula_vectors.json").write_bytes(
+        (peer / "formula_vectors.json").read_bytes() + b"\n"
+    )
+
+    got = subprocess.run(
+        ["bash", os.fspath(Path(__file__).parents[1] / "scripts" / "formula-vector-drift.sh")],
+        env={"PATH": "/usr/bin:/bin", "FORMULA_VECTOR_PEER_DIR": os.fspath(peer)},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert got.returncode == 1
+    assert "formula_vectors.json differs" in got.stderr
