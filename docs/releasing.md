@@ -163,10 +163,54 @@ filesystem order:
 ```bash
 scripts/assemble_changelog.py --check                     # names parse, none empty
 scripts/assemble_changelog.py --version <X.Y.Z> \
-    --headline "**the one thing this cut is about**"      # writes + `git rm`s fragments
+    --headline "**the one thing this cut is about**"      # writes; deletes nothing
 ```
 
+### A cut MARKS fragments consumed, and the TAGS decide which version owns one (pgw#1226)
+
+**What this replaces:** the cut used to `unlink()` every fragment it assembled, and
+it dated every fragment it found to the version being cut. Both halves were wrong
+in the same direction — they trusted the moment the cutter happened to run the
+script.
+
+- **Nothing is deleted at cut time.** The assembler appends
+  `<version>\t<fragment>` rows to `changelog.d/consumed.tsv` and leaves the files
+  alone. Fragments consumed by a release older than the previous one are pruned on
+  a later cut; the ledger row outlives the file, so a re-added fragment can never
+  be re-consumed.
+- **Attribution is derived from `git tag --contains`,** not from what the cutter
+  swept: a fragment belongs to the **earliest `vX.Y.Z` tag whose tree contains it**,
+  and to the version being cut only if no tag contains it.
+
+**The failure this kills, named:** *a fragment sitting in the tagged tree, absent
+from that version's section, silently re-dated onto the next wheel by the next
+cut.* It is not hypothetical — **0.114.3 was tagged with pgw#1244's code in the
+tree and `changelog.d/pgw1244.md` unconsumed**, and under the old tooling 0.115.0
+would have printed that bullet under `## 0.115.0`, pointing readers at a wheel
+that did not contain the change. The fragment is now written into the existing
+`## 0.114.3` section under a one-line *attributed after the cut* note, by the tool,
+with no cutter decision involved.
+
+The corollary the freeze convention kept failing to buy: **a lane fragment that
+merges while your cut is mid-queue is simply the next cut's.** It is in no tag, so
+it cannot be mis-dated, and the cut never deletes it, so it cannot be lost.
+
+Two refusals rather than a wrong answer: the assembler **refuses on a shallow
+repository** (a graft makes `tag --contains` answer about history the checkout does
+not have — the failure recorded in th#1810) and **refuses if no `vX.Y.Z` tag
+exists at all**. `--check` reads no git and stays the cheap `fast gates` guard; it
+now prints each fragment as `pending` or `consumed -> <version>`.
+
+**`--version` with nothing pending for it is not an error** — it is how a
+mis-attribution is repaired without cutting: the older sections are corrected, no
+new section is written, and the tool says so.
+
 ### SWEEP THE FRAGMENTS AGAINST `origin/master`, NOT YOUR CHECKOUT
+
+**pgw#1226 took one half of this off you and left the other.** A fragment that EXISTS and was
+never assembled is now handled by the tool — it is attributed back to the tag whose tree holds it,
+loudly. What is still yours is the half no tool can see: **a merge that never wrote a fragment at
+all.** That is the sweep below, and it is unchanged.
 
 A merge with no fragment is a **silent release note**, and the sweep for one is the cutter's job —
 lanes forget. Do it by listing the range's commits against the fragments **as they exist on the
