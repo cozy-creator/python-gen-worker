@@ -27,6 +27,7 @@ from torch_compiled_graphs.artifact import build_metadata, pack_artifact
 from torch_compiled_graphs.host_isa import _host_requirement
 
 from gen_worker import compiled_graph_store, fleet_cells
+from gen_worker.models.cache_paths import open_worker_cas
 
 
 KEY = "cg-key-v1-" + "1" * 56
@@ -88,8 +89,12 @@ def _elf() -> bytes:
     return bytes(image)
 
 
-def _real_artifact(tmp_path: Path) -> tuple[Path, str]:
-    name = "denoiser/h=64,w=64"
+def _real_artifact(
+    tmp_path: Path,
+    *,
+    name: str = "denoiser/h=64,w=64",
+) -> tuple[Path, str]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     package = tmp_path / "model.pt2"
     wrapper = "AOTInductorModelBase(1, 1, 0, device_str, std::move(cubin_dir), false)"
     with zipfile.ZipFile(package, "w") as archive:
@@ -101,7 +106,7 @@ def _real_artifact(tmp_path: Path) -> tuple[Path, str]:
         "constant_fqns": [],
         "lifted_inputs": [],
         "pytree": {"in": "leaf", "out": "leaf"},
-        "specialization": {},
+        "specialization": {"test_variant": name},
     }
     declaration = GraphClassDeclaration(
         graph_class=name,
@@ -222,6 +227,33 @@ def test_production_root_uses_only_the_canonical_worker_cas(
     assert "GEN_WORKER_LOCAL_COMPILED_GRAPHS_DIR" not in source
 
 
+def test_cas_creation_chmods_only_directories_created_by_this_call(
+    tmp_path: Path,
+) -> None:
+    existing = tmp_path / "operator-owned"
+    existing.mkdir(mode=0o700)
+    root = existing / "new" / "cas"
+    previous_umask = os.umask(0o077)
+    try:
+        cas = open_worker_cas(root)
+    finally:
+        os.umask(previous_umask)
+
+    assert cas.root == root
+    assert stat.S_IMODE(existing.stat().st_mode) == 0o700
+    created = [
+        existing / "new",
+        root,
+        *(root / name for name in ("objects", "refs", "locks", "tmp")),
+    ]
+    assert {stat.S_IMODE(path.stat().st_mode) for path in created} == {0o755}
+
+    preserved = root / "already-there"
+    preserved.mkdir(mode=0o700)
+    open_worker_cas(root)
+    assert stat.S_IMODE(preserved.stat().st_mode) == 0o700
+
+
 def test_same_process_concurrent_atomic_writes_have_unique_temporaries(
     tmp_path: Path,
 ) -> None:
@@ -283,13 +315,24 @@ def test_sidecar_is_readable_by_a_real_unprivileged_process(tmp_path: Path) -> N
     )
     if available.returncode != 0:
         pytest.skip(f"cached {image} image is unavailable")
-    path = _write_record(tmp_path, _record(KEY))
+    os.chmod(tmp_path, 0o755)
+    root = tmp_path / "cas"
+    previous_umask = os.umask(0o077)
+    try:
+        compiled_graph_store._cas(root)
+        path = _write_record(root, _record(KEY))
+    finally:
+        os.umask(previous_umask)
 
+    child_command = (
+        "test -x /worker-cache/cas/locks && "
+        f"cat /worker-cache/{path.relative_to(tmp_path)}"
+    )
     completed = subprocess.run(
         [
             "docker", "run", "--rm", "--user", "65534:65534",
-            "--volume", f"{path.parent}:/sidecar:ro",
-            image, "cat", "/sidecar/record.json",
+            "--volume", f"{tmp_path}:/worker-cache:ro",
+            image, "sh", "-c", child_command,
         ],
         check=False,
         capture_output=True,
@@ -552,7 +595,7 @@ def test_store_never_overwrites_present_invalid_sidecar(
 
     class NoImport:
         def __init__(self, _cas: object) -> None:
-            pass
+            pytest.fail("named nonregular worker state reached TCG")
 
         def import_artifact(self, _key: str, _artifact: Path) -> object:
             pytest.fail("present-invalid worker state mutated TCG")
@@ -563,6 +606,197 @@ def test_store_never_overwrites_present_invalid_sidecar(
         artifact, key=key, family="micro", root=root
     ) is None
     assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("kind", ["dangling", "symlink", "directory", "fifo"])
+def test_store_refuses_any_named_nonregular_sidecar_before_tcg(
+    kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact, key = _real_artifact(tmp_path)
+    root = tmp_path / "cas"
+    path = _record_path(root, key)
+    path.parent.mkdir(parents=True)
+    if kind == "directory":
+        path.mkdir()
+    elif kind == "fifo":
+        os.mkfifo(path)
+    else:
+        target = path.parent / ("missing" if kind == "dangling" else "target.json")
+        if kind == "symlink":
+            target.write_text(json.dumps(_record(key)))
+        path.symlink_to(target)
+
+    class NoImport:
+        def __init__(self, _cas: object) -> None:
+            pytest.fail("raced worker state reached TCG")
+
+        def import_artifact(self, _key: str, _artifact: Path) -> object:
+            pytest.fail("named nonregular worker state mutated TCG")
+
+    monkeypatch.setattr(compiled_graph_store, "Engine", NoImport)
+    assert compiled_graph_store.store(
+        artifact, key=key, family="micro", root=root
+    ) is None
+
+
+@pytest.mark.parametrize("replacement_kind", ["regular", "removed"])
+def test_persisted_state_refuses_a_regular_file_replaced_during_open(
+    replacement_kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact, key = _real_artifact(tmp_path)
+    root = tmp_path / "cas"
+    path = _record_path(root, key)
+    compiled_graph_store._write_json_atomic(path, _record(key))
+    replacement = path.with_name("replacement.json")
+    replacement.write_text(json.dumps(_record(key)))
+    real_open = os.open
+    replaced = False
+
+    def replacing_open(
+        opened: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal replaced
+        if Path(os.fsdecode(opened)) == path and not replaced:
+            replaced = True
+            if replacement_kind == "regular":
+                os.replace(replacement, path)
+            else:
+                path.unlink()
+        return real_open(opened, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", replacing_open)
+
+    class NoImport:
+        def __init__(self, _cas: object) -> None:
+            pytest.fail("named nonregular memo reached TCG")
+
+        def import_artifact(self, _key: str, _artifact: Path) -> object:
+            pytest.fail("raced worker state mutated TCG")
+
+    monkeypatch.setattr(compiled_graph_store, "Engine", NoImport)
+    assert compiled_graph_store.store(
+        artifact, key=key, family="micro", root=root
+    ) is None
+    assert replaced
+
+
+def test_fifo_state_is_refused_without_blocking(tmp_path: Path) -> None:
+    path = _record_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    os.mkfifo(path)
+    started = time.monotonic()
+    with pytest.raises(compiled_graph_store._PersistedStateError):
+        compiled_graph_store._read_record(path)
+    assert time.monotonic() - started < 1.0
+
+
+@pytest.mark.parametrize(
+    ("reader", "payload"),
+    [
+        (
+            compiled_graph_store._read_memo,
+            {"format": 1, "compiled_graph_key": KEY, "noted_at": 1.0},
+        ),
+        (
+            compiled_graph_store._read_trust,
+            {
+                "format": 1,
+                "class": compiled_graph_store.TRUST_UNTRUSTED,
+                "code": compiled_graph_store.UNTRUSTED_REFUSAL_CODE,
+                "detail": "",
+                "learned_at": 1.0,
+            },
+        ),
+    ],
+)
+def test_memo_and_trust_state_must_be_regular_files(
+    reader: Any,
+    payload: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target.json"
+    target.write_text(json.dumps(payload))
+    path = tmp_path / "state.json"
+    path.symlink_to(target)
+    with pytest.raises(compiled_graph_store._PersistedStateError):
+        reader(path)
+
+
+def test_named_nonregular_memo_refuses_store_before_tcg(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact, key = _real_artifact(tmp_path)
+    root = tmp_path / "cas"
+    token = "arm-v1-symlink"
+    path = compiled_graph_store.memo_path(token, root)
+    path.parent.mkdir(parents=True)
+    target = path.with_name("target.json")
+    target.write_text(json.dumps({
+        "format": 1,
+        "compiled_graph_key": key,
+        "noted_at": 1.0,
+    }))
+    path.symlink_to(target)
+
+    class NoImport:
+        def __init__(self, _cas: object) -> None:
+            pass
+
+        def import_artifact(self, _key: str, _artifact: Path) -> object:
+            pytest.fail("named nonregular memo mutated TCG")
+
+    monkeypatch.setattr(compiled_graph_store, "Engine", NoImport)
+    assert compiled_graph_store.store(
+        artifact,
+        key=key,
+        family="micro",
+        arm_token=token,
+        root=root,
+    ) is None
+
+
+def test_named_nonregular_staged_record_refuses_store_before_tcg(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact, key = _real_artifact(tmp_path)
+    root = tmp_path / "cas"
+    live = _record_path(root, key)
+    staged = live.with_name(".record.json.pending")
+    staged.parent.mkdir(parents=True)
+    target = staged.with_name("target.json")
+    target.write_text(json.dumps(_record(key)))
+    staged.symlink_to(target)
+
+    class NoEngine:
+        def __init__(self, _cas: object) -> None:
+            pytest.fail("named nonregular staged record reached TCG")
+
+    monkeypatch.setattr(compiled_graph_store, "Engine", NoEngine)
+    assert compiled_graph_store.store(
+        artifact, key=key, family="micro", root=root
+    ) is None
+
+
+def test_device_state_is_rejected_by_metadata_without_opening(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        os,
+        "open",
+        lambda *_args, **_kwargs: pytest.fail("device state was opened"),
+    )
+    with pytest.raises(compiled_graph_store._PersistedStateError):
+        compiled_graph_store._read_record(Path("/dev/null"))
 
 
 def test_store_refuses_contextually_wrong_key_before_tcg_mutation(
@@ -707,14 +941,38 @@ def test_store_requires_arm_memo_and_preserves_all_aliases(
 ) -> None:
     artifact, key = _real_artifact(tmp_path)
     refused_root = tmp_path / "refused"
-    monkeypatch.setattr(compiled_graph_store, "note_memo", lambda *_args: False)
+
+    def fail_memo_write(_path: Path, _key: str) -> bool:
+        raise OSError("injected memo write failure")
+
+    monkeypatch.setattr(compiled_graph_store, "_note_memo_locked", fail_memo_write)
     assert compiled_graph_store.store(
         artifact,
         key=key,
         family="micro",
         arm_token="arm-v1-refused",
+        sink=compiled_graph_store.SINK_OWED,
         root=refused_root,
     ) is None
+    assert compiled_graph_store.lookup(key, refused_root) is None
+    assert compiled_graph_store.graphs_owed_to_sink(refused_root) == []
+
+    restart_code = (
+        "from pathlib import Path; "
+        "from gen_worker import compiled_graph_store as s; "
+        f"root=Path({str(refused_root)!r}); key={key!r}; "
+        "print(int(s.lookup(key, root) is None), len(s.graphs_owed_to_sink(root)))"
+    )
+    restarted = subprocess.run(
+        [
+            sys.executable,
+            "-c", restart_code,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert restarted.stdout.strip() == "1 0"
 
     monkeypatch.undo()
     root = tmp_path / "aliases"
@@ -727,11 +985,178 @@ def test_store_requires_arm_memo_and_preserves_all_aliases(
     assert record is not None and record["arm_token"] == "arm-v1-first"
 
 
+def test_real_memo_collision_refuses_before_tcg_and_publishes_no_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact, key = _real_artifact(tmp_path)
+    root = tmp_path / "cas"
+    token = "arm-v1-collision"
+    compiled_graph_store._write_json_atomic(
+        _record_path(root, OTHER_KEY), _record(OTHER_KEY)
+    )
+    assert compiled_graph_store.note_memo(token, OTHER_KEY, root)
+
+    class NoEngine:
+        def __init__(self, _cas: object) -> None:
+            pytest.fail("memo collision reached TCG")
+
+    monkeypatch.setattr(compiled_graph_store, "Engine", NoEngine)
+    assert compiled_graph_store.store(
+        artifact,
+        key=key,
+        family="micro",
+        arm_token=token,
+        sink=compiled_graph_store.SINK_OWED,
+        root=root,
+    ) is None
+    assert not _record_path(root, key).exists()
+    assert not _record_path(root, key).with_name(".record.json.pending").exists()
+    assert compiled_graph_store.lookup(key, root) is None
+    assert compiled_graph_store.graphs_owed_to_sink(root) == []
+    assert json.loads(
+        compiled_graph_store.memo_path(token, root).read_text()
+    )["compiled_graph_key"] == OTHER_KEY
+
+
+def test_alias_commit_failure_is_invisible_after_restart_and_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact, key = _real_artifact(tmp_path)
+    root = tmp_path / "cas"
+    token = "arm-v1-retry"
+
+    def fail_install(_staged: Path, _destination: Path) -> None:
+        raise OSError("injected commit failure")
+
+    monkeypatch.setattr(compiled_graph_store, "_install_staged_record", fail_install)
+    assert compiled_graph_store.store(
+        artifact,
+        key=key,
+        family="micro",
+        arm_token=token,
+        sink=compiled_graph_store.SINK_OWED,
+        root=root,
+    ) is None
+    assert compiled_graph_store.lookup(key, root) is None
+    assert compiled_graph_store.lookup_for_arm(token, root) is None
+    assert compiled_graph_store.graphs_owed_to_sink(root) == []
+
+    restart_code = (
+        "from pathlib import Path; "
+        "from gen_worker import compiled_graph_store as s; "
+        f"root=Path({str(root)!r}); key={key!r}; token={token!r}; "
+        "print(int(s.lookup(key, root) is None), "
+        "int(s.lookup_for_arm(token, root) is None), "
+        "len(s.graphs_owed_to_sink(root)))"
+    )
+    restarted = subprocess.run(
+        [
+            sys.executable,
+            "-c", restart_code,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert restarted.stdout.strip() == "1 1 0"
+
+    monkeypatch.undo()
+    assert compiled_graph_store.store(
+        artifact,
+        key=key,
+        family="micro",
+        arm_token=token,
+        sink=compiled_graph_store.SINK_OWED,
+        root=root,
+    ) is not None
+    assert compiled_graph_store.lookup_for_arm(token, root) is not None
+    assert [
+        row.compiled_graph_key
+        for row in compiled_graph_store.graphs_owed_to_sink(root)
+    ] == [key]
+
+
+def test_failed_new_alias_does_not_apply_a_visible_record_transition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact, key = _real_artifact(tmp_path)
+    root = tmp_path / "cas"
+    assert compiled_graph_store.store(
+        artifact,
+        key=key,
+        family="micro",
+        arm_token="arm-v1-existing",
+        root=root,
+    ) is not None
+    record_path = _record_path(root, key)
+    before = record_path.read_bytes()
+    monkeypatch.setattr(
+        compiled_graph_store, "_note_memo_locked", lambda *_args: False
+    )
+
+    assert compiled_graph_store.store(
+        artifact,
+        key=key,
+        family="micro",
+        arm_token="arm-v1-new",
+        sink=compiled_graph_store.SINK_OWED,
+        root=root,
+    ) is None
+    assert record_path.read_bytes() == before
+    assert compiled_graph_store.graphs_owed_to_sink(root) == []
+
+
+def test_concurrent_alias_collision_publishes_only_the_memo_winner(
+    tmp_path: Path,
+) -> None:
+    first_artifact, first_key = _real_artifact(
+        tmp_path / "first", name="denoiser/h=64,w=64"
+    )
+    second_artifact, second_key = _real_artifact(
+        tmp_path / "second", name="denoiser/h=128,w=128"
+    )
+    assert first_key != second_key
+    root = tmp_path / "cas"
+    token = "arm-v1-collision"
+
+    def persist(artifact: Path, key: str) -> tuple[str, bool]:
+        stored = compiled_graph_store.store(
+            artifact,
+            key=key,
+            family="micro",
+            arm_token=token,
+            sink=compiled_graph_store.SINK_OWED,
+            root=root,
+        )
+        return key, stored is not None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = dict(pool.map(lambda row: persist(*row), [
+            (first_artifact, first_key),
+            (second_artifact, second_key),
+        ]))
+
+    assert sum(outcomes.values()) == 1
+    winner = next(key for key, stored in outcomes.items() if stored)
+    loser = next(key for key, stored in outcomes.items() if not stored)
+    assert compiled_graph_store.lookup_for_arm(token, root) is not None
+    assert compiled_graph_store.lookup(winner, root) is not None
+    assert compiled_graph_store.lookup(loser, root) is None
+    assert [row.compiled_graph_key for row in compiled_graph_store.graphs_owed_to_sink(root)] == [winner]
+
+
 @pytest.mark.parametrize("invalid", [False, True])
 def test_arm_memo_collision_or_invalid_state_is_never_overwritten(
     invalid: bool,
     tmp_path: Path,
 ) -> None:
+    _write_record(tmp_path, _record(KEY))
+    compiled_graph_store._write_json_atomic(
+        _record_path(tmp_path, OTHER_KEY), _record(OTHER_KEY)
+    )
     path = compiled_graph_store.memo_path("arm-v1-alias", tmp_path)
     if invalid:
         path.parent.mkdir(parents=True)
@@ -745,6 +1170,14 @@ def test_arm_memo_collision_or_invalid_state_is_never_overwritten(
         "arm-v1-alias", OTHER_KEY, tmp_path
     )
     assert path.read_bytes() == original
+
+
+def test_arm_memo_cannot_be_orphaned_without_live_or_staged_state(
+    tmp_path: Path,
+) -> None:
+    token = "arm-v1-orphan"
+    assert not compiled_graph_store.note_memo(token, KEY, tmp_path)
+    assert not compiled_graph_store.memo_path(token, tmp_path).exists()
 
 
 def test_duplicate_trust_state_is_never_overwritten(tmp_path: Path) -> None:

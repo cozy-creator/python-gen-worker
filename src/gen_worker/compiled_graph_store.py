@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import os
+import stat
 import tempfile
 import time
 from collections.abc import Callable, Iterator
@@ -41,6 +42,7 @@ SIDECARS_DIRNAME = "aot-compiled-graphs"
 MEMO_DIRNAME = ".memo"
 EXPORTS_DIRNAME = ".exports"
 RECORD_NAME = "record.json"
+_PENDING_RECORD_NAME = ".record.json.pending"
 TRUST_CLASS_NAME = "trust-class.json"
 
 UNTRUSTED_REFUSAL_CODE = "compiled_graph_publish_untrusted_tier"
@@ -166,6 +168,10 @@ class _PersistedStateError(ValueError):
     """A named state file exists but is not one value this worker may replace."""
 
 
+class _PersistedStateAbsent(FileNotFoundError):
+    """The state name was absent at its initial metadata lookup."""
+
+
 def _fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
@@ -248,7 +254,41 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _read_json(path: Path) -> Any:
-    with path.open("rb") as source:
+    try:
+        discovered = path.lstat()
+    except FileNotFoundError as exc:
+        raise _PersistedStateAbsent(path) from exc
+    if not stat.S_ISREG(discovered.st_mode):
+        raise ValueError(f"persisted state is not a regular file: {path}")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    if not getattr(os, "O_PATH", 0):
+        flags |= getattr(os, "O_NONBLOCK", 0)
+    descriptor = os.open(path, flags | getattr(os, "O_PATH", 0))
+    try:
+        opened = os.fstat(descriptor)
+        discovered_identity = (discovered.st_dev, discovered.st_ino)
+        opened_identity = (opened.st_dev, opened.st_ino)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened_identity != discovered_identity
+        ):
+            raise ValueError(f"persisted state changed while opening: {path}")
+        if getattr(os, "O_PATH", 0):
+            reader = os.open(
+                f"/proc/self/fd/{descriptor}",
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+            )
+        else:
+            reader = descriptor
+            descriptor = -1
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    with os.fdopen(reader, "rb") as source:
         encoded = source.read(_MAX_JSON_BYTES + 1)
     if len(encoded) > _MAX_JSON_BYTES:
         raise ValueError(f"persisted JSON exceeds {_MAX_JSON_BYTES} bytes")
@@ -363,7 +403,7 @@ def _read_state(
 ) -> Optional[dict[str, Any]]:
     try:
         value = _read_json(path)
-    except FileNotFoundError:
+    except _PersistedStateAbsent:
         return None
     except (OSError, ValueError) as exc:
         raise _PersistedStateError(f"invalid persisted {label} {path}: {exc}") from exc
@@ -468,6 +508,42 @@ def _merge_record(
     return candidate
 
 
+def _memo_preflight(arm_token: str, key: str, root: Path | None) -> None:
+    if not arm_token:
+        return
+    memo = _read_memo(memo_path(arm_token, root))
+    if memo is not None and memo["compiled_graph_key"] != key:
+        raise StorageError("arm memo already names a different compiled graph")
+
+
+def _install_staged_record(staged: Path, destination: Path) -> None:
+    """Publish a durable staged row without replacing any named state."""
+
+    os.link(staged, destination, follow_symlinks=False)
+    try:
+        _fsync_directory(destination.parent)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            destination.unlink()
+            _fsync_directory(destination.parent)
+        raise
+    with contextlib.suppress(OSError):
+        staged.unlink()
+        _fsync_directory(destination.parent)
+
+
+def _note_memo_locked(path: Path, key: str) -> bool:
+    existing = _read_memo(path)
+    if existing is not None:
+        return str(existing["compiled_graph_key"]) == key
+    _write_json_atomic(path, {
+        "format": _FORMAT,
+        "compiled_graph_key": key,
+        "noted_at": time.time(),
+    })
+    return True
+
+
 def store(
     artifact: Path,
     *,
@@ -490,18 +566,36 @@ def store(
         logger.warning("compiled-graph-store: invalid worker sidecar input")
         return None
     try:
-        cas = _cas(root)
-        engine = Engine(cas)
         path = sidecar_dir(key, root) / RECORD_NAME
+        staged_path = path.with_name(_PENDING_RECORD_NAME)
         with _record_lock(path):
             # Present-invalid is an operator fact, never permission to replace
             # it. Read it before importing so corrupt policy state cannot
             # mutate TCG as a side effect of a refused worker operation.
             existing = _read_record(path)
+            staged = _read_record(staged_path)
             if existing is not None and existing["compiled_graph_key"] != key:
                 raise _PersistedStateError(
                     "compiled-graph sidecar is stored under a different key"
                 )
+            if staged is not None and staged["compiled_graph_key"] != key:
+                raise _PersistedStateError(
+                    "staged compiled-graph sidecar is stored under a different key"
+                )
+            if existing is not None and staged is not None:
+                if staged != existing:
+                    raise _PersistedStateError(
+                        "live and staged compiled-graph sidecars disagree"
+                    )
+                staged_path.unlink()
+                _fsync_directory(staged_path.parent)
+                staged = None
+            basis = existing if existing is not None else staged
+            _memo_preflight(arm_token, key, root)
+            if basis is not None:
+                _memo_preflight(str(basis["arm_token"]), key, root)
+            cas = _cas(root)
+            engine = Engine(cas)
             result = engine.import_artifact(key, artifact)
             if result.outcome == StoreOutcome.DIVERGENT:
                 logger.error(
@@ -515,7 +609,7 @@ def store(
             if len(manifest.files) != 1:
                 raise StorageError("compiled graph CAS manifest is not one artifact")
             stored_file = manifest.files[0]
-            record = _merge_record(existing, {
+            record = _merge_record(basis, {
                 "format": _FORMAT,
                 "compiled_graph_key": str(result.key),
                 "family": family,
@@ -529,9 +623,34 @@ def store(
             })
             if not _valid_record(record):
                 raise StorageError("worker sidecar failed its strict schema")
-            _write_json_atomic(path, record)
-            if arm_token and not note_memo(arm_token, str(result.key), root):
-                raise StorageError("arm memo was not durably persisted")
+            if record["verdict"] == VERDICT_QUARANTINED:
+                return None
+            if existing is not None:
+                # A new alias may safely precede the state update because it
+                # already resolves to this visible exact-key record. If alias
+                # persistence fails, the old record remains byte-for-byte.
+                if arm_token:
+                    alias_path = memo_path(arm_token, root)
+                    with _record_lock(alias_path):
+                        if not _note_memo_locked(alias_path, str(result.key)):
+                            raise StorageError("arm memo was not durably persisted")
+                        _write_json_atomic(path, record)
+                else:
+                    _write_json_atomic(path, record)
+            else:
+                # Stage the complete row under a non-selectable name. Alias
+                # registration may fail or the process may die without ever
+                # exposing it. The final hard-link is a no-replace commit: any
+                # named record that raced us wins and is never overwritten.
+                _write_json_atomic(staged_path, record)
+                if record["arm_token"]:
+                    alias_path = memo_path(str(record["arm_token"]), root)
+                    with _record_lock(alias_path):
+                        if not _note_memo_locked(alias_path, str(result.key)):
+                            raise StorageError("arm memo was not durably persisted")
+                        _install_staged_record(staged_path, path)
+                else:
+                    _install_staged_record(staged_path, path)
         if record["verdict"] == VERDICT_QUARANTINED:
             return None
         graph = _resolve_selected(
@@ -664,17 +783,19 @@ def note_memo(arm_token: str, key: str, root: Optional[Path] = None) -> bool:
     ):
         return False
     try:
+        directory = sidecar_dir(key, root)
+        record = _read_record(directory / RECORD_NAME)
+        if record is None:
+            record = _read_record(directory / _PENDING_RECORD_NAME)
+        if (
+            record is None
+            or record["compiled_graph_key"] != key
+            or record["verdict"] == VERDICT_QUARANTINED
+        ):
+            return False
         path = memo_path(arm_token, root)
         with _record_lock(path):
-            existing = _read_memo(path)
-            if existing is not None:
-                return str(existing["compiled_graph_key"]) == key
-            _write_json_atomic(path, {
-                "format": _FORMAT,
-                "compiled_graph_key": key,
-                "noted_at": time.time(),
-            })
-        return True
+            return _note_memo_locked(path, key)
     except (OSError, ValueError):
         return False
 
@@ -697,14 +818,15 @@ def sweep_superseded_memos(scheme: str, root: Optional[Path] = None) -> int:
     if len(current) < 2 or not directory.is_dir():
         return 0
     removed = 0
-    for path in directory.glob("*.json"):
-        if path.name.startswith(current):
-            continue
-        try:
-            path.unlink()
-            removed += 1
-        except OSError:
-            pass
+    with _record_lock(directory / ".sweep"):
+        for path in directory.glob("*.json"):
+            if path.name.startswith(current):
+                continue
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                pass
     return removed
 
 

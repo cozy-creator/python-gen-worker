@@ -11,6 +11,48 @@ _STANDALONE = Settings()
 
 
 TENSORHUB_CACHE_DIR = "/tmp/tensorhub-cache"
+_CAS_DIRECTORIES = ("objects", "refs", "locks", "tmp")
+
+
+def _mkdir_traversable_if_missing(path: Path) -> None:
+    """Create exactly one CAS-owned directory with child-traversable mode.
+
+    ``mkdir(mode=...)`` is still masked by the process umask. The explicit
+    ``fchmod`` therefore applies only when this call won creation; pre-existing
+    configured parents and stores retain their operator-owned permissions.
+    """
+
+    try:
+        path.mkdir()
+    except FileExistsError:
+        if not path.is_dir():
+            raise NotADirectoryError(path)
+        return
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        os.fchmod(descriptor, 0o755)
+    finally:
+        os.close(descriptor)
+
+
+def _prepare_cas_directories(root: Path) -> None:
+    missing: list[Path] = []
+    cursor = root
+    while not cursor.exists():
+        missing.append(cursor)
+        cursor = cursor.parent
+    if not cursor.is_dir():
+        raise NotADirectoryError(cursor)
+    for directory in reversed(missing):
+        _mkdir_traversable_if_missing(directory)
+    for name in _CAS_DIRECTORIES:
+        _mkdir_traversable_if_missing(root / name)
 
 
 def tensorhub_cache_dir() -> Path:
@@ -46,7 +88,9 @@ def open_worker_cas(root: Path | None = None) -> LocalCAS:
     every path rather than inventing a private CAS subdirectory.
     """
 
-    return LocalCAS(tensorhub_cas_dir() if root is None else Path(root))
+    cas_root = tensorhub_cas_dir() if root is None else Path(root)
+    _prepare_cas_directories(cas_root)
+    return LocalCAS(cas_root)
 
 
 def tensorhub_fill_source_dir() -> Path | None:
