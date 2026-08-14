@@ -12,8 +12,12 @@ tag that must be written explicitly and round-trips stamped.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -25,6 +29,7 @@ from gen_worker.models.refs import (
 )
 
 VECTORS_PATH = Path(__file__).parent / "testdata" / "ref_grammar_vectors.json"
+REF_DIGEST_PATH = Path(__file__).parent / "testdata" / "REF_GRAMMAR_DIGEST"
 _DOC = json.loads(VECTORS_PATH.read_text())
 _VECTORS = _DOC["vectors"]
 
@@ -34,6 +39,55 @@ _ERR = [v for v in _VECTORS if v.get("error")]
 
 def _id(v: dict) -> str:
     return v["ref"] or "<empty>"
+
+
+def _contract_paths() -> tuple[Path, Path]:
+    return (
+        Path(os.environ.get("REF_GRAMMAR_VECTOR_FILE", VECTORS_PATH)),
+        Path(os.environ.get("REF_GRAMMAR_DIGEST_FILE", REF_DIGEST_PATH)),
+    )
+
+
+def _recorded_digest(path: Path) -> str:
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            return line.split()[0]
+    return ""
+
+
+def test_ref_grammar_corpus_digest_th1914() -> None:
+    corpus, digest_file = _contract_paths()
+    actual = hashlib.sha256(corpus.read_bytes()).hexdigest()
+    recorded = _recorded_digest(digest_file)
+    assert recorded == actual, (
+        "ref_grammar_vectors.json changed without its independent digest: "
+        f"recorded={recorded!r}, actual={actual}"
+    )
+
+
+def test_ref_grammar_digest_gate_can_go_red_th1914(tmp_path: Path) -> None:
+    candidate = tmp_path / "ref_grammar_vectors.json"
+    candidate.write_bytes(VECTORS_PATH.read_bytes() + b"\n")
+    env = os.environ.copy()
+    env["REF_GRAMMAR_VECTOR_FILE"] = str(candidate)
+    env["REF_GRAMMAR_DIGEST_FILE"] = str(REF_DIGEST_PATH)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            f"{Path(__file__).resolve()}::test_ref_grammar_corpus_digest_th1914",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "changed without its independent digest" in proc.stdout + proc.stderr
 
 
 @pytest.mark.parametrize("vec", _OK, ids=[_id(v) for v in _OK])
