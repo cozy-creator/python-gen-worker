@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
-from gen_worker import compile_cache, fleet_cells, mint_delegate
+from gen_worker import compile_cache, fleet_cells, mint_supervisor
 from gen_worker.api.decorators import Compile, Dim, GraphClass, Input
 from gen_worker.api.export_contract import (
     register_export_declaration,
@@ -121,7 +121,7 @@ def _events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
         seen.append((kind, phase, detail))
 
     monkeypatch.setattr(fleet_cells.activity_mod, "emit_event", _sink)
-    monkeypatch.setattr(mint_delegate.activity_mod, "emit_event", _sink)
+    monkeypatch.setattr(mint_supervisor.activity_mod, "emit_event", _sink)
     return seen
 
 
@@ -291,20 +291,20 @@ def test_delegation_declines_name_their_TRUE_cause(
 def test_mint_delegate_names_its_own_refusals(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert mint_delegate.delegation_refusal() == ""
+    assert mint_supervisor.delegation_refusal() == ""
     # eager-first is unconditional, so setting the deleted name is a
     # no-op rather than a second refusal. Asserted, not assumed — a deletion
     # that leaves a live reader somewhere else looks exactly like this test
     # passing for the wrong reason.
     monkeypatch.setenv("GEN_WORKER_EAGER_FIRST_BOOT", "0")
-    assert mint_delegate.delegation_refusal() == ""
-    assert not hasattr(mint_delegate, "REFUSAL_EAGER_FIRST_DISABLED")
+    assert mint_supervisor.delegation_refusal() == ""
+    assert not hasattr(mint_supervisor, "REFUSAL_EAGER_FIRST_DISABLED")
     # And the same is now true of the in-process switch — the WORKER
     # half of the decision can no longer refuse anything, because there is no
     # in-process mint shape to select.
     monkeypatch.setenv("GEN_WORKER_MINT_IN_PROCESS", "1")
-    assert mint_delegate.delegation_refusal() == ""
-    assert not hasattr(mint_delegate, "REFUSAL_IN_PROCESS_FORCED")
+    assert mint_supervisor.delegation_refusal() == ""
+    assert not hasattr(mint_supervisor, "REFUSAL_IN_PROCESS_FORCED")
 
 
 # ---------------------------------------------------------------------------

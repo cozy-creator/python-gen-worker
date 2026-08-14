@@ -28,7 +28,7 @@ from typing import Any, Dict
 
 import pytest
 
-from gen_worker import mint_delegate, mint_workers
+from gen_worker import mint_supervisor, mint_workers
 
 
 @pytest.fixture(autouse=True)
@@ -189,7 +189,7 @@ def test_a_FAILED_mint_leaves_a_bank_row() -> None:
     killed = _Outcome(report=None, partial=_phases(rows))
     assert killed.report is None, "a killed child writes no report — only a snapshot"
 
-    banked = mint_delegate._bank_device_peaks(
+    banked = mint_supervisor._bank_device_peaks(
         killed.partial_phases, weight_lane="w8a8")
 
     assert banked == 1, "a killed mint's snapshot must still bank"
@@ -204,7 +204,7 @@ def test_a_mint_that_REACHED_a_terminus_banks_from_its_report() -> None:
     rows = {"unet": {"allocated_bytes": 1_500, "reserved_bytes": 2_500}}
     refused = _Outcome(report=_Report(_phases(rows)), partial={})
 
-    banked = mint_delegate._bank_device_peaks(
+    banked = mint_supervisor._bank_device_peaks(
         refused.report.mint_phases, weight_lane="w8a8")
 
     assert banked == 1
@@ -226,7 +226,7 @@ def test_the_HUB_row_and_the_LOCAL_row_are_the_same_bytes() -> None:
     }
     phases = _phases(rows)
 
-    banked = mint_delegate._bank_device_peaks(phases, weight_lane="w8a8")
+    banked = mint_supervisor._bank_device_peaks(phases, weight_lane="w8a8")
     assert banked == 2
 
     # What the hub receives, verbatim out of the same table.
@@ -247,8 +247,8 @@ def test_the_HUB_row_and_the_LOCAL_row_are_the_same_bytes() -> None:
 def test_a_table_with_no_device_rows_banks_nothing_and_says_so() -> None:
     """"No rows" and "banked nothing" must be distinguishable — the same reason
     `entry_device_peak` returns None rather than a zero."""
-    assert mint_delegate._bank_device_peaks({}, weight_lane="w8a8") == 0
-    assert mint_delegate._bank_device_peaks(
+    assert mint_supervisor._bank_device_peaks({}, weight_lane="w8a8") == 0
+    assert mint_supervisor._bank_device_peaks(
         {"pool": {"peak_child_rss_bytes": 5}}, weight_lane="w8a8") == 0
     assert mint_workers.device_peak_rows() == {}
 
@@ -258,7 +258,7 @@ def test_a_malformed_table_never_costs_a_mint() -> None:
     must not add a second failure to the one being reported."""
     for junk in (None, {"pool": None}, {"pool": {"entry_device_peaks": "no"}},
                  {"pool": {"entry_device_peaks": {"unet": "no"}}}):
-        assert mint_delegate._bank_device_peaks(junk, weight_lane="w") == 0
+        assert mint_supervisor._bank_device_peaks(junk, weight_lane="w") == 0
 
 
 def test_the_parent_supplies_the_LANE_because_the_child_does_not_state_it() -> None:
@@ -269,7 +269,7 @@ def test_the_parent_supplies_the_LANE_because_the_child_does_not_state_it() -> N
     rows = {"unet": {"allocated_bytes": 10, "reserved_bytes": 20}}
     assert "weight_lane" not in _phases(rows)["pool"]["device_peak_provenance"]
 
-    mint_delegate._bank_device_peaks(_phases(rows), weight_lane="bf16")
+    mint_supervisor._bank_device_peaks(_phases(rows), weight_lane="bf16")
 
     assert mint_workers.entry_device_peak(_key("unet", weight_lane="bf16")) \
         is not None

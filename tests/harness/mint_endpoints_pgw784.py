@@ -3,7 +3,7 @@
 They exist to put a MINT on a real worker's real event loop, two ways, so the
 same instrumentation can measure both:
 
-* ``mint-out-of-process`` spawns the mint child exactly as ``mint_delegate``
+* ``mint-out-of-process`` spawns the mint child exactly as ``mint_supervisor``
   does and returns immediately — the shape pgw#784 ships;
 * ``mint-in-process`` does the equivalent work on the worker's own loop — the
   shape th#1299 died of, kept reachable ONLY so the detector can be calibrated

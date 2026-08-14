@@ -1167,7 +1167,7 @@ def resume_owed_publishes(
 
 
 #: Typed PIPELINE-side refusals of out-of-process minting (pgw#813). The
-#: operator-side half lives in ``mint_delegate.delegation_refusal``.
+#: operator-side half lives in ``mint_supervisor.delegation_refusal``.
 REFUSAL_NO_EAGER_TIER = "no_eager_tier"
 
 
@@ -1510,9 +1510,9 @@ def _arming_policy(
         # here means the executor's call is unchanged, every existing arming
         # double keeps working, and there is exactly one place the decision
         # lives. The parameter stays for tests that need to force either shape.
-        from . import mint_delegate
+        from . import mint_supervisor
 
-        delegate_refusal = mint_delegate.delegation_refusal()
+        delegate_refusal = mint_supervisor.delegation_refusal()
         delegate = not delegate_refusal
     elif not delegate:
         delegate_refusal = "caller_forced_in_process"

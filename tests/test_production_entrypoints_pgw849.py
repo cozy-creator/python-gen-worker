@@ -55,10 +55,9 @@ LADDERS: Dict[str, Tuple[str, ...]] = {
     "mint": (
         "gen_worker.executor.Executor.ensure_setup",
         "gen_worker.executor.Executor._background_mint",
-        "gen_worker.executor.Executor._background_mint_run",
-        "gen_worker.executor.Executor._delegated_mint_run",
-        "gen_worker.mint_delegate.build_cell",
-        "gen_worker.mint_process.run_mint",
+        "gen_worker.executor.Executor._supervise_mint",
+        "gen_worker.mint_supervisor.supervise",
+        "gen_worker.aot_mint.mint_graph_classes",
     ),
     "arm": (
         "gen_worker.executor.Executor._enable_compiled",
@@ -68,10 +67,10 @@ LADDERS: Dict[str, Tuple[str, ...]] = {
         "gen_worker.aot_serve.enable",
     ),
     "publish": (
-        "gen_worker.executor.Executor._delegated_mint_run",
+        "gen_worker.executor.Executor._supervise_mint",
         "gen_worker.fleet_cells.adopt_delegated_mint",
         "gen_worker.fleet_cells.publish_self_mint",
-        "gen_worker.executor.Executor._advertise_minted_cells",
+        "gen_worker.executor.Executor._advertise_compiled_graphs",
     ),
 }
 
@@ -82,10 +81,10 @@ UNCOVERED: Dict[str, Tuple[str, str, str]] = {
         "No test boots a worker and lets ensure_setup start a real background "
         "mint. The chain is covered in disjoint segments and never joined: "
         "test_eager_first_boot_pgw671 enters at ensure_setup with faked "
-        "leaves; the pgw#784 family enters at mint_delegate/mint_process with "
-        "a stubbed child; test_aot_mint_pgw723 does a REAL torch.export at the "
+        "leaves; the pgw#1215 family enters at mint_supervisor with a stubbed "
+        "compile pool; test_aot_mint_pgw723 does a REAL torch.export at the "
         "bottom with no pod above it. tests/harness/mint_endpoints_pgw784.py "
-        "says it outright — it 'spawns the mint child exactly as mint_delegate "
+        "says it outright — it 'spawns the mint child exactly as mint_supervisor "
         "does', i.e. the harness RE-IMPLEMENTS the production caller instead "
         "of driving it, which is this defect class inside the test layer.",
         "pgw#849 follow-up, owner: the mint lane",
@@ -108,12 +107,12 @@ UNCOVERED: Dict[str, Tuple[str, str, str]] = {
         "pgw#849 follow-up, owner: the arm lane",
     ),
     "publish": (
-        "gen_worker.executor.Executor._delegated_mint_run",
+        "gen_worker.executor.Executor._supervise_mint",
         "CellPublisher.publish has a genuinely real test "
         "(test_cell_publish_v2_pgw807: real sockets, real multi-MB bytes, real "
         "chunked sha256) but it enters at the publisher. Nothing drives "
-        "_delegated_mint_run -> adopt_delegated_mint -> publish_self_mint -> "
-        "_advertise_minted_cells as one chain, and _advertise_minted_cells is "
+        "_supervise_mint -> adopt_delegated_mint -> publish_self_mint -> "
+        "_advertise_compiled_graphs as one chain, and it is "
         "where active_compile_ref / active_self_mint become visible to the hub."
         " Blocked behind the mint ladder: publish has no input until a mint "
         "front-door test exists.",

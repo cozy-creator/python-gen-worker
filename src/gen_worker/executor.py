@@ -187,7 +187,7 @@ from . import fleet_cells
 from . import aot_serve, numerics_ladder, shape_growth
 from . import fleet_cells as fleet_cells_mod
 from . import hot_swap
-from . import mint_delegate
+from . import mint_supervisor
 
 _CONTEXT_BY_KIND: Dict[str, type] = {
     "inference": RequestContext,
@@ -4580,7 +4580,7 @@ class Executor:
         # pgw#805: a boot that DECLARED a compile target and ends with no
         # artifact and no mint in flight must say so. This is the terminal
         # backstop for the whole miss policy — the individual declines
-        # (fleet_cells._fail_closed, mint_recipe, mint_delegate) each name
+        # (fleet_cells._fail_closed, mint_recipe, mint_supervisor) each name
         # themselves, and this one catches whatever route a future decline
         # takes. Five real L4 pods reached exactly this state and emitted
         # nothing at all, which reads identically to a hung worker.
@@ -7908,7 +7908,7 @@ class Executor:
             if fleet_cells_mod.terminus_of(pending):
                 continue
             if driver_owns_delegated and getattr(pending, "delegated", False):
-                # The child owns it; `_delegated_mint_run` resolves it and is
+                # The supervisor owns it; `_supervise_mint` resolves it and is
                 # the one that must confess if it does not.
                 continue
             family = str(getattr(pending, "family", "") or "")
@@ -8065,7 +8065,7 @@ class Executor:
         assert act is not None
         try:
             with activity_mod.watchdog(act):
-                await self._background_mint_run(rec, bg, act)
+                await self._supervise_mint(rec, bg, act)
                 await self._await_publish_durable(act)
         except (_MintAbandoned, asyncio.CancelledError):
             self._abandon_mint_state(rec, bg)
@@ -8165,22 +8165,7 @@ class Executor:
         except Exception:  # noqa: BLE001 — never fail a mint on its own telemetry
             logger.debug("publish-durability wait failed", exc_info=True)
 
-    async def _background_mint_run(
-        self, rec: _ClassRecord, bg: "_BackgroundMint", act: Any,
-    ) -> None:
-        """Drive the owed mint(s) for this record, off the serving path.
-
-        pgw#1010: one route. What used to stand here — seed a capture in THIS
-        interpreter, drive the warm plan, prove, pack, publish — built a dynamo
-        cell, and a dynamo cell has no consumer. It also violated the liveness
-        contract by construction (long-running GIL-holding inductor Python on
-        the one task that carries the beat and eager serving, th#1299), and it
-        was reachable only behind an env switch kept "to red-verify that".
-        Both are gone; every mint is a child process.
-        """
-        await self._delegated_mint_run(rec, bg, act)
-
-    def _advertise_minted_cells(
+    def _advertise_compiled_graphs(
         self, rec: _ClassRecord, bg: "_BackgroundMint", act: Any,
         finalized: Dict[int, Any],
     ) -> None:
@@ -8188,8 +8173,10 @@ class Executor:
 
         State stays READY throughout — the tier flips eager->compiled in the
         next capability projection — and pgw#622 stays alive for post-mint
-        novel shapes. Shared by the in-process and delegated routes (pgw#784):
-        the artifact SOURCE differs, what it means to advertise one does not.
+        novel shapes. RESIDENCY, deliberately kept out of ``mint_supervisor``:
+        which pipe holds what, and what the wire is told about it, is this
+        module's question — the supervisor answers only "which compiled graphs
+        exist and did they arm".
 
         pgw#1113: ``finalized`` holds exactly the pipes that ARMED the cell.
         The caller no longer expands it across every pid that happened to hold
@@ -8227,58 +8214,67 @@ class Executor:
                     continue
             hot_swap.enable(pipe)
 
-    async def _delegated_mint_run(
+    async def _supervise_mint(
         self, rec: _ClassRecord, bg: "_BackgroundMint", act: Any,
     ) -> None:
-        """pgw#784: build every owed cell in a CHILD PROCESS, then advertise.
+        """th#1834 Phase 3 (pgw#1215 step 4): supervise this record's compile
+        children directly, then advertise what armed.
 
-        The delegated twin of ``_background_mint_run``, and far shorter,
-        because the phases that used to live here — seed, drain the queued
-        compiles, prove, pack — are the child's now. What stays is what only a
-        serving worker can do: keep serving eager and beating while it happens,
-        adopt the result through the DELIVERED-cell path, decide publish on
-        gw#612's sibling-coverage rule, and advertise the identity.
+        This replaced ``_background_mint_run`` / ``_delegated_mint_run``, which
+        were a wrapper and a driver for a MIDDLE PROCESS TIER that no longer
+        exists. The parent used to hand one mint child the whole job; that
+        child loaded a second weight-free pipeline and drove the compile pool
+        itself. The pipeline it loaded is one this record already holds a real,
+        resident, SERVING copy of, and the process boundary it bought is now
+        bought by a lint fence (``scripts/lint_serving_process_compiles.py``).
 
-        Raises exactly what ``_background_mint_run`` raises, so
-        ``_background_mint``'s outcome handling is untouched: ``_MintAbandoned``
-        (adopt-on-arm / vacate / shutdown), or a plain ``Exception`` (a failed
-        mint). Serving continues in every branch: the worker never dies with
-        its mint.
+        What stays here is exactly what only a serving worker can do: keep
+        serving eager and beating while it happens, decide publish on gw#612's
+        sibling-coverage rule, and advertise the identity on the live compile
+        targets. Everything between is ``mint_supervisor``'s — deliberately,
+        because that is the compiled-graph interior and it is the surface the
+        ``torch-compiled-graphs`` extraction lifts whole. Residency (which pipe,
+        which target, what the wire is told) does not leak into it.
+
+        Raises what ``_background_mint`` handles and nothing else:
+        ``_MintAbandoned`` (adopt-on-arm / vacate / shutdown), or a plain
+        ``Exception`` (a failed mint). Serving continues in every branch: the
+        worker never dies with its mint.
         """
 
         spec = bg.spec
-        # One child per DISTINCT pending. Pipes whose obligation identity is
-        # the same token share one pending and therefore one child mint —
+        # One supervised mint per DISTINCT pending. Pipes whose obligation
+        # identity is the same token share one pending and therefore one mint —
         # since pgw#1113 that identity names the SUBJECT (which slot, resolved
-        # to which checkpoint), so a shared pending means one thing to
-        # compile rather than one family on one card.
+        # to which checkpoint), so a shared pending means one thing to compile
+        # rather than one family on one card.
         holders: Dict[int, List[int]] = {}
         for pid, pending in bg.pendings.items():
             holders.setdefault(id(pending), []).append(pid)
         if not holders:
-            raise RuntimeError("delegated mint has no pending cell to build")
+            raise RuntimeError("supervised mint has no pending cell to build")
 
-        #: id(pipeline) -> the cell its OWN pipeline armed. pgw#1113 deleted
-        #: the "sharers" fiction that used to fill this for every pid holding
-        #: the pending: exactly one pipe is handed to `build_cell` and exactly
-        #: one pipe is passed to `adopt_delegated_mint`, so exactly one pipe
-        #: ever had those bytes installed on it. Advertising the other pids'
-        #: targets as compiled was a wire lie that only
+        #: id(pipeline) -> the compiled graphs its OWN pipeline armed.
+        #: pgw#1113 deleted the "sharers" fiction that used to fill this for
+        #: every pid holding the pending: exactly one pipe is supervised and
+        #: exactly one pipe is passed to `adopt_delegated_mint`, so exactly one
+        #: pipe ever had those bytes installed on it. Advertising the other
+        #: pids' targets as compiled was a wire lie that only
         #: `_bind_compile_guard`'s incidental `False` ("advertising eager")
         #: stopped from reaching the hub.
         finalized: Dict[int, Any] = {}
-        #: id(pending) -> the cell that discharged it. The publish-coverage
-        #: rule (gw#612) is about the OBLIGATION, not about how many pipes
-        #: hold it, so it reads this rather than `finalized`.
+        #: id(pending) -> what discharged it. The publish-coverage rule
+        #: (gw#612) is about the OBLIGATION, not about how many pipes hold it,
+        #: so it reads this rather than `finalized`.
         discharged: Dict[int, Any] = {}
         # pgw#999: every classified refusal this run saw, so the terminal
-        # RuntimeError names them instead of restating "no advertisable cell".
+        # RuntimeError names them instead of restating "nothing to advertise".
         declined_reasons: List[str] = []
         for pids in holders.values():
             pending = bg.pendings[pids[0]]
             pipe = bg.pipes[pids[0]]
-            result = await mint_delegate.build_cell(
-                mint_delegate.MintTask(
+            result = await mint_supervisor.supervise(
+                mint_supervisor.MintTask(
                     pending=pending,
                     pipe=pipe,
                     function=spec.name,
@@ -8289,46 +8285,47 @@ class Executor:
                     configs={spec.name: self._effective_config(spec)},
                     device=mint_workers.device_of(pipe),
                     # pgw#1199: this boot ran the endpoint's own handler on the
-                    # resident pipeline before any mint was delegated (setup
-                    # completes, THEN `bg.task` is created), so the child gets
-                    # pgw#984's guarantee for free and allocates nothing for
-                    # it. Empty when a custom `warmup()` stood in for the
-                    # synthesized plan and no handler actually ran — the child
-                    # refuses on that, honestly, rather than proving it at the
-                    # cost of a checkpoint.
+                    # resident pipeline before any mint was supervised (setup
+                    # completes, THEN `bg.task` is created), so the compile
+                    # children get pgw#984's guarantee for free and allocate
+                    # nothing for it. Empty when a custom `warmup()` stood in
+                    # for the synthesized plan and no handler actually ran —
+                    # the mint refuses on that, honestly, rather than proving it
+                    # at the cost of a checkpoint.
                     handler_proof=handler_proof.provenance(spec.name),
                 ),
                 act=act, abandon=bg.abandon)
-            if result.status == mint_delegate.ABANDONED:
+            if result.status == mint_supervisor.ABANDONED:
                 raise _MintAbandoned()
             minted = result.minted
             if not result.ok or minted is None:
                 logger.warning(
-                    "delegated mint for %s produced no adoptable cell (%s); "
-                    "that object stays eager", spec.name, result.detail)
-                # pgw#815: resolve the obligation instead of dropping it —
-                # a `continue` here left the pending with no terminus and no
-                # wire trace whenever a SIBLING pending succeeded (the
+                    "supervised mint for %s produced no adoptable compiled "
+                    "graph (%s); that object stays eager",
+                    spec.name, result.detail)
+                # pgw#815: resolve the obligation instead of dropping it — a
+                # `continue` here left the pending with no terminus and no wire
+                # trace whenever a SIBLING pending succeeded (the
                 # `if not finalized: raise` below never fires then).
                 fleet_cells_mod.abandon_self_mint(pending)
                 # pgw#999: `phase` carries the CLASSIFIED reason when the
-                # child's cell was built and then refused arming; it falls
+                # compiled graphs were built and then refused arming; it falls
                 # back to the call-site token only when there is genuinely no
-                # classification (no cell was produced at all).
+                # classification (nothing was produced at all).
                 activity_mod.emit_event(
                     "self_mint_abort",
                     f"family={pending.family} key={pending.arm_token}: the "
-                    f"delegated child produced no adoptable cell "
+                    f"supervised mint produced no adoptable compiled graph "
                     f"({result.detail or result.status}); this object stays "
                     f"eager and nothing is published",
-                    phase=result.reason or "delegated_no_cell",
+                    phase=result.reason or "supervised_no_graph",
                 )
                 declined_reasons.append(result.reason or result.status)
                 continue
-            # pgw#1113: the ARMED pipe, and only it. `build_cell` handed the
-            # child this one pipeline and `adopt_delegated_mint` installed the
-            # cell on this one pipeline; the other pids holding this pending
-            # were never armed with these bytes and must not advertise them.
+            # pgw#1113: the ARMED pipe, and only it. `adopt_delegated_mint`
+            # installed the compiled graphs on this one pipeline; the other pids
+            # holding this pending were never armed with these bytes and must
+            # not advertise them.
             finalized[pids[0]] = minted
             discharged[id(pending)] = minted
             if len(pids) > 1:
@@ -8336,42 +8333,38 @@ class Executor:
                     "self_mint_unarmed_holder",
                     f"family={pending.family} key={pending.arm_token}: "
                     f"{len(pids) - 1} further compile object(s) hold this "
-                    f"obligation and were NOT armed with its cell — one pipe "
-                    f"is armed per delegated mint, so they serve eager until "
-                    f"their own arm. They are not advertised as compiled "
-                    f"(pgw#1113)",
+                    f"obligation and were NOT armed with its compiled graphs — "
+                    f"one pipe is armed per supervised mint, so they serve "
+                    f"eager until their own arm. They are not advertised as "
+                    f"compiled (pgw#1113)",
                     phase="unarmed_obligation_holder",
                 )
             compile_cache.record_cell_proven(str(minted.ref))
 
         if not finalized:
             raise RuntimeError(
-                "delegated mint produced no advertisable cell; serving stays "
-                "eager"
+                "the supervised mint produced no advertisable compiled graph; "
+                "serving stays eager"
                 + (f" (refused: {', '.join(sorted(set(declined_reasons)))})"
                    if declined_reasons else ""))
 
-        # Publish per OBLIGATION on gw#612's rule: a cell ships only when the
-        # obligation it was built for was actually discharged — a partial pack
-        # bricks every adopting boot at the gw#607 per-object proof. pgw#1113
-        # re-aims the rule from the sharers map (pid membership, which said
-        # nothing about what armed) to the pending itself, which is the thing
-        # the child was given and the thing it either produced a cell for or
-        # did not.
+        # Publish per OBLIGATION on gw#612's rule: an artifact ships only when
+        # the obligation it was built for was actually discharged — a partial
+        # set bricks every adopting boot at the gw#607 per-object proof.
         for pids in holders.values():
             pending = bg.pendings[pids[0]]
             if id(pending) not in discharged:
                 fleet_cells_mod.withhold_self_mint_publish(
                     pending,
-                    "the delegated mint produced no cell for this obligation")
+                    "the supervised mint produced nothing for this obligation")
             else:
                 fleet_cells_mod.publish_self_mint(pending)
 
-        self._advertise_minted_cells(rec, bg, act, finalized)
+        self._advertise_compiled_graphs(rec, bg, act, finalized)
         logger.info(
-            "delegated mint for %s armed: %d compile object(s) hot-swapped to "
+            "supervised mint for %s armed: %d compile object(s) hot-swapped to "
             "compiled — this worker served eager and beat at its normal "
-            "cadence for the whole mint (pgw#784)",
+            "cadence for the whole mint (th#1834 Phase 3)",
             spec.name, len(finalized))
 
     async def _report_cell_selection_bug(

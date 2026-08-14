@@ -11,8 +11,8 @@ and no transport import at all, which a test reads out of the source tree. The
 obligation's terminus is ``fleet_cells.keep_self_mint_local``, which takes no
 publisher and therefore cannot grow into one.
 
-It adds no mint code (the delegated ``mint_delegate`` -> ``mint_process`` ->
-``mint_child`` chain is used unchanged), no second key scheme, no coordinator,
+It adds no mint code (``mint_supervisor`` is used unchanged — the same
+supervisor the fleet's serving parent drives), no second key scheme, no coordinator,
 no mint-request in any address form, no trust self-declaration and no env
 behaviour switch. A cozy-local box learns it keeps its own cells from
 ``no_publish_sink_reason``'s ``no_publish_sink`` — a fact about the SINK,
@@ -33,7 +33,7 @@ from . import activity as activity_mod
 from . import aot_compile_pool
 from . import compile_cache as cc
 from . import compile_posture, fleet_cells, handler_proof
-from . import local_cell_store, mint_delegate
+from . import local_cell_store, mint_supervisor
 from .child_contract import MintFrame, MintSlot
 
 logger = logging.getLogger(__name__)
@@ -48,7 +48,7 @@ NOTICE_INTERVAL_S = 10.0
 class LocalMintContext:
     """Everything a mint child needs that the local serve process knows.
 
-    The same three facts the executor hands ``mint_delegate.MintTask``: WHICH
+    The same three facts the executor hands ``mint_supervisor.MintTask``: WHICH
     routable function, WHICH modules to rediscover it in, and the parent's own
     resolution of every setup slot (identity + bytes + composition, as one
     value — see ``child_contract.MintSlot``). A context with no function or
@@ -270,18 +270,18 @@ class _Progress:
 def _mint_here(
     pipe: Any, pending: "fleet_cells.PendingSelfMint", mint: LocalMintContext,
 ) -> bool:
-    """Run the delegated child mint on THIS machine and keep what it produces.
+    """Supervise this machine's own compile children and keep what they pack.
 
-    Identical to the executor's ``_delegated_mint_run`` in everything that
-    decides correctness — same ``build_cell``, same child, same
-    ``adopt_delegated_mint`` gate — and different in the three things a desktop
-    does not have: there is no serving loop to keep beating (this call is the
-    boot, and it blocks), there is nowhere to publish, so the obligation ends
-    at ``keep_self_mint_local`` instead of at the publish gate, and there is a
-    PERSON on the machine — so §4.30's posture is declared here, and what the
-    compile is doing to their computer is said out loud.
+    Identical to the executor's ``_supervise_mint`` in everything that decides
+    correctness — same ``mint_supervisor.supervise``, same compile children,
+    same ``adopt_delegated_mint`` gate — and different in the three things a
+    desktop does not have: there is no serving loop to keep beating (this call
+    is the boot, and it blocks), there is nowhere to publish, so the obligation
+    ends at ``keep_self_mint_local`` instead of at the publish gate, and there
+    is a PERSON on the machine — so §4.30's posture is declared here, and what
+    the compile is doing to their computer is said out loud.
     """
-    result: Optional[mint_delegate.DelegatedResult] = None
+    result: Optional[mint_supervisor.SupervisedResult] = None
     family = str(pending.family)
     proof = handler_proof.provenance(mint.function)
     # §4.30: the ONE site in the tree that declares a user-machine posture. It
@@ -293,8 +293,8 @@ def _mint_here(
     watch = _Progress(family)
     with activity_mod.running(activity_mod.KIND_SELF_MINT_COMPILE) as act:
         try:
-            result = _drive(mint_delegate.build_cell(
-                mint_delegate.MintTask(
+            result = _drive(mint_supervisor.supervise(
+                mint_supervisor.MintTask(
                     pending=pending,
                     pipe=pipe,
                     function=mint.function,
@@ -329,9 +329,9 @@ def _mint_here(
         fleet_cells.keep_self_mint_local(pending)
         return True
     if not fleet_cells.terminus_of(pending):
-        # Every obligation ends somewhere nameable. `build_cell` abandons its
-        # own failures; a DECLINED one (no room on the card) it deliberately
-        # leaves open for a caller that might have another.
+        # Every obligation ends somewhere nameable. `supervise` abandons its
+        # own failures; an ABANDONED one it deliberately leaves open for a
+        # caller that might drive it again.
         fleet_cells.abandon_self_mint(pending)
     logger.info(
         "local-serve: %s has no cell on this machine yet (%s); serving eager",

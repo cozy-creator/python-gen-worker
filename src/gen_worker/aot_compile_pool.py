@@ -663,6 +663,17 @@ class EntryJob(msgspec.Struct, frozen=True, kw_only=True):
     share: str = ""
     share_index: int = 0
     share_count: int = 1
+    #: pgw#1215 step 4: declared graph classes this pod ALREADY HAS as packed
+    #: artifacts, from an earlier attempt of the same mint. A child skips them
+    #: before it exports — not after, and not at pack time — so a retry pays
+    #: neither the trace nor the compile for work that is already on disk.
+    #: This is the whole of what the deleted ``mint_delegate.build_cell``
+    #: retry loop got wrong: it re-ran every attempt in a FRESH ``child-N``
+    #: directory, so attempt 2 of a 36-class mint re-paid 35 finished classes
+    #: to retry one. Named by CLASS, because that is what a child can match
+    #: before it has traced anything; the artifacts themselves are addressed
+    #: by ``cg-key-v1`` key and the supervisor reads the names back off them.
+    have_classes: Tuple[str, ...] = ()
 
     #: WHERE. ``out_dir`` receives the packed artifacts, ``work`` the
     #: packaging scratch, ``report`` this child's one report file.
@@ -788,6 +799,19 @@ class EntryCompileFailed(RuntimeError):
         self.resource = bool(resource)
         self.basis = str(basis)
         self.peak_rss_bytes = int(peak_rss_bytes)
+
+
+class EntryCompileAbandoned(RuntimeError):
+    """The SUPERVISOR asked this pool to stop (pgw#1215 step 4).
+
+    Not a failure: a co-tenancy decision — an adopt-on-arm, a vacate, a
+    shutdown — took the card while the pool was working. The distinction is
+    load-bearing at the terminus (`self_mint_abort` phase `abandoned_*` vs
+    `error`), and it is the one thing the old three-tier stack could express
+    that a `to_thread`-driven pool cannot express by task cancellation: a
+    cancelled task does not reach the children, and children the parent has
+    stopped waiting for keep compiling on a card somebody else now owns.
+    """
 
 
 @dataclass
@@ -1285,6 +1309,7 @@ class EntryCompilePool:
     def compile(
         self, template: EntryJob,
         *, on_share: Optional[Callable[[str, int, int], None]] = None,
+        should_abandon: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, PackedGraphClass]:
         """Dispatch this mint's declared classes K-wide and collect what the
         children packed. ``{graph class name: PackedGraphClass}``.
@@ -1305,6 +1330,13 @@ class EntryCompilePool:
         This loop is the longest wire-silent stretch of a mint. Progress
         reporting is best-effort by construction: a raising callback must never
         cost the mint the classes it already has.
+
+        ``should_abandon()`` (pgw#1215 step 4) is polled in the same drain loop
+        and raises :class:`EntryCompileAbandoned`, so the ``finally`` below
+        group-kills every live child. The supervisor drives this pool from a
+        worker thread and cancelling that thread's task would reach nothing —
+        the children would keep compiling on a card the supervisor has already
+        given back.
         """
         width = max(1, int(self.width.workers))
         running: List[_Running] = []
@@ -1358,6 +1390,12 @@ class EntryCompilePool:
                 charge("idle_spawn_s", width - len(running))
             while running:
                 free = width - len(running)
+                if should_abandon is not None and should_abandon():
+                    raise EntryCompileAbandoned(
+                        f"the supervisor abandoned this mint with "
+                        f"{len(running)} of {width} share(s) still compiling; "
+                        f"{len(done)} graph class(es) are already packed and "
+                        f"stay on disk")
                 finished = self._reap(running)
                 if finished is None:
                     time.sleep(_POLL_S)
@@ -1397,7 +1435,8 @@ class EntryCompilePool:
                 charge("idle_other_s", width - len(running))
             if failure is not None:
                 raise failure
-            self._assert_shares_whole(declared, done, width)
+            self._assert_shares_whole(
+                declared, done, width, have=len(template.have_classes))
         finally:
             self.ledger.wall_s = round(time.monotonic() - pool_t0, 3)
             self.ledger.busy_s = round(sum(self.entry_seconds.values()), 3)
@@ -1415,6 +1454,7 @@ class EntryCompilePool:
 
     def _assert_shares_whole(
         self, declared: Mapping[str, int], done: Mapping[str, Any], width: int,
+        *, have: int = 0,
     ) -> None:
         """The shares must reconstruct the WHOLE declared class set.
 
@@ -1425,6 +1465,12 @@ class EntryCompilePool:
         this a child whose share came back empty — a stale declaration, a
         shard-index bug, a family whose fork differs per child — publishes a
         SHORT cell that verifies, arms, and is missing a class.
+
+        ``have`` (pgw#1215 step 4) is how many classes the children were told
+        to SKIP because this pod already holds their artifacts. They are part
+        of the whole set and are counted as such — the proof is over coverage,
+        not over this attempt's work, so a retry that compiles one class and
+        skips 35 is exactly as whole as a first attempt that compiled 36.
         """
         counts = {int(v) for v in declared.values() if int(v) > 0}
         if not counts:
@@ -1441,12 +1487,14 @@ class EntryCompilePool:
                 f"{sorted(declared)!r}) — they composed different pipelines, "
                 f"so their shares do not partition one declaration")
         want = counts.pop()
-        if len(done) != want:
+        if len(done) + int(have) != want:
             raise EntryCompileFailed(
                 "pool",
-                f"the {width} share(s) packed {len(done)} graph class(es) but "
-                f"every child reported {want} declared — rows[i::{width}] did "
-                f"not partition the declaration and this cell would be short")
+                f"the {width} share(s) packed {len(done)} graph class(es) "
+                + (f"beside {have} already held " if have else "")
+                + f"but every child reported {want} declared — "
+                f"rows[i::{width}] did not partition the declaration and this "
+                f"cell would be short")
 
     def _refresh_resume_facts(self) -> None:
         """Keep the LIVE ledger carrying the bank's row.

@@ -63,8 +63,10 @@ import logging
 import os
 import signal
 import sys
+import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field as dc_field
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
@@ -225,7 +227,7 @@ class MintReport(msgspec.Struct, frozen=True, kw_only=True):
     phase: str = ""
     #: Measured, so the NEXT mint's co-residency ask is a fact rather than
     #: an estimate (§1: no magic numbers). Read by
-    #: ``mint_delegate.record_child_peak``.
+    #: ``mint_supervisor``'s RSS bank.
     #:
     #: pgw#877: there was a `peak_rss_bytes` beside it, written from
     #: `getrusage(SELF)+getrusage(CHILDREN)` on both minted termini and read by
@@ -289,7 +291,7 @@ class MintOutcome:
     #: rather than a synthesized ``report``: ``retryable`` branches on
     #: ``report is None``, and inventing a report to carry telemetry would
     #: silently change a retry decision.
-    partial_phases: Dict[str, Any] = field(default_factory=dict)
+    partial_phases: Dict[str, Any] = dc_field(default_factory=dict)
 
     @property
     def minted(self) -> bool:
@@ -757,8 +759,115 @@ __all__ = [
     "REPORT_NAME",
     "REQUEST_NAME",
     "RESOURCE",
+    "MintTask",
+    "build_request",
+    "cfg_spec",
     "child_argv",
     "child_env",
     "run_mint",
+    "scratch_root",
     "write_request",
 ]
+
+
+# --- the operator/one-shot request, built parent-side --------------------
+#
+# pgw#1215 step 4 moved these here from `mint_delegate`, which is DELETED.
+# That module existed to make the SERVING parent spawn a mint child; the
+# serving parent now supervises compile children directly
+# (`mint_supervisor`), so its driver — a retry loop that gave every attempt a
+# fresh `child-N` directory and therefore re-paid every finished graph class —
+# is gone rather than relocated. What survives is the request VOCABULARY, and
+# it belongs to the module that owns the child protocol: `scripts/
+# micro_mint_rig.py` (the pre-publish proof harness) and any operator running
+# `python -m gen_worker.mint_child` by hand build a `MintRequest` through it.
+
+
+@dataclass(frozen=True)
+class MintTask:
+    """Everything a caller knows that a one-shot mint child needs.
+
+    Note what is NOT here: the pipeline object. Nothing live crosses the
+    process boundary — the child loads what it needs itself.
+    """
+
+    pending: Any                      # fleet_cells.PendingSelfMint
+    pipe: Any = None
+    function: str = ""
+    modules: Tuple[str, ...] = ()
+    #: pgw#974: the caller's resolution of each setup slot — identity, bytes
+    #: and pgw#617 composition in ONE value per slot.
+    slots: Dict[str, MintSlot] = dc_field(default_factory=dict)
+    weight_lane: str = ""
+    execution_lane: str = ""
+    configs: Dict[str, Dict[str, Any]] = dc_field(default_factory=dict)
+    device: Optional[int] = None
+    posture: compile_posture.CompilePosture = compile_posture.FLEET
+    handler_proof: str = ""
+
+
+def cfg_spec(cfg: Any) -> CompileSpec:
+    """Flatten a ``CompileCell`` for the wire.
+
+    The caller states the contract because the class-scoped guidance/text-len
+    unions live on the spec rather than the decorator: a child re-deriving
+    this from ``@endpoint`` alone would export a different declaration than
+    the caller asked for. It carries what the child READS and nothing else
+    (pgw#1034) — the child computes no key, so this is not a key-parity wire.
+    """
+    return CompileSpec(
+        shapes=tuple(tuple(int(v) for v in row) for row in (cfg.shapes or ())),
+        targets=tuple(str(t) for t in (cfg.targets or ())),
+        family=str(getattr(cfg, "family", "") or ""),
+        lora_bucket=int(getattr(cfg, "lora_bucket", 0) or 0),
+        guidance_scales=tuple(
+            float(v) for v in (getattr(cfg, "guidance_scales", ()) or ())),
+        text_lens=tuple(int(v) for v in (getattr(cfg, "text_lens", ()) or ())),
+    )
+
+
+def build_request(
+    task: MintTask, *, workdir: Path, compiled_graph_peak_rss_bytes: int = 0,
+    device: Optional[int] = None,
+) -> MintRequest:
+    from . import aot_resume
+
+    pending = task.pending
+    return MintRequest(
+        compiled_graph_peak_rss_bytes=int(compiled_graph_peak_rss_bytes),
+        function=task.function,
+        modules=tuple(task.modules),
+        family=str(pending.family),
+        arm_token=str(pending.arm_token),
+        target=str(Path(workdir) / "cell.tar.gz"),
+        work_root=str(workdir),
+        report=str(Path(workdir) / REPORT_NAME),
+        # pgw#848: where the child writes its LIVE table. `report` is written
+        # once, at a terminus the child reaches under its own power; this is
+        # written on every beat, so a mint the caller abandons still hands back
+        # what it measured.
+        phases_snapshot=str(Path(workdir) / PHASES_SNAPSHOT_NAME),
+        # pgw#848 item 5: outside the mint's own tree entirely. Keyed by the
+        # pending's arm token as a SCOPE (identity is the per-entry
+        # re-derivation inside it), so a mint child restarted in place on the
+        # same pod finds the same bank.
+        resume=str(aot_resume.bank_root(pending.arm_token)),
+        cfg=cfg_spec(pending.cfg),
+        slots=dict(task.slots),
+        device=_ordinal(task.device if device is None else device),
+        execution_lane=task.execution_lane,
+        configs={k: dict(v) for k, v in task.configs.items()},
+        posture=task.posture,
+        handler_proof=str(task.handler_proof or ""),
+    )
+
+
+def _ordinal(device: Optional[int]) -> int:
+    """``-1`` = leave the child's default; any other value names a card."""
+    return -1 if device is None else int(device)
+
+
+def scratch_root() -> Path:
+    """Where a one-shot mint's child workdirs live when no mint root exists
+    (tests / ad-hoc drives)."""
+    return Path(tempfile.mkdtemp(prefix="mint-process-"))

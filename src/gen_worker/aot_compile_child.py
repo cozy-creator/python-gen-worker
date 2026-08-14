@@ -362,7 +362,8 @@ def run(job: EntryJob) -> int:
                 share_index=int(job.share_index),
                 share_count=int(job.share_count),
                 compile_now=True,
-                inductor_configs=job.inductor_configs):
+                inductor_configs=job.inductor_configs,
+                have_classes=tuple(job.have_classes)):
             if traced.row is None:
                 # `trace_for_key` projects `_MintedEntry` down to a
                 # `TracedClass`; the row is what `pack_graph_classes` needs and
@@ -426,6 +427,18 @@ def run(job: EntryJob) -> int:
         # whole point of the per-graph-class atom. The refusal rides beside
         # them so the parent can say WHICH class stopped the share.
         refusal = str(exc)
+
+    if not declared:
+        # A share can legitimately yield NOTHING — every class in it is
+        # already held (pgw#1215 step 4's retry), or K exceeded the class
+        # count. The declared count is what proves the shares cover the
+        # declaration, so it cannot be a by-product of having traced
+        # something; it is enumerated directly. No export, no compile: this
+        # is the same `declared_class_rows` call the trace loop opens with.
+        try:
+            declared = len(aot_mint.declared_class_rows(pipeline, spec, decl))
+        except Exception:  # noqa: BLE001 — the pool refuses on 0, loudly
+            logger.exception("aot-compile: could not enumerate declared rows")
 
     ledger.mark("child_trace_s", trace_s)
     ledger.mark("compile_wall_s", compile_s)

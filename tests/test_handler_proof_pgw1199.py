@@ -33,7 +33,7 @@ import pytest
 from gen_worker import child_preflight
 from gen_worker import child_contract
 from gen_worker import handler_proof
-from gen_worker import mint_delegate, mint_process
+from gen_worker import mint_process
 
 REPO = Path(__file__).resolve().parent.parent
 MICRO_SRC = REPO / "examples" / "micro-diffusion" / "src"
@@ -92,7 +92,7 @@ def test_functions_are_proven_INDIVIDUALLY() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _task(**kw: Any) -> mint_delegate.MintTask:
+def _task(**kw: Any) -> mint_process.MintTask:
     pending = type("_Pending", (), {
         "family": "micro-diffusion", "arm_token": "arm1-x",
         "mint_root": "/tmp", "cfg": type("_Cfg", (), {
@@ -103,12 +103,12 @@ def _task(**kw: Any) -> mint_delegate.MintTask:
     base: Dict[str, Any] = dict(
         pending=pending, pipe=object(), function="generate", modules=("m",))
     base.update(kw)
-    return mint_delegate.MintTask(**base)
+    return mint_process.MintTask(**base)
 
 
 def test_the_request_carries_the_parents_proof(tmp_path: Path) -> None:
     task = _task(handler_proof="boot warm forward 'generate' (real weights)")
-    request = mint_delegate.build_request(task, workdir=tmp_path)
+    request = mint_process.build_request(task, workdir=tmp_path)
     assert request.handler_proof == "boot warm forward 'generate' (real weights)"
 
 
@@ -117,7 +117,7 @@ def test_an_unproven_parent_sends_an_EMPTY_proof_rather_than_a_guess(
 ) -> None:
     """An absent measurement is no evidence — never a silent pass. A parent
     that cannot say its handler ran says nothing, and the child refuses."""
-    request = mint_delegate.build_request(_task(), workdir=tmp_path)
+    request = mint_process.build_request(_task(), workdir=tmp_path)
     assert request.handler_proof == ""
 
 

@@ -48,7 +48,7 @@ from gen_worker import (
     worker_function,
 )
 from gen_worker import compile_cache as cc
-from gen_worker import fleet_cells, hot_swap, mint_delegate
+from gen_worker import fleet_cells, hot_swap, mint_supervisor
 from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.executor import Executor
 from gen_worker.models.store import ModelStore
@@ -196,7 +196,7 @@ class _Harness:
         # the wire. The compile the harness performs is the one its own
         # `compiled` wrapper does, on the boot/warm thread, exactly as before.
         monkeypatch.setattr(
-            mint_delegate, "build_cell", self._fake_build_cell)
+            mint_supervisor, "supervise", self._fake_build_cell)
         # The pgw#681 mint gate this simmed is deleted.
         # `guard_closure.closure_manifest` classified every compiled graph at
         # the MINT and wrote the result into the cell's metadata; it went with
@@ -217,8 +217,8 @@ class _Harness:
         pending._state["minted"] = minted
         pending.target.parent.mkdir(parents=True, exist_ok=True)
         pending.target.write_bytes(b"stub-cell")
-        return mint_delegate.DelegatedResult(
-            status=mint_delegate.ADOPTED, minted=minted, attempts=1)
+        return mint_supervisor.SupervisedResult(
+            status=mint_supervisor.ADOPTED, minted=minted, attempts=1)
 
     def _fake_enable_compiled(
         self, pipe: Any, cfg: Any, cache_dir: Any = None,

@@ -475,7 +475,7 @@ def test_the_compile_pool_reports_each_share_as_it_lands() -> None:
 def test_progress_reporting_never_costs_the_mint_its_work() -> None:
     """Telemetry must never fail the work it reports on: a raising callback
     would otherwise throw away entries that already compiled."""
-    from gen_worker import mint_delegate
+    from gen_worker import mint_supervisor
 
     class _ActNoCounter:
         """An Activity double with no counter registry — the shape every
@@ -486,21 +486,29 @@ def test_progress_reporting_never_costs_the_mint_its_work() -> None:
         def heartbeat(self) -> None:
             type(self).beats += 1
 
-    apply = mint_delegate._on_evidence(_ActNoCounter())
+    apply = mint_supervisor._on_evidence(_ActNoCounter())
     apply(12.5)  # must not raise despite the absent counter()
     assert _ActNoCounter.beats == 1
 
 
 def test_the_delegated_mint_actually_passes_the_evidence_callback() -> None:
-    """`run_mint` has accepted `on_evidence` since pgw#784 and NOBODY passed
-    one, so the child's measured progress existed only to decide whether to
-    KILL it — never to prove it was working."""
+    """`run_mint` accepted `on_evidence` since pgw#784 and NOBODY passed one,
+    so the mint's measured progress existed only to decide whether to KILL it
+    — never to prove it was working.
+
+    pgw#1215 step 4 re-based this on the supervisor: the callback is built once
+    per supervised mint and APPLIED on every attempt's outcome, which is the
+    property the assertion is about. A supervisor that built one and never
+    called it would be the same defect in a new hat.""" 
     import inspect
 
-    from gen_worker import mint_delegate
+    from gen_worker import mint_supervisor
 
-    src = inspect.getsource(mint_delegate.build_cell)
-    assert "on_evidence=_on_evidence(act)" in src
+    src = inspect.getsource(mint_supervisor.supervise)
+    assert "_on_evidence(act)" in src, "the callback is never built"
+    assert "apply_evidence(" in src, (
+        "the evidence callback is built and never applied — the counter "
+        "exists only to decide whether to kill the mint again")
 # ---------------------------------------------------------------------------
 # Invariant 1 — the two high-severity finds: both corrupt DECISIONS, not just
 # visibility, so both are asserted on the decision, not only on the event.

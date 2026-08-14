@@ -31,7 +31,7 @@ import pytest
 
 from gen_worker import activity as activity_mod
 from gen_worker import aot_compile_pool as pool
-from gen_worker import aot_mint, mint_delegate, mint_process
+from gen_worker import aot_mint, mint_process, mint_supervisor
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 _GIB = 1024 ** 3
@@ -235,14 +235,12 @@ def _relayed(table: Dict[str, Any]) -> List[pb.ActivityUpdate]:
         if msg.WhichOneof("msg") == "activity_update":
             sent.append(msg.activity_update)
 
-    outcome = mint_process.MintOutcome(
-        status=mint_process.MINTED, elapsed_s=12.5,
-        report=mint_process.MintReport(
-            status=mint_process.MINTED, elapsed_s=12.5, mint_phases=table))
     try:
         activity_mod.bind_sink(_send, loop)
-        mint_delegate._emit_aot_phases(
-            outcome, family="sdxl", execution_lane="w8a8-lora64")
+        mint_supervisor._emit_aot_phases(
+            mint_supervisor.phase_table(table, {}),
+            family="sdxl", execution_lane="w8a8-lora64",
+            terminus="", elapsed_s=12.5)
         loop.run_until_complete(asyncio.sleep(0.05))
     finally:
         activity_mod.bind_sink(None, None)

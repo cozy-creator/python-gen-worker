@@ -28,7 +28,7 @@ from typing import Any, List, Tuple
 
 import pytest
 
-from gen_worker import fleet_cells, mint_delegate
+from gen_worker import fleet_cells, mint_supervisor
 from gen_worker.cell_adopt import AdoptOutcome
 from gen_worker.compile_cache import AdoptError, CellSelectionBugError
 
@@ -58,7 +58,7 @@ def events(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
         seen.append((kind, phase, detail))
 
     monkeypatch.setattr(fleet_cells.activity_mod, "emit_event", _sink)
-    monkeypatch.setattr(mint_delegate.activity_mod, "emit_event", _sink)
+    monkeypatch.setattr(mint_supervisor.activity_mod, "emit_event", _sink)
     return seen
 
 
@@ -251,7 +251,7 @@ def test_the_reason_is_readable_by_the_caller_that_must_requote_it(
     pending: Any, events: List[Tuple[str, str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`mint_delegate.build_cell` and the executor each emit their own event
+    """`mint_supervisor.supervise` and the executor each emit their own event
     about the same refusal. They read the classification from the one place
     that produced it instead of re-deriving three vocabularies."""
     _arm_returns(monkeypatch, AdoptOutcome.miss("no_arm_for_mode", "mode='regional'"))
@@ -278,8 +278,8 @@ def test_the_delegated_result_carries_the_reason_field(monkeypatch: pytest.Monke
     """The transport between the two events. RED at HEAD: `DelegatedResult`
     had no `reason` at all, so the executor had nothing to quote and fell back
     to naming its own call site."""
-    result = mint_delegate.DelegatedResult(
-        status=mint_delegate.FAILED, reason="contract_invalid",
+    result = mint_supervisor.SupervisedResult(
+        status=mint_supervisor.FAILED, reason="contract_invalid",
         detail="the child's cell did not adopt on this runtime "
                "(contract_invalid: 5 leaves vs 3)")
     assert result.reason == "contract_invalid"

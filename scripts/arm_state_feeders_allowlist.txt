@@ -39,7 +39,7 @@
 src/gen_worker/executor.py::Executor._setup_locked_inner::compile_cache.record_cell_proven  VERDICT  the boot proof pass concluding this object served its OWN warmup graph (gw#587); no seam observes a proof
 src/gen_worker/executor.py::Executor._setup_locked_inner::compile_cache.record_cell_quarantined  VERDICT  the same pass concluding the opposite — pgw#672's churn-loop stop, written at the disarm
 src/gen_worker/executor.py::Executor._compile_guard_failed::compile_cache.record_cell_quarantined  VERDICT  a serve-time cell-attributable fault; the guard is the only frame that saw it
-src/gen_worker/executor.py::Executor._delegated_mint_run::compile_cache.record_cell_proven  VERDICT  the delegated mint's own finalize proof, same fact from the other producer
+src/gen_worker/executor.py::Executor._supervise_mint::compile_cache.record_cell_proven  VERDICT  the supervised mint's own finalize proof, same fact from the other producer
 src/gen_worker/fleet_cells.py::arm_from_local_store::local_cell_store.note_memo  VERDICT  §4.28's memo REWRITTEN FROM EVIDENCE — the cell just proved it arms under this arm token, which no wrap can know
 
 # ---------------------------------------------------------------------------
