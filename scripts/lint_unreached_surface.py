@@ -78,9 +78,19 @@ BASELINE = REPO / "scripts" / "unreached_surface_baseline.txt"
 # protobuf stubs, authored by protoc.
 GUARDED = re.compile(r"^gen_worker(?!\.pb($|\.))")
 
-# The authored-worker API. Its callers are endpoint repos that vendor the
-# wheel; this tree is not their call site and never will be.
-EXEMPT_PACKAGES = ("gen_worker.api",)
+# Packages whose whole reason to exist is a consumer OUTSIDE this repository,
+# so `src/` is structurally not their call site and never will be. This is a
+# package-shaped statement, not a per-symbol pardon: every symbol in one of
+# these is consumer surface by construction, which is what makes the blanket
+# honest here and dishonest anywhere else.
+EXEMPT_PACKAGES: Dict[str, str] = {
+    # Endpoint repos vendor the wheel and call this.
+    "gen_worker.api": "authored-worker API (consumers are endpoint repos)",
+    # th#1947 §4.2: the cross-repo corpora and their accessor, shipped as
+    # package data so a PINNED consumer reads the exact bytes it pinned.
+    # tensorhub's internal/wirecontract/peers.lock is the consumer of record.
+    "gen_worker.contracts": "cross-repo contract corpora (consumers are peer repos)",
+}
 
 # The same fact, one symbol at a time, WITH PROOF. `gen_worker.api` is exempt by
 # package because the whole package is authored-worker surface; these are
@@ -480,8 +490,9 @@ def exempt(d: Definition, published: Set[str], reach: Reach) -> Optional[str]:
         return EXEMPT_TARGETS[d.target]
     if d.target in AUTHOR_SURFACE:
         return AUTHOR_SURFACE[d.target]
-    if any(d.module == p or d.module.startswith(p + ".") for p in EXEMPT_PACKAGES):
-        return "authored-worker API (consumers are endpoint repos)"
+    for pkg, why in EXEMPT_PACKAGES.items():
+        if d.module == pkg or d.module.startswith(pkg + "."):
+            return why
     if d.name in published:
         return "re-exported from gen_worker/__init__.py"
     if set(d.decorators) & DYNAMIC_DECORATORS:
