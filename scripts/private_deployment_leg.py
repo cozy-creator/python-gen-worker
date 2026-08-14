@@ -7,11 +7,10 @@
 
 WHY THIS EXISTS (pgw#1250, for tensorhub th#1929 / epic th#1925)
 
-`scripts/micro_mint_rig.py` proves a mint before a wheel reaches PyPI. Its legs
-2-3 spawn a REAL child interpreter on this box and compile there. Paul's
-2026-08-10 hard cut removed that ground: **all mints and compiles run on remote
-pods only**, with no carve-out. So the rig's producer has to move off the box,
-and the only question was what replaces it.
+The retired local micro-mint rig spawned a child interpreter on this box and
+compiled there. Paul's 2026-08-10 hard cut removed that ground: **all mints and
+compiles run on remote pods only**, with no carve-out. This private-deployment
+leg is its sole replacement.
 
 Before private deployments the answer was ugly, and it is written down in this
 repo's own tracker as a THREE-STEP TEARDOWN PROTOCOL: cancel your own demand by
@@ -44,12 +43,8 @@ BLOCKED phase naming the issue -- never a skipped assertion and never a green.
 `--state resource|fences|merged` selecting which slices have "merged", so the
 report shows exactly what is owed today.
 
-WHAT THIS FILE DOES NOT DO
-
-It does not edit the rig. `scripts/micro_mint_rig.py` is carried by an open PR
-(pgw#1214/#761) and its mint modules are rewritten by th#1834's step 4, so the
-rig's own switch to this driver is a separate, ~10-line change made by whoever
-lands those -- see `REPOINT_NOTE` at the bottom of this file for the exact call.
+There is no local fallback. A missing private-deployment route is a typed
+BLOCKED result, never permission to resurrect the second mint path.
 """
 
 from __future__ import annotations
@@ -1412,31 +1407,6 @@ class ContractModel:
             raise ApiError("GET", "/v1/admin/worker-activity-events", 404, "", "404 page not found")
         return [e for e in self.events
                 if (not release or e["release_id"] == release) and (not state or e["state"] == state)]
-
-
-#: The exact change `scripts/micro_mint_rig.py` makes when it re-points. Kept
-#: here rather than applied, because the rig is carried by an open PR
-#: (pgw#1214/#761) and its mint modules are rewritten by th#1834 step 4 — the
-#: lane that lands those makes this edit in one place, with no conflict.
-REPOINT_NOTE = """\
-micro_mint_rig legs 2-3 (`mint_process.build_request` -> `mint_process.run_mint`)
-become, once th#1927's invoke route merges:
-
-    from scripts.private_deployment_leg import HttpDeploymentAPI, Leg, run_leg
-
-    outcome = run_leg(
-        HttpDeploymentAPI(hub_url, token),
-        Leg(org=org, endpoint=endpoint, release_id=release_id, pair=parse_pair(pair),
-            function=function, payload=payload, invocations=1,
-            spend_limit_usd=budget_usd, reason="micro mint rig"),
-        log=print,
-    )
-
-and the three-step teardown protocol (cancel own demand -> QUERY endpoint_tags
--> conditional force-terminate) is DELETED: run_leg stops the rental on every
-path, and the deployment id is the entire kill set. The local child path is not
-kept as a fallback — the hard cut means it has no ground to run on.
-"""
 
 
 def _main(argv: Sequence[str]) -> int:

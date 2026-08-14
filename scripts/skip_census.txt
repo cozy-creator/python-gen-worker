@@ -154,15 +154,6 @@ LOCAL-ONLY tests/test_aot_run_impl_split_pgw811.py|banked pgw#793 wrapper not pr
 # `lint_author_ci.py --selftest` (23 cases, red on 20), which its CI gates
 # on. Set AUTHOR_CI_LINT=<path to lint_author_ci.py> to run them anywhere.
 LOCAL-ONLY tests/test_author_ci_harness_pgw1150.py|inference-endpoints is not checked out beside this repo
-# pgw#978. The full local mint cycle: a real child spawn, a real torch.export +
-# AOTInductor compile, a real publish over the wire and a real second-process
-# adopt. It is opt-in EVERYWHERE, CI included — not because CI could run it and
-# we chose not to, but because it is the developer's inner loop and a CI runner
-# has no card. The rest of that file (the gates, the carve-out bounds, the
-# handoff round-trip, the pgw#980 probe disarm) is pure Python and RUNS in CI;
-# only this row is opt-in, which is the point of classifying it rather than
-# marking the whole module.
-LOCAL-ONLY tests/test_micro_mint_rig_pgw978.py|the pgw#978 micro-mint rig is opt-in: it runs a full local mint cycle (set pgw#_rig=#)
 
 # ─── STAGED ───────────────────────────────────────────────────────────────────
 # pgw#1179 (§4.34) DELETED four of the five entries that were here, plus the two
