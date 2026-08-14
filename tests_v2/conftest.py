@@ -90,9 +90,6 @@ os.environ.setdefault(
     "GEN_WORKER_BOOT_RECORD",
     str(Path(tempfile.mkdtemp(prefix="pgw-v2-postmortem-")) / "boot-record.json"),
 )
-# Deterministic CPU encode: never probe or engage NVENC from tests.
-os.environ.setdefault("GEN_WORKER_VIDEO_ENCODER", "x264")
-
 import gen_worker  # noqa: E402
 
 _LOCATION = Path(gen_worker.__file__).resolve()

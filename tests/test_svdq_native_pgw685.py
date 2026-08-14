@@ -352,16 +352,24 @@ def test_explicit_override_is_strict_never_substituted(monkeypatch) -> None:
         svdq_mod.select_svdq_engine("fp4", override="cutlass")
 
 
-def test_engine_env_override_is_validated(monkeypatch) -> None:
+def test_th1887_the_deleted_engine_env_changes_nothing(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """th#1887: GEN_WORKER_SVDQ_ENGINE is deleted — exporting it must be inert.
+
+    Asserted against a value that WOULD have changed the outcome under the old
+    code: int4's only candidate is nunchaku, so pinning "native" used to force
+    an engine that cannot serve it and produce a different result. If the env
+    ever regains meaning, this test fails.
+    """
+    monkeypatch.delenv("GEN_WORKER_SVDQ_ENGINE", raising=False)
+    before = svdq_mod.select_svdq_engine("int4")
     monkeypatch.setenv("GEN_WORKER_SVDQ_ENGINE", "native")
-    assert svdq_mod.svdq_engine_override() == "native"
-    monkeypatch.setenv("GEN_WORKER_SVDQ_ENGINE", "nunchaku")
-    assert svdq_mod.svdq_engine_override() == "nunchaku"
-    monkeypatch.setenv("GEN_WORKER_SVDQ_ENGINE", "trt")
-    with pytest.raises(svdq_mod.SvdqError, match="not a known svdq engine"):
-        svdq_mod.svdq_engine_override()
-    monkeypatch.delenv("GEN_WORKER_SVDQ_ENGINE")
-    assert svdq_mod.svdq_engine_override() == ""
+    assert svdq_mod.select_svdq_engine("int4") == before
+    monkeypatch.setenv("GEN_WORKER_SVDQ_ENGINE", "not-an-engine")
+    assert svdq_mod.select_svdq_engine("int4") == before
+    # The TYPED per-call override survives and is still honoured strictly.
+    with pytest.raises(svdq_mod.SvdqError, match="unknown svdq engine"):
+        svdq_mod.select_svdq_engine("fp4", override="cutlass")
 
 
 # --- the fp4 module (CUDA) ------------------------------------------------

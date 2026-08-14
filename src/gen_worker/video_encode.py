@@ -35,10 +35,6 @@ from fractions import Fraction
 
 logger = logging.getLogger(__name__)
 
-#: ``auto`` (default) probes NVENC and falls back to x264; ``x264`` skips the
-#: probe; ``nvenc`` insists (still falls back with a loud warning rather than
-#: refusing to serve).
-ENCODER_ENV = "GEN_WORKER_VIDEO_ENCODER"
 #: Max concurrent buffered CPU finalize encodes (a host-RAM bound).
 ENCODE_CONCURRENCY_ENV = "GEN_WORKER_VIDEO_ENCODE_CONCURRENCY"
 #: PER EXECUTION GROUP. The bound exists so raw frame buffers do not pile up in
@@ -118,19 +114,15 @@ def detect_encoder(*, refresh: bool = False) -> EncoderChoice:
     with _detect_lock:
         if _detected is not None and not refresh:
             return _detected
-        mode = (os.environ.get(ENCODER_ENV) or "auto").strip().lower()
-        if mode not in ("auto", "nvenc", "x264"):
-            logger.warning("%s=%r not recognized; using auto", ENCODER_ENV, mode)
-            mode = "auto"
-        if mode == "x264":
-            _detected = _x264()
-        elif _probe_nvenc():
+        # th#1887: the GEN_WORKER_VIDEO_ENCODER switch is deleted. Its default
+        # was this probe, and neither other value could reach an encoder the
+        # probe would not: `x264` only SKIPPED the probe, and `nvenc` already
+        # fell back to x264 when the probe failed. So the probe was always the
+        # decision — the env could only make a pod encode on CPU while its
+        # NVENC ASIC sat idle, and never report the gap.
+        if _probe_nvenc():
             _detected = EncoderChoice("h264_nvenc", dict(NVENC_OPTIONS), hardware=True)
         else:
-            if mode == "nvenc":
-                logger.warning(
-                    "%s=nvenc but the NVENC probe failed (datacenter GPU or no "
-                    "driver encoder lib); serving with libx264", ENCODER_ENV)
             _detected = _x264()
         logger.info(
             "video encoder selected: %s %s", _detected.codec, _detected.options)
@@ -448,7 +440,6 @@ def _mux_audio(container: Any, stream: Any, audio: Any, sample_rate: int, av: An
 
 
 __all__ = [
-    "ENCODER_ENV",
     "ENCODE_CONCURRENCY_ENV",
     "EncoderChoice",
     "StreamingVideoEncoder",
