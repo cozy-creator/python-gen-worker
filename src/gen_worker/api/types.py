@@ -214,14 +214,16 @@ class SourceRepo(msgspec.Struct):
     against ``source`` instead of building from.
 
     Fields:
-      - ref: "owner/repo" | "owner/repo:tag[#flavor...]" | "owner/repo@<checkpoint-id>"
+      - ref: "owner/repo" | "owner/repo:tag" | "owner/repo@<checkpoint-id>".
+        A ``#flavor`` selector is REFUSED (``FlavorSelectorRemoved``, th#1803):
+        a tag names an ordered SET of checkpoints and selection within it is
+        tensor-layout-contract compatibility, not an arbitrary string.
       - checkpoint_id: explicit content-addressed checkpoint id; highest-priority selector
-      - attributes: subset-containment selector against the checkpoint flavor's attributes
+      - attributes: subset-containment selector against the checkpoint's attributes
         map. Well-known keys include dtype, file_layout, file_type, quant_library,
         plus family-specific keys (quant_bits, quant_group_size, quant_sym,
         quant_desc_act, quant_block_size, quant_double_quant, quant_compute_dtype,
-        quant_layout, quant_granularity, quant_activation_scheme, etc.). See
-        tensorhub ``docs/checkpoint-flavors.md`` for the namespace.
+        quant_layout, quant_granularity, quant_activation_scheme, etc.).
     """
 
     ref: str

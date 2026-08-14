@@ -1865,7 +1865,7 @@ def normalize_variant_filenames(tree: Path) -> None:
     """Strip dtype-variant tokens from published weight filenames — the ONE
     canonical-naming pass every publish path runs (gw#466, unified by gw#522).
 
-    dtype is a checkpoint axis (flavor) in repo-cas — one dtype per tree — so
+    dtype is a checkpoint axis in repo-cas — one dtype per checkpoint — so
     HF variant suffixes are redundant, and the resharder composes an index
     name diffusers cannot find (live twice: J23 juggernaut-xl, gw#522
     sdxl-base — "diffusion_pytorch_model.fp16.safetensors.index.json" where

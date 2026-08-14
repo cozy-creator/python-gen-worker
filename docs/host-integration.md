@@ -86,8 +86,8 @@ Notes:
   ref** so `input_schema["properties"]` is directly available (a host builds
   field prompts off it). Nested struct references stay under `$defs`.
 - **`models`** maps each model slot to its binding descriptor:
-  `type`/`provider`/`ref` plus whichever of `tag`/`flavor`/`revision`/
-  `dtype`/`subfolder`/`version`/`storage_dtype` are set (the exact key tuple
+  `type`/`provider`/`ref` plus whichever of `tag`/`revision`/`dtype`/
+  `subfolder`/`version`/`storage_dtype` are set (the exact key tuple
   in `cli/listing.py`).
 - The document also carries a top-level **`detected`** block (GPU SM, torch /
   CUDA versions, installed libraries) and a per-function **`fit`** verdict.

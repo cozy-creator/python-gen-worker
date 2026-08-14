@@ -28,7 +28,6 @@ from ..component_vocab import denoiser_components
 from .safetensors_header import header_len_ok
 from typing import Any, Optional
 import importlib.metadata as md
-import os
 
 logger = logging.getLogger(__name__)
 
