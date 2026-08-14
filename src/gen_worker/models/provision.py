@@ -48,7 +48,7 @@ from .loading import (
     load_from_pretrained,
     model_index_components,
 )
-from .memory import flush_memory, place_pipeline
+from .memory import flush_memory, mark_shared_components, place_pipeline
 from .refs import DEFAULT_REF_TAG, parse_model_ref
 from .. import activity as activity_mod
 from .. import adopt_fit
@@ -185,6 +185,26 @@ def load_slot(
     # `clean=True` even on a raise: a Python-level failure reports itself, so
     # the breadcrumb clears. Only a kernel kill skips the finally — exactly
     # the death the surviving breadcrumb is for.
+    # ie#721/th#1867: MARK the shared modules before they are handed to
+    # `from_pretrained`. A module reaching a pipeline through `components` was
+    # loaded once and ALIASED into every lane that shares its content address
+    # (gw#479) — so moving it to the host under an offload rung strands every
+    # co-resident consumer on the device, which is the fatal
+    # `mat1 is on cuda:0, mat2 on cpu` mid-generate.
+    #
+    # That invariant is the one `provision`'s own docstring above still names
+    # ("an offload placement the shared-component invariant refuses"). Its
+    # enforcer WAS `Resources.strict_vram`, which th#1867 deleted as an author
+    # declaration about card size — correctly, but it took the enforcement with
+    # it and left the rule standing with nothing behind it.
+    #
+    # The mark is a FACT ABOUT WHAT HAPPENED (this object was injected as a
+    # shared component), never a number an author guessed, so it satisfies
+    # §1.35 by construction: nothing here declares how big a card must be.
+    # `memory.place_pipeline` reads it; marking at the injection site is what
+    # keeps `memory` free of an import edge to `residency`/`records`.
+    mark_shared_components(components)
+
     reporter = load_progress.LoadProgressReporter(
         f"{slot or 'slot'}:{ref or path}", staged_total).start()
     try:
