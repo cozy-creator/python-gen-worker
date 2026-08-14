@@ -240,16 +240,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # pgw#1264: `@v6` HERE ONLY, and the version bump is the point rather than
+      # hygiene. The dependency install is 19-21s of this job's ~128s and the
+      # rest is mypy, so the download cache is the only cheap win left — but
+      # `@v4` bundles `@actions/cache` v3, which speaks the cache API GitHub
+      # retired, and asking v4 to cache MEASURABLY fails:
+      #   ##[warning]Failed to restore: Cache service responded with 400
+      # with nothing saved and no step turning red. So `enable-cache: true` on
+      # `@v4` is dead config that reads as a working cache. The other three
+      # workflows stay on `@v4` deliberately: none of them is the required
+      # context, and an unused action bump is risk without a payoff.
+      #
+      # Cache scope note: Actions caches are branch-scoped, and a merge-group ref
+      # is nobody's child — so the entry that makes queue runs fast is the one
+      # written by a run on `master`, i.e. the nightly below. Until the first
+      # nightly lands, expect a miss and the full install.
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v6
         with:
           version: "latest"
-          # pgw#1264: `setup-uv@v4` does NOT cache by default (the `auto` default
-          # arrived in v6), so every run of the required job re-downloaded the
-          # dev dependency set — 19s of its measured 122s. The key is uv.lock's
-          # hash, so a lock bump misses and repopulates. Only this job asks for
-          # it: `tests` is off the merge path now, and two jobs writing one key
-          # just race to save the same cache.
+          # Keyed on uv.lock's hash (setup-uv's default glob): a lock bump
+          # misses once and repopulates. Only this job asks for the cache —
+          # `tests` is off the merge path now, and two jobs writing one key just
+          # race to save the same entry.
           enable-cache: true
 
       - name: Set up Python
