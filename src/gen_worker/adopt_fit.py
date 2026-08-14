@@ -37,6 +37,19 @@ the card's.
 FIT BY CONSTRUCTION, exactly like every other budget in this tree. An honest
 under-refusal beats a number invented to look like a bound; the refusal only
 ever fires on evidence this process produced itself.
+
+**THE RESIDENT FLOOR IS NEVER COMPUTED HERE, AND MUST NOT BE.** ``have`` is the
+DRIVER's free figure, so every byte anything holds on this card — this record's
+weights, a sibling instance's, and any component a placement rung kept resident
+rather than offloading (ie#721's exclusion set) — is already subtracted from it
+before this module sees it. There is deliberately no floor term to keep in step
+with `models/memory.place_pipeline`: a second derivation of a quantity the card
+already reports is how two subsystems come to disagree about it. If a future
+change wants the exclusion accounted for, it is accounted for — by observation,
+at the instant of the decision, which is stronger than any published set could
+be. The one thing this cannot see is a floor that rises AFTER the verdict (a
+rung transition, a sibling's rotation); no pre-check can, and that residue is
+exactly what the serve-time allocator-exhaustion ruling covers.
 """
 
 from __future__ import annotations
