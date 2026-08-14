@@ -29,7 +29,7 @@ Under self-mint the arming policy for a compile-declared function becomes:
 
 The publish transport reuses the existing repo-commit machinery
 (``hubio.client.HubClient``) with a capability token minted by
-``POST /v1/worker/cells/publish-intent`` (worker JWT) — the hub corroborates
+``POST /v1/worker/compiled-graphs/publish-intent`` (worker JWT) — the hub corroborates
 every claimed key axis against its own records and pins the token to
 exactly this cell key; the endpoint-scoped ``cell_store`` row is stamped
 hub-side from the token claim, never from anything this module sends.
@@ -539,7 +539,7 @@ def _credential_lapse_s(token: str, *, now: float) -> float:
 # .tar.gz) and is read from there — `guard_closure.load_manifest` opens the
 # tarball, `aot_serve` reads `entries` off the unpacked package. The copy in
 # the declare body had exactly one hub-side reader,
-# `api/cell_receipts.go:242-248`, which hashes it into two `omitempty` audit
+# the compiled-graph receipt signer, which hashes it into two audit
 # claims that nothing verifies against anything (the worker parses
 # `manifest_digest`/`fingerprint_digest` into a dataclass field and never
 # reads them) — and the content is already bound by `snapshot_digest`, as
@@ -963,7 +963,7 @@ class CellPublisher:
 
             # th#1303/pgw#807 item 3 — THE FLIP, taken. Both gates that held
             # it are discharged: th#1340 gave the v2 route the cell-publish
-            # claim (receipt + `cell_store` + `cell_receipts`, the same three
+            # claim (receipt + compiled-graph registry + receipt rows, the same three
             # writes v1 does), and the receipt reader dispatches on the
             # receipt's OWN algorithm tag, so a sha256-bound cell resolves.
             # The v1 (blake3) route is FROZEN hub-side — it answers a cell
@@ -1072,7 +1072,7 @@ def _publish_failure_phase(exc: BaseException) -> str:
 
     The hub's own `error.code` (or a th#1301 projection's `failure.code`)
     when it named one — `unsupported_digest_algorithm`,
-    `cell_publish_flavor_mismatch`, `cell_receipt_signer_unavailable` — else
+    `compiled_graph_publish_flavor_mismatch`, `compiled_graph_receipt_signer_unavailable` — else
     the status class, else the exception type. Never prose: a phase that
     varies with the message cannot be grouped, and grouping refusals by
     reason is the whole point of putting them on the wire.

@@ -8378,7 +8378,7 @@ class Executor:
         derivation" — which is a true statement that names nothing: no family,
         no gate, no event, and a caller unable to tell it from a pod that asked
         the hub and was told no. Three real pods on 0.103.0 called
-        ``/v1/worker/cells/resolve`` ZERO times and no artifact anywhere said
+        ``/v1/worker/compiled-graphs/resolve`` ZERO times and no artifact anywhere said
         which of these gates did it. Each one now names itself and emits.
 
         None of them is fatal, and none of them is new behaviour: every non-hit

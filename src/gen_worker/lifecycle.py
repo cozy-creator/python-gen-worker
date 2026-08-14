@@ -494,7 +494,7 @@ class Lifecycle:
                 return
         # Full-replace config: file base URL + desired model residency.
         self.executor.file_base_url = ack.file_base_url or ""
-        # Arm the cell-receipt gate the moment the hub wiring exists: every
+        # Arm the compiled-graph receipt gate the moment the hub wiring exists: every
         # delivered compile cell is signature-verified before it may arm.
         if self.executor.file_base_url:
             receipts.configure(base_url=self.executor.file_base_url)

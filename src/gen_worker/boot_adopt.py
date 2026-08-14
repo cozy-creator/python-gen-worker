@@ -554,7 +554,7 @@ def _adopt_answer(
     """
     key = answer.compiled_graph_key
     if answer.refusal_code:
-        # ambiguous / incomplete / transport_unavailable — a HUB-SIDE fault
+        # incomplete / transport_unavailable — a HUB-SIDE fault
         # about this one key, carrying the code it carried when the same fault
         # refused a whole request. Not a miss, and the pod must not mint over
         # it.
