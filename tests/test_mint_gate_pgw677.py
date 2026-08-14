@@ -305,6 +305,15 @@ def _stage_ms(res: pb.JobResult, name: str) -> int:
     return int(res.metrics.stage_ms.get(name, 0))
 
 
+#: pgw#1249. Slack for comparing two clocks that measure the SAME run — the
+#: worker's stage map against the tape's own wall — not patience for a slow
+#: machine. It bounds rounding and the few instructions between `t0` and the
+#: first stage opening, so it does NOT grow with load: both sides of every
+#: comparison below stretch together. That is the whole difference between
+#: this and the `>= 100` floor it replaced, which measured the weather.
+_CLOCK_SLOP_MS = 25.0
+
+
 # ---------------------------------------------------------------------------
 # 1 + 4 — the starvation shape, red-verified via the kill switch
 # ---------------------------------------------------------------------------
@@ -352,17 +361,42 @@ def test_compile_and_tenant_forward_never_overlap_and_red_verifies(
         while not h_on.in_compile.is_set():
             assert time.monotonic() < deadline, "no background compile ran"
             await asyncio.sleep(0.005)
+        t_admit = time.monotonic()
+        # The moment the in-flight compile RELEASES, watched from beside the
+        # dispatch. `in_compile` is the same signal the loop above already
+        # trusts to know a compile is holding the instance, so the ordering
+        # assertions rest on nothing new.
+        released: Dict[str, float] = {}
+
+        async def _watch_release() -> None:
+            while h_on.in_compile.is_set():
+                await asyncio.sleep(0.001)
+            released["at"] = time.monotonic()
+
+        watcher = asyncio.ensure_future(_watch_release())
         res, wall = await h_on.dispatch("r-safe", aspect="1:1")
+        t_done = time.monotonic()
+        await watcher
         assert res.status == pb.JOB_STATUS_OK, res.safe_message
-        # It waited for the in-flight compile (bounded by ONE unit)...
-        assert wall >= 0.1
-        # ...the wait is attributed, and runtime_ms excludes it.
-        assert _stage_ms(res, "instance_gate_wait") >= 100
-        # The gate wait it must EXCLUDE is the compile it waited on,
-        # so that is the anchor — a runtime that absorbed the wait could not
-        # come in under it.
-        assert res.metrics.runtime_ms < h_on.compile_delay_s * 1000, (
-            res.metrics.runtime_ms, h_on.compile_delay_s)
+        # The wait is ATTRIBUTED: present, and not zero.
+        #
+        # pgw#1249: this was `wall >= 0.1` and `instance_gate_wait >= 100`.
+        # Both are floors on how long a MACHINE took, and how long a machine
+        # takes is not the property under test — it is the weather. Neither
+        # had a defensible value either: the tenant enters somewhere INSIDE
+        # an 800 ms sleep, so the true wait is anywhere in (0, 800]. On a
+        # loaded runner it came in at 90 ms and turned a correct tree red on
+        # the release path. What the test MEANS is causal — it waited for the
+        # instance — and that is asserted as ordering below.
+        gate_wait_ms = _stage_ms(res, "instance_gate_wait")
+        assert gate_wait_ms > 0, dict(res.metrics.stage_ms)
+        # ...and runtime EXCLUDES it. Measured against this run's OWN
+        # end-to-end wall rather than against `compile_delay_s`: a slow runner
+        # stretches both sides together, so the relation holds exactly where a
+        # constant cannot, and a runtime that had absorbed the gate wait would
+        # overshoot the wall it was measured inside.
+        assert res.metrics.runtime_ms + gate_wait_ms <= wall * 1000 + _CLOCK_SLOP_MS, (
+            res.metrics.runtime_ms, gate_wait_ms, wall)
         # th#1111 invariant survives the new pre-handler stage: the map
         # still closes against runtime_ms with a large gate wait present.
         from gen_worker.stage_timing import reconciliation
@@ -371,6 +405,21 @@ def test_compile_and_tenant_forward_never_overlap_and_red_verifies(
         assert total == res.metrics.runtime_ms
         assert abs(attributed - total) <= 5, dict(res.metrics.stage_ms)
         await h_on.wait_mint()
+
+        # ORDERING — the causal claim, and the reason none of this needs a
+        # threshold. Timestamps THIS run produced, compared only to each
+        # other: the tenant was admitted while the compile still held the
+        # instance, and it did not complete until after that compile let go.
+        # A slow machine moves all of them together, so there is nothing here
+        # for load to falsify.
+        assert "at" in released, "the in-flight compile never released"
+        t_release = released["at"]
+        assert t_admit < t_release, (
+            "inconclusive tape: the tenant was admitted after the compile had "
+            "already released the instance, so nothing here was a wait")
+        assert t_release <= t_done + _CLOCK_SLOP_MS / 1000.0, (
+            "the tenant completed before the compile released the instance — "
+            "it was not gated at all", t_release - t_done)
 
     asyncio.run(_on())
     assert not h_on.overlaps, h_on.overlaps
