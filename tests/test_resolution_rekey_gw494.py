@@ -19,6 +19,7 @@ import msgspec
 import pytest
 
 from gen_worker.api.binding import Hub, rebind_pick, wire_ref
+from gen_worker.models.records import vacate_record
 from gen_worker.models.refs import FlavorSelectorRemoved
 from gen_worker.api.decorators import Resources
 from gen_worker.executor import Executor
@@ -123,14 +124,14 @@ def test_repick_rekeys_residency_zero_orphans() -> None:
         assert mid_key not in ex._classes
         assert _vram_refs(ex) == {"acme/z-image"}
 
-        await ex._vacate_record(ex._classes[spec.instance_key])
+        await vacate_record(ex._classes[spec.instance_key], ex.teardown_seam)
         assert _vram_refs(ex) == set()
 
     asyncio.run(_run())
 
 
 def test_vacate_releases_booked_keys_not_rebound_ones() -> None:
-    """_vacate_record must release the LOAD-TIME keys even after the spec
+    """vacate_record must release the LOAD-TIME keys even after the spec
     was rebound (the exact orphan mechanic)."""
 
     async def _run() -> None:
@@ -143,7 +144,7 @@ def test_vacate_releases_booked_keys_not_rebound_ones() -> None:
         ex.apply_model_resolutions({"acme/z-image": ("", "fp8", "")})
         # The rehome carried the live record to the new key; vacate it.
         rec = next(r for r in ex._classes.values() if r is rec)
-        await ex._vacate_record(rec)
+        await vacate_record(rec, ex.teardown_seam)
         assert _vram_refs(ex) == set(), f"orphan under {old_ref!r}"
         await asyncio.sleep(0.05)  # settle the scheduled revalidate task
 

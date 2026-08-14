@@ -26,6 +26,7 @@ from gen_worker import (
 )
 from gen_worker import compile_cache as cc
 from gen_worker.models import provision
+from gen_worker.models.records import vacate_record
 from gen_worker.api.binding import Hub
 from gen_worker.api.binding import wire_ref
 from gen_worker.api.errors import RetryableError
@@ -364,7 +365,7 @@ def test_target_vacate_removes_address_before_replacement(tmp_path):
     ex._on_state_change = lambda: state_snapshots.append(
         [t.incarnation_id for t in ex.compile_targets()])
 
-    asyncio.run(ex._vacate_record(rec))
+    asyncio.run(vacate_record(rec, ex.teardown_seam))
     assert ex.compile_targets() == []
     assert state_snapshots and state_snapshots[0] == []
 

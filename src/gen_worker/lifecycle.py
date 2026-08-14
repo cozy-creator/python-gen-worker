@@ -19,6 +19,7 @@ from . import fleet_cells
 from . import receipts
 from . import serve_posture
 from . import progress as progress_mod
+from .models.records import shutdown_instances
 from .models.refs import WireRef
 from .config import Settings
 from .config.settings import BOOT_CONFIG_GENERATION_ABSENT
@@ -1531,7 +1532,7 @@ class Lifecycle:
             await self.maybe_send_state_delta()
             await self.intent_registry.guard_await(
                 drain_intent,
-                self.executor.shutdown_instances(),
+                shutdown_instances(self.executor.teardown_seam),
                 operation="drain instance shutdown",
             )
             if self.transport is not None:

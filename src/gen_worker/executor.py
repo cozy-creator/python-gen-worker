@@ -110,7 +110,13 @@ from .models.memory import (
 )
 from .models import rung as rungspec
 from .models.rung import touches_host_ram, transition_line
-from .models.records import record_in_use, record_refs, records_holding
+from .models.records import (
+    RecordTeardown,
+    record_in_use,
+    record_refs,
+    records_holding,
+    vacate_record,
+)
 from .models.envelope import ArtifactEnvelopeExceeded
 from .models.errors import MissingSnapshotError, UrlExpiredError
 from .models.execution_lanes import ExecutionLaneUnavailableError
@@ -2133,7 +2139,7 @@ class Executor:
             async with self._load_lock:
                 if record_in_use(rec, records=self._classes.values(), jobs=self.jobs.values(), residency=self.store.residency):
                     return
-                await self._vacate_record(rec)
+                await vacate_record(rec, self.teardown_seam)
         self._on_state_change()
 
     async def revalidate_snapshot_identity(
@@ -4386,7 +4392,7 @@ class Executor:
                     reason=pb.LIFECYCLE_WAIT_REASON_LOAD_LOCK,
                     resume_stage=pb.LIFECYCLE_INTENT_STAGE_LOADING_HOST,
                 ):
-                    await self._vacate_record(rec)
+                    await vacate_record(rec, self.teardown_seam)
             if rec.ready:
                 await self._promote_setup_refs(spec, promote_slots, rec=rec)
                 self._intent_transition(
@@ -5208,7 +5214,7 @@ class Executor:
         if not self._record_has_setup_ownership(rec):
             return
         async with self._load_lock:
-            released = await self._vacate_record(rec)
+            released = await vacate_record(rec, self.teardown_seam)
         await aflush_memory()
         released_pinned = await asyncio.to_thread(
             release_unused_pinned_host_cache)
@@ -6877,7 +6883,7 @@ class Executor:
         A warm pipeline is owned by both Residency and its endpoint
         ``_ClassRecord``. Clearing only the Residency reference reports
         ON_DISK while ``record.instance`` still owns every tensor. Evict
-        record-owned victims through ``_vacate_record``; only ownerless
+        record-owned victims through ``records.vacate_record``; only ownerless
         entries may use ``release_to_disk`` directly. Re-probe observed RAM
         after every teardown and fail RETRYABLE if the real headroom still
         cannot cover the incoming bytes plus the derived floor.
@@ -6969,7 +6975,7 @@ class Executor:
                     held for held in record_refs(rec)
                     if res.tier(held) in (residency_mod.Tier.RAM, residency_mod.Tier.VRAM)
                 ]
-                released = await self._vacate_record(rec)
+                released = await vacate_record(rec, self.teardown_seam)
                 evicted.extend(released)
                 logger.info(
                     "host-RAM admission vacated warm record refs=%s for %s",
@@ -7120,7 +7126,7 @@ class Executor:
             rec = owners[0]
             if record_in_use(rec, records=self._classes.values(), jobs=self.jobs.values(), residency=self.store.residency, reclaim_ref=ref):
                 continue
-            await self._vacate_record(rec)
+            await vacate_record(rec, self.teardown_seam)
             if await asyncio.to_thread(make_room):
                 self._on_state_change()
                 return
@@ -8634,27 +8640,22 @@ class Executor:
             publisher=self._cell_publisher(),
         )
 
-    async def shutdown_instances(self) -> None:
-        for rec in self._classes.values():
-            await self.abandon_background_mint(
-                rec, reason="worker shutdown", code="shutdown")
-            inst, rec.instance, rec.ready = rec.instance, None, False
-            rec.compile_targets.clear()
-            rec.applied_lanes.clear()
-            rec.posture.clear()
-            shutdown = getattr(inst, "shutdown", None)
-            if inst is not None and callable(shutdown):
-                try:
-                    if asyncio.iscoroutinefunction(shutdown):
-                        await shutdown()
-                    else:
-                        await asyncio.to_thread(shutdown)
-                except Exception:
-                    logger.exception("shutdown() failed for %s", rec.cls.__name__)
-            server, rec.server = rec.server, None
-            if server is not None:
-                await asyncio.to_thread(server.stop)
-        self._on_state_change()
+    @property
+    def teardown_seam(self) -> RecordTeardown:
+        """What `models.records`' two mutators need from here.
+
+        Built per call, never cached: `_on_state_change` is reassigned after
+        `__init__` (worker.py wires it once Lifecycle exists).
+        `abandon_background_mint` is th#1834's ruled seam — abandonment stays
+        with the mint supervisor and residency calls it through this."""
+        return RecordTeardown(
+            records=self._classes.values(),
+            residency=self.store.residency,
+            abandon_background_mint=self.abandon_background_mint,
+            on_state_change=self._on_state_change,
+            close_sequence_group=self._close_sequence_group,
+            observe_host_ram_progress=self._observe_host_ram_progress,
+        )
 
     # ---- Compile-cache adoption -------------------------------------------
 
@@ -8755,112 +8756,6 @@ class Executor:
                 "" if adoption.armed else f" reason={adoption.reason}")
             await self._send(pb.WorkerMessage(model_event=event))
         inj.adoptions.clear()
-
-
-
-
-    async def _vacate_record(self, rec: _ClassRecord) -> List[str]:
-        """Tear an instance down and return refs whose owner was released."""
-        # pgw#671: a departing instance takes its background mint with it —
-        # stop the driver before any module teardown races a warm forward.
-        await self.abandon_background_mint(
-            rec, reason="instance vacate", code="vacate")
-        held_refs = record_refs(rec)
-        held_objects = rec.held_objects
-        released_refs: List[str] = []
-        old_obj: Any = None
-        inst, rec.instance, rec.ready = rec.instance, None, False
-        rec.compile_targets.clear()
-        # pgw#1104: the applied lane belonged to THESE weights; the next setup
-        # re-reports it or the lane honestly reverts to the binding's.
-        rec.applied_lanes.clear()
-        # th#1871 P1: and so does the posture. A lever applied to weights that
-        # no longer exist would qualify the NEXT instance's measurements with
-        # the last one's degradation.
-        rec.posture.clear()
-        # The next full StateDelta must remove the old address before any
-        # replacement can become READY. Do this synchronously before teardown
-        # awaits; adoption's second validation then rejects the stale ID.
-        self._on_state_change()
-        shutdown = getattr(inst, "shutdown", None)
-        if inst is not None and callable(shutdown):
-            try:
-                if asyncio.iscoroutinefunction(shutdown):
-                    await shutdown()
-                else:
-                    await asyncio.to_thread(shutdown)
-            except Exception:
-                logger.exception("shutdown() during vacate failed")
-        # A bound method owns its instance. Drop it before measuring cgroup
-        # headroom, otherwise this teardown frame itself can retain the whole
-        # departing pipeline and suppress a genuine capacity transition.
-        shutdown = None
-        del inst
-        server, rec.server = rec.server, None
-        if server is not None:
-            await asyncio.to_thread(server.stop)
-        server = None
-        # No gc pass here: the caller holds the load lock and the departing
-        # objects' owners were just dropped above, so only the allocator cache
-        # needs returning (pgw#657 fold).
-        await aflush_memory(collect=False)
-        # gw#494: inspect exactly what the instance BOOKED (held_refs) —
-        # re-deriving from spec.models would inspect the wrong keys after a
-        # resolution rebind. A multiply-held ref stays resident until its last
-        # ready record owner leaves.
-        for ref in held_refs:
-            tier_before = self.store.residency.tier(ref)
-            old_obj = held_objects.get(ref)
-            owners = records_holding(self._classes.values(), ref)
-            if owners:
-                # Residency keeps one representative object per wire ref. If
-                # it points at the departing record, transfer it to a survivor
-                # so the old pipeline can actually be collected. This is an
-                # ownership handoff, not an ON_DISK transition.
-                if old_obj is not None and self.store.residency.obj(ref) is old_obj:
-                    replacement = next(
-                        (owner.held_objects.get(ref) for owner in reversed(owners)
-                         if owner.held_objects.get(ref) is not None),
-                        None,
-                    )
-                    self.store.residency.replace_object(ref, replacement)
-                if old_obj is not None:
-                    released_refs.append(ref)
-                continue
-            if (
-                tier_before in (residency_mod.Tier.RAM, residency_mod.Tier.VRAM)
-                and self.store.residency.release_to_disk(ref)
-            ):
-                released_refs.append(ref)
-        rec.held_refs = []
-        rec.held_snapshot_digests = {}
-        rec.held_bindings = []
-        rec.execution_lane_refs = set()
-        rec.held_objects = {}
-        rec.slot_pipelines = {}  # pgw#678: pipelines die with the instance
-        # pgw#748: the rank siblings are an implementation detail of THIS
-        # instance's pipeline; they must not outlive it holding D cards.
-        self._close_sequence_group(rec)
-        # Do not let this teardown frame itself retain a departing pipeline
-        # while the cgroup probe decides whether capacity really progressed.
-        old_obj = None
-        replacement = None
-        owners = []
-        held_objects.clear()
-        rec.stale = False
-        if rec.shared_keys:
-            # Drop this record's holds on content-keyed shared components
-            # (gw#479). pgw#636: entries no other record references are NOT
-            # drained eagerly — a hot GPU keeps them resident as ordinary LRU
-            # candidates so the next pick that matches their bytes aliases
-            # them for free; real pressure reclaims them through make_room.
-            for key in rec.shared_keys:
-                self.store.residency.release_shared(key)
-            rec.shared_keys.clear()
-        self._on_state_change()
-        released_refs = list(dict.fromkeys(released_refs))
-        await self._observe_host_ram_progress(released_refs, collect_host=True)
-        return released_refs
 
     # ---- job intake --------------------------------------------------------
 
