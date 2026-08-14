@@ -18,14 +18,12 @@ adoption has been structurally impossible since 0.97.0 deleted ``aot_cells.py``.
 
 NEVER a second admission brain
 ------------------------------
-This module builds an :class:`aot_identity.ExpectedIdentity` from the answer and
-hands the transport to ``aot_delivery.materialize_named_artifact``. That is a
-RE-SITING of the expectation's source — the hub's resolve answer names the
-artifact — and nothing else. Every gate downstream is the one the deleted Plan
-path ran: ``receipts.refuse_untrusted_publisher``,
-``aot_serve.verify_contract``, pgw#903's pre-dlopen graph-contract fence. The
-answer's field set is not arbitrary; it is exactly ``ExpectedIdentity``'s five
-axes plus ``materialize_named_artifact``'s two arguments.
+This module verifies the answer's embedded receipt before transport, then hands
+the exact transport and typed receipt to
+``aot_delivery.materialize_named_artifact``. The receipt's identity axes are
+derived by TCG and bind its compiled-graph key; after delivery, TCG imports the
+artifact against that same key. The worker retains only family, publisher and
+transport policy. It does not project or re-derive graph identity.
 
 **The receipt rides the answer deliberately, and must not be re-fetched.**
 ``handleWorkerCellReceipt`` scopes by ENDPOINT while resolve scopes by ORG
@@ -480,7 +478,7 @@ def resolve_batch(
             raise CompiledGraphResolveRefused(
                 code or f"http_{resp.status_code}", detail,
                 status=resp.status_code)
-        answers = _answers_of(body, asked)
+        answers = _answers_of(body, asked, fam)
         hits = sum(1 for a in answers if a.hit)
         if span is not None:
             span.classify(
@@ -490,7 +488,7 @@ def resolve_batch(
 
 
 def _answers_of(
-    body: Any, asked: Tuple[str, ...],
+    body: Any, asked: Tuple[str, ...], family: str,
 ) -> Tuple[ResolveAnswer, ...]:
     """Decode the answer list, enforcing arity, order and per-answer signing."""
     raw = (body or {}) if isinstance(body, Mapping) else {}
@@ -539,7 +537,11 @@ def _answers_of(
                 f"answers[{i}] answers {echoed!r} and keys[{i}] asked {key}; "
                 f"answers are consumed positionally, so a transposed batch "
                 f"would arm every class with a sibling's kernels")
-        answer = _answer_from(row, key, str(raw.get("family") or ""))
+        # The request's family is the admission expectation. The response may
+        # echo it for observability, but it cannot replace it: otherwise a
+        # signed graph from another family could authorize itself by changing
+        # the unsigned batch envelope beside it.
+        answer = _answer_from(row, key, family)
         if answer.compiled_graph is not None:
             receipt_jws = str(row.get("receipt") or "")
             seen_for = receipt_owners.get(receipt_jws)

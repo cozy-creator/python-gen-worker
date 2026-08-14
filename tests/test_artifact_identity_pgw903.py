@@ -1,374 +1,294 @@
-"""pgw#903 — serving verifies AOT code identity against the current
-ExecutionSpec, before ``dlopen``.
+"""One identity authority: signed receipt -> TCG admission -> worker arm.
 
-Two questions were being conflated. ``aot_serve.verify`` asks *can this runtime
-execute these bytes* (sm/torch/cuda/host ISA, all probed here).
-``verify_contract`` asks *is this envelope internally consistent*. Neither asks
-*is this the artifact the hub named for this attempt* — nothing could, before
-there was an immutable spec to ask against.
-
-The fixture is deliberately model-free: identity is a metadata question, so a
-GPU, a pipeline and a real ``.pt2`` are all irrelevant to it. Mutating exactly
-one expected fact must refuse, and the refusal must name that fact.
+The former worker ``ExpectedIdentity`` projection compared a second spelling
+of facts TCG already derives. These tests drive real signed receipts and real
+TCG artifacts instead: the receipt binds the requested family and exact
+identity before transport, delivered bytes bind to that receipt, and TCG alone
+admits the compiled-graph key.
 """
+
+# Pytest fixtures are imported into this module and then named as parameters.
+# Ruff's ordinary shadowing rule cannot distinguish that injection idiom.
+# ruff: noqa: F811
 
 from __future__ import annotations
 
-import importlib
 import inspect
-import json
-import tarfile
+import shutil
+import struct
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from torch_compiled_graphs import Engine, GraphClassDeclaration
+from torch_compiled_graphs.artifact import build_metadata, pack_artifact
+from torch_compiled_graphs.host_isa import _host_requirement
+from torch_compiled_graphs.identity import from_artifact_metadata
 
-from gen_worker import aot_identity, aot_serve, cell_key, cell_resolve, env_seal
-from gen_worker.aot_identity import ExpectedIdentity
-from gen_worker.pb import worker_scheduler_pb2 as pb
-
-_TOOLCHAIN = {"cc": "sha256:aaa", "ld": "sha256:bbb"}
-_SEAL = {"config": "cfg16", "inductor": "ind16", "loaded_libs": "libs16"}
-_CLOSURE = {"gen_worker/executor.py": "sha256:ccc"}
-
-#: One well-formed entry, so `unpack` can parse the envelope. Identity is a
-#: metadata question — none of these values participate in it.
-_ENTRIES = {
-    "unet": {
-        "target": "unet",
-        "inputs": [{"name": "x", "dtype": "bfloat16", "shape": [1, 4]}],
-        "constants": [],
-    },
-}
-
-
-def _meta(**over: Any) -> dict[str, Any]:
-    """An artifact's ``metadata.json`` as ``aot_mint`` writes it: the stamped
-    envelope PLUS the identity blocks ``shared_identity_blocks`` merges in."""
-    meta: dict[str, Any] = {
-        aot_serve.COMPILED_GRAPH_FORMAT_KEY: aot_serve.COMPILED_GRAPH_FORMAT,
-        "kind": aot_serve.ARTIFACT_KIND,
-        "family": "micro",
-        "cell_key": "aot-inductor:k1",
-        "manifest_digest": "gc_01",
-        "entry": {"name": "unet", **dict(_ENTRIES["unet"])},
-        env_seal.SEAL_KEY: dict(_SEAL),
-        "toolchain": dict(_TOOLCHAIN),
-        "code_closure": dict(_CLOSURE),
-    }
-    meta.update(over)
-    return meta
-
-
-def _expected(**over: Any) -> ExpectedIdentity:
-    base: dict[str, Any] = {
-        "cell_key": "aot-inductor:k1",
-        "toolchain_digest": cell_key.facts_digest(_TOOLCHAIN),
-        "env_seal_digest": env_seal.seal_digest(_SEAL),
-        "graph_contract_digest": "gc_01",
-        "publisher_org": "cozy",
-    }
-    base.update(over)
-    return ExpectedIdentity(**base)
-
-
-# --- the identity an artifact's own facts describe --------------------------
-
-
-def test_identity_is_recomputed_from_the_recorded_facts_not_a_stamp() -> None:
-    """``cell_key``'s standing discipline: a digest is derived from the facts it
-    summarizes, so a stamp can never silently disagree with them."""
-    have = aot_identity.artifact_identity(_meta())
-    assert have.toolchain_digest == cell_key.facts_digest(_TOOLCHAIN)
-    assert have.env_seal_digest == env_seal.seal_digest(_SEAL)
-    assert have.graph_contract_digest == "gc_01"
-    # An artifact cannot attest to its own publisher; that claim is the
-    # hub-signed receipt's.
-    assert have.publisher_org == ""
-
-
-def test_a_matching_identity_passes() -> None:
-    assert aot_identity.verify_declared_identity(_meta(), _expected()) == ""
-
-
-# --- mutate exactly one expected fact ---------------------------------------
-
-
-@pytest.mark.parametrize(
-    "axis,mutated",
-    [
-        ("cell_key", {"cell_key": "aot-inductor:OTHER"}),
-        ("toolchain_digest", {"toolchain_digest": "0" * 16}),
-        ("env_seal_digest", {"env_seal_digest": "0" * 16}),
-        ("graph_contract_digest", {"graph_contract_digest": "gc_02"}),
-    ],
+from gen_worker import (
+    aot_delivery,
+    aot_serve,
+    artifact_meta,
+    cell_resolve,
+    compiled_graph_store,
+    receipts,
 )
-def test_one_mutated_fact_refuses_and_names_itself(axis: str, mutated: Any) -> None:
-    reason = aot_identity.verify_declared_identity(_meta(), _expected(**mutated))
-    assert reason.startswith(f"{axis}: expected ")
-    # Both values, not just the verdict: the hub team reads these as events.
-    assert "have " in reason
-    assert reason.split("expected ")[1].split(",")[0] != reason.split("have ")[1]
+from gen_worker.models import provision
+from gen_worker.models.cache_paths import open_worker_cas
+from harness import receipt_hub
+from harness.receipt_hub import hub, rsa_key  # noqa: F401
 
 
-@pytest.mark.parametrize(
-    "axis,dropped",
-    [
-        ("cell_key", "cell_key"),
-        ("toolchain_digest", "toolchain"),
-        ("env_seal_digest", env_seal.SEAL_KEY),
-        ("graph_contract_digest", "manifest_digest"),
-    ],
-)
-def test_an_artifact_silent_on_an_axis_refuses_rather_than_skipping(
-    axis: str, dropped: str,
-) -> None:
-    """Fail-closed: a cell that cannot state its own toolchain cannot be shown
-    to match the toolchain the spec named, and 'cannot be shown to match' is
-    what a refusal means. A skipped axis is a pass nobody proved."""
-    meta = _meta()
-    meta.pop(dropped)
-    reason = aot_identity.verify_declared_identity(meta, _expected())
-    assert reason.startswith(f"{axis}: ")
-    assert "<absent>" in reason
+def _elf() -> bytes:
+    """A parseable ELF carrying the section TCG's package verifier inspects."""
+
+    names = b"\0.shstrtab\0.lrodata\0"
+    section_offset = 64
+    section_size = 64
+    string_offset = section_offset + section_size * 3
+    image = bytearray(string_offset + len(names))
+    image[:4] = b"\x7fELF"
+    image[4:7] = bytes((2, 1, 1))
+    struct.pack_into("<Q", image, 0x28, section_offset)
+    struct.pack_into("<HHH", image, 0x3A, section_size, 3, 1)
+    struct.pack_into("<II", image, section_offset + section_size, 1, 3)
+    struct.pack_into(
+        "<QQ",
+        image,
+        section_offset + section_size + 0x18,
+        string_offset,
+        len(names),
+    )
+    struct.pack_into("<II", image, section_offset + 2 * section_size, 11, 1)
+    struct.pack_into(
+        "<QQ",
+        image,
+        section_offset + 2 * section_size + 0x18,
+        len(image),
+        0,
+    )
+    image[string_offset:] = names
+    return bytes(image)
 
 
-def test_an_expectation_naming_no_value_is_never_a_pass() -> None:
-    """An unverifiable expectation must not read as verified. Every naming
-    source refuses an artifact missing any of these, so reaching this means a
-    hand-built expectation — and it still refuses."""
-    reason = aot_identity.verify_declared_identity(_meta(), _expected(cell_key=""))
-    assert reason == "cell_key: the spec named no expected value"
+def _artifact(tmp_path: Path, witness: str) -> tuple[Path, dict[str, Any]]:
+    graph_class = f"denoiser/{witness[:8]}"
+    package = tmp_path / f"{witness[:8]}.pt2"
+    wrapper = "AOTInductorModelBase(1, 1, 0, device_str, std::move(cubin_dir), false)"
+    with zipfile.ZipFile(package, "w") as archive:
+        root = f"data/aotinductor/{graph_class}"
+        archive.writestr(f"{root}/model.wrapper.cpp", wrapper)
+        archive.writestr(f"{root}/model.so", _elf())
+    graph = {
+        "v": 3,
+        "constant_fqns": [],
+        "lifted_inputs": [],
+        "pytree": {"in": "leaf", "out": "leaf"},
+        "specialization": {},
+    }
+    declaration = GraphClassDeclaration(
+        graph_class=graph_class,
+        target="denoiser",
+        graph=graph,
+        graph_witness=witness,
+        range_digest="0123456789abcdef" * 2,
+    )
+    metadata = build_metadata(
+        graph_class={
+            "name": declaration.graph_class,
+            "target": declaration.target,
+            "class_hash": declaration.class_hash,
+            "graph": dict(declaration.graph),
+            "graph_witness": declaration.graph_witness,
+            "range_digest": declaration.range_digest,
+            "fork": [],
+            "class_dims": [],
+            "strict": True,
+            "lora_bucket": 0,
+            "literal_values": "",
+            "literal_payload_values": "",
+            "placement": list(declaration.placement),
+            "constants": [],
+        },
+        sm="sm_89",
+        toolchain={"torch": "torch-content", "triton": "triton-content"},
+        host_isa=_host_requirement().facts(),
+    )
+    path = pack_artifact(
+        package,
+        tmp_path / f"{witness[:8]}-compiled-graph.tar.gz",
+        metadata,
+    )
+    return path, metadata
 
 
-def test_the_closure_axis_is_absent_rather_than_invented() -> None:
-    """pgw#903 asks for closure identity and the landed schema carries no
-    comparable one: `EndpointRelease.code_closure_id` is the hub's release
-    identifier, while the artifact records a {path: digest} map. Equating them
-    on the strength of two similar names would refuse every healthy cell in the
-    fleet, so the axis is OWED, not faked.
-
-    This test exists to stop a later reader from 'finishing' it: closing the
-    gap is one ruling by the th#1457 lane (stamp a comparable
-    `code_closure_digest`, or delete the block per pgw#1034), never a local
-    equality.
-    """
-    assert "code_closure_id" not in ExpectedIdentity.__struct_fields__
-    assert "code_closure" not in aot_identity._COMPARED_AXES
-    # th#1842 deleted `pb.ExecutionSpec`/`pb.EndpointRelease` with the rest of
-    # the abandoned staged-dispatch surface, so the release id no longer rides
-    # the wire at all. The gap is unchanged and still one ruling by the th#1457
-    # lane; what changed is that closing it now needs a SOURCE for the digest,
-    # not merely a comparison. Pinned so nobody re-plumbs to a dead message.
-    assert not hasattr(pb, "EndpointRelease")
-    assert not hasattr(pb, "ExecutionSpec")
-
-
-def test_identity_is_never_confirmed_by_comparing_bytes() -> None:
-    """§4.25/§4.26 + pgw#1006: two mints of one key legitimately differ, so a
-    byte comparison would refuse healthy cells and prove nothing about
-    unhealthy ones. The module must not reach for artifact bytes at all."""
-    src = Path(aot_identity.__file__).read_text()
-    for banned in ("read_bytes", "sha256_file", "hashlib", "open(", "Path("):
-        assert banned not in src, f"aot_identity reaches for bytes via {banned!r}"
-
-
-# --- projection from the hub-named artifact -------------------------------------
-
-
-def _named(armed: bool = True) -> Any:
-    """The source that NAMES an artifact — now the PRODUCTION one.
-
-    th#1842 deleted `pb.ArtifactIdentity` and the `STEADY_BACKEND_*` enum with
-    the abandoned staged-dispatch surface. That surface was only ever this
-    test's fixture; the real caller of ``named_by`` is the JSON resolve answer
-    ``cell_resolve.ResolvedCell``. Re-pointing here is a strict improvement —
-    the projection is now exercised through the shape production actually
-    hands it. An unarmed request names no artifact, which the caller must read
-    as a complete answer rather than a gap.
-    """
-    if not armed:
-        return None
-    return cell_resolve.ResolvedCell(
-        family="micro", cell_key="aot-inductor:k1",
-        cell_ref="cozy/cells-micro#k1", checkpoint_id="",
-        content_digest="sha256:" + "c" * 64, artifact_path="cell.tar.gz",
-        size_bytes=0, publisher_org="cozy", publisher_tier="platform",
-        graph_contract="gc_01",
-        toolchain_digest=cell_key.facts_digest(_TOOLCHAIN),
-        env_seal_digest=env_seal.seal_digest(_SEAL),
-        identity_axes={}, sm="90", sku="h100", lane="", receipt="",
-        transport=cell_resolve.Transport(
-            snapshot_digest="blake3:" + "cd" * 32, files=()),
+def _receipt(hub: Any, artifact: Path, metadata: dict[str, Any]) -> receipts.Receipt:
+    jws = hub.serve_receipt_for(
+        artifact,
+        family=receipt_hub.FAMILY,
+        publisher_tier=receipts.PUBLISHER_TIER_PLATFORM,
+    )
+    return receipts.verify_receipt(
+        jws,
+        family=receipt_hub.FAMILY,
+        compiled_graph_key=str(metadata["compiled_graph_key"]),
+        snapshot_digest=receipt_hub.SNAPSHOT,
+        artifact_path=artifact.name,
+        artifact_digest=receipt_hub.artifact_digest(artifact),
+        artifact_size_bytes=artifact.stat().st_size,
     )
 
 
-def _named_expectation(armed: bool = True) -> Any:
-    named = _named(armed)
-    if named is None:
-        return None
-    return aot_identity.ExpectedIdentity.named_by(named, "gc_01")
+def _cache_artifact(root: Path, artifact: Path, digest: str) -> None:
+    target = (
+        root
+        / compiled_graph_store.SIDECARS_DIRNAME
+        / ".incoming"
+        / f"{digest.partition(':')[2]}.tar.gz"
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(artifact, target)
 
 
-def test_the_expectation_comes_from_the_named_artifact_and_matches_a_real_one() -> None:
-    expected = _named_expectation()
-    assert expected is not None
-    assert aot_identity.verify_declared_identity(_meta(), expected) == ""
-    assert expected.publisher_org == "cozy"
+def test_worker_expected_identity_authority_is_deleted() -> None:
+    root = Path(aot_serve.__file__).parent
+    assert not (root / "aot_identity.py").exists()
+    for module in (aot_serve, aot_delivery, cell_resolve, provision):
+        source = inspect.getsource(module)
+        assert "ExpectedIdentity" not in source
+        assert "expected_identity_mismatch" not in source
+    assert "expected" not in inspect.signature(aot_serve.stage_artifact).parameters
+    assert "expected" not in inspect.signature(aot_serve.arm_entry).parameters
+    assert "expected" not in inspect.signature(provision.arm_aot).parameters
 
 
-def test_an_arm_that_names_no_artifact_yields_no_expectation() -> None:
-    """``None`` is a complete answer, not a gap: an eager_only arm has nothing
-    to verify because it must arm nothing."""
-    assert _named_expectation(armed=False) is None
-    assert _named_expectation() is not None
-
-
-# --- the gate runs before dlopen, on a real staged tarball ------------------
-
-
-def _artifact(tmp_path: Path, meta: dict[str, Any]) -> Path:
-    """A staging-shaped tarball. It carries no real ``.pt2``: the point is that
-    identity refuses before anything would be loaded, so there is nothing to
-    load."""
-    payload = tmp_path / "payload"
-    payload.mkdir()
-    (payload / "metadata.json").write_text(json.dumps(meta))
-    (payload / aot_serve.PACKAGE_NAME).write_bytes(b"not-a-real-package")
-    out = tmp_path / "cell.tar.gz"
-    with tarfile.open(out, "w:gz") as tar:
-        for item in sorted(payload.iterdir()):
-            tar.add(item, arcname=item.name)
-    return out
-
-
-def test_stage_artifact_refuses_a_wrong_identity_before_any_load(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_real_receipt_and_tcg_engine_are_the_complete_identity_path(
+    tmp_path: Path,
+    hub: Any,
 ) -> None:
-    """The refusal must land while the artifact is still inert bytes. The
-    runtime-key and sm gates are neutralized so the ONLY thing under test is
-    identity — otherwise a green run could mean 'refused for the wrong
-    reason'."""
-    monkeypatch.setattr(aot_serve, "verify", lambda meta, **kw: "")
-    monkeypatch.setattr(aot_serve, "host_isa_reason", lambda meta: "")
-    loaded: list[Any] = []
-    monkeypatch.setattr(
-        aot_serve, "verify_package_compute_capability",
-        lambda path: loaded.append(path) or "")
+    artifact, metadata = _artifact(tmp_path, "a" * 16)
+    identity = from_artifact_metadata(artifact_meta.read_metadata(artifact))
+    assert identity.value == metadata["compiled_graph_key"]
+    verified = _receipt(hub, artifact, metadata)
+    assert verified.identity_axes == identity.axes
 
-    meta = _meta()
-    path = _artifact(tmp_path, meta)
+    cache = tmp_path / "cas"
+    _cache_artifact(cache, artifact, verified.artifact_digest)
+    materialized = aot_delivery.materialize_named_artifact(
+        identity.value,
+        receipt_hub.FAMILY,
+        f"root/family-{receipt_hub.FAMILY}#{identity.value}",
+        verified.artifact_digest,
+        None,
+        receipt=verified,
+        cache_dir=cache,
+        what="identity integration proof",
+    )
 
-    with pytest.raises(aot_serve.AdoptError) as exc:
-        aot_serve.stage_artifact(
-            path, "micro", cache_dir=tmp_path / "cache",
-            expected=_expected(cell_key="aot-inductor:SOMETHING-ELSE"))
-    assert exc.value.reason == "expected_identity_mismatch"
-    assert "cell_key: expected" in str(exc.value)
-    # Nothing downstream of the identity gate ran.
-    assert loaded == []
+    assert materialized.is_file()
+    resolved = Engine(open_worker_cas(cache)).resolve(
+        identity.value,
+        tmp_path / "resolved-after-restart",
+    )
+    assert resolved is not None
+    assert resolved.key == identity.value
+    assert from_artifact_metadata(resolved.metadata).axes == verified.identity_axes
 
 
-def test_stage_artifact_with_a_matching_identity_reaches_the_load_gates(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_signed_identity_mismatch_refuses_before_tcg_import(
+    tmp_path: Path,
+    hub: Any,
 ) -> None:
-    monkeypatch.setattr(aot_serve, "verify", lambda meta, **kw: "")
-    monkeypatch.setattr(aot_serve, "host_isa_reason", lambda meta: "")
-    reached: list[Any] = []
-    monkeypatch.setattr(
-        aot_serve, "verify_package_compute_capability",
-        lambda path: reached.append(path) or "")
+    original, original_meta = _artifact(tmp_path, "b" * 16)
+    changed, changed_meta = _artifact(tmp_path, "c" * 16)
+    original_identity = from_artifact_metadata(original_meta)
+    changed_identity = from_artifact_metadata(changed_meta)
+    assert original_identity.value != changed_identity.value
+    jws = hub.serve_receipt_for(
+        changed,
+        family=receipt_hub.FAMILY,
+        compiled_graph_key=original_identity.value,
+        identity_axes=original_identity.as_dict(),
+        publisher_tier=receipts.PUBLISHER_TIER_PLATFORM,
+    )
+    verified = receipts.verify_receipt(
+        jws,
+        family=receipt_hub.FAMILY,
+        compiled_graph_key=original_identity.value,
+        snapshot_digest=receipt_hub.SNAPSHOT,
+        artifact_path=changed.name,
+        artifact_digest=receipt_hub.artifact_digest(changed),
+        artifact_size_bytes=changed.stat().st_size,
+    )
+    cache = tmp_path / "cas"
+    _cache_artifact(cache, changed, verified.artifact_digest)
 
-    path = _artifact(tmp_path, _meta())
-    staged = aot_serve.stage_artifact(
-        path, "micro", cache_dir=tmp_path / "cache", expected=_expected())
-    try:
-        assert staged.metadata["cell_key"] == "aot-inductor:k1"
-        assert len(reached) == 1
-    finally:
-        staged.close()
+    with pytest.raises(aot_delivery.NamedArtifactUnavailable) as refused:
+        aot_delivery.materialize_named_artifact(
+            original_identity.value,
+            receipt_hub.FAMILY,
+            f"root/family-{receipt_hub.FAMILY}#{original_identity.value}",
+            verified.artifact_digest,
+            None,
+            receipt=verified,
+            cache_dir=cache,
+            what="tampered identity proof",
+        )
+    assert refused.value.reason == "artifact_receipt_refused"
+    assert "receipt_identity_mismatch" in str(refused.value)
+    assert Engine(open_worker_cas(cache)).resolve(
+        original_identity.value,
+        tmp_path / "must-not-resolve",
+    ) is None
 
 
-def test_no_expectation_leaves_the_legacy_path_byte_identical(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_unsigned_batch_family_cannot_replace_the_requested_family(
+    tmp_path: Path,
+    hub: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Until the cutover, RunJob dispatches carry no immutable spec. Absent an
-    expectation the gate must not invent one — a default expectation would
-    refuse every cell the fleet serves today."""
-    monkeypatch.setattr(aot_serve, "verify", lambda meta, **kw: "")
-    monkeypatch.setattr(aot_serve, "host_isa_reason", lambda meta: "")
-    monkeypatch.setattr(
-        aot_serve, "verify_package_compute_capability", lambda path: "")
-    meta = _meta()
-    meta.pop("toolchain")
-    meta.pop(env_seal.SEAL_KEY)
-    staged = aot_serve.stage_artifact(
-        _artifact(tmp_path, meta), "micro", cache_dir=tmp_path / "cache")
-    try:
-        assert staged.metadata["cell_key"] == "aot-inductor:k1"
-    finally:
-        staged.close()
+    artifact, metadata = _artifact(tmp_path, "d" * 16)
+    key = str(metadata["compiled_graph_key"])
+    digest = receipt_hub.artifact_digest(artifact)
+    wrong_family = "another-family"
+    jws = hub.serve_receipt_for(
+        artifact,
+        family=wrong_family,
+        publisher_tier=receipts.PUBLISHER_TIER_PLATFORM,
+    )
+    answer = {
+        "status": cell_resolve.STATUS_HIT,
+        "found": True,
+        "compiled_graph_key": key,
+        "compiled_graph_ref": f"root/family-{wrong_family}#{key}",
+        "content_digest": digest,
+        "receipt": jws,
+        "transport": {
+            "snapshot_digest": receipt_hub.SNAPSHOT,
+            "files": [{
+                "path": artifact.name,
+                "size_bytes": artifact.stat().st_size,
+                "digest": digest,
+                "url": "https://cas.invalid/compiled-graph",
+            }],
+        },
+    }
+    response = SimpleNamespace(
+        status_code=200,
+        text="",
+        json=lambda: {
+            "object": cell_resolve.RESOLVE_BATCH_OBJECT,
+            "family": wrong_family,
+            "answers": [answer],
+        },
+    )
+    monkeypatch.setattr(cell_resolve.broker, "request", lambda *_a, **_k: response)
 
+    (result,) = cell_resolve.resolve_batch(receipt_hub.FAMILY, [key])
 
-def test_an_internally_corrupt_artifact_keeps_its_own_distinct_refusal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A hash/signature problem inside the package is NOT an identity problem.
-    Folding them into one reason would put a supply-chain event and a stale
-    image rebuild in the same bucket."""
-    monkeypatch.setattr(aot_serve, "host_isa_reason", lambda meta: "")
-    monkeypatch.setattr(
-        aot_serve, "verify",
-        lambda meta, **kw: "entry 'unet': class_hash does not match its recorded facts")
-    with pytest.raises(aot_serve.AdoptError) as exc:
-        aot_serve.stage_artifact(
-            _artifact(tmp_path, _meta()), "micro",
-            cache_dir=tmp_path / "cache", expected=_expected())
-    assert exc.value.reason == "key_mismatch"
-    assert exc.value.reason != "expected_identity_mismatch"
-
-
-# ---------------------------------------------------------------------------
-# Every axis is verified SOMEWHERE, and the claim is checked
-# ---------------------------------------------------------------------------
-
-
-def test_every_identity_axis_is_either_compared_here_or_named_elsewhere() -> None:
-    """The accounting is enforced at import (`aot_identity` refuses to load
-    otherwise), so this row states the invariant rather than re-deriving it: an
-    axis on the identity that nothing verifies is how a cell gets armed on an
-    unchecked claim."""
-    accounted = (set(aot_identity._COMPARED_AXES)
-                 | set(aot_identity._VERIFIED_ELSEWHERE))
-    assert accounted == set(ExpectedIdentity.__struct_fields__)
-
-
-def test_each_axis_verified_elsewhere_names_a_gate_that_really_reads_it() -> None:
-    """`_VERIFIED_ELSEWHERE` is a CLAIM, and pgw#1152's rule for this fence
-    family is that a claim is CHECKED, not trusted — the arm-state lint accepts
-    a `RECOGNIZER` row only after verifying it structurally, for exactly the
-    reason that a comment naming the wrong gate reads identical to one naming
-    the right gate.
-
-    The checked property is that the named gate **is handed the axis** — it
-    takes it as a parameter — because "this gate verifies the expectation"
-    means the expectation reaches it. Merely *mentioning* the axis is too weak
-    to discriminate: this entry first named
-    `receipts.refuse_untrusted_publisher`, whose body does mention
-    `publisher_org` while asking a different question (is this producer trusted
-    AT ALL, rather than is it the one the spec NAMED). It takes no
-    `publisher_org` parameter, so it fails this row; `fleet_cells.arm_ordered`,
-    which compares the named org to the signed receipt's `publisher_org_id`
-    fail-closed on silence (§4.26), takes one and passes.
-    """
-    for axis, why in aot_identity._VERIFIED_ELSEWHERE.items():
-        dotted = why.split(" ", 1)[0]
-        mod_name, _, func_name = dotted.rpartition(".")
-        assert mod_name and func_name, f"{axis}: {why!r} must start with mod.func"
-        module = importlib.import_module(f"gen_worker.{mod_name}")
-        gate = getattr(module, func_name, None)
-        assert gate is not None, f"{axis} names {dotted}, which does not exist"
-        assert axis in inspect.signature(gate).parameters, (
-            f"{axis} claims {dotted} verifies it, but that function is never "
-            "handed the axis — a gate that does not receive the expectation "
-            "cannot be the gate that checks it")
+    assert result.status == cell_resolve.STATUS_INCOMPLETE
+    assert result.compiled_graph is None
+    assert result.refusal_code == "compiled_graph_resolve_incomplete"
+    assert "receipt_family_mismatch" in result.detail

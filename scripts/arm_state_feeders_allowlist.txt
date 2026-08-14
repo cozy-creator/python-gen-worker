@@ -45,7 +45,6 @@ src/gen_worker/fleet_cells.py::arm_from_local_store::local_cell_store.note_memo 
 # ---------------------------------------------------------------------------
 # OWNER — the producer putting its own bytes in its own store.
 # ---------------------------------------------------------------------------
-src/gen_worker/fleet_cells.py::_stage_durable::local_cell_store.store  OWNER  pgw#1183/§1.5: this machine minted these bytes and this is the store's ONE write path — durable BEFORE the arm, so the write cannot sit at the arm seam by construction. The two rows this replaces were `adopt_delegated_mint` (gated on having no publish sink, the inversion §1.5 retires) and `_publish_async.run` (a salvage racing the `finally` that deleted the same bytes; both are gone)
 
 # ---------------------------------------------------------------------------
 # RECOGNIZER (tests) — the registry/classifier IS the subject. Each row's claim
@@ -64,4 +63,3 @@ tests/test_boot_phases_pgw764.py::test_serving_mode_distinguishes_aot_from_jit_f
 # twice; that is pgw#1150's cause, restated.)
 # ---------------------------------------------------------------------------
 src/gen_worker/executor.py::_selection_for::_CompileArtifactSelection()  PROJECTION  built from a MINT object (ref + snapshot_digest off the SelfMint), not from a materialized artifact triple — a different source, and the `self_mint=True` flag says so
-src/gen_worker/aot_identity.py::artifact_identity::ExpectedIdentity()  PROJECTION  the OBSERVED side, read out of the mint's stored meta blocks — a Mapping, not a source that NAMED an artifact; it is what `verify_declared_identity` compares the expectation AGAINST, and it deliberately leaves publisher_org empty because an artifact cannot attest to its own producer

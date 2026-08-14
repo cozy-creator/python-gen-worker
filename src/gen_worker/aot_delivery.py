@@ -1,11 +1,10 @@
-"""Materialize the ONE artifact the hub named (the delivery half).
+"""Materialize the ONE compiled graph named by a verified receipt.
 
-Identity and delivery are split on purpose: ``aot_identity`` compares the
-DECLARED identities (never bytes, §4.25/§4.26), and this module does the one
-byte-level check that legitimately exists — the delivered bytes must hash to
-the content digest the hub named. There is no listing, no ranking and no
-sibling to fall back to: the grant either carries the named digest or the
-attempt refuses typed.
+The embedded receipt is verified before transport by :mod:`cell_resolve` and
+bound to the materialized bytes here before TCG imports them. TCG alone derives
+and admits graph identity; the worker retains the receipt's family/publisher
+policy and the byte-level digest check. There is no listing, ranking, sibling
+fallback, or worker-side identity reconstruction.
 
 Refusals are :class:`NamedArtifactUnavailable` (a ``RetryableError``): nothing
 about the caller's input is wrong — the hub re-issues a grant or re-routes —

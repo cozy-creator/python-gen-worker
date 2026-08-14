@@ -20,7 +20,7 @@ from typing import Any, Dict
 
 import pytest
 
-from gen_worker import aot_identity, cell_key as ck, cell_resolve, env_seal
+from gen_worker import cell_resolve
 from gen_worker.procsplit import actions as actions_mod
 
 KEY = "cg-key-v1-" + "ab" * 28
@@ -268,17 +268,19 @@ def test_an_incomplete_answer_is_refused_before_the_cell_is_paid_for(
     assert field in answer.detail
 
 
-def test_every_expectation_axis_is_required_of_the_answer() -> None:
-    """An axis on ``ExpectedIdentity`` that the answer need not name is an
-    expectation this route can state as empty — and
-    ``verify_declared_identity`` refuses an empty expectation only AFTER the
-    bytes are paid for. Derived from the struct, so a new axis reds here."""
-    required = {f for f, _ in cell_resolve._REQUIRED}
-    # the answer spells the graph axis without the `_digest` suffix; every
-    # other axis is copied by name in `ExpectedIdentity.named_by`
-    answer_name = {"graph_contract_digest": "graph_contract"}
-    for axis in aot_identity.ExpectedIdentity.__struct_fields__:
-        assert answer_name.get(axis, axis) in required, axis
+def test_every_pre_transport_requirement_has_one_downstream_consumer() -> None:
+    """Resolve requires only address, bytes and the signed TCG identity.
+
+    Graph/toolchain/seal projections are deliberately absent: the receipt
+    carries TCG's closed identity axes and delivery imports against its exact
+    compiled-graph key.
+    """
+    assert {field for field, _why in cell_resolve._REQUIRED} == {
+        "compiled_graph_key",
+        "compiled_graph_ref",
+        "content_digest",
+        "receipt",
+    }
 
 
 def test_an_incomplete_answer_is_a_typed_refusal_not_a_miss() -> None:
@@ -321,57 +323,6 @@ def test_a_missing_family_is_refused_before_the_hub_is_dialled(stub) -> None:
 # ---------------------------------------------------------------------------
 # A hit feeds the EXISTING admission machinery, never a second brain
 # ---------------------------------------------------------------------------
-
-
-def test_a_hit_builds_the_expected_identity_the_arm_gate_COMPARES(
-    stub,
-) -> None:
-    """``ExpectedIdentity`` is what ``verify_declared_identity`` compares, and
-    a resolve answer produces it through THE one map — which is what keeps this
-    from being a second admission brain.
-
-    Until pgw#1206 D this row read "the same object the Plan path builds"; the
-    Plan head is gone and this is the only naming source left, so the guard is
-    the pinned VALUE below plus the ``named_by`` equality: a new axis copied
-    wrong, or silently defaulted, reds here."""
-    _sent, resp = stub
-    resp["r"] = _Resp(200, _batch(_hit_body()))
-    cell = _one().cell
-    assert cell is not None
-
-    expected = cell.expected_identity()
-
-    assert isinstance(expected, aot_identity.ExpectedIdentity)
-    assert expected.cell_key == KEY
-    assert expected.toolchain_digest == "toolch0000000000"
-    assert expected.env_seal_digest == "seal000000000000"
-    assert expected.graph_contract_digest == "c0ffee0000000000"
-    assert expected.publisher_org == "org-a"
-    # ...and it is THE map that built it, not a second one written here.
-    assert expected == aot_identity.ExpectedIdentity.named_by(
-        cell, "c0ffee0000000000")
-
-    # And it is COMPARABLE: an artifact whose recorded facts match passes the
-    # existing gate, and one that does not is refused BY AXIS.
-    meta = {
-        "cell_key": KEY,
-        "toolchain": {"torch": "x"},
-        "env_seal": {"a": 1},
-        # pgw#1176: the declaration-wide coverage label. Same arithmetic as
-        # `combined_graph_hash`, demoted from identity — identity is
-        # `cell_key`, per entry.
-        "manifest_digest": "c0ffee0000000000",
-    }
-    meta["toolchain_digest_expected"] = ck.facts_digest(meta["toolchain"])
-    reason = aot_identity.verify_declared_identity(
-        meta,
-        aot_identity.ExpectedIdentity(
-            cell_key=KEY,
-            toolchain_digest=ck.facts_digest(meta["toolchain"]),
-            env_seal_digest=env_seal.seal_digest(meta["env_seal"]),
-            graph_contract_digest="c0ffee0000000000",
-            publisher_org="org-a"))
-    assert reason == ""
 
 
 def test_the_receipt_rides_the_answer_and_is_never_re_fetched(stub) -> None:

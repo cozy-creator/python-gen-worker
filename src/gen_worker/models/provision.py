@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
-    TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional, Sequence,
+    Any, Callable, Dict, Mapping, Optional, Sequence,
     Tuple,
 )
 
@@ -52,9 +52,6 @@ from .memory import place_pipeline
 from .refs import DEFAULT_REF_TAG, parse_model_ref
 from .. import activity as activity_mod
 from .. import mint_workers
-
-if TYPE_CHECKING:
-    from ..aot_identity import ExpectedIdentity
 
 __all__ = ["model_index_components"]  # re-export: single source in loading.py (gw#521)
 
@@ -274,8 +271,7 @@ def arm_route(mode: str) -> Optional[str]:
 def arm_aot(
     pipe: Any, cfg: Any, cache_dir: Optional[Path], artifact: Path,
     bucket: int, meta: Optional[Dict[str, Any]] = None,
-    *, expected: "Optional[ExpectedIdentity]" = None,
-    verify_numerics: bool = False,
+    *, verify_numerics: bool = False,
     declared: Sequence[str] = (),
 ) -> AdoptOutcome:
     """Arm ONE exported ``.pt2`` ENTRY on ``pipe``. The whole AOT arm, in one
@@ -475,7 +471,7 @@ def arm_aot(
     # pgw#1176 makes that refusal cheaper still: the attempt is ONE graph
     # class, so a card that cannot hold it costs that class and no other.
     outcome = aot_serve.enable(
-        pipe, cfg, cache_dir, artifact, expected=expected, declared=declared)
+        pipe, cfg, cache_dir, artifact, declared=declared)
     _, _peak_after_load = mint_workers.adopt_watermark(_budget_device)
     _load_bytes = max(0, _peak_after_load - _resident_before)
     if not outcome.armed and lifted_install_error:

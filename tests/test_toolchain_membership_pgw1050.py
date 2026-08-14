@@ -23,8 +23,9 @@ from __future__ import annotations
 from typing import Any, Dict
 
 import pytest
+from torch_compiled_graphs.identity import toolchain_axis_digest
 
-from gen_worker import aot_identity, cell_key, compile_cache as cc, dist_records
+from gen_worker import cell_key, compile_cache as cc, dist_records
 
 from harness.cell_meta import exported_cell_meta
 
@@ -178,13 +179,10 @@ def test_producer_and_reader_agree_on_membership() -> None:
 def test_the_published_toolchain_wire_fact_follows_the_key(
     library: str,
 ) -> None:
-    """``ArtifactIdentity.toolchain_digest`` is compared fail-closed at adopt
-    time. If it kept the old membership while the key narrowed, every adoption
-    of a correctly-keyed cell would refuse on an axis that is a consequence of
-    the key — so it narrows with it."""
+    """TCG's toolchain identity uses the same narrowed compiler membership."""
     def _wire(block: Dict[str, Any]) -> str:
-        return aot_identity.artifact_identity(
-            exported_cell_meta(toolchain=block)).toolchain_digest
+        recorded = exported_cell_meta(toolchain=block)["toolchain"]
+        return toolchain_axis_digest(cell_key.toolchain_facts(recorded))
 
     assert _wire(_bumped(library)) == _wire(dict(TOOLCHAIN))
     assert _wire(_bumped("torch")) != _wire(dict(TOOLCHAIN))

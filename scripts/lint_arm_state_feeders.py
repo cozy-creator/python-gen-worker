@@ -192,14 +192,6 @@ ONE_CONSTRUCTOR: Tuple[OneConstructor, ...] = (
         why="pgw#1152: both order builders also built the selection from the "
             "same three fields; it is now built once, with the order",
     ),
-    OneConstructor(
-        name="ExpectedIdentity",
-        constructor=("aot_identity.py", "ExpectedIdentity.named_by"),
-        why="pgw#1152's last reported duplicate: this is the object EVERY arm "
-            "gate compares a cell against, and its two expectation sources "
-            "are the hub PLAN and the §4.27 pull-by-key resolve — the same "
-            "plan-vs-adopt pair that produced pgw#1108/#1122/#1141/#1141b",
-    ),
 )
 
 

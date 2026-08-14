@@ -17,11 +17,9 @@ The rows:
   OWN ``trace_for_key`` and asserts the keying blocks are byte-identical on the
   INTERFACE half while the graph witnesses differ — AND the derived keys now
   differ. It is the RED→GREEN proof: pre-fix one key, post-fix two.
-* :func:`test_the_witness_backstops_a_residual_collision` runs the
-  defense-in-depth backstop over the same two traced blocks: even given a cell
-  built from one member's blocks, the matching pod admits and the colliding pod
-  is REFUSED by a reason naming both digests. The witness stays as belt-and-
-  braces beneath the now-sound key.
+TCG derives the compiled-graph key from this graph-class declaration. There is
+no worker-side witness comparison beneath it: a different witness is a
+different key and therefore a resolve miss.
 
 **No compile anywhere.** ``trace_for_key`` is ``torch.export`` and stops there
 (tracing for key derivation is explicitly permitted locally; mints are not).
@@ -39,7 +37,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from gen_worker import aot_identity, aot_serve, boot_key  # noqa: E402
+from gen_worker import aot_serve, boot_key  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 MICRO_SRC = REPO / "examples" / "micro-diffusion" / "src"
@@ -164,63 +162,6 @@ def test_the_bodies_now_key_apart(traced_pair: Dict[str, Any]) -> None:
         "again — class_hash must fold graph_witness")
 
 
-def test_the_witness_backstops_a_residual_collision(
-    traced_pair: Dict[str, Any],
-) -> None:
-    """Defense-in-depth: given a cell built from one member's blocks, the
-    matching pod adopts and the colliding pod is refused by name.
-
-    The key now separates the two members (``test_the_bodies_now_key_apart``),
-    so pull-by-key never hands the wrong cell over in the first place. This
-    proves the backstop still holds beneath the sound key: were a witness-blind
-    cell ever handed over, the adopt path still refuses on the witness."""
-    fixed, branchy = traced_pair[PAIR[0]], traced_pair[PAIR[1]]
-    # ONE artifact, ONE class — so the witness backstop is asked
-    # about the class this artifact carries, which is the only thing it could
-    # ever honestly answer about.
-    name = sorted(fixed["blocks"])[0]
-    cell = aot_serve.entry_metadata(
-        family=PAIR[0], precision="", cell_key=fixed["key"],
-        name=name, entry=fixed["blocks"][name],
-        strict_export=True, lora_bucket=0)
-
-    mine = {name: boot_key.graph_witnesses_of(fixed["blocks"])[name]}
-    theirs = {name: boot_key.graph_witnesses_of(branchy["blocks"])[name]}
-
-    assert aot_identity.verify_graph_witness(cell, mine) == "", (
-        "the pod whose graph this cell WAS compiled from must admit it")
-
-    refusal = aot_identity.verify_graph_witness(cell, theirs)
-    assert refusal, "the colliding pod must be REFUSED, not admitted"
-    assert "transformer" in refusal
-    assert mine["transformer"] in refusal and theirs["transformer"] in refusal, (
-        "a refusal that does not name BOTH digests cannot be acted on")
-
-
-def test_a_witnessless_cell_is_refused_not_skipped() -> None:
-    """Fail-closed: silence is a refusal (``verify_declared_identity``'s rule).
-
-    A pre-pgw#1031 cell records no witness, so it cannot be shown to compute
-    this pod's graph — and 'cannot be shown to match' is what a refusal means.
-    """
-    meta = {"entry": {"name": "unet", "class_hash": "aa" * 8}}
-    reason = aot_identity.verify_graph_witness(meta, {"unet": "d" * 16})
-    assert "graph_witness" in reason and "unet" in reason
-
-    assert aot_identity.verify_graph_witness(
-        {"entry": {"name": "unet", "graph_witness": "d" * 16}}, {})
-    assert aot_identity.verify_graph_witness(
-        {}, {"unet": "d" * 16})
-
-
-# pgw#1176 DELETED `test_a_differing_class_set_is_refused`. Its subject was a
-# CLASS SET on one artifact ("a partial agreement is not a narrower match, it
-# is an unproven one") — and one artifact carries one class now, so the set it
-# guarded cannot exist. Porting it would have preserved the collection in the
-# suite after removing it from the code. What survives is the row above: an
-# entry that records no witness is refused, never skipped.
-
-
 def _meta(row: Dict[str, Any], family: str) -> Dict[str, Any]:
     """One family's cell metadata, as the mint would stamp it."""
     from gen_worker import cell_key as ck, compile_cache as cc, env_seal
@@ -250,136 +191,19 @@ def test_the_key_now_separates_what_the_gates_could_not(
 
     * the two members derive DIFFERENT keys — pull-by-key never even offers
       cell A to pod B; the collision is a MISS, not a wrong hit;
-    * were the wrong cell forced across anyway, ``verify_declared_identity``
-      now REFUSES on the ``graph`` axis (this class's ``class_hash`` differs); and
-    * the witness backstop still refuses beneath both.
+    * TCG imports and resolves by that exact key, so there is no residual
+      worker projection that can reinterpret the class as a match.
     """
     fixed, branchy = traced_pair[PAIR[0]], traced_pair[PAIR[1]]
     cell_a = _meta(fixed, PAIR[0])
 
-    # The expectation pod B states from its OWN traced facts and its OWN
-    # runtime — nothing borrowed from the cell it is about to be handed.
-    expected_b = aot_identity.artifact_identity(_meta(branchy, PAIR[1]))
-    assert expected_b.cell_key != cell_a["cell_key"], (
+    cell_b = _meta(branchy, PAIR[1])
+    assert cell_b["cell_key"] != cell_a["cell_key"], (
         "THE FIX: pod B must derive a different key from cell A's, so the hub "
         "never answers B's pull with A. A red here means the key went body-"
         "blind — class_hash must fold graph_witness")
 
-    # Cell A is still self-consistent (its own stamp verifies)…
+    # Each declaration remains internally self-consistent; separation belongs
+    # to the key, not to a second post-hoc comparison.
     assert aot_serve.verify_contract(cell_a) == ""
-    # …but the identity gate now REFUSES the cross, naming the graph axis.
-    refusal = aot_identity.verify_declared_identity(cell_a, expected_b)
-    assert refusal, "the identity gate must refuse the wrong cell post-fix"
-
-    # …and the witness backstop refuses it too (defense-in-depth).
-    assert aot_identity.verify_graph_witness(
-        cell_a, boot_key.graph_witnesses_of(branchy["blocks"]))
-
-
-# ---------------------------------------------------------------------------
-# The ADOPT PATH — where a collision would actually arm another graph's kernels
-# ---------------------------------------------------------------------------
-
-
-def _artifact(tmp_path: Path, meta: Dict[str, Any]) -> Path:
-    """A cell whose only interesting member is its ``metadata.json``."""
-    import io
-    import tarfile
-
-    path = tmp_path / "cell.tar.gz"
-    blob = json.dumps(meta).encode()
-    with tarfile.open(path, mode="w:gz") as tar:
-        info = tarfile.TarInfo(aot_serve.METADATA_NAME)
-        info.size = len(blob)
-        tar.addfile(info, io.BytesIO(blob))
-    return path
-
-
-def _attempt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-             derived: Any, artifact: Path) -> Any:
-    from gen_worker import boot_adopt, boot_key, cell_resolve
-
-    class _Cell:
-        publisher_org = "org-a"
-        cell_ref = "root/family-micro-pad32"
-        publisher_tier = "platform"
-
-    monkeypatch.setattr(boot_key, "derive", lambda **_kw: derived)
-    monkeypatch.setattr(
-        cell_resolve, "resolve_batch",
-        lambda _f, keys, **_k: tuple(
-            cell_resolve.ResolveAnswer(
-                compiled_graph_key=k, status="hit", cell=_Cell())
-            for k in keys))
-    monkeypatch.setattr(
-        cell_resolve, "materialize", lambda *_a, **_k: artifact)
-
-    class _Cfg:
-        family = "micro-pad32"
-        targets = ("transformer",)
-        shapes = ((12, 12),)
-        text_lens = ()
-        guidance_scales = ()
-        lora_bucket = 0
-
-    return boot_adopt.attempt(
-        function="generate-pad32", modules=("m",), cfg=_Cfg(), slots={},
-        declared_hint=1, envelope={"shapes": [[12, 12]]},
-        work_root=tmp_path)
-
-
-def _derived_key(traced: Dict[str, Any], family: str) -> Any:
-    """A ``DerivedKey`` carrying one family's real traced witnesses."""
-    blocks = traced[family]["blocks"]
-    return boot_key.DerivedKey(
-        entry_keys=dict(traced[family]["key"]), class_hashes={}, manifest="",
-        workers=1, width_reason="pgw#1031 fixture", traced=len(blocks),
-        memo="miss", wall_ms=1,
-        graph_witnesses=boot_key.graph_witnesses_of(blocks))
-
-
-def test_the_adopt_path_admits_the_pod_whose_graph_it_is(
-    traced_pair: Dict[str, Any], monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    fixed = traced_pair[PAIR[0]]
-    name = sorted(fixed["blocks"])[0]
-    meta = aot_serve.entry_metadata(
-        family=PAIR[0], precision="", cell_key=fixed["key"][name],
-        name=name, entry=fixed["blocks"][name],
-        strict_export=True, lora_bucket=0)
-    # a boot returns ONE outcome per declared class; this fixture
-    # traces one, so the unpack ASSERTS that arity.
-    (out,) = _attempt(
-        monkeypatch, tmp_path, _derived_key(traced_pair, PAIR[0]),
-        _artifact(tmp_path, meta))
-    assert out.adopted and out.reason == "hit"
-
-
-def test_the_adopt_path_refuses_the_colliding_pod(
-    traced_pair: Dict[str, Any], monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """THE backstop: a FORCED cross — pod B handed cell A — is refused, and it
-    says which. Post-fix the keys differ, so pull-by-key never offers this cross
-    on its own; the monkeypatched ``derive`` forces it to prove the backstop
-    still refuses beneath the sound key. Without it this returns ``hit`` and the
-    pod arms ``micro-pad32``'s kernels for ``micro-pad32-branchy``'s
-    computation, with only the arm-time numerics tolerance between that and
-    served output.
-    """
-    fixed, branchy = traced_pair[PAIR[0]], traced_pair[PAIR[1]]
-    name = sorted(fixed["blocks"])[0]
-    # the fix: the shared class keys apart
-    assert fixed["key"][name] != branchy["key"][name]
-    meta = aot_serve.entry_metadata(
-        family=PAIR[0], precision="", cell_key=fixed["key"][name],
-        name=name, entry=fixed["blocks"][name],
-        strict_export=True, lora_bucket=0)
-    (out,) = _attempt(
-        monkeypatch, tmp_path, _derived_key(traced_pair, PAIR[1]),
-        _artifact(tmp_path, meta))
-    assert not out.adopted
-    assert out.reason == "graph_witness_mismatch"
-    assert boot_key.graph_witnesses_of(
-        branchy["blocks"])["transformer"] in out.detail
+    assert aot_serve.verify_contract(cell_b) == ""

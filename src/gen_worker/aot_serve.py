@@ -106,7 +106,6 @@ from torch_compiled_graphs import (
 
 from . import activity as activity_mod
 from . import aot_flatten
-from . import aot_identity
 from . import artifact_meta
 from . import boot_phases
 from . import cell_key as cell_key_mod
@@ -634,11 +633,10 @@ def class_hash(
     the witness here makes the key sound BY CONSTRUCTION: two different bodies
     key apart, a collision becomes a MISS (eager + mint), which is the cheap
     outcome. The witness stays recorded as a top-level sibling for the adopt
-    backstop (``aot_identity.verify_graph_witness``) — defense-in-depth. The
-    fold is tolerant of a missing witness (folds ``""``) so a pre-witness
-    entry is body-blind rather than unhashable; production entries always
-    carry it (``keying_block``), and such stale cells are refused by the
-    envelope/structure gates and the witness backstop regardless.
+    ``graph_witness`` remains recorded in the graph-class declaration so TCG's
+    closed identity can derive the exact key from the same facts. The fold is
+    tolerant of a missing witness (folds ``""``), while production entries
+    always carry it (``keying_block``).
 
     ``placement`` (pgw#1113) folds in only when the entry states MORE THAN ONE
     distinct device — see the comment at the fold.
@@ -1205,7 +1203,6 @@ class _StagedAotArtifact:
 
 def stage_artifact(
     artifact: Path, family: str, cache_dir: Optional[Path] = None,
-    *, expected: "Optional[aot_identity.ExpectedIdentity]" = None,
 ) -> _StagedAotArtifact:
     """Extract and runtime-verify a complete artifact in an isolated tree.
 
@@ -1213,12 +1210,10 @@ def stage_artifact(
     Concurrent attempts use distinct trees; a process crash can leave only
     an unreferenced staging directory, never a partially published ``.pt2``.
 
-    ``expected`` (pgw#903) is the identity the current ``ExecutionSpec`` named.
-    When supplied, this artifact must BE that one — a declared-identity
-    comparison, never a byte comparison (§4.25/§4.26: two mints of one key
-    legitimately differ, pgw#1006 measured it). ``None`` is the pre-cutover
-    RunJob path, where no immutable spec exists to compare against; it leaves
-    behaviour byte-identical rather than inventing an expectation.
+    Named artifacts reach this legacy unpacker only after their hub-signed
+    receipt has been checked and TCG has admitted their exact identity. This
+    function retains worker runtime/package checks; it never restates TCG's
+    graph identity.
     """
     base = Path(cache_dir) if cache_dir else Path.home() / ".cache" / "gen-worker"
     base.mkdir(parents=True, exist_ok=True)
@@ -1234,15 +1229,6 @@ def stage_artifact(
         reason = verify(meta, family=family, entry=entry)
         if reason:
             raise AdoptError("key_mismatch", reason)
-        # pgw#903: "can this runtime execute it" is answered above; this
-        # answers "is it the artifact the spec named", which nothing asked
-        # before there was an immutable spec to ask against. Its own reason
-        # class: a runnable cell that is the WRONG cell is a different bug,
-        # a different owner and a different fix from an unrunnable one.
-        if expected is not None:
-            mismatch = aot_identity.verify_declared_identity(meta, expected)
-            if mismatch:
-                raise AdoptError("expected_identity_mismatch", mismatch)
         # pgw#765: the GPU-architecture axis as the BYTES declare it, ruled
         # on by name before dlopen — the tier that keeps cross-SKU adoption
         # honest now that ``sku`` no longer stands in for the arch. Runs
@@ -3219,8 +3205,7 @@ def enable_compiled_graph(
 
 def arm_entry(
     pipeline: Any, cfg: Any, artifact: Path, cache_dir: Optional[Path] = None,
-    *, expected: "Optional[aot_identity.ExpectedIdentity]" = None,
-    declared: Sequence[str] = (),
+    *, declared: Sequence[str] = (),
 ) -> Dict[str, Any]:
     """Stage + verify + load + BIND + register ONE compiled graph class.
 
@@ -3253,10 +3238,6 @@ def arm_entry(
     feeds :attr:`EntryDispatch.declared`, so a call that no ARMED entry
     admits can say "pending compile" instead of reporting a shape gap for a
     class the declaration already contains.
-
-    ``expected`` (pgw#903) is checked inside :func:`stage_artifact`, i.e.
-    strictly before ``_load_package`` — the identity question must be settled
-    while the artifact is still inert bytes.
 
     §4.33 / pgw#1175, CARRIED THROUGH THE ATOM AND IMPROVED BY IT: THE DEVICE
     COST OF THIS FUNCTION IS ATTEMPTED, NEVER PREDICTED. Two estimates used to
@@ -3291,8 +3272,7 @@ def arm_entry(
         boot_phases.PHASE_CELL_VERIFY, ref=family,
         artifact_kind="aot-inductor",
     ) if boot_phases.in_boot() else contextlib.nullcontext():
-        staged = stage_artifact(
-            Path(artifact), family, cache_dir=cache_dir, expected=expected)
+        staged = stage_artifact(Path(artifact), family, cache_dir=cache_dir)
     try:
         meta = staged.metadata
         block = staged.entry  # parsed and validated once, while staging
@@ -3485,7 +3465,6 @@ def enable(
     cache_dir: Optional[Path] = None,
     artifact: Optional[Path] = None,
     *,
-    expected: "Optional[aot_identity.ExpectedIdentity]" = None,
     declared: Sequence[str] = (),
 ) -> AdoptOutcome:
     """Consumer entry point: verify + load + bind + register ONE entry.
@@ -3509,7 +3488,7 @@ def enable(
     try:
         meta = arm_entry(
             pipeline, cfg, Path(artifact), cache_dir=cache_dir,
-            expected=expected, declared=declared)
+            declared=declared)
     except Exception as exc:
         reason = str(getattr(exc, "reason", "") or "") or type(exc).__name__
         identity = _adopt_identity(Path(artifact))

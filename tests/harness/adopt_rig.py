@@ -62,17 +62,20 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from types import SimpleNamespace
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 import msgspec
 import pytest
 import torch
+from torch_compiled_graphs.identity import from_axes, toolchain_axis_digest
 
 from gen_worker import (
-    RequestContext, Resources, Slot, activity, aot_identity, aot_serve,
-    boot_adopt, boot_key, cell_key, cell_resolve, endpoint, env_seal, receipts,
+    RequestContext, Resources, Slot, activity, aot_serve, boot_adopt, boot_key,
+    cell_key, cell_resolve, compiled_graph_store, endpoint, env_seal, receipts,
     worker_function,
 )
 from gen_worker import executor as ex_mod
@@ -163,9 +166,7 @@ class AdoptedFamily:
 
 
 def cell_metadata() -> Dict[str, Any]:
-    """pgw#868's envelope plus the two identity blocks an ADOPTED cell must
-    carry: ``verify_declared_identity`` compares four axes and refuses a cell
-    that is SILENT on any of them."""
+    """pgw#868's envelope expressed under TCG's closed identity."""
     meta = cell868.metadata()
     meta["toolchain"] = {"torch": RUNTIME["torch"], "cuda": RUNTIME["cuda"],
                          "triton": "3.6.0"}
@@ -174,32 +175,68 @@ def cell_metadata() -> Dict[str, Any]:
         "shapes": [list(row) for row in ROWS], "text_len": 0,
         "shape_strategy": "static-rows",
     }
-    # The REAL key, restated from the artifact's own recorded facts — the same
-    # recomputation admission runs (pgw#1059), so nothing here is a stamp the
-    # bytes cannot back up.
-    meta["cell_key"] = cell_key.from_entry_metadata(meta).digest
+    entry = dict(meta["entry"])
+    identity = from_axes({
+        "graph": str(entry["class_hash"]),
+        "sm": str(meta["sm"]),
+        "toolchain": toolchain_axis_digest(meta["toolchain"]),
+    })
+    meta["graph_class"] = {
+        "name": str(entry["name"]),
+        "target": str(entry["target"]),
+        "class_hash": str(entry["class_hash"]),
+        "graph": entry,
+    }
+    meta["compiled_graph_key"] = identity.value
+    # The old unpacked-AOT harness still reads this presentation field; it is
+    # the same TCG value, never a second derivation.
+    meta["cell_key"] = identity.value
     return meta
 
 
 def resolved_cell(
-    meta: Dict[str, Any], *, publisher_tier: str = "platform",
-    publisher_org: str = ORG,
-) -> cell_resolve.ResolvedCell:
-    """The hub's answer, stating exactly the identity the mint stamped."""
-    have = aot_identity.artifact_identity(meta)
-    return cell_resolve.ResolvedCell(
-        family=FAMILY, cell_key=have.cell_key,
-        cell_ref=f"root/family-{FAMILY}#{have.cell_key}",
-        checkpoint_id="", content_digest="sha256:" + "ab" * 32,
-        artifact_path="cell.tar.gz", size_bytes=0,
-        publisher_org=publisher_org, publisher_tier=publisher_tier,
-        graph_contract=have.graph_contract_digest,
-        toolchain_digest=have.toolchain_digest,
-        env_seal_digest=have.env_seal_digest,
-        identity_axes={}, sm=RUNTIME["sm"], sku=RUNTIME["sku"], lane="",
-        receipt="",
+    meta: Dict[str, Any], artifact: Path, hub: Any, *,
+    publisher_tier: str = "platform", publisher_org: str = ORG,
+    owning_endpoint: str = "", serve_receipt: bool = True,
+) -> cell_resolve.ResolvedCompiledGraph:
+    """The hub's typed answer after real receipt preflight."""
+    key = str(meta["compiled_graph_key"])
+    digest = "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()
+    receipt: Any = None
+    if serve_receipt:
+        overrides: Dict[str, Any] = {
+            "family": FAMILY,
+            "publisher_tier": publisher_tier,
+            "publisher_org_id": publisher_org,
+            "snapshot_digest": "sha256:" + "cd" * 32,
+        }
+        if owning_endpoint:
+            overrides["owning_endpoint_id"] = owning_endpoint
+        jws = hub.serve_receipt_for(artifact, **overrides)
+        receipt = receipts.verify_receipt(
+            jws,
+            family=FAMILY,
+            compiled_graph_key=key,
+            snapshot_digest="sha256:" + "cd" * 32,
+            artifact_path=artifact.name,
+            artifact_digest=digest,
+            artifact_size_bytes=artifact.stat().st_size,
+        )
+    return cell_resolve.ResolvedCompiledGraph(
+        family=FAMILY,
+        compiled_graph_key=key,
+        compiled_graph_ref=f"root/family-{FAMILY}#{key}",
+        content_digest=digest,
+        receipt=cast(receipts.Receipt, receipt),
         transport=cell_resolve.Transport(
-            snapshot_digest="blake3:" + "cd" * 32, files=()),
+            snapshot_digest="sha256:" + "cd" * 32,
+            files=(cell_resolve.TransportFile(
+                path=artifact.name,
+                size_bytes=artifact.stat().st_size,
+                digest=digest,
+                url="https://cas.invalid/compiled-graph",
+            ),),
+        ),
     )
 
 
@@ -257,7 +294,7 @@ class AdoptedBoot:
     executor: Executor
     spec: Any
     pipeline: AdoptedPipeline
-    cell: cell_resolve.ResolvedCell
+    cell: cell_resolve.ResolvedCompiledGraph
     artifact: Path
     meta: Dict[str, Any]
     packages: Dict[str, ProbePackage]
@@ -397,15 +434,40 @@ class AdoptRig:
             for h, w in ROWS
         }
 
-    def _install_seams(self, packages: Dict[str, ProbePackage]) -> None:
+    def _install_seams(
+        self,
+        packages: Dict[str, ProbePackage],
+        meta: Dict[str, Any],
+    ) -> None:
         mp = self.monkeypatch
-        # SEAM 3 (GPU) + the runtime axes a cardless box cannot state —
-        # pgw#868's substitutions, verbatim.
-        mp.setattr(aot_serve, "runtime_key", lambda: dict(RUNTIME))
-        mp.setattr(aot_serve, "_entry_admission_drift", lambda *a, **k: None)
+
+        class _Runner:
+            key = str(meta["compiled_graph_key"])
+            graph_class = str(meta["graph_class"]["name"])
+            declared_fqns = ("weight",)
+
+            def __init__(self) -> None:
+                self.package = packages[self.graph_class]
+                self.calls = 0
+
+            def bind(self, state: Dict[str, Any], *, device: str) -> None:
+                del device
+                self.package.load_constants(state)
+
+            def __call__(self, *feeds: Any) -> Any:
+                self.calls += 1
+                return self.package(*feeds)
+
+        runner = _Runner()
+        graph = SimpleNamespace(key=runner.key, metadata=dict(meta))
+        loaded = compiled_graph_store.LoadedCompiledGraph(
+            cast(Any, graph), cast(Any, runner)
+        )
         mp.setattr(
-            aot_serve, "_load_package",
-            lambda path, entry="model": packages[entry])
+            compiled_graph_store,
+            "load_runner",
+            lambda key, root=None: loaded if key == runner.key else None,
+        )
 
         # SEAM 2: the class-annotated slot's weights load. `_inject_models`
         # arms whatever this returns, through the real ordered path.
@@ -421,16 +483,16 @@ class AdoptRig:
         # hand the arm? pgw#1150's third variant is a fixture passing a TYPE no
         # fleet path builds, so the rig records the real one and
         # `AdoptedBoot.armed_cfg` exposes it for assertion.
-        real_arm = provision.arm_aot
+        real_arm = aot_serve.enable_compiled_graph
 
         def _record_cfg(pipeline: Any, cfg: Any, *a: Any, **k: Any) -> Any:
             RIG["armed_cfg"] = cfg
             return real_arm(pipeline, cfg, *a, **k)
 
-        mp.setattr(provision, "arm_aot", _record_cfg)
+        mp.setattr(aot_serve, "enable_compiled_graph", _record_cfg)
 
         if self.after_arm is not None:
-            real_wrap = aot_serve.arm_entry
+            real_wrap = aot_serve.arm_compiled_graph
             hook = self.after_arm
 
             def _wrap_then_observe(pipeline: Any, *a: Any, **k: Any) -> Any:
@@ -438,10 +500,10 @@ class AdoptRig:
                 hook(pipeline)
                 return meta
 
-            mp.setattr(aot_serve, "arm_entry", _wrap_then_observe)
+            mp.setattr(aot_serve, "arm_compiled_graph", _wrap_then_observe)
 
     def _install_boot_adopt(
-        self, cell: cell_resolve.ResolvedCell, artifact: Path,
+        self, cell: cell_resolve.ResolvedCompiledGraph, artifact: Path,
     ) -> None:
         """SEAM 1: the derive+resolve half, whose own coverage is pgw#1116's."""
 
@@ -458,9 +520,11 @@ class AdoptRig:
             """
             return (boot_adopt.report(boot_adopt.BootAdoptOutcome(
                 adoption=boot_adopt.BootAdoption(
-                    derived=_derived(cell.cell_key), cell=cell,
+                    derived=_derived(cell.compiled_graph_key),
+                    compiled_graph=cell,
                     artifact=artifact),
-                reason=boot_adopt.HIT, derived_key=cell.cell_key,
+                reason=boot_adopt.HIT,
+                derived_key=cell.compiled_graph_key,
                 derive_ms=10_291, family=FAMILY, function="generate")),)
 
         self.monkeypatch.setattr(Executor, "_boot_adopt", _adopt)
@@ -476,20 +540,17 @@ class AdoptRig:
         meta = cell_metadata()
         artifact = cell868.artifact(self.tmp_path, meta)
         cell = resolved_cell(
-            meta, publisher_tier=self.publisher_tier,
-            publisher_org=self.publisher_org)
-
-        if self.serve_receipt:
-            # The hub countersigns these EXACT bytes.
-            self.hub.serve_receipt_for(
-                artifact, cell_key=cell.cell_key, family=FAMILY,
-                publisher_tier=self.publisher_tier,
-                publisher_org_id=self.publisher_org,
-                owning_endpoint_id=self.owning_endpoint)
-        receipts.configure(base_url=self.hub.base_url, worker_jwt=lambda: "")
+            meta,
+            artifact,
+            self.hub,
+            publisher_tier=self.publisher_tier,
+            publisher_org=self.publisher_org,
+            owning_endpoint=self.owning_endpoint,
+            serve_receipt=self.serve_receipt,
+        )
 
         packages = self._packages()
-        self._install_seams(packages)
+        self._install_seams(packages, meta)
         self._install_boot_adopt(cell, artifact)
 
         executor, spec = self._ensure_setup()
