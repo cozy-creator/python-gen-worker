@@ -26,8 +26,8 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 from private_deployment_leg import (  # noqa: E402
     BLOCKED,
+    SKIPPED,
     BLOCKER_INVOKE_ROUTE,
-    BLOCKER_PUBLISH_READ,
     BLOCKER_RECONCILER,
     BLOCKER_SETTLEMENT,
     CHOOSER_PRIVATE_DEPLOYMENT,
@@ -40,6 +40,7 @@ from private_deployment_leg import (  # noqa: E402
     Leg,
     coherence_error,
     parse_pair,
+    sku_slug,
     run_leg,
 )
 
@@ -73,24 +74,23 @@ def _finding(result: Any, ident: str) -> Any:
     raise AssertionError(f"no finding {ident!r} among {[f.ident for f in result.findings]}")
 
 
-def test_leg_on_a_fully_merged_hub_runs_every_phase_and_fails_nothing() -> None:
+def test_leg_on_a_fully_merged_hub_is_green_end_to_end() -> None:
     model = ContractModel(provisioning=True, invoke_route=True, settlement=True)
     result = _run(model, _leg())
 
-    assert not [f for f in result.findings if f.status == FAILED], [
-        (f.ident, f.detail) for f in result.findings if f.status == FAILED
+    assert result.status == OK, [
+        (f.ident, f.status, f.detail) for f in result.findings if f.status != OK
     ]
     assert [p.name for p in result.phases] == ["create", "provision", "invoke", "read", "stop"]
     assert result.usage["settlement"]["available"] is True
     assert result.usage["settlement"]["provider_micros"] > 0
     assert result.deployment["state"] in (STATE_STOPPING, STATE_STOPPED)
-    # DELIBERATELY still BLOCKED, and on exactly one thing: even with all three
-    # tensorhub slices merged, a completed request is not evidence that a
-    # compiled graph was sealed and published, and this driver has no hub read
-    # that says so. A mint leg that reported OK here would be claiming its own
-    # product without checking it.
-    assert result.status == BLOCKED
-    assert result.blockers == [BLOCKER_PUBLISH_READ]
+    assert result.blockers == []
+    # The product check ran, and it is what makes this leg an acceptance proof
+    # rather than a latency measurement.
+    for ident in ("seal.rows", "seal.sku_matches_rented_card", "seal.artifact_digest",
+                  "seal.not_quarantined", "seal.sm_recorded", "seal.no_failed_publish"):
+        assert _finding(result, ident).status == OK, _finding(result, ident).detail
 
 
 def test_leg_today_is_blocked_and_names_every_missing_merge() -> None:
@@ -224,3 +224,76 @@ def test_a_leg_with_no_invocations_is_a_lifecycle_proof_not_a_silent_pass() -> N
     assert invoke.status == "skipped"
     assert _finding(result, "provision.ready").status == OK
     assert result.pods and result.pods[0]["placement_chooser"] == CHOOSER_PRIVATE_DEPLOYMENT
+
+
+@pytest.mark.parametrize(
+    "break_invariant, ident",
+    [
+        ("seal_sku_mismatch", "seal.sku_matches_rented_card"),
+        ("seal_no_artifact", "seal.artifact_digest"),
+        ("seal_failed_publish", "seal.no_failed_publish"),
+        ("seal_wrong_release", "seal.rows"),
+    ],
+)
+def test_the_product_check_is_red_provable(break_invariant: str, ident: str) -> None:
+    """Each case is a way a mint leg could have reported success while producing
+    nothing usable: sealed on a card it never rented, a key with no artifact
+    behind it, a failed publish phase, or a graph minted for another release."""
+    model = ContractModel(provisioning=True, invoke_route=True, settlement=True,
+                          break_invariant=break_invariant)
+    result = _run(model, _leg())
+
+    assert _finding(result, ident).status == FAILED, (
+        f"severing {break_invariant!r} left {ident} at {_finding(result, ident).status}"
+    )
+    assert result.status == FAILED
+
+
+def test_missing_seal_routes_are_blocked_not_green() -> None:
+    model = ContractModel(provisioning=True, invoke_route=True, settlement=True,
+                          seal_evidence=False)
+    result = _run(model, _leg())
+
+    assert _finding(result, "seal.route").status == BLOCKED
+    assert result.status == BLOCKED
+
+
+def test_a_leg_that_is_not_a_mint_proof_claims_no_product() -> None:
+    model = ContractModel(provisioning=True, invoke_route=True, settlement=True)
+    result = _run(model, _leg(mint_proof=False))
+
+    assert not [f for f in result.findings if f.ident.startswith("seal.")]
+    assert result.status == OK
+
+
+def test_sku_slug_bridges_the_two_vocabularies() -> None:
+    """worker_pods.gpu_class holds the provider's CATALOGUE ID; the graph store
+    keys on the compilecache SKU SLUG. Comparing them raw is always false — a
+    vacuously RED assertion, as useless as a vacuously green one and harder to
+    spot, because red looks like it is working."""
+    assert sku_slug("NVIDIA A40") == "a40"
+    assert sku_slug("NVIDIA GeForce RTX 4090") == "rtx-4090"
+    assert sku_slug("NVIDIA RTX A4000") == "rtx-a4000"
+    assert sku_slug("NVIDIA H100 80GB HBM3") == "h100-80gb-hbm3"
+    assert sku_slug("a40") == "a40"
+    # The model records the provider display name exactly as a real hub does,
+    # so the bridge is load-bearing in every seal test above.
+    model = ContractModel(provisioning=True, invoke_route=True, settlement=True)
+    result = _run(model, _leg())
+    assert result.pods[0]["gpu_class"] == "NVIDIA A40"
+
+
+def test_a_mint_proof_that_never_invoked_reports_no_false_red() -> None:
+    """The trap this closes: on TODAY's hub the invoke route is absent, so a
+    mint-proof leg completes no request. Asserting an empty graph store there
+    would report "nothing was published" as a defect of the mint, when the real
+    answer is upstream and the invoke phase already names it. That is a false
+    red, and a false red costs exactly as much trust as a false green."""
+    model = ContractModel()  # resource only: no reconciler, no invoke route
+    result = _run(model, _leg())
+
+    assert _finding(result, "seal.workload").status == SKIPPED
+    assert not [f for f in result.findings
+                if f.ident.startswith("seal.") and f.status == FAILED]
+    assert result.status == BLOCKED
+    assert BLOCKER_INVOKE_ROUTE in result.blockers

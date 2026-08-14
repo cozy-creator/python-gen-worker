@@ -99,7 +99,8 @@ READY_POD_STATES = frozenset({"ready", "connected", "running", "serving"})
 BLOCKER_INVOKE_ROUTE = "th#1927 follow-up (POST /v1/private-deployments/:id/:function)"
 BLOCKER_RECONCILER = "th#1927 (provisioning reconciler)"
 BLOCKER_SETTLEMENT = "th#1928 (per-second settlement)"
-BLOCKER_PUBLISH_READ = "pgw#1250 (a hub read for per-graph publish durability)"
+BLOCKER_CELL_INVENTORY = "th#1355 (GET /v1/admin/cells) is absent from this hub"
+BLOCKER_ACTIVITY_EVENTS = "th#1839 (GET /v1/admin/worker-activity-events) is absent from this hub"
 
 OK = "ok"
 FAILED = "failed"
@@ -131,6 +132,26 @@ def parse_pair(raw: str) -> Tuple[str, str]:
     if not lane:
         raise ValueError(f"pair {raw!r}: names no execution lane")
     return gpu, lane
+
+
+def sku_slug(gpu_name: str) -> str:
+    """Mirror tensorhub's `compilecache.SKUSlug`.
+
+    THE FIELD TRAP THIS EXISTS FOR. `worker_pods.gpu_class` and the compiled-
+    graph row's `sku` look like the same fact and are in DIFFERENT vocabularies:
+    tensorhub's `observedGPUClass` writes the provider's catalogue id
+    ("NVIDIA A40"); the graph store keys on the compilecache SKU slug ("a40").
+    Comparing them raw is ALWAYS FALSE — a vacuously RED assertion, which is
+    exactly as useless as a vacuously green one and harder to notice, because a
+    red looks like it is working.
+    """
+    text = gpu_name.lower()
+    for noise in ("nvidia", "geforce"):
+        text = text.replace(noise, " ")
+    out = "".join(c if c.isascii() and c.isalnum() else "-" for c in text).strip("-")
+    while "--" in out:
+        out = out.replace("--", "-")
+    return out
 
 
 def coherence_error(state: str, stop_reason: str, stopped_at: Optional[str]) -> Optional[str]:
@@ -188,6 +209,8 @@ class DeploymentAPI(Protocol):
     def config_history(self, org: str, deployment_id: str) -> List[Dict[str, Any]]: ...
     def invoke(self, deployment_id: str, function: str, payload: Mapping[str, Any]) -> str: ...
     def request(self, request_id: str) -> Dict[str, Any]: ...
+    def admin_cells(self, release: str) -> List[Dict[str, Any]]: ...
+    def admin_activity_events(self, release: str, state: str) -> List[Dict[str, Any]]: ...
 
 
 class HttpDeploymentAPI:
@@ -259,6 +282,23 @@ class HttpDeploymentAPI:
     def request(self, request_id: str) -> Dict[str, Any]:
         return dict(self._call("GET", "/v1/requests/" + urllib.parse.quote(request_id)))
 
+    def admin_cells(self, release: str) -> List[Dict[str, Any]]:
+        """th#1355's compiled-graph inventory, filtered server-side.
+
+        Read from the graph's OWN row rather than through a demand join, so a
+        reaped demand row cannot hide a graph. (The route says `cells`; Paul
+        retired that word for `compiled_graph` and the rename belongs to the
+        cross-repo lockstep, not to this consumer.)
+        """
+        query = urllib.parse.urlencode({"view": "cells", "release": release, "limit": 200})
+        out = self._call("GET", "/v1/admin/cells?" + query)
+        return list(out.get("cells", []))
+
+    def admin_activity_events(self, release: str, state: str) -> List[Dict[str, Any]]:
+        query = urllib.parse.urlencode({"release": release, "state": state, "limit": 200})
+        out = self._call("GET", "/v1/admin/worker-activity-events?" + query)
+        return list(out.get("events", []))
+
 
 # ---------------------------------------------------------------------------
 # The leg
@@ -299,6 +339,9 @@ class Leg:
     on_pod_failure: str = ON_POD_FAILURE_STOP
     spend_limit_usd: float = 1.0
     reason: str = "pgw#1250 mint leg on a private deployment"
+    #: A leg whose PRODUCT is published compiled graphs rather than latency
+    #: numbers. It relaxes nothing; it adds the product check below.
+    mint_proof: bool = True
 
     def validate(self) -> None:
         if not self.org.strip():
@@ -595,15 +638,87 @@ class _Run:
                        f"genesis source={genesis[0].get('source')!r}")
             self.check("read.history_actor", bool(str(genesis[0].get("actor", "")).strip()),
                        f"genesis actor={genesis[0].get('actor')!r}")
-        # The mint leg's PRODUCT is published compiled graphs, and the durable
-        # evidence for that is the worker's activity events, not the request
-        # row. There is no verified hub read for it from this side yet, so it is
-        # reported as owed rather than inferred from a completed request.
-        self.find("read.publish_durability", BLOCKED,
-                  "per-graph publish durability is not asserted from here; a completed request is "
-                  "not evidence that a graph was sealed and published",
-                  BLOCKER_PUBLISH_READ)
+        # The mint leg's PRODUCT is published compiled graphs. A completed
+        # request is not evidence of one: a worker can serve eagerly, or mint
+        # and fail to seal, or seal and fail to publish, and every one of those
+        # completes the request. Runs BEFORE the stop, because a stopped
+        # rental's pods are gone and this reads what they left behind.
+        if self.leg.mint_proof:
+            # ONLY when something actually ran. A leg that never invoked — the
+            # invoke route is absent, or the workload was refused — cannot have
+            # minted anything, and asserting an empty store there is a FALSE
+            # RED: it would report "no graph was published" as a defect of the
+            # mint when the real answer is upstream, already named by the
+            # invoke phase's own blocker.
+            completed = [r for r in self.result.requests if r.get("status") == "completed"]
+            if not completed:
+                self.find("seal.workload", SKIPPED,
+                          "no invocation completed, so no compiled graph could have been minted; "
+                          "the invoke phase says why")
+            else:
+                self._assert_sealed()
         self.end()
+
+    def _assert_sealed(self) -> None:
+        # The card ACTUALLY rented, from the pod row — never the pair asked
+        # for. A create can land on an sm-equivalent sibling of the SKU it
+        # named, and an assertion against the ask is measuring an intention.
+        observed = ""
+        for pod in self.result.pods:
+            if str(pod.get("gpu_class", "")).strip():
+                observed = str(pod["gpu_class"])
+                break
+        try:
+            cells = self.api.admin_cells(self.leg.release_id)
+        except ApiError as exc:
+            if exc.route_missing:
+                self.find("seal.route", BLOCKED,
+                          f"cannot read the compiled-graph store: {exc}", BLOCKER_CELL_INVENTORY)
+            else:
+                self.find("seal.rows", FAILED, f"compiled-graph inventory read failed: {exc}")
+            return
+        mine = [c for c in cells if c.get("minted_for_release_id") == self.leg.release_id]
+        if not self.check("seal.rows", bool(mine),
+                          f"{len(mine)} compiled graph(s) minted for the pinned release "
+                          f"{self.leg.release_id} ({len(cells)} row(s) returned)"):
+            return
+        if not observed:
+            self.find("seal.sku_matches_rented_card", FAILED,
+                      f"no pod row recorded a gpu_class, so there is no rented card to match "
+                      f"{len(mine)} graph(s) against")
+            return
+        want = sku_slug(observed)
+        matched = [c for c in mine if c.get("sku") == want]
+        self.check("seal.sku_matches_rented_card", bool(matched),
+                   f"{len(matched)} graph(s) on sku={want!r} (from pod gpu_class {observed!r}); "
+                   f"the store holds {sorted({str(c.get('sku', '')) for c in mine})} for this "
+                   f"release [note: the pod view exposes no gpu_class provenance, so a "
+                   f"provider-reported card and an echoed ask are indistinguishable from here]")
+        if not matched:
+            return
+        # Sealed means an ARTIFACT exists, not merely that a key was computed.
+        sealed = [c for c in matched if str(c.get("artifact_digest", "")).strip()]
+        self.check("seal.artifact_digest", len(sealed) == len(matched),
+                   f"{len(sealed)}/{len(matched)} matched graph(s) carry an artifact digest")
+        quarantined = [c for c in matched if c.get("quarantined_at")]
+        self.check("seal.not_quarantined", not quarantined,
+                   f"{len(quarantined)} matched graph(s) quarantined")
+        self.check("seal.sm_recorded", bool(str(matched[0].get("sm", "")).strip()),
+                   f"sm={matched[0].get('sm')!r} on {matched[0].get('cell_key')!r}")
+        try:
+            failures = self.api.admin_activity_events(self.leg.release_id, "failed")
+        except ApiError as exc:
+            if exc.route_missing:
+                self.find("seal.no_failed_publish", BLOCKED,
+                          f"cannot read the publish timeline: {exc}", BLOCKER_ACTIVITY_EVENTS)
+            else:
+                self.find("seal.no_failed_publish", FAILED, f"publish timeline read failed: {exc}")
+            return
+        named = [f"{e.get('kind')}/{e.get('phase')}({e.get('error') or e.get('detail')})"
+                 for e in failures]
+        self.check("seal.no_failed_publish", not named,
+                   f"{len(named)} failed worker phase(s) in the leg window"
+                   + (": " + "; ".join(named[:5]) if named else ""))
 
     def _assert_settlement(self, usage: Mapping[str, Any]) -> None:
         settlement = dict(usage.get("settlement", {}))
@@ -734,7 +849,8 @@ class ContractModel:
                  settlement: bool = False, ready_after_reads: int = 1,
                  margin_bps: int = 2000, pod_rate_micros_per_hour: int = 440_000,
                  window_s: int = 300, advance_per_read_s: int = 120,
-                 actor: str = "admin:rig@cozy", break_invariant: str = "") -> None:
+                 actor: str = "admin:rig@cozy", break_invariant: str = "",
+                 seal_evidence: bool = True, pod_gpu_class: str = "NVIDIA A40") -> None:
         self.provisioning = provisioning
         self.invoke_route = invoke_route
         self.settlement = settlement
@@ -745,6 +861,16 @@ class ContractModel:
         self.advance = advance_per_read_s
         self.actor = actor
         self.break_invariant = break_invariant
+        #: th#1355 + th#1839 are on tensorhub master, so these routes exist by
+        #: default; turned off only to prove the driver reports absence as
+        #: BLOCKED rather than passing quietly.
+        self.seal_evidence = seal_evidence
+        #: What a REAL hub records: the provider's catalogue id, not a slug.
+        #: Keeping it faithful is what makes sku_slug load-bearing in the tests
+        #: instead of an identity function over an already-slugged value.
+        self.pod_gpu_class = pod_gpu_class
+        self.cells: List[Dict[str, Any]] = []
+        self.events: List[Dict[str, Any]] = []
         self.now = 0
         self.rows: Dict[str, Dict[str, Any]] = {}
         self.requests: Dict[str, Dict[str, Any]] = {}
@@ -765,7 +891,7 @@ class ContractModel:
                        else CHOOSER_PRIVATE_DEPLOYMENT)
             for index in range(int(body.get("pod_count", 1))):
                 pods.append({"pod_id": f"pod-{deployment_id[-4:]}-{index}", "state": "provisioning",
-                             "gpu_class": gpu, "cost_micros_per_hour": self.pod_rate,
+                             "gpu_class": self.pod_gpu_class, "cost_micros_per_hour": self.pod_rate,
                              "placement_chooser": chooser, "private_deployment_id": deployment_id})
         row = {
             "id": deployment_id, "org_id": self._id(), "created_by": self.actor,
@@ -894,7 +1020,8 @@ class ContractModel:
         if not [p for p in row["_pods"] if p["state"] in READY_POD_STATES]:
             raise ApiError("POST", "/invoke", 409, "private_deployment_stopped", "no ready pod")
         request_id = self._id()
-        self.requests[request_id] = {"id": request_id, "status": "queued", "_reads": 0}
+        self.requests[request_id] = {"id": request_id, "status": "queued", "_reads": 0,
+                                     "_deployment_id": deployment_id}
         return request_id
 
     def request(self, request_id: str) -> Dict[str, Any]:
@@ -903,8 +1030,46 @@ class ContractModel:
             raise ApiError("GET", "/v1/requests", 404, "request_not_found", "no such request")
         self.now += self.advance
         record["_reads"] += 1
+        if record["_reads"] >= 2 and record["status"] != "completed":
+            self._mint_graph(record["_deployment_id"])
         record["status"] = "completed" if record["_reads"] >= 2 else "running"
         return {"id": record["id"], "status": record["status"]}
+
+    def _mint_graph(self, deployment_id: str) -> None:
+        """What a worker leaves behind when it seals and publishes a graph."""
+        row = self.rows[deployment_id]
+        pod = row["_pods"][0] if row["_pods"] else {}
+        sku = sku_slug(str(pod.get("gpu_class", "")))
+        if self.break_invariant == "seal_sku_mismatch":
+            sku = "some-other-card"
+        release = row["release_id"]
+        if self.break_invariant == "seal_wrong_release":
+            release = "a-release-this-rental-did-not-pin"
+        digest = "" if self.break_invariant == "seal_no_artifact" else "blake3:" + self._id()[:16]
+        self.cells.append({
+            "cell_key": "cg-key-v1:" + self._id()[:12], "family": "sdxl",
+            "lane": row["execution_lane"], "sm": "sm86", "sku": sku,
+            "artifact_digest": digest, "minted_for_release_id": release,
+            "minted_by_pod_id": pod.get("pod_id", ""), "publisher_tier": "platform",
+        })
+        self.events.append({"kind": "aot_mint_phases", "phase": "minted", "state": "completed",
+                            "release_id": row["release_id"], "pod_id": pod.get("pod_id", "")})
+        if self.break_invariant == "seal_failed_publish":
+            self.events.append({"kind": "aot_mint_phases", "phase": "pack_failed",
+                                "state": "failed", "release_id": row["release_id"],
+                                "error": "artifact pack refused: short write",
+                                "pod_id": pod.get("pod_id", "")})
+
+    def admin_cells(self, release: str) -> List[Dict[str, Any]]:
+        if not self.seal_evidence:
+            raise ApiError("GET", "/v1/admin/cells", 404, "", "404 page not found")
+        return [c for c in self.cells if not release or c["minted_for_release_id"] == release]
+
+    def admin_activity_events(self, release: str, state: str) -> List[Dict[str, Any]]:
+        if not self.seal_evidence:
+            raise ApiError("GET", "/v1/admin/worker-activity-events", 404, "", "404 page not found")
+        return [e for e in self.events
+                if (not release or e["release_id"] == release) and (not state or e["state"] == state)]
 
 
 #: The exact change `scripts/micro_mint_rig.py` makes when it re-points. Kept
