@@ -94,40 +94,39 @@ KNOWN_SCALES: tuple[str, ...] = (
     SCALE_STATIC_ACTIVATION, SCALE_BLOCK_128X128, SCALE_GROUP_16,
 )
 
-# File topology the decoder can consume — the sharding half of th#1937's
-# completeness list. `sp_sharded` (pre-sharded sequence-parallel, the H3
-# int64/SP program) is registered and DECLARED BY NOTHING: a variant that is
-# pre-sharded therefore finds no decoder and is refused, which is the correct
-# answer until a decoder branches on it.
-SHARD_SINGLE_FILE = "single_file"
-SHARD_COMPONENT_DIR = "component_dir"
-SHARD_INDEX_SHARDED = "index_sharded"
-SHARD_SP_SHARDED = "sp_sharded"
-KNOWN_SHARDS: tuple[str, ...] = (
-    SHARD_SINGLE_FILE, SHARD_COMPONENT_DIR,
-    SHARD_INDEX_SHARDED, SHARD_SP_SHARDED,
-)
+# NO file-layout axis here, deliberately. `file_layout` is RULED
+# (`multi-file` | `single-file`, th#1937) and its pgw home is the
+# `1937-file-layout-vocabulary` lane's `gen_worker/convert/file_layout.py`.
+# Transcribing those tokens here would be the second vocabulary this whole
+# programme exists to delete; the decode-set constrains the axis in a
+# follow-up that IMPORTS that module, once it is on master.
+#
+# `pre_sharded` / `shard_axis` are likewise publish-side dimensions. No decoder
+# in this image branches on an SP-sharded tree and none can detect one, so the
+# decode-set states nothing about them rather than carrying a claim no code
+# backs: a pre-sharded variant must be refused by th#1938 against th#1937's
+# derived `pre_sharded`, not by a declaration here.
 
 # Structural bakes the decoder CONSUMES — tensor-set membership facts, not
-# element facts. The two modulation tokens are registered and declared by
-# nothing for the same reason `sp_sharded` is: te#195's two artifacts differ
-# exactly there and are byte-detectable, and no decoder in this image branches
-# on the difference today, so a modulation-baked variant must be REFUSED
-# rather than handed to a loader that would read it as a table.
-BAKE_LOWRANK_BRANCH = "lowrank_branch"
-BAKE_QUANTIZED_LOWRANK = "quantized_lowrank"
-BAKE_MODULATION_TABLE = "modulation_table"
-BAKE_MODULATION_BAKED = "modulation_baked"
+# element facts. RULED tensor-set names (th#1937): a bake token is a registered
+# tensor set, so this axis and the publish side name one thing once.
+#
+# `modulation_table` / `modulation_baked` are deliberately ABSENT: th#1937
+# keeps that rule UNREGISTERED until te#195's file format exists, because
+# "inventing a pattern that matches nothing is the failure mode, not the fix".
+BAKE_ADALN_PROJECTIONS = "adaln_projections"
+BAKE_LOW_RANK_BRANCH = "low_rank_branch"
 KNOWN_BAKES: tuple[str, ...] = (
-    BAKE_LOWRANK_BRANCH, BAKE_QUANTIZED_LOWRANK,
-    BAKE_MODULATION_TABLE, BAKE_MODULATION_BAKED,
+    BAKE_ADALN_PROJECTIONS,
+    BAKE_LOW_RANK_BRANCH,
 )
 
 # KEY TOPOLOGY — which tensor-KEY convention the decoder's model class can
-# ingest. Provisional here; th#1937 owns the single published vocabulary.
+# ingest. **RULED VOCABULARY (th#1937 lane, 2026-08-14): these exact strings,
+# no aliases.**
 #
-# This axis exists because of a measured failure (2026-08-14): DiffSynth's
-# MiniMaxH3DiT accepts the MINIMAX-NATIVE key set (535 keys, fused
+# This axis exists because of a measured failure (te#185 second stop):
+# DiffSynth's MiniMaxH3DiT accepts the MINIMAX-NATIVE key set (535 keys, fused
 # `blocks.N.attn.qkv_proj`) and every minimax-h3 artifact we hold is the
 # DIFFUSERS repackaging (638 keys, split `transformer_blocks.N.attn.to_q/
 # to_k/to_v`) — ONE key in common. It surfaced as `Cannot detect the model
@@ -135,44 +134,50 @@ KNOWN_BAKES: tuple[str, ...] = (
 # after a 71 GB fetch onto a rented 4xH100.
 #
 # **File topology cannot see it**: both are multi-file safetensors trees, so
-# `diffusers.multifile@1` classifies them identically. Nor can the quant
-# contract: both would be `plain.bf16@1`. The key convention is a third fact
-# and it needs its own axis or the decode-set is a lie that dies at load.
-#: `transformer_blocks.N.attn.to_q|to_k|to_v` — the diffusers repackaging.
-KEYS_DIFFUSERS_SPLIT_QKV = "diffusers.split-qkv"
-#: `blocks.N.attn.qkv_proj` — the upstream/native fused set.
-KEYS_NATIVE_FUSED_QKV = "native.fused-qkv"
-#: HF transformers module keys (`model.layers.N.…`, `encoder.layer.N.…`).
-KEYS_TRANSFORMERS_NATIVE = "transformers.native"
-#: The contract's OWN convention: a single-file artifact whose descriptor
-#: fixes the keys, with no alternative repackaging in circulation.
-KEYS_CONTRACT_NATIVE = "contract.native"
+# `file_layout` classifies them identically. Nor can the quant contract: both
+# would be `plain.bf16@1`. The key convention is a third fact and it needs its
+# own axis or the decode-set is a lie that dies at load.
+#: `…attn.to_q|to_k|to_v` — the diffusers repackaging.
+KEYS_DIFFUSERS_SPLIT_QKV = "diffusers.split-qkv@1"
+#: `…attn.qkv_proj|to_qkv` — the upstream/native fused set.
+KEYS_NATIVE_FUSED_QKV = "native.fused-qkv@1"
+#: `*layers.N.self_attn.q_proj` / `*layers.N.attention.self.query`. RENAMED
+#: from the provisional `transformers.native` by th#1937: the FILE-topology
+#: registry already spends `transformers.native@1` on a different axis, and
+#: one string meaning two things on two dimensions is the confusion this ends.
+KEYS_TRANSFORMERS_SPLIT_QKV = "transformers.split-qkv@1"
 KNOWN_KEY_TOPOLOGIES: tuple[str, ...] = (
     KEYS_DIFFUSERS_SPLIT_QKV,
     KEYS_NATIVE_FUSED_QKV,
-    KEYS_TRANSFORMERS_NATIVE,
-    KEYS_CONTRACT_NATIVE,
+    KEYS_TRANSFORMERS_SPLIT_QKV,
 )
+# The provisional `contract.native` is DECLINED (th#1937): "the descriptor
+# fixes the keys, no repackaging exists" is a fact about the QUANT CONTRACT,
+# and the `quant` dimension already carries it BY HANDLE. A decoder whose
+# handle fixes its keys declares `key_topologies=()` — an axis it does not
+# constrain, rather than a synonym for its own handle.
 
 DECODE_AXES: tuple[str, ...] = (
-    "elements", "scales", "shards", "bakes", "key_topologies",
+    "elements", "scales", "key_topologies", "bakes",
 )
 
 
 class DecodeDimensions(msgspec.Struct, frozen=True, kw_only=True):
     """What one decoder reads WITHIN a contract handle.
 
-    `elements`, `scales`, `shards` and `key_topologies` are non-empty: a
-    decoder that states nothing on them has not declared anything. `bakes` may
-    be empty — "this decoder consumes no structural bake fact" is itself a
-    complete answer, and it is the answer that makes a baked variant refuse.
+    Every axis is REQUIRED — there is no default, so a declaration cannot be
+    written by omission. `elements` and `scales` must be non-empty: a decoder
+    that states nothing there has declared nothing. `key_topologies` and
+    `bakes` MAY be empty, and empty is a statement rather than a silence —
+    "this decoder does not constrain the axis" (the tri-state's UNDECLARED
+    rung), which is the honest answer for a decoder whose quant handle already
+    fixes its keys, and the answer that makes a baked variant refuse.
     """
 
     elements: tuple[str, ...]
     scales: tuple[str, ...]
-    shards: tuple[str, ...]
     key_topologies: tuple[str, ...]
-    bakes: tuple[str, ...] = ()
+    bakes: tuple[str, ...]
 
 
 def _axis(values: object, *, known: tuple[str, ...], axis: str,
@@ -215,11 +220,10 @@ def _validate_dimensions(dims: object, *, where: str) -> DecodeDimensions:
                        axis="elements", where=where),
         scales=_axis(dims.scales, known=KNOWN_SCALES,
                      axis="scales", where=where),
-        shards=_axis(dims.shards, known=KNOWN_SHARDS,
-                     axis="shards", where=where),
         key_topologies=_axis(dims.key_topologies,
                              known=KNOWN_KEY_TOPOLOGIES,
-                             axis="key_topologies", where=where),
+                             axis="key_topologies", where=where,
+                             allow_empty=True),
         bakes=_axis(dims.bakes, known=KNOWN_BAKES, axis="bakes",
                     where=where, allow_empty=True),
     )

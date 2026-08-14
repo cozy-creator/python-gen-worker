@@ -50,10 +50,8 @@ from .tensor_layout_contract import (
     CONTRACT_HF_FP8_BLOCKWISE,
     ELEMENT_BF16,
     ELEMENT_FP8_E4M3,
-    KEYS_TRANSFORMERS_NATIVE,
+    KEYS_TRANSFORMERS_SPLIT_QKV,
     SCALE_BLOCK_128X128,
-    SHARD_COMPONENT_DIR,
-    SHARD_INDEX_SHARDED,
     DecodeDimensions,
     implements_contract,
 )
@@ -325,9 +323,9 @@ def _hf_model_class(path: Path, cls: Any) -> Any:
         # grid and refuses anything else, so declaring rowwise here would be
         # the exact conflation `cozy.fp8-rowwise@1` exists to prevent.
         scales=(SCALE_BLOCK_128X128,),
-        shards=(SHARD_COMPONENT_DIR, SHARD_INDEX_SHARDED),
         # transformers' own loader, so transformers' own key convention.
-        key_topologies=(KEYS_TRANSFORMERS_NATIVE,),
+        key_topologies=(KEYS_TRANSFORMERS_SPLIT_QKV,),
+        bakes=(),
     ),
     why="th#1803: transformers' FineGrainedFP8 reads this layout natively — "
         "resident fp8 weights with a 128x128 block scale grid, dynamic "

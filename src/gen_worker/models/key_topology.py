@@ -37,7 +37,7 @@ from .safetensors_header import header_len_ok
 from .tensor_layout_contract import (
     KEYS_DIFFUSERS_SPLIT_QKV,
     KEYS_NATIVE_FUSED_QKV,
-    KEYS_TRANSFORMERS_NATIVE,
+    KEYS_TRANSFORMERS_SPLIT_QKV,
 )
 
 # Ordered: the first rule that matches wins. FUSED is checked first because a
@@ -47,8 +47,11 @@ from .tensor_layout_contract import (
 _RULES: tuple[tuple[str, "re.Pattern[str]"], ...] = (
     (KEYS_NATIVE_FUSED_QKV, re.compile(r"\.(qkv_proj|to_qkv|qkv)\.")),
     (KEYS_DIFFUSERS_SPLIT_QKV, re.compile(r"\.(to_q|to_k|to_v)\.")),
-    (KEYS_TRANSFORMERS_NATIVE,
-     re.compile(r"\.(q_proj|k_proj|v_proj|query|key|value)\.")),
+    # th#1937's ruled keying for `transformers.split-qkv@1`:
+    # `*layers.N.self_attn.q_proj` OR `*layers.N.attention.self.query`, so
+    # encoder-style text encoders answer alongside decoder-style ones.
+    (KEYS_TRANSFORMERS_SPLIT_QKV,
+     re.compile(r"layers?\.\d+\.(self_attn\.q_proj|attention\.self\.query)\.")),
 )
 
 #: Header bytes are bounded by `header_len_ok`; this caps how many FILES we

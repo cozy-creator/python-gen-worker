@@ -74,8 +74,7 @@ from gen_worker.models.tensor_layout_contract import (
 @implements_contract(
     contract="{contract}", serves=("{body}",), composes_lora=False,
     decodes=DecodeDimensions(
-        elements=("{element}",), scales=("{scale}",), shards=("single_file",),
-        key_topologies=("contract.native",)),
+        elements=("{element}",), scales=("{scale}",), key_topologies=(), bakes=()),
     why="fake decoder",
 )
 def decode(tensors):
@@ -196,8 +195,6 @@ def test_every_entry_carries_the_dimensions_its_decoder_reads() -> None:
     for entry in ds.entries:
         assert entry.decodes.elements, entry.contract
         assert entry.decodes.scales, entry.contract
-        assert entry.decodes.shards, entry.contract
-        assert entry.decodes.key_topologies, entry.contract
 
     by_contract = {e.contract: e for e in ds.entries}
     # The two fp8 contracts differ on the axis that BRANCHES the decoder.
@@ -206,11 +203,12 @@ def test_every_entry_carries_the_dimensions_its_decoder_reads() -> None:
     assert "per_channel_out" in rowwise.scales
     assert "block_128x128" not in rowwise.scales
     assert blockwise.scales == ("block_128x128",)
-    # The bake that IS the difference between the two svdq contracts.
-    assert "quantized_lowrank" in by_contract[
-        CONTRACT_COZY_SVDQ_NVFP4_LR8].decodes.bakes
-    assert "quantized_lowrank" not in by_contract[
-        CONTRACT_NUNCHAKU_V1].decodes.bakes
+    # The svdq decoders CONSTRAIN no key topology, and that is a statement:
+    # the nunchaku descriptor fixes the keys, so the fact lives on the handle
+    # (th#1937 declined a `contract.native` synonym — one home per value).
+    assert by_contract[CONTRACT_NUNCHAKU_V1].decodes.key_topologies == ()
+    assert by_contract[CONTRACT_COZY_SVDQ_NVFP4_LR8].decodes.bakes == (
+        "low_rank_branch",)
     # A dense decoder states `none`, which is a fact; silence would not be.
     assert by_contract[CONTRACT_PLAIN_BF16].decodes.scales == ("none",)
 
@@ -229,8 +227,8 @@ def test_a_declaration_cannot_be_written_by_omission() -> None:
             contract=CONTRACT_PLAIN_BF16, serves=("bf16-w16a16",),
             composes_lora=False,
             decodes=DecodeDimensions(
-                elements=(), scales=("none",), shards=("single_file",),
-                key_topologies=("contract.native",)),
+                elements=(), scales=("none",), key_topologies=(),
+                bakes=()),
         )
         def _empty_axis(x):
             return x
@@ -241,7 +239,7 @@ def test_a_declaration_cannot_be_written_by_omission() -> None:
             composes_lora=False,
             decodes=DecodeDimensions(
                 elements=("fp6_e3m2",), scales=("none",),
-                shards=("single_file",), key_topologies=("contract.native",)),
+                key_topologies=(), bakes=()),
         )
         def _invented_token(x):
             return x
@@ -267,6 +265,7 @@ def test_the_manifest_block_carries_the_set_and_its_digest() -> None:
     assert block["derivation"] == DERIVATION
     assert block["digest"] == ds.digest
     assert {c["contract"] for c in block["contracts"]} == EXPECTED_CONTRACTS
+    assert "shards" not in block["contracts"][0]
     rowwise = next(c for c in block["contracts"]
                    if c["contract"] == CONTRACT_COZY_FP8_ROWWISE)
     assert rowwise["decoder"] == "gen_worker.models.w8a8:load_w8a8_denoiser"
@@ -539,15 +538,17 @@ _DIFFUSERS_KEYS = (
 
 
 def test_the_two_h3_repackagings_classify_differently() -> None:
-    assert identify_keys(_NATIVE_KEYS) == "native.fused-qkv"
-    assert identify_keys(_DIFFUSERS_KEYS) == "diffusers.split-qkv"
+    assert identify_keys(_NATIVE_KEYS) == "native.fused-qkv@1"
+    assert identify_keys(_DIFFUSERS_KEYS) == "diffusers.split-qkv@1"
     assert identify_keys(("model.layers.0.self_attn.q_proj.weight",)) \
-        == "transformers.native"
+        == "transformers.split-qkv@1"
+    assert identify_keys(("encoder.layer.0.attention.self.query.weight",)) \
+        == "transformers.split-qkv@1"
     # The block prefix varies by family and the projection split does not, so
     # flux's `single_transformer_blocks` classifies with everything else.
     assert identify_keys(
         ("single_transformer_blocks.0.attn.to_q.weight",)) \
-        == "diffusers.split-qkv"
+        == "diffusers.split-qkv@1"
     assert identify_keys(("some.tensor.weight",)) == ""
     assert identify_keys(()) == ""
 
@@ -561,9 +562,9 @@ def test_the_classifier_reads_headers_only(tmp_path: Path) -> None:
                  {k: "BF16" for k in _NATIVE_KEYS})
 
     whole = classify_snapshot(root)
-    assert whole.topology == "native.fused-qkv"
+    assert whole.topology == "native.fused-qkv@1"
     assert whole.denoiser is True
-    assert classify_snapshot(root, "transformer").topology == "native.fused-qkv"
+    assert classify_snapshot(root, "transformer").topology == "native.fused-qkv@1"
 
 
 def test_unknown_means_REFUSE_for_a_denoiser_and_NOT_APPLICABLE_elsewhere(
@@ -603,7 +604,7 @@ def test_unknown_means_REFUSE_for_a_denoiser_and_NOT_APPLICABLE_elsewhere(
     err = excinfo.value
     assert err.code == "decode_set_key_topology_unclassified"
     assert "stack.0.mixer.in.weight" in str(err)
-    assert "native.fused-qkv" in str(err)   # what IS registered
+    assert "native.fused-qkv@1" in str(err)   # what IS registered
     # The same bytes under a non-denoiser component pass, by design.
     require_decodable(CONTRACT_PLAIN_BF16, decode_set=ds, where=str(root),
                       keys=vae)
@@ -615,9 +616,9 @@ def test_no_decoder_here_ingests_the_native_key_set() -> None:
     ds = derive_decode_set()
 
     for contract in ds.contracts():
-        assert "native.fused-qkv" not in accepted_key_topologies(contract, ds)
+        assert "native.fused-qkv@1" not in accepted_key_topologies(contract, ds)
     assert accepted_key_topologies(CONTRACT_PLAIN_BF16, ds) == (
-        "diffusers.split-qkv", "transformers.native")
+        "diffusers.split-qkv@1", "transformers.split-qkv@1")
 
 
 def test_an_unclassifiable_denoiser_refuses_through_the_load_dispatch(
@@ -668,9 +669,9 @@ def test_a_topology_mismatch_refuses_before_the_load(tmp_path: Path) -> None:
 
     err = excinfo.value
     assert err.code == REFUSAL_KEY_TOPOLOGY_UNSUPPORTED
-    assert err.observed == "native.fused-qkv"
-    assert err.accepted == ("diffusers.split-qkv", "transformers.native")
-    assert "native.fused-qkv" in str(err)
+    assert err.observed == "native.fused-qkv@1"
+    assert err.accepted == ("diffusers.split-qkv@1", "transformers.split-qkv@1")
+    assert "native.fused-qkv@1" in str(err)
     assert "the KEYS are addressed differently" in str(err)
     # And the contract check did NOT fire: the format was never the problem.
     assert not isinstance(err, ContractNotDecodableError)
@@ -681,7 +682,7 @@ def test_the_accepted_topology_passes_the_same_gate(
 ) -> None:
     """Positive control: the diffusers repackaging of the same contract gets
     past both halves of the guard."""
-    assert classify_snapshot(fp8_rowwise_tree).topology == "diffusers.split-qkv"
+    assert classify_snapshot(fp8_rowwise_tree).topology == "diffusers.split-qkv@1"
 
     with pytest.raises(Exception) as excinfo:
         loading_module().contract_loaded_component(
@@ -702,5 +703,5 @@ def test_a_late_shard_still_classifies_the_denoiser(tmp_path: Path) -> None:
                  {"transformer_blocks.0.attn.to_q.weight": "BF16"})
 
     keys = classify_snapshot(root, "transformer")
-    assert keys.topology == "diffusers.split-qkv"
+    assert keys.topology == "diffusers.split-qkv@1"
     assert keys.unclassified_denoiser is False

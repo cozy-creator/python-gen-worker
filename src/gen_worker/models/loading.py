@@ -35,11 +35,8 @@ from .tensor_layout_contract import (
     ELEMENT_FP16,
     ELEMENT_FP32,
     KEYS_DIFFUSERS_SPLIT_QKV,
-    KEYS_TRANSFORMERS_NATIVE,
+    KEYS_TRANSFORMERS_SPLIT_QKV,
     SCALE_NONE,
-    SHARD_COMPONENT_DIR,
-    SHARD_INDEX_SHARDED,
-    SHARD_SINGLE_FILE,
     DecodeDimensions,
     implements_contract,
     unregistered_decode_path,
@@ -2386,12 +2383,12 @@ def _load_modular_pipeline(
         # scale tensors, and a tree that does carry them belongs to a
         # quantized contract whose own decoder reads them.
         scales=(SCALE_NONE,),
-        shards=(SHARD_COMPONENT_DIR, SHARD_INDEX_SHARDED, SHARD_SINGLE_FILE),
         # `from_pretrained` addresses tensors by the class's own parameter
-        # names. `native.fused-qkv` is registered and DECLARED BY NOTHING
+        # names. `native.fused-qkv@1` is registered and DECLARED BY NOTHING
         # here: a minimax-native tree offered to this loader is refused by
         # name rather than dying as an md5 miss inside a detection helper.
-        key_topologies=(KEYS_DIFFUSERS_SPLIT_QKV, KEYS_TRANSFORMERS_NATIVE),
+        key_topologies=(KEYS_DIFFUSERS_SPLIT_QKV, KEYS_TRANSFORMERS_SPLIT_QKV),
+        bakes=(),
     ),
     why="the dense-weights path: plain bf16 bytes are read as stored "
         "(bf16-w16a16), and `storage_dtype=fp8` restructures the SAME bytes "

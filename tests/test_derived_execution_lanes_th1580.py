@@ -34,8 +34,8 @@ from gen_worker.models.tensor_layout_contract import (
 )
 
 _DIMS = DecodeDimensions(
-    elements=("bf16",), scales=("none",), shards=("component_dir",),
-    key_topologies=("diffusers.split-qkv",))
+    elements=("bf16",), scales=("none",),
+    key_topologies=("diffusers.split-qkv@1",), bakes=())
 
 _GOOD_A = '''
 from gen_worker.models.tensor_layout_contract import (
@@ -45,8 +45,8 @@ from gen_worker.models.tensor_layout_contract import (
 @implements_contract(
     contract="nunchaku.v1@1", serves=("svdq-fp4-w4a4",), composes_lora=False,
     decodes=DecodeDimensions(
-        elements=("nvfp4",), scales=("group_16",), shards=("single_file",),
-        key_topologies=("contract.native",)),
+        elements=("nvfp4",), scales=("group_16",), key_topologies=(),
+        bakes=()),
     why="fake svdq decoder",
 )
 def decode_svdq(tensors):
@@ -63,7 +63,7 @@ from gen_worker.models.tensor_layout_contract import (
     composes_lora=True,
     decodes=DecodeDimensions(
         elements=("fp8_e4m3",), scales=("per_channel_out",),
-        shards=("component_dir",), key_topologies=("diffusers.split-qkv",)),
+        key_topologies=("diffusers.split-qkv@1",), bakes=()),
     why="fake fp8 decoder",
 )
 def decode_fp8(tensors):
@@ -83,8 +83,8 @@ from gen_worker.models.tensor_layout_contract import (
     contract="bfl.nvfp4-preswizzled@1", serves=("nvfp4-w4a4-static",),
     composes_lora=False,
     decodes=DecodeDimensions(
-        elements=("nvfp4",), scales=("per_tensor",), shards=("single_file",),
-        key_topologies=("contract.native",)),
+        elements=("nvfp4",), scales=("per_tensor",), key_topologies=(),
+        bakes=()),
     why="never reached",
 )
 def decode_nvfp4(tensors):

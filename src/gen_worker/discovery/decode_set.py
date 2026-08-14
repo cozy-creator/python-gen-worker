@@ -187,7 +187,6 @@ def manifest_block(ds: DecodeSet) -> Dict[str, Any]:
                 "composes_lora": e.composes_lora,
                 "elements": list(e.decodes.elements),
                 "scales": list(e.decodes.scales),
-                "shards": list(e.decodes.shards),
                 "key_topologies": list(e.decodes.key_topologies),
                 "bakes": list(e.decodes.bakes),
             }
@@ -490,6 +489,14 @@ def require_decodable(
         )
     if keys is None:
         return
+    accepted = accepted_key_topologies(contract, ds)
+    if not accepted:
+        # This contract's decoders do not CONSTRAIN the key axis — the quant
+        # handle already fixes the keys (th#1937 declined a synonym token for
+        # exactly that reason). An unconstrained axis is not evaluated, which
+        # is the tri-state's UNDECLARED rung and not a fail-open: the handle
+        # check above already refused anything this image cannot decode.
+        return
     if keys.unclassified_denoiser:
         from gen_worker.models.tensor_layout_contract import (
             KNOWN_KEY_TOPOLOGIES,
@@ -500,7 +507,6 @@ def require_decodable(
             where=where)
     if not keys.topology:
         return
-    accepted = accepted_key_topologies(contract, ds)
     if keys.topology not in accepted:
         raise KeyTopologyUnsupportedError(
             contract, observed=keys.topology, accepted=accepted, where=where)
