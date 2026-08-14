@@ -23,6 +23,8 @@ exists.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import List
 
 import pytest
@@ -124,6 +126,49 @@ def test_attempt_outcomes_coalesce_by_count_never_by_dropping() -> None:
     ep.note_outcome("exc_ConnectionError")
 
     assert ep.histogram() == "grpc_unavailable=200, exc_ConnectionError=1"
+
+
+def test_a_long_immediate_outage_stays_inside_the_reconnect_loop(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A capped backoff must not overflow before its own stop signal lands.
+
+    The production expression multiplied a float by ``2 ** attempt`` *before*
+    applying the cap.  Rapid connection refusals therefore raised
+    ``OverflowError`` around attempt 1,024 even when both configured delays
+    were zero.  That exception escaped ``Transport.run`` and killed the worker
+    thread; the full suite captured the exact traceback twice.
+
+    This tape drives the real reconnect loop beyond that boundary, then stops
+    it through its normal lifecycle signal.  The old expression goes red with
+    the production ``OverflowError`` before attempt 1,100 can be reached.
+    """
+    from gen_worker.config import load_settings
+    from gen_worker.transport import Transport
+
+    class _Handlers:
+        async def on_disconnect(self) -> None:
+            return None
+
+    class _AlwaysUnavailable(Transport):
+        attempts = 0
+
+        async def _connect_once(self, target: str, use_tls: bool) -> None:
+            del target, use_tls
+            self.attempts += 1
+            if self.attempts == 1_100:
+                self.stop()
+            raise ConnectionError("deliberate immediate refusal")
+
+    caplog.set_level(logging.CRITICAL)
+    transport = _AlwaysUnavailable(
+        load_settings(worker_id="pgw1251-overflow"),
+        _Handlers(),
+        backoff_base_s=0.0,
+        backoff_cap_s=0.0,
+    )
+    asyncio.run(transport.run())
+    assert transport.attempts == 1_100
 
 
 def test_an_episode_starts_when_the_STREAM_ended_not_when_teardown_finished() -> None:

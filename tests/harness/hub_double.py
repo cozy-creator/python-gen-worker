@@ -106,6 +106,10 @@ class Conn:
     def __init__(self) -> None:
         self.hello: Optional[pb.Hello] = None
         self.received: List[pb.WorkerMessage] = []
+        # Shared with the scheduler: fatal/error reporting uses a separate
+        # diagnostic-first Connect, but a failed wait on this primary stream
+        # still needs to print the cause that process delivered.
+        self.diagnostic_reports: List[pb.HardwareUnsuitable] = []
         self._recv_cond = threading.Condition()
         self._out: "queue.Queue[Any]" = queue.Queue()
         self.client_done = threading.Event()
@@ -217,7 +221,10 @@ class Conn:
 
         return self._wait(
             _take,
-            lambda: f"no matching message; got {[_label(m) for m in self.received]}",
+            lambda: (
+                f"no matching message; got {[_label(m) for m in self.received]}; "
+                f"diagnostics={[(r.reason_class, r.detail) for r in self.diagnostic_reports]}"
+            ),
             timeout,
         )
 
@@ -255,6 +262,11 @@ class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
         file_base_url: str = "http://127.0.0.1:1/files",
     ) -> None:
         self.connections: List[Conn] = []
+        # HardwareUnsuitable is also the typed worker fatal/error carrier. It
+        # opens its own Connect and is valid in place of Hello (gw#619/th#988).
+        # Keep the whole payload so a primary-stream failure cannot erase the
+        # exception detail that explains it.
+        self.diagnostic_reports: List[pb.HardwareUnsuitable] = []
         self._conn_cond = threading.Condition()
         self.reject_unauthenticated = reject_unauthenticated
         self.file_base_url = file_base_url
@@ -271,10 +283,22 @@ class FakeScheduler(pb_grpc.WorkerSchedulerServicer):
             context.abort(grpc.StatusCode.UNAUTHENTICATED, "bad worker jwt")
 
         first = next(request_iterator)
-        assert first.WhichOneof("msg") == "hello", "first message must be Hello"
+        first_kind = first.WhichOneof("msg")
+        if first_kind == "hardware_unsuitable":
+            with self._conn_cond:
+                self.diagnostic_reports.append(first.hardware_unsuitable)
+                self._conn_cond.notify_all()
+            # The client half-closes after this one report. Mirror the real hub:
+            # drain it and end the call with no response.
+            for _ in request_iterator:
+                pass
+            return
+        assert first_kind == "hello", (
+            f"first message must be Hello, got {first_kind!r}")
         conn = Conn()
         conn.hello = first.hello
         conn.boot_cost = self.boot_cost
+        conn.diagnostic_reports = self.diagnostic_reports
         # Queue the HelloAck BEFORE exposing the connection: the contract says
         # HelloAck precedes all other scheduler->worker traffic.
         conn.send(hello_ack=pb.HelloAck(

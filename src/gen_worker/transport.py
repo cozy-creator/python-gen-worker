@@ -172,6 +172,26 @@ def normalize_grpc_addr(addr: str, default_tls: Optional[bool] = None) -> Tuple[
     return a, a.endswith(":443")
 
 
+def _backoff_ceiling(base: float, cap: float, attempt: int) -> float:
+    """Return ``min(cap, base * 2**attempt)`` without building ``2**attempt``.
+
+    A cap does not make the original expression safe: Python evaluates the
+    float multiplication before ``min``, and converting a sufficiently large
+    integer exponent to float raises ``OverflowError``. Double only until the
+    ceiling saturates instead. The loop is bounded by the number of doublings
+    between ``base`` and ``cap`` (five for the production 1 s -> 30 s policy),
+    never by ``attempt`` once the cap has been reached.
+    """
+    safe_base = max(0.0, float(base))
+    safe_cap = max(0.0, float(cap))
+    ceiling = min(safe_base, safe_cap)
+    remaining = max(0, int(attempt))
+    while remaining and 0.0 < ceiling < safe_cap:
+        ceiling = min(safe_cap, ceiling * 2.0)
+        remaining -= 1
+    return ceiling
+
+
 def _msg_kind(msg: pb.WorkerMessage) -> str:
     which = msg.WhichOneof("msg")
     if which == "job_result":
@@ -1418,7 +1438,9 @@ class Transport:
                 if now - self._connected_at >= _BACKOFF_RESET_AFTER_S:
                     attempt = 0
 
-            delay = random.uniform(0, min(self._backoff_cap, self._backoff_base * (2 ** attempt)))
+            delay = random.uniform(
+                0, _backoff_ceiling(self._backoff_base, self._backoff_cap, attempt)
+            )
             attempt += 1
             self.reconnect_delays.append(delay)
             logger.info("reconnecting in %.2fs (attempt %d)", delay, attempt)

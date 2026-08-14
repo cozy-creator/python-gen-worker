@@ -8,14 +8,18 @@ carried zero orchestrator-visible evidence. Real gRPC sockets throughout
 from __future__ import annotations
 
 import time
+from concurrent import futures
 
+import grpc
 import pytest
 
 from gen_worker import hardware_report
 from gen_worker.config import Settings
 from gen_worker.cuda_probe import CudaProbeResult, classify_probe_failure
+from gen_worker.pb import worker_scheduler_pb2_grpc as pb_grpc
 
 from harness.hardware_report_hub import closed_port_addr, old_hub, recording_hub
+from harness.hub_double import FakeScheduler
 
 pytestmark = pytest.mark.filterwarnings("ignore")
 
@@ -107,6 +111,32 @@ def test_report_hardware_unsuitable_delivers_to_a_new_hub() -> None:
         assert hw.image_digest == "sha256:deadbeef"
         assert hw.instance_id == "pod-1"
         assert hw.reported_at_unix_ms > 0
+
+
+def test_general_hub_double_preserves_a_diagnostic_first_stream() -> None:
+    """The ordinary hub double mirrors both valid Connect first-message shapes.
+
+    Worker fatal/error reporting deliberately opens a separate Connect whose
+    first and only message is ``HardwareUnsuitable``.  Rejecting that valid
+    shape with a bare "first message must be Hello" assertion erased the
+    exception detail that caused the worker's primary stream to end, which is
+    exactly what the merge-queue failure needed to reveal.
+    """
+    scheduler = FakeScheduler()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+    pb_grpc.add_WorkerSchedulerServicer_to_server(scheduler, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        settings = _settings(orchestrator_public_addr=f"127.0.0.1:{port}")
+        probe = CudaProbeResult(ok=False, reason="the root failure survives")
+        assert hardware_report.report_hardware_unsuitable(settings, probe) is True
+        assert len(scheduler.diagnostic_reports) == 1
+        report = scheduler.diagnostic_reports[0]
+        assert report.reason_class == "cuda_error"
+        assert report.detail == probe.reason
+    finally:
+        server.stop(grace=0)
 
 
 def test_report_hardware_unsuitable_delivers_with_worker_jwt_identity() -> None:
