@@ -163,8 +163,8 @@ def contract_decoders_of(obj: Any) -> tuple[ContractDecoder, ...]:
 # honestly what it is — a transcription that is allowed to be stale and is
 # CHECKED, never authoritative.
 
-#: The whole-tree key: this slot's demand for every component that has no
-#: more specific declaration.
+#: The every-component key: this slot's demand for every component that has no
+#: more specific declaration. The map is one level deep, keyed by component.
 LAYOUT_KEY_ANY_COMPONENT = "*"
 
 # ── The TWO AXES (§1.33) ─────────────────────────────────────────────────────

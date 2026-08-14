@@ -383,8 +383,8 @@ class Generate:
   })
   ```
 
-  `"*"` is the whole-tree default; a component key overrides it for that
-  component. The hub compares an artifact's PROVEN layout against this set at
+  `"*"` is the every-component default; a component key overrides it for that
+  component. The map is one level deep, keyed by component. The hub compares an artifact's PROVEN layout against this set at
   rebind and refuses a mismatch with both sides named, before any pod is
   bought. **Omitting `layouts=` leaves the slot UNDECLARED** — the gate then
   falls back to the image-wide decoder census, and absence is never read as

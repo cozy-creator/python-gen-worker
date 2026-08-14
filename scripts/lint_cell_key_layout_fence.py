@@ -3,7 +3,7 @@
 
     Every byte the endpoint's loader/`setup()` observes is in one of the slot's
     DECLARED accepted layouts. Conversion completes strictly before
-    materialization into the worker's model tree, and the endpoint has no code
+    materialization into the worker's snapshot tree, and the endpoint has no code
     path that can observe the source layout, the conversion, or its provenance.
     Therefore the traced graph, `Compile.contract_axes()`, the ck1 cell key and
     the declared envelope are unchanged by any conversion, and no cell re-keys —
