@@ -29,6 +29,7 @@ from ..capability import HostRamCapacityError, InsufficientHostRamError
 from . import disk_gc, load_progress
 from .tensor_layout_contract import (
     CONTRACT_COZY_FP8_ROWWISE,
+    CONTRACT_HF_FP8_BLOCKWISE,
     CONTRACT_NUNCHAKU_V1,
     CONTRACT_PLAIN_BF16,
     ELEMENT_BF16,
@@ -49,6 +50,7 @@ from .memory import (
     meta_tensors,
     probe_host_ram,
 )
+from .hf_fp8_blockwise import detect_hf_fp8_blockwise, load_hf_fp8_blockwise
 from .safetensors_header import header_len_ok
 from .svdq import detect_svdq_artifact, load_svdq_pipeline
 from .w4a4 import (
@@ -1464,6 +1466,23 @@ def contract_loaded_component(
             f"dequantized by the pipeline's own gguf loader, so there is no "
             f"component-level production loader to borrow"
         )
+    # hf.fp8-blockwise@1: a transformers component tree (the conditioner /
+    # text encoder position), so it is detected on the component dir and
+    # after the denoiser lanes above. Without this arm the tree loads
+    # GENERICALLY — transformers reads `quantization_config` out of
+    # config.json by itself, so nothing fails and the image's declared
+    # decoder for this contract never runs. Measured (pgw#1253): the arm the
+    # decode-set declares was reached by nothing, so a transposed or rowwise
+    # scale grid was accepted here instead of refused by name, and the
+    # resident-vs-upcast lane was transformers' default rather than this
+    # image's declaration.
+    blockwise = detect_hf_fp8_blockwise(where)
+    if blockwise is not None:
+        require_decodable(
+            CONTRACT_HF_FP8_BLOCKWISE, weights,
+            component=component if where != weights else "")
+        return load_hf_fp8_blockwise(
+            where, cls=cls, dtype=compute_dtype, tree=blockwise)
     return None
 
 

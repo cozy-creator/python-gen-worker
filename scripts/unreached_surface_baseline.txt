@@ -105,6 +105,22 @@
 #       with NO importer at all"; this deletion is that lesson applied by
 #       hand.
 #
+#   A DECLARED capability derived from a function this file already listed
+#     models.hf_fp8_blockwise.load_hf_fp8_blockwise — ✅ DELISTED 2026-08-14
+#       (pgw#1253) by WIRING: `contract_loaded_component` now detects an
+#       `hf.fp8-blockwise@1` component tree and dispatches to it. Listed
+#       2026-08-12 (pgw#1182) when the fence grew to the whole package.
+#       pgw#1245 then hung `@implements_contract` on this same function and
+#       DERIVED the image's `[decode_set]` from the marker — so the hub was
+#       told this image decodes `hf.fp8-blockwise@1` on the strength of a
+#       function this file had already recorded as caller-less. Nothing broke,
+#       which is the point: transformers reads `quantization_config` out of
+#       config.json itself, so the tree loaded through the generic arm that
+#       declares `plain.bf16@1` and the contract's own verifier never ran.
+#       THIS GUARD DID NOT MISS IT — the row was here the whole time. What is
+#       missing is that a derivation reading the marker does not read this
+#       file.
+#
 #   ⚠️ KNOWN BLIND SPOT — the wrapper exemption clears the WRONG function
 #
 #     MECHANISM: a definition is exempted when its body is a one-line call
@@ -312,7 +328,6 @@ gen_worker.kernel_path.probe()
 gen_worker.models.attention_modes.known_attention_modes()
 gen_worker.models.fp8_storage.castable_leaves()
 gen_worker.models.hf_fp8_blockwise.dequantize_block_scaled()
-gen_worker.models.hf_fp8_blockwise.load_hf_fp8_blockwise()
 gen_worker.models.ladder.Placement.admits_sm()
 gen_worker.models.lora_lifted.LiftedLoraBinding.swap()
 gen_worker.models.lora_lifted.LiftedLoraPlan.views()

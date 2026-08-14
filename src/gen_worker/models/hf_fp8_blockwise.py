@@ -276,6 +276,37 @@ def inspect_hf_fp8_blockwise(
         modules_to_not_convert=skip, units=tuple(units), files=files)
 
 
+def detect_hf_fp8_blockwise(path: Path) -> Optional[HfFp8BlockwiseTree]:
+    """The verified ``hf.fp8-blockwise@1`` tree at ``path``, or ``None``.
+
+    DETECTION is the config's own claim and nothing else: a
+    ``quantization_config`` whose ``quant_method`` is fp8 and whose
+    ``weight_block_size`` is a ``[block_m, block_n]`` pair. A tree that makes
+    no such claim is not this contract and is left to the caller's own lane —
+    a per-tensor or per-row fp8 tree is ``cozy.fp8-rowwise@1``, detected by its
+    own arm.
+
+    A tree that DOES make the claim is verified against its headers before it
+    is returned, so a mis-blocked, transposed or rowwise-scaled grid raises
+    :class:`HfFp8BlockwiseLayoutError` here rather than reaching a generic
+    loader that reads it as something else.
+    """
+    p = Path(path)
+    try:
+        cfg = json.loads((p / "config.json").read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    qc = cfg.get("quantization_config") if isinstance(cfg, dict) else None
+    if not isinstance(qc, dict):
+        return None
+    if str(qc.get("quant_method", "")).lower() != QUANT_METHOD:
+        return None
+    raw = qc.get("weight_block_size")
+    if not (isinstance(raw, (list, tuple)) and len(raw) == 2):
+        return None
+    return inspect_hf_fp8_blockwise(p)
+
+
 def dequantize_block_scaled(weight: Any, scale: Any, *, out_dtype: Any = None) -> Any:
     """``hf.fp8_blockwise.dequant@1`` — the contract's reference dequant.
 
@@ -387,6 +418,7 @@ __all__ = [
     "HfFp8BlockwiseTree",
     "REFERENCE_DEQUANT",
     "dequantize_block_scaled",
+    "detect_hf_fp8_blockwise",
     "inspect_hf_fp8_blockwise",
     "load_hf_fp8_blockwise",
 ]
