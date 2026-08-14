@@ -626,6 +626,8 @@ MAX_PUBLISH_ENTRIES = 256
 #: indicts the pod and every entry from it is suspect. Only a fact about ONE
 #: key is answered per entry.
 PUBLISH_STATUS_GRANTED = "granted"
+PUBLISH_INTENT_PATH = "/v1/worker/compiled-graphs/publish-intent"
+PUBLISH_COMPLETE_PATH = "/v1/worker/compiled-graphs/publish-complete"
 
 
 @dataclass(frozen=True)
@@ -855,7 +857,7 @@ class CellPublisher:
             _publish_leg(family, asked[0].compiled_graph_key,
                          "credential_expired", {"past_exp_s": int(lapse)})
         body = self._post(
-            "/v1/worker/compiled-graphs/publish-intent",
+            PUBLISH_INTENT_PATH,
             {
                 "family": family,
                 # The three HUB-ATTESTED axes (pgw#709), checked against the
@@ -994,7 +996,7 @@ class CellPublisher:
             # Best-effort failure report so the hub's ledger/alarms see it.
             try:
                 self._post(
-                    "/v1/worker/compiled-graphs/publish-complete",
+                    PUBLISH_COMPLETE_PATH,
                     {"family": family, "compiled_graph_key": key, "ok": False,
                      "error": str(exc)[:300]},
                     timeout=_COMPLETE_TIMEOUT_S,
@@ -1009,7 +1011,7 @@ class CellPublisher:
             "bytes": result.total_bytes,
         })
         self._post(
-            "/v1/worker/compiled-graphs/publish-complete",
+            PUBLISH_COMPLETE_PATH,
             {"family": family, "compiled_graph_key": key,
              "checkpoint_id": checkpoint_id, "ok": True},
             timeout=_COMPLETE_TIMEOUT_S,

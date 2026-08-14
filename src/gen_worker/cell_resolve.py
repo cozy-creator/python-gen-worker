@@ -93,6 +93,8 @@ from .procsplit import broker
 logger = logging.getLogger(__name__)
 
 RESOLVE_PATH = "/v1/worker/compiled-graphs/resolve"
+RESOLVE_BATCH_OBJECT = "compiled_graph_resolve_batch"
+RESOLVE_HIT_OBSERVATION = "compiled_graph_resolve_hit"
 
 #: Mandatory (``scripts/lint_http_timeouts.py``). Generous relative to the
 #: hub's own 15 s transport resolve, because the answer is on the boot path and
@@ -119,24 +121,27 @@ _STATUS_REFUSAL_CODE = {
         "compiled_graph_resolve_transport_unavailable",
 }
 
-#: The hub's typed refusal codes. NOT misses — see the module docstring. The
-#: first three are per-ANSWER now (see :data:`_STATUS_REFUSAL_CODE`); the rest
-#: refuse the whole batch, because each is a property of the CALLER or of the
-#: REQUEST rather than of one key.
-REFUSAL_CODES = (
-    "compiled_graph_resolve_incomplete",
-    "compiled_graph_resolve_transport_unavailable",
+HUB_HTTP_REFUSAL_CODES = (
     "compiled_graph_resolve_client_supplied_field",
-    "compiled_graph_resolve_too_many_keys",
     "compiled_graph_resolve_duplicate_key",
-    # Answered, but not to the question that was asked. Local verdicts, and
-    # they are refusals rather than misses for the usual reason: a pod that
-    # read a mangled batch as misses would pay for a full cold mint per key.
-    "compiled_graph_resolve_short_answer",
+    "compiled_graph_resolve_too_many_keys",
+)
+
+WORKER_ONLY_VERDICT_CODES = (
     "compiled_graph_resolve_answer_out_of_order",
     "compiled_graph_resolve_batch_signature",
     "compiled_graph_resolve_shared_receipt",
+    "compiled_graph_resolve_short_answer",
     "compiled_graph_resolve_unknown_status",
+)
+
+#: Every typed worker verdict produced while consuming a batch.  This is not
+#: the hub's refusal vocabulary: the package contract partitions HTTP
+#: refusals, per-answer statuses and worker-only validation verdicts.
+VERDICT_CODES = (
+    *tuple(_STATUS_REFUSAL_CODE.values()),
+    *HUB_HTTP_REFUSAL_CODES,
+    *WORKER_ONLY_VERDICT_CODES,
 )
 
 #: Every field an accepted answer must NAME, and why. An answer omitting one
@@ -478,6 +483,12 @@ def _answers_of(
 ) -> Tuple[ResolveAnswer, ...]:
     """Decode the answer list, enforcing arity, order and per-answer signing."""
     raw = (body or {}) if isinstance(body, Mapping) else {}
+    if str(raw.get("object") or "") != RESOLVE_BATCH_OBJECT:
+        raise CellResolveRefused(
+            "compiled_graph_resolve_batch_signature",
+            f"the response object is {raw.get('object')!r}, not "
+            f"{RESOLVE_BATCH_OBJECT!r}",
+        )
     for field in _BATCH_SIGNATURE_FIELDS:
         if raw.get(field):
             raise CellResolveRefused(
@@ -566,8 +577,11 @@ def _null() -> Any:
 
 
 __all__ = [
-    "REFUSAL_CODES",
+    "VERDICT_CODES",
+    "HUB_HTTP_REFUSAL_CODES",
     "RESOLVE_PATH",
+    "RESOLVE_BATCH_OBJECT",
+    "RESOLVE_HIT_OBSERVATION",
     "RESOLVE_TIMEOUT_S",
     "CellResolveRefused",
     "ResolvedCell",
@@ -580,6 +594,7 @@ __all__ = [
     "STATUS_INCOMPLETE",
     "STATUS_MISS",
     "STATUS_TRANSPORT_UNAVAILABLE",
+    "WORKER_ONLY_VERDICT_CODES",
     "materialize",
     "resolve_batch",
 ]

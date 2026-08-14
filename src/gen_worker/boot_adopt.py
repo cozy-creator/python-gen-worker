@@ -172,7 +172,7 @@ ASK_REASONS: Tuple[str, ...] = (
     # then failed their function, and the event that promised to name the gate
     # named the gate BEFORE the one that refused.
     "arm_refused",
-) + tuple(cell_resolve.REFUSAL_CODES)
+) + tuple(cell_resolve.VERDICT_CODES)
 
 #: The COMPLETE boot-adopt vocabulary. A path that can produce a token missing
 #: from here is a path that can be silent again, so

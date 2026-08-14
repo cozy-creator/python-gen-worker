@@ -20,12 +20,14 @@ from gen_worker import (
     compile_cache,
     cuda_probe,
     host_canary,
+    fleet_cells,
+    receipts,
     serving_mode,
     worker_fatal,
 )
 from gen_worker.api.binding import ModelSource
 from gen_worker.convert.layout_converters import derived_artifact_identity
-from gen_worker.local_cell_store import UNTRUSTED_REFUSAL_CODE
+from gen_worker.compiled_graph_store import UNTRUSTED_REFUSAL_CODE
 from gen_worker.models import execution_lanes, rung
 from gen_worker.models.cozy_snapshot import PICKLE_WEIGHT_EXTENSIONS
 from gen_worker.models.tensor_layout_contract import (
@@ -38,8 +40,12 @@ from gen_worker.utils.lora import LORA_WEIGHT_BOUND
 
 
 _ROOT = Path(__file__).parents[1]
-_DEFAULT_CORPUS = Path(__file__).parent / "testdata" / "worker_value_contracts.json"
-_DEFAULT_DIGEST = Path(__file__).parent / "testdata" / "WORKER_VALUE_CONTRACTS_DIGEST"
+_DEFAULT_CORPUS = (
+    _ROOT / "src" / "gen_worker" / "contracts" / "worker_value_contracts.json"
+)
+_DEFAULT_DIGEST = (
+    _ROOT / "src" / "gen_worker" / "contracts" / "WORKER_VALUE_CONTRACTS_DIGEST"
+)
 _CORPUS = Path(os.environ.get("WORKER_VALUE_CONTRACT_FILE", _DEFAULT_CORPUS))
 
 
@@ -96,10 +102,54 @@ def test_exact_worker_values_match_pgw1237() -> None:
         {"kind": activity.KIND_AOT_MINT, "phase": activity.PHASE_MINTED},
         {"kind": activity.KIND_JIT_COMPILE, "phase": activity.PHASE_MINTED},
     ]
-    assert set(exact["cell_resolve_hub_refusal_codes"]) == set(
-        cell_resolve.REFUSAL_CODES
+    assert set(exact["compiled_graph_resolve_verdicts"]) == set(
+        cell_resolve.VERDICT_CODES
     )
-    assert exact["cell_publish_untrusted_refusal_code"] == UNTRUSTED_REFUSAL_CODE
+    assert (
+        exact["compiled_graph_publish_untrusted_refusal_code"]
+        == UNTRUSTED_REFUSAL_CODE
+    )
+
+    axes = _document()["compiled_graph_runtime"]["axes"]
+    assert axes["hub_http_refusal_codes"] == {
+        "emitter": "tensorhub",
+        "values": [
+            *cell_resolve.HUB_HTTP_REFUSAL_CODES,
+            UNTRUSTED_REFUSAL_CODE,
+        ],
+    }
+    statuses = axes["per_answer_statuses"]
+    assert statuses["emitter"] == "tensorhub"
+    assert [row["status"] for row in statuses["values"]] == [
+        cell_resolve.STATUS_HIT,
+        cell_resolve.STATUS_MISS,
+        cell_resolve.STATUS_INCOMPLETE,
+        cell_resolve.STATUS_TRANSPORT_UNAVAILABLE,
+    ]
+    assert statuses["values"][0]["worker_observation"] == (
+        cell_resolve.RESOLVE_HIT_OBSERVATION
+    )
+    assert axes["worker_only_verdicts"] == {
+        "emitter": "python-gen-worker",
+        "values": list(cell_resolve.WORKER_ONLY_VERDICT_CODES),
+    }
+    envelope = {
+        (row["kind"], row["value"]): row["emitter"]
+        for row in axes["envelope"]["values"]
+    }
+    assert envelope == {
+        ("worker_observation", cell_resolve.RESOLVE_BATCH_OBJECT): "tensorhub",
+        ("resolve_route", cell_resolve.RESOLVE_PATH): "python-gen-worker",
+        ("publish_intent_route", fleet_cells.PUBLISH_INTENT_PATH):
+            "python-gen-worker",
+        ("publish_complete_route", fleet_cells.PUBLISH_COMPLETE_PATH):
+            "python-gen-worker",
+        ("receipt_version", receipts.RECEIPT_VERSION): "tensorhub",
+        ("receipt_identity_field", "compiled_graph_key"): "tensorhub",
+        ("capability", "compiled_graph_publish"): "tensorhub",
+        ("capability_identity_field", "compiled_graph_key"): "tensorhub",
+        ("publish_status", fleet_cells.PUBLISH_STATUS_GRANTED): "tensorhub",
+    }
     assert exact["hardware_unsuitable_reason_classes"] == [
         "torch_unavailable",
         "cuda_unavailable",

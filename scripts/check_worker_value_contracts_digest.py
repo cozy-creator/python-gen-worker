@@ -9,8 +9,12 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CORPUS = ROOT / "tests" / "testdata" / "worker_value_contracts.json"
-DEFAULT_DIGEST = ROOT / "tests" / "testdata" / "WORKER_VALUE_CONTRACTS_DIGEST"
+DEFAULT_CORPUS = (
+    ROOT / "src" / "gen_worker" / "contracts" / "worker_value_contracts.json"
+)
+DEFAULT_DIGEST = (
+    ROOT / "src" / "gen_worker" / "contracts" / "WORKER_VALUE_CONTRACTS_DIGEST"
+)
 
 
 def recorded_digest(path: Path) -> str:
