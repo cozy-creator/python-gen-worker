@@ -27,6 +27,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 from private_deployment_leg import (  # noqa: E402
     BLOCKED,
     SKIPPED,
+    BLOCKER_COMPILED_GRAPH_INVENTORY,
     BLOCKER_INVOKE_ROUTE,
     BLOCKER_RECONCILER,
     BLOCKER_SETTLEMENT,
@@ -38,6 +39,8 @@ from private_deployment_leg import (  # noqa: E402
     STATE_STOPPING,
     ContractModel,
     Leg,
+    compiled_graph_inventory_path,
+    decoded_pixel_digest,
     coherence_error,
     parse_pair,
     sku_slug,
@@ -88,8 +91,31 @@ def test_leg_on_a_fully_merged_hub_is_green_end_to_end() -> None:
     assert result.blockers == []
     # The product check ran, and it is what makes this leg an acceptance proof
     # rather than a latency measurement.
-    for ident in ("seal.rows", "seal.sku_matches_rented_card", "seal.artifact_digest",
-                  "seal.not_quarantined", "seal.sm_recorded", "seal.no_failed_publish"):
+    for ident in ("seal.rows", "seal.sku_matches_rented_card", "seal.artifact_ref",
+                  "seal.graph_keys_exact", "seal.artifact_refs_exact",
+                  "seal.worker_versions_exact", "seal.not_quarantined",
+                  "seal.sm_recorded", "seal.no_failed_publish"):
+        assert _finding(result, ident).status == OK, _finding(result, ident).detail
+    for ident in (
+        "evidence.status[0]",
+        "evidence.outcome[0]",
+        "evidence.refusal[0]",
+        "evidence.graph_key[0]",
+        "evidence.artifact_ref[0]",
+        "evidence.receipt_ref[0]",
+        "evidence.versions[0]",
+        "evidence.serving_pid[0]",
+        "evidence.no_serving_compile[0]",
+        "evidence.hashrepo_refs[0]",
+        "evidence.hashrepo_objects[0]",
+        "evidence.bind_fqns[0]",
+        "evidence.bind_calls[0]",
+        "evidence.runner_calls[0]",
+        "evidence.pixel_digest[0]",
+        "evidence.publisher_compile_count[0]",
+        "evidence.publisher_spawn_count[0]",
+        "evidence.compile_child[0]",
+    ):
         assert _finding(result, ident).status == OK, _finding(result, ident).detail
 
 
@@ -230,7 +256,7 @@ def test_a_leg_with_no_invocations_is_a_lifecycle_proof_not_a_silent_pass() -> N
     "break_invariant, ident",
     [
         ("seal_sku_mismatch", "seal.sku_matches_rented_card"),
-        ("seal_no_artifact", "seal.artifact_digest"),
+        ("seal_no_artifact", "seal.artifact_ref"),
         ("seal_failed_publish", "seal.no_failed_publish"),
         ("seal_wrong_release", "seal.rows"),
     ],
@@ -255,6 +281,7 @@ def test_missing_seal_routes_are_blocked_not_green() -> None:
     result = _run(model, _leg())
 
     assert _finding(result, "seal.route").status == BLOCKED
+    assert _finding(result, "seal.route").blocker == BLOCKER_COMPILED_GRAPH_INVENTORY
     assert result.status == BLOCKED
 
 
@@ -297,3 +324,88 @@ def test_a_mint_proof_that_never_invoked_reports_no_false_red() -> None:
                 if f.ident.startswith("seal.") and f.status == FAILED]
     assert result.status == BLOCKED
     assert BLOCKER_INVOKE_ROUTE in result.blockers
+
+
+def test_admin_inventory_is_a_hard_compiled_graph_cut() -> None:
+    assert compiled_graph_inventory_path("rel 1") == (
+        "/v1/admin/compiled-graphs?view=compiled_graphs&release=rel+1&limit=200"
+    )
+
+
+def test_decoded_pixel_digest_binds_shape_mode_and_raw_pixels() -> None:
+    raw = bytes((0, 17, 34, 51, 68, 85))
+    baseline = decoded_pixel_digest("RGB", 2, 1, raw)
+
+    assert baseline.startswith("sha256:")
+    assert len(baseline) == len("sha256:") + 64
+    assert decoded_pixel_digest("RGBA", 2, 1, raw) != baseline
+    assert decoded_pixel_digest("RGB", 1, 2, raw) != baseline
+    assert decoded_pixel_digest("RGB", 2, 1, raw[:-1] + b"\x56") != baseline
+
+
+def test_second_request_proves_same_graph_reuse_without_compile_or_spawn() -> None:
+    model = ContractModel(provisioning=True, invoke_route=True, settlement=True)
+    result = _run(model, _leg(invocations=2))
+
+    assert result.status == OK, [
+        (f.ident, f.status, f.detail) for f in result.findings if f.status != OK
+    ]
+    published = result.requests[0]["compiled_graph_evidence"]
+    reused = result.requests[1]["compiled_graph_evidence"]
+    assert reused["outcome"] == "reused"
+    assert reused["compiled_graph_key"] == published["compiled_graph_key"]
+    assert reused["artifact_ref"] == published["artifact_ref"]
+    assert reused["receipt_ref"] == published["receipt_ref"]
+    assert reused["decoded_pixel"] == published["decoded_pixel"]
+    for ident in (
+        "evidence.reuse_compile_count[1]",
+        "evidence.reuse_spawn_count[1]",
+        "evidence.reuse_no_child[1]",
+    ):
+        assert _finding(result, ident).status == OK, _finding(result, ident).detail
+
+
+@pytest.mark.parametrize(
+    "break_invariant, invocations, ident",
+    [
+        ("evidence_status", 1, "evidence.status[0]"),
+        ("evidence_outcome", 1, "evidence.outcome[0]"),
+        ("evidence_refusal", 1, "evidence.refusal[0]"),
+        ("evidence_graph_key", 1, "evidence.graph_key[0]"),
+        ("evidence_artifact_ref", 1, "evidence.artifact_ref[0]"),
+        ("evidence_receipt_ref", 1, "evidence.receipt_ref[0]"),
+        ("evidence_versions", 1, "evidence.versions[0]"),
+        ("evidence_serving_pid", 1, "evidence.serving_pid[0]"),
+        ("evidence_serving_compile", 1, "evidence.no_serving_compile[0]"),
+        ("evidence_manifest_ref", 1, "evidence.hashrepo_manifest_ref[0]"),
+        ("evidence_materialized_root", 1, "evidence.hashrepo_materialized_root[0]"),
+        ("evidence_nonempty_cache", 1, "evidence.empty_cache[0]"),
+        ("evidence_ref_count", 1, "evidence.hashrepo_refs[0]"),
+        ("evidence_object_count", 1, "evidence.hashrepo_objects[0]"),
+        ("evidence_bind_fqns", 1, "evidence.bind_fqns[0]"),
+        ("evidence_bind_calls", 1, "evidence.bind_calls[0]"),
+        ("evidence_runner_calls", 1, "evidence.runner_calls[0]"),
+        ("evidence_pixel_shape", 1, "evidence.pixel_shape[0]"),
+        ("evidence_pixel_digest", 1, "evidence.pixel_digest[0]"),
+        ("evidence_publish_compile", 1, "evidence.publisher_compile_count[0]"),
+        ("evidence_publish_spawn", 1, "evidence.publisher_spawn_count[0]"),
+        ("evidence_compile_child", 1, "evidence.compile_child[0]"),
+        ("evidence_reuse_compile", 2, "evidence.reuse_compile_count[1]"),
+        ("evidence_reuse_spawn", 2, "evidence.reuse_spawn_count[1]"),
+        ("evidence_reuse_child", 2, "evidence.reuse_no_child[1]"),
+    ],
+)
+def test_every_compiled_graph_evidence_gate_is_red_provable(
+        break_invariant: str, invocations: int, ident: str) -> None:
+    model = ContractModel(
+        provisioning=True,
+        invoke_route=True,
+        settlement=True,
+        break_invariant=break_invariant,
+    )
+    result = _run(model, _leg(invocations=invocations))
+
+    assert _finding(result, ident).status == FAILED, (
+        f"severing {break_invariant!r} left {ident} at {_finding(result, ident).status}"
+    )
+    assert result.status == FAILED

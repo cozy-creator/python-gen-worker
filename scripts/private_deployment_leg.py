@@ -55,8 +55,11 @@ lands those -- see `REPOINT_NOTE` at the bottom of this file for the exact call.
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import os
+import struct
 import sys
 import time
 import urllib.error
@@ -99,7 +102,9 @@ READY_POD_STATES = frozenset({"ready", "connected", "running", "serving"})
 BLOCKER_INVOKE_ROUTE = "th#1927 follow-up (POST /v1/private-deployments/:id/:function)"
 BLOCKER_RECONCILER = "th#1927 (provisioning reconciler)"
 BLOCKER_SETTLEMENT = "th#1928 (per-second settlement)"
-BLOCKER_CELL_INVENTORY = "th#1355 (GET /v1/admin/cells) is absent from this hub"
+BLOCKER_COMPILED_GRAPH_INVENTORY = (
+    "th#1910 (GET /v1/admin/compiled-graphs) is absent from this hub"
+)
 BLOCKER_ACTIVITY_EVENTS = "th#1839 (GET /v1/admin/worker-activity-events) is absent from this hub"
 
 OK = "ok"
@@ -152,6 +157,27 @@ def sku_slug(gpu_name: str) -> str:
     while "--" in out:
         out = out.replace("--", "-")
     return out
+
+
+def decoded_pixel_digest(mode: str, width: int, height: int, raw_pixels: bytes) -> str:
+    """Bind decoded pixels, not encoder-dependent PNG/JPEG transport bytes.
+
+    v1 is unambiguous: a 32-bit big-endian UTF-8 mode length, the mode bytes,
+    64-bit big-endian width and height, then the row-major raw pixel bytes.
+    Changing shape or mode therefore changes the identity even if the raw byte
+    sequence happens to be the same.
+    """
+    mode_bytes = mode.encode("utf-8")
+    framed = struct.pack(">I", len(mode_bytes)) + mode_bytes
+    framed += struct.pack(">QQ", width, height) + raw_pixels
+    return "sha256:" + hashlib.sha256(framed).hexdigest()
+
+
+def compiled_graph_inventory_path(release: str) -> str:
+    query = urllib.parse.urlencode(
+        {"view": "compiled_graphs", "release": release, "limit": 200}
+    )
+    return "/v1/admin/compiled-graphs?" + query
 
 
 def coherence_error(state: str, stop_reason: str, stopped_at: Optional[str]) -> Optional[str]:
@@ -209,7 +235,7 @@ class DeploymentAPI(Protocol):
     def config_history(self, org: str, deployment_id: str) -> List[Dict[str, Any]]: ...
     def invoke(self, deployment_id: str, function: str, payload: Mapping[str, Any]) -> str: ...
     def request(self, request_id: str) -> Dict[str, Any]: ...
-    def admin_cells(self, release: str) -> List[Dict[str, Any]]: ...
+    def admin_compiled_graphs(self, release: str) -> List[Dict[str, Any]]: ...
     def admin_activity_events(self, release: str, state: str) -> List[Dict[str, Any]]: ...
 
 
@@ -282,17 +308,10 @@ class HttpDeploymentAPI:
     def request(self, request_id: str) -> Dict[str, Any]:
         return dict(self._call("GET", "/v1/requests/" + urllib.parse.quote(request_id)))
 
-    def admin_cells(self, release: str) -> List[Dict[str, Any]]:
-        """th#1355's compiled-graph inventory, filtered server-side.
-
-        Read from the graph's OWN row rather than through a demand join, so a
-        reaped demand row cannot hide a graph. (The route says `cells`; Paul
-        retired that word for `compiled_graph` and the rename belongs to the
-        cross-repo lockstep, not to this consumer.)
-        """
-        query = urllib.parse.urlencode({"view": "cells", "release": release, "limit": 200})
-        out = self._call("GET", "/v1/admin/cells?" + query)
-        return list(out.get("cells", []))
+    def admin_compiled_graphs(self, release: str) -> List[Dict[str, Any]]:
+        """Read durable compiled graphs from their own rows, not demand joins."""
+        out = self._call("GET", compiled_graph_inventory_path(release))
+        return list(out.get("compiled_graphs", []))
 
     def admin_activity_events(self, release: str, state: str) -> List[Dict[str, Any]]:
         query = urllib.parse.urlencode({"release": release, "state": state, "limit": 200})
@@ -660,6 +679,13 @@ class _Run:
         self.end()
 
     def _assert_sealed(self) -> None:
+        completed = [r for r in self.result.requests if r.get("status") == "completed"]
+        evidences: List[Dict[str, Any]] = []
+        for index, record in enumerate(completed):
+            evidence = self._assert_request_evidence(record, index)
+            if evidence is not None:
+                evidences.append(evidence)
+
         # The card ACTUALLY rented, from the pod row — never the pair asked
         # for. A create can land on an sm-equivalent sibling of the SKU it
         # named, and an assertion against the ask is measuring an intention.
@@ -669,18 +695,20 @@ class _Run:
                 observed = str(pod["gpu_class"])
                 break
         try:
-            cells = self.api.admin_cells(self.leg.release_id)
+            compiled_graphs = self.api.admin_compiled_graphs(self.leg.release_id)
         except ApiError as exc:
             if exc.route_missing:
                 self.find("seal.route", BLOCKED,
-                          f"cannot read the compiled-graph store: {exc}", BLOCKER_CELL_INVENTORY)
+                          f"cannot read the compiled-graph store: {exc}",
+                          BLOCKER_COMPILED_GRAPH_INVENTORY)
             else:
                 self.find("seal.rows", FAILED, f"compiled-graph inventory read failed: {exc}")
             return
-        mine = [c for c in cells if c.get("minted_for_release_id") == self.leg.release_id]
+        mine = [g for g in compiled_graphs
+                if g.get("minted_for_release_id") == self.leg.release_id]
         if not self.check("seal.rows", bool(mine),
                           f"{len(mine)} compiled graph(s) minted for the pinned release "
-                          f"{self.leg.release_id} ({len(cells)} row(s) returned)"):
+                          f"{self.leg.release_id} ({len(compiled_graphs)} row(s) returned)"):
             return
         if not observed:
             self.find("seal.sku_matches_rented_card", FAILED,
@@ -688,23 +716,47 @@ class _Run:
                       f"{len(mine)} graph(s) against")
             return
         want = sku_slug(observed)
-        matched = [c for c in mine if c.get("sku") == want]
+        matched = [g for g in mine if g.get("sku") == want]
         self.check("seal.sku_matches_rented_card", bool(matched),
                    f"{len(matched)} graph(s) on sku={want!r} (from pod gpu_class {observed!r}); "
-                   f"the store holds {sorted({str(c.get('sku', '')) for c in mine})} for this "
+                   f"the store holds {sorted({str(g.get('sku', '')) for g in mine})} for this "
                    f"release [note: the pod view exposes no gpu_class provenance, so a "
                    f"provider-reported card and an echoed ask are indistinguishable from here]")
         if not matched:
             return
         # Sealed means an ARTIFACT exists, not merely that a key was computed.
-        sealed = [c for c in matched if str(c.get("artifact_digest", "")).strip()]
-        self.check("seal.artifact_digest", len(sealed) == len(matched),
-                   f"{len(sealed)}/{len(matched)} matched graph(s) carry an artifact digest")
-        quarantined = [c for c in matched if c.get("quarantined_at")]
+        sealed = [g for g in matched if str(g.get("artifact_digest", "")).strip()]
+        self.check("seal.artifact_ref", len(sealed) == len(matched),
+                   f"{len(sealed)}/{len(matched)} matched graph(s) carry an artifact ref")
+        by_key = {str(g.get("compiled_graph_key", "")): g for g in matched}
+        evidence_keys = [str(e.get("compiled_graph_key", "")) for e in evidences]
+        self.check("seal.graph_keys_exact",
+                   bool(evidence_keys) and all(key in by_key for key in evidence_keys),
+                   f"request keys={evidence_keys!r}; inventory keys={sorted(by_key)!r}")
+        self.check(
+            "seal.artifact_refs_exact",
+            bool(evidences) and all(
+                str(by_key.get(str(e.get("compiled_graph_key", "")), {}).get(
+                    "artifact_digest", "")) == str(e.get("artifact_ref", ""))
+                for e in evidences
+            ),
+            "every request artifact ref equals its durable inventory row",
+        )
+        self.check(
+            "seal.worker_versions_exact",
+            bool(evidences) and all(
+                str(by_key.get(str(e.get("compiled_graph_key", "")), {}).get(
+                    "gen_worker_version", "")) == str(e.get("gen_worker_version", ""))
+                for e in evidences
+            ),
+            "every request worker version equals its durable inventory row",
+        )
+        quarantined = [g for g in matched if g.get("quarantined_at")]
         self.check("seal.not_quarantined", not quarantined,
                    f"{len(quarantined)} matched graph(s) quarantined")
         self.check("seal.sm_recorded", bool(str(matched[0].get("sm", "")).strip()),
-                   f"sm={matched[0].get('sm')!r} on {matched[0].get('cell_key')!r}")
+                   f"sm={matched[0].get('sm')!r} on "
+                   f"{matched[0].get('compiled_graph_key')!r}")
         try:
             failures = self.api.admin_activity_events(self.leg.release_id, "failed")
         except ApiError as exc:
@@ -719,6 +771,162 @@ class _Run:
         self.check("seal.no_failed_publish", not named,
                    f"{len(named)} failed worker phase(s) in the leg window"
                    + (": " + "; ".join(named[:5]) if named else ""))
+
+    def _assert_request_evidence(
+            self, record: Mapping[str, Any], index: int) -> Optional[Dict[str, Any]]:
+        ident = f"[{index}]"
+        raw = record.get("compiled_graph_evidence")
+        if not isinstance(raw, dict):
+            self.find(f"evidence.present{ident}", FAILED,
+                      "completed request carries no compiled_graph_evidence object")
+            return None
+        evidence = dict(raw)
+        required = {
+            "status", "outcome", "refusal", "compiled_graph_key", "artifact_ref",
+            "receipt_ref", "gen_worker_version", "torch_compiled_graphs_version",
+            "hashrepo_version", "hashrepo", "compile_child", "serving_pid_before",
+            "serving_pid_after", "serving_compile_count", "compile_count",
+            "child_spawn_count", "bind_fqns", "bind_call_count", "runner_call_count",
+            "decoded_pixel",
+        }
+        self.check(f"evidence.schema{ident}", set(evidence) == required,
+                   f"fields={sorted(evidence)}")
+        self.check(f"evidence.status{ident}", evidence.get("status") == "completed",
+                   f"status={evidence.get('status')!r}")
+        outcome = evidence.get("outcome")
+        self.check(f"evidence.outcome{ident}", outcome in ("published", "reused"),
+                   f"outcome={outcome!r}")
+        self.check(f"evidence.refusal{ident}", evidence.get("refusal") == "",
+                   f"refusal={evidence.get('refusal')!r}")
+        self.check(f"evidence.graph_key{ident}",
+                   bool(str(evidence.get("compiled_graph_key", "")).strip()),
+                   f"compiled_graph_key={evidence.get('compiled_graph_key')!r}")
+        self.check(f"evidence.artifact_ref{ident}",
+                   bool(str(evidence.get("artifact_ref", "")).strip()),
+                   f"artifact_ref={evidence.get('artifact_ref')!r}")
+        self.check(f"evidence.receipt_ref{ident}",
+                   bool(str(evidence.get("receipt_ref", "")).strip()),
+                   f"receipt_ref={evidence.get('receipt_ref')!r}")
+        versions = [
+            str(evidence.get("gen_worker_version", "")).strip(),
+            str(evidence.get("torch_compiled_graphs_version", "")).strip(),
+            str(evidence.get("hashrepo_version", "")).strip(),
+        ]
+        self.check(f"evidence.versions{ident}", all(versions), f"versions={versions!r}")
+
+        before = evidence.get("serving_pid_before")
+        after = evidence.get("serving_pid_after")
+        self.check(f"evidence.serving_pid{ident}",
+                   isinstance(before, int) and not isinstance(before, bool) and before > 0
+                   and before == after,
+                   f"serving_pid_before={before!r} serving_pid_after={after!r}")
+        self.check(f"evidence.no_serving_compile{ident}",
+                   evidence.get("serving_compile_count") == 0,
+                   f"serving_compile_count={evidence.get('serving_compile_count')!r}")
+
+        hashrepo = evidence.get("hashrepo")
+        if not isinstance(hashrepo, dict):
+            hashrepo = {}
+        hashrepo_required = {
+            "manifest_ref", "object_refs", "materialized_root",
+            "local_ref_count_before", "local_object_count_before",
+            "reference_count", "object_count", "materialized_object_count",
+        }
+        self.check(f"evidence.hashrepo_schema{ident}", set(hashrepo) == hashrepo_required,
+                   f"fields={sorted(hashrepo)}")
+        self.check(f"evidence.hashrepo_manifest_ref{ident}",
+                   bool(str(hashrepo.get("manifest_ref", "")).strip()),
+                   f"manifest_ref={hashrepo.get('manifest_ref')!r}")
+        self.check(f"evidence.hashrepo_materialized_root{ident}",
+                   bool(str(hashrepo.get("materialized_root", "")).strip()),
+                   f"materialized_root={hashrepo.get('materialized_root')!r}")
+        self.check(f"evidence.empty_cache{ident}",
+                   hashrepo.get("local_ref_count_before") == 0
+                   and hashrepo.get("local_object_count_before") == 0,
+                   "local ref/object counts before resolve are "
+                   f"{hashrepo.get('local_ref_count_before')!r}/"
+                   f"{hashrepo.get('local_object_count_before')!r}")
+        object_refs = hashrepo.get("object_refs")
+        refs = object_refs if isinstance(object_refs, list) else []
+        refs_valid = bool(refs) and all(isinstance(ref, str) and ref.strip() for ref in refs)
+        self.check(f"evidence.hashrepo_refs{ident}",
+                   refs_valid and hashrepo.get("reference_count") == len(refs),
+                   f"reference_count={hashrepo.get('reference_count')!r} refs={refs!r}")
+        unique_objects = len(set(refs))
+        self.check(f"evidence.hashrepo_objects{ident}",
+                   refs_valid and hashrepo.get("object_count") == unique_objects
+                   and hashrepo.get("materialized_object_count") == unique_objects,
+                   f"object_count={hashrepo.get('object_count')!r} "
+                   f"materialized={hashrepo.get('materialized_object_count')!r} "
+                   f"unique_refs={unique_objects}")
+
+        bind_fqns = evidence.get("bind_fqns")
+        fqns = bind_fqns if isinstance(bind_fqns, list) else []
+        self.check(f"evidence.bind_fqns{ident}",
+                   bool(fqns) and fqns == sorted(set(fqns))
+                   and all(isinstance(fqn, str) and fqn for fqn in fqns),
+                   f"bind_fqns={fqns!r}")
+        self.check(f"evidence.bind_calls{ident}", evidence.get("bind_call_count") == 1,
+                   f"bind_call_count={evidence.get('bind_call_count')!r}")
+        self.check(f"evidence.runner_calls{ident}", evidence.get("runner_call_count") == 1,
+                   f"runner_call_count={evidence.get('runner_call_count')!r}")
+
+        pixel = evidence.get("decoded_pixel")
+        if not isinstance(pixel, dict):
+            pixel = {}
+        mode, width, height = pixel.get("mode"), pixel.get("width"), pixel.get("height")
+        self.check(f"evidence.pixel_shape{ident}",
+                   set(pixel) == {"mode", "width", "height", "sha256"}
+                   and isinstance(mode, str) and bool(mode)
+                   and isinstance(width, int) and width > 0
+                   and isinstance(height, int) and height > 0,
+                   f"decoded_pixel={pixel!r}")
+        source = record.get("decoded_pixel_raw_base64")
+        try:
+            decoded = base64.b64decode(str(source), validate=True)
+            if not isinstance(width, int) or not isinstance(height, int):
+                raise TypeError("decoded pixel dimensions are not integers")
+            expected_digest = decoded_pixel_digest(str(mode), width, height, decoded)
+        except (ValueError, TypeError):
+            expected_digest = ""
+        self.check(f"evidence.pixel_digest{ident}",
+                   bool(expected_digest) and pixel.get("sha256") == expected_digest,
+                   f"reported={pixel.get('sha256')!r} recomputed={expected_digest!r}")
+        if isinstance(record, dict):
+            record.pop("decoded_pixel_raw_base64", None)
+
+        if outcome == "reused":
+            self.check(f"evidence.reuse_compile_count{ident}", evidence.get("compile_count") == 0,
+                       f"compile_count={evidence.get('compile_count')!r}")
+            self.check(f"evidence.reuse_spawn_count{ident}",
+                       evidence.get("child_spawn_count") == 0,
+                       f"child_spawn_count={evidence.get('child_spawn_count')!r}")
+            self.check(f"evidence.reuse_no_child{ident}", evidence.get("compile_child") is None,
+                       f"compile_child={evidence.get('compile_child')!r}")
+        elif outcome == "published":
+            self.check(f"evidence.publisher_compile_count{ident}",
+                       evidence.get("compile_count") == 1,
+                       f"compile_count={evidence.get('compile_count')!r}")
+            self.check(f"evidence.publisher_spawn_count{ident}",
+                       evidence.get("child_spawn_count") == 1,
+                       f"child_spawn_count={evidence.get('child_spawn_count')!r}")
+            child = evidence.get("compile_child")
+            if not isinstance(child, dict):
+                child = {}
+            start, finish = child.get("start"), child.get("finish")
+            self.check(
+                f"evidence.compile_child{ident}",
+                set(child) == {"pid", "ppid", "role", "start", "finish"}
+                and isinstance(child.get("pid"), int) and child["pid"] > 0
+                and child.get("pid") != before
+                and isinstance(child.get("ppid"), int) and child["ppid"] > 0
+                and child.get("role") == "compile_child"
+                and isinstance(start, (int, float)) and not isinstance(start, bool)
+                and isinstance(finish, (int, float)) and not isinstance(finish, bool)
+                and finish >= start,
+                f"compile_child={child!r} serving_pid={before!r}",
+            )
+        return evidence
 
     def _assert_settlement(self, usage: Mapping[str, Any]) -> None:
         settlement = dict(usage.get("settlement", {}))
@@ -869,7 +1077,7 @@ class ContractModel:
         #: Keeping it faithful is what makes sku_slug load-bearing in the tests
         #: instead of an identity function over an already-slugged value.
         self.pod_gpu_class = pod_gpu_class
-        self.cells: List[Dict[str, Any]] = []
+        self.compiled_graphs: List[Dict[str, Any]] = []
         self.events: List[Dict[str, Any]] = []
         self.now = 0
         self.rows: Dict[str, Dict[str, Any]] = {}
@@ -1031,11 +1239,15 @@ class ContractModel:
         self.now += self.advance
         record["_reads"] += 1
         if record["_reads"] >= 2 and record["status"] != "completed":
-            self._mint_graph(record["_deployment_id"])
+            self._mint_graph(record["_deployment_id"], record)
         record["status"] = "completed" if record["_reads"] >= 2 else "running"
-        return {"id": record["id"], "status": record["status"]}
+        return {key: value for key, value in record.items() if not key.startswith("_")}
 
-    def _mint_graph(self, deployment_id: str) -> None:
+    @staticmethod
+    def _digest(seed: str) -> str:
+        return "sha256:" + hashlib.sha256(seed.encode()).hexdigest()
+
+    def _mint_graph(self, deployment_id: str, request: Dict[str, Any]) -> None:
         """What a worker leaves behind when it seals and publishes a graph."""
         row = self.rows[deployment_id]
         pod = row["_pods"][0] if row["_pods"] else {}
@@ -1045,13 +1257,86 @@ class ContractModel:
         release = row["release_id"]
         if self.break_invariant == "seal_wrong_release":
             release = "a-release-this-rental-did-not-pin"
-        digest = "" if self.break_invariant == "seal_no_artifact" else "blake3:" + self._id()[:16]
-        self.cells.append({
-            "cell_key": "cg-key-v1:" + self._id()[:12], "family": "sdxl",
-            "lane": row["execution_lane"], "sm": "sm86", "sku": sku,
-            "artifact_digest": digest, "minted_for_release_id": release,
-            "minted_by_pod_id": pod.get("pod_id", ""), "publisher_tier": "platform",
-        })
+        existing = next(
+            (graph for graph in self.compiled_graphs
+             if graph.get("minted_for_release_id") == release),
+            None,
+        )
+        outcome = "reused" if existing is not None else "published"
+        if existing is None:
+            token = self._id()
+            graph_key = "cg-key-v1-" + hashlib.sha224(token.encode()).hexdigest()
+            artifact_ref = self._digest("artifact:" + token)
+            if self.break_invariant == "seal_no_artifact":
+                artifact_ref = ""
+            existing = {
+                "compiled_graph_key": graph_key,
+                "family": "sdxl",
+                "lane": row["execution_lane"],
+                "sm": "sm86",
+                "sku": sku,
+                "artifact_digest": artifact_ref,
+                "gen_worker_version": "0.116.0",
+                "minted_for_release_id": release,
+                "minted_by_pod_id": pod.get("pod_id", ""),
+                "publisher_tier": "platform",
+            }
+            self.compiled_graphs.append(existing)
+        graph_key = str(existing["compiled_graph_key"])
+        artifact_ref = str(existing["artifact_digest"])
+        receipt_ref = self._digest("receipt:" + graph_key)
+        object_refs = [self._digest("manifest:" + graph_key), artifact_ref]
+        raw_pixels = bytes((0, 17, 34, 51, 68, 85))
+        pixel = {
+            "mode": "RGB",
+            "width": 2,
+            "height": 1,
+            "sha256": decoded_pixel_digest("RGB", 2, 1, raw_pixels),
+        }
+        serving_pid = 4242
+        compile_child: Optional[Dict[str, Any]] = None
+        if outcome == "published":
+            compile_child = {
+                "pid": 5252,
+                "ppid": serving_pid,
+                "role": "compile_child",
+                "start": 1000.0,
+                "finish": 1001.0,
+            }
+        evidence: Dict[str, Any] = {
+            "status": "completed",
+            "outcome": outcome,
+            "refusal": "",
+            "compiled_graph_key": graph_key,
+            "artifact_ref": artifact_ref,
+            "receipt_ref": receipt_ref,
+            "gen_worker_version": "0.116.0",
+            "torch_compiled_graphs_version": "0.3.0",
+            "hashrepo_version": "0.3.1",
+            "hashrepo": {
+                "manifest_ref": self._digest("hashrepo:" + graph_key),
+                "object_refs": object_refs,
+                "materialized_root": f"/var/lib/gen-worker/compiled-graphs/{graph_key}",
+                "local_ref_count_before": 0,
+                "local_object_count_before": 0,
+                "reference_count": len(object_refs),
+                "object_count": len(set(object_refs)),
+                "materialized_object_count": len(set(object_refs)),
+            },
+            "compile_child": compile_child,
+            "serving_pid_before": serving_pid,
+            "serving_pid_after": serving_pid,
+            "serving_compile_count": 0,
+            "compile_count": 1 if outcome == "published" else 0,
+            "child_spawn_count": 1 if outcome == "published" else 0,
+            "bind_fqns": ["transformer.bias", "transformer.weight"],
+            "bind_call_count": 1,
+            "runner_call_count": 1,
+            "decoded_pixel": pixel,
+        }
+        self._break_evidence(evidence, outcome)
+        request["compiled_graph_evidence"] = evidence
+        request["decoded_pixel_raw_base64"] = base64.b64encode(raw_pixels).decode("ascii")
         self.events.append({"kind": "aot_mint_phases", "phase": "minted", "state": "completed",
                             "release_id": row["release_id"], "pod_id": pod.get("pod_id", "")})
         if self.break_invariant == "seal_failed_publish":
@@ -1060,10 +1345,67 @@ class ContractModel:
                                 "error": "artifact pack refused: short write",
                                 "pod_id": pod.get("pod_id", "")})
 
-    def admin_cells(self, release: str) -> List[Dict[str, Any]]:
+    def _break_evidence(self, evidence: Dict[str, Any], outcome: str) -> None:
+        broken = self.break_invariant
+        if broken == "evidence_status":
+            evidence["status"] = "running"
+        elif broken == "evidence_outcome":
+            evidence["outcome"] = "unknown"
+        elif broken == "evidence_refusal":
+            evidence["refusal"] = "compile_refused"
+        elif broken == "evidence_graph_key":
+            evidence["compiled_graph_key"] = ""
+        elif broken == "evidence_artifact_ref":
+            evidence["artifact_ref"] = ""
+        elif broken == "evidence_receipt_ref":
+            evidence["receipt_ref"] = ""
+        elif broken == "evidence_versions":
+            evidence["torch_compiled_graphs_version"] = ""
+        elif broken == "evidence_serving_pid":
+            evidence["serving_pid_after"] = 4343
+        elif broken == "evidence_serving_compile":
+            evidence["serving_compile_count"] = 1
+        elif broken == "evidence_manifest_ref":
+            evidence["hashrepo"]["manifest_ref"] = ""
+        elif broken == "evidence_materialized_root":
+            evidence["hashrepo"]["materialized_root"] = ""
+        elif broken == "evidence_nonempty_cache":
+            evidence["hashrepo"]["local_object_count_before"] = 1
+        elif broken == "evidence_ref_count":
+            evidence["hashrepo"]["reference_count"] += 1
+        elif broken == "evidence_object_count":
+            evidence["hashrepo"]["materialized_object_count"] += 1
+        elif broken == "evidence_bind_fqns":
+            evidence["bind_fqns"] = ["transformer.weight", "transformer.bias"]
+        elif broken == "evidence_bind_calls":
+            evidence["bind_call_count"] = 0
+        elif broken == "evidence_runner_calls":
+            evidence["runner_call_count"] = 0
+        elif broken == "evidence_pixel_shape":
+            evidence["decoded_pixel"]["width"] = 0
+        elif broken == "evidence_pixel_digest":
+            evidence["decoded_pixel"]["sha256"] = "sha256:" + "0" * 64
+        elif broken == "evidence_publish_compile" and outcome == "published":
+            evidence["compile_count"] = 0
+        elif broken == "evidence_publish_spawn" and outcome == "published":
+            evidence["child_spawn_count"] = 0
+        elif broken == "evidence_compile_child" and outcome == "published":
+            evidence["compile_child"]["role"] = "serving"
+        elif broken == "evidence_reuse_compile" and outcome == "reused":
+            evidence["compile_count"] = 1
+        elif broken == "evidence_reuse_spawn" and outcome == "reused":
+            evidence["child_spawn_count"] = 1
+        elif broken == "evidence_reuse_child" and outcome == "reused":
+            evidence["compile_child"] = {
+                "pid": 5252, "ppid": 4242, "role": "compile_child",
+                "start": 1000.0, "finish": 1001.0,
+            }
+
+    def admin_compiled_graphs(self, release: str) -> List[Dict[str, Any]]:
         if not self.seal_evidence:
-            raise ApiError("GET", "/v1/admin/cells", 404, "", "404 page not found")
-        return [c for c in self.cells if not release or c["minted_for_release_id"] == release]
+            raise ApiError("GET", "/v1/admin/compiled-graphs", 404, "", "404 page not found")
+        return [graph for graph in self.compiled_graphs
+                if not release or graph["minted_for_release_id"] == release]
 
     def admin_activity_events(self, release: str, state: str) -> List[Dict[str, Any]]:
         if not self.seal_evidence:
