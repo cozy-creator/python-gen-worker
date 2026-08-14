@@ -581,7 +581,7 @@ def _diffusers_source(tmp_path: Path) -> "object":
     (src / "model_index.json").write_text(json.dumps({"_class_name": "StableDiffusionXLPipeline"}))
     return IngestedSource(
         provider="huggingface", source_ref="acme/gonzalomo-xl", source_revision="sha1",
-        dir=src, layout="diffusers", model_family="sdxl", model_family_variant="",
+        dir=src, layout="multi-file", model_family="sdxl", model_family_variant="",
         attrs={"dtype": "fp16"},
     )
 
@@ -590,7 +590,7 @@ def test_distilled_fact_writes_trailing_timestep_spacing(tmp_path: Path) -> None
     from gen_worker.convert.clone import OutputSpec, build_flavor_tree
 
     source = _diffusers_source(tmp_path)
-    spec = OutputSpec(dtype="fp16", file_layout="diffusers", file_type="safetensors")
+    spec = OutputSpec(dtype="fp16", file_layout="multi-file", file_type="safetensors")
     tree, _attrs = build_flavor_tree(
         source, spec, tmp_path / "flavor-distilled", distilled=True)
 
@@ -603,7 +603,7 @@ def test_v_prediction_objective_writes_zero_snr_v_pred(tmp_path: Path) -> None:
     from gen_worker.convert.clone import OutputSpec, build_flavor_tree
 
     source = _diffusers_source(tmp_path)
-    spec = OutputSpec(dtype="fp16", file_layout="diffusers", file_type="safetensors")
+    spec = OutputSpec(dtype="fp16", file_layout="multi-file", file_type="safetensors")
     tree, _attrs = build_flavor_tree(
         source, spec, tmp_path / "flavor-vpred", objective="v_prediction")
 
@@ -616,7 +616,7 @@ def test_epsilon_unstamped_leaves_scheduler_config_untouched(tmp_path: Path) -> 
     from gen_worker.convert.clone import OutputSpec, build_flavor_tree
 
     source = _diffusers_source(tmp_path)
-    spec = OutputSpec(dtype="fp16", file_layout="diffusers", file_type="safetensors")
+    spec = OutputSpec(dtype="fp16", file_layout="multi-file", file_type="safetensors")
     tree, _attrs = build_flavor_tree(source, spec, tmp_path / "flavor-plain")
 
     cfg = json.loads((tree / "scheduler" / "config.json").read_text())

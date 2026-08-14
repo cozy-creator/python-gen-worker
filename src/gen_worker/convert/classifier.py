@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Mapping, Optional, Sequence
 
 from gen_worker.api.errors import ValidationError
+from .file_layout import MULTI_FILE, SINGLE_FILE
 
 _PICKLE_EXTS = {".bin", ".pt", ".pth", ".ckpt", ".pickle", ".pkl"}
 _JUNK_EXTS = {
@@ -418,7 +419,7 @@ def classify_repo(
         dtypes = sorted(set(resolved.values()))
         return _finish("diffusers", "diffusers", d_weights, d_indexes,
                        {"dtype": dtypes[0] if len(dtypes) == 1 else "",
-                        "file_layout": "diffusers"},
+                        "file_layout": MULTI_FILE},
                        "model_index.json at root")
 
     # 3.5 standalone diffusers component. Diffusers ModelMixin repos use a
@@ -432,7 +433,7 @@ def classify_repo(
     )
     if diffusers_class and component_weights:
         component_attrs = {
-            "file_layout": "singlefile",
+            "file_layout": SINGLE_FILE,
             "architecture": diffusers_class,
         }
         if component_dtype:
@@ -463,7 +464,7 @@ def classify_repo(
             # A component directory tree, not a root single file: the layout
             # label matches what detect_huggingface_source_layout reads off
             # the same tree, so passthrough and cast publishes agree.
-            sub_attrs = {"file_layout": "diffusers", "architecture": sub_class}
+            sub_attrs = {"file_layout": MULTI_FILE, "architecture": sub_class}
             if sub_dtype:
                 sub_attrs["dtype"] = sub_dtype
             return _finish(
@@ -483,14 +484,14 @@ def classify_repo(
     if "pipeline.json" in root_set and has_st:
         pt_weights = sorted(p for p in paths if p.lower().endswith(".safetensors"))
         return _finish("pipeline_tree", "trellis2", pt_weights, [],
-                       {"file_layout": "singlefile"}, "pipeline.json at root")
+                       {"file_layout": SINGLE_FILE}, "pipeline.json at root")
 
     # 5. transformers
     if config_json is not None and "config.json" in root_set and (has_st or has_st_index):
         t_indexes = [p for p in root if _is_safetensors_index(p)]
         t_weights, t_dtype = _pick_weight_set(
             [p for p in root if p.lower().endswith(".safetensors")], dtype_pref)
-        attrs: dict[str, str] = {"file_layout": "singlefile"}
+        attrs: dict[str, str] = {"file_layout": SINGLE_FILE}
         if t_dtype:
             attrs["dtype"] = t_dtype
         arch = config_json.get("architectures")
@@ -525,7 +526,7 @@ def classify_repo(
             gguf_pick = gguf_pick or sorted(gguf_files)[0]
         return _finish("gguf", "llama-cpp", [gguf_pick], [],
                        {"dtype": f"gguf:{_quant_of(gguf_pick) or 'unknown'}",
-                        "file_type": "gguf", "file_layout": "singlefile"},
+                        "file_type": "gguf", "file_layout": SINGLE_FILE},
                        f"{len(gguf_files)} *.gguf at root")
 
     # 7/8. root safetensors: native LoRA vs AIO singlefile
@@ -541,7 +542,7 @@ def classify_repo(
             is_lora = all(int(sizes.get(p, 0)) < gb for p in st_root) and bool(
                 all(sizes.get(p) is not None for p in st_root))
         if is_lora:
-            attrs = {"file_layout": "singlefile"}
+            attrs = {"file_layout": SINGLE_FILE}
             for k in ("ss_base_model_version", "ss_sd_model_name", "ss_network_module"):
                 if md.get(k):
                     attrs[f"kohya_{k}"] = str(md[k])
@@ -549,12 +550,12 @@ def classify_repo(
                            "root safetensors + LoRA signature")
         if len(st_root) == 1:
             return _finish("aio_singlefile", "diffusers-single-file", st_root, [],
-                           {"file_layout": "singlefile"},
+                           {"file_layout": SINGLE_FILE},
                            "single safetensors at root, no structured signals")
         # Multiple untyped root safetensors: pick by dtype preference.
         weights, dtype = _pick_weight_set(st_root, dtype_pref)
         return _finish("aio_singlefile", "diffusers-single-file", weights, [],
-                       {"file_layout": "singlefile", "dtype": dtype},
+                       {"file_layout": SINGLE_FILE, "dtype": dtype},
                        "root safetensors, dtype-variant pick")
 
     # Refusals — say what IS there.

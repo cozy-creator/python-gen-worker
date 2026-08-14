@@ -65,7 +65,7 @@ def _produce(tmp_path: Path, name: str, **kw) -> dict:
     out = tmp_path / name
     streaming_w8a8_snapshot(
         _h3_shaped_denoiser(tmp_path / name / "in"), out,
-        file_layout="diffusers", components=("transformer",), **kw)
+        file_layout="multi-file", components=("transformer",), **kw)
     return _header(out / "transformer" / "diffusion_pytorch_model.safetensors")
 
 

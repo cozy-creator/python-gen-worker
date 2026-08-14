@@ -47,10 +47,10 @@ def _source(dest_dir: Path) -> IngestedSource:
     (dest_dir / "model.safetensors").write_bytes(b"\x00" * 64)
     return IngestedSource(
         provider="huggingface", source_ref="Wan-AI/Wan2.2-T2V-A14B-Diffusers",
-        source_revision="5be7df96", dir=dest_dir, layout="singlefile",
+        source_revision="5be7df96", dir=dest_dir, layout="single-file",
         model_family="wan", model_family_variant="wan22",
         classification=SimpleNamespace(strategy="transformers"),
-        attrs={"dtype": "fp32", "file_layout": "singlefile"},
+        attrs={"dtype": "fp32", "file_layout": "single-file"},
         metadata={"source_provider": "huggingface"},
         repo_spec={"kind": "model", "library_name": "transformers"},
     )
@@ -68,7 +68,7 @@ def _run(fake_hub: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
         source_ref="Wan-AI/Wan2.2-T2V-A14B-Diffusers",
         destination_repo="tensorhub/wan22-t2v-a14b",
         destination_repo_tags=["prod"],
-        outputs=[{"dtype": "fp32", "file_layout": "diffusers",
+        outputs=[{"dtype": "fp32", "file_layout": "multi-file",
                   "file_type": "safetensors"}],
         **kw,
     )

@@ -106,7 +106,7 @@ def test_ingest_leaves_a_root_component_repo_alone(
     assert source.classification.component_subfolder == ""
     assert source.repo_spec["library_name"] == "diffusers"
     assert source.repo_spec["class_name"] == "AutoencoderKL"
-    assert source.attrs["file_layout"] == "singlefile"
+    assert source.attrs["file_layout"] == "single-file"
     assert "component_subfolder" not in source.metadata
     assert sorted(p.name for p in source.dir.rglob("*") if p.is_file()) == [
         "config.json", "diffusion_pytorch_model.safetensors"]

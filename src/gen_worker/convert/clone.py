@@ -81,8 +81,9 @@ _KNOWN_DTYPES = {
     "q4_0", "q4_1", "q3_k_m", "q3_k_s", "q2_k",
 }
 from ..component_vocab import quant_candidate_components
+from .file_layout import KNOWN_FILE_LAYOUTS, MULTI_FILE, SINGLE_FILE
 
-_KNOWN_FILE_LAYOUTS = {"diffusers", "singlefile"}
+_KNOWN_FILE_LAYOUTS = set(KNOWN_FILE_LAYOUTS)
 _KNOWN_FILE_TYPES = {"safetensors", "gguf"}
 
 _default_quant_components = quant_candidate_components
@@ -164,7 +165,7 @@ def normalize_tags(values: Iterable[str] | None) -> list[str]:
     return sorted(out)
 
 
-def normalize_outputs(values: Iterable[Any] | None, *, layout_hint: str = "diffusers") -> list[OutputSpec]:
+def normalize_outputs(values: Iterable[Any] | None, *, layout_hint: str = MULTI_FILE) -> list[OutputSpec]:
     out: list[OutputSpec] = []
     seen: set[tuple[str, str, str]] = set()
     for item in values or []:
@@ -189,7 +190,7 @@ def normalize_outputs(values: Iterable[Any] | None, *, layout_hint: str = "diffu
             seen.add(key)
             out.append(OutputSpec(dtype=dtype, file_layout=layout, file_type=ftype))
     if not out:
-        layout = layout_hint if layout_hint in _KNOWN_FILE_LAYOUTS else "diffusers"
+        layout = layout_hint if layout_hint in _KNOWN_FILE_LAYOUTS else MULTI_FILE
         out.append(OutputSpec(dtype="bf16", file_layout=layout, file_type="safetensors"))
     return out
 
@@ -228,7 +229,7 @@ def build_flavor_tree(
                              "file_type": spec.file_type}
 
     source_dir = Path(source.dir)
-    source_layout = source.layout if source.layout in _KNOWN_FILE_LAYOUTS else "singlefile"
+    source_layout = source.layout if source.layout in _KNOWN_FILE_LAYOUTS else SINGLE_FILE
     source_dtype = str(source.attrs.get("dtype") or "").strip().lower()
 
     # dtype="source": pure mirror — publish the source weights untouched and
@@ -277,7 +278,7 @@ def build_flavor_tree(
         # of failing deep inside the converter.
         declared = repackage_family(family)
         if declared is None or not (
-            declared.supports_singlefile_to_diffusers if source_layout == "singlefile"
+            declared.supports_singlefile_to_diffusers if source_layout == SINGLE_FILE
             else declared.supports_diffusers_to_singlefile
         ):
             raise ValueError(
@@ -286,8 +287,8 @@ def build_flavor_tree(
 
         repack_dir = out_dir.parent / f"{out_dir.name}.__repack__"
         repack_dir.mkdir(parents=True, exist_ok=True)
-        if source_layout == "singlefile":
-            groups = snapshot_weight_groups(source_dir, "singlefile")
+        if source_layout == SINGLE_FILE:
+            groups = snapshot_weight_groups(source_dir, SINGLE_FILE)
             if not groups:
                 raise ValueError("no safetensors entry for repackage")
             singlefile_to_diffusers(
@@ -313,7 +314,7 @@ def build_flavor_tree(
     groups = snapshot_weight_groups(work_root, work_layout)
     is_fp8 = spec.dtype == "fp8"
     fp8_block_scope = False
-    if is_fp8 and work_layout != "diffusers":
+    if is_fp8 and work_layout != MULTI_FILE:
         # One root weight set = a transformers backbone (the whole checkpoint
         # IS the denoiser, e.g. HiDream-O1's UiT): block-scoped fp8 cast.
         # Multi-set singlefile bundles still refuse — component identity is
@@ -493,7 +494,7 @@ def _preflight_disk(workdir: Path, plan: Any, specs: list[OutputSpec]) -> None:
                                         for path, _ in files)
                 else "safetensors"
             )
-            attrs = {"file_layout": "singlefile", "file_type": source_type}
+            attrs = {"file_layout": SINGLE_FILE, "file_type": source_type}
             if source_type == "gguf":
                 strategy = "gguf"
         # run_clone routes a strategy="aio_singlefile" source whose family
@@ -729,7 +730,7 @@ def run_clone(
     provider = str(provider or "").strip().lower()
     destination = normalize_destination_ref(destination_repo)
     tags = normalize_tags(destination_repo_tags)
-    layout_hint = str(target_layout or "diffusers").strip().lower() or "diffusers"
+    layout_hint = str(target_layout or MULTI_FILE).strip().lower() or MULTI_FILE
     specs = normalize_outputs(outputs, layout_hint=layout_hint)
     include = normalize_source_include(source_include)
     objective_fact = str(objective or "").strip().lower()
@@ -898,7 +899,7 @@ def run_clone(
                         # changes.
                         effective_layout = (
                             source.layout if source.layout in _KNOWN_FILE_LAYOUTS
-                            else "singlefile"
+                            else SINGLE_FILE
                         )
                         cast_spec = OutputSpec(
                             dtype=spec.dtype, file_layout=effective_layout,

@@ -28,6 +28,7 @@ from ..models.ladder import (
 from .dtype_pins import verify_produced_tree
 from .produced import ProducedFlavor
 from .writer import assert_one_file_per_component
+from .file_layout import validate_file_layout
 
 _PLACEMENT_ATTR_KEYS = ("placement_sm_allowed", "placement_sm_min", "placement_engines")
 
@@ -246,7 +247,7 @@ def publish_flavors(
             # header before recording it.
             artifact_contract=attrs.get("artifact_contract", ""),
             dtype=attrs.get("dtype", ""),
-            file_layout=attrs.get("file_layout", ""),
+            file_layout=validate_file_layout(attrs.get("file_layout", "")),
             file_type=attrs.get("file_type", ""),
             objective=str(objective or ""),
             distilled=distilled,

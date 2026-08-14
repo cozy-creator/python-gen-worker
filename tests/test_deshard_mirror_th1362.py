@@ -192,7 +192,7 @@ def test_sharded_reads_still_work_after_the_ruling(tmp_path):
 # The real mirror path
 # --------------------------------------------------------------------------
 
-def _source(tmp_path: Path, layout: str = "diffusers") -> IngestedSource:
+def _source(tmp_path: Path, layout: str = "multi-file") -> IngestedSource:
     return IngestedSource(
         provider="huggingface", source_ref="acme/thing", source_revision="deadbeef",
         dir=tmp_path, layout=layout, model_family="sdxl", model_family_variant="sdxl",
@@ -211,7 +211,7 @@ def test_pure_passthrough_mirror_is_desharded(tmp_path):
 
     out = tmp_path / "out"
     tree, attrs = build_flavor_tree(
-        _source(src), OutputSpec(dtype="source", file_layout="diffusers",
+        _source(src), OutputSpec(dtype="source", file_layout="multi-file",
                                  file_type="safetensors"), out)
 
     assert attrs["dtype"] == "bf16"
@@ -236,7 +236,7 @@ def test_dtype_matching_mirror_is_desharded(tmp_path):
 
     out = tmp_path / "out"
     tree, _ = build_flavor_tree(
-        _source(src), OutputSpec(dtype="bf16", file_layout="diffusers",
+        _source(src), OutputSpec(dtype="bf16", file_layout="multi-file",
                                  file_type="safetensors"), out)
     weights = sorted(p.name for p in (tree / "transformer").glob("*.safetensors"))
     assert weights == ["diffusion_pytorch_model.safetensors"]

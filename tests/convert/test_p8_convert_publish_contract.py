@@ -49,9 +49,9 @@ def _transformers_source(dest_dir: Path, *, dtype: str = "fp32") -> IngestedSour
     (dest_dir / "model.safetensors").write_bytes(b"\x00" * 64)
     return IngestedSource(
         provider="huggingface", source_ref="org/hidream-like", source_revision="sha-1",
-        dir=dest_dir, layout="singlefile", model_family="hidream", model_family_variant="",
+        dir=dest_dir, layout="single-file", model_family="hidream", model_family_variant="",
         classification=SimpleNamespace(strategy="transformers"),
-        attrs={"dtype": dtype, "file_layout": "singlefile"},
+        attrs={"dtype": dtype, "file_layout": "single-file"},
         metadata={"source_provider": "huggingface"},
         repo_spec={"kind": "model", "library_name": "transformers"},
     )
@@ -94,7 +94,7 @@ def test_explicit_dtype_mismatch_casts_not_silent_passthrough(
     result = run_clone(
         _Ctx(fake_hub), provider="huggingface", source_ref="org/hidream-like",
         destination_repo="acme/dest",
-        outputs=[{"dtype": "bf16", "file_layout": "diffusers", "file_type": "safetensors"}],
+        outputs=[{"dtype": "bf16", "file_layout": "multi-file", "file_type": "safetensors"}],
     )
 
     assert not result.failed_flavors, result.failed_flavors
@@ -115,7 +115,7 @@ def test_matching_dtype_is_genuinely_zero_work(
     result = run_clone(
         _Ctx(fake_hub), provider="huggingface", source_ref="org/hidream-like",
         destination_repo="acme/dest",
-        outputs=[{"dtype": "fp32", "file_layout": "diffusers", "file_type": "safetensors"}],
+        outputs=[{"dtype": "fp32", "file_layout": "multi-file", "file_type": "safetensors"}],
     )
     assert not result.failed_flavors
     assert result.published[0]["dtype"] == "fp32"
@@ -135,9 +135,9 @@ def test_non_cast_eligible_strategy_refuses_mismatch_loudly(
     (dest / "model.q4_k_m.gguf").write_bytes(b"\x00" * 32)
     source = IngestedSource(
         provider="huggingface", source_ref="org/gguf-src", source_revision="sha-1",
-        dir=dest, layout="singlefile", model_family="", model_family_variant="",
+        dir=dest, layout="single-file", model_family="", model_family_variant="",
         classification=SimpleNamespace(strategy="gguf"),
-        attrs={"dtype": "q4_k_m", "file_layout": "singlefile"}, metadata={}, repo_spec={},
+        attrs={"dtype": "q4_k_m", "file_layout": "single-file"}, metadata={}, repo_spec={},
     )
     _install_fake_ingest(monkeypatch, source)
     calls: list = []
@@ -147,7 +147,7 @@ def test_non_cast_eligible_strategy_refuses_mismatch_loudly(
         run_clone(
             _Ctx(fake_hub), provider="huggingface", source_ref="org/gguf-src",
             destination_repo="acme/dest",
-            outputs=[{"dtype": "bf16", "file_layout": "singlefile", "file_type": "gguf"}],
+            outputs=[{"dtype": "bf16", "file_layout": "single-file", "file_type": "gguf"}],
         )
     assert calls == [], "a refused dtype mismatch must never reach the cast path"
 
