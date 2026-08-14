@@ -28,6 +28,8 @@ fragile-and-not-shared, and both.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from gen_worker.models import memory as mem
@@ -60,6 +62,10 @@ class _VAE(_Mod):
 
 
 class _Pipe:
+    # diffusers sets this on the pipeline; declared so the exclusion assertions
+    # below type-check as the real attribute rather than as a dynamic one.
+    _exclude_from_cpu_offload: list[str]
+
     def __init__(self, *, fragile_vae: bool) -> None:
         self.text_encoder = _Mod("text_encoder")
         self.transformer = _Mod("transformer")
@@ -171,14 +177,16 @@ def test_an_existing_exclusion_list_is_extended_not_replaced() -> None:
 class _GroupPipe(_Pipe):
     def __init__(self, *, fragile_vae: bool) -> None:
         super().__init__(fragile_vae=fragile_vae)
-        self.group_kwargs: dict = {}
+        self.group_kwargs: dict[str, Any] = {}
 
-    def enable_group_offload(self, **kwargs) -> None:
+    def enable_group_offload(self, **kwargs: Any) -> None:
         self.group_kwargs = kwargs
 
 
 @pytest.mark.parametrize("fragile", [False, True])
-def test_group_rung_excludes_and_then_onloads(monkeypatch, fragile: bool) -> None:
+def test_group_rung_excludes_and_then_onloads(
+    monkeypatch: pytest.MonkeyPatch, fragile: bool,
+) -> None:
     pipe = _GroupPipe(fragile_vae=fragile)
     mem.mark_shared_components({"text_encoder": pipe.text_encoder})
     _force_cuda(monkeypatch)
@@ -187,7 +195,7 @@ def test_group_rung_excludes_and_then_onloads(monkeypatch, fragile: bool) -> Non
     ok = mem._apply_group_offload(pipe, applied, offload_to_disk_path=None)
 
     assert ok is True
-    excluded = pipe.group_kwargs.get("exclude_modules")
+    excluded: list[str] = list(pipe.group_kwargs.get("exclude_modules") or [])
     assert "text_encoder" in excluded, "the group rung must exclude shared modules too"
     assert applied.get("shared_resident") is True
     # Excluding a module from the group hooks does NOT place it — the caller
@@ -199,7 +207,9 @@ def test_group_rung_excludes_and_then_onloads(monkeypatch, fragile: bool) -> Non
         assert "vae" in excluded and pipe.vae.moved_to == ["cuda"]
 
 
-def test_group_rung_untouched_when_nothing_is_shared_or_fragile(monkeypatch) -> None:
+def test_group_rung_untouched_when_nothing_is_shared_or_fragile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The gw#441 baseline: no exclusions means no `exclude_modules` kwarg at
     all, so this change cannot alter placement for a pipeline it does not
     concern."""
@@ -226,7 +236,7 @@ class _FakeTorch:
         return name
 
 
-def _force_cuda(monkeypatch) -> None:
+def _force_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make the group rung believe it has a card, WITHOUT torch and WITHOUT a GPU.
 
     `pytest.importorskip("torch")` — this repo's usual idiom — would SKIP these

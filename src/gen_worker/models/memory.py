@@ -1363,14 +1363,24 @@ def place_pipeline(
             if fit_needed_gb > 0.0:
                 applied["fit_needed_gb"] = fit_needed_gb
                 applied["fit_available_gb"] = fit_available_gb
-            # ie#721 x pgw#1255: PUBLISH the components this placement forced to
-            # stay resident. Excluding them RAISES the resident floor, which is
-            # exactly the quantity an adoption headroom check must measure — so
-            # it consumes this rather than re-deriving it. Two independent
-            # derivations of one number is how they silently disagree later:
-            # one authority, one direction.
+            # DIAGNOSTIC ONLY — deliberately NOT an input to any budget check.
+            # Which components this placement forced to stay resident, so an
+            # operator asking "why is this pod's footprint higher than the rung
+            # implies" can read the answer instead of investigating it. It sits
+            # with `oom_demotions` / `fit_needed_gb` as reporting, not contract.
             #
-            # Always present, `[]` included, so a consumer can tell "nothing was
+            # It was briefly designed as a published input for the adoption
+            # headroom check (pgw#1255). That seam is RETIRED and must not be
+            # rebuilt: pgw#1265 checks `have >= need` where `have` is the
+            # DRIVER'S FREE-MEMORY FIGURE read at the decision point, so every
+            # byte these exclusions hold on the card is already subtracted by
+            # OBSERVATION — as is a sibling instance's weights, which no
+            # published set could have described. A measured quantity that
+            # already includes the effect beats two modules agreeing to exchange
+            # a computed one. Wiring this back in would reintroduce exactly the
+            # second derivation that seam existed to prevent.
+            #
+            # Always present, `[]` included, so a reader can tell "nothing was
             # excluded" from "this build predates the field".
             applied["resident_excluded"] = unhookable_components(pipeline)
             return applied
