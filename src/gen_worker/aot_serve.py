@@ -99,12 +99,18 @@ from typing import (
     Sequence, Tuple, Union,
 )
 
+from torch_compiled_graphs import (
+    CompiledGraphRunner,
+    ConstantBindingError,
+)
+
 from . import activity as activity_mod
 from . import aot_flatten
 from . import aot_identity
 from . import artifact_meta
 from . import boot_phases
 from . import cell_key as cell_key_mod
+from . import compiled_graph_store
 from . import host_isa
 from .cell_adopt import AdoptOutcome
 from . import serve_posture
@@ -2173,6 +2179,81 @@ class ArtifactRunner:
         return out
 
 
+@dataclass
+class TCGEntryRunner:
+    """Worker ingress policy around one TCG-owned bound runner.
+
+    TCG owns artifact verification, package loading, constant-table equality,
+    by-reference binding, and invocation.  The worker owns only the call-shape
+    contract and its fail-soft eager fallback.
+    """
+
+    runner: CompiledGraphRunner
+    contract: ArtifactContract
+    module_name: str
+    entry: str
+    family: str
+    refusals: Dict[str, int] = field(default_factory=dict)
+    realigned: Dict[str, int] = field(default_factory=dict)
+    aligner: FeedAligner = field(default_factory=FeedAligner)
+
+    @property
+    def calls(self) -> int:
+        return int(self.runner.calls)
+
+    @property
+    def bound(self) -> bool:
+        return bool(self.runner.bound)
+
+    @property
+    def user_managed(self) -> bool:
+        return True
+
+    def declared_fqns(self) -> Tuple[str, ...]:
+        return tuple(self.runner.declared_fqns)
+
+    def excludes(self, names: Sequence[str]) -> bool:
+        wanted = {str(name) for name in names}
+        return bool(wanted) and wanted <= set(self.contract.excluded)
+
+    def assert_ready(self) -> None:
+        if not self.runner.bound:
+            raise ConstantsUnboundError(
+                "constants_unbound",
+                f"refusing to invoke compiled graph {self.entry!r} before "
+                "TCG completed its exact constant bind",
+            )
+
+    def _report_normalized(self, name: str, reason: str, event: str) -> None:
+        key = f"{name}/{reason}"
+        seen = self.realigned.get(key, 0)
+        self.realigned[key] = seen + 1
+        if seen:
+            return
+        activity_mod.emit_event(
+            event,
+            f"family={self.family} graph_class={self.entry} "
+            f"target={self.module_name} input={name}: {reason}",
+            phase=reason,
+        )
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.assert_ready()
+        try:
+            assert_ingress(self.contract, args, kwargs)
+            feeds = marshal_positional(self.contract, args, kwargs)
+            feeds = aligned_feeds(
+                self.contract,
+                feeds,
+                self.aligner,
+                self._report_normalized,
+            )
+        except IngressContractError as exc:
+            self.refusals[exc.reason] = self.refusals.get(exc.reason, 0) + 1
+            raise
+        return self.runner(*feeds)
+
+
 def no_entry_detail(
     tried: int,
     missed: Sequence[Tuple[Tuple[int, ...], str, Tuple[IngressMiss, ...]]],
@@ -2251,7 +2332,7 @@ class EntryDispatch:
     shape" (a real shape-growth report).
     """
 
-    runners: Tuple[Tuple[str, ArtifactRunner], ...] = ()
+    runners: Tuple[Tuple[str, Union[ArtifactRunner, TCGEntryRunner]], ...] = ()
     declared: Tuple[str, ...] = ()
     #: entry name -> the reason it left. A de-armed entry is REMEMBERED, not
     #: forgotten: §4.31's de-arm is sticky for the boot, and a re-arm of a
@@ -2267,7 +2348,11 @@ class EntryDispatch:
     #: read as a pod that never served compiled at all.
     retired_calls: int = 0
 
-    def add(self, name: str, runner: ArtifactRunner) -> None:
+    def add(
+        self,
+        name: str,
+        runner: Union[ArtifactRunner, TCGEntryRunner],
+    ) -> None:
         """Register one armed entry. Replaces an entry of the same name (a
         re-arm), and refuses one this dispatch de-armed for cause."""
         label = str(name)
@@ -2277,7 +2362,9 @@ class EntryDispatch:
                 f"entry {label!r} was de-armed this boot "
                 f"({self.de_armed[label]}); §4.31's de-arm is sticky, so it "
                 f"must not be re-armed without a new process")
-        rows = [(n, r) for n, r in self.runners if n != label]
+        rows: List[Tuple[str, Union[ArtifactRunner, TCGEntryRunner]]] = [
+            (n, r) for n, r in self.runners if n != label
+        ]
         rows.append((label, runner))
         self.runners = tuple(sorted(rows, key=lambda row: row[0]))
 
@@ -2332,9 +2419,13 @@ class EntryDispatch:
 
     def select(
         self, args: Sequence[Any], kwargs: Mapping[str, Any],
-    ) -> Tuple[str, ArtifactRunner]:
-        admitted: List[Tuple[str, ArtifactRunner]] = []
-        missed: List[Tuple[str, ArtifactRunner]] = []
+    ) -> Tuple[str, Union[ArtifactRunner, TCGEntryRunner]]:
+        admitted: List[
+            Tuple[str, Union[ArtifactRunner, TCGEntryRunner]]
+        ] = []
+        missed: List[
+            Tuple[str, Union[ArtifactRunner, TCGEntryRunner]]
+        ] = []
         for name, runner in self.runners:
             misses, _symbols = ingress_report(
                 runner.contract, args, kwargs, first_only=True)
@@ -2618,7 +2709,7 @@ def wrap_module(
                 f"target={label}: {detail}",
                 phase=reason,
                 family=str(meta.get("family") or ""),
-                cell_key=str(meta.get("cell_key") or ""),
+                cell_key=str(meta.get("compiled_graph_key") or ""),
                 graph_class=name,
             )
             siblings = tuple(getattr(runner, "runners", ()) or ())
@@ -2705,7 +2796,7 @@ def wrap_module(
                 declared_class=ingress_class_name(label, args, kwargs),
                 reason=exc.reason,
                 detail=str(exc)[:400],
-                cell_key=str(meta.get("cell_key") or ""),
+                cell_key=str(meta.get("compiled_graph_key") or ""),
             ))
             return original(*args, **eager_kwargs)
         except ConstantsUnboundError as exc:
@@ -2961,6 +3052,169 @@ def _dispatch_for(marker: Dict[str, Any], target: str) -> Optional[EntryDispatch
     row = (marker.get("targets") or {}).get(target) or {}
     runner = (row.get("state") or {}).get("runner")
     return runner if isinstance(runner, EntryDispatch) else None
+
+
+def arm_compiled_graph(
+    pipeline: Any,
+    cfg: Any,
+    compiled_graph_key: str,
+    cache_dir: Optional[Path] = None,
+    *,
+    declared: Sequence[str] = (),
+) -> Dict[str, Any]:
+    """Bind and register one exact TCG graph on the resident pipeline.
+
+    The artifact has already been imported into TCG by delivery or mint. This
+    seam does not parse tar members, restate identity, or load AOTI itself.
+    It resolves the exact key, replays the worker-owned ingress contract, and
+    performs the first live mutation only after TCG's full bind succeeds.
+    """
+
+    family = str(getattr(cfg, "family", "") or "")
+    loaded = compiled_graph_store.load_runner(compiled_graph_key, cache_dir)
+    if loaded is None:
+        raise AdoptError(
+            "compiled_graph_unavailable",
+            f"TCG could not resolve and load {compiled_graph_key!r}",
+        )
+    metadata = dict(loaded.compiled_graph.metadata)
+    graph_class = metadata.get("graph_class")
+    if not isinstance(graph_class, Mapping):
+        raise AdoptError(
+            "contract_invalid",
+            "TCG admitted a compiled graph with no graph_class declaration",
+        )
+    graph = graph_class.get("graph")
+    if not isinstance(graph, Mapping):
+        raise AdoptError(
+            "contract_invalid",
+            "TCG graph_class records no worker ingress contract",
+        )
+    name = str(graph_class.get("name") or "").strip()
+    target = str(graph_class.get("target") or "").strip()
+    if not name or not target:
+        raise AdoptError(
+            "contract_invalid",
+            "TCG graph_class must name both graph class and target",
+        )
+
+    module, attr = _target_owner(pipeline, target)
+    installed_lifted = False
+    bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
+    try:
+        if (
+            bucket
+            and target in lora_lifted.branch_targets(pipeline)
+            and lora_lifted.lifted_binding(module) is None
+        ):
+            lora_lifted.install_lifted_lora_forward(module, bucket)
+            installed_lifted = True
+        contract = contract_from_meta(graph)
+        assert_lifted_contract(module, contract)
+        device = str(getattr(module, "device", "") or "cuda")
+        loaded.runner.bind(resident_constants(module), device=device)
+    except ConstantBindingError as exc:
+        if installed_lifted:
+            lora_lifted.remove_lifted_lora_forward(module)
+        reason = "insufficient_adopt_vram" if exc.reason == "out_of_memory" else exc.reason
+        raise AdoptError(reason, f"graph class {name!r}: {exc}") from exc
+    except Exception:
+        if installed_lifted:
+            lora_lifted.remove_lifted_lora_forward(module)
+        raise
+
+    marker = _marker(pipeline)
+    dispatch = _dispatch_for(marker, target)
+    first_for_target = dispatch is None
+    if dispatch is None:
+        dispatch = EntryDispatch(declared=tuple(str(item) for item in declared))
+    elif declared:
+        dispatch.declared = tuple(str(item) for item in declared)
+    entry_runner = TCGEntryRunner(
+        runner=loaded.runner,
+        contract=contract,
+        module_name=target,
+        entry=name,
+        family=family,
+    )
+    dispatch.add(name, entry_runner)
+
+    serve_meta: Dict[str, Any] = {
+        "family": family,
+        "compiled_graph_key": compiled_graph_key,
+        "compiled_graph_format": metadata.get("compiled_graph_format"),
+        "graph_class": dict(graph_class),
+        "sm": metadata.get("sm"),
+        "toolchain": metadata.get("toolchain"),
+    }
+    if first_for_target:
+        wrap_module(
+            module,
+            dispatch,
+            serve_meta,
+            attr=attr,
+            target=target,
+            eager_forward=None,
+        )
+        module_marker = getattr(module, _MARKER_ATTR, {})
+        marker["targets"][target] = {
+            "module": module,
+            "attr": attr,
+            "state": module_marker.get("state", {}),
+        }
+    marker["meta"] = serve_meta
+    marker["entries"][name] = {
+        "compiled_graph_key": compiled_graph_key,
+        "target": target,
+        "class_hash": str(graph_class.get("class_hash") or ""),
+    }
+    logger.info(
+        "aot-serve: armed TCG graph class %s on %s (%d constants, key=%s)",
+        name,
+        target,
+        len(loaded.runner.declared_fqns),
+        compiled_graph_key,
+    )
+    return serve_meta
+
+
+def enable_compiled_graph(
+    pipeline: Any,
+    cfg: Any,
+    compiled_graph_key: str,
+    cache_dir: Optional[Path] = None,
+    *,
+    declared: Sequence[str] = (),
+) -> AdoptOutcome:
+    """Fail-soft worker policy around :func:`arm_compiled_graph`."""
+
+    try:
+        meta = arm_compiled_graph(
+            pipeline,
+            cfg,
+            compiled_graph_key,
+            cache_dir,
+            declared=declared,
+        )
+    except Exception as exc:
+        reason = str(getattr(exc, "reason", "") or type(exc).__name__)
+        logger.warning(
+            "aot-serve: compiled graph %s unusable (%s: %s)",
+            compiled_graph_key,
+            reason,
+            exc,
+        )
+        return AdoptOutcome.miss(
+            reason,
+            f"compiled_graph_key={compiled_graph_key}: "
+            f"{type(exc).__name__}: {exc}",
+            f"family={getattr(cfg, 'family', '')} key={compiled_graph_key}",
+        )
+    graph_class = dict(meta.get("graph_class") or {})
+    return AdoptOutcome.hit(
+        f"family={meta.get('family')} key={compiled_graph_key} "
+        f"graph_class={graph_class.get('name')}"
+    )
 
 
 def arm_entry(

@@ -1654,8 +1654,12 @@ def arm_ordered(
         cc.apply_lora_execution_lane(pipe, bucket)
     started = time.monotonic()
     try:
-        outcome = provision.arm_aot(
-            pipe, cfg, cache_dir, Path(artifact), bucket, expected=None)
+        outcome = aot_serve.enable_compiled_graph(
+            pipe,
+            cfg,
+            want_key,
+            cache_dir,
+        )
     except BaseException:
         if bucket:
             cc.drop_lora_execution_lane(pipe)

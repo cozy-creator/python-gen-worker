@@ -18,10 +18,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from torch_compiled_graphs import (
+    CompiledGraphRunner,
     Engine,
     QuarantinedArtifact,
     StorageError,
     StoreOutcome,
+    StoredCompiledGraph,
     is_compiled_graph_key,
 )
 
@@ -97,6 +99,14 @@ class LocalCompiledGraph:
     sink: str = SINK_NONE
 
 
+@dataclass(frozen=True)
+class LoadedCompiledGraph:
+    """One admitted TCG graph and its not-yet-bound serving runner."""
+
+    compiled_graph: StoredCompiledGraph
+    runner: CompiledGraphRunner
+
+
 _SIDECAR_FIELDS = frozenset({
     "format",
     "compiled_graph_key",
@@ -143,7 +153,7 @@ def _artifact_digest(path: Path) -> str:
 def _export(key: str, root: Optional[Path]) -> Path:
     destination = _root(root) / EXPORTS_DIRNAME / key / "compiled_graph.tar.gz"
     destination.parent.mkdir(parents=True, exist_ok=True)
-    return _engine(root).export_artifact(key, destination)
+    return Path(_engine(root).export_artifact(key, destination))
 
 
 def _local(record: dict[str, Any], root: Optional[Path]) -> LocalCompiledGraph:
@@ -233,7 +243,11 @@ def lookup(key: str, root: Optional[Path] = None) -> Optional[LocalCompiledGraph
         record = _read_record(sidecar_dir(key, root) / RECORD_NAME)
     except ValueError:
         return None
-    if record is None or record["verdict"] != VERDICT_ADMITTED:
+    if (
+        record is None
+        or record["compiled_graph_key"] != key
+        or record["verdict"] != VERDICT_ADMITTED
+    ):
         return None
     destination = _root(root) / ".resolved" / key
     try:
@@ -241,6 +255,35 @@ def lookup(key: str, root: Optional[Path] = None) -> Optional[LocalCompiledGraph
         if graph is None:
             return None
         return _local(record, root)
+    except (OSError, QuarantinedArtifact, StorageError):
+        mark(key, verdict=VERDICT_QUARANTINED, root=root)
+        return None
+
+
+def load_runner(
+    key: str,
+    root: Optional[Path] = None,
+) -> Optional[LoadedCompiledGraph]:
+    """Resolve and load one exact TCG key without interpreting its artifact.
+
+    TCG owns both verification and package loading.  The worker receives the
+    closed metadata only so its ingress adapter can select the resident target
+    and replay the declared call contract before invoking the runner.
+    """
+
+    if not is_compiled_graph_key(key):
+        return None
+    engine = _engine(root)
+    destination = _root(root) / ".resolved" / key
+    runner_destination = _root(root) / ".runners" / key
+    try:
+        graph = engine.resolve(key, destination)
+        if graph is None:
+            return None
+        runner = engine.runner(key, runner_destination)
+        if runner is None or runner.key != key or graph.key != key:
+            return None
+        return LoadedCompiledGraph(graph, runner)
     except (OSError, QuarantinedArtifact, StorageError):
         mark(key, verdict=VERDICT_QUARANTINED, root=root)
         return None
@@ -320,7 +363,7 @@ def stored_graphs(root: Optional[Path] = None) -> list[LocalCompiledGraph]:
         if not path.is_dir() or path.name.startswith("."):
             continue
         record = _read_record(path / RECORD_NAME)
-        if record is None:
+        if record is None or record["compiled_graph_key"] != path.name:
             continue
         try:
             rows.append(_local(record, root))
@@ -372,6 +415,7 @@ def keeps_graphs_locally(root: Optional[Path] = None) -> bool:
 
 __all__ = [
     "ENV_STORE_DIR",
+    "LoadedCompiledGraph",
     "LocalCompiledGraph",
     "MEMO_DIRNAME",
     "RECORD_NAME",
@@ -392,6 +436,7 @@ __all__ = [
     "keeps_graphs_locally",
     "lookup",
     "lookup_for_arm",
+    "load_runner",
     "mark",
     "memo_path",
     "note_memo",
