@@ -1453,6 +1453,7 @@ class _PublisherMixin:
         destination_info: Optional[Dict[str, Any]] = None,
         text_encoder_info: Optional[Dict[str, Any]] = None,
         candidate_info: Optional[Dict[str, Any]] = None,
+        resume_from_info: Optional[Dict[str, Any]] = None,
         hf_token: str = "",
         **kwargs: Any,
     ) -> None:
@@ -1467,6 +1468,8 @@ class _PublisherMixin:
         self._text_encoder_path: Optional[str] = None
         self._candidate_info = dict(candidate_info or {})
         self._candidate_path: Optional[str] = None
+        self._resume_from_info = dict(resume_from_info or {})
+        self._resume_from_path: Optional[str] = None
         self._hf_token = (hf_token or "").strip()
     if TYPE_CHECKING:
         # The host contract: everything this mixin borrows from
@@ -1554,6 +1557,24 @@ class _PublisherMixin:
     def _set_candidate_path(self, path: str) -> None:
         """Library-internal: called after candidate materialization."""
         self._candidate_path = str(path) if path else None
+
+    # pgw#1242/te#185: the fifth reserved model input — a previously PUBLISHED
+    # checkpoint to CONTINUE from. `save_checkpoint` already publishes; before
+    # this there was no way to hand one back to a handler, so a training
+    # endpoint could not resume across pod loss at all and a multi-hour run
+    # restarted from zero. Absent on every existing payload struct — stays {}
+    # and is a no-op.
+    @property
+    def resume_from(self) -> dict[str, Any]:
+        return dict(self._resume_from_info)
+
+    @property
+    def resume_from_path(self) -> Optional[str]:
+        return self._resume_from_path
+
+    def _set_resume_from_path(self, path: str) -> None:
+        """Library-internal: called after resume_from materialization."""
+        self._resume_from_path = str(path) if path else None
 
     def save_checkpoint(
         self,
