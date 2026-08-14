@@ -214,6 +214,15 @@ def install_context_parallel(
 
     installed: List[str] = []
     for name, comp in components:
+        # diffusers #12536, at the one moment it costs nothing: the all-to-all
+        # shards the HEAD dimension, so an expert whose declared head count
+        # does not divide the degree fails as an inscrutable shape mismatch
+        # mid-denoise, on a paying request, on a pod that has already rented.
+        # The head count is a property of the MODEL and is knowable here; the
+        # sequence length is a property of a REQUEST and is not, so it is not
+        # stated (see `refuse_unless_divisible`).
+        refuse_unless_divisible(
+            tokens=0, heads=_declared_heads(comp), degree=int(degree))
         _install_on_component(comp, degree=int(degree), comms=comms)
         _install_gate_guard(comp, name)
         installed.append(name)
@@ -360,6 +369,28 @@ def _refuse_if_offloaded(pipeline: Any) -> None:
             )
 
 
+def _declared_heads(comp: Any) -> int:
+    """A sharding candidate's declared attention-head count, or 0.
+
+    Read off the DECLARATION (the model config), never counted from modules: a
+    module walk answers a different question (how many attention blocks) and
+    would produce a confident wrong number. 0 means the component declares
+    none, and an undeclared count is not a divisibility failure.
+    """
+    config = getattr(comp, "config", None)
+    for attr in ("num_attention_heads", "num_heads", "attention_heads"):
+        for holder in (config, comp):
+            if holder is None:
+                continue
+            try:
+                heads = int(getattr(holder, attr, 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if heads > 0:
+                return heads
+    return 0
+
+
 def refuse_unless_divisible(
     *, tokens: int, heads: int, degree: int
 ) -> None:
@@ -367,6 +398,12 @@ def refuse_unless_divisible(
 
     Ulysses shards the sequence across ranks and the head dimension inside the
     all-to-all, so both must divide the degree.
+
+    Either term may be 0 — "this caller cannot state it" — and 0 asserts
+    nothing rather than asserting falsely. ``install_context_parallel`` is
+    exactly such a caller: the head count is a property of the MODEL and is
+    knowable before the pod commits to a packing; the sequence length is a
+    property of a REQUEST and is not knowable at install.
     """
     d = int(degree)
     if d <= 1:

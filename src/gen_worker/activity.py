@@ -168,6 +168,18 @@ KIND_APPLIED_ATTENTION = "applied_attention"
 # (`boot_adopt.REASONS`, countable hub-side); `detail` names family, function,
 # derived key and the sentence; `duration_ms` is the derivation's own wall.
 KIND_BOOT_ADOPT = "boot_adopt"
+# pgw#1271: the boot-key MEMO honesty verdict, ruled at the one moment a pod
+# holds both halves — what the memo answered at boot, and what this mint just
+# traced. `boot_key`'s memo path SKIPS THE TRACES and produces the `graph` axis
+# of every published `cg-key-v1`, and the module header's promise ("Honesty is
+# enforced, not trusted... A wrong key is never produced") was carried by
+# `assert_memo_honest`, which had zero `src/` callers: the check existed, read
+# as enforcement, and never ran on a fleet pod. A typed event rather than a log
+# line because a hub-spawned pod's stdout goes nowhere (pgw#760/#1116) and a
+# dishonest memo is a KEY-SPACE fault — the fleet needs it countable.
+# `phase` is `memo_dishonest` / `memo_unrulable`; `detail` carries
+# `assert_memo_honest`'s own sentence, which names every disagreeing class.
+KIND_BOOT_MEMO = "boot_memo_honesty"
 # th#1322: JIT (dynamo/inductor) compile duration, as a typed numeric event.
 # It used to be `logger.info("compiled %s in %.0fs")` and nothing else, so on a
 # hub-spawned pod (no stdout, pgw#760) the one number an AOT-vs-JIT comparison

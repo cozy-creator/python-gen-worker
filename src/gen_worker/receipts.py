@@ -622,7 +622,15 @@ def verify_delivered_artifact(artifact: Path, family: str) -> Receipt:
         # A platform-tier cell is adoptable by every pod, so nothing here has
         # to know who we are — and asking anyway would make a seam hiccup
         # refuse the one class that never needed an identity.
-        refuse_untrusted_publisher(receipt, "", "")
+        #
+        # pgw#1271: this branch used to call `refuse_untrusted_publisher(
+        # receipt, "", "")` here — INSIDE that callee's own early-return
+        # condition (`if not needs_viewer_identity(receipt): return`), so it
+        # executed exactly zero checks, immediately before the caller dlopens
+        # the artifact. A call that reads as the last gate before native-code
+        # execution and is structurally incapable of refusing is worse than no
+        # call: it answers the reader's question wrongly. What actually clears
+        # this tier is the SIGNATURE, and it ran above.
         return receipt
     try:
         viewer = _self_viewer()

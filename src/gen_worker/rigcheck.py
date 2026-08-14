@@ -19,9 +19,10 @@ reads, best-first:
    own code — has this file. The only authority that declares CUDA.
 2. ``fleet-floors.toml`` ``[floors] torch`` — the fleet-wide floor CI enforces
    against every endpoint's lock. Fleet-scoped, torch only.
-3. Installed distribution metadata — the endpoint dist's own ``torch>=…``
-   requirement, else ``gen-worker[torch]``'s. Always available wherever the code
-   under measurement is installed; torch only.
+3. Installed distribution metadata — the ENDPOINT dist's own ``torch>=…``
+   requirement. Torch only, and never this SDK's own: ``gen-worker`` pins the
+   very torch the rig is being asked to prove, so consulting it made the SDK
+   its own last-resort authority and no rig could ever fail to find one.
 
 Every authority found is compared and the STRICTEST floor wins, so a rig sitting
 between two of them fails rather than picking the lenient one. **No authority
@@ -314,7 +315,13 @@ def _collect_authorities(
         found = _fleet_floors_authority(path)
         if found:
             authorities.append(found)
-    for dist in list(endpoint_dists) + ["gen-worker"]:
+    # ENDPOINT dists only. `gen-worker` used to be appended here as a
+    # last-resort authority, which made the SDK certify its own floor: the
+    # requirement it declares is the requirement the rig is installed against,
+    # so every rig passed, and `FleetLineUnknown` — the finding this function
+    # exists to produce — was unreachable on any machine with gen-worker
+    # installed, i.e. every machine that can run a rig.
+    for dist in endpoint_dists:
         found = _metadata_authority(dist)
         if found:
             authorities.append(found)
@@ -531,11 +538,16 @@ def assert_fleet_line(
     # A HOST fault is reported before a WHEEL fault even when both are present:
     # on a too-old driver every version string above can be perfect while nothing
     # allocates, and "rebuild the environment" is then the wrong instruction.
-    if env.get("driver") and env.get("cuda_usable") is False:
+    # NOT gated on `driver`: reading the driver version means `nvidia-smi` ran,
+    # and a host broken enough that it does not is exactly the host this refusal
+    # is for. `cuda_usable is False` is already a MEASUREMENT (a real allocation
+    # was attempted and failed) — `None` means unmeasured and does not refuse.
+    if env.get("cuda_usable") is False:
         raise CudaUnusable(
             f"{what}: REFUSING TO MEASURE — the wheel is on the fleet line but "
             f"this HOST cannot run it.\n"
-            f"  * driver {env.get('driver')} / torch CUDA {env.get('cuda')}: "
+            f"  * driver {env.get('driver') or '<nvidia-smi unreadable>'} / "
+            f"torch CUDA {env.get('cuda')}: "
             f"{env.get('cuda_unusable_class')} — {env.get('cuda_unusable_reason')}\n\n"
             + report
             + "\n\nThis is a DRIVER fact, not a torch defect (pgw#1120). RunPod's "

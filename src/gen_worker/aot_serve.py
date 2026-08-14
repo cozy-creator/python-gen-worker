@@ -115,8 +115,8 @@ from .compile_cache import (
     _clean_tarinfo,
     _resolve_target,
     parse_cell_ref,
-    sku_slug,
 )
+from . import compile_cache as _compile_cache
 from .models import lora_lifted
 from .models.memory import flush_memory, is_cuda_oom
 
@@ -252,35 +252,26 @@ class IngressContractError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
-def torch_version() -> str:
-    """Full torch version (``2.13.0+cu130``) — the artifact is ABI-locked
-    to it."""
-    try:
-        import torch
-
-        return str(torch.__version__)
-    except Exception:
-        return ""
-
-
 def runtime_key() -> Dict[str, str]:
-    """Consumer-side half of the artifact key, probed from this process.
+    """Consumer-side half of the artifact key — a PROJECTION of the one probe.
 
     ``sm`` is the compiled-code identity (:data:`IDENTITY_AXES`); ``sku`` is
     the GPU's marketing slug, recorded for observability and selection.
-    """
-    key = {"sku": "", "sm": "", "torch": torch_version(), "cuda": ""}
-    try:
-        import torch
 
-        key["cuda"] = str(torch.version.cuda or "")
-        if torch.cuda.is_available():
-            key["sku"] = sku_slug(torch.cuda.get_device_name(0))
-            major, minor = torch.cuda.get_device_capability(0)
-            key["sm"] = f"sm_{major}{minor}"
-    except Exception:
-        pass
-    return key
+    This re-probed torch itself until pgw#1271, behind its own
+    ``except Exception: pass`` — a second implementation of
+    ``compile_cache.runtime_key`` whose failure was SILENT. So the defect
+    pgw#657 fixed there (an empty sku/sm/torch manufactures a key no healthy
+    pod computes, i.e. a guaranteed miss and a mint, with no evidence why) was
+    fixed in one copy only. The four axes are a deliberate projection, not an
+    accidental subset: they are exactly what the artifact envelope carries, and
+    widening them here would re-key every artifact.
+    """
+    # Through the MODULE, never a from-import binding: one probe means one
+    # object to patch, to fix and to reason about.
+    probe = _compile_cache.runtime_key()
+    return {axis: str(probe.get(axis) or "")
+            for axis in ("sku", "sm", "torch", "cuda")}
 
 
 # Stamped cell keys this process LEARNED name aot-inductor artifacts
@@ -3565,7 +3556,6 @@ __all__ = [
     "report_ingress_refusal",
     "split_literals",
     "target_constant_pool",
-    "torch_version",
     "unpack",
     "unpack_metadata",
     "unwrap",
