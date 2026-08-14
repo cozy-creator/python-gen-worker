@@ -48,9 +48,10 @@ from .loading import (
     load_from_pretrained,
     model_index_components,
 )
-from .memory import place_pipeline
+from .memory import flush_memory, place_pipeline
 from .refs import DEFAULT_REF_TAG, parse_model_ref
 from .. import activity as activity_mod
+from .. import adopt_fit
 from .. import mint_workers
 from .. import postmortem
 
@@ -270,6 +271,43 @@ def arm_route(mode: str) -> Optional[str]:
     return {
         "": "aot_serve.enable",
     }.get(str(mode or ""))
+
+
+def _abandon_adopt(
+    pipe: Any, meta: Optional[Dict[str, Any]], detail: str, *, entry: str,
+) -> None:
+    """Give the adopt back (pgw#1265): de-arm, RELEASE, say so, serve eager.
+
+    The half `_bind_headroom` never needed. A catchable bind OOM refuses before
+    the first live mutation, so the pipeline is already as eager as it was
+    found; a headroom verdict taken AFTER the arm is looking at a pipeline that
+    has been mutated and at a runner that is holding device memory. Abandoning
+    means both come back: :func:`aot_serve.disarm_entry` drops the runner from
+    the dispatch and restores the target's eager callable, and
+    ``flush_memory`` is what turns a dropped reference into free bytes — the
+    whole point is that the floor this adopt raised comes back down.
+
+    The de-arm is sticky for the boot (§4.31), which is invariant 3: this class
+    cannot be re-armed in this process, so a refused adopt cannot become a
+    retry loop that pays the load again on a card that is already full.
+    """
+    from .. import aot_serve
+
+    family = str((meta or {}).get("family") or "")
+    if entry:
+        try:
+            aot_serve.disarm_entry(pipe, entry, adopt_fit.REASON)
+        except Exception:  # noqa: BLE001 — the refusal must survive its cleanup
+            logger.warning(
+                "adopt-fit: de-arming %r after a headroom refusal failed",
+                entry, exc_info=True)
+        flush_memory()
+    logger.warning("adopt-fit: %s", detail)
+    activity_mod.emit_event(
+        "adopt_headroom_refused", detail, phase=adopt_fit.REASON,
+        family=family, cell_key=str((meta or {}).get("cell_key") or ""),
+        graph_class=entry,
+    )
 
 
 def arm_aot(
@@ -495,6 +533,17 @@ def arm_aot(
     # `settings_authority.py:83`) is a native mapping abort that no `except`
     # sees, so the process dies here. When it does, this marker is what makes
     # the death read as a COMPILE crash rather than as the tenant's.
+    #
+    # pgw#1265: which is exactly why the attempt cannot be the WHOLE gate. An
+    # uncatchable death has no refusal to return, so the one question a query
+    # can settle — is there room for a forward at all — is asked first, from
+    # `adopt_fit`'s two measured terms. It predicts nothing and refuses only on
+    # evidence this process produced; see that module for why pgw#1164's
+    # deleted estimate is not what this is.
+    _no_room = adopt_fit.refusal("the adopt's LOAD", _budget_device)
+    if _no_room:
+        _abandon_adopt(pipe, meta, _no_room, entry="")
+        return AdoptOutcome.miss(adopt_fit.REASON, _no_room)
     with postmortem.compile_inflight(_adopt_label):
         outcome = aot_serve.enable(
             pipe, cfg, cache_dir, artifact, expected=expected, declared=declared)
@@ -510,6 +559,23 @@ def arm_aot(
             + f" — {lifted_install_error}]".strip(),
             outcome.identity)
     if outcome.armed:
+        # pgw#1265: THE RUNNER IS NOW RESIDENT, and everything below runs
+        # beside it. This is where the floor rose, so this is where it is
+        # checked — and, because the arm has already mutated the pipeline, it
+        # is also the first point that needs a way BACK DOWN. Both spans below
+        # are abandonable: the entry de-arms, its runner is released, the
+        # pipeline serves eager and the worker stays alive.
+        _entry_name = str(
+            ((meta or {}).get(cell_key.ENTRY_BLOCK_KEY) or {}).get("name") or "")
+        _no_room = adopt_fit.refusal(
+            "the §4.32 parity gate's forwards" if verify_numerics
+            else "serving through the freshly armed graph class",
+            _budget_device)
+        if _no_room:
+            _emit_adopt_budget(0, False)
+            _abandon_adopt(pipe, meta, _no_room, entry=_entry_name)
+            return AdoptOutcome.miss(
+                adopt_fit.REASON, _no_room, outcome.identity)
         # §4.32: quality is proven at MINT and in author CI, never at adoption.
         # An adopting pod materializes, arms and serves.
         # pgw#1262: the gate runs TWO forwards on a card that is already
@@ -525,6 +591,18 @@ def arm_aot(
             gate_ok = True
         _, _peak_after_verify = mint_workers.adopt_watermark(_budget_device)
         if gate_ok:
+            # pgw#1265: the gate's own forwards have just been paid and freed.
+            # The question this last verdict asks is the one the CALLER is
+            # about to act on — it advertises this arm and serves through it —
+            # so it is asked about the state the arm actually leaves behind,
+            # not about the state before the gate ran.
+            _no_room = adopt_fit.refusal(
+                "serving through the freshly armed graph class", _budget_device)
+            if _no_room:
+                _emit_adopt_budget(_peak_after_verify - _peak_after_load, False)
+                _abandon_adopt(pipe, meta, _no_room, entry=_entry_name)
+                return AdoptOutcome.miss(
+                    adopt_fit.REASON, _no_room, outcome.identity)
             _emit_adopt_budget(_peak_after_verify - _peak_after_load, True)
             return outcome
         _emit_adopt_budget(_peak_after_verify - _peak_after_load, False)

@@ -29,6 +29,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tupl
 import msgspec
 
 from . import activity as activity_mod
+from . import adopt_fit
 from . import aot_declaration, aot_identity, aot_mint
 from . import boot_adopt
 from . import boot_phases as boot_mod
@@ -5080,19 +5081,24 @@ class Executor:
         inflight_token = postmortem.note_inflight(
             "warmup", spec.name, request_id=str(ctx.request_id or ""))
         try:
-            if spec.is_async_gen:
-                async for _ in bound(**call_kwargs):
-                    pass
-            elif spec.is_async:
-                await bound(**call_kwargs)
-            else:
-                def _consume() -> None:
-                    out = bound(**call_kwargs)
-                    if spec.output_mode == "stream":
-                        for _ in out:
-                            pass
+            # pgw#1265: mint seeds and the boot warm forward go through here
+            # and nowhere else, so this is what gives the adopt's headroom
+            # verdict a measurement on a pod that has not served a tenant
+            # request yet — which is every pod that mints at boot.
+            with adopt_fit.forward_watermark():
+                if spec.is_async_gen:
+                    async for _ in bound(**call_kwargs):
+                        pass
+                elif spec.is_async:
+                    await bound(**call_kwargs)
+                else:
+                    def _consume() -> None:
+                        out = bound(**call_kwargs)
+                        if spec.output_mode == "stream":
+                            for _ in out:
+                                pass
 
-                await _to_thread_complete(_consume)
+                    await _to_thread_complete(_consume)
             # pgw#1199: THE proof, recorded where it already happens. This call
             # is the endpoint's own handler, running on the RESIDENT pipeline
             # with real checkpoint values, and every warm path in this process
@@ -8165,27 +8171,90 @@ class Executor:
         rec.eager_posture = ""
         for pid, outcome in finalized.items():
             pipe = bg.pipes[pid]
-            for target in rec.compile_targets.values():
-                if target.pipeline is not pipe:
-                    continue
-                with target.state_lock:
-                    target.active_compile_ref = str(outcome.ref)
-                    target.active_compile_snapshot_digest = str(
-                        outcome.snapshot_digest)
-                    target.active_self_mint = True
-                # pgw#686: the mint stamped the pipe's lane; re-advertise so
-                # the target's lane/bucket/contract descriptors match what it
-                # now serves.
-                self._refresh_compile_target(target)
-                if not self._bind_compile_guard(rec, target):
+            # pgw#1265: THE FLIP IS CHECKED BEFORE IT HAPPENS. Between the arm
+            # (where `arm_aot` took the same verdict) and here sit the publish
+            # and whatever a sibling instance did to the card meanwhile, so the
+            # question is asked again about the state that actually exists at
+            # the flip. The advertisement is a claim that this pipe SERVES
+            # compiled; making it on a card that can no longer fit a forward is
+            # how a mint's last step became a SIGSEGV and then a crash-loop the
+            # hub read as demand (th#1959).
+            device = mint_workers.device_of(pipe)
+            no_room = adopt_fit.refusal(
+                f"advertising the compiled graphs for {bg.spec.name}", device)
+            if no_room:
+                self._abandon_advertisement(rec, pipe, outcome, no_room)
+                continue
+            armed_here = False
+            # pgw#1262's marker, one question over: binding the guard and
+            # flipping the router touch the live compiled objects, so a signal
+            # death here is a compile's, not the tenant's.
+            with postmortem.compile_inflight(f"advertise:{bg.spec.name}"):
+                for target in rec.compile_targets.values():
+                    if target.pipeline is not pipe:
+                        continue
                     with target.state_lock:
-                        target.active_compile_ref = ""
-                        target.active_compile_snapshot_digest = ""
-                    logger.warning(
-                        "compile target %s has no runtime guard revocation "
-                        "signal; advertising eager", target.incarnation_id)
-                    continue
-            hot_swap.enable(pipe)
+                        target.active_compile_ref = str(outcome.ref)
+                        target.active_compile_snapshot_digest = str(
+                            outcome.snapshot_digest)
+                        target.active_self_mint = True
+                    # pgw#686: the mint stamped the pipe's lane; re-advertise so
+                    # the target's lane/bucket/contract descriptors match what it
+                    # now serves.
+                    self._refresh_compile_target(target)
+                    if not self._bind_compile_guard(rec, target):
+                        with target.state_lock:
+                            target.active_compile_ref = ""
+                            target.active_compile_snapshot_digest = ""
+                        logger.warning(
+                            "compile target %s has no runtime guard revocation "
+                            "signal; advertising eager", target.incarnation_id)
+                        continue
+                    armed_here = True
+                # pgw#1265: eager-while-compiling is turned on for a pipe that
+                # ADVERTISES something. Unconditional, it enabled concurrent
+                # routing on a pipe whose every target had just been rolled
+                # back to eager for want of a revocation signal.
+                if armed_here:
+                    hot_swap.enable(pipe)
+
+    def _abandon_advertisement(
+        self, rec: "_ClassRecord", pipe: Any, outcome: Any, detail: str,
+    ) -> None:
+        """pgw#1265: refuse the flip and GIVE THE ARM BACK.
+
+        Invariants 2 and 3 at the wire seam. Nothing is advertised, so no
+        capability projection claims a compiled tier; the armed entries are
+        de-armed and their runners released, so the residency floor this adopt
+        raised comes back down; and the de-arm is sticky for the boot, so the
+        next request cannot walk into the same refusal. The worker serves
+        eager and stays alive — which is the whole difference between a
+        degraded pod and `ComputeProcessDied`.
+
+        The artifact is not condemned and stays PUBLISHED: it was minted and
+        parity-gated by this process, and a card that is full at this instant
+        says nothing about it.
+        """
+        for target in rec.compile_targets.values():
+            if target.pipeline is not pipe:
+                continue
+            with target.state_lock:
+                target.active_compile_ref = ""
+                target.active_compile_snapshot_digest = ""
+                target.active_self_mint = False
+        for entry in list(aot_serve.entry_states(pipe)):
+            try:
+                aot_serve.disarm_entry(pipe, entry, adopt_fit.REASON)
+            except Exception:  # noqa: BLE001 — the refusal survives its cleanup
+                logger.warning(
+                    "adopt-fit: de-arming %r at the advertisement failed",
+                    entry, exc_info=True)
+        flush_memory()
+        logger.warning("adopt-fit: %s", detail)
+        activity_mod.emit_event(
+            "adopt_headroom_refused", detail, phase=adopt_fit.REASON,
+            cell_key=str(getattr(outcome, "ref", "") or ""),
+        )
 
     async def _supervise_mint(
         self, rec: _ClassRecord, bg: "_BackgroundMint", act: Any,
@@ -10631,7 +10700,11 @@ class Executor:
         # interval runtime_ms measures).
         ctx._stages.handler_open()
         try:
-            with _HandlerEvidence(owner):
+            # pgw#1265: the tenant forward is where "what does one forward cost
+            # this card" is MEASURED. The adopt's headroom verdict has no other
+            # source of truth — and this is the same forward, on the same card,
+            # that a raised residency floor would have to make room for.
+            with adopt_fit.forward_watermark(gpu_index), _HandlerEvidence(owner):
                 while True:
                     try:
                         return await asyncio.wait_for(
