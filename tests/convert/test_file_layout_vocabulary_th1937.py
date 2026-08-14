@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from gen_worker.convert.clone import OutputSpec, normalize_outputs
-from gen_worker.convert.file_layout import (
+from gen_worker.models.file_layout import (
     KNOWN_FILE_LAYOUTS,
     MULTI_FILE,
     NOT_APPLICABLE,

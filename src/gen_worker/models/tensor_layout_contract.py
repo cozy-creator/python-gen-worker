@@ -30,6 +30,7 @@ from typing import Any, Callable, Iterable, TypeVar
 import msgspec
 
 from .execution_lanes import known_execution_lane_bodies
+from .file_layout import KNOWN_FILE_LAYOUTS
 
 # The registered handles, transcribed from tensorhub's seeded registry. A
 # decoder naming anything else fails the BUILD: an unregistered contract is
@@ -61,7 +62,7 @@ _HANDLE_RE = re.compile(r"^([a-z0-9]+)\.([a-z0-9][a-z0-9._-]*)@([1-9][0-9]*)$")
 # shapes a given decoder reads, and the shapes are exactly where decoders
 # branch: `cozy.fp8-rowwise@1` is one handle whether or not the tree carries
 # the optional `input_scale` leaf, and a decoder that ignores it serves
-# different bytes than one that consumes it. So a declaration carries four
+# different bytes than one that consumes it. So a declaration carries five
 # axes, and th#1938's `resolve()` intersects a variant's derived contract
 # against them rather than against the handle alone.
 #
@@ -94,12 +95,11 @@ KNOWN_SCALES: tuple[str, ...] = (
     SCALE_STATIC_ACTIVATION, SCALE_BLOCK_128X128, SCALE_GROUP_16,
 )
 
-# NO file-layout axis here, deliberately. `file_layout` is RULED
-# (`multi-file` | `single-file`, th#1937) and its pgw home is the
-# `1937-file-layout-vocabulary` lane's `gen_worker/convert/file_layout.py`.
-# Transcribing those tokens here would be the second vocabulary this whole
-# programme exists to delete; the decode-set constrains the axis in a
-# follow-up that IMPORTS that module, once it is on master.
+# FILE LAYOUT — which on-disk shape the decoder's ENTRY POINT can read.
+# The tokens are th#1937's ruling and are IMPORTED from `models/file_layout.py`
+# (pgw#1252), never transcribed: that module is the same one `convert/` publishes
+# through, so the load side and the publish side cannot drift into two
+# spellings of one axis. `KNOWN_FILE_LAYOUTS` is `multi-file` | `single-file`.
 #
 # `pre_sharded` / `shard_axis` are likewise publish-side dimensions. No decoder
 # in this image branches on an SP-sharded tree and none can detect one, so the
@@ -158,7 +158,7 @@ KNOWN_KEY_TOPOLOGIES: tuple[str, ...] = (
 # constrain, rather than a synonym for its own handle.
 
 DECODE_AXES: tuple[str, ...] = (
-    "elements", "scales", "key_topologies", "bakes",
+    "elements", "scales", "key_topologies", "file_layouts", "bakes",
 )
 
 
@@ -167,8 +167,9 @@ class DecodeDimensions(msgspec.Struct, frozen=True, kw_only=True):
 
     Every axis is REQUIRED — there is no default, so a declaration cannot be
     written by omission. `elements` and `scales` must be non-empty: a decoder
-    that states nothing there has declared nothing. `key_topologies` and
-    `bakes` MAY be empty, and empty is a statement rather than a silence —
+    that states nothing there has declared nothing. `key_topologies`,
+    `file_layouts` and `bakes` MAY be empty, and empty is a statement rather
+    than a silence —
     "this decoder does not constrain the axis" (the tri-state's UNDECLARED
     rung), which is the honest answer for a decoder whose quant handle already
     fixes its keys, and the answer that makes a baked variant refuse.
@@ -177,6 +178,7 @@ class DecodeDimensions(msgspec.Struct, frozen=True, kw_only=True):
     elements: tuple[str, ...]
     scales: tuple[str, ...]
     key_topologies: tuple[str, ...]
+    file_layouts: tuple[str, ...]
     bakes: tuple[str, ...]
 
 
@@ -224,6 +226,10 @@ def _validate_dimensions(dims: object, *, where: str) -> DecodeDimensions:
                              known=KNOWN_KEY_TOPOLOGIES,
                              axis="key_topologies", where=where,
                              allow_empty=True),
+        file_layouts=_axis(dims.file_layouts,
+                           known=tuple(sorted(KNOWN_FILE_LAYOUTS)),
+                           axis="file_layouts", where=where,
+                           allow_empty=True),
         bakes=_axis(dims.bakes, known=KNOWN_BAKES, axis="bakes",
                     where=where, allow_empty=True),
     )

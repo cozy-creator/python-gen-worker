@@ -33,7 +33,7 @@ from ..net import hf, install_hf_http_timeouts
 from ..models.safetensors_header import header_len_ok
 from .classifier import RepoClassification, apply_source_include, classify_repo
 from .layout import detect_huggingface_source_layout
-from .file_layout import SINGLE_FILE
+from ..models.file_layout import SINGLE_FILE
 from huggingface_hub.errors import EntryNotFoundError, GatedRepoError, RepositoryNotFoundError, RevisionNotFoundError
 
 

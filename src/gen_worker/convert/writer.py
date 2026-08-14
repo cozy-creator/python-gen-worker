@@ -230,7 +230,7 @@ def _tensor_to_bytes(t: "torch.Tensor") -> Any:
 
 
 # ---------------------------------------------------------------------------
-from .file_layout import MULTI_FILE, SINGLE_FILE
+from ..models.file_layout import MULTI_FILE, SINGLE_FILE
 from ..component_vocab import (
     denoiser_components,
     text_encoder_components,

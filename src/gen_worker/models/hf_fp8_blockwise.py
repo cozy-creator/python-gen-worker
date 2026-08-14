@@ -46,6 +46,7 @@ from typing import Any, Dict, Optional, Tuple
 import msgspec
 
 from .safetensors_header import header_len_ok
+from .file_layout import MULTI_FILE, SINGLE_FILE
 from .tensor_layout_contract import (
     CONTRACT_HF_FP8_BLOCKWISE,
     ELEMENT_BF16,
@@ -356,6 +357,12 @@ def _hf_model_class(path: Path, cls: Any) -> Any:
         scales=(SCALE_BLOCK_128X128,),
         # transformers' own loader, so transformers' own key convention.
         key_topologies=(KEYS_TRANSFORMERS_SPLIT_QKV,),
+        # BOTH, because this axis is about the ARTIFACT and `classifier.py`
+        # stamps a transformers tree either way: a component subfolder of a
+        # pipeline is `multi-file`, a root transformers repo is `single-file`.
+        # `AutoModel.from_pretrained` reads both, and `inspect_hf_fp8_blockwise`
+        # refuses by name in either shape if the bytes disagree.
+        file_layouts=(MULTI_FILE, SINGLE_FILE),
         bakes=(),
     ),
     why="th#1803: transformers' FineGrainedFP8 reads this layout natively — "

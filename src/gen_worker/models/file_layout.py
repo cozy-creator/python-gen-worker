@@ -27,10 +27,18 @@ name on a layout value — a second collision on top of the first.  There are no
 aliases: tensorhub refuses a dead spelling at DECLARE with
 ``file_layout_unknown_token``, so this module is what keeps this repo's publishes
 speaking the language the hub accepts.
+
+It lives under ``models/`` rather than ``convert/`` (pgw#1252) because the LOAD
+side now reads it too: ``tensor_layout_contract`` declares a ``file_layouts``
+axis from these tokens. ``convert`` already imports ``models`` freely and the
+reverse is a hard cycle — measured, not assumed: ``convert/__init__`` reaches
+``api.slot`` and back into ``models``, so a ``models -> convert`` edge raises at
+import. One home, imported by both, and no copy in either.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Final, Literal
 
 #: A component-directory tree, read through a multi-component loader entry
@@ -79,11 +87,52 @@ def validate_file_layout(token: str) -> str:
     )
 
 
+def is_single_file_snapshot(path: Path) -> bool:
+    """The single-file SHAPE, from names alone.
+
+    The predicate half of ``loading._single_file_checkpoint``, split out of it
+    so the load-side observation and the loader's own routing decide from ONE
+    rule — and so the observation costs no shard reassembly.
+    """
+    if path.is_file():
+        return path.suffix == ".safetensors"
+    if not path.is_dir():
+        return False
+    if (path / "model_index.json").exists() or (path / "config.json").exists():
+        return False
+    singles = [p for p in path.glob("*.safetensors") if p.is_file()]
+    if len(singles) == 1:
+        return True
+    return bool(singles) and len(list(path.glob("*.safetensors.index.json"))) == 1
+
+
+def observed_file_layout(path: Path) -> str:
+    """The layout a tree ON DISK is in, or :data:`NOT_APPLICABLE`.
+
+    The same two shapes ``convert/classifier.py`` stamps at publish, read back
+    off the tree at load: a component-directory tree (``model_index.json`` /
+    ``config.json`` at the root of what is being read) is ``multi-file``;
+    a loose checkpoint is ``single-file``. Anything else states NOTHING rather
+    than guessing — an unclassifiable shape is not evaluated, which is the
+    tri-state's UNDECLARED rung and not a fail-open, since the contract handle
+    has already been checked by the time this is consulted.
+    """
+    p = Path(path)
+    if is_single_file_snapshot(p):
+        return SINGLE_FILE
+    if p.is_dir() and (
+            (p / "model_index.json").exists() or (p / "config.json").exists()):
+        return MULTI_FILE
+    return NOT_APPLICABLE
+
+
 __all__ = [
     "FileLayout",
     "KNOWN_FILE_LAYOUTS",
     "MULTI_FILE",
     "NOT_APPLICABLE",
     "SINGLE_FILE",
+    "is_single_file_snapshot",
+    "observed_file_layout",
     "validate_file_layout",
 ]

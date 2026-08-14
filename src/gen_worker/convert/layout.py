@@ -25,7 +25,7 @@ from pathlib import Path
 
 from .layout_spec import LayoutSignals, normalize_letters_digits
 from .registry import registered_layouts
-from .file_layout import MULTI_FILE, SINGLE_FILE
+from ..models.file_layout import MULTI_FILE, SINGLE_FILE
 
 _DEFAULT_SIGNALS = LayoutSignals()
 

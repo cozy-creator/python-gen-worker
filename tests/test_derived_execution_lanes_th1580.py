@@ -35,7 +35,7 @@ from gen_worker.models.tensor_layout_contract import (
 
 _DIMS = DecodeDimensions(
     elements=("bf16",), scales=("none",),
-    key_topologies=("diffusers.split-qkv@1",), bakes=())
+    key_topologies=("diffusers.split-qkv@1",), file_layouts=(), bakes=())
 
 _GOOD_A = '''
 from gen_worker.models.tensor_layout_contract import (
@@ -46,7 +46,7 @@ from gen_worker.models.tensor_layout_contract import (
     contract="nunchaku.v1@1", serves=("svdq-fp4-w4a4",), composes_lora=False,
     decodes=DecodeDimensions(
         elements=("nvfp4",), scales=("group_16",), key_topologies=(),
-        bakes=()),
+        file_layouts=(), bakes=()),
     why="fake svdq decoder",
 )
 def decode_svdq(tensors):
@@ -63,7 +63,7 @@ from gen_worker.models.tensor_layout_contract import (
     composes_lora=True,
     decodes=DecodeDimensions(
         elements=("fp8_e4m3",), scales=("per_channel_out",),
-        key_topologies=("diffusers.split-qkv@1",), bakes=()),
+        key_topologies=("diffusers.split-qkv@1",), file_layouts=(), bakes=()),
     why="fake fp8 decoder",
 )
 def decode_fp8(tensors):
@@ -84,7 +84,7 @@ from gen_worker.models.tensor_layout_contract import (
     composes_lora=False,
     decodes=DecodeDimensions(
         elements=("nvfp4",), scales=("per_tensor",), key_topologies=(),
-        bakes=()),
+        file_layouts=(), bakes=()),
     why="never reached",
 )
 def decode_nvfp4(tensors):
