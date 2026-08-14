@@ -20,8 +20,8 @@ kept registered as the measured alternative and the sm_100 seed, but is NOT
 the serving path on sm_120.
 
 Numerics vs the baseline lane: activation quantization is bit-identical by
-construction (same formulas, ``div_rn``, ties-up e2m1, same s2 — the arming
-self-check enforces it), and the GEMM is literally the same kernel; the
+construction (same formulas, ``div_rn``, ties-up e2m1, same s2), and the
+GEMM is literally the same kernel; the
 epilogue accumulates in fp32 with ONE final bf16 round where the baseline
 rounds at every op boundary. Divergence is quantified per shape on the parity
 harness, never assumed.
@@ -36,7 +36,6 @@ from typing import Any, Optional
 from .nvfp4_quant import BLOCK, E2M1_MAX, FP8_MAX, SCALE_MIN
 from .nvfp4_quant import blocked_scale_numel
 from .nvfp4_quant import cast_e2m1, pack_e2m1
-from .nvfp4_quant import quantize_activation_torch
 from .w4a4 import _gemm_w4a4
 
 logger = logging.getLogger(__name__)
@@ -50,8 +49,6 @@ _EPI_OP = "cozy_gen_worker::svdq_epilogue_lora"
 _K_ALIGN = 128
 _N_ALIGN = 16
 _RANK_ALIGN = 16
-
-_SELF_CHECK_PROBES = ((128, 512, 256), (77, 3072, 384))
 
 # Quantizer launch config per SM. Module level so scripts/svdq_bench/
 # tune_quant.py can sweep it per card instead of anyone editing source.
@@ -189,8 +186,8 @@ def _build_fused_ops() -> Optional[tuple[Any, Any, Any]]:
 
         Every value is read exactly once by an adjacent lane; the even/odd
         split the packer needs happens after the codes exist, as a register
-        reshape + split. Bit-identity with the strided kernel is enforced by
-        ``fused_self_check`` before the lane can arm."""
+        reshape + split. The correctness benchmark compares both layouts
+        directly."""
         row = tl.program_id(0)
         blk0 = tl.program_id(1) * BPP
         s2 = tl.load(s2_ptr)
@@ -472,14 +469,12 @@ def fused_ops() -> Optional[tuple[Any, Any, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Self-check — the arming gate the dispatch probe calls.
+# Correctness helpers shared with the benchmark.
 # ---------------------------------------------------------------------------
 
 
 def _reference_quant_flat(xs: Any, s2: Any) -> tuple[Any, Any]:
-    """The reference quantization chain with FLAT [M, K/16] scales (the fused
-    lane consumes plain scales; flat->blocked bijectivity is proven
-    separately)."""
+    """Reference quantization with flat ``[M, K/16]`` scales."""
     import torch
 
     in_f = int(xs.shape[1])
@@ -504,54 +499,6 @@ def _dyn_s2(x2: Any, smooth: Optional[Any]) -> Any:
     if smooth is not None:
         col = col / smooth
     return (col.abs().amax().float() / (E2M1_MAX * FP8_MAX)).clamp(min=1e-12)
-
-
-def fused_self_check() -> Optional[str]:
-    """Arm gate for the serving (hybrid) path: quantization BIT-IDENTICAL to
-    the reference chain in BOTH scale layouts, and the fused epilogue within
-    tolerance of its torch reference. Returns None when armed."""
-    import torch
-
-    ops = fused_ops()
-    if ops is None:
-        return "triton unavailable"
-    quant_op, _gemm_op, epi_op = ops
-
-    rank = 128
-    for m, k, n in _SELF_CHECK_PROBES:
-        torch.manual_seed(0)
-        x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
-        smooth = (torch.rand(k, device="cuda", dtype=torch.bfloat16) + 0.5)
-        up = torch.randn(n, rank, device="cuda", dtype=torch.bfloat16) * 0.02
-        bias = torch.randn(n, device="cuda", dtype=torch.bfloat16)
-        second = (torch.rand(n, device="cuda") + 0.1)
-
-        s2 = _dyn_s2(x, smooth)
-        xs_ref = x / smooth
-        want_q, want_s = _reference_quant_flat(xs_ref, s2)
-        got_q, got_s = quant_op(x, smooth, s2, False)
-        if not torch.equal(got_q, want_q):
-            bad = int((got_q != want_q).sum())
-            return (f"quant not bit-identical at {m}x{k} "
-                    f"({bad}/{want_q.numel()} bytes differ)")
-        if not torch.equal(got_s.view(torch.uint8),
-                           want_s.view(torch.uint8)):
-            return f"quant scales not bit-identical at {m}x{k}"
-        _bq, want_sb = quantize_activation_torch(xs_ref, s2)
-        got_qb, got_sb = quant_op(x, smooth, s2, True)
-        if not torch.equal(got_qb, want_q) or not torch.equal(
-                got_sb.view(torch.uint8), want_sb.view(torch.uint8)):
-            return f"blocked-scale quant not bit-identical at {m}x{k}"
-
-        y0 = torch.randn(m, n, device="cuda", dtype=torch.bfloat16)
-        la = torch.randn(m, rank, device="cuda", dtype=torch.bfloat16)
-        y = epi_op(y0, la, up, s2, second, bias)
-        ref = (y0.float() * (s2 * second).reshape(1, n)
-               + la.float() @ up.float().t() + bias.float())
-        rel = ((y.float() - ref).norm() / ref.norm().clamp(min=1e-9)).item()
-        if rel > 5e-3:
-            return f"fused epilogue rel err {rel:.4f} at {m}x{n}"
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -677,7 +624,6 @@ __all__ = [
     "SvdqFusedError",
     "build_svdq_fused_linear",
     "fused_ops",
-    "fused_self_check",
     "fused_shape_supported",
     "svdq_fused_linear_class",
 ]

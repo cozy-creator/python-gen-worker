@@ -149,15 +149,6 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
-def _fresh_boot_seal():
-    from gen_worker import env_seal
-
-    env_seal._BOOT_READBACK = None
-    yield
-    env_seal._BOOT_READBACK = None
-
-
-@pytest.fixture(autouse=True)
 def _fresh_boot_phases():
     """boot_phases is process-global and one-shot per boot; without a reset a
     second in-process boot records nothing (the pgw#797 suppression shape)."""
@@ -172,21 +163,9 @@ def _fresh_receipt_gate():
     process; every hub-double test walks a HelloAck, so clear it."""
     from gen_worker import receipts
 
-    receipts.reset()
+    receipts._reset_for_tests()
     yield
-    receipts.reset()
-
-
-@pytest.fixture(autouse=True)
-def _fresh_learned_aot_keys():
-    from gen_worker import aot_serve
-
-    with aot_serve._KNOWN_AOT_KEYS_LOCK:
-        before = set(aot_serve._KNOWN_AOT_KEYS)
-    yield
-    with aot_serve._KNOWN_AOT_KEYS_LOCK:
-        aot_serve._KNOWN_AOT_KEYS.clear()
-        aot_serve._KNOWN_AOT_KEYS.update(before)
+    receipts._reset_for_tests()
 
 
 @pytest.fixture(autouse=True)
@@ -196,10 +175,9 @@ def _fresh_cell_ledgers():
 
     def _clear() -> None:
         with _cc._PROVEN_CELLS_LOCK:
-            getattr(_cc, "_QUARANTINED_CELLS", set()).clear()
+            _cc._QUARANTINED_CELLS.clear()
         with _fc._PENDING_LOCK:
-            getattr(_fc, "_FINALIZED", {}).clear()
-        _cc._DELIVERED_SEEDED = False
+            _fc._FINALIZED.clear()
 
     _clear()
     yield

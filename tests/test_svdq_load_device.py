@@ -23,10 +23,7 @@ torch = pytest.importorskip("torch")
 
 from gen_worker.models import svdq_native as native          # noqa: E402
 from gen_worker.models.nvfp4_quant import BLOCK, cast_e2m1   # noqa: E402
-from gen_worker.models.svdq_awq import (                     # noqa: E402
-    decode_awq_linear,
-    encode_awq_linear,
-)
+from gen_worker.models.svdq_awq import decode_awq_linear     # noqa: E402
 from gen_worker.models.svdq_layout import (                  # noqa: E402
     convert_linear,
     decode_linear,
@@ -37,6 +34,7 @@ from gen_worker.models.svdq_layout import (                  # noqa: E402
     split_decoded,
     to_buffers,
 )
+from tests.harness.svdq_awq_encode import encode_awq_linear  # noqa: E402
 
 E2M1_MAX, FP8_MAX = 6.0, 448.0
 

@@ -184,19 +184,6 @@ def _fresh_report_sinks():
 
 
 @pytest.fixture(autouse=True)
-def _fresh_boot_seal():
-    """pgw#719 boot seal is process-lifetime in production (one boot, one
-    environment); tests legitimately vary global torch state per test, so
-    each test gets a fresh lazy boot — a mint in one test must never drift
-    against a boot seal adopted under another test's transient flags."""
-    from gen_worker import env_seal as _es
-
-    _es._BOOT_READBACK = None
-    yield
-    _es._BOOT_READBACK = None
-
-
-@pytest.fixture(autouse=True)
 def _boot_isa_clamp():
     """pgw#754's codegen clamp, imposed the way every real boot imposes it.
 

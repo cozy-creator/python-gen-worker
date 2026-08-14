@@ -13,7 +13,7 @@ artifact's geometry is additionally pinned in
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 
@@ -28,6 +28,11 @@ from gen_worker.models.svdq_awq import (  # noqa: E402
     unpack_w4x16,
 )
 from gen_worker.models.svdq_layout import SvdqLayoutError  # noqa: E402
+from tests.harness.svdq_awq_encode import (  # noqa: E402
+    apply_adanorm_splits,
+    encode_awq_linear,
+    pack_w4x16,
+)
 
 
 # --- UPSTREAM reference (verbatim; see module docstring) --------------------
@@ -271,13 +276,6 @@ def test_is_awq_linear_discriminates_on_wzeros() -> None:
 
 
 # --- pgw#755: the production forward encoders ------------------------------
-
-from gen_worker.models.svdq_awq import (  # noqa: E402
-    apply_adanorm_splits,
-    encode_awq_linear,
-    pack_w4x16,
-)
-
 
 @pytest.mark.parametrize("oc,ic", [(18432, 3072), (128, 64), (256, 192)])
 def test_pack_w4x16_matches_the_vendored_upstream_packer(oc: int, ic: int) -> None:

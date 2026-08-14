@@ -110,7 +110,6 @@ src/gen_worker/host_canary.py::MASTER_ADDR LIBRARY MASTER_ADDR, torch.distribute
 src/gen_worker/host_canary.py::MASTER_PORT LIBRARY MASTER_PORT, torch.distributed reads it at init.
 src/gen_worker/parallel/group.py::NCCL_NVLS_ENABLE LIBRARY reads the prior NCCL_NVLS_ENABLE only to REPORT that it is being overwritten.
 src/gen_worker/env_seal.py::$name LIBRARY scrub_env() ERASES the behaviour namespaces before torch imports. The one place §1.18 is already mechanically enforced in either repo - copy it, do not weaken it.
-src/gen_worker/env_seal.py::PYTHONHASHSEED LIBRARY PYTHONHASHSEED is a CPython interpreter fact the seal must record.
 src/gen_worker/models/native_kernels.py::GEN_WORKER_NATIVE_KERNELS_LIB LIBRARY GEN_WORKER_NATIVE_KERNELS_LIB, explicit .so path override for the loader.
 
 # ---------------------------------------------------------------------------

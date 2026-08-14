@@ -73,8 +73,6 @@ def test_impose_is_seal_visible(monkeypatch: pytest.MonkeyPatch) -> None:
     # The clamp reaches the sealed inductor-config digest surface...
     portable = inductor_config.save_config_portable()
     assert portable["cpp.march"] == march
-    # ...and the named seal facts.
-    assert env_seal.effective_config()["cpp_march"] == march
 
 
 def test_establish_wires_the_clamp(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -82,7 +80,6 @@ def test_establish_wires_the_clamp(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(inductor_config.cpp, "march", None)
     monkeypatch.setattr(inductor_config.cpp, "simdlen", None)
-    monkeypatch.setattr(env_seal, "_BOOT_READBACK", None)
     seal = env_seal.establish()
     # The clamp is a DECLARED inductor fact in the seal.
     assert seal["inductor"]["cpp.march"] == host_isa.mint_march()

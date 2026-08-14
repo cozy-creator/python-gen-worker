@@ -31,7 +31,6 @@ from harness.subprocess_runner import (
     startup_phase_lines,
 )
 
-from tests_v2 import catalog
 from tests_v2.conftest import manifest_entry, spawn_entrypoint, standalone_scheduler
 
 
@@ -154,12 +153,9 @@ def test_env_seal_imposes_canonical_config_and_refuses_drift(monkeypatch) -> Non
         with pytest.raises(sa.SettingsImpositionError, match="not_a_knob"):
             sa.impose_torch(overrides={"not_a_knob": "1"})
 
-        # Refusal 2: point-of-use drift refuses, naming the fact and both
-        # values — endpoint code mutating config behind our back is a named
-        # error, never a silently different graph.
+        # Ambient mutation cannot move the declared seal identity.
         torch.backends.cudnn.benchmark = True
-        with pytest.raises(env_seal.EnvSealError, match="cudnn_benchmark"):
-            env_seal.assert_seal_unchanged("tests_v2")
+        assert env_seal.seal_digest(env_seal.effective_seal()) == digest
     finally:
         precision, matmul_tf32, cudnn_tf32, benchmark = saved_flags
         torch.set_float32_matmul_precision(precision)
@@ -448,6 +444,6 @@ def test_torchless_declared_knob_refuses_by_name(torchless) -> None:
     with pytest.raises(sa.SettingsImpositionError, match="TORCHLESS"):
         sa.impose_torch(overrides={"cudnn_benchmark": "False"})
     # The torchless seal itself still stands: absence is a keyable fact.
-    cfg = env_seal.effective_config()
+    cfg = env_seal.effective_seal()["config"]
     assert cfg.get("torch") == "absent"
     assert "cuda_matmul_allow_tf32" not in cfg

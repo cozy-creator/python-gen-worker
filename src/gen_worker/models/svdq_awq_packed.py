@@ -32,7 +32,6 @@ import functools
 import logging
 from typing import Any, Optional
 from .svdq_awq import _scales_and_zeros, unpack_w4x16
-from .svdq_awq import decode_awq_linear, encode_awq_linear
 
 logger = logging.getLogger(__name__)
 
@@ -272,40 +271,11 @@ def build_awq_packed_linear(tensors: dict[str, Any], out_features: int,
     return mod
 
 
-def awq_packed_self_check() -> Optional[str]:
-    """Arm gate: packed module output vs the decoded bf16 Linear on random
-    layers (plain + adanorm-6). Returns None when armed."""
-    import torch
-
-    if awq_op() is None:
-        return "triton unavailable"
-    for oc, ic, splits in ((512, 256, 1), (768, 256, 6)):
-        torch.manual_seed(0)
-        w = torch.randn(oc, ic) * 0.05
-        b = torch.randn(oc)
-        tensors = encode_awq_linear(w, b, adanorm_splits=splits)
-        ref = decode_awq_linear(tensors, oc, ic, adanorm_splits=splits,
-                                device="cuda")
-        mod = build_awq_packed_linear(tensors, oc, ic,
-                                      adanorm_splits=splits, device="cuda")
-        x = torch.randn(3, ic, device="cuda", dtype=torch.bfloat16)
-        with torch.no_grad():
-            got = mod(x)
-            want = ref(x)
-        rel = ((got.float() - want.float()).norm()
-               / want.float().norm().clamp(min=1e-9)).item()
-        if rel > 5e-3:
-            return (f"awq packed rel err {rel:.4f} vs decoded Linear at "
-                    f"[{oc},{ic}] splits={splits}")
-    return None
-
-
 __all__ = [
     "AwqPackedError",
     "GROUP_SIZE",
     "awq_op",
     "awq_packed_linear_class",
-    "awq_packed_self_check",
     "awq_packed_supported",
     "build_awq_packed_linear",
 ]

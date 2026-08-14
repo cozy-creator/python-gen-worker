@@ -64,35 +64,21 @@ def _pinned_runtime(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         cc, "static_code_closure",
         lambda roots=(): (("gen_worker/compile_cache.py", "3" * 16),))
     monkeypatch.setattr(cc, "content_keys", lambda: ())
-    monkeypatch.setattr(env_seal, "_BOOT_READBACK", None)
     monkeypatch.setattr(env_seal, "_LIB_SNAPSHOT", None)
     yield
 
 
 def _phase(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str,
-    mapped: Tuple[Tuple[str, bytes], ...],
     disk: Tuple[Tuple[str, bytes], ...] = _COLD_LIBS + _WARM_EXTRA,
 ) -> None:
-    """Enter one process phase: `mapped` is what /proc/self/maps shows,
-    `disk` is what the python env ships. A fresh snapshot simulates a fresh
-    process freezing at this phase."""
+    """Enter one process phase with the supplied python-env disk content."""
     root = tmp_path / name
     root.mkdir()
-    lines = []
-    for i, (base, content) in enumerate(mapped):
-        target = root / base
-        target.write_bytes(content)
-        lines.append(
-            f"7f{i:010x}000-7f{i:010x}fff r-xp 00000000 08:01 {i + 1} {target}")
-    (root / "maps").write_text("\n".join(lines) + "\n")
     diskroot = root / "toolchain"
     diskroot.mkdir()
     for base, content in disk:
         (diskroot / base).write_bytes(content)
-    monkeypatch.setattr(env_seal, "_MAPS_PATH", root / "maps")
-    # raising=False: on the PRE-fix tree the override seam does not exist —
-    # the seal reads the mapped set and these tests fail RED, not error.
     monkeypatch.setattr(
         env_seal, "_TOOLCHAIN_LIB_DIRS_OVERRIDE", (diskroot,), raising=False)
     monkeypatch.setattr(env_seal, "_LIB_SNAPSHOT", None)
@@ -120,12 +106,12 @@ def test_cold_obligation_facts_equal_warm_facts(
     cfg = _cfg()
 
     # Cold phase — the obligation identity the arming policy computes.
-    _phase(monkeypatch, tmp_path, "cold", _COLD_LIBS)
+    _phase(monkeypatch, tmp_path, "cold")
     cold = fleet_cells.arm_identity("sdxl", "w8a8", 64, cfg)
     cold_seal = env_seal.seal_digest(env_seal.effective_seal())
 
     # Warm phase, fresh snapshot — the facts a compile-warm mint records.
-    _phase(monkeypatch, tmp_path, "warm", _COLD_LIBS + _WARM_EXTRA)
+    _phase(monkeypatch, tmp_path, "warm")
     warm = fleet_cells.arm_identity("sdxl", "w8a8", 64, cfg)
     warm_seal = env_seal.seal_digest(env_seal.effective_seal())
 
@@ -146,7 +132,7 @@ def test_artifact_manifest_records_disk_identity(
     """The metadata's per-library list is the DISK identity manifest (so a
     mismatch names the library), never the phase-dependent mapped set —
     and the host driver never appears in it."""
-    _phase(monkeypatch, tmp_path, "warm", _COLD_LIBS + _WARM_EXTRA)
+    _phase(monkeypatch, tmp_path, "warm")
     # read the manifest from its PRODUCER, `env_seal`, rather than
     # from `compile_cache.artifact_metadata`, which embedded it in a
     # `torch-inductor-cache` cell and is deleted with that format. `aot_mint`

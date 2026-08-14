@@ -264,24 +264,6 @@ def pipeline_arm_subject(pipe: Any) -> Tuple[SlotSubject, ...]:
         sub for sub in stamped if isinstance(sub, SlotSubject))
 
 
-def declared_envelope_block(cfg: Any) -> Dict[str, Any]:
-    """The DECLARED-envelope block for ``cfg`` — byte-for-byte the same
-    extraction :func:`aot_export_spec` performs (``shapes`` /
-    ``text_lens`` / ``guidance_scales``, no fallbacks: ``text_len`` was
-    dropped from the child handoff in pgw#1034), so the parent's pre-mint
-    envelope digest and the block the child records agree by construction.
-    GPU-gauntlet-proven: a fallback here that
-    the spec extraction does not share reds every handback as
-    ``envelope`` divergence."""
-    return {
-        "shapes": [
-            [int(v) for v in row] for row in (getattr(cfg, "shapes", ()) or ())],
-        "text_lens": [int(v) for v in (getattr(cfg, "text_lens", ()) or ())],
-        "guidance": [
-            float(v) for v in (getattr(cfg, "guidance_scales", ()) or ())],
-    }
-
-
 def arm_identity(
     family: str, weight_lane: str, lora_bucket: int, cfg: Any,
     subject: Iterable[SlotSubject] = (),
@@ -685,14 +667,6 @@ class PublishIntentBatch:
     repo: str
     family: str
     grants: Tuple[PublishGrant, ...]
-
-    def grant_for(self, compiled_graph_key: str) -> PublishGrant:
-        for g in self.grants:
-            if g.compiled_graph_key == compiled_graph_key:
-                return g
-        raise CellPublishRefused(
-            f"the intent batch names no answer for {compiled_graph_key}")
-
 
 class CellPublisher:
     """The fleet publish sink: intent -> commit flow -> complete.

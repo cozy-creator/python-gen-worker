@@ -535,13 +535,6 @@ def _event_bytes(event: mi.Materialization) -> int:
 # ---------------------------------------------------------------------------
 
 
-def is_structure_only(obj: Any) -> bool:
-    """Whether this module — or any component of this pipeline — is virtual."""
-    if getattr(obj, STAMP, False):
-        return True
-    return bool(structure_only_components(obj))
-
-
 def structure_only_components(pipe: Any) -> Tuple[str, ...]:
     """Names of the pipeline attributes that are structure-only modules."""
     out: List[str] = []
@@ -695,31 +688,6 @@ def assert_weight_free(pipe: Any, targets: Any, *, what: str = "") -> None:
             f"on {cls_name}{' for ' + what if what else ''} hold REAL "
             f"parameters totalling {total} bytes — "
             + "; ".join(b.sentence() for b in breaches)))
-
-
-def modules_of(pipe: Any) -> Tuple[Tuple[str, Any], ...]:
-    """``(attribute, module)`` for every structure-only component of ``pipe``."""
-    out: List[Tuple[str, Any]] = []
-    if getattr(pipe, STAMP, False):
-        return ((getattr(pipe, "__class__").__name__, pipe),)
-    for name, value in list(vars(pipe).items() if hasattr(pipe, "__dict__")
-                            else []):
-        if getattr(value, STAMP, False):
-            out.append((str(name).lstrip("_"), value))
-    return tuple(sorted(out, key=lambda row: row[0]))
-
-
-def facts_of(pipe: Any) -> Tuple[StructureFacts, ...]:
-    out: List[StructureFacts] = []
-    for value in list(vars(pipe).values() if hasattr(pipe, "__dict__") else []):
-        facts = getattr(value, FACTS_STAMP, None)
-        if isinstance(facts, StructureFacts):
-            out.append(facts)
-    if not out:
-        facts = getattr(pipe, FACTS_STAMP, None)
-        if isinstance(facts, StructureFacts):
-            out.append(facts)
-    return tuple(out)
 
 
 def fake_mode_of(obj: Any) -> Optional[Any]:
@@ -889,11 +857,8 @@ __all__ = [
     "assert_weight_free",
     "build_component",
     "compiling_under",
-    "facts_of",
     "fake_mode_of",
     "fake_mode_of_program",
-    "is_structure_only",
-    "modules_of",
     "program_shape_env",
     "refusal_token",
     "structure_only_components",

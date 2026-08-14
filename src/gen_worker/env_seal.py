@@ -25,21 +25,13 @@ namespaces wholesale and IMPOSES the declared configuration
   ``toolchain`` key axis, and everything else in the codegen surface is either
   declared (sealed) or erased. ``seal_v`` versions the dict, so new sealed
   facts change digest VALUES only, never the axis set.
-* :func:`assert_seal_unchanged` — the runtime TRIPWIRE, kept deliberately as
-  read-back where the seal itself no longer is: boot stores the live read-back
-  (posture, torch flags, dynamo facts, FULL portable inductor digest); every
-  mint trace re-reads and REFUSES on drift, naming the fact and both values.
-  Since boot verified read-back == declaration, any trip is also a declaration
-  mismatch, so ambient mutation becomes a named refusal, never a silently
-  different graph and never a different key. The per-call serving window is
-  covered by dynamo's GlobalStateGuard plus the guard-miss doctrine.
-
-The seal dict rides cell metadata verbatim (``artifact_metadata``) and is NOT
-a key axis: the declaration digest and the loaded-libs digest fold into the
+The seal dict rides compiled-graph metadata verbatim and is NOT a key axis:
+the declaration digest and the loaded-libs digest fold into the
 ``toolchain`` axis instead (``compile_cache.toolchain_digest`` — "the compiler
 as we configure it"), so a deliberate settings change re-keys through the axis
-it honestly belongs to, while the boot verify and the pre-trace tripwire here
-remain the GATES that make the fleet-wide single-declaration invariant true.
+it honestly belongs to. Compilation runs in a fresh dedicated child after
+``establish`` has imposed and verified this declaration; TCG folds the resulting
+toolchain axis into graph identity and checks it again at admission.
 """
 
 from __future__ import annotations
@@ -49,7 +41,6 @@ import hashlib
 import json
 import logging
 import os
-import sys
 import tempfile
 import time
 from pathlib import Path
@@ -57,7 +48,6 @@ from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Tuple
 
 from . import (
     boot_phases, dist_records, guard_closure, host_isa, settings_authority,
-    torch_capability,
 )
 import importlib.util
 
@@ -112,8 +102,7 @@ SCRUB_PREFIXES = (
 
 
 class EnvSealError(RuntimeError):
-    """The live settings drifted from the boot/declared state, or the host-ISA
-    clamp could not be imposed. Imposition failures raise
+    """The host-ISA clamp could not be imposed. Settings failures raise
     ``settings_authority.SettingsImpositionError``."""
 
 
@@ -137,57 +126,7 @@ def scrub_env() -> List[str]:
     return erased
 
 
-def effective_config() -> Dict[str, str]:
-    """The LIVE values of the sealed config surface — the TRIPWIRE's config
-    fact, never the seal's (the seal digests the declaration). The hash-seed
-    facts record what this interpreter actually booted with;
-    :func:`establish` refuses when they diverge from the declared
-    ``PYTHONHASHSEED=0`` (imposition is the entrypoint's re-exec —
-    ``settings_authority.ensure_interpreter_env``).
-
-    A torchless worker has no matmul/cudnn surface to read back, so it reads
-    the ABSENCE as a fact instead of crashing on the import."""
-    base = {
-        "python_hash_seed": os.environ.get("PYTHONHASHSEED", ""),
-        "hash_randomization": str(sys.flags.hash_randomization),
-        # The host codegen target, read back live so a drifted clamp is named
-        # legibly (beyond the opaque inductor digest below).
-        **host_isa.effective(),
-    }
-    return {**settings_authority.torch_readback(), **base}
-
-
-# Config entries torch MUTATES as a compile side effect — outputs, not knobs.
-# `torch._inductor.aot_compile` writes machine facts (AOTI_CPU_ISA,
-# AOTI_COMPUTE_CAPABILITY, ...) into the global `aot_inductor.metadata` and
-# `save_config_portable()` includes it, so without this exclusion a process
-# that has compiled digests differently from its own boot.
-_PORTABLE_VOLATILE = ("aot_inductor.metadata",)
-
-
-def inductor_config_digest() -> str:
-    """Digest of torch's PORTABLE inductor config — the codegen surface a
-    cell's kernels were minted under (machine-specific entries excluded by
-    torch itself, torch's own compile-side-effect entries excluded here).
-    ``"absent"`` on a torchless worker — a declared fact, so the seal digest
-    stays meaningful for CPU cells."""
-    if not torch_capability.present():
-        return torch_capability.ABSENT
-    import torch._inductor.config as inductor_config
-
-    portable = dict(inductor_config.save_config_portable())
-    for key in _PORTABLE_VOLATILE:
-        portable.pop(key, None)
-    encoded = json.dumps(
-        portable, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
-        default=str,
-    ).encode()
-    return hashlib.sha256(encoded).hexdigest()[:16]
-
-
-# Native libraries whose substitution changes compiled/served behavior:
-# what /proc/self/maps says is ACTUALLY loaded, not what any package
-# metadata claims — this closes the LD_PRELOAD/LD_LIBRARY_PATH hole.
+# Native userspace libraries whose content changes compiled behavior.
 _LIB_BASENAME_PREFIXES = (
     "libtorch", "libc10", "libcuda", "libcudart", "libcublas", "libcudnn",
     "libcufft", "libcusparse", "libcusolver", "libcupti", "libnvrtc",
@@ -207,10 +146,6 @@ _LIB_BASENAME_PREFIXES = (
 _DRIVER_LIB_BASENAME_PREFIXES = (
     "libcuda.so", "libcudadebugger", "libnvidia-", "libnvcuvid", "libnvoptix",
 )
-
-
-# Seam for tests: the loader map surface this process enumerates.
-_MAPS_PATH = Path("/proc/self/maps")
 
 
 @functools.lru_cache(maxsize=256)
@@ -353,44 +288,6 @@ def write_library_memo(path: Path) -> int:
     return len(digests)
 
 
-def loaded_library_digests() -> Tuple[Tuple[str, str], ...]:
-    """(basename, content digest) of every relevant native library the
-    LOADER actually mapped into this process (``/proc/self/maps``).
-    Deterministic: resolved real paths, sorted basenames. Empty off-Linux
-    (no maps surface — recorded as such).
-
-    Resolved through :func:`_identity_digest` like the manifest it is compared
-    against, so the comparison stays apples-to-apples and an LD_PRELOAD object
-    — which no RECORD covers — is HASHED and therefore named."""
-    maps = _MAPS_PATH
-    if not maps.is_file():
-        return ()
-    paths: Dict[str, str] = {}
-    try:
-        for line in maps.read_text().splitlines():
-            parts = line.split(None, 5)
-            if len(parts) < 6 or not parts[5].startswith("/"):
-                continue
-            file_path = parts[5]
-            base = os.path.basename(file_path)
-            if ".so" not in base or not base.startswith(_LIB_BASENAME_PREFIXES):
-                continue
-            if base.startswith(_DRIVER_LIB_BASENAME_PREFIXES):
-                continue  # host driver: recorded-only, never identity
-            paths[base] = os.path.realpath(file_path)
-    except OSError:
-        return ()
-    out: Dict[str, str] = {}
-    for base in sorted(paths):
-        try:
-            st = os.stat(paths[base])
-            out[base] = _identity_digest(
-                paths[base], st.st_mtime_ns, st.st_size)
-        except OSError:
-            out[base] = "<unreadable>"
-    return tuple(sorted(out.items()))
-
-
 # The IDENTITY manifest is enumerated from the python env ON DISK, never from
 # /proc/self/maps. The mapped set is a function of LOAD PHASE (torch preloads
 # cublas/cudnn at import; libtriton maps at first dynamo compile; libcuda at
@@ -398,10 +295,7 @@ def loaded_library_digests() -> Tuple[Tuple[str, str], ...]:
 # different consumers and cold-boot candidate keys can never match a published
 # key. Disk enumeration is phase-independent by construction, and host driver
 # objects can never appear in it (the driver is mounted from the host, not
-# shipped in the python env). The maps-based probe above remains the LIVE
-# integrity surface: assert_seal_unchanged compares what is actually mapped
-# against this manifest and refuses, naming the library, when an
-# LD_PRELOAD-style substitution diverges from the sealed disk content.
+# shipped in the python env).
 _TOOLCHAIN_LIB_PACKAGES = ("torch", "triton", "nvidia")
 
 # Test seam: when set, enumerate these directories instead of the resolved
@@ -428,16 +322,10 @@ def _toolchain_lib_dirs() -> Tuple[Path, ...]:
     return tuple(dirs)
 
 
-def _toolchain_lib_paths(
-    all_copies: bool = False,
-) -> Dict[str, List[str]]:
+def _toolchain_lib_paths() -> Dict[str, List[str]]:
     """{basename: [paths]} of every toolchain native lib the python env
-    ships. Identity uses the FIRST path per basename (sorted-root order,
-    deterministic); ``all_copies`` keeps every one — an env can ship the
-    same basename twice with different bytes (cu126: triton/backends and
-    nvidia/cuda_cupti both carry a ``libcupti.so.12``), and the live
-    substitution check must not read the env's own second copy as an
-    LD_PRELOAD."""
+    ships. Identity uses the FIRST path per basename in deterministic
+    sorted-root order; later same-name copies are aliases for identity."""
     paths: Dict[str, List[str]] = {}
     for root in _toolchain_lib_dirs():
         if not root.is_dir():
@@ -451,7 +339,7 @@ def _toolchain_lib_paths(
             if path.is_symlink() or not path.is_file():
                 continue  # digest real files once; alias links add nothing
             bucket = paths.setdefault(base, [])
-            if all_copies or not bucket:
+            if not bucket:
                 bucket.append(str(path))
     return paths
 
@@ -474,23 +362,6 @@ def toolchain_library_digests() -> Tuple[Tuple[str, str], ...]:
         except OSError:
             out[base] = "<unreadable>"
     return tuple(sorted(out.items()))
-
-
-def _shipped_digest_sets() -> Dict[str, Tuple[str, ...]]:
-    """EVERY digest the env ships per basename — the live substitution
-    check's reference set. Identity keeps the deterministic first copy; a
-    mapped lib matching ANY shipped copy is the env's own file, not an
-    LD_PRELOAD substitution."""
-    out: Dict[str, List[str]] = {}
-    for base, lib_paths in _toolchain_lib_paths(all_copies=True).items():
-        for lib_path in lib_paths:
-            try:
-                st = os.stat(lib_path)
-                out.setdefault(base, []).append(_identity_digest(
-                    lib_path, st.st_mtime_ns, st.st_size))
-            except OSError:
-                continue
-    return {base: tuple(v) for base, v in out.items()}
 
 
 # The identity manifest is FROZEN at first computation. The disk content is
@@ -579,9 +450,8 @@ def declaration_digest() -> str:
 def effective_seal() -> Dict[str, Any]:
     """The seal dict — a digest of the DECLARATION, recorded
     verbatim in cell metadata. Its settings facts come from
-    ``settings_authority.declaration()``; ambient mutation cannot move them
-    (it trips :func:`assert_seal_unchanged` instead). The one measured fact
-    is ``loaded_libs`` (:func:`loaded_libs_digest`).
+    ``settings_authority.declaration()``; ambient mutation cannot move them.
+    The one measured fact is ``loaded_libs`` (:func:`loaded_libs_digest`).
 
     The seal is NOT a key axis: its declaration and loaded-libs digests fold
     into the ``toolchain`` axis (``compile_cache.toolchain_digest``). This dict
@@ -606,80 +476,6 @@ def seal_digest(seal: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
-def settings_readback() -> Dict[str, Any]:
-    """The live settings state — the TRIPWIRE surface.
-
-    Deliberately read-back where :func:`effective_seal` no longer is: the
-    seal states the declaration; this states the process. The ``inductor``
-    fact is the digest of the FULL portable config (wheel defaults included,
-    torch-owned compile outputs excluded — ``_PORTABLE_VOLATILE``), so a
-    mutation of an entry the declaration never names is still caught and
-    refused by name, instead of silently forking the traced graph."""
-    return {
-        "posture": guard_closure.posture_snapshot(),
-        "config": effective_config(),
-        "dynamo": settings_authority.dynamo_readback(),
-        "inductor": inductor_config_digest(),
-    }
-
-
-# The boot read-back: stored by establish() AFTER read-back was
-# verified == declaration; every mint trace asserts the live state against
-# it before tracing.
-_BOOT_READBACK: Optional[Dict[str, Any]] = None
-
-
-def _seal_diff(boot: Mapping[str, Any], live: Mapping[str, Any]) -> List[str]:
-    out: List[str] = []
-    for fact in sorted(set(boot) | set(live)):
-        b, n = boot.get(fact), live.get(fact)
-        if isinstance(b, Mapping) and isinstance(n, Mapping):
-            for sub in sorted(set(b) | set(n)):
-                if b.get(sub) != n.get(sub):
-                    out.append(
-                        f"{fact}/{sub}: boot {b.get(sub)!r} != now {n.get(sub)!r}")
-        elif b != n:
-            out.append(f"{fact}: boot {b!r} != now {n!r}")
-    return out
-
-
-def assert_seal_unchanged(label: str = "") -> None:
-    """Point-of-use enforcement: the LIVE settings must still be
-    the BOOT settings — and boot verified those against the declaration, so
-    a trip is a declaration mismatch by transitivity. First call without an
-    established boot read-back adopts the current state as boot
-    (embedders/tests); any later drift refuses, naming the fact and both
-    values — code mutating config/env behind our back becomes a named error,
-    never a silently different graph, and NEVER a different key (the seal
-    derives from the declaration and cannot follow the drift). The
-    boot-frozen library snapshot is re-digested LIVE here: a substituted
-    native lib (LD_PRELOAD-style, post-boot) is named even though the seal
-    fact itself is frozen."""
-    global _BOOT_READBACK
-    live = settings_readback()
-    if _BOOT_READBACK is None:
-        _BOOT_READBACK = live
-        return
-    diffs = _seal_diff(_BOOT_READBACK, live)
-    snapshot = dict(frozen_library_digests())
-    if snapshot:
-        current = dict(loaded_library_digests())
-        shipped = _shipped_digest_sets()
-        for base in sorted(snapshot):
-            now = current.get(base)
-            if now is None or now == snapshot[base]:
-                continue
-            if now in shipped.get(base, ()):
-                continue  # the env's own alternate copy, not a substitution
-            diffs.append(
-                f"loaded lib {base}: boot {snapshot[base]} != now {now} "
-                "(native library substituted after boot)")
-    if diffs:
-        raise EnvSealError(
-            f"environment drifted since boot ({label or 'point-of-use'}): "
-            + "; ".join(diffs))
-
-
 #: What the LAST :func:`establish` call spent, per step. Telemetry only —
 #: nothing reads it to decide anything and no digest depends on it. It exists
 #: because ``establish()`` runs once per entry-compile CHILD, so on a 72-entry
@@ -694,8 +490,8 @@ LAST_ESTABLISH_SPANS: Dict[str, float] = {}
 def establish(overrides: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     """The boot entry (entrypoint wiring): SCRUB the behavior namespaces,
     IMPOSE the declaration (env, torch flags + declared knobs, dynamo shape
-    posture, host-ISA clamp, process posture), verify every read-back
-    against it, store the boot read-back for the tripwire, return the seal.
+    posture, host-ISA clamp, process posture), verify every read-back against
+    it, and return the seal.
     Never refuses on ambient env content — only on an imposition that does
     not take effect, an undeclared knob, or an interpreter that booted
     outside the declared env (``settings_authority.ensure_interpreter_env``
@@ -712,7 +508,7 @@ def establish(overrides: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
 
 
 def _establish(overrides: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
-    global _BOOT_READBACK, _ESTABLISHED_OVERRIDES
+    global _ESTABLISHED_OVERRIDES
 
     spans: Dict[str, float] = {}
     marks = [time.monotonic()]
@@ -741,7 +537,6 @@ def _establish(overrides: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     mark("seal_posture_s")
     cold_libs = _LIB_SNAPSHOT is None
     _ESTABLISHED_OVERRIDES = dict(overrides) if overrides else None
-    _BOOT_READBACK = settings_readback()
     seal = effective_seal()
     mark("seal_effective_s")
     # The library pass is timed where it runs (frozen_library_digests), not
@@ -764,16 +559,11 @@ __all__ = [
     "SEAL_KEY",
     "SEAL_LIB_MEMO_ENV",
     "SEAL_VERSION",
-    "assert_seal_unchanged",
     "digest_sources",
-    "effective_config",
     "effective_seal",
     "establish",
-    "inductor_config_digest",
     "frozen_library_digests",
-    "loaded_library_digests",
     "scrub_env",
     "seal_digest",
-    "settings_readback",
     "write_library_memo",
 ]

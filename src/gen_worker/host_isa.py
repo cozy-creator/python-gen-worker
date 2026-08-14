@@ -202,23 +202,9 @@ def impose() -> Dict[str, str]:
     return {"cpp_march": march, "cpp_simdlen": str(simdlen)}
 
 
-def effective() -> Dict[str, str]:
-    """Read-back of the live codegen target (seal fact; never assumed).
-    Empty on a torchless worker: no codegen target exists to read."""
-    if not torch_capability.present():
-        return {}
-    import torch._inductor.config as inductor_config
-
-    return {
-        "cpp_march": str(inductor_config.cpp.march or ""),
-        "cpp_simdlen": str(inductor_config.cpp.simdlen or ""),
-    }
-
-
 __all__ = [
     "BASELINE",
     "HostIsaError",
-    "effective",
     "host_flags",
     "host_level",
     "impose",

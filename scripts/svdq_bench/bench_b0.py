@@ -125,7 +125,8 @@ def run_correctness(args) -> int:
     from gen_worker.models.svdq import detect_svdq_artifact
     from gen_worker.models.svdq_fused import _dyn_s2, _reference_quant_flat
 
-    out_dir = Path(args.out); out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
     art = detect_svdq_artifact(Path(args.ckpt))
     assert art is not None
     assert native.svdq_native_available(), "blockwise must arm"
@@ -218,11 +219,10 @@ def run_correctness(args) -> int:
              > r["rel_base_vs_ref"] * 1.05 + 1e-6]
     report = {"device": torch.cuda.get_device_name(0),
               "units": rows, "quant_bit_identical_all": quant_bitident,
-              "fused_worse_than_base_vs_ref": [r["unit"] for r in worse],
-              "self_check": svdq_fused.fused_self_check()}
+              "fused_worse_than_base_vs_ref": [r["unit"] for r in worse]}
     (out_dir / "correctness.json").write_text(json.dumps(report, indent=1))
-    print(f"[corr] DONE bitident={quant_bitident} worse_units={len(worse)} "
-          f"self_check={report['self_check']}", flush=True)
+    print(f"[corr] DONE bitident={quant_bitident} worse_units={len(worse)}",
+          flush=True)
     return 0
 
 
@@ -233,7 +233,8 @@ def run_bench(args) -> int:
     from gen_worker.models import svdq_native as native
     from gen_worker.models.svdq import detect_svdq_artifact
 
-    out_dir = Path(args.out); out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
     execution_lane = nk.svdq_linear_execution_lane()
     report: dict = {"device": torch.cuda.get_device_name(0),
                     "torch": torch.__version__,

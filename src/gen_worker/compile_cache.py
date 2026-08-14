@@ -1004,8 +1004,8 @@ def toolchain_digest() -> Tuple[Tuple[str, str], ...]:
     evicted because their whole effect on a cell arrives through the traced
     graph, which the ``graph`` axis hashes node-for-node since pgw#1031 —
     see ``torch_compiled_graphs.identity`` for the channel-by-channel argument
-    and for the two fences (B1 code-only + the pgw#1097 folding fence;
-    ``env_seal.assert_seal_unchanged``) that close the routes around it.
+    and for the code-only and pgw#1097 folding fences that close the routes
+    around it.
     Folded here, every model-library patch release re-keyed every cell in
     the fleet for a graph that had not moved. TCG's
     ``identity.toolchain_axis_digest`` is the READER of the same membership,
@@ -1033,15 +1033,13 @@ def toolchain_digest() -> Tuple[Tuple[str, str], ...]:
       settings authority the declaration is one value fleet-wide, so as its
       own axis it carried zero bits — but a deliberate settings change must
       still re-key, and this is the axis that change honestly belongs to.
-      The seal's GATE roles (boot verify, pre-trace tripwire) live in
-      ``env_seal`` unchanged.
+      The dedicated compile child imposes and verifies this declaration before
+      tracing; TCG records the same axis and verifies it at admission.
     * ``loaded_libs`` — the boot-frozen per-file manifest of the native
       ``.so`` set the python env ships (pgw#719), which is what covers the
-      LD_PRELOAD/LD_LIBRARY_PATH substitution hole: it enumerates the FILES
-      rather than the packages, and pgw#1095 derives each digest from the
-      RECORD that installed the file while HASHING anything no RECORD
-      covers — a preloaded or non-wheel object is therefore still content,
-      not an assumption.
+      compiler binaries rather than only package versions. pgw#1095 derives
+      each digest from the RECORD that installed the file while HASHING
+      anything no RECORD covers.
     """
     out: Dict[str, str] = {
         "settings_declaration": env_seal.declaration_digest(),
@@ -2909,29 +2907,6 @@ def enable(pipeline: Any, cfg: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def resolve_pipeline_class(name: str) -> Any:
-    """Resolve a serving pipeline class name for a mint (gw#586).
-
-    The traced FX graphs depend on the pipeline's CALL path, not just the
-    module tree — an unknown name must refuse loudly, because a silent
-    generic-load fallback would trace the wrong call and publish a cell no
-    serving lookup can ever hit.
-    """
-    import diffusers
-
-    cleaned = str(name or "").strip()
-    if not cleaned:
-        raise RuntimeError("pipeline_class must be a non-empty class name")
-    cls = getattr(diffusers, cleaned, None)
-    if cls is None or not callable(getattr(cls, "from_pretrained", None)):
-        raise RuntimeError(
-            f"pipeline_class {cleaned!r} is not a loadable diffusers "
-            "pipeline class in this producer image; a generic-load fallback "
-            "would trace the wrong call path (gw#586), so the mint refuses"
-        )
-    return cls
-
-
 def emit_jit_compile_event(
     timings: Mapping[str, float],
     *,
@@ -3083,7 +3058,6 @@ __all__ = [
     "is_compile_armed",
     "execution_lane_bucket",
     "execution_lane_token",
-    "resolve_pipeline_class",
     "runtime_key",
     "record_cell_proven",
     "record_cell_quarantined",

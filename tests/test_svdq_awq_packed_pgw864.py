@@ -11,10 +11,8 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from gen_worker.models import svdq_awq_packed as pk  # noqa: E402
-from gen_worker.models.svdq_awq import (  # noqa: E402
-    decode_awq_linear,
-    encode_awq_linear,
-)
+from gen_worker.models.svdq_awq import decode_awq_linear  # noqa: E402
+from tests.harness.svdq_awq_encode import encode_awq_linear  # noqa: E402
 
 
 def _synth(oc: int, ic: int, splits: int, seed: int = 0):
@@ -68,8 +66,8 @@ def test_group_size_mismatch_refuses_typed() -> None:
     if pk.awq_op() is None:
         pytest.skip("triton unavailable")
     tensors, _w, _b = _synth(512, 256, 1)
-    from gen_worker.models.svdq_awq import encode_awq_linear as enc
-    t32 = enc(torch.randn(512, 256) * 0.05, torch.randn(512), group_size=32)
+    t32 = encode_awq_linear(
+        torch.randn(512, 256) * 0.05, torch.randn(512), group_size=32)
     with pytest.raises(pk.AwqPackedError):
         pk.build_awq_packed_linear(t32, 512, 256)
     assert not pk.awq_packed_supported(512, 200)  # ic % 128

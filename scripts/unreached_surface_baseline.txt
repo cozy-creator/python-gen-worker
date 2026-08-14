@@ -131,6 +131,10 @@
 #     aot_inputs.inputs_for / latent_dims — declaration-author surface; the
 #       callers are endpoint repos that vendor the wheel, like gen_worker.api.
 #     boot_phases.BootSpan.skipped — reached by an operator script only.
+#     discovery.heavy_deps._HeavyDepStubFinder.exec_module — invoked by
+#       importlib through the Loader protocol, not a direct Python call.
+#       OWNER: pgw#1232. EXPIRY: teach this lint to model importlib.abc.Loader
+#       hooks without exempting ordinary same-named methods.
 #     They stay listed rather than exempted: an exemption rule broad enough to
 #     clear them would also clear real hits.
 #
@@ -260,6 +264,7 @@ gen_worker.convert.source.Source.weights_size_bytes()
 gen_worker.convert.writer.fp8_te_components()
 gen_worker.convert.writer.streaming_cast_snapshot()
 gen_worker.convert.writer.streaming_w8a8_snapshot()
+gen_worker.discovery.heavy_deps._HeavyDepStubFinder.exec_module()
 gen_worker.families.base.family_registry()
 gen_worker.geometry.FamilyGeometry.assert_declared()
 gen_worker.input_assets.inputs_dir_for_request()

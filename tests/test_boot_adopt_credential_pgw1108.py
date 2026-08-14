@@ -78,8 +78,6 @@ def wired(monkeypatch, tmp_path):
     monkeypatch.setattr(executor_mod.aot_declaration, "cell_plans",
                         lambda decl: [object()])
     monkeypatch.setattr(executor_mod, "_mint_modules", lambda spec: ("m",))
-    monkeypatch.setattr(executor_mod.fleet_cells, "declared_envelope_block",
-                        lambda cfg: {})
     monkeypatch.setattr(executor_mod.boot_adopt, "attempt", _attempt)
 
     ex = _executor(tmp_path)

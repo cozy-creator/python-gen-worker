@@ -147,8 +147,7 @@ def main() -> int:
                 print(f"\n### correctness — quant bit-identical: "
                       f"{d.get('quant_bit_identical_all')}; units worse than "
                       f"baseline vs the fp32 reference: {len(bad)}/"
-                      f"{len(d.get('units', []))}; self_check="
-                      f"{d.get('self_check')}")
+                      f"{len(d.get('units', []))}")
             else:
                 print(f"\n### {title}: eager step "
                       f"{d.get('eager_step_ms', 0):.0f} ms, compiled step "

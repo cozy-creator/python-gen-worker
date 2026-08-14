@@ -109,11 +109,9 @@ def test_a_family_with_no_structure_only_path_still_has_a_target_to_mint(
     """
     pipeline, spec, decl = child.build_pipeline(_job(checkpoint, tmp_path))
 
-    # The fallback really is the path that ran: a weight-free composition
-    # stamps its facts on the pipeline, and this one carries none.
-    assert not structure_only.facts_of(pipeline), (
-        "this family has no structure-only path, so a composition that "
-        "reports structure-only facts is not the one under test")
+    # The fallback really is the path that ran: this composition carries no
+    # structure-only target.
+    assert not structure_only.structure_only_components(pipeline)
     params = list(pipeline.unet.parameters())
     assert params and not any(p.is_meta for p in params), (
         "the fallback composes REAL weights — a meta parameter here would "

@@ -1,11 +1,4 @@
-"""pgw#1049: the single settings authority — seal from DECLARATION.
-
-The headline RED-proof: replay the pgw#1042 mutation class (torch's own
-``aot_compile`` mutating global inductor config mid-process) on the real
-seal/mint seams and show the seal digest CANNOT move where seal-v3's
-read-back would have — ambient mutation now trips the pgw#719 tripwire (a
-named refusal) instead of moving identity.
-"""
+"""pgw#1049: the single settings authority — seal from DECLARATION."""
 
 from __future__ import annotations
 
@@ -28,82 +21,9 @@ REPO = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(autouse=True)
 def _fresh_boot(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setattr(env_seal, "_BOOT_READBACK", None)
     monkeypatch.setattr(env_seal, "_ESTABLISHED_OVERRIDES", None)
     yield
-    env_seal._BOOT_READBACK = None
     env_seal._ESTABLISHED_OVERRIDES = None
-
-
-@pytest.fixture()
-def _restore_inductor() -> Iterator[None]:
-    import torch._inductor.config as ic
-
-    max_autotune = ic.max_autotune
-    metadata = dict(ic.aot_inductor.metadata)
-    yield
-    ic.max_autotune = max_autotune
-    ic.aot_inductor.metadata = metadata
-
-
-# ---------------------------------------------------------------------------
-# The headline: ambient mutation cannot move the seal; the tripwire trips
-# ---------------------------------------------------------------------------
-
-
-def test_pgw1042_mutation_cannot_move_the_seal(_restore_inductor: None) -> None:
-    """The pgw#1042 replay, against v4: mutate global inductor config the way
-    a mid-mint library side effect does. Under seal v3 the READ-BACK digest
-    moved (that is how the child sealed a different identity than its own
-    boot); under v4 the seal digest is declaration-derived and CANNOT move —
-    the mutation surfaces as the pgw#719 tripwire's named refusal on the
-    mint seams instead."""
-    import torch._inductor.config as ic
-
-    env_seal.establish()
-    sealed = env_seal.seal_digest(env_seal.effective_seal())
-    readback_before = env_seal.inductor_config_digest()
-
-    # The mutation class: a global entry OUTSIDE _PORTABLE_VOLATILE (the
-    # pgw#1042 fix excluded exactly one entry; the DISEASE was never that
-    # one entry — this is the cure for the class).
-    ic.max_autotune = True
-
-    # v3's seal would have moved: the read-back digest demonstrably does.
-    assert env_seal.inductor_config_digest() != readback_before
-    # v4's seal did not: identity derives from the declaration.
-    assert env_seal.seal_digest(env_seal.effective_seal()) == sealed
-    # And the mint seams refuse by name — the JIT mint's pre-trace assert
-    # and aot_mint's (both call assert_seal_unchanged).
-    with pytest.raises(env_seal.EnvSealError, match="inductor"):
-        env_seal.assert_seal_unchanged("mint")
-
-
-def test_torch_owned_compile_output_is_not_drift(_restore_inductor: None) -> None:
-    """The OTHER half of pgw#1042: ``aot_compile`` legitimately writes
-    machine facts into ``aot_inductor.metadata``. That torch-owned output
-    must neither move the seal NOR trip the wire — a mint that has compiled
-    once must still be able to trace its next entry."""
-    import torch._inductor.config as ic
-
-    env_seal.establish()
-    sealed = env_seal.seal_digest(env_seal.effective_seal())
-    ic.aot_inductor.metadata["AOTI_CPU_ISA"] = "AVX2"  # what aot_compile does
-    assert env_seal.seal_digest(env_seal.effective_seal()) == sealed
-    env_seal.assert_seal_unchanged("post-compile")  # no refusal
-
-
-def test_backend_flag_mutation_trips_but_cannot_rekey() -> None:
-    env_seal.establish()
-    sealed = env_seal.seal_digest(env_seal.effective_seal())
-    before = torch.backends.cudnn.benchmark
-    try:
-        torch.backends.cudnn.benchmark = True
-        assert env_seal.seal_digest(env_seal.effective_seal()) == sealed
-        with pytest.raises(env_seal.EnvSealError, match="cudnn_benchmark"):
-            env_seal.assert_seal_unchanged("mint")
-    finally:
-        torch.backends.cudnn.benchmark = before
 
 
 # ---------------------------------------------------------------------------
@@ -123,13 +43,11 @@ def test_seal_v4_states_the_declaration() -> None:
 
 def test_declared_knob_moves_identity_by_declaration() -> None:
     base = env_seal.seal_digest(env_seal.establish())
-    env_seal._BOOT_READBACK = None
     try:
         knobbed = env_seal.establish(overrides={"cudnn_benchmark": "True"})
         assert knobbed["config"]["cudnn_benchmark"] == "True"
         assert env_seal.seal_digest(knobbed) != base
     finally:
-        env_seal._BOOT_READBACK = None
         env_seal.establish()
 
 
@@ -144,7 +62,10 @@ def test_dynamo_shape_posture_is_process_wide() -> None:
         lambda: (bool(torch._dynamo.config.automatic_dynamic_shapes),
                  bool(torch._dynamo.config.assume_static_by_default)))
     assert got == (False, True)
-    assert sa.dynamo_readback() == sa.DECLARED_DYNAMO
+    assert {
+        name: str(getattr(torch._dynamo.config, name))
+        for name in sa.DECLARED_DYNAMO
+    } == sa.DECLARED_DYNAMO
 
 
 # ---------------------------------------------------------------------------

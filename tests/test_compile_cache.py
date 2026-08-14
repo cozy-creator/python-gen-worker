@@ -610,24 +610,6 @@ def test_flavor_label_carries_weight_lane_gw534() -> None:
     assert execution_lane_token("") == "" and execution_lane_token("w8a8") == "w8a8"
 
 
-def test_resolve_pipeline_class_gw586() -> None:
-    """gw#586 call-path parity: a mint may name the SERVING pipeline class;
-    unknown names refuse loudly — a silent generic fallback would trace the
-    wrong call path and publish a cell no serving lookup can hit."""
-    from gen_worker.compile_cache import resolve_pipeline_class
-
-    cls = resolve_pipeline_class("DiffusionPipeline")
-    assert callable(getattr(cls, "from_pretrained", None))
-
-    with pytest.raises(RuntimeError, match="wrong call path"):
-        resolve_pipeline_class("NoSuchPipelineClass")
-    with pytest.raises(RuntimeError, match="non-empty"):
-        resolve_pipeline_class("   ")
-    # A diffusers attribute that is not a loadable pipeline class refuses too.
-    with pytest.raises(RuntimeError, match="wrong call path"):
-        resolve_pipeline_class("__version__")
-
-
 # ---------------------------------------------------------------------------
 # resident prep-mode drift (off <-> vae_only) converges to the cell
 # ---------------------------------------------------------------------------
@@ -756,4 +738,3 @@ def test_aot_autograd_cache_disabled_across_threads(monkeypatch, tmp_path):
 # live-directory census the sibling row now fences is the half a pod can still
 # reach: what the executor hands this function is an exported cell, which
 # carries no `inductor/` tree at all.
-

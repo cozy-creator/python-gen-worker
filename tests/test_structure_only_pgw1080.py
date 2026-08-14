@@ -198,9 +198,6 @@ def test_run_setup_composes_a_pipeline_whose_TARGETS_hold_no_weights(
         assert mi.is_virtual(param)
     for param in pipe.decoder.parameters():
         assert mi.is_virtual(param)
-    facts = so.facts_of(pipe)
-    assert len(facts) == 2
-    assert sum(f.virtual_param_bytes for f in facts) > 0
 
 
 def test_a_pipeline_that_IGNORES_the_injection_is_refused_not_trusted(

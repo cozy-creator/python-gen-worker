@@ -109,7 +109,7 @@ def derive_once(
     veh: Any, tree: Path, root: Path, *, workers: int, memo_dir: Optional[Path],
     label: str, trust_memo: bool = True,
 ) -> Any:
-    from gen_worker import boot_key, fleet_cells
+    from gen_worker import boot_key
 
     cfg = veh.compile_cell()
     work = root / f"work-{label}"
@@ -122,7 +122,6 @@ def derive_once(
         cfg=_spec(veh),
         slots=_slots(veh, tree),
         declared_hint=_declared_hint(str(cfg.family or "")),
-        envelope=fleet_cells.declared_envelope_block(cfg),
         work_root=work,
         memo_dir=memo_dir,
         workers=int(workers),

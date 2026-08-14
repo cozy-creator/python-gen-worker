@@ -57,8 +57,7 @@ def torchless(monkeypatch: pytest.MonkeyPatch):
 # ---------------------------------------------------------------------------
 
 
-def test_torchless_worker_completes_the_boot_seal(torchless, monkeypatch):
-    monkeypatch.setattr(env_seal, "_BOOT_READBACK", None, raising=False)
+def test_torchless_worker_completes_the_boot_seal(torchless):
     seal = env_seal.establish()
 
     assert seal["config"]["torch"] == torch_capability.ABSENT
@@ -66,24 +65,22 @@ def test_torchless_worker_completes_the_boot_seal(torchless, monkeypatch):
     # inductor block, same as a non-x86 host (absence rides `config`).
     assert seal["inductor"] == {}
     assert seal["posture"] == {"torch": torch_capability.ABSENT}
-    # A seal that states the absence is still a KEY: it digests, and the
-    # boot-vs-point-of-use check agrees with itself.
+    # A seal that states the absence is still a KEY: it digests.
     assert len(env_seal.seal_digest(seal)) == 16
-    env_seal.assert_seal_unchanged("pgw788")
 
 
 def test_torchless_config_carries_no_torch_flag_it_cannot_read(torchless):
-    cfg = env_seal.effective_config()
+    seal = env_seal.effective_seal()
+    cfg = seal["config"]
     for flag in ("float32_matmul_precision", "cuda_matmul_allow_tf32",
                  "cudnn_allow_tf32", "cudnn_benchmark"):
         assert flag not in cfg, f"{flag} cannot be read without torch"
-    # The interpreter-level facts are torch-free and must survive.
-    assert "python_hash_seed" in cfg and "hash_randomization" in cfg
+    # The interpreter declaration is torch-free and remains sealed.
+    assert seal["env"]["PYTHONHASHSEED"] == "0"
 
 
 def test_torchless_isa_clamp_and_posture_no_op(torchless):
     assert host_isa.impose() == {}
-    assert host_isa.effective() == {}
     assert guard_closure.establish_posture() == {
         "torch": torch_capability.ABSENT}
     assert guard_closure.posture_snapshot() == {
@@ -144,12 +141,11 @@ def test_torch_present_seal_shape_is_unchanged():
     torch = torch_capability.torch_or_none()
     if torch is None:
         pytest.skip("this leg asserts the torch-present shape")
-    cfg = env_seal.effective_config()
+    cfg = env_seal.effective_seal()["config"]
     assert "torch" not in cfg, (
         "a torch-present worker must seal exactly the pre-pgw#788 config keys — "
         "an extra key rewrites every cell key in the fleet")
     for flag in ("float32_matmul_precision", "cuda_matmul_allow_tf32",
                  "cudnn_allow_tf32", "cudnn_benchmark"):
         assert flag in cfg
-    assert env_seal.inductor_config_digest() != torch_capability.ABSENT
     assert guard_closure.posture_snapshot() == guard_closure.CANONICAL_POSTURE

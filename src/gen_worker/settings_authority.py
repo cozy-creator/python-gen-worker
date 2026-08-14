@@ -6,8 +6,6 @@ in this module's tables, imposed from here, and verified against the
 declaration. Cell identity (``env_seal``) derives from :func:`declaration` —
 the seal digests what WE declared, never a read-back of whatever the process
 happens to hold — so ambient mutation is structurally unable to move identity.
-It can only trip the drift tripwire (kept in ``env_seal`` as the runtime
-detector), which refuses typed before any trace runs under it.
 
 A read-back is a mirror; a declaration is an authority. Two failure modes make
 that concrete: torch's own ``aot_compile`` mutates global
@@ -247,7 +245,7 @@ def verify_interpreter_env() -> None:
 
 
 def torch_readback() -> Dict[str, str]:
-    """Live values of the :data:`DECLARED_TORCH` flags (tripwire surface)."""
+    """Live values of the declared torch flags for imposition checks."""
     torch = torch_capability.torch_or_none()
     if torch is None:
         return {"torch": torch_capability.ABSENT}
@@ -333,20 +331,6 @@ def read_in_fresh_thread(fn: Callable[[], Any]) -> Any:
     t.start()
     t.join()
     return box.get("v")
-
-
-def dynamo_readback() -> Dict[str, str]:
-    """Live values of the declared dynamo facts, read on THIS thread — the
-    mint/serve thread is exactly where a stray thread-local override would
-    sit, and a fresh thread would read the (imposed) default anyway."""
-    if not torch_capability.present():
-        return {"torch": torch_capability.ABSENT}
-    import torch._dynamo
-
-    return {
-        name: str(getattr(torch._dynamo.config, name))
-        for name in DECLARED_DYNAMO
-    }
 
 
 def impose_dynamo() -> Dict[str, str]:
@@ -448,7 +432,6 @@ __all__ = [
     "SettingsImpositionError",
     "declaration",
     "disable_autograd_cache",
-    "dynamo_readback",
     "ensure_interpreter_env",
     "impose_config_default",
     "impose_dynamo",
