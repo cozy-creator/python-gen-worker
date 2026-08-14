@@ -37,7 +37,7 @@ hub-side from the token claim, never from anything this module sends.
 cozy-local USES this module since pgw#1127, through ``local_serve``, with
 ``publisher=None`` — one arming brain, two sinks. What it never has is a
 PUBLISHER: user-controlled hardware is untrusted tier by definition, so its
-cells land in ``local_cell_store`` (``no_publish_sink_reason`` -> ``no_publish_sink``)
+cells land in ``compiled_graph_store`` (``no_publish_sink_reason`` -> ``no_publish_sink``)
 and its obligation ends at :func:`keep_self_mint_local`. That absence is
 pinned structurally by ``tests/test_local_serve_no_publisher_pgw1127.py``,
 not by this paragraph: before pgw#1127 the local CLI armed JIT through
@@ -72,7 +72,7 @@ from . import (
     artifact_meta,
     cell_key,
     env_seal,
-    local_cell_store,
+    compiled_graph_store,
     serve_posture,
 )
 from . import boot_phases as boot_mod
@@ -1292,9 +1292,9 @@ def _publish_async(
             # written to the local CAS before it armed, so an untrusted
             # machine's next boot finds it whatever the hub says, and th#1643's
             # SUNK case cannot recur through this path or any other.
-            local_cell_store.note_refusal(
+            compiled_graph_store.note_refusal(
                 str(getattr(exc, "code", "") or ""), str(exc))
-            _mark_publish(key, local_cell_store.SINK_REFUSED)
+            _mark_publish(key, compiled_graph_store.SINK_REFUSED)
             activity_mod.emit_event(
                 "self_mint_publish_failed",
                 f"family={family} key={key}: hub refused the publish: {exc}",
@@ -1323,7 +1323,7 @@ def _publish_async(
             )
         else:
             _note_durable(key, "published")
-            _mark_publish(key, local_cell_store.SINK_DELIVERED)
+            _mark_publish(key, compiled_graph_store.SINK_DELIVERED)
             activity_mod.emit_event(
                 "self_mint_publish",
                 f"family={family} key={key} checkpoint={checkpoint_id}: "
@@ -1348,7 +1348,7 @@ def _publish_async(
 def _mark_publish(key: str, state: str) -> None:
     """Record an upload's outcome beside the bytes it uploaded (pgw#1183)."""
     if cell_key.is_key(key):
-        local_cell_store.mark(key, sink=state)
+        compiled_graph_store.mark(key, sink=state)
 
 
 def resume_owed_publishes(
@@ -1370,15 +1370,16 @@ def resume_owed_publishes(
         return []
     threads: List[threading.Thread] = []
     in_flight = set(publishes_in_flight())
-    for cell in local_cell_store.cells_owed_to_sink():
+    for cell in compiled_graph_store.graphs_owed_to_sink():
         # The sink is rebuilt on every HelloAck, so this runs on reconnects
         # too. A key whose upload is already running is owed nothing more.
-        if cell.key in in_flight:
+        if cell.compiled_graph_key in in_flight:
             continue
         meta = artifact_meta.try_read_metadata(cell.artifact) or {}
         threads.append(_publish_async(
             publisher, cell.family or str(meta.get("family") or ""),
-            cell.artifact, dict(meta), cell_key_digest=cell.key,
+            cell.artifact, dict(meta),
+            cell_key_digest=cell.compiled_graph_key,
             arm_token=cell.arm_token))
     if threads:
         logger.info(
@@ -1698,6 +1699,11 @@ def arm_ordered(
         raise OrderedArmError(
             outcome.reason or "ordered_arm_refused",
             f"the named cell did not arm: {outcome.detail or outcome.identity}")
+    compiled_graph_store.mark(
+        want_key,
+        verdict=compiled_graph_store.VERDICT_ADMITTED,
+        root=cache_dir,
+    )
     return ArmOutcome(armed=True, adoptions=(row,))
 
 
@@ -2130,7 +2136,7 @@ def no_publish_sink_reason(publisher: Optional[CellPublisher]) -> str:
     """Why this machine cannot ship its cell, "" when it can.
 
     pgw#1183 RENAMED THIS AND SHRANK WHAT IT DECIDES. As ``local_keep_reason``
-    it gated ``local_cell_store.store`` — durability decided by a fact about
+    it gated ``compiled_graph_store.store`` — durability decided by a fact about
     the SINK, which is §1.5's inversion in one predicate: the pods that mint
     for the fleet are exactly the pods with a sink, so exactly they kept
     nothing. Storing is now unconditional and this answers only whether an
@@ -2144,7 +2150,7 @@ def no_publish_sink_reason(publisher: Optional[CellPublisher]) -> str:
 
     * :data:`KEEP_HUB_ASSERTED_UNTRUSTED` — the HUB refused a publish from this
       hardware (`cell_publish_untrusted_tier`; `cloudtier.PublishRefusal` on a
-      community/marketplace/unknown tier), recorded by `local_cell_store`. The
+      community/marketplace/unknown tier), recorded by `compiled_graph_store`. The
       community-cloud case, and the only one that is about trust at all.
     * :data:`KEEP_NO_PUBLISHER` — this process constructed no publisher. That
       is **cozy-local**, which never has one (`fleet_cells` docstring) and never
@@ -2161,7 +2167,7 @@ def no_publish_sink_reason(publisher: Optional[CellPublisher]) -> str:
     decision anything makes — §1.5 keeps them always. Whether to UPLOAD them
     still is, and it is this.
     """
-    if local_cell_store.keeps_cells_locally():
+    if compiled_graph_store.keeps_graphs_locally():
         return KEEP_HUB_ASSERTED_UNTRUSTED
     if publisher is None or not publisher.enabled():
         return KEEP_NO_PUBLISHER
@@ -2290,7 +2296,7 @@ def _sweep_superseded_memos_once() -> None:
         return
     _MEMO_SWEPT = True
     try:
-        local_cell_store.sweep_superseded_memos(ARM_SCHEME)
+        compiled_graph_store.sweep_superseded_memos(ARM_SCHEME)
     except Exception:  # noqa: BLE001 — a cache sweep is never fatal
         logger.debug("fleet-cells: memo sweep failed", exc_info=True)
 
@@ -2319,7 +2325,7 @@ def arm_from_local_store(
       the memo this machine's own mint wrote for that exact token. The fast
       path, and the only one before pgw#1127.
     * :data:`ROUTE_BOOT_KEY` — the ``ck1`` key §4.27's boot derivation produced
-      and ``local_cell_store`` answered on. This is what makes an arm-token
+      and ``compiled_graph_store`` answered on. This is what makes an arm-token
       SCHEME BUMP cost a trace instead of a mint: `sweep_superseded_memos`
       deletes the shortcut and leaves the CELLS under their own keys, so after
       the sweep the memo misses and the derived key still addresses the cell it
@@ -2336,13 +2342,13 @@ def arm_from_local_store(
     _sweep_superseded_memos_once()
     route = ROUTE_MEMO
     try:
-        local = local_cell_store.lookup_for_arm(arm_key.token)
+        local = compiled_graph_store.lookup_for_arm(arm_key.token)
         if local is None and boot_local_key:
             # The memo is a SHORTCUT, never an authority (§4.28) — so when it
             # has nothing to say, the address the boot derived is asked
             # directly. Same store, same key space, same gate below.
             route = ROUTE_BOOT_KEY
-            local = local_cell_store.lookup(boot_local_key)
+            local = compiled_graph_store.lookup(boot_local_key)
     except Exception as exc:  # noqa: BLE001 — a cache read must never be fatal
         logger.warning("fleet-cells: local cell store unreadable (%s)", exc)
         return None
@@ -2354,14 +2360,16 @@ def arm_from_local_store(
         dropped = route == ROUTE_MEMO
         logger.warning(
             "fleet-cells: the local store's cell for %s (key=%s, route=%s) did "
-            "not arm (%s%s); %s and minting", family, local.key, route, reason,
+            "not arm (%s%s); %s and minting", family,
+            local.compiled_graph_key, route, reason,
             f": {detail}" if detail else "",
             "dropping it" if dropped else "leaving it in place")
         if dropped:
-            local_cell_store.drop(local.key)
+            compiled_graph_store.drop(local.compiled_graph_key)
         activity_mod.emit_event(
             "local_cell_refused",
-            f"family={family} arm_key={arm_key.token} cell_key={local.key} "
+            f"family={family} arm_key={arm_key.token} "
+            f"compiled_graph_key={local.compiled_graph_key} "
             f"route={route}: this machine's own stored cell did not arm "
             f"({reason}{': ' + detail if detail else ''}); it has been "
             + ("dropped from the local store" if dropped else
@@ -2372,7 +2380,10 @@ def arm_from_local_store(
             phase=reason,
         )
         return None
-    key = str((meta or {}).get("cell_key") or "").strip() or local.key
+    key = (
+        str((meta or {}).get("compiled_graph_key") or "").strip()
+        or local.compiled_graph_key
+    )
     if route == ROUTE_BOOT_KEY:
         # The shortcut, REPAIRED. The cell just proved it arms under this arm
         # token, so the memo the sweep deleted (or that a re-keyed graph left
@@ -2380,7 +2391,8 @@ def arm_from_local_store(
         # mint. This is the whole cost argument for the derived-key route: with
         # it an arm-scheme bump costs one TRACE per family per machine; without
         # it, one MINT.
-        local_cell_store.note_memo(arm_key.token, local.key)
+        compiled_graph_store.note_memo(
+            arm_key.token, local.compiled_graph_key)
     # pgw#1152: the `note_aot_key(key)` that stood here is GONE, not moved. The
     # arm above already went through `aot_serve.load_and_wrap`, which registers
     # the key at the wrap (pgw#1141b) — this line was one of the two
@@ -2696,19 +2708,19 @@ def _stage_durable(pending: "PendingSelfMint", artifact: Path) -> str:
     if not key or not cell_key.is_key(key):
         return ""
     sink_absent = no_publish_sink_reason(pending.publisher)
-    stored = local_cell_store.store(
+    stored = compiled_graph_store.store(
         artifact, key=key, family=pending.family,
         arm_token=pending.arm_token,
-        verdict=local_cell_store.VERDICT_UNVERIFIED,
-        sink=(local_cell_store.SINK_NONE if sink_absent
-              else local_cell_store.SINK_OWED),
+        verdict=compiled_graph_store.VERDICT_UNVERIFIED,
+        sink=(compiled_graph_store.SINK_NONE if sink_absent
+              else compiled_graph_store.SINK_OWED),
     )
     if stored is None:
         # A local-store write failure is the one thing §1.5 cannot absorb
         # silently: the mint continues, but its ONLY copy is back under the
         # mint root. Wire-visible (§4.34's anti-silence rule), not a log line.
         activity_mod.emit_event(
-            "local_cell_store_failed",
+            "compiled_graph_store_failed",
             f"family={pending.family} arm_key={pending.arm_token} "
             f"cell_key={key}: the local CAS write FAILED, so this mint has no "
             f"durable copy and a crash before publish loses it",
@@ -2721,13 +2733,13 @@ def _stage_durable(pending: "PendingSelfMint", artifact: Path) -> str:
 def _quarantine_durable(key: str) -> None:
     """Keep a refused artifact addressable, and unservable (§1.3.4)."""
     if key:
-        local_cell_store.mark(
-            key, verdict=local_cell_store.VERDICT_QUARANTINED)
+        compiled_graph_store.mark(
+            key, verdict=compiled_graph_store.VERDICT_QUARANTINED)
 
 
 def _admit_durable(
     pending: "PendingSelfMint", key: str, staged_key: str,
-) -> Optional[local_cell_store.LocalCell]:
+) -> Optional[compiled_graph_store.LocalCompiledGraph]:
     """Promote a staged artifact to ADMITTED once its gate has passed.
 
     ``staged_key`` is what the pre-arm stamp read; ``key`` is what the armed
@@ -2738,17 +2750,17 @@ def _admit_durable(
     """
     if not key or staged_key != key:
         return None
-    local_cell_store.mark(key, verdict=local_cell_store.VERDICT_ADMITTED)
-    cell = local_cell_store.lookup(key)
+    compiled_graph_store.mark(key, verdict=compiled_graph_store.VERDICT_ADMITTED)
+    cell = compiled_graph_store.lookup(key)
     if cell is None:
         return None
     activity_mod.emit_event(
-        "local_cell_stored",
+        "compiled_graph_stored",
         f"family={pending.family} arm_key={pending.arm_token} "
         f"cell_key={key}: durable in this machine's local CAS before it "
         f"armed, and admitted now that it has (§1.5); every later boot of "
         f"this machine arms it from disk with no mint"
-        + ("" if cell.sink != local_cell_store.SINK_OWED
+        + ("" if cell.sink != compiled_graph_store.SINK_OWED
            else ", and the fleet upload is owed from these bytes"),
         phase=cell.sink,
     )

@@ -33,7 +33,7 @@ from . import activity as activity_mod
 from . import aot_compile_pool
 from . import compile_cache as cc
 from . import compile_posture, fleet_cells, handler_proof
-from . import local_cell_store, mint_supervisor
+from . import compiled_graph_store, mint_supervisor
 from .child_contract import MintFrame, MintSlot
 
 logger = logging.getLogger(__name__)
@@ -211,7 +211,7 @@ def compile_notice(
         1, posture.cpu_budget_cores(
             vcpus, headroom=aot_compile_pool.SERVING_HEADROOM_CPUS))
     workers = posture.entry_ceiling(aot_compile_pool.MAX_ENTRY_WORKERS)
-    root = store_root if store_root is not None else local_cell_store.store_root()
+    root = store_root if store_root is not None else compiled_graph_store.store_root()
     reserve = posture.rss_reserve_bytes(
         aot_compile_pool.ENTRY_RSS_RESERVE_BYTES) // 1024**3
     return (
@@ -286,7 +286,7 @@ def _mint_here(
     proof = handler_proof.provenance(mint.function)
     # §4.30: the ONE site in the tree that declares a user-machine posture. It
     # is stated here, never derived from `publisher is None` or from
-    # `local_cell_store.trust_class()` — both are facts about the SINK, and a
+    # `compiled_graph_store.trust_class()` — both are facts about the SINK, and a
     # community-cloud pod matches them while having no human on it.
     posture = compile_posture.USER_MACHINE
     _say(compile_notice(family, posture))
@@ -316,7 +316,7 @@ def _mint_here(
     if result is not None and result.ok:
         _say(
             f"compiled {family} in {watch.elapsed()} — kept at "
-            f"{local_cell_store.store_root()}; later runs arm from it.")
+            f"{compiled_graph_store.store_root()}; later runs arm from it.")
     else:
         _say(
             f"{family} is not compiled on this machine ({watch.elapsed()} "

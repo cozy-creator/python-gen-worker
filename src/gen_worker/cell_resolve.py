@@ -549,6 +549,8 @@ def materialize(
     from . import aot_delivery
 
     return aot_delivery.materialize_named_artifact(
+        cell.compiled_graph_key,
+        cell.family,
         cell.cell_ref,
         cell.content_digest,
         cell.transport,

@@ -29,7 +29,7 @@ from hashrepo import (
     download,
 )
 
-from . import boot_phases
+from . import boot_phases, compiled_graph_store
 from .api.errors import RetryableError
 from .models.cache_paths import open_worker_cas
 
@@ -44,6 +44,8 @@ class NamedArtifactUnavailable(RetryableError):
 
 
 def materialize_named_artifact(
+    compiled_graph_key: str,
+    family: str,
     cell_ref: str,
     content_digest: str,
     presigned: Optional[Any],
@@ -69,11 +71,13 @@ def materialize_named_artifact(
         artifact_key=str(content_digest or ""),
     ) if boot_phases.in_boot() else contextlib.nullcontext() as fetch_span:
         return _materialize_named_artifact(
-            cell_ref, content_digest, presigned,
+            compiled_graph_key, family, cell_ref, content_digest, presigned,
             cache_dir=cache_dir, what=what, span=fetch_span)
 
 
 def _materialize_named_artifact(
+    compiled_graph_key: str,
+    family: str,
     cell_ref: str,
     content_digest: str,
     presigned: Optional[Any],
@@ -88,7 +92,7 @@ def _materialize_named_artifact(
             "artifact_unpinned", f"{what}: named cell {cell_ref!r} carries no "
             "content digest")
     cas = open_worker_cas(cache_dir)
-    dest_dir = cas.root / "aot-cells"
+    dest_dir = cas.root / "aot-compiled-graphs" / ".incoming"
     dest = dest_dir / f"{digest.split(':', 1)[-1]}.tar.gz"
     try:
         expected = CASRef.parse(digest)
@@ -105,7 +109,20 @@ def _materialize_named_artifact(
             if span is not None:
                 span.classify("cached", f"ref={cell_ref}")
                 span.bytes_moved(dest.stat().st_size, boot_phases.SOURCE_LOCAL)
-            return dest
+            stored = compiled_graph_store.store(
+                dest,
+                key=compiled_graph_key,
+                family=family,
+                verdict=compiled_graph_store.VERDICT_UNVERIFIED,
+                root=cache_dir,
+            )
+            if stored is None:
+                raise NamedArtifactUnavailable(
+                    "artifact_admission_failed",
+                    f"{what}: cached bytes do not form the exact TCG artifact "
+                    f"for {compiled_graph_key}",
+                )
+            return stored.artifact
 
     if presigned is None or not list(getattr(presigned, "files", ())):
         raise NamedArtifactUnavailable(
@@ -171,7 +188,20 @@ def _materialize_named_artifact(
         span.classify("fetched", f"ref={cell_ref} chunks={len(remote_chunks)}")
         span.bytes_moved(declared_size or dest.stat().st_size,
                          boot_phases.SOURCE_CAS)
-    return dest
+    stored = compiled_graph_store.store(
+        dest,
+        key=compiled_graph_key,
+        family=family,
+        verdict=compiled_graph_store.VERDICT_UNVERIFIED,
+        root=cache_dir,
+    )
+    if stored is None:
+        raise NamedArtifactUnavailable(
+            "artifact_admission_failed",
+            f"{what}: fetched bytes do not form the exact TCG artifact for "
+            f"{compiled_graph_key}",
+        )
+    return stored.artifact
 
 
 __all__ = ["NamedArtifactUnavailable", "materialize_named_artifact"]

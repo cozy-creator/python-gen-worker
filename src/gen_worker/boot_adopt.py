@@ -6,7 +6,7 @@ pod:
 1. **Derive** the ``cg-key-v1`` key SET from code alone — ``boot_key.derive``,
    process-parallel structure-only traces, no weight resident anywhere. One key
    per graph class (pgw#1176), not one per pod.
-2. **Ask THIS MACHINE first** (pgw#1127 S2, §4.28) — ``local_cell_store.
+2. **Ask THIS MACHINE first** (pgw#1127 S2, §4.28) — ``compiled_graph_store.
    lookup(key)``. The derived key is the local store's own address, so an
    offline machine holding the exact cell it needs answers here and no hub is
    asked at all. ONE key, TWO lookup routes, the same CAS.
@@ -75,7 +75,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import (
     activity, aot_identity, artifact_meta, boot_key, cell_resolve,
-    local_cell_store,
+    compiled_graph_store,
 )
 from .child_contract import CompileSpec, MintSlot
 
@@ -335,7 +335,7 @@ def no_cell_source(hub_absent: str) -> bool:
 
     The honest form of the gate pgw#1127 §1b found. The old one asked *"is
     there a hub"* and refused on behalf of both answerers; this asks whether
-    EITHER exists. ``stored_cells`` is a listdir with no digest recomputation
+    EITHER exists. ``has_graphs`` is a listdir with no digest recomputation
     (pgw#1096), so the fleet path — whose store is always empty — pays exactly
     what the old early return paid, and the machines §4.28 is about stop being
     told there is nobody to ask when they are holding the answer.
@@ -343,7 +343,7 @@ def no_cell_source(hub_absent: str) -> bool:
     if not hub_absent:
         return False
     try:
-        return not local_cell_store.stored_cells()
+        return not compiled_graph_store.has_graphs()
     except Exception:  # noqa: BLE001 — an unreadable store is an absent one
         logger.debug("boot-adopt: local store unreadable", exc_info=True)
         return True
@@ -368,7 +368,7 @@ def _local_answer(
     derived-key hit is an inference about which pipe owns the bytes.
     """
     try:
-        cell = local_cell_store.lookup(key)
+        cell = compiled_graph_store.lookup(key)
     except Exception as exc:  # noqa: BLE001 — a cache read is never fatal
         logger.debug("boot-adopt: local store lookup failed", exc_info=True)
         logger.warning("boot-adopt: local store unreadable (%s)", exc)
