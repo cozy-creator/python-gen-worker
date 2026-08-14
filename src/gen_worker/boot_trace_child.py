@@ -173,15 +173,11 @@ def run(job: TraceJob) -> int:
 
     cfg = job.cfg
     paths = {name: slot.path for name, slot in job.slots.items()}
-    overrides = {
-        name: dict(slot.component_paths or {})
-        for name, slot in job.slots.items() if slot.component_paths}
 
     instance = chosen.cls()
     try:
         loaded = run_setup(
             instance, dict(paths), arm_compile=False, return_loaded=True,
-            component_paths=overrides,
             # pgw#1124: no serving placement, ever — see `off_host_tensors`.
             place=False,
             structure_only=tuple(cfg.targets)) or {}

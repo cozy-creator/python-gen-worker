@@ -519,7 +519,7 @@ class AdoptRig:
         spec = ex.specs["generate"]
         eff = ex._dispatched_spec(
             spec,
-            {"pipeline": dispatch_mod.SlotOrder(ref=MODEL_REF, components=())})
+            {"pipeline": dispatch_mod.SlotOrder(ref=MODEL_REF)})
         snaps: Dict[WireRef, pb.Snapshot] = {normalize_model_ref(MODEL_REF): pb.Snapshot(
             digest="d1" * 16,
             files=[pb.SnapshotFile(

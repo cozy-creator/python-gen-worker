@@ -46,7 +46,6 @@ from gen_worker.models.memory import HostRam
 from harness.modular_endpoint import (
     TinyModularPipeline,
     build_base_tree,
-    build_override_vae_tree,
 )
 
 _GIB = 1024 ** 3
@@ -82,18 +81,6 @@ def test_the_unit_of_staging_is_a_component_dir(tmp_path) -> None:
     # costs its config and nothing else.
     assert units["vae_ref"] < units["vae"]
     assert max(units.values()) < sum(units.values())
-
-
-def test_an_override_tree_replaces_the_base_unit(tmp_path) -> None:
-    """A pgw#617/th#980 override stages its OWN tree; the base dir it
-    replaces is never read, so it is not a unit."""
-    tree = build_base_tree(tmp_path / "base", fill=1.0)
-    override = build_override_vae_tree(tmp_path / "ovr", fill=2.0, subdir=True)
-    units = modular_staging_units(tree, {"vae": str(override)})
-
-    assert "vae" not in units
-    assert units["vae (override)"] == loading_mod.disk_gc.tree_bytes(
-        override / "vae")
 
 
 def test_a_tree_with_no_modular_index_yields_no_units(tmp_path) -> None:
@@ -200,14 +187,14 @@ def _sparse_h3_tree(root: Path) -> Path:
     return root
 
 
-async def _admit(spec, paths, *, component_paths=None):
+async def _admit(spec, paths):
     from gen_worker.executor import Executor
 
     async def _send(_msg: Any) -> None:
         return None
 
     ex = Executor([spec], _send)
-    await ex._ensure_host_ram_for(spec, paths, component_paths=component_paths)
+    await ex._ensure_host_ram_for(spec, paths)
 
 
 def _modular_spec():

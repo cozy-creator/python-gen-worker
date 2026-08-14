@@ -131,12 +131,7 @@ def _orders(run):
     from gen_worker import dispatch
 
     return {
-        b.slot: dispatch.SlotOrder(
-            ref=b.ref.strip(),
-            components=tuple(sorted(
-                (str(k).strip(), str(v).strip())
-                for k, v in b.components.items())),
-        )
+        b.slot: dispatch.SlotOrder(ref=b.ref.strip())
         for b in run.models if b.slot
     }
 
@@ -227,15 +222,8 @@ def test_warm_contract_key_splits_on_execution_lane_and_overrides_not_ref(
 
     # The flavor arm of this key is DELETED with the flavor axis
     # (§1.32(d)) — a per-request pick can no longer name a stored precision,
-    # so the key's remaining discriminators are the declared cast/dtype and
-    # the component overrides asserted below.
-
-    run = pb.RunJob(function_name="generate", models=[pb.ModelBinding(
-        slot="pipeline", ref="acme/sdxl-base",
-        components={"vae": "tensorhub/sdxl-vae-fp16-fix"},
-    )])
-    overridden = ex._dispatched_spec(ex.specs["generate"], _orders(run))
-    assert ex._warm_contract_key(overridden) != ex._warm_contract_key(base)
+    # and th#1941 deleted the component-override arm with the wire field that
+    # fed it. What remains is the declared cast/dtype.
 
 
 # ---------------------------------------------------------------------------
@@ -349,53 +337,6 @@ def test_composition_compute_dtype_inherits_base_not_override(
     assert composition_compute_dtype(fp8_base) == "bf16"
     # An fp32/undetectable base stays "" (caller falls back).
     assert composition_compute_dtype(fp32_base) == ""
-
-
-def test_load_component_override_prefers_composition_dtype(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from gen_worker.models import loading as loading_mod
-
-    base = tmp_path / "base"
-    base.mkdir()
-    (base / "model_index.json").write_text(json.dumps({
-        "_class_name": "FakePipe", "vae": ["fake_lib", "FakeVae"],
-    }))
-    _write_safetensors(base / "vae", "F8_E4M3")  # composition computes bf16
-    override = tmp_path / "override"
-    _write_safetensors(override, "F32")  # fp32-stored fp16-fix shape
-
-    seen: dict = {}
-
-    class FakeVae:
-        @classmethod
-        def from_pretrained(cls, path: str, **kwargs: Any) -> "FakeVae":
-            seen.update(kwargs)
-            return cls()
-
-    import types
-
-    fake_lib = types.ModuleType("fake_lib")
-    fake_lib.FakeVae = FakeVae  # type: ignore[attr-defined]
-    monkeypatch.setitem(__import__("sys").modules, "fake_lib", fake_lib)
-
-    captured: dict = {}
-
-    def _get_torch_dtype(name: str) -> str:
-        captured["wanted"] = name
-        raise ImportError("torch-less test rig")
-
-    monkeypatch.setattr(loading_mod, "get_torch_dtype", _get_torch_dtype)
-    loading_mod.load_component_override(base, "vae", override)
-    assert captured["wanted"] == "bf16", (
-        "override must inherit the base composition's compute dtype, "
-        "never its own on-disk fp32"
-    )
-
-
-# ---------------------------------------------------------------------------
-# ctx.adjustments: the public read side
-# ---------------------------------------------------------------------------
 
 
 def test_ctx_adjustments_is_public_and_immutable() -> None:

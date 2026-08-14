@@ -448,8 +448,8 @@ def toolchain_axis_digest(block: Mapping[str, Any]) -> str:
 class SlotSubject:
     """WHICH checkpoint one setup slot resolved to.
 
-    ``refs`` is the base wire ref plus every pgw#617 component-override ref,
-    in the order ``api.binding.binding_wire_refs`` produces them;
+    ``refs`` is the slot's wire ref (th#1941 left one ref per slot — a
+    composed manifest has no second ref to name);
     ``snapshot_digest`` is the materialized tree's content digest when the
     resolver stated one (it is "" for a slot resolved without one, which is a
     narrower statement, never a different subject).

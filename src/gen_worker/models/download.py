@@ -192,7 +192,6 @@ async def ensure_local(
     civitai_api_key: str = "",
     allow_patterns: Sequence[str] = (),
     components: Sequence[str] = (),
-    exclude_components: Sequence[str] = (),
     progress: Optional[ProgressFn] = None,
     fill_source_dir: Optional[Path] = None,
 ) -> Path:
@@ -221,15 +220,6 @@ async def ensure_local(
     (``models/provision.py::_fetch_tensorhub_snapshot``), which owns its own
     resolve+download+materialize loop end to end.
 
-    ``exclude_components`` IS applied to the snapshot branch, and the
-    paragraph above is exactly why it can be: the narrowed tree gets its OWN
-    directory key (``cozy_snapshot.snapshot_dir_key``), so it never occupies
-    the name reserved for the complete snapshot, and ``ensure_snapshot``
-    verifies it against the SAME filtered manifest it wrote. The executor's
-    cached-path verifier only ever sees a tree named with the bare digest,
-    i.e. a complete one — so the spurious corruption/quarantine loop that
-    blocks ``components`` here cannot occur.
-
     ``fill_source_dir``: an endpoint-scoped datacenter-warm CAS mount (RunPod
     volume) consulted before R2 on the tensorhub-snapshot branch only.
     ``None`` (the default, and always true for cozy-local / non-tensorhub
@@ -247,7 +237,6 @@ async def ensure_local(
             ref=_snapshot_ref(parsed, ref),
             resolved=snapshot,
             progress=progress,
-            exclude_components=tuple(exclude_components),
             fill_source_dir=fill_source_dir,
         )
 
@@ -385,7 +374,6 @@ def select_hf_files(repo_files: Sequence[str]) -> Optional[set[str]]:
 def select_component_paths(
     paths: Sequence[str],
     components: Sequence[str],
-    exclude: Sequence[str] = (),
 ) -> set[str]:
     """Narrow a repo file listing to declared pipeline COMPONENTS:
     every path under a ``<component>/`` subfolder, plus every root-level
@@ -396,31 +384,22 @@ def select_component_paths(
     the tensorhub CAS snapshot downloader (``cozy_snapshot.py``) — the ONE
     filter both sources apply.
 
-    ``exclude`` is the negative form: drop every path under the named
-    ``<component>/`` subfolders. It applies with or without ``components``
-    and is how a component OVERRIDE stops the base composition from
-    shipping the component the override replaces — the
-    worker loads the base with the override object passed to
-    ``from_pretrained``, so the base's own copy is downloaded and discarded
-    (~1.64 GB per SDXL text-encoder override). Root files are still kept:
-    ``model_index.json`` is what validates the override's component name.
+    Positive selection only: th#1941 deleted the negative ``exclude`` arm
+    with the override-on-base composition it compensated for. A hub-composed
+    manifest already IS the file list to fetch.
     """
     comps = {c.strip() for c in components if c and str(c).strip()}
-    drop = {c.strip() for c in exclude if c and str(c).strip()}
-    if not comps and not drop:
+    if not comps:
         return set(paths)
     keep: set[str] = set()
     for p in paths:
         if not p:
             continue
         if "/" not in p:
-            if not comps or p.lower().endswith(".json"):
+            if p.lower().endswith(".json"):
                 keep.add(p)
             continue
-        top = p.split("/", 1)[0]
-        if top in drop:
-            continue
-        if not comps or top in comps:
+        if p.split("/", 1)[0] in comps:
             keep.add(p)
     return keep
 

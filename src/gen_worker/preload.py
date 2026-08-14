@@ -54,9 +54,8 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 from . import activity as activity_mod
 from . import dispatch
 from .models.refs import WireRef
-from .api.binding import binding_wire_refs, component_overrides, wire_ref
+from .api.binding import wire_ref
 from .models import residency as residency_mod
-from .models.loading import ComponentSubstitutionError
 from .models.pinned_swap import prestage_module
 from pathlib import Path
 import functools
@@ -202,23 +201,6 @@ class Preloader:
                 did = await self._stage_instance(instance)
             except asyncio.CancelledError:
                 raise
-            except ComponentSubstitutionError as exc:
-                # Deterministic, not a failure to retry: the tree is
-                # materialized and the injection is known, so the next desired
-                # set carrying these same bytes has the same answer, and
-                # retrying is minutes of a paid pod spent on it.
-                self._refused.add(ident)
-                logger.error(
-                    "rotation preload REFUSED %s: %s", instance.function_name, exc)
-                activity_mod.emit_event(
-                    activity_mod.KIND_ROTATION_PRELOAD,
-                    f"fn={instance.function_name} "
-                    f"generation={self._generation}: stage REFUSED, terminal "
-                    f"for this dispatched identity (a refetch cannot satisfy "
-                    f"it): {type(exc).__name__}: {exc}",
-                    phase="stage_refused",
-                )
-                continue
             except Exception as exc:
                 self._failed.add(ident)
                 logger.warning(
@@ -263,31 +245,19 @@ class Preloader:
                 ref = pick[0]
             if not slot or not ref:
                 return None
-            orders[slot] = dispatch.SlotOrder(
-                ref=ref,
-                components=tuple(sorted(
-                    (str(k).strip(), str(v).strip())
-                    for k, v in m.components.items()
-                    if str(k).strip() and str(v).strip())),
-            )
+            orders[slot] = dispatch.SlotOrder(ref=ref)
         try:
             return ex._dispatched_spec(spec, orders)
         except Exception:
             return None
 
     def _instance_refs(self, effective: Any) -> Dict[WireRef, Any]:
-        """ref -> binding for every setup slot and component override."""
+        """ref -> binding for every setup slot."""
         ex = self._ex
         out: Dict[WireRef, Any] = {}
         for slot in ex._setup_slots(effective):
             binding = effective.models[slot]
-            for ref in binding_wire_refs(binding):
-                out.setdefault(ref, binding)
-            for _comp, comp_ref in component_overrides(binding):
-                try:
-                    out.setdefault(comp_ref, ex._hub_binding(comp_ref))
-                except ValueError:
-                    out.setdefault(comp_ref, None)
+            out.setdefault(wire_ref(binding), binding)
         return out
 
     def _fence_conflict(self, ref: WireRef) -> bool:
@@ -374,7 +344,7 @@ class Preloader:
         the component-first ruling by construction."""
 
         # CYCLE: models.loading is reached through executor, which imports preload.
-        from .models.loading import load_component_override
+        from .models.loading import load_component
 
         ex = self._ex
         res = ex.store.residency
@@ -402,11 +372,10 @@ class Preloader:
             if not digests:
                 continue
             sizes = ex.store.component_sizes(ref)
-            overridden = {c for c, _ in component_overrides(binding)}
             for comp, digest in sorted(digests.items()):
                 if self._stopped or self._ex.draining:
                     return staged_any
-                if not comp or not digest or comp in overridden:
+                if not comp or not digest:
                     continue
                 nbytes = sizes.get(comp, 0)
                 if nbytes < _MIN_STAGE_COMPONENT_BYTES:
@@ -425,7 +394,7 @@ class Preloader:
                     )
                     return staged_any
                 module = await self._in_stage_thread(
-                    load_component_override, local, comp, local, dtype=dtype,
+                    load_component, local, comp, dtype=dtype,
                 )
                 pinned = await self._in_stage_thread(prestage_module, module)
                 # Seed-then-release: the entry becomes an ordinary LRU RAM

@@ -163,7 +163,7 @@ def test_a_WRONG_divisor_refuses_before_the_export_is_paid_for() -> None:
 
 
 def test_the_refusal_blames_the_COMPOSITION_not_the_checkpoint() -> None:
-    """A `component_overrides` vae swap genuinely makes the declared latent
+    """A vae sourced from another release genuinely makes the declared latent
     extents wrong for that composition, so refusing is right — but the text
     must not send the next reader to the checkpoint's repo."""
     register_export_declaration(_decl(8))

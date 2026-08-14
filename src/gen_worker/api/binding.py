@@ -97,12 +97,6 @@ class ModelRef(msgspec.Struct, frozen=True):
     version: str = ""
     files: tuple[str, ...] = ()
     components: tuple[str, ...] = ()
-    # Hierarchical bindings (tensorhub only): sorted (component name,
-    # canonical ref) substitutions on the base composition — stamped from
-    # ModelBinding.components at dispatch, never declared by endpoint code.
-    # Part of the binding's identity: a component-only rebind derives a new
-    # instance/residency identity.
-    component_overrides: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         # msgspec.structs.force_setattr, NOT object.__setattr__: the latter
@@ -118,17 +112,8 @@ class ModelRef(msgspec.Struct, frozen=True):
         force(self, "version", _clean(self.version))
         force(self, "files", tuple(_clean(p) for p in self.files if _clean(p)))
         force(self, "components", tuple(_clean(p) for p in self.components if _clean(p)))
-        force(self, "component_overrides", tuple(sorted(
-            (_clean(k), _clean(v))
-            for k, v in self.component_overrides if _clean(k) and _clean(v)
-        )))
         force(self, "storage_dtype", _clean_storage_dtype(self.storage_dtype))
 
-        if self.component_overrides and self.source != "tensorhub":
-            raise ValueError(
-                "component_overrides= is tensorhub-only (pgw#617: refs are "
-                "tensorhub-CAS, mirror-first)"
-            )
         # THE FLAVOR SYSTEM IS DEAD. A `#` in ANY binding path is a weight
         # selector and refuses typed here, at the site the author wrote — never
         # as a hub 400 three layers away. Cell refs are not bindings and never
@@ -271,27 +256,6 @@ def wire_ref(binding: Binding) -> WireRef:
     return WireRef(binding.path)
 
 
-def component_overrides(binding: Binding) -> tuple[tuple[str, WireRef], ...]:
-    """The ``(component, canonical ref)`` substitutions ``binding`` carries
-, normalized and sorted by :class:`ModelRef` itself.
-
-    This and :func:`binding_wire_refs` live HERE, beside the field they read —
-    they answer "what does this binding resolve to", which is not an executor
-    internal. Every consumer names the SAME derivation, so placement semantics
-    cannot fork.
-
-    ``getattr`` so an externally-constructed stand-in is answered, not raised
-    at.
-    """
-    return tuple(getattr(binding, "component_overrides", ()) or ())
-
-
-def binding_wire_refs(binding: Binding) -> list[WireRef]:
-    """The base :func:`wire_ref` plus every component-override ref (pgw#617):
-    the full set of refs materializing this binding pins and downloads."""
-    return [wire_ref(binding), *(ref for _, ref in component_overrides(binding))]
-
-
 def rebind_pick(
     binding: Binding,
     *,
@@ -334,6 +298,5 @@ def rebind_pick(
 
 __all__ = [
     "Binding", "BINDING_TYPES", "Civitai", "HF", "Hub", "ModelRef",
-    "ModelScope", "STORAGE_DTYPES", "binding_wire_refs", "component_overrides",
-    "rebind_pick", "wire_ref",
+    "ModelScope", "STORAGE_DTYPES", "rebind_pick", "wire_ref",
 ]

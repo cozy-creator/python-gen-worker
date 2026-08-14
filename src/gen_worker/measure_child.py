@@ -611,9 +611,6 @@ def run(
                      partial=partial)
 
     paths = {name: slot.path for name, slot in job.slots.items()}
-    overrides = {
-        name: dict(slot.component_paths or {})
-        for name, slot in job.slots.items() if slot.component_paths}
     device_label = _device_label(job)
     refusal = ""
     refusal_token = ""
@@ -621,7 +618,7 @@ def run(
     def _load(structure: Sequence[str]) -> Dict[str, Any]:
         return run_setup(
             chosen.cls(), dict(paths), arm_compile=False, return_loaded=True,
-            component_paths=overrides, structure_only=tuple(structure)) or {}
+            structure_only=tuple(structure)) or {}
 
     try:
         try:

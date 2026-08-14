@@ -255,19 +255,15 @@ def test_both_siblings_are_bound_so_the_warm_plan_stays_class_scoped(
 def test_the_binding_crosses_the_wire_whole(
     served: Tuple[Path, ModelRef], tmp_path: Path,
 ) -> None:
-    """Identity, not just a path string: source, tag, flavor, storage dtype
-    and the pgw#617 component overrides all ride the same struct, so the
-    child cannot be handed a narrowed half of a resolution again."""
+    """Identity, not just a path string: source, tag and storage dtype all
+    ride the same struct, so the child cannot be handed a narrowed half of a
+    resolution again."""
     tree, binding = served
-    binding = msgspec.structs.replace(
-        binding, storage_dtype="fp8",
-        component_overrides=(("vae", "harness/override-vae:prod"),))
+    binding = msgspec.structs.replace(binding, storage_dtype="fp8")
     request = _request(tree, binding, tmp_path)
     assert request.slots["pipeline"].ref == binding
     _chosen, siblings = _child_specs(request)
     assert siblings[0].models["pipeline"].storage_dtype == "fp8"
-    assert siblings[0].models["pipeline"].component_overrides == (
-        ("vae", "harness/override-vae:prod"),)
 
 
 # ---------------------------------------------------------------------------

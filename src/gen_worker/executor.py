@@ -50,18 +50,16 @@ from . import worker_credential
 from . import worker_goals
 from .api.binding import (
     ModelRef,
-    binding_wire_refs,
-    component_overrides,
     wire_ref,
 )
 from .hubio.client import HubPublishError
 from .hub_error import HubApiError
 from . import cell_key
 from .child_contract import MintSlot, slot_subjects
+from .wire_snapshots import index_snapshots
 from .api.errors import (
     ArtifactTransferError,
     CanceledError,
-    ComponentSubstitutionError,
     EndpointSetupFailed,
     GpuSlotUnreachable,
     IllegalCombination,
@@ -455,15 +453,11 @@ def _exported_arm(pipeline: Any, ref: str = "") -> bool:
 
 
 def _alias_binding_matches(alias: "EndpointSpec", slot_key: str, ref: str) -> bool:
-    """Does ``alias`` hold this load-time binding fact? ``slot_key`` is a
-    slot name or ``<slot>.<component>`` override key (pgw#617)."""
-    base, _, comp = slot_key.partition(".")
-    binding = alias.models.get(base)
+    """Does ``alias`` hold this load-time binding fact?"""
+    binding = alias.models.get(slot_key)
     if binding is None:
         return False
-    if not comp:
-        return wire_ref(binding).strip() == ref
-    return (comp, ref) in component_overrides(binding)
+    return wire_ref(binding).strip() == ref
 
 
 def _map_exception(exc: BaseException) -> Tuple["pb.JobStatus", str]:
@@ -549,7 +543,7 @@ def _typed_setup_fault(
     * an exception that already maps to a non-FATAL status — a warm-phase OOM
       is still an OOM, and re-typing it would fatal a job a bigger card serves;
     * anything already a ``WorkerError`` — those carry their own origin claim
-      (``ModelSlotIdentityError``, ``ComponentSubstitutionError``, ... are
+      (``ModelSlotIdentityError``, ... are
       exactly the labels the hub routes on), and wrapping would erase it.
     """
     if phase not in _WORKER_OWNED_SETUP_PHASES:
@@ -3770,20 +3764,6 @@ class Executor:
         run_refs = {
             slot: so.ref for slot, so in slots.items() if slot and so.ref
         }
-        # pgw#617 hierarchical bindings: per-component substitutions ride the
-        # dispatch binding and become part of the derived spec's identity —
-        # a component-only rebind derives a NEW instance (reload), a flat
-        # binding (empty map) is byte-identical to the pre-#617 path.
-        run_comps: Dict[str, Dict[str, str]] = {}
-        for slot, so in slots.items():
-            if not so.components:
-                continue
-            if slot not in spec.slots:
-                logger.warning(
-                    "component substitutions on %s slot %r ignored: not a "
-                    "declared Slot", spec.name, slot)
-                continue
-            run_comps[slot] = dict(so.components)
         effective = dict(spec.models)
         for slot, decl in spec.slots.items():
             if decl.optional and not run_refs.get(slot, ""):
@@ -3796,20 +3776,7 @@ class Executor:
                 # the parameter's own default.
                 effective.pop(slot, None)
                 continue
-            binding = self._bound_slot(spec, slot, run_refs.get(slot, ""))
-            slot_comps = run_comps.get(slot) or {}
-            if slot_comps:
-                for comp, comp_ref in slot_comps.items():
-                    try:
-                        self._hub_binding(comp_ref)
-                    except ValueError:
-                        raise ComponentSubstitutionError(
-                            spec.name, slot, comp,
-                            detail=f"override ref {comp_ref!r} is not a "
-                                   "tensorhub-CAS ref") from None
-                binding = msgspec.structs.replace(
-                    binding, component_overrides=tuple(sorted(slot_comps.items())))
-            effective[slot] = binding
+            effective[slot] = self._bound_slot(spec, slot, run_refs.get(slot, ""))
         if effective == spec.models:
             return spec
         return dc_replace(spec, models=effective)
@@ -4188,16 +4155,7 @@ class Executor:
                 f"{sorted(spec.models)!r}); got {sorted(bindings)!r}"
             )
 
-        orders = {
-            m.slot: dispatch.SlotOrder(
-                ref=m.ref,
-                components=tuple(sorted(
-                    (str(k).strip(), str(v).strip())
-                    for k, v in m.components.items()
-                    if str(k).strip() and str(v).strip())),
-            )
-            for m in remapped
-        }
+        orders = {m.slot: dispatch.SlotOrder(ref=m.ref) for m in remapped}
         effective = self._dispatched_spec(spec, orders)
         mismatched = {
             slot: wire_ref(effective.models[slot])
@@ -4226,7 +4184,7 @@ class Executor:
         return list(dict.fromkeys(
             [
                 r for s in slots
-                for r in binding_wire_refs(spec.models[s])
+                for r in [wire_ref(spec.models[s])]
                 if r not in execution_lane_refs
             ]
             + shared_ids
@@ -4356,8 +4314,8 @@ class Executor:
         async with self._setup_singleflight(spec, rec) as intent_id:
             if rec.ready and not rec.stale:
                 setup_refs = [
-                    r for slot in self._setup_slots(spec)
-                    for r in binding_wire_refs(spec.models[slot])
+                    wire_ref(spec.models[slot])
+                    for slot in self._setup_slots(spec)
                 ]
                 for ref in setup_refs:
                     wanted = self.store.snapshot_digest(
@@ -4693,17 +4651,15 @@ class Executor:
     def _warm_contract_key(self, spec: EndpointSpec) -> Any:
         """The identity under which warm RUNS are shared across checkpoint
         instances (pgw#654 warm-tax fix): the class plus every per-slot fact
-        that selects graphs or kernels — precision lane (storage_dtype /
-        dtype) and component overrides — and NEVER the
-        checkpoint ref itself. Two fine-tunes of one family land on the same
-        key by construction; a lane rebind or a component substitution
-        derives a different one."""
+        that selects graphs or kernels — the precision lane (storage_dtype /
+        dtype) — and NEVER the checkpoint ref itself. Two fine-tunes of one
+        family land on the same key by construction; a lane rebind derives a
+        different one."""
         rows = tuple(
             (
                 slot,
                 getattr(b, "storage_dtype", "") or "",
                 getattr(b, "dtype", "") or "",
-                component_overrides(b),
             )
             for slot, b in sorted(spec.models.items())
         )
@@ -5154,7 +5110,7 @@ class Executor:
         gated: List[str] = []
         for name, spec in self.specs.items():
             bound = any(
-                ref in binding_wire_refs(binding)
+                ref == wire_ref(binding)
                 for slot, binding in spec.models.items()
                 if slot not in spec.slots
             )
@@ -5277,14 +5233,10 @@ class Executor:
             slot: wire_ref(spec.models[slot]) for slot in setup_slots
         }
         slot_identities: Dict[str, _ResidencyIdentity] = {}
-        # pgw#974: ONE resolution per slot — the binding, the tree its bytes
-        # were materialized into, and the pgw#617 component overrides that
-        # complete the composition. Written by a single statement per slot, so
-        # the three cannot drift apart or arrive without one another; the
-        # plain-path and plain-override views the local loaders take are
-        # DERIVED from it below, never maintained beside it.
+        # pgw#974: ONE resolution per slot — the binding and the tree its
+        # bytes were materialized into. Written by a single statement per
+        # slot, so the two cannot drift apart or arrive without one another.
         resolved_slots: Dict[str, MintSlot] = {}
-        override_digests: Dict[str, str] = {}
         self._intent_transition(
             intent_id,
             pb.LIFECYCLE_INTENT_STATUS_RUNNING,
@@ -5297,29 +5249,10 @@ class Executor:
             materialized = await self.store._materialize_local(
                 ref, snap, binding=binding)
             slot_identities[slot] = materialized.identity
-            comps: Dict[str, str] = {}
-            for comp, comp_ref in component_overrides(binding):
-                try:
-                    comp_binding = self._hub_binding(comp_ref)
-                except ValueError:
-                    raise ComponentSubstitutionError(
-                        spec.name, slot, comp,
-                        detail=f"override ref {comp_ref!r} is not a "
-                               "tensorhub-CAS ref") from None
-                comp_mat = await self.store._materialize_local(
-                    comp_ref, (snapshots or {}).get(comp_ref),
-                    binding=comp_binding)
-                comps[comp] = str(comp_mat.path)
-                if comp_mat.identity[0]:
-                    override_digests[comp_ref] = comp_mat.identity[0]
             resolved_slots[slot] = MintSlot(
-                ref=binding, path=str(materialized.path),
-                component_paths=comps)
+                ref=binding, path=str(materialized.path))
         paths: Dict[str, str] = {
             slot: res.path for slot, res in resolved_slots.items()}
-        component_paths: Dict[str, Dict[str, str]] = {
-            slot: dict(res.component_paths)
-            for slot, res in resolved_slots.items() if res.component_paths}
         topology_eager = self._eager_only_reason()
         # pgw#1142 / §4.32 item 4. The order joins the topology reason for
         # every "do not go looking for a cell" decision below — this is the
@@ -5456,48 +5389,22 @@ class Executor:
             # VRAM make-room may demote the old pipeline into host RAM. Admit
             # the incoming load only AFTER that transition so the probe sees
             # the actual post-demotion pressure (pgw#541).
-            await self._ensure_host_ram_for(
-                spec, paths, component_paths=component_paths)
+            await self._ensure_host_ram_for(spec, paths)
             instance = spec.cls()
             # Stamp provisional ownership BEFORE tenant setup/warmup. The
             # record is not advertised until rec.ready becomes true, but an
             # exception or cancellation can now tear down the exact instance
             # and exact resolved refs instead of losing them in stack locals.
             rec.instance = instance
-            rec.held_refs = sorted(
-                set(slot_refs.values()) | set(override_digests)
-                | {
-                    comp_ref
-                    for slot in setup_slots
-                    for _, comp_ref in component_overrides(spec.models[slot])
-                }
-            )
+            rec.held_refs = sorted(set(slot_refs.values()))
             rec.held_snapshot_digests = {
                 slot_refs[slot]: identity[0]
                 for slot, identity in slot_identities.items()
                 if slot in slot_refs and identity[0]
             }
-            rec.held_snapshot_digests.update(override_digests)
-            # Override triples key as "<slot>.<component>" — part of the
-            # composition's identity (compile-cell applicability, pgw#617).
             rec.held_bindings = sorted(
-                [
-                    (
-                        slot,
-                        ref,
-                        rec.held_snapshot_digests.get(ref, ""),
-                    )
-                    for slot, ref in slot_refs.items()
-                ]
-                + [
-                    (
-                        f"{slot}.{comp}",
-                        comp_ref,
-                        rec.held_snapshot_digests.get(comp_ref, ""),
-                    )
-                    for slot in setup_slots
-                    for comp, comp_ref in component_overrides(spec.models[slot])
-                ]
+                (slot, ref, rec.held_snapshot_digests.get(ref, ""))
+                for slot, ref in slot_refs.items()
             )
             setup = getattr(instance, "setup", None)
             inj = _InjectionResult(kwargs={}, loaded={})
@@ -5511,7 +5418,6 @@ class Executor:
                     compile_selection=compile_selection,
                     snapshots=snapshots,
                     slot_identities=slot_identities,
-                    component_paths=component_paths,
                     arm=arm, boot_local_key=boot_local_key)
                 rec.shared_keys.extend(inj.shared_keys)
                 # pgw#517: a self-loading (str/Path-slot) endpoint builds its
@@ -6860,7 +6766,6 @@ class Executor:
         self,
         spec: EndpointSpec,
         paths: Dict[str, str],
-        component_paths: Optional[Dict[str, Dict[str, str]]] = None,
     ) -> None:
         """Owner-aware host-RAM admission (gw#407/pgw#541). ``from_pretrained``
         stages the full weight set in host RAM before placement; loading into
@@ -6901,15 +6806,6 @@ class Executor:
         for slot, p in paths.items():
             if slot in slots:
                 slot_bytes = await asyncio.to_thread(disk_gc.tree_bytes, Path(p))
-                # pgw#1041: a pgw#617/th#980 component override stages its
-                # OWN materialized tree alongside the (narrowed) base — the
-                # slot's true staging requirement is their sum. ie#615:
-                # counting only the base under-admitted by the override's
-                # 27.6 GB.
-                comp_paths = dict((component_paths or {}).get(slot) or {})
-                for comp_path in comp_paths.values():
-                    slot_bytes += await asyncio.to_thread(
-                        disk_gc.tree_bytes, Path(comp_path))
                 ref = wire_ref(spec.models[slot])
                 if is_modular_pipeline_class(slots[slot]):
                     # pgw#1063: the discount below is the loader's promise
@@ -6922,7 +6818,6 @@ class Executor:
                     plan = await asyncio.to_thread(
                         functools.partial(
                             plan_streamed_hydration, Path(p),
-                            component_trees=comp_paths,
                             placement_mode=self._placement_mode(spec, ref)),
                     )
                     if plan.engaged:
@@ -7292,7 +7187,6 @@ class Executor:
         compile_selection: Optional[_CompileArtifactSelection] = None,
         snapshots: Optional[Dict[WireRef, pb.Snapshot]] = None,
         slot_identities: Optional[Dict[str, _ResidencyIdentity]] = None,
-        component_paths: Optional[Dict[str, Dict[str, str]]] = None,
         arm: Optional[_ArmOrder] = None,
         boot_local_key: str = "",
     ) -> "_InjectionResult":
@@ -7332,17 +7226,6 @@ class Executor:
         try:
             for slot, path in paths.items():
                 ann = hints.get(slot)
-                overrides = dict((component_paths or {}).get(slot) or {})
-                if overrides and not (
-                    isinstance(ann, type)
-                    and callable(getattr(ann, "from_pretrained", None))
-                ):
-                    # pgw#617: substitution requires a worker-loaded pipeline
-                    # slot; a self-loading str/Path slot never sees components.
-                    raise ComponentSubstitutionError(
-                        spec.name, slot, sorted(overrides)[0],
-                        detail="slot is not worker-loaded (no pipeline-class "
-                               "annotation); components cannot substitute")
                 if ann is None or ann is str:
                     kwargs[slot] = path
                 elif ann is Path:
@@ -7367,42 +7250,6 @@ class Executor:
                         slot_share = {}
                     res = self.store.residency
                     injected: Dict[str, Any] = {}
-                    override_trees: Dict[str, str] = {}
-                    if overrides:
-                        # pgw#617 load-then-substitute: each override component
-                        # loads from its OWN materialized tree and rides the
-                        # same from_pretrained components= injection as gw#479
-                        # shared modules. Unknown names refuse typed at setup.
-                        # pgw#1036: a MODULAR slot's overrides ride the
-                        # hydration guard's spec routing instead — the
-                        # components= kwarg is what ModularPipeline.__init__
-                        # silently discards.
-                        valid = self._model_index_components(path)
-                        unknown = sorted(set(overrides) - valid)
-                        if unknown:
-                            raise ComponentSubstitutionError(
-                                spec.name, slot, unknown[0],
-                                detail=f"base composition {ref!r} declares "
-                                       f"components {sorted(valid)}")
-                        for comp in overrides:
-                            # An overridden component never rides the shared
-                            # cache: its bytes differ from the base's.
-                            slot_share.pop(comp, None)
-                        from .models.loading import (
-                            is_modular_pipeline_class,
-                            load_component_override,
-                        )
-
-                        if is_modular_pipeline_class(ann):
-                            override_trees = {
-                                comp: str(p) for comp, p in overrides.items()}
-                        else:
-                            for comp, comp_path in sorted(overrides.items()):
-                                injected[comp] = await _to_thread_complete(
-                                    load_component_override, path, comp,
-                                    comp_path,
-                                    dtype=str(
-                                        getattr(binding, "dtype", "") or ""))
                     if slot_share:
                         valid = self._model_index_components(path)
                         for comp, key in list(slot_share.items()):
@@ -7428,7 +7275,6 @@ class Executor:
                         sl = await _to_thread_complete(
                             provision.load_slot, ann, path, binding=binding,
                             slot=slot, ref=ref, mode=mode, components=injected,
-                            component_trees=override_trees or None,
                             force_storage_dtype=(
                                 "fp8" if slot in force_fp8_slots else ""),
                         )
@@ -7453,7 +7299,6 @@ class Executor:
                         sl = await _to_thread_complete(
                             provision.load_slot, ann, path, binding=binding,
                             slot=slot, ref=ref, mode=mode, components=injected,
-                            component_trees=override_trees or None,
                             force_storage_dtype=(
                                 "fp8" if slot in force_fp8_slots else ""),
                         )
@@ -7538,7 +7383,7 @@ class Executor:
                         # one pending, one child and one memo row.
                         if binding is not None:
                             fleet_cells.stamp_arm_subject(
-                                pipe, slot, binding_wire_refs(binding),
+                                pipe, slot, [wire_ref(binding)],
                                 (slot_identities or {}).get(slot, ("", 0))[0],
                             )
                         exec_execution_lane, lane_pinned = (
@@ -8962,13 +8807,8 @@ class Executor:
         for b in run.models:
             if not b.slot:
                 continue
-            comps = tuple(sorted(
-                (str(k).strip(), str(v).strip())
-                for k, v in b.components.items()
-                if str(k).strip() and str(v).strip()))
             slots[b.slot] = dispatch.SlotOrder(
                 ref=str(b.ref or "").strip(),
-                components=comps,
                 inference_defaults=str(b.inference_defaults or ""),
                 objective=str(b.objective or ""),
                 distilled=bool(b.distilled),
@@ -9009,7 +8849,7 @@ class Executor:
             group=group,
             slots=slots,
             adapters=adapters,
-            snapshots=dict(run.snapshots) if run.snapshots else {},
+            snapshots=index_snapshots(run.snapshots, run.models),
             input_manifest=manifest_from_run_job(run.input_assets),
             # Positional call through the LIVE method (tests and tooling
             # observe/replace `_validate_required_compile` by name).

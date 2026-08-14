@@ -383,7 +383,6 @@ def mint_context(
 def slot_map(
     paths: Mapping[str, str],
     bindings: Mapping[str, Any],
-    component_paths: Optional[Mapping[str, Mapping[str, str]]] = None,
 ) -> Dict[str, MintSlot]:
     """The parent's resolution of every setup slot, as the child reads it.
 
@@ -397,10 +396,7 @@ def slot_map(
         binding = bindings.get(slot)
         if binding is None or not str(path or ""):
             continue
-        out[slot] = MintSlot(
-            ref=binding, path=str(path),
-            component_paths=dict((component_paths or {}).get(slot) or {}),
-        )
+        out[slot] = MintSlot(ref=binding, path=str(path))
     return out
 
 

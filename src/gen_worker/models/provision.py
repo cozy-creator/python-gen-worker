@@ -112,7 +112,6 @@ def load_slot(
     ref: str = "",
     mode: str = "auto",
     components: Optional[Dict[str, Any]] = None,
-    component_trees: Optional[Dict[str, str]] = None,
     device: str = "",
     place: bool = True,
     force_storage_dtype: str = "",
@@ -180,8 +179,6 @@ def load_slot(
     # load (hydration AND placement). The counter feeds the existing 10s
     # activity beat; the breadcrumb names the phase a SIGKILL lands in.
     staged_total = disk_gc.tree_bytes(Path(path))
-    for tree in (component_trees or {}).values():
-        staged_total += disk_gc.tree_bytes(Path(tree))
     # `clean=True` even on a raise: a Python-level failure reports itself, so
     # the breadcrumb clears. Only a kernel kill skips the finally — exactly
     # the death the surviving breadcrumb is for.
@@ -191,7 +188,6 @@ def load_slot(
         pipe = load_from_pretrained(
             annotation, path, dtype=dtype, storage_dtype=storage_dtype,
             components=components or None,
-            component_trees=component_trees or None,
             ref=ref,
             # pgw#1063: the loader's own host-RAM decisions depend on where
             # this pipeline will END UP. `place_pipeline(mode=...)` below is

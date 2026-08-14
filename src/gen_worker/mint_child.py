@@ -208,39 +208,6 @@ def mint_identity(request: MintRequest) -> str:
         f"mint family={request.family!r} arm_key={request.arm_token!r} "
         f"lane={request.execution_lane or '(unset)'!r} "
         f"fn={request.function!r}")
-
-
-def assert_composable(resolved: Mapping[str, MintSlot]) -> None:
-    """pgw#816: refuse a request that describes a tree this child cannot load.
-
-    A materialized snapshot path is not self-describing except in one
-    direction: ``snapshot_dir_key`` stamps ``__x`` on a tree fetched with an
-    overridden component EXCLUDED (th#1330 B2). Handed such a path and no
-    override for it, diffusers walks into the absent subfolder and reports
-    ``no file named config.json found in directory <the tree's ROOT>`` — which
-    names neither the component nor the cause, and cost the first delegated
-    mint in production two attempts to say nothing.
-
-    So the wiring gap is caught HERE, before a single weight is read, as a
-    named REFUSAL: deterministic, terminal, and it points at the parent that
-    built the request rather than at the loader that tripped over it.
-    """
-    from .models.cozy_snapshot import dir_key_excludes_components
-
-    bad = sorted(
-        slot for slot, res in resolved.items()
-        if dir_key_excludes_components(res.path) and not res.component_paths
-    )
-    if not bad:
-        return
-    raise PreflightRefused(
-        f"slot(s) {bad} were materialized as override-narrowed trees "
-        f"(the overridden component's files were excluded from the fetch) "
-        f"but this request carries no component override for them, so the "
-        f"composition cannot be rebuilt: "
-        + "; ".join(f"{slot}={resolved[slot].path}" for slot in bad))
-
-
 def _drive_warm_plan(
     instance: Any, jobs: Sequence[Any], request: MintRequest, *,
     proof_only: bool = False,
@@ -625,14 +592,6 @@ def mint(request: MintRequest) -> MintReport:
     # The two views ``cli.run.run_setup`` takes, both DERIVED from the one
     # resolution (pgw#974) rather than carried beside it.
     paths = {slot: res.path for slot, res in request.slots.items()}
-    overrides = {
-        slot: dict(res.component_paths)
-        for slot, res in request.slots.items() if res.component_paths
-    }
-    # pgw#816: the request's SHAPE is checked before anything heavy is
-    # imported or a single weight is read — a composition this child cannot
-    # rebuild is a wiring refusal, not a load crash eight seconds in.
-    assert_composable(request.slots)
 
     from . import compile_cache as cc
     from . import env_seal
@@ -683,10 +642,7 @@ def mint(request: MintRequest) -> MintReport:
     # a refusal that only one of the two paths honours is not a refusal.
     _assert_family_mintable(str(getattr(cfg, "family", "") or ""))
 
-    frame(phase="load", note=(
-        f"setup {spec.cls.__name__}"
-        + (f" (+{sum(len(c) for c in overrides.values())} component "
-           f"override(s))" if overrides else "")))
+    frame(phase="load", note=f"setup {spec.cls.__name__}")
 
     # pgw#1080: the compile targets are built from CODE + CONFIG, so the
     # process that exports and compiles never holds a checkpoint value. A
@@ -711,8 +667,7 @@ def mint(request: MintRequest) -> MintReport:
         obj = spec.cls()
         try:
             got = run_setup(
-                obj, dict(paths), arm_compile=False,
-                return_loaded=True, component_paths=overrides,
+                obj, dict(paths), arm_compile=False, return_loaded=True,
                 # pgw#1208: NO SERVING PLACEMENT on the weight-free path. The
                 # pgw#1124 seam, and the same argument one door over: the
                 # placement ladder is for a pipeline that will run a forward,
@@ -775,7 +730,7 @@ def mint(request: MintRequest) -> MintReport:
             # exports and never executes may skip the ladder.
             got = run_setup(
                 obj, dict(paths), arm_compile=False,
-                return_loaded=True, component_paths=overrides) or {}
+                return_loaded=True) or {}
         _slot, loaded_pipe = pick_compile_target(got, cfg)
         frame(phase="load", note=f"compile target on slot {_slot!r}")
         assert_traceable_as_loaded(loaded_pipe, request)
@@ -1142,4 +1097,4 @@ if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
 
 
-__all__ = ["assert_composable", "frame", "main", "mint_identity", "mint"]
+__all__ = ["frame", "main", "mint_identity", "mint"]

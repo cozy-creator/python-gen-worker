@@ -22,7 +22,6 @@ class SlotOrder:
     """
 
     ref: str = ""
-    components: Tuple[Tuple[str, str], ...] = ()
     inference_defaults: str = ""
     objective: str = ""
     distilled: bool = False

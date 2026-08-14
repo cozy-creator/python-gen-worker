@@ -174,12 +174,7 @@ def _orders(run):
     from gen_worker import dispatch
 
     return {
-        b.slot: dispatch.SlotOrder(
-            ref=b.ref.strip(),
-            components=tuple(sorted(
-                (str(k).strip(), str(v).strip())
-                for k, v in b.components.items())),
-        )
+        b.slot: dispatch.SlotOrder(ref=b.ref.strip())
         for b in run.models if b.slot
     }
 

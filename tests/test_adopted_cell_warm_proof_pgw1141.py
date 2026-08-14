@@ -449,7 +449,7 @@ def _boot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 
     spec = ex.specs["generate"]
     eff = ex._dispatched_spec(
-        spec, {"pipeline": dispatch_mod.SlotOrder(ref=ref, components=())})
+        spec, {"pipeline": dispatch_mod.SlotOrder(ref=ref)})
     snaps = {normalize_model_ref(ref): pb.Snapshot(
         digest="d1" * 16,
         files=[pb.SnapshotFile(
