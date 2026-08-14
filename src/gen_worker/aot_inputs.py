@@ -212,7 +212,6 @@ def compose(
         load_cls, str(model),
         dtype=str(request.get("dtype") or "bf16"),
         storage_dtype=str(request.get("storage_dtype") or ""),
-        declared_vram_gb=float(request.get("declared_vram_gb") or 0.0),
     )
     place_pipeline(pipe)
     if int(spec.lora_bucket or 0):

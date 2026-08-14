@@ -117,7 +117,6 @@ from .models.records import (
     records_holding,
     vacate_record,
 )
-from .models.envelope import ArtifactEnvelopeExceeded
 from .models.errors import MissingSnapshotError, UrlExpiredError
 from .models.execution_lanes import ExecutionLaneUnavailableError
 from .topology import (
@@ -163,8 +162,8 @@ from .models.loading import (
 from .compile_cache import CompiledExecutionLaneUnavailableError
 from .preload import Preloader
 from .api.binding import rebind_pick
-from .models.hub_policy import FIT_INCOMPATIBLE, TensorhubWorkerCapabilities
-from .models.serve_fit import (RUN_CPU, RUN_FP8_STORAGE,
+from .models.hub_policy import TensorhubWorkerCapabilities
+from .models.serve_fit import (RUN_FP8_STORAGE,
                                    RUN_OFFLOAD, plan_serve)
 from . import postmortem
 from .models.serve_fit import replan
@@ -721,30 +720,26 @@ def _shared_execution_lanes_need_fp8(
     return fp8_needed + margin_bytes <= free_vram_bytes
 
 
-def _estimate_setup_need(
-    per_ref: typing.Sequence[Tuple[int, int]],
-    vram_gb: float,
-) -> int:
+def _estimate_setup_need(per_ref: typing.Sequence[Tuple[int, int]]) -> int:
     """Pre-load VRAM headroom estimate for one setup's refs (pgw#636).
 
     ``per_ref`` carries ``(vram_hint, snapshot_bytes)`` per ref: a prior
-    MEASURED footprint wins; else the wire snapshot's byte total (an honest
-    first-load footprint for stored-precision lanes — make_room's margin
-    covers slack). Only when a ref has NEITHER fact does the declared
-    ``vram_gb`` floor the total: the declaration is a placement MINIMUM
-    ("a card with at least this much"), never a per-load reservation —
-    reserving it wholesale for every never-seen checkpoint pick evicted the
-    resident pipeline on 24 GB cards and pinned workers to one pipeline
-    (the 2026-07-24 9.8/24 GB incident)."""
+    MEASURED footprint wins, else the wire snapshot's byte total (an honest
+    first-load footprint for stored-precision lanes — make_room's margin covers
+    slack). Both terms are MEASUREMENTS of bytes at hand.
+
+    th#1867 deleted the third term. A ref with NEITHER fact used to raise the
+    total to the endpoint's declared ``vram_gb``, and that declaration is gone
+    (§2.4 ruling 4). The estimate is now strictly what is known: an unweighed
+    ref contributes nothing, ``make_room`` evicts what the known refs need, and
+    a genuine shortfall is found by the load and carried down the rung ladder —
+    the same trade §1.35 makes everywhere else. Guessing here was never safe
+    anyway: reserving a declared minimum wholesale for every never-seen
+    checkpoint pick evicted the resident pipeline on 24 GB cards and pinned
+    workers to one pipeline (the 2026-07-24 9.8/24 GB incident)."""
     needed = 0
-    unknown = False
     for hint, snapshot_bytes in per_ref:
-        size = hint if hint > 0 else max(0, int(snapshot_bytes))
-        if size <= 0:
-            unknown = True
-        needed += size
-    if unknown and vram_gb > 0:
-        needed = max(needed, int(vram_gb * _GiB))
+        needed += hint if hint > 0 else max(0, int(snapshot_bytes))
     return needed
 
 
@@ -2177,19 +2172,19 @@ class Executor:
     def gate_functions(self, gpu_info: Dict[str, Any]) -> None:
         """Run hardware gates; populate self.unavailable + self.serve_plans.
 
-        th#683 P3 — the worker NEVER hard-refuses a function on the
-        recommended-VRAM hint. Genuine incompatibilities (compute capability /
-        missing quant library / a stored flavor outside its SM window) still
-        gate a function off; everything else is an ADAPTIVE FIT: the function
-        serves by the best available means (native -> runtime fp8 storage ->
-        emergency 4-bit -> CPU/disk offload -> CPU-only) and records an honest
-        advisory. Needing offload/CPU is NEVER a refusal (Paul's ruling
-        2026-07-10: gen workers offload out of necessity, not preference —
-        better to run degraded than not run). The only opt-out is the
-        author's own ``Resources(strict_vram=True)`` for bindings that
-        cannot tolerate CPU-resident weights. Every degraded serve is
-        reported structurally (FnDegraded) so the orchestrator can move the
-        release to a bigger card.
+        th#683 P3, as th#1867 left it — the worker NEVER refuses a function
+        because of a card's SIZE, and after §1.35 there is no size input left
+        for it to refuse on. Exactly TWO gates survive here, and both name OUR
+        code: a quant library this IMAGE does not carry
+        (``missing_cuda_library``), and no CUDA device at all
+        (``cuda_unavailable`` — the owned pgw#1212 exception, see
+        ``models/serve_fit``). Everything else serves by the best available
+        means, and WHICH means is measured at load time by
+        ``models/memory.select_auto_mode`` rather than predicted here. Needing
+        offload is NEVER a refusal (Paul's ruling 2026-07-10: gen workers
+        offload out of necessity, not preference — better to run degraded than
+        not run). Every degraded serve is reported structurally (FnDegraded)
+        as evidence for the OPERATOR; nothing on this path sizes a card.
         """
 
         # Idempotent re-gate (gw#494): drop only the marks THIS gate made
@@ -2206,7 +2201,7 @@ class Executor:
         # `gpu_free_mem` is genuinely 0 on a SATURATED card, which is exactly
         # the state where the native/fp8/4-bit/offload/CPU ladder must engage
         # and exactly the state that then read as "all of VRAM is free". This
-        # figure feeds `plan_serve`/`variant_fit` and what the pod advertises
+        # figure feeds what the pod advertises
         # to the hub, so an unmeasured card must present as no room, not as an
         # empty one. `lifecycle.probe_hardware` initialises the key to 0 and
         # wraps its whole CUDA probe in `except Exception: pass`, so "the
@@ -2293,9 +2288,10 @@ class Executor:
                 self._gate_owned.add(name)
                 continue
             # SDK v2 (pgw#647): NO compute-capability gate — precision per
-            # card class is the fit ladder's decision (sdxl runs fine in
-            # fp16 on sm75); only stored-flavor SM windows (svdq/nvfp4,
-            # via variant_fit) remain genuinely hard.
+            # card class is the fit ladder's decision (sdxl runs fine in fp16
+            # on sm75). pgw#1148 moved the stored-flavor SM windows onto the
+            # loaders' tensor-layout contracts, so nothing SM-shaped is left
+            # in this gate at all.
             missing = [lib for lib in (r.libraries or ()) if lib not in libs]
             if missing:
                 import importlib.util
@@ -2307,30 +2303,25 @@ class Executor:
                 self._gate_owned.add(name)
                 continue
 
-            # Adaptive serve-time fit for the VRAM / GPU-presence / stored-
-            # flavor dimensions. The primary binding carries the flavor token
-            # (#fp8 / #nvfp4 / #svdq-*) whose SM window variant_fit gates.
+            # Serve-time plan. th#1867: this no longer asks a size question —
+            # `plan_serve` returns non-serveable ONLY for the two gates that
+            # name our own code.
             primary = next(iter(spec.models.values()), None)
             plan = plan_serve(r, caps, free_vram_gb, binding=primary)
             self.serve_plans[name] = plan
             self._gate_serve_plans[name] = plan
             if not plan.serveable:
-                if plan.run_mode in (RUN_CPU, RUN_OFFLOAD):
-                    # The author's strict_vram opt-out of the CPU-touching
-                    # rungs: on a GPU-less host that reads as no-CUDA, on a
-                    # too-small card as a VRAM shortfall.
-                    code = "cuda_unavailable" if plan.run_mode == RUN_CPU else "insufficient_vram"
-                elif plan.fit == FIT_INCOMPATIBLE:
-                    # A stored flavor outside its hardware window (fp8 /
-                    # nvfp4 / svdq SM gates, quant stack pins).
-                    code = "compute_capability_unmet"
-                else:
-                    code = "insufficient_vram"
+                # After th#1867 the planner has ONE non-serveable verdict left
+                # and it is a library one — our IMAGE is short a dependency.
+                # The `missing_cuda_library` gate above normally catches it
+                # first (it re-checks with importlib), so reaching here means
+                # the two library views disagreed. Report it under the same
+                # honest token rather than inventing a card verdict for it:
+                # naming a GPU problem that does not exist is exactly what
+                # `compute_capability_unmet` was deleted for (§2.7).
                 self.unavailable[name] = (
-                    code, plan.reason,
-                    {"detected_vram_gb": f"{total_vram_gb:.0f}",
-                     "recommended_vram_gb": (
-                         f"{r.vram_gb_hint:.0f}" if r.vram_gb_hint else "")})
+                    "missing_cuda_library", plan.reason,
+                    {"detected_vram_gb": f"{total_vram_gb:.0f}"})
                 self._gate_owned.add(name)
                 continue
             if plan.degraded:
@@ -5127,16 +5118,6 @@ class Executor:
             # every attempt is this function's terminal truth (th#1159's
             # genuinely-unfittable VRAM lane is the case this exists for).
             reason, axes = "retry_exhausted", {}
-        elif isinstance(exc, ArtifactEnvelopeExceeded):
-            # pgw#1117 / th#1777: a RELEASE/BINDING verdict, reported under
-            # its own token so the hub can tell it apart from the OOM it
-            # replaces. Deliberately ahead of nothing and behind nothing
-            # meaningful — it is not a HardwareUnmetError (no machine was
-            # consulted, and routing it there would teach the buy-floor
-            # learner to shop for a card big enough to serve an archive
-            # clone) and not a bare setup_failed (which the hub reads as
-            # "the pod could not boot" and feeds to the breaker).
-            reason, axes = exc.reason, exc.axes()
         elif isinstance(exc, HardwareUnmetError):
             reason = getattr(exc, "reason", "hardware_unmet")
             axes = {str(k): str(v) for k, v in (exc.axes() or {}).items()}
@@ -7102,8 +7083,7 @@ class Executor:
             [
                 (res.vram_hint(r), sum(self.store.component_sizes(r).values()))
                 for r in refs
-            ],
-            float(spec.resources.vram_gb_hint or 0),
+            ]
         )
         if needed <= 0:
             return
@@ -7443,12 +7423,8 @@ class Executor:
                             provision.load_slot, ann, path, binding=binding,
                             slot=slot, ref=ref, mode=mode, components=injected,
                             component_trees=override_trees or None,
-                            declared_vram_gb=float(
-                                spec.resources.vram_gb_hint or 0),
                             force_storage_dtype=(
                                 "fp8" if slot in force_fp8_slots else ""),
-                            strict_vram=bool(spec.resources.strict_vram),
-                            artifact_digest=_snapshot_digest(snapshots, ref),
                         )
                     except Exception as exc:
                         # Corruption-shaped load failure (gw#408): digest-verify
@@ -7472,12 +7448,8 @@ class Executor:
                             provision.load_slot, ann, path, binding=binding,
                             slot=slot, ref=ref, mode=mode, components=injected,
                             component_trees=override_trees or None,
-                            declared_vram_gb=float(
-                                spec.resources.vram_gb_hint or 0),
                             force_storage_dtype=(
                                 "fp8" if slot in force_fp8_slots else ""),
-                            strict_vram=bool(spec.resources.strict_vram),
-                            artifact_digest=_snapshot_digest(snapshots, ref),
                         )
                     pipe = sl.obj
                     # pgw#678: record the PIPELINE identity for this slot

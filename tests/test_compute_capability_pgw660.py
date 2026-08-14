@@ -39,7 +39,7 @@ class Out(msgspec.Struct):
     ok: bool = True
 
 
-@endpoint(resources=Resources(compute_capability=8.9, vcpus=16, vram_gb_hint=80))
+@endpoint(resources=Resources(compute_capability=8.9, vcpus=16))
 class FP8ProducerEndpoint:
     """The shape of conversion's modelopt producers: scaled_mm or nothing."""
 
@@ -47,7 +47,7 @@ class FP8ProducerEndpoint:
         return Out()
 
 
-@endpoint(resources=Resources(gpu=True, vram_gb_hint=24))
+@endpoint(resources=Resources(gpu=True))
 class UndeclaredEndpoint:
     def generate(self, ctx: RequestContext[_Defaults], p: In) -> Out:
         return Out()
@@ -75,8 +75,9 @@ def test_declaration_is_validated_and_normalized() -> None:
 
 def test_an_arch_floor_implies_a_gpu() -> None:
     # A compute-capability floor is meaningless without a CUDA device, so it
-    # implies gpu=True exactly like vram_gb_hint does. The builder infers the
-    # same thing from the key, but the declaration should not depend on that.
+    # implies gpu=True. The builder infers the same thing from the key, but
+    # the declaration should not depend on that. th#1867 deleted the VRAM
+    # markers that used to imply it too — this is the last implying axis.
     assert Resources(compute_capability=8.9).gpu is True
 
 
@@ -88,7 +89,8 @@ def test_the_floor_reaches_the_manifest_under_the_builders_own_key() -> None:
     # `compute_capability.min` -> req.MinGPUCapSM -> the placement filters.
     assert res["compute_capability"] == 8.9
     assert res["gpu"] is True
-    assert res["vram_gb_hint"] == 80.0
+    # th#1867: nothing VRAM-shaped rides beside it any more.
+    assert not [k for k in res if "vram" in k]
 
 
 def test_undeclared_is_unchanged() -> None:
@@ -108,9 +110,11 @@ def test_the_projection_is_owned_by_resources() -> None:
 
 
 def test_the_floor_is_not_a_hint() -> None:
-    # Naming is the contract here: vram_gb_hint/ram_gb_hint are ALLOCATION-time
-    # asks the platform may miss. This one is an incapability declaration, so
-    # it carries no _hint suffix and there is no second spelling for it.
+    # Naming is the contract here: ram_gb_hint is an ALLOCATION-time ask the
+    # platform may miss. This one is an incapability declaration, so it
+    # carries no _hint suffix and there is no second spelling for it. th#1867
+    # kept it for exactly that reason: an sm floor names our KERNELS, and
+    # §2.4 ruling 1 protects that species of refusal while deleting card sizes.
     assert "compute_capability_hint" not in Resources.__struct_fields__
     assert "compute_capability_min" not in Resources.__struct_fields__
     assert "compute_capability" in Resources.__struct_fields__

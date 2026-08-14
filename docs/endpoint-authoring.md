@@ -580,58 +580,58 @@ Resources(gpu=True, libraries=("nunchaku",))
 ```
 
 Fields: `gpu`, `gpu_count`, `max_gpu_count`,
-`max_gpus_per_execution_group`, `parallel`, `libraries`, `strict_vram`
-(bindings that cannot tolerate CPU-resident weights), `vcpus`,
-the two hard floors `compute_capability` / `min_vram_gb`, and the two hints
-`vram_gb_hint` / `ram_gb_hint`.
+`max_gpus_per_execution_group`, `parallel`, `libraries`, `vcpus`,
+the hard floor `compute_capability`, and the two allocation hints
+`ram_gb_hint` / `min_disk_gb`.
 `max_gpus_per_execution_group` / `parallel` are the multi-GPU axis — see
 [multi-gpu.md](multi-gpu.md).
 
-**Hints vs. gates — the distinction is the whole contract.**
+**There is no VRAM declaration. Do not look for one.**
 
-`vram_gb_hint` is an optional FIRST-BUILD placement hint used only before
-th#683 profiling measurements exist; `ram_gb_hint` (pgw#670) is its
-host-side twin and does not imply `gpu=True`. Both are allocation-time
-asks the platform may miss: never a gate, ceiling, or reservation.
+th#1867 (DESIGN-RULINGS §1.35) deleted `vram_gb_hint`, `min_vram_gb` and
+`strict_vram` outright — the last three VRAM markers, removed as one change.
+The ruling: *"We should be able to run any model on any GPU. The challenge is
+not IF it can run — it's: is it an EFFICIENT choice?"*
 
-`compute_capability` and `min_vram_gb` (both pgw#660) are the opposite —
-HARD floors the scheduler filters offers on and refuses to rent below.
-`compute_capability` is the GPU-architecture floor: declare the dotted
-capability the way NVIDIA writes it (`8.9`, `"8.9"`, or `"sm_89"`, never the
-bare SM code `89`). `min_vram_gb` is the VRAM floor, named `min_` for what it
-is — a floor the hub may exceed, never a cap. Both imply `gpu=True`.
+A card that looks too small is a card whose best rung sits further down the
+ladder (fp8 storage → offload → deeper offload), and the worker picks that rung
+from what it MEASURES at load time, not from a number you wrote before the
+first build existed. Measured against live serve profiles, the declarations
+were wrong in both directions anyway: `anima` declared 8 GB against a 10.6 GiB
+peak, and `sdxl` declared 20 GB while serving, proven, in 9.3 GiB on a 16 GB
+A4000.
+
+If your endpoint runs slowly on a small card, that is information for the
+OPERATOR — who curates the ordered (GPU, lane) preference list from benchmarks
+— not a declaration for you to make. Every degraded serve is already reported
+structurally (`FnDegraded`: what was wanted, what ran, how much slower).
+
+**`compute_capability` survives, and the distinction is the whole point.**
+
+An sm floor says which KERNELS exist in our build: a producer whose kernel is
+`torch._scaled_mm` cannot run below sm_89 at any precision, on any rung, ever.
+That is a statement about our code. A card SIZE is a statement about the card,
+and §1.35 rules that we never make it.
 
 ```python
-# scaled_mm is sm_89+ or nothing, and 80 GB is the card it cannot run below —
-# both are incapabilities, not slow rungs.
-Resources(gpu=True, compute_capability=8.9, min_vram_gb=80,
-          libraries=("modelopt",))
+# scaled_mm is sm_89+ or nothing — an incapability, not a slow rung.
+Resources(gpu=True, compute_capability=8.9, libraries=("modelopt",))
 ```
 
-**`vram_gb_hint` is not a smaller `min_vram_gb`.** The hint is never read as
-a gate by the builder, so a function that declares only the hint has *no*
-VRAM floor on the placement path — that is the exact v2 regression pgw#660
-closes, and it is silent (no error, no lint, no build failure). If your
-function cannot run below a size, say `min_vram_gb`. Where both are declared
-the hint may not sit below the floor; that contradiction is a declaration-time
-`ValueError`.
+Declare the dotted capability the way NVIDIA writes it (`8.9`, `"8.9"`, or
+`"sm_89"`, never the bare SM code `89`). It implies `gpu=True`. Declare it ONLY
+for a genuine incapability — a function that merely runs *better* on newer
+silicon declares nothing and lets the ladder choose; over-declaring shrinks the
+rentable pool for no reason.
 
-Declare either ONLY for genuine incapability. A function that merely runs
-*better* on newer or larger silicon declares nothing and lets the fit ladder
-choose; over-declaring shrinks the rentable pool for no reason. Omitting them
-is always safe — no key, no gate, today's behaviour.
+`ram_gb_hint` (pgw#670) and `min_disk_gb` (pgw#732) are HOST-side allocation
+asks and neither implies `gpu=True`. They survive because they size the pod,
+not the card.
 
-Note the split of duties: `min_vram_gb` is a PLACEMENT gate only. The
-worker-side fit ladder never refuses on a declared VRAM number — `strict_vram`
-is the sole author opt-out of the CPU-touching rungs.
-
-The v1 spellings `vram_gb` and `ram_gb` remain deleted from SDK v2 — what a
-function WANTS per lane and shape is the profiler's measurement, not an
-authored guess. What it CANNOT RUN BELOW came back under explicit names
-(`min_vram_gb`, `compute_capability`), which is why the old words stay gone
-rather than being restored: one word for two questions is how the hint got
-declared where the gate was meant. v1's `min_compute_capability` spelling is
-also still dead — the hub rejects that key outright.
+The v1 spellings `vram_gb` and `ram_gb` were deleted by SDK v2 and are still
+gone; `min_compute_capability` is rejected by the hub outright. Nothing
+VRAM-shaped is emitted into the manifest any more, so nothing lands on the
+hub's `min_vram_gb` fold.
 
 ## Kinds
 

@@ -2,7 +2,7 @@
 ``discover`` walk over a toy on-disk package, matching SDK declarations:
 slots, kinds, reserved-method/duplicate-slug rejection, payload Meta bounds,
 accelerator fields present (SDK v2: ``resources.gpu`` is the binary
-incapability declaration; ``vram_gb_hint`` an optional placement hint).
+incapability declaration; th#1867 deleted every VRAM marker beside it).
 Real discovery/registry code, no mocking.
 """
 
@@ -49,7 +49,7 @@ def test_slot_endpoint_emits_slots_block(tmp_pkg: Path) -> None:
                     default_checkpoint=HF("stabilityai/stable-diffusion-xl-base-1.0"),
                 ),
             },
-            resources=Resources(gpu=True, vram_gb_hint=12),
+            resources=Resources(gpu=True),
         )
         class Gen:
             def setup(self, pipeline: object) -> None: ...
@@ -73,12 +73,12 @@ def test_slot_endpoint_emits_slots_block(tmp_pkg: Path) -> None:
     # schema, the catalog owns the values).
     assert fn["config_schema"] == "ExampleDefaults"
     assert fn["config_family"] == "example"
-    # SDK v2 resources: gpu is the binary incapability declaration;
-    # vram_gb_hint the optional placement hint (vram_gb/compute_capability
-    # are deleted).
+    # SDK v2 + th#1867: `gpu` is the binary incapability declaration and the
+    # ONLY GPU-shaped thing left. Every size marker is deleted, so the whole
+    # family is asserted absent rather than one spelling at a time — a new
+    # `vram_*` key appearing is the regression this line exists to catch.
     assert fn["resources"]["gpu"] is True
-    assert fn["resources"]["vram_gb_hint"] == pytest.approx(12.0)
-    assert "vram_gb" not in fn["resources"]
+    assert not [k for k in fn["resources"] if "vram" in k]
     assert "compute_capability" not in fn["resources"]
 
 

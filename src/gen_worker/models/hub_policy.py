@@ -3,8 +3,6 @@ from __future__ import annotations
 import importlib.util
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
-from .memory import effective_vram_requirement_gb
-from .loading import FP8_STORAGE_FIT_FACTOR
 
 
 @dataclass(frozen=True)
@@ -83,14 +81,18 @@ def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> Ten
 # ---------------------------------------------------------------------------
 
 FIT_FITS = "fits"
-FIT_FP8 = "fp8"
-FIT_NVFP4 = "nvfp4"
-FIT_SVDQ_FP4 = "svdq_fp4"
-FIT_SVDQ_INT4 = "svdq_int4"
-FIT_EMERGENCY_FP8 = "emergency_fp8"
-FIT_GGUF = "gguf_quant"
-FIT_OFFLOAD = "offload"
 FIT_INCOMPATIBLE = "incompatible"
+
+# th#1867 (§1.35) deleted the SIZE verdicts this module used to return —
+# `fp8`, `nvfp4`, `svdq_fp4`, `svdq_int4`, `emergency_fp8`, `gguf_quant`,
+# `offload`. Every one of them was derived from `Resources.vram_gb_hint`, an
+# author DECLARATION, compared against free VRAM: a prediction made before
+# anything is measured, which §4.33 forbids from acting as a floor and §1.35
+# forbids from acting at all. The rungs themselves did not go anywhere — they
+# are chosen at LOAD time by `models/memory.select_auto_mode` from the
+# pipeline's real size against the card's real free VRAM, and reported as they
+# happen (`serve_fit.replan` -> FnDegraded). What is deleted is the guess, not
+# the ladder.
 
 # The STORED-PRECISION classification of a binding is NOT this planner's. A
 # binding names a tag or a digest; WHAT THE BYTES ARE is the checkpoint's
@@ -111,15 +113,19 @@ def variant_fit(
 ) -> tuple[str, str]:
     """Fit verdict for ONE function/variant's ``Resources`` on this machine.
 
-    - ``incompatible``: hard gates unmet (no CUDA GPU, required quant
-      libraries not installed).
-    - ``emergency_fp8``: does not fit as stored, but runtime fp8-E4M3 weight
-      storage (loading.apply_fp8_storage: fp8 bytes resident, bf16 compute,
-      no fp8 silicon required) would fit — quality ~= a stored #fp8 flavor.
-    - ``offload``: runnable, but the recommended card size (vram_gb minus the
-      fixed GPU reserve) exceeds free VRAM — the models/memory.py offload
-      ladder carries it (slower).
-    - ``fits``: full-VRAM residency expected.
+    Exactly TWO verdicts remain after th#1867, and both name OUR code rather
+    than the card (§1.35 amendment 2):
+
+    - ``incompatible``: no CUDA device at all, or a quant library this build
+      does not carry.
+    - ``fits``: everything else. Not a promise of full residency — a promise
+      that nothing here has an opinion about the card's size. How the pipeline
+      actually lands is measured at load time by ``models/memory``.
+
+    ``free_vram_gb`` is retained in the signature and deliberately unused: it
+    is the number the deleted comparison was made against, and re-admitting it
+    is the single edit that would rebuild the estimate-as-floor this ruling
+    removed. Nothing may reintroduce a size comparison here.
     """
     needs_gpu = bool(getattr(resources, "gpu", False))
     libs = tuple(getattr(resources, "libraries", ()) or ())
@@ -130,25 +136,5 @@ def variant_fit(
     missing = [lib for lib in libs if lib not in (caps.installed_libs or [])]
     if missing:
         return FIT_INCOMPATIBLE, f"missing libraries: {', '.join(missing)}"
-    vram = getattr(resources, "vram_gb_hint", None)
-    # vram_gb recommends a card SIZE (total VRAM), so an idle card of exactly
-    # that size counts as fitting: subtract the fixed driver/framebuffer/CUDA
-    # reserve before comparing against measured free VRAM.
-
-    if vram is None or effective_vram_requirement_gb(vram) <= float(free_vram_gb):
-        return FIT_FITS, ""
-
-    # Runtime rungs are automatic on CUDA hosts — pure functions of
-    # the declared capabilities, so verdicts don't depend on the probing host.
-    if caps.gpu_sm > 0:
-        # fp8-E4M3 runtime storage: weights ~halve, bf16 compute, quality
-        # ~= a stored #fp8 flavor — try before dropping to 4-bit.
-        if float(vram) * FP8_STORAGE_FIT_FACTOR <= float(free_vram_gb):
-            return FIT_EMERGENCY_FP8, (
-                f"runs (fp8 storage): {float(vram):g} GB VRAM via runtime "
-                f"fp8-E4M3 weight storage, {float(free_vram_gb):.1f} GB free"
-            )
-    return FIT_OFFLOAD, (
-        f"declares {float(vram):g} GB VRAM, {float(free_vram_gb):.1f} GB free"
-    )
+    return FIT_FITS, ""
 

@@ -40,13 +40,13 @@ class Out(msgspec.Struct):
 
 
 @endpoint(resources=Resources(
-    gpu=True, vram_gb_hint=80.0, max_gpu_count=2, parallel=("sequence",)))
+    gpu=True, max_gpu_count=2, parallel=("sequence",)))
 class SPEndpoint:
     def generate(self, ctx: RequestContext[_Defaults], p: In) -> Out:
         return Out()
 
 
-@endpoint(resources=Resources(gpu=True, vram_gb_hint=80.0))
+@endpoint(resources=Resources(gpu=True))
 class PlainEndpoint:
     def generate(self, ctx: RequestContext[_Defaults], p: In) -> Out:
         return Out()
@@ -109,7 +109,7 @@ def test_ceiling_below_floor_refused() -> None:
 
 
 @endpoint(resources=Resources(
-    gpu=True, vram_gb_hint=80.0, max_gpu_count=4,
+    gpu=True, max_gpu_count=4,
     max_gpus_per_execution_group=2, parallel=("sequence",)))
 class TwoByTwoEndpoint:
     def generate(self, ctx: RequestContext[_Defaults], p: In) -> Out:

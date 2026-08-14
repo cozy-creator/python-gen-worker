@@ -34,12 +34,12 @@ _PROTO = _ROOT / "proto" / "worker_scheduler.proto"
 _SOURCES = (
     _ROOT / "src" / "gen_worker" / "executor.py",
     _ROOT / "src" / "gen_worker" / "capability.py",
-    # The third file declaring a reason token on an exception class.
-    # `_mark_setup_failed` writes `exc.reason` for it exactly the way it does
-    # for the capability gates, so leaving this file out would have made the
-    # NEW token the one case the contract test cannot see — which is precisely
-    # the blindness th#1562/th#1563 wrote this test to end.
-    _ROOT / "src" / "gen_worker" / "models" / "envelope.py",
+    # th#1867 removed `models/envelope.py` from this list with the module
+    # itself: pgw#1117's `artifact_envelope_exceeded` compared the bound
+    # artifact against the release's declared `vram_gb` under `strict_vram`,
+    # and §2.4 ruling 4 deleted both operands. If a third file ever declares a
+    # reason token on an exception class again, it belongs here — that
+    # omission is the blindness th#1562/th#1563 wrote this test to end.
 )
 
 _FunctionNode = (ast.FunctionDef, ast.AsyncFunctionDef)
@@ -196,12 +196,48 @@ def test_the_derivation_still_finds_the_refusals() -> None:
     """The scan itself is load-bearing: a refactor that moves the refusal map
     must not silently turn this whole file into a no-op."""
     reasons = emitted_reason_vocabulary()
-    for anchor in ("native_crash_streak", "setup_failed", "compute_capability_unmet"):
+    # th#1867 replaced `compute_capability_unmet` here — the token is deleted,
+    # so anchoring on it would have made this scan pass by describing a world
+    # that no longer exists. `missing_cuda_library` is its replacement: it is
+    # now the ONLY hardware-adjacent refusal the gate can produce, and it names
+    # our IMAGE rather than the card, so a scan that stops finding it has gone
+    # blind to the last one.
+    for anchor in ("native_crash_streak", "setup_failed", "missing_cuda_library"):
         assert anchor in reasons, (
             f"the reason scan no longer finds {anchor!r}, which `executor.py` "
             f"demonstrably emits — the derivation has gone blind. Found: {sorted(reasons)}"
         )
-    assert len(reasons) >= 15, f"suspiciously few reasons derived: {sorted(reasons)}"
+    # 16 before th#1867, 12 after. Deleted together under §1.35 clause 1 +
+    # §2.4 ruling 4: `insufficient_vram`, `compute_capability_unmet`,
+    # `artifact_envelope_exceeded` — and `cuda_unavailable`, whose only
+    # trigger was `strict_vram` on a CUDA-less pod. (That last one still
+    # exists in `HardwareUnsuitable.reason_class`, a boot driver probe, which
+    # is a different message and is not scanned here.) The floor is an EXACT
+    # count rather than a slack bound so the next deletion has to come here and
+    # say which token it removed — a `>=` that drifts below its own subject is
+    # how this scan would go blind without failing.
+    assert len(reasons) == 12, f"reason vocabulary changed size: {sorted(reasons)}"
+
+
+def test_the_deleted_markers_are_gone_and_stay_gone_th1867() -> None:
+    """§1.35's abolished tokens may not re-enter the emitted vocabulary.
+
+    The wire contract documents each of these by NAME in the comment ABOVE
+    `message FnUnavailable` — deliberately outside the message body, so that
+    re-adding an emission cannot satisfy
+    `test_every_emitted_reason_is_in_the_wire_contract` off the deletion note.
+    This test is the other half of that arrangement: the note explains, this
+    reds.
+    """
+    reasons = emitted_reason_vocabulary()
+    for gone in ("insufficient_vram", "compute_capability_unmet",
+                 "artifact_envelope_exceeded", "cuda_unavailable"):
+        assert gone not in reasons, (
+            f"{gone!r} is emitted again. th#1867 (§1.35) abolished it: a small "
+            "card takes the offload rung and SERVES, and a refusal that names "
+            "the hardware rather than our code is the class this deletion "
+            "removed. If the emission is genuinely needed, that is a ruling to "
+            "reopen, not a token to reinstate.")
 
 
 @pytest.mark.parametrize("reason", sorted(emitted_reason_vocabulary()))

@@ -13,7 +13,7 @@ class is a declaration that never reaches the builder's
   * ``ram_gb_hint`` is declared, validated, and reaches the manifest under the
     key the builder actually reads (``ram_gb`` -> scheduler ``min_ram_gb``);
   * it does NOT imply ``gpu=True`` (a CPU encode lane needs host RAM too),
-    unlike ``vram_gb_hint``;
+    unlike a GPU-axis ask;
   * omitting it changes nothing (``omit_defaults``): no key, no behaviour.
 """
 
@@ -41,7 +41,7 @@ class Out(msgspec.Struct):
     ok: bool = True
 
 
-@endpoint(resources=Resources(gpu=True, vcpus=16, ram_gb_hint=64, vram_gb_hint=80))
+@endpoint(resources=Resources(gpu=True, vcpus=16, ram_gb_hint=64))
 class FloorEndpoint:
     def generate(self, ctx: RequestContext[_Defaults], p: In) -> Out:
         return Out()
@@ -70,9 +70,9 @@ def test_declaration_is_validated() -> None:
 
 
 def test_a_host_floor_does_not_imply_a_gpu() -> None:
-    # vram_gb_hint is a GPU-axis ask and forces gpu=True; a host-RAM floor is
+    # A host-RAM floor is
     # not (video encode is host-CPU/RAM bound — ie#484 — with or without a GPU).
-    assert Resources(vram_gb_hint=80).gpu is True
+    assert Resources(compute_capability=8.9).gpu is True
     assert Resources(ram_gb_hint=64).gpu is False
     assert Resources(vcpus=16).gpu is False
 

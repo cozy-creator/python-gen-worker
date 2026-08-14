@@ -1,40 +1,37 @@
-"""Serve-time adaptive fit.
+"""Serve-time adaptive fit (th#683 P3), after th#1867 took the estimate out.
 
-The worker NEVER hard-refuses a function on the recommended-VRAM hint. On
-whatever card it is actually on, it serves the function by the best available
-means and is HONEST about the trade. The full ladder, best-first:
+The worker NEVER refuses a function because a card is small. On whatever card
+it is actually on it serves by the best available means and is HONEST about the
+trade — and WHICH means is a decision this module no longer makes. th#1867
+(§1.35) deleted `Resources(vram_gb_hint / min_vram_gb / strict_vram)`, which
+were the only inputs to the plan-time ladder here, so the rung is now chosen at
+LOAD time by `models/memory.select_auto_mode` against the pipeline's real size
+and the card's real free VRAM, and reported as it happens through
+:func:`replan` -> FnDegraded. The prediction is gone; the ladder is not.
 
-  stored, native-> the binding's own precision at full VRAM residency:
-                  bf16/fp16, #fp8 (Ada/Hopper+), #nvfp4 (Blackwell),
-                  #svdq-* (their SM windows) — each HW-window-gated in
-                  hub_policy.variant_fit; wrong silicon is a refusal
-  fp8 storage   -> runtime fp8-E4M3 weight storage + bf16 compute
-                  (loading.apply_fp8_storage; no fp8 silicon required):
-                  near-native quality, weights ~halve
-  offload       -> weights spill to CPU/disk, slower but valid (the PRIMARY
-                  lever at the low end where weights exceed VRAM even quantized)
-  cpu           -> no GPU at all: very slow, offered behind a loud warning
-                  rather than refused
+WHAT STILL REFUSES. Exactly ONE verdict, and it names our IMAGE: a quant
+library this build does not carry. The executor's own gate reports that as
+`missing_cuda_library` before this planner is reached, so in practice this
+module refuses nothing at all — every card serves, and the only question left
+is which rung.
 
-A function is UNSERVEABLE only when a genuine incompatibility bars it (compute
-capability / required quant library / a stored flavor outside its SM window)
-OR the author opted out of the CPU-touching rungs with
-``Resources(strict_vram=True)`` (a binding that cannot tolerate CPU-resident
-weights — compiled fixed-shape graphs — and would rather refuse than serve
-slowly). It is never refused on hardware inadequacy alone: better to run
-degraded than not run at all. The orchestrator hears about every degraded serve
-(FnDegraded) and owns moving the workload to a bigger card.
+NO CUDA IS NOT A REFUSAL, AND THAT WAS TESTED RATHER THAN ASSUMED. th#1867
+drafted a `cuda_unavailable` refusal here on the reasoning that pgw#1212 records
+the CPU serve path as never executed. The repo's own boot tests refuted it:
+every harness endpoint declares `Resources(gpu=True)` and serves on CPU-only CI,
+and `test_boot_span_ladder_pgw797` boots one and runs a warmup forward through
+it. Withdrawing a function that demonstrably works is the opposite of §1.35
+amendment 2's bar ("the worker either serves, however slowly, or emits a typed
+defect naming what in OUR code failed"). pgw#1212's protection stays where it
+already was and where it is true: the REACTIVE walk in `models/rung` stops one
+rung short of CPU (`FLOOR_CPU_RUNG_UNEXECUTABLE`), so a pod that OOMs its way
+down refuses and names our code. Plan time is not that situation.
 
-Selection ACROSS stored flavors stays upstream: this planner marks each
-function serveable/unserveable + how-it-runs, and the hub's routing ranking
-picks the highest-quality fitting flavor. bf16 -> fp8 -> nvfp4 -> int4 falls out
-of that ranking over the serveable set; this planner adds the RUNTIME rungs (fp8
-storage / offload / cpu) for the one function it was given, plus an honest hint
-when a stored flavor would have served natively.
-
-Every degraded plan carries ``wanted`` (what the function declares) and
-``ran`` (what actually runs) so the worker can report the degradation
-STRUCTURALLY to the orchestrator (FnDegraded) as a placement signal.
+Every degraded plan carries ``wanted`` (what the function declares) and ``ran``
+(what actually runs) so the worker can report the degradation STRUCTURALLY to
+the orchestrator (FnDegraded) as OPERATOR EVIDENCE. It carries no card size:
+th#1867 deleted `FnDegraded.recommended_vram_gb` because its only source was
+the author's own guess, which §1.2 measured wrong in both directions.
 """
 
 from __future__ import annotations
@@ -43,13 +40,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Optional
 
 from .hub_policy import (
-    FIT_EMERGENCY_FP8,
-    FIT_FITS,
-    FIT_FP8,
     FIT_INCOMPATIBLE,
-    FIT_NVFP4,
-    FIT_SVDQ_FP4,
-    FIT_SVDQ_INT4,
     TensorhubWorkerCapabilities,
     variant_fit,
 )
@@ -64,10 +55,6 @@ from .rung import (
     price as price,
 )
 
-# The FIT verdicts that run natively: full residency at the binding's own
-# stored precision on supported silicon.
-_NATIVE_FITS = (FIT_FITS, FIT_FP8, FIT_NVFP4, FIT_SVDQ_FP4, FIT_SVDQ_INT4)
-
 
 @dataclass(frozen=True)
 class ServePlan:
@@ -79,7 +66,6 @@ class ServePlan:
     reason: str = ""              # why unserveable, when !serveable
     warning: str = ""             # honest-guidance warning for a slow/degraded run
     est_latency_multiplier: float = 1.0
-    recommended_vram_gb: Optional[float] = None  # the ideal card for this fn
     wanted: str = ""              # what the function declares (flavor, or "bf16")
     ran: str = ""                 # what actually runs (flavor when native, else run_mode)
 
@@ -114,95 +100,64 @@ def plan_serve(
     *,
     binding: Any = None,
 ) -> ServePlan:
-    """Decide how one function serves on the actual card. Never refuses on the
-    recommended-VRAM hint alone; ``Resources(strict_vram=True)`` is the sole
-    author opt-out of the CPU-touching rungs (offload / cpu).
+    """Decide how one function serves on the actual card.
+
+    Never refuses on card SIZE — there is no size input left to refuse on
+    (th#1867). ``free_vram_gb`` is accepted and unused for the same reason
+    :func:`variant_fit` keeps it: it is the number the deleted comparison was
+    made against, and a caller that stops passing it would hide the fact that
+    reintroducing the comparison is a one-line edit.
     """
-    recommended = getattr(resources, "vram_gb_hint", None)
     needs_gpu = bool(getattr(resources, "gpu", False))
-    strict_vram = bool(getattr(resources, "strict_vram", False))
     wanted = _wanted(binding)
 
     verdict, detail = variant_fit(resources, caps, free_vram_gb, binding=binding)
 
-    # No CUDA GPU present. variant_fit calls this incompatible; P3 turns it
-    # into a CPU-only rung (behind a loud warning) unless the author opted
-    # out of CPU-resident weights entirely.
+    # No CUDA device: the CPU rung, SERVED, behind a loud warning.
+    #
+    # This branch was very nearly a refusal (th#1867 drafted one citing
+    # pgw#1212's unproven CPU path). The repo's own boot tests refuted it:
+    # every harness endpoint declares `Resources(gpu=True)` and serves on
+    # CPU-only CI — `test_boot_span_ladder_pgw797` boots one and runs a warmup
+    # forward. Refusing here would have withdrawn a function that demonstrably
+    # WORKS, which is the opposite of §1.35 amendment 2's robustness bar.
+    #
+    # pgw#1212's protection is real and stays exactly where it already was: the
+    # REACTIVE walk in `models/rung` stops one rung short of CPU
+    # (FLOOR_CPU_RUNG_UNEXECUTABLE), so a pod that OOMs its way down still
+    # refuses, naming our code. Plan time is not that situation — nothing has
+    # failed here.
     if verdict == FIT_INCOMPATIBLE and needs_gpu and caps.gpu_sm <= 0:
-        if strict_vram:
-            return ServePlan(
-                serveable=False,
-                run_mode=RUN_CPU,
-                fit=FIT_INCOMPATIBLE,
-                reason=(
-                    "no GPU here and the author requires full VRAM residency "
-                    "(strict_vram=True); run on a GPU host"
-                ),
-                recommended_vram_gb=recommended,
-                wanted=wanted,
-            )
         return ServePlan(
             serveable=True,
             run_mode=RUN_CPU,
             fit=FIT_INCOMPATIBLE,
-            warning=_honest_warning(RUN_CPU, recommended),
+            warning=_honest_warning(RUN_CPU, "no CUDA device detected on this pod"),
             est_latency_multiplier=price(RUN_CPU),
-            recommended_vram_gb=recommended,
             wanted=wanted,
             ran=RUN_CPU,
         )
 
-    # Genuine incompatibility (compute capability / missing quant library /
-    # a stored flavor outside its SM window): no lever helps — this really
-    # cannot run here.
+    # A quant library this build does not carry. Names our IMAGE; the
+    # executor's own gate reports it as `missing_cuda_library`.
     if verdict == FIT_INCOMPATIBLE:
         return ServePlan(
             serveable=False,
             run_mode=RUN_NATIVE,
             fit=FIT_INCOMPATIBLE,
-            reason=detail or "incompatible with this GPU",
-            recommended_vram_gb=recommended,
+            reason=detail or "this build is missing a library this function needs",
             wanted=wanted,
         )
 
-    # Fits natively at its own stored precision (incl. the fp8/nvfp4/svdq
-    # flavor rungs, which are native on their supported silicon).
-    if verdict in _NATIVE_FITS:
-        return ServePlan(
-            serveable=True,
-            run_mode=RUN_NATIVE,
-            fit=verdict,
-            recommended_vram_gb=recommended,
-            wanted=wanted,
-            ran=wanted,
-        )
-
-    # Runs, but degraded: runtime fp8 storage or the offload ladder. Offload
-    # is the PRIMARY lever whenever the weights exceed VRAM — fit over speed.
-    # Only offload is CPU-touching. Nothing quantizes at runtime.
-    run_mode = RUN_FP8_STORAGE if verdict == FIT_EMERGENCY_FP8 else RUN_OFFLOAD
-    if run_mode == RUN_OFFLOAD and strict_vram:
-        return ServePlan(
-            serveable=False,
-            run_mode=RUN_OFFLOAD,
-            fit=verdict,
-            reason=(
-                "only runs via CPU/disk offload here and the author requires "
-                "full VRAM residency (strict_vram=True); run on a card with "
-                + (f"~{recommended:.0f} GB" if recommended else "more VRAM")
-            ),
-            recommended_vram_gb=recommended,
-            wanted=wanted,
-        )
+    # Everything else SERVES. Which rung it lands on is measured at load time
+    # (models/memory.select_auto_mode) and reported through `replan`, never
+    # predicted here.
     return ServePlan(
         serveable=True,
-        run_mode=run_mode,
+        run_mode=RUN_NATIVE,
         fit=verdict,
-        warning=_honest_warning(run_mode, recommended, detail),
-        est_latency_multiplier=price(run_mode),
-        recommended_vram_gb=recommended,
         wanted=wanted,
-        ran=run_mode,
+        ran=wanted,
     )
 
 
@@ -220,9 +175,15 @@ def replan(
     A runtime ladder transition re-prices the plan at ``run_mode`` and reports
     it structurally (FnDegraded) with the SAME vocabulary as plan-time.
     ``ran`` stays inside the hub's exact-match RunMode vocabulary — placement
-    detail travels in ``detail``/``warning``, never decorates the token
-    tensorhub switches on (degradation_reschedule.go). A cast that could not
-    apply passes ``wanted``/``ran`` dtype tokens with no ``run_mode`` change.
+    detail travels in ``detail``/``warning``, never decorates the token the
+    hub switches on. A cast that could not apply passes ``wanted``/``ran``
+    dtype tokens with no ``run_mode`` change.
+
+    th#1867: this is now the ONLY producer of the honest degradation warning.
+    It used to be written at plan time from the author's declared card size;
+    the transition it describes here is one that ACTUALLY HAPPENED, which is
+    the loud-and-quantified evidence §1.36's amendment asks for and the
+    declared number never was.
     """
     base = plan if plan is not None else ServePlan(
         serveable=True, run_mode=RUN_NATIVE, fit="", wanted="bf16", ran="bf16",
@@ -234,32 +195,33 @@ def replan(
         run_mode=mode,
         wanted=(wanted or base.wanted),
         ran=(ran or (mode if run_mode else base.ran)),
-        warning=detail,
+        warning=_honest_warning(mode, detail),
         est_latency_multiplier=price(mode),
     )
 
 
-def _honest_warning(run_mode: str, recommended_vram_gb: Optional[float], detail: str = "") -> str:
-    ideal = (
-        f" For full speed/quality use a ~{recommended_vram_gb:.0f} GB card."
-        if recommended_vram_gb
-        else ""
-    )
+def _honest_warning(run_mode: str, detail: str = "") -> str:
+    """The observed transition, priced. ``detail`` is the caller's own words
+    and is the whole answer for a mode with no standard story."""
+    # th#1867: no " For full speed/quality use a ~N GB card." tail. That number
+    # was the author's declaration, and §1.2 measured it wrong in both
+    # directions on live releases — advice derived from it was confident and
+    # unfounded. What the warning says now is only what was observed.
     mult = price(run_mode)
     if run_mode == RUN_CPU:
-        return (
-            "running on CPU (no GPU detected): expect dramatically slower "
-            f"generation (~{mult:.0f}x)." + ideal
-        )
-    if run_mode == RUN_OFFLOAD:
-        return (
-            "weights do not fit VRAM; streaming from CPU/disk (offload): slower "
-            f"(~{mult:.1f}x) but valid." + ideal
-        )
-    if run_mode == RUN_FP8_STORAGE:
-        return (
-            "does not fit at full precision; running fp8-E4M3 weight storage: "
-            "near-native quality. A stored #fp8 flavor of this model would "
-            "serve natively here." + ideal
-        )
-    return detail
+        head = ("running on CPU (no GPU detected): expect dramatically slower "
+                f"generation (~{mult:.0f}x).")
+    elif run_mode == RUN_OFFLOAD:
+        head = ("weights do not fit VRAM; streaming from CPU/disk (offload): "
+                f"slower (~{mult:.1f}x) but valid.")
+    elif run_mode == RUN_FP8_STORAGE:
+        head = ("does not fit at full precision; running fp8-E4M3 weight "
+                "storage: near-native quality. A stored #fp8 flavor of this "
+                "model would serve natively here.")
+    else:
+        return detail
+    # The caller's own words carry the MEASURED numbers behind the transition
+    # (the size that did not fit, the VRAM that was free). Dropping them to
+    # print a canned sentence is how a quantified degradation becomes a
+    # qualitative one — the failure mode this whole issue is about.
+    return f"{head} {detail}".strip() if detail else head

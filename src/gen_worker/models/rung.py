@@ -39,9 +39,9 @@ class Rung:
     rungs that keep full residency); ``storage`` the runtime weight-storage
     transform ("" or "fp8"); ``run_mode`` the hub-wire projection
     (``serve_fit.RUN_*``); ``latency`` the honest price vs a native run;
-    ``touches_host_ram`` whether weights become host-resident (the
-    ``strict_vram`` opt-out boundary, and the pgw#1063 host-RAM pricing
-    trigger)."""
+    ``touches_host_ram`` whether weights become host-resident (the pgw#1063
+    host-RAM pricing trigger; it was also the ``strict_vram`` opt-out boundary
+    until th#1867 deleted that declaration)."""
 
     name: str
     placement: str
@@ -88,13 +88,15 @@ FLOOR_CPU_RUNG_UNEXECUTABLE = "cpu_rung_unexecutable"
 #: Standing on the last rung the ladder declares. Nothing is below it.
 FLOOR_LADDER_EXHAUSTED = "placement_ladder_exhausted"
 
-#: The author's ``Resources(strict_vram=True)`` opt-out cut the ladder before
-#: the next rung, which touches host RAM. A DECLARATION stopped the walk, not
-#: the ladder's end — the two are opposite findings and must not share a token.
-FLOOR_STRICT_VRAM_TRUNCATED = "strict_vram_truncated"
+# th#1867 deleted FLOOR_STRICT_VRAM_TRUNCATED with the declaration that
+# produced it. `Resources(strict_vram=True)` was the author asserting a card
+# requirement in softer words (§2.4 ruling 4), and it truncated this walk
+# before the first host-RAM-touching rung — turning "run slower" into "do not
+# run". The walk now ends only where the LADDER ends, which is a fact about
+# our code, not a declaration about a card.
 
 
-def _walk(current: Optional[str], strict_vram: bool) -> tuple[Optional[Rung], Optional[str]]:
+def _walk(current: Optional[str]) -> tuple[Optional[Rung], Optional[str]]:
     """The ONE verdict :func:`descend` and :func:`descent_floor` both read.
 
     th#1867 §3.0: a diagnosis and an action that answer the same question from
@@ -115,30 +117,26 @@ def _walk(current: Optional[str], strict_vram: bool) -> tuple[Optional[Rung], Op
         return None, FLOOR_LADDER_EXHAUSTED
     if nxt is CPU:
         return None, FLOOR_CPU_RUNG_UNEXECUTABLE
-    if strict_vram and nxt.touches_host_ram:
-        return None, FLOOR_STRICT_VRAM_TRUNCATED
     return nxt, None
 
 
-def descend(current: Optional[str], *, strict_vram: bool = False) -> Optional[Rung]:
+def descend(current: Optional[str]) -> Optional[Rung]:
     """The next rung down from ``current``; None when the ladder ends.
 
-    ``strict_vram`` truncates the ladder before the first host-RAM-touching
-    rung (the author's ``Resources(strict_vram=True)`` opt-out). The reactive
-    OOM path descends only through the PLACEMENT tail (a storage transform
-    cannot be applied to an already-loaded object), so from any resident
-    token the next reactive rung is ``model_offload``.
+    The reactive OOM path descends only through the PLACEMENT tail (a storage
+    transform cannot be applied to an already-loaded object), so from any
+    resident token the next reactive rung is ``model_offload``.
     """
-    return _walk(current, strict_vram)[0]
+    return _walk(current)[0]
 
 
-def descent_floor(current: Optional[str], *, strict_vram: bool = False) -> Optional[str]:
+def descent_floor(current: Optional[str]) -> Optional[str]:
     """Why ``descend`` returned None — the typed floor, or None if it did not.
 
-    th#1867: A DESCENT THAT RUNS OUT MUST NAME ITS FLOOR. Deleting the
-    proactive fit ladder (``Resources.vram_gb_hint``, an ESTIMATE deciding
-    placement before anything is measured — §4.33) makes this reactive walk
-    the only ladder, so its bottom rung stops being theoretical. The failure
+    th#1867: A DESCENT THAT RUNS OUT MUST NAME ITS FLOOR. The proactive fit
+    ladder (``Resources.vram_gb_hint``, an ESTIMATE deciding placement before
+    anything is measured — §4.33) is now DELETED, so this reactive walk is the
+    only ladder and its bottom rung has stopped being theoretical. The failure
     mode that must not happen is the descent silently falling into a rung
     nothing can run: that converts a loud estimate-error into a quiet
     execution-error, which is the trade §1.35 and §1.36 keep rejecting.
@@ -148,7 +146,7 @@ def descent_floor(current: Optional[str], *, strict_vram: bool = False) -> Optio
     amendment. It also makes pgw#1212's gap visible in production rather than
     latent, which is the fastest way it gets prioritised on evidence.
     """
-    return _walk(current, strict_vram)[1]
+    return _walk(current)[1]
 
 
 def price(run_mode: str) -> float:

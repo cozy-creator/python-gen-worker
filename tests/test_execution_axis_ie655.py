@@ -1,7 +1,17 @@
 """The EXECUTION axis of `metrics.lane` is reported, not derived.
 
-A DERIVED execution axis errs in the FLATTERING direction: running the lane
-table's PLANNING coercion over an observed eager posture rewrites the fact (the
+The live defect (master stack, pod `sbzo69ff5t0l44`, an H100 80GB HBM3, both
+billed wan-2.2 canary requests `774a84f3-…` / `e1baede2-…`, endpoint 0.4.13 on
+gen-worker 0.103.0): the worker declined its own compile mint
+(`self_mint_skipped reason=insufficient_vram headroom=37.68GiB — the reason
+token th#1867 has since deleted
+needed~=72.54GiB … this worker serves eager for the rest of its life`), said
+`eager` three times in its own boot rows, served eager — and reported
+`metrics.lane = fp8-w8a8-dynamic+compiled` on both requests.
+
+pgw#1104 fixed the WEIGHTS axis by having the recipe REPORT what it applied.
+The EXECUTION axis was left derived, and it erred in the FLATTERING direction:
+`_served_execution_lane` ran the lane table's PLANNING coercion — the
 `fp8-w8a8-dynamic` body is compiled-only because eager w8a8 is UNMEASURED, not
 because it cannot happen). A worker that declined its own compile mint and
 served eager then reports `fp8-w8a8-dynamic+compiled`. The lane id feeds

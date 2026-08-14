@@ -62,14 +62,11 @@ _COZY_MODE_ATTR = "_cozy_low_vram_mode"
 GPU_VRAM_OVERHEAD_GB = 1.0
 
 
-def effective_vram_requirement_gb(recommended_gb: float) -> float:
-    """The probed-VRAM floor implied by a ``vram_gb`` recommendation.
-
-    Single definition of "usable VRAM" for every gate/fit comparison:
-    compare probed total or free GB against THIS, never against the raw
-    recommendation.
-    """
-    return max(0.0, float(recommended_gb) - GPU_VRAM_OVERHEAD_GB)
+# th#1867 deleted `effective_vram_requirement_gb`. It translated a DECLARED
+# `vram_gb` recommendation into a probed-VRAM floor, and its only caller was
+# `hub_policy.variant_fit`'s size arm — so with the declaration gone it had
+# nothing left to translate. `GPU_VRAM_OVERHEAD_GB` survives below because the
+# other use subtracts it from a MEASURED total, which is arithmetic on a fact.
 
 # The ladder itself lives in rung.py (pgw#1206 A2): one ordered Rung, one
 # walk, one price. This module keeps the probes and the appliers.
@@ -864,7 +861,7 @@ def select_auto_mode(
     so comparing it against the pipeline's TOTAL weight bytes counts those
     bytes twice — measured at ~7.85 GB for z-image and ~15.5 GB for
     qwen-image, enough to push a second shared lane off the resident rung
-    entirely (and, under th#1107's ``strict_vram``, into a hard refusal).
+    entirely (th#1867 deleted the ``strict_vram`` refusal that used to sit here).
     The per-SKU refinement below keeps the GROSS requirement on purpose.
     """
     avail = available_vram_gb if available_vram_gb is not None else get_available_vram_gb()
@@ -1193,7 +1190,6 @@ def place_pipeline(
     logger: Optional[logging.Logger] = None,
     mode: Mode = "auto",
     ref: str = "",
-    strict_vram: bool = False,
 ) -> Dict[str, Any]:
     """Worker-owned placement + offload policy for a freshly-loaded pipeline.
 
@@ -1210,15 +1206,14 @@ def place_pipeline(
     The result dict carries ``oom_demotions``/``requested_mode`` when that
     happened so the caller can record + report the degradation.
 
-    ``strict_vram`` (th#1043) is the author's own opt-out of the
-    CPU-touching rungs (``Resources(strict_vram=True)``, serve_fit.py):
-    plan-time already refuses a function whose predicted footprint needs
-    offload, but that prediction can be wrong (an inaccurate plan-time
-    estimate, a deploy-time binding that changed after the author sized
-    ``vram_gb``). Without this flag a reactive CUDA OOM here would silently
-    walk into ``model_offload``/``group_offload`` anyway — exactly the
-    CPU-resident weights the author declared this binding cannot tolerate.
-    Refuse immediately instead of demoting into a rung the caller forbade.
+    th#1867 deleted the ``strict_vram`` opt-out (th#1043/th#1107) that used to
+    turn a CPU-touching rung into a hard refusal here. It was the author
+    declaring a card requirement in softer words (§2.4 ruling 4), and it made
+    THIS function — the one place that actually MEASURES the pipeline against
+    the card — refuse on a declaration instead. The descent is now bounded only
+    by the ladder itself (``models/rung``), and a binding that genuinely cannot
+    survive host-resident weights is a defect with an owner in OUR code, not a
+    card size to declare around (§1.35 amendment 2).
     """
     log = logger or _LOG
     try:
@@ -1231,20 +1226,6 @@ def place_pipeline(
     effective = select_auto_mode(pipeline=pipeline) if mode == "auto" else mode
     if mode == "auto":
         effective = _gguf_resident_override(pipeline, effective, log)
-    # th#1107: strict_vram was only enforced on the reactive OOM-demotion path
-    # below, so an auto SELECTION straight into an offload rung walked past the
-    # author's opt-out with no OOM and no error — the th#1043 shape
-    # ("shared-component lanes require resident placement") reached serving as
-    # a silent 5-10x tax. Refuse here too, with the same typed message.
-    if strict_vram and touches_host_ram(effective):
-        raise RuntimeError(
-            f"placement selected {effective!r} for "
-            f"{ref or type(pipeline).__name__!r} "
-            f"({estimate_pipeline_size_gb(pipeline):.1f} GB, "
-            f"{get_available_vram_gb():.1f} GB free): this binding requires "
-            "full VRAM residency (strict_vram=True); run on a card with more "
-            "free VRAM"
-        )
     requested = effective
     # th#1871 P1 (pgw#1225) §6.6 item 2/3: the fit numbers this decision was
     # made on, kept instead of discarded. They are locals of the decision one
@@ -1282,15 +1263,6 @@ def place_pipeline(
             nxt = nxt_rung.name if nxt_rung is not None else None
             if nxt is None:
                 raise
-            if strict_vram and touches_host_ram(nxt):
-                raise RuntimeError(
-                    f"CUDA OOM placing {ref or type(pipeline).__name__!r} at "
-                    f"{effective!r} ({estimate_pipeline_size_gb(pipeline):.1f} GB, "
-                    f"{get_available_vram_gb():.1f} GB free): only CPU/disk "
-                    f"offload ({nxt!r}) would fit here, but this binding "
-                    "requires full VRAM residency (strict_vram=True); run on a "
-                    "card with more free VRAM"
-                ) from exc
             # ``pipeline.to('cuda')`` may have moved only a prefix of the
             # component graph before the allocator raised. Offload hooks must
             # start from a coherent CPU object; attaching them to that partial
@@ -1555,7 +1527,6 @@ __all__ = [
     "cuda_allocated_bytes",
     "get_available_vram_gb",
     "GPU_VRAM_OVERHEAD_GB",
-    "effective_vram_requirement_gb",
     "get_available_ram_gb",
     "effective_ram_floor_gb",
     "get_total_ram_gb",

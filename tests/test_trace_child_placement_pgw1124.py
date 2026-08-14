@@ -126,9 +126,10 @@ def test_a_trace_child_oom_demotes_instead_of_fataling(
     """THE census failure, end to end through the real `place_pipeline`.
 
     Deliberately does NOT stub `_move_pipeline_to_cpu` / `repair_device_
-    placement` the way `test_place_pipeline_strict_vram_th1043` does: those
-    two ARE the defect, and stubbing them is why the OOM ladder looked proven
-    while every qwen-image boot fataled on it.
+    placement`: those two ARE the defect, and stubbing them is why the OOM
+    ladder looked proven while every qwen-image boot fataled on it. (The suite
+    that did stub them, `test_place_pipeline_strict_vram_th1043`, went with
+    `strict_vram` in th#1867.)
     """
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(memory, "select_auto_mode", lambda **_: "off")

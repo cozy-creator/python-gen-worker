@@ -145,7 +145,7 @@ def test_cancelled_setup_frees_prior_attempt_before_retry() -> None:
     refs: List[weakref.ref] = []
     alive_at_second_attempt: List[bool] = []
 
-    @endpoint(resources=Resources(vram_gb_hint=8))
+    @endpoint(resources=Resources(gpu=True))
     class Ep:
         def setup(self) -> None:
             if refs:
