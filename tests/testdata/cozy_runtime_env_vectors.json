@@ -10,6 +10,11 @@
       "name": "GEN_WORKER_LOCAL_OUTPUT_DIR",
       "role": "asset_ref_root",
       "sample_asset_ref": "outputs/request-1/result.bin"
+    },
+    {
+      "name": "GEN_WORKER_LOCAL_CELLS_DIR",
+      "role": "compiled_graph_root",
+      "consumer_relative_path": "aot-cells"
     }
   ]
 }

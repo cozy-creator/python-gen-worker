@@ -9,7 +9,10 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from gen_worker import config
+from gen_worker import local_cell_store
 from gen_worker.cli.local_context import _save_local_bytes
 from gen_worker.models.cache_paths import tensorhub_cache_dir, tensorhub_cas_dir
 
@@ -31,9 +34,11 @@ def _variables() -> dict[str, dict[str, str]]:
     return {row["role"]: row for row in rows}
 
 
-def test_runtime_env_semantics_match_pgw1237(monkeypatch, tmp_path: Path) -> None:
+def test_runtime_env_semantics_match_pgw1237(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     rows = _variables()
-    assert set(rows) == {"cache_root", "asset_ref_root"}
+    assert set(rows) == {"cache_root", "asset_ref_root", "compiled_graph_root"}
 
     cache = rows["cache_root"]
     cache_root = tmp_path / "cache-root"
@@ -46,12 +51,24 @@ def test_runtime_env_semantics_match_pgw1237(monkeypatch, tmp_path: Path) -> Non
         config.reset_for_test()
 
     output = rows["asset_ref_root"]
+    assert output["name"] == "GEN_WORKER_LOCAL_OUTPUT_DIR"
     output_root = tmp_path / "output-root"
     monkeypatch.setenv(output["name"], os.fspath(output_root))
     asset = _save_local_bytes(output["sample_asset_ref"], b"pgw#1237")
     expected = output_root / output["sample_asset_ref"]
+    assert asset.local_path is not None
     assert Path(asset.local_path) == expected
     assert expected.read_bytes() == b"pgw#1237"
+
+    compiled = rows["compiled_graph_root"]
+    assert compiled["name"] == local_cell_store.ENV_STORE_DIR
+    compiled_root = tmp_path / "compiled-graph-root"
+    monkeypatch.setenv(compiled["name"], os.fspath(compiled_root))
+    assert local_cell_store.store_root() == compiled_root
+    assert local_cell_store.cells_root() == (
+        compiled_root / compiled["consumer_relative_path"]
+    )
+    assert compiled["consumer_relative_path"] == local_cell_store.CELLS_DIRNAME
 
 
 def test_runtime_env_corpus_digest_matches_pgw1237() -> None:
@@ -85,9 +102,24 @@ def test_runtime_env_digest_gate_can_go_red_pgw1237(tmp_path: Path) -> None:
     assert "changed without its digest" in got.stdout
 
 
-def test_runtime_env_semantic_fence_can_go_red_pgw1237(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("role", "field", "mutation"),
+    [
+        ("cache_root", "consumer_relative_path", "not-cas"),
+        ("asset_ref_root", "name", "GEN_WORKER_LOCAL_OUTPUT_DIR_BROKEN"),
+        (
+            "compiled_graph_root",
+            "name",
+            "GEN_WORKER_LOCAL_CELLS_DIR_BROKEN",
+        ),
+    ],
+)
+def test_runtime_env_semantic_fence_can_go_red_pgw1237(
+    tmp_path: Path, role: str, field: str, mutation: str
+) -> None:
     document = json.loads(_DEFAULT_CORPUS.read_text(encoding="utf-8"))
-    document["variables"][0]["consumer_relative_path"] = "not-cas"
+    row = next(row for row in document["variables"] if row["role"] == role)
+    row[field] = mutation
     corpus = tmp_path / "cozy_runtime_env_vectors.json"
     corpus.write_text(json.dumps(document), encoding="utf-8")
 
@@ -107,7 +139,7 @@ def test_runtime_env_semantic_fence_can_go_red_pgw1237(tmp_path: Path) -> None:
         text=True,
     )
     assert got.returncode == 1
-    assert "not-cas" in got.stdout
+    assert mutation in got.stdout
 
 
 def test_runtime_env_peer_gate_can_go_red_pgw1237(tmp_path: Path) -> None:
@@ -116,6 +148,8 @@ def test_runtime_env_peer_gate_can_go_red_pgw1237(tmp_path: Path) -> None:
     for source in (_DEFAULT_CORPUS, _DEFAULT_DIGEST):
         (peer / source.name).write_bytes(source.read_bytes())
     (peer / _DEFAULT_CORPUS.name).write_bytes(_DEFAULT_CORPUS.read_bytes() + b"\n")
+    peer_digest = hashlib.sha256((peer / _DEFAULT_CORPUS.name).read_bytes()).hexdigest()
+    (peer / _DEFAULT_DIGEST.name).write_text(peer_digest + "\n", encoding="utf-8")
 
     got = subprocess.run(
         ["bash", os.fspath(Path(__file__).parents[1] / "scripts" / "cozy-runtime-env-drift.sh")],

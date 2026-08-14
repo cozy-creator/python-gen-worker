@@ -179,12 +179,39 @@ def test_worker_value_semantic_fence_can_go_red_pgw1237(tmp_path: Path) -> None:
     assert "compilecache_rank_buckets" in got.stdout
 
 
+def test_worker_value_relation_fence_can_go_red_pgw1237(tmp_path: Path) -> None:
+    document = json.loads(_DEFAULT_CORPUS.read_text(encoding="utf-8"))
+    document["relations"]["sku_slug"]["cases"][0]["result"] = "not-rtx-4090"
+    corpus = tmp_path / _DEFAULT_CORPUS.name
+    corpus.write_text(json.dumps(document), encoding="utf-8")
+
+    got = subprocess.run(
+        [
+            "uv",
+            "run",
+            "pytest",
+            "-q",
+            os.fspath(Path(__file__)),
+            "-k",
+            "test_bounded_worker_relations_match_pgw1237",
+        ],
+        env={**os.environ, "WORKER_VALUE_CONTRACT_FILE": os.fspath(corpus)},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert got.returncode == 1
+    assert "not-rtx-4090" in got.stdout
+
+
 def test_worker_value_peer_gate_can_go_red_pgw1237(tmp_path: Path) -> None:
     peer = tmp_path / "peer"
     peer.mkdir()
     for source in (_DEFAULT_CORPUS, _DEFAULT_DIGEST):
         (peer / source.name).write_bytes(source.read_bytes())
     (peer / _DEFAULT_CORPUS.name).write_bytes(_DEFAULT_CORPUS.read_bytes() + b"\n")
+    peer_digest = hashlib.sha256((peer / _DEFAULT_CORPUS.name).read_bytes()).hexdigest()
+    (peer / _DEFAULT_DIGEST.name).write_text(peer_digest + "\n", encoding="utf-8")
 
     got = subprocess.run(
         ["bash", os.fspath(_ROOT / "scripts" / "worker-value-contract-drift.sh")],
@@ -197,4 +224,4 @@ def test_worker_value_peer_gate_can_go_red_pgw1237(tmp_path: Path) -> None:
         text=True,
     )
     assert got.returncode == 1
-    assert "peer corpus does not match its digest" in got.stderr
+    assert "worker_value_contracts.json differs from python-gen-worker" in got.stderr
