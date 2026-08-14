@@ -159,7 +159,7 @@ def test_the_fetch_path_refuses_the_whole_document_rather_than_skipping(
             return {"keys": [_jwk(2048, "good"), _jwk(1 << 20, "absurd")]}
 
     monkeypatch.setattr(receipts.requests, "get", lambda *a, **k: _Resp())
-    cfg = receipts._Config(base_url="http://hub.invalid", worker_jwt=lambda: "")
+    cfg = receipts._Config(base_url="http://hub.invalid")
     with pytest.raises(receipts.ReceiptError) as exc:
         receipts._fetch_jwks(cfg)
     assert exc.value.reason == "jwks_modulus_oversized"

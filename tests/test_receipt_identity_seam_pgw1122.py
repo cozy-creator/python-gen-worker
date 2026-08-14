@@ -1,4 +1,4 @@
-"""pgw#1122: the cell RECEIPT TRUST GATE runs in the process that holds no
+"""pgw#1122: the compiled-graph receipt trust gate runs in a process with no
 credential — so it must not answer "who am I?" by decoding one.
 
 The defect class: ``receipts._self_endpoint_id``/``_self_org_id`` named this pod
@@ -59,7 +59,7 @@ from test_procsplit_pgw763 import (  # noqa: F401 — fixtures come with it
     captured_dials,
     isolated_postmortem,
 )
-from test_receipts_pgw709 import (  # noqa: F401 — fixtures come with it
+from harness.receipt_hub import (  # noqa: F401 — fixtures come with it
     FAMILY,
     OTHER_ENDPOINT,
     SELF_ENDPOINT,
@@ -69,7 +69,7 @@ from test_receipts_pgw709 import (  # noqa: F401 — fixtures come with it
     make_artifact,
     pub_map,
     rsa_key,
-    worker_jwt_for,
+    verify_artifact,
 )
 
 #: The parent's credential, shaped exactly as `cellgrant.Stamp` writes it:
@@ -224,10 +224,9 @@ class _FakeParent:
     real one.
     """
 
-    def __init__(self, endpoint_id: str, org_id: str, base_url: str = "") -> None:
+    def __init__(self, endpoint_id: str, org_id: str) -> None:
         self.endpoint_id = endpoint_id
         self.org_id = org_id
-        self.base_url = base_url.rstrip("/")
         self.asks: List[str] = []
 
     def call_action(
@@ -238,30 +237,12 @@ class _FakeParent:
         assert args == {}, "the child names no field in an identity ask"
         return {"endpoint_id": self.endpoint_id, "org_id": self.org_id}
 
-    def call(
-        self, method: str, path: str, *, params: Any = None, json: Any = None,
-        timeout: float = 30.0,
-    ) -> broker.HubResponse:
-        """The parent's half of a mediated HTTP call: it names the host, it
-        attaches the credential, the child sees only the response."""
-        import requests
-
-        self.asks.append(f"{method} {path}")
-        resp = requests.request(
-            method, self.base_url + path, params=params, json=json,
-            headers={"Authorization": "Bearer parent-holds-this"},
-            timeout=timeout)
-        return broker.HubResponse(status_code=resp.status_code, text=resp.text)
-
 
 def _child_gate(stub: HubStub, parent: Optional[_FakeParent]) -> None:
-    """Arm the receipt gate exactly as ``lifecycle.on_hello_ack`` does IN THE
-    COMPUTE CHILD: the provider is the child's, so it returns ``""``."""
+    """Arm the public-JWKS gate inside a credential-free compute child."""
     worker_credential.reset()
     worker_identity.reset()
-    receipts.configure(base_url=stub.base_url, worker_jwt=lambda: "")
-    if parent is not None:
-        parent.base_url = stub.base_url
+    receipts.configure(base_url=stub.base_url)
     broker.install(parent)
 
 
@@ -274,16 +255,18 @@ def test_the_child_arms_an_org_tier_cell_it_is_entitled_to(
     On master this raises ``publisher_untrusted`` — on 3 of 3 real pods.
     """
     artifact = make_artifact(tmp_path)
-    hub.serve_receipt_for(
+    receipt_jws = hub.serve_receipt_for(
         artifact, owning_endpoint_id=POD_ENDPOINT,
         publisher_tier="org", publisher_org_id=POD_ORG)
     parent = _FakeParent(POD_ENDPOINT, POD_ORG)
     _child_gate(hub, parent)
 
-    receipt = receipts.verify_delivered_artifact(artifact, FAMILY)
+    receipt = verify_artifact(artifact, FAMILY, receipt_jws)
 
     assert receipt.publisher_org_id == POD_ORG
-    assert receipts.gate_delivered_artifact(artifact, FAMILY) is True
+    assert hub.requests == [receipts.JWKS_PATH], (
+        "receipt verification called a deleted lookup/revocation route"
+    )
     assert parent.asks.count(actions.ACTION_VIEWER_IDENTITY) == 1, (
         "identity does not change for the life of a pod; asking per arm puts a "
         "seam round trip on every cell")
@@ -296,13 +279,12 @@ def test_a_sibling_endpoint_in_the_same_org_arms_from_the_child(
     even when the endpoint does not. Master could not apply it at all — with
     both ids empty the ``not mine and not my_org`` branch fired first."""
     artifact = make_artifact(tmp_path)
-    hub.serve_receipt_for(
+    receipt_jws = hub.serve_receipt_for(
         artifact, owning_endpoint_id=OTHER_ENDPOINT,
         publisher_tier="org", publisher_org_id=POD_ORG)
     _child_gate(hub, _FakeParent(POD_ENDPOINT, POD_ORG))
 
-    assert receipts.verify_delivered_artifact(
-        artifact, FAMILY).publisher_org_id == POD_ORG
+    assert verify_artifact(artifact, FAMILY, receipt_jws).publisher_org_id == POD_ORG
 
 
 def test_another_orgs_cell_is_still_refused_from_the_child(
@@ -312,13 +294,13 @@ def test_another_orgs_cell_is_still_refused_from_the_child(
     a ``.so`` this process is about to ``dlopen``. A relayed identity that
     matches everybody would be worse than one that matches nobody."""
     artifact = make_artifact(tmp_path)
-    hub.serve_receipt_for(
+    receipt_jws = hub.serve_receipt_for(
         artifact, owning_endpoint_id=OTHER_ENDPOINT, publisher_tier="org",
         publisher_org_id="99999999-0000-0000-0000-000000000000")
     _child_gate(hub, _FakeParent(POD_ENDPOINT, POD_ORG))
 
     with pytest.raises(receipts.ReceiptError) as exc:
-        receipts.verify_delivered_artifact(artifact, FAMILY)
+        verify_artifact(artifact, FAMILY, receipt_jws)
     assert exc.value.reason == "publisher_untrusted"
 
 
@@ -334,13 +316,13 @@ def test_no_identity_at_all_refuses_LOUDLY_and_by_its_own_name(
     evidence read like an attack on the platform by the platform.
     """
     artifact = make_artifact(tmp_path)
-    hub.serve_receipt_for(
+    receipt_jws = hub.serve_receipt_for(
         artifact, owning_endpoint_id=POD_ENDPOINT,
         publisher_tier="org", publisher_org_id=POD_ORG)
     _child_gate(hub, None)  # no parent, no credential
 
     with pytest.raises(receipts.ReceiptError) as exc:
-        receipts.verify_delivered_artifact(artifact, FAMILY)
+        verify_artifact(artifact, FAMILY, receipt_jws)
     assert exc.value.reason == "identity_unavailable", (
         "a pod that could not be ASKED about its identity reported the same "
         "reason as a pod whose identity does not match the publisher")
@@ -356,31 +338,29 @@ def test_a_platform_tier_cell_still_arms_with_no_identity(
     """The refusal must stay scoped to the org-tier decision it is about: a
     platform-tier cell needs no viewer identity and never asks for one."""
     artifact = make_artifact(tmp_path)
-    hub.serve_receipt_for(
-        artifact, owning_endpoint_id="", publisher_tier="platform",
-        publisher_org_id="")
+    receipt_jws = hub.serve_receipt_for(
+        artifact, owning_endpoint_id=OTHER_ENDPOINT, publisher_tier="platform",
+        publisher_org_id="platform-org")
     _child_gate(hub, None)
 
-    assert receipts.verify_delivered_artifact(artifact, FAMILY).publisher_tier \
+    assert verify_artifact(artifact, FAMILY, receipt_jws).publisher_tier \
         == "platform"
 
 
-def test_a_hub_that_stamped_no_claims_is_an_ANSWER_not_a_failure(
+def test_a_viewer_answer_with_no_claims_is_not_a_transport_failure(
     tmp_path: Path, hub: HubStub,  # noqa: F811
 ) -> None:
-    """``cellgrant.Stamp`` omits both claims when the hub cannot resolve them,
-    which legally narrows the pod to platform-tier. That is a resolved identity
-    that names nothing — and it must not be reported as an unreachable one."""
+    """An empty viewer answer is reachable but cannot adopt an org receipt."""
     _child_gate(hub, _FakeParent("", ""))
     me = worker_identity.viewer()
     assert not me.named
 
     artifact = make_artifact(tmp_path)
-    hub.serve_receipt_for(
+    receipt_jws = hub.serve_receipt_for(
         artifact, owning_endpoint_id=POD_ENDPOINT,
         publisher_tier="org", publisher_org_id=POD_ORG)
     with pytest.raises(receipts.ReceiptError) as exc:
-        receipts.verify_delivered_artifact(artifact, FAMILY)
+        verify_artifact(artifact, FAMILY, receipt_jws)
     assert exc.value.reason == "publisher_untrusted"
 
 

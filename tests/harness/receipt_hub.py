@@ -1,16 +1,8 @@
-"""A REAL cell-receipt hub: real RSA keys, real JWS, real HTTP on localhost.
+"""Real compiled-graph receipt signer and JWKS-only HTTP test server.
 
-Promoted out of ``test_receipts_pgw709.py`` by pgw#1152, unchanged. The signer
-mirrors the hub's production format byte-for-byte (RS256 PKCS1v15/SHA256
-compact JWS, kid header, ``cell-receipt-v1+jws`` typ, ``cell-receipt-v2``
-claims); the hub half's Go tests pin the same format from the signing side.
-:class:`HubStub` serves the three real routes the worker calls — JWKS, receipt
-lookup, revocations — on a real socket.
-
-It is here rather than in a test module because the receipt gate is on the ARM
-path: :mod:`harness.adopt_rig` drives a boot-adopt through it, and pgw#1122's
-identity seam drives it from the other side. A shared vehicle belongs where
-shared vehicles live.
+Resolve embeds the signed receipt, so the hub double serves only the public
+JWKS route. Tests receive the JWS directly from :meth:`HubStub.serve_receipt_for`
+and verify it before the artifact helper opens local bytes.
 """
 
 from __future__ import annotations
@@ -21,30 +13,29 @@ import io
 import json
 import tarfile
 import threading
+from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from typing import Any
 
 import pytest
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from torch_compiled_graphs.identity import (
+    from_artifact_metadata,
+    toolchain_axis_digest,
+)
 
-from gen_worker import receipts, worker_credential, worker_identity
+from gen_worker import artifact_meta, receipts, worker_credential, worker_identity
 
-KID = "test-kid-1"
+KID = "test-compiled-graph-receipt-key"
 FAMILY = "sdxl"
-CELL_KEY = "ck1-0123456789abcdef0123456789abcdef0123456789abcdef01234567"
-SNAPSHOT = "snapdigest-abc123"
-# th#1657: the endpoint the test pod serves, and the one every fixture receipt
-# is minted FOR unless a test deliberately mints it for someone else. Keeping
-# the default a matching ORG-tier pair means the publisher gate is live in every
-# case below, not just the ones that name it.
+SNAPSHOT = "sha256:" + "9" * 64
 SELF_ENDPOINT = "3e0f8f7a-1111-2222-3333-444455556666"
 OTHER_ENDPOINT = "9c1d2e3f-9999-8888-7777-666655554444"
 SELF_ORG = "11111111-2222-3333-4444-555555555555"
-B3_HEX = "ab12cd34" * 8
-SHA_HEX = "12ab34cd" * 8
+PUBLISHER = "selfmint:worker=w1:pod=p1:release=r1"
+ISSUED_AT = 1_700_000_000
 
 
 def _b64url(raw: bytes) -> str:
@@ -53,55 +44,115 @@ def _b64url(raw: bytes) -> str:
 
 def sign_receipt(
     key: rsa.RSAPrivateKey,
-    claims: Dict[str, Any],
+    claims: dict[str, Any],
     *,
     kid: str = KID,
     alg: str = "RS256",
+    typ: str = receipts.RECEIPT_TYPE,
 ) -> str:
-    header = {"alg": alg, "kid": kid, "typ": "cell-receipt-v1+jws"}
-    signing_input = (
-        _b64url(json.dumps(header).encode()) + "." + _b64url(json.dumps(claims).encode())
+    header = {"alg": alg, "kid": kid, "typ": typ}
+    signing_input = ".".join((
+        _b64url(json.dumps(header, sort_keys=True).encode()),
+        _b64url(json.dumps(claims, sort_keys=True).encode()),
+    ))
+    signature = key.sign(
+        signing_input.encode("ascii"), padding.PKCS1v15(), hashes.SHA256()
     )
-    sig = key.sign(signing_input.encode("ascii"), padding.PKCS1v15(), hashes.SHA256())
-    return signing_input + "." + _b64url(sig)
+    return f"{signing_input}.{_b64url(signature)}"
+
+
+def _metadata(
+    *, graph_hash: str = "receipt-harness-graph", compiled_graph_key: str = "",
+) -> dict[str, Any]:
+    toolchain = {"torch": "torch-content", "triton": "triton-content"}
+    axes = {
+        "graph": graph_hash,
+        "sm": "sm_86",
+        "toolchain": toolchain_axis_digest(toolchain),
+    }
+    derived = from_artifact_metadata({
+        "kind": "aot-inductor",
+        "graph_class": {"class_hash": graph_hash},
+        "sm": "sm_86",
+        "toolchain": toolchain,
+    }).value
+    return {
+        "compiled_graph_format": 1,
+        "kind": "aot-inductor",
+        "compiled_graph_key": compiled_graph_key or derived,
+        "graph_class": {
+            "name": "denoiser/b=1",
+            "class_hash": axes["graph"],
+        },
+        "sm": axes["sm"],
+        "toolchain": toolchain,
+        "host_isa": {"avx2": "true"},
+        "package_constants_in_so": False,
+        "constant_folding_fenced": True,
+    }
+
+
+def make_artifact(
+    tmp_path: Path,
+    *,
+    compiled_graph_key: str = "",
+    graph_hash: str = "receipt-harness-graph",
+) -> Path:
+    """Pack one TCG-shaped artifact for receipt verification tests."""
+    target = tmp_path / "compiled_graph.tar.gz"
+    with tarfile.open(target, "w:gz") as archive:
+        raw = json.dumps(
+            _metadata(graph_hash=graph_hash, compiled_graph_key=compiled_graph_key),
+            sort_keys=True,
+        ).encode()
+        member = tarfile.TarInfo(artifact_meta.METADATA_NAME)
+        member.size = len(raw)
+        archive.addfile(member, io.BytesIO(raw))
+        payload = b"fake-compiled-graph-shared-object"
+        member = tarfile.TarInfo("data/aoti_eager/denoiser.so")
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+    return target
+
+
+def artifact_digest(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _artifact_identity(path: Path) -> tuple[str, dict[str, str]]:
+    metadata = artifact_meta.read_metadata(path)
+    identity = from_artifact_metadata(metadata)
+    return identity.value, identity.as_dict()
 
 
 def make_claims(
-    artifact_digest: str,
-    size_bytes: int,
+    artifact: Path,
     *,
-    legacy_blake3_only: bool = False,
+    family: str = FAMILY,
+    snapshot_digest: str = SNAPSHOT,
+    owning_endpoint_id: str = SELF_ENDPOINT,
+    publisher: str = PUBLISHER,
+    publisher_tier: str = receipts.PUBLISHER_TIER_ORG,
+    publisher_org_id: str = SELF_ORG,
     **overrides: Any,
-) -> Dict[str, Any]:
-    """Build receipt claims binding an ALGORITHM-TAGGED artifact digest.
-
-    ``legacy_blake3_only`` reproduces a receipt minted before pgw#807: the
-    bare-hex ``blake3`` claim and no ``digest`` at all. It exists so the tests
-    can prove that shape is now REFUSED — the v1 protocol that minted it is
-    gone from this SDK, so a cell it names is re-minted, never armed.
-    """
-    algo, _, hex_part = artifact_digest.partition(":")
-    artifact: Dict[str, Any] = {"path": "cell.tar.gz", "size_bytes": size_bytes}
-    if legacy_blake3_only:
-        assert algo == "blake3", "legacy receipts only ever carried blake3"
-        artifact["blake3"] = hex_part
-    else:
-        artifact["digest"] = artifact_digest
-    claims: Dict[str, Any] = {
-        "crv": "cell-receipt-v2",
-        "family": FAMILY,
-        "cell_key": CELL_KEY,
-        "axes": {"sku": "rtx-4090", "image_digest": "sha256:feed", "gen_worker": "0.75.1"},
-        "owning_endpoint_id": SELF_ENDPOINT,
-        "publisher": "selfmint:worker=w1:pod=p1:release=r1",
-        # th#1657 publisher trust, inside the signature.
-        "publisher_tier": "org",
-        "publisher_org_id": SELF_ORG,
-        "snapshot_digest": SNAPSHOT,
-        "artifact": artifact,
-        "manifest_digest": "sha256:aa",
-        "fingerprint_digest": "sha256:bb",
-        "iat": 1_700_000_000,
+) -> dict[str, Any]:
+    key, axes = _artifact_identity(artifact)
+    claims: dict[str, Any] = {
+        "crv": receipts.RECEIPT_VERSION,
+        "family": family,
+        "compiled_graph_key": key,
+        "identity_axes": axes,
+        "owning_endpoint_id": owning_endpoint_id,
+        "publisher": publisher,
+        "publisher_tier": publisher_tier,
+        "publisher_org_id": publisher_org_id,
+        "snapshot_digest": snapshot_digest,
+        "artifact": {
+            "path": artifact.name,
+            "digest": artifact_digest(artifact),
+            "size_bytes": artifact.stat().st_size,
+        },
+        "iat": ISSUED_AT,
     }
     claims.update(overrides)
     return claims
@@ -113,84 +164,46 @@ def rsa_key() -> rsa.RSAPrivateKey:
 
 
 @pytest.fixture()
-def pub_map(rsa_key: rsa.RSAPrivateKey) -> Dict[str, rsa.RSAPublicKey]:
+def pub_map(rsa_key: rsa.RSAPrivateKey) -> dict[str, rsa.RSAPublicKey]:
     return {KID: rsa_key.public_key()}
 
 
-def make_artifact(tmp_path: Path, *, cell_key: str = CELL_KEY, family: str = FAMILY) -> Path:
-    meta = {"cell_key": cell_key, "family": family, "format": "cozy-compile-cache/v1"}
-    target = tmp_path / "cell.tar.gz"
-    with tarfile.open(target, "w:gz") as tar:
-        raw = json.dumps(meta).encode()
-        ti = tarfile.TarInfo("metadata.json")
-        ti.size = len(raw)
-        tar.addfile(ti, io.BytesIO(raw))
-        payload = b"fake-inductor-entry" * 64
-        ti = tarfile.TarInfo("inductor/aa/entry.py")
-        ti.size = len(payload)
-        tar.addfile(ti, io.BytesIO(payload))
-    return target
-
-
 class HubStub:
-    """A real HTTP server speaking the hub's three receipt surfaces."""
+    """A real HTTP server exposing only the public artifact-signing JWKS."""
 
     def __init__(self, key: rsa.RSAPrivateKey) -> None:
         self.key = key
-        self.receipts: Dict[Tuple[str, str], str] = {}
-        self.last_query: Tuple[List[str], str] = ([], "")
-        self.revoked: List[Dict[str, str]] = []
-        self.receipt_status: Optional[int] = None  # force an error status
-        pub = key.public_key().public_numbers()
+        self.requests: list[str] = []
+        public = key.public_key().public_numbers()
 
-        def b64_int(v: int) -> str:
-            raw = v.to_bytes((v.bit_length() + 7) // 8, "big")
-            return _b64url(raw)
+        def integer(value: int) -> str:
+            return _b64url(value.to_bytes((value.bit_length() + 7) // 8, "big"))
 
-        self.jwks = {"keys": [{"kty": "RSA", "kid": KID, "use": "sig", "alg": "RS256",
-                               "n": b64_int(pub.n), "e": b64_int(pub.e)}]}
+        jwks = {"keys": [{
+            "kty": "RSA",
+            "kid": KID,
+            "use": "sig",
+            "alg": "RS256",
+            "n": integer(public.n),
+            "e": integer(public.e),
+        }]}
         stub = self
 
         class Handler(BaseHTTPRequestHandler):
-            def log_message(self, *args: Any) -> None:  # noqa: N802
-                pass
+            def log_message(self, *_args: Any) -> None:
+                return
 
             def do_GET(self) -> None:  # noqa: N802
-                parsed = urlparse(self.path)
-                if parsed.path == receipts.JWKS_PATH:
-                    self._json(200, stub.jwks)
-                elif parsed.path == receipts.RECEIPT_PATH:
-                    if stub.receipt_status is not None:
-                        self._json(stub.receipt_status, {"error": "forced"})
-                        return
-                    q = parse_qs(parsed.query)
-                    cell_key = q.get("cell_key", [""])[0]
-                    # The real route matches on the SET of tagged digests the
-                    # worker offers. pgw#807 deleted the bare-hex `blake3`
-                    # param with the protocol that needed it.
-                    offered = list(q.get("artifact_digest", []))
-                    stub.last_query = (offered, cell_key)
-                    jws = None
-                    for ref in offered:
-                        jws = stub.receipts.get((ref, cell_key))
-                        if jws is not None:
-                            break
-                    if jws is None:
-                        self._json(404, {"error": "cell_receipt_not_found"})
-                    else:
-                        self._json(200, {"receipt": jws, "snapshot_digest": SNAPSHOT})
-                elif parsed.path == receipts.REVOCATIONS_PATH:
-                    self._json(200, {"revoked": stub.revoked})
-                else:
-                    self._json(404, {"error": "unknown route"})
-
-            def _json(self, status: int, body: Dict[str, Any]) -> None:
-                raw = json.dumps(body).encode()
-                self.send_response(status)
+                stub.requests.append(self.path)
+                if self.path != receipts.JWKS_PATH:
+                    self.send_error(404)
+                    return
+                body = json.dumps(jwks).encode()
+                self.send_response(200)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
-                self.wfile.write(raw)
+                self.wfile.write(body)
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -203,67 +216,53 @@ class HubStub:
     def close(self) -> None:
         self.server.shutdown()
         self.server.server_close()
+        self.thread.join()
 
-    def serve_receipt_for(
-        self, artifact: Path, *, algo: str = "sha256", **claim_overrides: Any
-    ) -> str:
-        """Publish a receipt for ``artifact`` bound with ``algo``; returns the ref."""
-        assert algo == "sha256"
-        ref = receipts.artifact_digest(artifact)
-        size = artifact.stat().st_size
-        claims = make_claims(ref, size, **claim_overrides)
-        self.receipts[(ref, str(claims["cell_key"]))] = sign_receipt(self.key, claims)
-        return ref
+    def serve_receipt_for(self, artifact: Path, **claim_overrides: Any) -> str:
+        """Return the embedded JWS; no receipt lookup route exists."""
+        return sign_receipt(self.key, make_claims(artifact, **claim_overrides))
+
+
+def verify_artifact(
+    artifact: Path, family: str, receipt_jws: str,
+) -> receipts.Receipt:
+    """Drive the production pre-transport then pre-import receipt gates."""
+    key, _axes = _artifact_identity(artifact)
+    verified = receipts.verify_receipt(
+        receipt_jws,
+        family=family,
+        compiled_graph_key=key,
+        snapshot_digest=SNAPSHOT,
+        artifact_path=artifact.name,
+        artifact_digest=artifact_digest(artifact),
+        artifact_size_bytes=artifact.stat().st_size,
+    )
+    return receipts.verify_delivered_artifact(artifact, family, verified)
 
 
 @pytest.fixture()
 def hub(rsa_key: rsa.RSAPrivateKey) -> Iterator[HubStub]:
     stub = HubStub(rsa_key)
+    receipts.configure(stub.base_url)
     yield stub
     stub.close()
     receipts.reset()
-    # pgw#1122: identity is a PROCESS fact now, so the fixture must unwind it
-    # too or the next test inherits this one's pod.
     worker_identity.reset()
     worker_credential.reset()
 
 
 def worker_jwt_for(endpoint_id: str, org_id: str = "") -> str:
-    """A hub-shaped worker credential naming the endpoint this pod serves.
-
-    th#1657: the pod's own identity comes from the `cell_read_endpoint_id` the
-    hub stamps on the cell-read grant (th#1335), so the test builds the same
-    thing. The signature is never checked — this is our OWN bearer token, not an
-    input — so an unsigned third segment is faithful to what the gate reads.
-    """
+    """Build the viewer claims a real worker credential carries."""
     header = _b64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
     claims = {"sub": "worker-1", "cell_read_endpoint_id": endpoint_id}
-    # th#1680: the org rides the same grant. Omitted when empty, exactly as a
-    # pre-th#1680 hub (or one that could not resolve the org) leaves it out.
     if org_id:
         claims["cell_read_org_id"] = org_id
-    payload = _b64url(json.dumps(claims).encode())
-    return header + "." + payload + ".not-checked-here"
+    return f"{header}.{_b64url(json.dumps(claims).encode())}.not-checked-here"
 
 
-def _identify(token: str) -> None:
-    """Give this process the credential a single-process worker holds.
-
-    pgw#1122: the gate no longer decodes its OWN bearer for identity — the
-    compute child holds none by construction, so the process-wide credential
-    (``worker_credential``, pgw#848's single source) is what
-    ``worker_identity.viewer`` reads, exactly as production does after the
-    transport installs a rotation. Installing it here is what production
-    writes; passing a token to ``receipts.configure`` was only ever a bearer.
-    """
+def identify(token: str) -> None:
+    """Install this process's own worker identity exactly once."""
     worker_identity.reset()
     worker_credential.reset()
     if token:
         worker_credential.install(token)
-
-
-def _configure(stub: HubStub, *, endpoint_id: str = SELF_ENDPOINT) -> None:
-    token = worker_jwt_for(endpoint_id)
-    _identify(token)
-    receipts.configure(base_url=stub.base_url, worker_jwt=lambda: token)
-
