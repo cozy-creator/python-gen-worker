@@ -39,6 +39,15 @@ class _FakeHub(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_v2_repudiation(self, pid: str, failure: dict) -> None:
+        """A typed refusal, projection-shaped. The STATUS follows the hub's own
+        split (`failCASPublishV2`): retryable is 409, terminal is 422."""
+        self._send(409 if failure.get("retryable") else 422, {"status": {
+            "publish_id": pid, "stage": "repudiated", "terminal": True,
+            "stages": [{"stage": "verify", "status": "failed"}],
+            "failure": failure,
+        }})
+
     def _send_proxy_page(self, code: int) -> None:
         """Answer as a PROXY would (ngrok offline page): text/html, no hub
         error envelope. pgw#738/#743: origin discrimination must classify
@@ -170,12 +179,21 @@ class _FakeHub(BaseHTTPRequestHandler):
             # (pgw#1002 A) rather than re-derive one from the message.
             verdict = st.get("complete_failure")
             if verdict is not None:
-                self._send(409, {"status": {
-                    "publish_id": pid, "stage": "repudiated", "terminal": True,
-                    "stages": [{"stage": "verify", "status": "failed"}],
-                    "failure": dict(verdict),
-                }})
+                self._send_v2_repudiation(pid, dict(verdict))
                 return
+            # th#1980: the release is resolved INSIDE the publish transaction
+            # and must already have been CUT — publishing never cuts one.
+            # `release_not_found` is outside chunkcas' retryable allowlist, so
+            # the projection is a repudiation the producer must not retry.
+            release = str(req.get("release") or "").strip()
+            if release and release not in st.setdefault("releases", set()):
+                self._send_v2_repudiation(pid, {
+                    "code": "release_not_found", "retryable": False,
+                    "message": f"no release {release} in this repo",
+                })
+                return
+            if release:
+                st.setdefault("attached_releases", {})[pid] = release
             st.setdefault("v2_manifests", {})[pid] = req.get("files") or []
             checkpoint_id = "sha256:" + "ab" * 32
             completed[pid] = checkpoint_id
