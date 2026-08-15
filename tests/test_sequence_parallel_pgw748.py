@@ -27,6 +27,7 @@ from typing import Any
 import pytest
 
 from gen_worker.parallel import (
+    BootPlan,
     ContextParallelUnavailable,
     FollowerChannel,
     GroupPlan,
@@ -38,6 +39,7 @@ from gen_worker.parallel import (
     install_context_parallel,
     refuse_unless_divisible,
     refuse_unless_shard_invariant_quant,
+    wire,
 )
 
 torch = pytest.importorskip("torch")
@@ -58,7 +60,8 @@ def _follower_echo(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no
 
     pg = init_rank(spec)
     cmd = chan.next_command(timeout=120)
-    plan = cmd["plan"]
+    assert isinstance(cmd, wire.Arm), cmd
+    plan = cmd.plan
     assert plan.precision_execution_lane == "w8a8"
     assert plan.gemm_mode == "rowwise"
     chan.report_ready(spec.rank)
@@ -72,8 +75,9 @@ def _follower_disagrees(spec: RankSpec, chan: FollowerChannel) -> None:  # pragm
     against the delivered plan)."""
     init_rank(spec)
     cmd = chan.next_command(timeout=120)
+    assert isinstance(cmd, wire.Arm), cmd
     mine = GroupPlan(precision_execution_lane="bf16", sp_degree=2)
-    mine.assert_agrees(cmd["plan"], rank=spec.rank)
+    mine.assert_agrees(cmd.plan, rank=spec.rank)
 
 
 def _follower_dies_before_joining(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no cover - spawned
@@ -100,7 +104,7 @@ def test_rank_zero_decides_and_every_rank_obeys() -> None:
             precision_execution_lane="w8a8", gemm_mode="rowwise", sp_degree=2,
             loras=(("style", 0.8),),
         )
-        group.send({"op": "arm", "plan": plan})
+        group.send(wire.Arm(boot=BootPlan(), plan=plan))
         group.wait_armed()
         group.barrier()
     finally:
@@ -114,8 +118,9 @@ def test_a_follower_that_disagrees_fails_the_group() -> None:
     group = _cpu_group(_follower_disagrees)
     group.form()
     try:
-        group.send({"op": "arm",
-                    "plan": GroupPlan(precision_execution_lane="w8a8", sp_degree=2)})
+        group.send(wire.Arm(
+            boot=BootPlan(),
+            plan=GroupPlan(precision_execution_lane="w8a8", sp_degree=2)))
         with pytest.raises(RankGroupError):
             for _ in range(200):
                 group.check_alive()
@@ -277,7 +282,9 @@ def _follower_echo4(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: n
     import torch.distributed as dist
 
     pg = init_rank(spec)
-    plan = chan.next_command(timeout=120)["plan"]
+    cmd = chan.next_command(timeout=120)
+    assert isinstance(cmd, wire.Arm), cmd
+    plan = cmd.plan
     assert plan.sp_degree == 4, plan
     assert plan.gemm_mode == "rowwise"
     assert plan.loras == (("style", 0.8),)
@@ -303,7 +310,7 @@ def test_degree_four_group_forms_and_every_rank_obeys_rank_zero() -> None:
             precision_execution_lane="w8a8", gemm_mode="rowwise", sp_degree=4,
             compile_armed=False, loras=(("style", 0.8),),
         )
-        group.send({"op": "arm", "plan": plan})
+        group.send(wire.Arm(boot=BootPlan(), plan=plan))
         group.wait_armed()
         group.barrier()   # all four ranks reached it
     finally:
@@ -319,7 +326,7 @@ def test_one_dead_rank_of_four_fails_the_whole_group() -> None:
     group = _cpu_group(_follower_rank3_dies, degree=4)
     group.form()
     try:
-        group.send({"op": "arm", "plan": GroupPlan(sp_degree=4)})
+        group.send(wire.Arm(boot=BootPlan(), plan=GroupPlan(sp_degree=4)))
         with pytest.raises(RankGroupError):
             for _ in range(300):
                 group.check_alive()
@@ -385,12 +392,10 @@ def test_the_call_gate_routes_the_pipeline_through_the_group() -> None:
 
 
 def test_call_marshalling_survives_the_wire() -> None:
-    # The model call must arrive at every rank IDENTICAL. CUDA tensors go via
-    # CPU (the followers own other cards) and a Generator is not picklable at
-    # all — only its seed has to agree.
-    import pickle
-
-    from gen_worker.parallel.runtime import _dehydrate, _rehydrate
+    # The model call must arrive at every rank IDENTICAL. Tensors go via CPU
+    # (the followers own other cards) as safetensors bytes; a Generator cannot
+    # cross at all — only its seed has to agree.
+    from gen_worker.parallel import wire
 
     payload = {
         "latents": torch.ones(2, 3),
@@ -399,9 +404,11 @@ def test_call_marshalling_survives_the_wire() -> None:
         "generator": torch.Generator().manual_seed(1234),
         "sigmas": [torch.zeros(2), 0.5],
     }
-    wire = _dehydrate(payload)
-    pickle.loads(pickle.dumps(wire))          # must cross the command channel
-    back = _rehydrate(wire, device=0)
+    # The real crossing: marshal -> encode -> bytes -> decode, as the queue
+    # does it.
+    command = wire.decode(wire.encode(wire.run_command((), payload)))
+    assert isinstance(command, wire.Run)
+    _args, back = wire.run_call(command, device="cpu")
     assert torch.equal(back["latents"].cpu(), payload["latents"])
     assert back["steps"] == 4 and back["prompt"] == "a cat"
     assert back["generator"].initial_seed() == 1234

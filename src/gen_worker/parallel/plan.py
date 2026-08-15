@@ -21,12 +21,30 @@ the only place a follower is allowed to disagree is by raising
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class BootPlan:
+    """Everything a follower needs to build the SAME pipeline.
+
+    Lives beside :class:`GroupPlan` because they are the same act — rank 0
+    decides, every rank obeys — and they ride the arm command together.
+    """
+
+    modules: Tuple[str, ...] = ()
+    function_name: str = ""
+    slot: str = ""
+    # slot -> the pod-shared CAS path. One copy of the bytes, N mappings.
+    path: str = ""
+    cache_dir: str = ""
+    degree: int = 1
+    dtype: str = ""
+    storage_dtype: str = ""
 
 
 class RankDivergence(RuntimeError):
@@ -76,15 +94,6 @@ class GroupPlan:
     # The sharding degree this plan was decided for.
     sp_degree: int = 1
     extra: Dict[str, Any] = field(default_factory=dict)
-
-    def encode(self) -> bytes:
-        return json.dumps(asdict(self), sort_keys=True).encode()
-
-    @classmethod
-    def decode(cls, raw: bytes) -> "GroupPlan":
-        obj = json.loads(raw.decode())
-        obj["loras"] = tuple(tuple(x) for x in obj.get("loras") or ())
-        return cls(**obj)
 
     def refuse_unless_cp_safe(self) -> None:
         """Refuse a plan that cannot be correct under sharding, BEFORE the

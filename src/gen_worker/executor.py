@@ -174,9 +174,9 @@ from . import warmup as warmup_mod
 from .api.decorators import ATTR as _DECL_ATTR
 from . import compile_cache as _cc_execution_lane
 from .parallel import ContextParallelUnavailable
-from .parallel import GroupPlan
+from .parallel import BootPlan, GroupPlan
 from .parallel.cp import w8a8_gemm_mode
-from .parallel.runtime import BootPlan, SequenceRuntime, arm_sequence_gate
+from .parallel.runtime import SequenceRuntime, arm_sequence_gate
 from .runtimes.server import RUNTIME_FACTORIES
 from .models.loading import composition_compute_dtype
 from .runtimes.server import ServerHandle

@@ -38,10 +38,10 @@ pytestmark = pytest.mark.skipif(
     reason="needs torch.distributed with the gloo backend",
 )
 
-from gen_worker.parallel import RankGroupError  # noqa: E402
+from gen_worker.parallel import RankGroupError, wire  # noqa: E402
 from gen_worker.parallel.group import FollowerChannel, RankSpec, init_rank  # noqa: E402
-from gen_worker.parallel.runtime import BootPlan, SequenceRuntime  # noqa: E402
-from gen_worker.parallel.plan import GroupPlan  # noqa: E402
+from gen_worker.parallel.plan import BootPlan, GroupPlan  # noqa: E402
+from gen_worker.parallel.runtime import SequenceRuntime  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -95,13 +95,13 @@ def _make_toy_pipe() -> Any:
 
 def _rig_entry(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no cover - spawned
     """A follower that mirrors sequence_rank_main against the toy pipe."""
+    from gen_worker.parallel import wire
     from gen_worker.parallel.cp import CpComms, gated_call, install_context_parallel
-    from gen_worker.parallel.runtime import _rehydrate
 
     pg = init_rank(spec)
     first = chan.next_command(timeout=120)
-    assert first["op"] == "arm", first
-    plan: GroupPlan = first["plan"]
+    assert isinstance(first, wire.Arm), first
+    plan: GroupPlan = first.plan
     plan.refuse_unless_cp_safe()
     pipe = _make_toy_pipe()
     install_context_parallel(
@@ -111,9 +111,9 @@ def _rig_entry(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no cov
     chan.report_ready(spec.rank)
     while True:
         cmd = chan.next_command()
-        if not isinstance(cmd, dict) or cmd.get("op") == "close":
+        if not isinstance(cmd, wire.Run):
             return
-        args = tuple(_rehydrate(a, spec.device) for a in cmd.get("args", ()))
+        args, _kwargs = wire.run_call(cmd, device="cpu")
         # Same gate `sequence_rank_main` enters: a follower's forward IS
         # rank-symmetric, so it is inside the gate.
         with torch.no_grad(), gated_call():
@@ -129,13 +129,15 @@ def _rig_entry_never_ready(spec: RankSpec, chan: FollowerChannel) -> None:  # pr
 def _rig_entry_skips_collectives(spec: RankSpec, chan: FollowerChannel) -> None:  # pragma: no cover
     """Armed and alive, but never joins a RUN's collectives — the follower-
     hang case. Rank 0 must time out TYPED, not park forever."""
+    from gen_worker.parallel import wire
+
     init_rank(spec)
     first = chan.next_command(timeout=120)
-    assert first["op"] == "arm"
+    assert isinstance(first, wire.Arm)
     chan.report_ready(spec.rank)
     while True:
         cmd = chan.next_command()
-        if not isinstance(cmd, dict) or cmd.get("op") == "close":
+        if not isinstance(cmd, wire.Run):
             return
         time.sleep(600)  # a RUN arrived; ignore it
 
@@ -270,11 +272,11 @@ def test_a_follower_that_skips_the_collective_times_out_typed() -> None:
         rt.close()
 
 
-def test_an_unpicklable_argument_is_typed_and_does_not_condemn() -> None:
+def test_an_uncrossable_argument_is_typed_and_does_not_condemn() -> None:
     # DPA-28's shape: a `callback_on_step_end` closure cannot cross the rank
     # boundary. The old broadcast_object_list raised AFTER the followers
-    # were already in _recv, desynchronizing the group. Now the pickle runs
-    # eagerly on rank 0: typed error, group coherent, next call serves.
+    # were already in _recv, desynchronizing the group. Now the marshalling
+    # runs eagerly on rank 0: typed error, group coherent, next call serves.
     rt, pipe = _armed_runtime((0, 1))
     try:
         with pytest.raises(RankGroupError, match="cannot cross the rank"):
@@ -321,7 +323,7 @@ def test_close_is_never_a_collective_and_completes_against_a_wedged_follower() -
                               timeout_s=5.0)
     # A RUN the follower ignores: it is now parked in a 600s sleep.
     parked_s = 600.0
-    rt._group.send({"op": "run", "args": (), "kwargs": {}})
+    rt._group.send(wire.Run())
     start = time.monotonic()
     rt.close()   # must join/terminate, never broadcast
     # The property is that close() does NOT wait out the parked follower.

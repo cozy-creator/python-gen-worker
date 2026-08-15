@@ -32,9 +32,10 @@ from .group import (
     RankSpec,
     init_rank,
 )
-from .plan import GroupPlan, RankDivergence
+from .plan import BootPlan, GroupPlan, RankDivergence
 
 __all__ = [
+    "BootPlan",
     "ContextParallelUnavailable",
     "CpComms",
     "FollowerChannel",
