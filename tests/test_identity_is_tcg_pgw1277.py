@@ -92,6 +92,37 @@ def test_an_artifact_that_cannot_name_its_class_has_no_identity() -> None:
         tcg_identity.from_artifact_metadata(hollow)
 
 
+@pytest.mark.parametrize("axis", ["sm", "graph_class", "toolchain", "kind"])
+def test_no_axis_may_be_DEFAULTED_into_existence(axis: str) -> None:
+    """An artifact that cannot state an axis must REFUSE, never invent one.
+
+    Found by red-proving pgw#1277, and it is the pgw#1270 failure verbatim:
+    giving ``sm`` an ``or "cpu"`` default inside TCG left the whole pgw suite
+    green, because nothing here asserted the CARDLESS case. That exact edit is
+    what once turned a deterministic refusal into a published, unadoptable
+    artifact — the line that looks like a default is the line that MANUFACTURES
+    an identity decision.
+
+    So every required axis is dropped in turn and the refusal must be typed.
+    A key minted from a defaulted axis names a compiled graph nobody compiled.
+    """
+    cardless = json.loads(json.dumps(TCG_METADATA))
+    cardless.pop(axis)
+    with pytest.raises(tcg_identity.IdentityError):
+        tcg_identity.from_artifact_metadata(cardless)
+
+
+@pytest.mark.parametrize("axis", ["sm", "kind"])
+def test_an_empty_axis_is_refused_as_hard_as_a_missing_one(axis: str) -> None:
+    """``""`` is the shape a probe returns when it could not answer — the
+    likeliest way a default sneaks in is an empty string surviving as a value.
+    """
+    blank = json.loads(json.dumps(TCG_METADATA))
+    blank[axis] = ""
+    with pytest.raises(tcg_identity.IdentityError):
+        tcg_identity.from_artifact_metadata(blank)
+
+
 def test_a_key_is_refused_where_a_fact_belongs() -> None:
     """A key is the OUTPUT of the computation and never an input to it.
 
