@@ -353,18 +353,30 @@ def write_library_memo(path: Path) -> int:
     return len(digests)
 
 
-def loaded_library_digests() -> Tuple[Tuple[str, str], ...]:
+class LoadedLibraries(NamedTuple):
+    """The loader-map probe as a TRI-STATE. ``readable`` says whether the map
+    could be read AT ALL: an unreadable map yields no digests, and so does a
+    process that mapped nothing relevant — the absence of a measurement is not
+    a measurement of absence, and the two must not share a verdict
+    (:func:`assert_seal_unchanged`)."""
+
+    readable: bool
+    digests: Tuple[Tuple[str, str], ...]
+
+
+def loaded_library_probe() -> LoadedLibraries:
     """(basename, content digest) of every relevant native library the
-    LOADER actually mapped into this process (``/proc/self/maps``).
-    Deterministic: resolved real paths, sorted basenames. Empty off-Linux
-    (no maps surface — recorded as such).
+    LOADER actually mapped into this process (``/proc/self/maps``), plus
+    whether that map was readable at all. Deterministic: resolved real
+    paths, sorted basenames. Off-Linux there is no maps surface, so the
+    probe reports ``readable=False`` and nothing may be concluded from it.
 
     Resolved through :func:`_identity_digest` like the manifest it is compared
     against, so the comparison stays apples-to-apples and an LD_PRELOAD object
     — which no RECORD covers — is HASHED and therefore named."""
     maps = _MAPS_PATH
     if not maps.is_file():
-        return ()
+        return LoadedLibraries(False, ())
     paths: Dict[str, str] = {}
     try:
         for line in maps.read_text().splitlines():
@@ -379,7 +391,7 @@ def loaded_library_digests() -> Tuple[Tuple[str, str], ...]:
                 continue  # host driver: recorded-only, never identity
             paths[base] = os.path.realpath(file_path)
     except OSError:
-        return ()
+        return LoadedLibraries(False, ())
     out: Dict[str, str] = {}
     for base in sorted(paths):
         try:
@@ -388,7 +400,13 @@ def loaded_library_digests() -> Tuple[Tuple[str, str], ...]:
                 paths[base], st.st_mtime_ns, st.st_size)
         except OSError:
             out[base] = "<unreadable>"
-    return tuple(sorted(out.items()))
+    return LoadedLibraries(True, tuple(sorted(out.items())))
+
+
+def loaded_library_digests() -> Tuple[Tuple[str, str], ...]:
+    """The mapped-library digests alone. Callers that must distinguish an
+    unreadable map from an empty one take :func:`loaded_library_probe`."""
+    return loaded_library_probe().digests
 
 
 # The IDENTITY manifest is enumerated from the python env ON DISK, never from
@@ -401,7 +419,8 @@ def loaded_library_digests() -> Tuple[Tuple[str, str], ...]:
 # shipped in the python env). The maps-based probe above remains the LIVE
 # integrity surface: assert_seal_unchanged compares what is actually mapped
 # against this manifest and refuses, naming the library, when an
-# LD_PRELOAD-style substitution diverges from the sealed disk content.
+# LD_PRELOAD-style substitution diverges from the sealed disk content — or
+# when the map could not be read, since a blind check is not a passing one.
 _TOOLCHAIN_LIB_PACKAGES = ("torch", "triton", "nvidia")
 
 # Test seam: when set, enumerate these directories instead of the resolved
@@ -654,7 +673,8 @@ def assert_seal_unchanged(label: str = "") -> None:
     derives from the declaration and cannot follow the drift). The
     boot-frozen library snapshot is re-digested LIVE here: a substituted
     native lib (LD_PRELOAD-style, post-boot) is named even though the seal
-    fact itself is frozen."""
+    fact itself is frozen. Refuses too when that check could not RUN —
+    unmeasurable is its own outcome, never folded into "unchanged"."""
     global _BOOT_READBACK
     live = settings_readback()
     if _BOOT_READBACK is None:
@@ -662,12 +682,33 @@ def assert_seal_unchanged(label: str = "") -> None:
         return
     diffs = _seal_diff(_BOOT_READBACK, live)
     snapshot = dict(frozen_library_digests())
+    # An env shipping no toolchain libs has nothing to substitute — the
+    # torchless boot, not an unmeasured one.
     if snapshot:
-        current = dict(loaded_library_digests())
+        probe = loaded_library_probe()
+        if not probe.readable:
+            # UNMEASURABLE, not unchanged: the loader map is the only surface
+            # that sees a substitution (the manifest is disk-derived and
+            # structurally blind to LD_PRELOAD), so a map we cannot read
+            # leaves every sealed library unchecked and must refuse.
+            diffs.append(
+                f"loader map {_MAPS_PATH} unreadable: {len(snapshot)} sealed "
+                "libraries could not be checked for substitution")
+        current = dict(probe.digests)
         shipped = _shipped_digest_sets()
         for base in sorted(snapshot):
             now = current.get(base)
-            if now is None or now == snapshot[base]:
+            # Never mapped: nothing was loaded that could have been swapped.
+            if now is None:
+                continue
+            if "<unreadable>" in (snapshot[base], now):
+                # Two `<unreadable>` sides are equal without being a
+                # comparison; naming that is the whole point of this row.
+                diffs.append(
+                    f"loaded lib {base}: content unverified (boot "
+                    f"{snapshot[base]}, now {now}) — no comparison happened")
+                continue
+            if now == snapshot[base]:
                 continue
             if now in shipped.get(base, ()):
                 continue  # the env's own alternate copy, not a substitution
@@ -676,7 +717,8 @@ def assert_seal_unchanged(label: str = "") -> None:
                 "(native library substituted after boot)")
     if diffs:
         raise EnvSealError(
-            f"environment drifted since boot ({label or 'point-of-use'}): "
+            "environment not verifiably unchanged since boot "
+            f"({label or 'point-of-use'}): "
             + "; ".join(diffs))
 
 
@@ -760,6 +802,7 @@ __all__ = [
     "LAST_ESTABLISH_SPANS",
     "DigestSources",
     "EnvSealError",
+    "LoadedLibraries",
     "SCRUB_PREFIXES",
     "SEAL_KEY",
     "SEAL_LIB_MEMO_ENV",
@@ -772,6 +815,7 @@ __all__ = [
     "inductor_config_digest",
     "frozen_library_digests",
     "loaded_library_digests",
+    "loaded_library_probe",
     "scrub_env",
     "seal_digest",
     "settings_readback",
