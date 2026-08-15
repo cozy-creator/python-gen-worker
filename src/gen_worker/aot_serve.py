@@ -43,7 +43,6 @@ from .compile_cache import (
     _resolve_target,
     parse_cell_ref,
 )
-from . import compile_cache as _compile_cache
 from .models import lora_lifted
 from .models.cache_paths import open_worker_engine, tensorhub_cas_dir
 from .models.memory import is_cuda_oom
@@ -147,33 +146,6 @@ class IngressContractError(RuntimeError):
     def __init__(self, reason: str, detail: str = "") -> None:
         self.reason = reason
         super().__init__(detail or reason)
-
-
-# ---------------------------------------------------------------------------
-# Key
-# ---------------------------------------------------------------------------
-
-
-def runtime_key() -> Dict[str, str]:
-    """Consumer-side half of the artifact key — a PROJECTION of the one probe.
-
-    ``sm`` is the compiled-code identity (:data:`IDENTITY_AXES`); ``sku`` is
-    the GPU's marketing slug, recorded for observability and selection.
-
-    This re-probed torch itself until pgw#1271, behind its own
-    ``except Exception: pass`` — a second implementation of
-    ``compile_cache.runtime_key`` whose failure was SILENT. So the defect
-    pgw#657 fixed there (an empty sku/sm/torch manufactures a key no healthy
-    pod computes, i.e. a guaranteed miss and a mint, with no evidence why) was
-    fixed in one copy only. The four axes are a deliberate projection, not an
-    accidental subset: they are exactly what the artifact envelope carries, and
-    widening them here would re-key every artifact.
-    """
-    # Through the MODULE, never a from-import binding: one probe means one
-    # object to patch, to fix and to reason about.
-    probe = _compile_cache.runtime_key()
-    return {axis: str(probe.get(axis) or "")
-            for axis in ("sku", "sm", "torch", "cuda")}
 
 
 def is_aot_ref(ref: str, family: str = "") -> bool:

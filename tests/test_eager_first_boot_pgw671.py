@@ -409,10 +409,11 @@ def test_no_env_read_survives_in_the_eager_first_and_bg_yield_paths() -> None:
     """
     import gen_worker.executor as _ex
     import gen_worker.mint_supervisor as _md
-    import gen_worker.aot_wrapper_split as _ws
 
+    # `aot_wrapper_split` was the third module read here; pgw#1270 deleted it
+    # with the wrapper/run_impl split TCG now owns.
     src = "".join(
-        Path(m.__file__).read_text() for m in (_ex, _md, _ws) if m.__file__)
+        Path(m.__file__).read_text() for m in (_ex, _md) if m.__file__)
     for gone in (
         "GEN_WORKER_EAGER_FIRST_BOOT",
         "GEN_WORKER_BG_YIELD",

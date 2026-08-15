@@ -169,7 +169,9 @@ src/gen_worker/aot_mint.py::PODGUARD_STATE TRIPWIRE External watchdog adapter wi
 #
 # ...but only together with a MEASURED declaration count. Zero fleet
 # declarations is what licenses a deletion, and it is a fact you query, not one
-# you infer from the code.
+# you infer from the code — `GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF` looks identical
+# to its deleted sibling in this file and was LIVE on the standing hub the last
+# time anyone asked.
 #
 # VERDICTS (declaration counts measured on the standing hub 2026-08-03):
 #
@@ -184,12 +186,17 @@ src/gen_worker/aot_mint.py::PODGUARD_STATE TRIPWIRE External watchdog adapter wi
 #     GEN_WORKER_EAGER_FIRST_BOOT       pgw#671 eager-first is now unconditional
 #     GEN_WORKER_AOT_WRAPPER_SPLIT_OFF  v1 ctor-split is now unconditional
 #
-#   DELETED by pgw#1270 with the duplicate worker runner implementation:
-#     GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF current authoritative standing state
-#             has zero release declarations and zero endpoint entries. The
-#             five historical SDXL releases recorded on 2026-08-03 are absent
-#             from the rebuilt stack; any separately retained old fleet must
-#             be retired or migrated before deploying this hard cut.
+#   READ SITE GONE, NAME DELIBERATELY NOT RETIRED — pgw#1270:
+#     GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF `aot_wrapper_split.py` read it, and TCG
+#             owns the run_impl split now, so the read site died with the module
+#             and this file's row went with it (a stale row is a hard failure of
+#             this very gate). The NAME is still accepted by
+#             `config.loader._OWNED_NON_SETTINGS`, on purpose: the 2026-08-03
+#             census recorded five SDXL releases declaring it and one live
+#             `endpoint_env_entries` row, and NOBODY HAS RE-QUERIED THE STANDING
+#             HUB SINCE. Dropping the name would make those pods fail config
+#             load on an UnknownSettingError. Retire the name only on a fresh
+#             measured count of zero. The env is inert either way.
 #
 #   NOT DELETED, and each for a stated reason:
 #     GEN_WORKER_HOST_MOVE_GUARD        ruled exception: safety guard, on by
