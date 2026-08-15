@@ -135,7 +135,7 @@ def test_a_minted_cell_comes_back_as_a_path_and_a_digest(tmp_path: Path) -> None
     assert out.report is not None
     ((_key, _path, digest),) = out.report.entries
     assert digest == "blake3:stub"
-    assert out.report.cell_key == "arm1-deadbeef"
+    assert out.report.compiled_graph_key == "arm1-deadbeef"
     assert not out.retryable
     assert "status=minted" in out.line()
 

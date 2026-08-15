@@ -414,7 +414,7 @@ def run_cycle(
         "phases_seen": sorted(set(phases)),
         "phase_seconds": dict(report.phases) if report else {},
         "peak_vram_bytes": int(report.peak_vram_bytes) if report else 0,
-        "cell_key": str(report.cell_key) if report else "",
+        "compiled_graph_key": str(report.compiled_graph_key) if report else "",
         "artifact": str(outcome.artifact or ""),
         "detail": outcome.detail[:500],
         "stderr_tail": outcome.stderr_tail[-1200:],
@@ -445,7 +445,7 @@ def run_cycle(
         return result
     leg.detail = (
         f"minted {Path(outcome.artifact or '').name} "
-        f"key={(report.cell_key if report else '')[:20]} "
+        f"key={(report.compiled_graph_key if report else '')[:20]} "
         f"warm={warm:.2f}s peak={leg.facts['peak_vram_bytes'] / 1e9:.2f}GB "
         f"entries={len(packed)}")
 
@@ -497,12 +497,12 @@ def run_cycle(
         leg.ok = minted is not None
         leg.facts = {
             "arm_key": arm.token,
-            "cell_key": str(getattr(minted, "cell_key", "") or ""),
+            "compiled_graph_key": str(getattr(minted, "compiled_graph_key", "") or ""),
             "arm_reason": reason,
             "detail": (why or "")[:400],
         }
         leg.detail = (
-            f"parent adopted {leg.facts['cell_key'][:20]} "
+            f"parent adopted {leg.facts['compiled_graph_key'][:20]} "
             f"(arm_key={arm.token[:20]})" if leg.ok
             else f"{reason}: {(why or '')[:200]}")
         # Return the VRAM before the publish/adopt legs need it.
@@ -554,7 +554,7 @@ def run_cycle(
         parity = adopted.get("parity_max_abs")
         leg.detail = (
             f"pid={adopted.get('pid')} adopted "
-            f"{str(adopted.get('cell_key'))[:20]} "
+            f"{str(adopted.get('compiled_graph_key'))[:20]} "
             f"({adopted.get('artifact_bytes', 0) / 1e6:.1f} MB"
             + (f", {len(adopted['entries'])} entries"
                if adopted.get("entries") else "") + ")"

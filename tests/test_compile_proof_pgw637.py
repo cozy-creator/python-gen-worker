@@ -34,13 +34,13 @@ def _clean_process_registries() -> Iterator[None]:
 
 def test_proven_cell_registry_roundtrip() -> None:
     ref = "cozy-fleet/cells/sdxl-rtx-4090-w8a8:abc123"
-    assert cc.cell_proven_in_process(ref) is False
-    cc.record_cell_proven(ref)
-    assert cc.cell_proven_in_process(ref) is True
+    assert cc.compiled_graph_proven_in_process(ref) is False
+    cc.record_compiled_graph_proven(ref)
+    assert cc.compiled_graph_proven_in_process(ref) is True
     # Whitespace/empty never register.
-    cc.record_cell_proven("")
-    cc.record_cell_proven("   ")
-    assert cc.cell_proven_in_process("") is False
+    cc.record_compiled_graph_proven("")
+    cc.record_compiled_graph_proven("   ")
+    assert cc.compiled_graph_proven_in_process("") is False
 
 
 class _Mod:
@@ -85,7 +85,7 @@ def test_inmemory_probe_reports_dynamo_truth_not_the_registry() -> None:
     pytest.importorskip("torch")
     assert cc.has_inmemory_compiled_code(object()) is False
     pipe = _armed_pipe()
-    cc.record_cell_proven("cozy-fleet/cells/whatever:abc")
+    cc.record_compiled_graph_proven("cozy-fleet/cells/whatever:abc")
     assert cc.has_inmemory_compiled_code(pipe) is False
 
 

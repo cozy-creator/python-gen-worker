@@ -61,9 +61,9 @@ from gen_worker.hubio.client import HubPublishError
 FAMILY = "sdxl"
 # pgw#1046: computed from `_meta()`'s identity blocks, never invented — the
 # publish path refuses a stamp its recorded axes do not describe.
-CELL_KEY = exported_cell_meta(
+COMPILED_GRAPH_KEY = exported_cell_meta(
     family=FAMILY, sku="rtx-4090", gen_worker="0.91.0",
-    weight_lane="w8a8", lora_bucket=64)["cell_key"]
+    weight_lane="w8a8", lora_bucket=64)["compiled_graph_key"]
 
 # The hub's group-wide default (internal/api/api.go: `maxRequestBodyMiddleware(32 << 20)`).
 HUB_BODY_CAP = 32 << 20
@@ -154,17 +154,17 @@ class _Hub(http.server.BaseHTTPRequestHandler):
             return
         body = self._body()
 
-        if path.endswith("/v1/worker/cells/publish-intent"):
+        if path.endswith("/v1/worker/compiled-graphs/publish-intent"):
             entries = body.get("entries") or []
             self._json(200, {
                 "repo": f"root/family-{body.get('family')}",
                 "granted": len(entries),
                 "answers": [
-                    {"cell_key": e.get("cell_key"), "status": "granted",
+                    {"compiled_graph_key": e.get("compiled_graph_key"), "status": "granted",
                      "capability_token": f"cap-token-{i}"}
                     for i, e in enumerate(entries)]})
             return
-        if path.endswith("/v1/worker/cells/publish-complete"):
+        if path.endswith("/v1/worker/compiled-graphs/publish-complete"):
             with srv.lock:
                 srv.completes.append(dict(body))
             self._json(200, {"recorded": True})
@@ -312,7 +312,7 @@ def _meta() -> dict:
 @pytest.fixture()
 def artifact(tmp_path: Path) -> Path:
     """A REAL ~200 MB cell artifact — the size attempt twenty-two produced."""
-    out = tmp_path / f"{CELL_KEY}.tar.gz"
+    out = tmp_path / f"{COMPILED_GRAPH_KEY}.tar.gz"
     # Every megabyte distinct. A repeating block would make all four 64 MiB
     # chunks hash the same, the CAS would dedup three of them, and the test
     # would silently prove a 68 MB upload instead of a 200 MB one.
@@ -344,7 +344,7 @@ def test_the_envelope_that_broke_the_hub_is_over_the_cap():
     """The premise, measured rather than asserted: the OLD declare body — the
     whole envelope, which is what shipped — really does exceed 32 MiB."""
     old_body = {k: v for k, v in _meta().items() if v is not None}
-    encoded = len(json.dumps({"mode": "replace", "files": [], "flavor": CELL_KEY,
+    encoded = len(json.dumps({"mode": "replace", "files": [], "flavor": COMPILED_GRAPH_KEY,
                               "metadata": old_body}).encode())
     assert encoded > HUB_BODY_CAP, (
         f"the fixture no longer reproduces the incident: {encoded} bytes is "
@@ -385,8 +385,8 @@ def test_a_new_unbounded_block_is_refused_on_the_pod_and_named():
     assert "th#1645" in str(excinfo.value)
     # Its own groupable token: a code defect must not land in the same bucket
     # as the hub's trust-tier and quota refusals.
-    assert excinfo.value.code == fc.CELL_DECLARE_OVERSIZE_CODE
-    assert fc._publish_failure_phase(excinfo.value) == "cell_declare_oversize"
+    assert excinfo.value.code == fc.COMPILED_GRAPH_DECLARE_OVERSIZE_CODE
+    assert fc._publish_failure_phase(excinfo.value) == "compiled_graph_declare_oversize"
 
 
 def test_a_real_200mb_cell_publishes_through_the_real_cap(hub, artifact, monkeypatch):
@@ -407,7 +407,7 @@ def test_a_real_200mb_cell_publishes_through_the_real_cap(hub, artifact, monkeyp
     assert hub.httpd.declare_lengths[0] < fc.CELL_DECLARE_MAX_BYTES
     declared_meta = hub.httpd.declares[0]["metadata"]
     assert GUARD_MANIFEST_BLOCK not in declared_meta
-    assert declared_meta["cell_key"] == CELL_KEY
+    assert declared_meta["compiled_graph_key"] == COMPILED_GRAPH_KEY
 
     # ...and the DATA still moved, all of it, over presigned PUTs, every
     # object refused unless it hashed to the digest signed into its grant.
@@ -416,7 +416,7 @@ def test_a_real_200mb_cell_publishes_through_the_real_cap(hub, artifact, monkeyp
     assert len(hub.httpd.objects) == expected_chunks
 
     assert hub.httpd.completes[-1]["ok"] is True
-    assert hub.httpd.completes[-1]["cell_key"] == CELL_KEY
+    assert hub.httpd.completes[-1]["compiled_graph_key"] == COMPILED_GRAPH_KEY
 
 
 # --------------------------------------------------------------------------

@@ -156,7 +156,7 @@ def test_a_faithful_cell_arms_AND_THE_PASS_IS_ANNOUNCED(
 
 
 @pytest.mark.parametrize("package,reason", [
-    (ProbePackage(raises="dlopen: undefined symbol"), "cell_forward_failed"),
+    (ProbePackage(raises="dlopen: undefined symbol"), "compiled_graph_forward_failed"),
     (ProbePackage(drop_output=True), "output_structure_differs"),
 ])
 def test_a_cell_that_cannot_be_MEASURED_does_not_arm(
@@ -219,7 +219,7 @@ def test_the_report_cannot_report_a_pass_it_did_not_take():
 
     errored = CompiledGraphNumerics(
         FAMILY, "k", thresholds, "declared",
-        (AxisVerdict(axis=axis, reason="cell_forward_failed"),), 1)
+        (AxisVerdict(axis=axis, reason="compiled_graph_forward_failed"),), 1)
     assert errored.measured is False
     assert errored.comparison() is None
 
@@ -319,7 +319,7 @@ def test_a_REAL_arm_reaches_the_gate(tmp_path, monkeypatch, declared, events):
     assert all(p.invocations == 1 for p in packages.values()), (
         "a REAL arm did not run the cell against its eager reference: "
         f"{ {k: p.invocations for k, p in packages.items()} }")
-    assert numerics_rows(events), "a REAL arm emitted no cell_numerics row"
+    assert numerics_rows(events), "a REAL arm emitted no compiled_graph_numerics row"
 
 
 def test_the_gate_is_never_reached_without_a_comparison(monkeypatch):

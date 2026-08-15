@@ -221,7 +221,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         with srv.lock:
             srv.calls.append((path, body))
 
-        if path.endswith("/v1/worker/cells/publish-intent"):
+        if path.endswith("/v1/worker/compiled-graphs/publish-intent"):
             family = str(body.get("family") or "")
             with srv.lock:
                 srv.intents.append(dict(body))
@@ -236,7 +236,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 "family": family,
                 "granted": len(entries),
                 "answers": [
-                    {"cell_key": str(e.get("cell_key") or ""),
+                    {"compiled_graph_key": str(e.get("compiled_graph_key") or ""),
                      "status": "granted",
                      "capability_token": f"local-rig-cap-{i}",
                      "expires_at_unix": 4102444800}
@@ -245,7 +245,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             })
             return
 
-        if path.endswith("/v1/worker/cells/publish-complete"):
+        if path.endswith("/v1/worker/compiled-graphs/publish-complete"):
             with srv.lock:
                 srv.completes.append(dict(body))
             self._json(200, {"recorded": True})

@@ -93,7 +93,7 @@ def test_the_MINTING_pod_proves_its_own_bytes_before_they_ship(
 
     assert outcome.armed is True
     assert aot_serve.is_armed(pipeline) is True
-    rows = [(p, d) for k, d, p in events if k == activity.KIND_CELL_NUMERICS]
+    rows = [(p, d) for k, d, p in events if k == activity.KIND_COMPILED_GRAPH_NUMERICS]
     # ONE row per graph class — the gate runs at the moment that
     # entry exists, never "after all N" (DESIGN-RULINGS 4.32).
     assert [p for p, _d in rows] == ["checked", "checked"], rows
@@ -121,7 +121,7 @@ def test_the_MINT_gate_is_strict_a_gray_band_cell_does_not_ship(
     # One gate row PER GRAPH CLASS — this declaration has two,
     # so the vocabulary repeats rather than aggregating.
     assert [p for k, _d, p in events
-            if k == activity.KIND_CELL_NUMERICS] == ["degraded", "degraded"]
+            if k == activity.KIND_COMPILED_GRAPH_NUMERICS] == ["degraded", "degraded"]
 
 
 def test_the_MINT_gate_refuses_a_cell_below_its_floor(
@@ -138,7 +138,7 @@ def test_the_MINT_gate_refuses_a_cell_below_its_floor(
     # One gate row PER GRAPH CLASS — this declaration has two,
     # so the vocabulary repeats rather than aggregating.
     assert [p for k, _d, p in events
-            if k == activity.KIND_CELL_NUMERICS] == ["refused", "refused"]
+            if k == activity.KIND_COMPILED_GRAPH_NUMERICS] == ["refused", "refused"]
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +167,7 @@ def test_ADOPTION_arms_a_cell_the_mint_gate_would_have_REFUSED(
 
     assert outcome.armed is True, f"an adopting pod re-judged a cell {label}"
     assert aot_serve.is_armed(pipeline) is True
-    assert [k for k, _d, _p in events if k == activity.KIND_CELL_NUMERICS] == [], (
+    assert [k for k, _d, _p in events if k == activity.KIND_COMPILED_GRAPH_NUMERICS] == [], (
         "adoption emitted a quality verdict, so it ran a quality gate")
 
 
@@ -300,9 +300,9 @@ def _fake_adopt_arm(key: str, ref: str, *, revoke: bool = False):
         # the PIPELINE. Sharing one dict between them was what kept a
         # `_marker_states` fallback alive for a shape nothing produces.
         setattr(unet, aot_serve._MARKER_ATTR, {
-            "meta": {"cell_key": key}, "state": state})
+            "meta": {"compiled_graph_key": key}, "state": state})
         setattr(pipe, aot_serve._MARKER_ATTR, {
-            "meta": {"cell_key": key},
+            "meta": {"compiled_graph_key": key},
             "targets": {"unet": {
                 "module": unet, "attr": "forward", "state": state}},
             "entries": {"unet/main": {"key": key, "target": "unet"}},
@@ -321,7 +321,7 @@ def _fake_adopt_arm(key: str, ref: str, *, revoke: bool = False):
             state["failed"] = True
             _dispatch.remove("unet/main", "revoked by the rig")
         adopted = fleet_cells.SelfMint(
-            family=FAMILY, cell_key=key, ref=ref,
+            family=FAMILY, compiled_graph_key=key, ref=ref,
             snapshot_digest="blake3:" + "ab" * 32,
             artifact=Path(cache_dir or ".") / "cell.tar")
         return fleet_cells.ArmOutcome(armed=True, self_mint=adopted)
@@ -411,7 +411,7 @@ def test_an_ADOPTED_cell_serves_COMPILED_immediately_after_materialize(
     assert aot_serve.is_armed(pipe) is True, (
         "the pod threw away the cell it had just materialized")
     assert getattr(pipe.unet, aot_serve._MARKER_ATTR, None) is not None
-    assert not compile_cache.cell_quarantined_in_process(ref)
+    assert not compile_cache.compiled_graph_quarantined_in_process(ref)
 
     # ...and the arm is DISPATCHABLE, which is the half the pod actually lost:
     # an empty `function_proofs` installs no target and the boot still ends
@@ -427,10 +427,10 @@ def test_an_ADOPTED_cell_serves_COMPILED_immediately_after_materialize(
         spy, "serve_eager_posture")
     assert ex._served_execution_lane(eff).endswith("+compiled")
 
-    # §4.32: adoption measured nothing. The only cell_numerics row a boot like
+    # §4.32: adoption measured nothing. The only compiled_graph_numerics row a boot like
     # this may emit is the posture one — never a verdict.
     rows = [(phase, detail) for kind, phase, detail in spy
-            if kind == activity.KIND_CELL_NUMERICS]
+            if kind == activity.KIND_COMPILED_GRAPH_NUMERICS]
     assert [p for p, _d in rows] == [
         numerics_ladder.PHASE_ARMED_UNDISPATCHED], rows
     assert "STAYS ARMED" in rows[0][1]
@@ -448,7 +448,7 @@ def test_a_REVOKED_artifact_is_not_re_armed_by_the_setup_pass(
     pipe = RIG["pipe"]
 
     assert aot_serve.is_armed(pipe) is False
-    assert not compile_cache.cell_proven_in_process(ref)
+    assert not compile_cache.compiled_graph_proven_in_process(ref)
     rec = ex._classes[eff.instance_key]
     assert not rec.compile_targets, (
         "a revoked artifact kept an installed target, so the wire would say "
@@ -493,7 +493,7 @@ class _Module:
 def _wrapped(runner: _Runner, spy: List[Tuple[str, str, str]]) -> Any:
     module = _Module()
     aot_serve.wrap_module(
-        module, runner, {"family": FAMILY, "cell_key": "ck1-x"},
+        module, runner, {"family": FAMILY, "compiled_graph_key": "ck1-x"},
         attr="forward", target="unet")
     return module
 
@@ -553,8 +553,8 @@ def test_a_warm_DISPATCH_still_proves_first_and_says_nothing_extra(
 
     assert aot_serve.is_armed(pipe) is True
     assert aot_serve.execution_count(pipe) > PROBE_CALLS
-    assert compile_cache.cell_proven_in_process(ref)
+    assert compile_cache.compiled_graph_proven_in_process(ref)
     rec = ex._classes[eff.instance_key]
     assert rec.compile_targets
     assert [phase for kind, phase, _d in spy
-            if kind == activity.KIND_CELL_NUMERICS] == []
+            if kind == activity.KIND_COMPILED_GRAPH_NUMERICS] == []

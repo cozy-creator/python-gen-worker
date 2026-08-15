@@ -226,7 +226,7 @@ class Report:
     #: id, or the issue that owns the gap. Prose belongs in `arm_detail`.
     blocker: str
     arm_detail: str
-    cell_key: str
+    compiled_graph_key: str
     bar: Bar
     pod: str
     sm: str
@@ -277,7 +277,7 @@ class Report:
             f'commit = "{_toml_str(self.commit)}"',
             f'pod = "{_toml_str(self.pod)}"',
             f'sm = "{_toml_str(self.sm)}"',
-            f'cell = "{_toml_str(self.cell_key)}"',
+            f'cell = "{_toml_str(self.compiled_graph_key)}"',
             f"n = {len(self.compiled.samples)}",
             f"cosine = {cosine if cosine is not None else 0.0:.6f}",
             f"eager_median_ms = {self.eager.median:.1f}",
@@ -642,7 +642,7 @@ def run(args: argparse.Namespace) -> Tuple[int, Report]:
     parity: Optional[Parity] = None
     compiled: Optional[Leg] = None
     eager: Optional[Leg] = None
-    cell_key = ""
+    compiled_graph_key = ""
     try:
         if arm == ARM_BLOCKED:
             eager = measure_leg(subject, ARM_EAGER_ARM, bar.stage, n)
@@ -664,13 +664,13 @@ def run(args: argparse.Namespace) -> Tuple[int, Report]:
                     "compare — the reason is on the activity wire "
                     "(self_mint_skipped / self_mint_abort)")
             else:
-                cell_key = str(
+                compiled_graph_key = str(
                     aot_serve.armed_metadata(pipe).get("compiled_graph_key")
                     or "")
                 fresh = numerics_probe.last_report()
                 minted = fresh if fresh is not before else None
                 arm = ARM_MINTED if minted is not None else ARM_ADOPTED
-                arm_detail = f"cell {cell_key or '?'}"
+                arm_detail = f"cell {compiled_graph_key or '?'}"
                 parity = read_parity(subject, declaration, minted)
             # The in-process order (the author's pod may have no hub) is what
             # makes the SAME process, weights and pipeline answer eager.
@@ -685,7 +685,7 @@ def run(args: argparse.Namespace) -> Tuple[int, Report]:
 
     report = Report(
         family=family, arm=arm, blocker=blocker, arm_detail=arm_detail,
-        cell_key=cell_key, bar=bar, pod=str(env.get("device") or ""),
+        compiled_graph_key=compiled_graph_key, bar=bar, pod=str(env.get("device") or ""),
         sm=_sm(env), commit=commit,
         date=datetime.datetime.now(datetime.timezone.utc).date().isoformat(),
         parity=parity, compiled=compiled, eager=eager)

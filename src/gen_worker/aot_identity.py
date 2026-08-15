@@ -18,7 +18,7 @@ class NamesAnArtifact(Protocol):
     """A source that names one compiled graph by already-authorized facts."""
 
     @property
-    def cell_key(self) -> str: ...
+    def compiled_graph_key(self) -> str: ...
 
     @property
     def toolchain_digest(self) -> str: ...
@@ -33,7 +33,7 @@ class NamesAnArtifact(Protocol):
 class ExpectedIdentity(msgspec.Struct, frozen=True):
     """The immutable hub projection threaded to the exact-key TCG arm."""
 
-    cell_key: str
+    compiled_graph_key: str
     toolchain_digest: str
     env_seal_digest: str
     graph_contract_digest: str
@@ -45,7 +45,7 @@ class ExpectedIdentity(msgspec.Struct, frozen=True):
     ) -> ExpectedIdentity:
         """Build the projection in one place from the authorized answer."""
         return ExpectedIdentity(
-            cell_key=named.cell_key,
+            compiled_graph_key=named.compiled_graph_key,
             toolchain_digest=named.toolchain_digest,
             env_seal_digest=named.env_seal_digest,
             graph_contract_digest=graph_contract_digest,

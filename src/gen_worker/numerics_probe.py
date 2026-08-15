@@ -81,7 +81,7 @@ class ProbeUnavailable(RuntimeError):
 class CellNumericsRefused(RuntimeError):
     """This cell does not reproduce the eager forward it replaces."""
 
-    reason = "cell_numerics_below_floor"
+    reason = "compiled_graph_numerics_below_floor"
 
     def __init__(self, detail: str, comparison: Optional[Comparison] = None) -> None:
         super().__init__(detail)
@@ -314,7 +314,7 @@ def measure_axis(
             subject = compiled(*args)
     except Exception as exc:  # noqa: BLE001
         raise ProbeUnavailable(
-            "cell_forward_failed",
+            "compiled_graph_forward_failed",
             f"{axis}: the ARMED CELL raised on its own declared feed "
             f"({type(exc).__name__}: {exc})") from exc
     try:

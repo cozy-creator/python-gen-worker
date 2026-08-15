@@ -471,7 +471,7 @@ def test_every_hub_dial_reads_ONE_refreshable_credential() -> None:
 
 def test_the_unchecked_announcement_is_gone_because_the_gate_landed(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    """CP12 shipped `cell_numerics phase=unchecked` — an arm that stated, on
+    """CP12 shipped `compiled_graph_numerics phase=unchecked` — an arm that stated, on
     the wire, that nobody had checked it. That was the right stopgap and the
     wrong end state, and pgw#868 replaced it with the measurement.
 
@@ -511,7 +511,7 @@ def test_the_unchecked_announcement_is_gone_because_the_gate_landed(
     assert provision.arm_aot(
         object(), cfg, None, Path("cell.pt2"), 0,
         verify_numerics=True).armed is False
-    rows = [(d, p) for k, d, p in said if k == activity_mod.KIND_CELL_NUMERICS]
+    rows = [(d, p) for k, d, p in said if k == activity_mod.KIND_COMPILED_GRAPH_NUMERICS]
     assert rows, "an arm that could not be measured said nothing"
     detail, phase = rows[-1]
     assert phase == "unmeasurable"

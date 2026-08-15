@@ -1,5 +1,5 @@
 """pgw#1090 (§4.29), batched by pgw#1224 — the worker half of
-``POST /v1/worker/cells/resolve``.
+``POST /v1/worker/compiled-graphs/resolve``.
 
 Written against the hub's ANSWER CONTRACT (th#1750 merged ``26275ff8``;
 th#1842 PR #1118 made it a batch), so a hub-side field rename reds here rather
@@ -42,7 +42,7 @@ def _hit_body(**over: Any) -> Dict[str, Any]:
         "status": "hit",
         "found": True,
         "family": "sdxl",
-        "cell_key": KEY,
+        "compiled_graph_key": KEY,
         "cell_ref": f"root/family-sdxl#{KEY}",
         "checkpoint_id": "ckpt-1",
         "content_digest": "sha256:" + "11" * 32,
@@ -86,7 +86,7 @@ def _batch(*answers: Any, **top: Any) -> Dict[str, Any]:
 
 
 def _miss(key: str = KEY) -> Dict[str, Any]:
-    return {"cell_key": key, "status": "miss", "found": False}
+    return {"compiled_graph_key": key, "status": "miss", "found": False}
 
 
 def _one(family: str = "sdxl", key: str = KEY, **kw: Any) -> Any:
@@ -115,12 +115,12 @@ def stub(monkeypatch):
 
 def test_the_body_carries_family_and_keys_and_nothing_else(stub) -> None:
     """A body naming any entitlement input is a NAMED 400 hub-side
-    (``cell_resolve_client_supplied_field``) — refused, never ignored. So a
+    (``compiled_graph_resolve_client_supplied_field``) — refused, never ignored. So a
     client that grew a field would not be tolerated, it would refuse the whole
     boot. Pinned here and in the action table, which are the two places the
     shape is stated.
 
-    pgw#1224: the field is ``keys[]`` and the single-key ``cell_key`` is GONE.
+    pgw#1224: the field is ``keys[]`` and the single-key ``compiled_graph_key`` is GONE.
     A hard cut needs both halves to be checkable, and this is the worker half."""
     sent, resp = stub
     resp["r"] = _Resp(200, _batch(_miss(), _miss(OTHER_KEY)))
@@ -128,26 +128,26 @@ def test_the_body_carries_family_and_keys_and_nothing_else(stub) -> None:
         "sdxl", [KEY, OTHER_KEY], base_url="https://hub", bearer="t")
 
     assert sent["method"] == "POST"
-    assert sent["path"] == cell_resolve.RESOLVE_PATH == "/v1/worker/cells/resolve"
+    assert sent["path"] == cell_resolve.RESOLVE_PATH == "/v1/worker/compiled-graphs/resolve"
     assert sent["json"] == {"family": "sdxl", "keys": [KEY, OTHER_KEY]}
     assert sent["timeout"] == cell_resolve.RESOLVE_TIMEOUT_S
 
 
 def test_the_single_key_wire_is_gone(stub) -> None:
-    """HARD CUT. A client that could still speak ``{family, cell_key}`` would
+    """HARD CUT. A client that could still speak ``{family, compiled_graph_key}`` would
     make the hub's own hard cut unprovable — the two halves have to land as one
     fleet, and a surviving alias is how "both sides landed" becomes false while
     every test stays green."""
     assert not hasattr(cell_resolve, "resolve")
-    assert "cell_key" not in actions_mod.ACTIONS["cells.resolve"].body
+    assert "compiled_graph_key" not in actions_mod.ACTIONS["compiled_graphs.resolve"].body
 
 
 def test_the_action_table_admits_exactly_the_two_fields() -> None:
-    action = actions_mod.ACTIONS["cells.resolve"]
+    action = actions_mod.ACTIONS["compiled_graphs.resolve"]
     assert action.method == "POST"
     assert action.body == frozenset({"family", "keys"})
-    assert action.path.match("/v1/worker/cells/resolve")
-    assert not action.path.match("/v1/worker/cells/resolve/extra")
+    assert action.path.match("/v1/worker/compiled-graphs/resolve")
+    assert not action.path.match("/v1/worker/compiled-graphs/resolve/extra")
     assert action.timeout_s > 0        # scripts/lint_http_timeouts.py
     assert not action.scoped_to_job    # a boot has no attempt (§4.16)
 
@@ -155,7 +155,7 @@ def test_the_action_table_admits_exactly_the_two_fields() -> None:
 def test_the_resolve_action_is_not_a_publish_action() -> None:
     """``PUBLISH_ACTIONS`` gates the two actions that WRITE into a shared
     family namespace. Resolve reads; a probe pod must still be able to adopt."""
-    assert "cells.resolve" not in actions_mod.PUBLISH_ACTIONS
+    assert "compiled_graphs.resolve" not in actions_mod.PUBLISH_ACTIONS
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +177,7 @@ def test_a_miss_is_an_answer_never_an_omission(stub) -> None:
 
 
 @pytest.mark.parametrize("code,status", [
-    ("cell_resolve_client_supplied_field", 400),
+    ("compiled_graph_resolve_client_supplied_field", 400),
     ("compiled_graph_resolve_too_many_keys", 400),
 ])
 def test_a_whole_batch_refusal_still_raises(stub, code, status) -> None:
@@ -194,9 +194,9 @@ def test_a_whole_batch_refusal_still_raises(stub, code, status) -> None:
 
 
 @pytest.mark.parametrize("status,code", [
-    ("ambiguous", "cell_resolve_ambiguous"),
-    ("incomplete", "cell_resolve_incomplete"),
-    ("transport_unavailable", "cell_resolve_transport_unavailable"),
+    ("ambiguous", "compiled_graph_resolve_ambiguous"),
+    ("incomplete", "compiled_graph_resolve_incomplete"),
+    ("transport_unavailable", "compiled_graph_resolve_transport_unavailable"),
 ])
 def test_a_per_key_fault_is_an_answer_and_keeps_its_own_token(
     stub, status, code,
@@ -208,7 +208,7 @@ def test_a_per_key_fault_is_an_answer_and_keeps_its_own_token(
     "no cell" would go pay for a full cold mint over a row the hub HAS."""
     _sent, resp = stub
     resp["r"] = _Resp(200, _batch(
-        {"cell_key": KEY, "status": status, "found": False,
+        {"compiled_graph_key": KEY, "status": status, "found": False,
          "detail": "because"}))
     answer = _one()
     assert answer.cell is None
@@ -222,7 +222,7 @@ def test_an_unknown_status_is_refused_and_never_read_as_a_miss(stub) -> None:
     name a new fault, every pod silently self-mints over it."""
     _sent, resp = stub
     resp["r"] = _Resp(200, _batch(
-        {"cell_key": KEY, "status": "something_new", "found": False}))
+        {"compiled_graph_key": KEY, "status": "something_new", "found": False}))
     with pytest.raises(cell_resolve.CellResolveRefused) as err:
         _one()
     assert err.value.code == "compiled_graph_resolve_unknown_status"
@@ -233,15 +233,15 @@ def test_an_answer_naming_a_different_key_is_refused_not_adopted(stub) -> None:
     match its slot is refused rather than adopted: a transposed batch would arm
     every class with a sibling's kernels."""
     _sent, resp = stub
-    resp["r"] = _Resp(200, _batch(_hit_body(cell_key=OTHER_KEY)))
+    resp["r"] = _Resp(200, _batch(_hit_body(compiled_graph_key=OTHER_KEY)))
     with pytest.raises(cell_resolve.CellResolveRefused) as err:
         _one()
     assert err.value.code == "compiled_graph_resolve_answer_out_of_order"
 
 
-#: ``cell_key`` is caught one gate earlier — an empty echo is not the key that
+#: ``compiled_graph_key`` is caught one gate earlier — an empty echo is not the key that
 #: was asked for, so the ORDER gate names the seam that lied first.
-_EARLIER_GATE = {"cell_key": "compiled_graph_resolve_answer_out_of_order"}
+_EARLIER_GATE = {"compiled_graph_key": "compiled_graph_resolve_answer_out_of_order"}
 
 
 @pytest.mark.parametrize("field", [f for f, _ in cell_resolve._REQUIRED])
@@ -257,14 +257,14 @@ def test_an_incomplete_answer_is_refused_before_the_cell_is_paid_for(
     """
     _sent, resp = stub
     resp["r"] = _Resp(200, _batch(_hit_body(**{field: ""})))
-    if field == "cell_key":
+    if field == "compiled_graph_key":
         with pytest.raises(cell_resolve.CellResolveRefused) as err:
             _one()
         assert err.value.code == _EARLIER_GATE[field]
         return
     answer = _one()
     assert answer.cell is None
-    assert answer.refusal_code == "cell_resolve_incomplete"
+    assert answer.refusal_code == "compiled_graph_resolve_incomplete"
     assert field in answer.detail
 
 
@@ -284,7 +284,7 @@ def test_every_expectation_axis_is_required_of_the_answer() -> None:
 def test_an_incomplete_answer_is_a_typed_refusal_not_a_miss() -> None:
     """A pod that read it as "no cell" would go pay for a whole cold mint
     believing the hub holds nothing, which is false and expensive."""
-    assert "cell_resolve_incomplete" in cell_resolve.REFUSAL_CODES
+    assert "compiled_graph_resolve_incomplete" in cell_resolve.REFUSAL_CODES
 
 
 def test_a_non_key_is_refused_before_the_hub_is_dialled(stub) -> None:
@@ -342,7 +342,7 @@ def test_a_hit_builds_the_expected_identity_the_arm_gate_COMPARES(
     expected = cell.expected_identity()
 
     assert isinstance(expected, aot_identity.ExpectedIdentity)
-    assert expected.cell_key == KEY
+    assert expected.compiled_graph_key == KEY
     assert expected.toolchain_digest == "toolch0000000000"
     assert expected.env_seal_digest == "seal000000000000"
     assert expected.graph_contract_digest == "c0ffee0000000000"
@@ -495,7 +495,7 @@ def _attempt_all(monkeypatch, tmp_path, *, derive=None, resolve_batch=None,
 def _derived_multi() -> Any:
     """A declaration that traced THREE graph classes — the shape the batch wire
     exists for, and the one a single-key loop would bill three round trips."""
-    from gen_worker import boot_key, cell_key as ck
+    from gen_worker import boot_key, compiled_graph_key as ck
 
     axes = [{"graph": g, "sm": "sm_89", "toolchain": "t" * 16}
             for g in ("c0ffee0000000000", "beef000000000000",
@@ -507,7 +507,7 @@ def _derived_multi() -> Any:
 
 
 def _derived(digest: str = KEY) -> Any:
-    from gen_worker import boot_key, cell_key as ck
+    from gen_worker import boot_key, compiled_graph_key as ck
 
     return boot_key.DerivedKey(
         # pgw#1176: a boot derives a KEY SET. These declarations trace to one
@@ -538,13 +538,13 @@ def test_a_hub_refusal_degrades_but_keeps_its_own_token(
 ) -> None:
     def _refuse(*_a, **_k):
         raise cell_resolve.CellResolveRefused(
-            "cell_resolve_ambiguous", "two rows", status=409)
+            "compiled_graph_resolve_ambiguous", "two rows", status=409)
 
     out = _attempt(
         monkeypatch, tmp_path,
         derive=lambda **_kw: _derived(), resolve_batch=_refuse)
     assert not out.adopted
-    assert out.reason == "cell_resolve_ambiguous"
+    assert out.reason == "compiled_graph_resolve_ambiguous"
     assert out.derived_key.startswith("cg-key-v1-")
     assert out.derive_ms == 1234
 
@@ -614,7 +614,7 @@ def test_one_answer_per_key_in_request_order(stub) -> None:
     _sent, resp = stub
     resp["r"] = _Resp(200, _batch(
         _hit_body(), _miss(OTHER_KEY),
-        _hit_body(cell_key=THIRD_KEY, receipt="eyJ.dGhpcmQ.c2ln")))
+        _hit_body(compiled_graph_key=THIRD_KEY, receipt="eyJ.dGhpcmQ.c2ln")))
     answers = cell_resolve.resolve_batch("sdxl", keys)
     assert [a.compiled_graph_key for a in answers] == keys
     assert [a.status for a in answers] == ["hit", "miss", "hit"]
@@ -656,7 +656,7 @@ def test_transposed_answers_are_refused(stub) -> None:
     with a sibling's kernels, and the key is an ingress identity — only the
     graph-witness floor would stand in the way, after the bytes were paid for."""
     _sent, resp = stub
-    resp["r"] = _Resp(200, _batch(_hit_body(cell_key=OTHER_KEY), _hit_body()))
+    resp["r"] = _Resp(200, _batch(_hit_body(compiled_graph_key=OTHER_KEY), _hit_body()))
     with pytest.raises(cell_resolve.CellResolveRefused) as err:
         cell_resolve.resolve_batch("sdxl", [KEY, OTHER_KEY])
     assert err.value.code == "compiled_graph_resolve_answer_out_of_order"
@@ -687,7 +687,7 @@ def test_two_answers_may_not_share_one_receipt(stub) -> None:
     adopted, and the second arms bytes nothing signed for it."""
     _sent, resp = stub
     resp["r"] = _Resp(200, _batch(
-        _hit_body(), _hit_body(cell_key=OTHER_KEY)))
+        _hit_body(), _hit_body(compiled_graph_key=OTHER_KEY)))
     with pytest.raises(cell_resolve.CellResolveRefused) as err:
         cell_resolve.resolve_batch("sdxl", [KEY, OTHER_KEY])
     assert err.value.code == "compiled_graph_resolve_shared_receipt"
@@ -698,7 +698,7 @@ def test_distinctly_signed_answers_are_both_adopted(stub) -> None:
     everything: two answers, two receipts, both hits."""
     _sent, resp = stub
     resp["r"] = _Resp(200, _batch(
-        _hit_body(), _hit_body(cell_key=OTHER_KEY, receipt="eyJ.b3RoZXI.c2ln")))
+        _hit_body(), _hit_body(compiled_graph_key=OTHER_KEY, receipt="eyJ.b3RoZXI.c2ln")))
     answers = cell_resolve.resolve_batch("sdxl", [KEY, OTHER_KEY])
     assert [a.status for a in answers] == ["hit", "hit"]
     assert answers[0].cell is not None and answers[1].cell is not None
@@ -713,7 +713,7 @@ def test_an_unsigned_hit_is_refused_before_the_bytes_are_paid_for(stub) -> None:
     resp["r"] = _Resp(200, _batch(_hit_body(receipt="")))
     answer = _one()
     assert answer.cell is None
-    assert answer.refusal_code == "cell_resolve_incomplete"
+    assert answer.refusal_code == "compiled_graph_resolve_incomplete"
     assert "receipt" in answer.detail
 
 
@@ -724,13 +724,13 @@ def test_one_bad_answer_does_not_sink_its_siblings(stub) -> None:
     _sent, resp = stub
     resp["r"] = _Resp(200, _batch(
         _hit_body(),
-        {"cell_key": OTHER_KEY, "status": "ambiguous", "found": False,
+        {"compiled_graph_key": OTHER_KEY, "status": "ambiguous", "found": False,
          "detail": "two rows"},
-        _hit_body(cell_key=THIRD_KEY, receipt="eyJ.dGhpcmQ.c2ln")))
+        _hit_body(compiled_graph_key=THIRD_KEY, receipt="eyJ.dGhpcmQ.c2ln")))
     answers = cell_resolve.resolve_batch("sdxl", [KEY, OTHER_KEY, THIRD_KEY])
     assert [a.status for a in answers] == ["hit", "ambiguous", "hit"]
     assert sum(1 for a in answers if a.hit) == 2
-    assert answers[1].refusal_code == "cell_resolve_ambiguous"
+    assert answers[1].refusal_code == "compiled_graph_resolve_ambiguous"
 
 
 def test_a_duplicate_key_is_refused_before_the_hub_is_dialled(stub) -> None:

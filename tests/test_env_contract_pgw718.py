@@ -234,5 +234,5 @@ def test_mint_refuses_on_env_drift_naming_the_flag(tmp_path: Path) -> None:
 # property is stronger on the surviving lane rather than absent: the seal is
 # an identity AXIS of the exported cell (`fleet_cells.ENV_SEAL_AXIS`, folded
 # into `ck1`), so a drifted seal yields a different key and the cell never
-# resolves at all — proven in `tests/test_cell_key_pgw1059.py`, whose
+# resolves at all — proven in `tests/test_compiled_graph_key_pgw1059.py`, whose
 # staleness matrix lists `env_seal` among the axes that re-key.

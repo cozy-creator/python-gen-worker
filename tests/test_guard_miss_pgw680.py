@@ -53,7 +53,7 @@ from torch._dynamo import exc as dexc
 
 import gen_worker.executor as executor_mod
 from gen_worker import Compile, activity as activity_mod
-from gen_worker import cell_key as cell_key_mod
+from gen_worker import compiled_graph_key as compiled_graph_key_mod
 from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells, hot_swap
 from gen_worker.api.binding import Hub, wire_ref

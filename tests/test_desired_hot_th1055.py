@@ -210,7 +210,7 @@ def _mint_enable(cell_ref: str, digest: str, artifact_path: Path):
             "regional_mods": [],
         })
         return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
-            family=FAMILY, cell_key=cell_ref.rsplit("#", 1)[-1], ref=cell_ref,
+            family=FAMILY, compiled_graph_key=cell_ref.rsplit("#", 1)[-1], ref=cell_ref,
             snapshot_digest=digest, artifact=artifact_path))
 
     return _enable

@@ -331,7 +331,7 @@ def _abandon_adopt(
     activity_mod.emit_event(
         "adopt_headroom_refused", detail, phase=adopt_fit.REASON,
         family=family,
-        cell_key=str((meta or {}).get("compiled_graph_key") or ""),
+        compiled_graph_key=str((meta or {}).get("compiled_graph_key") or ""),
         graph_class=entry,
     )
 
@@ -497,7 +497,7 @@ def arm_aot(
         or "unknown")
 
     def _emit_adopt_budget(verify_bytes: int, armed: bool) -> None:
-        """One `cell_adopt_budget` row per arm attempt, whatever the outcome.
+        """One `compiled_graph_adopt_budget` row per arm attempt, whatever the outcome.
 
         Emitted even for a REFUSED arm: the device high-water was paid either
         way, and a refusal is exactly when the number is most worth having.
@@ -518,7 +518,7 @@ def arm_aot(
         entries = 1 if (meta or {}).get("entry") else 0
         gib = 1 << 30
         activity_mod.emit_event(
-            "cell_adopt_budget",
+            "compiled_graph_adopt_budget",
             f"family={family} lane={lane or '(plain)'} entries={entries} "
             f"adopt_device_peak={total / gib:.3f}GiB "
             f"load={_load_bytes / gib:.3f}GiB "
@@ -636,7 +636,7 @@ def arm_aot(
         # ran, so a reader counting armed adoptions over-counted every numerics
         # refusal and a second closing row existed only to correct the first.
         # Nothing is announced until the arm is final, so the refusal is simply
-        # what this function returns; the numbers still ride `cell_numerics`.
+        # what this function returns; the numbers still ride `compiled_graph_numerics`.
         meta = aot_serve.armed_metadata(pipe)
         # pgw#1176: THE PARITY REFUSAL IS PER ENTRY. This used to `unwrap` the
         # whole pipeline, which was correct while the gate's subject was a
@@ -707,7 +707,7 @@ def gate_cell_numerics(pipe: Any, cfg: Any, *, strict: bool = False) -> bool:
 
     Outcomes, all typed rows on the wire:
 
-    * HEALTHY -> `cell_numerics phase=checked`; the mint arms and publishes.
+    * HEALTHY -> `compiled_graph_numerics phase=checked`; the mint arms and publishes.
       The pass is announced deliberately: an unannounced pass is
       indistinguishable from a gate that never ran, which is this program's
       signature failure.
@@ -746,7 +746,7 @@ def gate_cell_numerics(pipe: Any, cfg: Any, *, strict: bool = False) -> bool:
     try:
         numerics_ladder.gate(
             comparison,
-            kind=activity_mod.KIND_CELL_NUMERICS,
+            kind=activity_mod.KIND_COMPILED_GRAPH_NUMERICS,
             refuse=lambda detail, worst_row: numerics_probe.CellNumericsRefused(
                 detail, worst_row),
             context=report.context())
@@ -761,7 +761,7 @@ def gate_cell_numerics(pipe: Any, cfg: Any, *, strict: bool = False) -> bool:
             return False
         if comparison is not None and comparison.healthy:
             activity_mod.emit_event(
-                activity_mod.KIND_CELL_NUMERICS,
+                activity_mod.KIND_COMPILED_GRAPH_NUMERICS,
                 f"CHECKED against eager on every packaged entry — "
                 f"{report.context()}",
                 phase="checked", duration_ms=report.elapsed_ms)
@@ -795,7 +795,7 @@ def _refuse_unmeasurable(family: str, reason: str, detail: str) -> bool:
         "(%s): %s", family or "cell", reason, detail)
     try:
         activity_mod.emit_event(
-            activity_mod.KIND_CELL_NUMERICS,
+            activity_mod.KIND_COMPILED_GRAPH_NUMERICS,
             f"family={family} REFUSED TO ARM: the compiled-vs-eager "
             f"comparison could not be taken ({reason}). This is not a pass — "
             f"an unmeasurable cell stays eager (pgw#868). {detail}",
@@ -866,7 +866,7 @@ def enable_compiled(
     # The inductor lane declines without a classified token of its own — "no
     # delivered cell for this identity" is the whole answer. A prior typed
     # refusal from the exported arm is the more specific one and survives.
-    return refused if refused is not None else AdoptOutcome.miss("no_cell")
+    return refused if refused is not None else AdoptOutcome.miss("no_compiled_graph")
 
 
 # ---------------------------------------------------------------------------

@@ -32,7 +32,7 @@ from .models.tensor_layout_contract import LAYOUT_KEY_ANY_COMPONENT
 from .warmup import validate_class_warmup
 import dataclasses
 from .api.compile_axis import warm_guidance_values
-from .cell_key import facts_digest
+from .compiled_graph_key import facts_digest
 from .api.export_contract import (
     declares_export_contract, register_export_declaration, registered_entry,
 )

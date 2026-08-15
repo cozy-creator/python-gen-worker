@@ -110,7 +110,7 @@ def _miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     gw_config.reload_for_test()
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
-        lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_cell"))
+        lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_compiled_graph"))
     monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda p, c, **_kw: True)
     monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
     monkeypatch.setattr(fleet_cells.cc, "apply_lora_execution_lane", lambda p, b, **_kw: None)
@@ -426,7 +426,7 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
 
     target = tmp_path / "cell.tar.gz"
     # a `ck1` key names a 36-entry all-or-nothing cell, which this
-    # runtime cannot arm at all — `cell_key.is_key` refuses the prefix
+    # runtime cannot arm at all — `compiled_graph_key.is_key` refuses the prefix
     # deliberately, so a fixture keyed that way tests a shape nothing produces.
     key = "cg-key-v1-" + "a" * 56
     packed = tmp_path / "aot" / f"{key}.tar.gz"
@@ -550,7 +550,7 @@ def test_a_self_minted_aot_cell_arms_through_the_aot_gates(
     # seed adopt has grown back for an exported cell.
     monkeypatch.setattr(
         fleet_cells, "_packed_metadata",
-        lambda artifact: {"cell_key": "ck1-real", "kind": "aot-inductor"})
+        lambda artifact: {"compiled_graph_key": "ck1-real", "kind": "aot-inductor"})
     monkeypatch.setattr(fleet_cells, "sha256_file", lambda p: "beef")
     monkeypatch.setattr(fleet_cells, "_unregister", lambda p: None)
 
@@ -564,7 +564,7 @@ def test_a_self_minted_aot_cell_arms_through_the_aot_gates(
 
     artifact = tmp_path / "cell.tar.gz"
     _payload = _json.dumps(
-        {"cell_key": "ck1-real", "kind": "aot-inductor"}).encode()
+        {"compiled_graph_key": "ck1-real", "kind": "aot-inductor"}).encode()
     with _tarfile.open(artifact, mode="w:gz") as _tar:
         _info = _tarfile.TarInfo("metadata.json")
         _info.size = len(_payload)
@@ -580,4 +580,4 @@ def test_a_self_minted_aot_cell_arms_through_the_aot_gates(
     assert minted is not None
     # The REAL key comes off the packed envelope — an AOT key folds the
     # combined graph hash and cannot be known before the export runs.
-    assert minted.cell_key == "ck1-real"
+    assert minted.compiled_graph_key == "ck1-real"

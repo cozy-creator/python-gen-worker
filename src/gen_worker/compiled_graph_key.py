@@ -121,7 +121,7 @@ cozy-local store verdict compares recorded facts directly
 
 A wrong key can only produce a MISS (eager, then a background self-mint),
 never a refusal: any failure to arm a self-requested cell is by construction a
-selection-logic bug that must surface loudly (``cell_selection_bug``),
+selection-logic bug that must surface loudly (``compiled_graph_selection_bug``),
 never a silent eager fallback.
 """
 
@@ -173,7 +173,7 @@ _DIGEST_HEX = 56
 # one of these has no identity. Adding a name here is adding an axis, which
 # the axiom forbids unless the new fact provably alters the compiled
 # artifact AND cannot ride an existing axis's fact block
-# (tests/test_cell_key_pgw1059.py enforces the set).
+# (tests/test_compiled_graph_key_pgw1059.py enforces the set).
 _REQUIRED = ("graph", "sm", "toolchain")
 _OPTIONAL: tuple = ()
 
@@ -209,12 +209,12 @@ EXPORT_ENVELOPE_KEY = "declared_envelope"
 ENTRY_BLOCK_KEY = "entry"
 
 
-class CellKeyError(ValueError):
+class CompiledGraphKeyError(ValueError):
     """The artifact (or runtime) cannot state a required key axis."""
 
 
 @dataclass(frozen=True)
-class CellKey:
+class CompiledGraphKey:
     """A computed ENTRY identity: canonical axes + their digest.
 
     One instance = one compiled graph class. The name is kept (rather than
@@ -299,15 +299,15 @@ def _refuse_key_shaped(where: str, name: str, value: str) -> None:
     letting it hash into a key nobody can restate.
     """
     if is_key(value):
-        raise CellKeyError(
+        raise CompiledGraphKeyError(
             f"{where}: {name}={value!r} is an ENTRY KEY where a fact digest "
             f"belongs. A key is the OUTPUT of this computation, never an "
             f"input to it — passing one here would hash an identity into "
             f"another identity and produce a key no artifact can restate.")
 
 
-def from_axes(axes: Mapping[str, str]) -> CellKey:
-    """Canonicalize an axes mapping into a :class:`CellKey`.
+def from_axes(axes: Mapping[str, str]) -> CompiledGraphKey:
+    """Canonicalize an axes mapping into a :class:`CompiledGraphKey`.
 
     Unknown axes are rejected TYPED — including every dropped axis name
     (``envelope`` since pgw#1176; ``contract``, ``env_seal``, ``kind``,
@@ -319,7 +319,7 @@ def from_axes(axes: Mapping[str, str]) -> CellKey:
     for name, value in axes.items():
         text = str(value or "").strip()
         if name not in _REQUIRED and name not in _OPTIONAL:
-            raise CellKeyError(
+            raise CompiledGraphKeyError(
                 f"unknown cell-key axis {name!r}: the key is exactly "
                 f"{list(_REQUIRED)!r} — the membership axiom (pgw#1059 "
                 "amendment 6, Paul: \"don't key on parameters that don't "
@@ -331,9 +331,9 @@ def from_axes(axes: Mapping[str, str]) -> CellKey:
             clean[name] = text
     missing = [name for name in _REQUIRED if not clean.get(name)]
     if missing:
-        raise CellKeyError(
+        raise CompiledGraphKeyError(
             f"cell key requires axes {missing!r} (got {sorted(clean)!r})")
-    return CellKey(axes=tuple(sorted(clean.items())))
+    return CompiledGraphKey(axes=tuple(sorted(clean.items())))
 
 
 def facts_digest(facts: Mapping[str, Any]) -> str:
@@ -409,7 +409,7 @@ def toolchain_facts(block: Mapping[str, Any]) -> Dict[str, str]:
     (the publish recompute, the boot key, the arm handback, the wire
     identity) reads membership from here. Two ends that decide membership
     separately are two derivations of one axis, which is the failure
-    ``test_cell_key_pgw1059``'s fence exists to prevent.
+    ``test_compiled_graph_key_pgw1059``'s fence exists to prevent.
     """
     return {
         str(name): str(value) for name, value in block.items()
@@ -485,7 +485,7 @@ def subject_digest(subjects: Iterable[SlotSubject]) -> str:
     return facts_digest(subject_facts(subs))
 
 
-def from_entry_metadata(meta: Mapping[str, Any]) -> CellKey:
+def from_entry_metadata(meta: Mapping[str, Any]) -> CompiledGraphKey:
     """The key an EXPORTED (``aot-inductor``) ENTRY's OWN recorded facts
     describe — THE single implementation of entry identity: ``aot_mint``
     stamps what this returns and the publish path recomputes it, so the axes
@@ -493,7 +493,7 @@ def from_entry_metadata(meta: Mapping[str, Any]) -> CellKey:
     minted from.
 
     Every axis is read from a recorded block, never from a probe and never
-    from the ``cell_key`` stamp. Raises :class:`CellKeyError` when a fact is
+    from the ``compiled_graph_key`` stamp. Raises :class:`CompiledGraphKeyError` when a fact is
     missing: an entry that cannot name an axis has no identity, and must not
     be published under a partial one.
 
@@ -510,25 +510,25 @@ def from_entry_metadata(meta: Mapping[str, Any]) -> CellKey:
     """
     kind = str(meta.get("kind") or "")
     if kind != EXPORTED_KIND:
-        raise CellKeyError(
+        raise CompiledGraphKeyError(
             f"artifact kind {kind!r} has no entry-key identity: only exported "
             f"{EXPORTED_KIND!r} entries are keyed (pgw#1010/pgw#1059 — JIT is "
             "intake, local torch-inductor-cache artifacts compare facts via "
             "compile_cache.local_cell_mismatch)")
     sm = str(meta.get("sm") or "")
     if not sm:
-        raise CellKeyError(
+        raise CompiledGraphKeyError(
             "cannot state the compute capability (sm) of this runtime; an "
             "exported entry has no identity without it — mint on the target GPU")
     entry = meta.get(ENTRY_BLOCK_KEY)
     if not isinstance(entry, Mapping) or not entry:
-        raise CellKeyError(
+        raise CompiledGraphKeyError(
             f"artifact records no {ENTRY_BLOCK_KEY!r} block; the atom is ONE "
             "graph class (pgw#1176) and an artifact that cannot name its "
             "class has no identity")
     graph = str(entry.get("class_hash") or "")
     if not graph:
-        raise CellKeyError(
+        raise CompiledGraphKeyError(
             f"entry {str(entry.get('name') or '')!r} carries no class_hash; a "
             "class the key cannot name is a class a mismatch cannot name "
             "(pgw#716)")
@@ -536,7 +536,7 @@ def from_entry_metadata(meta: Mapping[str, Any]) -> CellKey:
         f"entry {str(entry.get('name') or '')!r}", "class_hash", graph)
     toolchain = meta.get("toolchain")
     if not isinstance(toolchain, dict) or not toolchain:
-        raise CellKeyError(
+        raise CompiledGraphKeyError(
             "artifact records no toolchain block; no recipe identity")
     return from_axes({
         "graph": graph,
@@ -580,8 +580,8 @@ __all__ = [
     "EXPORTED_KIND",
     "EXPORT_ENVELOPE_KEY",
     "ENTRY_BLOCK_KEY",
-    "CellKey",
-    "CellKeyError",
+    "CompiledGraphKey",
+    "CompiledGraphKeyError",
     "SlotSubject",
     "subject_digest",
     "subject_facts",

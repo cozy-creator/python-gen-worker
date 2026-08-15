@@ -475,4 +475,4 @@ def numerics_rows(said: List[Tuple[str, str, str]]) -> List[Tuple[str, str]]:
     import gen_worker.activity as activity_mod
 
     return [(detail, phase) for kind, detail, phase in said
-            if kind == activity_mod.KIND_CELL_NUMERICS]
+            if kind == activity_mod.KIND_COMPILED_GRAPH_NUMERICS]

@@ -2,7 +2,7 @@
 layer must agree on — the Python twin of tensorhub's ``internal/refgrammar``.
 
 A leaf module on purpose: the ref parser (:mod:`gen_worker.models.refs`) and
-the compiled-graph key grammar (:mod:`gen_worker.cell_key`) both need the
+the compiled-graph key grammar (:mod:`gen_worker.compiled_graph_key`) both need the
 bound, and neither may import the other. The Go half states the same reason
 for the same shape.
 """

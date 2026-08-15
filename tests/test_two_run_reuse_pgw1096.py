@@ -81,7 +81,7 @@ opened_mints = []
 fleet_cells.provision.arm_aot = (            # type: ignore[assignment]
     lambda *a, **k: AdoptOutcome.hit(KEY))
 fleet_cells.artifact_meta.try_read_metadata = (  # type: ignore[assignment]
-    lambda p: {"cell_key": KEY, "family": FAMILY})
+    lambda p: {"compiled_graph_key": KEY, "family": FAMILY})
 fleet_cells.arm_axis_divergence = lambda arm, meta, **_kw: ""   # type: ignore[assignment]
 fleet_cells.activity_mod.emit_event = lambda *a, **k: None  # type: ignore[assignment]
 
@@ -99,12 +99,12 @@ if MODE == "mint":
     # Stand in for the child's packed cell. On a pod this is a real .pt2
     # tarball out of a real AOTI link. The store itself does not care what the
     # cell IS — but run 2 ARMS this cell, and since pgw#1098 the arm refuses
-    # `cell_envelope_unreadable` before any other gate, so the stand-in has to
+    # `compiled_graph_envelope_unreadable` before any other gate, so the stand-in has to
     # carry a readable `metadata.json` exactly as the real thing does.
     art = Path(os.environ["PGW1096_ARTIFACT"])
     art.parent.mkdir(parents=True, exist_ok=True)
     _meta = json.dumps(
-        {"kind": "aot-inductor", "cell_key": KEY, "family": FAMILY}).encode()
+        {"kind": "aot-inductor", "compiled_graph_key": KEY, "family": FAMILY}).encode()
     _body = b"a-real-cell-would-be-here" * 40
     with tarfile.open(art, mode="w:gz") as _tar:
         _mi = tarfile.TarInfo("metadata.json")
@@ -131,7 +131,7 @@ else:
     print("RESULT " + json.dumps({
         "run": 2,
         "armed": minted is not None,
-        "cell_key": getattr(minted, "cell_key", ""),
+        "compiled_graph_key": getattr(minted, "compiled_graph_key", ""),
         "artifact": str(getattr(minted, "artifact", "")),
         "mints_opened": len(opened_mints),
         "resident": [c.key for c in local_cell_store.stored_cells()],
@@ -179,7 +179,7 @@ def test_run_one_mints_and_keeps_run_two_reuses_with_no_mint(
     assert two["mints_opened"] == 0, (
         "the second run opened a mint — compile-once-run-forever is the whole "
         "product promise and this is what breaking it looks like")
-    assert two["cell_key"] == "cg-key-v1-" + "c" * 56
+    assert two["compiled_graph_key"] == "cg-key-v1-" + "c" * 56
     assert two["artifact"].startswith(str(store)), (
         "run 2 must serve the STORE's bytes, not a leftover from the mint")
     assert two["resident"] == ["cg-key-v1-" + "c" * 56]

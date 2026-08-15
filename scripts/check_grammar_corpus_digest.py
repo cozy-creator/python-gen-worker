@@ -47,7 +47,7 @@ def main() -> int:
         f"  recorded: {recorded}\n"
         f"  actual:   {actual}\n\n"
         "The corpus is the CONTRACT between tensorhub's "
-        "compilecache.IsCompiledGraphKey and gen_worker.cell_key.is_key, "
+        "compilecache.IsCompiledGraphKey and gen_worker.compiled_graph_key.is_key, "
         "vendored byte-identically in both repos. Editing it is a coupled "
         "cross-repo cut: land this repo's half first (tensorhub vendors the "
         f"file byte-for-byte), then record\n  {actual}\n"

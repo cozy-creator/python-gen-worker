@@ -60,7 +60,7 @@ import msgspec
 from . import activity as activity_mod
 from . import artifact_meta
 from . import boot_phases
-from . import cell_key as cell_key_mod
+from . import compiled_graph_key as compiled_graph_key_mod
 from . import compile_posture
 from . import mint_workers
 from . import progress as progress_mod
@@ -261,7 +261,7 @@ def rule_on_boot_memo(
     blocks: Dict[str, Dict[str, Any]] = {}
     for row in entries:
         block = dict(getattr(row, "metadata", None) or {}).get(
-            cell_key_mod.ENTRY_BLOCK_KEY)
+            compiled_graph_key_mod.ENTRY_BLOCK_KEY)
         if not isinstance(block, Mapping):
             return ""
         blocks[str(row.entry)] = dict(block)
@@ -594,8 +594,8 @@ def held_graph_classes(out_dir: Path) -> List[Any]:
     for path in sorted(out_dir.glob("*.tar.gz")):
         try:
             meta = dict(artifact_meta.read_metadata(path))
-            name = str(meta[cell_key_mod.ENTRY_BLOCK_KEY]["name"])
-            key = str(meta.get("cell_key") or "")
+            name = str(meta[compiled_graph_key_mod.ENTRY_BLOCK_KEY]["name"])
+            key = str(meta.get("compiled_graph_key") or "")
         except Exception:  # noqa: BLE001 — see the docstring
             logger.warning(
                 "mint-supervisor: %s is not a readable compiled graph; this "

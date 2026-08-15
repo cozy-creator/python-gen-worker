@@ -95,7 +95,7 @@ def test_an_aot_shape_gap_is_a_countable_typed_fact(events):
         arm=shape_growth.ARM_AOT, family="sdxl", target="unet",
         declared_class="unet/sample=bfloat16[2,4,112,144]",
         reason=shape_growth.REASON_UNCOVERED,
-        cell_key="ck1-0d945144")
+        compiled_graph_key="ck1-0d945144")
     assert shape_growth.report(gap) is True
     kinds = [(k, p) for k, p, _d in events]
     assert (activity_mod.KIND_SHAPE_GAP, "no_entry_admits") in kinds

@@ -809,7 +809,7 @@ def test_self_mint_boot_serves_compiled_after_own_warmup_proof(
     def _minting_enable(pipeline, *_args):
         _mark_fake_aot_arm(pipeline, mint_key)
         return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
-            family=FAMILY, cell_key=mint_key, ref=mint_ref,
+            family=FAMILY, compiled_graph_key=mint_key, ref=mint_ref,
             snapshot_digest=mint_digest, artifact=mint_artifact))
 
     monkeypatch.setattr(ex, "_enable_compiled", _minting_enable)
@@ -894,7 +894,7 @@ def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
     def _minting_enable(pipeline, *_args):
         _mark_fake_guard(pipeline)
         return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
-            family=FAMILY, cell_key=mint_key,
+            family=FAMILY, compiled_graph_key=mint_key,
             ref=f"root/family-{FAMILY}#{mint_key}",
             snapshot_digest="sha256:" + "0" * 64, artifact=mint_artifact))
 
@@ -910,7 +910,7 @@ def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
     assert ex.compile_targets() == [], "an unproven self-mint must not advertise"
     assert spec.name not in ex.unavailable
     assert ex.serving_tiers() == {spec.name: "eager"}
-    assert cc.cell_quarantined_in_process(f"root/family-{FAMILY}#{mint_key}")
+    assert cc.compiled_graph_quarantined_in_process(f"root/family-{FAMILY}#{mint_key}")
 
 
 def _sim_guard_closure(pipe, cfg, label=""):
@@ -1158,7 +1158,7 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
     (tripped,) = ex.compile_targets()
     assert tripped.active_compile_ref == ""
     assert ex.serving_tiers() == {"edit": "eager", "generate": "eager"}
-    assert cc.cell_quarantined_in_process(cell_ref)
+    assert cc.compiled_graph_quarantined_in_process(cell_ref)
     # revocation is state-only. The `adopt_failed:runtime_guard`
     # ModelEvent terminated a hub-commanded adoption operation, and there is no
     # operation to terminate — the tier flip above is the wire-visible signal.
@@ -1459,7 +1459,7 @@ def test_second_checkpoint_served_from_dynamo_inmemory_cache_proves(
     first = _run("acme/checkpoint-one", (10, 11), first_pipe)
     (first_target,) = first.compile_targets()
     assert first_target.active_compile_ref == CACHE_REF
-    assert cc.cell_proven_in_process(CACHE_REF) is True
+    assert cc.compiled_graph_proven_in_process(CACHE_REF) is True
 
     # Checkpoint 2: same cell, new pipeline object, ZERO counter movement.
     second_pipe = _Pipe()
@@ -1905,7 +1905,7 @@ def test_a_failed_warmup_proof_carries_the_fx_cache_state(
     wiring and this goes red.
 
     pgw#1200 retargeted the stub. It used to return the cell-side vocabulary
-    (`cell_keys` / `fresh_keys` / `divergence`) and take the artifact path —
+    (`compiled_graph_keys` / `fresh_keys` / `divergence`) and take the artifact path —
     both deleted with the `torch-inductor-cache` format, so the fixture was
     asserting a shape the real function can no longer emit. The wiring is the
     subject and it is unchanged; the payload is now the live census."""
@@ -2088,7 +2088,7 @@ def test_missing_desired_w8a8_cell_keeps_workers_own_armed_target(tmp_path, monk
     cell is no longer authority to tear down a worker's own armed, proven
     target — the worker minted (or can re-mint) that cell itself.
     Invalidation still flows through the real channels (adoption ops,
-    artifact_drift, cell_selection_bug), never through non-delivery.
+    artifact_drift, compiled_graph_selection_bug), never through non-delivery.
     Pre-gw#587 this asserted the fail-closed teardown."""
     spec = replace(
         _spec(), models={"pipeline": Hub(
@@ -2312,7 +2312,7 @@ def test_runtime_guard_revokes_state_and_quarantines_the_cell(tmp_path):
     # arm path so this boot never re-arms the cell that just exploded.
     assert rec.stale is False
     assert spec.name not in ex.unavailable
-    assert cc.cell_quarantined_in_process(active_ref)
+    assert cc.compiled_graph_quarantined_in_process(active_ref)
     # No ModelEvent. The causal terminal belonged to a hub-commanded
     # adoption operation, and there is no operation to terminate.
     assert _events(sent, pb.MODEL_STATE_FAILED) == []

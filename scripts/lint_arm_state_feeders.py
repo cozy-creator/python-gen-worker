@@ -78,8 +78,8 @@ class Feeder:
 
 
 FEEDERS = (
-    Feeder("compile_cache.record_cell_proven", "compile_cache.py"),
-    Feeder("compile_cache.record_cell_quarantined", "compile_cache.py"),
+    Feeder("compile_cache.record_compiled_graph_proven", "compile_cache.py"),
+    Feeder("compile_cache.record_compiled_graph_quarantined", "compile_cache.py"),
     Feeder(
         "local_cell_store.store",
         "local_cell_store.py",

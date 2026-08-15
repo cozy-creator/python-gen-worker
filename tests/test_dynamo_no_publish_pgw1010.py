@@ -97,7 +97,7 @@ def test_the_intake_branch_cannot_reach_a_seal_or_a_publish() -> None:
         "(pgw#1010). Delete the call; do not gate it.")
 
 
-def test_the_intake_branch_returns_before_a_cell_key_exists() -> None:
+def test_the_intake_branch_returns_before_a_compiled_graph_key_exists() -> None:
     """Intake has no identity. A key computed for it is a key the hub would
     then be asked for, and a demand row nothing can ever satisfy."""
     branch = _intake_branch()
@@ -220,7 +220,7 @@ def _miss_with_no_declaration(monkeypatch: pytest.MonkeyPatch) -> List[str]:
     armed: List[str] = []
     monkeypatch.setattr(
         provision, "enable_compiled",
-        lambda *a, **k: provision.AdoptOutcome.miss("no_cell"))
+        lambda *a, **k: provision.AdoptOutcome.miss("no_compiled_graph"))
     monkeypatch.setattr(fc, "_cuda_ready", lambda: True)
     monkeypatch.setattr(cc, "toolchain_present", lambda: True)
     monkeypatch.setattr(fc, "export_declaration", lambda family: None)

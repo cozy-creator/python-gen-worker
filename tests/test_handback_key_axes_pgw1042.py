@@ -30,7 +30,7 @@ from typing import Any, Dict, cast
 
 import pytest
 
-from gen_worker import aot_serve, cell_key, env_seal, fleet_cells
+from gen_worker import aot_serve, compiled_graph_key, env_seal, fleet_cells
 from gen_worker.compile_cache import AdoptError
 from torch_compiled_graphs import (
     CallIngress,
@@ -62,22 +62,22 @@ def _arm_key(seal: Dict[str, Any], toolchain: Dict[str, Any]) -> fleet_cells.Arm
         aot_serve.COMPILED_GRAPH_FORMAT_KEY: str(aot_serve.COMPILED_GRAPH_FORMAT),
         "lane": "w8a8-lora64",
         "sm": "sm_89",
-        "envelope": cell_key.envelope_digest(_DECLARED_ENVELOPE),
+        "envelope": compiled_graph_key.envelope_digest(_DECLARED_ENVELOPE),
         "env_seal": env_seal.seal_digest(seal),
-        "toolchain": cell_key.facts_digest(toolchain),
+        "toolchain": compiled_graph_key.facts_digest(toolchain),
     }.items())))
 
 
 def _envelope(seal: Dict[str, Any], toolchain: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "cell_key": "cg-key-v1-" + "e" * 56,
+        "compiled_graph_key": "cg-key-v1-" + "e" * 56,
         "kind": "aot-inductor",
         aot_serve.COMPILED_GRAPH_FORMAT_KEY: str(aot_serve.COMPILED_GRAPH_FORMAT),
         "family": "micro-diffusion",
         "weight_lane": "w8a8",
         "lora_bucket": 64,
         "sm": "sm_89",
-        cell_key.EXPORT_ENVELOPE_KEY: dict(_DECLARED_ENVELOPE),
+        compiled_graph_key.EXPORT_ENVELOPE_KEY: dict(_DECLARED_ENVELOPE),
         env_seal.SEAL_KEY: dict(seal),
         "toolchain": dict(toolchain),
     }
@@ -136,7 +136,7 @@ def test_the_envelope_is_deliberately_NOT_compared_at_this_seam() -> None:
     assert "envelope" not in fleet_cells.ARM_ENVIRONMENT_FACTS
 
     meta = _envelope(seal, TOOLCHAIN)
-    meta[cell_key.EXPORT_ENVELOPE_KEY] = {
+    meta[compiled_graph_key.EXPORT_ENVELOPE_KEY] = {
         "shapes": [[128, 128]], "text_lens": [7], "guidance": [1.0]}
     assert fleet_cells.arm_axis_divergence(
         _arm_key(seal, TOOLCHAIN), meta) == ""
@@ -155,7 +155,7 @@ def test_adopt_refuses_typed_before_any_arm(
     from gen_worker.models import provision
 
     # The adopt reads through `read_metadata` now — an envelope it
-    # CANNOT read is its own refusal (`cell_envelope_unreadable`) rather than
+    # CANNOT read is its own refusal (`compiled_graph_envelope_unreadable`) rather than
     # a `None` that flows on into a gate it silently disables. This test is
     # about the DIVERGENCE verdict, so it supplies a readable envelope.
     monkeypatch.setattr(
@@ -181,7 +181,7 @@ def test_adopt_refuses_typed_before_any_arm(
     reason, detail = fleet_cells.adopt_refusal(pending)
     assert reason == "key_axis_divergence"
     assert "env_seal: " in detail
-    assert meta["cell_key"] in detail
+    assert meta["compiled_graph_key"] in detail
 
 
 def test_inductor_digest_ignores_aot_compile_metadata() -> None:

@@ -83,7 +83,7 @@ def test_compile_target_execution_lane_vocabulary_rejects_impossible_states(exec
 # lane by CONSTRUCTION rather than by comparison — sm, the declared contract,
 # the env seal, the lane and the graph are all axes of `ck1`, so a cell that
 # disagrees has a different key and never resolves; see
-# `tests/test_cell_key_pgw1059.py`.
+# `tests/test_compiled_graph_key_pgw1059.py`.
 
 
 def test_execution_contract_uses_structure_not_checkpoint_values():

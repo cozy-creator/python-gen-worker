@@ -91,7 +91,7 @@ def _armable_artifact(tmp_path: Path, *, key: str = KEY_A) -> Path:
     p = tmp_path / "mint" / "cell.tar.gz"
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(
-        {"kind": "aot-inductor", "cell_key": key, "family": "micro-diffusion"}
+        {"kind": "aot-inductor", "compiled_graph_key": key, "family": "micro-diffusion"}
     ).encode()
     with tarfile.open(p, mode="w:gz") as tar:
         info = tarfile.TarInfo("metadata.json")
@@ -122,7 +122,7 @@ def machine(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
         lambda pipe, cfg, cache_dir=None, artifact=None: AdoptOutcome.miss(
-            "no_cell", "no artifact was delivered to this machine"))
+            "no_compiled_graph", "no artifact was delivered to this machine"))
 
 
 @pytest.fixture()
@@ -145,10 +145,10 @@ def armable(monkeypatch: pytest.MonkeyPatch) -> List[Path]:
     monkeypatch.setattr(fleet_cells.provision, "arm_aot", _arm)
     monkeypatch.setattr(
         fleet_cells.artifact_meta, "read_metadata",
-        lambda p: {"cell_key": KEY_A, "family": "micro-diffusion"})
+        lambda p: {"compiled_graph_key": KEY_A, "family": "micro-diffusion"})
     monkeypatch.setattr(
         fleet_cells.artifact_meta, "try_read_metadata",
-        lambda p: {"cell_key": KEY_A, "family": "micro-diffusion"})
+        lambda p: {"compiled_graph_key": KEY_A, "family": "micro-diffusion"})
     monkeypatch.setattr(fleet_cells, "arm_axis_divergence", lambda key, meta: "")
     return seen
 

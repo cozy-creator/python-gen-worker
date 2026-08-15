@@ -1210,8 +1210,8 @@ def wrap_module(
                 f"target={label}: {detail}",
                 phase=reason,
                 family=str(meta.get("family") or ""),
-                cell_key=str(
-                    meta.get("compiled_graph_key") or meta.get("cell_key") or ""
+                compiled_graph_key=str(
+                    meta.get("compiled_graph_key") or meta.get("compiled_graph_key") or ""
                 ),
                 graph_class=name,
             )
@@ -1299,8 +1299,8 @@ def wrap_module(
                 declared_class=ingress_class_name(label, args, kwargs),
                 reason=exc.reason,
                 detail=str(exc)[:400],
-                cell_key=str(
-                    meta.get("compiled_graph_key") or meta.get("cell_key") or ""
+                compiled_graph_key=str(
+                    meta.get("compiled_graph_key") or meta.get("compiled_graph_key") or ""
                 ),
             ))
             return original(*args, **eager_kwargs)
@@ -1668,10 +1668,10 @@ def _import_and_arm(
                 "compiled_graph_key_invalid",
                 f"artifact names no canonical compiled-graph key: {key!r}",
             )
-        if expected is not None and expected.cell_key != key:
+        if expected is not None and expected.compiled_graph_key != key:
             raise AdoptError(
                 "compiled_graph_key_mismatch",
-                f"the arm named {expected.cell_key!r}, artifact names {key!r}",
+                f"the arm named {expected.compiled_graph_key!r}, artifact names {key!r}",
             )
         publication = open_worker_engine(cache_dir).import_artifact(key, artifact)
         if publication.outcome == StoreOutcome.DIVERGENT:

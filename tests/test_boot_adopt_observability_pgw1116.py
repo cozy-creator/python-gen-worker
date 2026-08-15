@@ -1,7 +1,7 @@
 """pgw#1116: a boot-adopt refusal must NAME ITS GATE, on the wire.
 
 The measured defect (pgw#1108's POD PROOF, three real pods on 0.103.0):
-``/v1/worker/cells/resolve`` was called **zero** times, every pod self-minted,
+``/v1/worker/compiled-graphs/resolve`` was called **zero** times, every pod self-minted,
 and nothing off-pod could say why — ``BootAdoptOutcome.reason``/``.detail``/
 ``.derived_key``/``.derive_ms`` had zero readers outside ``boot_adopt.py`` (the
 executor consumed only ``.adoption``), and the executor's own three pre-attempt
@@ -174,15 +174,15 @@ def test_the_vocabulary_names_the_gates_that_used_to_return_a_bare_none() -> Non
     """The three executor pre-attempt gates are the ones that produced NOTHING
     — not even a discarded reason. They are the reason one pod could not name
     its own refusal."""
-    # pgw#1127 replaced `no_hub` with `no_cell_source`: the gate now refuses
+    # pgw#1127 replaced `no_hub` with `no_compiled_graph_source`: the gate now refuses
     # only when BOTH answerers are absent (no hub AND an empty local store),
     # because the derived ck1 key is `local_cell_store`'s own address.
     for token in ("no_export_declaration", "declaration_unreadable",
-                  "no_cell_source"):
+                  "no_compiled_graph_source"):
         assert token in boot_adopt.GATE_REASONS
     assert "no_hub" not in boot_adopt.REASONS, (
         "a token nothing can emit is a query nobody can write — pgw#1127 "
-        "split it into `no_cell_source` (pre-derive, nobody at all) and "
+        "split it into `no_compiled_graph_source` (pre-derive, nobody at all) and "
         "`local_miss_no_hub` (derived, this machine does not hold it, and "
         "there is no hub either)")
 
@@ -294,9 +294,9 @@ def test_no_cell_source_names_which_half_of_the_readiness_was_missing(
     (out,) = ex._boot_adopt(_Spec(), {})
     # pgw#1127: the same sentence, under the token that is now true — the
     # detail is what an operator greps, so it is deliberately unchanged.
-    assert out.reason == "no_cell_source"
+    assert out.reason == "no_compiled_graph_source"
     row = _one(events)
-    assert row.phase == "no_cell_source"
+    assert row.phase == "no_compiled_graph_source"
     assert "base_url=<unset>" in row.detail and "seam=down" in row.detail
     assert "own cell store is empty" in row.detail
 
@@ -338,7 +338,7 @@ def test_the_gates_are_pairwise_distinguishable(
 
 
 def _derived(wall_ms: int = 1234) -> Any:
-    from gen_worker import cell_key as ck
+    from gen_worker import compiled_graph_key as ck
 
     return boot_key.DerivedKey(
         # pgw#1176: a boot derives a KEY SET. These declarations trace to one
@@ -419,9 +419,9 @@ def _refuse_hub(code: str) -> Any:
             "child_died", "trace child exited 1 without a report"))}),
         ("derive_failed", {"derive": _raise(MemoryError("no headroom"))}),
         # Step 2 — the ask. A typed hub refusal is NOT a miss.
-        ("cell_resolve_ambiguous",
+        ("compiled_graph_resolve_ambiguous",
          {"derive": lambda **_k: _derived(), "resolve": _refuse_hub(
-             "cell_resolve_ambiguous")}),
+             "compiled_graph_resolve_ambiguous")}),
         ("resolve_unreachable",
          {"derive": lambda **_k: _derived(),
           "resolve": _raise(OSError("connection reset"))}),
@@ -505,7 +505,7 @@ class _ResolveHub(BaseHTTPRequestHandler):
         out = json.dumps({
             "object": "compiled_graph_resolve_batch",
             "family": body.get("family"),
-            "answers": [{"cell_key": k, "status": "miss", "found": False}
+            "answers": [{"compiled_graph_key": k, "status": "miss", "found": False}
                         for k in keys],
             "hits": 0, "misses": len(keys),
         }).encode()
@@ -631,7 +631,7 @@ def test_a_cold_boot_with_a_reachable_hub_actually_issues_the_resolve(
     assert resolves[0][1]["family"] == "micro-diffusion"
     assert len(resolves[0][1]["keys"]) == 3
     assert out.derived_key in resolves[0][1]["keys"]
-    assert "cell_key" not in resolves[0][1]
+    assert "compiled_graph_key" not in resolves[0][1]
     assert out.derived_key.startswith("cg-key-v1-")
     assert out.reason == "miss"
 

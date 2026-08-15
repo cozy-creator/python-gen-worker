@@ -159,7 +159,7 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     family: str
     #: The parent's ArmIdentity token (``arm1-…``) — the obligation this
     #: child discharges. NOT a cell key (pgw#1059): the cell's key is
-    #: stamped by the mint itself and returned in ``MintReport.cell_key``.
+    #: stamped by the mint itself and returned in ``MintReport.compiled_graph_key``.
     arm_token: str
     target: str          # artifact the child writes (.tar.gz), atomically
     #: The child's work root (target, export tree, snapshots). The parent
@@ -229,7 +229,7 @@ class MintReport(msgspec.Struct, frozen=True, kw_only=True):
     entries: Tuple[Tuple[str, str, str], ...] = ()
     artifact: str = ""
     digest: str = ""
-    cell_key: str = ""
+    compiled_graph_key: str = ""
     detail: str = ""
     phase: str = ""
     #: Measured, so the NEXT mint's co-residency ask is a fact rather than

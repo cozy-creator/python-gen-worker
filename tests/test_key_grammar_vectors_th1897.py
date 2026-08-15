@@ -27,7 +27,7 @@ import sys
 
 import pytest
 
-from gen_worker import cell_key
+from gen_worker import compiled_graph_key
 from gen_worker.compile_cache import parse_cell_ref
 from gen_worker.models.refs import parse_model_ref
 from gen_worker.refgrammar import MAX_FRAGMENT_LEN
@@ -64,7 +64,7 @@ def test_is_key_answers_every_shared_vector(vector: dict) -> None:
     scheme containing a hex run, which is the regression vector for ever
     splitting a key on ``-``.
     """
-    assert cell_key.is_key(vector["key"]) is vector["valid"], vector["note"]
+    assert compiled_graph_key.is_key(vector["key"]) is vector["valid"], vector["note"]
 
 
 def test_the_corpus_matches_the_digest_both_repos_commit() -> None:
@@ -100,20 +100,20 @@ def test_no_blessed_scheme_list_anywhere_in_the_grammar() -> None:
     by an older hub, so hub and fleet can never again ship in different
     windows.
     """
-    minted = cell_key.KEY_SCHEME
+    minted = compiled_graph_key.KEY_SCHEME
     for scheme in (minted, "cg-key-v2", "ck1", "ek1", "a", "cg.key_v1"):
-        assert cell_key.is_key(f"{scheme}-{HEX56}"), scheme
+        assert compiled_graph_key.is_key(f"{scheme}-{HEX56}"), scheme
 
 
 def test_the_key_the_deriver_mints_is_a_key() -> None:
     """The agreement between the two halves of THIS repo, which is what goes
     red if a scheme change is made in one and not the other."""
-    key = cell_key.from_axes(
+    key = compiled_graph_key.from_axes(
         {"graph": "0f0e0d0c0b0a0908", "sm": "sm_100",
          "toolchain": "bb11cc22dd33ee44"}
     ).digest
-    assert key.startswith(cell_key.KEY_SCHEME + "-")
-    assert cell_key.is_key(key) is True
+    assert key.startswith(compiled_graph_key.KEY_SCHEME + "-")
+    assert compiled_graph_key.is_key(key) is True
 
 
 # ---------------------------------------------------------------------------
@@ -124,9 +124,9 @@ def test_the_key_the_deriver_mints_is_a_key() -> None:
 def test_the_real_key_length_fits() -> None:
     """66 — `cg-key-v1-` + 56 hex. THE number the old 64-byte cap refused,
     which is the whole reason the bound moved."""
-    key = f"{cell_key.KEY_SCHEME}-{HEX56}"
+    key = f"{compiled_graph_key.KEY_SCHEME}-{HEX56}"
     assert len(key) == 66
-    assert cell_key.is_key(key)
+    assert compiled_graph_key.is_key(key)
     assert _flavor_of(f"root/family-sdxl#{key}") == key
 
 
@@ -140,7 +140,7 @@ def test_the_fragment_bound_is_96_exactly(length: int, valid: bool) -> None:
     assert MAX_FRAGMENT_LEN == 96
     key = "c" * (length - 1 - len(HEX56)) + "-" + HEX56
     assert len(key) == length
-    assert cell_key.is_key(key) is valid
+    assert compiled_graph_key.is_key(key) is valid
     ref = f"root/family-sdxl#{key}"
     if valid:
         assert _flavor_of(ref) == key
@@ -158,7 +158,7 @@ def test_a_pod_can_name_the_family_of_what_it_just_armed() -> None:
     ``aot_serve.is_aot_ref`` therefore returned False for an artifact the
     process had armed itself.
     """
-    key = f"{cell_key.KEY_SCHEME}-{HEX56}"
+    key = f"{compiled_graph_key.KEY_SCHEME}-{HEX56}"
     assert parse_cell_ref(f"root/family-sdxl#{key}") == ("sdxl", key)
 
 

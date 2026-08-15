@@ -276,7 +276,7 @@ proof artifact, not a fleet pin.
 > at all. Below
 > 0.106.0 the boot-key derivation refuses outright: `models/structure_only`
 > imported `accelerate`, which this image deliberately does not ship, so no key
-> exists, no `/v1/worker/cells/resolve` is ever issued and the pod self-mints
+> exists, no `/v1/worker/compiled-graphs/resolve` is ever issued and the pod self-mints
 > forever — measured on `ykwoaiqub6ktt3` and `3o09rf9ehnc4ym`, and it is what
 > silenced the first paid reuse-circle proof (pgw#1123). Older floors still
 > apply and are all below it: pgw#994 (`2165c2d5`, 0.93.4) for the container
@@ -371,12 +371,12 @@ verdict off the pod's own typed rows, never off a log:
 
 ```
 GET /v1/admin/worker-activity-events?release=…&kind=boot_adopt
-GET /v1/admin/worker-activity-events?release=…&kind=cell_numerics
+GET /v1/admin/worker-activity-events?release=…&kind=compiled_graph_numerics
 GET /v1/admin/worker-activity-events?release=…&kind=serve_eager_posture
 GET /v1/admin/worker-activity-events?release=…&kind=serve_degrade
 ```
 
-GREEN is `boot_adopt=hit`, `cell_numerics=armed_undispatched`, `lane=…+compiled`
+GREEN is `boot_adopt=hit`, `compiled_graph_numerics=armed_undispatched`, `lane=…+compiled`
 / `serving_mode=aot_cell`, and **no `serve_degrade` row at all**. A
 `target_applicability_incomplete` or `armed_target_unresolved` row is pgw#1141b
 (POD PROOF #4) recurring — that boot adopted a cell and then threw it away.

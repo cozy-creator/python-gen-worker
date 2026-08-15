@@ -201,7 +201,7 @@ class _Harness:
                 reason="synthetic_child_failure",
                 detail="synthetic inductor failure")
         minted = fleet_cells.SelfMint(
-            family=pending.family, cell_key=pending.arm_token,
+            family=pending.family, compiled_graph_key=pending.arm_token,
             ref=pending.ref, snapshot_digest="sha256:" + "b" * 64,
             artifact=pending.target)
         pending._state["minted"] = minted
@@ -339,7 +339,7 @@ def test_eager_first_boot_ready_before_compile_then_hot_swaps(
             cc.system_repo(FAMILY))
         assert target.active_compile_snapshot_digest.startswith("sha256:")
         assert h.ex.serving_tiers() == {"generate": "compiled"}
-        assert cc.cell_proven_in_process(target.active_compile_ref)
+        assert cc.compiled_graph_proven_in_process(target.active_compile_ref)
         # The self_mint_compile activity outlived READY and COMPLETED from
         # the driver — never FAILED.
         states = h.activity_states("self_mint_compile")

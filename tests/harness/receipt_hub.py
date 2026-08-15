@@ -2,7 +2,7 @@
 
 Promoted out of ``test_receipts_pgw709.py`` by pgw#1152, unchanged. The signer
 mirrors the hub's production format byte-for-byte (RS256 PKCS1v15/SHA256
-compact JWS, kid header, ``cell-receipt-v1+jws`` typ, ``cell-receipt-v2``
+compact JWS, kid header, ``compiled-graph-receipt-v1+jws`` typ, ``compiled-graph-receipt-v1``
 claims); the hub half's Go tests pin the same format from the signing side.
 :class:`HubStub` serves the three real routes the worker calls — JWKS, receipt
 lookup, revocations — on a real socket.
@@ -34,7 +34,7 @@ from gen_worker import receipts, worker_credential, worker_identity
 
 KID = "test-kid-1"
 FAMILY = "sdxl"
-CELL_KEY = "ck1-0123456789abcdef0123456789abcdef0123456789abcdef01234567"
+COMPILED_GRAPH_KEY = "ck1-0123456789abcdef0123456789abcdef0123456789abcdef01234567"
 SNAPSHOT = "snapdigest-abc123"
 # th#1657: the endpoint the test pod serves, and the one every fixture receipt
 # is minted FOR unless a test deliberately mints it for someone else. Keeping
@@ -58,7 +58,7 @@ def sign_receipt(
     kid: str = KID,
     alg: str = "RS256",
 ) -> str:
-    header = {"alg": alg, "kid": kid, "typ": "cell-receipt-v1+jws"}
+    header = {"alg": alg, "kid": kid, "typ": "compiled-graph-receipt-v1+jws"}
     signing_input = (
         _b64url(json.dumps(header).encode()) + "." + _b64url(json.dumps(claims).encode())
     )
@@ -88,9 +88,9 @@ def make_claims(
     else:
         artifact["digest"] = artifact_digest
     claims: Dict[str, Any] = {
-        "crv": "cell-receipt-v2",
+        "crv": "compiled-graph-receipt-v1",
         "family": FAMILY,
-        "cell_key": CELL_KEY,
+        "compiled_graph_key": COMPILED_GRAPH_KEY,
         "axes": {"sku": "rtx-4090", "image_digest": "sha256:feed", "gen_worker": "0.75.1"},
         "owning_endpoint_id": SELF_ENDPOINT,
         "publisher": "selfmint:worker=w1:pod=p1:release=r1",
@@ -117,8 +117,8 @@ def pub_map(rsa_key: rsa.RSAPrivateKey) -> Dict[str, rsa.RSAPublicKey]:
     return {KID: rsa_key.public_key()}
 
 
-def make_artifact(tmp_path: Path, *, cell_key: str = CELL_KEY, family: str = FAMILY) -> Path:
-    meta = {"cell_key": cell_key, "family": family, "format": "cozy-compile-cache/v1"}
+def make_artifact(tmp_path: Path, *, compiled_graph_key: str = COMPILED_GRAPH_KEY, family: str = FAMILY) -> Path:
+    meta = {"compiled_graph_key": compiled_graph_key, "family": family, "format": "cozy-compile-cache/v1"}
     target = tmp_path / "cell.tar.gz"
     with tarfile.open(target, "w:gz") as tar:
         raw = json.dumps(meta).encode()
@@ -164,15 +164,15 @@ class HubStub:
                         self._json(stub.receipt_status, {"error": "forced"})
                         return
                     q = parse_qs(parsed.query)
-                    cell_key = q.get("cell_key", [""])[0]
+                    compiled_graph_key = q.get("compiled_graph_key", [""])[0]
                     # The real route matches on the SET of tagged digests the
                     # worker offers. pgw#807 deleted the bare-hex `blake3`
                     # param with the protocol that needed it.
                     offered = list(q.get("artifact_digest", []))
-                    stub.last_query = (offered, cell_key)
+                    stub.last_query = (offered, compiled_graph_key)
                     jws = None
                     for ref in offered:
-                        jws = stub.receipts.get((ref, cell_key))
+                        jws = stub.receipts.get((ref, compiled_graph_key))
                         if jws is not None:
                             break
                     if jws is None:
@@ -212,7 +212,7 @@ class HubStub:
         ref = receipts.artifact_digest(artifact)
         size = artifact.stat().st_size
         claims = make_claims(ref, size, **claim_overrides)
-        self.receipts[(ref, str(claims["cell_key"]))] = sign_receipt(self.key, claims)
+        self.receipts[(ref, str(claims["compiled_graph_key"]))] = sign_receipt(self.key, claims)
         return ref
 
 

@@ -155,7 +155,7 @@ def _fake_arm(key: str, ref: str):
         # `holds_exported_cell` answers the lane question off the OBJECT.
         # A fixture that needs a REAL boot-adopt drives tests/harness/adopt_rig.py.
         adopted = fleet_cells.SelfMint(
-            family=FAMILY, cell_key=key, ref=ref,
+            family=FAMILY, compiled_graph_key=key, ref=ref,
             snapshot_digest="blake3:" + "ab" * 32,
             artifact=Path(cache_dir or ".") / "cell.tar")
         return fleet_cells.ArmOutcome(armed=True, self_mint=adopted)
@@ -228,8 +228,8 @@ def test_exercised_pure_aot_arm_is_proven_at_boot(
     assert aot_serve.execution_count(pipe) > 0
     # The gap: with no dynamo selection coexisting, the proof loop never
     # ran, so an honestly-exercised arm was never RECORDED proven.
-    assert compile_cache.cell_proven_in_process(ref)
-    assert not compile_cache.cell_quarantined_in_process(ref)
+    assert compile_cache.compiled_graph_proven_in_process(ref)
+    assert not compile_cache.compiled_graph_quarantined_in_process(ref)
 
 
 def test_unexercised_pure_aot_arm_keeps_serving_and_banks_no_proof(
@@ -244,8 +244,8 @@ def test_unexercised_pure_aot_arm_keeps_serving_and_banks_no_proof(
     pipe = RIG["pipe"]
     assert aot_serve.is_armed(pipe)
     assert getattr(pipe.unet, aot_serve._MARKER_ATTR, None) is not None
-    assert not compile_cache.cell_quarantined_in_process(ref)
-    assert not compile_cache.cell_proven_in_process(ref)
+    assert not compile_cache.compiled_graph_quarantined_in_process(ref)
+    assert not compile_cache.compiled_graph_proven_in_process(ref)
 
 
 def test_mandatory_execution_lane_without_a_dispatch_does_not_kill_the_boot(
@@ -257,4 +257,4 @@ def test_mandatory_execution_lane_without_a_dispatch_does_not_kill_the_boot(
     _boot(ex)  # never a load failure
     pipe = RIG["pipe"]
     assert aot_serve.is_armed(pipe)
-    assert not compile_cache.cell_proven_in_process(ref)
+    assert not compile_cache.compiled_graph_proven_in_process(ref)

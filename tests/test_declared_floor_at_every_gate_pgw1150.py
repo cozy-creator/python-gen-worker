@@ -267,7 +267,7 @@ def test_the_provenance_is_decided_in_exactly_one_place():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("name", sorted(CFGS))
-def test_declaring_a_band_never_moves_a_cell_key(name):
+def test_declaring_a_band_never_moves_a_compiled_graph_key(name):
     """A numerics band is a GATE, not a graph axis. If declaring one re-keyed,
     every family that states its floor would re-mint the whole fleet — which is
     the cost that makes "just leave it at the default" tempting."""

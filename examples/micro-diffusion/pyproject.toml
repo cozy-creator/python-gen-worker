@@ -30,7 +30,7 @@ dependencies = [
 #
 # The FLOOR is 0.106.0 BECAUSE of pgw#1123: on 0.97.0-0.105.0
 # `models/structure_only` imported `accelerate`, so on THIS image the boot-key
-# derivation refused, no `/v1/worker/cells/resolve` was ever issued, and the pod
+# derivation refused, no `/v1/worker/compiled-graphs/resolve` was ever issued, and the pod
 # self-minted forever — measured on pods `ykwoaiqub6ktt3` and `3o09rf9ehnc4ym`,
 # and it is what silenced the first paid reuse-circle proof. 0.106.0 owns the
 # meta-init (`gen_worker.models.meta_init`), which `pipeline.py` uses. Adding

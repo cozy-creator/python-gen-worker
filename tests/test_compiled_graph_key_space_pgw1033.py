@@ -115,7 +115,7 @@ def _miss(monkeypatch: pytest.MonkeyPatch) -> Any:
     gw_config.reload_for_test()
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
-        lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_cell"))
+        lambda pipe, cfg, cache_dir, artifact: AdoptOutcome.miss("no_compiled_graph"))
     monkeypatch.setattr(fleet_cells.cc, "has_compile_target", lambda p, c, **_kw: True)
     monkeypatch.setattr(fleet_cells.cc, "toolchain_present", lambda: True)
     monkeypatch.setattr(fleet_cells.cc, "mandatory_serving", lambda p: False)
@@ -161,7 +161,7 @@ def _adopt(
 
     pending.target.parent.mkdir(parents=True, exist_ok=True)
     payload = _json.dumps(
-        {"kind": "aot-inductor", "cell_key": stamped, "family": FAMILY}).encode()
+        {"kind": "aot-inductor", "compiled_graph_key": stamped, "family": FAMILY}).encode()
     with _tarfile.open(pending.target, mode="w:gz") as tar:
         info = _tarfile.TarInfo("metadata.json")
         info.size = len(payload)
@@ -191,7 +191,7 @@ def test_the_memo_is_keyed_on_the_arm_key_the_next_arm_can_look_up(
     assert pending is not None and pending.arm_token == ARM_KEY
 
     minted = _adopt(monkeypatch, pending)
-    assert minted is not None and minted.cell_key == STAMPED_KEY
+    assert minted is not None and minted.compiled_graph_key == STAMPED_KEY
 
     prior = fleet_cells.finalized_in_process(ARM_KEY)
     assert prior is minted, (
@@ -199,7 +199,7 @@ def test_the_memo_is_keyed_on_the_arm_key_the_next_arm_can_look_up(
         "cell — every same-key re-arm pays a second full export")
     # The VALUE still carries the cell's own identity; only the INDEX is the
     # arm key. Nothing looks the ledger up by the stamped key.
-    assert prior.cell_key == STAMPED_KEY
+    assert prior.compiled_graph_key == STAMPED_KEY
     assert prior.ref.endswith("#" + STAMPED_KEY)
 
 
@@ -245,17 +245,17 @@ def test_a_quarantined_STAMPED_ref_declines_the_next_arm_of_that_identity(
     assert minted is not None
 
     # Exactly what `_revoke_compiled_proof` does with the ref it was serving.
-    compile_cache.record_cell_quarantined(minted.ref)
+    compile_cache.record_compiled_graph_quarantined(minted.ref)
 
     again = _arm()
 
     assert not again.armed
-    assert again.eager_reason == EagerPhase.CELL_QUARANTINED, (
+    assert again.eager_reason == EagerPhase.COMPILED_GRAPH_QUARANTINED, (
         "the arm re-minted an identity whose own cell was disproven seconds "
         "ago — a deterministic recipe rebuilds the same disproven cell")
     skipped = [
         detail for kind, phase, detail in _events
-        if kind == "self_mint_skipped" and phase == EagerPhase.CELL_QUARANTINED
+        if kind == "self_mint_skipped" and phase == EagerPhase.COMPILED_GRAPH_QUARANTINED
     ]
     assert skipped and minted.ref in skipped[0], (
         "the decline must NAME the quarantined ref; two identities can decline "
@@ -271,12 +271,12 @@ def test_a_quarantined_ARM_ref_still_declines_the_next_arm(
     pending = _arm().self_mint
     assert pending is not None
 
-    compile_cache.record_cell_quarantined(pending.ref)
+    compile_cache.record_compiled_graph_quarantined(pending.ref)
 
     again = _arm()
 
     assert not again.armed
-    assert again.eager_reason == EagerPhase.CELL_QUARANTINED
+    assert again.eager_reason == EagerPhase.COMPILED_GRAPH_QUARANTINED
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +319,7 @@ def test_an_owed_mint_advertises_no_artifact_identity(
 # ---------------------------------------------------------------------------
 # 4. The pgw#686 divergence warning — DELETED by pgw#1032
 #
-# `_warn_cell_key_divergence` and its two tests
+# `_warn_compiled_graph_key_divergence` and its two tests
 # (`test_a_healthy_self_minted_AOT_boot_logs_no_key_divergence`,
 # `test_a_divergence_inside_one_key_space_is_still_loud`) are gone with
 # `requested_cell_key` itself. This issue's fix was the INTERIM it announced:

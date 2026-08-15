@@ -96,10 +96,10 @@ def test_exact_worker_values_match_pgw1237() -> None:
         {"kind": activity.KIND_AOT_MINT, "phase": activity.PHASE_MINTED},
         {"kind": activity.KIND_JIT_COMPILE, "phase": activity.PHASE_MINTED},
     ]
-    assert set(exact["cell_resolve_hub_refusal_codes"]) == set(
+    assert set(exact["compiled_graph_resolve_hub_refusal_codes"]) == set(
         cell_resolve.REFUSAL_CODES
     )
-    assert exact["cell_publish_untrusted_refusal_code"] == UNTRUSTED_REFUSAL_CODE
+    assert exact["compiled_graph_publish_untrusted_refusal_code"] == UNTRUSTED_REFUSAL_CODE
     assert exact["hardware_unsuitable_reason_classes"] == [
         "torch_unavailable",
         "cuda_unavailable",

@@ -111,7 +111,7 @@ KIND_LORA_FIDELITY = "lora_fidelity"
 # real DEGRADED artifact (flux2 w8a8 whole-graph, cos 0.931-0.973 against
 # eager) that nothing in the worker would have noticed, which is why the
 # verdict has to reach the hub whether or not it refuses.
-KIND_CELL_NUMERICS = "cell_numerics"
+KIND_COMPILED_GRAPH_NUMERICS = "compiled_graph_numerics"
 # pgw#1036: modular-pipeline hydration provenance — one event per slot load,
 # detail lists component<-local_source pairs (the hydration guard's proof that
 # every weight came from OUR tree, bankable hub-side; phase=hydrated).
@@ -443,7 +443,7 @@ class Activity:
         _end(self)
 
 
-#: pgw#1176 / th#1839: cell identity travels as TYPED WIRE FIELDS.
+#: pgw#1176 / th#1839: compiled-graph identity travels as TYPED WIRE FIELDS.
 #:
 #: ``ActivityUpdate.family`` / ``.cell_key`` / ``.graph_class`` (proto fields
 #: 18-20) land in the hub's existing ``worker_activity_events`` columns. The
@@ -453,16 +453,18 @@ class Activity:
 #: cannot be indexed, cannot be grouped, and returns NULL the first time the
 #: formatting changes.
 #:
-#: This was a COORDINATED PROTO CUT: ``proto/worker_scheduler.proto`` is a
-#: byte-for-byte vendored copy of tensorhub's canonical one, gated on
-#: ``PROTO_DIGEST``, so the field could not be added here unilaterally. It is
-#: additive — old readers ignore all three — and an emitter that states none
-#: sends empty strings, which is the honest "this event is not about a cell".
+#: ``proto/worker_scheduler.proto`` is a byte-for-byte vendored copy of
+#: tensorhub's canonical one, gated on ``PROTO_DIGEST``, so field 19 cannot be
+#: renamed here unilaterally: pgw#1278 renames the vocabulary AROUND it and
+#: leaves the proto spelling alone. The single translation lives in
+#: :func:`emit_event` below — one line, at the seam, never a second name in
+#: the worker's own vocabulary. Field 19 becomes ``compiled_graph_key`` in the
+#: proto lane (th#1947), and no caller here moves when it does.
 
 
 def emit_event(
     kind: str, detail: str, phase: str = "", duration_ms: int = 0,
-    *, family: str = "", cell_key: str = "", graph_class: str = "",
+    *, family: str = "", compiled_graph_key: str = "", graph_class: str = "",
 ) -> None:
     """One self-contained COMPLETED ActivityUpdate — a countable typed
     EVENT (pgw#680 ``guard_miss``), not a running activity.
@@ -486,7 +488,8 @@ def emit_event(
         state=pb.ActivityState.ACTIVITY_STATE_COMPLETED,
         detail=detail[:2000],
         family=str(family or "")[:200],
-        cell_key=str(cell_key or "")[:200],
+        # proto field 19 is still spelled `cell_key` — see the note above.
+        cell_key=str(compiled_graph_key or "")[:200],
         graph_class=str(graph_class or "")[:300],
         duration_ms=max(0, int(duration_ms)),
         updated_at_unix_ms=int(time.time() * 1000),

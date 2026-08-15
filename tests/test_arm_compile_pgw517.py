@@ -390,7 +390,7 @@ def test_self_loaded_w8a8_pipeline_emits_exact_target_and_requires_cell_fence(
         # (delivered-cell selection is deleted).
         _fake_enable(pipe, cfg, cache_dir, artifact)
         return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
-            family=FAMILY, cell_key=cell_ref.rsplit("#", 1)[-1], ref=cell_ref,
+            family=FAMILY, compiled_graph_key=cell_ref.rsplit("#", 1)[-1], ref=cell_ref,
             snapshot_digest="blake3:" + "b" * 64,
             artifact=tmp_path / "cell.tar.gz"))
 
