@@ -127,26 +127,32 @@ def test_an_oversized_envelope_still_refuses_before_decompressing(
 # ---------------------------------------------------------------------------
 
 
-def test_both_envelope_readers_agree_on_the_same_member(tmp_path: Path) -> None:
+def test_there_is_ONE_envelope_reader_and_it_is_BOUNDED(tmp_path: Path) -> None:
     """RED pre-fix: `aot_serve.unpack_metadata` kept its own UNBOUNDED scan, so
     on row 7's cell the bounded reader refused and this one succeeded. That
     disagreement is the whole mechanism — `arm_aot` got `None` and skipped its
-    install while `enable`, reading through this function, saw a lifted
-    artifact and refused it."""
+    install while `enable`, reading through the second reader, saw a lifted
+    artifact and refused it.
+
+    pgw#1270 removed the second reader outright: TCG's Engine owns artifact
+    import and this repo has one bounded envelope reader left. So the property
+    is asserted the strong way — the reader is bounded in both directions, and
+    `aot_serve` exposes no reader of its own for the asymmetry to come back on.
+    """
     from gen_worker import aot_serve
 
     artifact = _cell(tmp_path / "cell.tar.gz", _ROW7_META, pad_to=20 << 20)
-
-    assert aot_serve.unpack_metadata(artifact) == artifact_meta.read_metadata(artifact)
+    assert artifact_meta.read_metadata(artifact)["family"] == _ROW7_META["family"]
 
     over = _cell(
         tmp_path / "over.tar.gz", _ROW7_META,
         pad_to=artifact_meta.MAX_METADATA_BYTES + (1 << 20))
-    # Both refuse, and neither answers "there are no facts here".
+    # It refuses, and it does not answer "there are no facts here".
     with pytest.raises(artifact_meta.ArtifactMetadataError):
         artifact_meta.read_metadata(over)
-    with pytest.raises(artifact_meta.ArtifactMetadataError):
-        aot_serve.unpack_metadata(over)
+
+    assert not hasattr(aot_serve, "unpack_metadata"), (
+        "a second envelope reader is back; pgw#1098 is that asymmetry")
 
 
 # ---------------------------------------------------------------------------

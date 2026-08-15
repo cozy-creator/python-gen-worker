@@ -34,6 +34,7 @@ from gen_worker import aot_serve, cell_key, env_seal, fleet_cells
 from gen_worker.compile_cache import AdoptError
 from torch_compiled_graphs import (
     CallIngress,
+    CallInput,
     CompiledGraphRunner,
     ConstantBindingError,
 )
@@ -291,7 +292,12 @@ def test_cpp_bind_failure_is_typed_injection_failed(
         _RefusingPackage(),
         [_constant("lin.weight")],
     )
-    ingress = CallIngress(parameters=(), flat_arity=0, inputs=())
+    # TCG refuses an empty parameter tuple; the arm under test never reaches a
+    # forward, so one declared input is all this metadata needs to be valid.
+    ingress = CallIngress(
+        parameters=("x",), flat_arity=1,
+        inputs=(CallInput("x", 0, "x", 0, (), "x", "float32", (4,)),),
+    )
     metadata = {
         "graph_class": {
             "name": "transformer/cfg=true",

@@ -197,7 +197,7 @@ def test_the_fallback_asks_for_real_weights_and_still_never_places_them(
     recorder = _Recorder(raises=[_unsupported(), None])
     _patch_run_setup(monkeypatch, recorder)
     monkeypatch.setattr(
-        aot_mint, "export_declaration", lambda family: object())
+        child, "export_declaration", lambda family: object())
     monkeypatch.setattr(
         "gen_worker.fleet_cells.aot_export_spec",
         lambda pipe, cfg: type("S", (), {"family": cfg.family})())

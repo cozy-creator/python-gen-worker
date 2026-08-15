@@ -67,6 +67,11 @@ from gen_worker.models import store as store_mod
 FAMILY = "sdxl"
 COMPILED_GRAPH_KEY = "cg-key-v1-" + "8" * 56
 CELL_REF = f"root/family-{FAMILY}#{COMPILED_GRAPH_KEY}"
+#: The DYNAMO control arm's ref. Lane identity is structural now — a ref whose
+#: flavor is a compiled-graph key IS the exported lane (`is_aot_ref`) — so the
+#: dynamo arm has to carry a dynamo flavor or it scores itself on the wrong
+#: failure detector.
+DYNAMO_REF = f"root/family-{FAMILY}#inductor-l4-torch2.13-w8a8"
 CELL_DIGEST = "blake3:" + "a" * 64
 MODEL_DIGEST = "blake3:" + "c" * 64
 CHANNELS = 320
@@ -198,7 +203,7 @@ def test_the_collapsed_declaration_dispatches_every_bucket_uniquely():
             ),
             "unet/block=BasicTransformerBlock#0,cfg=false",
         ),
-    )))
+    ),))
 
     for h, w in SDXL_BUCKETS:
         name, _r = collapsed.select(_call(h, w), {})
@@ -358,8 +363,10 @@ def _boot(
     async def _send(_msg: Any) -> None:
         return None
 
+    cell_ref = CELL_REF if exported else DYNAMO_REF
+
     async def _download(ref, **kwargs):
-        return artifact.parent if ref == CELL_REF else model_dir
+        return artifact.parent if ref == cell_ref else model_dir
 
     ex = Executor(specs, _send)
     ex.store._cache_dir = tmp_path / "cas"
@@ -375,7 +382,7 @@ def _boot(
     arm_order = executor_mod._ArmOrder(
         backend="aot_cell",
         selection=executor_mod._CompileArtifactSelection(
-            path=artifact, ref=CELL_REF, snapshot_digest=CELL_DIGEST))
+            path=artifact, ref=cell_ref, snapshot_digest=CELL_DIGEST))
     asyncio.run(ex.ensure_setup(generate, {
         model_ref: pb.Snapshot(digest=MODEL_DIGEST),
     }, arm=arm_order))
