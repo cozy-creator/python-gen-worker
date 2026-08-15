@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
+from safetensors.torch import load_file, save_file
 from torch import nn
 
 #: Latent channels, matching the SD-class convention the declaration mirrors.
@@ -45,8 +46,21 @@ WIDTH = 64
 #: on two boots agrees.
 SEED = 978
 
-WEIGHTS_NAME = "diffusion_pytorch_model.bin"
+#: safetensors, like every tree the fleet serves. It was a `.bin` — the rig
+#: fabricated exactly the shape the production lane refuses (HARDCUT E5), and
+#: read it back through the one deserializer this platform bans.
+WEIGHTS_NAME = "diffusion_pytorch_model.safetensors"
 CONFIG_NAME = "config.json"
+
+
+def _flatten(state: Dict[str, torch.Tensor], prefix: str) -> Dict[str, torch.Tensor]:
+    """One flat namespace, cloned — safetensors refuses aliased storages."""
+    return {f"{prefix}.{k}": v.detach().cpu().clone() for k, v in state.items()}
+
+
+def _unflatten(state: Dict[str, torch.Tensor], prefix: str) -> Dict[str, torch.Tensor]:
+    head = prefix + "."
+    return {k[len(head):]: v for k, v in state.items() if k.startswith(head)}
 
 
 class _TimestepEmbedding(nn.Module):
@@ -180,9 +194,9 @@ class TinyDiffusionPipeline:
         vae = TinyDecoder(
             width=int(config["width"]),
             latent_channels=int(config["latent_channels"]))
-        state = torch.load(root / WEIGHTS_NAME, map_location="cpu", weights_only=True)
-        unet.load_state_dict(state["unet"])
-        vae.load_state_dict(state["vae"])
+        state = load_file(str(root / WEIGHTS_NAME), device="cpu")
+        unet.load_state_dict(_unflatten(state, "unet"))
+        vae.load_state_dict(_unflatten(state, "vae"))
         return cls(unet.eval(), vae.eval(), source=str(root))
 
     def to(self, device: Any) -> "TinyDiffusionPipeline":
@@ -298,8 +312,8 @@ def build_checkpoint(root: Path, *, seed: int = SEED) -> Path:
     torch.manual_seed(int(seed))
     unet = TinyUNet(WIDTH, CONTEXT_DIM, LATENT_CHANNELS)
     vae = TinyDecoder(WIDTH, LATENT_CHANNELS)
-    torch.save({"unet": unet.state_dict(), "vae": vae.state_dict()},
-               root / WEIGHTS_NAME)
+    save_file(_flatten(unet.state_dict(), "unet") | _flatten(vae.state_dict(), "vae"),
+              str(root / WEIGHTS_NAME))
     cfg_path.write_text(json.dumps(config, indent=2, sort_keys=True))
     return root
 

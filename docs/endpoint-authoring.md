@@ -581,8 +581,7 @@ Resources(gpu=True, libraries=("nunchaku",))
 
 Fields: `gpu`, `gpu_count`, `max_gpu_count`,
 `max_gpus_per_execution_group`, `parallel`, `libraries`, `vcpus`,
-the hard floor `compute_capability`, and the two allocation hints
-`ram_gb_hint` / `min_disk_gb`.
+the hard floor `compute_capability`, and the allocation hint `ram_gb_hint`.
 `max_gpus_per_execution_group` / `parallel` are the multi-GPU axis — see
 [multi-gpu.md](multi-gpu.md).
 
@@ -624,9 +623,10 @@ for a genuine incapability — a function that merely runs *better* on newer
 silicon declares nothing and lets the ladder choose; over-declaring shrinks the
 rentable pool for no reason.
 
-`ram_gb_hint` (pgw#670) and `min_disk_gb` (pgw#732) are HOST-side allocation
-asks and neither implies `gpu=True`. They survive because they size the pod,
-not the card.
+`ram_gb_hint` (pgw#670) is a HOST-side allocation ask and does not imply
+`gpu=True`; it survives because it sizes the pod, not the card. There is no
+disk axis — `min_disk_gb` was deleted unused (HARDCUT C3); the hub sizes
+container disk from the bytes a job will materialize.
 
 The v1 spellings `vram_gb` and `ram_gb` were deleted by SDK v2 and are still
 gone; `min_compute_capability` is rejected by the hub outright. Nothing

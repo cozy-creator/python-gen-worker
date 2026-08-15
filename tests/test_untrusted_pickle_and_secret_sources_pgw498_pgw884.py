@@ -9,8 +9,10 @@ legacy repo is to MIRROR it without the pickle. There is no pickle reader in
 this package at all: `classifier.py` refuses a pickle-only repo with
 `pickle_only`, and both component-level doors
 (`repackage._load_component_state_dict`, `writer.iter_component_tensors`) raise
-the same refusal instead of converting. The scan below asserts ZERO
-`torch.load` sites, not "one safe one".
+the same refusal instead of converting. The SHAPE scan that asserts zero
+deserializer sites — not "one safe one" — is `scripts/lint_pickle_readers.py`,
+in `fast gates` (HARDCUT E5); the two copies that lived here scanned `src/`
+only, in a job that gates nothing.
 
 A bare `torch.load` is NOT a substitute. On torch >= 2.6 `weights_only` defaults
 to `True`, but that safety is a DEFAULT, not a decision — and torch publishes
@@ -101,7 +103,8 @@ def test_the_payload_really_does_execute_through_an_unguarded_load(
     component, marker = _poisoned_component(tmp_path)
     monkeypatch.setenv("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
     with pytest.warns(UserWarning, match="TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"):
-        torch.load(str(component / "diffusion_pytorch_model.bin"), map_location="cpu")
+        torch.load(str(component / "diffusion_pytorch_model.bin"),  # pickle-ban: proves-the-refusal
+                   map_location="cpu")
     assert marker.exists(), (
         "the payload did not run — torch no longer honours "
         "TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD, so this file's guard is stale"
@@ -176,79 +179,6 @@ def test_safetensors_still_wins_over_the_pickle(tmp_path: Path) -> None:
     )
     assert list(state) == ["a.weight"]
     assert not marker.exists()
-
-
-def test_there_is_no_pickle_reader_in_the_tree() -> None:
-    """ZERO pickle readers: Paul's ban, enforced structurally.
-
-    Scanning for the shape is what stops one coming back, since a new site is
-    silently safe on today's torch and silently unsafe under
-    `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD`. A `weights_only=True` site would be
-    safe and is STILL refused here — the ban is on reading pickles at all, so
-    the scan deliberately does not exempt it.
-
-    `torch.export.load` is deliberately out of scope: an AOTI `.pt2` is
-    admitted through the cell-key identity gate and the org/endpoint trust
-    model (§4.26), not through this lane's tenant-repo assumption.
-    """
-    src_root = Path(writer.__file__).resolve().parent.parent
-    offenders: list[str] = []
-    for path in sorted(src_root.rglob("*.py")):
-        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue
-            if "torch.load(" not in stripped and "torch_mod.load(" not in stripped:
-                continue
-            offenders.append(f"{path.relative_to(src_root)}:{lineno}: {stripped}")
-    assert offenders == [], (
-        "a pickle reader is back. Pickles are banned platform-wide; mirror the "
-        "source repo without the pickle instead of reading it:\n"
-        + "\n".join(offenders)
-    )
-
-
-#: Modules permitted to deserialize a pickle. It starts EMPTY and it stays
-#: empty: an entry here is a decision that some byte stream in this process may
-#: name a class and reach its constructor. There is no such stream.
-_PICKLE_DESERIALIZER_ALLOWLIST: frozenset = frozenset()
-
-_PICKLE_DESERIALIZERS = ("pickle.loads", "pickle.load(", "Unpickler")
-
-
-def test_no_module_deserializes_a_pickle_directly() -> None:
-    """The scan above reads `torch.load(` ONLY — it was blind to the direct
-    `pickle` API, and `parallel/group.py` unpickled off an `mp.Queue` whose
-    writer is the process that imports tenant endpoint code and marshals
-    tenant-supplied model-call arguments (pgw#1275). Every rank-sibling
-    follower reading that queue was a deserialization gadget on
-    tenant-reachable input, and nothing in the tree could go red about it.
-
-    Scanned as a SHAPE, because that is what stops one coming back: a new site
-    is silently a gadget, and no test of the surrounding feature notices.
-    `pickle.dumps` is deliberately not scanned — writing a pickle executes
-    nothing; reading one does.
-    """
-    src_root = Path(writer.__file__).resolve().parent.parent
-    offenders: list[str] = []
-    for path in sorted(src_root.rglob("*.py")):
-        rel = str(path.relative_to(src_root))
-        if rel in _PICKLE_DESERIALIZER_ALLOWLIST:
-            continue
-        for lineno, line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(), 1
-        ):
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue
-            if not any(name in stripped for name in _PICKLE_DESERIALIZERS):
-                continue
-            offenders.append(f"{rel}:{lineno}: {stripped}")
-    assert offenders == [], (
-        "a pickle DESERIALIZER is back. Whatever the stream is, its writer is "
-        "reachable from tenant code; carry the payload as msgspec (see "
-        "`gen_worker/parallel/wire.py`) instead:\n" + "\n".join(offenders)
-    )
 
 
 # ---------------------------------------------------------------------------

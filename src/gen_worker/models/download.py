@@ -274,18 +274,13 @@ async def ensure_local(
 
     if parsed.provider == "modelscope" and parsed.modelscope is not None:
         ms = parsed.modelscope
-
-        def _ms_download() -> str:
-            from modelscope import snapshot_download as ms_snap
-
-            kw: dict[str, Any] = {"cache_dir": str(base / "modelscope")}
-            if ms.revision:
-                kw["revision"] = ms.revision
-            if allow_patterns:
-                kw["allow_patterns"] = list(allow_patterns)
-            return ms_snap(model_id=ms.repo_id, **kw)
-
-        return Path(await asyncio.to_thread(_ms_download))
+        return await asyncio.to_thread(
+            download_modelscope,
+            ms.repo_id,
+            cache_dir=base / "modelscope",
+            revision=ms.revision or "",
+            allow_patterns=tuple(allow_patterns),
+        )
 
     # Typed so the executor classifies it INVALID (bad input, never retry) —
     # a bare ValueError maps FATAL.
@@ -555,6 +550,8 @@ def _refuse_pickles_on_disk(root: Path, label: str) -> None:
     """
     try:
         names = [p.name for p in root.rglob("*") if p.is_file() or p.is_symlink()]
+        if root.is_file() or root.is_symlink():
+            names.append(root.name)  # a lane may return the artifact, not a tree
     except OSError:
         return
     if bad := first_pickle_weight_path(names):
@@ -562,6 +559,41 @@ def _refuse_pickles_on_disk(root: Path, label: str) -> None:
             f"refusing {label}: {bad!r} is a pickle-format weight. "
             "Unpickling is arbitrary code execution in this process."
         )
+
+
+def download_modelscope(
+    repo_id: str,
+    *,
+    cache_dir: Optional[Path] = None,
+    revision: str = "",
+    allow_patterns: Sequence[str] = (),
+    local_files_only: bool = False,
+) -> Path:
+    """ModelScope snapshot fetch — the THIRD entry lane, and the one pgw#1273
+    left open (HARDCUT E5).
+
+    HF refuses a pickle off the file listing before a byte moves and civitai
+    selects `.safetensors`/`.gguf` by allow-list, but modelscope mirrors
+    HF-shaped repos verbatim — `.bin` components and all — and both call sites
+    handed `snapshot_download`'s return straight to a loader. The refusal is on
+    what LANDED rather than on a listing (modelscope's listing API is a network
+    call this lane does not otherwise make), so bytes move and then nothing
+    reads them: the door is still shut in front of every deserializer.
+    """
+    from modelscope import snapshot_download as ms_snap
+
+    kwargs: Dict[str, Any] = {}
+    if cache_dir is not None:
+        kwargs["cache_dir"] = str(cache_dir)
+    if revision:
+        kwargs["revision"] = revision
+    if allow_patterns:
+        kwargs["allow_patterns"] = list(allow_patterns)
+    if local_files_only:
+        kwargs["local_files_only"] = True
+    local = Path(str(ms_snap(model_id=repo_id, **kwargs)))
+    _refuse_pickles_on_disk(local, f"modelscope:{repo_id}")
+    return local
 
 
 def _hf_progress_dir(hf_home: Optional[str], ref: HuggingFaceRef) -> Path:
@@ -1043,6 +1075,18 @@ def download_civitai(
     payload = fetch_civitai_model_version(version_id, api_key=api_key)
     files = _civitai_select_files(payload, gguf_quant=gguf_quant)
     if not files:
+        # The selector is an ALLOW-list, so a pickle-only version already
+        # cannot be downloaded — but it said `no_supported_files`, which reads
+        # as "civitai is broken". Name the real reason, with the same typed
+        # refusal the other two lanes raise (HARDCUT E5).
+        names = [str(f.get("name") or "") for f in (payload.get("files") or [])
+                 if isinstance(f, Mapping)]
+        if bad := first_pickle_weight_path(names):
+            raise PickleWeightRefused(
+                f"refusing civitai version {version_id}: {bad!r} is a "
+                "pickle-format weight and it is the only weight published. "
+                "Unpickling is arbitrary code execution in this process."
+            )
         raise ValueError("civitai_no_supported_files")
 
     out_dir = Path(out_dir)
@@ -1119,6 +1163,7 @@ __all__ = [
     "ensure_local",
     "download_hf",
     "download_civitai",
+    "download_modelscope",
     "select_hf_files",
     "select_component_paths",
     "components_present",

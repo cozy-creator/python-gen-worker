@@ -635,12 +635,12 @@ def _record_guard_miss(
 # Key
 # ---------------------------------------------------------------------------
 
-#: The axes :func:`verify` refuses on — the runtime facts a seeded FX cache
-#: is genuinely pinned to. ``sku`` left in the pgw#691/ck3 collapse (see
-#: :func:`verify`) and must never return; ``sm`` is the GPU identity. The
-#: exported lane declares the same shape as ``aot_serve.IDENTITY_AXES``.
-IDENTITY_AXES: Tuple[str, ...] = ("torch", "triton", "sm", "cuda",
-                                  "image_digest")
+# pgw#1281: no axis tuple lives here. The one that did named `verify()` (gone
+# with the pgw#1035 dead-code wave) and claimed parity with
+# `aot_serve.IDENTITY_AXES`, which was never true — 5 entries against 3, and
+# pgw#1034 had already ruled the two sets deliberately different. The cell key's
+# axes are `compiled_graph_key.KEY_AXES`; this module's job is `runtime_key()`,
+# the ONE probe that states them.
 
 
 def sku_slug(gpu_name: str) -> str:

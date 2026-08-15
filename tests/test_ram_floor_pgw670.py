@@ -69,6 +69,15 @@ def test_declaration_is_validated() -> None:
         Resources(ram_gb_hint=-8)
 
 
+def test_the_deleted_disk_axis_is_refused_as_UNKNOWN() -> None:
+    """HARDCUT C3 / pgw#1281: `min_disk_gb` (pgw#732) shipped for two releases
+    and no endpoint in any repo ever declared it, so the emitter is gone. It
+    must refuse BY NAME rather than be accepted and dropped — a silently
+    swallowed floor is a pod sized by nothing with nobody told."""
+    with pytest.raises(TypeError, match="min_disk_gb"):
+        Resources(min_disk_gb=1)  # type: ignore[call-arg]
+
+
 def test_a_host_floor_does_not_imply_a_gpu() -> None:
     # A host-RAM floor is
     # not (video encode is host-CPU/RAM bound — ie#484 — with or without a GPU).
