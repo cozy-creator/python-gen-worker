@@ -62,7 +62,6 @@ from . import artifact_meta
 from . import boot_phases
 from . import cell_key as cell_key_mod
 from . import compile_posture
-from . import kernel_path
 from . import mint_workers
 from . import progress as progress_mod
 from .api.export_contract import (
@@ -674,18 +673,7 @@ async def supervise(
         modules=tuple(task.modules),
         cfg=cfg_spec(cfg),
         slots=dict(task.slots),
-        # pgw#947, re-based on the reroute: the mint child used to A/B the
-        # kernel lanes by loading one full pipeline per candidate on an empty
-        # card. A SERVING parent has neither an empty card nor the right to
-        # take one, and it does not need the probe — the lane this pod SERVES
-        # on is a fact it already holds first-hand, and it is the lane the
-        # artifact must be stamped with. Recorded as a typed UNMEASURED
-        # verdict with its reason rather than as an absence.
-        execution_lane=kernel_path.unmeasured(
-            task.execution_lane,
-            "supervised mint: the serving parent states the lane it is "
-            "already serving on rather than benchmarking a second pipeline "
-            "onto the card it is resident on"),
+        posture=task.posture,
         out_dir=str(out_dir),
     )
 

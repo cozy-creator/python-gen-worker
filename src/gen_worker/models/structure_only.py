@@ -534,13 +534,6 @@ def _event_bytes(event: mi.Materialization) -> int:
 # ---------------------------------------------------------------------------
 
 
-def is_structure_only(obj: Any) -> bool:
-    """Whether this module — or any component of this pipeline — is virtual."""
-    if getattr(obj, STAMP, False):
-        return True
-    return bool(structure_only_components(obj))
-
-
 def structure_only_components(pipe: Any) -> Tuple[str, ...]:
     """Names of the pipeline attributes that are structure-only modules."""
     out: List[str] = []
@@ -891,7 +884,6 @@ __all__ = [
     "facts_of",
     "fake_mode_of",
     "fake_mode_of_program",
-    "is_structure_only",
     "modules_of",
     "program_shape_env",
     "refusal_token",

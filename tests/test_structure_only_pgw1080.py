@@ -107,8 +107,12 @@ def test_a_component_the_tree_does_not_declare_REFUSES_by_name(
 # ---------------------------------------------------------------------------
 
 
-def test_the_structure_EXPORTS_and_AOT_COMPILES(tree: Path) -> None:
-    from gen_worker import aot_mint
+def test_the_structure_EXPORTS_and_TCG_COMPILES(
+    tree: Path, tmp_path: Path,
+) -> None:
+    from torch_compiled_graphs import build_call_ingress
+
+    from gen_worker import aot_compile_child, aot_mint
 
     module, _facts = so.build_component(tree, "decoder", device="cpu")
     mode = so.fake_mode_of(module)
@@ -117,11 +121,31 @@ def test_the_structure_EXPORTS_and_AOT_COMPILES(tree: Path) -> None:
     with so.under(mode):
         latent = torch.randn(1, 8, 16)
         program = aot_mint.export_program(module, (latent,), {})
+        ingress = build_call_ingress(program, ("latent",), (latent,), {})
     assert so.fake_mode_of_program(program) is mode, (
-        "the compile has to find the program's own mode — `aot_compile` "
-        "asserts every input belongs to ONE mode")
-    files = aot_mint.compile_entry_files(program, "decoder")
-    assert files, "AOTInductor produced no loose files for the fake structure"
+        "TCG's AOTInductor compile has to receive the program in the fake "
+        "mode that owns every structure-only input")
+
+    spec = aot_mint.ExportSpec(family="micro", target="decoder")
+    traced = aot_mint.TracedClass(
+        name="decoder/static",
+        block=aot_mint.keying_block(program, ingress, spec),
+        nodes=len(program.graph_module.graph.nodes),
+        program=program,
+    )
+    engine, runtime = aot_compile_child._tcg_runtime(tmp_path / "cas")
+    result = aot_compile_child.compile_traced_class(
+        traced,
+        spec,
+        engine,
+        runtime,
+        work=tmp_path / "work",
+        out_dir=tmp_path / "artifacts",
+    )
+
+    assert Path(result.packed.artifact).is_file()
+    assert result.packed.key.startswith("cg-key-v1-")
+    assert traced.program is None, "the compile child releases each TCG row"
 
 
 # ---------------------------------------------------------------------------

@@ -273,8 +273,7 @@ def build_awq_packed_linear(tensors: dict[str, Any], out_features: int,
 
 
 def awq_packed_self_check() -> Optional[str]:
-    """Arm gate: packed module output vs the decoded bf16 Linear on random
-    layers (plain + adanorm-6). Returns None when armed."""
+    """Benchmark-side packed output check against the decoded bf16 linear."""
     import torch
 
     if awq_op() is None:
@@ -284,19 +283,25 @@ def awq_packed_self_check() -> Optional[str]:
         w = torch.randn(oc, ic) * 0.05
         b = torch.randn(oc)
         tensors = encode_awq_linear(w, b, adanorm_splits=splits)
-        ref = decode_awq_linear(tensors, oc, ic, adanorm_splits=splits,
-                                device="cuda")
-        mod = build_awq_packed_linear(tensors, oc, ic,
-                                      adanorm_splits=splits, device="cuda")
+        ref = decode_awq_linear(
+            tensors, oc, ic, adanorm_splits=splits, device="cuda",
+        )
+        mod = build_awq_packed_linear(
+            tensors, oc, ic, adanorm_splits=splits, device="cuda",
+        )
         x = torch.randn(3, ic, device="cuda", dtype=torch.bfloat16)
         with torch.no_grad():
             got = mod(x)
             want = ref(x)
-        rel = ((got.float() - want.float()).norm()
-               / want.float().norm().clamp(min=1e-9)).item()
+        rel = (
+            (got.float() - want.float()).norm()
+            / want.float().norm().clamp(min=1e-9)
+        ).item()
         if rel > 5e-3:
-            return (f"awq packed rel err {rel:.4f} vs decoded Linear at "
-                    f"[{oc},{ic}] splits={splits}")
+            return (
+                f"awq packed rel err {rel:.4f} vs decoded Linear at "
+                f"[{oc},{ic}] splits={splits}"
+            )
     return None
 
 

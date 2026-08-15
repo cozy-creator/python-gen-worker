@@ -1,7 +1,7 @@
 """pgw#1215 (th#1834 Phase 3 keystone) — the wiring, the durability bound, and
 the one label a share cannot state.
 
-Four properties, none of which any other file covers:
+Three properties, none of which any other file covers:
 
 1. **``mint_child`` drives the K-wide path.** The keystone is worth nothing if
    the production mint still calls the serial one — that would be a K=1
@@ -13,18 +13,14 @@ Four properties, none of which any other file covers:
    loop, so a refusal at class *k* leaves the *k−1* artifacts on disk and NAMES
    them. Batch-packing a share would reinstate exactly the all-or-nothing loss
    pgw#1183 fixed and th#1825 spent 1 h 37 m on.
-3. **A share cannot state a declaration-wide coverage label.** Each child
-   stamps ``manifest_digest`` EMPTY; the parent folds the real one across every
-   share. A share-local digest in the artifact would read like a whole one.
-4. **Two shares that emit ONE key collapse to ONE artifact.** No child can see
-   a peer's keys, so a duplicate is only detectable at the parent — and if it
-   reaches the hub it is a publish 409 discovered after both compiles are paid
-   for. The absorbed name is recorded as an alias, never silently dropped.
+3. **The recipe and refusal ledger survive the process boundary.** The child
+   wire stays weight-free, and a refusing share names every partition member
+   it completed. TCG owns graph-class metadata and package admission; the
+   parent-only key collapse is covered by ``test_tcg_mint_parent_pgw1270``.
 """
 
 from __future__ import annotations
 
-import json
 import types
 from pathlib import Path
 from typing import Any, Dict, List
@@ -38,7 +34,7 @@ torch = pytest.importorskip("torch")
 import torch.nn as nn  # noqa: E402
 
 from gen_worker import aot_compile_pool as pool  # noqa: E402
-from gen_worker import aot_mint, aot_serve, cell_key, compile_cache  # noqa: E402
+from gen_worker import aot_mint, compile_cache  # noqa: E402
 from gen_worker.api.decorators import Compile  # noqa: E402
 from gen_worker.api.export_contract import (  # noqa: E402
     Dim,
@@ -117,7 +113,7 @@ def _request(tmp_path: Path) -> Any:
 def test_mint_child_drives_the_K_WIDE_path_and_hands_over_the_recipe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RED if `_mint_aot` still calls `aot_mint.mint`.
+    """RED if `_mint_aot` stops driving the K-wide TCG compiler.
 
     The keystone's whole point is that the compile children TRACE. If the mint
     child kept calling the serial driver, every fleet mint would run K=1 while
@@ -132,6 +128,7 @@ def test_mint_child_drives_the_K_WIDE_path_and_hands_over_the_recipe(
     from gen_worker import mint_child
 
     _declare()
+    assert not hasattr(aot_mint, "mint")
     seen: Dict[str, Any] = {}
 
     def _capture(template: Any, **kw: Any) -> Any:
@@ -140,12 +137,6 @@ def test_mint_child_drives_the_K_WIDE_path_and_hands_over_the_recipe(
         return aot_mint.MintResult(entries=(), manifest="m0", timings={})
 
     monkeypatch.setattr(aot_mint, "mint_graph_classes", _capture)
-    monkeypatch.setattr(
-        aot_mint, "mint",
-        lambda *a, **k: pytest.fail(
-            "mint_child called the SERIAL driver — every fleet mint would run "
-            "K=1 while the K-wide driver sits uncalled (pgw#1215)"))
-
     request = _request(tmp_path)
     pipe = types.SimpleNamespace(unet=_TinyUNet())
     spec = aot_mint.ExportSpec(family=FAMILY, target="", shapes=((4, 4),))
@@ -154,8 +145,7 @@ def test_mint_child_drives_the_K_WIDE_path_and_hands_over_the_recipe(
 
     report = mint_child._mint_aot(
         request, pipe, request.cfg, target,
-        started=0.0, sha256_file=lambda p: "sha", spec=spec,
-        execution_lane_verdict=None, footprint={})
+        started=0.0, sha256_file=lambda p: "sha", spec=spec, footprint={})
 
     template = seen["template"]
     assert isinstance(template, pool.EntryJob)
@@ -165,7 +155,9 @@ def test_mint_child_drives_the_K_WIDE_path_and_hands_over_the_recipe(
     assert template.modules == tuple(request.modules)
     assert template.cfg == request.cfg
     assert template.slots == request.slots
+    assert template.posture == request.posture
     assert template.out_dir, "a child with no out_dir cannot pack anything"
+    assert all(parameter.device.type == "meta" for parameter in pipe.unet.parameters())
 
     kwargs = seen["kwargs"]
     # The width is DERIVED from the pod and from the enumerated class count —
@@ -261,317 +253,6 @@ def test_a_share_that_refuses_midway_keeps_the_classes_it_already_packed(
     # The measurement survives too (pgw#848: the attempt that failed is the one
     # the next attempt has to size against).
     assert set(box.class_spans) >= {row.name for row in kept}
-
-
-def test_the_child_packs_inside_its_trace_loop_not_after_it() -> None:
-    """The structural half of the row above, so the mechanism cannot drift
-    back while a fake child keeps the behavioural test green.
-
-    ``pack_graph_classes`` must be called with ONE row, from inside the loop
-    over ``trace_for_key``. A call taking an accumulated list is a batch pack
-    however the report is shaped.
-    """
-    import ast
-    import inspect
-
-    from gen_worker import aot_compile_child
-
-    tree = ast.parse(inspect.getsource(aot_compile_child.run))
-    packs = [
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "pack_graph_classes"
-    ]
-    assert len(packs) == 1, f"expected one pack call, found {len(packs)}"
-    first = packs[0].args[0]
-    assert isinstance(first, ast.List) and len(first.elts) == 1, (
-        "pack_graph_classes is being handed a LIST OF ROWS — that is a batch "
-        "pack, and a crash then costs the whole share rather than the one "
-        "class in flight")
-    # ...and the row is dropped straight after, so the child holds one
-    # compiled program at a time rather than its whole share.
-    releases = [
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "release"
-    ]
-    assert releases, (
-        "nothing calls TracedClass.release(): the child accumulates every "
-        "compiled program it has traced")
-
-
-# ---------------------------------------------------------------------------
-# 3. A share cannot state a declaration-wide coverage label
-# ---------------------------------------------------------------------------
-
-
-def _block(name: str, dim: int) -> Dict[str, Any]:
-    """The shape ``aot_mint.keying_block`` produces, minimally."""
-    return {
-        "target": "unet",
-        "fork": [],
-        "class_dims": [["B", dim]],
-        "graph_witness": f"witness-{name}",
-        "inputs": [{
-            "name": "sample", "position": 0, "dtype": "float32",
-            "shape": [dim, 4], "optional": False,
-        }],
-        "symbols": {},
-        "constants": [],
-        "graph": {
-            "v": 3,
-            "constant_fqns": ["lin.weight"],
-            "lifted_inputs": [],
-            "pytree": {
-                "user_inputs": ["sample"], "in_spec": "", "out_spec": ""},
-            "specialization": {
-                "weight_lane": "bf16", "lora_bucket": 0, "strict": True},
-        },
-    }
-
-
-def test_the_manifest_is_the_UNION_of_the_shares_never_one_shares_view() -> None:
-    """The coverage label is declaration-wide, so it must not depend on how
-    the declaration was sharded.
-
-    Folded from the class hashes, which is why ``class_manifest`` is ONE
-    function: the label a whole-declaration mint stamps and the label the
-    parent assembles from K shares are the same computation over the same
-    stamped values, and a K=2 mint and a K=3 mint of the same declaration
-    therefore carry the same label.
-    """
-    spec = aot_mint.ExportSpec(family=FAMILY, target="unet")
-    blocks = {f"cls/dim={i}": _block(f"cls/dim={i}", i) for i in range(6)}
-
-    whole = aot_mint.class_manifest(blocks, spec)
-    assert whole
-
-    for k in (2, 3):
-        shares = [
-            {n: b for j, (n, b) in enumerate(sorted(blocks.items()))
-             if j % k == i}
-            for i in range(k)
-        ]
-        assert sum(len(s) for s in shares) == len(blocks)
-        union: Dict[str, Any] = {}
-        for share in shares:
-            union.update(share)
-        assert aot_mint.class_manifest(union, spec) == whole, (
-            f"K={k}: the folded label moved with the sharding — a coverage "
-            f"label that depends on how many children ran describes the pool, "
-            f"not the declaration")
-
-
-def test_a_share_stamps_NO_manifest_rather_than_a_share_local_one() -> None:
-    """``pack_graph_classes(manifest="")`` is the compile child's contract.
-
-    A share-local digest would read exactly like a whole-declaration one to
-    every consumer, and the hub folds compile-health rows under
-    ``(manifest, sm, toolchain)``. Empty is the honest answer and the publish
-    path already says so in as many words — ``fleet_cells._identity_axes``:
-    *"Empty is HONEST for an entry minted by a pod that has not folded its
-    whole declaration, so it is not a publish refusal."*
-    """
-    import inspect
-
-    from gen_worker import aot_compile_child, fleet_cells
-
-    assert 'manifest=""' in inspect.getsource(aot_compile_child.run), (
-        "the compile child is stamping a coverage label over its own share")
-    # The claim about the publish path, asserted rather than quoted: an entry
-    # whose manifest is empty must still publish.
-    assert "manifest_digest" in inspect.getsource(fleet_cells._identity_axes)
-
-    # And the default is unchanged for a whole-declaration caller.
-    params = inspect.signature(aot_mint.pack_graph_classes).parameters
-    assert params["manifest"].default is None
-
-
-def test_the_parent_stamps_the_folded_label_on_what_it_returns(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The parent is the only process that sees every share, so it is the only
-    one that can state coverage — and it must actually do it, or every mint
-    reports an empty label."""
-    _declare()
-    spec = aot_mint.ExportSpec(family=FAMILY, target="unet")
-    blocks = {f"cls/dim={i}": _block(f"cls/dim={i}", i) for i in range(2)}
-    want = aot_mint.class_manifest(blocks, spec)
-
-    packed = {}
-    for name, block in blocks.items():
-        meta = {
-            "family": FAMILY,
-            cell_key.ENTRY_BLOCK_KEY: aot_serve.stamp_entry(
-                name, block, strict=True, lora_bucket=0),
-            "manifest_digest": "",
-        }
-        packed[name] = pool.PackedGraphClass(
-            name=name, key=f"ek1-{name}", artifact=f"/tmp/{name}",
-            metadata=json.dumps(meta))
-
-    class _Pool:
-        entry_seconds: Dict[str, float] = {}
-        peak_rss_bytes = 0
-
-        def __init__(self, *a: Any, **k: Any) -> None:
-            pass
-
-        def compile(self, template: Any, **kw: Any) -> Any:
-            return packed
-
-    monkeypatch.setattr(pool, "EntryCompilePool", _Pool)
-    monkeypatch.setattr(aot_mint, "_pool_facts", lambda p: {})
-    width = pool.entry_workers(
-        2, limit=2, vcpus=16, available_bytes=64 * 1024**3, device_lock=True)
-
-    result = aot_mint.mint_graph_classes(
-        pool.EntryJob(function="generate", modules=("m",), out_dir="/tmp"),
-        workdir=Path("/tmp/pgw1215-nowhere"), width=width, spec=spec)
-
-    assert result.manifest == want, (
-        "the parent did not fold the declaration-wide label across the shares")
-    for row in result.entries:
-        assert row.metadata["manifest_digest"] == want
-        assert row.metadata["mint_phases"], (
-            "the whole-mint phase table must replace each share's own")
-
-
-# ---------------------------------------------------------------------------
-# 4. Two shares that emit ONE key collapse to one artifact
-# ---------------------------------------------------------------------------
-
-
-def _packed_with_keys(keys: Dict[str, str]) -> Dict[str, Any]:
-    """``{class name: PackedGraphClass}`` as the pool hands it back, with the
-    key each child stamped stated by the caller."""
-    rows: Dict[str, Any] = {}
-    for i, (name, key) in enumerate(sorted(keys.items())):
-        meta = {
-            "family": FAMILY,
-            cell_key.ENTRY_BLOCK_KEY: aot_serve.stamp_entry(
-                name, _block(name, i), strict=True, lora_bucket=0),
-            "manifest_digest": "",
-        }
-        rows[name] = pool.PackedGraphClass(
-            name=name, key=key, artifact=f"/tmp/{i}.tar.gz",
-            metadata=json.dumps(meta))
-    return rows
-
-
-def _drive(packed_rows: Dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> Any:
-    class _Pool:
-        entry_seconds: Dict[str, float] = {}
-        peak_rss_bytes = 0
-
-        def __init__(self, *a: Any, **k: Any) -> None:
-            pass
-
-        def compile(self, template: Any, **kw: Any) -> Any:
-            return packed_rows
-
-    monkeypatch.setattr(pool, "EntryCompilePool", _Pool)
-    monkeypatch.setattr(aot_mint, "_pool_facts", lambda p: {})
-    width = pool.entry_workers(
-        len(packed_rows) or 1, limit=2, vcpus=16,
-        available_bytes=64 * 1024**3, device_lock=True)
-    return aot_mint.mint_graph_classes(
-        pool.EntryJob(function="generate", modules=("m",), out_dir="/tmp"),
-        workdir=Path("/tmp/pgw1215-nowhere"), width=width,
-        spec=aot_mint.ExportSpec(family=FAMILY, target="unet"))
-
-
-def test_two_shares_that_emit_ONE_key_collapse_to_ONE_artifact(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """RED if the parent returns both — the second publish is a 409.
-
-    Each compile child holds ONE SHARE and stamps its own keys, so two classes
-    that key identically can land in different children and neither can see
-    the other. Nothing below the parent can catch it: the pool returns a dict
-    keyed by class NAME, so two names carrying one key survive the collection
-    intact and the collision is only discovered by the hub, on the pod, after
-    both compiles are paid for. The parent is the only process that sees every
-    share, so the collapse belongs here.
-    """
-    _declare()
-    shared = "ek1-" + "a" * 56
-    result = _drive(_packed_with_keys({
-        "cls/dim=0": shared,
-        "cls/dim=1": shared,
-        "cls/dim=2": "ek1-" + "b" * 56,
-    }), monkeypatch)
-
-    keys = [row.key for row in result.entries]
-    assert len(keys) == len(set(keys)), (
-        f"the parent returned two artifacts under one key {keys!r} — the "
-        f"second publish of that key is a 409")
-    assert sorted(keys) == sorted({shared, "ek1-" + "b" * 56})
-    names = {row.entry for row in result.entries}
-    assert names == {"cls/dim=0", "cls/dim=2"}, (
-        "the survivor must be deterministic (first by name), or two mints of "
-        "the same declaration publish different class names")
-
-    # The absorbed name is RECORDED, not merely dropped: a reader asking
-    # "where did cls/dim=1 go" gets an answer instead of an absence.
-    survivor = next(r for r in result.entries if r.key == shared)
-    aliases = survivor.metadata[cell_key.ENTRY_BLOCK_KEY].get("aliases") or []
-    assert [a["name"] for a in aliases] == ["cls/dim=1"], (
-        f"the absorbed class left no alias: {aliases!r}")
-    assert aliases[0]["class_dims"] == [["B", 1]], (
-        "the alias must carry the absorbed class's own coordinate")
-
-    # And the alias must not re-key the survivor: it is not a `class_hash`
-    # fact, so the key the child stamped is the key the parent returns.
-    assert survivor.key == shared
-
-
-def test_a_declaration_with_no_key_collision_is_untouched(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The dedupe is a collapse, never a filter — distinct keys all survive,
-    nothing is aliased, and the coverage label covers all of them."""
-    _declare()
-    rows = _packed_with_keys({
-        f"cls/dim={i}": f"ek1-{i:056d}" for i in range(3)})
-    result = _drive(rows, monkeypatch)
-
-    assert len(result.entries) == 3
-    for row in result.entries:
-        assert "aliases" not in row.metadata[cell_key.ENTRY_BLOCK_KEY]
-    spec = aot_mint.ExportSpec(family=FAMILY, target="unet")
-    blocks = {
-        row.entry: row.metadata[cell_key.ENTRY_BLOCK_KEY]
-        for row in result.entries}
-    assert result.manifest == aot_mint.class_manifest(blocks, spec)
-
-
-def test_the_coverage_label_does_not_count_an_absorbed_class_twice(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An absorbed class contributes the same ``class_hash`` its survivor
-    already contributes, so folding it as well would make the declaration-wide
-    label depend on how the declaration happened to be sharded."""
-    _declare()
-    shared = "ek1-" + "c" * 56
-    result = _drive(_packed_with_keys({
-        "cls/dim=0": shared, "cls/dim=1": shared}), monkeypatch)
-
-    spec = aot_mint.ExportSpec(family=FAMILY, target="unet")
-    both = {name: _block(name, i)
-            for i, name in enumerate(("cls/dim=0", "cls/dim=1"))}
-    one = {"cls/dim=0": both["cls/dim=0"]}
-    # Stated as two independent folds so the assertion cannot pass by reading
-    # the same set back out of the result it is checking.
-    assert aot_mint.class_manifest(one, spec) \
-        != aot_mint.class_manifest(both, spec)
-    assert result.manifest == aot_mint.class_manifest(one, spec), (
-        "the absorbed class was folded into the coverage label as well, so "
-        "the label now depends on how the declaration was sharded")
-    for row in result.entries:
-        assert row.metadata["manifest_digest"] == result.manifest
 
 
 def test_a_child_envelope_that_cannot_be_parsed_refuses(

@@ -175,7 +175,12 @@ def test_an_entry_childs_reported_peak_includes_the_compiler_it_ran(
         [sys.executable, str(probe), str(alloc_py), str(alloc),
          str(tmp_path / "up2")],
         check=True, capture_output=True, text=True,
-        env={**os.environ, "PYTHONPATH": str(Path(pool.PACKAGE_ROOT))})
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(filter(None, (
+                str(Path(pool.PACKAGE_ROOT)), os.environ.get("PYTHONPATH", ""),
+            ))),
+        })
     got = __import__("json").loads(out.stdout.strip().splitlines()[-1])
 
     assert got["after"] - got["before"] > alloc * 0.8, (
@@ -247,8 +252,9 @@ def test_the_pools_own_measurement_reaches_the_bank_over_the_real_relay(
     width = pool.entry_workers(
         2, vcpus=16, available_bytes=64 * _GIB, device_lock=True, limit=2)
     table = aot_mint._mint_phase_table(
-        [], {"total_s": 1.0}, None, width,
-        {"peak_child_rss_bytes": 6 * _GIB, "pool_workers": 2})
+        [], {"total_s": 1.0}, width,
+        {"peak_child_rss_bytes": 6 * _GIB, "pool_workers": 2},
+    )
     assert table["pool"]["peak_child_rss_bytes"] == 6 * _GIB, (
         "the pool's measurement must be IN the table the parent relays")
 

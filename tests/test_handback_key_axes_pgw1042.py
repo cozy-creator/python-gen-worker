@@ -25,11 +25,21 @@ A full 36/36 sdxl mint publishing nothing, behind two defects this file pins:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict
+from types import SimpleNamespace
+from typing import Any, Dict, cast
 
 import pytest
 
 from gen_worker import aot_serve, cell_key, env_seal, fleet_cells
+from gen_worker.compile_cache import AdoptError
+from torch_compiled_graphs import (
+    CallIngress,
+    CallInput,
+    CompiledGraphRunner,
+    ConstantBindingError,
+)
+from torch_compiled_graphs import runner as tcg_runner_mod
+from torch_compiled_graphs.storage import StoredCompiledGraph
 
 
 def _seal_dict() -> Dict[str, Any]:
@@ -212,7 +222,7 @@ class _FakeTensor:
 class _RefusingPackage:
     """A package whose C++ update fails the way the pod's did."""
 
-    def get_constant_fqns(self) -> list:
+    def get_constant_fqns(self) -> list[str]:
         return ["lin.weight"]
 
     def load_constants(self, *_a: Any, **_k: Any) -> None:
@@ -223,24 +233,122 @@ class _RefusingPackage:
             "model_container_runner.cpp, line 289")
 
 
-def test_cpp_bind_failure_is_typed_injection_failed() -> None:
+class _RecordingPackage:
+    def __init__(self, fqns: tuple[str, ...]) -> None:
+        self.fqns = fqns
+        self.loaded: Dict[str, Any] = {}
+
+    def get_constant_fqns(self) -> list[str]:
+        return list(self.fqns)
+
+    def load_constants(
+        self, values: Dict[str, Any], **_kwargs: Any,
+    ) -> None:
+        self.loaded = dict(values)
+
+
+def _tcg_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    package: Any,
+    constants: list[Dict[str, Any]],
+    *,
+    literals: Dict[str, Any] | None = None,
+) -> CompiledGraphRunner:
+    """Create TCG's real bind authority over one admitted metadata block."""
+    monkeypatch.setattr(tcg_runner_mod, "_load_package", lambda *_a: package)
+    if literals is not None:
+        monkeypatch.setattr(
+            tcg_runner_mod, "_load_literals", lambda *_a: dict(literals))
+    graph = cast(StoredCompiledGraph, SimpleNamespace(
+        key="cg-key-v1-" + "9" * 56,
+        metadata={
+            "graph_class": {
+                "name": "transformer/cfg=true",
+                "constants": constants,
+            },
+        },
+        package=tmp_path / "model.pt2",
+        literals=(
+            tmp_path / "constants.safetensors"
+            if literals is not None else None
+        ),
+    ))
+    return CompiledGraphRunner._from_verified_graph(graph)
+
+
+def _constant(fqn: str, source: str = "state_dict") -> Dict[str, Any]:
+    return {"fqn": fqn, "source": source, "dtype": "float32", "shape": [4]}
+
+
+def test_cpp_bind_failure_is_typed_injection_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The pod's anonymous `API call failed` becomes a NAMED refusal with the
     entry and live device-memory context — pgw#999's rule, one frame deeper."""
-    spec = aot_serve.ConstantSpec(
-        fqn="lin.weight", source=aot_serve.SOURCE_STATE_DICT,
-        dtype="torch.bfloat16", shape=(2, 2))
-    runner = aot_serve.ArtifactRunner(
-        package=_RefusingPackage(),
-        contract=None,  # bind never reads it
-        constants=(spec,), entry="transformer/cfg=true")
-    with pytest.raises(aot_serve.ConstantsUnboundError) as exc:
-        runner.bind({"lin.weight": _FakeTensor()}, {})
+    runner = _tcg_runner(
+        tmp_path,
+        monkeypatch,
+        _RefusingPackage(),
+        [_constant("lin.weight")],
+    )
+    # TCG refuses an empty parameter tuple; the arm under test never reaches a
+    # forward, so one declared input is all this metadata needs to be valid.
+    ingress = CallIngress(
+        parameters=("x",), flat_arity=1,
+        inputs=(CallInput("x", 0, "x", 0, (), "x", "float32", (4,)),),
+    )
+    metadata = {
+        "graph_class": {
+            "name": "transformer/cfg=true",
+            "target": "transformer",
+            "class_hash": "a" * 16,
+            "constants": [_constant("lin.weight")],
+            "graph": {
+                "pytree": {"ingress": ingress.as_dict()},
+                "constant_fqns": ["lin.weight"],
+            },
+        },
+    }
+
+    class _Target:
+        device = "cpu"
+
+        def forward(self) -> None:
+            return None
+
+        def state_dict(self) -> Dict[str, Any]:
+            return {"lin.weight": _FakeTensor()}
+
+        def named_buffers(self) -> tuple[()]:
+            return ()
+
+    class _Pipeline:
+        transformer = _Target()
+
+    class _Cfg:
+        family = "micro-diffusion"
+
+    class _Engine:
+        def resolve(self, _key: str, _destination: Path) -> Any:
+            return SimpleNamespace(metadata=metadata)
+
+        def runner(self, _key: str, _destination: Path) -> CompiledGraphRunner:
+            return runner
+
+    monkeypatch.setattr(aot_serve, "open_worker_engine", lambda _root=None: _Engine())
+    with pytest.raises(AdoptError) as exc:
+        aot_serve.arm_compiled_graph(
+            _Pipeline(), _Cfg(), "cg-key-v1-" + "9" * 56, tmp_path,
+        )
     assert exc.value.reason == "injection_failed"
     assert "transformer/cfg=true" in str(exc.value)
     assert not runner.bound
 
 
-def test_target_constant_pool_is_one_REFERENCE_per_fqn() -> None:
+def test_tcg_entries_share_one_resident_REFERENCE_per_fqn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """N entries share ONE pool slot per FQN — the N x constants VRAM demand
     that OOM'd the 36-entry sdxl arm must not be reconstructible.
 
@@ -254,20 +362,26 @@ def test_target_constant_pool_is_one_REFERENCE_per_fqn() -> None:
     inverted.
     """
     torch = pytest.importorskip("torch")
-    spec = aot_serve.ConstantSpec(
-        fqn="w", source=aot_serve.SOURCE_STATE_DICT,
-        dtype="torch.float32", shape=(4,))
-    lit = aot_serve.ConstantSpec(
-        fqn="tbl", source=aot_serve.SOURCE_LITERAL,
-        dtype="torch.float32", shape=(4,))
     resident = torch.arange(4, dtype=torch.float32)
-    pool = aot_serve.target_constant_pool(
-        [(spec, lit), (spec,), (spec,)], {"w": resident})
-    assert set(pool) == {"w"}  # literals ride their own payload
-    assert pool["w"] is resident  # BY REFERENCE — no second copy (§4.33 §4)
+    literal = torch.arange(4, dtype=torch.float32) + 10
+    packages = [_RecordingPackage(("w", "tbl")) for _ in range(3)]
+    for package in packages:
+        runner = _tcg_runner(
+            tmp_path,
+            monkeypatch,
+            package,
+            [_constant("w"), _constant("tbl", "literal")],
+            literals={"tbl": literal},
+        )
+        runner.bind({"w": resident}, device="cpu")
+
+    assert all(package.loaded["w"] is resident for package in packages)
+    assert all(package.loaded["tbl"] is literal for package in packages)
 
 
-def test_a_NON_contiguous_resident_is_the_one_thing_still_copied() -> None:
+def test_a_NON_contiguous_resident_is_the_one_thing_still_copied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The surviving guard from the inversion above. Dropping the blanket
     clone kept exactly one thing it also did: an AOTI container binds a RAW
     POINTER, so a non-contiguous resident cannot be bound by reference and is
@@ -275,13 +389,15 @@ def test_a_NON_contiguous_resident_is_the_one_thing_still_copied() -> None:
     pool for its sake. Without this row the inversion would read as "nothing
     is ever copied", which would be a segfault precondition."""
     torch = pytest.importorskip("torch")
-    spec = aot_serve.ConstantSpec(
-        fqn="w", source=aot_serve.SOURCE_STATE_DICT,
-        dtype="torch.float32", shape=(4,))
     resident = torch.arange(8, dtype=torch.float32)[::2]
     assert not resident.is_contiguous()
 
-    pool = aot_serve.target_constant_pool([(spec,)], {"w": resident})
-    assert pool["w"] is not resident
-    assert pool["w"].is_contiguous()
-    assert torch.equal(pool["w"], resident)
+    package = _RecordingPackage(("w",))
+    runner = _tcg_runner(
+        tmp_path, monkeypatch, package, [_constant("w")],
+    )
+    runner.bind({"w": resident}, device="cpu")
+    bound = package.loaded["w"]
+    assert bound is not resident
+    assert bound.is_contiguous()
+    assert torch.equal(bound, resident)

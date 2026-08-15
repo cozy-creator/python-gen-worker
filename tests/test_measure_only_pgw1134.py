@@ -25,12 +25,12 @@ The properties, one section each:
    its report type carries no artifact identity; its source calls no publish
    symbol; and an end-to-end run with every publish seam wired to raise
    completes without touching one.
-3. **The compile half is real work with no residue** — the inductor output is
-   counted and DELETED, so the one thing a measure run could have left behind
-   is gone before the report is written.
+3. **The compile half is real work with no residue** — the TCG artifact is
+   counted and its temporary runtime is DELETED, so the one thing a measure
+   run could have left behind is gone before the report is written.
 4. **Every refusal names itself** in an enumerable vocabulary.
 
-Cardless: CPU fixtures throughout, and the inductor compile is FAKED wherever
+Cardless: CPU fixtures throughout, and the TCG compile is FAKED wherever
 it is exercised — this file mints nothing, compiles nothing and touches no GPU.
 """
 
@@ -40,13 +40,14 @@ import ast
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Tuple
 
 import msgspec
 import pytest
 
 from gen_worker import child_preflight
-from gen_worker import activity, aot_mint, boot_trace_child, boot_key
+from gen_worker import activity, aot_compile_child, boot_trace_child, boot_key
 from gen_worker import measure_child, mint_child
 from gen_worker.child_contract import CompileSpec, MintSlot
 from gen_worker.mint_process import MintRequest
@@ -324,7 +325,7 @@ def test_a_full_mint_request_decodes_with_its_destinations_dropped(
         function="generate-w8a8", modules=("micro_diffusion.main_w8a8",), family=FAMILY,
         arm_token="arm1-deadbeef", target=str(tmp_path / "cell.tar.gz"),
         work_root=str(tmp_path / "work"), report=str(tmp_path / "mint.json"),
-        resume=str(tmp_path / "bank"), cfg=cfg)
+        cfg=cfg)
     raw = msgspec.json.encode(request)
     assert b"cell.tar.gz" in raw
 
@@ -356,7 +357,6 @@ PUBLISH_SURFACE = (
     ("local_cell_store", "store"),
     ("aot_serve", "artifact_metadata"),
     ("aot_mint", "mint_targets"),
-    ("aot_package", "pack"),
     ("mint_child", "mint"),
     ("mint_process", "run_mint"),
     ("aot_delivery", "materialize_named_artifact"),
@@ -425,15 +425,28 @@ def test_an_end_to_end_run_never_touches_a_publish_seam(
 
 
 # ---------------------------------------------------------------------------
-# 3. The inductor half: real work, no residue
+# 3. The TCG compile half: real work, no residue
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
-def fake_compiler(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> List[Tuple[str, Path]]:
-    """AOTInductor, faked at the ONE seam ``_export_entry`` compiles through.
+def fake_tcg_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> List[Path]:
+    """TCG runtime creation, faked at the measure child's central seam."""
+    roots: List[Path] = []
+
+    def _runtime(cache_root: Path) -> Tuple[Any, Any]:
+        roots.append(cache_root)
+        return object(), object()
+
+    monkeypatch.setattr(aot_compile_child, "_tcg_runtime", _runtime)
+    return roots
+
+
+@pytest.fixture
+def fake_compiler(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, Path]]:
+    """TCG compilation, faked at ``compile_traced_class``.
 
     Everything before it is real — the export, the gates, the branch-arm
     ordering. This box does not compile (mints and compiles run on remote
@@ -443,26 +456,33 @@ def fake_compiler(
     """
     made: List[Tuple[str, Path]] = []
 
-    def _compile(program: Any, entry: str, **_kw: Any) -> List[str]:
-        out = tmp_path / "inductor" / entry.replace("/", "_")
-        out.mkdir(parents=True, exist_ok=True)
-        files = []
-        for suffix in (".so", ".cpp"):
-            path = out / f"model{suffix}"
-            path.write_bytes(b"\x00" * 16)
-            files.append(str(path))
-            made.append((entry, path))
-        return files
+    def _compile(
+        traced: Any,
+        _export_spec: Any,
+        _engine: Any,
+        _runtime: Any,
+        *,
+        work: Path,
+        out_dir: Path,
+    ) -> Any:
+        assert out_dir.parent == work
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"{str(traced.name).replace('/', '_')}.tar.gz"
+        path.write_bytes(b"tcg-artifact")
+        made.append((str(traced.name), path))
+        traced.release()
+        return SimpleNamespace(compile_s=0.001, reuse_s=0.0)
 
-    monkeypatch.setattr(aot_mint, "compile_entry_files", _compile)
+    monkeypatch.setattr(aot_compile_child, "compile_traced_class", _compile)
     return made
 
 
 def test_the_compile_half_runs_and_leaves_nothing_behind(
     tmp_path: Path, w8a8_tree: Path, blocked_declaration: None, on_path: None,
-    fake_compiler: List[Tuple[str, Path]], events: List[Any],
+    fake_tcg_runtime: List[Path], fake_compiler: List[Tuple[str, Path]],
+    events: List[Any],
 ) -> None:
-    """OQ-3's own words: *"the INDUCTOR half is the half that matters — an
+    """OQ-3's own words: *"the compile half is the half that matters — an
     export-only trace never exercises the whole-graph planner this blocker
     names"*. So the compile runs by default, is measured per entry, and its
     output is counted and deleted before the report is written."""
@@ -473,18 +493,23 @@ def test_the_compile_half_runs_and_leaves_nothing_behind(
 
     assert rc == measure_child.EXIT_OK and report.ok, report.detail[:600]
     assert report.compiled is True
-    assert len(fake_compiler) == 6, (
+    assert [entry for entry, _path in fake_compiler] == [
+        "decoder", "transformer/cfg=false", "transformer/cfg=true",
+    ], (
         f"every declared class must reach the compiler: {fake_compiler}")
-    assert [e.compiled_files for e in report.entries] == [2, 2, 2]
+    assert [e.compiled_files for e in report.entries] == [1, 1, 1]
     assert [str(p) for _e, p in fake_compiler if p.exists()] == [], (
-        "a measure run that leaves loose .so files behind is one packaging "
-        "step away from the artifact it may not produce")
+        "a measure run must delete every temporary TCG artifact")
+    assert len(fake_tcg_runtime) == 1
+    assert not fake_tcg_runtime[0].exists(), (
+        "the diagnostic TCG runtime must disappear with its temporary CAS")
     assert _measure_events(events)[-1].phase == "measured"
 
 
 def test_an_entry_that_runs_out_of_memory_IS_the_measurement(
     tmp_path: Path, w8a8_tree: Path, blocked_declaration: None, on_path: None,
-    monkeypatch: pytest.MonkeyPatch, events: List[Any],
+    monkeypatch: pytest.MonkeyPatch, fake_tcg_runtime: List[Path],
+    events: List[Any],
 ) -> None:
     """The FAIL verdict OQ-3 names (*"MintResourceExhausted ... OUT OF DEVICE
     MEMORY, phase=trace_graph"*) is an ANSWER, not an error: the run reports
@@ -493,10 +518,14 @@ def test_an_entry_that_runs_out_of_memory_IS_the_measurement(
     The compiler is faked into raising — a real OOM is a pod fact, and this is
     the classification path, which is cardless.
     """
-    def _oom(_program: Any, entry: str, **_kw: Any) -> List[str]:
-        raise MemoryError(f"entry {entry!r}: OUT OF DEVICE MEMORY")
+    attempted: List[str] = []
 
-    monkeypatch.setattr(aot_mint, "compile_entry_files", _oom)
+    def _oom(traced: Any, *_args: Any, **_kwargs: Any) -> Any:
+        attempted.append(str(traced.name))
+        traced.release()
+        raise MemoryError(f"entry {traced.name!r}: OUT OF DEVICE MEMORY")
+
+    monkeypatch.setattr(aot_compile_child, "compile_traced_class", _oom)
 
     report_path = tmp_path / "measure.json"
     rc = measure_child.run(_measure_job(w8a8_tree), report_path)
@@ -506,10 +535,12 @@ def test_an_entry_that_runs_out_of_memory_IS_the_measurement(
     assert rc == measure_child.EXIT_REFUSED and not report.ok
     assert report.reason == "export_refused"
     assert "OUT OF DEVICE MEMORY" in report.detail
+    assert attempted == ["decoder"]
     assert len(report.entries) == 1 and not report.entries[0].ok
     assert report.entries[0].entry == "decoder", (
         "an exception escaping a generator carries no row identity, and "
         "'something ran out of memory' is not evidence anybody can act on")
+    assert len(fake_tcg_runtime) == 1 and not fake_tcg_runtime[0].exists()
     assert _measure_events(events)[-1].phase == "export_refused"
 
 

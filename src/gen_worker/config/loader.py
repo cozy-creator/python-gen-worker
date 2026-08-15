@@ -143,6 +143,9 @@ _OWNED_NON_SETTINGS: frozenset[str] = frozenset(REFUSED_KEY_MATERIAL) | frozense
     "GEN_WORKER_LOG_LEVEL",
     "GEN_WORKER_LOCAL_CELLS_DIR",
     "GEN_WORKER_LOCAL_OUTPUT_DIR",
+    # pgw#1270 deleted these four read sites with the modules TCG replaced.
+    # The NAMES stay accepted until a fresh fleet census measures zero
+    # declarations: dropping one makes a pod that declares it fail config load.
     "GEN_WORKER_MINT_RESUME_DIR",
     "GEN_WORKER_MINT_RESUME_MAX_BYTES",
     "GEN_WORKER_AOT_HOST_COMPILE_JOBS",

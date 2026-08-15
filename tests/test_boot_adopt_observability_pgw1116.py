@@ -44,6 +44,7 @@ import pytest
 
 from gen_worker import activity, boot_adopt, boot_key, cell_resolve
 from gen_worker import executor as executor_mod
+from gen_worker.api import export_contract as export_contract_mod
 
 
 def _raise(exc: BaseException) -> Any:
@@ -228,7 +229,7 @@ def _executor(tmp_path: Path) -> Any:
         (
             "no_export_declaration",
             lambda mp: mp.setattr(
-                executor_mod.aot_mint, "export_declaration", lambda f: None),
+                export_contract_mod, "export_declaration", lambda f: None),
             "no registered export declaration",
         ),
         # pgw#1107: there is no `declaration_refused` row any more. The gate
@@ -251,7 +252,7 @@ def test_each_pre_attempt_gate_names_itself_on_the_wire(
     gate: str, wire: Any, expect: str,
 ) -> None:
     monkeypatch.setattr(
-        executor_mod.aot_mint, "export_declaration", lambda f: object())
+        export_contract_mod, "export_declaration", lambda f: object())
     monkeypatch.setattr(
         executor_mod.aot_declaration, "cell_plans", lambda d: [object()])
     monkeypatch.setattr(
@@ -281,7 +282,7 @@ def test_no_cell_source_names_which_half_of_the_readiness_was_missing(
     from gen_worker.procsplit import broker
 
     monkeypatch.setattr(
-        executor_mod.aot_mint, "export_declaration", lambda f: object())
+        export_contract_mod, "export_declaration", lambda f: object())
     monkeypatch.setattr(
         executor_mod.aot_declaration, "cell_plans", lambda d: [object()])
     monkeypatch.setattr(broker, "_broker", None, raising=False)
@@ -315,10 +316,10 @@ def test_the_gates_are_pairwise_distinguishable(
 
     ex = _executor(tmp_path)
     monkeypatch.setattr(
-        executor_mod.aot_mint, "export_declaration", lambda f: None)
+        export_contract_mod, "export_declaration", lambda f: None)
     ex._boot_adopt(_Spec(), {})
     monkeypatch.setattr(
-        executor_mod.aot_mint, "export_declaration", lambda f: object())
+        export_contract_mod, "export_declaration", lambda f: object())
     monkeypatch.setattr(
         executor_mod.aot_declaration, "cell_plans", _raise(ValueError("nope")))
     ex._boot_adopt(_Spec(), {})
@@ -345,8 +346,6 @@ def _derived(wall_ms: int = 1234) -> Any:
         entry_keys={"a": ck.from_axes({
             "graph": "c0ffee0000000000",
             "sm": "sm_89", "toolchain": "t" * 16}).digest},
-        class_hashes={"a": "c0ffee0000000000"},
-        manifest=ck.manifest_digest(["c0ffee0000000000"]),
         workers=2, width_reason="test", traced=1, memo="miss",
         wall_ms=wall_ms)
 
@@ -381,7 +380,6 @@ def _attempt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **wires: Any) -> A
     return boot_adopt.attempt(
         function="generate", modules=("micro_diffusion.main",), cfg=_Cfg(),
         slots={}, declared_hint=3,
-        envelope={"shapes": [[64, 64]], "text_lens": [8], "guidance": []},
         work_root=tmp_path)[0]
 
 
@@ -470,7 +468,7 @@ def test_a_pod_that_derived_and_missed_is_not_a_pod_that_never_derived(
     events.clear()
 
     monkeypatch.setattr(
-        executor_mod.aot_mint, "export_declaration", lambda f: None)
+        export_contract_mod, "export_declaration", lambda f: None)
     _executor(tmp_path)._boot_adopt(_Spec(), {})
     never = _one(events)
 
@@ -574,7 +572,7 @@ def sm_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     combined into a key is faked."""
     import torch
 
-    from gen_worker import aot_serve, compile_cache
+    from gen_worker import compile_cache
 
     full = {
         "sku": "l4", "sm": "sm_89", "torch": str(torch.__version__),
@@ -582,8 +580,6 @@ def sm_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
         "image_digest": "sha256:" + "ab" * 32,
     }
     monkeypatch.setattr(compile_cache, "runtime_key", lambda: dict(full))
-    monkeypatch.setattr(aot_serve, "runtime_key", lambda: {
-        k: full[k] for k in ("sku", "sm", "torch", "cuda")})
 
 
 def test_a_cold_boot_with_a_reachable_hub_actually_issues_the_resolve(

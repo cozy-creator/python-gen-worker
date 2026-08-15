@@ -22,31 +22,29 @@ from __future__ import annotations
 
 import dataclasses
 import types
-from typing import Any, Dict
+from typing import Any
 
 import pytest
 
 torch = pytest.importorskip("torch")
 
-import torch.nn as nn  # noqa: E402
+from torch import nn
+from torch_compiled_graphs import CallIngress
 
-from gen_worker import (  # noqa: E402
+from gen_worker import (
     aot_declaration,
     aot_mint,
-    aot_serve,
-    cell_key,
-    compile_cache,
     fleet_cells,
 )
-from gen_worker.api.decorators import Compile  # noqa: E402
-from gen_worker.api.export_contract import (  # noqa: E402
+from gen_worker.api.decorators import Compile
+from gen_worker.api.export_contract import (
     Dim,
     GraphClass,
     Input,
     register_export_declaration,
     reset_export_declarations,
 )
-from gen_worker.models import lora_lifted, w8a8_lora  # noqa: E402
+from gen_worker.models import lora_lifted, w8a8_lora
 
 FAMILY = "tiny822"
 BUCKET = 16      # RANK_BUCKETS' floor — the cheapest real branch there is
@@ -70,22 +68,22 @@ class NoBranchVAE(nn.Module):
 
 def _declare(**changes: Any) -> Any:
     reset_export_declarations()
-    fields: Dict[str, Any] = dict(
-        family=FAMILY,
-        targets=("unet",),
-        dims=(Dim("B", carried_by=(("sample", 0),)),),
-        classes=(GraphClass(dims={"B": 2}),),
-        inputs=(Input("sample", shape=("B", BUCKET), dtype="model"),),
-        shape_strategy="static-rows",
-        warm_changes_key=False,
-    )
+    fields: dict[str, Any] = {
+        "family": FAMILY,
+        "targets": ("unet",),
+        "dims": (Dim("B", carried_by=(("sample", 0),)),),
+        "classes": (GraphClass(dims={"B": 2}),),
+        "inputs": (Input("sample", shape=("B", BUCKET), dtype="model"),),
+        "shape_strategy": "static-rows",
+        "warm_changes_key": False,
+    }
     fields.update(changes)
     return register_export_declaration(Compile(**fields))
 
 
 def _container_only_pipe() -> Any:
     """Exactly what ``compile_cache.apply_lora_lane`` leaves behind — the
-    state the mint child handed to ``aot_mint.mint`` in the measured run.
+    state the compile child hands to ``trace_for_key``.
     Branch containers allocated, denoiser forward untouched."""
     pipe = types.SimpleNamespace(unet=TinyUNet().eval())
     w8a8_lora.enable_branch_execution_lanes(pipe, BUCKET)
@@ -97,12 +95,6 @@ def _spec() -> aot_mint.ExportSpec:
     return aot_mint.ExportSpec(
         family=FAMILY, target="", lora_bucket=BUCKET,
         lifted_inputs=lora_lifted.LIFTED_INPUT_NAMES)
-
-
-def _fake_sm(mp) -> None:
-    full = {"sku": "", "sm": "sm_89", "torch": str(torch.__version__), "cuda": ""}
-    mp.setattr(compile_cache, "runtime_key", lambda: dict(full))
-    mp.setattr(aot_serve, "runtime_key", lambda: dict(full))
 
 
 @pytest.fixture(autouse=True)
@@ -156,33 +148,30 @@ def test_the_declared_feed_binds_once_the_execution_lane_is_armed() -> None:
 
 
 # ---------------------------------------------------------------------------
-# The mint, end to end: RED here at base, both classes here after the fix
+# The trace into TCG declarations: both classes, no AOTI compile
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
-def cell(tmp_path_factory, request) -> Dict[str, Any]:
-    """ONE real two-arm mint (torch.export + AOTI) from a CONTAINER-ONLY
-    pipeline — the state the child actually produced. At base this raises
+def traced_classes() -> dict[str, Any]:
+    """One two-arm export from a CONTAINER-ONLY pipeline, stopped at TCG's
+    public declaration boundary. At base this raises
     ``MintRefused: ... ['lora_a', 'lora_b'] are not parameters of 'forward'``
-    and every assertion below is unreachable."""
-    from _pytest.monkeypatch import MonkeyPatch
-
-    mp = MonkeyPatch()
-    request.addfinalizer(mp.undo)
-    _fake_sm(mp)
-    _declare()
-    tmp = tmp_path_factory.mktemp("cell822")
+    and every assertion below is unreachable. ``Engine.compile`` is never
+    constructed or called."""
+    decl = _declare()
     pipe = _container_only_pipe()
-    result = aot_mint.mint(
-        pipe, _spec(), tmp / "out")
+    rows = list(aot_mint.trace_for_key(pipe, _spec(), decl))
+    declarations = {
+        row.name: aot_mint.tcg_graph_class_spec(row, _spec()).declare()
+        for row in rows
+    }
+    for row in rows:
+        row.release()
     reset_export_declarations()
-    # The mint yields one independently keyed artifact per graph
-    # class. Index them by the class each NAMES — the addressing the atom
-    # makes natural, and what keeps a per-class assertion bisectable.
-    by_entry = {row.entry: row for row in result.entries}
-    assert len(by_entry) == len(result.entries), "two entries collided on one name"
-    return {"pipe": pipe, "result": result, "by_entry": by_entry}
+    by_entry = {row.name: row for row in rows}
+    assert len(by_entry) == len(rows), "two traces collided on one name"
+    return {"pipe": pipe, "by_entry": by_entry, "declarations": declarations}
 
 
 #: The two graph classes this declaration forks into.
@@ -190,43 +179,41 @@ LEAN = "unet/adapter=false/B=2"
 FAT = "unet/adapter=true/B=2"
 
 
-def _entry_block(cell: Dict[str, Any], name: str) -> Dict[str, Any]:
-    """One class's recorded entry block, off ITS OWN artifact's metadata."""
-    block = dict(cell["by_entry"][name].metadata[cell_key.ENTRY_BLOCK_KEY])
-    assert block["name"] == name, block.get("name")
-    return block
+def test_a_container_only_pipeline_declares_both_graph_classes(
+    traced_classes: dict[str, Any],
+) -> None:
+    assert sorted(traced_classes["by_entry"]) == [LEAN, FAT]
+    declarations = traced_classes["declarations"]
+    assert len({row.class_hash for row in declarations.values()}) == 2
 
 
-def test_a_container_only_pipeline_mints_both_graph_classes(cell) -> None:
-    """pgw#1176: "both classes in one cell" became "both classes as two
-    independently keyed artifacts" — the fork is unchanged, what it packages
-    into is not."""
-    result = cell["result"]
-    assert sorted(row.entry for row in result.entries) == [LEAN, FAT]
-    assert len({row.key for row in result.entries}) == 2
-
-
-def test_the_two_classes_were_prepared_DIFFERENTLY(cell) -> None:
+def test_the_two_classes_were_prepared_DIFFERENTLY(
+    traced_classes: dict[str, Any],
+) -> None:
     """The pgw#790 fork survives the pgw#822 arm: the adapter-bearing class
     carries the lifted pair, the branchless one is exported from the PLAIN
     module and says so. A one-size wrapper would break this."""
-    fat = _entry_block(cell, FAT)
-    lean = _entry_block(cell, LEAN)
+    fat = traced_classes["declarations"][FAT]
+    lean = traced_classes["declarations"][LEAN]
+    fat_ingress = CallIngress.from_graph(fat.graph)
+    lean_ingress = CallIngress.from_graph(lean.graph)
     assert set(lora_lifted.LIFTED_INPUT_NAMES) <= {
-        row["name"] for row in fat["inputs"]}
+        row.name for row in fat_ingress.inputs}
     assert not set(lora_lifted.LIFTED_INPUT_NAMES) & {
-        row["name"] for row in lean["inputs"]}
-    assert lean["excluded_inputs"] == list(lora_lifted.LIFTED_INPUT_NAMES)
-    assert fat["graph"]["lifted_inputs"] == sorted(
+        row.name for row in lean_ingress.inputs}
+    assert lean_ingress.excluded_inputs == tuple(sorted(lora_lifted.LIFTED_INPUT_NAMES))
+    assert fat.graph["lifted_inputs"] == sorted(
         lora_lifted.LIFTED_INPUT_NAMES)
-    assert lean["graph"]["lifted_inputs"] == []
+    assert lean.graph["lifted_inputs"] == []
 
 
-def test_the_pipeline_is_left_lifted_after_the_mint(cell) -> None:
+def test_the_pipeline_is_left_lifted_after_the_trace(
+    traced_classes: dict[str, Any],
+) -> None:
     """The branchless exports disarm the pipeline; a mint that returned it
     branchless would leave the process serving a different graph family."""
-    assert lora_lifted.lifted_binding(cell["pipe"].unet) is not None
-    assert w8a8_lora.branch_bucket(cell["pipe"].unet) == BUCKET
+    assert lora_lifted.lifted_binding(traced_classes["pipe"].unet) is not None
+    assert w8a8_lora.branch_bucket(traced_classes["pipe"].unet) == BUCKET
 
 
 def test_an_unarmed_export_refuses_naming_the_ARM_not_the_declaration() -> None:
@@ -240,7 +227,7 @@ def test_an_unarmed_export_refuses_naming_the_ARM_not_the_declaration() -> None:
         aot_declaration.cell_plans(decl), pipe, _spec())[0]
     assert arm is True
     with pytest.raises(aot_mint.MintRefused, match="carries no lifted forward"):
-        aot_mint._export_entry(pipe, _spec(), plan, decl, compile_now=False)
+        aot_mint._export_entry(pipe, _spec(), plan, decl)
 
 
 # ---------------------------------------------------------------------------

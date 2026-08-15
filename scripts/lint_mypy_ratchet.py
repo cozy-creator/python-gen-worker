@@ -48,10 +48,12 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # discovery.discover, discovery.execution_lanes, entrypoint) — what an
     # endpoint image build exercises.
     # 56 -> 55: pgw#1232 moved the generic transfer journal to HashRepo.
-    "disallow_any_generics": (55, 285),
+    # 55 -> 54: pgw#1270 deleted the duplicate worker package/runner surface.
+    "disallow_any_generics": (54, 285),
     # 26 -> 25: PR 6, request_context.
     "warn_return_any": (25, 48),
-    "disallow_untyped_calls": (20, 37),
+    # 20 -> 19: pgw#1270 deleted the duplicate worker package/runner surface.
+    "disallow_untyped_calls": (19, 37),
     "disallow_untyped_decorators": (3, 9),
     # implicit_reexport is split in two: our modules (a burn-down) and
     # third-party stub export gaps (not our debt — upstream's __all__).
@@ -79,7 +81,9 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # test_group_processes_pgw783 was NOT deleted despite scoring mock-heavy:
     # it holds the only red-proof of `host_move_guard._refuse_if_over_budget`,
     # a live on-by-default guard, and the only coverage of procsplit.group/merge.
-    "ignore_errors": (269, 2016),
+    # 269 -> 255: pgw#1270 deleted the implementation-only tests of the worker
+    # package/runner/resume authorities TCG now owns.
+    "ignore_errors": (255, 2016),
 }
 
 #: WILDCARD patterns are structural policy, not debt, so they are not counted

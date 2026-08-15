@@ -49,7 +49,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
 SRC = REPO / "src"
@@ -152,6 +152,7 @@ DYNAMIC_DECORATORS = {
 PROTOCOL_METHODS = {
     "run", "close", "start", "stop", "write", "read", "flush", "emit",
     "keys", "items", "values", "get", "next", "send", "throw",
+    "exec_module",
 }
 
 SKIP_PARAMS = {"self", "cls"}
@@ -844,11 +845,11 @@ def inert_declarations() -> List[Tuple[str, Dict[str, List[str]]]]:
     fields = set(declaration_fields())
     every = _all_read_roles(fields)
     out = []
-    for field in sorted(fields):
-        roles = every[field]
+    for field_name in sorted(fields):
+        roles = every[field_name]
         outside = sum(len(v) for k, v in roles.items() if k != "validate")
         if outside and not roles.get("act"):
-            out.append((field, dict(roles)))
+            out.append((field_name, dict(roles)))
     return out
 
 

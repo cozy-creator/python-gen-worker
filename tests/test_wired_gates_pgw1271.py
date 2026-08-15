@@ -14,6 +14,7 @@ Nothing here compiles, mints or touches a GPU.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, cast
 
@@ -53,27 +54,24 @@ from harness.receipt_hub import (  # noqa: F401 — fixtures ride along
 # ---------------------------------------------------------------------------
 
 
-def _keying_block(*, dim: int = 64) -> Dict[str, Any]:
-    """The shape `aot_mint.keying_block` produces — a keying block, unstamped."""
+def _class_hash(dim: int) -> str:
+    """One TCG class hash, in the only shape the memo accepts (16 lower hex).
+
+    pgw#1270: TCG derives `class_hash` inside `GraphClassDeclaration` and the
+    memo stores those hashes directly, so there is no worker-side keying block
+    left to stamp. `graph_witness` is one of the facts TCG folds INTO
+    `class_hash`, so two dims disagreeing here is exactly what a drifted
+    witness or a drifted graph body looks like at this seam.
+    """
+    return hashlib.sha256(f"class-dim-{int(dim)}".encode()).hexdigest()[:16]
+
+
+def _entry_block(*, dim: int = 64) -> Dict[str, Any]:
+    """The `entry` block a minted artifact carries, as the seam reads it."""
     return {
+        "name": "a",
         "target": "unet",
-        "fork": [],
-        "class_dims": [["h", int(dim)]],
-        "inputs": [{
-            "name": "x", "position": 0, "dtype": "bfloat16",
-            "shape": [1, 4, "s0", 64], "optional": False,
-        }],
-        "symbols": {"s0": [16, 160]},
-        "constants": [],
-        "graph_witness": f"gw-{dim}",
-        "graph": {
-            "v": 3,
-            "constant_fqns": ["w.weight"],
-            "lifted_inputs": [],
-            "pytree": {"user_inputs": ["x"], "in_spec": "", "out_spec": ""},
-            "specialization": {
-                "weight_lane": "bf16", "lora_bucket": 0, "strict": True},
-        },
+        "class_hash": _class_hash(dim),
     }
 
 
@@ -116,14 +114,6 @@ def _mint_task(tmp_path: Path) -> Any:
     )
 
 
-def _stamped(blocks: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """The blocks as the MINT stamps them — through the mint's own function."""
-    return {
-        name: aot_serve.stamp_entry(name, block, strict=True, lora_bucket=0)
-        for name, block in blocks.items()
-    }
-
-
 @pytest.fixture()
 def _runtime_key(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make the runtime key-complete on a GPU-less box.
@@ -138,11 +128,11 @@ def _runtime_key(monkeypatch: pytest.MonkeyPatch) -> None:
     })
 
 
-def _write_memo(tmp_path: Path, blocks: Dict[str, Dict[str, Any]]) -> str:
+def _write_memo(tmp_path: Path, hashes: Dict[str, str]) -> str:
     cfg = _Cfg()
     digest = boot_key.closure_digest(
         "tiny", mint_supervisor.cfg_spec(cfg), function="generate", slots={})
-    assert boot_key.write_memo(tmp_path, digest, blocks)
+    assert boot_key.write_memo(tmp_path, digest, hashes)
     return digest
 
 
@@ -154,17 +144,16 @@ def test_the_mint_publish_seam_rules_on_a_DISHONEST_boot_memo(
     the memo path skips the traces, so nothing else in the pod ever held a
     traced truth to contradict it with.
 
-    Here the memo holds one closure's blocks and the mint traces DIFFERENT
-    ones. The production seam must name the disagreement and invalidate the
-    entry, so the next boot re-traces rather than re-reading a proven-wrong
-    hash.
+    Here the memo holds one closure's class hash and the mint traces a
+    DIFFERENT one. The production seam must name the disagreement and
+    invalidate the entry, so the next boot re-traces rather than re-reading a
+    proven-wrong hash.
     """
-    digest = _write_memo(tmp_path, {"a": _keying_block(dim=64)})
-    traced = _stamped({"a": _keying_block(dim=128)})
+    digest = _write_memo(tmp_path, {"a": _class_hash(64)})
 
     reason = mint_supervisor.rule_on_boot_memo(
         _mint_task(tmp_path), _Cfg(),
-        _Result([_Row("a", traced["a"])]), declared=1)
+        _Result([_Row("a", _entry_block(dim=128))]), declared=1)
 
     assert "DISHONEST" in reason and "a: memo" in reason
     # The entry is GONE: the next boot re-traces instead of answering from it.
@@ -174,15 +163,14 @@ def test_the_mint_publish_seam_rules_on_a_DISHONEST_boot_memo(
 def test_an_HONEST_boot_memo_is_silence_at_the_publish_seam(
     tmp_path: Path, _runtime_key: None,
 ) -> None:
-    blocks = {"a": _keying_block(dim=64)}
-    digest = _write_memo(tmp_path, blocks)
-    traced = _stamped(blocks)
+    hashes = {"a": _class_hash(64)}
+    digest = _write_memo(tmp_path, hashes)
 
     assert mint_supervisor.rule_on_boot_memo(
         _mint_task(tmp_path), _Cfg(),
-        _Result([_Row("a", traced["a"])]), declared=1) == ""
+        _Result([_Row("a", _entry_block(dim=64))]), declared=1) == ""
     # An honest memo SURVIVES — the whole economic point of having one.
-    assert boot_key.read_memo(tmp_path, digest) == blocks
+    assert boot_key.read_memo(tmp_path, digest) == hashes
 
 
 def test_a_PARTIAL_class_set_rules_on_nothing(
@@ -192,14 +180,13 @@ def test_a_PARTIAL_class_set_rules_on_nothing(
     classes cannot tell "the memo holds a class we did not trace" from "we have
     not traced it yet". Ruling anyway would fire `class set differs` on every
     partial mint — a gate that cries wolf is uninstalled within a week."""
-    blocks = {"a": _keying_block(dim=64), "b": _keying_block(dim=128)}
-    digest = _write_memo(tmp_path, blocks)
-    traced = _stamped(blocks)
+    hashes = {"a": _class_hash(64), "b": _class_hash(128)}
+    digest = _write_memo(tmp_path, hashes)
 
     assert mint_supervisor.rule_on_boot_memo(
         _mint_task(tmp_path), _Cfg(),
-        _Result([_Row("a", traced["a"])]), declared=2) == ""
-    assert boot_key.read_memo(tmp_path, digest) == blocks
+        _Result([_Row("a", _entry_block(dim=64))]), declared=2) == ""
+    assert boot_key.read_memo(tmp_path, digest) == hashes
 
 
 def test_the_dishonest_verdict_reaches_the_wire_as_a_TYPED_EVENT(
@@ -215,10 +202,9 @@ def test_the_dishonest_verdict_reaches_the_wire_as_a_TYPED_EVENT(
         lambda kind, detail, **kw: seen.append(
             (kind, detail, str(kw.get("phase") or ""))))
 
-    _write_memo(tmp_path, {"a": _keying_block(dim=64)})
-    traced = _stamped({"a": _keying_block(dim=128)})
+    _write_memo(tmp_path, {"a": _class_hash(64)})
     mint_supervisor._rule_on_boot_memo(
-        _mint_task(tmp_path), _Cfg(), _Result([_Row("a", traced["a"])]),
+        _mint_task(tmp_path), _Cfg(), _Result([_Row("a", _entry_block(dim=128))]),
         declared=1, family="tiny")
 
     assert [(k, p) for k, _d, p in seen] == [
@@ -361,7 +347,7 @@ def test_an_ordinary_topology_failure_is_still_swallowed(
 # ---------------------------------------------------------------------------
 
 
-def _report(cosine: float, *, measured: bool = True) -> numerics_probe.CellNumerics:
+def _report(cosine: float, *, measured: bool = True) -> numerics_probe.CompiledGraphNumerics:
     thresholds = numerics_ladder.Thresholds(
         floor=0.90, warn=0.99, label="test",
         source=numerics_ladder.SOURCE_SDK_DEFAULT)
@@ -374,8 +360,8 @@ def _report(cosine: float, *, measured: bool = True) -> numerics_probe.CellNumer
     verdict = numerics_probe.AxisVerdict(
         axis=axis, comparison=comparison if measured else None,
         reason="" if measured else "cell_forward_failed")
-    return numerics_probe.CellNumerics(
-        family="tiny", cell_key="cg-1", thresholds=thresholds,
+    return numerics_probe.CompiledGraphNumerics(
+        family="tiny", compiled_graph_key="cg-1", thresholds=thresholds,
         threshold_source=thresholds.source, verdicts=(verdict,), axes_total=1)
 
 
@@ -475,29 +461,14 @@ def test_a_divisible_head_count_gets_past_the_divisibility_gate() -> None:
 
 
 # ---------------------------------------------------------------------------
-# aot_serve.runtime_key is a PROJECTION of the one probe, not a second one
+# aot_serve.runtime_key: pgw#1270 deleted the second probe outright
 # ---------------------------------------------------------------------------
-
-
-def test_there_is_ONE_runtime_probe(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`aot_serve.runtime_key` re-probed torch behind its own
-    `except Exception: pass` — a duplicate of `compile_cache.runtime_key` whose
-    failure was SILENT, so pgw#657's fix (say it out loud, because an empty
-    sku/sm/torch manufactures a key no healthy pod computes) lived in one copy
-    only."""
-    monkeypatch.setattr(compile_cache, "runtime_key", lambda: {
-        "sku": "h100", "sm": "sm_90", "torch": "9.9.9+cu999", "cuda": "99.9",
-        "triton": "9.9.9", "image_digest": "sha256:ff",
-    })
-    assert aot_serve.runtime_key() == {
-        "sku": "h100", "sm": "sm_90", "torch": "9.9.9+cu999", "cuda": "99.9"}
-
-
-def test_the_projection_stays_four_axes_wide() -> None:
-    """The four axes are what the artifact envelope carries. Widening them here
-    would re-key every artifact, so the projection is asserted, not assumed."""
-    assert set(aot_serve.runtime_key()) == {"sku", "sm", "torch", "cuda"}
-
+#
+# pgw#1271 made `aot_serve.runtime_key` delegate to `compile_cache.runtime_key`
+# and asserted the projection here. The cut then removed its last caller — TCG
+# owns the artifact key — so the duplicate implementation is GONE rather than
+# delegating. That is the same guarantee in its strongest form: there is one
+# runtime probe because there is one function.
 
 # ---------------------------------------------------------------------------
 # receipts — no call that reads as the last gate and checks nothing

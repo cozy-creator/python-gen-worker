@@ -1,5 +1,5 @@
 """Registration hooks for ``convert/`` — the third registry, beside ``@family``
-(serving defaults) and ``@inputs_for`` (export inputs). Without it, ``convert/``
+(serving defaults) and ``Compile(inputs=...)`` (export inputs). Without it, ``convert/``
 family knowledge would have to live in the SDK.
 
 Two registries, one refusal doctrine: an unknown family is refused **by name**,

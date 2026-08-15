@@ -19,7 +19,9 @@ premise of the audit.
 from __future__ import annotations
 
 import inspect
+import json
 import re
+from pathlib import Path
 from typing import Any, List, Tuple
 
 import pytest
@@ -299,128 +301,96 @@ def test_a_quarantined_cell_is_a_typed_event_not_a_log_line() -> None:
 # ---------------------------------------------------------------------------
 # Invariant 3 — progress INSIDE a long phase
 #
-# Driven through a REAL mint (torch.export + AOTI pack, CPU, no GPU and no
-# stand-in), because what broke on this branch was the wiring between `mint`
-# and `_mint_cell`, not the callback's shape.
+# The retained K-wide driver receives independently TCG-compiled graph classes
+# from its child pool. Progress is asserted at that boundary: before the pool
+# starts and whenever one share lands.
 # ---------------------------------------------------------------------------
 
-_FAMILY = "tiny824"
-_WIDTH = 8
+def _drive_tcg_pool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail_after_first: bool = False,
+    on_progress: Any = None,
+    phase_snapshot: Path | None = None,
+) -> None:
+    from gen_worker import aot_compile_pool, aot_mint
 
+    class _Pool:
+        entry_seconds: dict[str, float] = {}
+        peak_rss_bytes = 0
 
-def _mint(tmp_path: Any, monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> Any:
-    """One real two-class mint of a tiny CPU module."""
-    torch = pytest.importorskip("torch")
-    import types
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
 
-    from gen_worker import aot_mint, aot_serve, compile_cache
-    from gen_worker.api.decorators import Compile
-    from gen_worker.api.export_contract import (
-        Dim, GraphClass, Input, register_export_declaration,
-        reset_export_declarations,
+        def compile(self, *_args: Any, **kwargs: Any) -> dict[str, Any]:
+            on_share = kwargs["on_share"]
+            on_share("share-a", 1, 2)
+            if fail_after_first:
+                raise aot_compile_pool.EntryCompileFailed(
+                    "share-b", "TCG refused share-b")
+            on_share("share-b", 2, 2)
+            return {}
+
+    monkeypatch.setattr(aot_compile_pool, "EntryCompilePool", _Pool)
+    monkeypatch.setattr(aot_mint, "_pool_facts", lambda _pool: {})
+    width = aot_compile_pool.entry_workers(
+        2, limit=2, vcpus=16, available_bytes=64 * 1024**3,
+        device_lock=True)
+    aot_mint.mint_graph_classes(
+        aot_compile_pool.EntryJob(function="generate", modules=()),
+        workdir=tmp_path / "pool",
+        width=width,
+        spec=aot_mint.ExportSpec(family="tiny824", target="unet"),
+        on_progress=on_progress,
+        phase_snapshot=phase_snapshot,
     )
 
-    class _Tiny(torch.nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.lin = torch.nn.Linear(_WIDTH, _WIDTH, bias=False)
 
-        def forward(self, sample: Any) -> Any:
-            return torch.tanh(self.lin(sample))
-
-    full = {"sku": "", "sm": "sm_89", "torch": str(torch.__version__), "cuda": ""}
-    monkeypatch.setattr(compile_cache, "runtime_key", lambda: dict(full))
-    monkeypatch.setattr(aot_serve, "runtime_key", lambda: dict(full))
-
-    reset_export_declarations()
-    monkeypatch.setattr(
-        aot_mint, "reset_export_declarations", reset_export_declarations,
-        raising=False)
-    register_export_declaration(Compile(
-        family=_FAMILY,
-        targets=("unet",),
-        dims=(Dim("B", carried_by=(("sample", 0),)),),
-        # TWO classes, so "entry i of N" has something to count.
-        classes=(GraphClass(dims={"B": 1}), GraphClass(dims={"B": 2})),
-        inputs=(Input("sample", shape=("B", _WIDTH), dtype="model"),),
-        shape_strategy="static-rows",
-        warm_changes_key=False,
-    ))
-    try:
-        return aot_mint.mint(
-            types.SimpleNamespace(unet=_Tiny().eval()),
-            aot_mint.ExportSpec(family=_FAMILY, target=""),
-            tmp_path / "out", **kwargs)
-    finally:
-        reset_export_declarations()
-
-
-def test_a_multi_entry_mint_reports_every_entry_before_it_runs(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
+def test_the_tcg_pool_reports_every_share_as_it_lands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RED before pgw#824: `aot_mint.mint` was one opaque call over the
-    family's whole declared class set, so a real ~5-minute export emitted
-    NOTHING between `trace_graph` and `seal_publish`.
-
-    A REAL mint — real `torch.export`, real AOTI pack, CPU, no stand-in — over
-    a two-class declaration, because the callback contract on its own is not
-    the thing that broke. pgw#825 split the monolithic `mint()` into
-    `mint` / `_attach_partial_phases` / `_mint_cell` while this parameter was
-    on a branch; the two merged textually clean and the beat was left calling
-    a name its function no longer had (`NameError: on_progress`, 16 failed / 6
-    errored). Only a test that drives the real `mint()` end to end can catch
-    that class, so this one does.
-
-    Reported BEFORE the work, deliberately: a row that never returns is the one
-    a reader most needs named, and an after-the-fact tick names only the rows
-    that finished.
-    """
+    """The longest parent-side silent stretch names each completed share."""
     from gen_worker import aot_mint
 
     beats: List[Tuple[str, int, int, str]] = []
-    _mint(
-        tmp_path, monkeypatch,
+    _drive_tcg_pool(
+        tmp_path,
+        monkeypatch,
         on_progress=lambda *row: beats.append(row))  # type: ignore[arg-type]
 
-    trace = [b for b in beats if b[0] == aot_mint.PHASE_TRACE_GRAPH]
-    # The opener names the size of the job, then one row per declared class.
-    assert [b[1] for b in trace] == [0, 1, 2], beats
-    assert all(b[2] == 2 for b in trace), "a step with no total is not progress"
-    assert trace[0][0] == activity.PHASE_TRACE_GRAPH
-    # Each row NAMES its entry, or "12 of 18" says nothing about which 12.
-    assert all(b[3] for b in trace[1:]), trace
-    # And the mint's tail phase reports too, so a reader can tell "still
-    # exporting" from "packing".
-    assert [b[0] for b in beats][-1] == aot_mint.PHASE_SEAL_PUBLISH, beats
+    compile_beats = [
+        beat for beat in beats
+        if beat[0] == aot_mint.PHASE_INDUCTOR_COMPILE
+    ]
+    assert [beat[1] for beat in compile_beats] == [0, 1, 2]
+    assert all(beat[2] == 2 for beat in compile_beats)
+    assert [beat[3] for beat in compile_beats[1:]] == ["share-a", "share-b"]
 
 
-def test_an_aborted_mint_reports_the_entry_it_died_ON(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
+def test_a_tcg_pool_refusal_preserves_the_last_completed_share(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The reconciliation of pgw#824's live beat with pgw#825's abort table.
-
-    pgw#825 made an aborted mint report where it SPENT — per-entry rows for the
-    entries that finished. That is the wrong half of the question when a mint
-    dies mid-entry: 11 rows and no twelfth, and the twelfth is the one being
-    asked about. Because both halves now read one `MintProgress`, the abort
-    table carries the last position the live beat reported, as `at`.
-    """
+    """A TCG refusal does not erase the latest durable progress snapshot."""
     from gen_worker import aot_mint
 
-    def _refuse(row: Any, package: Any) -> Any:
-        raise aot_mint.MintRefused(f"entry {row.name!r}: bindability gate: nope")
+    snapshot = tmp_path / "mint-phases.json"
+    with pytest.raises(aot_mint.MintRefused, match="TCG refused share-b"):
+        _drive_tcg_pool(
+            tmp_path,
+            monkeypatch,
+            fail_after_first=True,
+            phase_snapshot=snapshot,
+        )
 
-    monkeypatch.setattr(aot_mint, "_gate_and_declare_entry", _refuse)
-    with pytest.raises(aot_mint.MintRefused) as excinfo:
-        _mint(tmp_path, monkeypatch)
-
-    table = getattr(excinfo.value, "mint_phases", {})
-    assert table.get("terminus") == "aborted"
-    # pgw#825's half, unchanged.
-    assert table["n_entries"] == 2 and table["totals"]["export_s"] > 0
-    # pgw#824's half, on the SAME record.
-    assert table["at"]["phase"] == aot_mint.PHASE_SEAL_PUBLISH
-    assert table["at"]["total"] == 2
+    table = json.loads(snapshot.read_text())
+    assert table["terminus"] == "in_flight"
+    assert table["at"] == {
+        "phase": aot_mint.PHASE_INDUCTOR_COMPILE,
+        "step": 1,
+        "total": 2,
+        "note": "share-a",
+    }
 
 
 def test_the_position_is_recorded_even_with_no_sink_and_a_raising_one() -> None:
@@ -453,23 +423,6 @@ def test_the_mint_progress_tokens_are_the_hubs_own_phase_vocabulary() -> None:
     assert aot_mint.PHASE_TRACE_GRAPH == activity.PHASE_TRACE_GRAPH
     assert aot_mint.PHASE_INDUCTOR_COMPILE == activity.PHASE_INDUCTOR_COMPILE
     assert aot_mint.PHASE_SEAL_PUBLISH == activity.PHASE_SEAL_PUBLISH
-
-
-def test_the_compile_pool_reports_each_share_as_it_lands() -> None:
-    """The pool loop is the longest wire-silent stretch of a mint (an 18-class
-    sdxl cell spends the bulk of its wall clock there) and reported nothing
-    between "compiling" and "packed"."""
-    import inspect
-
-    from gen_worker import aot_compile_pool
-
-    src = inspect.getsource(aot_compile_pool.EntryCompilePool.compile)
-    assert "on_share" in src
-    assert "len(by_share), width" in src, (
-        "progress must carry BOTH a step and a total — a bare step is not "
-        "progress, it is a counter. Since pgw#1215 the total is K, the number "
-        "of shares dispatched, which the parent knows before it spawns any "
-        "of them (it no longer produces the work item by item)")
 
 
 def test_progress_reporting_never_costs_the_mint_its_work() -> None:

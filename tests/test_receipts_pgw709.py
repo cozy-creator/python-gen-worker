@@ -21,11 +21,11 @@ from gen_worker import receipts
 # The signer + the live hub moved to `tests/harness/receipt_hub.py`.
 # pgw#1122's identity seam already imported them from here, and the adopt-path
 # rig needs the same real receipt gate. Same objects, one home.
-from harness.receipt_hub import (  # noqa: F401 — fixtures come with it
+from harness.receipt_hub import (
     B3_HEX, CELL_KEY, FAMILY, KID, OTHER_ENDPOINT, SELF_ENDPOINT, SELF_ORG,
     SHA_HEX, SNAPSHOT,
-    HubStub, _b64url, _configure, _identify, hub, make_artifact, make_claims,
-    pub_map, rsa_key, sign_receipt, worker_jwt_for,
+    HubStub, _b64url, _configure, _identify, make_artifact, make_claims,
+    sign_receipt, worker_jwt_for,
 )
 
 
@@ -187,13 +187,8 @@ class TestProvisionHook:
         """The provision.enable_compiled hook: a refused delivered artifact
         must be dropped BEFORE anything dispatches on it.
 
-        pgw#1181 moved where that is observable. The drop used to be visible
-        as `compile_cache.enable` receiving `artifact=None`; that function
-        takes no artifact any more (the `torch-inductor-cache` format it
-        seeded has no writer and is deleted), so the observable is the KIND
-        DISPATCH — `artifact_meta.try_read_metadata`, the first thing any
-        delivered cell touches — never being reached."""
-        from gen_worker import artifact_meta
+        The observable boundary is the TCG metadata read: an unreceipted path
+        must never be offered to the compiled-graph admission path."""
         from gen_worker.models import provision
 
         artifact = make_artifact(tmp_path)
@@ -205,7 +200,7 @@ class TestProvisionHook:
             seen["dispatched"] = path
             return {}
 
-        monkeypatch.setattr(provision.artifact_meta, "try_read_metadata", _dispatched)
+        monkeypatch.setattr(provision, "_compiled_graph_metadata", _dispatched)
 
         from gen_worker import compile_cache
 
@@ -218,9 +213,8 @@ class TestProvisionHook:
         armed = provision.enable_compiled(object(), Cfg(), tmp_path, artifact).armed
         assert armed is False
         assert "dispatched" not in seen, (
-            "refused delivered artifact leaked through to the kind dispatch"
+            "refused delivered artifact leaked through to TCG admission"
         )
-        assert artifact_meta is provision.artifact_meta
 
     def test_enable_compiled_passes_verified_artifact(
         self, tmp_path: Path, hub: HubStub, monkeypatch: pytest.MonkeyPatch
@@ -237,7 +231,7 @@ class TestProvisionHook:
             seen["dispatched"] = path
             return {}
 
-        monkeypatch.setattr(provision.artifact_meta, "try_read_metadata", _dispatched)
+        monkeypatch.setattr(provision, "_compiled_graph_metadata", _dispatched)
 
         from gen_worker import compile_cache
 

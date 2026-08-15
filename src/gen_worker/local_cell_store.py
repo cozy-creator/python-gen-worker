@@ -58,7 +58,6 @@ unit and a partial write leaves nothing admissible)::
     <root>/aot-cells/<ck1-…>/record.json   {cell_key, content_digest, family, …}
     <root>/aot-cells/.memo/<arm1-…>.json   the MEMO: pre-trace identity -> ck1 key
     <root>/trust-class.json                the learned trust class
-    <root>/.mint-resume/…                  aot_resume's crash-only bank (pgw#848)
 
 THE MEMO, and why a content-addressed store needs one. The ck1 key's ``graph``
 axis is the traced-graph digest, which does not exist until an export
@@ -169,12 +168,8 @@ SINK_REFUSED = "refused"
 def store_root() -> Path:
     """The local store root: the stated env path, else the cozy cache dir.
 
-    Moved here from ``local_cells`` by pgw#1096 with its value UNCHANGED —
-    same env name, same default — so ``aot_resume``'s crash-only bank and
-    cozy-local's ``cozy cells`` CLI keep resolving to the identical
-    directory. That move is what makes ``local_cells.py`` deletable by
-    pgw#1086 wave 1 (pgw#1092 §4 landmine 1: the production resume bank was
-    routed through a module the JIT demolition deletes).
+    Moved here from ``local_cells`` by pgw#1096 with its value unchanged so
+    cozy-local's ``cozy cells`` CLI keeps resolving to the same directory.
     """
     env = os.environ.get(ENV_STORE_DIR, "").strip()
     if env:
@@ -250,7 +245,7 @@ def store(
     record — which carries the digest every later lookup is checked against —
     is written LAST, so a crash mid-store leaves a directory with no record
     and the next lookup treats it as absent rather than as a short cell. Same
-    ordering rule ``aot_resume`` banks entries under, for the same reason.
+    ordering rule every crash-safe artifact publication uses.
 
     ``verdict`` defaults to :data:`VERDICT_ADMITTED` — "the caller vouches for
     these bytes", which is what every route that finds an already-proven cell
@@ -358,8 +353,8 @@ def lookup(key: str, root: Optional[Path] = None) -> Optional[LocalCell]:
 
     The recorded ``content_digest`` is RECOMPUTED over the bytes on disk, so a
     truncated, half-written or edited artifact refuses here instead of being
-    handed to the arm — the ``aot_resume`` rule (*"a bank cannot vouch for
-    itself"*) applied to the store. A refusing entry is dropped, which turns a
+    handed to the arm: persisted bytes cannot vouch for themselves. A refusing
+    entry is dropped, which turns a
     corrupted cell into exactly one honest re-mint.
 
     pgw#1183: a cell whose verdict is not :data:`VERDICT_ADMITTED` is absent

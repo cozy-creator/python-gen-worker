@@ -664,8 +664,9 @@ def run(args: argparse.Namespace) -> Tuple[int, Report]:
                     "compare — the reason is on the activity wire "
                     "(self_mint_skipped / self_mint_abort)")
             else:
-                cell_key = str(aot_serve.armed_metadata(pipe).get("cell_key")
-                               or "")
+                cell_key = str(
+                    aot_serve.armed_metadata(pipe).get("compiled_graph_key")
+                    or "")
                 fresh = numerics_probe.last_report()
                 minted = fresh if fresh is not before else None
                 arm = ARM_MINTED if minted is not None else ARM_ADOPTED

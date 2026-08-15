@@ -9,8 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 from hashrepo import LocalCAS, TransferGrant, TransferReport
+from torch_compiled_graphs import StoreOutcome
 
-from gen_worker import aot_delivery
+from gen_worker import aot_delivery, receipts
 
 
 def test_aot_delivery_materializes_small_variable_chunks(
@@ -56,9 +57,22 @@ def test_aot_delivery_materializes_small_variable_chunks(
         )
 
     monkeypatch.setattr(aot_delivery, "download", fake_download)
+    monkeypatch.setattr(
+        receipts, "gate_delivered_artifact", lambda *_a: True
+    )
+
+    class Engine:
+        def import_artifact(self, key: str, artifact: Path) -> object:
+            assert key == "cg-key-v1-" + "1" * 56
+            assert artifact.read_bytes() == payload
+            return SimpleNamespace(outcome=StoreOutcome.PRESENT)
+
+    monkeypatch.setattr(
+        aot_delivery, "open_worker_engine", lambda _root=None: Engine()
+    )
 
     output = aot_delivery._materialize_named_artifact(
-        "repo/family#compiled-graph",
+        "root/family-test#cg-key-v1-" + "1" * 56,
         whole,
         presigned,
         cache_dir=tmp_path / "cache",

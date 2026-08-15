@@ -36,8 +36,8 @@ The three properties that make that safe:
 2. **It cannot produce an artifact, structurally.** :class:`MeasureJob` is a
    DIFFERENT wire struct from ``MintRequest`` and declares none of the
    output-side fields (:data:`WITHHELD_FIELDS` — ``target``, ``work_root``,
-   ``resume``, ``report``, ``arm_token``). msgspec drops what a struct does not
-   declare, so the artifact destination, resume bank and report path never
+   ``report``, ``arm_token``). msgspec drops what a struct does not declare,
+   so the artifact destination and report path never
    enter this process even when handed the same ``*.mint.json``.
 3. **The real-weight fallback is scoped to HERE**, and the run REPORTS which
    lane it measured (:attr:`MeasureReport.weights`), read off the composed
@@ -60,6 +60,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -119,11 +120,11 @@ REASONS: Tuple[str, ...] = (
 )
 
 #: The ``MintRequest`` fields :class:`MeasureJob` deliberately does NOT
-#: declare. Every one of them is an output destination or a cross-attempt
-#: bank; a measure run has neither, and the cheapest way to prove it cannot
+#: declare. Every one of them is an output destination; a measure run has
+#: none, and the cheapest way to prove it cannot
 #: write one is for the path never to arrive.
 WITHHELD_FIELDS: Tuple[str, ...] = (
-    "target", "work_root", "report", "resume", "arm_token", "phases_snapshot",
+    "target", "work_root", "report", "arm_token", "phases_snapshot",
 )
 
 
@@ -300,24 +301,6 @@ def _device_label(job: MeasureJob) -> str:
         return "cpu"
     ordinal = int(job.device or -1)
     return f"cuda:{ordinal}" if ordinal >= 0 else "cuda"
-
-
-def _discard(files: Sequence[str]) -> int:
-    """Delete an entry's compiled output and return how much there was.
-
-    The compile is the half of the question that matters, and its OUTPUT is
-    the half that must not survive: a measure run that left loose ``.so``
-    files behind would be one packaging step away from the artifact this
-    module may not produce.
-    """
-    count = 0
-    for name in files:
-        count += 1
-        try:
-            Path(name).unlink()
-        except OSError:
-            logger.debug("measure: could not remove %s", name, exc_info=True)
-    return count
 
 
 # ---------------------------------------------------------------------------
@@ -586,7 +569,13 @@ def run(
     job: MeasureJob, report_path: Path, *, compile_entries: bool = True,
 ) -> int:
     """Measure this job's declared class set. Never raises, never publishes."""
-    from . import aot_declaration, aot_mint, compile_cache as cc, fleet_cells
+    from . import (
+        aot_compile_child,
+        aot_declaration,
+        aot_mint,
+        compile_cache as cc,
+        fleet_cells,
+    )
     from .cli.run import run_setup
     from .models import structure_only
     from .registry import collect_endpoints
@@ -673,7 +662,9 @@ def run(
         compiled=bool(compile_entries),
         setup_ms=int((time.monotonic() - t_setup) * 1000))
 
-    decl = aot_mint.export_declaration(str(spec.family or family))
+    from .api.export_contract import export_declaration
+
+    decl = export_declaration(str(spec.family or family))
     if decl is None:
         return _fail(
             report_path, "no_declaration",
@@ -705,24 +696,47 @@ def run(
     _reset_peak()
     t_entry = time.monotonic()
     try:
-        for traced in aot_mint.trace_for_key(
-                pipeline, spec, decl, compile_now=bool(compile_entries)):
-            allocated, reserved = _peaks()
-            timings = dict(traced.timings or {})
-            # ONE enumeration: `ordered` above and this count both come from
-            # `declared_class_rows`, so they cannot disagree.
-            declared = int(traced.declared) or declared
-            entries.append(EntryMeasurement(
-                entry=traced.name, ok=True, nodes=int(traced.nodes),
-                export_ms=int(float(timings.get("export_s", 0.0)) * 1000),
-                compile_ms=int(float(timings.get("compile_s", 0.0)) * 1000),
-                running_peak_device_bytes=allocated,
-                running_peak_device_reserved_bytes=reserved,
-                compiled_files=_discard(traced.files)))
-            # The program is the largest object this child holds and nothing
-            # downstream reads it.
-            traced.program = None
-            t_entry = time.monotonic()
+        with tempfile.TemporaryDirectory(
+            prefix="measure-compiled-graphs-",
+        ) as raw:
+            work = Path(raw)
+            engine_runtime = (
+                aot_compile_child._tcg_runtime(work / "cas")
+                if compile_entries else None
+            )
+            for traced in aot_mint.trace_for_key(pipeline, spec, decl):
+                compile_ms = 0
+                compiled_files = 0
+                if engine_runtime is not None:
+                    engine, runtime = engine_runtime
+                    compiled = aot_compile_child.compile_traced_class(
+                        traced,
+                        spec,
+                        engine,
+                        runtime,
+                        work=work,
+                        out_dir=work / "exports",
+                    )
+                    compile_ms = int(
+                        (compiled.compile_s + compiled.reuse_s) * 1000
+                    )
+                    compiled_files = 1
+                else:
+                    traced.release()
+                allocated, reserved = _peaks()
+                timings = dict(traced.timings or {})
+                declared = int(traced.declared) or declared
+                entries.append(EntryMeasurement(
+                    entry=traced.name,
+                    ok=True,
+                    nodes=int(traced.nodes),
+                    export_ms=int(float(timings.get("export_s", 0.0)) * 1000),
+                    compile_ms=compile_ms,
+                    running_peak_device_bytes=allocated,
+                    running_peak_device_reserved_bytes=reserved,
+                    compiled_files=compiled_files,
+                ))
+                t_entry = time.monotonic()
     except BaseException as exc:  # noqa: BLE001 — an OOM here IS the answer
         allocated, reserved = _peaks()
         in_flight = ordered[len(entries)] if len(entries) < len(ordered) else ""

@@ -1,60 +1,22 @@
 #!/usr/bin/env python3
-"""A process-global fact about an ARMED cell is fed at a SEAM, never by a
-caller who remembered — and a TEST may not feed one at all.
+"""Keep compiled-graph arming behind one structural seam.
 
-``aot_serve._KNOWN_AOT_KEYS`` decides which failure detector applies to a
-serving object: the DYNAMO lane's per-class cache-hit ledger (which an AOTI
-artifact can never move, so it reads every honest adoption as a disproof) or
-§4.31's serve-first rule. A feeding rule written as a CONVENTION —
-*"whoever reads a `cell_key` off an aot-inductor envelope registers it"* — is
-taken by the SELF-PRODUCED routes and skipped by the adopt routes, and a cell
-that resolved, materialized and armed is then scored on the dynamo ledger,
-disarmed, so the pod serves eager for life.
+``aot_serve.arm_compiled_graph`` is the only production function allowed to
+assemble live TCG serve state. It must resolve and load the exact key through
+TCG, bind constants, create or reuse an :class:`EntryDispatch`, register the
+entry, and install the module wrapper. A second constructor, registration, or
+wrapper call is red: callers submit an admitted key to the seam; they do not
+rebuild part of its state machine.
 
-So the rule is structural: the registration happens inside
-``aot_serve.arm_entry``, which arms ONE graph class and which every arm route
-passes exactly once per class. The registration is a property of the function
-that arms, never of a caller remembering to announce.
+The fence also retains two smaller invariants that are still process-global:
+compiled proof/quarantine writes must be classified, and objects with one
+canonical constructor may not acquire a second map. Deleted AOT key registries
+and their test-only hand-feed exceptions are deliberately absent.
 
-TWO SCOPES, TWO RULES.
-
-**src/gen_worker** — every call to a listed feeder must be either the declared
-SEAM itself, or a row in ``scripts/arm_state_feeders_allowlist.txt`` under one of
-the classifications below. Unclassified is red; a stale row is red; and a SEAM
-that stops calling its feeder is red (the registration is an asserted fact, not
-a habit).
-
-    SEAM      the one function every route passes; declared in FEEDERS below and
-              exempt because it IS the structure. Never written in the allowlist.
-    VERDICT   the site records a decision only this frame can know, and it sits
-              AT that decision — no seam can derive it (a proof pass concluding
-              a cell served its own graph; a disarm concluding one did not).
-    OWNER     the module that owns the state, writing it from its own primary
-              write path (a mint finalize putting its own bytes in its own
-              store).
-
-**There is deliberately NO ``CONVENTION`` classification, and no ``RELAY``.**
-A feeder called because a docstring asked the caller to remember is exactly the
-bug. It has no label to write down: move the call to the seam, or delete it and
-ask the OBJECT instead (``aot_serve.holds_exported_cell``).
-
-**tests/** — a hand-feed is RED, and so is stubbing a lane ACCESSOR. A
-stand-in calling ``aot_serve.note_aot_key(key)`` BY HAND, or a suite that stubs
-``is_aot_ref`` outright, answers the question the gate is supposed to ask, so
-RED-first prevents nothing. A test that needs an armed, boot-adopted object
-drives ``tests/harness/adopt_rig.py``, which arms a real packed cell through the
-real ordered path.
-
-There is exactly ONE test classification, ``RECOGNIZER``, and **the lint checks
-the claim instead of trusting it**: the row is accepted only when the enclosing
-function DRIVES no arm and the module REPLACES no arm driver. A unit test of the
-recognizer itself qualifies structurally; a fixture standing in for an adoption
-cannot, whatever it writes in the file.
-
-Same enforcement shape as ``lint_credential_identity.py``,
-``lint_settings_writers.py`` and ``lint_config_reads.py`` (§1.18).
-Sites are keyed ``<path>::<enclosing scope>::<name>``, never by line number: a
-line is a fact other people change.
+Every invocation first executes three synthetic red proofs: a seam missing a
+required operation, a second dispatch writer, and a direct marker writer. A
+green audit therefore proves the rejection paths ran before the real tree was
+accepted.
 """
 
 from __future__ import annotations
@@ -64,463 +26,483 @@ import ast
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Mapping, Optional, Sequence
 
 REPO = Path(__file__).resolve().parents[1]
 
-CLASSIFICATIONS = {"VERDICT", "OWNER", "RECOGNIZER", "PROJECTION"}
+ARM_MODULE = "aot_serve.py"
+ARM_SEAM = "arm_compiled_graph"
 
-#: Calling one of these means this frame ARMS something. A test that both arms
-#: and hand-feeds is standing in for an adoption, which is the bug class.
-ARM_DRIVERS = frozenset({
-    "ensure_setup", "arm_aot", "arm_ordered", "enable_compiled",
-    "_enable_compiled", "arm_entry", "adopt_delegated_mint",
-    "arm_from_local_store", "self_mint",
+# The operations that make an admitted TCG class live. These are deliberately
+# names, not line numbers: moving code cannot silently weaken the fence.
+REQUIRED_ARM_CALLS = frozenset({
+    "open_worker_engine",
+    "resolve",
+    "runner",
+    "bind",
+    "_marker",
+    "EntryDispatch",
+    "dispatch.add",
+    "wrap_module",
 })
+
+# These operations assemble the pipeline/module arm state and therefore have
+# exactly one production caller. EntryDispatch.remove is a serve-time verdict,
+# not admission, and remains owned by disarm_entry.
+EXCLUSIVE_ARM_CALLS = frozenset({
+    "_marker",
+    "EntryDispatch",
+    "dispatch.add",
+    "wrap_module",
+})
+
+# Module marker installation and removal live in these low-level
+# implementations. Their callers are still fenced above.
+MARKER_WRITER_SCOPES = frozenset({
+    (ARM_MODULE, "_marker"),
+    (ARM_MODULE, "wrap_module"),
+    (ARM_MODULE, "unwrap"),
+})
+
+CLASSIFICATIONS = frozenset({"VERDICT", "OWNER", "PROJECTION"})
 
 
 @dataclass(frozen=True)
 class Feeder:
-    """One production-owned writer of arming/serving process state."""
+    """One remaining production writer of process-global serve state."""
 
-    #: dotted spelling as other modules call it, e.g. ``aot_serve.note_aot_key``
     dotted: str
-    #: the module that owns it, so a bare call inside that file counts too
     owner: str
-    #: the state it feeds, for the message
-    state: str
-    #: ``(file, function)`` that is the structural seam, or None when the fact
-    #: is a verdict no seam can derive
-    seam: Optional[Tuple[str, str]] = None
-    #: does a hand-feed in a TEST simulate an ARM? those are unwriteable
-    arm_simulating: bool = True
-    #: is the bare name distinctive enough to match on ANY receiver?
     distinctive: bool = True
-    #: when it is not, the receiver spellings that count
-    receivers: Tuple[str, ...] = ()
+    receivers: tuple[str, ...] = ()
 
 
-FEEDERS: Tuple[Feeder, ...] = (
+FEEDERS = (
+    Feeder("compile_cache.record_cell_proven", "compile_cache.py"),
+    Feeder("compile_cache.record_cell_quarantined", "compile_cache.py"),
     Feeder(
-        dotted="aot_serve.note_aot_key", owner="aot_serve.py",
-        state="aot_serve._KNOWN_AOT_KEYS (which lane a cell ref is on)",
-        seam=("aot_serve.py", "arm_entry"),
+        "local_cell_store.store",
+        "local_cell_store.py",
+        distinctive=False,
+        receivers=("local_cell_store", "store"),
     ),
-    Feeder(
-        dotted="compile_cache.record_cell_proven", owner="compile_cache.py",
-        state="compile_cache._PROVEN_CELLS (this process served this cell)",
-        seam=None,
-    ),
-    Feeder(
-        dotted="compile_cache.record_cell_quarantined", owner="compile_cache.py",
-        state="compile_cache._QUARANTINED_CELLS (this identity failed here)",
-        seam=None, arm_simulating=False,
-    ),
-    Feeder(
-        dotted="local_cell_store.store", owner="local_cell_store.py",
-        state="this machine's own cell store (§4.28)",
-        seam=None, arm_simulating=False,
-        distinctive=False, receivers=("local_cell_store", "store"),
-    ),
-    Feeder(
-        dotted="local_cell_store.note_memo", owner="local_cell_store.py",
-        state="the pre-trace arm-token -> ck1 memo (§4.28)",
-        seam=None, arm_simulating=False,
-    ),
+    Feeder("local_cell_store.note_memo", "local_cell_store.py"),
 )
-
-#: Reading these is how a frame asks WHICH LANE an object serves on. A test that
-#: replaces one has answered the gate's question for it.
-#: Scoped to the LANE-IDENTITY question — "is this the exported lane, and has
-#: this process served this cell?" — not to the broader "is anything armed"
-#: (``is_armed`` / ``is_compile_armed``), which is a different and much older
-#: pattern this issue makes no claim about.
-ACCESSORS: Dict[str, Tuple[str, ...]] = {
-    "aot_serve": ("is_aot_ref", "holds_exported_cell", "proven_since"),
-    "aot": ("is_aot_ref", "holds_exported_cell", "proven_since"),
-    "compile_cache": ("cell_proven_in_process", "cell_quarantined_in_process"),
-    "cc": ("cell_proven_in_process", "cell_quarantined_in_process"),
-}
-
-RIG = "tests/harness/adopt_rig.py"
 
 
 @dataclass(frozen=True)
 class OneConstructor:
-    """A production object that must have exactly ONE map into it.
+    """A production object that must have exactly one canonical map."""
 
-    Two sites mapping a ``Compile`` onto a ``CompileCell`` — the registry's
-    ``compile_cell()`` and ``cli.run``'s §4.28 desktop arm — let the
-    ``numerics_floor``/``numerics_warn`` fields reach one and not the other, so
-    a whole serving path was judged at an SDK default nobody chose while every
-    record said ``declared``. The instance was a missing field; the CAUSE is
-    that the same object had two independent constructors. On the arming path
-    those two are usually "the self-mint/plan route" and "the adopt route".
-    """
-
-    #: the type name as it is CALLED
     name: str
-    #: ``<file>::<scope>`` of the one constructor, which is exempt
-    constructor: Tuple[str, str]
-    #: only constructions passing one of these keywords are fenced; empty =
-    #: every construction. (``_ArmOrder(backend=…)`` with no artifact is a
-    #: complete answer for a dynamo/eager plan and maps nothing.)
-    when_kwargs: Tuple[str, ...] = ()
+    constructor: tuple[str, str]
+    when_kwargs: tuple[str, ...] = ()
     why: str = ""
 
 
-ONE_CONSTRUCTOR: Tuple[OneConstructor, ...] = (
+ONE_CONSTRUCTOR = (
     OneConstructor(
-        name="CompileCell",
-        constructor=("registry.py", "CompileCell.from_declaration"),
-        why="pgw#1150: a Compile field that reaches one map and not the other "
-            "judges a whole path at a default nobody chose",
+        "CompileCell",
+        ("registry.py", "CompileCell.from_declaration"),
+        why="a declaration field reaching one map but not another silently "
+        "changes the compiled class",
     ),
     OneConstructor(
-        name="_ArmOrder",
-        constructor=("executor.py", "_ArmOrder.for_artifact"),
+        "_ArmOrder",
+        ("executor.py", "_ArmOrder.for_artifact"),
         when_kwargs=("selection",),
-        why="pgw#1152: the §4.27 boot-adopt order and the hub PLAN order were "
-            "built independently and are field-for-field identical except "
-            "`adopt` — the exact adopt-vs-plan asymmetry that produced "
-            "pgw#1108/#1122/#1141/#1141b",
+        why="plan and adopt must not independently map the same arm order",
     ),
     OneConstructor(
-        name="_CompileArtifactSelection",
-        constructor=("executor.py", "_ArmOrder.for_artifact"),
-        when_kwargs=(),
-        why="pgw#1152: both order builders also built the selection from the "
-            "same three fields; it is now built once, with the order",
+        "_CompileArtifactSelection",
+        ("executor.py", "_ArmOrder.for_artifact"),
+        why="artifact selection is part of the one arm-order map",
     ),
     OneConstructor(
-        name="ExpectedIdentity",
-        constructor=("aot_identity.py", "ExpectedIdentity.named_by"),
-        why="pgw#1152's last reported duplicate: this is the object EVERY arm "
-            "gate compares a cell against, and its two expectation sources "
-            "are the hub PLAN and the §4.27 pull-by-key resolve — the same "
-            "plan-vs-adopt pair that produced pgw#1108/#1122/#1141/#1141b",
+        "ExpectedIdentity",
+        ("aot_identity.py", "ExpectedIdentity.named_by"),
+        why="artifact naming has one projection from the declaration",
     ),
 )
 
 
 def _dotted(node: ast.AST) -> str:
-    parts: List[str] = []
+    parts: list[str] = []
     while isinstance(node, ast.Attribute):
         parts.append(node.attr)
         node = node.value
     if isinstance(node, ast.Name):
         parts.append(node.id)
-        return ".".join(reversed(parts))
-    return ""
+    return ".".join(reversed(parts))
 
 
-class _Calls(ast.NodeVisitor):
-    """Every feeder call and every accessor stub in one module, scoped."""
+def _scope(parts: list[str]) -> str:
+    return ".".join(parts) or "<module>"
 
-    def __init__(self, owner_file: str) -> None:
-        self.owner_file = owner_file
-        self.feeds: List[Tuple[int, str, Feeder]] = []
-        self.stubs: List[Tuple[int, str, str]] = []
-        self.builds: List[Tuple[int, str, OneConstructor]] = []
-        #: every function/class scope defined in this module, dotted
-        #: enclosing scopes that call an arm driver
-        self.arming_scopes: set = set()
-        #: True when this module REPLACES an arm driver (a fixture standing in
-        #: for the arm)
-        self.replaces_arm = False
-        self.defined_scopes: set = set()
-        self._scope: List[str] = []
 
-    def _where(self) -> str:
-        return ".".join(self._scope) or "<module>"
+@dataclass(frozen=True)
+class CallSite:
+    file: str
+    scope: str
+    line: int
+    call: str
 
-    def _push(self, node: ast.AST, name: str) -> None:
-        self._scope.append(name)
-        self.defined_scopes.add(self._where())
+
+class Calls(ast.NodeVisitor):
+    """Collect only the few call/write shapes this fence owns."""
+
+    def __init__(self, filename: str) -> None:
+        self.filename = filename
+        self.parts: list[str] = []
+        self.calls: list[CallSite] = []
+        self.marker_writes: list[CallSite] = []
+        self.feeds: list[CallSite] = []
+        self.builds: list[CallSite] = []
+        self.defined_scopes: set[str] = set()
+        self.dispatch_vars: set[tuple[str, str]] = set()
+
+    @property
+    def scope(self) -> str:
+        return _scope(self.parts)
+
+    def _visit_scope(self, node: ast.AST, name: str) -> None:
+        self.parts.append(name)
+        self.defined_scopes.add(self.scope)
         self.generic_visit(node)
-        self._scope.pop()
+        self.parts.pop()
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        self._push(node, node.name)
+        self._visit_scope(node, node.name)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self._push(node, node.name)
+        self._visit_scope(node, node.name)
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        self._push(node, node.name)
+        self._visit_scope(node, node.name)
+
+    def _record_assignment(self, target: ast.AST, value: ast.AST) -> None:
+        if isinstance(target, ast.Attribute) and target.attr == "_cozy_aot":
+            self.marker_writes.append(
+                CallSite(self.filename, self.scope, target.lineno, "assignment")
+            )
+        if not isinstance(target, ast.Name) or not isinstance(value, ast.Call):
+            return
+        constructor = _dotted(value.func).rpartition(".")[2]
+        if constructor in {"EntryDispatch", "_dispatch_for"}:
+            self.dispatch_vars.add((self.scope, target.id))
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        for target in node.targets:
+            self._record_assignment(target, node.value)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if node.value is not None:
+            self._record_assignment(node.target, node.value)
+        self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
         path = _dotted(node.func)
         tail = path.rpartition(".")[2]
+        receiver = path.rpartition(".")[0]
+        dispatch_add = tail == "add" and (
+            (self.scope, receiver) in self.dispatch_vars
+            or receiver.rpartition(".")[2].endswith("dispatch")
+            or (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Call)
+                and _dotted(node.func.value.func).rpartition(".")[2]
+                == "_dispatch_for"
+            )
+        )
+        call = "dispatch.add" if dispatch_add else tail
+        self.calls.append(CallSite(self.filename, self.scope, node.lineno, call))
+
+        if tail in {"setattr", "delattr"} and len(node.args) >= 2:
+            marker = _dotted(node.args[1])
+            if (
+                (self.filename == ARM_MODULE and marker == "_MARKER_ATTR")
+                or marker.endswith("aot_serve._MARKER_ATTR")
+                or (
+                    isinstance(node.args[1], ast.Constant)
+                    and node.args[1].value == "_cozy_aot"
+                )
+            ):
+                self.marker_writes.append(
+                    CallSite(self.filename, self.scope, node.lineno, tail)
+                )
+
         for feeder in FEEDERS:
-            bare = feeder.dotted.split(".")[-1]
-            # Deliberately by NAME rather than by resolved receiver, except
-            # where the name is too generic to be one: the receiver is
-            # `aot_serve`, `aot`, `cc`, `fleet_cells.aot_serve` or a module
-            # alias at different sites, and a fence that only catches the
-            # spellings we thought of is not a fence.
+            bare = feeder.dotted.rpartition(".")[2]
             if tail != bare:
                 continue
-            receiver = path.rpartition(".")[0].rpartition(".")[2]
-            if not receiver:
-                if self.owner_file != feeder.owner:
+            feed_receiver = path.rpartition(".")[0].rpartition(".")[2]
+            if not feed_receiver:
+                if self.filename != feeder.owner:
                     continue
-            elif not feeder.distinctive and receiver not in feeder.receivers:
+            elif (
+                not feeder.distinctive
+                and feed_receiver not in feeder.receivers
+            ):
                 continue
-            self.feeds.append((node.lineno, self._where(), feeder))
-        if tail in ARM_DRIVERS:
-            self.arming_scopes.add(self._where())
+            self.feeds.append(
+                CallSite(self.filename, self.scope, node.lineno, feeder.dotted)
+            )
+
         for one in ONE_CONSTRUCTOR:
             if tail != one.name:
                 continue
             if one.when_kwargs and not any(
-                kw.arg in one.when_kwargs for kw in node.keywords
+                keyword.arg in one.when_kwargs for keyword in node.keywords
             ):
                 continue
-            self.builds.append((node.lineno, self._where(), one))
-        self._note_stub(node, path)
+            self.builds.append(
+                CallSite(self.filename, self.scope, node.lineno, f"{one.name}()")
+            )
         self.generic_visit(node)
 
-    def _note_stub(self, node: ast.Call, path: str) -> None:
-        if not path.endswith("setattr") or len(node.args) < 2:
-            return
-        owner = _dotted(node.args[0]).split(".")[-1]
-        name = node.args[1]
-        if not isinstance(name, ast.Constant) or not isinstance(name.value, str):
-            return
-        if name.value in ARM_DRIVERS:
-            self.replaces_arm = True
-        if name.value in ACCESSORS.get(owner, ()):
-            self.stubs.append(
-                (node.lineno, self._where(), f"{owner}.{name.value}"))
+
+def _parse_modules(sources: Mapping[str, str]) -> dict[str, Calls]:
+    out: dict[str, Calls] = {}
+    for filename, source in sources.items():
+        visitor = Calls(filename)
+        visitor.visit(ast.parse(source, filename=filename))
+        out[filename] = visitor
+    return out
 
 
-def _iter_modules(root: Path) -> List[Path]:
-    return [p for p in sorted(root.rglob("*.py")) if "__pycache__" not in p.parts]
+def audit_arm_seam(sources: Mapping[str, str]) -> list[str]:
+    """Return structural TCG arm violations for parsed module sources."""
+    modules = _parse_modules(sources)
+    owner = modules.get(ARM_MODULE)
+    problems: list[str] = []
+    if owner is None or ARM_SEAM not in owner.defined_scopes:
+        return [f"ARM SEAM MISSING: {ARM_MODULE}::{ARM_SEAM}"]
 
-
-def _rel(path: Path) -> str:
-    try:
-        return str(path.relative_to(REPO))
-    except ValueError:
-        return str(path)
-
-
-def scan_src(root: Path) -> Tuple[Dict[Tuple[str, str], int], List[str]]:
-    """Feeder sites outside the declared seams, plus seam-integrity problems."""
-    sites: Dict[Tuple[str, str], int] = {}
-    problems: List[str] = []
-    seams_seen = {f.seam: False for f in FEEDERS if f.seam}
-    constructors_seen = {o.name: False for o in ONE_CONSTRUCTOR}
-    for path in _iter_modules(root):
-        calls = _Calls(path.name)
-        calls.visit(ast.parse(path.read_text(encoding="utf-8")))
-        rel = _rel(path)
-        for lineno, scope, feeder in calls.feeds:
-            if feeder.seam and (path.name, scope) == feeder.seam:
-                seams_seen[feeder.seam] = True
-                continue
-            sites.setdefault((rel, f"{scope}::{feeder.dotted}"), lineno)
-        for one in ONE_CONSTRUCTOR:
-            if one.constructor[0] == path.name and (
-                one.constructor[1] in calls.defined_scopes
-            ):
-                constructors_seen[one.name] = True
-        for lineno, scope, one in calls.builds:
-            if (path.name, scope) == one.constructor:
-                continue
-            sites.setdefault((rel, f"{scope}::{one.name}()"), lineno)
-    for name, seen in constructors_seen.items():
-        where = dict((o.name, o.constructor) for o in ONE_CONSTRUCTOR)[name]
-        # Only demanded when the owning module is in the scanned tree at all,
-        # so the rule can be exercised over a synthetic tree.
-        if not seen and (root / where[0]).is_file():
-            problems.append(
-                f"ONE-CONSTRUCTOR MISSING: {where[0]}::{where[1]} — the one "
-                f"map into {name} — does not exist. That map IS the fence; if "
-                "it moved, move it in ONE_CONSTRUCTOR here too.")
-    for seam, seen in seams_seen.items():
-        if seen:
-            continue
-        feeder = next(f for f in FEEDERS if f.seam == seam)
+    seam_calls = {
+        site.call for site in owner.calls if site.scope == ARM_SEAM
+    }
+    missing = sorted(REQUIRED_ARM_CALLS - seam_calls)
+    if missing:
         problems.append(
-            f"SEAM BROKEN: {seam[0]}::{seam[1]} no longer calls "
-            f"{feeder.dotted}. That call is what feeds {feeder.state} for "
-            "EVERY arm route — with it gone, a new route is one forgotten "
-            "convention away from pgw#1141b (a resolved, materialized, armed "
-            "cell scored on the dynamo ledger and thrown away on a real pod). "
-            "Put it back, or move the seam and update FEEDERS here.")
-    return sites, problems
+            f"ARM SEAM INCOMPLETE: {ARM_MODULE}::{ARM_SEAM} no longer calls "
+            f"{', '.join(missing)}; exact TCG resolve, bind, dispatch "
+            "registration, and module installation are one atomic boundary"
+        )
 
-
-def scan_tests(
-    root: Path, allowed: Dict[Tuple[str, str], str],
-) -> Tuple[Dict[Tuple[str, str], int], List[str]]:
-    """A test may not feed a production registry, nor stub a lane accessor.
-
-    The one escape, ``RECOGNIZER``, is CHECKED rather than trusted: the row is
-    accepted only when the enclosing function drives no arm and the module
-    replaces no arm driver. A fixture standing in for an adoption fails that
-    test whatever it writes in the allowlist.
-    """
-    sites: Dict[Tuple[str, str], int] = {}
-    problems: List[str] = []
-    for path in _iter_modules(root):
-        if _rel(path) == RIG:
-            # The rig is the sanctioned vehicle; it is fenced by
-            # `test_adopt_rig_pgw1152.py::test_the_rig_itself_registers_nothing`,
-            # which reads its source and refuses a registration.
-            continue
-        calls = _Calls(path.name)
-        calls.visit(ast.parse(path.read_text(encoding="utf-8")))
-        rel = _rel(path)
-
-        def _recognizer_ok(scope: str) -> Optional[str]:
-            """None when the RECOGNIZER claim holds, else why it does not."""
-            if calls.replaces_arm:
-                return ("this module REPLACES an arm driver, so it is standing "
-                        "in for the arm — the claim is refused")
-            if scope in calls.arming_scopes:
-                return f"{scope} drives an arm itself — the claim is refused"
-            return None
-
-        def _judge(lineno: int, scope: str, name: str, complaint: str) -> None:
-            key = (rel, f"{scope}::{name}")
-            label = allowed.get(key)
-            if label == "RECOGNIZER":
-                refusal = _recognizer_ok(scope)
-                if refusal is None:
-                    sites[key] = lineno
-                    return
-                problems.append(
-                    f"{rel}:{lineno}: RECOGNIZER claimed for {scope}::{name}, "
-                    f"but {refusal}. Drive {RIG}.")
-                return
-            if label is not None:
-                problems.append(
-                    f"{rel}:{lineno}: {label} is not a TEST classification for "
-                    f"{scope}::{name} — the only one is RECOGNIZER.")
-                return
-            problems.append(f"{rel}:{lineno}: {complaint}")
-
-        for lineno, scope, feeder in calls.feeds:
-            if not feeder.arm_simulating:
+    for visitor in modules.values():
+        for site in visitor.calls:
+            if site.call not in EXCLUSIVE_ARM_CALLS:
                 continue
-            _judge(
-                lineno, scope, feeder.dotted,
-                f"a TEST hand-feeds {feeder.dotted} in {scope} — that writes "
-                f"{feeder.state}, which is exactly the fact production writes "
-                "at its seam. pgw#1141 shipped 13 green rows whose stand-ins "
-                "did this; they entered one gate east of the bug. Drive "
-                f"{RIG} instead.")
-        for lineno, scope, name in calls.stubs:
-            _judge(
-                lineno, scope, name,
-                f"a TEST STUBBED the lane accessor {name} in {scope} — the "
-                "gate under test then answers from the fixture rather than "
-                f"from the object. Drive {RIG} and let a real arm make the "
-                "answer true.")
+            if (site.file, site.scope) == (ARM_MODULE, ARM_SEAM):
+                continue
+            problems.append(
+                f"{site.file}:{site.line}: ARM STATE WRITE OUTSIDE SEAM: "
+                f"{site.scope} calls {site.call}; route the admitted key "
+                f"through {ARM_MODULE}::{ARM_SEAM}"
+            )
+        for site in visitor.marker_writes:
+            if (site.file, site.scope) in MARKER_WRITER_SCOPES:
+                continue
+            problems.append(
+                f"{site.file}:{site.line}: DIRECT AOT MARKER WRITE: "
+                f"{site.scope} calls {site.call}; module and pipeline marker "
+                f"state is installed only by {ARM_MODULE}::{ARM_SEAM}"
+            )
+    return problems
+
+
+def _iter_sources(root: Path) -> dict[str, str]:
+    return {
+        str(path.relative_to(root)): path.read_text(encoding="utf-8")
+        for path in sorted(root.rglob("*.py"))
+        if "__pycache__" not in path.parts
+    }
+
+
+def _site_key(root: Path, filename: str, scope: str, call: str) -> tuple[str, str]:
+    path = root / filename
+    return str(path.relative_to(REPO)), f"{scope}::{call}"
+
+
+def audit_classified_sites(
+    root: Path,
+    sources: Mapping[str, str],
+) -> tuple[dict[tuple[str, str], int], list[str]]:
+    """Collect remaining global feeds and duplicate constructor maps."""
+    modules = _parse_modules(sources)
+    sites: dict[tuple[str, str], int] = {}
+    problems: list[str] = []
+    for filename, visitor in modules.items():
+        for site in visitor.feeds + visitor.builds:
+            one = next(
+                (
+                    row for row in ONE_CONSTRUCTOR
+                    if site.call == f"{row.name}()"
+                ),
+                None,
+            )
+            if one is not None and (filename, site.scope) == one.constructor:
+                continue
+            key = _site_key(root, filename, site.scope, site.call)
+            sites.setdefault(key, site.line)
+
+    for one in ONE_CONSTRUCTOR:
+        constructor_visitor = modules.get(one.constructor[0])
+        if (
+            constructor_visitor is not None
+            and one.constructor[1] not in constructor_visitor.defined_scopes
+        ):
+            problems.append(
+                f"ONE CONSTRUCTOR MISSING: {one.constructor[0]}::"
+                f"{one.constructor[1]} no longer defines the sole {one.name} map"
+            )
     return sites, problems
 
 
-def load_allowlist(path: Path) -> Tuple[Dict[Tuple[str, str], str], List[str]]:
-    """Parse ``<path>::<scope>::<name>  <CLASSIFICATION>  <reason>`` lines."""
-    allowed: Dict[Tuple[str, str], str] = {}
-    errors: List[str] = []
+def load_allowlist(path: Path) -> tuple[dict[tuple[str, str], str], list[str]]:
+    """Parse ``<path>::<scope>::<call> <classification> <reason>`` rows."""
+    allowed: dict[tuple[str, str], str] = {}
+    errors: list[str] = []
     if not path.is_file():
         return allowed, [f"{path} is missing"]
-    for num, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         parts = line.split(None, 2)
-        if len(parts) < 3:
+        if len(parts) != 3:
             errors.append(
-                f"{path.name}:{num}: need '<path>::<scope>::<name> "
-                f"<CLASSIFICATION> <reason>', got {line!r}")
+                f"{path.name}:{number}: need '<site> <classification> <reason>'"
+            )
             continue
-        key, classification = parts[0], parts[1]
-        if "::" not in key:
-            errors.append(f"{path.name}:{num}: site key {key!r} lacks '::'")
-            continue
+        key_text, classification, _reason = parts
         if classification not in CLASSIFICATIONS:
             errors.append(
-                f"{path.name}:{num}: unknown classification "
-                f"{classification!r} (want one of {sorted(CLASSIFICATIONS)}). "
-                "There is no CONVENTION class and no RELAY class: a feeder "
-                "called because the caller was asked to remember is the bug "
-                "itself (pgw#1033 -> pgw#1141b). Move it to the seam, or "
-                "delete it and ask the object.")
+                f"{path.name}:{number}: unknown classification "
+                f"{classification!r}; want {sorted(CLASSIFICATIONS)}"
+            )
             continue
-        file_part, name = key.split("::", 1)
+        file_part, separator, name = key_text.partition("::")
+        if not separator or not name:
+            errors.append(
+                f"{path.name}:{number}: site key {key_text!r} lacks '::'"
+            )
+            continue
         allowed[(file_part, name)] = classification
     return allowed, errors
 
 
-def check(
-    sites: Dict[Tuple[str, str], int],
-    allowed: Dict[Tuple[str, str], str],
-    seen: Optional[Dict[Tuple[str, str], int]] = None,
-) -> List[str]:
-    problems: List[str] = []
-    for (rel, name), lineno in sorted(sites.items()):
-        if allowed.get((rel, name)) == "RECOGNIZER":
-            problems.append(
-                f"{rel}:{lineno}: RECOGNIZER is a TEST classification and this "
-                "is production code — a src feeder is SEAM, VERDICT or OWNER.")
+def check_allowlist(
+    sites: Mapping[tuple[str, str], int],
+    allowed: Mapping[tuple[str, str], str],
+) -> list[str]:
+    problems: list[str] = []
+    for key, line in sorted(sites.items()):
+        if key in allowed:
             continue
-        if name.endswith("()"):
-            if (rel, name) in allowed:
-                continue
-            one = next(o for o in ONE_CONSTRUCTOR if o.name == name.rpartition("::")[2][:-2])
+        call = key[1].rpartition("::")[2]
+        one = next(
+            (row for row in ONE_CONSTRUCTOR if call == f"{row.name}()"),
+            None,
+        )
+        if one is not None:
             problems.append(
-                f"{rel}:{lineno}: SECOND MAP into {one.name} at {name} — "
-                f"{one.constructor[0]}::{one.constructor[1]} is the one "
-                f"constructor. {one.why}. Call it, or — if this builds the "
-                "object from a DIFFERENT source shape and is therefore not a "
-                "second copy of the same map — classify it PROJECTION in "
-                "scripts/arm_state_feeders_allowlist.txt. There is no label "
-                "for writing the same map twice.")
-            continue
-        if (rel, name) not in allowed:
+                f"{key[0]}:{line}: SECOND MAP into {one.name} at {key[1]}; "
+                f"{one.constructor[0]}::{one.constructor[1]} is canonical. "
+                f"{one.why}. A genuinely different source projection may be "
+                "classified PROJECTION."
+            )
+        else:
             problems.append(
-                f"{rel}:{lineno}: UNCLASSIFIED arm-state feed: {name} — this "
-                "writes a process-global fact about an armed cell from "
-                "somewhere that is not the seam every arm route passes. That "
-                "is pgw#1033's convention, and the route that did not keep it "
-                "cost four pods and four gates (pgw#1141b). Move it to the "
-                "seam, delete it in favour of asking the object, or classify "
-                "it in scripts/arm_state_feeders_allowlist.txt")
-    matched = set(sites) | set(seen or {})
-    for key in sorted(set(allowed) - matched):
+                f"{key[0]}:{line}: UNCLASSIFIED process-global feed "
+                f"{key[1]}; classify the verdict/owner at its real write site"
+            )
+    for key in sorted(set(allowed) - set(sites)):
         problems.append(
-            f"stale allowlist row {key[0]}::{key[1]} matches no feed site — "
-            "delete it (a row matching nothing is a boundary that lies)")
+            f"stale allowlist row {key[0]}::{key[1]} matches no site; delete it"
+        )
     return problems
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--src", type=Path, default=REPO / "src" / "gen_worker")
-    ap.add_argument("--tests", type=Path, default=REPO / "tests")
-    ap.add_argument(
-        "--allowlist", type=Path,
-        default=REPO / "scripts" / "arm_state_feeders_allowlist.txt")
-    args = ap.parse_args(argv)
+def run_red_proofs() -> int:
+    """Exercise the current fence's rejection paths before auditing src."""
+    good = """
+def arm_compiled_graph():
+    engine = open_worker_engine()
+    engine.resolve()
+    runner = engine.runner()
+    runner.bind()
+    _marker()
+    dispatch = EntryDispatch()
+    dispatch.add()
+    wrap_module()
+def _marker():
+    setattr(object(), _MARKER_ATTR, {})
+def wrap_module():
+    setattr(object(), _MARKER_ATTR, {})
+def unwrap():
+    delattr(object(), _MARKER_ATTR)
+"""
+    cases = (
+        (
+            {ARM_MODULE: good.replace("    wrap_module()\n", "")},
+            "ARM SEAM INCOMPLETE",
+        ),
+        (
+            {ARM_MODULE: good + "\ndef bypass():\n    EntryDispatch()\n"},
+            "ARM STATE WRITE OUTSIDE SEAM",
+        ),
+        (
+            {
+                ARM_MODULE: good,
+                "bypass.py": "def bypass(obj):\n    obj._cozy_aot = {}\n",
+            },
+            "DIRECT AOT MARKER WRITE",
+        ),
+    )
+    for sources, expected in cases:
+        observed = audit_arm_seam(sources)
+        if not any(expected in problem for problem in observed):
+            raise AssertionError(
+                f"red proof did not reject {expected}: {observed!r}"
+            )
+    if audit_arm_seam({ARM_MODULE: good}):
+        raise AssertionError("valid synthetic arm seam did not pass")
+    return len(cases)
 
-    sites, seam_problems = scan_src(args.src)
-    allowed, errors = load_allowlist(args.allowlist)
-    test_sites, test_problems = scan_tests(args.tests, allowed)
-    problems = (seam_problems + errors
-                + check(sites, allowed, seen=test_sites) + test_problems)
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--src", type=Path, default=REPO / "src" / "gen_worker")
+    parser.add_argument(
+        "--allowlist",
+        type=Path,
+        default=REPO / "scripts" / "arm_state_feeders_allowlist.txt",
+    )
+    args = parser.parse_args(argv)
+
+    red_proofs = run_red_proofs()
+    sources = _iter_sources(args.src)
+    arm_problems = audit_arm_seam(sources)
+    sites, site_problems = audit_classified_sites(args.src, sources)
+    allowed, allowlist_errors = load_allowlist(args.allowlist)
+    problems = (
+        arm_problems
+        + site_problems
+        + allowlist_errors
+        + check_allowlist(sites, allowed)
+    )
     if problems:
         print("\n".join(problems), file=sys.stderr)
         return 1
-    print(f"arm-state fence: {len(sites)} classified production feed(s), "
-          f"{len([f for f in FEEDERS if f.seam])} structural seam(s) intact, "
-          f"{len(test_sites)} RECOGNIZER row(s); no test simulates an arm")
+    print(
+        f"arm-state fence: {red_proofs} red proofs passed; "
+        f"{ARM_MODULE}::{ARM_SEAM} is the sole TCG arm seam; "
+        f"{len(sites)} classified global/constructor site(s)"
+    )
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

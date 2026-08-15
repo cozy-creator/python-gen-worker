@@ -20,11 +20,11 @@ without the other:
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Dict
 
 import pytest
 
-from gen_worker import aot_identity, cell_key, compile_cache as cc, dist_records
+from gen_worker import cell_key, compile_cache as cc, dist_records
 
 from harness.cell_meta import exported_cell_meta
 
@@ -172,19 +172,3 @@ def test_producer_and_reader_agree_on_membership() -> None:
 # ---------------------------------------------------------------------------
 # The wire fact follows the key
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("library", MODEL_LIBRARIES)
-def test_the_published_toolchain_wire_fact_follows_the_key(
-    library: str,
-) -> None:
-    """``ArtifactIdentity.toolchain_digest`` is compared fail-closed at adopt
-    time. If it kept the old membership while the key narrowed, every adoption
-    of a correctly-keyed cell would refuse on an axis that is a consequence of
-    the key — so it narrows with it."""
-    def _wire(block: Dict[str, Any]) -> str:
-        return aot_identity.artifact_identity(
-            exported_cell_meta(toolchain=block)).toolchain_digest
-
-    assert _wire(_bumped(library)) == _wire(dict(TOOLCHAIN))
-    assert _wire(_bumped("torch")) != _wire(dict(TOOLCHAIN))

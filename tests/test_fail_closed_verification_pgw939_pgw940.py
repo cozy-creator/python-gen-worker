@@ -1,4 +1,4 @@
-"""pgw#939 + pgw#940 — eight verified fail-open sites, one shape each.
+"""pgw#939 + pgw#940 — missing evidence is a refusal, never a skipped check.
 
 **pgw#939 (supply chain).** `if expected { compare }` — so an absent expected
 value ADMITS. The artifact in every case is bytes that will subsequently be
@@ -12,117 +12,79 @@ code reading the shared zero as the permissive case. §1.22 again, and the
 asymmetry decides it: admitting on an unreadable measurement OOMs paid tenant
 work, refusing costs a rung of performance.
 
-Every test below is RED against `master` at the commit this branch left, and
-each one names the site it covers.
+TCG now owns compiled-graph declaration and admission, so the first rows use
+its closed public declaration instead of the deleted worker verifier. The
+remaining rows preserve the independent download and measurement checks.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import pytest
-
-from gen_worker import aot_serve, cell_key  # noqa: E402
-
-
-# ---------------------------------------------------------------------------
-# pgw#939 §3-4 — aot_serve.verify guarded three identity axes on "a stamp is
-# present". A stampless cell was a wrong cache HIT, not a miss.
-# ---------------------------------------------------------------------------
+from torch_compiled_graphs import (
+    CallIngress,
+    CallInput,
+    DeclarationError,
+    GraphClassDeclaration,
+)
 
 
-def _entry_block() -> Dict[str, Any]:
-    """A minimal but VALID entry contract — `artifact_metadata` validates
-    every block it stamps, so a hand-rolled dict would fail before reaching
-    the axes under test."""
-    return {
-        "target": "unet",
-        "fork": [],
-        "class_dims": [["h", 64]],
-        "inputs": [{
-            "name": "x", "position": 0, "dtype": "bfloat16",
-            "shape": [1, 4, "s0", 64], "optional": False,
-        }],
-        "symbols": {"s0": [16, 160]},
-        "constants": [],
-        "graph": {
+def _declaration(
+    *,
+    range_digest: str | None = None,
+    graph_witness: str = "a" * 16,
+) -> GraphClassDeclaration:
+    ingress = CallIngress(
+        parameters=("sample",),
+        flat_arity=1,
+        inputs=(CallInput(
+            "sample", 0, "sample", 0, (), "sample", "bfloat16",
+            (1, 4, "s0", 64),
+        ),),
+        symbols=(("s0", (16, 160)),),
+    )
+    return GraphClassDeclaration(
+        graph_class="unet/h=64",
+        target="unet",
+        graph={
             "v": 3,
             "constant_fqns": ["w.weight"],
             "lifted_inputs": [],
-            "pytree": {"user_inputs": ["x"], "in_spec": "", "out_spec": ""},
-            "specialization": {
-                "weight_lane": "bf16", "lora_bucket": 0, "strict": True},
+            "pytree": {"ingress": ingress.as_dict()},
+            "specialization": {},
         },
-    }
-
-
-def _minted(family: str = "sdxl") -> Dict[str, Any]:
-    """A real, fully-stamped artifact envelope from the ONE producer."""
-    return aot_serve.entry_metadata(
-        family=family, precision="bf16", cell_key="",
-        name="unet", entry=_entry_block(),
-        strict_export=True, lora_bucket=0,
+        graph_witness=graph_witness,
+        range_digest=ingress.digest() if range_digest is None else range_digest,
+        class_dims=(("h", 64),),
     )
 
 
-def test_a_correctly_stamped_cell_still_verifies() -> None:
-    """The control. Without it a green result below could mean the whole
-    envelope stopped verifying for an unrelated reason."""
-    meta = _minted()
-    assert aot_serve.verify_declared(meta, family="sdxl") == ""
-    assert aot_serve.verify_contract(meta) == ""
+def test_tcg_declaration_is_the_closed_identity_control() -> None:
+    declaration = _declaration()
+
+    assert declaration.range_digest == CallIngress.from_graph(
+        declaration.graph
+    ).digest()
+    assert len(declaration.class_hash) == 16
+    assert "family" not in declaration.facts()
 
 
-def test_an_unstamped_family_is_refused_by_name() -> None:
-    """`if family and want_fam and want_fam != family` — the middle clause
-    made an unstamped cell match EVERY family it was offered to, on the axis
-    that decides which pipeline the `.so` is dlopen'd into."""
-    meta = _minted()
-    meta["family"] = ""
-    reason = aot_serve.verify_declared(meta, family="sdxl")
-    assert reason and "family" in reason, reason
+def test_tcg_refuses_an_absent_range_digest() -> None:
+    with pytest.raises(DeclarationError, match="range_digest"):
+        _declaration(range_digest="")
 
 
-def test_a_family_stamped_differently_is_still_refused() -> None:
-    """Unchanged behaviour on the arm that already worked."""
-    meta = _minted(family="flux")
-    assert "family" in aot_serve.verify_declared(meta, family="sdxl")
+def test_tcg_refuses_a_range_digest_that_does_not_restate_ingress() -> None:
+    with pytest.raises(DeclarationError, match="does not restate"):
+        _declaration(range_digest="0" * 32)
 
 
-def test_no_family_asked_means_no_family_refused() -> None:
-    """The strictness bites only when a caller names a family — a call that
-    asks nothing about family must not start failing."""
-    meta = _minted()
-    meta["family"] = ""
-    assert aot_serve.verify_declared(meta, family="") == ""
-
-
-def test_an_unstamped_range_digest_is_refused_by_name() -> None:
-    meta = _minted()
-    meta[cell_key.ENTRY_BLOCK_KEY].pop("range_digest")
-    reason = aot_serve.verify_contract(meta)
-    assert reason == "entry 'unet': no range_digest stamped", reason
-
-
-# pgw#1176 DELETED `test_an_unstamped_combined_graph_hash_is_refused_by_name`.
-# Its subject was `combined_graph_hash` as IDENTITY — an artifact-level fact
-# `verify_contract` had to refuse on. There is no such fact now: the label it
-# became (`manifest_digest`) is coverage telemetry, and an entry minted by a
-# pod that has not folded its whole declaration is a complete, keyable,
-# armable artifact. Refusing on its absence would reintroduce the collection
-# as a precondition for the atom, which is the disease. The fail-closed claim
-# this file exists for survives whole in the row below: absence is a VERDICT,
-# not a skipped check.
-
-
-def test_class_hash_absence_was_already_correct_and_stays_so() -> None:
-    """`:665-666` proves the author knew the right form; the other axis is
-    brought to IT, not the reverse."""
-    meta = _minted()
-    meta[cell_key.ENTRY_BLOCK_KEY]["class_hash"] = ""
-    assert aot_serve.verify_contract(meta) == "entry 'unet': no class_hash stamped"
+def test_tcg_refuses_an_absent_graph_witness() -> None:
+    with pytest.raises(DeclarationError, match="graph_witness"):
+        _declaration(graph_witness="")
 
 
 # ---------------------------------------------------------------------------

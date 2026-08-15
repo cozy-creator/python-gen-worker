@@ -126,7 +126,7 @@ def _template_declaration() -> Compile:
 
 def _spec(family: str, **kw: Any) -> ExportSpec:
     return ExportSpec(family=family, target="transformer",
-                      weight_lane="", precision="bf16", **kw)
+                      weight_lane="", **kw)
 
 
 # ---------------------------------------------------------------------------

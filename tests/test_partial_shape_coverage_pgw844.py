@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Annotated, Any, Dict, List, Tuple
+from typing import Annotated, Any, List, Tuple, cast
 
 import msgspec
 import pytest
@@ -49,6 +49,11 @@ from gen_worker import (  # noqa: E402
     endpoint,
 )
 from gen_worker import aot_serve  # noqa: E402
+from torch_compiled_graphs import (  # noqa: E402
+    CallIngress,
+    CallInput,
+    CompiledGraphRunner,
+)
 from gen_worker import compile_cache as cc  # noqa: E402
 from gen_worker import serving_mode  # noqa: E402
 import gen_worker.executor as executor_mod  # noqa: E402
@@ -60,8 +65,13 @@ from gen_worker.registry import extract_specs  # noqa: E402
 from gen_worker.models import store as store_mod
 
 FAMILY = "sdxl"
-FLAVOR = "inductor-l4-torch2.13-w8a8"
-CELL_REF = f"root/family-{FAMILY}#{FLAVOR}"
+COMPILED_GRAPH_KEY = "cg-key-v1-" + "8" * 56
+CELL_REF = f"root/family-{FAMILY}#{COMPILED_GRAPH_KEY}"
+#: The DYNAMO control arm's ref. Lane identity is structural now — a ref whose
+#: flavor is a compiled-graph key IS the exported lane (`is_aot_ref`) — so the
+#: dynamo arm has to carry a dynamo flavor or it scores itself on the wrong
+#: failure detector.
+DYNAMO_REF = f"root/family-{FAMILY}#inductor-l4-torch2.13-w8a8"
 CELL_DIGEST = "blake3:" + "a" * 64
 MODEL_DIGEST = "blake3:" + "c" * 64
 CHANNELS = 320
@@ -82,33 +92,50 @@ def _entry_name(h: int, w: int, *, cfg: bool = False) -> str:
             f"/B=1,H_lat={h},T_txt={TEXT_LEN},W_lat={w}")
 
 
-def _entry_meta(h: int, w: int) -> Dict[str, Any]:
+def _entry_contract(h: int, w: int) -> CallIngress:
     """One entry block exactly as the regional mint packs it: keyed on H_lat
     and W_lat, but the BLOCK's own input carries only their product."""
-    return {
-        "inputs": [
-            {"name": "hidden_states", "position": 0, "dtype": "bfloat16",
-             "shape": [1, h * w, CHANNELS]},
-            {"name": "encoder_hidden_states", "position": 1,
-             "dtype": "bfloat16", "shape": [1, TEXT_LEN, 2048]},
-        ],
-        "symbols": {},
-    }
+    return CallIngress(
+        parameters=("hidden_states", "encoder_hidden_states"),
+        flat_arity=2,
+        inputs=(
+            CallInput(
+                "hidden_states", 0, "hidden_states", 0, (), "hidden_states",
+                "bfloat16", (1, h * w, CHANNELS),
+            ),
+            CallInput(
+                "encoder_hidden_states", 1, "encoder_hidden_states", 1, (),
+                "encoder_hidden_states", "bfloat16", (1, TEXT_LEN, 2048),
+            ),
+        ),
+    )
 
 
-def _runner(h: int, w: int) -> aot_serve.ArtifactRunner:
-    """A real :class:`aot_serve.ArtifactRunner` over the real parsed contract.
-    Only the compiled package itself is a stub — the gates, the marshal and
-    the ingress assertion are production code."""
-    return aot_serve.ArtifactRunner(
-        package=lambda *feeds: feeds[0],
-        contract=aot_serve.contract_from_meta(_entry_meta(h, w)),
-        constants=(),
+class _FakeTCGRunner:
+    bound = True
+    declared_fqns: tuple[str, ...] = ()
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, *feeds: Any) -> Any:
+        self.calls += 1
+        return feeds[0]
+
+
+def _entry_runner(contract: CallIngress, entry: str) -> aot_serve.TCGEntryRunner:
+    """The live worker policy around the minimal TCG-owned runner surface."""
+    return aot_serve.TCGEntryRunner(
+        runner=cast(CompiledGraphRunner, _FakeTCGRunner()),
+        contract=contract,
         module_name="unet",
-        entry=_entry_name(h, w),
-        bound=True,
+        entry=entry,
         family=FAMILY,
     )
+
+
+def _runner(h: int, w: int) -> aot_serve.TCGEntryRunner:
+    return _entry_runner(_entry_contract(h, w), _entry_name(h, w))
 
 
 def _dispatch(buckets: Tuple[Tuple[int, int], ...]) -> aot_serve.EntryDispatch:
@@ -132,9 +159,8 @@ def test_sdxl_nine_buckets_collapse_to_four_token_counts_at_real_dispatch():
     """The pod's own table, reproduced through ``EntryDispatch.select``.
 
     This is the reproduction, not an illustration: the entries are parsed by
-    :func:`aot_serve.contract_from_meta` and admitted by
-    :func:`aot_serve.assert_ingress`, the same two functions the armed pod
-    ran.  One bucket dispatches; eight are ``entry_ambiguous``.
+    TCG's closed :class:`CallIngress` and admitted by the worker's real
+    ingress path. One bucket dispatches; eight are ``entry_ambiguous``.
     """
     dispatch = _dispatch(SDXL_BUCKETS)
 
@@ -158,23 +184,26 @@ def test_the_collapsed_declaration_dispatches_every_bucket_uniquely():
         h * w for h, w in SDXL_BUCKETS)
     collapsed = aot_serve.EntryDispatch(((
         "unet/block=BasicTransformerBlock#0,cfg=false",
-        aot_serve.ArtifactRunner(
-            package=lambda *feeds: feeds[0],
-            contract=aot_serve.contract_from_meta({
-                "inputs": [
-                    {"name": "hidden_states", "position": 0,
-                     "dtype": "bfloat16", "shape": [1, "s_tok", CHANNELS]},
-                    {"name": "encoder_hidden_states", "position": 1,
-                     "dtype": "bfloat16", "shape": [1, TEXT_LEN, 2048]},
-                ],
-                "symbols": {"s_tok": list(hull)},
-            }),
-            constants=(),
-            module_name="unet",
-            entry="unet/block=BasicTransformerBlock#0,cfg=false",
-            bound=True,
-            family=FAMILY,
-        )),))
+        _entry_runner(
+            CallIngress(
+                parameters=("hidden_states", "encoder_hidden_states"),
+                flat_arity=2,
+                inputs=(
+                    CallInput(
+                        "hidden_states", 0, "hidden_states", 0, (),
+                        "hidden_states", "bfloat16", (1, "s_tok", CHANNELS),
+                    ),
+                    CallInput(
+                        "encoder_hidden_states", 1, "encoder_hidden_states", 1,
+                        (), "encoder_hidden_states", "bfloat16",
+                        (1, TEXT_LEN, 2048),
+                    ),
+                ),
+                symbols=(("s_tok", hull),),
+            ),
+            "unet/block=BasicTransformerBlock#0,cfg=false",
+        ),
+    ),))
 
     for h, w in SDXL_BUCKETS:
         name, _r = collapsed.select(_call(h, w), {})
@@ -264,24 +293,14 @@ def _arm(pipe: _Pipe, *_args: Any) -> Any:
 
 
 def _cell_snapshot(tmp_path: Path) -> Path:
-    """A real packed cell tarball, in the format this repository can WRITE.
+    """Opaque transport bytes carried through the executor's exact order.
 
-    pgw#1181 retargeted this from `compile_cache.pack` (the whole-cell
-    `torch-inductor-cache` tarball, no writer since pgw#1178, deleted here)
-    onto the exported `aot-inductor` cell, through the same shared harness the
-    publish-path tests use. What the rows below need is a cell ON DISK that
-    the executor's snapshot/selection plumbing carries; building it out of a
-    format nothing writes made them fixtures constructing a shape production
-    cannot produce (§4.34)."""
-    from gen_worker import aot_serve
-    from harness.cell_meta import exported_cell_meta
-
-    work = tmp_path / "cap"
-    work.mkdir(parents=True, exist_ok=True)
-    (work / aot_serve.PACKAGE_NAME).write_bytes(b"\x00not-a-real-pt2")
-    out = tmp_path / "minted"
-    out.mkdir(exist_ok=True)
-    return aot_serve.pack(work, out / "cell.tar.gz", exported_cell_meta(family=FAMILY))
+    This suite stubs the compile-arm leaf below, so no Engine imports these
+    bytes. The proof here is snapshot/selection plumbing plus live dispatch,
+    not TCG artifact admission (which has its own tests)."""
+    artifact = tmp_path / "compiled-graph-transfer.tar.gz"
+    artifact.write_bytes(b"\x00tcg-transfer-placeholder")
+    return artifact
 
 
 def _arm_dynamo(pipe: _Pipe, *_args: Any) -> Any:
@@ -324,7 +343,7 @@ def _boot(
         executor_mod.activity_mod, "emit_event",
         lambda kind, detail, phase="", duration_ms=0, **_kw: events.append(
             (kind, phase, detail)))
-    # An `aot_serve.note_aot_key(FLAVOR)` stood here, with a comment
+    # An `aot_serve.note_aot_key(COMPILED_GRAPH_KEY)` stood here, with a comment
     # arguing this process is "TOLD the flavor is an AOT cell exactly as a
     # Plan's `Arm.artifact` tells a pod". Production is told no such thing — it
     # LEARNS at the wrap (`arm_entry`, pgw#1141b), and the route that
@@ -344,8 +363,10 @@ def _boot(
     async def _send(_msg: Any) -> None:
         return None
 
+    cell_ref = CELL_REF if exported else DYNAMO_REF
+
     async def _download(ref, **kwargs):
-        return artifact.parent if ref == CELL_REF else model_dir
+        return artifact.parent if ref == cell_ref else model_dir
 
     ex = Executor(specs, _send)
     ex.store._cache_dir = tmp_path / "cas"
@@ -361,7 +382,7 @@ def _boot(
     arm_order = executor_mod._ArmOrder(
         backend="aot_cell",
         selection=executor_mod._CompileArtifactSelection(
-            path=artifact, ref=CELL_REF, snapshot_digest=CELL_DIGEST))
+            path=artifact, ref=cell_ref, snapshot_digest=CELL_DIGEST))
     asyncio.run(ex.ensure_setup(generate, {
         model_ref: pb.Snapshot(digest=MODEL_DIGEST),
     }, arm=arm_order))

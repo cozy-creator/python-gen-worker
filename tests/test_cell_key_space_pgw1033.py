@@ -1,18 +1,17 @@
-"""The STAMPED key is the cell's identity; the ARM TOKEN names an obligation.
+"""The TCG key is the cell's identity; the ARM TOKEN names an obligation.
 Comparing one against the other silently disarms a protection.
 
-The two spaces are disjoint BY SPELLING, not just by formula:
+The two values have different semantic owners even though TCG deliberately
+accepts future key schemes by grammar rather than by a closed prefix list:
 
-* the **arm token** (``fleet_cells.arm_identity``, ``arm1-<56 hex>``) — the
+* the **arm token** (``fleet_cells.arm_identity``, ``arm2-<56 hex>``) — the
   pre-trace obligation identity. It exists before anything is compiled,
-  which is exactly why it can name a pending mint — and it is NOT a cell
-  key (``cell_key.is_key`` is False on it);
-* the **stamped** key (``aot_mint.cell_identity``, ``ck1-<56 hex>``, the
-  four-axis graph x envelope x sm x toolchain digest) — what the exported
-  cell actually IS. It does not exist until the export finishes.
+  which is exactly why it can name a pending mint. It never selects bytes;
+* the **TCG key** (``cg-key-v1-<56 hex>``) — what one exported graph class
+  actually IS. It does not exist until tracing and TCG declaration finish.
 
 Each protection below was written on one side and fed from the other, and so
-silently stopped firing. The three that matter:
+silently stopped firing. The two that matter:
 
 1. ``finalized_in_process`` (the no-second-mint memo) read the computed key
    while ``adopt_delegated_mint`` wrote the stamped one — the memo could never
@@ -21,9 +20,6 @@ silently stopped firing. The three that matter:
    a real proof failure (``executor``'s runtime guard and boot proof) record the
    STAMPED ref of the armed cell — so the churn-loop gate was blind to the refs
    that actually fail;
-3. ``aot_serve.note_aot_key`` had ONE caller, discovery — so a SELF-MINTED cell
-   was never registered and the kind dispatch scored this pod's own ``.pt2`` by
-   FX cache hits it cannot produce.
 
 Plus the dead-attribute guard: ``_selection_for`` tested ``mint.recipe ==
 "aot"``, an attribute no mint object carries.
@@ -37,7 +33,7 @@ from typing import Any, List, Tuple
 
 import pytest
 
-from gen_worker import aot_serve, compile_cache, fleet_cells
+from gen_worker import compile_cache, fleet_cells
 from gen_worker import config as gw_config
 from gen_worker import mint_supervisor
 from gen_worker.api.decorators import Compile, Dim, GraphClass, Input
@@ -48,8 +44,8 @@ from gen_worker.cell_adopt import AdoptOutcome, EagerPhase
 
 FAMILY = "sdxl"
 #: What this runtime's facts COMPUTE — the arm token, known before any
-#: compile has run. NOT ck-shaped: an obligation is not a cell.
-ARM_KEY = "arm1-" + "a" * 56
+#: compile has run. An obligation never selects compiled-graph bytes.
+ARM_KEY = fleet_cells.ARM_SCHEME + "-" + "a" * fleet_cells.ARM_DIGEST_HEX
 #: What the child's envelope is STAMPED with — the cell identity, unknowable
 #: until the export finishes. A different digest, always.
 STAMPED_KEY = "cg-key-v1-" + "b" * 56
@@ -284,47 +280,7 @@ def test_a_quarantined_ARM_ref_still_declines_the_next_arm(
 
 
 # ---------------------------------------------------------------------------
-# 3. The pgw#734/#735 kind dispatch
-# ---------------------------------------------------------------------------
-
-
-def test_an_ARM_TOKEN_is_never_classified_as_an_exported_ref(
-    _miss: None, _events: List[Tuple[str, str, str]],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The KEY-SPACE half, which is this file's subject: an owed mint's
-    computed ref names an obligation, never an artifact, and no adopt may make
-    it read as one. The cell's STAMPED key is a different space entirely.
-
-    pgw#1152 moved the other half out. ``note_aot_key`` used to be called by
-    this finalize — one of pgw#1033's two SELF-PRODUCED feeders, and the
-    convention the ordered/boot-adopt arm did not keep (pgw#1141b, measured on
-    a pod). Registration is now a property of ``aot_serve.arm_entry``, so
-    "an exported cell's ref is recognized" is a fact about the WRAP and is
-    asserted where a real wrap happens:
-    ``test_adopted_arm_lane_pgw1141b::test_the_ordered_arm_teaches_the_recognizer_its_key``.
-    This fixture deliberately stubs ``arm_aot`` — nothing is wrapped here, and
-    nothing may therefore be recognized.
-    """
-    pending = _arm().self_mint
-    assert pending is not None
-    assert not aot_serve.is_aot_ref(pending.ref), (
-        "an OWED mint has no cell yet — nothing may claim its computed ref "
-        "names an exported artifact")
-
-    minted = _adopt(monkeypatch, pending)
-    assert minted is not None
-    assert minted.cell_key == STAMPED_KEY, (
-        "the finalized cell carries the ARM token as its identity; the stamped "
-        "key is the only thing that addresses the bytes")
-    assert not aot_serve.is_aot_ref(pending.ref)
-    assert not aot_serve.is_aot_ref(minted.ref), (
-        "this fixture never reached the wrap, so nothing armed these bytes — "
-        "a ref recognized here would be a registration nobody earned")
-
-
-# ---------------------------------------------------------------------------
-# 4. The dead-attribute guard (pgw#805's, on an attribute pgw#1010 deleted)
+# 3. The dead-attribute guard (pgw#805's, on an attribute pgw#1010 deleted)
 # ---------------------------------------------------------------------------
 
 
@@ -361,7 +317,7 @@ def test_an_owed_mint_advertises_no_artifact_identity(
 
 
 # ---------------------------------------------------------------------------
-# 5. The pgw#686 divergence warning — DELETED by pgw#1032
+# 4. The pgw#686 divergence warning — DELETED by pgw#1032
 #
 # `_warn_cell_key_divergence` and its two tests
 # (`test_a_healthy_self_minted_AOT_boot_logs_no_key_divergence`,

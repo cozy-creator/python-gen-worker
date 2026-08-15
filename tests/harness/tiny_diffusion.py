@@ -229,7 +229,7 @@ SYNTHETIC_RUNTIME_ENV = "PGW978_SYNTHETIC_RUNTIME"
 
 #: The values it installs. Every one is a real fact of a real runtime (an L4 at
 #: sm_89, cuda 13.0) — nothing about how they are COMBINED into a cell key is
-#: faked, which is the same seam `test_aot_mint_pgw723._gpu_runtime` has used
+#: faked, which is the same seam the TCG compile-child tests use
 #: since pgw#723. sm_89 specifically because it is this box's own compute
 #: capability; the box simply cannot execute cu130 today (pgw#983).
 SYNTHETIC_RUNTIME = {
@@ -264,13 +264,10 @@ def install_synthetic_runtime_if_asked() -> bool:
         return False
     import torch as _torch
 
-    from gen_worker import aot_serve, compile_cache
+    from gen_worker import compile_cache
 
     full = dict(SYNTHETIC_RUNTIME, torch=str(_torch.__version__))
     compile_cache.runtime_key = lambda: dict(full)  # type: ignore[assignment]
-    aot_serve.runtime_key = lambda: {  # type: ignore[assignment]
-        "sku": full["sku"], "sm": full["sm"], "torch": full["torch"],
-        "cuda": full["cuda"]}
     return True
 
 

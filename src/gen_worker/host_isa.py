@@ -22,10 +22,9 @@ incidental EVEX scalar encodings with exact SSE2 equivalents. Because
 is env_seal- and therefore cell-key-visible: hosts below baseline mint and
 serve their own honestly-keyed cohort instead of sharing a lying key.
 
-Defense in depth: mints stamp :func:`stamp` into artifact metadata, and
-``aot_serve`` refuses an artifact whose requirement this host cannot execute
-(``adopt_failed:host_isa_unsupported``) BEFORE ``aoti_load_package`` — a
-named refusal that composes with the ordinary miss policy, never a SIGILL.
+TCG owns artifact admission and runner loading. The worker's responsibility is
+therefore only the process-wide compiler clamp, which is exercised against a
+real TCG AOTI package below this module's tests.
 """
 
 from __future__ import annotations
@@ -33,7 +32,7 @@ from __future__ import annotations
 import logging
 import platform
 from functools import lru_cache
-from typing import Dict, FrozenSet, Mapping, Optional, Sequence, Tuple, Union
+from typing import Dict, FrozenSet, Optional, Tuple
 
 from . import torch_capability
 
@@ -204,33 +203,6 @@ def impose() -> Dict[str, str]:
     return {"cpp_march": march, "cpp_simdlen": str(simdlen)}
 
 
-def assert_command_is_clamped(argv: Sequence[str]) -> None:
-    """Refuse a host compile whose ARGV still carries ``-march=native``.
-
-    :func:`impose` asserts the clamp at the *config* level only; a harness
-    that never booted through ``env_seal.establish`` mints unclamped objects.
-    torch builds the flag in
-    ``cpp_builder._get_cpu_arch_cflags``, which falls through to
-    ``march=native`` whenever ``config.cpp.march`` is None, so this reads
-    what was actually built rather than what was intended.
-
-    Why it matters beyond ISA portability: gcc records the EXPANDED flag set
-    in ``DW_AT_producer``, so a ``-march=native`` object is byte-different on
-    every host CPU model even when the machine code is identical.
-
-    A no-op on non-x86 (``mint_march()`` is None there, so nothing is
-    claimed and nothing is checked).
-    """
-    if mint_march() is None:
-        return
-    for tok in argv:
-        if tok == "-march=native" or tok == "--param=march=native":
-            raise HostIsaError(
-                "host compile carries -march=native despite the pgw#754 clamp; "
-                "this process did not boot through env_seal.establish. "
-                f"argv: {' '.join(argv[:12])}...")
-
-
 def effective() -> Dict[str, str]:
     """Read-back of the live codegen target (seal fact; never assumed).
     Empty on a torchless worker: no codegen target exists to read."""
@@ -244,56 +216,6 @@ def effective() -> Dict[str, str]:
     }
 
 
-def stamp() -> Dict[str, Union[str, int]]:
-    """The host-ISA requirement block a mint records in artifact metadata.
-
-    ``level`` is the EXECUTION requirement: the imposed march when clamped,
-    else this host's own level — an unclamped (native) build may use any
-    instruction the mint host has, so its requirement is the whole host.
-    """
-    import torch._inductor.config as inductor_config
-
-    march = str(inductor_config.cpp.march or "")
-    if march in _RANK:
-        level = march
-    elif machine() == "x86_64":
-        level = host_level()
-    else:
-        level = ""
-    return {
-        "machine": machine(),
-        "march": march,
-        "simdlen": int(inductor_config.cpp.simdlen or 0),
-        "level": level,
-    }
-
-
-def unsupported_reason(level: str, artifact_machine: str) -> str:
-    """'' when THIS host can execute code built for (machine, level), else
-    the refusal reason naming the missing capability."""
-    here = machine()
-    if artifact_machine and artifact_machine != here:
-        return (
-            f"artifact host code is {artifact_machine}, this host is {here}")
-    if not level:
-        return ""
-    if here != "x86_64":
-        # x86 level stamped but we are not x86 (and machine field was
-        # empty/matching): unexecutable by construction.
-        return f"artifact requires x86-64 level {level!r} on {here}"
-    missing = sorted(_required_flags(level) - host_flags())
-    if missing:
-        return (
-            f"artifact requires {level} but this host cpu lacks "
-            f"{','.join(missing)}")
-    return ""
-
-
-def requirement_of_meta(block: Mapping[str, object]) -> Tuple[str, str]:
-    """(level, machine) requirement recorded by a mint's ``host_isa`` block."""
-    return str(block.get("level") or ""), str(block.get("machine") or "")
-
-
 __all__ = [
     "BASELINE",
     "HostIsaError",
@@ -304,7 +226,4 @@ __all__ = [
     "machine",
     "mint_march",
     "mint_simdlen",
-    "requirement_of_meta",
-    "stamp",
-    "unsupported_reason",
 ]

@@ -59,17 +59,13 @@ from test_procsplit_pgw763 import (  # noqa: F401 — fixtures come with it
     captured_dials,
     isolated_postmortem,
 )
-from test_receipts_pgw709 import (  # noqa: F401 — fixtures come with it
+from harness.receipt_hub import (
     FAMILY,
     OTHER_ENDPOINT,
     SELF_ENDPOINT,
     SELF_ORG,
     HubStub,
-    hub,
     make_artifact,
-    pub_map,
-    rsa_key,
-    worker_jwt_for,
 )
 
 #: The parent's credential, shaped exactly as `cellgrant.Stamp` writes it:

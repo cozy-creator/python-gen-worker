@@ -12,8 +12,7 @@ What was RED before this issue, on every one of these:
   rmtree'd the bytes — th#1643's SUNK case, once per boot, forever;
 * nothing in the tree could address a locally-stored AOT cell (``local_cells``
   is JIT-only and knows no ``ck1`` key);
-* ``aot_resume``'s PRODUCTION resume bank was rooted through the module
-  pgw#1086 wave 1 deletes.
+* compiled-graph reuse had no single canonical HashRepo/TCG authority.
 
 The store's own guarantees are proven against REAL bytes on disk (digest,
 atomicity, drop-on-corruption). The arm is proven to be the SAME gate the
@@ -26,11 +25,11 @@ import ast
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import pytest
 
-from gen_worker import aot_resume, cell_key, fleet_cells, local_cell_store
+from gen_worker import cell_key, fleet_cells, local_cell_store
 from gen_worker.cell_adopt import AdoptOutcome
 
 KEY_A = "cg-key-v1-" + "a" * 56
@@ -128,7 +127,7 @@ def test_the_store_refuses_to_be_addressed_by_anything_that_is_not_a_key(
 def test_a_record_written_but_never_filled_is_absent_not_short(
     store: Path, tmp_path: Path,
 ) -> None:
-    """The record is written LAST (aot_resume's rule): a crash mid-store leaves
+    """The record is written LAST: a crash mid-store leaves
     a directory the next lookup treats as absent, never as a short cell."""
     local_cell_store.store(_artifact(tmp_path), key=KEY_A, family="f")
     (store / "aot-cells" / KEY_A / local_cell_store.RECORD_NAME).unlink()
@@ -143,8 +142,8 @@ def test_a_record_written_but_never_filled_is_absent_not_short(
 def test_corrupting_a_stored_cell_refuses_admission_and_drops_it(
     store: Path, tmp_path: Path,
 ) -> None:
-    """`aot_resume`'s safety property, applied to the store: **a bank cannot
-    vouch for itself.** The digest is RECOMPUTED over the bytes on disk, so a
+    """A persisted artifact cannot vouch for itself. The digest is RECOMPUTED
+    over the bytes on disk, so a
     truncated, half-written or edited artifact refuses HERE rather than being
     handed to an arm that would then serve it.
 
@@ -322,27 +321,6 @@ def test_the_local_store_has_no_publish_path(store: Path) -> None:
         assert not bad, f"the local cell store references {bad}"
 
 
-def test_the_production_resume_bank_still_roots_in_the_local_store(
-    store: Path,
-) -> None:
-    """pgw#1092 §4 landmine 1, closed. `aot_resume` is a SERVE-PATH module and
-    its bank was rooted through `local_cells.store_root()` — the module
-    pgw#1086 wave 1 deletes. The accessor moved here with its value unchanged,
-    so no bank is orphaned and wave 1 is unblocked.
-    """
-    bank = aot_resume.bank_root("some-scope")
-    assert bank.is_relative_to(local_cell_store.store_root())
-    assert aot_resume.RESUME_DIRNAME in bank.parts
-
-    resume_tree = ast.parse(Path(aot_resume.__file__).read_text())
-    names = {
-        n.value.id for n in ast.walk(resume_tree)
-        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
-    }
-    assert "local_cells" not in names, (
-        "aot_resume must not reach into the JIT store pgw#1086 deletes")
-
-
 # ---------------------------------------------------------------------------
 # 6. Reuse: ONE gate, and the local cell gets no weaker verification
 # ---------------------------------------------------------------------------
@@ -399,7 +377,6 @@ def armable(monkeypatch: pytest.MonkeyPatch) -> List[Path]:
     # the cell agree, so the gate passes and what is under test is the
     # LOOKUP -> ARM wiring.
     monkeypatch.setattr(fleet_cells, "arm_axis_divergence", lambda arm, meta, **_kw: "")
-    monkeypatch.setattr(fleet_cells.aot_serve, "note_aot_key", lambda k: None)
     monkeypatch.setattr(fleet_cells.activity_mod, "emit_event",
                         lambda *a, **k: None)
     monkeypatch.setattr(fleet_cells, "_FINALIZED", {})

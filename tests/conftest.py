@@ -53,6 +53,8 @@ os.environ.setdefault(
 if str(Path(__file__).parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).parent))
 
+pytest_plugins = ("harness.receipt_hub",)
+
 import gen_worker  # noqa: E402
 
 # The suite runs under the DECLARED interpreter env — the exact
@@ -123,22 +125,6 @@ def _fresh_process_settings():
     yield
     gw_config.reset_for_test()
     gw_worker_goals.reset_for_test()
-
-
-@pytest.fixture(autouse=True)
-def _fresh_learned_aot_keys():
-    """`aot_serve.note_aot_key` learns into a process-global set. A key one
-    test teaches must never reclassify another test's dynamo refs as AOT —
-    the pgw#722 discovery suite's `ck1-999…` collided with the adopt suite's
-    stubbed mint digest and silently flipped its whole proof lane."""
-    from gen_worker import aot_serve
-
-    with aot_serve._KNOWN_AOT_KEYS_LOCK:
-        before = set(aot_serve._KNOWN_AOT_KEYS)
-    yield
-    with aot_serve._KNOWN_AOT_KEYS_LOCK:
-        aot_serve._KNOWN_AOT_KEYS.clear()
-        aot_serve._KNOWN_AOT_KEYS.update(before)
 
 
 @pytest.fixture(autouse=True)
@@ -223,11 +209,10 @@ def _boot_isa_clamp():
     every real AOTI compile a test drove was built ``-march=native``: an
     unclamped, unportable object, silently unlike anything a pod produces.
 
-    pgw#811's ``assert_command_is_clamped`` made that visible by refusing it
-    at the argv level. The honest answer is to give the suite the boot
-    precondition production has, not to soften the assert — pgw#754 is a
-    SIGILL-class defect. Tests that exercise the clamp itself monkeypatch
-    ``inductor_config.cpp`` directly and are unaffected (monkeypatch restores).
+    The honest answer is to give the suite the boot precondition production
+    has — pgw#754 is a SIGILL-class defect. Tests that exercise the clamp itself
+    monkeypatch ``inductor_config.cpp`` directly and are unaffected
+    (monkeypatch restores).
     """
     from gen_worker import host_isa as _isa
 
@@ -358,8 +343,7 @@ def _isolated_local_cell_store(tmp_path_factory):
     `local_keep_reason` keeps a cell whenever no publisher was wired, which is
     every unit fixture in the tree. Redirect the root per test, so the suite
     can never deposit fake cells in the developer's real store (or read one
-    left by a previous run and call it a hit). Also isolates
-    ``aot_resume.bank_root``, which is sited under the same root.
+    left by a previous run and call it a hit).
 
     **Deliberately does NOT take `monkeypatch`**, and this is not a style
     preference — it cost a CI red. An AUTOUSE fixture is set up before the

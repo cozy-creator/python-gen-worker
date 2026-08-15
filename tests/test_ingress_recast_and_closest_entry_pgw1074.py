@@ -26,13 +26,13 @@ actual objection was unavailable and diagnosing it meant pulling the published
 cell apart.
 
 Real codepaths: a real `torch.export` + real AOTI compile on CPU, driven through
-the real `ArtifactRunner`/`EntryDispatch`, on the pgw#791 rig.
+the live `TCGEntryRunner`/`EntryDispatch`, on the pgw#791 rig.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, cast
 
 import pytest
 
@@ -41,6 +41,11 @@ torch = pytest.importorskip("torch")
 import torch.nn as nn  # noqa: E402
 
 from gen_worker import activity, aot_serve  # noqa: E402
+from torch_compiled_graphs import (  # noqa: E402
+    CallIngress,
+    CallInput,
+    CompiledGraphRunner,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -77,26 +82,47 @@ def package(tmp_path_factory) -> Any:
 def _contract(timestep_dtype: str = "float32",
               sample_dims: Tuple[int, int] = (2, 8),
               timestep_shape: List[Any] | None = None,
-              ) -> aot_serve.ArtifactContract:
-    return aot_serve.contract_from_meta({
-        "inputs": [
-            {"name": "sample", "position": 0, "dtype": "float32",
-             "shape": list(sample_dims)},
-            {"name": "timestep", "position": 1, "dtype": timestep_dtype,
-             "shape": [] if timestep_shape is None else timestep_shape},
-        ],
-        "symbols": {},
-        "constants": [],
-    })
+              ) -> CallIngress:
+    return CallIngress(
+        parameters=("sample", "timestep"),
+        flat_arity=2,
+        inputs=(
+            CallInput(
+                "sample", 0, "sample", 0, (), "sample", "float32",
+                tuple(sample_dims),
+            ),
+            CallInput(
+                "timestep", 1, "timestep", 1, (), "timestep",
+                timestep_dtype,
+                tuple(() if timestep_shape is None else timestep_shape),
+            ),
+        ),
+    )
+
+
+class _PackageRunner:
+    """The minimal TCG runner surface around this test's real AOTI package."""
+
+    def __init__(self, package: Any) -> None:
+        self.package = package
+        self.calls = 0
+        self.bound = True
+        self.declared_fqns: Tuple[str, ...] = ()
+
+    def __call__(self, *feeds: Any) -> Any:
+        if self.package is None:
+            raise AssertionError("selection-only runner was invoked")
+        result = self.package(*feeds)
+        self.calls += 1
+        return result
 
 
 def _runner(package: Any, contract: Any = None,
             entry: str = "unet/adapter=false,cfg=false/B=1") -> Any:
-    runner = aot_serve.ArtifactRunner(
-        package=package, contract=contract or _contract(),
-        constants=(), module_name="unet", entry=entry, family="tiny1074")
-    runner.bound = True
-    return runner
+    return aot_serve.TCGEntryRunner(
+        runner=cast(CompiledGraphRunner, _PackageRunner(package)),
+        contract=contract or _contract(),
+        module_name="unet", entry=entry, family="tiny1074")
 
 
 @pytest.fixture
@@ -249,31 +275,40 @@ def _sdxl_entry(adapter: bool, cfg: bool, batch: int, h: int, w: int,
     branch-bearing one declares it."""
     name = (f"unet/adapter={str(adapter).lower()},cfg={str(cfg).lower()}"
             f"/B={batch},H_lat={h},T_txt=77,W_lat={w}")
-    inputs: List[Dict[str, Any]] = [
-        {"name": "sample", "position": 0, "dtype": "bfloat16",
-         "shape": [batch, 4, h, w]},
-        {"name": "timestep", "position": 1, "dtype": timestep_dtype,
-         "shape": []},
-        {"name": "encoder_hidden_states", "position": 2,
-         "dtype": "bfloat16", "shape": [batch, 77, 2048]},
+    inputs = [
+        CallInput(
+            "sample", 0, "sample", 0, (), "sample", "bfloat16",
+            (batch, 4, h, w),
+        ),
+        CallInput(
+            "timestep", 1, "timestep", 1, (), "timestep", timestep_dtype, ()
+        ),
+        CallInput(
+            "encoder_hidden_states", 2, "encoder_hidden_states", 2, (),
+            "encoder_hidden_states", "bfloat16", (batch, 77, 2048),
+        ),
     ]
     excluded: List[str] = []
     if adapter:
         inputs += [
-            {"name": "lora_a", "position": 3, "dtype": "bfloat16",
-             "shape": [64, 8]},
-            {"name": "lora_b", "position": 4, "dtype": "bfloat16",
-             "shape": [8, 64]},
+            CallInput(
+                "lora_a", 3, "lora_a", 3, (), "lora_a", "bfloat16", (64, 8)
+            ),
+            CallInput(
+                "lora_b", 4, "lora_b", 4, (), "lora_b", "bfloat16", (8, 64)
+            ),
         ]
     else:
         excluded = ["lora_a", "lora_b"]
-    contract = aot_serve.contract_from_meta({
-        "inputs": inputs, "symbols": {}, "constants": [],
-        "excluded_inputs": excluded,
-    })
-    return name, aot_serve.ArtifactRunner(
-        package=None, contract=contract, constants=(), module_name="unet",
-        entry=name, family="sdxl")
+    contract = CallIngress(
+        parameters=(
+            "sample", "timestep", "encoder_hidden_states", "lora_a", "lora_b"
+        ),
+        flat_arity=len(inputs),
+        inputs=tuple(inputs),
+        excluded_inputs=tuple(excluded),
+    )
+    return name, _runner(None, contract=contract, entry=name)
 
 
 def _sdxl_dispatch(timestep_dtype: str) -> aot_serve.EntryDispatch:

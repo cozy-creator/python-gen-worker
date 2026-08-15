@@ -1,6 +1,5 @@
 """pgw#1113 — the obligation names its subject, the memo names what it traced,
 the advertisement names what armed, and the key names the placement.
-
 THE GOVERNING PRINCIPLE, which is why these five changes are one change:
 
     The CELL KEY is the computation and must not OVER-split (the membership
@@ -20,14 +19,13 @@ milliseconds.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict, Mapping
+from typing import Any, Dict
 
 import pytest
 
-from gen_worker import aot_serve, boot_key, cell_key, fleet_cells, local_cell_store
+from gen_worker import boot_key, cell_key, fleet_cells, local_cell_store
 from gen_worker.api.binding import Hub
 from gen_worker.child_contract import CompileSpec, MintSlot
 
@@ -199,30 +197,6 @@ def test_the_arm_facts_split_into_environment_and_subject() -> None:
     assert "graph" not in identity.facts_dict()
 
 
-def test_a_subject_difference_is_not_a_handback_divergence() -> None:
-    """A cell records no subject, so the handback seam must not ask for one —
-    otherwise every delegated mint would refuse itself."""
-    pipe = _Pipe()
-    fleet_cells.stamp_arm_subject(pipe, "pipeline", ["q/img"], "sha256:aa")
-    arm = fleet_cells.arm_identity(
-        "qwen-image", "", 0, _Cfg(),
-        subject=fleet_cells.pipeline_arm_subject(pipe))
-    facts = arm.facts_dict()
-    meta: Dict[str, Any] = {
-        "family": facts["family"],
-        aot_serve.COMPILED_GRAPH_FORMAT_KEY:
-            facts[aot_serve.COMPILED_GRAPH_FORMAT_KEY],
-        "weight_lane": "",
-        "lora_bucket": 0,
-        "sm": facts["sm"],
-        cell_key.EXPORT_ENVELOPE_KEY: fleet_cells.declared_envelope_block(
-            _Cfg()),
-        "toolchain": dict(fleet_cells.cc.toolchain_digest()),
-    }
-    meta[fleet_cells.env_seal.SEAL_KEY] = fleet_cells.env_seal.effective_seal()
-    assert fleet_cells.arm_axis_divergence(arm, meta) == ""
-
-
 # --------------------------------------------------------------------------
 # 2. the boot-key memo is no longer checkpoint-blind
 # --------------------------------------------------------------------------
@@ -243,15 +217,8 @@ def test_a_rebinding_forces_a_memo_MISS() -> None:
 
     ``closure_digest`` folded the SDK+endpoint code content and the
     declaration — and not the resolved slot refs the traces are actually run
-    against. A memo HIT skips the traces and returns the MEMO's own witnesses
-    (``graph_witnesses_of(memoized)``), which ``boot_adopt`` then verifies the
-    pulled cell against. On that path pgw#1031's graph-witness floor — the
-    fail-closed backstop for a wrong cell by key — was comparing a cell
-    against a stale record of a DIFFERENT checkpoint's graph, so it could only
-    agree. It was structurally unable to fire on the one path that most needs
-    it.
-
-    Folding the slots in is what makes that check capable of failing.
+    against. A memo HIT skips those traces, so folding the slots is what keeps
+    a different checkpoint from reusing stale TCG class hashes.
     """
     cfg = _spec()
     base = boot_key.closure_digest(
@@ -269,8 +236,7 @@ def test_the_memo_row_of_one_checkpoint_does_not_answer_for_another(
     redeploy that rebinds the slot."""
     cfg = _spec()
     was = boot_key.closure_digest("q", cfg, function="fn", slots=_slots(BASE))
-    boot_key.write_memo(tmp_path, was, {
-        "a": {"class_hash": "1" * 16, "graph_witness": "w" * 16}})
+    boot_key.write_memo(tmp_path, was, {"a": "1" * 16})
     assert boot_key.read_memo(tmp_path, was), "the memo must answer itself"
 
     now = boot_key.closure_digest("q", cfg, function="fn", slots=_slots(EDIT))
@@ -327,132 +293,3 @@ def test_the_arm_token_scheme_is_its_fact_set(tmp_path: Path) -> None:
     assert dropped == 1
     assert not stale.exists() and current.exists()
     assert fleet_cells.ARM_SCHEME != "arm1"
-
-
-# --------------------------------------------------------------------------
-# 4. the placement keying fact — and the NO-RE-KEY proof
-# --------------------------------------------------------------------------
-
-
-def _class_hash_before_pgw1113(
-    entry: Mapping[str, Any], *, strict: bool, lora_bucket: int,
-) -> str:
-    """``aot_serve.class_hash`` VERBATIM as of the parent commit.
-
-    Kept as a literal second implementation on purpose — the only way to prove
-    a keying change re-keys nothing is to compute both keys, and the honest
-    "before" is the old formula, not the new one with the new field left out.
-    """
-    facts = {
-        "v": 3,
-        "target": str(entry.get("target") or ""),
-        "fork": [[str(n), v] for n, v in (entry.get("fork") or [])],
-        "class_dims": [
-            [str(n), int(v)] for n, v in (entry.get("class_dims") or [])],
-        "range_digest": str(entry.get("range_digest") or ""),
-        "graph": dict(entry.get("graph") or {}),
-        "graph_witness": str(entry.get("graph_witness") or ""),
-        "strict": bool(strict),
-        "lora_bucket": int(lora_bucket or 0),
-    }
-    blob = json.dumps(facts, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(blob).hexdigest()[:16]
-
-
-def _entry(**extra: Any) -> Dict[str, Any]:
-    block: Dict[str, Any] = {
-        "target": "transformer",
-        "fork": [["adapter", False]],
-        "class_dims": [["height", 1024], ["width", 1024]],
-        "range_digest": "d" * 32,
-        "graph": {"specialization": {"strict": True, "lora_bucket": 0}},
-        "graph_witness": "e" * 16,
-    }
-    block.update(extra)
-    return block
-
-
-@pytest.mark.parametrize("extra", [
-    {},                                    # every cell published to date
-    {"placement": ["cuda:0"]},             # a single-device cell that states it
-    {"placement": []},                     # stated, and empty
-])
-def test_no_live_cell_re_keys(extra: Dict[str, Any]) -> None:
-    """pgw#1113 claims NOTHING re-keys a live cell, as a deliberate property
-    rather than luck: every new fact is omitted at the value every published
-    cell holds. This is that claim, checked rather than asserted.
-
-    A single-device placement is TRIVIAL, so the canonical form is
-    byte-identical to the form with no placement at all — the ``excluded`` /
-    ``param`` / ``overlay`` precedent, and the reason ``v`` does not move.
-    """
-    from gen_worker import aot_serve
-
-    entry = _entry(**extra)
-    assert aot_serve.class_hash(entry, strict=True, lora_bucket=0) == (
-        _class_hash_before_pgw1113(entry, strict=True, lora_bucket=0))
-
-
-def test_a_multi_device_placement_keys_APART() -> None:
-    """pgw#819: a cell minted on a ``gpu_count=2, parallel="internal"`` pod —
-    where the pipeline's own device map split the modules across
-    ``cuda:0``/``cuda:1`` and inductor baked that placement into the graph —
-    published under a key byte-identical to the single-GPU one, in BOTH
-    directions, and the hub deduped them."""
-    from gen_worker import aot_serve
-
-    narrow = aot_serve.class_hash(_entry(), strict=True, lora_bucket=0)
-    wide = aot_serve.class_hash(
-        _entry(placement=["cuda:0", "cuda:1"]), strict=True, lora_bucket=0)
-    assert narrow != wide
-    # …and the order it was observed in is not information.
-    assert wide == aot_serve.class_hash(
-        _entry(placement=["cuda:1", "cuda:0"]), strict=True, lora_bucket=0)
-
-
-def test_the_graph_hash_still_scrubs_the_device_index() -> None:
-    """The placement rides its OWN fact precisely so the canonical graph form
-    does not have to change. Un-scrubbing the index there would re-key every
-    published cell to record a fact all of them state trivially — and it is
-    scrubbed by deliberate design (*"placement is the sm axis, not graph
-    identity"*)."""
-    import inspect
-
-    from gen_worker import graph_hash
-
-    body = inspect.getsource(graph_hash._render_scalar)
-    assert 'text.split(":", 1)[0]' in body
-
-
-def _fx_module(torch: Any, first: str, second: str) -> Any:
-    """A two-node graph whose nodes name two devices. No allocation, no CUDA
-    context, no card — ``torch.device("cuda:1")`` is just a value."""
-    graph = torch.fx.Graph()
-    x = graph.placeholder("x")
-    a = graph.call_function(
-        torch.zeros, (2,), {"device": torch.device(first)})
-    b = graph.call_function(
-        torch.zeros, (2,), {"device": torch.device(second)})
-    graph.output((x, a, b))
-    return torch.fx.GraphModule(torch.nn.Module(), graph)
-
-
-def test_device_placement_reads_exactly_what_the_graph_hash_scrubs() -> None:
-    """pgw#819, demonstrated on a CPU in milliseconds.
-
-    The two graphs differ ONLY in the device index of one node — a 1-card
-    program and a 2-card one. Their canonical graph forms are byte-identical
-    (the index is scrubbed by design), which is why no key axis could tell
-    them apart and both directions of the adoption were silent. The placement
-    observer sees the difference the canonical form deliberately does not.
-    """
-    torch = pytest.importorskip("torch")
-
-    from gen_worker import graph_hash
-
-    narrow = _fx_module(torch, "cuda:0", "cuda:0")
-    wide = _fx_module(torch, "cuda:0", "cuda:1")
-
-    assert graph_hash.graph_hash(narrow) == graph_hash.graph_hash(wide)
-    assert graph_hash.device_placement(narrow) == ("cuda:0",)
-    assert graph_hash.device_placement(wide) == ("cuda:0", "cuda:1")

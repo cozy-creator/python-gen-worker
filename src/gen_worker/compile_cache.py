@@ -693,6 +693,44 @@ def runtime_key() -> Dict[str, str]:
     return key
 
 
+def compile_target_block() -> str:
+    """Why a mint on this host would not produce a CUDA-serving artifact —
+    ``""`` when it would. THE deterministic environment decline (pgw#985).
+
+    ``sm`` is one of the three ``cg-key-v1`` axes. A host with no card can still
+    compile: TCG's other target is ``cpu``, which it resolves to ``cpu-<isa>``
+    and keys honestly. That is exactly the danger. The artifact is TRUE and
+    unadoptable — no GPU pod computes a ``cpu-avx512`` key — so a mint pod
+    bought to serve CUDA that takes the CPU lane burns its whole mint and the
+    family re-mints on the next boot, forever, with nothing anywhere saying why.
+
+    Deterministic for the life of the process, and for the life of the POD: a
+    second pod is the same host answering the same way. So callers refuse
+    TYPED (``PreflightRefused`` -> ``EXIT_REFUSED``, ``retryable=False``),
+    which is what stops the orchestrator buying another one.
+
+    Side-effect free and it only NAMES, exactly like :func:`arming_block` — the
+    raise belongs to the child that has a report to write, and the ORDER of that
+    raise is the caller's business (``mint_child`` asks last, so the specific
+    wiring refusals win). The three-valued :func:`hostfacts.cuda_state` is used
+    rather than the capability predicate because this sentence is REPORTED to
+    the fleet, and "this host has no card" and "this host's card would not
+    answer" are different pod verdicts.
+    """
+    if str(runtime_key().get("sm") or "").strip():
+        return ""
+    from . import hostfacts
+
+    state = hostfacts.cuda_state()
+    evidence = f" ({state.probe_class}: {state.detail})" if state.detail else ""
+    return (
+        f"this host states no `sm`, and `sm` is one of the three cg-key-v1 "
+        f"axes — accelerator={state.state}{evidence}. It could still compile "
+        f"the CPU lane, and that artifact would be keyed truthfully and "
+        f"adopted by nothing: a mint bought to serve CUDA would burn itself "
+        f"and the family would re-mint forever.")
+
+
 def _lib_versions() -> Dict[str, str]:
     out: Dict[str, str] = {}
     for lib in ("diffusers", "transformers"):
@@ -896,6 +934,9 @@ def declared_compile_facts(cfg: Any, *, lora_bucket_override: Optional[int] = No
 # sound in the first place.
 
 _CLOSURE_ENTRYPOINTS = (
+    "gen_worker.aot_mint",
+    "gen_worker.boot_trace_child",
+    "gen_worker.api.export_contract",
     "gen_worker.compile_cache",
     "gen_worker.guard_closure",
     "gen_worker.cell_key",
@@ -2903,29 +2944,6 @@ def enable(pipeline: Any, cfg: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def resolve_pipeline_class(name: str) -> Any:
-    """Resolve a serving pipeline class name for a mint (gw#586).
-
-    The traced FX graphs depend on the pipeline's CALL path, not just the
-    module tree — an unknown name must refuse loudly, because a silent
-    generic-load fallback would trace the wrong call and publish a cell no
-    serving lookup can ever hit.
-    """
-    import diffusers
-
-    cleaned = str(name or "").strip()
-    if not cleaned:
-        raise RuntimeError("pipeline_class must be a non-empty class name")
-    cls = getattr(diffusers, cleaned, None)
-    if cls is None or not callable(getattr(cls, "from_pretrained", None)):
-        raise RuntimeError(
-            f"pipeline_class {cleaned!r} is not a loadable diffusers "
-            "pipeline class in this producer image; a generic-load fallback "
-            "would trace the wrong call path (gw#586), so the mint refuses"
-        )
-    return cls
-
-
 def emit_jit_compile_event(
     timings: Mapping[str, float],
     *,
@@ -3051,6 +3069,7 @@ __all__ = [
     "apply",
     "apply_lora_execution_lane",
     "arming_block",
+    "compile_target_block",
     "resolve_targets",
     "arm_jit_intake",
     "cell_base_execution_lane",
@@ -3077,7 +3096,6 @@ __all__ = [
     "is_compile_armed",
     "execution_lane_bucket",
     "execution_lane_token",
-    "resolve_pipeline_class",
     "runtime_key",
     "record_cell_proven",
     "record_cell_quarantined",

@@ -150,16 +150,11 @@
 #     (kills the `str.strip` class outright), and flag any guarded module with
 #     no importer in src/ regardless of per-symbol reach.
 #
-#   KNOWN FALSE POSITIVES (3 of 24 — the measured rate is 12.5%)
-#     aot_inputs.inputs_for / latent_dims — declaration-author surface; the
-#       callers are endpoint repos that vendor the wheel, like gen_worker.api.
+#   KNOWN FALSE POSITIVES
 #     boot_phases.BootSpan.skipped — reached by an operator script only.
 #     They stay listed rather than exempted: an exemption rule broad enough to
 #     clear them would also clear real hits.
 #
-gen_worker.aot_inputs.inputs_for()
-gen_worker.aot_inputs.latent_dims()
-gen_worker.aot_package.package_entry_names()
 gen_worker.aot_serve.EntryDispatch.refusal_counts()
 gen_worker.aot_serve.realigned_inputs()
 gen_worker.aot_serve.served_entry_calls()
@@ -222,13 +217,6 @@ gen_worker.boot_phases.servable_ms()
 #           BEFORE that campaign would change the harness the campaign is meant
 #           to validate the reroute with, which is the wrong order.
 #
-#   aot_resume.discard — its only caller was `mint_delegate.build_cell`'s
-#   success terminus. The supervisor keeps no resume bank at all: coverage
-#   accretes in an attempt-STABLE artifact directory and a retry consumes the
-#   artifacts, so there is nothing to discard. `aot_resume` itself stays (it has
-#   two live importers, `aot_compile_pool` and `mint_child`) and its deletion
-#   remains sequenced where th#1834 put it — the change that proves boot
-#   resolves already-compiled graphs locally, which is not this one.
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # IN FLIGHT — a seam that landed AHEAD of its caller. Not 2026-08-01 debt.
@@ -353,9 +341,6 @@ gen_worker.input_assets.inputs_dir_for_request()
 gen_worker.io.exists()
 gen_worker.io.read_audio()
 gen_worker.io.write_image()
-gen_worker.kernel_path.Verdict.measurement()
-gen_worker.kernel_path.clear()
-gen_worker.kernel_path.probe()
 gen_worker.models.attention_modes.known_attention_modes()
 gen_worker.models.fp8_storage.castable_leaves()
 gen_worker.models.hf_fp8_blockwise.dequantize_block_scaled()
@@ -365,6 +350,8 @@ gen_worker.models.lora_lifted.LiftedLoraPlan.views()
 gen_worker.models.native_kernels.extension_available()
 gen_worker.models.native_kernels.svdq_linear_execution_lane_reason()
 gen_worker.models.native_kernels.svdq_modulation_execution_lane_reason()
+gen_worker.models.svdq_awq_packed.awq_packed_self_check()
+gen_worker.models.svdq_fused.fused_self_check()
 gen_worker.models.residency.Residency.drain_shared()
 gen_worker.models.residency.Residency.leased_refs()
 gen_worker.models.residency.Residency.shared_refcount()
@@ -395,6 +382,5 @@ gen_worker.worker_credential.expires_at()
 gen_worker.worker_credential.reset()
 gen_worker.worker_fatal.fatal_identity()
 gen_worker.worker_goals.install()
-gen_worker.aot_resume.discard()
 gen_worker.mint_process.build_request()
 gen_worker.mint_process.run_mint()

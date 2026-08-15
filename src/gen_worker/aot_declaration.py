@@ -25,14 +25,11 @@ Shape strategy (per-family declared):
 
 from __future__ import annotations
 
-import importlib
-import importlib.util
 import logging
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from .aot_contract import ADAPTER_FORK, DynamicDim, ExportSpec, MintRefused
+from .aot_inputs import ADAPTER_FORK, DynamicDim, ExportSpec, MintRefused
 from .api.decorators import Compile
 from .api.export_contract import (
     DYNAMIC_COLLAPSE,
@@ -727,42 +724,6 @@ def _nest(kwargs: Dict[str, Any], dotted: str, value: Any) -> None:
     node[parts[-1]] = value
 
 
-# ---------------------------------------------------------------------------
-# Request-side resolution — python -m gen_worker.aot_mint consumes this
-# ---------------------------------------------------------------------------
-
-
-def load_declaration(request: Mapping[str, Any], request_path: Optional[Path] = None) -> None:
-    """Import the endpoint's declaration module named by a mint request.
-
-    ``declaration_module`` is a dotted import; ``declaration_file`` is a
-    path (relative paths resolve against the request file, so a request in
-    ``aot/`` can say ``"declaration.py"``). Importing runs the endpoint's
-    ``register_export_declaration`` call — the same load-to-register shape
-    as ``convert.registry.load_declaration_module``.
-    """
-    dotted = str(request.get("declaration_module") or "").strip()
-    file_ref = str(request.get("declaration_file") or "").strip()
-    if dotted:
-        try:
-            importlib.import_module(dotted)
-        except ImportError as exc:
-            raise MintRefused(
-                f"cannot import declaration module {dotted!r}: {exc}") from exc
-    if file_ref:
-        path = Path(file_ref)
-        if not path.is_absolute() and request_path is not None:
-            path = Path(request_path).parent / path
-        if not path.exists():
-            raise MintRefused(f"declaration file {path} does not exist")
-        module_spec = importlib.util.spec_from_file_location(
-            f"_gen_worker_declaration_{path.stem}", path)
-        if module_spec is None or module_spec.loader is None:
-            raise MintRefused(f"cannot load declaration file {path}")
-        mod = importlib.util.module_from_spec(module_spec)
-        module_spec.loader.exec_module(mod)
-
-
 __all__ = [
     "MintPlan",
     "call_signature",
@@ -774,7 +735,6 @@ __all__ = [
     "entry_coordinates",
     "entry_name",
     "fork_gaps",
-    "load_declaration",
     "mint_plans",
     "plan_entry_name",
     "select_plan",

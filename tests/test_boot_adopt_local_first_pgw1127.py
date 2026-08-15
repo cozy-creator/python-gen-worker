@@ -48,6 +48,7 @@ from gen_worker import (
     activity, boot_adopt, boot_key, cell_resolve, fleet_cells, local_cell_store,
 )
 from gen_worker import executor as executor_mod
+from gen_worker.api import export_contract as export_contract_mod
 from gen_worker.cell_adopt import AdoptOutcome
 
 # pgw#1176: `cg-key-v1`, because `local_cell_store.store` refuses anything that is
@@ -190,7 +191,7 @@ def _executor(tmp_path: Path) -> Any:
     return ex
 
 
-def _derived(witnesses: Optional[Dict[str, str]] = None) -> Any:
+def _derived() -> Any:
     """A REAL ``DerivedKey`` — the key is built by ``cell_key.from_axes`` over
     real axes, so the address the boot hands the store is the address the store
     is addressed by everywhere else. Only the TRACE is stood in for (there is no
@@ -201,10 +202,7 @@ def _derived(witnesses: Optional[Dict[str, str]] = None) -> Any:
         entry_keys={"a": ck.from_axes({
             "graph": "c0ffee0000000000",
             "sm": "sm_89", "toolchain": "t" * 16}).digest},
-        class_hashes={"a": "c0ffee0000000000"},
-        manifest=ck.manifest_digest(["c0ffee0000000000"]),
-        workers=2, width_reason="test", traced=1, memo="miss", wall_ms=7,
-        graph_witnesses=dict(WITNESSES if witnesses is None else witnesses))
+        workers=2, width_reason="test", traced=1, memo="miss", wall_ms=7)
 
 
 #: The key that derivation actually produces — what the local store must be
@@ -221,7 +219,7 @@ KEY_DERIVED = _derived().keys[0]
 def declared(monkeypatch: pytest.MonkeyPatch) -> None:
     """The two pre-attempt gates that are NOT under test here."""
     monkeypatch.setattr(
-        executor_mod.aot_mint, "export_declaration", lambda f: object())
+        export_contract_mod, "export_declaration", lambda f: object())
     monkeypatch.setattr(
         executor_mod.aot_declaration, "cell_plans", lambda d: [object()])
     from gen_worker.procsplit import broker
@@ -358,7 +356,7 @@ def test_a_local_hit_carries_an_ADDRESS_and_never_an_adoption(
 
     (out,) = boot_adopt.attempt(
         function="generate", modules=("micro_diffusion.main",), cfg=_Cfg(),
-        slots={}, declared_hint=1, envelope={}, work_root=tmp_path,
+        slots={}, declared_hint=1, work_root=tmp_path,
         hub_absent="nobody to ask")
 
     assert out.reason == boot_adopt.LOCAL_HIT
@@ -366,42 +364,6 @@ def test_a_local_hit_carries_an_ADDRESS_and_never_an_adoption(
         "a local cell must not become an `_ArmOrder`: the receipt gate would "
         "refuse it, and pgw#1122's degrade would spend a whole arm learning it")
     assert out.local_key == KEY_DERIVED
-
-
-# ---------------------------------------------------------------------------
-# 3. The pgw#1031 graph-witness floor applies to route B — and does not drop
-# ---------------------------------------------------------------------------
-
-
-def test_a_local_cell_whose_graphs_are_not_this_pods_graphs_is_refused(
-    store: Path, tmp_path: Path, events: List[Any],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`ck1` is an INGRESS identity: two endpoints whose declared contracts
-    match can share one key while their bodies differ (`micro-pad32` vs
-    `micro-pad32-branchy`, measured 2026-08-10). Pull-by-key would hand this pod
-    the other endpoint's kernels — locally exactly as much as from the hub."""
-    local_cell_store.store(
-        _cell(tmp_path, key=KEY_DERIVED), key=KEY_DERIVED,
-        family="micro-diffusion", arm_token=ARM_A)
-    # A REAL disagreement, judged by the real `aot_identity.verify_graph_
-    # witness`: the cell records `WITNESSES`, this pod traced something else.
-    # Nothing here is stubbed, so the row cannot pass by agreeing with a stub.
-    monkeypatch.setattr(
-        boot_key, "derive", lambda **kw: _derived({"transformer": "aa" * 8}))
-
-    (out,) = boot_adopt.attempt(
-        function="generate", modules=("m",), cfg=_Cfg(), slots={},
-        declared_hint=1, envelope={}, work_root=tmp_path,
-        hub_absent="nobody to ask")
-
-    assert out.reason == "local_graph_witness_mismatch"
-    assert not out.local_key
-    assert local_cell_store.lookup(KEY_DERIVED) is not None, (
-        "a derived-key hit is an INFERENCE about which pipe owns the bytes; "
-        "dropping the cell to punish a wrong guess turns one honest re-mint "
-        "into two, and the memo route already covers the stale case")
-    assert _adopt_events(events)[-1].phase == "local_graph_witness_mismatch"
 
 
 # ---------------------------------------------------------------------------
@@ -546,8 +508,7 @@ def test_every_new_terminus_is_in_the_typed_vocabulary() -> None:
     carry is a path that can be silent again. That telemetry has paid for itself
     twice in a day; a new gate that skipped it would be the next unattributable
     pod."""
-    for token in ("local_hit", "local_miss_no_hub",
-                  "local_graph_witness_mismatch"):
+    for token in ("local_hit", "local_miss_no_hub"):
         assert token in boot_adopt.LOCAL_REASONS
         assert token in boot_adopt.REASONS
     assert "no_cell_source" in boot_adopt.GATE_REASONS

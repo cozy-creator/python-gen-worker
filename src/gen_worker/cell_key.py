@@ -27,14 +27,12 @@ honest granularity that test admits THREE axes and no more:
                   entry's target, fork coordinate, class dims, declared-range
                   digest, graph-INTERFACE block, the node-level
                   ``graph_witness`` body digest, trace mode and lora bucket
-                  (``aot_serve.class_hash`` — stamped by
-                  ``aot_serve.entry_metadata``, proven at admission by
-                  ``aot_serve.verify_contract``, READ — never re-derived —
-                  here).
+                  (derived and validated by TCG's closed
+                  ``GraphClassDeclaration``).
 
                   **This axis is the traced COMPUTATION** (pgw#1031, option a,
                   Paul-ruled): since class_hash facts v3 the per-node digest
-                  (``graph_hash.graph_hash``) folds in, so two endpoints whose
+                  (TCG's ``graph_witness``) folds in, so two endpoints whose
                   declarations agree while their bodies differ key APART. Before
                   v3 the axis folded the graph INTERFACE only and they collided
                   — measured 2026-08-10, ``micro-pad32`` vs
@@ -42,9 +40,8 @@ honest granularity that test admits THREE axes and no more:
                   byte-identical keying block, one key, two artifacts; post-fix
                   two keys. A residual collision (a witness-blind or hash-broken
                   entry) is still caught belt-and-braces: every entry records a
-                  ``graph_witness`` top-level sibling and the adopt path refuses
-                  a cell whose witness is not the graph this pod traced
-                  (``aot_identity.verify_graph_witness``).
+                  ``graph_witness`` inside TCG's closed declaration and TCG
+                  artifact admission refuses any mismatch.
     sm            compute capability (sm_89, ...) — the GPU architecture.
     toolchain     "the compiler stack AS WE CONFIGURE IT" (amendment 4):
                   CONTENT digest of the compile stack (pgw#710 dist-info
@@ -204,7 +201,7 @@ EXPORTED_KIND = "aot-inductor"
 #:
 #: Naming note (pgw#1059 §F): this is the DECLARED envelope. The OTHER
 #: "envelope" in this codebase is the artifact-metadata blob itself
-#: (``kernel_path.envelope_block``, the hub error envelope). Where both
+#: (the hub error envelope). Where both
 #: appear, write "the artifact-metadata envelope" vs "the declared envelope".
 EXPORT_ENVELOPE_KEY = "declared_envelope"
 
@@ -437,7 +434,7 @@ def toolchain_axis_digest(block: Mapping[str, Any]) -> str:
 #
 # So the subject is deliberately NOT a key axis and must never become one: one
 # cell legally serves every checkpoint whose graph it is (weight VALUES are
-# never hashed — see graph_hash's module docstring), and keying on the
+# never hashed — TCG keys their identities separately), and keying on the
 # checkpoint would put every fine-tune in its own key space.  What the subject
 # does is stop two DIFFERENT checkpoints sharing one pending mint, one
 # local-store memo entry or one boot-key memo row on the strength of an

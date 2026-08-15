@@ -124,19 +124,12 @@ def hub():
 
 @pytest.fixture()
 def artifact(tmp_path: Path) -> Path:
-    # packed by the exported packer. `compile_cache.pack` wrote the
-    # `torch-inductor-cache` envelope, whose producer died in pgw#1178 and
-    # whose format is deleted; what a pod publishes is an exported cell, and
-    # what this file is about is the CREDENTIAL on the publish leg, not the
-    # bytes underneath it.
-    from gen_worker import aot_serve
-
-    root = tmp_path / "capture"
-    root.mkdir(parents=True, exist_ok=True)
-    (root / aot_serve.PACKAGE_NAME).write_bytes(b"\x11" * 4096)
+    # Every row is refused at publish-intent, before artifact transport opens
+    # this path. Keep only the opaque carrier needed by the publisher API: the
+    # behavior under test is the credential on the real HTTP leg.
     out = tmp_path / "mintdir" / "cell.tar.gz"
     out.parent.mkdir()
-    aot_serve.pack(root, out, dict(META))
+    out.write_bytes(b"\x11" * 4096)
     return out
 
 
@@ -256,12 +249,20 @@ def clean_process_credential():
         worker_credential._BOOTSTRAP = prior_boot
 
 
-def test_the_mint_publisher_reads_the_credential_at_use_time(
+def test_the_self_mint_publisher_reads_the_credential_at_use_time(
         monkeypatch, clean_process_credential):
-    """RED before the fix: `_publisher_from_settings` closed over
-    `worker_jwt=lambda: token`, so a rotation landing during the mint — the
-    only thing that can save a compile longer than the TTL — was invisible."""
-    from gen_worker import aot_mint, config, worker_credential
+    """RED before the fix: the mint publisher closed over
+    `worker_jwt=lambda: token`, a token CAPTURED at construction, so a rotation
+    landing during the mint — the only thing that can save a compile longer
+    than the TTL — was invisible.
+
+    pgw#1270 deleted the `aot_mint` CLI that built a second publisher of its
+    own. `Executor._cell_publisher` is the ONE surviving construction site, so
+    it is the one asserted; a captured token here would be the same defect in
+    the only place left to have it.
+    """
+    from gen_worker import config, worker_credential
+    from gen_worker.executor import Executor
 
     boot = _jwt(lifetime_s=60)
     rotated = _jwt(lifetime_s=3600)
@@ -271,14 +272,20 @@ def test_the_mint_publisher_reads_the_credential_at_use_time(
     monkeypatch.delenv("TENSORHUB_PUBLIC_URL", raising=False)
     monkeypatch.delenv("TENSORHUB_TOKEN", raising=False)
     config.reload_for_test()
-    # The CLI's own starting state: nothing has handed the process-wide
+    # The pod's own starting state: nothing has handed the process-wide
     # credential source anything yet.
     worker_credential.reset()
     monkeypatch.setattr(worker_credential, "_BOOTSTRAP", "", raising=False)
 
-    publisher = aot_mint._publisher_from_settings()
-    # `install_bootstrap` must have run here, or the process-wide credential
-    # source is empty and the fallback is silently doing all the work.
+    async def _send(_msg):
+        return None
+
+    ex = Executor([], _send)
+    # th#1423: `worker_credential.current()` only answers once the PROCESS
+    # ENTRY hands it the boot token (`entrypoint` / the procsplit parent).
+    worker_credential.install_bootstrap(config.current())
+
+    publisher = ex._cell_publisher()
     assert publisher.worker_jwt() == boot
 
     # 0.0 = expiry unknown to the installer; the token states its own.

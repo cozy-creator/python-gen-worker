@@ -83,7 +83,6 @@ fleet_cells.provision.arm_aot = (            # type: ignore[assignment]
 fleet_cells.artifact_meta.try_read_metadata = (  # type: ignore[assignment]
     lambda p: {"cell_key": KEY, "family": FAMILY})
 fleet_cells.arm_axis_divergence = lambda arm, meta, **_kw: ""   # type: ignore[assignment]
-fleet_cells.aot_serve.note_aot_key = lambda k: None      # type: ignore[assignment]
 fleet_cells.activity_mod.emit_event = lambda *a, **k: None  # type: ignore[assignment]
 
 _real_pending = fleet_cells.PendingSelfMint

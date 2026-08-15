@@ -20,7 +20,7 @@ from typing import Any, Dict
 
 import pytest
 
-from gen_worker import aot_identity, cell_key as ck, cell_resolve, env_seal
+from gen_worker import aot_identity, cell_resolve
 from gen_worker.procsplit import actions as actions_mod
 
 KEY = "cg-key-v1-" + "ab" * 28
@@ -351,29 +351,6 @@ def test_a_hit_builds_the_expected_identity_the_arm_gate_COMPARES(
     assert expected == aot_identity.ExpectedIdentity.named_by(
         cell, "c0ffee0000000000")
 
-    # And it is COMPARABLE: an artifact whose recorded facts match passes the
-    # existing gate, and one that does not is refused BY AXIS.
-    meta = {
-        "cell_key": KEY,
-        "toolchain": {"torch": "x"},
-        "env_seal": {"a": 1},
-        # pgw#1176: the declaration-wide coverage label. Same arithmetic as
-        # `combined_graph_hash`, demoted from identity — identity is
-        # `cell_key`, per entry.
-        "manifest_digest": "c0ffee0000000000",
-    }
-    meta["toolchain_digest_expected"] = ck.facts_digest(meta["toolchain"])
-    reason = aot_identity.verify_declared_identity(
-        meta,
-        aot_identity.ExpectedIdentity(
-            cell_key=KEY,
-            toolchain_digest=ck.facts_digest(meta["toolchain"]),
-            env_seal_digest=env_seal.seal_digest(meta["env_seal"]),
-            graph_contract_digest="c0ffee0000000000",
-            publisher_org="org-a"))
-    assert reason == ""
-
-
 def test_the_receipt_rides_the_answer_and_is_never_re_fetched(stub) -> None:
     """th#1680: ``handleWorkerCellReceipt`` scopes by ENDPOINT while resolve
     scopes by ORG, so a second fetch for the same cell could 403 what resolve
@@ -485,8 +462,6 @@ def _attempt(monkeypatch, tmp_path, *, derive=None, resolve_batch=None,
     (out,) = boot_adopt.attempt(
         function="txt2img", modules=("m",), cfg=_Cfg(), slots={},
         declared_hint=3,
-        envelope={"shapes": [[1024, 1024]], "text_lens": [77],
-                  "guidance": [7.5]},
         work_root=tmp_path)
     return out
 
@@ -514,8 +489,6 @@ def _attempt_all(monkeypatch, tmp_path, *, derive=None, resolve_batch=None,
     return boot_adopt.attempt(
         function="txt2img", modules=("m",), cfg=_Cfg(), slots={},
         declared_hint=3,
-        envelope={"shapes": [[1024, 1024]], "text_lens": [77],
-                  "guidance": [7.5]},
         work_root=tmp_path)
 
 
@@ -530,8 +503,6 @@ def _derived_multi() -> Any:
     return boot_key.DerivedKey(
         entry_keys={f"e{i}": ck.from_axes(a).digest
                     for i, a in enumerate(axes)},
-        class_hashes={f"e{i}": a["graph"] for i, a in enumerate(axes)},
-        manifest=ck.manifest_digest([a["graph"] for a in axes]),
         workers=2, width_reason="test", traced=3, memo="miss", wall_ms=1234)
 
 
@@ -544,8 +515,6 @@ def _derived(digest: str = KEY) -> Any:
         entry_keys={"a": ck.from_axes({
             "graph": "c0ffee0000000000",
             "sm": "sm_89", "toolchain": "t" * 16}).digest},
-        class_hashes={"a": "c0ffee0000000000"},
-        manifest=ck.manifest_digest(["c0ffee0000000000"]),
         workers=2, width_reason="test", traced=1, memo="miss", wall_ms=1234)
 
 

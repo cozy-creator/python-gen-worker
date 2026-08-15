@@ -15,7 +15,7 @@ Input 1 is `timestep`: diffusers passes `timesteps[i]`, a scalar VIEW at an
 odd element offset into the scheduler's timestep tensor.
 
 Real codepaths throughout: a real `torch.export` + real AOTI compile on CPU,
-called through the real `aot_serve.ArtifactRunner`. The red half runs the same
+called through the live `aot_serve.TCGEntryRunner`. The red half runs the same
 package through the same unaligned view WITHOUT the ingress pass and asserts
 the runner itself reports the misalignment — so the fix is measured against
 the defect, not against a description of it.
@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import types
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, List, Tuple, cast
 
 import pytest
 
@@ -34,6 +34,11 @@ torch = pytest.importorskip("torch")
 import torch.nn as nn  # noqa: E402
 
 from gen_worker import activity, aot_serve  # noqa: E402
+from torch_compiled_graphs import (  # noqa: E402
+    CallIngress,
+    CallInput,
+    CompiledGraphRunner,
+)
 
 
 class TinyDenoiser(nn.Module):
@@ -60,27 +65,41 @@ def _export_package(tmp_path: Path) -> Tuple[Any, Any]:
     return module, torch._inductor.aoti_load_package(str(path))
 
 
-def _contract() -> aot_serve.ArtifactContract:
-    return aot_serve.contract_from_meta({
-        "inputs": [
-            {"name": "sample", "position": 0, "dtype": "float32",
-             "shape": [2, 8]},
-            {"name": "timestep", "position": 1, "dtype": "float32",
-             "shape": []},
-        ],
-        "symbols": {},
-        "constants": [],
-    })
+def _contract() -> CallIngress:
+    return CallIngress(
+        parameters=("sample", "timestep"),
+        flat_arity=2,
+        inputs=(
+            CallInput(
+                "sample", 0, "sample", 0, (), "sample", "float32", (2, 8)
+            ),
+            CallInput(
+                "timestep", 1, "timestep", 1, (), "timestep", "float32", ()
+            ),
+        ),
+    )
 
 
-def _runner(package: Any) -> aot_serve.ArtifactRunner:
-    runner = aot_serve.ArtifactRunner(
-        package=package, contract=_contract(), constants=(),
-        module_name="unet", entry="unet/adapter=false", family="tiny791")
-    # Constants are baked in a locally compiled package (this test is about
-    # ingress, not B1), so the bind proof has nothing to prove here.
-    runner.bound = True
-    return runner
+class _PackageRunner:
+    """The minimal TCG runner surface around this test's real AOTI package."""
+
+    def __init__(self, package: Any) -> None:
+        self.package = package
+        self.calls = 0
+        self.bound = True
+        self.declared_fqns: Tuple[str, ...] = ()
+
+    def __call__(self, *feeds: Any) -> Any:
+        result = self.package(*feeds)
+        self.calls += 1
+        return result
+
+
+def _runner(package: Any) -> aot_serve.TCGEntryRunner:
+    return aot_serve.TCGEntryRunner(
+        runner=cast(CompiledGraphRunner, _PackageRunner(package)),
+        contract=_contract(), module_name="unet",
+        entry="unet/adapter=false", family="tiny791")
 
 
 def _unaligned_timestep() -> Any:
@@ -256,7 +275,7 @@ def test_realignment_emits_one_typed_event_naming_the_input(
     assert len(events) == 1, "one event per (entry, input, reason), not per call"
     detail = events[0].detail
     assert "input=timestep" in detail
-    assert "entry=unet/adapter=false" in detail
+    assert "graph_class=unet/adapter=false" in detail
     assert "family=tiny791" in detail
     assert events[0].phase == "unaligned_16b"
     # Coalesced, but never lost: the count carries every occurrence.

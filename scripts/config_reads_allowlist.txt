@@ -113,8 +113,6 @@ src/gen_worker/parallel/group.py::NCCL_NVLS_ENABLE LIBRARY reads the prior NCCL_
 src/gen_worker/env_seal.py::$name LIBRARY scrub_env() ERASES the behaviour namespaces before torch imports. The one place §1.18 is already mechanically enforced in either repo - copy it, do not weaken it.
 src/gen_worker/env_seal.py::PYTHONHASHSEED LIBRARY PYTHONHASHSEED is a CPython interpreter fact the seal must record.
 src/gen_worker/models/native_kernels.py::GEN_WORKER_NATIVE_KERNELS_LIB LIBRARY GEN_WORKER_NATIVE_KERNELS_LIB, explicit .so path override for the loader.
-src/gen_worker/aot_wrapper_split.py::GEN_WORKER_AOT_HOST_COMPILE_JOBS LIBRARY GEN_WORKER_AOT_HOST_COMPILE_JOBS, per-entry host-compile fan-out; derived from the pod budget when unset.
-src/gen_worker/aot_wrapper_split.py::GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF LIBRARY GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF. LIVE: five SDXL releases (0.2.111/112/113/116/117) declare it in `release_env_declarations` and one endpoint has a non-deleted `endpoint_env_entries` row. Verified on the standing hub 2026-08-03. NOT a deletion candidate.
 
 # ---------------------------------------------------------------------------
 # STANDALONE — CLI / convert paths that load no app config.
@@ -132,8 +130,6 @@ src/gen_worker/net.py::$name STANDALONE COZY_HTTP_*_TIMEOUT_S. Documented as "re
 src/gen_worker/local_cell_store.py::GEN_WORKER_LOCAL_CELLS_DIR STANDALONE GEN_WORKER_LOCAL_CELLS_DIR, the local cell store's ROOT (pgw#1096 moved the accessor here from local_cells): a path relocation like TENSORHUB_CACHE_DIR, never a behavior knob, and a cross-repo contract with cozy-local's paths.go.
 src/gen_worker/video_encode.py::GEN_WORKER_VIDEO_ENCODE_CONCURRENCY STANDALONE GEN_WORKER_VIDEO_ENCODE_CONCURRENCY, encode fan-out.
 src/gen_worker/models/native_kernels.py::GEN_WORKER_NATIVE_KERNELS VIOLATION GEN_WORKER_NATIVE_KERNELS. th#1887: NOT standalone — a serving-path rollout gate, not a CLI. Now also registered in BEHAVIOUR_GATES; deletion target pending a release-declaration check.
-src/gen_worker/aot_resume.py::GEN_WORKER_MINT_RESUME_MAX_BYTES STANDALONE GEN_WORKER_MINT_RESUME_MAX_BYTES, resume-area capacity bound.
-src/gen_worker/aot_resume.py::GEN_WORKER_MINT_RESUME_DIR STANDALONE GEN_WORKER_MINT_RESUME_DIR. Operator override for the resume root; production wiring is `aot_resume.set_root` (pgw#1030 deleted the zero-caller `resume_enabled()` wrapper — `open_bank` states the decision).
 
 # ---------------------------------------------------------------------------
 # TRIPWIRE — guards whose entire purpose is to fire on a misconfiguration.
@@ -174,7 +170,8 @@ src/gen_worker/aot_mint.py::PODGUARD_STATE TRIPWIRE External watchdog adapter wi
 # ...but only together with a MEASURED declaration count. Zero fleet
 # declarations is what licenses a deletion, and it is a fact you query, not one
 # you infer from the code — `GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF` looks identical
-# to its deleted sibling in this file and is LIVE on the standing hub.
+# to its deleted sibling in this file and was LIVE on the standing hub the last
+# time anyone asked.
 #
 # VERDICTS (declaration counts measured on the standing hub 2026-08-03):
 #
@@ -189,10 +186,19 @@ src/gen_worker/aot_mint.py::PODGUARD_STATE TRIPWIRE External watchdog adapter wi
 #     GEN_WORKER_EAGER_FIRST_BOOT       pgw#671 eager-first is now unconditional
 #     GEN_WORKER_AOT_WRAPPER_SPLIT_OFF  v1 ctor-split is now unconditional
 #
+#   READ SITE GONE, NAME DELIBERATELY NOT RETIRED — pgw#1270:
+#     GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF `aot_wrapper_split.py` read it, and TCG
+#             owns the run_impl split now, so the read site died with the module
+#             and this file's row went with it (a stale row is a hard failure of
+#             this very gate). The NAME is still accepted by
+#             `config.loader._OWNED_NON_SETTINGS`, on purpose: the 2026-08-03
+#             census recorded five SDXL releases declaring it and one live
+#             `endpoint_env_entries` row, and NOBODY HAS RE-QUERIED THE STANDING
+#             HUB SINCE. Dropping the name would make those pods fail config
+#             load on an UnknownSettingError. Retire the name only on a fresh
+#             measured count of zero. The env is inert either way.
+#
 #   NOT DELETED, and each for a stated reason:
-#     GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF LIVE: 5 SDXL releases declare it, 1
-#             endpoint carries a non-deleted entry. Deleting it changes a
-#             running endpoint.
 #     GEN_WORKER_HOST_MOVE_GUARD        ruled exception: safety guard, on by
 #             default, named threat, documented. Do not touch.
 #     GEN_WORKER_PROBE / _PUBLISH_ARMED security boundary; deliberately NOT a

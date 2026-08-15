@@ -20,6 +20,9 @@ from gen_worker import (
     AxisClass,
     Compile,
     CompileAxis,
+    Dim,
+    GraphClass,
+    Input,
     RequestContext,
     Resources,
     endpoint,
@@ -34,7 +37,11 @@ from gen_worker.config import Settings
 from gen_worker.executor import Executor
 from gen_worker.lifecycle import Lifecycle
 from gen_worker.pb import worker_scheduler_pb2 as pb
-from gen_worker.registry import EndpointSpec, extract_specs
+from gen_worker.registry import (
+    EndpointSpec,
+    extract_specs,
+    register_declared_exports,
+)
 from gen_worker.models import store as store_mod
 
 FAMILY = "flux2-klein-4b"
@@ -141,6 +148,10 @@ def _mark_fake_guard(pipeline) -> None:
 
 
 def _record_fake_warm(pipeline, *, hits=None, misses=None) -> None:
+    aot_runner = getattr(pipeline, "_fake_aot_runner", None)
+    if aot_runner is not None:
+        aot_runner.calls += 1
+        return
     marker = getattr(pipeline, cc._MARKER_ATTR, None) or {}
     signal = marker.get("failure_signal")
     if not isinstance(signal, dict):
@@ -169,6 +180,41 @@ def _guarded_enable(pipeline, *_args):
 
     _mark_fake_guard(pipeline)
     return fleet_cells.ArmOutcome(armed=True)
+
+
+class _FakeAotRunner:
+    """The one runner fact the executor's exported warm proof observes."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+
+def _mark_fake_aot_arm(pipeline, compiled_graph_key: str) -> None:
+    """Install the per-target marker shape produced by the TCG arm path."""
+    from gen_worker import aot_serve
+
+    runner = _FakeAotRunner()
+    dispatch = aot_serve.EntryDispatch(declared=("transformer/main",))
+    dispatch.add("transformer/main", runner)  # type: ignore[arg-type]
+    setattr(pipeline, "_fake_aot_runner", runner)
+    setattr(pipeline, aot_serve._MARKER_ATTR, {
+        "meta": {},
+        "targets": {"transformer": {
+            "module": pipeline.transformer,
+            "attr": "forward",
+            "state": {
+                "runner": dispatch,
+                "successful_calls": 0,
+                "failed": False,
+                "original": pipeline.transformer.forward,
+            },
+        }},
+        "entries": {"transformer/main": {
+            "compiled_graph_key": compiled_graph_key,
+            "target": "transformer",
+        }},
+        "bound_constants": {"pools": {}, "literals": {}},
+    })
 
 
 def _cell_arm(artifact, ref=None, digest=None):
@@ -208,31 +254,18 @@ def _spec(compile_cfg=None) -> EndpointSpec:
     )
 
 
-def _artifact(
-    tmp_path: Path, *, family: str = FAMILY, **meta_overrides,
-) -> Path:
-    """A delivered cell on disk, in the format this repository can WRITE.
+def _artifact(tmp_path: Path) -> Path:
+    """An existing artifact path for tests that stub the complete arm seam.
 
-    pgw#1181 retargeted this from `compile_cache.pack` — the whole-cell
-    `torch-inductor-cache` tarball, whose last producer died with
-    `mint_artifact` and which is now deleted — onto the exported
-    `aot-inductor` cell, through the same shared harness the publish-path
-    tests use. The rows below stub `_enable_compiled`, so what they need from
-    this file is that it EXISTS at a path the executor's snapshot plumbing
-    carries; building it out of a format nothing writes made every one of
-    them a fixture constructing a shape production cannot produce (§4.34).
+    These tests do not inspect, unpack, or execute an artifact. Their subject
+    starts after ``Executor._enable_compiled`` has accepted it, so constructing
+    an old worker-owned package envelope here would claim production still
+    writes a format that TCG 0.4 now owns. A neutral file keeps the path
+    plumbing real without inventing package fields outside TCG.
     """
-    from gen_worker import aot_serve
-    from harness.cell_meta import exported_cell_meta
-
-    meta = exported_cell_meta(family=family)
-    meta.update(meta_overrides)
-    work = tmp_path / "cap"
-    work.mkdir(exist_ok=True)
-    (work / aot_serve.PACKAGE_NAME).write_bytes(b"\x00not-a-real-pt2")
-    snapdir = tmp_path / "snap"
-    snapdir.mkdir(exist_ok=True)
-    return aot_serve.pack(work, snapdir / "cell.tar.gz", meta)
+    artifact = tmp_path / "compiled-graph.tcg"
+    artifact.write_bytes(b"stubbed-arm-seam")
+    return artifact
 
 
 #: pgw#1148: the w8a8 lane no longer arrives as a `#fp8-w8a8` ref TOKEN
@@ -519,7 +552,7 @@ def test_unrelated_record_loading_preserves_existing_target(tmp_path):
     assert [t.incarnation_id for t in ex.compile_targets()] == [first_id]
 
 
-def _cold_spec(binding=None) -> EndpointSpec:
+def _cold_spec(binding=None, *, compile_cfg=None) -> EndpointSpec:
     return EndpointSpec(
         name="cold-generate",
         method=_ColdEndpoint.run,
@@ -529,15 +562,34 @@ def _cold_spec(binding=None) -> EndpointSpec:
         cls=_ColdEndpoint,
         attr_name="run",
         models={"pipeline": binding or Hub("acme/klein-finetune")},
-        compile=Compile(shapes=((768, 768),), family=FAMILY, text_len=0),
+        compile=compile_cfg or Compile(
+            shapes=((768, 768),), family=FAMILY, text_len=0,
+        ),
     )
+
+
+def _declared_cold_spec(binding=None) -> EndpointSpec:
+    """A cold endpoint that owns the export declaration production registers."""
+    declaration = Compile(
+        shapes=((768, 768),),
+        targets=("transformer",),
+        family=FAMILY,
+        text_len=0,
+        dims=(Dim("B", carried_by=(("sample", 0),)),),
+        classes=(GraphClass(dims={"B": 1}),),
+        inputs=(Input("sample", shape=("B", 4), dtype="float32"),),
+        shape_strategy="static-rows",
+        warm_changes_key=False,
+    )
+    spec = _cold_spec(binding, compile_cfg=declaration)
+    register_declared_exports((spec,))
+    return spec
 
 
 def test_production_setup_stamps_cold_active_identity_after_warmup(
     tmp_path, monkeypatch,
 ):
     """Real ensure_setup -> fetch -> typed injection -> warmup -> StateDelta."""
-    import gen_worker.executor as executor_mod
 
     artifact = _artifact(tmp_path)
     model_dir = tmp_path / "model"
@@ -591,7 +643,6 @@ def test_store_served_boot_with_clean_hits_raises_no_compile_alarm(
     """gw#587 runtime assertion: a store-served boot (cell delivered, not
     self-minted) that proves clean cache hits must NOT alarm — the whole
     point of a delivered cell is ~0 compile wall time at boot."""
-    import gen_worker.executor as executor_mod
 
     artifact = _artifact(tmp_path)
     model_dir = tmp_path / "model"
@@ -650,7 +701,6 @@ def test_store_served_boot_with_hidden_compile_fires_alarm(
     gw#586 defect class generalized (a cell that claims to serve while the
     boot silently recompiles). Must alarm loudly AND report it hub-side via
     the existing ADOPTED ModelEvent shape."""
-    import gen_worker.executor as executor_mod
 
     artifact = _artifact(tmp_path)
     model_dir = tmp_path / "model"
@@ -724,12 +774,11 @@ def test_self_mint_boot_serves_compiled_after_own_warmup_proof(
     The minting boot legitimately burns compile wall time — it must NOT trip
     the STORE_SERVED_BOOT_COMPILED alarm (that line belongs to delivered
     cells only; the store-served side is proven by the sibling tests above)."""
-    import gen_worker.executor as executor_mod
     from gen_worker import fleet_cells
 
     model_dir = tmp_path / "model"
     model_dir.mkdir()
-    spec = _cold_spec(Hub("acme/klein-finetune"))
+    spec = _declared_cold_spec(Hub("acme/klein-finetune"))
     model_ref = wire_ref(spec.models["pipeline"])
     mint_key = "cg-key-v1-" + "d" * 56
     mint_ref = f"root/family-{FAMILY}#{mint_key}"
@@ -758,7 +807,7 @@ def test_self_mint_boot_serves_compiled_after_own_warmup_proof(
     )
 
     def _minting_enable(pipeline, *_args):
-        _mark_fake_guard(pipeline)
+        _mark_fake_aot_arm(pipeline, mint_key)
         return fleet_cells.ArmOutcome(armed=True, self_mint=fleet_cells.SelfMint(
             family=FAMILY, cell_key=mint_key, ref=mint_ref,
             snapshot_digest=mint_digest, artifact=mint_artifact))
@@ -800,7 +849,6 @@ def test_self_mint_boot_without_warmup_proof_never_reaches_serving(
     (CompiledLaneUnavailable), never advertise a target, never serve eager.
     If self-mints are dropped from the warmup proof again (the 0.39.0
     regression this closes), this boot completes and the test goes red."""
-    import gen_worker.executor as executor_mod
     from gen_worker import fleet_cells
 
     model_dir = tmp_path / "model"
@@ -886,7 +934,6 @@ def test_boot_warmup_proves_each_compile_object_independently(
     tmp_path, monkeypatch,
 ):
     """A hit from pipeline A must never certify its unexecuted sibling B."""
-    import gen_worker.executor as executor_mod
 
     artifact = _artifact(tmp_path)
     model_dir = tmp_path / "model"
@@ -954,11 +1001,10 @@ def test_sdxl_w8a8_boot_proves_both_aliases_through_their_own_runs(
     per-alias proof — a sibling's run never certifies an unexercised code
     path), and the class-union contract keeps both aliases on ONE cell, so
     turbo serves compiled on w8a8 instead of failing closed (gap #1)."""
-    import gen_worker.executor as executor_mod
 
     family = "sdxl"
     cell_ref = f"root/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
-    artifact = _artifact(tmp_path, family=family)
+    artifact = _artifact(tmp_path)
     model_dir = tmp_path / "sdxl-model"
     model_dir.mkdir()
     calls = {"generate": 0, "generate_turbo": 0}
@@ -1020,7 +1066,6 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
     tmp_path, monkeypatch,
 ):
     """Both aliases recover coherently after one target guard failure."""
-    import gen_worker.executor as executor_mod
 
     cell_ref = CACHE_REF + "-w8a8"
     artifact = _artifact(tmp_path)
@@ -1149,7 +1194,6 @@ def test_flux_real_guard_requires_object_activation_and_each_alias_execution(
     expected_hits,
 ):
     """One object hit plus one exact wrapper call per alias is causal proof."""
-    import gen_worker.executor as executor_mod
     import torch
 
     artifact = _artifact(tmp_path)
@@ -1253,7 +1297,6 @@ def test_compile_hit_on_other_object_cannot_certify_primary_object(
     tmp_path, monkeypatch,
 ):
     """Process-wide hit deltas remain owned by the wrapper that observed them."""
-    import gen_worker.executor as executor_mod
     import torch
 
     artifact = _artifact(tmp_path)
@@ -1346,7 +1389,6 @@ def test_second_checkpoint_served_from_dynamo_inmemory_cache_proves(
     `compile_cell_failed`) on every multi-checkpoint session. It now proves,
     but ONLY with dynamo confirming live compiled code for this object's
     targets: the sibling-hit guard above must keep failing closed."""
-    import gen_worker.executor as executor_mod
     import torch
     from torch._dynamo import eval_frame
 
@@ -1444,7 +1486,6 @@ def test_pipeline_target_owns_only_pipeline_not_ancillary_vae(
     tmp_path, monkeypatch,
 ):
     """Production-shaped SDXL: ancillary bindings cannot certify the graph."""
-    import gen_worker.executor as executor_mod
 
     artifact = _artifact(tmp_path)
     model_dir = tmp_path / "model"
@@ -1553,7 +1594,6 @@ def test_w8a8_without_exact_cell_self_mints_and_fails_typed_without_cuda(
     env the mint is impossible, so the quantized lane's typed refusal fires
     from the self-mint exit (never a silent eager serve), and the function
     still lands in the same compile_cell_failed unavailable class."""
-    import gen_worker.executor as executor_mod
 
     spec = _cold_spec(Hub("acme/klein-finetune"))
     model_ref = wire_ref(spec.models["pipeline"])
@@ -1604,11 +1644,10 @@ def test_w8a8_custom_warmup_proof_attributes_to_all_compatible_siblings(
     ONE custom warmup that warms every declared graph — under the ac0bab9
     single-name attribution no >=0.38.8 worker could EVER boot it compiled,
     delivered cells included."""
-    import gen_worker.executor as executor_mod
 
     family = "sdxl"
     cell_ref = f"root/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
-    artifact = _artifact(tmp_path, family=family)
+    artifact = _artifact(tmp_path)
     model_dir = tmp_path / "partial-proof-model"
     model_dir.mkdir()
 
@@ -1681,11 +1720,10 @@ def test_w8a8_custom_warmup_multi_alias_boot_serves_all_siblings(
     ("expected=['edit','generate'] proven=['edit']") on delivered AND
     self-mint cells alike; under the gw#603 ruling the proven object
     certifies both siblings and the boot serves."""
-    import gen_worker.executor as executor_mod
 
     family = "ltx-shaped"
     cell_ref = f"root/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
-    artifact = _artifact(tmp_path, family=family)
+    artifact = _artifact(tmp_path)
     model_dir = tmp_path / "ltx-shaped-model"
     model_dir.mkdir()
 
@@ -1768,11 +1806,10 @@ def _merged_execution_lane_endpoint(record_warm):
 
 
 def _wire_merged_execution_lane(ex_cls_specs, tmp_path, monkeypatch):
-    import gen_worker.executor as executor_mod
 
     family = "qwen-image"
     cell_ref = f"root/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
-    artifact = _artifact(tmp_path, family=family)
+    artifact = _artifact(tmp_path)
     model_dir = tmp_path / "merged-lane-model"
     model_dir.mkdir(exist_ok=True)
     pipes = {"t2i": _LoadablePipe(), "edit": _LoadablePipe()}
@@ -1922,7 +1959,6 @@ def test_production_w8a8_ignores_legacy_compile_environment_fallbacks(
     tmp_path, monkeypatch,
 ):
     """DesiredInstance and RunJob require Tensorhub-attached exact evidence."""
-    import gen_worker.executor as executor_mod
 
     artifact = _artifact(tmp_path)
     monkeypatch.setenv("GEN_WORKER_COMPILE_CACHE", str(artifact))
@@ -2006,7 +2042,6 @@ def test_w8a8_binding_cannot_advertise_plain_materialized_pipeline(tmp_path):
 
 
 def test_w8a8_setup_with_no_addressable_compile_object_serves_eager(tmp_path, monkeypatch):
-    import gen_worker.executor as executor_mod
 
     artifact = _artifact(tmp_path)
     model_dir = tmp_path / "model"
@@ -2074,7 +2109,6 @@ def test_concurrent_same_ref_setups_keep_each_loaded_snapshot_identity(
 ):
     """A loads digest A, B advances ref-global disk state to B before A's
     load lock; A's record/target must still say A, never the current B."""
-    import gen_worker.executor as executor_mod
 
     first = _cold_spec()
     second = replace(

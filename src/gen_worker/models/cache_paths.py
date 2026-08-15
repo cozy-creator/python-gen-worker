@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from hashrepo import LocalCAS
 
 from ..config import Settings, current_or
+
+if TYPE_CHECKING:
+    from torch_compiled_graphs import Engine
 
 _STANDALONE = Settings()
 
@@ -47,6 +51,18 @@ def open_worker_cas(root: Path | None = None) -> LocalCAS:
     """
 
     return LocalCAS(tensorhub_cas_dir() if root is None else Path(root))
+
+
+def open_worker_engine(root: Path | None = None) -> Engine:
+    """Open TCG on the worker's one canonical HashRepo store.
+
+    Compile, import, resolve, and runner construction all cross this factory so
+    no caller can silently introduce a second compiled-graph store.  The import
+    stays lazy because model-only commands do not require TCG at startup.
+    """
+    from torch_compiled_graphs import Engine
+
+    return Engine(open_worker_cas(root))
 
 
 def tensorhub_fill_source_dir() -> Path | None:

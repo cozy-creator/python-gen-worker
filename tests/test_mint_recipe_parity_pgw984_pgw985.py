@@ -273,6 +273,12 @@ def aot_without_the_export(
     monkeypatch.setattr(mint_child, "_PHASE_OPEN", ("", 0.0), raising=False)
     monkeypatch.setattr(cc, "toolchain_present", lambda: True)
     monkeypatch.setattr(cc, "cxx_toolchain_present", lambda: True)
+    # The third environment preflight, stubbed for the same reason as the two
+    # above: this box has no card, and pgw#985's decline is a statement ABOUT
+    # THE EXPORT — which is the thing this fixture removes. Its own red-proof
+    # is `test_the_child_refuses_a_deterministic_environment_decline`, which
+    # runs the real child with no stubs at all.
+    monkeypatch.setattr(cc, "compile_target_block", lambda: "")
 
     exported: List[Dict[str, Any]] = []
 
