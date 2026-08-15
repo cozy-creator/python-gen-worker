@@ -381,45 +381,52 @@ def test_runtime_uses_the_canonical_worker_cas(
     }
 
 
-def test_a_host_that_cannot_name_its_sm_REFUSES_instead_of_substituting(
+def test_the_LANE_CHOICE_is_not_made_here_and_the_decline_is_named(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """pgw#985's deterministic environment decline, one axis over.
+    """pgw#985's deterministic environment decline, and where it does NOT live.
 
-    RED before the fix: `_tcg_runtime` read `runtime.get("sm") or "cpu"`, so a
-    cardless child built a valid `RuntimeCompatibility("cpu")`, TCG compiled
-    and KEYED against it, and a mint that must refuse deterministically
-    published an artifact under an `sm` no card reports. A missing gate arm
-    refuses; it never substitutes.
+    `_tcg_runtime` read `runtime.get("sm") or "cpu"`. TCG's target vocabulary
+    really is `cpu` or a concrete `sm_NN`, and `cpu` is keyed honestly as
+    `cpu-<isa>` — so naming it is legitimate. CHOOSING it is not: a mint pod
+    bought to serve CUDA that silently compiled `cpu-avx512` produced a true,
+    unadoptable artifact and re-minted forever.
+
+    So this frame states the target it can state, and the LANE DECISION is
+    `compile_cache.compile_target_block`, which `mint_child.mint` refuses on
+    before any export (its end-to-end red-proof is
+    `test_mint_recipe_parity_pgw984_pgw985`).
     """
     import torch_compiled_graphs
 
     from gen_worker import compile_cache
-    from gen_worker.child_preflight import PreflightRefused
-    from gen_worker.models import cache_paths
-
-    monkeypatch.setattr(compile_cache, "runtime_key", lambda: {"sm": ""})
-    monkeypatch.setattr(
-        torch_compiled_graphs, "RuntimeCompatibility",
-        lambda *a, **kw: pytest.fail("a compile target was built without an sm"))
-    monkeypatch.setattr(
-        cache_paths, "open_worker_engine",
-        lambda root=None: pytest.fail("TCG was opened without an sm"))
-
-    with pytest.raises(PreflightRefused) as caught:
-        child._tcg_runtime()
-
     from gen_worker.hostfacts import (
         DEVICE_ABSENT, DEVICE_PRESENT, DEVICE_UNREADABLE,
     )
+    from gen_worker.models import cache_paths
 
-    detail = str(caught.value)
-    assert "compiled_graph_target_unnameable" in detail
-    assert "sm" in detail
-    # The refusal REPORTS an accelerator state, and the vocabulary is
-    # cuda/none/unreadable — "cpu" is not a state of that axis.
-    assert any(f"accelerator={v}" in detail
+    targets: list[str] = []
+    monkeypatch.setattr(compile_cache, "runtime_key", lambda: {"sm": ""})
+    monkeypatch.setattr(
+        torch_compiled_graphs, "RuntimeCompatibility",
+        lambda target, **kw: targets.append(target))
+    monkeypatch.setattr(
+        cache_paths, "open_worker_engine", lambda root=None: object())
+    monkeypatch.setattr(
+        compile_cache, "toolchain_digest", lambda: (("torch", "exact"),))
+
+    child._tcg_runtime()
+    # The one legal non-CUDA target, NAMED — never a fabricated `sm_NN`.
+    assert targets == [child.CPU_COMPILE_TARGET]
+
+    # And the decline that stops a CUDA mint taking it is stated, with the
+    # accelerator vocabulary (cuda/none/unreadable — "cpu" is not a state).
+    block = compile_cache.compile_target_block()
+    assert "sm" in block
+    assert any(f"accelerator={v}" in block
                for v in (DEVICE_PRESENT, DEVICE_ABSENT, DEVICE_UNREADABLE))
+    monkeypatch.setattr(compile_cache, "runtime_key", lambda: {"sm": "sm_86"})
+    assert compile_cache.compile_target_block() == ""
 
 
 def test_child_refuses_setup_seal_drift_before_tcg_runtime(

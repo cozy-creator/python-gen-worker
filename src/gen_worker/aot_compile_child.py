@@ -106,6 +106,13 @@ from .api.export_contract import export_declaration
 
 logger = logging.getLogger(__name__)
 
+#: TCG's non-CUDA compile target. Not a placeholder and not an accelerator
+#: state: TCG resolves it to ``cpu-<isa>`` and keys the artifact on that, which
+#: every CPU-lane host with the same ISA computes identically. Choosing it for
+#: a mint that was bought to serve CUDA is the defect — see
+#: ``compile_cache.compile_target_block`` and ``mint_child.mint``.
+CPU_COMPILE_TARGET = "cpu"
+
 
 def _install_posture(job: EntryJob) -> None:
     """Install worker-owned host policy before tracing or compiling."""
@@ -374,25 +381,28 @@ def _tcg_runtime(cache_root: Optional[Path] = None) -> Tuple[Any, Any]:
     CAS. The explicit measurement CLI supplies a temporary root so a diagnostic
     run cannot mutate serving state.
 
-    The compile target is the host's ``sm`` or NOTHING. It read
-    ``runtime.get("sm") or "cpu"`` for the length of one review, and that one
-    ``or`` is the whole pgw#985 regression: a cardless child built a valid
-    ``RuntimeCompatibility("cpu")``, TCG compiled and keyed against it, and a
-    mint that must refuse deterministically instead published an artifact on an
-    axis value no card reports. "cpu" is also not a state of the accelerator
-    axis — it is ``cuda`` or ``none``.
+    TCG's target vocabulary is exactly ``"cpu"`` or a concrete ``sm_NN``, and
+    it validates the CUDA form against the visible device. ``cpu`` is not a
+    placeholder there — it keys the artifact ``cpu-<isa>``, an honest identity
+    every CPU-lane host with that ISA computes — so this function may name it,
+    and the measurement CLI and the CPU-lane compile tests depend on that.
+
+    What it must NOT do is CHOOSE the lane. A mint pod bought to serve CUDA
+    that quietly compiles ``cpu-avx512`` has burnt itself: the artifact is
+    keyed truthfully and no GPU pod will ever adopt it, so the family re-mints
+    forever. That decision belongs to ``mint_child.mint``, which refuses
+    deterministically on :func:`compile_cache.compile_target_block` before any
+    export — pgw#985. This frame only reports which of the two targets the host
+    can state.
     """
     from torch_compiled_graphs import RuntimeCompatibility
 
     from . import compile_cache
     from .models.cache_paths import open_worker_engine
 
-    block = compile_cache.compile_target_block()
-    if block:
-        raise PreflightRefused(f"compiled_graph_target_unnameable: {block}")
-    target = str(compile_cache.runtime_key()["sm"]).strip()
+    sm = str(compile_cache.runtime_key().get("sm") or "").strip()
     compatibility = RuntimeCompatibility(
-        target,
+        sm or CPU_COMPILE_TARGET,
         toolchain=dict(compile_cache.toolchain_digest()),
     )
     return open_worker_engine(cache_root), compatibility

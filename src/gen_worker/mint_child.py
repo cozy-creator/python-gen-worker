@@ -653,20 +653,6 @@ def mint(request: MintRequest) -> MintReport:
     # retired worker kernel-lane A/B neither reached that schema nor affected
     # the compile child, so it cannot be a second artifact-policy authority.
     instance, pipe, aot_spec = _load()
-    # pgw#985, one axis over: a host that cannot NAME what it would produce
-    # must refuse before it produces it — once, here, rather than K times
-    # inside the compile children that would each rediscover it.
-    #
-    # DELIBERATELY AFTER `_load()`. The wiring refusals (no such target, an
-    # unresolvable slot, an untraceable pipeline) are more specific than "this
-    # box has no card", and pgw#985's whole finding was that the general
-    # sentence standing in for the specific one is what makes an operator rule
-    # out the only thing it was not. The environment is the LAST preflight, and
-    # it still precedes every export, compile and published byte.
-    target_block = cc.compile_target_block()
-    if target_block:
-        raise PreflightRefused(
-            f"compiled_graph_target_unnameable: {target_block}")
     from .models import structure_only
 
     facts = structure_only.facts_of(pipe)
@@ -721,6 +707,23 @@ def mint(request: MintRequest) -> MintReport:
             instance, handler_proof.warm_jobs(siblings), request,
             proof_only=True)
     _reset_peak()
+    # pgw#985's deterministic environment decline, one axis over, and the LAST
+    # preflight on purpose: everything above it (an unresolvable slot, a target
+    # this pipeline does not own, an untraceable pipeline, a handler that
+    # cannot run) is a MORE SPECIFIC statement than "this box has no card", and
+    # pgw#985's whole finding was that a general sentence standing in for a
+    # specific one is what makes an operator rule out the only thing it was not.
+    #
+    # It still precedes every export, every compile child and every published
+    # byte. A mint pod bought to produce a CUDA-serving artifact must not
+    # quietly produce a `cpu-<isa>` one instead: TCG keys that honestly, but no
+    # GPU pod will ever adopt it, so the mint is burnt and the family re-mints
+    # forever. Typed, so the orchestrator buys no second pod for a fact the
+    # second pod would state identically.
+    target_block = cc.compile_target_block()
+    if target_block:
+        raise PreflightRefused(
+            f"compiled_graph_target_unnameable: {target_block}")
     # Deliberately NOT `aot_mint.compose_for_mint` (which builds a pipeline
     # from a model ref for an operator's mint pod): the graphs this cell must
     # serve are the graphs the ENDPOINT's own composed pipeline runs, and

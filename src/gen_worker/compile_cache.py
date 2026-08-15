@@ -694,25 +694,28 @@ def runtime_key() -> Dict[str, str]:
 
 
 def compile_target_block() -> str:
-    """Why this host cannot name the `sm` a compiled graph would be keyed on —
-    ``""`` when it can. THE deterministic environment decline (pgw#985).
+    """Why a mint on this host would not produce a CUDA-serving artifact —
+    ``""`` when it would. THE deterministic environment decline (pgw#985).
 
-    ``sm`` is one of the three ``cg-key-v1`` axes, so a host that cannot state
-    it cannot name what it would produce. Substituting a placeholder is the
-    defect this exists to forbid: the compile succeeds, the artifact publishes,
-    and its key is one no pod on any card ever computes — a guaranteed miss
-    bought with a full mint, and a fact no retry can change.
+    ``sm`` is one of the three ``cg-key-v1`` axes. A host with no card can still
+    compile: TCG's other target is ``cpu``, which it resolves to ``cpu-<isa>``
+    and keys honestly. That is exactly the danger. The artifact is TRUE and
+    unadoptable — no GPU pod computes a ``cpu-avx512`` key — so a mint pod
+    bought to serve CUDA that takes the CPU lane burns its whole mint and the
+    family re-mints on the next boot, forever, with nothing anywhere saying why.
 
     Deterministic for the life of the process, and for the life of the POD: a
-    second pod is the same host asking the same question. So callers refuse
-    TYPED (``PreflightRefused`` -> ``EXIT_REFUSED``) rather than crashing,
+    second pod is the same host answering the same way. So callers refuse
+    TYPED (``PreflightRefused`` -> ``EXIT_REFUSED``, ``retryable=False``),
     which is what stops the orchestrator buying another one.
 
-    Side-effect free and it only NAMES, exactly like :func:`arming_block` —
-    the raise belongs to the child that has a report to write. The three-valued
-    :func:`hostfacts.cuda_state` is used rather than the capability predicate
-    because this sentence is REPORTED to the fleet, and "this host has no card"
-    and "this host's card would not answer" are different pod verdicts.
+    Side-effect free and it only NAMES, exactly like :func:`arming_block` — the
+    raise belongs to the child that has a report to write, and the ORDER of that
+    raise is the caller's business (``mint_child`` asks last, so the specific
+    wiring refusals win). The three-valued :func:`hostfacts.cuda_state` is used
+    rather than the capability predicate because this sentence is REPORTED to
+    the fleet, and "this host has no card" and "this host's card would not
+    answer" are different pod verdicts.
     """
     if str(runtime_key().get("sm") or "").strip():
         return ""
@@ -722,9 +725,10 @@ def compile_target_block() -> str:
     evidence = f" ({state.probe_class}: {state.detail})" if state.detail else ""
     return (
         f"this host states no `sm`, and `sm` is one of the three cg-key-v1 "
-        f"axes — accelerator={state.state}{evidence}. A compiled graph minted "
-        f"here could not be keyed, and keying it on a placeholder would "
-        f"publish an artifact under an identity no pod computes.")
+        f"axes — accelerator={state.state}{evidence}. It could still compile "
+        f"the CPU lane, and that artifact would be keyed truthfully and "
+        f"adopted by nothing: a mint bought to serve CUDA would burn itself "
+        f"and the family would re-mint forever.")
 
 
 def _lib_versions() -> Dict[str, str]:
