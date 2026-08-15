@@ -1351,6 +1351,11 @@ class _Job:
     # contaminates every compiled-vs-eager latency comparison with eager data.
     served_eager_fallback: bool = False
     fallback_reason: str = ""
+    # pgw#888: the dispatch fence runs TWICE for one job (at intake, and again
+    # as the last execution fence before the GPU turn), so a degrade that
+    # persists across both would confess twice and double every hub-side count
+    # of it. One request, one confession.
+    pinned_cell_degrade_reported: bool = False
     # pgw#789: (steps, width, height) of the EXECUTED payload, defaults
     # applied — the axes latency is a function of. Stamped beside `lane`,
     # where the resolved payload is in scope; 0 means "not applicable"
@@ -3566,6 +3571,11 @@ class Executor:
         the latency sample must be subtractable; a DIFFERENT armed cell still
         serves compiled, and `serving_mode` reports the cell it actually used.
         """
+        job = self.jobs.get((run.request_id, int(run.attempt)))
+        if job is not None:
+            if job.pinned_cell_degrade_reported:
+                return  # the intake fence already confessed this one
+            job.pinned_cell_degrade_reported = True
         served_eager = not active[0]
         detail = (
             f"fn={spec.name} request={run.request_id or '<unknown>'} "

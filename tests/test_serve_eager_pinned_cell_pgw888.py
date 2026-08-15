@@ -58,15 +58,15 @@ class _Endpoint:
 
 
 class _LiveJob:
-    """The two fields `_mark_request_eager_fallback` writes, plus the two it
-    reads. A real `_Job` needs an asyncio loop and a hub transport; the fence
-    touches none of that."""
+    """The four fields the fence writes and reads on a live job. A real `_Job`
+    needs an asyncio loop and a hub transport; the fence touches neither."""
 
     def __init__(self, request_id: str) -> None:
         self.request_id = request_id
         self.finished = False
         self.served_eager_fallback = False
         self.fallback_reason = ""
+        self.pinned_cell_degrade_reported = False
 
 
 class _Fence:
@@ -290,6 +290,20 @@ def test_an_exactly_matching_pin_is_silent(
     assert job.served_eager_fallback is False
     assert not [
         e for e in events if e.kind == activity_mod.KIND_SERVE_DEGRADE]
+
+
+def test_one_request_confesses_once(events: List[pb.ActivityUpdate]) -> None:
+    """`_JobOrder.fence` is invoked TWICE for one job — at intake, and again
+    as the last execution fence before the GPU turn. A degrade that persists
+    across both must not double every hub-side count of it."""
+    fence = _Fence("fp8-w8a16+compiled", _target("fp8-w8a16", "", ""))
+    fence.jobs[("req-888", 1)] = _LiveJob("req-888")
+
+    _serve(fence, _spec(), _run())   # intake
+    _serve(fence, _spec(), _run())   # last execution fence
+
+    assert len(
+        [e for e in events if e.kind == activity_mod.KIND_SERVE_DEGRADE]) == 1
 
 
 def test_pinned_cell_unavailable_is_a_wire_fallback_class() -> None:
