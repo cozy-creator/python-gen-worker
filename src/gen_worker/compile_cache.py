@@ -83,8 +83,10 @@ from typing import (
 
 import sys
 
+from torch_compiled_graphs import is_compiled_graph_key
+
 from . import (
-    compiled_graph_key, dist_records, env_seal, guard_closure, hot_swap,
+    dist_records, env_seal, graph_facts, guard_closure, hot_swap,
     serve_posture, settings_authority,
 )
 from .api.errors import FatalError, RetryableError
@@ -163,7 +165,7 @@ def _cell_ref_identity(ref: str) -> str:
     family, flavor = parse_cell_ref(ref)
     if family and flavor:
 
-        if compiled_graph_key.is_key(flavor):
+        if is_compiled_graph_key(flavor):
             return f"{family}#{flavor}"
     return ref
 
@@ -639,7 +641,7 @@ def _record_guard_miss(
 # with the pgw#1035 dead-code wave) and claimed parity with
 # `aot_serve.IDENTITY_AXES`, which was never true — 5 entries against 3, and
 # pgw#1034 had already ruled the two sets deliberately different. The cell key's
-# axes are `compiled_graph_key.KEY_AXES`; this module's job is `runtime_key()`,
+# axes are `graph_facts.KEY_AXES`; this module's job is `runtime_key()`,
 # the ONE probe that states them.
 
 
@@ -785,7 +787,7 @@ def execution_lane_label(weight_lane: str, lora_bucket: int = 0) -> str:
     string already carries wins — it is what was actually traced.
 
     pgw#1040: this body existed twice, byte for byte, as
-    ``compiled_graph_key._canonical_execution_lane`` and
+    ``graph_facts``'s canonical execution lane and
     ``aot_contract.ExportSpec.execution_lane_label``; both were folded here.
     Since pgw#1059 the lane is store METADATA + discovery scoping, never a
     key axis — but the one-derivation rule stands for the same reason: a
@@ -939,7 +941,7 @@ _CLOSURE_ENTRYPOINTS = (
     "gen_worker.api.export_contract",
     "gen_worker.compile_cache",
     "gen_worker.guard_closure",
-    "gen_worker.compiled_graph_key",
+    "gen_worker.graph_facts",
     "gen_worker.env_seal",
     "gen_worker.models.loading",
     "gen_worker.models.provision",
@@ -1044,11 +1046,11 @@ def toolchain_digest() -> Tuple[Tuple[str, str], ...]:
     ``transformers`` / ``peft`` rode this axis until 2026-08-11 and were
     evicted because their whole effect on a cell arrives through the traced
     graph, which the ``graph`` axis hashes node-for-node since pgw#1031 —
-    see ``compiled_graph_key``'s module docstring for the channel-by-channel argument
+    see ``torch_compiled_graphs.identity``'s membership rules for the channel-by-channel argument
     and for the two fences (B1 code-only + the pgw#1097 folding fence;
     ``env_seal.assert_seal_unchanged``) that close the routes around it.
     Folded here, every model-library patch release re-keyed every cell in
-    the fleet for a graph that had not moved. ``compiled_graph_key.toolchain_facts``
+    the fleet for a graph that had not moved. ``tcg.identity.toolchain_axis_digest``
     is the READER of the same membership, and the pair is what keeps one
     axis one derivation. Their versions stay RECORDED for forensics
     (:func:`_lib_versions`, ``artifact_metadata``'s ``libs`` block) — an
@@ -1220,7 +1222,7 @@ def _semantic_cache_tag(pipeline: Any, cfg: Any) -> str:
         str(SEMANTIC_TAG_FORMAT), "inductor",
         str(getattr(cfg, "family", "") or ""), execution_lane,
         "regional" if bool(getattr(cfg, "regional", False)) else "whole",
-        compiled_graph_key.facts_digest(declared_compile_facts(cfg)),
+        graph_facts.facts_digest(declared_compile_facts(cfg)),
     ))
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 

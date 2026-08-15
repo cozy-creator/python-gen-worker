@@ -87,7 +87,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from . import aot_identity, boot_phases, compiled_graph_key
+from torch_compiled_graphs import is_compiled_graph_key
+
+from . import aot_identity, boot_phases
 from .procsplit import broker
 
 logger = logging.getLogger(__name__)
@@ -340,7 +342,7 @@ def _require_batch(family: str, keys: Sequence[str]) -> Tuple[str, Tuple[str, ..
     seen: Set[str] = set()
     for i, raw in enumerate(keys):
         key = str(raw or "").strip()
-        if not compiled_graph_key.is_key(key):
+        if not is_compiled_graph_key(key):
             raise CellResolveRefused(
                 "invalid_request",
                 f"keys[{i}] is {key!r}, which is not a compiled-graph key; "

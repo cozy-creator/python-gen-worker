@@ -53,7 +53,7 @@ from .api.binding import (
 )
 from .hubio.client import HubPublishError
 from .hub_error import HubApiError
-from . import compiled_graph_key
+from . import graph_facts
 from .child_contract import MintSlot, slot_subjects
 from .wire_snapshots import index_snapshots
 from .api.errors import (
@@ -8584,7 +8584,7 @@ class Executor:
     def _arming_enable(
         self, pipe: Any, cfg: Any, cache_dir: Optional[Path],
         artifact: Optional[Path],
-        subject: Tuple[compiled_graph_key.SlotSubject, ...] = (),
+        subject: Tuple[graph_facts.SlotSubject, ...] = (),
     ) -> "fleet_cells.ArmOutcome":
         """ArmingScope adapter: a self-loaded pipeline's ``arm_compile()``
         gets the same fleet policy (delivered cell first, self-mint on miss)

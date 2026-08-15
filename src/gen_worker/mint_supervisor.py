@@ -60,7 +60,7 @@ import msgspec
 from . import activity as activity_mod
 from . import artifact_meta
 from . import boot_phases
-from . import compiled_graph_key as compiled_graph_key_mod
+from . import graph_facts
 from . import compile_posture
 from . import mint_workers
 from . import progress as progress_mod
@@ -261,7 +261,7 @@ def rule_on_boot_memo(
     blocks: Dict[str, Dict[str, Any]] = {}
     for row in entries:
         block = dict(getattr(row, "metadata", None) or {}).get(
-            compiled_graph_key_mod.ENTRY_BLOCK_KEY)
+            graph_facts.TCG_GRAPH_CLASS_BLOCK)
         if not isinstance(block, Mapping):
             return ""
         blocks[str(row.entry)] = dict(block)
@@ -594,7 +594,7 @@ def held_graph_classes(out_dir: Path) -> List[Any]:
     for path in sorted(out_dir.glob("*.tar.gz")):
         try:
             meta = dict(artifact_meta.read_metadata(path))
-            name = str(meta[compiled_graph_key_mod.ENTRY_BLOCK_KEY]["name"])
+            name = str(meta[graph_facts.TCG_GRAPH_CLASS_BLOCK]["name"])
             key = str(meta.get("compiled_graph_key") or "")
         except Exception:  # noqa: BLE001 — see the docstring
             logger.warning(

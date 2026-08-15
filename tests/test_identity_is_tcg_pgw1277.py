@@ -31,7 +31,7 @@ import pytest
 from torch_compiled_graphs import identity as tcg_identity
 from torch_compiled_graphs import is_compiled_graph_key
 
-from gen_worker import fleet_cells
+from gen_worker import env_seal, fleet_cells, graph_facts
 
 #: Exactly the metadata shape ``aot_mint`` records for a minted graph class:
 #: TCG's ``graph_class`` block, never an ``entry`` block.
@@ -40,6 +40,10 @@ TCG_METADATA = {
     "sm": "sm_89",
     "graph_class": {"name": "unet", "target": "unet", "class_hash": "a" * 16},
     "toolchain": {"torch": "c" * 16, "ptxas": "d" * 16},
+    # A wire fact the hub's ArtifactIdentity requires by name, not a key axis
+    # (pgw#1059 amendment 4). The publish path fails closed without it, which
+    # is a separate refusal from the identity one this file is about.
+    env_seal.SEAL_KEY: {"v": 4, "matmul_precision": "high"},
 }
 
 VECTORS = pathlib.Path(__file__).parent / "testdata" / "compiled_graph_key_vectors.json"
@@ -98,6 +102,40 @@ def test_a_key_is_refused_where_a_fact_belongs() -> None:
     forged["graph_class"]["class_hash"] = "cg-key-v1-" + "f" * 56
     with pytest.raises(tcg_identity.IdentityError):
         tcg_identity.from_artifact_metadata(forged)
+
+
+def test_the_axis_projection_is_fenced_against_tcgs_refusal() -> None:
+    """``graph_facts.KEY_AXES`` is a PROJECTION, so it needs a fence.
+
+    TCG does not export its required-axis tuple, and the publish wire has to
+    name the axes. A copy nobody checks is how two enumerations start
+    disagreeing about what an entry must restate — so assert TCG accepts
+    exactly this set and refuses anything outside it.
+    """
+    sample = {name: f"{name}-fact" for name in graph_facts.KEY_AXES}
+    assert tcg_identity.from_axes(sample).as_dict().keys() == set(graph_facts.KEY_AXES)
+
+    for dropped in graph_facts.KEY_AXES:
+        with pytest.raises(tcg_identity.IdentityError):
+            tcg_identity.from_axes({k: v for k, v in sample.items() if k != dropped})
+
+    with pytest.raises(tcg_identity.IdentityError):
+        tcg_identity.from_axes({**sample, "envelope": "e" * 16})
+
+
+def test_the_graph_class_block_projection_is_fenced() -> None:
+    """``graph_facts.TCG_GRAPH_CLASS_BLOCK`` must name the block TCG reads.
+
+    This is the constant whose drift caused the defect. Prove it against TCG
+    itself rather than against another copy of the same guess: renaming the
+    block makes TCG refuse the artifact.
+    """
+    assert tcg_identity.from_artifact_metadata(TCG_METADATA).value
+
+    renamed = json.loads(json.dumps(TCG_METADATA))
+    renamed["entry"] = renamed.pop(graph_facts.TCG_GRAPH_CLASS_BLOCK)
+    with pytest.raises(tcg_identity.IdentityError):
+        tcg_identity.from_artifact_metadata(renamed)
 
 
 def test_the_worker_holds_no_second_identity_module() -> None:

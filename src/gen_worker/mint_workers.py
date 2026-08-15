@@ -115,7 +115,7 @@ class DevicePeakKey(NamedTuple):
     card: str
     sm: str
     #: The SAME digest the cell key's toolchain axis uses
-    #: (``compiled_graph_key.toolchain_axis_digest``), so a banked row and the cell it
+    #: (``tcg.identity.toolchain_axis_digest``), so a banked row and the cell it
     #: was measured for agree about what "this toolchain" means.
     toolchain: str
     gen_worker: str

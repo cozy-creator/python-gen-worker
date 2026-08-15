@@ -8,7 +8,7 @@ subsequent run of that code reuses the same compiled cell — same ck1 key
 derivation, same memo shortcut, fully offline-capable."*
 
 ONE IDENTITY, TWO STORES. A cell stored here is addressed by exactly the
-key the hub store addresses it by — ``compiled_graph_key.from_exported_artifact_metadata``
+key the hub store addresses it by — ``tcg.identity.from_artifact_metadata``
 stamped on the bytes (pgw#1059's four axes: graph x envelope x sm x
 toolchain). The hub store and this one differ in their SINK, never in their
 addressing, so a cell that later becomes publishable needs no re-keying and a
@@ -91,7 +91,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import compiled_graph_key
+from torch_compiled_graphs import is_compiled_graph_key
+from torch_compiled_graphs.identity import KEY_SCHEME
 
 logger = logging.getLogger(__name__)
 
@@ -188,9 +189,9 @@ def cell_dir(key: str, root: Optional[Path] = None) -> Path:
     store addressed by a key-shaped string it did not verify is a store whose
     layout depends on what a caller happened to pass.
     """
-    if not compiled_graph_key.is_key(key):
+    if not is_compiled_graph_key(key):
         raise ValueError(
-            f"the local cell store addresses {compiled_graph_key.KEY_SCHEME} keys only; "
+            f"the local cell store addresses {KEY_SCHEME} keys only; "
             f"{key!r} is not one")
     return cells_root(root) / key
 

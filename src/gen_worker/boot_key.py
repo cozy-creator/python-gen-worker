@@ -81,7 +81,7 @@ from typing import (
 
 import msgspec
 
-from . import boot_phases, compiled_graph_key, compile_cache as cc
+from . import boot_phases, compile_cache as cc, graph_facts
 from .child_contract import CompileSpec, MintSlot, slot_subjects
 from . import hostfacts
 
@@ -406,7 +406,7 @@ def closure_digest(
             "guidance": sorted(float(v) for v in cfg.guidance_scales),
             "lora_bucket": int(cfg.lora_bucket or 0),
         },
-        "subject": compiled_graph_key.subject_facts(slot_subjects(dict(slots or {}))),
+        "subject": graph_facts.subject_facts(slot_subjects(dict(slots or {}))),
     }
     blob = json.dumps(facts, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(blob).hexdigest()[:32]
