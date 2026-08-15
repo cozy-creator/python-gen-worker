@@ -3428,6 +3428,26 @@ class Executor:
         worker-session address, not a durable model identity; vacate/reload,
         mutable-tag republish, or an alias/model mismatch must requeue rather
         than execute on a merely same-family pipeline.
+
+        pgw#888 (Paul, 2026-08-15): *"a worker should serve-eager if
+        compilation doesn't work … although it should loudly report when it's
+        performing in a degraded mode."* So this fence now answers TWO
+        questions that it used to fold into one refusal:
+
+        - **Is this the right model?** — incarnation, lane, function and every
+          model binding. A mismatch is a different object, there is nothing
+          correct to serve, and it still requeues.
+        - **Is the pinned COMPILED GRAPH still what this pod serves?** — the
+          cell ref/digest half. A cell that de-armed for cause (§4.31), was
+          revoked, or was replaced by a newer one is a SPEED fact, not a
+          correctness one: the pipeline, its weights and its lane are exactly
+          what the hub picked. Refusing there is what burned 11 real requests
+          through five retries each. It now serves and confesses.
+
+        The mandatory-quantized carve-out stands: `w8a8`/`w4a4` is a lane the
+        author declared serves only from a cell, so a dispatch that cannot
+        name one is still refused rather than answered with numerics the
+        endpoint never sanctioned.
         """
         setup_slots = self._setup_slots(spec)
         want_execution_lane = self._mandatory_execution_lane_of_bound(
@@ -3479,14 +3499,13 @@ class Executor:
                 "required_compile_function_mismatch: target does not serve "
                 f"{spec.name!r}"
             )
-        if (
-            target_active[0] != identity[1]
-            or target_active[1] != identity[2]
-            or target_active[2] != identity[3]
-        ):
+        if target_active[2] != identity[3]:
+            # The EXECUTION CONTRACT, not the cell. A changed contract digest
+            # means the target's call ingress is not the one the hub validated
+            # this dispatch against, so serving it would run a different
+            # function signature — an identity fault, not a degrade.
             raise RetryableError(
-                "required_compile_identity_mismatch: active cell or execution "
-                "contract changed"
+                "required_compile_contract_mismatch: execution contract changed"
             )
 
         expected: List[Tuple[str, str, str]] = []
@@ -3510,6 +3529,70 @@ class Executor:
             raise RetryableError(
                 "required_compile_binding_mismatch: selected target holds a "
                 "different model ref or snapshot digest"
+            )
+
+        # LAST, and only once every identity fence above has passed: this is
+        # the right pipeline, holding the right models, on the right lane —
+        # and the compiled graph the hub pinned is not the one it serves.
+        if target_active[0] != identity[1] or target_active[1] != identity[2]:
+            if want_execution_lane:
+                raise RetryableError(
+                    f"required_compile_identity_mismatch: {want_execution_lane.upper()} "
+                    "dispatch pinned a compile cell this target no longer "
+                    "serves, and the lane is declared mandatory — eager would "
+                    "serve numerics this endpoint never sanctioned"
+                )
+            self._report_pinned_cell_unavailable(spec, run, identity, target_active)
+
+    def _report_pinned_cell_unavailable(
+        self,
+        spec: EndpointSpec,
+        run: pb.RunJob,
+        identity: Tuple[str, str, str, str],
+        active: Tuple[str, str, str],
+    ) -> None:
+        """pgw#888: SERVE this request, and say loudly that it is degraded.
+
+        A log line is not reporting — a hub-spawned worker exposes no stdout
+        (pgw#760) — so the confession is a typed `serve_degrade` event naming
+        the degraded mode, the compiled-graph key that failed to be here, and
+        the cause. The hub banks it in `worker_activity_events`, which is what
+        lets the fleet's republish/re-mint machinery fix the root cause while
+        users keep getting outputs.
+
+        Two distinguishable degrades share this exit, and conflating them
+        would be the exact `serving_mode` contamination pgw#764 exists to
+        prevent: nothing armed means this request really is served EAGER and
+        the latency sample must be subtractable; a DIFFERENT armed cell still
+        serves compiled, and `serving_mode` reports the cell it actually used.
+        """
+        served_eager = not active[0]
+        detail = (
+            f"fn={spec.name} request={run.request_id or '<unknown>'} "
+            f"attempt={int(run.attempt)} "
+            f"pinned_cell={identity[1]} pinned_digest={identity[2][:16]} "
+            f"active_cell={active[0] or '<none>'} "
+            f"active_digest={active[1][:16] or '<none>'} "
+            f"cause=the pinned compiled graph is not armed on this target "
+            f"(de-armed for cause, revoked, or superseded); serving "
+            f"{'eager' if served_eager else 'the armed cell'} instead of "
+            f"refusing (pgw#888)"
+        )
+        logger.warning(
+            "serving request %s DEGRADED: the hub pinned compile cell %s and "
+            "this target serves %s — answering it anyway",
+            run.request_id or "<unknown>", identity[1], active[0] or "eager",
+        )
+        activity_mod.emit_event(
+            activity_mod.KIND_SERVE_DEGRADE,
+            detail,
+            phase=serving_mode_mod.FALLBACK_PINNED_CELL_UNAVAILABLE,
+            compiled_graph_key=identity[1],
+        )
+        if served_eager:
+            self._mark_request_eager_fallback(
+                run.request_id,
+                serving_mode_mod.FALLBACK_PINNED_CELL_UNAVAILABLE,
             )
 
     def in_flight_keys(self) -> List[Tuple[str, int]]:

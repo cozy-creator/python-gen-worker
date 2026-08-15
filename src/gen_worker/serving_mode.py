@@ -47,9 +47,18 @@ FALLBACK_GUARD_MISS = "guard_miss"
 FALLBACK_INGRESS_REFUSED = "ingress_refused"
 FALLBACK_HEALING = "healing"
 FALLBACK_VOLATILE = "volatile"
+#: pgw#888: the hub PINNED an exact compile cell and this target no longer
+#: serves it (de-armed for cause, revoked, superseded). The other four classes
+#: all describe a cell that is armed and was skipped for one request; this one
+#: describes a cell that is not here at all — and until the pgw#888 ruling it
+#: was not a fallback reason but a refusal, so the request had no serving mode
+#: to report. It rides here so an eager sample charged to a dispatch the hub
+#: believed was compiled stays subtractable from the compiled measurement.
+FALLBACK_PINNED_CELL_UNAVAILABLE = "pinned_cell_unavailable"
 _PER_REQUEST_FALLBACKS = frozenset({
     FALLBACK_GUARD_MISS, FALLBACK_INGRESS_REFUSED,
     FALLBACK_HEALING, FALLBACK_VOLATILE,
+    FALLBACK_PINNED_CELL_UNAVAILABLE,
 })
 
 # --- eager POSTURE reason classes (pgw#824, wire-shared) ---------------------

@@ -64,7 +64,8 @@
       "guard_miss",
       "ingress_refused",
       "healing",
-      "volatile"
+      "volatile",
+      "pinned_cell_unavailable"
     ],
     "eager_posture_reasons": [
       "arm_pending",

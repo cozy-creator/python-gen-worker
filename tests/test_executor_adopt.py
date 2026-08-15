@@ -2216,7 +2216,12 @@ def _required_run(spec: EndpointSpec, target, **overrides) -> pb.RunJob:
         ({"target_incarnation_id": "gone"}, "required_compile_replaced"),
         ({"cell_ref": CACHE_REF + "-other"}, "required_compile_identity_mismatch"),
         ({"cell_snapshot_digest": DIGEST_B}, "required_compile_identity_mismatch"),
-        ({"contract_digest": "bad-contract"}, "required_compile_identity_mismatch"),
+        # pgw#888 split the single `identity_mismatch` refusal in two. The
+        # execution CONTRACT is identity — a different call ingress is a
+        # different function — so it keeps a refusal and gets its own token.
+        # The cell ref/digest above is AVAILABILITY, and still refuses here
+        # only because this fixture's lane is the declared-mandatory w8a8 one.
+        ({"contract_digest": "bad-contract"}, "required_compile_contract_mismatch"),
         ({"cell_ref": ""}, "required_compile_invalid"),
     ],
 )
