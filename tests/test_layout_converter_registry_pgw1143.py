@@ -596,7 +596,9 @@ def test_the_fence_covers_every_module_that_computes_a_cell_key() -> None:
     file which violates the rule is the one nobody added."""
     fenced = {p.name for p in _fence_module().fenced_modules()}
     assert {"cell_key.py", "fleet_cells.py", "boot_key.py", "aot_mint.py",
-            "aot_serve.py", "compile_cache.py"} <= fenced
+            "compile_cache.py"} <= fenced
+    assert "aot_serve.py" not in fenced, (
+        "runtime admission consumes the TCG key; it must not derive one")
 
 
 def _run_fence(*argv: str) -> subprocess.CompletedProcess:

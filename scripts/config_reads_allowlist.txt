@@ -130,8 +130,6 @@ src/gen_worker/net.py::$name STANDALONE COZY_HTTP_*_TIMEOUT_S. Documented as "re
 src/gen_worker/local_cell_store.py::GEN_WORKER_LOCAL_CELLS_DIR STANDALONE GEN_WORKER_LOCAL_CELLS_DIR, the local cell store's ROOT (pgw#1096 moved the accessor here from local_cells): a path relocation like TENSORHUB_CACHE_DIR, never a behavior knob, and a cross-repo contract with cozy-local's paths.go.
 src/gen_worker/video_encode.py::GEN_WORKER_VIDEO_ENCODE_CONCURRENCY STANDALONE GEN_WORKER_VIDEO_ENCODE_CONCURRENCY, encode fan-out.
 src/gen_worker/models/native_kernels.py::GEN_WORKER_NATIVE_KERNELS VIOLATION GEN_WORKER_NATIVE_KERNELS. th#1887: NOT standalone — a serving-path rollout gate, not a CLI. Now also registered in BEHAVIOUR_GATES; deletion target pending a release-declaration check.
-src/gen_worker/aot_resume.py::GEN_WORKER_MINT_RESUME_MAX_BYTES STANDALONE GEN_WORKER_MINT_RESUME_MAX_BYTES, resume-area capacity bound.
-src/gen_worker/aot_resume.py::GEN_WORKER_MINT_RESUME_DIR STANDALONE GEN_WORKER_MINT_RESUME_DIR. Operator override for the resume root; production wiring is `aot_resume.set_root` (pgw#1030 deleted the zero-caller `resume_enabled()` wrapper — `open_bank` states the decision).
 
 # ---------------------------------------------------------------------------
 # TRIPWIRE — guards whose entire purpose is to fire on a misconfiguration.

@@ -374,10 +374,10 @@ def _tcg_runtime(cache_root: Optional[Path] = None) -> Tuple[Any, Any]:
     CAS. The explicit measurement CLI supplies a temporary root so a diagnostic
     run cannot mutate serving state.
     """
-    from torch_compiled_graphs import Engine, RuntimeCompatibility
+    from torch_compiled_graphs import RuntimeCompatibility
 
     from . import compile_cache
-    from .models.cache_paths import open_worker_cas
+    from .models.cache_paths import open_worker_engine
 
     runtime = compile_cache.runtime_key()
     target = str(runtime.get("sm") or "cpu")
@@ -385,8 +385,7 @@ def _tcg_runtime(cache_root: Optional[Path] = None) -> Tuple[Any, Any]:
         target,
         toolchain=dict(compile_cache.toolchain_digest()),
     )
-    cas = open_worker_cas() if cache_root is None else open_worker_cas(cache_root)
-    return Engine(cas), compatibility
+    return open_worker_engine(cache_root), compatibility
 
 
 def _compile_traced_class(
@@ -527,6 +526,7 @@ def run(job: EntryJob) -> int:
         # deserializing one somebody else traced.
         with ledger.span("child_setup_s"):
             pipeline, spec, decl = build_pipeline(job)
+            env_seal.assert_seal_unchanged("aot compile child setup")
     except PreflightRefused as exc:
         return _refuse(str(exc))
     except Exception as exc:  # noqa: BLE001

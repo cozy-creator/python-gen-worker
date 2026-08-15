@@ -176,11 +176,6 @@ class MintRequest(msgspec.Struct, frozen=True, kw_only=True):
     #: pgw#848: where the child rewrites its live phase table, so a mint the
     #: parent KILLS still leaves its measurements behind. Empty = no snapshot.
     phases_snapshot: str = ""
-    #: pgw#848 item 5: the CROSS-ATTEMPT resume bank root (``aot_resume``).
-    #: Deliberately NOT under the per-attempt ``child-<n>`` workdir — that is
-    #: precisely why a crash at entry 30 of 36 used to discard ~5.2 h of
-    #: compile. Empty = this mint does not resume and behaves as it did before.
-    resume: str = ""
     #: pgw#848: one ENTRY child's measured host high-water, banked by the
     #: parent from a previous mint on this pod (``mint_workers.compiled_graph_peak_rss``).
     #: 0 = never measured here, and the pool's width falls back to its
@@ -937,8 +932,6 @@ def build_request(
     task: MintTask, *, workdir: Path, compiled_graph_peak_rss_bytes: int = 0,
     device: Optional[int] = None,
 ) -> MintRequest:
-    from . import aot_resume
-
     pending = task.pending
     return MintRequest(
         compiled_graph_peak_rss_bytes=int(compiled_graph_peak_rss_bytes),
@@ -954,11 +947,6 @@ def build_request(
         # written on every beat, so a mint the caller abandons still hands back
         # what it measured.
         phases_snapshot=str(Path(workdir) / PHASES_SNAPSHOT_NAME),
-        # pgw#848 item 5: outside the mint's own tree entirely. Keyed by the
-        # pending's arm token as a SCOPE (identity is the per-entry
-        # re-derivation inside it), so a mint child restarted in place on the
-        # same pod finds the same bank.
-        resume=str(aot_resume.bank_root(pending.arm_token)),
         cfg=cfg_spec(pending.cfg),
         slots=dict(task.slots),
         device=_ordinal(task.device if device is None else device),

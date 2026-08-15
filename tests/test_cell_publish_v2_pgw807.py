@@ -33,7 +33,7 @@ import pytest
 from hashrepo import TransferReport
 
 import gen_worker.hubio.client as hub_client
-from gen_worker import aot_serve, cell_key, env_seal, receipts
+from gen_worker import cell_key, env_seal, receipts
 from gen_worker import fleet_cells as fc
 from gen_worker.hubio.client import HubPublishError
 from gen_worker.procsplit import actions
@@ -219,22 +219,14 @@ def hub():
 
 @pytest.fixture()
 def artifact(tmp_path: Path) -> Path:
-    """A real cell tarball packed by the real packer: metadata.json inside the
-    digested bytes, which is what the receipt gate reads back.
+    """Deterministic artifact bytes for the real HashRepo transfer path.
 
-    pgw#1181: packed by `aot_serve.pack`, not `compile_cache.pack`. `META`
-    below already declares `kind="aot-inductor"` — the packer was the last
-    thing here still writing the `torch-inductor-cache` envelope, whose
-    producer died in pgw#1178 and whose format is deleted. Same bytes, same
-    sizes (the chunked-upload and republish-identical rows depend on them),
-    written into the member set the exported cell actually has.
+    TCG owns compiled-graph packaging and admission.  This suite owns the
+    client transport contract, so it passes the publisher an already-admitted
+    artifact and separately supplies the identity row the publisher attests.
     """
-    root = tmp_path / "capture"
-    root.mkdir(parents=True, exist_ok=True)
-    (root / aot_serve.PACKAGE_NAME).write_bytes(
-        b"".join(_blob(20_000, i) for i in range(6)))
-    out = tmp_path / "cell.tar.gz"
-    aot_serve.pack(root, out, dict(META))
+    out = tmp_path / "compiled-graph.tar.gz"
+    out.write_bytes(b"".join(_blob(20_000, i) for i in range(6)))
     return out
 
 

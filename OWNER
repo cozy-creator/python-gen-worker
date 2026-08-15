@@ -1,0 +1,4 @@
+owner: /root
+purpose: pgw#1270 declaration + ingress + package extraction to torch-compiled-graphs 0.4
+branch: 1270-tcg-declaration-package
+base: 6bd44617f8b310d9faf57340815b63b8844329c6

@@ -79,6 +79,49 @@ def _real(device: str = "cpu") -> nn.Module:
     return nn.Linear(8, 8, dtype=torch.bfloat16).to(device)
 
 
+class _TinyTrace(nn.Module):
+    def forward(self, value: Any) -> Any:
+        return value.sin()
+
+
+def _traced_class(aot_mint: Any) -> Any:
+    """One real export crossing the same TCG declaration seam as production."""
+    from torch_compiled_graphs import CallIngress, CallInput
+
+    example = torch.ones(2)
+    program = torch.export.export(_TinyTrace(), (example,))
+    ingress = CallIngress(
+        parameters=("value",),
+        flat_arity=1,
+        inputs=(
+            CallInput(
+                "value", 0, "value", 0, (), "value", "float32", (2,),
+            ),
+        ),
+    )
+    return aot_mint.TracedClass(
+        name="transformer",
+        block={
+            "target": "transformer",
+            "fork": [],
+            "class_dims": [],
+            "graph": {
+                "v": 3,
+                "lifted_inputs": [],
+                "pytree": {
+                    "in": "leaf",
+                    "out": "leaf",
+                    "ingress": ingress.as_dict(),
+                },
+                "specialization": {},
+            },
+        },
+        nodes=len(program.graph_module.graph.nodes),
+        program=program,
+        declared=1,
+    )
+
+
 def test_the_target_is_fake_on_the_compute_device_which_is_the_premise() -> None:
     """Everything below is about a component whose parameters claim the card
     and allocate nothing. If that ever stops being what production builds,
@@ -276,9 +319,7 @@ def test_the_boot_trace_child_never_runs_the_serving_placement_ladder(
 
     def _traced(pipeline: Any, spec: Any, decl: Any, **_: Any) -> Any:
         composed.append(pipeline)
-        return iter([aot_mint.TracedClass(
-            name="transformer", block={"entry": "transformer"}, nodes=1,
-            program=None, declared=1)])
+        return iter([_traced_class(aot_mint)])
 
     monkeypatch.setattr(aot_mint, "trace_for_key", _traced)
 

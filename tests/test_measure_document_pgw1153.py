@@ -32,7 +32,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Tuple
+from typing import Any, Dict, List
 
 import msgspec
 import pytest
@@ -154,7 +154,7 @@ def test_a_runtime_mint_request_still_decodes_through_the_same_door(
         function="generate-w8a8", modules=("micro_diffusion.main_w8a8",),
         family=FAMILY, arm_token="arm1-deadbeef",
         target=str(tmp_path / "cell.tar.gz"), work_root=str(tmp_path / "work"),
-        report=str(tmp_path / "mint.json"), resume=str(tmp_path / "bank"),
+        report=str(tmp_path / "mint.json"),
         cfg=cfg)
     raw = msgspec.json.encode(request)
     assert b"cell.tar.gz" in raw
@@ -220,6 +220,16 @@ def on_path(monkeypatch: pytest.MonkeyPatch, micro_src: None) -> None:
     monkeypatch.syspath_prepend(str(REPO / "tests"))
     monkeypatch.setenv("PYTHONPATH", ":".join(
         [str(REPO / "src"), str(REPO / "tests"), str(MICRO_SRC)]))
+
+    # Another test may have reset the process-global declaration registry after
+    # this endpoint module was first imported.  A cached module import does not
+    # rerun its registration side effect, so restore the endpoint-owned value
+    # explicitly at this test boundary.
+    from gen_worker.api import export_contract as ec
+
+    import micro_diffusion.aot_declaration as decl
+
+    ec.register_export_declaration(decl.DECLARATION, replace=True)
 
 
 def _resolve(body: Dict[str, Any], **kw: Any) -> measure_child.MeasureJob:

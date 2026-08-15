@@ -262,25 +262,6 @@ def pipeline_arm_subject(pipe: Any) -> Tuple[cell_key.SlotSubject, ...]:
         sub for sub in stamped if isinstance(sub, cell_key.SlotSubject))
 
 
-def declared_envelope_block(cfg: Any) -> Dict[str, Any]:
-    """The DECLARED-envelope block for ``cfg`` — byte-for-byte the same
-    extraction :func:`aot_export_spec` performs (``shapes`` /
-    ``text_lens`` / ``guidance_scales``, no fallbacks: ``text_len`` was
-    dropped from the child handoff in pgw#1034), so the parent's pre-mint
-    envelope digest and the digest of the block the child RECORDS under
-    ``cell_key.EXPORT_ENVELOPE_KEY`` agree by construction (canonical form:
-    ``cell_key.envelope_facts``). GPU-gauntlet-proven: a fallback here that
-    the spec extraction does not share reds every handback as
-    ``envelope`` divergence."""
-    return {
-        "shapes": [
-            [int(v) for v in row] for row in (getattr(cfg, "shapes", ()) or ())],
-        "text_lens": [int(v) for v in (getattr(cfg, "text_lens", ()) or ())],
-        "guidance": [
-            float(v) for v in (getattr(cfg, "guidance_scales", ()) or ())],
-    }
-
-
 def arm_identity(
     family: str, weight_lane: str, lora_bucket: int, cfg: Any,
     subject: Iterable[cell_key.SlotSubject] = (),
@@ -683,14 +664,6 @@ class PublishIntentBatch:
     repo: str
     family: str
     grants: Tuple[PublishGrant, ...]
-
-    def grant_for(self, compiled_graph_key: str) -> PublishGrant:
-        for g in self.grants:
-            if g.compiled_graph_key == compiled_graph_key:
-                return g
-        raise CellPublishRefused(
-            f"the intent batch names no answer for {compiled_graph_key}")
-
 
 class CellPublisher:
     """The fleet publish sink: intent -> commit flow -> complete.
@@ -2952,14 +2925,10 @@ def abandon_self_mint(pending: "PendingSelfMint") -> None:
     proven sibling already finalized the shared capture (the artifact and
     its publish must survive).
 
-    pgw#848 item 5: this rmtree is why the crash-only resume bank is NOT sited
-    under ``mint_root``. Abandonment is how a crashed mint ends, so a bank here
-    would be destroyed on its way out of the one case it exists for. It lives
-    in the worker-local resume area instead (``aot_resume.bank_root``), keyed
-    by scope, and is dropped only when a cell actually ADOPTS. Keeping it past
-    an abandonment is safe by construction rather than by policy: nothing is
-    re-admitted without its identity being re-derived from a freshly exported
-    program."""
+    Completed graph classes are already durable in TCG's canonical HashRepo
+    CAS before this handoff exists. Abandonment removes only the attempt-local
+    capture; a retry reuses exact classes from TCG and re-derives any class
+    that never reached the CAS."""
     if pending._state.get("minted") is not None:
         return
     mark_terminus(pending, TERMINUS_ABANDONED)
@@ -3153,10 +3122,6 @@ def _aot_export_spec(aot_mint: Any, pipe: Any, cfg: Any) -> "Any":
         family=str(getattr(cfg, "family", "") or ""),
         target="",
         weight_lane=execution_lane,
-        # pgw#1076: the lane when the pipeline HAS one, and otherwise absent —
-        # never "bf16". `aot_mint` derives the stamp from the modules it
-        # traces when this is empty, so an unlabelled fp32 pipeline records
-        # fp32 instead of a cast nobody performed.
         precision=execution_lane,
         lora_bucket=bucket,
         shapes=tuple(

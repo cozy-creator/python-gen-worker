@@ -139,6 +139,49 @@ def _real(module: nn.Module | None = None, device: str = "cpu") -> nn.Module:
     return mod.to(device)
 
 
+class _TinyTrace(nn.Module):
+    def forward(self, value: Any) -> Any:
+        return value.sin()
+
+
+def _traced_class(aot_mint: Any) -> Any:
+    """One real export crossing the same TCG declaration seam as production."""
+    from torch_compiled_graphs import CallIngress, CallInput
+
+    example = torch.ones(2)
+    program = torch.export.export(_TinyTrace(), (example,))
+    ingress = CallIngress(
+        parameters=("value",),
+        flat_arity=1,
+        inputs=(
+            CallInput(
+                "value", 0, "value", 0, (), "value", "float32", (2,),
+            ),
+        ),
+    )
+    return aot_mint.TracedClass(
+        name="transformer",
+        block={
+            "target": "transformer",
+            "fork": [],
+            "class_dims": [],
+            "graph": {
+                "v": 3,
+                "lifted_inputs": [],
+                "pytree": {
+                    "in": "leaf",
+                    "out": "leaf",
+                    "ingress": ingress.as_dict(),
+                },
+                "specialization": {},
+            },
+        },
+        nodes=len(program.graph_module.graph.nodes),
+        program=program,
+        declared=1,
+    )
+
+
 # ---------------------------------------------------------------------------
 # The premise, and the fixture that states it
 # ---------------------------------------------------------------------------
@@ -396,7 +439,13 @@ def _job(micro_tree: Path, report: Path, *, extra_targets: tuple = ()) -> Any:
     )
 
 
-def _run(monkeypatch: pytest.MonkeyPatch, job: Any, report_path: Path) -> Any:
+def _run(
+    monkeypatch: pytest.MonkeyPatch,
+    job: Any,
+    report_path: Path,
+    *,
+    seen: list[Any] | None = None,
+) -> Any:
     from gen_worker import aot_mint
     from gen_worker.models import provision
 
@@ -409,9 +458,10 @@ def _run(monkeypatch: pytest.MonkeyPatch, job: Any, report_path: Path) -> Any:
         provision, "place_pipeline", lambda pipe, **kw: {"mode": "off"})
 
     def _traced(pipeline: Any, spec: Any, decl: Any, **_: Any) -> Any:
-        return iter([aot_mint.TracedClass(
-            name="transformer", block={"entry": "transformer"}, nodes=1,
-            program=None, declared=1)])
+        traced = _traced_class(aot_mint)
+        if seen is not None:
+            seen.append(traced)
+        return iter([traced])
 
     monkeypatch.setattr(aot_mint, "trace_for_key", _traced)
     rc = boot_trace_child.run(job)
@@ -434,6 +484,39 @@ def test_the_real_child_still_derives_when_the_premise_HOLDS(
 
     assert report.ok and rc == boot_key.EXIT_OK, (
         f"the trace child refused {report.reason!r}: {report.detail[:400]}")
+
+
+def test_a_tcg_declaration_refusal_releases_the_exported_program(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    micro_tree: Path,
+    micro_declaration: None,
+) -> None:
+    from gen_worker import aot_mint
+
+    class RefusingSpec:
+        def declare(self) -> Any:
+            raise ValueError("declaration refused")
+
+    monkeypatch.syspath_prepend(str(REPO / "tests"))
+    monkeypatch.setattr(
+        aot_mint,
+        "tcg_graph_class_spec",
+        lambda *_args, **_kwargs: RefusingSpec(),
+    )
+    report_path = tmp_path / "refused.json"
+    seen: list[Any] = []
+
+    rc, report = _run(
+        monkeypatch,
+        _job(micro_tree, report_path),
+        report_path,
+        seen=seen,
+    )
+
+    assert rc == boot_key.EXIT_REFUSED
+    assert report.reason == "trace_refused"
+    assert len(seen) == 1 and seen[0].program is None
 
 
 def test_the_real_child_REFUSES_a_second_target_that_loaded_real_weights(

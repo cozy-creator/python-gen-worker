@@ -48,8 +48,8 @@ import msgspec
 import pytest
 
 from gen_worker import (
-    aot_compile_pool, compile_posture, local_serve, mint_child, mint_process,
-    mint_supervisor)
+    aot_compile_child, aot_compile_pool, compile_cache, compile_posture,
+    local_serve, mint_child, mint_process, mint_supervisor)
 from gen_worker.compile_posture import FLEET, USER_MACHINE, CompilePosture
 from gen_worker.child_contract import (
     CompileSpec, MintFrame, MintSlot)
@@ -627,26 +627,45 @@ def test_a_user_machine_mint_child_DIES_WITH_ITS_PARENT(
     assert armed == [True]
 
 
-def test_a_stopped_local_mint_does_not_WASTE_what_it_finished() -> None:
-    """The claim the notice makes out loud ("Ctrl-C is safe"), pinned.
+def test_a_stopped_local_mint_reuses_only_the_canonical_tcg_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ctrl-C may cost the in-flight class, never a second resume substrate.
 
-    ``aot_resume``'s bank is keyed by the pending's arm token and sited OUTSIDE
-    the per-attempt workdir on purpose — ``abandon_self_mint`` rmtree's
-    ``mint_root``, and abandonment is how a killed mint ends. A bank inside the
-    workdir would be deleted on its way out of the one case it exists for, and
-    the notice would become a lie.
+    Every completed class is already in TCG's canonical HashRepo CAS. The
+    worker request therefore carries no private bank path, and the compile
+    child opens the same production engine factory as import and serving.
     """
+    from gen_worker.models import cache_paths
+
     workdir = Path("/tmp/pgw1137/child-1")
     request = mint_process.build_request(
         mint_process.MintTask(
             pending=_Pending(), pipe=None, function="generate",
             modules=("m",), posture=USER_MACHINE),
         workdir=workdir)
-    bank = Path(request.resume)
-    assert str(bank), "a local mint must bank its finished entries"
-    assert workdir not in bank.parents and bank != workdir, (
-        "the resume bank must outlive the attempt AND the pending, or a "
-        "cancelled compile throws away every entry it had already finished")
+    assert "resume" not in MintRequest.__struct_fields__
+    assert not hasattr(request, "resume")
+
+    opened: List[Optional[Path]] = []
+    engine = object()
+    monkeypatch.setattr(
+        cache_paths,
+        "open_worker_engine",
+        lambda root=None: (opened.append(root), engine)[1],
+    )
+    monkeypatch.setattr(
+        compile_cache,
+        "runtime_key",
+        lambda: {"sm": "cpu"},
+    )
+    monkeypatch.setattr(
+        compile_cache, "toolchain_digest", lambda: (("torch", "test"),),
+    )
+
+    actual, _runtime = aot_compile_child._tcg_runtime()
+    assert actual is engine
+    assert opened == [None], "production compile invented a private CAS root"
 
 
 def test_the_local_notice_and_the_local_posture_cannot_drift(

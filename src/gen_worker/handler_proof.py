@@ -13,12 +13,11 @@ virtual parameter — one full checkpoint at compute dtype, **concurrently with
 the parent's resident copy**. On an H100-80 for wan-2.2 that is 56.2 GB wanted
 against 15.5 GiB free: `CUDA out of memory`, no cell, eager for life.
 
-§4.33 steps 4-5 already say where verification goes: *"load the cell into the
+§4.33 steps 4-5 already say where verification goes: *"load the graph into the
 LIVE pipeline — already running eager — and verify it works"*, against weights
-that are resident and are not paid for twice. The SDK already makes the same
-call in ``mint_child.execution_lane_verdict_for``, which skips the kernel-lane
-A/B on a meta mint because *"running it would put weight-scale values back in the
-one process this slice exists to keep empty"*.
+that are resident and are not paid for twice. The compile child therefore
+accepts the parent's proof provenance and never recreates weight-scale values
+inside the process that exists to remain weight-free.
 
 WHAT A PROOF IS
 ---------------

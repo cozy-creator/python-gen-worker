@@ -1,22 +1,21 @@
-"""One class that cannot export must not cost the other thirty-five.
+"""An untraceable loaded pipeline must refuse before TCG compilation.
 
 The failure shape: the mint child ran the worker's SERVING placement ladder, the
 ladder engaged diffusers group offloading, and the offload hooks put a
 ``@torch.compiler.disable``d function (``ModuleGroup.onload_``) in the traced
 path, which ``torch.export(strict=True)`` refuses fatally.
 
-Two properties are guarded:
+Two surviving properties are guarded:
 
 1. The mint child does not PLACE on the weight-free path (``place=False``). The
    ladder is for a pipeline that will run a forward; this one only ever exports,
    so the hooks are never installed rather than stripped afterwards.
-2. **A deterministic per-entry export failure does not kill the mint.** The
-   entry is already the unit of identity and of publish; it is the unit of
-   FAILURE too.
+2. A real-weight fallback carrying untraceable hooks refuses once, before any
+   graph class is exported, and names the disabled construct.
 
-Fail-closed stays fail-closed AT THE ENTRY: a skipped class is never packed and
-never published, and serving covers it eager by the same mechanism that covers
-any shape outside a cell's declared envelope. Only the blast radius changed.
+TCG owns graph-class declaration, compilation, and refusal. This file retains
+only the worker placement and preflight boundary that prevents the known
+diffusers hook failure from reaching TCG at all.
 """
 
 from __future__ import annotations
@@ -31,23 +30,10 @@ torch = pytest.importorskip("torch")
 
 import torch.nn as nn  # noqa: E402
 
-from torch._dynamo.exc import Unsupported  # noqa: E402
-
 from gen_worker import child_preflight
 from gen_worker import child_contract
-from gen_worker import aot_mint, aot_serve, compile_cache  # noqa: E402
-from gen_worker.api.decorators import Compile  # noqa: E402
-from gen_worker.api.export_contract import (  # noqa: E402
-    Dim,
-    GraphClass,
-    Input,
-    register_export_declaration,
-    reset_export_declarations,
-)
 
 pytestmark = pytest.mark.filterwarnings("ignore::FutureWarning")
-
-FAMILY = "tiny1208"
 
 
 class TinyUNet(nn.Module):
@@ -57,208 +43,6 @@ class TinyUNet(nn.Module):
 
     def forward(self, sample: Any) -> Any:
         return torch.tanh(self.lin(sample)) + 1.0
-
-
-def _declare() -> Any:
-    """TWO declared graph classes, so 'one failed' and 'the rest survived' are
-    distinguishable outcomes."""
-    return register_export_declaration(Compile(
-        family=FAMILY,
-        targets=("unet",),
-        dims=(Dim("B", carried_by=(("sample", 0),)),),
-        classes=(GraphClass(dims={"B": 2}), GraphClass(dims={"B": 1})),
-        inputs=(Input("sample", shape=("B", 4), dtype="model"),),
-        shape_strategy="static-rows",
-        warm_changes_key=False,
-    ))
-
-
-@pytest.fixture(autouse=True)
-def _fresh_registry() -> Any:
-    reset_export_declarations()
-    yield
-    reset_export_declarations()
-
-
-@pytest.fixture
-def fake_sm(monkeypatch: pytest.MonkeyPatch) -> Dict[str, str]:
-    full = {"sku": "", "sm": "sm_89", "torch": str(torch.__version__), "cuda": ""}
-    monkeypatch.setattr(compile_cache, "runtime_key", lambda: dict(full))
-    monkeypatch.setattr(aot_serve, "runtime_key", lambda: dict(full))
-    return full
-
-
-def _mint(tmp: Path) -> aot_mint.MintResult:
-    pipe = types.SimpleNamespace(unet=TinyUNet())
-    spec = aot_mint.ExportSpec(family=FAMILY, target="")
-    # K=1: this file is about the export loop, and the serial path exercises
-    # the same `_rows_source` the overlapped one does (one body, by design).
-    return aot_mint.mint(pipe, spec, tmp, entry_workers=1)
-
-
-def _fail_one(monkeypatch: pytest.MonkeyPatch, *, on: str, exc: BaseException) -> List[str]:
-    """Make ONE declared class refuse at export. Returns the names attempted."""
-    real = aot_mint._export_entry
-    seen: List[str] = []
-
-    def _patched(pipeline: Any, spec: Any, plan: Any, decl: Any, **kw: Any) -> Any:
-        from gen_worker import aot_declaration as _decl
-
-        name = _decl.plan_entry_name(plan)
-        seen.append(name)
-        if on in name:
-            raise exc
-        return real(pipeline, spec, plan, decl, **kw)
-
-    monkeypatch.setattr(aot_mint, "_export_entry", _patched)
-    return seen
-
-
-# ---------------------------------------------------------------------------
-# The blast radius
-# ---------------------------------------------------------------------------
-
-
-def test_a_deterministic_refusal_skips_ONE_class_and_mints_the_rest(
-    tmp_path: Path, fake_sm: Dict[str, str], monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The whole issue. Before this, the mint died here and the class that HAD
-    exported was discarded with it."""
-    _declare()
-    seen = _fail_one(
-        monkeypatch, on="B=1",
-        exc=Unsupported("Skip inlining `torch.compiler.disable()`d function\n"
-                        "  Explanation: <function ModuleGroup.onload_>"))
-
-    result = _mint(tmp_path)
-
-    assert len(seen) == 2, "both classes must be ATTEMPTED — one refusing must not stop the loop"
-    assert result.timings.get("skipped_entries") == 1.0
-    # a mint produces a SET of independently keyed entry artifacts,
-    # not one cell with an `entries` map — so the surviving class is a packed
-    # ARTIFACT rather than a member of a bundle. The claim is unchanged and
-    # sharper: fail-closed is per ENTRY, and the refusing class simply has no
-    # artifact.
-    names = [row.entry for row in result.entries]
-    assert len(names) == 1, "the surviving class must still be packed"
-    assert not any("B=1" in name for name in names), (
-        "the class that refused must NOT have been packed — fail-closed is "
-        "per ENTRY, not abandoned")
-
-
-def test_the_skipped_class_is_NAMED_with_the_construct_that_refused(
-    tmp_path: Path, fake_sm: Dict[str, str], monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A skipped class is only actionable if the reason names the thing someone
-    has to change."""
-    _declare()
-    _fail_one(monkeypatch, on="B=1", exc=Unsupported(
-        "Skip inlining `torch.compiler.disable()`d function\n"
-        "  Explanation: Skip inlining function <function ModuleGroup.onload_> "
-        "since it was wrapped with `torch.compiler.disable`\n"
-        "  Developer debug context: <function ModuleGroup.onload_>"))
-
-    events: List[Any] = []
-    monkeypatch.setattr(
-        aot_mint.activity_mod, "emit_event",
-        lambda kind, detail, **kw: events.append((kind, detail, kw)))
-
-    _mint(tmp_path)
-
-    skips = [e for e in events if e[0] == aot_mint.KIND_ENTRY_EXPORT_UNSUPPORTED]
-    assert len(skips) == 1, "the hub must be told, once, which class was skipped"
-    detail = skips[0][1]
-    assert "ModuleGroup.onload_" in detail, (
-        "the event must name the CONSTRUCT that refused, not just the entry")
-    assert "B=1" in detail
-
-
-def test_a_RESOURCE_shortfall_still_aborts_the_WHOLE_mint(
-    tmp_path: Path, fake_sm: Dict[str, str], monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The distinction the whole change rests on.
-
-    An OOM says nothing about the graph class — it says the pod is out of room,
-    and the mint must abort so the parent can retry narrower. Skipping here
-    would publish a cell whose missing classes are an artifact of memory
-    pressure and would have exported fine on the retry.
-    """
-    _declare()
-    boom = aot_mint.MintResourceExhausted("host memory exhausted mid-export")
-    _fail_one(monkeypatch, on="B=1", exc=boom)
-
-    with pytest.raises(Exception) as caught:
-        _mint(tmp_path)
-    assert caught.value is boom or "exhaust" in str(caught.value).lower()
-
-
-def test_every_class_skipped_still_REFUSES(
-    tmp_path: Path, fake_sm: Dict[str, str], monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A cell with no entries is not a partial cell, it is not a cell. It fails
-    closed on the path it already failed closed on (`_pack`), rather than
-    through a second check."""
-    _declare()
-    _fail_one(monkeypatch, on="B=", exc=Unsupported("nope"))
-
-    with pytest.raises(aot_mint.MintRefused, match="no entries"):
-        _mint(tmp_path)
-
-
-# ---------------------------------------------------------------------------
-# The classifier, directly
-# ---------------------------------------------------------------------------
-
-
-def test_only_deterministic_local_failures_are_skippable() -> None:
-    assert aot_mint._export_skippable(Unsupported("whatever")), (
-        "torch's own export refusal is the skippable case")
-
-    # ...and ONLY torch's own. `_export_entry` also warms, gates and compiles;
-    # skipping any of those would be this issue's own defect in a new hat.
-    assert not aot_mint._export_skippable(RuntimeError("boom in forward")), (
-        "a broken forward is not an unsupported construct")
-    assert not aot_mint._export_skippable(
-        aot_mint.MintRefused("mint-warm: the declared warm forward failed")), (
-        "pgw#758 made a warm failure a NAMED REFUSAL — a cell whose classes "
-        "were never warm-proven must not publish")
-    assert not aot_mint._export_skippable(
-        aot_mint.MintRefused("folding fence: lifted weight absent")), (
-        "a correctness gate that can be skipped is not a gate")
-
-    assert not aot_mint._export_skippable(KeyboardInterrupt()), (
-        "a shutdown is not a property of the graph")
-    assert not aot_mint._export_skippable(SystemExit(1))
-    assert not aot_mint._export_skippable(
-        aot_mint.MintResourceExhausted("no room")), (
-        "a resource shortfall must abort so the parent can retry narrower")
-
-    marked = RuntimeError("host memory")
-    setattr(marked, "mint_resource_shortfall", True)
-    assert not aot_mint._export_skippable(marked), (
-        "the duck-typed shortfall marker must be honoured")
-
-
-def test_a_cuda_oom_is_never_skippable() -> None:
-    oom = torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 50.00 MiB")
-    assert not aot_mint._export_skippable(oom)
-
-
-def test_the_construct_namer_lifts_dynamos_own_explanation() -> None:
-    exc = Unsupported(
-        "Skip inlining `torch.compiler.disable()`d function\n"
-        "  Explanation: Skip inlining function <function ModuleGroup.onload_> "
-        "since it was wrapped with `torch.compiler.disable` (reason: None)\n"
-        "  Hint: Remove the `torch.compiler.disable` call\n"
-        "  Developer debug context: <function ModuleGroup.onload_>\n"
-        "  " + "traceback noise " * 200)
-
-    named = aot_mint._unsupported_construct(exc)
-
-    assert "ModuleGroup.onload_" in named
-    assert "Unsupported" in named
-    assert len(named) <= 600, "this rides an event; it may not carry a traceback"
-    assert "traceback noise traceback noise" not in named
 
 
 # ---------------------------------------------------------------------------

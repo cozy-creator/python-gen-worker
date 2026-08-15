@@ -1,18 +1,16 @@
-"""A REAL packed exported cell: real declaration, real envelope, real tensors.
+"""A TCG-backed exported graph probe: real declaration and real tensors.
 
 Promoted out of ``test_numerics_gate_pgw868.py`` by pgw#1152, unchanged. It was
 already a harness in everything but location — three other modules imported it
 as ``rig868`` — and the adopt-path rig (:mod:`harness.adopt_rig`) needs the same
 artifact, so the shared thing now lives where shared things live.
 
-What is REAL here: the ``Compile`` declaration, the packed ``cell.tar.gz`` with
-its recorded entry blocks, the class/range digests, the constants manifest, and
-a genuine ``nn.Module`` whose eager output the compiled subject is compared
-against. The ONE substitution is :class:`ProbePackage`, which stands in for an
-entry's ``AOTICompiledModel`` — an AOTI ``.so`` needs a GPU, and it is the only
-piece deferred to a pod. It reproduces the eager maths from the constants it was
-BOUND with, so the comparison is genuinely compiled-vs-eager on identical
-weights, then rotates the result to an exactly declared cosine.
+What is REAL here: the ``Compile`` declaration, public TCG metadata and ingress,
+the constants manifest, and a genuine ``nn.Module`` whose eager output the
+compiled subject is compared against. The substitutions are a tiny Engine and
+:class:`ProbePackage`, which stands in for an entry's GPU-built AOTI payload.
+The worker still exercises its real import/resolve/runner/bind/dispatch path;
+the harness does not recreate the deleted worker-owned package format.
 
 No number produced here may be cited as evidence about a real cell's numerics.
 """
@@ -23,13 +21,20 @@ import hashlib
 import math
 import platform
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, cast
+from types import SimpleNamespace
 
 import pytest
 import torch
+from torch_compiled_graphs import (
+    CallIngress,
+    CallInput,
+    CompiledGraphRunner,
+    ConstantBindingError,
+    StoreOutcome,
+)
 
 from gen_worker import aot_serve as aot
-from gen_worker import cell_key as cell_key_mod
 from gen_worker.api.decorators import Compile
 from gen_worker.api.export_contract import (
     Dim, GraphClass, Input, register_export_declaration,
@@ -156,6 +161,18 @@ def entry_name(h: int, w: int) -> str:
 
 
 def _entry(h: int, w: int) -> Dict[str, Any]:
+    ingress = CallIngress(
+        parameters=("sample", "timestep"),
+        flat_arity=2,
+        inputs=(
+            CallInput(
+                "sample", 0, "sample", 0, (), "sample", "float32", (h, w)
+            ),
+            CallInput(
+                "timestep", 1, "timestep", 1, (), "timestep", "float32", ()
+            ),
+        ),
+    )
     block = {
         "target": TARGET,
         "fork": [],
@@ -167,12 +184,17 @@ def _entry(h: int, w: int) -> Dict[str, Any]:
              "shape": []},
         ],
         "symbols": {},
-        "constants": [{"fqn": "weight", "source": aot.SOURCE_STATE_DICT,
+        "constants": [{"fqn": "weight", "source": "state_dict",
                        "dtype": "float32", "shape": [16, 16]}],
-        "graph": {},
+        "graph": {
+            "pytree": {"ingress": ingress.as_dict()},
+            "constant_fqns": ["weight"],
+        },
     }
-    block["range_digest"] = aot.range_digest(block)
-    block["class_hash"] = aot.class_hash(block, strict=True, lora_bucket=0)
+    block["range_digest"] = ingress.digest()
+    block["class_hash"] = hashlib.sha256(
+        f"{TARGET}\0{h}\0{w}\0{block['range_digest']}".encode("utf-8")
+    ).hexdigest()[:16]
     return block
 
 
@@ -187,31 +209,50 @@ def metadata(
     row: Tuple[int, int] = ROWS[0],
     rows: Tuple[Tuple[int, int], ...] = ROWS,
 ) -> Dict[str, Any]:
-    """ONE entry artifact's metadata (format 3, pgw#1176).
+    """Public TCG metadata for one graph class.
 
-    ``row`` is the class this artifact carries; ``rows`` is only the
-    declaration it belongs to, and reaches the metadata solely through the
-    ``manifest_digest`` coverage label — never through identity. Widening
-    ``rows`` therefore leaves every existing entry's key untouched, which is
-    the property pgw#1176 exists for.
+    ``rows`` is accepted for the historical harness call shape but deliberately
+    does not enter this class's identity: TCG keys one declared graph class,
+    not a worker-owned multi-entry package.
     """
+    del rows
+    block = _entry(*row)
     name = entry_name(*row)
-    meta = aot.entry_metadata(
-        family=FAMILY, precision="w8a8", cell_key="",
-        name=name, entry=_entry(*row),
-        strict_export=True, lora_bucket=0,
-        manifest_digest=cell_key_mod.manifest_digest(
-            _entry(h, w)["class_hash"] for h, w in rows),
-    )
-    meta.update(RUNTIME)
-    # pgw#950: every mint stamps a host-ISA requirement, and an entry that
-    # stamps none is refused rather than sniffed from the .pt2. Satisfiable
-    # anywhere: this host's machine, no ISA level.
-    meta["host_isa"] = {"machine": platform.machine(), "march": "",
-                        "simdlen": 0, "level": ""}
-    meta["toolchain"] = dict(TOOLCHAIN)
-    meta["cell_key"] = cell_key_mod.from_entry_metadata(meta).digest
-    return meta
+    key = "cg-key-v1-" + hashlib.sha256(
+        f"{FAMILY}\0{name}\0{block['class_hash']}".encode("utf-8")
+    ).hexdigest()[:56]
+    return {
+        "compiled_graph_format": 1,
+        "kind": "aot-inductor",
+        "compiled_graph_key": key,
+        "family": FAMILY,
+        "precision": "w8a8",
+        "lora_bucket": 0,
+        "sm": RUNTIME["sm"],
+        "toolchain": dict(TOOLCHAIN),
+        "host_isa": {
+            "machine": platform.machine(), "march": "", "simdlen": 0,
+            "level": "",
+        },
+        "package_constants_in_so": False,
+        "constant_folding_fenced": True,
+        "graph_class": {
+            "name": name,
+            "target": TARGET,
+            "class_hash": str(block["class_hash"]),
+            "graph": dict(block["graph"]),
+            "graph_witness": str(block.get("graph_witness") or "0" * 32),
+            "range_digest": str(block["range_digest"]),
+            "fork": list(block.get("fork") or ()),
+            "class_dims": list(block.get("class_dims") or ()),
+            "strict": True,
+            "lora_bucket": 0,
+            "literal_values": "",
+            "literal_payload_values": "",
+            "placement": [],
+            "constants": [dict(value) for value in block["constants"]],
+        },
+    }
 
 
 def declared_names(rows: Tuple[Tuple[int, int], ...] = ROWS) -> Tuple[str, ...]:
@@ -222,14 +263,52 @@ def declared_names(rows: Tuple[Tuple[int, int], ...] = ROWS) -> Tuple[str, ...]:
 
 
 def artifact(tmp_path: Path, meta: Dict[str, Any] | None = None) -> Path:
-    """Pack ONE entry artifact. Named after its key, as the mint names it."""
+    """Create an opaque stand-in for one Engine-owned artifact."""
     meta = meta or metadata()
-    name = str((meta.get(cell_key_mod.ENTRY_BLOCK_KEY) or {}).get("name") or "")
-    work = tmp_path / "work" / hashlib.sha256(name.encode()).hexdigest()[:16]
-    work.mkdir(parents=True, exist_ok=True)
-    (work / aot.PACKAGE_NAME).write_bytes(b"\x00not-a-real-pt2")
-    return aot.pack(
-        work, tmp_path / f"{meta.get('cell_key') or 'cell'}.tar.gz", meta)
+    key = str(meta["compiled_graph_key"])
+    path = tmp_path / f"{key}.tcg"
+    path.write_bytes(b"\x00tcg-probe-artifact")
+    return path
+
+
+def _tcg_metadata(meta: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep the old helper name while its value is already public TCG data."""
+    return dict(meta)
+
+
+class _ProbeTCGRunner:
+    """The public TCG runner surface around the probe's fake AOTI package."""
+
+    def __init__(self, package: ProbePackage) -> None:
+        self.package = package
+        self.bound = False
+        self.declared_fqns = tuple(package.get_constant_fqns())
+        self.bound_fqns: tuple[str, ...] = ()
+
+    @property
+    def calls(self) -> int:
+        return int(self.package.invocations)
+
+    def bind(self, state: Dict[str, Any], *, device: str) -> None:
+        del device
+        values = {name: state[name] for name in self.declared_fqns if name in state}
+        missing = sorted(set(self.declared_fqns) - set(values))
+        if missing:
+            raise ConstantBindingError(
+                "constant_unresolved", f"missing constants: {missing!r}"
+            )
+        try:
+            self.package.load_constants(
+                values, check_full_update=True, user_managed=True
+            )
+        except Exception as exc:
+            reason = "out_of_memory" if isinstance(exc, torch.OutOfMemoryError) else "injection_failed"
+            raise ConstantBindingError(reason, str(exc)) from exc
+        self.bound_fqns = tuple(sorted(values))
+        self.bound = True
+
+    def __call__(self, *feeds: object) -> Any:
+        return self.package(*cast(Tuple[Any, ...], feeds))
 
 
 @pytest.fixture
@@ -345,12 +424,29 @@ def arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
     truthy/falsy, so `assert outcome` reads exactly as `assert armed` did.
     """
     from gen_worker.models import provision
+    from torch_compiled_graphs import artifact as tcg_artifact
 
-    monkeypatch.setattr(aot, "runtime_key", lambda: dict(RUNTIME))
+    metadata_by_artifact: Dict[Path, Dict[str, Any]] = {}
+    metadata_by_key: Dict[str, Dict[str, Any]] = {}
+    runners_by_key: Dict[str, _ProbeTCGRunner] = {}
+
+    class _Engine:
+        def import_artifact(self, key: str, artifact_path: Path) -> Any:
+            assert metadata_by_artifact[Path(artifact_path)]["compiled_graph_key"] == key
+            return SimpleNamespace(outcome=StoreOutcome.PRESENT)
+
+        def resolve(self, key: str, _destination: Path) -> Any:
+            return SimpleNamespace(metadata=metadata_by_key[key])
+
+        def runner(self, key: str, _destination: Path) -> CompiledGraphRunner:
+            return runners_by_key[key]  # type: ignore[return-value]
+
+    monkeypatch.setattr(aot, "open_worker_engine", lambda _root=None: _Engine())
     monkeypatch.setattr(
-        aot, "_entry_admission_drift", lambda *a, **k: None)
-    monkeypatch.setattr(
-        aot, "_load_package", lambda path, entry="model": packages[entry])
+        tcg_artifact,
+        "read_metadata",
+        lambda path: metadata_by_artifact[Path(path)],
+    )
     module = ProbeDenoiser()
     pipeline = ProbePipeline(module)
     use_rows = ROWS if rows is None else rows
@@ -359,9 +455,17 @@ def arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
         block = metadata(row, use_rows)
         if meta is not None and index == 0:
             block = meta
+        artifact_path = artifact(tmp_path, block)
+        tcg_meta = _tcg_metadata(block)
+        key = str(tcg_meta["compiled_graph_key"])
+        metadata_by_artifact[artifact_path] = tcg_meta
+        metadata_by_key[key] = tcg_meta
+        runners_by_key[key] = _ProbeTCGRunner(
+            packages[str(tcg_meta["graph_class"]["name"])]
+        )
         outcomes.append(provision.arm_aot(
             pipeline, cell_cfg(decl) if cfg is None else cfg,
-            tmp_path / "cache", artifact(tmp_path, block), 0,
+            tmp_path / "cache", artifact_path, 0, meta=tcg_meta,
             verify_numerics=verify_numerics,
             declared=declared_names(use_rows)))
     return pipeline, module, ArmOutcomes(outcomes)

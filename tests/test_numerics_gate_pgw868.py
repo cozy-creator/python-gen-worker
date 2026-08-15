@@ -29,6 +29,10 @@ pod, and no test here may be cited as evidence about a real cell's numerics.
 
 from __future__ import annotations
 
+# ``declared`` and ``events`` are imported pytest fixtures, so test parameters
+# intentionally reuse their fixture names.
+# ruff: noqa: F811
+
 from typing import Any, List
 
 import pytest
@@ -43,7 +47,7 @@ from gen_worker.api.export_contract import reset_export_declarations
 # adopt-path rig needs the same packed artifact — a shared vehicle belongs
 # where shared vehicles live. Nothing about it changed; the names below are
 # the same objects.
-from harness.exported_cell import (  # noqa: F401 — `declared`/`events` are fixtures
+from harness.exported_cell import (  # noqa: F401 — imported pytest fixtures
     FAMILY, FLOOR, ROWS, RUNTIME, TARGET, WARN,
     ProbeDenoiser, ProbePackage, ProbePipeline,
     arm, artifact, blend, declaration, declared, entry_name, events,
@@ -189,7 +193,7 @@ def test_an_undeclared_family_cannot_be_probed_AND_THEREFORE_CANNOT_ARM(
 def test_the_report_cannot_report_a_pass_it_did_not_take():
     """The structural guard against the trap, asserted on the type itself.
 
-    `CellNumerics.measured` is the single predicate the arm consults, and it
+    `CompiledGraphNumerics.measured` is the predicate the arm consults, and it
     must be False for every shape of partial or absent evidence — an empty
     report, a report short of its own axis count, and a report whose axes
     errored. If this ever returns True for one of these, the gate is passing
@@ -200,15 +204,20 @@ def test_the_report_cannot_report_a_pass_it_did_not_take():
     ones); "absent evidence is never a pass" is the part that was always the
     point, and it is what these three shapes assert.
     """
-    from gen_worker.numerics_probe import AxisVerdict, CellNumerics, ProbeAxis
+    from gen_worker.numerics_probe import (
+        AxisVerdict,
+        CompiledGraphNumerics,
+        ProbeAxis,
+    )
 
     thresholds = numerics_probe.numerics_ladder.DEFAULT_THRESHOLDS
     axis = ProbeAxis(entry="e", target=TARGET)
-    empty = CellNumerics(FAMILY, "k", thresholds, "declared", (), 2)
+    empty = CompiledGraphNumerics(
+        FAMILY, "k", thresholds, "declared", (), 2)
     assert empty.measured is False
     assert empty.comparison() is None
 
-    errored = CellNumerics(
+    errored = CompiledGraphNumerics(
         FAMILY, "k", thresholds, "declared",
         (AxisVerdict(axis=axis, reason="cell_forward_failed"),), 1)
     assert errored.measured is False

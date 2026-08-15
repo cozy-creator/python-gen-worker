@@ -41,7 +41,6 @@ from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
 import msgspec
-import pytest
 
 import gen_worker
 from gen_worker.hostfacts import HostFacts
@@ -164,24 +163,16 @@ def _snapshot(digest: str) -> pb.Snapshot:
 
 
 def _cell_artifact(tmp_path: Path) -> Path:
-    """A real packed cell tarball, in the format this repository can WRITE.
+    """Opaque carrier bytes for the fully stubbed compiled-enable boundary.
 
-    pgw#1181 retargeted this from `compile_cache.pack` (the whole-cell
-    `torch-inductor-cache` tarball, no writer since pgw#1178, deleted here)
-    onto the exported `aot-inductor` cell, through the same shared harness the
-    publish-path tests use. What the rows below need is a cell ON DISK that
-    the executor's snapshot/selection plumbing carries; building it out of a
-    format nothing writes made them fixtures constructing a shape production
-    cannot produce (§4.34)."""
-    from gen_worker import aot_serve
-    from harness.cell_meta import exported_cell_meta
-
-    work = tmp_path / "cap"
-    work.mkdir(parents=True, exist_ok=True)
-    (work / aot_serve.PACKAGE_NAME).write_bytes(b"\x00not-a-real-pt2")
-    out = tmp_path / "minted"
-    out.mkdir(exist_ok=True)
-    return aot_serve.pack(work, out / "cell.tar.gz", exported_cell_meta(family=FAMILY))
+    The executor still downloads and selects this path, which is the behavior
+    these rows exercise. ``provision.enable_compiled`` is replaced below, so
+    neither TCG metadata nor package bytes are read in this harness.
+    """
+    artifact = tmp_path / "minted" / "cell.tar.gz"
+    artifact.parent.mkdir(exist_ok=True)
+    artifact.write_bytes(b"tcg-artifact-not-read")
+    return artifact
 
 
 def _harness(tmp_path: Path, monkeypatch, specs: List[EndpointSpec]):
@@ -203,7 +194,6 @@ def _harness(tmp_path: Path, monkeypatch, specs: List[EndpointSpec]):
             shutil.copy(artifact, p / artifact.name)
         return p
 
-    import gen_worker.executor as ex_mod
     monkeypatch.setattr(store_mod, "ensure_local", _fake_download)
 
     enables: List[Tuple[Any, Optional[Path]]] = []

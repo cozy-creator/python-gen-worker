@@ -28,10 +28,12 @@ from hashrepo import (
     TransferGrant,
     download,
 )
+from torch_compiled_graphs import StoreOutcome, is_compiled_graph_key
 
-from . import boot_phases
+from . import boot_phases, receipts
 from .api.errors import RetryableError
-from .models.cache_paths import open_worker_cas
+from .compile_cache import parse_cell_ref
+from .models.cache_paths import open_worker_cas, open_worker_engine
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,40 @@ class NamedArtifactUnavailable(RetryableError):
     def __init__(self, reason: str, detail: str) -> None:
         self.reason = reason
         super().__init__(f"{reason}: {detail}")
+
+
+def _import_verified_artifact(
+    artifact: Path,
+    *,
+    cell_ref: str,
+    cache_dir: Optional[Path],
+    what: str,
+) -> None:
+    """Bind verified delivery bytes to the one exact TCG key they declare."""
+
+    family, named_key = parse_cell_ref(cell_ref)
+    if not is_compiled_graph_key(named_key):
+        raise NamedArtifactUnavailable(
+            "artifact_unpinned",
+            f"{what}: named ref {cell_ref!r} carries no compiled-graph key",
+        )
+    if not receipts.gate_delivered_artifact(artifact, family):
+        raise NamedArtifactUnavailable(
+            "artifact_receipt_refused",
+            f"{what}: the hub receipt did not authorize {cell_ref!r}",
+        )
+    try:
+        result = open_worker_engine(cache_dir).import_artifact(named_key, artifact)
+    except Exception as exc:
+        raise NamedArtifactUnavailable(
+            "artifact_admission_failed",
+            f"{what}: TCG refused {cell_ref!r}: {type(exc).__name__}: {exc}",
+        ) from exc
+    if result.outcome == StoreOutcome.DIVERGENT:
+        raise NamedArtifactUnavailable(
+            "artifact_divergent",
+            f"{what}: local TCG already binds {named_key!r} to different bytes",
+        )
 
 
 def materialize_named_artifact(
@@ -88,7 +124,9 @@ def _materialize_named_artifact(
             "artifact_unpinned", f"{what}: named cell {cell_ref!r} carries no "
             "content digest")
     cas = open_worker_cas(cache_dir)
-    dest_dir = cas.root / "aot-cells"
+    # A bounded transfer staging path, never a second compiled-graph store.
+    # The serve handoff removes it after TCG has resolved its CAS record.
+    dest_dir = cas.root / "compiled-graph-transfer" / ".incoming"
     dest = dest_dir / f"{digest.split(':', 1)[-1]}.tar.gz"
     try:
         expected = CASRef.parse(digest)
@@ -105,6 +143,9 @@ def _materialize_named_artifact(
             if span is not None:
                 span.classify("cached", f"ref={cell_ref}")
                 span.bytes_moved(dest.stat().st_size, boot_phases.SOURCE_LOCAL)
+            _import_verified_artifact(
+                dest, cell_ref=cell_ref, cache_dir=cache_dir, what=what
+            )
             return dest
 
     if presigned is None or not list(getattr(presigned, "files", ())):
@@ -171,6 +212,9 @@ def _materialize_named_artifact(
         span.classify("fetched", f"ref={cell_ref} chunks={len(remote_chunks)}")
         span.bytes_moved(declared_size or dest.stat().st_size,
                          boot_phases.SOURCE_CAS)
+    _import_verified_artifact(
+        dest, cell_ref=cell_ref, cache_dir=cache_dir, what=what
+    )
     return dest
 
 

@@ -114,7 +114,6 @@ def quiet(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str]]:
 
     monkeypatch.setattr(fleet_cells.activity_mod, "emit_event", _emit)
     monkeypatch.setattr(fleet_cells, "_note_durable", lambda *a, **k: None)
-    monkeypatch.setattr(fleet_cells.aot_serve, "note_aot_key", lambda k: None)
     monkeypatch.setattr(fleet_cells, "arm_axis_divergence",
                         lambda arm, meta, **_kw: "")
     monkeypatch.setattr(fleet_cells, "_FINALIZED", {})

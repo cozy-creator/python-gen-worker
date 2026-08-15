@@ -29,8 +29,6 @@ from typing import (
     Tuple,
 )
 
-from .. import artifact_meta
-from .. import cell_key
 from ..cell_adopt import AdoptOutcome
 from ..component_vocab import denoiser_components
 from ..api.binding import ModelRef, wire_ref
@@ -67,6 +65,17 @@ EmitFn = Callable[[Dict[str, Any]], None]
 
 class ModelResolutionError(Exception):
     """A model binding cannot be resolved locally (CLI exit 3)."""
+
+
+def _compiled_graph_metadata(path: Path) -> Optional[Dict[str, Any]]:
+    """Read metadata through TCG, returning ``None`` for a non-TCG artifact."""
+
+    from torch_compiled_graphs import artifact as compiled_graph_artifact
+
+    try:
+        return dict(compiled_graph_artifact.read_metadata(Path(path)))
+    except (OSError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -321,7 +330,8 @@ def _abandon_adopt(
     logger.warning("adopt-fit: %s", detail)
     activity_mod.emit_event(
         "adopt_headroom_refused", detail, phase=adopt_fit.REASON,
-        family=family, cell_key=str((meta or {}).get("cell_key") or ""),
+        family=family,
+        cell_key=str((meta or {}).get("compiled_graph_key") or ""),
         graph_class=entry,
     )
 
@@ -369,7 +379,7 @@ def arm_aot(
     from .. import aot_serve
 
     if meta is None:
-        meta = artifact_meta.try_read_metadata(artifact)
+        meta = _compiled_graph_metadata(artifact)
     lifted_target: Any = None
     lifted_installed = False
     #: pgw#999: why the lifted-binding install failed, if it did. Carried into
@@ -397,25 +407,19 @@ def arm_aot(
         # component name (pgw#740: the vocabulary is not repeated in live
         # code; a guessed name on a non-UNet family would silently skip the
         # install and waste the arm).
-        targets = [str(t) for t in ((meta or {}).get("targets") or ())]
-        if not targets:
-            # pgw#1001: a packed multi-entry cell records its targets PER
-            # ENTRY and carries no top-level `targets`/`module` (measured:
-            # both None on a real 5-entry lora64 cell). Without this the name
-            # resolved to "" and the lifted install was silently skipped.
-            # pgw#1176: one artifact, one entry, one target.
-            name = str(
-                ((meta or {}).get("entry") or {}).get("target") or "").strip()
-            targets = [name] if name else []
+        graph_class = (meta or {}).get("graph_class") or {}
+        targets: list[str] = []
+        if isinstance(graph_class, Mapping):
+            target = str(graph_class.get("target") or "").strip()
+            targets = [target] if target else []
         # ...and among them the BRANCH-CAPABLE one: `decoder` sorts first
         # among entry names, and a lifted forward on a module with no branch
         # container fails by name. `branch_targets` is the authority.
         branch_capable = lora_lifted.branch_targets(pipe)
-        module_name = str((meta or {}).get("module") or "")
-        if not module_name:
-            module_name = next(
-                (t for t in targets if t in branch_capable),
-                targets[0] if targets else "")
+        module_name = next(
+            (target for target in targets if target in branch_capable),
+            targets[0] if targets else "",
+        )
         lifted_target = (
             getattr(pipe, module_name, None) if module_name else None)
         if lifted_target is None:
@@ -430,9 +434,8 @@ def arm_aot(
             # its two known causes; this closes it for every future one, by
             # refusing to leave the branch silently.
             lifted_install_error = (
-                f"no lifted target resolved: metadata names module="
-                f"{str((meta or {}).get('module') or '') or '<absent>'} "
-                f"targets={targets or '<absent>'}, branch-capable="
+                f"no lifted target resolved: graph_class target="
+                f"{targets or '<absent>'}, branch-capable="
                 f"{sorted(branch_capable) or '<none>'}"
                 + ("; the cell envelope was unreadable" if meta is None else ""))
             logger.warning(
@@ -536,7 +539,7 @@ def arm_aot(
     # "CANNOT refuse a card that merely cannot hold 36 runners", i.e. it could
     # not refuse the failure it was written for (th#1825) and could refuse
     # cards that were fine. The honest gate is the bind itself:
-    # `aot_serve.arm_entry` attempts THIS entry and returns a typed
+    # `aot_serve.arm_compiled_graph` attempts THIS entry and returns a typed
     # `insufficient_adopt_vram` miss on a real device OOM, before any live
     # mutation, and this pod serves eager exactly as it did — on evidence.
     #
@@ -581,8 +584,10 @@ def arm_aot(
         # is also the first point that needs a way BACK DOWN. Both spans below
         # are abandonable: the entry de-arms, its runner is released, the
         # pipeline serves eager and the worker stays alive.
+        graph_class = (meta or {}).get("graph_class") or {}
         _entry_name = str(
-            ((meta or {}).get(cell_key.ENTRY_BLOCK_KEY) or {}).get("name") or "")
+            graph_class.get("name") if isinstance(graph_class, Mapping) else ""
+        )
         _no_room = adopt_fit.refusal(
             "the §4.32 parity gate's forwards" if verify_numerics
             else "serving through the freshly armed graph class",
@@ -640,11 +645,15 @@ def arm_aot(
         # condemns that class and says nothing about its siblings. The refused
         # entry de-arms sticky, its siblings keep serving compiled, and it is
         # not published.
-        entry = str((meta.get(cell_key.ENTRY_BLOCK_KEY) or {}).get("name") or "")
+        graph_class = meta.get("graph_class") or {}
+        entry = str(
+            graph_class.get("name") if isinstance(graph_class, Mapping) else ""
+        )
         aot_serve.disarm_entry(pipe, entry, "numerics_refused")
         outcome = AdoptOutcome.miss(
             "numerics_refused",
-            f"family={meta.get('family')} key={meta.get('cell_key')} "
+            f"family={meta.get('family')} key="
+            f"{meta.get('compiled_graph_key')} "
             f"entry={entry}: this pod MINTED these bytes and they do not "
             f"reproduce the eager forward they were traced from — this CLASS "
             f"is not published and serves eager; sibling classes are "
@@ -835,11 +844,9 @@ def enable_compiled(
     if bucket:
         compile_cache.apply_lora_execution_lane(pipe, bucket)
     if artifact is not None:
-        # ONE kind sniff for every non-inductor backend. `metadata.json` is
-        # the shared envelope member across all artifact kinds (the pgw#709
-        # receipts gate above reads it from the same place), so `kind` is the
-        # dispatch key: absent/unknown falls through to the inductor lane.
-        meta = artifact_meta.try_read_metadata(artifact)
+        # TCG owns the compiled-graph envelope. A non-TCG artifact falls
+        # through to the ordinary inductor lane.
+        meta = _compiled_graph_metadata(artifact)
         kind = str((meta or {}).get("kind") or "")
         if kind == aot_serve.ARTIFACT_KIND:
             aot = arm_aot(pipe, cfg, cache_dir, Path(artifact), bucket, meta)

@@ -59,14 +59,14 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import msgspec
 
 from . import compile_posture, handler_proof, warm_spans
 from .api.errors import ValidationError
 from .api.export_contract import blocker_refusal, export_declaration, open_blockers
-from .child_contract import MintSlot, frame_line
+from .child_contract import frame_line
 from .child_preflight import (
     PreflightRefused,
     assert_slots_resolvable,
@@ -257,136 +257,67 @@ def _drive_warm_plan(
     return ledger
 
 
-def _release() -> None:
-    """Reclaim a probe pipeline's device memory. The caller has already
-    dropped its references; this collects the cycles and returns the cached
-    blocks so the next candidate loads onto an empty card."""
-    import gc
+def _release_compile_recipe_residents(pipeline: Any) -> Dict[str, float]:
+    """Release the recipe process's dead pipeline before compile children run.
 
-    gc.collect()
+    The serving pipeline lives in another process.  Once this child has
+    enumerated the graph-class rows, its local modules are neither traced nor
+    served again: each compile child composes its own weight-free target.  This
+    lifecycle action belongs here, not in TCG's declaration/package engine.
+    """
     try:
+        import gc
+
         import torch
+    except Exception:  # noqa: BLE001 -- no torch means nothing is resident
+        return {}
 
-        if cuda_ready():
-            torch.cuda.empty_cache()
-            torch.cuda.reset_peak_memory_stats()
-    except Exception:  # noqa: BLE001 — best effort
-        logger.debug("mint-child: empty_cache failed", exc_info=True)
-
-
-def _measure_execution_lane(execution_lane: str, load: Any) -> Any:
-    """Load, build and time ONE candidate lane.
-
-    Its own frame on purpose: the probe pipeline and its compiled step must
-    be unreachable the moment this returns, or the next candidate loads onto
-    a card the previous one is still resident on.
-    """
-    from . import aot_mint, kernel_path
-
-    kernel_path.pin(execution_lane, "mint-time A/B probe (pgw#947)")
+    modules: List[Any] = []
+    candidates: List[Any] = [pipeline]
     try:
-        _instance, pipe, spec = load(execution_lane)
-        return kernel_path.measure(execution_lane, aot_mint.bench_step(pipe, spec))
-    except Exception as exc:  # noqa: BLE001 — a candidate that cannot be
-        # built or measured drops out of the ranking; it never fails the
-        # mint, and the reason is recorded with the verdict.
-        logger.warning("mint-child: kernel-lane %s not buildable — %s",
-                       execution_lane, exc)
-        return kernel_path.Measurement(
-            execution_lane=execution_lane, unavailable=f"build: {type(exc).__name__}: {exc}")
+        candidates.extend(vars(pipeline).values())
+    except TypeError:
+        pass
+    for candidate in candidates:
+        if isinstance(candidate, torch.nn.Module) and all(
+            candidate is not module for module in modules
+        ):
+            modules.append(candidate)
 
-
-def execution_lane_verdict_for(
-    load: Any, *, meta_mint: bool = False,
-) -> Tuple[Any, Any, Any, Any]:
-    """MEASURE which serving-kernel lane wins on THIS card (pgw#947).
-
-    Returns ``(verdict, endpoint instance, pipeline, spec)`` — the winning
-    lane's loaded pipeline and its export spec, ready to mint, so the artifact
-    and the verdict inside it can never describe different code. The INSTANCE
-    rides along because the AOT recipe now proves the endpoint's own warm plan
-    runs before it exports (pgw#984), and the handler is a method on it.
-
-    A "lane" is the pgw#863 COMBINATION of both axes (``fused+packed``,
-    ``baseline+packed``, ...), so the ranking prices the modulation lane's
-    residency win and the linear lane's throughput win against each other
-    under one rule instead of a hand tuple per axis.
-
-    The A/B has to happen HERE and not inside ``aot_mint``: the lane is
-    chosen when the checkpoint's linears are swapped, which is model LOAD, so
-    comparing lanes means loading once per candidate. ``load(lane)`` does one
-    full endpoint load with that lane pinned and hands back
-    ``(pipeline, export_spec)``.
-
-    Replaces the hand-maintained SM tuples this used to be. Whether each
-    kernel EXISTS on a card is still a capability question
-    (``kernel_lane.candidate_axes``), and an axis with one buildable value
-    contributes no candidates — a non-Blackwell card therefore has ONE
-    combination and pays no benchmark at all. Whether an armed value is
-    FASTER on a qualifying card is now measured there instead of edited into
-    a tuple after a $12 campaign.
-
-    Never fails a mint: any gap leaves the default lane pinned, records no
-    verdict, and says why — a cell with no verdict is the documented
-    conservative-default case on the serving side.
-    """
-    from . import kernel_path
-
-    candidates = kernel_path.candidates_here()
-    if meta_mint and len(candidates) >= 2:
-        # pgw#1080, coordinator ruling 2026-08-10: option (a). The A/B is a
-        # WHOLE-MODEL benchmark (`bench_step` times a real pipeline step), so
-        # running it would put weight-scale values back in the one process
-        # this slice exists to keep empty — to buy a verdict with no consumer
-        # below Blackwell, where `fused_candidate_gap` leaves one candidate
-        # and no A/B runs at all. Typed absence, with its reason.
-        verdict = kernel_path.unmeasured(
-            candidates[0],
-            "meta-mint: this child holds no weights (pgw#1080) and the lane "
-            "A/B is a whole-model benchmark; the serving side treats a cell "
-            "with no verdict as the documented conservative default")
-        kernel_path.pin(verdict.winner, f"meta-mint: {verdict.detail}")
-        frame(phase="load",
-              note=f"kernel lane {verdict.winner} (unmeasured, meta-mint)")
-        instance, pipe, spec = load(verdict.winner)
-        return verdict, instance, pipe, spec
-
-    if len(candidates) < 2:
-        _axes, gaps = kernel_path.candidate_axes()
-        detail = "; ".join(
-            f"{axis}: {gap}" for axis, gap in sorted(gaps.items()))
-        verdict = kernel_path.sole(
-            candidates[0] if candidates else kernel_path.DEFAULT_EXECUTION_LANE,
-            f"only one lane combination is buildable on this card — "
-            f"{detail or 'no rival'}")
-        kernel_path.pin(verdict.winner, f"sole candidate: {verdict.detail}")
-        frame(phase="load", note=f"kernel lane {verdict.winner} (sole)")
-        instance, pipe, spec = load(verdict.winner)
-        return verdict, instance, pipe, spec
-
-    measurements = []
-    for index, execution_lane in enumerate(candidates, start=1):
-        frame(phase="load", step=index, total=len(candidates),
-              note=f"kernel-lane probe: {execution_lane}")
-        measurements.append(_measure_execution_lane(execution_lane, load))
-        # Each candidate is loaded onto an EMPTY card and torn down before the
-        # next one: two resident pipelines would make the probe itself the
-        # thing that OOMs a mint pod sized for one, and the peak this measures
-        # has to be one lane's peak, not two lanes' sum. The probe pipeline
-        # dies with `_measure_execution_lane`'s frame; this reclaims it.
-        _release()
-
-    total, name, sm = kernel_path.device_facts()
-    verdict = kernel_path.select(
-        measurements, device_total_bytes=total, device_name=name, sm=sm)
-    frame(phase="load",
-          note=f"kernel lane {verdict.winner} ({verdict.binding})")
-    kernel_path.pin(verdict.winner, f"mint verdict: {verdict.detail}")
-    # The winner is loaded FRESH rather than kept from its probe pass: the
-    # probe ran `torch.compile` over the denoiser, and the graph that gets
-    # exported must come from a pipeline nothing has warmed or specialized.
-    instance, pipe, spec = load(verdict.winner)
-    return verdict, instance, pipe, spec
+    refused = 0
+    cuda = False
+    before = 0
+    try:
+        cuda = bool(torch.cuda.is_available())
+        if cuda:
+            before = int(torch.cuda.memory_reserved())
+    except Exception:  # noqa: BLE001 -- telemetry never changes the release
+        cuda = False
+    for module in modules:
+        try:
+            module.to("meta")
+        except Exception:  # noqa: BLE001 -- best effort, reported below
+            refused += 1
+            logger.debug(
+                "mint child could not release %s to meta",
+                type(module).__name__,
+                exc_info=True,
+            )
+    gc.collect()
+    facts = {"residents_release_modules": float(len(modules) - refused)}
+    if cuda:
+        try:
+            torch.cuda.empty_cache()
+            facts["residents_released_bytes"] = float(
+                max(0, before - int(torch.cuda.memory_reserved()))
+            )
+            facts["peak_vram_before_release_bytes"] = float(
+                torch.cuda.max_memory_allocated()
+            )
+            torch.cuda.reset_peak_memory_stats()
+        except Exception:  # noqa: BLE001 -- telemetry only
+            pass
+    return facts
 
 
 def _mint_aot(
@@ -462,7 +393,7 @@ def _mint_aot(
     # holds a pipeline, and the fork depends on the composed pipeline: a child
     # cannot be told how many classes exist, it can only be told which share
     # of them is its own (`aot_mint.declared_class_rows`).
-    decl = aot_mint.export_declaration(str(spec.family or ""))
+    decl = export_declaration(str(spec.family or ""))
     if decl is None:
         raise PreflightRefused(
             f"family {spec.family!r} has no registered export declaration — "
@@ -488,7 +419,7 @@ def _mint_aot(
     # above) and before the first child spawns. It matters most on the
     # REAL-WEIGHT FALLBACK path, where this process is holding a whole
     # checkpoint.
-    released = aot_mint.release_mint_residents(pipe)
+    released = _release_compile_recipe_residents(pipe)
     if released:
         frame(phase="trace_graph", note=(
             "released mint residents: "
@@ -557,8 +488,7 @@ def _mint_aot(
         elapsed_s=time.monotonic() - started,
         phases=_close_phases(),
         mint_phases=dict(
-            (result.entries[0].metadata.get("mint_phases") or {})
-            if result.entries else {}),
+            result.entries[0].mint_phases if result.entries else {}),
         structure_only_components=tuple(
             marks.get("structure_only_components") or ()),
         structure_refusal=str(marks.get("structure_refusal") or ""),
@@ -635,10 +565,8 @@ def mint(request: MintRequest) -> MintReport:
     structure_targets = tuple(cfg.targets)
     structure_refusals: List[str] = []
 
-    def _load(_execution_lane: str) -> Tuple[Any, Any, Any]:
-        """One full endpoint load on the currently pinned kernel lane: the
-        endpoint instance, its compile-target pipeline, and that pipeline's
-        export spec."""
+    def _load() -> Tuple[Any, Any, Any]:
+        """Load the endpoint instance and its compile-target pipeline once."""
         from . import fleet_cells
         from .models import structure_only
         from .models.structure_only import (
@@ -721,12 +649,10 @@ def mint(request: MintRequest) -> MintReport:
             cc.apply_lora_execution_lane(loaded_pipe, cfg.lora_bucket)
         return obj, loaded_pipe, fleet_cells.aot_export_spec(loaded_pipe, cfg)
 
-    # pgw#947: MEASURE the serving-kernel lane on this card before the cell is
-    # exported, so the cell can carry the verdict instead of the fleet
-    # re-deriving it from a hand-maintained SM tuple. The probe loads once per
-    # candidate; the winner's pipeline is what gets minted.
-    verdict, instance, pipe, aot_spec = execution_lane_verdict_for(
-        _load, meta_mint=bool(structure_targets))
+    # TCG owns the compiled artifact and admits a closed metadata schema. The
+    # retired worker kernel-lane A/B neither reached that schema nor affected
+    # the compile child, so it cannot be a second artifact-policy authority.
+    instance, pipe, aot_spec = _load()
     from .models import structure_only
 
     facts = structure_only.facts_of(pipe)
@@ -761,9 +687,7 @@ def mint(request: MintRequest) -> MintReport:
     # and it is what §4.33's "~8 GiB" was actually measuring (`materialize_random`
     # for an sdxl-sized family). §4.33 steps 4-5 put verification on the LIVE
     # pipeline that already holds these weights, so the proof travels as the
-    # parent's PROVENANCE and this process allocates nothing for it. The SDK had
-    # already made the same call for the kernel-lane A/B — see
-    # `execution_lane_verdict_for`'s `meta_mint` branch.
+    # parent's PROVENANCE and this process allocates nothing for it.
     #
     # REFUSED, never re-proven here: a child that proved it itself would
     # reintroduce the allocation, and a caller that cannot prove its handler
@@ -979,10 +903,10 @@ def _install_posture(request: MintRequest) -> None:
     desktop the "parent" is a CLI that a human closes, and without this a
     closed terminal leaves a full-speed compile tree running with nobody left
     to reap it: the exact "my machine is at a crawl and I don't know why"
-    support ticket politeness exists to prevent. Nothing is lost by dying —
-    ``MintRequest.resume`` points at ``aot_resume``'s cross-attempt bank, which
-    lives outside the per-attempt workdir precisely so finished entries survive
-    into the next run.
+    support ticket politeness exists to prevent. TCG publishes each completed
+    graph class into the canonical HashRepo CAS before the worker exports its
+    handoff, so a restart reuses committed classes without a second worker
+    resume bank.
 
     Never fatal. A kernel that refuses either call leaves a mint that is rude
     rather than no mint at all, and says so.

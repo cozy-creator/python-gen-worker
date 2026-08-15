@@ -124,19 +124,12 @@ def hub():
 
 @pytest.fixture()
 def artifact(tmp_path: Path) -> Path:
-    # packed by the exported packer. `compile_cache.pack` wrote the
-    # `torch-inductor-cache` envelope, whose producer died in pgw#1178 and
-    # whose format is deleted; what a pod publishes is an exported cell, and
-    # what this file is about is the CREDENTIAL on the publish leg, not the
-    # bytes underneath it.
-    from gen_worker import aot_serve
-
-    root = tmp_path / "capture"
-    root.mkdir(parents=True, exist_ok=True)
-    (root / aot_serve.PACKAGE_NAME).write_bytes(b"\x11" * 4096)
+    # Every row is refused at publish-intent, before artifact transport opens
+    # this path. Keep only the opaque carrier needed by the publisher API: the
+    # behavior under test is the credential on the real HTTP leg.
     out = tmp_path / "mintdir" / "cell.tar.gz"
     out.parent.mkdir()
-    aot_serve.pack(root, out, dict(META))
+    out.write_bytes(b"\x11" * 4096)
     return out
 
 

@@ -422,10 +422,14 @@ def test_ONE_floor_AND_THE_MINT_NO_LONGER_SPELLS_IT(clean_registry) -> None:
     (DESIGN-RULINGS §4.28)."""
     from gen_worker import aot_mint
 
-    assert aot_mint.LIFTED_LORA_TORCH_FLOOR is pre.LIFTED_LORA_TORCH_FLOOR
-    assert not hasattr(aot_mint, "lifted_torch_gap")
-    assert not hasattr(aot_mint, "torch_version_gap")
+    for retired in (
+        "LIFTED_LORA_TORCH_FLOOR",
+        "lifted_torch_gap",
+        "torch_version_gap",
+    ):
+        assert not hasattr(aot_mint, retired)
     source = Path(aot_mint.__file__).read_text()
+    assert "LIFTED_LORA_TORCH_FLOOR" not in source
     assert "__version__" not in source
 
     # ...and the ONE surviving spelling still refuses below the floor.

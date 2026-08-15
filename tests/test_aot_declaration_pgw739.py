@@ -13,7 +13,7 @@
   through ONE code path (``declared_inputs``);
 - the fork gate reads ``(pipeline|module, field)`` sources off composed
   objects and refuses a wrong or unstated arm by name;
-- fork coordinates and class rows reach the cell identity.
+- fork coordinates and class rows reach TCG's graph-class identity.
 
 Real torch throughout; the only fabricated things are tiny modules.
 """
@@ -27,10 +27,10 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from gen_worker import aot_declaration, aot_mint, cell_key  # noqa: E402
-from gen_worker.aot_mint import ExportSpec, MintRefused  # noqa: E402
-from gen_worker.api.decorators import Compile, DynamicDim  # noqa: E402
-from gen_worker.api.export_contract import (  # noqa: E402
+from gen_worker import aot_declaration, aot_mint
+from gen_worker.aot_mint import ExportSpec, MintRefused
+from gen_worker.api.decorators import Compile, DynamicDim
+from gen_worker.api.export_contract import (
     Arg,
     Dim,
     Fork,
@@ -448,52 +448,8 @@ def test_declared_inputs_actually_export() -> None:
 
 
 # ---------------------------------------------------------------------------
-# The two pgw#723-residuals mint gates (pods 8/9)
+# The two pgw#723-residual trace gates (pods 8/9)
 # ---------------------------------------------------------------------------
-
-
-def test_mint_refuses_kwarg_example_feeds_by_name(tmp_path) -> None:
-    """The pod-9 shape, refused at the mint instead of discovered at first
-    serve: the flat forward traced the lifted pair as kwargs, the package
-    demanded kwargs, the positional serve marshal fed none — 'Ran into a
-    kwarg keyword mismatch' swallowed on first call, every "armed" call
-    silently eager (splat_served=false, B_vs_eagerB_maxdiff=0.0).
-
-    Declared Input rows are positionalized by construction, so the kwarg
-    shape can only arrive via a HAND-REGISTERED builder (the escape hatch
-    for families whose declaration is still being written) — which is
-    exactly where the mint must still refuse it, naming the entry."""
-    from types import SimpleNamespace
-
-    from gen_worker import aot_inputs
-
-    class Tiny(torch.nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.proj = torch.nn.Linear(4, 4)
-
-        def forward(self, x, lora_a=None, lora_b=None):  # type: ignore[no-untyped-def]
-            return self.proj(x)
-
-    register_export_declaration(Compile(
-        family="kwargfam", targets=("unet",),
-        dims=(Dim("B", carried_by=(("x", 0),)),),
-        classes=(GraphClass(dims={"B": 2}),),
-        shape_strategy="static-rows", warm_changes_key=False,
-    ))
-
-    @aot_inputs.inputs_for("kwargfam")
-    def _kwarg_builder(module, spec):  # type: ignore[no-untyped-def]
-        return ((torch.randn(2, 4),), {
-            "lora_a": torch.randn(2, 4), "lora_b": torch.randn(4, 2)})
-
-    try:
-        spec = ExportSpec(family="kwargfam", target="", weight_lane="w8a8")
-        with pytest.raises(MintRefused, match="kwarg"):
-            aot_mint.mint(
-                SimpleNamespace(unet=Tiny().eval()), spec, tmp_path)
-    finally:
-        aot_inputs._BUILDERS.pop(("kwargfam", ""), None)
 
 
 def test_positionalize_refuses_keyword_only_declared_inputs() -> None:
@@ -634,41 +590,47 @@ def test_hand_dynamic_rows_are_refused_at_declaration_time() -> None:
         })
 
 
-def test_fork_and_row_reach_the_cell_identity() -> None:
-    """A fork is a DISTINCT graph class in #716's hash; a static row is the
-    artifact's identity. Both travel through the per-class hash, which pgw#1176
-    made the key's `graph` axis DIRECTLY — the fold into a combined hash is
-    gone, so a fork that did not reach `class_hash` would no longer be
-    disguised by a set-wide digest."""
-    from gen_worker import aot_serve, cell_key
+def test_fork_and_row_reach_tcg_graph_class_identity() -> None:
+    """Forks and static rows are TCG declaration facts, so either changing
+    must change the graph-class hash before ``Engine.compile`` is called."""
+    from torch_compiled_graphs import GraphClassSpec, build_call_ingress
 
-    def _identity(fork: list, class_dims: list) -> str:
-        entry = {
-            "name": "unet/main",
-            "target": "unet", "fork": fork, "class_dims": class_dims,
-            "range_digest": "r1", "graph": {"v": 2},
-        }
-        ch = aot_serve.class_hash(entry, strict=True, lora_bucket=0)
-        entry["class_hash"] = ch
-        meta = {
-            "sm": "sm_89", "format": 3, "family": "sdxl-shaped",
-            "kind": aot_serve.ARTIFACT_KIND,
-            # ONE entry block, which NAMES its class. The manifest
-            # digest rides beside it as a coverage label, never as identity.
-            cell_key.ENTRY_BLOCK_KEY: entry,
-            "manifest_digest": cell_key.manifest_digest([ch]),
-            # Every key input is now a RECORDED block, so this
-            # fixture states them rather than relying on an empty-dict digest.
-            "env_seal": {"v": 1}, "toolchain": {"torch": "2.9.0"},
-            "declared_envelope": {"shapes": [], "text_lens": [], "guidance": []},
-            "lora_bucket": 0, "strict_export": True,
-        }
-        return aot_mint.cell_identity(meta).digest
+    class Tiny(torch.nn.Module):
+        def forward(self, sample: Any) -> Any:
+            return sample.cos()
 
-    a = _identity([["cfg", True]], [])
-    b = _identity([["cfg", False]], [])
-    c = _identity([], [])
+    args = (torch.randn(2, 4),)
+    program = torch.export.export(Tiny().eval(), args, strict=True)
+    ingress = build_call_ingress(program, ("sample",), args, {})
+    graph = {
+        "v": 3,
+        "lifted_inputs": [],
+        "pytree": {
+            "user_inputs": ["sample"],
+            "in_spec": "",
+            "out_spec": "",
+            "ingress": ingress.as_dict(),
+        },
+        "specialization": {},
+    }
+
+    def _identity(
+        fork: tuple[tuple[str, Any], ...],
+        class_dims: tuple[tuple[str, int], ...],
+    ) -> str:
+        return GraphClassSpec(
+            graph_class="unet/main",
+            target="unet",
+            program=program,
+            graph=graph,
+            fork=fork,
+            class_dims=class_dims,
+        ).declare().class_hash
+
+    a = _identity((("cfg", True),), ())
+    b = _identity((("cfg", False),), ())
+    c = _identity((), ())
     assert len({a, b, c}) == 3
-    d1 = _identity([], [["H_lat", 128], ["W_lat", 128]])
-    d2 = _identity([], [["H_lat", 112], ["W_lat", 144]])
+    d1 = _identity((), (("H_lat", 128), ("W_lat", 128)))
+    d2 = _identity((), (("H_lat", 112), ("W_lat", 144)))
     assert d1 != d2

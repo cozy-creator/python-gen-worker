@@ -31,7 +31,7 @@ import pytest
 
 from gen_worker import activity as activity_mod
 from gen_worker import aot_compile_pool as pool
-from gen_worker import aot_mint, mint_process, mint_supervisor
+from gen_worker import aot_mint, mint_supervisor
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 _GIB = 1024 ** 3
@@ -277,8 +277,9 @@ def test_a_real_pools_width_and_ledger_land_hub_side(tmp_path: Path) -> None:
         "peak_concurrency": box.peak_concurrency,
         "peak_child_rss_bytes": box.peak_rss_bytes,
     }
-    table = aot_mint._mint_phase_table([], {"total_s": 12.5}, None, width,
-                                       ledger)
+    table = aot_mint._mint_phase_table(
+        [], {"total_s": 12.5}, width, ledger,
+    )
     updates = _relayed(table)
 
     pool_events = [
@@ -308,8 +309,9 @@ def test_a_narrow_pool_says_so_in_the_first_line() -> None:
     width = pool.entry_workers(
         72, vcpus=21, available_bytes=13 * _GIB, device_lock=True)
     assert width.workers == 3 and width.underwidth == 5, width.reason
-    table = aot_mint._mint_phase_table([], {"total_s": 554.78}, None, width,
-                                       {"pool_wall_s": 453.0})
+    table = aot_mint._mint_phase_table(
+        [], {"total_s": 554.78}, width, {"pool_wall_s": 453.0},
+    )
     updates = _relayed(table)
     detail = next(
         u.detail for u in updates if u.phase == aot_mint.POOL_PHASE)

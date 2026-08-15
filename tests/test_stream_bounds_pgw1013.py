@@ -531,7 +531,15 @@ def _repo_for(family: str = "fam") -> str:
     return cc.system_repo(family)
 
 
-def test_cell_artifact_legitimate_transfer_is_unaffected(rig: _Rig, tmp_path: Path) -> None:
+def test_cell_artifact_legitimate_transfer_is_unaffected(
+    rig: _Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gen_worker import aot_delivery
+
+    # This suite owns the bounded transport, not TCG package admission.  Keep
+    # the latter at its typed handoff so arbitrary control bytes do not need to
+    # masquerade as a compiled graph.
+    monkeypatch.setattr(aot_delivery, "_import_verified_artifact", lambda *a, **k: None)
     url = _serve(rig, "/cell.tar.gz", ARTIFACT)
     entry = {"path": "cell.tar.gz", "url": url,
              "digest": ARTIFACT_DIGEST, "size_bytes": len(ARTIFACT)}

@@ -23,6 +23,7 @@ from typing import Any, Dict
 import pytest
 
 from gen_worker import executor as executor_mod
+from gen_worker.api import export_contract as export_contract_mod
 from gen_worker.procsplit import broker
 
 
@@ -74,13 +75,11 @@ def wired(monkeypatch, tmp_path):
         return (executor_mod.boot_adopt.BootAdoptOutcome(reason="miss"),)
 
     # Everything before the gate: a declaration exists and sizes one class.
-    monkeypatch.setattr(executor_mod.aot_mint, "export_declaration",
+    monkeypatch.setattr(export_contract_mod, "export_declaration",
                         lambda family: object())
     monkeypatch.setattr(executor_mod.aot_declaration, "cell_plans",
                         lambda decl: [object()])
     monkeypatch.setattr(executor_mod, "_mint_modules", lambda spec: ("m",))
-    monkeypatch.setattr(executor_mod.fleet_cells, "declared_envelope_block",
-                        lambda cfg: {})
     monkeypatch.setattr(executor_mod.boot_adopt, "attempt", _attempt)
 
     ex = _executor(tmp_path)

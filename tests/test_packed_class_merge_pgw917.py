@@ -32,39 +32,58 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 import pytest
+from torch_compiled_graphs import CallIngress, CallInput, GraphClassDeclaration
 
-from gen_worker import aot_mint, aot_serve
+from gen_worker import aot_mint
 
 
 def _block(
-    *, name: str, dims: List[List[Any]], witness: str = "w" * 16,
+    *, name: str, dims: List[List[Any]], witness: str = "a" * 16,
     seq: int = 16128, target: str = "unet", arm: bool = True,
 ) -> Dict[str, Any]:
-    """One packed entry block, in the shape ``aot_mint.keying_block`` writes
-    and ``aot_serve.stamp_entry`` stamps."""
-    block: Dict[str, Any] = {
-        "name": name,
-        "target": target,
-        "fork": [[aot_mint.ADAPTER_FORK, arm]],
-        "class_dims": dims,
-        "inputs": [
-            {"name": "hidden", "position": 0, "dtype": "float16",
-             "shape": [2, seq, 320], "path": []},
-        ],
-        "symbols": {},
-        "constants": [],
-        "graph": {"v": 3, "constant_fqns": [], "lifted_inputs": [],
-                  "pytree": {"user_inputs": ["hidden"]},
-                  "specialization": {}},
-        "graph_witness": witness,
+    """One closed TCG graph-class declaration as the child returns it."""
+    ingress = CallIngress(
+        parameters=("hidden",),
+        flat_arity=1,
+        inputs=(CallInput(
+            name="hidden",
+            position=0,
+            param="hidden",
+            param_position=0,
+            path=(),
+            exported_name="hidden",
+            dtype="float16",
+            shape=(2, seq, 320),
+        ),),
+    )
+    graph = {
+        "v": 3,
+        "constant_fqns": [],
+        "lifted_inputs": [],
+        "pytree": {"ingress": ingress.as_dict()},
+        "specialization": {},
     }
-    return aot_serve.stamp_entry(name, block, strict=True, lora_bucket=0)
+    declaration = GraphClassDeclaration(
+        graph_class=name,
+        target=target,
+        graph=graph,
+        graph_witness=witness,
+        range_digest=ingress.digest(),
+        fork=((aot_mint.ADAPTER_FORK, arm),),
+        class_dims=tuple((str(axis), int(value)) for axis, value in dims),
+        strict=True,
+        lora_bucket=0,
+    )
+    return {
+        "name": name,
+        "class_hash": declaration.class_hash,
+        **declaration.facts(),
+    }
 
 
 def _meta(**over: Any) -> Dict[str, Any]:
     meta: Dict[str, Any] = {
-        "precision": "fp16", "lora_bucket": 0, "strict_export": True,
-        "source_digest": "blake3:src",
+        "sm": "cpu-test", "toolchain": {"torch": "test"},
     }
     meta.update(over)
     return meta
@@ -103,7 +122,7 @@ def test_a_cluster_that_is_NOT_one_class_REFUSES_and_names_the_axis() -> None:
     """
     a = _block(name="unet.denoise@112x144", dims=[["H_lat", 112], ["W_lat", 144]])
     b = _block(name="unet.denoise@144x112", dims=[["H_lat", 144], ["W_lat", 112]],
-               witness="DIFFERENT-BODY!")
+               witness="b" * 16)
 
     with pytest.raises(aot_mint.MintRefused) as exc:
         aot_mint.canonicalize_packed_classes(
@@ -115,20 +134,17 @@ def test_a_cluster_that_is_NOT_one_class_REFUSES_and_names_the_axis() -> None:
     assert "entry_ambiguous" in str(exc.value)
 
 
-def test_a_metadata_axis_the_entry_block_does_NOT_carry_still_refuses() -> None:
-    """`_class_identity` folds four axes that live on the ARTIFACT rather than
-    in the entry block — precision, lora_bucket, strict, source_digest — and a
-    reconstruction that dropped them would MERGE two artifacts that are not the
-    same thing. Asserted with the one an adopting pod cannot recover from."""
+def test_a_runtime_axis_the_graph_class_does_NOT_carry_still_refuses() -> None:
+    """Runtime compatibility lives beside the TCG graph-class declaration."""
     a = _block(name="unet.denoise@112x144", dims=[["H_lat", 112], ["W_lat", 144]])
     b = _block(name="unet.denoise@144x112", dims=[["H_lat", 144], ["W_lat", 112]])
 
     with pytest.raises(aot_mint.MintRefused) as exc:
         aot_mint.canonicalize_packed_classes(
             {a["name"]: a, b["name"]: b},
-            {a["name"]: _meta(precision="fp16"),
-             b["name"]: _meta(precision="fp8")})
-    assert "precision" in str(exc.value)
+            {a["name"]: _meta(sm="sm_80"),
+             b["name"]: _meta(sm="sm_90")})
+    assert "sm" in str(exc.value)
 
 
 def test_rows_on_DIFFERENT_targets_are_never_compared() -> None:
@@ -156,12 +172,8 @@ def test_the_two_adapter_ARMS_of_one_class_are_never_merged() -> None:
 def test_the_coverage_LABEL_counts_survivors_and_not_absorbed_rows() -> None:
     """Owed item (d), re-fired on the merge.
 
-    A compile child stamps its artifact's ``manifest_digest`` EMPTY — it holds
-    ONE SHARE and cannot state a declaration-wide coverage label — and the
-    parent folds the real one across every share. An absorbed class
-    contributes the same ``class_hash`` its survivor already contributes, so
-    folding it as well would make the label depend on how the declaration
-    happened to be sharded, which is exactly what a coverage label may not do.
+    The TCG artifact carries no worker coverage stamp. The parent derives a
+    telemetry-only manifest from the surviving closed graph classes.
     """
     a = _block(name="unet.denoise@112x144", dims=[["H_lat", 112], ["W_lat", 144]])
     b = _block(name="unet.denoise@144x112", dims=[["H_lat", 144], ["W_lat", 112]])
@@ -176,17 +188,15 @@ def test_the_coverage_LABEL_counts_survivors_and_not_absorbed_rows() -> None:
         aot_mint.MintedArtifact(
             key="cg-key-v1-" + "a" * 56, entry=a["name"],
             artifact=aot_mint.Path("/dev/null"),
-            metadata={"entry": a, **_meta()}),
+            metadata={"graph_class": a, **_meta()}),
         aot_mint.MintedArtifact(
             key="cg-key-v1-" + "b" * 56, entry=b["name"],
             artifact=aot_mint.Path("/dev/null"),
-            metadata={"entry": b, **_meta()}),
+            metadata={"graph_class": b, **_meta()}),
     ]
     result = aot_mint.fold_held_graph_classes(held, spec=spec)
     assert len(result.entries) == 1
     assert result.manifest == survivors_only, (
         "the coverage label counted an absorbed class twice — the label would "
         "then depend on the sharding rather than on the declaration")
-    assert result.entries[0].metadata["manifest_digest"] == survivors_only, (
-        "the parent must stamp the folded label on the result; the bytes "
-        "inside each artifact keep the empty stamp its child honestly wrote")
+    assert "manifest_digest" not in result.entries[0].metadata

@@ -73,10 +73,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from . import (
-    activity, aot_identity, artifact_meta, boot_key, cell_resolve,
-    local_cell_store,
-)
+from . import activity, aot_identity, boot_key, cell_resolve, local_cell_store
 from .child_contract import CompileSpec, MintSlot
 
 logger = logging.getLogger(__name__)
@@ -128,12 +125,6 @@ LOCAL_REASONS: Tuple[str, ...] = (
     # that used to fire BEFORE the derivation and therefore before the local
     # store had an address to be asked at.
     "local_miss_no_hub",
-    # The local store answered with bytes whose recorded graphs are not the
-    # graphs this pod traced (the pgw#1031 floor, applied to route B). NOT a
-    # drop: unlike the memo — which this machine's own mint wrote for this
-    # exact arm token — a derived-key hit is an inference, so it refuses
-    # without destroying a cell some other pipe may legitimately own.
-    "local_graph_witness_mismatch",
 )
 
 #: Step 1 — the derivation. ``boot_key.BootKeyUnavailable.reason`` tokens,
@@ -150,7 +141,8 @@ DERIVE_REASONS: Tuple[str, ...] = (
     # family it serves derives no key, asks for no cell, and self-mints
     # forever — which is what two paid pods spent an evening looking like.
     "structure_capability_missing",
-    "structure_not_honored", "no_declaration", "trace_refused", "empty_share",
+    "structure_not_honored", "no_declaration", "invalid_declaration",
+    "trace_refused", "empty_share",
     # pgw#1124: the child's composition put REAL tensors off the host, so it
     # would be competing for VRAM with the parent that spawned it.
     "real_weights_resident",
@@ -163,8 +155,7 @@ DERIVE_REASONS: Tuple[str, ...] = (
 #: of them being typed.
 ASK_REASONS: Tuple[str, ...] = (
     "invalid_request", "resolve_unreachable",
-    "miss", "materialize_failed", "witness_unreadable",
-    "graph_witness_mismatch", "hit",
+    "miss", "materialize_failed", "hit",
     # pgw#1122 — the LAST terminus, and the one the journey previously ran off
     # the end of. `hit` was reported at resolve+materialize, and everything
     # after it (the receipt gate, the publisher check, the arm itself) was
@@ -360,12 +351,9 @@ def _local_answer(
     is the ADDRESS, on ``local_key``, for ``fleet_cells.arm_from_local_store``
     to arm through the same gate a child's fresh mint passes.
 
-    The pgw#1031 graph-witness floor applies here exactly as it does to a hub
-    hit, and for the same reason: ``ck1`` is an ingress identity, so two
-    endpoints whose declared contracts match can share one key while their
-    bodies differ. It refuses WITHOUT dropping, though — the memo route is
-    written by this machine's own mint for one exact arm token, while a
-    derived-key hit is an inference about which pipe owns the bytes.
+    The derived TCG key already commits the graph class and the TCG store admits
+    only bytes whose metadata reproduces that key. There is no second worker
+    witness to compare.
     """
     try:
         cell = local_cell_store.lookup(key)
@@ -375,22 +363,6 @@ def _local_answer(
         return None
     if cell is None:
         return None
-    try:
-        meta = artifact_meta.read_metadata(Path(cell.artifact))
-        mismatch = aot_identity.verify_graph_witness(
-            meta, derived.graph_witnesses)
-    except Exception as exc:  # noqa: BLE001 — unreadable IS unproven
-        mismatch = f"unreadable ({type(exc).__name__}: {exc})"
-    if mismatch:
-        return report(BootAdoptOutcome(
-            reason="local_graph_witness_mismatch",
-            detail=(
-                f"this machine's own store holds {key} and its graphs are not "
-                f"this pod's graphs: {mismatch}. The cell is LEFT in place — a "
-                f"derived-key hit is an inference, not the memo this machine "
-                f"wrote for its own arm — and this pod asks the hub instead"),
-            derived_key=key, derive_ms=derived.wall_ms,
-            family=family, function=fn))
     return report(BootAdoptOutcome(
         reason="local_hit",
         detail=(
@@ -408,7 +380,6 @@ def attempt(
     cfg: Any,
     slots: Mapping[str, MintSlot],
     declared_hint: int,
-    envelope: Mapping[str, Any],
     work_root: Path,
     memo_dir: Optional[Path] = None,
     cache_dir: Optional[Path] = None,
@@ -425,9 +396,7 @@ def attempt(
     genuinely about the declaration rather than about a class.
 
     ``declared_hint`` is ``len(aot_declaration.cell_plans(decl))`` — it sizes
-    the trace pool and nothing else. ``envelope`` is
-    ``fleet_cells.declared_envelope_block(cfg)``, i.e. the same extraction the
-    publish path recomputes the envelope axis from.
+    the trace pool and nothing else.
 
     ``hub_absent`` (pgw#1127) is the caller's own sentence for why there is
     nobody to ask over the wire, "" when there is. It is a DETAIL, not a
@@ -459,7 +428,6 @@ def attempt(
             cfg=spec,
             slots=dict(slots),
             declared_hint=int(declared_hint),
-            envelope=dict(envelope),
             work_root=Path(work_root),
             memo_dir=Path(memo_dir) if memo_dir else None,
             device=int(device),
@@ -503,9 +471,9 @@ def attempt(
             detail="the declaration traced to no graph class at all",
             derive_ms=derived.wall_ms, family=family, function=fn)),)
     logger.info(
-        "boot-adopt: %s asking for %d key(s) (manifest %s, %d class(es), "
+        "boot-adopt: %s asking for %d key(s) (%d class(es), "
         "K=%d, memo=%s, derived in %d ms)",
-        family, len(keys), derived.manifest, derived.traced, derived.workers,
+        family, len(keys), len(derived.entry_keys), derived.workers,
         derived.memo, derived.wall_ms)
 
     # ── §4.28 / pgw#1127: THIS MACHINE, before the wire ────────────────────
@@ -613,41 +581,6 @@ def _adopt_answer(
         logger.debug("boot-adopt: materialize failed", exc_info=True)
         return report(BootAdoptOutcome(
             reason="materialize_failed", detail=f"{type(exc).__name__}: {exc}",
-            derived_key=key, derive_ms=derived.wall_ms,
-            family=family, function=fn))
-
-    # pgw#1031, THE GRAPH-WITNESS FLOOR. Everything above this line agreed on
-    # the KEY, and the key is an ingress identity: two endpoints whose declared
-    # contracts match while their bodies differ mint under one `ck1`
-    # (`micro-pad32` vs `micro-pad32-branchy`, measured 2026-08-10 — identical
-    # keying block from 112- and 102-node graphs). Pull-by-key would hand this
-    # pod the other endpoint's kernels, and only the arm-time numerics
-    # tolerance would stand in the way. So the last thing checked before an
-    # adoption is returned is that the cell's compiled graphs ARE the graphs
-    # this pod traced.
-    try:
-        # THE one bounded reader (pgw#1098): a second scan of the same
-        # member is a divergence waiting for the first caller who bounds
-        # only one of them.
-        meta = artifact_meta.read_metadata(Path(artifact))
-    except Exception as exc:  # noqa: BLE001 — unreadable IS unproven
-        logger.debug("boot-adopt: metadata unreadable", exc_info=True)
-        return report(BootAdoptOutcome(
-            reason="witness_unreadable",
-            detail=(
-                f"the materialized cell for {key} would not state its "
-                f"metadata ({type(exc).__name__}: {exc}), so its graphs cannot "
-                f"be shown to be this pod's graphs"),
-            derived_key=key, derive_ms=derived.wall_ms,
-            family=family, function=fn))
-    mismatch = aot_identity.verify_graph_witness(
-        meta, derived.graph_witnesses)
-    if mismatch:
-        return report(BootAdoptOutcome(
-            reason="graph_witness_mismatch",
-            detail=(
-                f"the key matched {cell.cell_ref} and the graph did not: "
-                f"{mismatch}. This pod serves eager and mints its own."),
             derived_key=key, derive_ms=derived.wall_ms,
             family=family, function=fn))
 

@@ -2,9 +2,9 @@
 
 Composes the compile target STRUCTURE-ONLY (pgw#1080's builder, reached through
 the loader's own ``components=`` seam), exports its assigned graph classes on
-fake tensors, and writes each class's keying block. It holds no checkpoint
-value, opens no socket, and returns no artifact — only the facts an entry's
-``class_hash`` is computed from.
+fake tensors, and asks TCG to declare each class while the exported program is
+still alive. It holds no checkpoint value, opens no socket, and returns no
+artifact — only TCG's validated public declaration facts.
 
 **This is pgw#1080's owed widening**, discharged the only way that keeps ONE
 load path: the boot derivation runs the mint child's own load
@@ -55,7 +55,6 @@ this path is required to treat as fatal.
 
 from __future__ import annotations
 
-import json
 import logging
 import sys
 import time
@@ -73,7 +72,13 @@ from .child_preflight import (
     select_specs,
 )
 from .boot_key import (
-    CODE_DIGEST, EXIT_BAD_JOB, EXIT_OK, EXIT_REFUSED, TraceJob, TraceReport,
+    CODE_DIGEST,
+    EXIT_BAD_JOB,
+    EXIT_OK,
+    EXIT_REFUSED,
+    TraceJob,
+    TraceReport,
+    serialize_declaration,
 )
 
 logger = logging.getLogger(__name__)
@@ -157,6 +162,7 @@ def run(job: TraceJob) -> int:
             f"classes the parent's code describes")
 
     from . import aot_mint, fleet_cells
+    from .api.export_contract import export_declaration
     from .cli.run import run_setup
     from .registry import collect_endpoints
     from .models import structure_only
@@ -238,14 +244,14 @@ def run(job: TraceJob) -> int:
     export_spec = fleet_cells.aot_export_spec(pipeline, cfg)
     setup_ms = int((time.monotonic() - t_setup) * 1000)
 
-    decl = aot_mint.export_declaration(export_spec.family)
+    decl = export_declaration(export_spec.family)
     if decl is None:
         return _fail(
             report_path, "no_declaration",
             f"family {export_spec.family!r} has no registered export "
             f"declaration — a multi-graph cell derives its class set from it")
 
-    blocks: Dict[str, str] = {}
+    declarations: Dict[str, str] = {}
     nodes: Dict[str, int] = {}
     trace_ms: Dict[str, int] = {}
     prop_ms = 0
@@ -260,23 +266,28 @@ def run(job: TraceJob) -> int:
         for traced in aot_mint.trace_for_key(
                 pipeline, export_spec, decl,
                 share_index=job.share_index, share_count=job.share_count):
-            elapsed = int((time.monotonic() - t0) * 1000)
-            declared = int(traced.declared)
-            nodes[traced.name] = int(traced.nodes)
-            trace_ms[traced.name] = elapsed
-            if not export_ms:
-                export_ms = elapsed
-                prop_ms = _probe_prop_ms(traced.program)
-            blocks[traced.name] = json.dumps(
-                traced.block, sort_keys=True, separators=(",", ":"))
-            # The program is the largest object this child holds and nothing
-            # downstream reads it.
-            traced.program = None
+            try:
+                elapsed = int((time.monotonic() - t0) * 1000)
+                declared = int(traced.declared)
+                nodes[traced.name] = int(traced.nodes)
+                trace_ms[traced.name] = elapsed
+                if not export_ms:
+                    export_ms = elapsed
+                    prop_ms = _probe_prop_ms(traced.program)
+                declaration = aot_mint.tcg_graph_class_spec(
+                    traced, export_spec,
+                ).declare()
+                declarations[traced.name] = serialize_declaration(declaration)
+            finally:
+                # The program is the largest object this child holds. A typed
+                # TCG refusal must release it just as surely as success; the
+                # child may still need to serialize its refusal report.
+                traced.release()
             t0 = time.monotonic()
-    except aot_mint.MintRefused as exc:
+    except (aot_mint.MintRefused, ValueError) as exc:
         return _fail(report_path, "trace_refused", str(exc))
 
-    if not blocks:
+    if not declarations:
         # A share with no rows is only legitimate when the declaration has
         # fewer classes than the pool has children, and the parent does not
         # spawn those. Reaching here means the enumeration disagreed.
@@ -287,16 +298,12 @@ def run(job: TraceJob) -> int:
 
     _write(report_path, TraceReport(
         ok=True,
-        blocks=blocks,
+        declarations=declarations,
         nodes=nodes,
         trace_ms=trace_ms,
         setup_ms=setup_ms,
         declared_classes=declared,
         structure_only=tuple(virtual),
-        weight_lane=str(export_spec.weight_lane or ""),
-        precision=str(export_spec.precision or ""),
-        strict=bool(export_spec.strict),
-        lora_bucket=int(export_spec.lora_bucket or 0),
         code_digest=CODE_DIGEST,
         prop_probe_ms=prop_ms,
         export_probe_ms=export_ms,

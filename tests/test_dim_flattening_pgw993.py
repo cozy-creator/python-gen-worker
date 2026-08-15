@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 import pytest
 
 from gen_worker import Compile, Dim, GraphClass, Input
-from gen_worker.aot_contract import DynamicDim, ExportSpec
+from gen_worker.aot_inputs import DynamicDim, ExportSpec
 from gen_worker.aot_declaration import (
     cell_plans, container_arities, declared_inputs,
 )
@@ -251,7 +251,7 @@ def test_a_lifted_input_declared_as_a_container_resolves_too() -> None:
     it cost \\$0.4655 to find out."""
     spec = ExportSpec(
         family="harness", target="transformer", weight_lane="",
-        precision="bf16", lifted_inputs=("lora_a",))
+        lifted_inputs=("lora_a",))
     program = _Program({"lora_a_0": (128, 64), "lora_a_1": (128, 64)}, {})
 
     assert lifted_input_gaps(program, spec, {"lora_a": 2}) == []
@@ -302,7 +302,7 @@ def _list_declaration(repeat: Any) -> Compile:
 def _export(arity: int) -> Tuple[Any, Sequence[DynamicDim], Dict[str, int]]:
     decl = _list_declaration(arity)
     spec = ExportSpec(family=decl.family, target="transformer",
-                      weight_lane="", precision="bf16")
+                      weight_lane="")
     module = _ListModule()
     args, kwargs = declared_inputs(module, spec, decl)
     (plan,) = cell_plans(decl)

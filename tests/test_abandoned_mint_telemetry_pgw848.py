@@ -20,13 +20,12 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import pytest
 
-from gen_worker import child_contract
 from gen_worker import aot_compile_pool as pool
-from gen_worker import aot_mint, mint_process, mint_supervisor
+from gen_worker import aot_mint, child_contract, mint_process, mint_supervisor
 from gen_worker.cell_adopt import AdoptOutcome
 
 _GIB = 1 << 30
@@ -108,7 +107,7 @@ def test_an_abandoned_outcome_emits_the_rows_it_measured(
     # was abandoned mid-flight), so the snapshot is what there is.
     table = mint_supervisor.phase_table({}, recovered)
 
-    emitted: list[Dict[str, Any]] = []
+    emitted: list[dict[str, Any]] = []
 
     def _capture(**kwargs: Any) -> None:
         emitted.append(kwargs)
@@ -145,7 +144,7 @@ def test_a_report_beats_a_snapshot_when_both_exist(tmp_path: Path) -> None:
         {"v": 1, "terminus": "aborted", "pool": {"entry_workers": 7}},
         {"v": 1, "pool": {"entry_workers": 99}})
 
-    emitted: list[Dict[str, Any]] = []
+    emitted: list[dict[str, Any]] = []
     original = aot_mint.emit_phase_events
     aot_mint.emit_phase_events = (
         lambda **kw: emitted.append(kw))  # type: ignore[assignment]
@@ -238,7 +237,7 @@ def test_the_pool_ledger_is_live_not_end_of_run(tmp_path: Path) -> None:
         box = pool.EntryCompilePool(
             tmp_path / "pool", width=width, cache_dir=str(tmp_path / "cache"),
             python=fake_compile_child.script(tmp_path))
-        seen: list[Dict[str, Any]] = []
+        seen: list[dict[str, Any]] = []
         box.compile(
             pool.EntryJob(
                 function="generate", modules=("harness.toy_endpoints",),
@@ -318,30 +317,29 @@ def test_every_mint_beat_feeds_both_survivors(
     beat: the phase snapshot (what it measured) and the pod-side progress
     token (that it was working). Neither may depend on the other running.
 
-    Was `inspect.getsource(aot_mint.mint)`, and that failed TWICE in a
-    release gate — once because I edited the file mid-run, once because a
-    SIBLING LANE did. That is the finding, not the accident: on a shared
-    chaos worktree the source file is not a stable object, so a source-text
-    assertion tests the file rather than the behaviour and can go red without
-    the behaviour changing. Driven through the real `mint()` entrypoint
-    instead: `_mint_cell` is replaced with one that beats once and raises, so
-    the REAL beat wrapper `mint()` installs is what runs.
+    Driven through the retained K-wide entrypoint. Its first progress beat
+    happens before any compile child is started, so replacing the pool's
+    compile call with an abandonment exercises the real snapshot/podguard
+    wrapper without compiling a graph.
     """
     snapshot = tmp_path / mint_process.PHASES_SNAPSHOT_NAME
     state = tmp_path / "podguard"
     monkeypatch.setenv(aot_mint.PODGUARD_STATE_ENV, str(state))
 
-    def _one_beat(pipeline, spec, out_dir, **kw):  # type: ignore[no-untyped-def]
-        progress = kw["progress"]
-        progress.width = pool.entry_workers(
-            2, vcpus=16, available_bytes=64 * _GIB, device_lock=True, limit=2)
-        progress.timings["export_all_s"] = 1.0
-        progress.beat(aot_mint.PHASE_INDUCTOR_COMPILE, 1, 36, "unet/row=0")
-        raise aot_mint.MintRefused("stop here — the beat is what is under test")
+    def _abandon(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise pool.EntryCompileAbandoned("stop after the initial beat")
 
-    monkeypatch.setattr(aot_mint, "_mint_cell", _one_beat)
-    with pytest.raises(aot_mint.MintRefused):
-        aot_mint.mint(None, None, tmp_path / "out", phase_snapshot=snapshot)
+    monkeypatch.setattr(pool.EntryCompilePool, "compile", _abandon)
+    width = pool.entry_workers(
+        2, vcpus=16, available_bytes=64 * _GIB, device_lock=True, limit=2)
+    with pytest.raises(pool.EntryCompileAbandoned):
+        aot_mint.mint_graph_classes(
+            pool.EntryJob(function="generate", modules=()),
+            workdir=tmp_path / "compile-pool",
+            width=width,
+            spec=aot_mint.ExportSpec(family="tiny", target="unet"),
+            phase_snapshot=snapshot,
+        )
 
     assert snapshot.exists(), (
         "the beat did not write the phase snapshot — a killed mint keeps "
@@ -349,7 +347,7 @@ def test_every_mint_beat_feeds_both_survivors(
     assert (state / "progress").exists(), (
         "the beat did not touch the pod-side progress token — the reaper is "
         "told nothing about work that is happening")
-    assert "1/36" in (state / "progress").read_text()
+    assert f"0/{width.workers}" in (state / "progress").read_text()
 
 
 # ---------------------------------------------------------------------------

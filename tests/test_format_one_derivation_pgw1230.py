@@ -4,8 +4,7 @@ THE DEFECT, and why nothing caught it. Two different facts shared the name
 ``ARTIFACT_FORMAT`` in two modules:
 
   * ``aot_serve.COMPILED_GRAPH_FORMAT`` (then spelled ``ARTIFACT_FORMAT``) —
-    the compiled-graph metadata schema. The CHILD stamps it into every
-    artifact (``aot_serve.entry_metadata``).
+    the compiled-graph metadata schema. TCG stamps it into every artifact.
   * ``compile_cache.ARTIFACT_FORMAT`` — the torch-inductor-cache PRODUCER
     format (gw#391), an ingredient of the JIT semantic cache tag and nothing
     to do with cell metadata.
@@ -29,8 +28,8 @@ file:
      the bug and stayed green through the 2->3 bump.
 
 So the rows here are deliberately built from the REAL derivations on both
-sides — ``fleet_cells.arm_identity`` for the parent, ``aot_serve``'s own
-producer for the child — because a double on either side is what hid a P0.
+sides — ``fleet_cells.arm_identity`` for the parent, public TCG metadata for
+the child — because a double on either side is what hid a P0.
 
 The arm check itself was NOT at fault and is not weakened: it fired, named
 the axis, named both values, and refused loudly. That is why this was
@@ -45,7 +44,7 @@ from typing import Any, Dict
 
 import pytest
 
-from gen_worker import aot_serve, cell_key, compile_cache as cc, env_seal
+from gen_worker import aot_serve, compile_cache as cc, env_seal
 from gen_worker import fleet_cells
 
 SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "gen_worker"
@@ -74,7 +73,6 @@ def one_process_tree(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setattr(cc, "runtime_key", lambda: dict(RUNTIME_KEY))
     monkeypatch.setattr(cc, "toolchain_digest", lambda: TOOLCHAIN)
-    monkeypatch.setattr(aot_serve, "runtime_key", lambda: dict(RUNTIME_KEY))
 
 
 def _child_meta() -> Dict[str, Any]:
@@ -103,13 +101,10 @@ def test_the_stamp_and_the_computed_format_are_the_same_value(
 
     Goes red on the tree as it stood before this fix: the parent computed
     ``'2'`` from ``compile_cache`` while the child stamped ``3`` from
-    ``aot_serve``.
+    public TCG artifact metadata.
     """
     parent = fleet_cells.arm_identity(_Cfg.family, "", 0, _Cfg())
-    stamped = aot_serve.entry_metadata(
-        family=_Cfg.family, precision="w8a8", cell_key="", name="x",
-        entry=_child_meta()[cell_key.ENTRY_BLOCK_KEY],
-    )
+    stamped = _child_meta()
     k = aot_serve.COMPILED_GRAPH_FORMAT_KEY
     assert parent.facts_dict()[k] == str(stamped[k])
 

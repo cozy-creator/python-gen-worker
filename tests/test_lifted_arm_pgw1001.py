@@ -20,13 +20,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Tuple
 
 import pytest
 import torch
 from torch import nn
 
-from gen_worker import cell_key
 from gen_worker import compile_cache as cc
 from gen_worker.cell_adopt import AdoptOutcome
 from gen_worker.models import lora_lifted, provision
@@ -74,18 +73,10 @@ class _Pipe:
         self.decoder = _Decoder().eval()
 
 
-def _meta_with_entry_only() -> Dict[str, Any]:
-    """The shape a REAL packed entry artifact has: ONE entry block naming its
-    own target, and NO top-level `targets`/`module` at all.
-
-    Measured on a real 5-entry lora64 cell: `meta["targets"] is None` and
-    `meta["module"] is None`, every entry `target='transformer'`. pgw#1176
-    kept the ABSENCE — which is what defect 1 is about — and removed the MAP:
-    one artifact, one entry, one target.
-    """
+def _tcg_metadata() -> Dict[str, Any]:
+    """One TCG graph class naming its own target, with no worker package map."""
     return {
-        "lora_bucket": BUCKET,
-        cell_key.ENTRY_BLOCK_KEY: {
+        "graph_class": {
             "name": "transformer/adapter=true,cfg=true",
             "target": "transformer",
         },
@@ -93,18 +84,16 @@ def _meta_with_entry_only() -> Dict[str, Any]:
 
 
 @pytest.fixture()
-def armed(monkeypatch: pytest.MonkeyPatch) -> List[Any]:
-    """Record which module `arm_aot` installed the lifted binding on."""
-    from gen_worker import aot_serve, artifact_meta
+def armed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drive the arm through one valid TCG graph-class metadata row."""
+    from gen_worker import aot_serve
 
     monkeypatch.setattr(
-        artifact_meta, "try_read_metadata",
-        lambda p: _meta_with_entry_only())
+        provision, "_compiled_graph_metadata", lambda p: _tcg_metadata())
     monkeypatch.setattr(provision, "arm_route", lambda mode: object())
     monkeypatch.setattr(
         aot_serve, "enable", lambda *a, **k: AdoptOutcome.hit("armed"))
     monkeypatch.setattr(provision, "gate_cell_numerics", lambda p, c: True)
-    return []
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +102,7 @@ def armed(monkeypatch: pytest.MonkeyPatch) -> List[Any]:
 
 
 def test_the_lifted_target_is_resolved_from_the_per_entry_targets(
-    armed: List[Any], tmp_path: Path,
+    armed: None, tmp_path: Path,
 ) -> None:
     """RED at HEAD: `targets` came only from `meta["targets"]`, which a packed
     cell does not carry, so `module_name` was "" and the install was SILENTLY

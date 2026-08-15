@@ -42,7 +42,7 @@ from micro_diffusion.weights import (  # noqa: E402
 )
 
 from gen_worker import aot_declaration as ad  # noqa: E402
-from gen_worker import aot_flatten  # noqa: E402
+from torch_compiled_graphs import build_call_ingress  # noqa: E402
 from gen_worker.aot_mint import ExportSpec  # noqa: E402
 
 EXPECTED_ENTRIES = ["decoder", "transformer/cfg=false", "transformer/cfg=true"]
@@ -152,11 +152,12 @@ def test_a_plain_input_sits_after_a_container_and_its_leaf_shifts(
     assert kwargs == {}
     assert isinstance(args[0], list) and len(args[0]) == 2, "x is a container"
     assert isinstance(args[1], torch.Tensor), "t is plain, and it is next"
-    leaves = aot_flatten.flatten_call(("x", "t", "cond"), args, {})
-    by_name = {leaf.name: leaf for leaf in leaves}
-    t_leaf = by_name["t"]
-    assert t_leaf.param_position == 1, "argument position"
-    assert leaves.index(t_leaf) == 2, "flattened position — the divergence"
+    program = torch.export.export(module.eval(), args, {}, strict=True)
+    ingress = build_call_ingress(program, ("x", "t", "cond"), args, {})
+    by_name = {row.name: row for row in ingress.inputs}
+    t_row = by_name["t"]
+    assert t_row.param_position == 1, "argument position"
+    assert t_row.position == 2, "flattened position — the divergence"
     assert by_name["x.0"].exported_name == "x_0"
 
 
@@ -168,8 +169,9 @@ def test_the_turbo_arm_is_a_one_element_container_not_a_bare_tensor(
     module = MicroDenoiser(MicroConfig())
     args, _ = ad.declared_inputs(module, _spec("transformer", False), declaration)
     assert isinstance(args[0], list) and len(args[0]) == 1
-    leaves = aot_flatten.flatten_call(("x", "t", "cond"), args, {})
-    assert leaves[0].exported_name == "x_0"
+    program = torch.export.export(module.eval(), args, {}, strict=True)
+    ingress = build_call_ingress(program, ("x", "t", "cond"), args, {})
+    assert ingress.inputs[0].exported_name == "x_0"
 
 
 def test_every_declared_arm_runs_eagerly(declaration, tree) -> None:

@@ -24,7 +24,6 @@ An UNCOVERED entry is a debt, not a resting state. Each names its owner issue.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Dict, Tuple
 
 import msgspec
@@ -82,7 +81,7 @@ UNCOVERED: Dict[str, Tuple[str, str, str]] = {
         "mint. The chain is covered in disjoint segments and never joined: "
         "test_eager_first_boot_pgw671 enters at ensure_setup with faked "
         "leaves; the pgw#1215 family enters at mint_supervisor with a stubbed "
-        "compile pool; test_aot_mint_pgw723 does a REAL torch.export at the "
+        "compile pool; the TCG compile-child suite does a REAL torch.export at the "
         "bottom with no pod above it. tests/harness/mint_endpoints_pgw784.py "
         "says it outright — it 'spawns the mint child exactly as mint_supervisor "
         "does', i.e. the harness RE-IMPLEMENTS the production caller instead "

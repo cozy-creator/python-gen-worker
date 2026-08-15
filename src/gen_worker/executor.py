@@ -30,7 +30,7 @@ import msgspec
 
 from . import activity as activity_mod
 from . import adopt_fit
-from . import aot_declaration, aot_identity, aot_mint
+from . import aot_declaration, aot_identity
 from . import boot_adopt
 from . import boot_phases as boot_mod
 from . import cell_adopt
@@ -38,7 +38,6 @@ from . import dispatch
 from . import handler_proof
 from .procsplit import broker as procsplit_broker
 from . import cpu_budget
-from . import kernel_path
 from . import measured_posture as posture_mod
 from . import mint_workers
 from . import settings_authority
@@ -5361,18 +5360,6 @@ class Executor:
                 eager_only,
                 family=str(getattr(spec.compile, "family", "") or ""),
                 function=str(spec.name or ""))
-        # pgw#947: the serving-kernel lane comes from the CELL, and it has to
-        # be pinned BEFORE setup() — the linears are swapped at model load, so
-        # a verdict read afterwards would arrive one whole pipeline too late.
-        # No cell (eager boot, self-minting boot, pre-pgw#947 cell) is the
-        # declared conservative default WITH a typed reason; there is no SM
-        # allowlist and no per-boot probe to fall back on any more.
-        # The verdict is EVIDENCE, not an instruction: cells are keyed on SM
-        # and the lane is not a key axis, so a 96 GB card's winner can reach a
-        # 32 GB card of the same SM. adopt() re-applies the fit constraint
-        # against THIS device before pinning.
-        kernel_path.adopt_from_artifact(
-            compile_artifact, source=f"{spec.name} boot")
         # Loads serialize: concurrent setups would cross-contaminate each
         # other's allocator deltas and place_pipeline's free-VRAM reads.
         async with self._intent_lock(
@@ -8305,7 +8292,9 @@ class Executor:
         # could raise out of here (and, uncaught, failed the whole model setup)
         # is retired; a blocked family carries its refusal as
         # `Compile.blockers` and the mint gate reads it.
-        decl = aot_mint.export_declaration(family)
+        from .api.export_contract import export_declaration
+
+        decl = export_declaration(family)
         if decl is None:
             return (boot_adopt.refused(
                 "no_export_declaration",
@@ -8360,7 +8349,6 @@ class Executor:
             cfg=cfg,
             slots=slots,
             declared_hint=declared_hint,
-            envelope=fleet_cells.declared_envelope_block(cfg),
             work_root=work_root,
             # The memo lives beside the cell cache and OUTLIVES one boot on a
             # pod with a volume — which is the whole point (§4.28's

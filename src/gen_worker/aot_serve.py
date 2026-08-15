@@ -1,132 +1,55 @@
-"""AOTInductor ``.pt2`` compiled artifacts (pgw#721) — the THIRD producer/
-consumer on the compile-cache rails (gw#384 / th#569 / #390).
+"""Worker serving policy around TCG-owned compiled graph artifacts.
 
-``compile_cache`` serves the dynamo lane (a JIT warmed from seeded FX
-entries); this module serves ``torch.export`` ->
-``aoti_compile_and_package`` artifacts. Same trust model, storage,
-delivery, and arming seam — cells live as flavors
-of ``root/family-<family>``::
+TCG's Engine is the sole artifact import, resolve, extraction, runner and
+constant-binding authority. This module adds the worker policy that belongs
+outside that engine: input ingress checks and normalization, per-class
+dispatch, eager fallback, sticky de-arm, shape-growth reporting and live
+serve-state introspection.
 
-    root/family-<f>#aot-<sku>-torch<maj.min>-<precision>
-
-Artifact = deterministic ``.tar.gz`` (the receipts gate reads
-``metadata.json`` straight out of the digested bytes)::
-
-    metadata.json           kind/format, runtime key (sm, torch, cuda + sku),
-                            family, cell_key, and the ENTRY block — the ONE
-                            NAMED GRAPH CLASS this artifact carries, with
-                            its target, fork/class-dim coordinate, INPUT
-                            CONTRACT, SYMBOL RANGES, declared CONSTANT
-                            manifest, and class hash
-    model.pt2               ONE AOTI package holding that entry as its named
-                            model (``data/aotinductor/<entry>/``) — CODE ONLY
-    constants.safetensors   optional: non-weight lifted constants, keys
-                            namespaced ``<entry>::<fqn>``
-
-Format 3 — the atom is ONE GRAPH CLASS (pgw#1176, Paul-directed)
-----------------------------------------------------------------
-Format 2 packed EVERY declared class into one artifact under one key, and
-made identity, adoption, durability, verification, arming and advertisement
-the same 36-entry unit. That unit is what forbade the incremental
-compile-and-adopt Paul asked for, forced ~32 GiB of all-runners-resident
-arming, and destroyed a 1 h 37 m mint when the 36th entry segfaulted.
-
-Format 3 is one entry per artifact. What used to be "a cell" is a derived
-CONTRACT MANIFEST (``cell_key.manifest_digest``) — a view, never a thing you
-download, verify or arm. Entries accrete: each arms whole or not at all, and
-an entry IS one graph, so that is atomic by nature. Serve-side dispatch is
-unchanged in kind — it was already built at the right granularity: the call
-routes to the entry whose DECLARED ingress contract admits it, zero
-admitting entries is a named refusal (eager service), and more than one is
-``entry_ambiguous``. What changed is that :class:`EntryDispatch` is a
-REGISTRY entries join as they arm, not a frozen tuple built from a complete
-cell. Every pgw#704 gate (B1 constants-bound, B2 ingress) holds PER ENTRY —
-the unbound-entry segfault was re-measured per named model on the pin.
-
-**Truthfulness is structural.** The pod never claims "cell X armed"; it
-reports per-entry serve state. There is no unit left that CAN advertise more
-than it serves, so the old all-or-nothing invariant ("a cell that cannot arm
-one of its graph classes arms none of them") is not weakened — it is
-vacuous.
-
-Why the artifact is code-only, and what that costs
---------------------------------------------------
-``aot_inductor.package_constants_in_so`` defaults ``True``, which BAKES the
-weights into the ``.so`` — measured at 4.79 GiB (plain) / 2.73 GiB (w8a8)
-per cell. That would duplicate model weights into every cell and destroy
-the CAS / th#883 distribution model the whole cell system rests on, so
-cells are minted with the flag ``False`` and weights bind at load from the
-resident (CAS-provisioned) module. This is a correctness requirement for
-the fleet, not an optimization, and the same decision the LoRA hot-swap
-needs.
-
-The price is pgw#704's B1: invoking a code-only artifact BEFORE
-``load_constants`` **SEGFAULTS inside** ``AOTICompiledModel.__call__`` —
-killing the worker, not the request. A segfault cannot be caught, so it
-must be made unreachable: :class:`ArtifactRunner` refuses every call until
-its own binding proof has passed (:func:`bind_constants` -> exact declared-
-vs-bound FQN set), and the module swap is not installed until then.
-
-And pgw#704's B2: an exported graph carries ZERO symbolic-range assertions
-(``ep.range_constraints`` is metadata only), so out-of-declared-range input
-is SILENTLY ACCEPTED — measured, 2048x2048 through an artifact declaring
-``max=160`` latent units. That is a silent-failure path, which the
-no-silent-failure rule forbids, so the range is asserted at OUR ingress
-(:func:`assert_ingress`) where the refusal is NAMED and composes with the
-cell contract, instead of depending on an upstream opt-in export pass.
-
-Torch is imported inside functions (never at module scope) — the whole
-compile stack keeps ``import gen_worker`` off the torch/pb import graph.
+An arm resolves and creates a runner at the same destination, binds the
+resident module tensors, and only then mutates the live module. Each compiled
+graph class is independently visible through :func:`entry_states`; no
+worker-owned archive, extraction tree, package loader or compatibility store
+exists here.
 """
 
 from __future__ import annotations
 
-import contextlib
-import copy
-import gzip
-import hashlib
-import io
-import json
 import logging
-import tarfile
-import tempfile
-import threading
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
-    Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional,
-    Sequence, Tuple,
+    Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple,
 )
 
-from torch_compiled_graphs import CallIngress, CallInput, IngressError
+from torch_compiled_graphs import (
+    CallIngress,
+    CallInput,
+    CompiledGraphRunner,
+    ConstantBindingError,
+    IngressError,
+    StoreOutcome,
+    is_compiled_graph_key,
+)
 
 from . import activity as activity_mod
 from . import aot_identity
-from . import artifact_meta
-from . import boot_phases
-from . import cell_key as cell_key_mod
-from . import host_isa
 from .cell_adopt import AdoptOutcome
 from . import serve_posture
 from . import shape_growth
 from .compile_cache import (
     AdoptError,
     CompiledExecutionLaneUnavailableError,
-    _clean_tarinfo,
     _resolve_target,
     parse_cell_ref,
 )
 from . import compile_cache as _compile_cache
 from .models import lora_lifted
-from .models.memory import flush_memory, is_cuda_oom
-from . import hostfacts
+from .models.cache_paths import open_worker_engine, tensorhub_cas_dir
+from .models.memory import is_cuda_oom
 
 logger = logging.getLogger(__name__)
 
-METADATA_NAME = "metadata.json"
-PACKAGE_NAME = "model.pt2"
-LITERALS_NAME = "constants.safetensors"
 ARTIFACT_KIND = "aot-inductor"
 #: pgw#791: an input the artifact was compiled for as 16-byte aligned arrived
 #: unaligned (or non-contiguous) and this ingress realigned it. Typed and
@@ -148,8 +71,8 @@ RECAST_EVENT = "aot_input_recast"
 #: runner clone it per call. Not a knob: it is the compiler's constant.
 AOTI_ALIGNMENT = 16
 #: THE compiled-graph artifact metadata/package version. v1 = ONE graph class
-#: per artifact: the metadata carries one ``entry`` block, never an ``entries``
-#: map.
+#: per artifact: TCG metadata carries one ``graph_class`` block, never an
+#: ``entries`` map.
 #:
 #: DESIGN-RULINGS §1.38b (Paul, 2026-08-13): *"we are pre-launch, so we should
 #: be on v1 for everything, including our compiled-graph format."* The version
@@ -164,9 +87,9 @@ AOTI_ALIGNMENT = 16
 #:
 #: HARD CUT, not compatibility: formats 1/2/3 of the deleted cell/bundle
 #: implementations have no reader here. There is no 3->1 mapping and no
-#: accepted set — an artifact of a retired format is REFUSED BY NAME
-#: (`verify_declared`), which is what makes a v1 reader unable to consume one.
-#: The window is real and was measured before this shipped: `cell_store` held
+#: accepted set: TCG Engine validates the artifact format while importing and
+#: resolving it, so this worker cannot consume a retired package by accident.
+#: The window is real and was measured before this shipped: the old store held
 #: 0 rows and no `cg-key-v1` object existed anywhere durable.
 #:
 #: The name is QUALIFIED on purpose. §1.38b: *"use qualified names such as
@@ -179,30 +102,7 @@ COMPILED_GRAPH_FORMAT = 1
 #: One symbol so the stamp and the comparison cannot drift into two spellings
 #: — the pgw#1230 failure mode, one level up.
 COMPILED_GRAPH_FORMAT_KEY = "compiled_graph_format"
-#: Separator between the entry name and the constant FQN in
-#: ``constants.safetensors`` keys. Entry names never contain it (targets are
-#: dotted identifiers; coordinate values are ints/bools/identifiers).
-LITERAL_SEP = "::"
 _MARKER_ATTR = "_cozy_aot"
-_REQUIRED_MEMBERS = (METADATA_NAME, PACKAGE_NAME)
-_OPTIONAL_MEMBERS = (LITERALS_NAME,)
-_MEMBERS = _REQUIRED_MEMBERS + _OPTIONAL_MEMBERS
-
-#: A constant whose value comes from the resident module's ``state_dict``
-#: (every model weight — the bytes the CAS already delivered).
-SOURCE_STATE_DICT = "state_dict"
-#: A constant lifted by export that is NOT a module weight (a traced tensor
-#: literal). Tiny, so it ships inside the artifact rather than being
-#: reconstructed — nothing outside the artifact knows its value.
-SOURCE_LITERAL = "literal"
-#: pgw#1080: a constant AOTInductor COMPUTES for itself at load, from the
-#: constants that were bound (`_FOLDED_CONST_*`, produced by the runtime
-#: constant-folding pass). Nothing binds it and nothing ships its bytes — it
-#: is neither a weight nor a literal, and treating it as either is a refusal
-#: for a value that is not missing. Weightless mints (pgw#1080) defer folding
-#: to load precisely so a rebindable weight's VALUE is never compiled in, so
-#: this class exists wherever that fence is armed.
-SOURCE_COMPUTED = "computed"
 
 #: The hardware/toolchain axes an ``.pt2`` is genuinely pinned to (pgw#765).
 #: ``sm`` is the GPU identity: AOTInductor itself keys on
@@ -276,61 +176,14 @@ def runtime_key() -> Dict[str, str]:
             for axis in ("sku", "sm", "torch", "cuda")}
 
 
-# Stamped cell keys this process LEARNED name aot-inductor artifacts
-# (pgw#722 F1 discovery). Published AOT cells ride the same key space as
-# their store flavor — indistinguishable from a dynamo cell's flavor by
-# string shape alone — so every reader of a stamped envelope registers the
-# key it learned here and :func:`is_aot_ref` consults the set. Without this
-# the executor's kind dispatch (#734/#735) would score an armed ``.pt2`` by
-# FX cache hits and disprove every honest adoption.
-#
-# THE RULE (pgw#1033): whoever reads a ``cell_key`` off an ``aot-inductor``
-# envelope registers it. There are two such readers on the serving path —
-# the delivered/named-cell arm and
-# ``fleet_cells.adopt_delegated_mint`` (this pod's OWN mint). Only the first
-# registered, so a self-minted cell — the one artifact this process is
-# certain is exported — was the one ref ``is_aot_ref`` did not recognize.
-#
-# pgw#1141b: that rule was a CONVENTION, and the ORDERED arm route — the one
-# §4.27 boot-adopt and every hub Plan take — never kept it. `arm_ordered`
-# verifies the receipt and calls `provision.arm_aot` directly, so a
-# boot-adopted cell wrapped itself onto a live pipeline while `is_aot_ref`
-# still answered False for its ref, and every reader asking "is this the
-# exported lane?" scored it on the DYNAMO lane's cache-hit ledger, which no
-# AOTI artifact can move. Measured on a real pod (0.111.0, POD PROOF #4):
-# `functions=()` -> `target_applicability_incomplete` ->
-# `armed_target_unresolved` -> eager for life. The registration is now made
-# by :func:`load_and_wrap` at the wrap itself — the one place every route
-# passes and the moment the fact becomes true — so no future arm route can
-# forget it.
-_KNOWN_AOT_KEYS: set[str] = set()
-_KNOWN_AOT_KEYS_LOCK = threading.Lock()
-
-
-def note_aot_key(cell_key: str) -> None:
-    """Record that ``cell_key`` (a stamped cell-key digest) is an AOT cell."""
-    key = str(cell_key or "").strip()
-    if not key:
-        return
-    with _KNOWN_AOT_KEYS_LOCK:
-        _KNOWN_AOT_KEYS.add(key)
-
-
 def is_aot_ref(ref: str, family: str = "") -> bool:
-    """True when ``ref`` names an AOTI cell (optionally of one family).
-
-    ONE recognizer: the stamped cell keys this process learned via
-    :func:`note_aot_key`. pgw#1035 deleted the second, a
-    ``flavor.startswith("aot-")`` label sniff — the only producer of that label
-    form was ``aot_serve.flavor_label``, which had no caller and is gone. A cell
-    ref carries a stamped KEY, so a label branch could only ever have matched a
-    string this codebase no longer writes.
-    """
-    fam, flavor = parse_cell_ref(ref)
-    if not fam or (family and fam != family):
-        return False
-    with _KNOWN_AOT_KEYS_LOCK:
-        return flavor in _KNOWN_AOT_KEYS
+    """Whether ``ref`` names a TCG compiled graph, optionally for ``family``."""
+    ref_family, key = parse_cell_ref(ref)
+    return bool(
+        ref_family
+        and (not family or ref_family == family)
+        and is_compiled_graph_key(key)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -338,715 +191,25 @@ def is_aot_ref(ref: str, family: str = "") -> bool:
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class ConstantSpec:
-    """One declared constant of a code-only artifact."""
-
-    fqn: str
-    source: str
-    dtype: str
-    shape: Tuple[int, ...]
-
-
-def constants_from_meta(meta: Mapping[str, Any]) -> Tuple[ConstantSpec, ...]:
-    """Parse the declared constant manifest."""
-    raw = meta.get("constants")
-    if not isinstance(raw, list):
-        raise ValueError("metadata declares no constants list")
-    out: List[ConstantSpec] = []
-    for idx, row in enumerate(raw):
-        if not isinstance(row, dict):
-            raise ValueError(f"constant {idx} is not an object")
-        fqn = str(row.get("fqn") or "").strip()
-        if not fqn:
-            raise ValueError(f"constant {idx} has no fqn")
-        source = str(row.get("source") or "").strip()
-        if source not in (SOURCE_STATE_DICT, SOURCE_LITERAL, SOURCE_COMPUTED):
-            raise ValueError(
-                f"constant {fqn!r} has unknown source {source!r} "
-                f"(expected {SOURCE_STATE_DICT!r}, {SOURCE_LITERAL!r} or "
-                f"{SOURCE_COMPUTED!r})")
-        shape = row.get("shape")
-        if not isinstance(shape, list):
-            raise ValueError(f"constant {fqn!r} has no shape list")
-        out.append(ConstantSpec(
-            fqn=fqn,
-            source=source,
-            dtype=str(row.get("dtype") or "").strip(),
-            shape=tuple(int(d) for d in shape),
-        ))
-    seen: Dict[str, int] = {}
-    for spec in out:
-        seen[spec.fqn] = seen.get(spec.fqn, 0) + 1
-    dupes = sorted(f for f, n in seen.items() if n > 1)
-    if dupes:
-        raise ValueError(f"constant manifest repeats {dupes!r}")
-    return tuple(out)
-
-
-def range_digest(meta: Mapping[str, Any]) -> str:
-    """Return TCG's canonical digest of ``graph.pytree.ingress``."""
-    graph = meta.get("graph")
-    if not isinstance(graph, Mapping):
-        raise ValueError("graph class records no graph interface")
-    try:
-        return str(CallIngress.from_graph(graph).digest())
-    except IngressError as exc:
-        raise ValueError(str(exc)) from exc
-
-
-def class_hash(
-    entry: Mapping[str, Any], *, strict: bool, lora_bucket: int,
-) -> str:
-    """The per-class graph hash of one packaged entry (pgw#716/#758).
-
-    Folds the entry's coordinate (target, fork, class dims), its
-    ``range_digest`` (the MEASURED node-only-collision fix: three exports
-    differing only in declared range hashed identically), its graph
-    interface block, the node-level ``graph_witness`` body digest, and the
-    trace-mode/lora facts. 16-hex, recomputable from the entry block alone —
-    so a consumer can prove the stamp and a mismatch NAMES the class (the
-    receipts principle).
-
-    ``graph_witness`` (v3, pgw#1031): the node-level digest of the traced
-    program (``graph_hash.graph_hash``, recorded on every keying block by
-    ``aot_mint.keying_block``). Before v3 this axis folded only the graph
-    INTERFACE (``graph``) — the traced ingress identity — so two endpoints
-    whose declarations agreed while their bodies differed shared a key
-    (measured 2026-08-10: ``micro-pad32`` 112 nodes vs ``micro-pad32-branchy``
-    102 nodes, byte-identical keying block, one key, two artifacts). Folding
-    the witness here makes the key sound BY CONSTRUCTION: two different bodies
-    key apart, a collision becomes a MISS (eager + mint), which is the cheap
-    outcome. The witness stays recorded as a top-level sibling for the adopt
-    backstop (``aot_identity.verify_graph_witness``) — defense-in-depth. The
-    fold is tolerant of a missing witness (folds ``""``) so a pre-witness
-    entry is body-blind rather than unhashable; production entries always
-    carry it (``keying_block``), and such stale cells are refused by the
-    envelope/structure gates and the witness backstop regardless.
-
-    ``placement`` (pgw#1113) folds in only when the entry states MORE THAN ONE
-    distinct device — see the comment at the fold.
-    """
-    facts = {
-        "v": 3,
-        "target": str(entry.get("target") or ""),
-        "fork": [[str(n), v] for n, v in (entry.get("fork") or [])],
-        "class_dims": [
-            [str(n), int(v)] for n, v in (entry.get("class_dims") or [])],
-        "range_digest": str(entry.get("range_digest") or ""),
-        "graph": dict(entry.get("graph") or {}),
-        "graph_witness": str(entry.get("graph_witness") or ""),
-        "strict": bool(strict),
-        "lora_bucket": int(lora_bucket or 0),
-    }
-    placement = sorted({str(d) for d in (entry.get("placement") or ()) if d})
-    if len(placement) > 1:
-        # pgw#1113, closing pgw#819 at the key: a program whose own device map
-        # spans several cards has that placement baked into its kernels, and
-        # the canonical graph form scrubs the device INDEX by deliberate
-        # design (`graph_hash._render_scalar`) so it cannot ride `graph`.
-        # Keyed only when non-trivial — the `excluded` / `param` / `overlay`
-        # precedent — because a single-device placement is what every cell the
-        # fleet has published states, and a field that says "unchanged" would
-        # strand all of them. No `v` bump for the same reason: the fact is
-        # absent from every existing entry and its absence must stay the
-        # canonical form.
-        facts["placement"] = placement
-    blob = json.dumps(facts, sort_keys=True, separators=(",", ":")).encode()
-    # 64 bits, DERIVED (pgw#1232, §1.38b review). THIS is the `graph` axis of a
-    # `cg-key-v1` key — the second of its two 64-bit chokepoints, the other
-    # being `graph_hash._DIGEST_HEX`, which produces one of the facts above.
-    # The axis has the MINIMUM of the two, so a widening moves both or neither;
-    # `graph_hash` carries the birthday derivation (P ~= N^2/2^65: ~3e-12 at
-    # 10^4 classes, ~3e-8 at 10^6). Kept at v1 deliberately rather than
-    # inherited.
-    return hashlib.sha256(blob).hexdigest()[:16]
-
-
-def stamp_entry(
-    name: str, block: Mapping[str, Any], *, strict: bool, lora_bucket: int,
-) -> Dict[str, Any]:
-    """One validated + stamped ENTRY block: ``name`` folded in, contract and
-    constants parsed, ``range_digest`` and ``class_hash`` stamped.
-
-    THE one place a class hash is stamped, so the mint's stamp, the boot
-    key's fold and the admission recomputation are the same computation.
-    Raises :class:`ValueError` naming the entry — a malformed contract must
-    fail at MINT, on the pod, not at serve time on a paying request.
-    """
-    label = str(name or "").strip()
-    if not label:
-        raise ValueError("entry block carries no name")
-    if LITERAL_SEP in label:
-        raise ValueError(
-            f"entry name {label!r} contains {LITERAL_SEP!r}, which the "
-            f"literal namespace reserves")
-    if not isinstance(block, Mapping):
-        raise ValueError(f"entry {label!r} is not an object")
-    if not str(block.get("target") or "").strip():
-        raise ValueError(f"entry {label!r} declares no target")
-    # Deep copy: the stamped block must not alias the caller's nested
-    # containers (a later caller-side mutation would silently rewrite the
-    # recorded contract).
-    row = copy.deepcopy(dict(block))
-    row["name"] = label
-    try:
-        graph = row.get("graph")
-        if not isinstance(graph, Mapping):
-            raise ValueError("graph class records no graph interface")
-        CallIngress.from_graph(graph)
-        constants_from_meta(row)
-    except ValueError as exc:
-        raise ValueError(f"entry {label!r}: {exc}") from exc
-    row["range_digest"] = range_digest(row)
-    row["class_hash"] = class_hash(
-        row, strict=bool(strict), lora_bucket=int(lora_bucket or 0))
-    return row
-
-
 def entry_from_meta(meta: Mapping[str, Any]) -> Dict[str, Any]:
-    """The validated ``entry`` block of a format-3 artifact.
-
-    The block must parse as a full contract (inputs, symbols, constants),
-    carry a target and carry a name — an entry the dispatch cannot route or
-    assert is B2 with extra steps. Raises :class:`ValueError` naming the
-    entry.
+    """Return one graph class in the shape used by the numerics probe.
 
     pgw#1176: the plural ``entries_from_meta`` is GONE with the multi-entry
     artifact. A caller that wants several entries holds several artifacts.
     """
-    raw = meta.get(cell_key_mod.ENTRY_BLOCK_KEY)
-    if not isinstance(raw, Mapping) or not raw:
-        raise ValueError("metadata declares no entry block")
-    label = str(raw.get("name") or "").strip()
-    if not label:
-        raise ValueError("entry block carries no name")
-    if LITERAL_SEP in label:
-        raise ValueError(
-            f"entry name {label!r} contains {LITERAL_SEP!r}, which the "
-            f"literal namespace reserves")
-    if not str(raw.get("target") or "").strip():
-        raise ValueError(f"entry {label!r} declares no target")
-    try:
-        graph = raw.get("graph")
-        if not isinstance(graph, Mapping):
-            raise ValueError("graph class records no graph interface")
-        CallIngress.from_graph(graph)
-        constants_from_meta(raw)
-    except ValueError as exc:
-        raise ValueError(f"entry {label!r}: {exc}") from exc
-    return dict(raw)
-
-
-def entry_metadata(
-    *,
-    family: str,
-    precision: str,
-    cell_key: str,
-    name: str,
-    entry: Mapping[str, Any],
-    strict_export: bool = True,
-    lora_bucket: int = 0,
-    source_ref: str = "",
-    source_digest: str = "",
-    manifest_digest: str = "",
-) -> Dict[str, Any]:
-    """Build ONE entry artifact's ``metadata.json`` (format 3).
-
-    THE single source of truth for the artifact-metadata envelope: the mint
-    lane calls this rather than hand-rolling a dict, so producer and consumer
-    cannot drift into two interpretations of the same bytes.
-
-    ``manifest_digest`` is the declaration-wide coverage LABEL
-    (``cell_key.manifest_digest``) — telemetry only, never identity. It is
-    optional precisely because it is not identity: an entry minted by a pod
-    that has not folded its whole declaration is still a complete, keyable,
-    armable artifact.
-    """
-    stamped = stamp_entry(
-        name, entry, strict=bool(strict_export),
-        lora_bucket=int(lora_bucket or 0))
-    meta: Dict[str, Any] = {
-        COMPILED_GRAPH_FORMAT_KEY: COMPILED_GRAPH_FORMAT,
-        "kind": ARTIFACT_KIND,
-        **runtime_key(),
-        "family": str(family or ""),
-        "precision": str(precision or ""),
-        "cell_key": str(cell_key or ""),
-        cell_key_mod.ENTRY_BLOCK_KEY: stamped,
-        "manifest_digest": str(manifest_digest or ""),
-        "strict_export": bool(strict_export),
-        "lora_bucket": int(lora_bucket or 0),
-        "package_constants_in_so": False,
-        # pgw#1097: the folding fence, DECLARED. `package_constants_in_so`
-        # says no weight BYTES ship inside the cell; this says no weight
-        # VALUES were compiled into its kernels either. Both are what make
-        # one cell legally serve every fine-tune of a family, and both are
-        # refused pre-download when absent — a cell minted before the fence
-        # may carry its minting checkpoint's copy of any 0-dim or <=8-element
-        # weight, which is exactly the tensor a fine-tune changes.
-        "constant_folding_fenced": True,
-        "source_ref": str(source_ref or ""),
-        "source_digest": str(source_digest or ""),
-        # pgw#754: the host-CPU execution requirement of the packaged host
-        # code (wrapper .so + cpu kernels). Consumers refuse by name when
-        # this host cannot execute it — the .so must never be dlopen'd
-        # first and SIGILL second.
-        "host_isa": host_isa.stamp(),
+    graph_class = meta.get("graph_class")
+    if not isinstance(graph_class, Mapping):
+        raise ValueError("compiled graph metadata has no graph_class")
+    graph = graph_class.get("graph")
+    if not isinstance(graph, Mapping):
+        raise ValueError("compiled graph class has no graph contract")
+    return {
+        **dict(graph),
+        "name": str(graph_class.get("name") or ""),
+        "target": str(graph_class.get("target") or ""),
+        "fork": list(graph_class.get("fork") or ()),
+        "class_dims": list(graph_class.get("class_dims") or ()),
     }
-    entry_from_meta(meta)
-    return meta
-
-
-#: The metadata keys :func:`verify_declared` rules on — every axis a cell's
-#: publish DECLARE carries, and therefore everything discovery may refuse a
-#: cell for before it has downloaded a byte.
-#:
-#: pgw#988: this set and ``fleet_cells.control_plane_metadata`` are two halves
-#: of ONE contract, and they used to be two independent computations of it.
-#: th#1645 moved ``entries`` out of the declare (correctly — it is unbounded in
-#: the model and the declare is control-plane) while the pre-download filter
-#: still demanded it, so every AOT cell published for the next day was rejected
-#: as ``malformed declared contract`` by every pod, and a pod that finds no cell
-#: mints its own — the fleet paid a full compile per cold boot and the symptom
-#: presented as cost, not as an error. ``fleet_cells`` now asserts at import
-#: that nothing it strips appears here.
-DECLARED_AXES: Tuple[str, ...] = (
-    COMPILED_GRAPH_FORMAT_KEY, "kind", "package_constants_in_so",
-    "constant_folding_fenced", *IDENTITY_AXES,
-    "host_isa", "family",
-)
-
-
-def verify_declared(meta: Dict[str, Any], *, family: str = "") -> str:
-    """'' when a cell's DECLARE matches this runtime, else the reason.
-
-    The pre-download half of :func:`verify`: exactly the axes a bounded
-    control-plane declare carries (:data:`DECLARED_AXES`). Discovery rules on
-    this against the hub listing row, so an unloadable cell costs no bytes.
-
-    An AOTI ``.pt2`` is a ``dlopen``-ed ELF built against one exact torch
-    C++ ABI on one compute capability — the FULL torch version must match,
-    not maj.min, or the load either fails obscurely or is undefined.
-
-    Fail-closed on every REAL axis (:data:`IDENTITY_AXES` + host ISA), each of
-    them STRICTLY — an axis a cell is silent on is refused by name, never
-    skipped. Never on ``sku`` (pgw#765): a cell minted on an l4
-    and a cell minted on an rtx-4090 are the same sm_89 compiled code, and
-    refusing the cross-SKU adoption discards the whole point of the pgw#691
-    collapse, the FX inner-key shim, and the pgw#754 ISA clamp. The JIT lane
-    (``compile_cache.verify``) carried the identical hard sku pin and shed it
-    in the ck3 wave; this is the same defect on the exported lane.
-    """
-    stated = meta.get(COMPILED_GRAPH_FORMAT_KEY)
-    if int(stated or 0) != COMPILED_GRAPH_FORMAT:
-        return (f"{COMPILED_GRAPH_FORMAT_KEY} {stated!r} != "
-                f"{COMPILED_GRAPH_FORMAT}")
-    if str(meta.get("kind") or "") != ARTIFACT_KIND:
-        return f"kind {meta.get('kind')!r} != {ARTIFACT_KIND}"
-    # A weights-baked artifact is refused OUTRIGHT, never merely warned
-    # about: it would duplicate multi-GiB weights per cell and break the CAS
-    # distribution model (pgw#704 B1). Absent flag = a pre-contract mint.
-    if meta.get("package_constants_in_so") is not False:
-        return (
-            "artifact was minted with package_constants_in_so != False "
-            "(weights baked into the .so; breaks the CAS cell model)")
-    # pgw#1097: the same shape of refusal, one layer in. A cell minted before
-    # the folding fence carries the minting checkpoint's values for any 0-dim
-    # or <=8-element weight inductor inlined, so it is sound for exactly one
-    # fine-tune and silently wrong for the rest. Absent flag = a pre-fence
-    # mint; refused, not warned about, and re-minting is the remedy.
-    if meta.get("constant_folding_fenced") is not True:
-        return (
-            "artifact was minted without the folding fence "
-            "(constant_folding_fenced != True; its weights may carry the "
-            "minting checkpoint's values — pgw#1097). Re-mint")
-    here = runtime_key()
-    if not here["torch"]:
-        return "torch not importable"
-    for field_name in IDENTITY_AXES:
-        want, have = str(meta.get(field_name) or ""), here[field_name]
-        if want != have:
-            return f"{field_name} {want!r} != runtime {have!r}"
-    isa_reason = host_isa_reason(meta)
-    if isa_reason:
-        return isa_reason
-    want_fam = str(meta.get("family") or "")
-    # pgw#939: STRICTLY, like every axis above it and like this function's own
-    # docstring already promised. `want_fam and ...` meant an UNSTAMPED cell
-    # matched every family it was ever offered to — a wrong cache HIT, not a
-    # miss, on the axis that decides which pipeline the .so is dlopen'd into.
-    # The mint stamps this from one place (`artifact_metadata`), so a silent
-    # cell is a malformed one; when no caller names a family nothing changes.
-    if family and want_fam != family:
-        return f"family {want_fam!r} != {family!r}"
-    return ""
-
-
-def verify_contract(
-    meta: Dict[str, Any],
-    *,
-    entry: Optional[Mapping[str, Any]] = None,
-) -> str:
-    """'' when the artifact's ``entry`` contract is self-consistent, else
-    the reason.
-
-    The post-download half of :func:`verify`. The contract rides INSIDE the
-    artifact — :func:`unpack` reads it off ``metadata.json``, which is where
-    ``aot_serve`` has always served it from. It is verified HERE, on the
-    staged bytes, and never against a control-plane declare that is not
-    required to carry it (pgw#988).
-
-    ``entry`` is the already-validated block from :func:`_unpack` when the
-    arm path has one (pgw#1040 — same pure parse, threaded rather than
-    repeated); ``None`` parses it here, which is what a caller holding only a
-    metadata dict does.
-    """
-    if entry is None:
-        try:
-            entry = entry_from_meta(meta)
-        except ValueError as exc:
-            return f"malformed declared contract: {exc}"
-    strict = bool(meta.get("strict_export", True))
-    bucket = int(meta.get("lora_bucket") or 0)
-    name = str(entry.get("name") or "")
-    # pgw#939: absence is a verdict, not a skipped check. `class_hash` below
-    # was already written this way and is the model the other axis is brought
-    # to — `compile_cache.verify` is strict on every IDENTITY_AXES field for
-    # the same reason, and `compile_cache.py` names this exact
-    # `if want and want != have` shape as JAX PR #27814's one documented
-    # wrong-cache-hit.
-    stamped = str(entry.get("range_digest") or "")
-    if not stamped:
-        return f"entry {name!r}: no range_digest stamped"
-    if stamped != range_digest(entry):
-        return f"entry {name!r}: range_digest does not match its contract"
-    stamped_hash = str(entry.get("class_hash") or "")
-    if not stamped_hash:
-        return f"entry {name!r}: no class_hash stamped"
-    if stamped_hash != class_hash(entry, strict=strict, lora_bucket=bucket):
-        # The receipts principle (pgw#716): a hash mismatch NAMES the class.
-        return f"entry {name!r}: class_hash does not match its recorded facts"
-    # pgw#1059/pgw#1176: the stamped key must be exactly the key the
-    # artifact's OWN recorded facts describe — the same recomputation the
-    # mint stamped and the publish path corroborated, now proven at ADMISSION
-    # on the staged bytes. Two consequences, both deliberate: a forged /
-    # hand-edited stamp is refused by name, and a PRE-ATOM cell is refused
-    # STRUCTURALLY (its metadata records an `entries` MAP and a
-    # `combined_graph_hash`, no per-entry identity, so the recomputation
-    # raises rather than matching) — which is what makes the ck1 corpus purge
-    # hygiene rather than a correctness precondition.
-    # Gated on key SHAPE: an ek-shaped stamp is an identity claim and must
-    # restate; a non-key stamp (focused fixtures, torn metadata) is not a
-    # claim — and it can never match a hub row either (`IsCellKey` gates the
-    # store flavor), so nothing downstream can mistake it for identity.
-    stamped_key = str(meta.get("cell_key") or "")
-    if stamped_key and cell_key_mod.is_key(stamped_key):
-        try:
-            recomputed = cell_key_mod.from_entry_metadata(meta)
-        except cell_key_mod.CellKeyError as exc:
-            return (
-                f"stamped cell_key {stamped_key} is not restatable from the "
-                f"artifact's own recorded facts ({exc})")
-        if recomputed.digest != stamped_key:
-            return (
-                f"stamped cell_key {stamped_key} != the key the artifact's "
-                f"recorded facts describe ({recomputed.digest})")
-    return ""
-
-
-def verify(
-    meta: Dict[str, Any],
-    *,
-    family: str = "",
-    entry: Optional[Mapping[str, Any]] = None,
-) -> str:
-    """'' when an entry's FULL metadata matches this runtime, else the reason.
-
-    Both halves, for callers holding an artifact's own ``metadata.json``
-    (:func:`stage_artifact`). Discovery, which holds only a declare, calls
-    :func:`verify_declared` and reaches this one after the fetch.
-
-    ``entry`` threads the already-validated block through to
-    :func:`verify_contract` (pgw#1040).
-    """
-    return (verify_declared(meta, family=family)
-            or verify_contract(meta, entry=entry))
-
-
-#: :func:`host_isa_reason`'s refusal for a cell that stamped no requirement.
-NO_HOST_ISA_STAMP = "no_host_isa_stamp"
-
-
-def host_isa_reason(meta: Mapping[str, Any]) -> str:
-    """'' when this host's CPU can execute the artifact's packaged host
-    code, else the refusal reason (pgw#754).
-
-    Reads the mint's ``host_isa`` requirement stamp — metadata-only.
-    An artifact carrying NO stamp is refused here: its true
-    ISA need is undiscoverable from metadata, an AVX-512-built ``.pt2``
-    SIGILLs (exit 132 inside ``aoti_load_package``) on a host without it, and
-    the miss policy for a refused cell is a self-mint that stamps one.
-    """
-    block = meta.get("host_isa")
-    if not isinstance(block, Mapping):
-        return f"artifact records no host_isa stamp ({NO_HOST_ISA_STAMP})"
-    level, machine = host_isa.requirement_of_meta(block)
-    return host_isa.unsupported_reason(level, machine)
-
-
-def _package_torch_stamps(package: Path) -> List[Dict[str, Any]]:
-    """Torch's own ``*_metadata.json`` rows inside a ``.pt2`` — the mint
-    environment as TORCH recorded it (``AOTI_CPU_ISA`` / ``AOTI_MACHINE`` /
-    ``AOTI_COMPUTE_CAPABILITY``, written by
-    ``codecache.get_device_information``). Empty list when unreadable: an
-    unreadable package fails later, loudly, in the load path with its own
-    named error, and a gate only rules on what it can read.
-    """
-    rows: List[Dict[str, Any]] = []
-    try:
-        import zipfile
-
-        with zipfile.ZipFile(package) as zf:
-            for name in zf.namelist():
-                if not name.endswith("_metadata.json"):
-                    continue
-                try:
-                    row = json.loads(zf.read(name).decode("utf-8"))
-                except (ValueError, UnicodeDecodeError):
-                    continue
-                if isinstance(row, dict):
-                    rows.append(row)
-    except (OSError, zipfile.BadZipFile) as exc:
-        logger.debug("aot-serve: package stamp read failed: %s", exc)
-    return rows
-
-
-def verify_package_compute_capability(package: Path) -> str:
-    """The staged-bytes GPU-architecture gate: torch's own
-    ``AOTI_COMPUTE_CAPABILITY`` inside the ``.pt2`` against this device's
-    capability. '' = same architecture (or unknowable).
-
-    The second tier that lets :func:`verify` stop refusing on ``sku``
-    without loosening the axis that actually matters (pgw#765). It rules on
-    the one case metadata cannot: a cell whose ``sm`` stamp disagrees with
-    its own bytes. A
-    cubin built for another arch has no PTX fallback (pgw#698 packs cubins
-    only), so without this the refusal would be a raw CUDA load error
-    instead of a named ``adopt_failed:sm_mismatch``.
-
-    The METADATA ``sm`` axis stays :func:`verify`'s (reported as
-    ``key_mismatch`` like every other stamped axis, and rulable before the
-    bytes are ever fetched).
-    """
-    here = runtime_key()["sm"]
-    if not here:
-        return ""  # no CUDA device to rule against; the load path will say so
-    # torch writes the capability as ``major*10+minor`` ("89"); digits-only
-    # comparison also admits the dotted/tuple spellings other device
-    # interfaces use, so a shape surprise is never read as a mismatch.
-    here_digits = "".join(c for c in here if c.isdigit())
-    for row in _package_torch_stamps(package):
-        raw = str(row.get("AOTI_COMPUTE_CAPABILITY") or "").strip()
-        digits = "".join(c for c in raw if c.isdigit())
-        if not digits:
-            continue
-        if digits != here_digits:
-            return (f"sm 'sm_{digits}' != runtime {here!r} "
-                    f"(torch package stamp)")
-    return ""
-
-
-# ---------------------------------------------------------------------------
-# Pack / unpack
-# ---------------------------------------------------------------------------
-
-
-def pack(content_dir: Path, out_path: Path, metadata: Dict[str, Any]) -> Path:
-    """Deterministic artifact from ``content_dir`` holding ``model.pt2``
-    (and optionally ``constants.safetensors``)."""
-    content_dir = Path(content_dir)
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(out_path, "wb") as raw:
-        with gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=0) as gz:
-            with tarfile.open(fileobj=gz, mode="w") as tar:
-                meta_bytes = json.dumps(metadata, sort_keys=True, indent=1).encode()
-                ti = _clean_tarinfo(tarfile.TarInfo(METADATA_NAME))
-                ti.size = len(meta_bytes)
-                tar.addfile(ti, io.BytesIO(meta_bytes))
-                for name in (PACKAGE_NAME,) + _OPTIONAL_MEMBERS:
-                    p = content_dir / name
-                    if not p.exists():
-                        if name in _REQUIRED_MEMBERS:
-                            raise ValueError(f"{name} missing from {content_dir}")
-                        continue
-                    ti = _clean_tarinfo(tarfile.TarInfo(name))
-                    ti.size = p.stat().st_size
-                    with open(p, "rb") as f:
-                        tar.addfile(ti, f)
-    return out_path
-
-
-def unpack(artifact: Path, dest_root: Path) -> Dict[str, Any]:
-    """Extract the fixed member set into ``dest_root``; returns metadata."""
-    return _unpack(artifact, dest_root)[0]
-
-
-def _unpack(
-    artifact: Path, dest_root: Path,
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """:func:`unpack`, also handing back the ``entry`` block it had to parse.
-
-    pgw#1040: one arm used to run the entry parse three times over the same
-    bytes — here for the literal-payload check, again in
-    :func:`verify_contract`, and a third time in the arm — and each pass
-    re-parses the entry's full contract and constant table. The parse is the
-    same pure function of the same dict every time, so the arm path threads
-    ONE result from here instead.
-    """
-    dest_root = Path(dest_root)
-    dest_root.mkdir(parents=True, exist_ok=True)
-    meta: Dict[str, Any] = {}
-    seen: set[str] = set()
-    with tarfile.open(artifact, mode="r:*") as tar:
-        for member in tar:
-            name = member.name
-            if name not in _MEMBERS or not member.isfile() or name in seen:
-                raise ValueError(
-                    f"unexpected member in {ARTIFACT_KIND} artifact: {member.name!r}")
-            seen.add(name)
-            src = tar.extractfile(member)
-            assert src is not None
-            data = src.read()
-            if name == METADATA_NAME:
-                meta = json.loads(data.decode())
-                continue
-            (dest_root / name).write_bytes(data)
-    missing = set(_REQUIRED_MEMBERS) - seen
-    if missing:
-        raise ValueError(
-            f"{ARTIFACT_KIND} artifact {artifact} is incomplete; "
-            f"missing {sorted(missing)!r}")
-    if not meta:
-        raise ValueError(f"{ARTIFACT_KIND} artifact {artifact} has no {METADATA_NAME}")
-    # A literal-sourced constant with no payload member would only be
-    # discovered at bind time, mid-arm. Name it (and its entry) here.
-    entry = entry_from_meta(meta)
-    name = str(entry.get("name") or "")
-    literals = [
-        f"{name}{LITERAL_SEP}{s.fqn}"
-        for s in constants_from_meta(entry) if s.source == SOURCE_LITERAL]
-    if literals and LITERALS_NAME not in seen:
-        raise ValueError(
-            f"{ARTIFACT_KIND} artifact {artifact} declares literal constants "
-            f"{sorted(literals)[:4]!r} but carries no {LITERALS_NAME}")
-    return meta, entry
-
-
-#: Read the packed envelope without unpacking the cell.
-#:
-#: pgw#1035: no serving-path caller since ``is_aot_artifact`` (its only one)
-#: was deleted, and DELIBERATELY KEPT — this is the AOT lane's own reader of its
-#: own envelope, and the pgw#699 double-mint byte-compare proof drives it over
-#: real minted tarballs. It once had a byte-identical twin in
-#: ``trt_engine.unpack_metadata``, and the dedup was deferred to a "TRT
-#: ratification" that never came — TensorRT was deleted outright in pgw#1187,
-#: so this is now the AOT lane's sole reader of its own envelope.
-#:
-#: pgw#1040 collapsed the OTHER seven envelope readers into
-#: :func:`artifact_meta.read_metadata` and left this one alone ON PURPOSE,
-#: reasoning that "it costs nothing to wait".
-#:
-#: pgw#1098 PRICED THE WAIT: $1.584 and 92 minutes. pgw#1013 then bounded the
-#: collapsed reader and not this one, so two readers of one member disagreed
-#: about row 7's sdxl envelope — and the disagreement was silent in the exact
-#: direction that loses work. Delegated now. A second reader of a member is
-#: not duplication to be tidied later; it is a divergence waiting for the
-#: first caller who bounds one of them.
-def unpack_metadata(artifact: Path) -> Dict[str, Any]:
-    """Read ONLY metadata.json from an artifact (kind sniffing — cheap).
-
-    pgw#1098: DELEGATES to ``artifact_meta``, which calls itself "the ONE
-    reader" and was not. This function kept its own unbounded scan, so the
-    two disagreed about the same bytes: on row 7's sdxl cell the bounded
-    reader refused the envelope and this one read it fine, which is what made
-    the failure asymmetric and invisible — ``arm_aot`` got ``meta=None`` and
-    silently skipped the lifted-binding install, then ``enable`` (reaching
-    the envelope through here) refused the artifact by a downstream name.
-    One reader, one bound, or the next divergence costs another mint.
-    """
-    return artifact_meta.read_metadata(artifact)
-
-
-@dataclass
-class _StagedAotArtifact:
-    metadata: Dict[str, Any]
-    #: The validated ``entry`` block of :attr:`metadata`, parsed ONCE while
-    #: staging (pgw#1040) and threaded to every consumer in the arm.
-    entry: Dict[str, Any]
-    root: Path
-    temporary: "tempfile.TemporaryDirectory[str]"
-
-    def close(self) -> None:
-        self.temporary.cleanup()
-
-
-def stage_artifact(
-    artifact: Path, family: str, cache_dir: Optional[Path] = None,
-    *, expected: "Optional[aot_identity.ExpectedIdentity]" = None,
-) -> _StagedAotArtifact:
-    """Extract and runtime-verify a complete artifact in an isolated tree.
-
-    The live/shared cache and pipeline remain untouched on every rejection.
-    Concurrent attempts use distinct trees; a process crash can leave only
-    an unreferenced staging directory, never a partially published ``.pt2``.
-
-    ``expected`` (pgw#903) is the identity the current ``ExecutionSpec`` named.
-    When supplied, this artifact must BE that one — a declared-identity
-    comparison, never a byte comparison (§4.25/§4.26: two mints of one key
-    legitimately differ, pgw#1006 measured it). ``None`` is the pre-cutover
-    RunJob path, where no immutable spec exists to compare against; it leaves
-    behaviour byte-identical rather than inventing an expectation.
-    """
-    base = Path(cache_dir) if cache_dir else Path.home() / ".cache" / "gen-worker"
-    base.mkdir(parents=True, exist_ok=True)
-    temporary = tempfile.TemporaryDirectory(prefix="aot-stage-", dir=base)
-    root = Path(temporary.name)
-    try:
-        meta, entry = _unpack(Path(artifact), root)
-        # pgw#754: rule on host-CPU executability FIRST and by name — the
-        # one failure mode that must never reach dlopen.
-        isa_reason = host_isa_reason(meta)
-        if isa_reason:
-            raise AdoptError("host_isa_unsupported", isa_reason)
-        reason = verify(meta, family=family, entry=entry)
-        if reason:
-            raise AdoptError("key_mismatch", reason)
-        # pgw#903: "can this runtime execute it" is answered above; this
-        # answers "is it the artifact the spec named", which nothing asked
-        # before there was an immutable spec to ask against. Its own reason
-        # class: a runnable cell that is the WRONG cell is a different bug,
-        # a different owner and a different fix from an unrunnable one.
-        if expected is not None:
-            mismatch = aot_identity.verify_declared_identity(meta, expected)
-            if mismatch:
-                raise AdoptError("expected_identity_mismatch", mismatch)
-        # pgw#765: the GPU-architecture axis as the BYTES declare it, ruled
-        # on by name before dlopen — the tier that keeps cross-SKU adoption
-        # honest now that ``sku`` no longer stands in for the arch. Runs
-        # after `verify` so a stamped axis mismatch keeps its own name.
-        sm_reason = verify_package_compute_capability(root / PACKAGE_NAME)
-        if sm_reason:
-            raise AdoptError("sm_mismatch", sm_reason)
-        return _StagedAotArtifact(meta, entry, root, temporary)
-    except AdoptError:
-        temporary.cleanup()
-        raise
-    except Exception as exc:
-        temporary.cleanup()
-        raise AdoptError("artifact_invalid", str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -1527,38 +690,6 @@ def assert_ingress(
 # ---------------------------------------------------------------------------
 
 
-def _load_package(path: Path, entry: str = "model") -> Any:
-    """Load one NAMED model out of a ``.pt2`` (the sole torch entry point
-    for the load path — tests substitute this). ``"model"`` is torch's own
-    default name for a single-model package."""
-    from torch._inductor.package import load_package
-
-    return load_package(str(path), model_name=str(entry or "model"))
-
-
-def _load_literals(path: Path, device: str) -> Dict[str, Any]:
-    from safetensors.torch import load_file
-
-    return dict(load_file(str(path), device=device))
-
-
-def split_literals(literals: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """Split a namespaced literal payload into per-entry tables.
-
-    Keys are ``<entry>::<fqn>`` (:data:`LITERAL_SEP`); a key with no
-    namespace is refused by name — a literal the dispatch cannot attribute
-    to an entry could bind to the wrong graph."""
-    out: Dict[str, Dict[str, Any]] = {}
-    for key, value in literals.items():
-        entry, sep, fqn = str(key).partition(LITERAL_SEP)
-        if not sep or not entry or not fqn:
-            raise ValueError(
-                f"literal key {key!r} is not namespaced "
-                f"'<entry>{LITERAL_SEP}<fqn>'")
-        out.setdefault(entry, {})[fqn] = value
-    return out
-
-
 def resident_constants(module: Any) -> Dict[str, Any]:
     """Every resident tensor a ``state_dict``-sourced constant can bind to.
 
@@ -1592,356 +723,76 @@ def resident_constants(module: Any) -> Dict[str, Any]:
     return out
 
 
-def resolve_constants(
-    specs: Sequence[ConstantSpec],
-    state_dict: Mapping[str, Any],
-    literals: Mapping[str, Any],
-) -> Dict[str, Any]:
-    """Assemble the full constant mapping from the resident weights plus the
-    artifact's literal payload.
-
-    Export preserves module FQNs, so a ``state_dict``-sourced constant is a
-    direct name lookup — no value-identity matching is needed. An
-    unresolvable FQN is a named refusal:
-    binding a partial set is exactly the state that segfaults.
-
-    **MEASURED CONTRACT FACT (pgw#723 final pod, torch 2.13.0+cu130):**
-    ``load_constants`` keys by the ORIGINAL FQN (``lin.bias``), NOT the
-    mangled C++ identifier (``lin_bias``) that the package's own table
-    answers with. Keying a hand-rolled binder by ``DeclaredConstant.name``
-    fails with ``RuntimeError: Constant not found: lin_bias`` — and only at
-    bind time, on a pod. This function keys by ``spec.fqn`` (the
-    ``original_fqn`` the package records), which is the correct side of that
-    split; do not "simplify" it to the C++ name, and do not hand-roll a
-    binder that does.
-    """
-    out: Dict[str, Any] = {}
-    missing: List[str] = []
-    for spec in specs:
-        if spec.source == SOURCE_COMPUTED:
-            # AOTInductor's own const-fold pass produces this one AFTER the
-            # bound constants land; handing it a value would be handing it a
-            # value it is about to overwrite, and demanding one would refuse a
-            # cell that is complete (pgw#1080).
-            continue
-        table = state_dict if spec.source == SOURCE_STATE_DICT else literals
-        if spec.fqn not in table:
-            missing.append(f"{spec.fqn} (source={spec.source})")
-            continue
-        out[spec.fqn] = table[spec.fqn]
-    if missing:
-        raise ConstantsUnboundError(
-            "constant_unresolved",
-            f"{len(missing)} declared constant(s) have no value: "
-            f"{sorted(missing)[:6]!r}")
-    return out
-
-
-def _tensor_bytes(values: Iterable[Any]) -> int:
-    total = 0
-    for v in values:
-        try:
-            total += int(v.numel()) * int(v.element_size())
-        except Exception:  # noqa: BLE001 — sizing is context, never a gate
-            continue
-    return total
-
-
-def _device_memory_line() -> str:
-    """One human line of live device memory for a typed refusal."""
-    if not hostfacts.cuda_ready():
-        return "device=cpu"
-    free = hostfacts.free_vram_bytes()
-    total = hostfacts.total_vram_bytes()
-    if free is None or total is None:
-        return "device=unknown"
-    return (f"device free {free / (1 << 20):.0f} MiB of "
-            f"{total / (1 << 20):.0f} MiB")
-
-
-#: :func:`target_constant_pool`'s refusal for a resident tensor an AOTI
-#: container cannot take a raw pointer to.
-NONCONTIGUOUS_CONSTANT = "constant_noncontiguous"
-
-
-def target_constant_pool(
-    entry_constants: Iterable[Sequence[ConstantSpec]],
-    state_dict: Mapping[str, Any],
-    into: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """The target's state_dict-sourced constants, BY REFERENCE, accreted into
-    ``into`` (pgw#1042, pgw#1176, pgw#1177).
-
-    ``into`` is the marker-owned pool an earlier entry already built for this
-    target. Entries JOIN a target's pool as they arm — the pool is not a
-    frozen product of a complete cell — and an FQN already present is left
-    alone, so N entries of one target cost ONE pool whatever their number and
-    whatever ORDER they arrive in.
-
-    **THE CLONE IS GONE (pgw#1177, measured).** This function used to hand
-    back ``value.detach().clone()`` per FQN. ``update_constant_buffer(...,
-    user_managed=True)`` makes no copy of its own, so that clone was **the
-    only copy in the system**: one full duplicate of the target's weights,
-    held for the life of the arm — ~5.1 GiB on sdxl's single ``unet`` target
-    — in direct contradiction of §4.33 step 4 ("the compiled entries bind
-    constants BY REFERENCE against the resident weights; there is no second
-    copy of the model"). Its stated justification, "a post-arm resident
-    mutation cannot silently change an armed cell", is BACKWARDS: eager sees
-    such a mutation immediately, so it is the un-mutated compiled entry that
-    would silently diverge from the pipeline it serves.
-
-    What the clone ALSO did, and what therefore survives explicitly: it
-    normalised CONTIGUITY. An AOTI container takes a raw pointer, so a
-    non-contiguous resident tensor cannot be bound by reference. Those are
-    cloned individually (the exception, priced per tensor) rather than the
-    whole pool being cloned for their sake.
-    """
-    out: Dict[str, Any] = {} if into is None else into
-    for specs in entry_constants:
-        for spec in specs:
-            if spec.source != SOURCE_STATE_DICT or spec.fqn in out:
-                continue
-            value = state_dict.get(spec.fqn)
-            if value is None:
-                continue  # resolve_constants names the miss, typed, per entry
-            try:
-                contiguous = bool(value.is_contiguous())
-            except Exception:  # noqa: BLE001 — duck-typed rigs hand non-tensors
-                out[spec.fqn] = value
-                continue
-            # The exception, and only the exception, is copied.
-            out[spec.fqn] = value if contiguous else value.detach().contiguous()
-    return out
-
-
-def assert_bindable(
-    specs: Sequence[ConstantSpec], runner_fqns: Iterable[str],
-) -> None:
-    """The artifact's OWN constant table must equal the declared manifest.
-
-    Both directions matter. A declared FQN the artifact does not want means
-    the manifest describes different bytes than we loaded. An FQN the
-    artifact wants that is undeclared would be left UNBOUND — the segfault
-    precondition — and, when it is a LoRA branch, a missing FQN is also the
-    constant-folded-adapter bug in a different hat (pgw#704 G1).
-    """
-    declared = {s.fqn for s in specs}
-    actual = set(runner_fqns)
-    only_declared = sorted(declared - actual)
-    only_actual = sorted(actual - declared)
-    if only_declared or only_actual:
-        raise ConstantsUnboundError(
-            "constant_set_mismatch",
-            f"artifact constant table != declared manifest; "
-            f"declared-only={only_declared[:6]!r} "
-            f"artifact-only={only_actual[:6]!r}")
-
-
 @dataclass
-class ArtifactRunner:
-    """A loaded code-only ``.pt2`` behind the two pgw#704 gates.
+class TCGEntryRunner:
+    """Worker ingress and fallback policy around one TCG-owned runner."""
 
-    Every call is refused until :meth:`bind` has proven the constant set
-    complete (B1 — the alternative is a process-killing segfault) and is
-    checked against the declared contract (B2). The underlying compiled
-    model is reached ONLY from :meth:`__call__`, after both gates.
-    """
-
-    package: Any
+    runner: CompiledGraphRunner
     contract: CallIngress
-    constants: Tuple[ConstantSpec, ...]
-    module_name: str = ""
-    entry: str = ""
-    bound: bool = False
-    #: pgw#817/D3: True when :meth:`bind` bound BY REFERENCE. Recorded rather
-    #: than inferred so an arm report can state whether N instances cost N
-    #: weight copies or none.
-    user_managed: bool = False
-    bound_fqns: Tuple[str, ...] = ()
-    calls: int = 0
+    module_name: str
+    entry: str
+    family: str
     refusals: Dict[str, int] = field(default_factory=dict)
-    #: pgw#791 + pgw#1074. ``"<input>/<reason>" -> count`` over every ingress
-    #: NORMALIZATION — realignment (``unaligned_16b``) and dtype recast
-    #: (``int64_to_float32``) alike; the typed event fires on the first of
-    #: each, the count keeps the whole tax countable afterwards.
     realigned: Dict[str, int] = field(default_factory=dict)
     aligner: FeedAligner = field(default_factory=FeedAligner)
-    #: Set by :func:`load_and_wrap` so the typed realignment event can name
-    #: the cell it belongs to.
-    family: str = ""
+
+    @property
+    def calls(self) -> int:
+        return int(self.runner.calls)
+
+    @property
+    def bound(self) -> bool:
+        return bool(self.runner.bound)
+
+    @property
+    def user_managed(self) -> bool:
+        return True
 
     def declared_fqns(self) -> Tuple[str, ...]:
-        return tuple(s.fqn for s in self.constants)
+        return tuple(self.runner.declared_fqns)
 
     def excludes(self, names: Sequence[str]) -> bool:
-        """True when this class refuses every one of ``names`` (pgw#790)."""
-        wanted = set(str(n) for n in names)
+        wanted = {str(name) for name in names}
         return bool(wanted) and wanted <= set(self.contract.excluded_inputs)
 
-    def bind(
-        self, state_dict: Mapping[str, Any], literals: Mapping[str, Any],
-        *, user_managed: bool = False,
-    ) -> None:
-        """Bind constants from the resident weights + literal payload, then
-        PROVE the artifact reports them all bound.
-
-        Order is load-bearing: nothing may call the package before this
-        returns, and this must not mark itself bound on a partial update.
-
-        ``user_managed=True`` binds BY REFERENCE (pgw#812 D3): the artifact
-        keeps pointers to the caller's tensors instead of copying them into
-        its own constant buffer. A copying bind is one duplicate of the
-        weights PER RUNNER — and pgw#758's multi-graph cells bind every
-        entry up front, so an N-entry cell paid N duplicates and OOM'd the
-        sdxl arm (pgw#1042). The whole-graph arm therefore binds by
-        reference against ONE marker-owned pool per target
-        (:func:`target_constant_pool`). The caller that passes True is
-        asserting that the tensors outlive this runner — the pool rides the
-        arm marker for exactly that reason.
-        """
-        try:
-            table = self.package.get_constant_fqns()
-        except Exception as exc:
-            raise ConstantsUnboundError(
-                "constant_table_unreadable",
-                f"artifact will not report its constant FQNs: "
-                f"{type(exc).__name__}: {exc}") from exc
-        assert_bindable(self.constants, table)
-        values = resolve_constants(self.constants, state_dict, literals)
-        # check_full_update=True is the artifact's own assertion that the
-        # update covers its ENTIRE table. We already proved set equality
-        # above; this makes torch refuse rather than leave a hole.
-        #
-        # MEASURED (pgw#721 S8 first light, L4/torch 2.9.1+cu128): this HOLDS
-        # on a real sdxl w8a8 cell — 2,422 constants, all state_dict-sourced,
-        # declared and package sets identical, strict update accepted.
-        #
-        # FOLDING CAVEAT CLOSED (pgw#723 residuals, torch 2.13.0+cu130 — the
-        # prod floor): strictness also HOLDS against a genuinely FOLDING
-        # artifact. AOTInductor folds ONLY under
-        # ``aot_inductor.use_runtime_constant_folding=True`` (default never
-        # folds — measured on 3 constant-expression module shapes AND the
-        # real sdxl cell), and when it does, the ``_FOLDED_CONST_*`` entries
-        # (``from_folded=True``) are EXEMPT from the full-update check and
-        # RECOMPUTED from the freshly bound originals (mutate-arm proven:
-        # binding values 3x off compile time tracks eager bit-exactly). So
-        # strict is safe for both artifact classes. NOTE our own mint cannot
-        # ship a folding artifact today: folded entries classify as literals
-        # with no ``ep.constants`` value, so ``_write_literals`` refuses the
-        # mint by name — and if runtime folding is ever deliberately enabled,
-        # the change is to EXCLUDE from_folded constants from the manifest
-        # and binding (they are derived), not to loosen this gate.
-        #
-        # pgw#817/D3: `user_managed` is passed only when asked for, so the
-        # copying path's call shape is byte-identical to what pgw#721/#723
-        # measured on a pod. A torch whose `load_constants` has no such
-        # parameter is a NAMED refusal rather than a silent copy — a caller
-        # that asked for by-reference and silently copied would OOM the card
-        # N binds later, which is a far worse way to learn the same fact.
-        #
-        # pgw#1042: the residual C++ failure is CLASSIFIED. The pod's 36/36
-        # sdxl mint died at publish as an anonymous `RuntimeError:
-        # update_constant_buffer_func_(...) API call failed at
-        # model_container_runner.cpp:289` — the real message (a cudaMalloc
-        # OOM from per-entry constant copies) went to a stderr no pod
-        # exposes. Every failure inside the AOTI update is now a typed
-        # ConstantsUnboundError carrying the entry, the constants' size and
-        # the card's live free/total, so the hub row names the failure class.
-        try:
-            if user_managed:
-                try:
-                    self.package.load_constants(
-                        values, check_full_update=True, user_managed=True)
-                except TypeError as exc:
-                    if "user_managed" not in str(exc):
-                        raise
-                    raise ConstantsUnboundError(
-                        "user_managed_unsupported",
-                        f"this torch's load_constants has no user_managed "
-                        f"parameter, so every constant would be COPIED — one "
-                        f"copy of the target weights per bound entry "
-                        f"({type(exc).__name__}: {exc})") from exc
-            else:
-                self.package.load_constants(values, check_full_update=True)
-        except (ConstantsUnboundError, TypeError):
-            raise
-        except RuntimeError as exc:
-            raise ConstantsUnboundError(
-                "injection_failed",
-                f"entry {self.entry or self.module_name or 'unknown'}: the "
-                f"artifact refused the constant update inside AOTI "
-                f"({type(exc).__name__}: {exc}); {len(values)} constants, "
-                f"{_tensor_bytes(values.values()) / (1 << 20):.0f} MiB, "
-                f"{_device_memory_line()}") from exc
-        self.user_managed = bool(user_managed)
-        self.bound_fqns = tuple(sorted(values))
-        self.bound = True
-
     def assert_ready(self) -> None:
-        """The gate that keeps the segfault unreachable — per ENTRY: the
-        unbound-call segfault was re-measured per named model (pgw#758)."""
-        if not self.bound:
+        if not self.runner.bound:
             raise ConstantsUnboundError(
                 "constants_unbound",
-                f"refusing to invoke code-only artifact entry "
-                f"({self.entry or self.module_name or 'unknown'}) with "
-                f"{len(self.constants)} unbound constant(s): calling before "
-                f"load_constants segfaults the worker process")
+                f"refusing to invoke compiled graph {self.entry!r} before "
+                "TCG completed its exact constant bind",
+            )
 
     def _report_normalized(self, name: str, reason: str, event: str) -> None:
-        """First occurrence of an (input, reason) is a typed hub-visible
-        event; every occurrence is counted (pgw#791, pgw#1074).
-
-        Coalesced deliberately: the defect fires 28+ times per request, and a
-        per-call event would be the stderr spam it replaces, on a wire that
-        costs money. One event names the input; the counter carries the rest.
-        """
         key = f"{name}/{reason}"
         seen = self.realigned.get(key, 0)
         self.realigned[key] = seen + 1
         if seen:
             return
-        entry = self.entry or self.module_name
-        if event == RECAST_EVENT:
-            logger.warning(
-                "aot-serve: input %r arrived %s for entry %r; recasting to "
-                "the declared dtype at ingress (the sampler, not the family, "
-                "decides this dtype)", name, reason, entry)
-            detail = (
-                f"family={self.family} entry={entry} "
-                f"target={self.module_name} input={name}: {reason} — recast "
-                f"at ingress to the dtype this graph is specialized on "
-                f"(pgw#1074: a scalar timestep's dtype is a per-request "
-                f"SAMPLER fact, not a family one)")
-        else:
-            logger.warning(
-                "aot-serve: input %r arrived %s for entry %r; realigning into "
-                "an owned aligned buffer at ingress (the artifact would "
-                "otherwise copy it on every call and report only on stderr)",
-                name, reason, entry)
-            detail = (
-                f"family={self.family} entry={entry} "
-                f"target={self.module_name} input={name}: {reason} — "
-                f"realigned at ingress into an owned {AOTI_ALIGNMENT}-byte "
-                f"aligned buffer (AOTInductor would otherwise copy it on "
-                f"every call)")
-        activity_mod.emit_event(event, detail, phase=reason)
+        activity_mod.emit_event(
+            event,
+            f"family={self.family} graph_class={self.entry} "
+            f"target={self.module_name} input={name}: {reason}",
+            phase=reason,
+        )
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         self.assert_ready()
         try:
             assert_ingress(self.contract, args, kwargs)
-            feeds = marshal_positional(self.contract, args, kwargs)
-            # pgw#791: satisfy the artifact's ALIGNED-input contract here,
-            # once, instead of letting the runner discover it per call.
             feeds = aligned_feeds(
-                self.contract, feeds, self.aligner, self._report_normalized)
+                self.contract,
+                marshal_positional(self.contract, args, kwargs),
+                self.aligner,
+                self._report_normalized,
+            )
         except IngressContractError as exc:
             self.refusals[exc.reason] = self.refusals.get(exc.reason, 0) + 1
             raise
-        out = self.package(*feeds)
-        self.calls += 1
-        return out
+        return self.runner(*feeds)
+
+
+EntryRunner = TCGEntryRunner
 
 
 def no_entry_detail(
@@ -2022,7 +873,7 @@ class EntryDispatch:
     shape" (a real shape-growth report).
     """
 
-    runners: Tuple[Tuple[str, ArtifactRunner], ...] = ()
+    runners: Tuple[Tuple[str, EntryRunner], ...] = ()
     declared: Tuple[str, ...] = ()
     #: entry name -> the reason it left. A de-armed entry is REMEMBERED, not
     #: forgotten: §4.31's de-arm is sticky for the boot, and a re-arm of a
@@ -2038,7 +889,7 @@ class EntryDispatch:
     #: read as a pod that never served compiled at all.
     retired_calls: int = 0
 
-    def add(self, name: str, runner: ArtifactRunner) -> None:
+    def add(self, name: str, runner: EntryRunner) -> None:
         """Register one armed entry. Replaces an entry of the same name (a
         re-arm), and refuses one this dispatch de-armed for cause."""
         label = str(name)
@@ -2103,9 +954,9 @@ class EntryDispatch:
 
     def select(
         self, args: Sequence[Any], kwargs: Mapping[str, Any],
-    ) -> Tuple[str, ArtifactRunner]:
-        admitted: List[Tuple[str, ArtifactRunner]] = []
-        missed: List[Tuple[str, ArtifactRunner]] = []
+    ) -> Tuple[str, EntryRunner]:
+        admitted: List[Tuple[str, EntryRunner]] = []
+        missed: List[Tuple[str, EntryRunner]] = []
         for name, runner in self.runners:
             misses, _symbols = ingress_report(
                 runner.contract, args, kwargs, first_only=True)
@@ -2259,7 +1110,7 @@ def lifted_call_kwargs(module: Any) -> Dict[str, Any]:
 
 
 def adapter_call_kwargs(
-    module: Any, runner: "ArtifactRunner | EntryDispatch",
+    module: Any, runner: "EntryDispatch",
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """``(artifact kwargs, eager kwargs)`` for one call's adapter inputs.
 
@@ -2326,7 +1177,7 @@ def assert_lifted_contract(module: Any, contract: CallIngress) -> None:
 
 def wrap_module(
     module: Any,
-    runner: "ArtifactRunner | EntryDispatch",
+    runner: "EntryDispatch",
     meta: Dict[str, Any],
     *,
     attr: str = "forward",
@@ -2340,10 +1191,8 @@ def wrap_module(
     synchronously revokes scheduler-visible compiled proof and permanently
     routes to eager; the module object (config, dtype, device, weights)
     stays untouched, and its weights remain the constant-binding source.
-    ``runner`` is one target's :class:`EntryDispatch` (or a bare
-    :class:`ArtifactRunner` in focused tests — both are callable and count
-    calls); ``attr`` generalizes the swap beyond ``forward`` for dotted
-    targets like ``vae.decode`` (pgw#758).
+    ``runner`` is one target's :class:`EntryDispatch`; ``attr`` generalizes
+    the swap beyond ``forward`` for dotted targets like ``vae.decode``.
 
     An :class:`IngressContractError` is NOT such an error. It is a named,
     counted, per-request contract refusal — the request serves eagerly and
@@ -2389,7 +1238,9 @@ def wrap_module(
                 f"target={label}: {detail}",
                 phase=reason,
                 family=str(meta.get("family") or ""),
-                cell_key=str(meta.get("cell_key") or ""),
+                cell_key=str(
+                    meta.get("compiled_graph_key") or meta.get("cell_key") or ""
+                ),
                 graph_class=name,
             )
             siblings = tuple(getattr(runner, "runners", ()) or ())
@@ -2476,7 +1327,9 @@ def wrap_module(
                 declared_class=ingress_class_name(label, args, kwargs),
                 reason=exc.reason,
                 detail=str(exc)[:400],
-                cell_key=str(meta.get("cell_key") or ""),
+                cell_key=str(
+                    meta.get("compiled_graph_key") or meta.get("cell_key") or ""
+                ),
             ))
             return original(*args, **eager_kwargs)
         except ConstantsUnboundError as exc:
@@ -2619,73 +1472,6 @@ def _target_owner(pipeline: Any, target: str) -> Tuple[Any, str]:
 ADOPT_OOM_REASON = "insufficient_adopt_vram"
 
 
-@contextlib.contextmanager
-def _bind_headroom(what: str, armed: int, declared: int) -> Iterator[None]:
-    """Turn a CUDA OOM inside one bind into a typed adopt refusal (pgw#1175).
-
-    §4.33 step 4 loads the cell into the LIVE pipeline and keeps it or rejects
-    it. Rejection has to be survivable, and the ONLY honest evidence that a
-    card cannot hold the runners is a card that says so. This is the whole
-    replacement for the deleted headroom estimate: no number is computed, the
-    bind is attempted, and the attempt that fails names itself.
-
-    It is deliberately narrow. A CUDA OOM and nothing else — every other
-    exception keeps its own classification, because "the artifact is broken"
-    and "this pod is full" are different verdicts and only one of them says
-    anything about the cell. It also runs strictly BEFORE the first live
-    mutation (:func:`wrap_module` is called after every entry binds), so a
-    refusal leaves the pipeline exactly as eager as it found it.
-
-    pgw#1176 CHANGED WHAT THE POSITION MEANS, and the change is the whole
-    forensic point. It used to be ``(index+1 of total)`` — where in a
-    bind-all-then-wrap sequence the OOM landed — which measured "how far
-    through the cell did we get" and was the only handle th#1825 had. Under
-    the atom that sequence does not exist: each class binds alone, so the
-    index is always 1 of 1 and says nothing. What distinguishes "one class too
-    big" from "wholly unadoptable" NOW is **how many siblings are already
-    armed and still serving**, so that is what the refusal carries. The
-    question the old number answered is answered better, because the armed
-    count is a fact about what the pod is currently doing rather than about a
-    loop it happened to be in.
-
-    THE CHAIN IS WALKED, not just the top frame. ``ArtifactRunner.bind`` wraps
-    every ``RuntimeError`` out of ``load_constants`` as
-    ``ConstantsUnboundError("injection_failed")`` — a CONTRACT verdict — and
-    ``torch.OutOfMemoryError`` is a ``RuntimeError``. So the exact failure this
-    guard exists for arrives already re-labelled as the cell's fault, which is
-    how "this pod is full" would have retired a correct cell. The cause is what
-    decides.
-    """
-    try:
-        yield
-    except Exception as exc:  # noqa: BLE001 — re-raised unless it is an OOM
-        oom = _oom_in_chain(exc)
-        if oom is None:
-            raise
-        flush_memory()
-        raise AdoptError(
-            ADOPT_OOM_REASON,
-            f"{what} ({armed} of {declared} already armed) ran out of device "
-            f"memory while binding ({type(oom).__name__}: {oom}) — this pod "
-            f"cannot hold THIS CLASS beside what it is already serving. It "
-            f"serves eager; the {armed} class(es) already armed keep serving "
-            f"COMPILED. Neither the class nor the declaration is condemned: "
-            f"another pod, or this one with less resident, may bind it fine",
-        ) from exc
-
-
-def _oom_in_chain(exc: BaseException) -> Optional[BaseException]:
-    """The CUDA OOM in this exception's cause chain, or ``None``."""
-    seen: set = set()
-    cur: Optional[BaseException] = exc
-    while cur is not None and id(cur) not in seen:
-        if is_cuda_oom(cur):
-            return cur
-        seen.add(id(cur))
-        cur = cur.__cause__ or cur.__context__
-    return None
-
-
 def _marker(pipeline: Any) -> Dict[str, Any]:
     """The pipeline's arm marker, created empty on first use.
 
@@ -2711,201 +1497,119 @@ def _dispatch_for(marker: Dict[str, Any], target: str) -> Optional[EntryDispatch
     return runner if isinstance(runner, EntryDispatch) else None
 
 
-def arm_entry(
-    pipeline: Any, cfg: Any, artifact: Path, cache_dir: Optional[Path] = None,
-    *, expected: "Optional[aot_identity.ExpectedIdentity]" = None,
+def _tcg_destination(cache_dir: Optional[Path], compiled_graph_key: str) -> Path:
+    root = tensorhub_cas_dir() if cache_dir is None else Path(cache_dir)
+    return root / "compiled-graph-runtime" / compiled_graph_key
+
+
+def arm_compiled_graph(
+    pipeline: Any,
+    cfg: Any,
+    compiled_graph_key: str,
+    cache_dir: Optional[Path] = None,
+    *,
     declared: Sequence[str] = (),
 ) -> Dict[str, Any]:
-    """Stage + verify + load + BIND + register ONE compiled graph class.
+    """Resolve, bind, then register one exact TCG graph class.
 
-    THE ATOM (pgw#1176). What this replaces — ``load_and_wrap``'s
-    stage-verify-load-EVERY-entry-then-bind-ALL-then-wrap shape — carried the
-    invariant "a cell that cannot arm one of its graph classes arms none of
-    them, because a partially served contract would be a silent subset of
-    what the cell key advertises". That invariant was locally correct and
-    globally the disease: it was a faithful guard on the premise that the
-    advertising unit is a 36-class set. Shrink the unit to one graph and
-    nothing is left that CAN lie — an entry arms whole or not at all, and an
-    entry is one graph, so that is atomic by nature.
-
-    Consequences that fall out rather than being engineered:
-
-    * an entry that cannot arm costs THAT class. Its siblings keep serving
-      compiled, and the pod reports per-entry serve state rather than a
-      cell-level claim;
-    * coverage ACCRETES. A second call arms a second class into the same
-      registry, the same target pool and the same live wrap. There is no
-      "complete" state and nothing waits for one;
-    * a deliberate, permanent SUBSET is a legitimate steady state — which
-      pgw#1177 measured the reason for: ~0.75 GiB of device memory per
-      resident AOTI container, so a pod that arms its hot classes and leaves
-      the cold ones eager holds a handful of containers instead of 36;
-    * verification costs ONE runner beside the already-resident weights,
-      which is §4.33's ~8 GiB achieved by construction rather than by budget.
-
-    ``declared`` is every class name this pod's declaration traces to. It
-    feeds :attr:`EntryDispatch.declared`, so a call that no ARMED entry
-    admits can say "pending compile" instead of reporting a shape gap for a
-    class the declaration already contains.
-
-    ``expected`` (pgw#903) is checked inside :func:`stage_artifact`, i.e.
-    strictly before ``_load_package`` — the identity question must be settled
-    while the artifact is still inert bytes.
-
-    §4.33 / pgw#1175, CARRIED THROUGH THE ATOM AND IMPROVED BY IT: THE DEVICE
-    COST OF THIS FUNCTION IS ATTEMPTED, NEVER PREDICTED. Two estimates used to
-    stand in front of it — both ``mint_budget.adopt_headroom``, both pricing
-    the arm at twice an "activation" that was a quarter of the RESIDENT SET
-    whenever no forward had run, and both compared against a free figure those
-    weights were already outside of. The function's own docstring conceded it
-    could not refuse the failure it was written for, while stickily refusing
-    cards that were fine (it pinned two real mints at 11.09 GiB on cards with
-    21.48 GiB free). What refuses now is the bind: ``_load_package`` + ``bind``
-    run inside a CUDA-OOM guard, so a card that genuinely cannot hold the
-    runner returns a typed ``insufficient_adopt_vram`` refusal NAMING the
-    entry — before the first live mutation, so the pipeline is untouched and
-    the pod serves eager. The attempt is the measurement.
-
-    **The atom makes that refusal cheaper and more honest than it could be
-    under the cell.** A bind OOM here costs exactly ONE graph class: its
-    siblings stay armed and keep serving compiled, and the refused class is
-    retried by nobody and condemned by nothing — another pod, or this one with
-    less resident, may bind it fine. Under the 36-entry cell the same OOM
-    discarded every class.
-
-    Raises :class:`AdoptError` with a classified reason on any failure, and
-    never publishes extracted files into a shared live cache.
+    TCG is the only artifact/store authority. The first resolve establishes
+    the immutable extraction directory and admitted metadata; ``runner`` is
+    asked for the same key and the same directory, so its internal resolve
+    verifies/reuses that extraction instead of creating a second one. No live
+    module or dispatch state changes until TCG's exact constant bind succeeds.
     """
+
+    key = str(compiled_graph_key or "").strip()
+    if not is_compiled_graph_key(key):
+        raise AdoptError(
+            "compiled_graph_key_invalid", f"not a compiled-graph key: {key!r}"
+        )
+    engine = open_worker_engine(cache_dir)
+    destination = _tcg_destination(cache_dir, key)
+    compiled_graph = engine.resolve(key, destination)
+    if compiled_graph is None:
+        raise AdoptError(
+            "compiled_graph_unavailable", f"TCG could not resolve {key!r}"
+        )
+    runner = engine.runner(key, destination)
+    if runner is None:
+        raise AdoptError(
+            "compiled_graph_unavailable", f"TCG could not load {key!r}"
+        )
+    metadata = dict(compiled_graph.metadata)
+    graph_class = metadata.get("graph_class")
+    if not isinstance(graph_class, Mapping):
+        raise AdoptError(
+            "contract_invalid",
+            "TCG admitted a compiled graph with no graph_class declaration",
+        )
+    graph = graph_class.get("graph")
+    if not isinstance(graph, Mapping):
+        raise AdoptError(
+            "contract_invalid", "TCG graph_class records no worker ingress contract"
+        )
+    name = str(graph_class.get("name") or "").strip()
+    target = str(graph_class.get("target") or "").strip()
+    if not name or not target:
+        raise AdoptError(
+            "contract_invalid", "TCG graph_class must name both graph class and target"
+        )
+
     family = str(getattr(cfg, "family", "") or "")
-    # pgw#1087: admission splits in two and the halves have different owners.
-    # `cell_verify` is unpack + identity + contract verification on inert
-    # bytes (disk + hashing); `entry_admit` below is dlopen, constant bind and
-    # ingress-assertion arming (device).
-    with boot_phases.span(
-        boot_phases.PHASE_CELL_VERIFY, ref=family,
-        artifact_kind="aot-inductor",
-    ) if boot_phases.in_boot() else contextlib.nullcontext():
-        staged = stage_artifact(
-            Path(artifact), family, cache_dir=cache_dir, expected=expected)
+    module, attr = _target_owner(pipeline, target)
     try:
-        meta = staged.metadata
-        block = staged.entry  # parsed and validated once, while staging
-        name = str(block.get("name") or "")
-        target = str(block.get("target") or "")
-        module, attr = _target_owner(pipeline, target)
+        contract = CallIngress.from_graph(graph)
+        assert_lifted_contract(module, contract)
+        device = str(getattr(module, "device", "") or "cuda")
+        runner.bind(resident_constants(module), device=device)
+    except ConstantBindingError as exc:
+        reason = ADOPT_OOM_REASON if exc.reason == "out_of_memory" else exc.reason
+        raise AdoptError(reason, f"graph class {name!r}: {exc}") from exc
 
-        marker = _marker(pipeline)
-        dispatch = _dispatch_for(marker, target)
-        first_for_target = dispatch is None
-        if dispatch is None:
-            dispatch = EntryDispatch(declared=tuple(str(d) for d in declared))
-        elif declared:
-            dispatch.declared = tuple(str(d) for d in declared)
+    marker = _marker(pipeline)
+    dispatch = _dispatch_for(marker, target)
+    first_for_target = dispatch is None
+    if dispatch is None:
+        dispatch = EntryDispatch(declared=tuple(str(item) for item in declared))
+    elif declared:
+        dispatch.declared = tuple(str(item) for item in declared)
+    entry_runner = TCGEntryRunner(runner, contract, target, name, family)
+    dispatch.add(name, entry_runner)
 
-        t0 = time.monotonic()
-        literals: Dict[str, Any] = {}
-        literals_path = staged.root / LITERALS_NAME
-        if literals_path.exists():
-            device = str(getattr(module, "device", "cuda"))
-            try:
-                literals = split_literals(
-                    _load_literals(literals_path, device)).get(name, {})
-            except ValueError as exc:
-                raise AdoptError("contract_invalid", str(exc)) from exc
-
-        try:
-            graph = block.get("graph")
-            if not isinstance(graph, Mapping):
-                raise ValueError("graph class records no graph interface")
-            contract = CallIngress.from_graph(graph)
-            constants = constants_from_meta(block)
-            # pgw#725: the lifted-adapter signature must match the module's
-            # actual lifted state.
-            assert_lifted_contract(module, contract)
-        except ValueError as exc:
-            raise AdoptError(
-                "contract_invalid", f"entry {name!r}: {exc}") from exc
-        # The target's by-reference pool, ACCRETED (pgw#1176/pgw#1177): this
-        # entry's state-dict constants join whatever earlier entries already
-        # registered. The pool rides the marker because user_managed binds
-        # hold raw pointers, so the bound values must outlive the runners.
-        pools = marker["bound_constants"]["pools"]
-        pool = pools.setdefault(target, {})
-        # pgw#1175, carried: the pool grows by reference, so an OOM here is a
-        # CARD fact and gets the card's own verdict rather than the cell's.
-        _armed_here = len(dispatch.runners)
-        _declared_here = len(dispatch.declared) or (_armed_here + 1)
-        with _bind_headroom(
-                f"target {target!r} pool", _armed_here, _declared_here):
-            target_constant_pool(
-                [constants], resident_constants(module), into=pool)
-
-        with boot_phases.span(
-            boot_phases.PHASE_ENTRY_ADMIT, ref=family, function=name,
-            artifact_kind="aot-inductor",
-        ) if boot_phases.in_boot() else contextlib.nullcontext() as sp:
-            # pgw#1175 + pgw#1176: THE ATTEMPT IS THE MEASUREMENT, and under
-            # the atom it costs exactly one graph class. `_bind_headroom`
-            # walks the CAUSE CHAIN, which is load-bearing: `bind` re-labels
-            # every RuntimeError out of `load_constants` as a CONTRACT
-            # verdict, and `torch.OutOfMemoryError` IS a RuntimeError — so a
-            # full card would otherwise condemn a correct cell, and a contract
-            # verdict is the kind that quarantines a key (th#1819). Capacity
-            # is never a contract verdict.
-            with _bind_headroom(
-                    f"entry {name!r}", _armed_here, _declared_here):
-                package = _load_package(staged.root / PACKAGE_NAME, name)
-                runner = ArtifactRunner(
-                    package=package, contract=contract, constants=constants,
-                    module_name=target, entry=name, family=family)
-                try:
-                    runner.bind(pool, literals, user_managed=True)
-                except ConstantsUnboundError as exc:
-                    raise AdoptError(
-                        f"constants_{exc.reason}",
-                        f"entry {name!r}: {exc}") from exc
-            if sp is not None:
-                sp.note(f"target={target} constants={len(constants)}")
-
-        # FIRST LIVE MUTATION, and it is exactly one entry wide. Everything
-        # above is proven for THIS entry: complete artifact, matching runtime
-        # key, restated key, resolved target, loaded named model, constant
-        # table proven bound against its manifest.
-        dispatch.add(name, runner)
-        marker["bound_constants"]["literals"][name] = literals
-        if first_for_target:
-            wrap_module(
-                module, dispatch, meta, attr=attr, target=target,
-                eager_forward=None)
-            module_marker = getattr(module, _MARKER_ATTR, {})
-            marker["targets"][target] = {
-                "module": module,
-                "attr": attr,
-                "state": module_marker.get("state", {}),
-            }
-        # `meta` on the marker is the DECLARE half every entry of this
-        # pipeline shares by construction (`verify_declared` refuses any
-        # artifact whose sm/torch/cuda/family disagree), kept so callers that
-        # ask the live object what it is armed with get an answer without
-        # re-reading a tarball. Per-entry facts live in `entries`.
-        marker["meta"] = meta
-        marker["entries"][name] = {
-            "key": str(meta.get("cell_key") or ""),
-            "target": target,
-            "class_hash": str(block.get("class_hash") or ""),
-            "manifest_digest": str(meta.get("manifest_digest") or ""),
+    serve_meta: Dict[str, Any] = {
+        **metadata,
+        "family": family,
+        "compiled_graph_key": key,
+    }
+    if first_for_target:
+        wrap_module(
+            module,
+            dispatch,
+            serve_meta,
+            attr=attr,
+            target=target,
+            eager_forward=None,
+        )
+        module_marker = getattr(module, _MARKER_ATTR, {})
+        marker["targets"][target] = {
+            "module": module,
+            "attr": attr,
+            "state": module_marker.get("state", {}),
         }
-        # pgw#1141b: THE registration, at the one seam every arm route passes.
-        note_aot_key(str(meta.get("cell_key") or ""))
-        logger.info(
-            "aot-serve: armed entry %s on target %s in %.1fs (%d declared "
-            "constants, key=%s); %d entr%s now armed on this pipeline",
-            name, target, time.monotonic() - t0, len(constants),
-            meta.get("cell_key"), len(marker["entries"]),
-            "y" if len(marker["entries"]) == 1 else "ies")
-        return meta
-    finally:
-        staged.close()
+    marker["meta"] = serve_meta
+    marker["entries"][name] = {
+        "compiled_graph_key": key,
+        "target": target,
+        "class_hash": str(graph_class.get("class_hash") or ""),
+    }
+    logger.info(
+        "aot-serve: armed TCG graph class %s on %s (%d constants, key=%s)",
+        name,
+        target,
+        len(runner.declared_fqns),
+        key,
+    )
+    return serve_meta
 
 
 def disarm_entry(pipeline: Any, name: str, reason: str) -> bool:
@@ -2959,13 +1663,56 @@ def entry_states(pipeline: Any) -> Dict[str, Dict[str, Any]]:
 
 
 def _adopt_identity(artifact: Path) -> str:
-    """Best-effort ``family=… key=…`` from the artifact's own metadata for
-    the typed adopt event — a refusal must name the candidate cell even when
-    the refusal itself is a metadata problem."""
-    meta = artifact_meta.try_read_metadata(artifact)
-    if meta is None:
+    """Best-effort exact TCG key for a typed adopt event."""
+    try:
+        from torch_compiled_graphs.artifact import read_metadata
+
+        meta = read_metadata(artifact)
+    except Exception:  # noqa: BLE001 - identity is diagnostic on a refusal
         return f"artifact={artifact.name}"
-    return f"family={meta.get('family')} key={meta.get('cell_key')}"
+    return f"key={meta.get('compiled_graph_key')}"
+
+
+def _import_and_arm(
+    pipeline: Any,
+    cfg: Any,
+    artifact: Path,
+    cache_dir: Optional[Path],
+    *,
+    expected: "Optional[aot_identity.ExpectedIdentity]",
+    declared: Sequence[str],
+) -> Dict[str, Any]:
+    from torch_compiled_graphs.artifact import read_metadata
+
+    transfer_staging = (
+        artifact.parent.name == ".incoming"
+        and artifact.parent.parent.name == "compiled-graph-transfer"
+    )
+    try:
+        metadata = read_metadata(artifact)
+        key = str(metadata.get("compiled_graph_key") or "").strip()
+        if not is_compiled_graph_key(key):
+            raise AdoptError(
+                "compiled_graph_key_invalid",
+                f"artifact names no canonical compiled-graph key: {key!r}",
+            )
+        if expected is not None and expected.cell_key != key:
+            raise AdoptError(
+                "compiled_graph_key_mismatch",
+                f"the arm named {expected.cell_key!r}, artifact names {key!r}",
+            )
+        publication = open_worker_engine(cache_dir).import_artifact(key, artifact)
+        if publication.outcome == StoreOutcome.DIVERGENT:
+            raise AdoptError(
+                "compiled_graph_divergent",
+                f"local TCG already binds {key!r} to different admitted bytes",
+            )
+        return arm_compiled_graph(
+            pipeline, cfg, key, cache_dir, declared=declared
+        )
+    finally:
+        if transfer_staging:
+            artifact.unlink(missing_ok=True)
 
 
 def enable(
@@ -2996,9 +1743,14 @@ def enable(
     if artifact is None:
         return AdoptOutcome.miss("no_artifact")
     try:
-        meta = arm_entry(
-            pipeline, cfg, Path(artifact), cache_dir=cache_dir,
-            expected=expected, declared=declared)
+        meta = _import_and_arm(
+            pipeline,
+            cfg,
+            Path(artifact),
+            cache_dir,
+            expected=expected,
+            declared=declared,
+        )
     except Exception as exc:
         reason = str(getattr(exc, "reason", "") or "") or type(exc).__name__
         identity = _adopt_identity(Path(artifact))
@@ -3007,17 +1759,16 @@ def enable(
             reason, exc)
         return AdoptOutcome.miss(
             reason, f"{identity}: {type(exc).__name__}: {exc}", identity)
-    entry = dict(meta.get(cell_key_mod.ENTRY_BLOCK_KEY) or {})
+    entry = dict(meta.get("graph_class") or {})
     armed = len(armed_entries(pipeline))
     logger.info(
         "aot-serve: armed %s entry %s (sku=%s torch=%s precision=%s, "
         "constants bound BY REFERENCE from resident weights); %d armed",
         meta.get("family"), entry.get("name"),
-        meta.get("sku"), meta.get("torch"), meta.get("precision"), armed)
+        meta.get("sm"), "TCG", "code-only", armed)
     return AdoptOutcome.hit(
-        f"family={meta.get('family')} key={meta.get('cell_key')} "
-        f"entry={entry.get('name')} armed={armed} sku={meta.get('sku')} "
-        f"torch={meta.get('torch')} precision={meta.get('precision')}")
+        f"family={meta.get('family')} key={meta.get('compiled_graph_key')} "
+        f"entry={entry.get('name')} armed={armed} sm={meta.get('sm')}")
 
 
 def _marker_states(subject: Any) -> List[Dict[str, Any]]:
@@ -3033,8 +1784,8 @@ def _marker_states(subject: Any) -> List[Dict[str, Any]]:
 
     So the branch is not legacy and stays; what it reads is named. The two
     markers are different objects and always were: :func:`wrap_module` writes
-    ``state`` on the MODULE it swapped, :func:`arm_entry` writes ``targets``
-    on the PIPELINE that owns it.
+    ``state`` on the MODULE it swapped, while :func:`arm_compiled_graph`
+    writes ``targets`` on the PIPELINE that owns it.
     """
     marker = getattr(subject, _MARKER_ATTR, None) or {}
     rows = marker.get("targets")
@@ -3165,7 +1916,9 @@ def armed_entries(pipeline: Any) -> Dict[str, str]:
         if dispatch is None:
             continue
         for name, _runner in dispatch.runners:
-            out[name] = str((rows.get(name) or {}).get("key") or "")
+            out[name] = str(
+                (rows.get(name) or {}).get("compiled_graph_key") or ""
+            )
     return out
 
 
@@ -3222,9 +1975,9 @@ def unwrap(pipeline: Any) -> bool:
     """Restore every wrapped target's eager callable — rotation/eviction
     and the unproven-adoption rollback both go through here."""
     marker = getattr(pipeline, _MARKER_ATTR, None) or {}
-    # pgw#1176: one shape, the one `arm_entry` writes. The `module`/`state`
-    # fallback that stood here read a pipeline marker no production path
-    # produces — see :func:`_marker_states`.
+    # One pipeline-marker shape, written by `arm_compiled_graph`. The
+    # `module`/`state` fallback that stood here read a shape no production
+    # path produces — see :func:`_marker_states`.
     targets = marker.get("targets")
     rows: List[Dict[str, Any]] = (
         list(targets.values()) if isinstance(targets, dict) else [])
@@ -3251,66 +2004,41 @@ def unwrap(pipeline: Any) -> bool:
 
 __all__ = [
     "AdoptOutcome",
+    "ARTIFACT_KIND",
     "COMPILED_GRAPH_FORMAT",
     "COMPILED_GRAPH_FORMAT_KEY",
-    "ARTIFACT_KIND",
-    "ArtifactRunner",
-    "ConstantSpec",
     "ConstantsUnboundError",
-    "DECLARED_AXES",
     "EntryDispatch",
     "IDENTITY_AXES",
     "IngressContractError",
-    "LITERAL_SEP",
-    "LITERALS_NAME",
-    "METADATA_NAME",
-    "PACKAGE_NAME",
-    "SOURCE_COMPUTED",
-    "SOURCE_LITERAL",
-    "SOURCE_STATE_DICT",
+    "TCGEntryRunner",
+    "aligned_feeds",
+    "armed_entries",
     "armed_metadata",
     "armed_targets",
-    "arm_entry",
-    "armed_entries",
-    "assert_bindable",
+    "arm_compiled_graph",
     "assert_lifted_contract",
     "assert_ingress",
     "bind_call_inputs",
-    "class_hash",
-    "constants_from_meta",
+    "disarm_entry",
     "enable",
     "entry_from_meta",
-    "entry_metadata",
     "entry_states",
-    "disarm_entry",
     "execution_count",
-    "proven_since",
     "holds_exported_cell",
-    "host_isa_reason",
-    "NO_HOST_ISA_STAMP",
     "ingress_class_name",
     "ingress_refusals",
     "is_aot_ref",
     "is_armed",
     "lifted_call_kwargs",
     "marshal_positional",
-    "note_aot_key",
-    "pack",
-    "range_digest",
+    "proven_since",
+    "realigned_inputs",
     "resident_constants",
-    "resolve_constants",
-    "runtime_key",
+    "served_entry_calls",
     "set_guard_failure_callback",
     "set_ingress_refusal_callback",
     "report_ingress_refusal",
-    "split_literals",
-    "target_constant_pool",
-    "unpack",
-    "unpack_metadata",
     "unwrap",
-    "verify",
-    "verify_contract",
-    "verify_declared",
-    "verify_package_compute_capability",
     "wrap_module",
 ]

@@ -16,8 +16,8 @@ convenience:
    equal a post-redefinition key, and a pre-redefinition artifact can never
    restate a post-redefinition identity — which is what makes the dev-stack
    purge (pgw#868 runbook) hygiene, not a correctness precondition.
-4. The stamp discipline: the key an artifact carries is the key its own
-   recorded facts describe, proven at admission (``verify_contract``).
+4. TCG PARITY: while the worker still projects publish metadata, that
+   projection derives exactly TCG's public ``CompiledGraphKey``.
 """
 
 from __future__ import annotations
@@ -28,8 +28,14 @@ import re
 from pathlib import Path
 
 import pytest
+from torch_compiled_graphs import (
+    CallIngress,
+    CallInput,
+    GraphClassDeclaration,
+    RuntimeCompatibility,
+)
 
-from gen_worker import aot_serve, cell_key, fleet_cells
+from gen_worker import cell_key, fleet_cells
 
 from harness.cell_meta import exported_cell_meta
 
@@ -96,46 +102,21 @@ def test_missing_axis_is_a_typed_refusal():
 #: (module-relative path, count-limit-free) pairs. Everything else in
 #: src/gen_worker must READ the stamped value instead of re-deriving it.
 #: Extending an allowlist is a conscious act reviewed against the module
-#: docstrings of cell_key/aot_serve — never a drive-by.
+#: docstrings of the named authorities — never a drive-by.
 _DERIVATION_ALLOWLIST = {
     # the declaration-wide coverage LABEL (pgw#1176: demoted from identity,
     # so the fence is about ONE arithmetic, not one identity).
     "manifest_digest(": {
         "cell_key.py",    # def
-        "aot_mint.py",    # the mint's label over the class set it produced
-        "boot_key.py",    # the boot fold's label over the classes it traced
-        # CONSCIOUS EXTENSION (pgw#1176), and it is a NAME COLLISION rather
-        # than a second derivation: `guard_closure.manifest_digest` digests a
-        # GUARD CLOSURE's manifest and has nothing to do with cell identity.
-        # The fence greps a bare string, so an unrelated same-named function
-        # reads as a violation. Listed rather than silenced, so the next
-        # reader sees it was checked.
-        "guard_closure.py",
     },
-    # the exported-ENTRY key: mint stamp, publish recompute, admission proof.
+    # the exported-ENTRY key: definition plus retained publish projection.
     "from_entry_metadata(": {
         "cell_key.py",    # def
-        "aot_mint.py",    # cell_identity (the stamp)
         "fleet_cells.py",  # _recomputed_key (the publish recompute)
-        "aot_serve.py",   # verify_contract (the admission proof)
-        # pgw#1089 (§4.27 step 1): the BOOT-side derivation. Added
-        # consciously, and it is the reason the fence is an allowlist rather
-        # than a ban: the boot key must be THE cell key, so the fourth site
-        # had to be this function and not a fourth arithmetic. `boot_key.fold`
-        # assembles the mint's own entry blocks, stamps them through
-        # `aot_serve.artifact_metadata` (which is where `combined_graph_hash`
-        # and every `class_hash` are computed — note `boot_key.py` is NOT in
-        # the `combined_graph_hash(` allowlist below, and must not be), and
-        # asks THIS function for the key. A boot derivation that computed the
-        # digest itself would be attempt 28 exactly: a declared-facts key
-        # beside a traced-facts key under one axis name.
-        "boot_key.py",
     },
     # the declared-envelope digest.
     "envelope_digest(": {
         "cell_key.py",    # def (+ envelope_facts)
-        "fleet_cells.py",  # arm_identity + arm_axis_divergence (same derivation
-                           # both sides of the handback seam — the pgw#1042 check)
     },
     # the toolchain-axis digest, i.e. its MEMBERSHIP (pgw#1050). The producer
     # (`compile_cache.toolchain_digest`) collects components; this is the one
@@ -145,7 +126,7 @@ _DERIVATION_ALLOWLIST = {
     "toolchain_axis_digest(": {
         "cell_key.py",     # def (+ toolchain_facts)
         "fleet_cells.py",  # arm_identity + arm_axis_divergence
-        "aot_identity.py",  # artifact_identity (the wire fact)
+        "boot_key.py",     # boot compatibility closure
         # pgw#1205: the device-peak census's provenance. Added CONSCIOUSLY,
         # which is what this fence's own message offers as the alternative to
         # reading a stamped value — and here there is no stamped value to
@@ -295,41 +276,18 @@ def test_old_and_new_keys_cannot_collide():
     assert old_key != new_key
 
 
-def _admissible_meta() -> dict:
-    """A fully self-consistent ENTRY metadata: the block stamped by the ONE
-    producer (``aot_serve.entry_metadata``), identity blocks recorded, key
-    stamped from the recorded facts."""
-    meta = aot_serve.entry_metadata(
-        family="fam", precision="bf16", cell_key="", name="unet/main",
-        entry={
-            "target": "unet",
-            "fork": [],
-            "class_dims": [["b", 1]],
-            "inputs": [{"name": "sample", "position": 0, "dtype": "float16",
-                        "shape": [1, 4, 64, 64]}],
-            "symbols": {},
-            "constants": [],
-            "graph": {"v": 2},
-        })
-    meta.update({
-        "sm": "sm_89",
-        "weight_lane": "",
-        "env_seal": {"seal_v": 4, "env": {"PYTHONHASHSEED": "0"}},
-        "toolchain": {"torch": "x" * 16, "settings_declaration": "d" * 16,
-                      "loaded_libs": "l" * 16},
-    })
-    meta["cell_key"] = cell_key.from_entry_metadata(meta).digest
-    return meta
+def _current_worker_meta() -> dict:
+    """A current worker publish projection, keyed from its recorded facts."""
+    return exported_cell_meta()
 
 
 def test_pre_redefinition_artifact_is_structurally_refused():
     """An artifact recording the OLD blocks (an ``entries`` MAP and a
     ``combined_graph_hash``, the 36-entry-cell era) cannot restate a
-    per-entry identity: the key derivation refuses typed, and admission
-    (``verify_contract``) turns the unrestatable stamp into a named refusal
-    before anything can arm. That is what makes the ck1 corpus purge hygiene
-    rather than a correctness precondition."""
-    meta = _admissible_meta()
+    per-entry identity: the retained publish projection refuses typed before
+    anything can move. That is what makes the ck1 corpus purge hygiene rather
+    than a correctness precondition."""
+    meta = _current_worker_meta()
     old = dict(meta)
     entry = old.pop(cell_key.ENTRY_BLOCK_KEY)
     old["entries"] = {entry["name"]: entry}
@@ -339,23 +297,49 @@ def test_pre_redefinition_artifact_is_structurally_refused():
     old["format"] = 2
     with pytest.raises(cell_key.CellKeyError, match="entry"):
         cell_key.from_entry_metadata(old)
-    # its (old-formula) stamp is present but unrestatable => admission refuses.
-    # An ek-shaped stamp, because a ck1 stamp is not an identity CLAIM to this
-    # runtime at all — `is_key` refuses it, so it never reaches the restate.
-    old["cell_key"] = "cg-key-v1-" + "5" * 56
-    reason = aot_serve.verify_contract(old)
-    assert "malformed declared contract" in reason or "not restatable" in reason
 
 
-def test_forged_stamp_is_refused_at_admission():
-    meta = _admissible_meta()
-    meta["cell_key"] = "cg-key-v1-" + "0" * 56
-    reason = aot_serve.verify_contract(meta)
-    assert "recorded facts describe" in reason
+def test_worker_publish_projection_matches_public_tcg_key() -> None:
+    ingress = CallIngress(
+        parameters=("sample",),
+        flat_arity=1,
+        inputs=(CallInput(
+            "sample", 0, "sample", 0, (), "sample", "float32", (1, 4),
+        ),),
+    )
+    declaration = GraphClassDeclaration(
+        graph_class="unet/main",
+        target="unet",
+        graph={
+            "v": 3,
+            "constant_fqns": [],
+            "lifted_inputs": [],
+            "pytree": {"ingress": ingress.as_dict()},
+            "specialization": {},
+        },
+        graph_witness="a" * 16,
+        range_digest=ingress.digest(),
+        class_dims=(("b", 1),),
+    )
+    toolchain = {
+        "torch": "x" * 16,
+        "settings_declaration": "d" * 16,
+        "loaded_libs": "l" * 16,
+    }
+    runtime = RuntimeCompatibility("cpu", toolchain=toolchain)
+    meta = {
+        "kind": cell_key.EXPORTED_KIND,
+        "sm": runtime.sm,
+        cell_key.ENTRY_BLOCK_KEY: {
+            "name": declaration.graph_class,
+            "class_hash": declaration.class_hash,
+        },
+        "toolchain": runtime.toolchain,
+    }
 
-
-def test_true_stamp_passes_admission():
-    assert aot_serve.verify_contract(_admissible_meta()) == ""
+    assert cell_key.from_entry_metadata(meta).digest == str(
+        runtime.key(declaration)
+    )
 
 
 # ---------------------------------------------------------------------------

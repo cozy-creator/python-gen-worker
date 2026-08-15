@@ -28,7 +28,7 @@ import argparse
 import asyncio
 import types
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, cast
 
 import pytest
 
@@ -43,6 +43,7 @@ from gen_worker import serving_mode
 from gen_worker.cell_adopt import EagerPhase
 from gen_worker.cli import serve as serve_cli
 from gen_worker.pb import worker_scheduler_pb2 as pb
+from torch_compiled_graphs import CallIngress, CallInput, CompiledGraphRunner
 
 
 # ---------------------------------------------------------------------------
@@ -72,24 +73,24 @@ class FakeTensor:
 
 
 class FakePackage:
-    """Stands in for ``AOTICompiledModel``; records every invocation."""
+    """Stands in for TCG's bound runner; records every invocation."""
 
     def __init__(self) -> None:
         self.invocations: List[Any] = []
-        self.loaded: Dict[str, Any] | None = None
+        self.bound = False
+        self.calls = 0
+        self.declared_fqns = ("conv_in.weight",)
         self.raises = False
 
-    def get_constant_fqns(self) -> List[str]:
-        return ["conv_in.weight"]
-
-    def load_constants(self, values: Any, check_full_update: bool = False,
-                       user_managed: bool = False) -> None:
-        self.loaded = dict(values)
+    def bind(self, values: Dict[str, Any], *, device: str) -> None:
+        del values, device
+        self.bound = True
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         self.invocations.append((args, kwargs))
         if self.raises:
             raise RuntimeError("cuda kernel launch failed")
+        self.calls += 1
         return "ARTIFACT_OUTPUT"
 
 
@@ -118,50 +119,40 @@ class Cfg:
     regional = False
 
 
+KEY = "cg-key-v1-" + "d" * 56
 META: Dict[str, Any] = {
-    aot_serve.COMPILED_GRAPH_FORMAT_KEY: aot_serve.COMPILED_GRAPH_FORMAT,
-    "kind": aot_serve.ARTIFACT_KIND,
-    "family": "sdxl-base", "precision": "w8a8", "sku": "l4", "sm": "sm_89",
-    "torch": "2.13.0+cu130", "cuda": "13.0",
-    # This is now an ENTRY key and rides the marker's `entries` row,
-    # so it is spelled in the grammar `cell_key.is_key` actually admits.
-    "cell_key": "cg-key-v1-" + "d" * 56,
-    "lora_bucket": 0,
+    "family": "sdxl-base",
+    "compiled_graph_key": KEY,
 }
 
 #: The ONE graph class this fixture arms. An entry NAMES its class.
 ENTRY_NAME = "unet/g"
 
-ENTRY = {
-    "name": ENTRY_NAME,
-    "target": "unet", "fork": [], "class_dims": [],
-    "inputs": [{"name": "sample", "position": 0, "dtype": "bfloat16",
-                "shape": [2, 4, "h", "w"]}],
-    "symbols": {"h": [64, 160], "w": [64, 160]},
-    "constants": [{"fqn": "conv_in.weight", "source": aot_serve.SOURCE_STATE_DICT,
-                   "dtype": "bfloat16", "shape": [320, 4, 3, 3]}],
-    "graph": {},
-}
+INGRESS = CallIngress(
+    parameters=("sample",),
+    flat_arity=1,
+    inputs=(CallInput(
+        "sample", 0, "sample", 0, (), "sample", "bfloat16",
+        (2, 4, "h", "w"),
+    ),),
+    symbols=(("h", (64, 160)), ("w", (64, 160))),
+)
 
 
 def _armed_module() -> tuple[FakeModule, FakePackage, FakePipeline]:
-    """A module wrapped by the real ``aot_serve`` swap, ONE entry armed.
-
-    the PIPELINE marker carries ``targets`` + ``entries`` — the shape
-    :func:`aot_serve.arm_entry` writes. It used to be a bare ``state``, which
-    no production path has ever written on a pipeline and which
-    ``armed_entries`` does not recognise, so leaving it would have made
-    ``is_armed`` answer False on a pipeline this fixture calls armed.
-    """
+    """A module wrapped by the real TCG runner policy, one class armed."""
     module, package = FakeModule(), FakePackage()
     pipeline = FakePipeline(module)
-    runner = aot_serve.ArtifactRunner(
-        package=package,
-        contract=aot_serve.contract_from_meta(ENTRY),
-        constants=aot_serve.constants_from_meta(ENTRY),
-        module_name="unet", entry=ENTRY_NAME)
-    runner.bind(module.state_dict(), {})
-    dispatch = aot_serve.EntryDispatch(((ENTRY_NAME, runner),))
+    package.bind(module.state_dict(), device="cpu")
+    runner = aot_serve.TCGEntryRunner(
+        cast(CompiledGraphRunner, package),
+        INGRESS,
+        "unet",
+        ENTRY_NAME,
+        Cfg.family,
+    )
+    dispatch = aot_serve.EntryDispatch(declared=(ENTRY_NAME,))
+    dispatch.add(ENTRY_NAME, runner)
     aot_serve.wrap_module(module, dispatch, META, target="unet")
     setattr(pipeline, "_cozy_aot", {
         "meta": META,
@@ -169,13 +160,15 @@ def _armed_module() -> tuple[FakeModule, FakePackage, FakePipeline]:
             "module": module, "attr": "forward",
             "state": getattr(module, "_cozy_aot")["state"]}},
         "entries": {ENTRY_NAME: {
-            "key": META["cell_key"], "target": "unet",
-            "class_hash": "", "manifest_digest": ""}},
+            "compiled_graph_key": KEY,
+            "target": "unet",
+            "class_hash": "",
+        }},
         "bound_constants": {"pools": {}, "literals": {}},
     })
     # The fixture's own claim, checked once here rather than in five rows: this
     # pipeline really is serving the class it says it is.
-    assert aot_serve.armed_entries(pipeline) == {ENTRY_NAME: META["cell_key"]}
+    assert aot_serve.armed_entries(pipeline) == {ENTRY_NAME: KEY}
     return module, package, pipeline
 
 
@@ -373,12 +366,7 @@ def test_the_two_triggers_report_different_reasons() -> None:
 
 
 def test_a_suppressed_request_is_not_reported_as_compiled() -> None:
-    ref = "root/family-sdxl-base#cg-key-v1-abc"
-    # The noted key must be the key the ref NAMES — `is_aot_ref` recognises an
-    # AOT cell by exactly that match, so a `ck1`-stamped note against an `cg-key-v1`
-    # ref resolves `jit_cell` and this row would assert the suppression
-    # vocabulary on the wrong serving mode.
-    aot_serve.note_aot_key("cg-key-v1-abc")
+    ref = f"root/family-sdxl-base#{KEY}"
     armed = serving_mode.resolve(active_compile_ref=ref, sm="89")
     assert armed.serving_mode == serving_mode.MODE_AOT_CELL
 
@@ -397,7 +385,7 @@ def test_a_suppressed_request_is_not_reported_as_compiled() -> None:
 def test_a_real_guard_miss_still_reports_itself() -> None:
     """The order must not swallow the per-request fallback vocabulary."""
     missed = serving_mode.resolve(
-        active_compile_ref="root/family-sdxl-base#cg-key-v1-abc", guard_missed=True)
+        active_compile_ref=f"root/family-sdxl-base#{KEY}", guard_missed=True)
     assert missed.fallback_reason == serving_mode.FALLBACK_GUARD_MISS
     assert missed.served_eager_fallback is True
 

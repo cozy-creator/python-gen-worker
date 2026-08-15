@@ -105,7 +105,6 @@ def test_a_real_oom_killed_entry_child_is_a_retryable_shortfall_that_teaches_the
     if root is None:
         pytest.skip("no delegated cgroup v2 memory controller on this box")
 
-    program = torch.export.export(_Tiny(), (torch.randn(8, 256),))
     cgroup = root / f"pgw848-{os.getpid()}"
     cgroup.mkdir(exist_ok=True)
     try:
@@ -130,7 +129,6 @@ def test_a_real_oom_killed_entry_child_is_a_retryable_shortfall_that_teaches_the
             2, vcpus=16, available_bytes=64 * _GIB, device_lock=True, limit=1)
         box = pool.EntryCompilePool(
             tmp_path / "pool", width=width,
-            inductor_configs={"compile_threads": 2},
             cache_dir=str(tmp_path / "cache"), python=str(launcher))
 
         # pgw#868, gating the 0.90.6 cut: a delegated cgroup root EXISTING is
@@ -213,8 +211,9 @@ def test_a_real_oom_killed_entry_child_is_a_retryable_shortfall_that_teaches_the
         assert facts["oom_entry"] == "share-000"
         assert facts["oom_basis"] == failure.basis
         assert facts["peak_child_rss_bytes"] == box.peak_rss_bytes > 0
-        table = aot_mint._mint_phase_table([], {"total_s": 1.0}, None, width,
-                                           facts)
+        table = aot_mint._mint_phase_table(
+            [], {"total_s": 1.0}, width, facts,
+        )
         assert table["pool"]["oom_entry"] == "share-000"
 
         # 5. ...and the parent banks it, so the RETRY is narrower

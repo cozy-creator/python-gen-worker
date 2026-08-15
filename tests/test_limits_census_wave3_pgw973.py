@@ -14,115 +14,14 @@ Three shapes are proven here, all on the real code paths:
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List
 
 import pytest
 
 
 # ---------------------------------------------------------------------------
-# 1. aot_resume — TWO absence collapses in one expression, one of them an
-#    inversion that DELETED the corpus it was supposed to bound.
-# ---------------------------------------------------------------------------
-
-
-def _area(tmp_path: Path, *names: str, size: int = 4096) -> List[Path]:
-    """A real resume area on disk: one directory per scope with real bytes."""
-    area = tmp_path / ".mint-resume"
-    made: List[Path] = []
-    for i, name in enumerate(names):
-        scope = area / name
-        scope.mkdir(parents=True)
-        (scope / "blob.bin").write_bytes(b"\0" * size)
-        # Distinct mtimes so "oldest first" is well-defined.
-        os.utime(scope, (1_700_000_000 + i, 1_700_000_000 + i))
-        made.append(scope)
-    return made
-
-
-def test_an_env_zero_no_longer_purges_every_banked_scope(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """THE INVERSION. `cap = int(max_bytes or os.environ.get(ENV) or DEFAULT)`
-    read the env as the string ``"0"``, which is TRUTHY — so
-    ``GEN_WORKER_MINT_RESUME_MAX_BYTES=0``, the spelling an operator would
-    reach for to mean "no cap", produced ``cap = 0`` and the sweep then removed
-    every scope except ``keep``. A capacity bound turned into a delete-all.
-    """
-    from gen_worker import aot_resume
-
-    keep, other_a, other_b = _area(tmp_path, "keep", "old-a", "old-b")
-    monkeypatch.setenv(aot_resume.ENV_MAX_BYTES, "0")
-
-    with pytest.raises(ValueError) as exc:
-        aot_resume.sweep(keep)
-    assert aot_resume.ENV_MAX_BYTES in str(exc.value)
-
-    # The corpus is intact — which is the whole point. Under the old
-    # expression this assertion fails with both siblings deleted.
-    assert other_a.exists() and other_b.exists() and keep.exists()
-
-
-def test_a_caller_computed_zero_is_refused_not_silently_replaced(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The second collapse in the same expression, in the OPPOSITE direction:
-    a caller passing ``max_bytes=0`` fell through to the 4 GiB default, so a
-    budget that computed to nothing silently got the module's own number."""
-    from gen_worker import aot_resume
-
-    monkeypatch.delenv(aot_resume.ENV_MAX_BYTES, raising=False)
-    with pytest.raises(ValueError, match="max_bytes must be positive"):
-        aot_resume.resume_area_cap_bytes(0)
-    with pytest.raises(ValueError, match="max_bytes must be positive"):
-        aot_resume.resume_area_cap_bytes(-1)
-    # Absence — and ONLY absence — takes the stated default.
-    assert aot_resume.resume_area_cap_bytes(None) == aot_resume.DEFAULT_MAX_BYTES
-    assert aot_resume.resume_area_cap_bytes(1024) == 1024
-
-
-def test_a_malformed_env_names_itself_instead_of_raising_bare(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from gen_worker import aot_resume
-
-    monkeypatch.setenv(aot_resume.ENV_MAX_BYTES, "4GiB")
-    with pytest.raises(ValueError, match="not an integer byte count"):
-        aot_resume.resume_area_cap_bytes()
-    monkeypatch.setenv(aot_resume.ENV_MAX_BYTES, "-5")
-    with pytest.raises(ValueError, match="must be positive"):
-        aot_resume.resume_area_cap_bytes()
-
-
-def test_the_cap_still_sweeps_when_it_is_stated(tmp_path: Path) -> None:
-    """The bound is not merely safe — it still does its job, oldest first."""
-    from gen_worker import aot_resume
-
-    # `_area` stamps ascending mtimes, so `old-a` is the oldest non-keep.
-    keep, old_a, old_b = _area(tmp_path, "old-a", "old-b", "keep", size=4096)
-    dropped = aot_resume.sweep(keep, max_bytes=9000)   # room for two scopes
-    assert dropped == 1
-    assert keep.exists() and old_b.exists() and not old_a.exists(), (
-        "the sweep evicted the NEWEST abandoned scope — the one most likely "
-        "to be resumed next — instead of the oldest"
-    )
-
-
-def test_a_bad_env_disables_the_bank_rather_than_failing_the_mint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`open_bank` never fails a mint for a cache — the refusal surfaces as a
-    warning and no bank, not as a dead mint."""
-    from gen_worker import aot_resume
-
-    monkeypatch.setenv(aot_resume.ENV_MAX_BYTES, "0")
-    (keep,) = _area(tmp_path, "keep")
-    assert aot_resume.open_bank(str(keep)) is None
-
-
-# ---------------------------------------------------------------------------
-# 2. transport.SendQueue — `maxsize <= 0` deleted the bound outright
+# transport.SendQueue — `maxsize <= 0` deleted the bound outright
 # ---------------------------------------------------------------------------
 
 
@@ -321,18 +220,6 @@ def test_the_host_ram_floor_has_one_owner_and_one_derivation() -> None:
     assert memory.effective_ram_floor_gb(total_gb=0.0) == 8.0      # unreadable host
 
 
-def test_serving_headroom_is_one_number_pgw973() -> None:
-    """The fifth pair is deliberately NOT collapsed: `aot_wrapper_split` is an
-    inductor hook whose only in-repo imports are `host_isa` and
-    `aot_run_impl_split`, and importing `aot_compile_pool` would drag the whole
-    mint driver into it. The duplication is stated at the site; this pins the
-    two values together so a drift is a failure and not a surprise."""
-    from gen_worker import aot_compile_pool, aot_wrapper_split
-
-    assert (aot_wrapper_split.SERVING_HEADROOM_CPUS
-            == aot_compile_pool.SERVING_HEADROOM_CPUS)
-
-
 # ---------------------------------------------------------------------------
 # 5. Deletions — the bounds that were never read
 # ---------------------------------------------------------------------------
@@ -387,5 +274,3 @@ def test_the_mint_reap_grace_is_named_and_argues_its_exemption() -> None:
 # absence to infer. The state it named is gone — §4.33 deleted the budget that
 # computed `vram_cap_bytes`, so there is no ceiling to apply and no silence to
 # distinguish from one. The RULE survives everywhere else in this census.
-
-

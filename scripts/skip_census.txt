@@ -76,7 +76,6 @@ CI-SKIPPED tests/test_llama_runtime.py|gpu smoke runs on the nightly gpu ci lane
 # pgw#1053: the real-card park/restore leg. Measured by hand on the rig box's
 # RTX 4070 via .venv-cu126 (2026-08-09); the cardless rows above it assert the
 # goals decision and the move/restore symmetry.
-CI-SKIPPED tests/test_mint_residents_pgw1053.py|needs a real card
 
 # ─── CI-SKIPPED: host capability the runner genuinely lacks ───────────────────
 # Each is measured on a developer box or a pod; none is a property of the code

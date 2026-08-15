@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, cast
 
 import msgspec
 import pytest
@@ -38,6 +38,7 @@ from gen_worker.models.refs import normalize_model_ref
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs
 from gen_worker.models import store as store_mod
+from torch_compiled_graphs import CallIngress, CallInput, CompiledGraphRunner
 
 FAMILY = "sdxl"
 
@@ -64,6 +65,14 @@ class _Unet:
 class _Pipe:
     def __init__(self) -> None:
         self.unet = _Unet()
+
+
+class _FakeTCGRunner:
+    bound = True
+    declared_fqns: tuple[str, ...] = ()
+
+    def __init__(self) -> None:
+        self.calls = 0
 
 
 #: per-test wiring the endpoint instance reads at setup/handler time.
@@ -99,7 +108,7 @@ class AotFamily:
             for row in ((marker or {}).get("targets") or {}).values():
                 runner = (row.get("state") or {}).get("runner")
                 for _name, art in getattr(runner, "runners", ()) or ():
-                    art.calls += 1
+                    art.runner.calls += 1
         return Out()
 
 
@@ -112,10 +121,16 @@ def _fake_arm(key: str, ref: str):
                 publisher: Any = None) -> "fleet_cells.ArmOutcome":
         unet = pipe.unet
         # production wraps a REGISTRY; `is_armed` reads it.
-        _runner = aot_serve.ArtifactRunner(
-            package=None,
-            contract=aot_serve.ArtifactContract(inputs=(), symbols={}),
-            constants=(), module_name="unet", entry="unet/main")
+        _runner = aot_serve.TCGEntryRunner(
+            runner=cast(CompiledGraphRunner, _FakeTCGRunner()),
+            contract=CallIngress(
+                parameters=("sample",),
+                flat_arity=1,
+                inputs=(CallInput(
+                    "sample", 0, "sample", 0, (), "sample", "float32", (1,),
+                ),),
+            ),
+            module_name="unet", entry="unet/main", family=FAMILY)
         _dispatch = aot_serve.EntryDispatch(declared=("unet/main",))
         _dispatch.add("unet/main", _runner)
         state = {"successful_calls": 0, "failed": False,
@@ -133,7 +148,6 @@ def _fake_arm(key: str, ref: str):
                 "module": unet, "attr": "forward", "state": state}},
             "entries": {"unet/main": {"key": ""}},
         })
-        marker = getattr(pipe, aot_serve._MARKER_ATTR)
         # An `aot_serve.note_aot_key(key)` stood here — the ONE line no
         # production arm route ever called, which is why these rows were green
         # while the pod served eager (pgw#1141b). It is DELETED, not moved: the
@@ -162,8 +176,6 @@ def _executor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Executor:
         p = tmp_path / ref.replace("/", "_").replace(":", "_")
         p.mkdir(parents=True, exist_ok=True)
         return p
-
-    import gen_worker.executor as ex_mod
 
     monkeypatch.setattr(store_mod, "ensure_local", _fake_download)
     return ex

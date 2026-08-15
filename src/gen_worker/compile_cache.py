@@ -896,6 +896,9 @@ def declared_compile_facts(cfg: Any, *, lora_bucket_override: Optional[int] = No
 # sound in the first place.
 
 _CLOSURE_ENTRYPOINTS = (
+    "gen_worker.aot_mint",
+    "gen_worker.boot_trace_child",
+    "gen_worker.api.export_contract",
     "gen_worker.compile_cache",
     "gen_worker.guard_closure",
     "gen_worker.cell_key",
@@ -2903,29 +2906,6 @@ def enable(pipeline: Any, cfg: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def resolve_pipeline_class(name: str) -> Any:
-    """Resolve a serving pipeline class name for a mint (gw#586).
-
-    The traced FX graphs depend on the pipeline's CALL path, not just the
-    module tree — an unknown name must refuse loudly, because a silent
-    generic-load fallback would trace the wrong call and publish a cell no
-    serving lookup can ever hit.
-    """
-    import diffusers
-
-    cleaned = str(name or "").strip()
-    if not cleaned:
-        raise RuntimeError("pipeline_class must be a non-empty class name")
-    cls = getattr(diffusers, cleaned, None)
-    if cls is None or not callable(getattr(cls, "from_pretrained", None)):
-        raise RuntimeError(
-            f"pipeline_class {cleaned!r} is not a loadable diffusers "
-            "pipeline class in this producer image; a generic-load fallback "
-            "would trace the wrong call path (gw#586), so the mint refuses"
-        )
-    return cls
-
-
 def emit_jit_compile_event(
     timings: Mapping[str, float],
     *,
@@ -3077,7 +3057,6 @@ __all__ = [
     "is_compile_armed",
     "execution_lane_bucket",
     "execution_lane_token",
-    "resolve_pipeline_class",
     "runtime_key",
     "record_cell_proven",
     "record_cell_quarantined",

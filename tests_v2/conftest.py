@@ -178,18 +178,6 @@ def _fresh_receipt_gate():
 
 
 @pytest.fixture(autouse=True)
-def _fresh_learned_aot_keys():
-    from gen_worker import aot_serve
-
-    with aot_serve._KNOWN_AOT_KEYS_LOCK:
-        before = set(aot_serve._KNOWN_AOT_KEYS)
-    yield
-    with aot_serve._KNOWN_AOT_KEYS_LOCK:
-        aot_serve._KNOWN_AOT_KEYS.clear()
-        aot_serve._KNOWN_AOT_KEYS.update(before)
-
-
-@pytest.fixture(autouse=True)
 def _fresh_cell_ledgers():
     from gen_worker import compile_cache as _cc
     from gen_worker import fleet_cells as _fc

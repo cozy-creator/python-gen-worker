@@ -887,7 +887,6 @@ class PoolLedger:
             "pool_entries": int(self.entries),
             "pool_workers": int(self.workers),
             "pool_workers_initial": int(self.workers_initial),
-            **dict(self.resume),
         }
 
 
