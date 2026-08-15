@@ -41,7 +41,13 @@ import msgspec
 
 from .binding import ModelRef
 from ..families.base import KIND_LORA, GenerationDefaults, family_for
-from ..models.tensor_layout_contract import normalize_layout_demand
+from ..models.tensor_layout_contract import (
+    LayoutDeclarationError,
+    LayoutRequirements,
+    normalize_layout_demand,
+    normalize_layout_requirements,
+    normalize_layout_undeclarable,
+)
 
 D = TypeVar("D", bound=GenerationDefaults)
 
@@ -144,18 +150,55 @@ class Slot(Generic[D]):
     The handles are validated here against the SDK's
     transcribed ``KNOWN_CONTRACTS``; the KEYS are validated at decoration
     against the slot's DERIVED component tree, so a key that would silently
-    match nothing is a build error naming the tree. **Absent is UNDECLARED**
-    — a tri-state, neither "accepts everything" nor "accepts nothing": the
-    hub's gate has no teeth on a slot that declares nothing and falls back to
-    the image-wide decoder census. An empty mapping or an empty tuple is a
-    decoration-time error, because collapsing the tri-state is a fail-open
-    defect.
+    match nothing is a build error naming the tree. An empty mapping or an
+    empty tuple is a decoration-time error, because collapsing the tri-state
+    is a fail-open defect.
+
+    **A19 (Paul, 2026-08-15): the declaration is MANDATORY.** Absence used to
+    be the UNDECLARED tri-state; measured fleet-wide it was only ever the
+    default, so "no opinion" and "nobody wrote the line" were one state.
+    Discovery now REFUSES a model slot carrying neither ``layouts=`` nor
+    ``layouts_undeclarable=`` — see :func:`gen_worker.models.
+    tensor_layout_contract.undeclared_slot_refusal`. The refusal is at
+    discovery/publish, not here: a bare ``Slot(...)`` remains constructible
+    in-process, and it is the IMAGE that may not ship undeclared.
+
+    ``layouts_undeclarable`` is the explicit third rung, and it is a
+    declaration rather than a default: a REASON string, refused when blank,
+    mutually exclusive with ``layouts=``. It exists for slots whose bytes no
+    registered handle names — a tokenizer tree with no tensors, a GGUF quant
+    axis (th#1809 T3), a compressed-tensors checkpoint with no descriptor.
+    Inventing a handle for those is the failure mode, not the fix.
 
     This lives on ``Slot`` and NOT on ``Compile``: ``Compile``'s fields feed
     ``contract_axes()``, a cell-key input, and §1.33 point 5 is that
     conversion is upstream of compute and invisible to cell identity. A
     layout declaration there would either re-key every cell in the fleet or
     sit inside the key struct while deliberately not participating.
+
+    ``layout_requirements`` is the REQUIREMENTS axis (Paul, 2026-08-15): what
+    EXECUTING a declared contract needs of the machine, keyed by the handle it
+    guards. Dual form — the compact ``"sm100+"`` or the structured
+    ``LayoutRequirements(min_sm=100)``::
+
+        Slot(QwenImagePipeline, selected_by="model",
+             layouts={"*": (CONTRACT_PLAIN_BF16, CONTRACT_COZY_SVDQ_NVFP4_LR8)},
+             layout_requirements={CONTRACT_COZY_SVDQ_NVFP4_LR8: "sm100+"})
+
+    A handle names bytes at rest; the floor its kernels need is an EXECUTION
+    fact, which is why it lives here and not on the artifact contract — the
+    same placement, and the same name, as tensorhub's
+    ``contractspec.DecodeEntry.MinSM``, which is the field it feeds. It is per
+    (slot, handle) because one contract has different floors in different
+    code: ``cozy.fp8-rowwise@1`` is sm89 per-tensor and sm90 rowwise.
+
+    NO DEFAULTS, as everywhere else on this surface: a declared requirement is
+    checked, an undeclared one is not evaluated. A key naming a handle
+    ``layouts=`` does not accept is a refusal — a requirement guarding nothing
+    is never checked. Kernel and torch-version requirements are named in the
+    ruling and deliberately NOT built; the compact grammar is a comma-separated
+    term list so they can be added without re-spelling a declaration, and an
+    unknown term is refused rather than ignored.
 
     ``optional`` is DERIVED, never passed: a slot is optional exactly when
     its ``setup()`` parameter carries a default (``edit: Pipe | None =
@@ -167,7 +210,7 @@ class Slot(Generic[D]):
 
     __slots__ = (
         "pipeline_cls", "selected_by", "family", "default_checkpoint", "root",
-        "optional", "layouts",
+        "optional", "layouts", "layouts_undeclarable", "layout_requirements",
     )
 
     def __init__(
@@ -179,6 +222,8 @@ class Slot(Generic[D]):
         default_checkpoint: Optional[ModelRef] = None,
         root: bool = False,
         layouts: Optional[Mapping[str, Sequence[str]]] = None,
+        layouts_undeclarable: str = "",
+        layout_requirements: Optional[Mapping[str, Any]] = None,
     ) -> None:
         if not isinstance(pipeline_cls, type):
             raise TypeError(
@@ -196,21 +241,54 @@ class Slot(Generic[D]):
         self.default_checkpoint = default_checkpoint
         self.root = bool(root)
         self.optional = False  # derived at decoration from setup()'s default
-        # None is UNDECLARED and stays None; anything else normalizes now, at
-        # the declaration site, so the traceback names the Slot the author
-        # wrote rather than a manifest key.
+        where = f"Slot({pipeline_cls.__name__})"
+        if layouts is not None and str(layouts_undeclarable or "").strip():
+            raise LayoutDeclarationError(
+                f"{where}: layouts= and layouts_undeclarable= are mutually "
+                "exclusive — a slot either names the contracts it consumes or "
+                "says why none is nameable, never both."
+            )
+        # None is UNDECLARED at construction and stays None; discovery is what
+        # refuses it (A19). Anything else normalizes now, at the declaration
+        # site, so the traceback names the Slot the author wrote rather than a
+        # manifest key.
         self.layouts: Optional[Dict[str, tuple[str, ...]]] = (
             None if layouts is None
-            else normalize_layout_demand(
-                layouts, where=f"Slot({pipeline_cls.__name__})")
+            else normalize_layout_demand(layouts, where=where)
         )
+        # `""` is the parameter's own default — the author passed nothing, and
+        # discovery is what refuses that. Anything else was WRITTEN, so a
+        # whitespace-only reason is a refusal here rather than a silent escape.
+        self.layouts_undeclarable: str = (
+            "" if layouts_undeclarable == ""
+            else normalize_layout_undeclarable(
+                layouts_undeclarable, where=where)
+        )
+        # The REQUIREMENTS axis, keyed by the handle it guards. Declared
+        # against the accepted SET, so a requirement can never guard a
+        # contract this slot does not consume.
+        if layout_requirements is None:
+            self.layout_requirements: Dict[str, LayoutRequirements] = {}
+        elif self.layouts is None:
+            raise LayoutDeclarationError(
+                f"{where}: layout_requirements= without layouts=. A "
+                "requirement guards a declared contract; there is none here "
+                "to guard."
+            )
+        else:
+            self.layout_requirements = normalize_layout_requirements(
+                layout_requirements, where=where,
+                accepted={h for hs in self.layouts.values() for h in hs},
+            )
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return (
             f"Slot({self.pipeline_cls.__name__}, selected_by={self.selected_by!r}, "
             f"family={self.family!r}, default_checkpoint={self.default_checkpoint!r}, "
             f"root={self.root!r}, optional={self.optional!r}, "
-            f"layouts={self.layouts!r})"
+            f"layouts={self.layouts!r}, "
+            f"layouts_undeclarable={self.layouts_undeclarable!r}, "
+            f"layout_requirements={self.layout_requirements!r})"
         )
 
 

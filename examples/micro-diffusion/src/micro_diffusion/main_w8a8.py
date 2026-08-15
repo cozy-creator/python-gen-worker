@@ -62,7 +62,17 @@ class MicroW8a8Out(msgspec.Struct):
 
 
 @endpoint(
-    models={"pipeline": Slot(MicroW8a8Pipeline, selected_by="model")},
+    models={"pipeline": Slot(
+        MicroW8a8Pipeline, selected_by="model",
+        # The denoiser IS the fp8 artifact `load_w8a8_denoiser` reads; the
+        # decoder beside it is dense. Both are in the set this slot executes.
+        layouts={"*": ("cozy.fp8-rowwise@1", "plain.bf16@1")},
+        # And what EXECUTING that contract needs of the card. sm89 is the
+        # floor `models/w8a8.py` states (`W8A8_MIN_SM`) — `_scaled_mm`
+        # per-tensor. The rowwise GEMM wants sm90, but the contract is still
+        # DECODABLE at sm89 through the per-tensor path, so 89 is the honest
+        # floor for the handle rather than the fastest one.
+        layout_requirements={"cozy.fp8-rowwise@1": "sm89+"})},
     compile=Compile(
         family=FAMILY, targets=("transformer", "decoder"), shapes=PIXEL_ROWS,
         text_len=COND_LEN),

@@ -44,7 +44,8 @@ class MicroEscapeOut(msgspec.Struct):
 
 
 @endpoint(
-    models={"pipeline": Slot(MicroEscapePipeline, selected_by="model")},
+    models={"pipeline": Slot(MicroEscapePipeline, selected_by="model",
+        layouts={"*": ("plain.bf16@1",)})},
     compile=Compile(
         family=FAMILY, targets=("transformer",), shapes=PIXEL_ROWS,
         text_len=COND_LEN),

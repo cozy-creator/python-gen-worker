@@ -90,7 +90,8 @@ class MicroOut(msgspec.Struct):
 
 
 @endpoint(
-    models={"pipeline": Slot(MicroPipeline, selected_by="model")},
+    models={"pipeline": Slot(MicroPipeline, selected_by="model",
+        layouts={"*": ("plain.bf16@1",)})},
     compile=Compile(
         family=FAMILY, targets=("transformer", "decoder"), shapes=PIXEL_ROWS,
         text_len=COND_LEN),

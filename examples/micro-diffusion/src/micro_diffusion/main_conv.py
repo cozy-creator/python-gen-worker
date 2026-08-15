@@ -44,7 +44,8 @@ class MicroConvOut(msgspec.Struct):
 
 
 @endpoint(
-    models={"pipeline": Slot(MicroConvPipeline, selected_by="model")},
+    models={"pipeline": Slot(MicroConvPipeline, selected_by="model",
+        layouts={"*": ("plain.bf16@1",)})},
     compile=Compile(
         family=FAMILY, targets=("unet",), shapes=PIXEL_ROWS,
         text_len=COND_LEN),

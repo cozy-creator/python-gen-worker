@@ -130,6 +130,46 @@ def _check_layouts(
     return problems
 
 
+def _check_undeclarable(path: Path, value: ast.expr) -> List[str]:
+    """The escape is reviewed in the diff like any other declaration, so its
+    REASON has to be a literal too — a computed one is unreadable exactly
+    where it matters."""
+    if isinstance(value, ast.Constant) and isinstance(value.value, str) \
+            and value.value.strip():
+        return []
+    return [
+        f"{path}:{value.lineno}: layouts_undeclarable= must be a non-empty "
+        "string literal saying which bytes this slot holds and why no "
+        "registered handle names them"
+    ]
+
+
+def _check_requirements(
+    path: Path, value: ast.expr, vocabulary: Set[str],
+) -> List[str]:
+    """The requirements axis is reviewed in the diff like the demand it
+    guards, so it is a dict literal of handle -> compact string literal."""
+    where = f"{path}:{value.lineno}"
+    if not isinstance(value, ast.Dict):
+        return [
+            f"{where}: layout_requirements= is a {type(value).__name__}, not "
+            "a dict literal — the AST sweep cannot read it"
+        ]
+    problems: List[str] = []
+    for key, item in zip(value.keys, value.values):
+        if key is None or not _handle_is_readable(key, vocabulary):
+            problems.append(
+                f"{where}: layout_requirements= key must be a handle literal "
+                f"or a constant imported from {VOCABULARY_MODULE}")
+            continue
+        if not (isinstance(item, ast.Constant) and isinstance(item.value, str)):
+            problems.append(
+                f"{path}:{item.lineno}: layout_requirements= value must be "
+                "the compact string form (e.g. \'sm100+\'); a computed "
+                "requirement is unreviewable exactly where it matters")
+    return problems
+
+
 def _call_name(call: ast.Call) -> str:
     func = call.func
     if isinstance(func, ast.Name):
@@ -149,15 +189,32 @@ def scan(path: Path) -> List[str]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or _call_name(node) != "Slot":
             continue
+        declared = False
         for kw in node.keywords:
             if kw.arg == "layouts":
+                declared = True
                 problems.extend(_check_layouts(path, node, kw.value, vocabulary))
+            elif kw.arg == "layouts_undeclarable":
+                declared = True
+                problems.extend(_check_undeclarable(path, kw.value))
+            elif kw.arg == "layout_requirements":
+                problems.extend(
+                    _check_requirements(path, kw.value, vocabulary))
             elif kw.arg is None:
                 # `Slot(cls, **kwargs)` — a layouts= could be hiding in there.
                 problems.append(
                     f"{path}:{node.lineno}: Slot(**kwargs) may carry a "
                     "layouts= the sweep cannot see; pass the declaration "
                     "explicitly")
+                declared = True   # unknowable; the splat refusal above stands
+        if not declared:
+            problems.append(
+                f"{path}:{node.lineno}: this model slot declares no consumed "
+                "tensor-layout contract. A19 is a hard cut — ABSENT is a "
+                "refusal, never the UNDECLARED tri-state. Write "
+                'layouts={"*": ("plain.bf16@1",)}, or, if no registered '
+                "handle names this slot's bytes, "
+                'layouts_undeclarable="<why>".')
     return problems
 
 
@@ -167,8 +224,8 @@ def main(argv: List[str]) -> int:
     for path in _iter_python_files(roots):
         problems.extend(scan(path))
     if problems:
-        print("pgw#1143: Slot(layouts=...) declarations that the AST sweep "
-              "cannot read:\n", file=sys.stderr)
+        print("pgw#1143 / A19: Slot layout declarations that are missing or "
+              "that the AST sweep cannot read:\n", file=sys.stderr)
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)
         print(

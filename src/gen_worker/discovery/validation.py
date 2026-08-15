@@ -106,6 +106,7 @@ def validate_endpoint_lock(lock_dict: Dict[str, Any]) -> EndpointLockValidationR
             )
         slugs[slug] = py_name
 
+    _check_slot_layout_declarations(lock_dict, errors)
     _check_aot_preconditions(lock_dict, errors, warnings)
 
     return EndpointLockValidationResult(
@@ -113,6 +114,60 @@ def validate_endpoint_lock(lock_dict: Dict[str, Any]) -> EndpointLockValidationR
         errors=tuple(errors),
         warnings=tuple(warnings),
     )
+
+
+def _undeclared_slot_layouts(lock_dict: Dict[str, Any]) -> List[str]:
+    """A19 — the model slots in this manifest that declare no consumed
+    tensor-layout contract, each already rendered as its own refusal.
+
+    There is no default and no exemption list: every entry of a function's
+    ``models={}`` is a model slot by construction, so "non-model slots are
+    exempt" needs no test — they are not slots. A slot whose bytes no
+    registered handle names says so with ``layouts_undeclarable="<reason>"``,
+    and the reason travels on the manifest.
+    """
+    from ..models.tensor_layout_contract import undeclared_slot_refusal
+
+    out: List[str] = []
+    functions = lock_dict.get("functions") if isinstance(lock_dict, dict) else None
+    for fn in functions or ():
+        if not isinstance(fn, dict):
+            continue
+        fn_label = str(fn.get("name") or fn.get("python_name") or "<function>")
+        for slot in fn.get("slots") or ():
+            if not isinstance(slot, dict):
+                continue
+            if slot.get("layouts"):
+                continue
+            if str(slot.get("layouts_undeclarable") or "").strip():
+                continue
+            out.append(undeclared_slot_refusal(
+                function=fn_label, slot=str(slot.get("name") or "<slot>")))
+    return out
+
+
+def refuse_undeclared_slot_layouts(lock_dict: Dict[str, Any]) -> None:
+    """A19's refusal, typed. Every offender in ONE exception rather than one
+    per build — an author fixing them one image build at a time is why nobody
+    fixed them."""
+    from ..models.tensor_layout_contract import UndeclaredSlotLayoutError
+
+    found = _undeclared_slot_layouts(lock_dict)
+    if found:
+        raise UndeclaredSlotLayoutError("\n\n".join(found))
+
+
+def _check_slot_layout_declarations(
+    lock_dict: Dict[str, Any], errors: List[str],
+) -> None:
+    """The typed refusal, as a build error beside the others, so one run
+    surfaces it with everything else the manifest gets wrong."""
+    from ..models.tensor_layout_contract import UndeclaredSlotLayoutError
+
+    try:
+        refuse_undeclared_slot_layouts(lock_dict)
+    except UndeclaredSlotLayoutError as exc:
+        errors.append(str(exc))
 
 
 def _check_aot_preconditions(
