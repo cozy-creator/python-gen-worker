@@ -653,6 +653,20 @@ def mint(request: MintRequest) -> MintReport:
     # retired worker kernel-lane A/B neither reached that schema nor affected
     # the compile child, so it cannot be a second artifact-policy authority.
     instance, pipe, aot_spec = _load()
+    # pgw#985, one axis over: a host that cannot NAME what it would produce
+    # must refuse before it produces it — once, here, rather than K times
+    # inside the compile children that would each rediscover it.
+    #
+    # DELIBERATELY AFTER `_load()`. The wiring refusals (no such target, an
+    # unresolvable slot, an untraceable pipeline) are more specific than "this
+    # box has no card", and pgw#985's whole finding was that the general
+    # sentence standing in for the specific one is what makes an operator rule
+    # out the only thing it was not. The environment is the LAST preflight, and
+    # it still precedes every export, compile and published byte.
+    target_block = cc.compile_target_block()
+    if target_block:
+        raise PreflightRefused(
+            f"compiled_graph_target_unnameable: {target_block}")
     from .models import structure_only
 
     facts = structure_only.facts_of(pipe)

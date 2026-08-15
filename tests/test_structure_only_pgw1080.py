@@ -108,11 +108,21 @@ def test_a_component_the_tree_does_not_declare_REFUSES_by_name(
 
 
 def test_the_structure_EXPORTS_and_TCG_COMPILES(
-    tree: Path, tmp_path: Path,
+    tree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from torch_compiled_graphs import build_call_ingress
 
-    from gen_worker import aot_compile_child, aot_mint
+    from gen_worker import aot_compile_child, aot_mint, compile_cache
+
+    # This runner has no card, and pgw#985 makes a host that cannot name its
+    # `sm` REFUSE rather than compile against a placeholder. The subject here
+    # is the structure/export/compile path, not host identity, so the target
+    # is STATED — the same thing `test_tcg_compile_child_pgw1270` does. A
+    # compile that wants to run off-card says which `sm` it is keying for.
+    monkeypatch.setattr(compile_cache, "runtime_key", lambda: {
+        "sku": "a10", "sm": "sm_86", "torch": "2.13.0+cu130",
+        "triton": "3.6.0", "cuda": "13.0", "image_digest": "",
+    })
 
     module, _facts = so.build_component(tree, "decoder", device="cpu")
     mode = so.fake_mode_of(module)

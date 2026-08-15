@@ -381,6 +381,47 @@ def test_runtime_uses_the_canonical_worker_cas(
     }
 
 
+def test_a_host_that_cannot_name_its_sm_REFUSES_instead_of_substituting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pgw#985's deterministic environment decline, one axis over.
+
+    RED before the fix: `_tcg_runtime` read `runtime.get("sm") or "cpu"`, so a
+    cardless child built a valid `RuntimeCompatibility("cpu")`, TCG compiled
+    and KEYED against it, and a mint that must refuse deterministically
+    published an artifact under an `sm` no card reports. A missing gate arm
+    refuses; it never substitutes.
+    """
+    import torch_compiled_graphs
+
+    from gen_worker import compile_cache
+    from gen_worker.child_preflight import PreflightRefused
+    from gen_worker.models import cache_paths
+
+    monkeypatch.setattr(compile_cache, "runtime_key", lambda: {"sm": ""})
+    monkeypatch.setattr(
+        torch_compiled_graphs, "RuntimeCompatibility",
+        lambda *a, **kw: pytest.fail("a compile target was built without an sm"))
+    monkeypatch.setattr(
+        cache_paths, "open_worker_engine",
+        lambda root=None: pytest.fail("TCG was opened without an sm"))
+
+    with pytest.raises(PreflightRefused) as caught:
+        child._tcg_runtime()
+
+    from gen_worker.hostfacts import (
+        DEVICE_ABSENT, DEVICE_PRESENT, DEVICE_UNREADABLE,
+    )
+
+    detail = str(caught.value)
+    assert "compiled_graph_target_unnameable" in detail
+    assert "sm" in detail
+    # The refusal REPORTS an accelerator state, and the vocabulary is
+    # cuda/none/unreadable — "cpu" is not a state of that axis.
+    assert any(f"accelerator={v}" in detail
+               for v in (DEVICE_PRESENT, DEVICE_ABSENT, DEVICE_UNREADABLE))
+
+
 def test_child_refuses_setup_seal_drift_before_tcg_runtime(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

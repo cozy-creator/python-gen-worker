@@ -693,6 +693,40 @@ def runtime_key() -> Dict[str, str]:
     return key
 
 
+def compile_target_block() -> str:
+    """Why this host cannot name the `sm` a compiled graph would be keyed on —
+    ``""`` when it can. THE deterministic environment decline (pgw#985).
+
+    ``sm`` is one of the three ``cg-key-v1`` axes, so a host that cannot state
+    it cannot name what it would produce. Substituting a placeholder is the
+    defect this exists to forbid: the compile succeeds, the artifact publishes,
+    and its key is one no pod on any card ever computes — a guaranteed miss
+    bought with a full mint, and a fact no retry can change.
+
+    Deterministic for the life of the process, and for the life of the POD: a
+    second pod is the same host asking the same question. So callers refuse
+    TYPED (``PreflightRefused`` -> ``EXIT_REFUSED``) rather than crashing,
+    which is what stops the orchestrator buying another one.
+
+    Side-effect free and it only NAMES, exactly like :func:`arming_block` —
+    the raise belongs to the child that has a report to write. The three-valued
+    :func:`hostfacts.cuda_state` is used rather than the capability predicate
+    because this sentence is REPORTED to the fleet, and "this host has no card"
+    and "this host's card would not answer" are different pod verdicts.
+    """
+    if str(runtime_key().get("sm") or "").strip():
+        return ""
+    from . import hostfacts
+
+    state = hostfacts.cuda_state()
+    evidence = f" ({state.probe_class}: {state.detail})" if state.detail else ""
+    return (
+        f"this host states no `sm`, and `sm` is one of the three cg-key-v1 "
+        f"axes — accelerator={state.state}{evidence}. A compiled graph minted "
+        f"here could not be keyed, and keying it on a placeholder would "
+        f"publish an artifact under an identity no pod computes.")
+
+
 def _lib_versions() -> Dict[str, str]:
     out: Dict[str, str] = {}
     for lib in ("diffusers", "transformers"):
@@ -3031,6 +3065,7 @@ __all__ = [
     "apply",
     "apply_lora_execution_lane",
     "arming_block",
+    "compile_target_block",
     "resolve_targets",
     "arm_jit_intake",
     "cell_base_execution_lane",

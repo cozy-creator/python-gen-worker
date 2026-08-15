@@ -373,14 +373,24 @@ def _tcg_runtime(cache_root: Optional[Path] = None) -> Tuple[Any, Any]:
     Production omits ``cache_root`` and therefore uses the worker's canonical
     CAS. The explicit measurement CLI supplies a temporary root so a diagnostic
     run cannot mutate serving state.
+
+    The compile target is the host's ``sm`` or NOTHING. It read
+    ``runtime.get("sm") or "cpu"`` for the length of one review, and that one
+    ``or`` is the whole pgw#985 regression: a cardless child built a valid
+    ``RuntimeCompatibility("cpu")``, TCG compiled and keyed against it, and a
+    mint that must refuse deterministically instead published an artifact on an
+    axis value no card reports. "cpu" is also not a state of the accelerator
+    axis — it is ``cuda`` or ``none``.
     """
     from torch_compiled_graphs import RuntimeCompatibility
 
     from . import compile_cache
     from .models.cache_paths import open_worker_engine
 
-    runtime = compile_cache.runtime_key()
-    target = str(runtime.get("sm") or "cpu")
+    block = compile_cache.compile_target_block()
+    if block:
+        raise PreflightRefused(f"compiled_graph_target_unnameable: {block}")
+    target = str(compile_cache.runtime_key()["sm"]).strip()
     compatibility = RuntimeCompatibility(
         target,
         toolchain=dict(compile_cache.toolchain_digest()),
