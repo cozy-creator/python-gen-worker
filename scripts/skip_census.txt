@@ -71,7 +71,6 @@ CI-MUST-RUN tests/test_pod_privilege_isolation_pgw858.py|the container cannot ex
 # UNVERIFIED except by hand on a pod. Do not read a green CI as evidence.
 CI-SKIPPED tests/test_svdq_load_device.py|needs cuda
 CI-SKIPPED tests/test_svdq_native_pgw685.py|needs a cuda device
-CI-SKIPPED tests/test_nvfp4_fused_quant_pgw685.py|needs a cuda device
 CI-SKIPPED tests/test_aot_input_alignment_pgw791.py|cpu aoti wrapper emits no alignment check (gpu wrapper only); the pointer contract is asserted directly below
 CI-SKIPPED tests/test_llama_runtime.py|gpu smoke runs on the nightly gpu ci lane
 # pgw#1053: the real-card park/restore leg. Measured by hand on the rig box's
