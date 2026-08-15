@@ -64,6 +64,7 @@ from .fp8_storage import structural_base
 from .w8a8 import fp8_scaled_linear_class
 import inspect
 from .loading import pipeline_weight_lane
+from ..hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
@@ -454,7 +455,7 @@ def _stage_adapter(mapped: Dict[str, Tuple[Any, Any, float]]) -> Dict[str, Any]:
     slices: Dict[Tuple[str, str], Tuple[Any, int, Tuple[int, ...]]] = {}
     for dt, items in by_dtype.items():
         total = sum(t.numel() for _p, _tag, t in items)
-        pin = (torch.cuda.is_available()
+        pin = (cuda_ready()
                and total * items[0][2].element_size() <= _PIN_MAX_BYTES)
         buf = torch.empty(total, dtype=dt, pin_memory=pin)
         off = 0
@@ -837,7 +838,7 @@ def _place_adapters(
                 covered += 1
             else:
                 mod.lora_b.zero_()  # canonical zeroed slot (uniform)
-        if torch.cuda.is_available():
+        if cuda_ready():
             torch.cuda.synchronize()
     if mapped and not covered:
         # Every mapped key resolved to a branch-capable module, so zero

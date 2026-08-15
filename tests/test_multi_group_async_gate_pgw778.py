@@ -22,6 +22,7 @@ from typing import Any, List
 import msgspec
 import pytest
 
+from gen_worker.hostfacts import HostFacts
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker import Hub, Resources
 from gen_worker.executor import EndpointSpec, Executor
@@ -63,8 +64,8 @@ def _executor(topology: ExecutionTopology) -> Executor:
     return Executor(_specs(), _send, topology=topology)
 
 
-_GPU = {"gpu_total_mem": 40 * 1024**3, "gpu_free_mem": 40 * 1024**3,
-        "gpu_sm": "89", "installed_libs": []}
+_GPU = HostFacts(vram_total_bytes=40 * 1024**3, vram_free_bytes=40 * 1024**3,
+                 gpu_sm="89")
 
 
 def test_a_wide_pod_withdraws_the_async_function_instead_of_advertising_it() -> None:

@@ -30,6 +30,7 @@ from .. import activity as activity_mod
 from ..stall import SilenceWindow
 from .memory import get_available_vram_gb
 from .residency import Residency, Tier, _obj_offload_hooked
+from ..hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
@@ -54,12 +55,7 @@ _HEADROOM_STEP_GB = 1.0 / 16.0
 
 
 def _cuda_available() -> bool:
-    try:
-        import torch
-
-        return torch.cuda.is_available()
-    except Exception:
-        return False
+    return cuda_ready()
 
 
 def _inference_mode_off() -> Any:

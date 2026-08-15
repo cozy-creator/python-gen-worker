@@ -65,6 +65,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from ..api.errors import WorkerError
 from .. import meta_instantiation as mi
+from ..hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
@@ -324,8 +325,6 @@ def build_component(
     BUFFERS are real, because they are config-derived and a literal-bearing
     family ships them.
     """
-    import torch
-
     # FIRST, before anything about this family is inspected: a process that
     # cannot meta-instantiate refuses about ITSELF, not about the tree it was
     # handed (pgw#1123 — the pod message named component '' and 'unknown
@@ -356,7 +355,7 @@ def build_component(
     facts = _facts(module, component=component,
                    cls_name=getattr(cls, "__name__", str(cls)), census=census)
     setattr(module, FACTS_STAMP, facts)
-    if not torch.cuda.is_available() and device.startswith("cuda"):
+    if not cuda_ready() and device.startswith("cuda"):
         raise StructureOnlyUnsupported(
             component=component, cls_name=facts.cls_name, tree=str(root),
             lacks=f"device {device!r} is not available in this process")

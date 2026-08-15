@@ -18,8 +18,9 @@ import pytest
 
 from gen_worker import host_canary as hc
 from gen_worker.config import Settings
-from gen_worker.executor import Executor
-from gen_worker.lifecycle import Lifecycle
+from gen_worker.procsplit import measure
+from gen_worker.procsplit.parent import ParentControl
+from gen_worker.topology import ExecutionTopology
 
 
 # Verbatim `nvidia-smi topo -m` from a 2x H100 80GB HBM3 (SXM) host.
@@ -94,13 +95,26 @@ def _fake_cuda(monkeypatch: pytest.MonkeyPatch):
 
 
 def _hello_canary(monkeypatch: pytest.MonkeyPatch):
+    """The canary as the HUB receives it.
+
+    Through the real relay: the pre-tenant-import measurement subprocess's
+    payload (`procsplit.measure.measure`) into the control parent's ONE
+    `WorkerResources` builder. pgw#898 deleted the compute child's second
+    builder, whose output the parent overwrote before the hub ever saw it —
+    so a canary asserted there was asserted on a discarded value.
+    """
     monkeypatch.setattr(hc, "_cached", None)
-    lc = Lifecycle(
+    pc = ParentControl(
         Settings(bootstrap_worker_jwt="", worker_id="w-748",
-                 runpod_pod_id="", worker_image_digest=""),
-        Executor([], lambda *a, **k: None),
+                 runpod_pod_id="", worker_image_digest="",
+                 orchestrator_public_addr="127.0.0.1:1"),
+        socket_path="/tmp/gen-worker-canary.sock",
+        topology=ExecutionTopology.single(),
     )
-    return lc.build_hello().resources.host_canary
+    pc._measurement = measure.measure()
+    resources = pc._parent_resources()
+    assert resources is not None
+    return resources.host_canary
 
 
 def test_measured_fabric_reaches_the_hub(_fake_cuda, monkeypatch: pytest.MonkeyPatch) -> None:

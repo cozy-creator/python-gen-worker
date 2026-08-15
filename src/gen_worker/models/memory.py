@@ -32,6 +32,8 @@ import msgspec
 from ..component_vocab import component_vocabulary
 from .structure_only import STAMP as _STRUCTURE_ONLY
 import asyncio
+from ..hostfacts import cuda_ready
+from .. import hostfacts
 
 _LOG = logging.getLogger(__name__)
 
@@ -184,14 +186,10 @@ def available_vram(device_index: int = 0) -> VramReading:
     :func:`get_available_vram_gb`; a caller that must DECIDE with it reads
     ``reason`` and says out loud what it does when the card is unreadable.
     """
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return VramReading(0.0, VRAM_NO_CUDA)
-        free, _total = torch.cuda.mem_get_info(device_index)
-    except Exception as exc:
-        _LOG.warning("free-VRAM probe failed: %s: %s", type(exc).__name__, exc)
+    if not hostfacts.cuda_ready():
+        return VramReading(0.0, VRAM_NO_CUDA)
+    free = hostfacts.free_vram_bytes(device_index)
+    if free is None:
         return VramReading(0.0, VRAM_UNREADABLE)
     return VramReading(float(free) / float(1024**3))
 
@@ -209,15 +207,8 @@ def get_available_vram_gb(device_index: int = 0) -> float:
 def get_total_vram_gb(device_index: int = 0) -> float:
     """TOTAL VRAM of the selected CUDA device — a per-SKU constant
     (pgw#750: deterministic placement inputs). 0.0 if no CUDA."""
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return 0.0
-        _free, total = torch.cuda.mem_get_info(device_index)
-        return float(total) / float(1024**3)
-    except Exception:
-        return 0.0
+    total = hostfacts.total_vram_bytes(device_index)
+    return float(total) / float(1024**3) if total is not None else 0.0
 
 
 def get_available_ram_gb() -> float:
@@ -305,24 +296,6 @@ def _read_cgroup_int(path: Path) -> Optional[int]:
     return value if 0 <= value < _CGROUP_UNLIMITED else None
 
 
-def _v2_cgroup_nodes(root: Path, proc_self_cgroup: Path) -> List[Path]:
-    """Cgroup-v2 dirs from root down to this process's own cgroup."""
-    rel = ""
-    try:
-        for line in proc_self_cgroup.read_text().splitlines():
-            if line.startswith("0::"):
-                rel = line[3:].strip().strip("/")
-                break
-    except OSError:
-        pass
-    nodes = [root]
-    node = root
-    for part in Path(rel).parts:
-        node = node / part
-        nodes.append(node)
-    return nodes
-
-
 def cgroup_memory_limit_bytes(
     root: Path = _CGROUP_ROOT,
     proc_self_cgroup: Path = _PROC_SELF_CGROUP,
@@ -333,7 +306,7 @@ def cgroup_memory_limit_bytes(
     and host cgroup namespaces); v1 fallback: ``memory/memory.limit_in_bytes``.
     """
     limits = [
-        v for node in _v2_cgroup_nodes(root, proc_self_cgroup)
+        v for node in hostfacts.cgroup_nodes(root, proc_self_cgroup)
         if (v := _read_cgroup_int(node / "memory.max")) is not None
     ]
     if limits:
@@ -346,7 +319,7 @@ def cgroup_memory_current_bytes(
     proc_self_cgroup: Path = _PROC_SELF_CGROUP,
 ) -> Optional[int]:
     """Current cgroup memory usage; reads the deepest available counter."""
-    for node in reversed(_v2_cgroup_nodes(root, proc_self_cgroup)):
+    for node in reversed(hostfacts.cgroup_nodes(root, proc_self_cgroup)):
         v = _read_cgroup_int(node / "memory.current")
         if v is not None:
             return v
@@ -390,7 +363,7 @@ def _cgroup_reclaimable_file_bytes(
     backing file) and pages still dirty or under writeback.
     """
     stats: Optional[Dict[str, int]] = None
-    for node in reversed(_v2_cgroup_nodes(root, proc_self_cgroup)):
+    for node in reversed(hostfacts.cgroup_nodes(root, proc_self_cgroup)):
         stats = _read_cgroup_stat(node / "memory.stat")
         if stats is not None:
             break
@@ -446,9 +419,17 @@ def probe_host_ram(
     *,
     root: Path = _CGROUP_ROOT,
     proc_self_cgroup: Path = _PROC_SELF_CGROUP,
+    meminfo: Optional[Path] = None,
     siblings: Optional[int] = None,
 ) -> HostRam:
-    """One truthful host-RAM snapshot: psutil meminfo min'd with the cgroup cap.
+    """The ONE effective host-RAM view: ``/proc/meminfo`` min'd with the
+    cgroup cap, with clean page cache credited back.
+
+    Every consumer that must answer "will this fit in host RAM" reads THIS —
+    the host-move guard, the residency demote floor, the staging admission and
+    (since pgw#897) the AOT compile pool, which used to parse ``/proc/meminfo``
+    and ``memory.stat`` itself with a NARROWER reclaimable definition and no
+    sibling divisor.
 
     ``siblings`` defaults to the compute-child count this process shares its
     cgroup with (pgw#783; 1 unless the process split is running G groups).
@@ -457,15 +438,9 @@ def probe_host_ram(
         from ..procsplit import host_siblings
 
         siblings = host_siblings()
-    meminfo_total = meminfo_available = 0.0
-    try:
-        import psutil
-
-        vm = psutil.virtual_memory()
-        meminfo_total = float(vm.total) / float(_GIB)
-        meminfo_available = float(vm.available) / float(_GIB)
-    except Exception:
-        pass
+    info = hostfacts.meminfo_kb(meminfo)
+    meminfo_total = float(info.get("MemTotal", 0)) * 1024.0 / float(_GIB)
+    meminfo_available = float(info.get("MemAvailable", 0)) * 1024.0 / float(_GIB)
     limit = cgroup_memory_limit_bytes(root, proc_self_cgroup)
     if limit is None:
         return _host_ram_share(HostRam(
@@ -538,7 +513,7 @@ def cuda_allocated_bytes(device_index: Optional[int] = None) -> int:
     try:
         import torch
 
-        if torch.cuda.is_available():
+        if cuda_ready():
             return int(torch.cuda.memory_allocated(device_index))
     except Exception:
         pass
@@ -792,7 +767,7 @@ def flush_memory() -> None:
     try:
         import torch
 
-        if torch.cuda.is_available():
+        if cuda_ready():
             torch.cuda.empty_cache()
             try:
                 torch.cuda.reset_peak_memory_stats()
@@ -822,7 +797,7 @@ async def aflush_memory(*, collect: bool = True, reset_peak: bool = False) -> No
         import torch
     except Exception:  # noqa: BLE001 — torch-free installs (cozy-local CLI)
         return
-    if not torch.cuda.is_available():
+    if not cuda_ready():
         return
     try:
         await asyncio.to_thread(torch.cuda.empty_cache)
@@ -849,7 +824,7 @@ def release_unused_pinned_host_cache() -> int:
         gc.collect()
         import torch
 
-        if not torch.cuda.is_available():
+        if not cuda_ready():
             return 0
         # Pinned frees can remain stream-dependent.  Finish prior CUDA work so
         # the host allocator can distinguish inactive blocks before flushing.
@@ -1026,9 +1001,7 @@ def _call_if_present(obj: Any, method: str, **kwargs: Any) -> bool:
 
 def _move_pipeline_to_cpu(pipeline: Any) -> None:
     try:
-        import torch
-
-        if not torch.cuda.is_available():
+        if not cuda_ready():
             return
         if callable(getattr(pipeline, "to", None)):
             pipeline.to("cpu")
@@ -1149,7 +1122,7 @@ def _apply_group_offload(
         import torch
     except Exception:
         return False
-    if not torch.cuda.is_available():
+    if not cuda_ready():
         return False
 
     kwargs: Dict[str, Any] = {
@@ -1324,12 +1297,7 @@ def place_pipeline(
     card size to declare around (§1.35 amendment 2).
     """
     log = logger or _LOG
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return {"mode": "cpu"}
-    except Exception:
+    if not cuda_ready():
         return {"mode": "cpu"}
     effective = select_auto_mode(pipeline=pipeline) if mode == "auto" else mode
     if mode == "auto":
@@ -1519,12 +1487,7 @@ def apply_low_vram_config(
         log.info("low_vram: vae_only applied (%s)", _applied_summary(applied))
         return applied
 
-    try:
-        import torch
-
-        cuda_ok = torch.cuda.is_available()
-    except Exception:
-        cuda_ok = False
+    cuda_ok = cuda_ready()
 
     if not cuda_ok:
         setattr(pipeline, _COZY_MODE_ATTR, "vae_only")

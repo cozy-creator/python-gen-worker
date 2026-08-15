@@ -59,6 +59,7 @@ from .memory import (
 from .hf_fp8_blockwise import detect_hf_fp8_blockwise, load_hf_fp8_blockwise
 from .safetensors_header import header_len_ok
 from .svdq import detect_svdq_artifact, load_svdq_pipeline
+from ..hostfacts import cuda_ready
 from .w4a4 import (
     detect_w4a4_artifact,
     load_w4a4_denoiser,
@@ -539,7 +540,7 @@ def apply_block_window_offload(
         logger.warning("block-window offload ignored: torch not installed")
         return False
     if device is None:
-        if not torch.cuda.is_available():
+        if not cuda_ready():
             logger.warning("block-window offload ignored: no CUDA device")
             return False
         device = "cuda"
@@ -927,7 +928,7 @@ def runtime_fp8_storage_supported() -> bool:
     try:
         import torch
 
-        return bool(torch.cuda.is_available()) and hasattr(torch, "float8_e4m3fn")
+        return bool(cuda_ready()) and hasattr(torch, "float8_e4m3fn")
     except ImportError:
         return False
 

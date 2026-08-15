@@ -34,6 +34,7 @@ from . import compile_cache
 from . import shape_growth
 from .shape_growth import TurnGateBusy, TurnGateClosed
 from . import postmortem
+from . import hostfacts
 
 logger = logging.getLogger(__name__)
 
@@ -196,18 +197,11 @@ def _headroom_ok(device: Optional[int]) -> bool:
     Unknown/unprobeable state degrades to sequential (never OOM)."""
     if device is None:
         return True  # CPU-only call: no VRAM to protect
-    try:
-        import torch
-
-        free, total = torch.cuda.mem_get_info(device)
-        cached = max(
-            0,
-            torch.cuda.memory_reserved(device)
-            - torch.cuda.memory_allocated(device),
-        )
-        return (free + cached) >= max(_BG_FLOOR_BYTES, total // 8)
-    except Exception:
+    have = hostfacts.headroom_bytes(device)
+    total = hostfacts.total_vram_bytes(device)
+    if have is None or total is None:
         return False
+    return have >= max(_BG_FLOOR_BYTES, total // 8)
 
 
 # ---------------------------------------------------------------------------

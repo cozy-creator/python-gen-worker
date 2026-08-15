@@ -77,11 +77,15 @@ from . import compile_posture, kernel_path
 from .child_contract import CompileSpec, MintSlot
 from .compile_posture import (
     USER_MACHINE_RSS_RESERVE_BYTES, CompilePosture)
-from .postmortem import cpu_quota_cores
+from . import hostfacts
+from .hostfacts import cuda_ready
+from .models.memory import probe_host_ram
 from .stall import SilenceWindow
 import hashlib
 
 logger = logging.getLogger(__name__)
+
+_GIB = 1024 ** 3
 
 ENTRY_CHILD_MODULE = "gen_worker.aot_compile_child"
 
@@ -349,114 +353,52 @@ class PoolWidth:
         return out
 
 
-def _read_int(path: Path) -> Optional[int]:
-    try:
-        raw = path.read_text().strip()
-    except OSError:
-        return None
-    if raw == "max":
-        return None
-    try:
-        value = int(raw)
-    except ValueError:
-        return None
-    # A cgroup v1 "unlimited" is a huge sentinel, not a limit.
-    return value if 0 <= value < (1 << 62) else None
-
-
-def _cgroup_reclaimable_bytes(stat: Path) -> int:
-    """File pages this cgroup is charged for that the kernel will hand back
-    under pressure — page cache, and reclaimable slab.
-
-    pgw#842: ``memory.current`` counts page cache. A mint reads GBs (weights,
-    the toolchain the seal hashes, every staged program) and every one of
-    those pages inflates ``current`` until something needs the memory. Sizing
-    a pool on ``max - current`` therefore shrinks the pool in proportion to
-    how much I/O the pod has already done — a bound that moves with history
-    instead of with the box. Subtracting what is reclaimable is the same
-    working-set definition every container runtime uses.
-    """
-    total = 0
-    try:
-        lines = stat.read_text().splitlines()
-    except OSError:
-        return 0
-    wanted = {
-        "inactive_file", "slab_reclaimable",          # cgroup v2
-        "total_inactive_file", "total_slab_reclaimable",  # cgroup v1
-    }
-    for line in lines:
-        parts = line.split()
-        if len(parts) == 2 and parts[0] in wanted:
-            try:
-                total += int(parts[1])
-            except ValueError:
-                continue
-    return total
-
-
 def memory_facts(
     *,
-    meminfo: Path = Path("/proc/meminfo"),
+    meminfo: Optional[Path] = None,
     cgroup_root: Path = Path("/sys/fs/cgroup"),
+    proc_self_cgroup: Path = Path("/proc/self/cgroup"),
 ) -> MemoryFacts:
-    """Host RAM this process may actually take, cgroup-aware.
+    """Host RAM this pool may take — a PROJECTION of ``probe_host_ram``.
 
-    ``MemAvailable`` is the host's answer and a container's limit is not; the
-    narrower of the two is the only honest one — the same rule
-    ``effective_cpu_count`` applies to cores. Both readings are kept, so the
-    telemetry can say WHICH one bounded the pool.
+    pgw#897: this used to be a second host-RAM probe with its own
+    ``/proc/meminfo`` parse and its own, narrower, "reclaimable" definition
+    (``inactive_file + slab_reclaimable``, missing the ACTIVE file LRU that
+    ``models/memory`` documents as the dominant term for a pod that just
+    downloaded its weights) and NO sibling divisor — so on a split pod the
+    compile pool sized itself against the whole container while the host-move
+    guard sized against 1/G of it. Two components allocating from the same RAM
+    with denominators that differed by the split degree.
 
-    The paths are arguments so a test can drive this function against a real
-    (synthetic) cgroup tree instead of re-implementing its arithmetic.
+    The paths stay arguments so a test can drive the real arithmetic against a
+    synthetic cgroup tree instead of re-implementing it.
     """
-    host = 0
-    try:
-        for line in meminfo.read_text().splitlines():
-            if line.startswith("MemAvailable:"):
-                host = int(line.split()[1]) * 1024
-                break
-    except (OSError, ValueError, IndexError):
-        host = 0
-    cgroup = -1
-    reclaimable = 0
-    for limit_name, usage_name, stat_name in (
-        ("memory.max", "memory.current", "memory.stat"),
-        ("memory/memory.limit_in_bytes", "memory/memory.usage_in_bytes",
-         "memory/memory.stat"),
-    ):
-        limit = _read_int(cgroup_root / limit_name)
-        used = _read_int(cgroup_root / usage_name)
-        if limit is None or used is None or limit <= 0:
-            continue
-        reclaimable = _cgroup_reclaimable_bytes(cgroup_root / stat_name)
-        working_set = max(0, used - reclaimable)
-        cgroup = max(0, limit - working_set)
-        break
-    if host > 0 and cgroup >= 0:
-        basis = "cgroup" if cgroup < host else "meminfo"
-        return MemoryFacts(min(host, cgroup), basis, host, cgroup, reclaimable)
-    if cgroup >= 0:
-        return MemoryFacts(cgroup, "cgroup", host, cgroup, reclaimable)
-    if host > 0:
-        return MemoryFacts(host, "meminfo", host, -1, 0)
-    return MemoryFacts(0, "unreadable", 0, -1, 0)
+    ram = probe_host_ram(
+        root=cgroup_root, proc_self_cgroup=proc_self_cgroup, meminfo=meminfo)
+    host = int(ram.meminfo_available_gb * _GIB)
+    reclaimable = int(ram.reclaimable_file_gb * _GIB)
+    cgroup = (
+        -1 if ram.cgroup_limit_gb is None
+        else int(ram.available_gb * _GIB) if ram.source == "cgroup"
+        else int(ram.cgroup_limit_gb * _GIB)
+    )
+    if host <= 0 and cgroup < 0:
+        return MemoryFacts(0, "unreadable", 0, -1, 0)
+    return MemoryFacts(
+        int(ram.available_gb * _GIB), ram.source, host, cgroup, reclaimable)
 
 
 def cpu_facts() -> CpuFacts:
-    """The pod's honest core count, and which of the three readings it is."""
-    os_count = os.cpu_count() or 1
-    try:
-        affinity = len(os.sched_getaffinity(0))
-    except (AttributeError, OSError):
-        affinity = os_count
-    quota = cpu_quota_cores()
-    quota_cores = float(quota) if quota is not None else -1.0
-    candidates = [(os_count, "cpu_count"), (affinity, "affinity")]
-    if quota is not None:
-        candidates.append((max(1, int(quota + 0.5)), "quota"))
-    vcpus, basis = min(candidates)
-    return CpuFacts(max(1, vcpus), basis, os_count, affinity, quota_cores)
+    """The pod's honest core count — a PROJECTION of ``hostfacts.cpu_allowance``.
+
+    pgw#897: this was the THIRD independent ``min()`` over the same three
+    candidates, and the second to round the quota half-up. A 2.5-core pod sized
+    its compile width at 3.
+    """
+    allowance = hostfacts.cpu_allowance()
+    return CpuFacts(
+        allowance.whole_cores, allowance.basis,
+        allowance.os_count, allowance.affinity, allowance.quota_cores)
 
 
 def _has_card() -> bool:
@@ -469,12 +411,14 @@ def _has_card() -> bool:
     it needs presence and never size. Unreadable counts as present: refusing
     to widen is the conservative answer for a lock question.
     """
+    # `cuda_ready()` answers False for BOTH "no card" and "torch will not
+    # import"; for a LOCK bound the second must read as PRESENT, so it is
+    # stated here rather than inherited from the predicate.
     try:
-        import torch
-
-        return bool(torch.cuda.is_available())
+        import torch  # noqa: F401 — an unimportable torch is not an absent card
     except Exception:  # noqa: BLE001
         return True
+    return bool(cuda_ready())
 
 
 def entry_workers(

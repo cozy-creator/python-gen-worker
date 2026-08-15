@@ -61,6 +61,7 @@ from .plan import GroupPlan
 from .cp import w8a8_gemm_mode
 from ..models import provision
 from ..registry import collect_endpoints
+from ..hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
@@ -109,9 +110,7 @@ def _dehydrate(value: Any) -> Any:
 def _rank_device(device: int) -> str:
     """A rank's device string. Falls back to CPU only where there is no CUDA
     at all — i.e. the gloo test rig; a real follower always has its card."""
-    import torch
-
-    return f"cuda:{int(device)}" if torch.cuda.is_available() else "cpu"
+    return f"cuda:{int(device)}" if cuda_ready() else "cpu"
 
 
 def _force_collectives(value: Any) -> Any:

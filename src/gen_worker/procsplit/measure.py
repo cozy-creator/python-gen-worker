@@ -33,7 +33,7 @@ def measure() -> Dict[str, Any]:
     try:
         from ..lifecycle import probe_hardware
 
-        out["hardware"] = probe_hardware()
+        out["hardware"] = probe_hardware().as_dict()
     except Exception as exc:  # never fatal: an unmeasured axis is a zero
         out["hardware_error"] = f"{type(exc).__name__}: {exc}"
     try:

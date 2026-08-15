@@ -41,53 +41,24 @@ from __future__ import annotations
 
 import logging
 import math
-import os
-from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
+
+from . import hostfacts
 from .procsplit import host_siblings
 
 logger = logging.getLogger(__name__)
 
-_CGROUP_V2 = "/sys/fs/cgroup/cpu.max"
-_CGROUP_V1_QUOTA = "/sys/fs/cgroup/cpu/cpu.cfs_quota_us"
-_CGROUP_V1_PERIOD = "/sys/fs/cgroup/cpu/cpu.cfs_period_us"
-
-
-def cgroup_cpu_quota() -> Optional[float]:
-    """CPU cores this cgroup may use, or None when unlimited/unreadable."""
-    try:
-        raw = Path(_CGROUP_V2).read_text().split()
-        if raw and raw[0] != "max":
-            return int(raw[0]) / int(raw[1])
-        if raw:
-            return None
-    except (OSError, ValueError, IndexError):
-        pass
-    try:
-        quota = int(Path(_CGROUP_V1_QUOTA).read_text().strip())
-        period = int(Path(_CGROUP_V1_PERIOD).read_text().strip())
-        if quota > 0 and period > 0:
-            return quota / period
-    except (OSError, ValueError):
-        pass
-    return None
-
 
 def cpu_allowance() -> float:
-    """The narrowest true bound on this process's CPU: cgroup quota,
-    affinity mask, and cpu_count — whichever is smallest."""
-    bounds = []
-    quota = cgroup_cpu_quota()
-    if quota and quota > 0:
-        bounds.append(float(quota))
-    try:
-        bounds.append(float(len(os.sched_getaffinity(0))))
-    except (AttributeError, OSError):
-        pass
-    count = os.cpu_count()
-    if count:
-        bounds.append(float(count))
-    return min(bounds) if bounds else 1.0
+    """The narrowest true bound on this process's CPU, in fractional cores.
+
+    A projection of :func:`hostfacts.cpu_allowance` — the one reduction over
+    cgroup quota, affinity mask and host core count. This module's own copy
+    read a FIXED ``/sys/fs/cgroup/cpu.max`` (which reads ``max`` in a nested
+    cgroup that really is capped) while ``postmortem``'s copy walked the chain
+    and had no v1 fallback; the single reader has both.
+    """
+    return hostfacts.cpu_allowance().cores
 
 
 def per_group_threads(allowance: float, groups: int) -> int:
@@ -149,7 +120,6 @@ def impose_intra_op_threads(groups: int) -> Dict[str, Any]:
 
 
 __all__ = [
-    "cgroup_cpu_quota",
     "cpu_allowance",
     "impose_intra_op_threads",
     "per_group_threads",

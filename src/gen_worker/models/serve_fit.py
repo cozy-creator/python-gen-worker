@@ -39,6 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Optional
 
+from .. import hostfacts
 from .hub_policy import (
     FIT_INCOMPATIBLE,
     TensorhubWorkerCapabilities,
@@ -127,12 +128,24 @@ def plan_serve(
     # (FLOOR_CPU_RUNG_UNEXECUTABLE), so a pod that OOMs its way down still
     # refuses, naming our code. Plan time is not that situation — nothing has
     # failed here.
+    #
+    # pgw#896: "no CUDA device detected" was said for BOTH a genuinely cardless
+    # pod and a pod whose card would not answer, because the predicate behind
+    # it (`torch.cuda.is_available()`) cannot tell them apart. The operator
+    # reading the warning then goes looking for a provisioning mistake on a box
+    # that has an H100 in it. The strong probe's own class discriminates.
     if verdict == FIT_INCOMPATIBLE and needs_gpu and caps.gpu_sm <= 0:
+        state = hostfacts.cuda_state()
+        why = (
+            f"this pod HAS a CUDA device and it will not answer "
+            f"({state.probe_class}: {state.detail})"
+            if state.unreadable else "no CUDA device detected on this pod"
+        )
         return ServePlan(
             serveable=True,
             run_mode=RUN_CPU,
             fit=FIT_INCOMPATIBLE,
-            warning=_honest_warning(RUN_CPU, "no CUDA device detected on this pod"),
+            warning=_honest_warning(RUN_CPU, why),
             est_latency_multiplier=price(RUN_CPU),
             wanted=wanted,
             ran=RUN_CPU,

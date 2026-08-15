@@ -59,6 +59,7 @@ from .protocol import PROTOCOL_VERSION, gen_worker_version
 from .sockaddr import DEFAULT_SOCKET_PATH
 from ..api.binding import BINDING_TYPES
 from ..models import provision
+from ..hostfacts import cuda_ready
 
 
 
@@ -250,7 +251,7 @@ def _make_gpu_semaphore() -> threading.BoundedSemaphore:
     try:
         import torch
 
-        if torch.cuda.is_available():
+        if cuda_ready():
             gpu_count = int(torch.cuda.device_count() or 0)
     except Exception:
         gpu_count = 0

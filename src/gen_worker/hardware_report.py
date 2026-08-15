@@ -32,6 +32,7 @@ from .cuda_probe import (
 from .pb import worker_scheduler_pb2 as pb
 from .pb import worker_scheduler_pb2_grpc as pb_grpc
 from .transport import normalize_grpc_addr
+from .hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ def build_hardware_report(probe: CudaProbeResult, settings: Settings) -> Hardwar
         torch_cuda_version = str(getattr(torch.version, "cuda", "") or "")
         if not gpu_name:
             try:
-                if torch.cuda.is_available():
+                if cuda_ready():
                     gpu_name = torch.cuda.get_device_name(0)
             except Exception:
                 pass

@@ -334,24 +334,35 @@ def test_the_reading_carries_its_zero_cause(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_a_saturated_card_no_longer_reads_as_empty() -> None:
     """`float(gpu_free_mem or gpu_total_mem or 0)`: `or` treats a legitimate
-    0 as absent and substitutes the largest plausible number. `gpu_free_mem`
-    is genuinely 0 on a saturated card — the state where the ladder must
-    engage, reading as the state where nothing is needed."""
+    0 as absent and substitutes the largest plausible number. Free VRAM is
+    genuinely 0 on a saturated card — the state where the ladder must engage,
+    reading as the state where nothing is needed.
+
+    Since pgw#896 the gate reads a typed `HostFacts`, so the substitution can
+    also be refuted at the VALUE level: a saturated card plans against 0, and
+    the total is never allowed to stand in for it.
+    """
     import ast
     import inspect
 
     from gen_worker import executor
+    from gen_worker.hostfacts import HostFacts
 
     src = inspect.getsource(executor.Executor.gate_functions)
     lines = [
         line.strip() for line in src.splitlines()
-        if "gpu_free_mem" in line and not line.strip().startswith("#")
+        if "vram_free_bytes" in line and not line.strip().startswith("#")
     ]
-    assert lines, "the fit gate no longer reads gpu_free_mem — re-cut this test"
+    assert lines, "the fit gate no longer reads vram_free_bytes — re-cut this"
     for line in lines:
-        assert "gpu_total_mem" not in line, (
+        assert "vram_total_bytes" not in line, (
             f"free VRAM is substituted by total again: {line}")
     ast.parse(src.strip())  # the slice is still syntactically a function
+
+    # A saturated 48 GiB card: free is 0 and the type says so.
+    saturated = HostFacts(vram_total_bytes=48 * 1024**3, vram_free_bytes=0)
+    assert saturated.vram_free_bytes == 0
+    assert float(saturated.vram_free_bytes) / (1024**3) == 0.0
 
 
 # ---------------------------------------------------------------------------

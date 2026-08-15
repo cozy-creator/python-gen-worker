@@ -18,6 +18,7 @@ from typing import List
 import msgspec
 import pytest
 
+from gen_worker.hostfacts import HostFacts
 from gen_worker.api.binding import Hub, rebind_pick, wire_ref
 from gen_worker.models.records import vacate_record
 from gen_worker.models.refs import FlavorSelectorRemoved
@@ -181,9 +182,11 @@ def test_regate_runs_after_resolutions_and_is_idempotent() -> None:
     spec = _spec(resources=Resources(gpu=True, libraries=("nunchaku",)))
     ex = _executor(spec)
 
-    without_lib = {"gpu_total_mem": 48 * 1024**3, "gpu_free_mem": 48 * 1024**3,
-                   "gpu_sm": "90", "installed_libs": []}
-    with_lib = dict(without_lib, installed_libs=["nunchaku"])
+    without_lib = HostFacts(
+        vram_total_bytes=48 * 1024**3, vram_free_bytes=48 * 1024**3,
+        gpu_sm="90")
+    with_lib = msgspec.structs.replace(
+        without_lib, installed_libs=("nunchaku",))
 
     ex.gate_functions(without_lib)
     assert ex.unavailable["generate"][0] == "missing_cuda_library"

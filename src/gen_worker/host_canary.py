@@ -45,6 +45,7 @@ from concurrent.futures import ThreadPoolExecutor
 from .cuda_probe import NVIDIA_SMI_TIMEOUT_S as _NVIDIA_SMI_TIMEOUT_S
 from .postmortem import effective_cpu_count
 import tempfile
+from .hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +180,7 @@ def _measure_pcie() -> tuple[float, float, bool]:
     try:
         import torch
 
-        if not torch.cuda.is_available():
+        if not cuda_ready():
             return 0.0, 0.0, False
     except Exception:
         return 0.0, 0.0, False
@@ -319,7 +320,7 @@ def _measure_peer(devices: Tuple[int, int] = (0, 1)) -> Tuple[str, float, bool, 
     try:
         import torch
 
-        if not torch.cuda.is_available() or torch.cuda.device_count() <= max(a, b):
+        if not cuda_ready() or torch.cuda.device_count() <= max(a, b):
             return INTERCONNECT_NONE, 0.0, False, ""
     except Exception:
         return INTERCONNECT_NONE, 0.0, False, ""
@@ -387,7 +388,7 @@ def measure_host_canary() -> HostCanaryReport:
     try:
         import torch
 
-        gpu_count = int(torch.cuda.device_count()) if torch.cuda.is_available() else 0
+        gpu_count = int(torch.cuda.device_count()) if cuda_ready() else 0
     except Exception:
         pass
     interconnect, peer_gbps, peer_access, topo_link = (
@@ -522,7 +523,7 @@ def measure_peer_collective(
     import torch
     import torch.multiprocessing as mp
 
-    if not torch.cuda.is_available() or torch.cuda.device_count() < world_size:
+    if not cuda_ready() or torch.cuda.device_count() < world_size:
         return {"ok": False, "error": f"needs {world_size} visible CUDA devices"}
 
     env_saved = {k: os.environ.get(k) for k in

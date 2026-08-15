@@ -30,6 +30,7 @@ from typing import List
 import msgspec
 import pytest
 
+from gen_worker.hostfacts import HostFacts
 from gen_worker.api.binding import Hub
 from gen_worker.api.decorators import Resources
 from gen_worker.executor import Executor
@@ -136,8 +137,8 @@ def _executor() -> Executor:
     return Executor(_specs(), _send)
 
 
-_GPU = {"gpu_total_mem": 20 * 1024**3, "gpu_free_mem": 20 * 1024**3,
-        "gpu_sm": "86", "installed_libs": []}
+_GPU = HostFacts(vram_total_bytes=20 * 1024**3, vram_free_bytes=20 * 1024**3,
+                 gpu_sm="86")
 
 
 def test_crash_streak_gates_only_the_crashing_function(

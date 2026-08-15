@@ -44,6 +44,7 @@ from .memory import (
 )
 from .pinned_swap import swap_object
 from .pinned_swap import cached_swap_bytes
+from .. import hostfacts
 
 logger = logging.getLogger(__name__)
 
@@ -152,16 +153,13 @@ class DeviceGroup:
         plan; the probe reports physics) — which under ``replicated`` makes
         the whole group unusable, correctly: you cannot replicate onto a
         card that is not there."""
-        import torch
-
-        if not torch.cuda.is_available():
+        count = hostfacts.device_count()
+        if not count:
             return []
-        count = int(torch.cuda.device_count())
         out: List[int] = []
         for d in self.devices:
-            out.append(
-                int(torch.cuda.mem_get_info(d)[0]) if 0 <= int(d) < count else 0
-            )
+            free = hostfacts.free_vram_bytes(d) if 0 <= int(d) < count else None
+            out.append(int(free or 0))
         return out
 
     def free_vram_bytes(self) -> int:

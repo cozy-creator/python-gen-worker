@@ -63,6 +63,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import msgspec
+from . import hostfacts
 
 from .child_preflight import (
     PreflightRefused,
@@ -322,16 +323,16 @@ def _device_peak_bytes() -> int:
     """
     try:
         import torch
+
+        if not torch.cuda.is_initialized():
+            return 0
     except Exception:  # noqa: BLE001 — telemetry never fails a trace
         return 0
-    try:
-        if not torch.cuda.is_available() or not torch.cuda.is_initialized():
-            return 0
-        free, total = torch.cuda.mem_get_info()
-        used = int(total) - int(free)
-        return max(0, used)
-    except Exception:  # noqa: BLE001
+    free = hostfacts.free_vram_bytes()
+    total = hostfacts.total_vram_bytes()
+    if free is None or total is None:
         return 0
+    return max(0, int(total) - int(free))
 
 
 def main(argv: List[str]) -> int:

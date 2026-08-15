@@ -31,6 +31,8 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
+import sys
+
 import pytest
 
 from gen_worker import activity as activity_mod
@@ -113,6 +115,11 @@ def card(monkeypatch: pytest.MonkeyPatch) -> FakeCard:
     """A card with 40 GiB free that has served one 12 GiB forward."""
     dev = FakeCard(free=40 * _GIB, reserved=2 * _GIB, allocated=1 * _GIB)
     monkeypatch.setattr(adopt_fit, "_torch", lambda: dev)
+    # pgw#896: the free/reclaimable construction itself now lives in the ONE
+    # home (`hostfacts.headroom_bytes`), which imports torch on its own — so
+    # the fake card has to BE torch for the production formula to be the one
+    # under test.
+    monkeypatch.setitem(sys.modules, "torch", dev)
     with adopt_fit.forward_watermark(0):
         dev.run_forward(12 * _GIB)
     assert adopt_fit.forward_peak(0) == 12 * _GIB

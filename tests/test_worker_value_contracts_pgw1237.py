@@ -112,7 +112,7 @@ def test_exact_worker_values_match_pgw1237() -> None:
         cuda_probe.classify_probe_failure(reason)
         for reason in (
             "torch unavailable: import failed",
-            "torch.cuda.is_available() is False",
+            cuda_probe.NO_DEVICE_REASON,
             "CUDA initialization: driver too old (found version 12080)",
             "CUDA-capable device is busy",
             "",

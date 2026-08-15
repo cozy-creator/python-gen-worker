@@ -33,6 +33,7 @@ import logging
 from typing import Any, Dict, List, Tuple
 
 from . import staging
+from ..hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ def swap_module(module: Any, device: str) -> bool:
     target = torch.device(device)
     if target.type not in ("cpu", "cuda"):
         return False
-    if target.type == "cuda" and not torch.cuda.is_available():
+    if target.type == "cuda" and not cuda_ready():
         return False
 
     tensors = _module_tensors(module)
@@ -148,7 +149,7 @@ def swap_module(module: Any, device: str) -> bool:
                 copy_stream.synchronize()
             except Exception:
                 pass
-        elif torch.cuda.is_available():
+        elif cuda_ready():
             try:
                 torch.cuda.synchronize()
             except Exception:

@@ -161,6 +161,7 @@ from .models.loading import (
 from .compile_cache import CompiledExecutionLaneUnavailableError
 from .preload import Preloader
 from .api.binding import rebind_pick
+from . import hostfacts
 from .models.hub_policy import TensorhubWorkerCapabilities
 from .models.serve_fit import (RUN_FP8_STORAGE,
                                    RUN_OFFLOAD, plan_serve)
@@ -186,6 +187,7 @@ from . import aot_serve, numerics_ladder, shape_growth
 from . import fleet_cells as fleet_cells_mod
 from . import hot_swap
 from . import mint_supervisor
+from .hostfacts import cuda_ready
 
 _CONTEXT_BY_KIND: Dict[str, type] = {
     "inference": RequestContext,
@@ -1816,7 +1818,7 @@ class Executor:
         # failures (owned by _mark_setup_failed) survive re-gates.
         self._gate_owned: set = set()
         # Last hardware probe, so resolutions can re-run the gates.
-        self._last_gpu_info: Optional[Dict[str, Any]] = None
+        self._last_gpu_info: Optional[hostfacts.HostFacts] = None
         # th#683 P3: how each serveable function will run on the actual card
         # (native / emergency / offload / cpu) + honest-guidance advisory.
         self.serve_plans: Dict[str, "ServePlan"] = {}
@@ -2164,7 +2166,7 @@ class Executor:
 
     # ---- availability ----------------------------------------------------
 
-    def gate_functions(self, gpu_info: Dict[str, Any]) -> None:
+    def gate_functions(self, facts: hostfacts.HostFacts) -> None:
         """Run hardware gates; populate self.unavailable + self.serve_plans.
 
         th#683 P3, as th#1867 left it — the worker NEVER refuses a function
@@ -2185,12 +2187,12 @@ class Executor:
         # Idempotent re-gate (gw#494): drop only the marks THIS gate made
         # last time; setup failures and other owners survive. Remember the
         # probe so apply_model_resolutions can re-run us.
-        self._last_gpu_info = dict(gpu_info)
+        self._last_gpu_info = facts
         for fn in self._gate_owned:
             self.unavailable.pop(fn, None)
         self._gate_owned = set()
 
-        total_vram_gb = float(gpu_info.get("gpu_total_mem") or 0) / (1024 ** 3)
+        total_vram_gb = float(facts.vram_total_bytes) / (1024 ** 3)
         # pgw#940: no substitution. `or gpu_total_mem` treated a legitimate 0
         # as "absent" and replaced it with the largest plausible number — and
         # `gpu_free_mem` is genuinely 0 on a SATURATED card, which is exactly
@@ -2202,13 +2204,13 @@ class Executor:
         # wraps its whole CUDA probe in `except Exception: pass`, so "the
         # probe raised" arrives here indistinguishable from "the card is
         # full" — both are non-permissive now, which is the point.
-        free_vram_gb = float(gpu_info.get("gpu_free_mem") or 0) / (1024 ** 3)
-        detected_sm = str(gpu_info.get("gpu_sm") or "")
-        libs = {str(x) for x in (gpu_info.get("installed_libs") or [])}
+        free_vram_gb = float(facts.vram_free_bytes) / (1024 ** 3)
+        detected_sm = facts.gpu_sm
+        libs = set(facts.installed_libs)
         caps = TensorhubWorkerCapabilities(
-            cuda_version=str(gpu_info.get("cuda_version") or ""),
+            cuda_version=facts.cuda_version,
             gpu_sm=int(detected_sm) if detected_sm.isdigit() else 0,
-            torch_version=str(gpu_info.get("torch_version") or ""),
+            torch_version=facts.torch_version,
             installed_libs=list(libs),
         )
         # pgw#676: per-pod native-crash streaks (SIGSEGV & friends recorded
@@ -4876,7 +4878,7 @@ class Executor:
                             f"boot warm plan cut short: {evidence.aborted}",
                             phase="warmup_oom",
                         )
-                    if torch is not None and torch.cuda.is_available():
+                    if torch is not None and cuda_ready():
                         torch.cuda.empty_cache()
                     return False
             evidence.count += 1
@@ -6495,7 +6497,7 @@ class Executor:
                 cid for k in rec.shared_keys
                 if (cid := k.cache_id()) not in refs
             )
-        cuda_host = torch is not None and torch.cuda.is_available()
+        cuda_host = torch is not None and cuda_ready()
         if any(res.tier(r) is residency_mod.Tier.RAM for r in refs):
             async with self._load_lock:
                 for ref in refs:
@@ -6989,7 +6991,7 @@ class Executor:
         if needed <= 0:
             return
         # CPU-only workers do not have a VRAM tier to admit against.
-        if torch is None or not torch.cuda.is_available():
+        if torch is None or not cuda_ready():
             return
         # This job's own reservations are the demand being satisfied here —
         # exclude them from the outstanding-claim accounting (pgw#641 Stage 2).
@@ -9751,7 +9753,7 @@ class Executor:
                     # this job exclusively owns gpu_index (jobs serialize under
                     # _gpu_semaphore) — peak_vram_bytes then measures THIS
                     # job's peak, not the process-lifetime high-water mark.
-                    if torch is not None and torch.cuda.is_available():
+                    if torch is not None and cuda_ready():
                         try:
                             torch.cuda.reset_peak_memory_stats(gpu_index)
                         except Exception:
@@ -10575,7 +10577,7 @@ class Executor:
     def _call_sync(
         job: _Job, bound: Callable[..., Any], call_kwargs: Dict[str, Any], gpu_index: int,
     ) -> Any:
-        if torch is not None and torch.cuda.is_available():
+        if torch is not None and cuda_ready():
             try:
                 torch.cuda.set_device(gpu_index)
             except Exception:
@@ -10710,7 +10712,7 @@ class Executor:
         gpu_index: int,
         loop: asyncio.AbstractEventLoop,
     ) -> Optional[StreamResult]:
-        if torch is not None and torch.cuda.is_available():
+        if torch is not None and cuda_ready():
             try:
                 torch.cuda.set_device(gpu_index)
             except Exception:
@@ -10770,7 +10772,7 @@ class Executor:
     def _peak_vram_bytes(gpu_index: int) -> int:
         """This job's CUDA peak-allocator high-water mark (reset when it took
         the GPU). 0 without torch/CUDA."""
-        if torch is not None and torch.cuda.is_available():
+        if torch is not None and cuda_ready():
             try:
                 return int(torch.cuda.max_memory_allocated(gpu_index))
             except Exception:

@@ -95,6 +95,7 @@ from .models.refs import parse_model_ref
 from .models.w8a8_lora import RANK_BUCKETS
 from .models import execution_lanes as lanespec
 from .models import loading as _loading
+from .hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
@@ -671,7 +672,7 @@ def runtime_key() -> Dict[str, str]:
 
         key["torch"] = str(torch.__version__)
         key["cuda"] = str(torch.version.cuda or "")
-        if torch.cuda.is_available():
+        if cuda_ready():
             key["sku"] = sku_slug(torch.cuda.get_device_name(0))
             major, minor = torch.cuda.get_device_capability(0)
             key["sm"] = f"sm_{major}{minor}"
@@ -1684,10 +1685,10 @@ def arming_block(
         return ("the hub-resolved execution lane is operator-pinned to +eager "
                 "(pgw#714 kill switch)")
     try:
-        import torch
+        import torch  # noqa: F401 — the import IS the probe here
     except Exception as exc:  # noqa: BLE001 — a torchless process is eager
         return f"torch is not importable ({type(exc).__name__}: {exc})"
-    if not torch.cuda.is_available():
+    if not cuda_ready():
         return "torch reports no CUDA device in this process"
     if cache_ready:
         return ""

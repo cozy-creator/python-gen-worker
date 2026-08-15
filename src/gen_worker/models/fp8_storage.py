@@ -50,6 +50,7 @@ from __future__ import annotations
 import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
+from ..hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
@@ -332,7 +333,7 @@ def _release_freed_blocks() -> None:
     try:
         import torch
 
-        if torch.cuda.is_available() and torch.cuda.is_initialized():
+        if cuda_ready() and torch.cuda.is_initialized():
             torch.cuda.empty_cache()
     except Exception:
         logger.debug("fp8-storage: empty_cache after restructure failed",

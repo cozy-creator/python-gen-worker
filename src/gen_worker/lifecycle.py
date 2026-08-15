@@ -38,6 +38,7 @@ from .api.binding import wire_ref
 # module import: tests monkeypatch worker_fatal.report_worker_error_async; stay late-bound.
 from . import worker_fatal
 from .topology import TopologyError, delivered_topology
+from . import hostfacts
 
 logger = logging.getLogger(__name__)
 
@@ -68,54 +69,48 @@ HEARTBEAT_INTERVAL_MS = 10_000
 _DISK_REPORT_TTL_S = 30.0
 
 
-def probe_hardware() -> Dict[str, Any]:
-    """Static hardware facts + gate inputs. torch is optional.
+def probe_hardware() -> hostfacts.HostFacts:
+    """Measure this host ONCE into one immutable :class:`HostFacts`.
 
-    ``gpu_free_mem`` is the input `gate_functions` turns into `unavailable` +
-    `serve_plans` for EVERY function, so on a wide pod it must be the free pool
-    of the group with the LEAST room, not card 0's. The MIN is the honest
-    single scalar until the fit ladder is per-rank: it never promises a group
-    room it does not have.
+    The single producer of the facts the fleet acts on. ``vram_free_bytes`` is
+    the input `gate_functions` turns into `unavailable` + `serve_plans` for
+    EVERY function, so on a wide pod it must be the free pool of the group with
+    the LEAST room, not card 0's. The MIN is the honest single scalar until the
+    fit ladder is per-rank: it never promises a group room it does not have.
     """
-    info: Dict[str, Any] = {
-        "gpu_count": 0,
-        "gpu_total_mem": 0,
-        "gpu_free_mem": 0,
-        "gpu_name": "",
-        "gpu_sm": "",
-        "torch_version": "",
-        "installed_libs": [],
-        "driver_version": "",
-    }
+    gpu_count = 0
+    vram_total = 0
+    vram_free = 0
+    gpu_name = ""
+    gpu_sm = ""
+    torch_version = ""
+    cuda_version = ""
+    driver_version = ""
+    installed_libs: tuple[str, ...] = ()
     # The HOST driver, read from NVML rather than torch: it must stay readable
     # when the CUDA runtime is not. A cu130 build on a 570.x host imports fine,
     # reports every version string correctly, and dies on its first allocation.
     try:
         from .hardware_report import _nvidia_smi_driver_and_gpu
 
-        driver, gpu = _nvidia_smi_driver_and_gpu()
-        info["driver_version"] = driver
-        if gpu and not info["gpu_name"]:
-            info["gpu_name"] = gpu
+        driver_version, gpu_name = _nvidia_smi_driver_and_gpu()
     except Exception:
         pass
     try:
-        import torch
-
-        if torch.cuda.is_available():
-            info["gpu_count"] = torch.cuda.device_count()
-            props = torch.cuda.get_device_properties(0)
-            info["gpu_name"] = props.name
-            free_mem, total_mem = torch.cuda.mem_get_info(0)
-            info["gpu_total_mem"] = int(total_mem)
-            info["gpu_free_mem"] = int(free_mem)
+        count = hostfacts.device_count()
+        if count:
+            gpu_count = count
+            gpu_name = hostfacts.device_identity(0)[0] or gpu_name
+            vram_total = hostfacts.total_vram_bytes(0) or 0
+            card0_free = hostfacts.free_vram_bytes(0) or 0
+            vram_free = card0_free
             worst = _worst_group_free_vram_bytes()
-            if worst and worst != int(free_mem):
+            if worst and worst != card0_free:
                 logger.info(
                     "fit inputs: gating on the least-free group (%d bytes) "
                     "instead of card 0 (%d bytes) — pgw#776",
-                    int(worst), int(free_mem))
-                info["gpu_free_mem"] = int(worst)
+                    int(worst), int(card0_free))
+                vram_free = int(worst)
     except TopologyError:
         # A WEDGED fabric is the one topology fault that must reach the caller:
         # `delivered_topology` raises it so the hub re-packs instead of this
@@ -128,13 +123,24 @@ def probe_hardware() -> Dict[str, Any]:
         from .models.hub_policy import detect_worker_capabilities
 
         caps = detect_worker_capabilities()
-        info["installed_libs"] = list(caps.installed_libs or [])
-        info["torch_version"] = str(caps.torch_version or "")
+        installed_libs = tuple(str(x) for x in (caps.installed_libs or []))
+        torch_version = str(caps.torch_version or "")
+        cuda_version = str(caps.cuda_version or "")
         if caps.gpu_sm:
-            info["gpu_sm"] = str(int(caps.gpu_sm))
+            gpu_sm = str(int(caps.gpu_sm))
     except Exception:
         pass
-    return info
+    return hostfacts.HostFacts(
+        gpu_count=gpu_count,
+        vram_total_bytes=vram_total,
+        vram_free_bytes=vram_free,
+        gpu_name=gpu_name,
+        gpu_sm=gpu_sm,
+        torch_version=torch_version,
+        cuda_version=cuda_version,
+        driver_version=driver_version,
+        installed_libs=installed_libs,
+    )
 
 
 _MULTI_GPU_NO_TOPOLOGY_WARNED = False
@@ -176,14 +182,7 @@ def free_vram_bytes() -> int:
         raise  # see `probe_hardware` — a wedged fabric is never a zero.
     except Exception:
         pass
-    try:
-        import torch
-
-        if torch.cuda.is_available() and torch.cuda.device_count():
-            return int(torch.cuda.mem_get_info(0)[0])
-    except Exception:
-        pass
-    return 0
+    return hostfacts.free_vram_bytes(0) or 0
 
 
 def _warn_once_if_gpus_are_invisible() -> None:
@@ -191,13 +190,11 @@ def _warn_once_if_gpus_are_invisible() -> None:
     if _MULTI_GPU_NO_TOPOLOGY_WARNED:
         return
     try:
-        import torch
-
         from .topology import ENV_VAR
 
         if os.environ.get(ENV_VAR):
             return
-        count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        count = hostfacts.device_count()
         if count > 1 and delivered_topology().gpu_count == 1:
             _MULTI_GPU_NO_TOPOLOGY_WARNED = True
             logger.warning(
@@ -341,7 +338,7 @@ class Lifecycle:
 
     def _state_delta(self) -> pb.StateDelta:
         free = free_vram_bytes()
-        total = int(self.hardware.get("gpu_total_mem") or 0)
+        total = int(self.hardware.vram_total_bytes)
         quantum = max(1, int(total * _VRAM_QUANTUM_FRACTION)) if total else 1
         return pb.StateDelta(
             # echo DesiredResidency.config_generation.
@@ -391,59 +388,6 @@ class Lifecycle:
 
         self._disk_report_refresh_task = asyncio.create_task(_run(), name="disk-usage-refresh")
 
-    def build_resources(self) -> pb.WorkerResources:
-        hw = self.hardware
-        # measured once per process (cached), so
-        # reconnect Hellos re-ship the same boot-time facts. Never fatal.
-        canary = None
-        try:
-            from .host_canary import get_host_canary
-
-            c = get_host_canary()
-            canary = pb.HostCanary(
-                memcpy_gbps=c.memcpy_gbps,
-                d2h_gbps=c.d2h_gbps,
-                pinned_alloc_ok=c.pinned_alloc_ok,
-                cpu_single_mbps=c.cpu_single_mbps,
-                cpu_multi_mbps=c.cpu_multi_mbps,
-                vcpus=c.vcpus,
-                ram_total_gb=c.ram_total_gb,
-                duration_ms=c.duration_ms,
-                # The measured GPU fabric, alongside gpu_count.
-                interconnect=c.interconnect,
-                peer_gbps=c.peer_gbps,
-                peer_access=c.peer_access,
-                topo_link=c.topo_link,
-            )
-        except Exception:
-            logger.warning("host canary failed; Hello ships without it", exc_info=True)
-        # The hub attests the self-mint publish's gen_worker axis against THIS
-        # Hello-reported version; absent => the publish fails closed.
-        try:
-            from .compile_cache import gen_worker_version
-
-            gw_version = gen_worker_version()
-        except Exception:
-            gw_version = ""
-        return pb.WorkerResources(
-            host_canary=canary,
-            gpu_count=int(hw.get("gpu_count") or 0),
-            vram_total_bytes=int(hw.get("gpu_total_mem") or 0),
-            gpu_name=str(hw.get("gpu_name") or ""),
-            gpu_sm=str(hw.get("gpu_sm") or ""),
-            torch_version=str(hw.get("torch_version") or ""),
-            # The host driver, so the hub can answer "can the host we landed on
-            # run this pod's CUDA line?" from a SUCCESSFUL boot, not a corpse.
-            driver_version=str(hw.get("driver_version") or ""),
-            installed_libs=[str(x) for x in (hw.get("installed_libs") or [])],
-            gen_worker_version=gw_version,
-            image_digest=self._settings.worker_image_digest,
-            # git_commit intentionally unpopulated — dead on both ends. The
-            # field stays on the wire; deleting it needs a coordinated
-            # tensorhub proto update.
-            instance_id=self._settings.runpod_pod_id or "",
-        )
-
     # ---- transport handlers --------------------------------------------------
 
     def build_hello(self) -> pb.Hello:
@@ -455,11 +399,17 @@ class Lifecycle:
             self._desired_residency,
             self._model_resolutions,
         )
+        # NO `resources` field. `WorkerResources` has exactly ONE builder,
+        # `procsplit.parent.ParentControl._parent_resources`, which measures
+        # the silicon in a process that has imported no tenant code and stamps
+        # it onto every relayed Hello. This process HAS imported tenant code,
+        # so anything it measured about the host would be replaced wholesale
+        # before the hub saw it — 53 lines computing a value the wire
+        # discarded, and the fleet condemned SKUs on the other one (pgw#898).
         return pb.Hello(
             protocol_version=PROTOCOL_VERSION,
             worker_id=self.worker_id,
             release_id=self.release_id,
-            resources=self.build_resources(),
             state=self._state_delta(),
             models=self.executor.store.residency_snapshot(),
             in_flight=[

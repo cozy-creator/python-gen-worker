@@ -87,6 +87,7 @@ later step could upload.
 """
 
 from __future__ import annotations
+from .hostfacts import cuda_ready
 
 import argparse
 import contextlib
@@ -234,7 +235,7 @@ def raise_if_device_oom(exc: BaseException, where: str) -> None:
     try:
         import torch
 
-        if torch.cuda.is_available():
+        if cuda_ready():
             peak = int(torch.cuda.max_memory_allocated())
     except Exception:  # noqa: BLE001 — a probe never changes an outcome
         peak = 0
@@ -3606,7 +3607,7 @@ def release_mint_residents(
     cuda = False
     before = 0
     try:
-        cuda = torch.cuda.is_available()
+        cuda = cuda_ready()
         if cuda:
             before = int(torch.cuda.memory_reserved())
     except Exception:  # noqa: BLE001 — a probe never changes an outcome

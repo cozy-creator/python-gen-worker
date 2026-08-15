@@ -69,6 +69,7 @@ from typing import Any, Mapping, Optional, Tuple
 
 from .models.residency import REPLICATED, SHARDED, DeviceGroup
 from .host_canary import is_fabric_wedge, sp_admits
+from .hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +143,7 @@ def pin_cuda_device_for_group() -> None:
     try:
         import torch
 
-        if torch.cuda.is_available() and device < torch.cuda.device_count():
+        if cuda_ready() and device < torch.cuda.device_count():
             torch.cuda.set_device(device)
     except Exception:  # noqa: BLE001 - placement is best-effort here; the
         # residency promote still targets `cuda:N` explicitly.

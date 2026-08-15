@@ -29,6 +29,7 @@ ever grows a term it did not measure, it belongs in the deleted module.
 from __future__ import annotations
 
 from typing import Any, Dict, NamedTuple, Optional, Tuple
+from .hostfacts import cuda_ready
 
 
 #: One entry child's measured HOST high-water, keyed by (family, weight lane).
@@ -223,7 +224,7 @@ def adopt_watermark(device: Optional[int] = None) -> Tuple[int, int]:
     try:
         import torch
 
-        if not torch.cuda.is_available():
+        if not cuda_ready():
             return 0, 0
         dev = torch.cuda.current_device() if device is None else int(device)
         return (int(torch.cuda.memory_allocated(dev)),

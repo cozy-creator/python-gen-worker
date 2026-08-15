@@ -92,6 +92,7 @@ from .aot_compile_pool import (
     PackedGraphClass,
 )
 from . import aot_device_lock
+from .hostfacts import cuda_ready
 from .child_preflight import (
     PreflightRefused,
     assert_slots_resolvable,
@@ -169,7 +170,7 @@ def _peak_device() -> tuple:
     try:
         import torch
 
-        if not torch.cuda.is_available():
+        if not cuda_ready():
             return (0, 0)
         return (int(torch.cuda.max_memory_allocated()),
                 int(torch.cuda.max_memory_reserved()))
@@ -339,7 +340,7 @@ def run(job: EntryJob) -> int:
     # whatever the seal's torch import allocated first. A probe: it reads and
     # clears a counter and decides nothing.
     try:
-        if torch.cuda.is_available():
+        if cuda_ready():
             torch.cuda.reset_peak_memory_stats()
     except Exception:  # noqa: BLE001 — a probe never changes an outcome
         pass

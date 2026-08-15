@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from .. import hostfacts
 from ..postmortem import cgroup_nodes
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,6 @@ _OVERRUN_ALLOWANCE = 2
 _TIGHTEST_OBSERVED_DOMAIN_BYTES = 14 * 1024 ** 3
 
 _SELF_OOM_SCORE_ADJ = Path("/proc/self/oom_score_adj")
-_PROC_MEMINFO = Path("/proc/meminfo")
 
 #: Kernel range for ``oom_score_adj`` (``fs/proc/base.c``). Not ours to pick.
 _OOM_SCORE_ADJ_MIN = -1000
@@ -142,13 +142,8 @@ def _cgroup_memory_max() -> Optional[int]:
 
 
 def _meminfo_total_bytes() -> Optional[int]:
-    try:
-        for line in _PROC_MEMINFO.read_text().splitlines():
-            if line.startswith("MemTotal:"):
-                return int(line.split()[1]) * 1024
-    except (OSError, ValueError, IndexError):
-        pass
-    return None
+    total = hostfacts.meminfo_kb().get("MemTotal")
+    return total * 1024 if total else None
 
 
 def oom_domain_bytes() -> int:

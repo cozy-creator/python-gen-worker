@@ -85,6 +85,7 @@ from .hubio.client import HubPublishError
 from .models import loading, lora_lifted, provision
 from .procsplit import broker
 from .request_context._helpers import _decode_unverified_jwt_claims
+from .hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
@@ -3237,12 +3238,7 @@ def _fail_closed(
 
 
 def _cuda_ready() -> bool:
-    try:
-        import torch
-
-        return bool(torch.cuda.is_available())
-    except Exception:
-        return False
+    return cuda_ready()
 
 
 __all__ = [

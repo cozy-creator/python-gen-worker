@@ -80,7 +80,7 @@ import msgspec
 
 from . import aot_serve, boot_phases, cell_key, compile_cache as cc, env_seal
 from .child_contract import CompileSpec, MintSlot, slot_subjects
-from .postmortem import cpu_quota_cores, effective_cpu_count
+from . import hostfacts
 
 logger = logging.getLogger(__name__)
 
@@ -280,13 +280,12 @@ def trace_workers(classes: int, *, limit: int = 0) -> PoolWidth:
     keeps this function free of a device parameter no caller would pass.
     """
     classes = max(1, int(classes))
-    quota = cpu_quota_cores()
-    if quota is not None:
-        cores = max(1, int(quota))
-        basis = f"cgroup cpu.max={quota:g}"
-    else:
-        cores = effective_cpu_count()
-        basis = f"effective_cpu_count={cores} (uncapped cgroup)"
+    # ONE reduction (hostfacts): quota AND affinity AND host count, floored.
+    # The old branch took floor(quota) when a quota existed, ignoring the
+    # affinity mask — a fourth answer to "how many cores may I use".
+    allowance = hostfacts.cpu_allowance()
+    cores = allowance.whole_cores
+    basis = f"{allowance.basis}={allowance.cores:g} cores"
     usable = max(1, cores - SERVING_HEADROOM_CORES)
     workers = min(classes, usable)
     binding = "classes" if workers == classes else "cpu"
@@ -656,14 +655,8 @@ def free_device_bytes() -> int:
     serving throughout a boot) are already excluded — the children compete for
     what is left, not for the nameplate capacity.
     """
-    try:
-        import torch
-        if not torch.cuda.is_available():
-            return 0
-        free, _total = torch.cuda.mem_get_info()
-        return max(0, int(free))
-    except Exception:  # noqa: BLE001 — a probe never changes an outcome
-        return 0
+    free = hostfacts.free_vram_bytes()
+    return max(0, int(free)) if free is not None else 0
 
 
 def concurrency_budget(

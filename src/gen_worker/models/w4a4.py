@@ -51,6 +51,7 @@ from .safetensors_header import header_len_ok
 from .tensor_layout_contract import unregistered_decode_path
 from typing import Any, Dict, List, Optional
 import shutil
+from ..hostfacts import cuda_ready
 
 from .nvfp4_quant import (
     BLOCK as _BLOCK,
@@ -331,7 +332,7 @@ def w4a4_gemm_mode() -> str:
         import torch
     except ImportError:
         return ""
-    if not torch.cuda.is_available() or _fp4_dtype() is None:
+    if not cuda_ready() or _fp4_dtype() is None:
         return ""
     major, minor = torch.cuda.get_device_capability()
     if major * 10 + minor < W4A4_MIN_SM:

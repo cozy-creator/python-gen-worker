@@ -15,6 +15,7 @@ import pytest
 
 from gen_worker import hardware_report
 from gen_worker.config import Settings
+from gen_worker import cuda_probe
 from gen_worker.cuda_probe import CudaProbeResult, classify_probe_failure
 from gen_worker.pb import worker_scheduler_pb2_grpc as pb_grpc
 
@@ -34,7 +35,7 @@ pytestmark = pytest.mark.filterwarnings("ignore")
     [
         ("", "unknown"),
         ("torch unavailable: no module named torch", "torch_unavailable"),
-        ("torch.cuda.is_available() is False", "cuda_unavailable"),
+        (cuda_probe.NO_DEVICE_REASON, "cuda_unavailable"),
         # th#591/th#979's exact real-world signature, reproduced verbatim.
         ("RuntimeError: CUDA initialization: driver too old (found version 12080)", "driver_too_old"),
         ("RuntimeError: CUDA-capable device(s) is/are busy or unavailable", "cuda_error"),
@@ -66,7 +67,7 @@ def test_build_hardware_report_degrades_safely_without_nvidia_smi(monkeypatch: p
         raise FileNotFoundError("no nvidia-smi on this box")
 
     monkeypatch.setattr(hardware_report, "_nvidia_smi_driver_and_gpu", lambda: ("", ""))
-    probe = CudaProbeResult(ok=False, reason="torch.cuda.is_available() is False")
+    probe = CudaProbeResult(ok=False, reason=cuda_probe.NO_DEVICE_REASON)
     report = hardware_report.build_hardware_report(probe, _settings())
     assert report.reason_class == "cuda_unavailable"
     assert report.detail == probe.reason
@@ -98,7 +99,7 @@ def test_build_hardware_report_uses_nvidia_smi_when_torch_cuda_is_down(monkeypat
 def test_report_hardware_unsuitable_delivers_to_a_new_hub() -> None:
     with recording_hub() as (servicer, addr):
         settings = _settings(orchestrator_public_addr=addr, bootstrap_worker_jwt="")
-        probe = CudaProbeResult(ok=False, reason="torch.cuda.is_available() is False")
+        probe = CudaProbeResult(ok=False, reason=cuda_probe.NO_DEVICE_REASON)
         delivered = hardware_report.report_hardware_unsuitable(settings, probe)
         assert delivered is True
 

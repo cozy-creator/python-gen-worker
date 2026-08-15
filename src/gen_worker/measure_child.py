@@ -68,6 +68,7 @@ import msgspec
 
 from . import activity
 from .child_contract import CompileSpec, MintSlot
+from .hostfacts import cuda_ready
 from .child_preflight import (
     PreflightRefused,
     assert_slots_resolvable,
@@ -266,7 +267,7 @@ def _cuda() -> Any:
     try:
         import torch
 
-        return torch if torch.cuda.is_available() else None
+        return torch if cuda_ready() else None
     except Exception:  # noqa: BLE001 — torch-less: nothing to measure
         return None
 
