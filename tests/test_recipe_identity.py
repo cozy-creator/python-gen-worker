@@ -31,7 +31,8 @@ GUARD_MANIFEST_BLOCK = "guard_manifest"
 
 torch = pytest.importorskip("torch")
 
-from gen_worker import compiled_graph_key as ck
+from torch_compiled_graphs import identity as ck
+from torch_compiled_graphs import is_compiled_graph_key
 from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells as fc
 from gen_worker import guard_closure as gc
@@ -75,7 +76,7 @@ def pinned_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_static_closure_reaches_the_composition_code() -> None:
     closure = dict(cc.static_code_closure())
     # Entrypoints and their import graph (root-imports makes this sound).
-    for probe in ("gen_worker/compile_cache.py", "gen_worker/compiled_graph_key.py",
+    for probe in ("gen_worker/compile_cache.py", "gen_worker/graph_facts.py",
                   "gen_worker/guard_closure.py", "gen_worker/env_seal.py",
                   "gen_worker/models/loading.py", "gen_worker/__init__.py"):
         assert probe in closure, probe
@@ -92,23 +93,23 @@ def test_static_closure_reaches_the_composition_code() -> None:
 def test_cg_key_v1_axes_are_the_recipe(pinned_runtime: None,
                                  monkeypatch: pytest.MonkeyPatch) -> None:
     meta = exported_cell_meta()
-    key = ck.from_entry_metadata(meta)
-    assert key.digest.startswith("cg-key-v1-")
-    axes = key.axes_dict()
+    key = ck.from_artifact_metadata(meta)
+    assert key.value.startswith("cg-key-v1-")
+    axes = key.as_dict()
     assert set(axes) == {"graph", "sm", "toolchain"}
     # Version strings and image identity are GONE from the key: a
     # version-string bump alone can never re-key a cell (content digests
     # decide) — they are not even inputs to the derivation.
     bumped = dict(meta, gen_worker="99.0.0", torch="9.9.9",
                   image_digest="sha256:other")
-    assert ck.from_entry_metadata(bumped).digest == key.digest
+    assert ck.from_artifact_metadata(bumped).value == key.value
     # Foreign schemes can never collide with a current key; they stay
     # key-SHAPED (pgw#990, restored by th#1897 — is_key mirrors tensorhub's
     # scheme-agnostic IsCompiledGraphKey) and are ruled on by axes, not by
     # their label.
     for dead in ("ek1-", "ek2-", "cg-key-v2-"):
-        assert ck.is_key(dead + "a" * 56)
-        assert key.digest != dead + "a" * 56
+        assert is_compiled_graph_key(dead + "a" * 56)
+        assert key.value != dead + "a" * 56
     # pgw#1176: a ``ck`` key names a 36-entry all-or-nothing cell this runtime
     # cannot arm at all, so an orphaned ref must fail at the
     # comparison rather than late, inside a per-entry code path — and th#1897
@@ -119,37 +120,37 @@ def test_cg_key_v1_axes_are_the_recipe(pinned_runtime: None,
     # fence-symbol-exempt: `ck1` is the SUPERSEDED scheme and naming it IS the
     # assertion — the sixth instance of a blanket rename eating the one line
     # whose job is to name the old vocabulary. Do not sweep this.
-    assert ck.is_key("ck1-" + "a" * 56)
-    assert key.digest != "ck1-" + "a" * 56
+    assert is_compiled_graph_key("ck1-" + "a" * 56)
+    assert key.value != "ck1-" + "a" * 56
     # Version-string axes are rejected outright.
-    with pytest.raises(ck.CompiledGraphKeyError):
+    with pytest.raises(ck.IdentityError):
         ck.from_axes(dict(axes, torch="2.13.0"))
 
 
 def test_recipe_change_changes_the_key(pinned_runtime: None) -> None:
     meta = exported_cell_meta()
-    base = ck.from_entry_metadata(meta).digest
+    base = ck.from_artifact_metadata(meta).value
     # Toolchain content change -> new identity.
     retooled = json.loads(json.dumps(meta))
     retooled["toolchain"]["torch"] = "f" * 16
-    assert ck.from_entry_metadata(retooled).digest != base
+    assert ck.from_artifact_metadata(retooled).value != base
     # A deliberate settings-declaration change re-keys THROUGH toolchain
     # (pgw#1059 amendment 4) — the axis it honestly belongs to.
     reconfigured = json.loads(json.dumps(meta))
     reconfigured["toolchain"]["settings_declaration"] = "e" * 16
-    assert ck.from_entry_metadata(reconfigured).digest != base
+    assert ck.from_artifact_metadata(reconfigured).value != base
 
 
 def test_metadata_roundtrips_the_recipe_key(pinned_runtime: None) -> None:
     """Mint stamp == publish recompute, from the recorded recipe blocks —
     never trusted as a stamp."""
     meta = exported_cell_meta()
-    want = ck.from_entry_metadata(meta)
-    assert meta["compiled_graph_key"] == want.digest
+    want = ck.from_artifact_metadata(meta)
+    assert meta["compiled_graph_key"] == want.value
     # A cell with no toolchain block has no recipe identity.
     legacy = {k: v for k, v in meta.items() if k != "toolchain"}
-    with pytest.raises(ck.CompiledGraphKeyError, match="recipe"):
-        ck.from_entry_metadata(legacy)
+    with pytest.raises(ck.IdentityError, match="toolchain"):
+        ck.from_artifact_metadata(legacy)
     # pgw#990's memo half is GONE with its subject (pgw#1181): the local JIT
     # kind that recorded `code_closure` and carried no `compiled_graph_key` was the
     # `torch-inductor-cache` artifact, and there is no longer any kind without
@@ -158,7 +159,7 @@ def test_metadata_roundtrips_the_recipe_key(pinned_runtime: None) -> None:
     # A TOOLCHAIN drift is identity on the exported kind.
     retooled = json.loads(json.dumps(meta))
     retooled["toolchain"]["torch"] = "0" * 16
-    assert ck.from_entry_metadata(retooled).digest != want.digest
+    assert ck.from_artifact_metadata(retooled).value != want.value
 
 
 def test_toolchain_covers_the_compiler_and_not_the_model_libraries() -> None:

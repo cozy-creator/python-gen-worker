@@ -426,7 +426,7 @@ def test_the_child_runs_the_exporter_for_the_aot_recipe(
 
     target = tmp_path / "cell.tar.gz"
     # a `ck1` key names a 36-entry all-or-nothing cell, which this
-    # runtime cannot arm at all — `compiled_graph_key.is_key` refuses the prefix
+    # runtime cannot arm at all — `tcg.is_compiled_graph_key` refuses the prefix
     # deliberately, so a fixture keyed that way tests a shape nothing produces.
     key = "cg-key-v1-" + "a" * 56
     packed = tmp_path / "aot" / f"{key}.tar.gz"

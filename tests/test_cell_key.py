@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import pytest
 
-from gen_worker import compiled_graph_key as ck
+from torch_compiled_graphs import identity as ck
+from torch_compiled_graphs import is_compiled_graph_key
 from gen_worker import compile_cache as cc
 
 
@@ -60,26 +61,26 @@ def fixed_runtime(monkeypatch):
 
 def test_key_deterministic_and_axis_sensitive():
     a = ck.from_axes(_AXES)
-    assert a.digest == ck.from_axes(dict(_AXES)).digest
-    assert ck.is_key(a.digest)
+    assert a.value == ck.from_axes(dict(_AXES)).value
+    assert is_compiled_graph_key(a.value)
     for axis in ("graph", "sm", "toolchain"):
         bumped = dict(_AXES, **{axis: _AXES[axis] + "x"})
-        assert ck.from_axes(bumped).digest != a.digest, axis
+        assert ck.from_axes(bumped).value != a.value, axis
 
 
 def test_unknown_and_missing_axes_refuse():
-    with pytest.raises(ck.CompiledGraphKeyError):
+    with pytest.raises(ck.IdentityError):
         ck.from_axes(dict(_AXES, cuda_driver="13020"))  # host lottery axis
-    with pytest.raises(ck.CompiledGraphKeyError):
+    with pytest.raises(ck.IdentityError):
         ck.from_axes(dict(_AXES, sku="b200"))  # observability, never identity
-    with pytest.raises(ck.CompiledGraphKeyError):
+    with pytest.raises(ck.IdentityError):
         ck.from_axes(dict(_AXES, torch="2.13.0"))  # version axes are gone
-    with pytest.raises(ck.CompiledGraphKeyError):
+    with pytest.raises(ck.IdentityError):
         ck.from_axes({k: v for k, v in _AXES.items() if k != "toolchain"})
 
 
 def test_the_deriver_and_the_validator_agree_on_cg_key_v1():
-    """pgw#1213: `is_key` admits exactly what `from_axes(...).digest` mints.
+    """pgw#1213: `is_compiled_graph_key` admits exactly what `from_axes(...).value` mints.
 
     THE row that can go red on a scheme change: the deriver writes the
     scheme through `_PREFIX` and the validator reads it through the
@@ -91,9 +92,9 @@ def test_the_deriver_and_the_validator_agree_on_cg_key_v1():
     `tests/test_key_grammar_vectors_th1897.py`, against the corpus both repos
     vendor.
     """
-    key = ck.from_axes(_AXES).digest
+    key = ck.from_axes(_AXES).value
     assert key.startswith("cg-key-v1-")
-    assert ck.is_key(key) is True
+    assert is_compiled_graph_key(key) is True
 
 
 def test_the_grammar_refuses_shape_never_scheme():
@@ -107,15 +108,15 @@ def test_the_grammar_refuses_shape_never_scheme():
     `-`, because the scheme carries hyphens itself.
     """
     for foreign in ("ek1-", "ck1-", "cg-key-v2-", "a-", "cg.key_v1-"):
-        assert ck.is_key(foreign + "a" * 56), foreign
-        assert ck.from_axes(_AXES).digest != foreign + "a" * 56
-    assert not ck.is_key("cg-key-v1-" + "a" * 55)     # digest too short
-    assert not ck.is_key("cg-key-v1-" + "a" * 57)     # digest too long
-    assert not ck.is_key("cg-key-v1-" + "A" * 56)     # uppercase hex
-    assert not ck.is_key("cg-key-v1" + "a" * 56)      # no separator
-    assert not ck.is_key("-" + "a" * 56)              # empty scheme
-    assert not ck.is_key("cg-key-v1-" + "a" * 56 + "\n")  # \Z, not $
-    assert not ck.is_key("")
+        assert is_compiled_graph_key(foreign + "a" * 56), foreign
+        assert ck.from_axes(_AXES).value != foreign + "a" * 56
+    assert not is_compiled_graph_key("cg-key-v1-" + "a" * 55)     # digest too short
+    assert not is_compiled_graph_key("cg-key-v1-" + "a" * 57)     # digest too long
+    assert not is_compiled_graph_key("cg-key-v1-" + "A" * 56)     # uppercase hex
+    assert not is_compiled_graph_key("cg-key-v1" + "a" * 56)      # no separator
+    assert not is_compiled_graph_key("-" + "a" * 56)              # empty scheme
+    assert not is_compiled_graph_key("cg-key-v1-" + "a" * 56 + "\n")  # \Z, not $
+    assert not is_compiled_graph_key("")
 
 
 def test_execution_lane_canonicalization():

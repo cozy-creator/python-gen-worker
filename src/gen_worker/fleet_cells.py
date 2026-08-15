@@ -64,12 +64,15 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from . import activity as activity_mod
+from torch_compiled_graphs import is_compiled_graph_key
+from torch_compiled_graphs import identity as tcg_identity
+
 from . import (
     aot_identity,
     aot_serve,
     artifact_meta,
-    compiled_graph_key,
     env_seal,
+    graph_facts,
     local_cell_store,
     serve_posture,
 )
@@ -127,7 +130,7 @@ class SelfMint:
 
 
 #: The mint-obligation identity prefix. An arm token must never pass
-#: ``compiled_graph_key.is_key`` / the hub's ``compilecache.IsCompiledGraphKey``,
+#: ``tcg.is_compiled_graph_key`` / the hub's ``compilecache.IsCompiledGraphKey``,
 #: because it is NOT a compiled-graph key — see :class:`ArmIdentity`.
 #:
 #: The digit is the token's FACT-SET SCHEMA, and it is the memo-invalidation
@@ -188,7 +191,7 @@ class ArmIdentity:
 #: The ENVIRONMENT half of an :class:`ArmIdentity` — the facts a delegated
 #: child re-derives in its own process and RECORDS on the cell it hands back.
 #: ``envelope`` and ``toolchain`` use the exported key's own derivations
-#: (``compiled_graph_key.envelope_digest`` / ``compiled_graph_key.facts_digest``), ``lane`` the
+#: (``graph_facts.envelope_digest`` / ``graph_facts.facts_digest``), ``lane`` the
 #: one lane label (``cc.execution_lane_label``) — :func:`arm_axis_divergence`
 #: compares exactly these, so an axis that fails to survive the parent->child
 #: boundary is refused BY NAME at the handback seam.
@@ -205,7 +208,7 @@ ARM_ENVIRONMENT_FACTS = ("family", aot_serve.COMPILED_GRAPH_FORMAT_KEY,
 
 #: The SUBJECT half (pgw#1113): WHAT this obligation compiles, as opposed to
 #: what runtime it compiles on. ``subject`` is the resolved slot identity
-#: (:func:`compiled_graph_key.subject_digest` — which slot, which checkpoint refs,
+#: (:func:`graph_facts.subject_digest` — which slot, which checkpoint refs,
 #: which snapshot digest); ``targets``/``dynamic``/``regional`` are the rest
 #: of ``cc.declared_compile_facts`` the token could not previously see.
 #:
@@ -220,12 +223,12 @@ ARM_SUBJECT_FACTS = ("subject", "targets", "dynamic", "regional")
 #: Every fact in the token, in report order.
 ARM_FACTS = ARM_ENVIRONMENT_FACTS + ARM_SUBJECT_FACTS
 
-#: The pipeline attribute carrying the resolved :class:`compiled_graph_key.SlotSubject`
+#: The pipeline attribute carrying the resolved :class:`graph_facts.SlotSubject`
 #: set the executor built this object from (pgw#1113). Stamped beside the
 #: execution lane, read here for the same reason the lane is read here rather
 #: than threaded through six call sites: the pipe is the one handle every arm
 #: site holds. A pipeline the worker did not resolve carries none, and
-#: :func:`compiled_graph_key.subject_digest` answers "" for it — honestly narrower, not
+#: :func:`graph_facts.subject_digest` answers "" for it — honestly narrower, not
 #: silently equal to some other subject.
 ARM_SUBJECT_ATTR = "_cozy_arm_subject"
 
@@ -240,7 +243,7 @@ def stamp_arm_subject(
     leaves the subject unstated, which is the pre-pgw#1113 posture and never
     an exception on a serving path.
     """
-    subject = compiled_graph_key.SlotSubject(
+    subject = graph_facts.SlotSubject(
         slot=str(slot or ""),
         refs=tuple(str(ref) for ref in refs if str(ref or "")),
         snapshot_digest=str(snapshot_digest or ""),
@@ -255,16 +258,16 @@ def stamp_arm_subject(
                      exc_info=True)
 
 
-def pipeline_arm_subject(pipe: Any) -> Tuple[compiled_graph_key.SlotSubject, ...]:
+def pipeline_arm_subject(pipe: Any) -> Tuple[graph_facts.SlotSubject, ...]:
     """The resolved subject stamped on ``pipe``, or ``()``."""
     stamped = getattr(pipe, ARM_SUBJECT_ATTR, None) or ()
     return tuple(
-        sub for sub in stamped if isinstance(sub, compiled_graph_key.SlotSubject))
+        sub for sub in stamped if isinstance(sub, graph_facts.SlotSubject))
 
 
 def arm_identity(
     family: str, weight_lane: str, lora_bucket: int, cfg: Any,
-    subject: Iterable[compiled_graph_key.SlotSubject] = (),
+    subject: Iterable[graph_facts.SlotSubject] = (),
 ) -> ArmIdentity:
     """This runtime's :class:`ArmIdentity` for one owed mint.
 
@@ -306,8 +309,8 @@ def arm_identity(
             str(weight_lane or ""), int(lora_bucket or 0)),
         "sm": sm,
         "env_seal": env_seal.seal_digest(env_seal.effective_seal()),
-        "toolchain": compiled_graph_key.toolchain_axis_digest(dict(cc.toolchain_digest())),
-        "subject": compiled_graph_key.subject_digest(subject),
+        "toolchain": tcg_identity.toolchain_axis_digest(dict(cc.toolchain_digest())),
+        "subject": graph_facts.subject_digest(subject),
         "targets": ",".join(str(t) for t in declared["targets"]),
         "dynamic": json.dumps(
             declared["dynamic"], sort_keys=True, separators=(",", ":")),
@@ -799,7 +802,7 @@ class CellPublisher:
         seen: Dict[str, int] = {}
         for i, entry in enumerate(asked):
             key = entry.compiled_graph_key
-            if not compiled_graph_key.is_key(key):
+            if not is_compiled_graph_key(key):
                 raise CellPublishRefused(
                     f"entries[{i}].compiled_graph_key is {key!r}, which is not a "
                     f"compiled-graph key")
@@ -809,7 +812,7 @@ class CellPublisher:
                 raise CellPublishRefused(
                     f"entries[{i}] repeats entries[{seen[key]}]'s key {key}")
             seen[key] = i
-            for axis in compiled_graph_key.KEY_AXES:
+            for axis in graph_facts.KEY_AXES:
                 if not str(entry.identity_axes.get(axis) or "").strip():
                     raise CellPublishRefused(
                         f"entries[{i}].identity_axes states no {axis!r}; an "
@@ -1027,7 +1030,7 @@ def intent_entry(
             "it is fenced (pgw#712)")
     key = str(meta.get("compiled_graph_key") or "").strip()
     if not key:
-        key = _recomputed_key(meta).digest
+        key = _recomputed_key(meta).value
     return (
         PublishEntry(
             compiled_graph_key=key,
@@ -1091,7 +1094,7 @@ GRAPH_CONTRACT_AXIS = "graph_contract"
 ENV_SEAL_AXIS = "env_seal"
 
 
-def _recomputed_key(meta: Mapping[str, Any]) -> compiled_graph_key.CompiledGraphKey:
+def _recomputed_key(meta: Mapping[str, Any]) -> tcg_identity.CompiledGraphKey:
     """The key this cell's OWN recorded facts describe.
 
     One derivation for the whole publish path, so the key a cell is
@@ -1101,8 +1104,8 @@ def _recomputed_key(meta: Mapping[str, Any]) -> compiled_graph_key.CompiledGraph
     kind is refused here by the derivation itself.
     """
     try:
-        return compiled_graph_key.from_entry_metadata(meta)
-    except compiled_graph_key.CompiledGraphKeyError as exc:
+        return tcg_identity.from_artifact_metadata(meta)
+    except tcg_identity.IdentityError as exc:
         raise CellPublishRefused(
             f"cell states no computable identity ({exc}); publishing it under "
             "partial axes would produce a row the fleet cannot arm from "
@@ -1138,12 +1141,12 @@ def _identity_axes(family: str, meta: dict) -> Dict[str, str]:
     """
     key = _recomputed_key(meta)
     stamped = str(meta.get("compiled_graph_key") or "").strip()
-    if stamped and stamped != key.digest:
+    if stamped and stamped != key.value:
         raise CellPublishRefused(
             f"compiled_graph_key stamp {stamped} disagrees with the key its recorded "
-            f"axes describe ({key.digest}); refusing to publish an identity "
+            f"axes describe ({key.value}); refusing to publish an identity "
             "the artifact does not corroborate")
-    axes = {k: str(v) for k, v in key.axes_dict().items()}
+    axes = {k: str(v) for k, v in key.as_dict().items()}
     # The manifest label — telemetry/coverage, never identity. Empty is
     # HONEST for an entry minted by a pod that has not folded its whole
     # declaration, so it is not a publish refusal.
@@ -1329,7 +1332,7 @@ def _publish_async(
 
 def _mark_publish(key: str, state: str) -> None:
     """Record an upload's outcome beside the bytes it uploaded (pgw#1183)."""
-    if compiled_graph_key.is_key(key):
+    if is_compiled_graph_key(key):
         local_cell_store.mark(key, sink=state)
 
 
@@ -2070,7 +2073,7 @@ def arm_axis_divergence(
         "sm": str(meta.get("sm") or ""),
         "env_seal": env_seal.seal_digest(
             dict(meta.get(env_seal.SEAL_KEY) or {})),
-        "toolchain": compiled_graph_key.toolchain_axis_digest(
+        "toolchain": tcg_identity.toolchain_axis_digest(
             dict(meta.get("toolchain") or {})),
     }
     parent = arm_key.facts_dict()
@@ -2503,7 +2506,7 @@ def adopt_delegated_mint(
             row_meta = {}
         row_key = str(row_meta.get("compiled_graph_key") or "").strip()
         entry_name = str(
-            (row_meta.get(compiled_graph_key.ENTRY_BLOCK_KEY) or {}).get("name") or "")
+            (row_meta.get(graph_facts.TCG_GRAPH_CLASS_BLOCK) or {}).get("name") or "")
         if not row_armed:
             refusals.append((entry_name or row.name, *row_refusal))
             activity_mod.emit_event(
@@ -2656,7 +2659,7 @@ def _stage_durable(pending: "PendingSelfMint", artifact: Path) -> str:
             "compiled_graph_key") or "").strip()
     except Exception:  # noqa: BLE001 — an unreadable stamp is refused below
         key = ""
-    if not key or not compiled_graph_key.is_key(key):
+    if not key or not is_compiled_graph_key(key):
         return ""
     sink_absent = no_publish_sink_reason(pending.publisher)
     stored = local_cell_store.store(

@@ -185,7 +185,6 @@ module = [
   "gen_worker.cli.prefetch",
   "gen_worker.compile_cache",
   "gen_worker.compile_posture",
-  "gen_worker.compiled_graph_key",
   "gen_worker.convert._hf_load",
   "gen_worker.convert.component",
   "gen_worker.convert.dataset",

@@ -24,7 +24,7 @@ from gen_worker import (
     aot_serve,
     author_ci,
     boot_key,
-    compiled_graph_key,
+    graph_facts,
     compile_cache,
     lifecycle,
     mint_supervisor,
@@ -96,7 +96,7 @@ class _Row:
     def __init__(self, entry: str, block: Dict[str, Any]) -> None:
         self.entry = entry
         self.key = f"cg-{entry}"
-        self.metadata = {compiled_graph_key.ENTRY_BLOCK_KEY: block}
+        self.metadata = {graph_facts.TCG_GRAPH_CLASS_BLOCK: block}
 
 
 class _Result:

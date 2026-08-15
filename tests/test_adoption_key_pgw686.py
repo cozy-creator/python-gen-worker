@@ -25,7 +25,8 @@ from typing import Any, Dict, Iterator
 
 import pytest
 
-from gen_worker import compiled_graph_key as ck
+from torch_compiled_graphs import identity as ck
+from torch_compiled_graphs import is_compiled_graph_key
 from gen_worker import compile_cache as cc
 from gen_worker import env_seal
 from gen_worker.models import w8a8_lora
@@ -190,9 +191,9 @@ def test_burst_divergence_reproduced_execution_lane_only(burst_runtime: None) ->
     # nothing, because no current derivation restates its axes. The orphan
     # misses at the comparison, not at the parse.
     for old in (CK2_PUBLISHED, CK2_REQUESTED_PLAIN, CK2_REQUESTED_FP8_HOOKS):
-        assert ck.is_key(old)
-    with pytest.raises(ck.CompiledGraphKeyError, match="has no entry-key identity"):
-        ck.from_entry_metadata(_BURST_META)
+        assert is_compiled_graph_key(old)
+    with pytest.raises(ck.IdentityError, match="only an aot-inductor artifact has compiled-graph identity"):
+        ck.from_artifact_metadata(_BURST_META)
 
 
 # --- the fix: one base-lane resolution for every cell-identity surface -----

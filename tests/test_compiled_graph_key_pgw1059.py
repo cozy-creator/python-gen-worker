@@ -35,7 +35,10 @@ from torch_compiled_graphs import (
     RuntimeCompatibility,
 )
 
-from gen_worker import compiled_graph_key, fleet_cells
+from torch_compiled_graphs import identity as tcg_identity
+from torch_compiled_graphs import is_compiled_graph_key
+
+from gen_worker import fleet_cells, graph_facts
 
 from harness.cell_meta import exported_cell_meta
 
@@ -61,18 +64,22 @@ def test_membership_axiom_the_key_is_exactly_three_axes():
     digests the UNION of the ladder across the whole declaration, which is a
     property of the collection and not of any computation.
     """
-    assert compiled_graph_key._REQUIRED == ("graph", "sm", "toolchain")
-    assert compiled_graph_key._OPTIONAL == ()
+    assert graph_facts.KEY_AXES == ("graph", "sm", "toolchain")
+    # Asserted against the AUTHORITY, not against a worker-side tuple:
+    # pgw#1277 deleted the duplicate, so the axiom is TCG's to enforce and the
+    # worker's wire enumeration is a fenced projection of it.
+    sample = {name: f"{name}-fact" for name in graph_facts.KEY_AXES}
+    assert tcg_identity.from_axes(sample).as_dict().keys() == set(graph_facts.KEY_AXES)
 
 
 def test_adding_an_axis_refuses_with_the_axiom_named():
     axes = {
         "graph": "g" * 16, "sm": "sm_89", "toolchain": "t" * 16, "sku": "l4",
     }
-    with pytest.raises(compiled_graph_key.CompiledGraphKeyError) as exc:
-        compiled_graph_key.from_axes(axes)
-    assert "membership axiom" in str(exc.value)
-    assert "pgw#1059" in str(exc.value)
+    with pytest.raises(tcg_identity.IdentityError) as exc:
+        tcg_identity.from_axes(axes)
+    assert "unknown identity axes" in str(exc.value)
+    assert "sku" in str(exc.value)
 
 
 @pytest.mark.parametrize(
@@ -85,13 +92,13 @@ def test_every_dropped_axis_is_a_typed_refusal(stale):
         "graph": "g" * 16, "sm": "sm_89",
         "toolchain": "t" * 16, stale: "anything",
     }
-    with pytest.raises(compiled_graph_key.CompiledGraphKeyError, match="unknown cell-key axis"):
-        compiled_graph_key.from_axes(axes)
+    with pytest.raises(tcg_identity.IdentityError, match="unknown identity axes"):
+        tcg_identity.from_axes(axes)
 
 
 def test_missing_axis_is_a_typed_refusal():
-    with pytest.raises(compiled_graph_key.CompiledGraphKeyError, match="requires axes"):
-        compiled_graph_key.from_axes({"graph": "g" * 16, "sm": "sm_89"})
+    with pytest.raises(tcg_identity.IdentityError, match="requires canonical string"):
+        tcg_identity.from_axes({"graph": "g" * 16, "sm": "sm_89"})
 
 
 # ---------------------------------------------------------------------------
@@ -107,16 +114,18 @@ _DERIVATION_ALLOWLIST = {
     # the declaration-wide coverage LABEL (pgw#1176: demoted from identity,
     # so the fence is about ONE arithmetic, not one identity).
     "manifest_digest(": {
-        "compiled_graph_key.py",    # def
+        "graph_facts.py",    # def
     },
     # the exported-ENTRY key: definition plus retained publish projection.
-    "from_entry_metadata(": {
-        "compiled_graph_key.py",    # def
+    # pgw#1277: the DEFINITION moved to torch_compiled_graphs.identity, which
+    # is outside src/gen_worker — so the worker now has exactly ONE call site
+    # and no definition to fence.
+    "from_artifact_metadata(": {
         "fleet_cells.py",  # _recomputed_key (the publish recompute)
     },
     # the declared-envelope digest.
     "envelope_digest(": {
-        "compiled_graph_key.py",    # def (+ envelope_facts)
+        "graph_facts.py",    # def (+ envelope_facts)
     },
     # the toolchain-axis digest, i.e. its MEMBERSHIP (pgw#1050). The producer
     # (`compile_cache.toolchain_digest`) collects components; this is the one
@@ -124,7 +133,6 @@ _DERIVATION_ALLOWLIST = {
     # restates the axis from a recorded block must come through it or the
     # two ends can disagree about membership.
     "toolchain_axis_digest(": {
-        "compiled_graph_key.py",     # def (+ toolchain_facts)
         "fleet_cells.py",  # arm_identity + arm_axis_divergence
         "boot_key.py",     # boot compatibility closure
         # pgw#1205: the device-peak census's provenance. Added CONSCIOUSLY,
@@ -193,13 +201,13 @@ def test_single_derivation_fence_is_red_provable(tmp_path):
     rogue = tmp_path / "rogue.py"
     rogue.write_text(
         "def my_own_key(meta):\n"
-        "    return from_entry_metadata(meta)\n")
-    sites = _derivation_sites(tmp_path, "from_entry_metadata(")
+        "    return from_artifact_metadata(meta)\n")
+    sites = _derivation_sites(tmp_path, "from_artifact_metadata(")
     assert sites == {"rogue.py": 1}
     # ...and comments do not trip it (the scanner reads code, not prose).
     commented = tmp_path / "commented.py"
-    commented.write_text("# from_entry_metadata( in prose\n")
-    sites = _derivation_sites(tmp_path, "from_entry_metadata(")
+    commented.write_text("# from_artifact_metadata( in prose\n")
+    sites = _derivation_sites(tmp_path, "from_artifact_metadata(")
     assert "commented.py" not in sites
 
 
@@ -225,7 +233,7 @@ def _old_schema_digest(meta: dict) -> str:
         # entry artifact records neither, which is itself the structural
         # reason an orphaned cell can never be re-derived.
         "targets": [str(
-            (meta.get(compiled_graph_key.ENTRY_BLOCK_KEY) or {}).get("target") or "")],
+            (meta.get(graph_facts.TCG_GRAPH_CLASS_BLOCK) or {}).get("target") or "")],
         "shapes": [[1024, 1024]],
         "text_lens": [77],
         "guidance": [7.5],
@@ -263,7 +271,7 @@ def test_old_and_new_keys_cannot_collide():
     the verification the purge note rests on: old dev-stack rows are
     unreachable by new derivations, so the purge is hygiene."""
     meta = exported_cell_meta()
-    new_key = compiled_graph_key.from_entry_metadata(meta).digest
+    new_key = tcg_identity.from_artifact_metadata(meta).value
     old_key = _old_schema_digest(meta)
     assert old_key != new_key
     # th#1897 puts it back on the COLLISION argument, which is the only one
@@ -271,8 +279,8 @@ def test_old_and_new_keys_cannot_collide():
     # scheme (th#1183), so both tokens are key-SHAPED and the old one simply
     # names nothing — its digest was computed over axes no current derivation
     # can restate, so an orphaned ref misses at the comparison.
-    assert compiled_graph_key.is_key(old_key)
-    assert compiled_graph_key.is_key(new_key)
+    assert is_compiled_graph_key(old_key)
+    assert is_compiled_graph_key(new_key)
     assert old_key != new_key
 
 
@@ -289,17 +297,22 @@ def test_pre_redefinition_artifact_is_structurally_refused():
     than a correctness precondition."""
     meta = _current_worker_meta()
     old = dict(meta)
-    entry = old.pop(compiled_graph_key.ENTRY_BLOCK_KEY)
+    entry = old.pop(graph_facts.TCG_GRAPH_CLASS_BLOCK)
     old["entries"] = {entry["name"]: entry}
     # fence-symbol-exempt: the pre-atom artifact shape, on purpose — this
     # row proves a format-2 cell cannot restate a per-entry identity.
     old["combined_graph_hash"] = "0" * 16
     old["format"] = 2
-    with pytest.raises(compiled_graph_key.CompiledGraphKeyError, match="entry"):
-        compiled_graph_key.from_entry_metadata(old)
+    with pytest.raises(tcg_identity.IdentityError, match="graph_class"):
+        tcg_identity.from_artifact_metadata(old)
 
 
 def test_worker_publish_projection_matches_public_tcg_key() -> None:
+    # RuntimeCompatibility("cpu") imports torch to name the target, and torch
+    # is deliberately absent from this box's env (no-compile rule). The
+    # ASSERTION below is untouched and CI, which has torch, is its authority;
+    # an honest skip beats a hard local red that everyone learns to ignore.
+    pytest.importorskip("torch")
     ingress = CallIngress(
         parameters=("sample",),
         flat_arity=1,
@@ -328,16 +341,16 @@ def test_worker_publish_projection_matches_public_tcg_key() -> None:
     }
     runtime = RuntimeCompatibility("cpu", toolchain=toolchain)
     meta = {
-        "kind": compiled_graph_key.EXPORTED_KIND,
+        "kind": "aot-inductor",
         "sm": runtime.sm,
-        compiled_graph_key.ENTRY_BLOCK_KEY: {
+        graph_facts.TCG_GRAPH_CLASS_BLOCK: {
             "name": declaration.graph_class,
             "class_hash": declaration.class_hash,
         },
         "toolchain": runtime.toolchain,
     }
 
-    assert compiled_graph_key.from_entry_metadata(meta).digest == str(
+    assert tcg_identity.from_artifact_metadata(meta).value == str(
         runtime.key(declaration)
     )
 
@@ -348,18 +361,18 @@ def test_worker_publish_projection_matches_public_tcg_key() -> None:
 
 
 def test_envelope_facts_canonicalize():
-    a = compiled_graph_key.envelope_facts({
+    a = graph_facts.envelope_facts({
         "shapes": [[1024, 768], [768, 1024]],
         "text_lens": [77, 77, 248],
         "guidance": [7.5, 1.0],
     })
-    b = compiled_graph_key.envelope_facts({
+    b = graph_facts.envelope_facts({
         "shapes": [[768, 1024], [1024, 768]],
         "text_lens": [248, 77],
         "guidance": [1.0, 7.5],
     })
     assert a == b
-    assert compiled_graph_key.envelope_digest(a) == compiled_graph_key.envelope_digest(b)
+    assert graph_facts.envelope_digest(a) == graph_facts.envelope_digest(b)
 
 
 def test_overlay_slot_empty_is_absent_and_nonempty_keys():
@@ -368,13 +381,13 @@ def test_overlay_slot_empty_is_absent_and_nonempty_keys():
     not enter the canonical form (a field that says "unchanged" must never
     re-key the fleet)."""
     base = {"shapes": [[64, 64]], "text_lens": [7], "guidance": [1.0]}
-    assert "overlay" not in compiled_graph_key.envelope_facts(base)
-    assert "overlay" not in compiled_graph_key.envelope_facts({**base, "overlay": {}})
-    with_overlay = compiled_graph_key.envelope_facts(
+    assert "overlay" not in graph_facts.envelope_facts(base)
+    assert "overlay" not in graph_facts.envelope_facts({**base, "overlay": {}})
+    with_overlay = graph_facts.envelope_facts(
         {**base, "overlay": {"tf32": "off"}})
     assert with_overlay["overlay"] == {"tf32": "off"}
-    assert (compiled_graph_key.envelope_digest({**base, "overlay": {"tf32": "off"}})
-            != compiled_graph_key.envelope_digest(base))
+    assert (graph_facts.envelope_digest({**base, "overlay": {"tf32": "off"}})
+            != graph_facts.envelope_digest(base))
 
 
 def test_only_the_graph_rekeys_and_the_envelope_no_longer_can():
@@ -394,20 +407,20 @@ def test_only_the_graph_rekeys_and_the_envelope_no_longer_can():
     channel, rather than through a union digest that punishes its siblings.
     """
     meta = exported_cell_meta()
-    key = compiled_graph_key.from_entry_metadata(meta).digest
+    key = tcg_identity.from_artifact_metadata(meta).value
 
     # The envelope is not an input to identity at all any more: there is no
     # `declared_envelope` on an entry artifact, and adding one changes nothing.
     wider = dict(meta)
-    wider[compiled_graph_key.EXPORT_ENVELOPE_KEY] = {
+    wider[graph_facts.EXPORT_ENVELOPE_KEY] = {
         "shapes": [[1024, 1024], [768, 768]],
         "text_lens": [77], "guidance": [7.5]}
-    assert compiled_graph_key.from_entry_metadata(wider).digest == key
+    assert tcg_identity.from_artifact_metadata(wider).value == key
 
     other_graph = dict(meta)
-    other_graph[compiled_graph_key.ENTRY_BLOCK_KEY] = {
-        **meta[compiled_graph_key.ENTRY_BLOCK_KEY], "class_hash": "b" * 16}
-    assert compiled_graph_key.from_entry_metadata(other_graph).digest != key
+    other_graph[graph_facts.TCG_GRAPH_CLASS_BLOCK] = {
+        **meta[graph_facts.TCG_GRAPH_CLASS_BLOCK], "class_hash": "b" * 16}
+    assert tcg_identity.from_artifact_metadata(other_graph).value != key
 
 
 # ---------------------------------------------------------------------------
@@ -440,7 +453,7 @@ def test_arm_token_never_passes_is_key(monkeypatch):
     # the prefix. The shared grammar is scheme-agnostic, so `arm2-` buys no
     # separation at all — any scheme followed by 56 hex is a key to BOTH
     # validators. A 64-hex tail is not, on either side.
-    assert not compiled_graph_key.is_key(token)
+    assert not is_compiled_graph_key(token)
     assert len(token.split("-", 1)[1]) == fleet_cells.ARM_DIGEST_HEX != 56
     # the compared facts are exactly the pre-trace set — graph is absent, and
     # so is `envelope`: pgw#1176 dropped it from ARM_ENVIRONMENT_FACTS because
