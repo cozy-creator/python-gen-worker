@@ -149,6 +149,35 @@ class HubPublishError(RuntimeError):
         self.retryable = retryable
 
 
+# The hub's typed refusal for a publish naming a release nobody cut (th#1980).
+RELEASE_NOT_FOUND = "release_not_found"
+
+
+class HubReleaseNotFoundError(HubPublishError):
+    """The named release does not exist, and publishing does not cut one.
+
+    Cutting a release is a deliberate act (``POST
+    /repos/{org}/{name}/releases``); a publish ATTACHES an artifact to one that
+    already exists. So the remedy is to cut the release and publish again — never
+    to re-hash, re-cast or re-upload the bytes, which were never the problem.
+    Typed because "the release is missing" and "the artifact is bad" are the two
+    refusals a producer must not confuse: one is a control-plane act costing
+    nothing, the other is gigabytes.
+    """
+
+
+def _publish_refusal(message: str, *, status: int = 0, code: str = "",
+                     retryable: Optional[bool] = None) -> HubPublishError:
+    """One hub refusal as the narrowest exception that fits its code."""
+    if code == RELEASE_NOT_FOUND:
+        return HubReleaseNotFoundError(
+            f"{message} — cut the release first "
+            "(POST /repos/{org}/{name}/releases), then publish into it; the "
+            "bytes are not at fault, do not re-upload",
+            status=status, code=code, retryable=False)
+    return HubPublishError(message, status=status, code=code, retryable=retryable)
+
+
 def _is_terminal_repudiation(exc: BaseException) -> bool:
     """Should this failure destroy the session's staged bytes?
 
@@ -416,6 +445,14 @@ class HubClient:
         destination_repo: str,
         files: list[CommitFile],
         tags: list[str] | None = None,
+        # The release this artifact ATTACHES to (th#1980). It must ALREADY have
+        # been cut — publishing never cuts one, exactly as uploading a binary to
+        # GitHub never creates the release it lands in. An unknown identifier is
+        # a typed, non-retryable `release_not_found`
+        # (:class:`HubReleaseNotFoundError`), whose remedy is a control-plane
+        # act, never a re-upload. Optional for now; requiredness rides the
+        # repo-tag hard cut.
+        release: str = "",
         # "replace" — a checkpoint is COMPLETE IN ITSELF. "merge" unions this
         # publish with the repo's prior :latest, so a caller that never
         # mentioned a sibling INHERITS its bytes (an fp8 checkpoint carrying
@@ -535,6 +572,7 @@ class HubClient:
                 {"tag": t, **({"head": True} if head else {})} for t in tags
             ]
         for key, val in (
+            ("release", release.strip()),
             ("dtype", _dtype_token(dtype)), ("file_layout", file_layout),
             ("file_type", file_type), ("display_label", display_label),
             ("objective", objective), ("artifact_contract", artifact_contract),
@@ -670,7 +708,7 @@ class HubClient:
         if session is None:
             resp = self._post(f"{repo_path}/publishes", body)
             if resp.status_code < 200 or resp.status_code >= 300:
-                raise HubPublishError(
+                raise _publish_refusal(
                     f"publish declare failed ({resp.status_code}): {resp.text[:800]}",
                     status=resp.status_code, code=_error_code_of(resp))
             session = self._json(resp)
@@ -766,7 +804,7 @@ class HubClient:
                                 stage = str(s.get("stage") or "")
                     except Exception:  # noqa: BLE001 - the stage is a nicety
                         pass
-                    raise HubPublishError(
+                    raise _publish_refusal(
                         f"publish {publish_id} "
                         f"{'repudiated' if not failure.get('retryable') else 'failed'}"
                         f"{f' at {stage}' if stage else ''}: "
@@ -775,7 +813,7 @@ class HubClient:
                         status=done.status_code, code=str(failure.get("code") or ""),
                         retryable=bool(failure.get("retryable")),
                     )
-                raise HubPublishError(
+                raise _publish_refusal(
                     f"publish complete failed ({done.status_code}): {done.text[:800]}",
                     status=done.status_code, code=_error_code_of(done))
             final = self._json(done)
@@ -872,6 +910,8 @@ def files_from_tree(tree: Path, *, prefix: str = "") -> list[CommitFile]:
 __all__ = [
     "HubClient",
     "HubPublishError",
+    "HubReleaseNotFoundError",
+    "RELEASE_NOT_FOUND",
     "CommitFile",
     "CommitResult",
     "files_from_tree",

@@ -143,6 +143,7 @@ def publish_flavors(
     flavors: Iterable[ProducedFlavor],
     *,
     destination_repo: str = "",
+    release: str = "",
     tags: Iterable[str] | None = None,
     mode: str = "replace",
     metadata: Mapping[str, Any] | None = None,
@@ -158,6 +159,13 @@ def publish_flavors(
     ships a quantized checkpoint carrying the base weights. Pass
     ``mode="merge"`` explicitly only for deliberate overlay publishes (e.g. a
     vae swap on top of an existing tree).
+
+    ``release`` names the ALREADY-CUT release each flavor attaches to (th#1980);
+    every flavor of one export lands in the same release and is told apart there
+    by its contract. Publishing never cuts a release, so an unknown identifier is
+    a typed ``HubReleaseNotFoundError`` — cut it and publish again, never
+    re-upload. It is a first-class field on the declare request: stating it in
+    ``metadata`` publishes inert prose the hub never reads.
 
     ``journal_path`` is where the in-flight ``publish_id`` is recorded so a
     retry on this pod re-uploads instead of re-casting. Pass the produced
@@ -236,6 +244,7 @@ def publish_flavors(
         results.append(client.publish_v2(
             destination_repo=dest,
             files=_flavor_files(flavor),
+            release=release,
             tags=list(tags or []),
             mode=mode,
             # The conversion producer's own legs. (The per-object liveness beat
