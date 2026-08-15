@@ -104,6 +104,49 @@ def test_a_key_is_refused_where_a_fact_belongs() -> None:
         tcg_identity.from_artifact_metadata(forged)
 
 
+#: KNOWN-ANSWER VECTORS — the only thing in this repo that pins the key VALUE.
+#:
+#: Found by red-proving pgw#1277 rather than by design: mutating TCG's canonical
+#: fold (``separators=(",", ":")`` -> ``(", ", ": ")``) left the entire pgw
+#: suite GREEN. Every other identity assertion here is RELATIONAL — equal,
+#: not-equal, has the prefix, matches the grammar — and a fold change moves all
+#: keys together, so relations survive it intact. The one test that did bind the
+#: value, ``test_worker_publish_projection_matches_public_tcg_key``, needs torch
+#: and cannot run on a control-plane box.
+#:
+#: A fold change is a FLEET RE-KEY: every published artifact is orphaned. That
+#: must never be reachable by an accidental edit that no gate notices, so these
+#: three vectors are pinned by hand. If one fails, do not "update the expected
+#: value" — establish first that a deliberate re-key was intended.
+KAT_AXES = {"graph": "0f0e0d0c0b0a0908", "sm": "sm_90", "toolchain": "bb11cc22dd33ee44"}
+KAT_KEY = "cg-key-v1-3460b43a25317f2d8d5ab5fce1e5cf5b7817d6447ef2343dc6f3b78b"
+KAT_TOOLCHAIN = {"torch": "aa" * 8, "ptxas": "bb" * 8, "diffusers": "cc" * 8}
+KAT_TOOLCHAIN_AXIS = "4863b405217cfc4b"
+KAT_META = {
+    "kind": "aot-inductor",
+    "sm": "sm_90",
+    "graph_class": {"class_hash": "0f0e0d0c0b0a0908"},
+    "toolchain": {"torch": "aa" * 8, "ptxas": "bb" * 8},
+}
+KAT_META_KEY = "cg-key-v1-7d14d604a8fbe097eb5f730f0b9290b4ce4e2482268de6ea3d76b626"
+
+
+def test_the_key_fold_is_pinned_by_value_not_only_by_relation() -> None:
+    """Any change to the canonical fold moves these, and nothing else here."""
+    assert tcg_identity.from_axes(KAT_AXES).value == KAT_KEY
+
+
+def test_the_toolchain_axis_is_pinned_by_value() -> None:
+    """Pins the fold AND the eviction together: ``diffusers`` is in the input
+    and must not be in the digest (pgw#1050)."""
+    assert tcg_identity.toolchain_axis_digest(KAT_TOOLCHAIN) == KAT_TOOLCHAIN_AXIS
+
+
+def test_the_artifact_derivation_is_pinned_by_value() -> None:
+    """The whole path an artifact travels — recorded block to published key."""
+    assert tcg_identity.from_artifact_metadata(KAT_META).value == KAT_META_KEY
+
+
 def test_the_axis_projection_is_fenced_against_tcgs_refusal() -> None:
     """``graph_facts.KEY_AXES`` is a PROJECTION, so it needs a fence.
 
