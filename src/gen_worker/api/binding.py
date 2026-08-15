@@ -5,7 +5,7 @@ constructor argument — it comes from the ``models={}`` dict key (or, for a
 single ``model=`` binding, the ``setup()``/handler parameter name).
 
     HF("black-forest-labs/FLUX.1-dev", dtype="bf16")
-    Hub("owner/repo", tag="canary")
+    Hub("owner/repo", release="2026.08")
     Civitai("123456", version="789012")
     ModelScope("circlestone-labs/Anima", files=("split_files/*.safetensors",))
 
@@ -25,7 +25,6 @@ import msgspec
 from msgspec import structs
 
 from ..models.refs import (
-    DEFAULT_REF_TAG,
     HuggingFaceRef,
     WireRef,
     fold_ref,
@@ -69,7 +68,7 @@ class ModelRef(msgspec.Struct, frozen=True):
     slot-policy concern, not an identity-struct flag.
 
     Carries the union of every registry's per-source fields (tensorhub:
-    ``tag``; huggingface: ``revision``/``dtype``/``subfolder``/
+    ``release``; huggingface: ``revision``/``dtype``/``subfolder``/
     ``files``; civitai: ``version``; modelscope: ``revision``/``files``).
     ``storage_dtype`` is shared by tensorhub/huggingface. Build one via
     ``Hub``/``HF``/``Civitai``/``ModelScope`` rather than the raw
@@ -89,7 +88,10 @@ class ModelRef(msgspec.Struct, frozen=True):
 
     source: ModelSource
     path: str
-    tag: str = ""
+    #: th#1987: the tensorhub RELEASE this binding pins. There is no default —
+    #: a binding that names none addresses the repo and no artifact in it, and
+    #: the hub answers `release_not_found`.
+    release: str = ""
     revision: str = ""
     subfolder: str = ""
     dtype: str = ""
@@ -105,7 +107,7 @@ class ModelRef(msgspec.Struct, frozen=True):
         # CI), so the endpoint import dies at decoration in the image only.
         force = msgspec.structs.force_setattr
         force(self, "path", _clean(self.path))
-        force(self, "tag", _clean(self.tag))
+        force(self, "release", _clean(self.release))
         force(self, "revision", _clean(self.revision))
         force(self, "subfolder", _clean(self.subfolder))
         force(self, "dtype", _clean(self.dtype))
@@ -120,8 +122,6 @@ class ModelRef(msgspec.Struct, frozen=True):
         # reach this constructor.
         refuse_flavor_selector(self.path, where=f"{self.source} binding")
         if self.source == "tensorhub":
-            if not self.tag:
-                msgspec.structs.force_setattr(self, "tag", DEFAULT_REF_TAG)
             if not self.path:
                 raise ValueError("Hub requires a non-empty ref")
         elif self.source == "huggingface":
@@ -152,19 +152,23 @@ class ModelRef(msgspec.Struct, frozen=True):
         label = self.path
         if self.source == "civitai" and self.version:
             label += f"@{self.version}"
-        elif self.tag and self.tag != DEFAULT_REF_TAG:
-            label += f":{self.tag}"
+        elif self.release and "@" not in label:
+            label += f"@{self.release}"
         return label
 
 
 def Hub(
     ref: str,
     *,
-    tag: str = DEFAULT_REF_TAG,
+    release: str = "",
     storage_dtype: str = "",
     components: tuple[str, ...] = (),
 ) -> ModelRef:
-    """Tensorhub-backed binding: ``Hub("owner/repo", tag=, storage_dtype=, components=)``.
+    """Tensorhub-backed binding: ``Hub("owner/repo@<release>", storage_dtype=, components=)``.
+
+    The release may ride the ref (``Hub("owner/repo@2026.08")``) or be given
+    beside it (``release="2026.08"``); the side channel wins. A binding that
+    names neither pins no artifact — th#1987 deleted the default.
 
     ``components=`` fetches only the named pipeline component
     subfolders (+ root config files) instead of the whole repo — e.g. a
@@ -172,7 +176,7 @@ def Hub(
     ``Hub("owner/sdxl-repo", components=("vae",))``.
     """
     return ModelRef(
-        source="tensorhub", path=ref, tag=tag,
+        source="tensorhub", path=ref, release=release,
         storage_dtype=storage_dtype, components=components,
     )
 
@@ -236,17 +240,14 @@ def wire_ref(binding: Binding) -> WireRef:
     """Normal-form ref string for the wire / cache key — delegates to the ONE
     grammar module (``gen_worker.models.refs``).
 
-    Hub refs carry ``:tag`` (elided when ``prod``, the grammar default — an
-    explicit ``tag="latest"`` is stamped verbatim); HF refs carry
-    ``@revision``. Load-time metadata (dtype/subfolder/files/storage_dtype)
+    Hub refs carry ``@<release>`` (nothing is elided — th#1987 deleted the
+    default); HF refs carry ``@revision``. Load-time metadata (dtype/subfolder/files/storage_dtype)
     never enters the ref, and there is no ``#flavor`` suffix — a binding has no
     second selector to mint.
     """
 
     if binding.source == "tensorhub":
-        # The default tag never overrides one embedded in ``ref``.
-        tag = binding.tag if binding.tag != DEFAULT_REF_TAG else ""
-        return fold_ref(binding.path, tag=tag)
+        return fold_ref(binding.path, release=binding.release)
     if binding.source == "huggingface":
         return HuggingFaceRef(binding.path, binding.revision or None).canonical()
     # civitai/modelscope: the path is ASSERTED to be normal form rather than
@@ -271,7 +272,7 @@ def rebind_pick(
     pick the rebound binding cannot re-mint would split the slot into two
     residency identities.
 
-    There is no within-tag-group selector left to fold, so a pick is a digest
+    There is no within-release selector left to fold, so a pick is a digest
     or it is nothing.
     """
 

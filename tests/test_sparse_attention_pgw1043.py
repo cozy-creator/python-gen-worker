@@ -73,7 +73,7 @@ def test_a_report_inside_the_scope_carries_k_and_the_measured_density():
     with provision.AppliedAttentionScope() as scope:
         assert provision.report_applied_attention(
             "transformer", "sparse-k16", block_size=128, density=0.0826,
-            selector="indexer", index_ref="tensorhub/h3:v1#sparse-index")
+            selector="indexer", index_ref="tensorhub/h3@v1#sparse-index")
     (entry,) = scope.applied
     assert entry.mode == "sparse-k16" and entry.k_blocks == 16
     assert entry.density == pytest.approx(0.0826)

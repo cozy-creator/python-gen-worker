@@ -2,15 +2,15 @@
 
   POST /api/v1/repos/{org}/{name}/publishes
       {files: [{path, size_bytes, digest:"sha256:<hex>", chunks?}], mode,
-       tags: [{tag, head?}], dtype/file_layout/file_type, artifact_contract,
+       release, dtype/file_layout/file_type, artifact_contract,
        metadata, provenance, ...}
   → {publish_id, have: [...], need: [{digest, put_url, headers, ...}]}
 
 Then PUT every `need` grant VERBATIM (the sha256 is signed into the presigned
 URL, so the store itself refuses bytes that do not hash to the key), re-plan
 `.../grants` to resume, and POST `.../complete`. One publish == one
-checkpoint; N artifacts are N publishes joining one tag group, and exactly
-one of them is `head=True`.
+checkpoint; N artifacts are N publishes joining one RELEASE, told apart there
+by their tensor-layout contracts. th#1987 deleted the tag axis and its head.
 
 THE v1 (blake3) `/commits` PROTOCOL IS GONE FROM THIS CLIENT: it is frozen
 hub-side (every new v1 commit answers 410 `unsupported_digest_algorithm`),
@@ -151,6 +151,23 @@ class HubPublishError(RuntimeError):
 
 # The hub's typed refusal for a publish naming a release nobody cut (th#1980).
 RELEASE_NOT_FOUND = "release_not_found"
+
+#: The ONE legal "no release" on a v2 publish. A self-minted compiled graph is
+#: selected by its endpoint-scoped `compiled_graph_store` row, never by
+#: contract, so it joins no release and the hub answers `release_forbidden` to a
+#: body that names one. It is a NAMED value rather than an empty string so a
+#: caller that simply forgot is refused instead of silently taking the exemption.
+COMPILED_GRAPH_NO_RELEASE = "compiled-graph:no-release"
+
+
+class HubReleaseRequiredError(HubPublishError):
+    """The publish named no release, and th#1987 made one mandatory.
+
+    Raised HERE rather than after a multi-GB upload: the hub refuses at DECLARE
+    with `release_required`, and a producer that cannot say which release its
+    output belongs to has a caller-side defect (`destination.release` unset),
+    not a transfer problem.
+    """
 
 
 class HubReleaseNotFoundError(HubPublishError):
@@ -444,17 +461,17 @@ class HubClient:
         *,
         destination_repo: str,
         files: list[CommitFile],
-        tags: list[str] | None = None,
-        # The release this artifact ATTACHES to (th#1980). It must ALREADY have
-        # been cut — publishing never cuts one, exactly as uploading a binary to
-        # GitHub never creates the release it lands in. An unknown identifier is
-        # a typed, non-retryable `release_not_found`
+        # The release this artifact ATTACHES to (th#1980), REQUIRED since
+        # th#1987 — no default, so every call site states one. It must ALREADY
+        # have been cut: publishing never cuts a release, exactly as uploading a
+        # binary to GitHub never creates the release it lands in. An unknown
+        # identifier is a typed, non-retryable `release_not_found`
         # (:class:`HubReleaseNotFoundError`), whose remedy is a control-plane
-        # act, never a re-upload. Optional for now; requiredness rides the
-        # repo-tag hard cut.
-        release: str = "",
+        # act, never a re-upload. `COMPILED_GRAPH_NO_RELEASE` is the ONE legal
+        # empty value — see its docstring.
+        release: str,
         # "replace" — a checkpoint is COMPLETE IN ITSELF. "merge" unions this
-        # publish with the repo's prior :latest, so a caller that never
+        # publish with the repo's prior manifest, so a caller that never
         # mentioned a sibling INHERITS its bytes (an fp8 checkpoint carrying
         # the fp16 base weights; a differently-sharded base spliced into a
         # quantization). Both this default and the hub's are "replace"; pass
@@ -462,10 +479,6 @@ class HubClient:
         # checkpoint across several commits (clone.py's chunked full-clone,
         # _stream.py's streamed output).
         mode: str = "replace",
-        # HEAD. A variant publish (one carrying quant provenance) JOINS the tag
-        # group without moving the tag; `head=True` says this publish owns the
-        # bare row.
-        head: bool = False,
         # `ns.name@N` — what the bytes ARE. PROVEN at tier 1 against
         # the safetensors header, so an unprovable claim refuses the publish
         # instead of being stored as a maybe.
@@ -533,6 +546,16 @@ class HubClient:
 
         if not files:
             raise HubPublishError("publish_v2 requires at least one file")
+        attaches_to_no_release = release == COMPILED_GRAPH_NO_RELEASE
+        release = "" if release == COMPILED_GRAPH_NO_RELEASE else release.strip()
+        if not release and not attaches_to_no_release:
+            raise HubReleaseRequiredError(
+                f"publish into {destination_repo!r} names no release: th#1987 "
+                "made `release` mandatory. Cut one "
+                "(POST /repos/{org}/{name}/releases) and pass release=<id>; "
+                "pass COMPILED_GRAPH_NO_RELEASE only for a self-mint "
+                "compiled-graph publish, which attaches to no release.",
+                code="release_required", retryable=False)
 
         repo_path = self._repo_path(destination_repo)
 
@@ -564,15 +587,8 @@ class HubClient:
             "mode": mode,
             "files": [_tensorhub_file(entry) for entry in manifest.files],
         }
-        # An EMPTY list is an explicit "move no tags" and must reach the wire
-        # (the classification gate refuses an OMITTED tags field on repos that
-        # carry tag rows); only None omits the field.
-        if tags is not None:
-            body["tags"] = [
-                {"tag": t, **({"head": True} if head else {})} for t in tags
-            ]
         for key, val in (
-            ("release", release.strip()),
+            ("release", release),
             ("dtype", _dtype_token(dtype)), ("file_layout", file_layout),
             ("file_type", file_type), ("display_label", display_label),
             ("objective", objective), ("artifact_contract", artifact_contract),

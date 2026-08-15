@@ -56,7 +56,7 @@ def _spec() -> EndpointSpec:
         name="generate-turbo", method=_Endpoint.run, kind="inference",
         payload_type=_Payload, output_mode="single", cls=_Endpoint,
         attr_name="run",
-        models={"checkpoint": Hub("acme/wai-illustrious", tag="prod")},
+        models={"checkpoint": Hub("acme/wai-illustrious")},
         resources=Resources(gpu=True),
         compile=Compile(family="sdxl", shapes=((1024, 1024),), text_len=0),
     )

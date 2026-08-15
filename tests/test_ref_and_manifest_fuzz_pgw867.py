@@ -34,8 +34,8 @@ from hypothesis import strategies as st
 
 from gen_worker.models.hub_client import HubResolveError, parse_chunk_list, resolved_entry_digest
 from gen_worker.models.refs import (
-    DEFAULT_REF_TAG,
     MAX_FRAGMENT_LEN,
+    REF_GRAMMAR_SEPARATORS,
     format_model_ref,
     normalize_model_ref,
     parse_model_ref,
@@ -51,8 +51,10 @@ HEX64 = "a" * 64
 
 def _ref_seeds() -> list[str]:
     seeds = [
-        "", " ", "/", "//", "a/", "/b", "owner/repo", "owner/repo:", "owner/repo:prod",
-        "owner/repo:latest", "owner/repo#fp8", "owner/repo#FP8", "owner/repo#",
+        "", " ", "/", "//", "a/", "/b", "owner/repo", "owner/repo:", "owner/repo@prod",
+        "owner/repo@latest", "owner/repo#fp8", "owner/repo#FP8", "owner/repo#",
+        "owner/repo:prod",    # refused: the retired tag production
+        "owner/repo:latest",  # refused: the retired tag production
         "owner/repo#a#b", "owner/repo#fp8?attr=1",
         # An over-long fragment. pgw#1213 widened the cap to MAX_FRAGMENT_LEN
         # so a `cg-key-v1` key (66 chars) fits, so the seed tracks the cap
@@ -60,7 +62,8 @@ def _ref_seeds() -> list[str]:
         "owner/repo#" + "a" * (MAX_FRAGMENT_LEN + 1),
         f"owner/repo@sha256:{HEX64}", f"owner/repo@blake3:{'b' * 64}",
         f"owner/repo@SHA256:{HEX64.upper()}", "owner/repo@sha256:", "owner/repo@deadbeef",
-        "owner/repo@v1", f"owner/repo:tag@sha256:{HEX64}#fp8",
+        "owner/repo@v1",
+        f"owner/repo:tag@sha256:{HEX64}#fp8",  # refused: the retired tag production
         # th#1388's shape: a codepoint whose .lower() is not length-preserving,
         # which shifts an index computed on the lowercased copy.
         f"owner/rİpo@SHA256:{HEX64}",
@@ -75,26 +78,10 @@ def _ref_seeds() -> list[str]:
     return seeds
 
 
-def _known_grammar_hole_th1387(parsed: Any) -> bool:
-    """th#1387 / pgw#872 — the grammar applies NO charset check to owner, repo or
-    tag, so a component can carry a separator the grammar excludes and the normal
-    form stops being injective. Verified identical in tensorhub's
-    ``ParseCanonicalRef``, so this is a SHARED hole, not a divergence — which is
-    the point worth keeping: a defect both sides implement the same way is
-    invisible to the shared fixture and to the conformance test, and only the
-    single-language invariants can see it."""
-    th = parsed.tensorhub
-    return (
-        any(c in th.owner for c in "/@:#")
-        or any(c in th.repo for c in "/@:#")
-        or any(c in th.tag for c in "/@:#")
-    )
-
-
 @settings(max_examples=400, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 @given(st.one_of(st.sampled_from(_ref_seeds()), st.text(max_size=60)))
 @example("owner/repo")
-@example("owner/repo:latest#fp8")
+@example("owner/repo:latest#fp8")  # refused: the retired tag production
 @example(f"owner/repo@sha256:{HEX64}")
 @example(f"owner/rİpo@SHA256:{HEX64}")   # pgw#872 index/slice mismatch (fixed)
 @example("owner/repo/extra")                   # th#1387 unbounded path segments
@@ -108,8 +95,6 @@ def test_ref_normal_form_is_a_fixed_point(raw: str) -> None:
         parsed = parse_model_ref(raw)
     except ValueError:
         return  # a typed refusal is a correct outcome
-    if _known_grammar_hole_th1387(parsed):
-        return
     normal = format_model_ref(parsed)
     again = parse_model_ref(str(normal))
     assert again == parsed, f"normal form is not a fixed point: {raw!r} -> {normal!r}"
@@ -128,7 +113,11 @@ def test_ref_acceptance_implies_well_formed_components(raw: str) -> None:
     th = parsed.tensorhub
     assert th is not None and parsed.provider == "tensorhub"
     assert th.owner and th.repo, f"{raw!r} accepted with an empty owner/repo"
-    assert th.tag, f"{raw!r} accepted with an empty tag; the default is {DEFAULT_REF_TAG!r}"
+    # th#1387's hole is CLOSED (th#1987 re-key): no accepted component may
+    # carry a grammar separator, which is what makes the normal form injective.
+    for name, part in (("owner", th.owner), ("repo", th.repo), ("release", th.release)):
+        assert not any(c in part for c in REF_GRAMMAR_SEPARATORS), (
+            f"{raw!r} accepted with a separator inside {name}={part!r}")
     if th.flavor is not None:
         assert th.flavor == th.flavor.lower()
         assert 1 <= len(th.flavor) <= MAX_FRAGMENT_LEN

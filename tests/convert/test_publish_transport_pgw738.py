@@ -54,6 +54,7 @@ def test_proxy_404_on_publish_declare_is_retried_then_succeeds(
     _FakeHub.state["proxy_posts"] = 2
     _FakeHub.state["proxy_status"] = 404
     res = _client(fake_hub).publish_v2(
+        release="r1",
         destination_repo="acme/repo", files=[_one_file(tmp_path)])
     assert res.uploaded == 1
     assert res.checkpoint_id
@@ -67,6 +68,7 @@ def test_proxy_503_on_publish_is_retried_then_succeeds(
     _FakeHub.state["proxy_posts"] = 7  # > the old 5-attempt budget
     _FakeHub.state["proxy_status"] = 503
     res = _client(fake_hub).publish_v2(
+        release="r1",
         destination_repo="acme/repo", files=[_one_file(tmp_path)])
     assert res.uploaded == 1
 
@@ -86,7 +88,7 @@ def test_hub_origin_404_stays_terminal(fake_hub: Any, tmp_path: Path) -> None:
         mp.setattr(hub_mod._http_session(), "post", counting_post)
         with pytest.raises(HubPublishError, match=r"publish declare failed \(404\)"):
             client.publish_v2(destination_repo="acme/repo",
-                              files=[_one_file(tmp_path)])
+                              files=[_one_file(tmp_path)], release="r1")
     assert len(calls) == 1, "a definite hub 404 must not be retried"
 
 
@@ -100,4 +102,5 @@ def test_sustained_outage_exhausts_typed_never_raw(
     _FakeHub.state["proxy_status"] = 503
     with pytest.raises(HubPublishError, match=r"publish declare failed \(503\)"):
         _client(fake_hub).publish_v2(
+            release="r1",
             destination_repo="acme/repo", files=[_one_file(tmp_path)])

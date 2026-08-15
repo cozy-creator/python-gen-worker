@@ -23,9 +23,9 @@ def _write(root: Path, name: str, data: bytes) -> CommitFile:
 def test_small_file_publishes_as_one_hashrepo_object(fake_hub, tmp_path: Path) -> None:
     data = b'{"model":"hashrepo"}'
     result = _client(fake_hub).publish_v2(
+        release="r1",
         destination_repo="acme/model",
         files=[_write(tmp_path, "config.json", data)],
-        tags=["prod"],
     )
     assert result.checkpoint_id
     declaration = next(iter(_FakeHub.state["publishes"].values()))["files"][0]
@@ -40,9 +40,9 @@ def test_small_file_publishes_as_one_hashrepo_object(fake_hub, tmp_path: Path) -
 def test_non_safetensors_file_uses_bounded_hashrepo_chunks(fake_hub, tmp_path: Path) -> None:
     data = b"a" * MAX_CHUNK_SIZE + b"tail"
     result = _client(fake_hub).publish_v2(
+        release="r1",
         destination_repo="acme/model",
         files=[_write(tmp_path, "weights.safetensors", data)],
-        tags=["prod"],
     )
     declaration = next(iter(_FakeHub.state["publishes"].values()))["files"][0]
     assert [chunk["len"] for chunk in declaration["chunks"]] == [MAX_CHUNK_SIZE, 4]
@@ -68,9 +68,9 @@ def test_valid_safetensors_publishes_header_and_tensor_chunks_at_small_size(
     data = len(header).to_bytes(8, "little") + header + body
 
     result = _client(fake_hub).publish_v2(
+        release="r1",
         destination_repo="acme/model",
         files=[_write(tmp_path, "weights.safetensors", data)],
-        tags=["prod"],
     )
 
     declaration = next(iter(_FakeHub.state["publishes"].values()))["files"][0]
@@ -83,9 +83,10 @@ def test_republishing_identical_bytes_is_a_remote_dedup_hit(
 ) -> None:
     file = _write(tmp_path, "config.json", b"same")
     client = _client(fake_hub)
-    client.publish_v2(destination_repo="acme/model", files=[file], tags=["prod"])
+    client.publish_v2(destination_repo="acme/model", files=[file], release="r1")
     result = client.publish_v2(
-        destination_repo="acme/model", files=[file], tags=["prod"]
+        release="r1",
+        destination_repo="acme/model", files=[file]
     )
     assert result.uploaded == 0
     assert result.deduped == 1
@@ -94,6 +95,7 @@ def test_republishing_identical_bytes_is_a_remote_dedup_hit(
 def test_by_reference_add_is_refused(fake_hub) -> None:
     with pytest.raises(HubPublishError, match="by-reference"):
         _client(fake_hub).publish_v2(
+            release="r1",
             destination_repo="acme/model",
             files=[CommitFile(path="weights.safetensors", size_bytes=10)],
         )
@@ -103,9 +105,9 @@ def test_tensorhub_metadata_and_provenance_stay_in_the_adapter(
     fake_hub, tmp_path: Path
 ) -> None:
     _client(fake_hub).publish_v2(
+        release="r1",
         destination_repo="acme/model",
         files=[_write(tmp_path, "config.json", b"{}")],
-        tags=["prod"],
         dtype="int8:awq",
         metadata={"placement": "l4"},
         provenance={"upstream_revision": "abc123", "parents": "forbidden"},

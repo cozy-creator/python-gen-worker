@@ -84,7 +84,7 @@ in a `ctx.for_request` view over shared weights — never assigned onto the
 instance.
 
 Bindings: `HF(id, revision=, dtype=, subfolder=, files=, storage_dtype=)`,
-`Hub(ref, tag=, storage_dtype=)`, `Civitai(id, version=)`, `ModelScope(id, ...)`.
+`Hub(ref, release=, storage_dtype=)`, `Civitai(id, version=)`, `ModelScope(id, ...)`.
 The slot name comes from the `models={}` key or the `setup()` parameter —
 never a constructor argument. `storage_dtype="fp8"` keeps denoiser weights in
 fp8-E4M3 storage with per-layer upcast to the compute `dtype` (half the VRAM

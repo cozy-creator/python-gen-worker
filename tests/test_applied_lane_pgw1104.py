@@ -41,7 +41,7 @@ from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs
 from gen_worker.models import store as store_mod
 
-REF = "tensorhub/minimax-h3:serve-narrowed"
+REF = "tensorhub/minimax-h3@serve-narrowed"
 
 #: Flipped by the fixture to stand in for `serve_recipe.w8a8_capable()`.
 W8A8_CAPABLE = True

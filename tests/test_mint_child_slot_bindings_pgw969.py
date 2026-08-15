@@ -53,7 +53,7 @@ from harness.hub_double import hub_double, is_ready, is_result_for
 
 CATALOG_MODULE = "harness.mint_catalog_slot_pgw969"
 #: The hub's pick for this dispatch. Nothing in the endpoint's code names it.
-PICK_REF = wire_ref(_hub_binding_for_wire_ref("harness/catalog-pick:prod"))
+PICK_REF = wire_ref(_hub_binding_for_wire_ref("harness/catalog-pick@prod"))
 GIB = 1 << 30
 
 
@@ -333,11 +333,11 @@ def test_a_bound_slot_that_still_fails_names_the_divergence(
     processes, never a normal path, and it must not read like the wire gap
     above."""
     request = _request(
-        tmp_path, ModelRef(source="tensorhub", path="harness/pick", tag="prod"),
+        tmp_path, ModelRef(source="tensorhub", path="harness/pick", release="prod"),
         tmp_path)
     request = msgspec.structs.replace(
         request, slots={"nonexistent-slot": child_contract.MintSlot(
-            ref=ModelRef(source="tensorhub", path="harness/pick", tag="prod"),
+            ref=ModelRef(source="tensorhub", path="harness/pick", release="prod"),
             path=str(tmp_path))})
     with pytest.raises(child_preflight.PreflightRefused) as exc:
         _child_specs(request)
@@ -362,7 +362,7 @@ def test_a_code_default_never_stands_in_for_the_parents_pick(
     from harness import toy_endpoints as toy
 
     declared = wire_ref(toy.JUGGLE_DECLARED)
-    picked = ModelRef(source="tensorhub", path="harness/juggle-pick", tag="prod")
+    picked = ModelRef(source="tensorhub", path="harness/juggle-pick", release="prod")
     specs = registry.collect_endpoints(["harness.toy_endpoints"])
     chosen, siblings = child_preflight.select_specs(specs, "juggle-echo")
     assert wire_ref(chosen.models["pipeline"]) == declared
@@ -418,11 +418,11 @@ def test_a_slot_with_bytes_and_no_identity_cannot_be_constructed() -> None:
         child_contract.MintSlot(path="/cas/snapshots/sha256:cafe")   # type: ignore[call-arg]
     with pytest.raises(TypeError):
         child_contract.MintSlot(ref=ModelRef(                        # type: ignore[call-arg]
-            source="tensorhub", path="harness/pick", tag="prod"))
+            source="tensorhub", path="harness/pick", release="prod"))
     # ...and the degenerate spelling of the same lie.
     with pytest.raises(ValueError):
         child_contract.MintSlot(
-            ref=ModelRef(source="tensorhub", path="harness/pick", tag="prod"),
+            ref=ModelRef(source="tensorhub", path="harness/pick", release="prod"),
             path="")
 
 

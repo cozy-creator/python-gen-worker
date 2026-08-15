@@ -19,7 +19,7 @@ from gen_worker.aot_preconditions import (
     declared_compile_families,
     static_mint_preconditions,
 )
-from gen_worker.api.binding import Binding
+from gen_worker.api.binding import Binding, wire_ref
 from gen_worker.api.slot import Slot
 from gen_worker.api.types import (
     Asset,
@@ -45,7 +45,6 @@ from gen_worker.discovery.heavy_deps import stub_missing_heavy_deps
 from gen_worker.discovery.names import slugify_name
 from gen_worker.discovery.project import load_project_config
 from gen_worker.discovery.walk import EndpointImportError, find_endpoints
-from gen_worker.models.refs import DEFAULT_REF_TAG
 from gen_worker.registry import extract_specs
 from .validation import validate_endpoint_lock
 import importlib.machinery
@@ -349,7 +348,7 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
 
     Every binding is a fixed pick; the slot name is the dict key. Keys stay
     compatible with ``models.download.build_provider_index_from_manifest``
-    (``ref`` / ``provider`` / ``tag``).
+    (``ref`` / ``provider``).
     """
     out: Dict[str, Any] = {
         "kind": "fixed",
@@ -358,12 +357,10 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
         "ref": binding.path,
     }
     if binding.source == "tensorhub":
-        # Normal form: the default tag is elided at the manifest boundary so
-        # hub-minted keep/routing refs stay byte-equal to worker-minted wire
-        # refs (Go folds a non-empty tag verbatim). An explicit 'latest' is
-        # stamped, never elided.
-        if binding.tag and binding.tag != DEFAULT_REF_TAG:
-            out["tag"] = binding.tag
+        # th#1987: the release rides the REF, in normal form — there is no
+        # side-channel key any more. The hub reads it with ParseCanonicalRef,
+        # so worker-minted and hub-minted refs stay byte-equal.
+        out["ref"] = str(wire_ref(binding))
         if binding.components:
             # The hub's desired-snapshot scoping reads this to resolve only the
             # named pipeline component subfolders instead of the whole repo.
@@ -402,10 +399,11 @@ def _stamp_family(binding_manifest: Dict[str, Any], family: str) -> None:
 
 def _model_ref_to_manifest(ref: Any) -> Dict[str, Any]:
     """``default_checkpoint`` ref shape used by the slots block:
-    ``{source, path, tag?, revision?, version?, components?}``."""
+    ``{source, path, revision?, version?, components?}``. The tensorhub
+    release rides ``path`` in normal form (th#1987)."""
     out: Dict[str, Any] = {"source": ref.source, "path": ref.path}
-    if ref.tag and ref.tag != DEFAULT_REF_TAG:
-        out["tag"] = ref.tag
+    if ref.source == "tensorhub":
+        out["path"] = str(wire_ref(ref))
     if ref.components:
         out["components"] = list(ref.components)
     if ref.source in ("huggingface", "modelscope") and ref.revision:

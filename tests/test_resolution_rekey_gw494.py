@@ -219,14 +219,17 @@ def test_rebind_pick_is_the_single_fold() -> None:
     # hub path: resolved_ref is checked, cast is stamped
     out = rebind_pick(b, resolved_ref="", cast="fp8")
     assert out.storage_dtype == "fp8" and wire_ref(out) == "acme/z-image"
-    # non-normal hub spelling still round-trips (':prod' is the elided form
-    # since th#1276)
-    out = rebind_pick(b, resolved_ref="acme/z-image:prod")
-    assert wire_ref(out) == "acme/z-image"
-    # ...and a pick at a genuinely DIFFERENT tag is refused, because the
-    # rebound binding could not re-mint it (two residency identities).
-    with pytest.raises(ValueError):
-        rebind_pick(b, resolved_ref="acme/z-image:latest")
+    # th#1987: nothing is elided any more, so a pick naming a RELEASE the
+    # binding does not carry cannot round-trip — that is the guard, not a
+    # regression: the rebound binding could not re-mint it and the slot would
+    # split into two residency identities.
+    for pick in ("acme/z-image@prod", "acme/z-image@latest"):
+        with pytest.raises(ValueError):
+            rebind_pick(b, resolved_ref=pick)
+    # A binding that DOES carry the release re-mints it exactly.
+    pinned = Hub("acme/z-image", release="prod")
+    out = rebind_pick(pinned, resolved_ref="acme/z-image@prod")
+    assert wire_ref(out) == "acme/z-image@prod"
 
     with pytest.raises(ValueError):
         rebind_pick(b, resolved_ref="acme/OTHER")  # ref mismatch

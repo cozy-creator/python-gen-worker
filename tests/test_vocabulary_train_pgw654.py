@@ -433,8 +433,8 @@ def test_model_ref_label_mirrors_registry_wire_forms() -> None:
     assert HF("acme/gonzalomo-xl").label == "acme/gonzalomo-xl"
     # `prod` is the grammar default, so the normal form ELIDES it;
     # every other tag — `latest` included — is stamped verbatim.
-    assert Hub("acme/wai-illustrious", tag="prod").label \
-        == "acme/wai-illustrious"
-    assert Hub("acme/wai-illustrious", tag="latest").label \
-        == "acme/wai-illustrious:latest"
+    assert Hub("acme/wai-illustrious", release="prod").label \
+        == "acme/wai-illustrious@prod"
+    assert Hub("acme/wai-illustrious", release="latest").label \
+        == "acme/wai-illustrious@latest"
     assert Civitai("civitai/123", version="456").label == "civitai/123@456"

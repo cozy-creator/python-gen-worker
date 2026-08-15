@@ -5,7 +5,7 @@ repo-cas instead of HuggingFace directly. Same handler as
 `examples/sd15-image`; the only difference is the model binding:
 
 ```python
-@endpoint(model=Hub("tensorhub/sd15-mirror", tag="prod"), resources=Resources(gpu=True))
+@endpoint(model=Hub("tensorhub/sd15-mirror", release="prod"), resources=Resources(gpu=True))
 ```
 
 `Hub(...)` (provider `"tensorhub"`) resolves through tensorhub's repo-cas

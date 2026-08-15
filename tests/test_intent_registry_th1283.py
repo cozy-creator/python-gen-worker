@@ -26,7 +26,7 @@ def _materialize(intent_id: str, *, mandatory: bool, digest: bytes = b"blake3:ab
         cause=(
             pb.DESIRED_INTENT_CAUSE_REQUEST if mandatory else pb.DESIRED_INTENT_CAUSE_PREPOSITION
         ),
-        ref="owner/model:latest",
+        ref="owner/model@latest",
         snapshot_digest=digest,
         mandatory=mandatory,
     )

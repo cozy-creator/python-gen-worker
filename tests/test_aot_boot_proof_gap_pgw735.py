@@ -191,7 +191,7 @@ def _orders(run):
     }
 
 
-def _boot(ex: Executor, ref: str = "acme/sdxl-base:prod") -> None:
+def _boot(ex: Executor, ref: str = "acme/sdxl-base@prod") -> None:
     spec = ex.specs["generate"]
     run = pb.RunJob(function_name="generate",
                     models=[pb.ModelBinding(slot="pipeline", ref=ref)])

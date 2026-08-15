@@ -72,7 +72,7 @@ class BlobServer:
 
 
 def _ref() -> TensorhubRef:
-    return TensorhubRef(owner="acme", repo="model", tag="latest")
+    return TensorhubRef(owner="acme", repo="model", release="latest")
 
 
 def test_grpc_adapter_keeps_ordered_lengths_and_drops_fixed_layout_scalar() -> None:

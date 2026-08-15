@@ -24,7 +24,7 @@ from gen_worker.models.refs import (
     refuse_flavor_selector,
 )
 
-CELL_REF = "root/family-sdxl:cells#cg-key-v1-4f2a9b"
+CELL_REF = "root/family-sdxl#cg-key-v1-4f2a9b"
 
 
 # --------------------------------------------------------------------------
@@ -34,7 +34,7 @@ CELL_REF = "root/family-sdxl:cells#cg-key-v1-4f2a9b"
 @pytest.mark.parametrize("ref", [
     "owner/repo#fp8",
     "owner/repo#fp8-w8a8",
-    "owner/repo:latest#bf16",
+    "owner/repo@latest#bf16",
     "owner/repo#svdq-int4-r128",
     "owner/repo#gguf-q4_k_m",
 ])
@@ -78,7 +78,7 @@ def test_a_hub_resolution_carrying_a_flavor_is_refused() -> None:
 def test_refuse_flavor_selector_is_a_valueerror() -> None:
     """Callers that already catch ValueError on ref grammar keep working."""
     assert issubclass(FlavorSelectorRemoved, ValueError)
-    refuse_flavor_selector("owner/repo:prod")  # no `#`: silent
+    refuse_flavor_selector("owner/repo@prod")  # no `#`: silent
     refuse_flavor_selector("")
 
 
@@ -100,7 +100,7 @@ def test_hf_refs_have_no_flavor_and_no_cache_key_fold() -> None:
 
 def test_wire_ref_can_no_longer_mint_a_flavored_ref() -> None:
     assert wire_ref(Hub("owner/repo")) == "owner/repo"
-    assert wire_ref(Hub("owner/repo", tag="latest")) == "owner/repo:latest"
+    assert wire_ref(Hub("owner/repo", release="latest")) == "owner/repo@latest"
 
 
 def test_deleted_names_are_deleted_not_aliased() -> None:
@@ -119,7 +119,7 @@ def test_deleted_names_are_deleted_not_aliased() -> None:
 
 
 def test_fold_ref_has_no_flavor_overlay() -> None:
-    assert refs.fold_ref("owner/repo", tag="canary") == "owner/repo:canary"
+    assert refs.fold_ref("owner/repo", release="canary") == "owner/repo@canary"
     with pytest.raises(TypeError):
         refs.fold_ref("owner/repo", flavor="fp8")  # type: ignore[call-arg]
 
@@ -140,8 +140,8 @@ def test_the_hub_resolve_no_longer_sends_or_parses_a_flavor() -> None:
 def test_the_cell_fragment_still_parses() -> None:
     th = parse_model_ref(CELL_REF).tensorhub
     assert th is not None
-    assert (th.owner, th.repo, th.tag, th.flavor) == (
-        "root", "family-sdxl", "cells", "cg-key-v1-4f2a9b")
+    assert (th.owner, th.repo, th.release, th.flavor) == (
+        "root", "family-sdxl", "", "cg-key-v1-4f2a9b")
 
 
 def test_parse_cell_ref_is_unchanged() -> None:

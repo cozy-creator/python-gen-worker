@@ -90,7 +90,7 @@ class WorkerResolvedRepo:
     files: List[WorkerResolvedRepoFile]
     # Total checkpoint size. There is deliberately no `sibling_flavors`: the
     # hub emits `tag_members` (checkpoint rows) and no flavor row exists to
-    # parse. Selection within a tag group is contract compatibility (§1.33).
+    # parse. Selection within a release is contract compatibility (§1.33).
     size_bytes: int = 0
     # The resolved checkpoint's architecture family ("sdxl-pony",
     # ...) — drives the local family lane policy. "" on hubs not sending it.
@@ -107,7 +107,7 @@ class HubResolveError(RuntimeError):
 
 
 class HubRepoNotFoundError(HubResolveError):
-    """404: unknown repo/tag OR a private repo the caller may not see
+    """404: unknown repo/release OR a private repo the caller may not see
     (the route deliberately never distinguishes these)."""
 
 
@@ -205,8 +205,8 @@ def resolve_repo(
     params: dict[str, str] = {}
     if ref.digest:
         params["digest"] = ref.digest
-    elif ref.tag:
-        params["tag"] = ref.tag
+    elif ref.release:
+        params["release"] = ref.release
 
     url = f"{base}/api/v1/repos/{ref.owner}/{ref.repo}/resolve"
     try:
@@ -228,7 +228,7 @@ def resolve_repo(
             )
         raise HubRepoNotFoundError(
             f"tensorhub repo {ref.canonical()} not found (unknown repo or "
-            "tag, or a private repo — set TENSORHUB_TOKEN for private pulls)"
+            "release, or a private repo — set TENSORHUB_TOKEN for private pulls)"
         )
     if resp.status_code in (401, 403):
         raise HubAuthError(

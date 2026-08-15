@@ -211,7 +211,7 @@ def test_a_refused_phase_is_closed_as_ended_not_complete(tmp_path, monkeypatch):
         with pytest.raises(InsufficientHostRamError):
             provision.load_slot(
                 TinyModularPipeline, str(tree), slot="pipeline",
-                ref="test/tiny:latest", mode="auto", device="cpu")
+                ref="test/tiny@latest", mode="auto", device="cpu")
 
     done = events.of_kind(load_progress.EVENT_PHASE_DONE)
     assert done, "the phase that refused must still close its span"
@@ -270,7 +270,7 @@ def test_live_load_names_each_component_to_the_hub(tmp_path, monkeypatch):
     with _PhaseEvents() as events:
         sl = provision.load_slot(
             TinyModularPipeline, str(tree), slot="pipeline",
-            ref="test/tiny:latest", mode="auto", device="cpu")
+            ref="test/tiny@latest", mode="auto", device="cpu")
     assert sl.obj is not None
 
     started = events.of_kind(load_progress.EVENT_PHASE)
@@ -288,7 +288,7 @@ def test_live_load_names_each_component_to_the_hub(tmp_path, monkeypatch):
     # The component's own tree size rides the entry row: the operator reading
     # a stuck load learns WHICH component and HOW BIG without a second query.
     unet = next(ev for ev in started if ev.phase == "hydrate:unet")
-    assert "GiB tree" in unet.detail and "test/tiny:latest" in unet.detail
+    assert "GiB tree" in unet.detail and "test/tiny@latest" in unet.detail
 
     # Every phase that was entered was also closed, exactly once, and the
     # spans are measured rather than interpolated into the text.
@@ -347,7 +347,7 @@ def test_load_slot_clears_breadcrumb_on_success(tmp_path, monkeypatch):
     tree = build_base_tree(tmp_path / "base", fill=1.0)
     sl = provision.load_slot(
         TinyModularPipeline, str(tree), slot="pipeline",
-        ref="test/tiny:latest", mode="auto", device="cpu")
+        ref="test/tiny@latest", mode="auto", device="cpu")
     assert sl.obj is not None
     assert not marker.exists()
     assert load_progress.COUNTER_NAME not in {

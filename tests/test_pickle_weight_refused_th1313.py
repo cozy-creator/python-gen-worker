@@ -41,7 +41,7 @@ def _resolved(*paths: str) -> WorkerResolvedRepo:
 
 
 def _ref() -> TensorhubRef:
-    return TensorhubRef(owner="acme", repo="victim", tag="prod")
+    return TensorhubRef(owner="acme", repo="victim", release="prod")
 
 
 @pytest.mark.parametrize("bad", [

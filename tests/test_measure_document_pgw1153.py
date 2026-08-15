@@ -207,7 +207,7 @@ def _committed_shape(**over: Any) -> Dict[str, Any]:
         "text_lens": [],
         "guidance_scales": [],
         "strict": True,
-        "source_ref": "cozy/micro-diffusion:prod",
+        "source_ref": "cozy/micro-diffusion@prod",
         "source_digest": "",
         "declared_vram_gb": 8.0,
     }

@@ -137,7 +137,7 @@ def _drive_to_load(
         handler_proof="test: the parent proved it",
         slots={"pipeline": child_contract.MintSlot(
             ref=ModelRef(source="tensorhub", path="harness/composed",
-                         tag="prod"),
+                         release="prod"),
             path=str(tree))},
     )
     with pytest.raises(BaseException):

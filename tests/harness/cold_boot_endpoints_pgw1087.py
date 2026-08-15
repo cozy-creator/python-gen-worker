@@ -62,7 +62,7 @@ class MultiComponentPipeline:
         return self
 
 
-COMPILE_MODEL = Hub("harness/pgw1087-multi-component", tag="prod")
+COMPILE_MODEL = Hub("harness/pgw1087-multi-component", release="prod")
 
 
 @endpoint(

@@ -96,8 +96,8 @@ class _Out(msgspec.Struct):
 
 
 FAMILY = "gw584-fam"
-AUTHORED = Hub("acme/qwen-image", tag="prod")           # bare authored binding
-AUTHORED_REF = "acme/qwen-image"
+AUTHORED = Hub("acme/qwen-image", release="prod")           # release-addressed binding
+AUTHORED_REF = "acme/qwen-image@prod"
 #: pgw#1148/§1.32(d): a HelloAck pick can no longer RE-ADDRESS a binding —
 #: the `#flavor` that used to is deleted and th#1803's digest pin resolves
 #: the same address. The pick's carried facts are the cast and the lane, and
@@ -141,7 +141,7 @@ def _slot_spec(setup_calls: List[str]) -> EndpointSpec:
         def generate(self, ctx: Any, payload: _In) -> _Out:
             return _Out()
 
-    default = Hub("acme/slotted-default", tag="prod")
+    default = Hub("acme/slotted-default", release="prod")
     # SDK v2: Slot(default_config=...) is deleted — the config schema is the
     # handler's derived defaults type (ctx: RequestContext[_Fam]), carried on
     # the spec as defaults_type.

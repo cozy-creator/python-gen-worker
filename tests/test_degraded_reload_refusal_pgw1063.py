@@ -248,7 +248,7 @@ def test_a_structurally_unfittable_offload_reload_is_refused(
         headroom=_headroom(available_gb=20.0, total_gb=64.0))
 
     verdict = asyncio.run(ex._refuse_unfittable_offload(
-        spec, [("hub/h3:prod", "", "model_offload", 0.0)]))
+        spec, [("hub/h3@prod", "", "model_offload", 0.0)]))
 
     assert verdict and "host RAM" in verdict
     assert len(sent) == 1
@@ -267,7 +267,7 @@ def test_a_reload_that_does_not_fit_RIGHT_NOW_blocks_the_ref_here(
         headroom=_headroom(available_gb=100.0, total_gb=233.76))
 
     verdict = asyncio.run(ex._refuse_unfittable_offload(
-        spec, [("hub/h3:prod", "", "model_offload", 0.0)]))
+        spec, [("hub/h3@prod", "", "model_offload", 0.0)]))
 
     assert verdict == ""  # the ladder proceeds
     assert len(sent) == 1
@@ -280,7 +280,7 @@ def test_an_affordable_reload_says_nothing(monkeypatch) -> None:
         headroom=_headroom(available_gb=200.0, total_gb=233.76))
 
     assert asyncio.run(ex._refuse_unfittable_offload(
-        spec, [("hub/h3:prod", "", "model_offload", 0.0)])) == ""
+        spec, [("hub/h3@prod", "", "model_offload", 0.0)])) == ""
     assert sent == []
 
 
@@ -291,7 +291,7 @@ def test_a_resident_rung_is_not_priced_as_an_offload(monkeypatch) -> None:
         headroom=_headroom(available_gb=1.0, total_gb=64.0))
 
     assert asyncio.run(ex._refuse_unfittable_offload(
-        spec, [("hub/h3:prod", "", "vae_only", 0.0)])) == ""
+        spec, [("hub/h3@prod", "", "vae_only", 0.0)])) == ""
     assert sent == []
 
 

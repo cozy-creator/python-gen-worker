@@ -204,7 +204,7 @@ def tree_files(root: Path) -> Dict[str, bytes]:
     }
 
 
-MODULAR_DECLARED = Hub("harness/tiny-modular", tag="prod")
+MODULAR_DECLARED = Hub("harness/tiny-modular", release="prod")
 
 
 @endpoint(models={

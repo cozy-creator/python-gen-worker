@@ -94,7 +94,7 @@ def _denoiser_adapter() -> PreparedAdapter:
         sd[f"transformer.blocks.0.attn1.to_q.{kind}.weight"] = (
             torch.randn(*shape) * 0.02)
     return PreparedAdapter(
-        slot=_SLOT, ref="tensorhub/sdxl-lightning-4step-lora:prod",
+        slot=_SLOT, ref="tensorhub/sdxl-lightning-4step-lora@prod",
         cache_key="lightning@deadbeef", name="lightning",
         weight=1.0, state_dict=sd,
     )
@@ -130,7 +130,7 @@ class _ExecStub:
 
 _BINDING = ModelRef(
     source="tensorhub", path="tensorhub/wai-illustrious",
-    tag="prod")
+    release="prod")
 #: The one ref spelling the executor books under — derived, never hand-typed.
 _REF = wire_ref(_BINDING)
 

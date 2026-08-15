@@ -83,7 +83,7 @@ def _request(checkpoint: Path, workdir: Path, *, bucket: int) -> mp.MintRequest:
         modules=(ENDPOINT_MODULE,),
         slots={"pipeline": child_contract.MintSlot(
             ref=ModelRef(source="tensorhub", path="rig/tiny-diffusion",
-                         tag="prod"),
+                         release="prod"),
             path=str(checkpoint))},
         device=-1, execution_lane="", configs={})
     request = mint_process.build_request(task, workdir=workdir)

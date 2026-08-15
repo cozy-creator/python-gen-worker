@@ -63,7 +63,12 @@ def _resolve_body(
     }
 
 
+#: th#1987: every publish attaches to an already-cut release.
+RELEASE = "2026.08"
+
+
 def _publish(ctx: _Ctx, tree: Path, **kw: Any) -> Any:
+    kw.setdefault("release", RELEASE)
     return publish_flavors(
         ctx,
         [ProducedFlavor(path=str(tree), flavor="fp8")],
@@ -83,7 +88,7 @@ def test_source_stamps_are_restated_by_default(
     ctx = _Ctx(f"http://127.0.0.1:{fake_hub.server_port}",
                source_ref="acme/qwen-image")
 
-    _publish(ctx, _tree(tmp_path), tags=["prod"])
+    _publish(ctx, _tree(tmp_path))
 
     req = _FakeHub.state["publish_request"]
     assert req["objective"] == "flow"
@@ -176,12 +181,16 @@ def test_no_source_and_failed_resolve_stay_unstamped(
     assert any("source-stamp read failed" in line for line in ctx.lines)
 
 
-def test_empty_tag_list_is_an_explicit_clear(
+def test_the_tag_axis_is_gone_from_the_declare(
     fake_hub: Any, tmp_path: Path,
 ) -> None:
-    """th#1411's tags leg: `publish_flavors` always states the tag set, so an
-    empty one reaches the wire as `"tags": []` (move none) instead of an
-    omitted field the gate refuses."""
-    _publish(_Ctx(f"http://127.0.0.1:{fake_hub.server_port}"),
-             _tree(tmp_path), tags=[])
-    assert _FakeHub.state["publish_request"]["tags"] == []
+    """th#1987 deleted the tag axis: `publish_flavors` no longer accepts a tag
+    set and no `tags` field reaches the wire — the release does that job."""
+    tree = _tree(tmp_path)
+    ctx = _Ctx(f"http://127.0.0.1:{fake_hub.server_port}")
+    with pytest.raises(TypeError):
+        _publish(ctx, tree, tags=[])  # type: ignore[call-arg]
+    _publish(ctx, tree)
+    req = _FakeHub.state["publish_request"]
+    assert "tags" not in req
+    assert req["release"] == RELEASE

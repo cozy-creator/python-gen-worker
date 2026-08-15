@@ -30,7 +30,7 @@
   "lora_fqns": [],
   "lifted_inputs": [],
   "strict": true,
-  "source_ref": "tensorhub/wan22-t2v-a14b:prod",
+  "source_ref": "tensorhub/wan22-t2v-a14b@prod",
   "source_digest": "",
   "closure_roots": [],
   "pipeline_class": "WanPipeline",

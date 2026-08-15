@@ -153,7 +153,7 @@ def _cell_ref_identity(ref: str) -> str:
     """Process-registry identity for one cell ref (pgw#672 / th#1166).
 
     The SAME cell can be named in two forms — the mint path's
-    ``system_repo(family)#<key>`` vs the store's delivered ref (tag/digest
+    ``system_repo(family)#<key>`` vs the store's delivered ref (release/digest
     decorated). Exact-string matching between those forms manufactured
     false negatives in the pgw#637 escape. A key-flavored ref collapses to
     its (family, key); anything else keeps its literal string."""
@@ -861,7 +861,7 @@ def system_repo(family: str) -> str:
 
 def parse_cell_ref(ref: str) -> Tuple[str, str]:
     """(family, flavor) from a system cell ref
-    (``root/family-<f>[:tag][@digest][#<flavor>]``) via the ONE ref
+    (``root/family-<f>[@release|@digest][#<flavor>]``) via the ONE ref
     grammar (gw#492); ('', '') when the ref is not a system-family ref."""
 
     try:

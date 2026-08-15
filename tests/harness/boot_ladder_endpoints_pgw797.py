@@ -56,7 +56,7 @@ class ToyPipeline:
 
 #: Never reachable from the code default: only a hub-stamped DesiredResidency
 #: snapshot materializes it, which is the ordering the ladder has to survive.
-COMPILE_MODEL = Hub("harness/pgw797-compile-model", tag="prod")
+COMPILE_MODEL = Hub("harness/pgw797-compile-model", release="prod")
 
 
 @endpoint(

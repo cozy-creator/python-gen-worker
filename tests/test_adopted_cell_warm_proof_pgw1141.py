@@ -359,7 +359,7 @@ def spy(monkeypatch: pytest.MonkeyPatch) -> List[Tuple[str, str, str]]:
 
 
 def _boot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-          ref: str = "acme/micro-diffusion:prod") -> Tuple[Executor, Any]:
+          ref: str = "acme/micro-diffusion@prod") -> Tuple[Executor, Any]:
     sent: List[pb.WorkerMessage] = []
 
     async def _send(msg: pb.WorkerMessage) -> None:

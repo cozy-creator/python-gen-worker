@@ -32,6 +32,7 @@ def test_transport_failure_keeps_hashrepo_session_and_staged_bytes(
     journal = tmp_path / JOURNAL_NAME
     with pytest.raises(HubPublishError, match="failed to upload"):
         _client(fake_hub).publish_v2(
+            release="r1",
             destination_repo="acme/model",
             files=[_file(tmp_path)],
             journal_path=journal,
@@ -46,12 +47,14 @@ def test_retry_replans_the_same_hashrepo_session(fake_hub, tmp_path: Path) -> No
     _FakeHub.state["fail_puts"] = 999
     with pytest.raises(HubPublishError):
         _client(fake_hub).publish_v2(
+            release="r1",
             destination_repo="acme/model", files=[file], journal_path=journal
         )
     (session,) = _sessions(journal)
 
     _FakeHub.state["fail_puts"] = 0
     result = _client(fake_hub).publish_v2(
+        release="r1",
         destination_repo="acme/model", files=[file], journal_path=journal
     )
     assert result.revision_id == session["session_id"]
@@ -70,6 +73,7 @@ def test_terminal_refusal_aborts_and_clears_both_records(
     journal = tmp_path / JOURNAL_NAME
     with pytest.raises(HubPublishError) as caught:
         _client(fake_hub).publish_v2(
+            release="r1",
             destination_repo="acme/model",
             files=[_file(tmp_path)],
             journal_path=journal,
@@ -93,6 +97,7 @@ def test_retryable_refusal_retains_producer_recovery_policy(
     state = {"spec_label": "fp8", "tree": str(tmp_path), "attrs": {"dtype": "fp8"}}
     with pytest.raises(HubPublishError):
         _client(fake_hub).publish_v2(
+            release="r1",
             destination_repo="acme/model",
             files=[_file(tmp_path)],
             journal_path=journal,
@@ -110,6 +115,7 @@ def test_different_artifact_never_adopts_another_session(
     _FakeHub.state["fail_puts"] = 999
     with pytest.raises(HubPublishError):
         _client(fake_hub).publish_v2(
+            release="r1",
             destination_repo="acme/model",
             files=[_file(tmp_path, b"first")],
             journal_path=journal,
@@ -117,6 +123,7 @@ def test_different_artifact_never_adopts_another_session(
     first = _sessions(journal)[0]["session_id"]
     _FakeHub.state["fail_puts"] = 0
     result = _client(fake_hub).publish_v2(
+        release="r1",
         destination_repo="acme/model",
         files=[_file(tmp_path, b"second")],
         journal_path=journal,
@@ -132,18 +139,18 @@ def test_different_declaration_never_adopts_another_session(
     _FakeHub.state["fail_puts"] = 999
     with pytest.raises(HubPublishError):
         _client(fake_hub).publish_v2(
+            release="r1",
             destination_repo="acme/model",
             files=[file],
-            tags=["candidate"],
             journal_path=journal,
         )
     first = _sessions(journal)[0]["session_id"]
 
     _FakeHub.state["fail_puts"] = 0
     result = _client(fake_hub).publish_v2(
+        release="r2",
         destination_repo="acme/model",
         files=[file],
-        tags=["prod"],
         journal_path=journal,
     )
     assert result.revision_id != first
@@ -154,6 +161,7 @@ def test_lost_complete_success_reconciles_through_idempotent_complete(
 ) -> None:
     _FakeHub.state["lose_complete_responses"] = 1
     result = _client(fake_hub).publish_v2(
+        release="r1",
         destination_repo="acme/model",
         files=[_file(tmp_path)],
         journal_path=tmp_path / JOURNAL_NAME,

@@ -54,7 +54,7 @@ from gen_worker.registry import extract_specs
 from gen_worker.models import store as store_mod
 
 FAMILY = "minimax-h3"
-REF = "tensorhub/minimax-h3:serve-narrowed"
+REF = "tensorhub/minimax-h3@serve-narrowed"
 
 _COMPILE = Compile(
     family=FAMILY,

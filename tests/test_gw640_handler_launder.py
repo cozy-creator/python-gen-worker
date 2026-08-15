@@ -136,7 +136,7 @@ def test_waiting_intent_always_carries_blocker_retry_or_deadline():
     from gen_worker.pb import worker_scheduler_pb2 as p
 
     reg = IntentRegistry("release-1", ["artifact-stat"])
-    intent_id = reg.ensure_local_intent("materialize", "tensorhub/tiny:prod")
+    intent_id = reg.ensure_local_intent("materialize", "tensorhub/tiny@prod")
     assert intent_id.startswith("compat-materialize-"), intent_id
 
     reg.transition(
@@ -159,7 +159,7 @@ def test_explicit_waiting_fields_are_not_overwritten():
     from gen_worker.pb import worker_scheduler_pb2 as p
 
     reg = IntentRegistry("release-1", ["artifact-stat"])
-    intent_id = reg.ensure_local_intent("materialize", "tensorhub/tiny:prod")
+    intent_id = reg.ensure_local_intent("materialize", "tensorhub/tiny@prod")
     reg.transition(
         intent_id,
         p.LIFECYCLE_INTENT_STATUS_WAITING,

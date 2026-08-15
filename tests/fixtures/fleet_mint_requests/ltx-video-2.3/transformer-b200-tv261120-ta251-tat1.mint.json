@@ -73,7 +73,7 @@
   "lora_fqns": [],
   "lifted_inputs": [],
   "strict": true,
-  "source_ref": "tensorhub/ltx-2.3-distilled:prod",
+  "source_ref": "tensorhub/ltx-2.3-distilled@prod",
   "source_digest": "",
   "closure_roots": [],
   "pipeline_class": "LTX2ConditionPipeline",
