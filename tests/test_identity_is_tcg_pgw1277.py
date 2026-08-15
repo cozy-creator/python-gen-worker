@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+from typing import Any
 
 import pytest
 from torch_compiled_graphs import identity as tcg_identity
@@ -35,11 +36,15 @@ from gen_worker import env_seal, fleet_cells, graph_facts
 
 #: Exactly the metadata shape ``aot_mint`` records for a minted graph class:
 #: TCG's ``graph_class`` block, never an ``entry`` block.
-TCG_METADATA = {
+#: Split out so the toolchain block keeps its own type: indexing the
+#: heterogeneous metadata dict widens it to Collection[str] under strict mypy.
+TCG_TOOLCHAIN: dict[str, str] = {"torch": "c" * 16, "ptxas": "d" * 16}
+
+TCG_METADATA: dict[str, Any] = {
     "kind": "aot-inductor",
     "sm": "sm_89",
     "graph_class": {"name": "unet", "target": "unet", "class_hash": "a" * 16},
-    "toolchain": {"torch": "c" * 16, "ptxas": "d" * 16},
+    "toolchain": dict(TCG_TOOLCHAIN),
     # A wire fact the hub's ArtifactIdentity requires by name, not a key axis
     # (pgw#1059 amendment 4). The publish path fails closed without it, which
     # is a separate refusal from the identity one this file is about.
@@ -75,8 +80,7 @@ def test_the_worker_publish_path_keys_a_real_tcg_artifact() -> None:
     expected = tcg_identity.from_artifact_metadata(TCG_METADATA)
     assert axes["graph"] == "a" * 16
     assert axes["sm"] == "sm_89"
-    assert axes["toolchain"] == tcg_identity.toolchain_axis_digest(
-        TCG_METADATA["toolchain"])
+    assert axes["toolchain"] == tcg_identity.toolchain_axis_digest(TCG_TOOLCHAIN)
     assert expected.value.startswith("cg-key-v1-")
 
 

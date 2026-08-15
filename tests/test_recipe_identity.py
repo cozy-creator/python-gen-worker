@@ -95,7 +95,7 @@ def test_cg_key_v1_axes_are_the_recipe(pinned_runtime: None,
     meta = exported_cell_meta()
     key = ck.from_artifact_metadata(meta)
     assert key.value.startswith("cg-key-v1-")
-    axes = key.axes_dict()
+    axes = key.as_dict()
     assert set(axes) == {"graph", "sm", "toolchain"}
     # Version strings and image identity are GONE from the key: a
     # version-string bump alone can never re-key a cell (content digests
