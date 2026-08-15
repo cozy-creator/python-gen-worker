@@ -62,7 +62,11 @@ class MicroW8a8Out(msgspec.Struct):
 
 
 @endpoint(
-    models={"pipeline": Slot(MicroW8a8Pipeline, selected_by="model")},
+    models={"pipeline": Slot(
+        MicroW8a8Pipeline, selected_by="model",
+        # The denoiser IS the fp8 artifact `load_w8a8_denoiser` reads; the
+        # decoder beside it is dense. Both are in the set this slot executes.
+        layouts={"*": ("cozy.fp8-rowwise@1", "plain.bf16@1")})},
     compile=Compile(
         family=FAMILY, targets=("transformer", "decoder"), shapes=PIXEL_ROWS,
         text_len=COND_LEN),

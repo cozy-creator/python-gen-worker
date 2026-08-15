@@ -72,7 +72,9 @@ _MAIN = """
             return {{}}
 
     @endpoint(
-        models={{"pipeline": Slot(Pipe, selected_by="model")}},
+        models={{"pipeline": Slot(
+            Pipe, selected_by="model",
+            layouts={{"*": ("plain.bf16@1",)}})}},
         resources=Resources(gpu=True),
         compile=Compile(family="ep996", shapes=((1024, 1024),), text_len=77),
         lora_bucket={bucket},

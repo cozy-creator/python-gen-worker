@@ -386,10 +386,48 @@ class Generate:
   `"*"` is the every-component default; a component key overrides it for that
   component. The map is one level deep, keyed by component. The hub compares an artifact's PROVEN layout against this set at
   rebind and refuses a mismatch with both sides named, before any pod is
-  bought. **Omitting `layouts=` leaves the slot UNDECLARED** — the gate then
-  falls back to the image-wide decoder census, and absence is never read as
-  "accepts everything"; an empty mapping or an empty tuple is a
-  decoration-time error. Handles must be registered
+  bought. **The declaration is MANDATORY (A19, Paul 2026-08-15).** Omitting it
+  used to leave the slot UNDECLARED; measured fleet-wide that rung was only
+  ever the default, so "no opinion" and "nobody wrote the line" were one
+  state. Discovery now REFUSES a model slot carrying neither `layouts=` nor
+  `layouts_undeclarable=`, naming the function, the slot and the syntax; an
+  empty mapping or an empty tuple is a decoration-time error. If no registered
+  handle names this slot's bytes — a tokenizer tree with no tensors, a GGUF
+  quant axis (th#1809 T3), a compressed-tensors checkpoint — say so and say
+  why:
+
+  ```python
+  Slot(Path, layouts_undeclarable="tokenizer files only — no tensors")
+  ```
+
+  That is a DECLARATION, not a default: the reason is required, it travels
+  onto the manifest, and it cannot be worn alongside `layouts=`.
+
+- **`layout_requirements=` declares WHAT EXECUTING A CONTRACT NEEDS OF THE
+  MACHINE** (Paul, 2026-08-15) — keyed by the handle it guards, dual form:
+
+  ```python
+  Slot(QwenImagePipeline, selected_by="model",
+       layouts={"*": (CONTRACT_PLAIN_BF16, CONTRACT_COZY_SVDQ_NVFP4_LR8)},
+       layout_requirements={CONTRACT_COZY_SVDQ_NVFP4_LR8: "sm100+"})
+  ```
+
+  A handle names bytes at rest; the floor its kernels need is an EXECUTION
+  fact, which is why it lives on the slot and not on the artifact contract —
+  the same placement and the same name as tensorhub's
+  `contractspec.DecodeEntry.MinSM`, the field it feeds and the one the ladder
+  reads for rung admission. Per (slot, handle), because one contract has
+  different floors in different code (`cozy.fp8-rowwise@1` is sm89 per-tensor
+  and sm90 rowwise). A key naming a handle `layouts=` does not accept is
+  refused — a requirement guarding nothing is never checked. Kernel and
+  torch-version requirements are named in the ruling and NOT built; the
+  compact grammar is a comma-separated term list so they can be added without
+  re-spelling a declaration, and an unknown term is refused rather than
+  ignored. **No defaults on this axis either**: a declared requirement is
+  checked, an undeclared one is not evaluated, and there is no "no floor"
+  value to write.
+
+  Handles must be registered
   (`KNOWN_CONTRACTS`, transcribed from tensorhub's `internal/tensorlayout`)
   and written as LITERALS or as constants imported from that module —
   `scripts/lint_layout_declarations.py` refuses anything the AST sweep cannot

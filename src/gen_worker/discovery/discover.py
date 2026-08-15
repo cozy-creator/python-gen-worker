@@ -447,15 +447,28 @@ def _slot_to_manifest(
             {"name": part, "kind": kind}
             for part, kind in sorted(components.items())
         ]
-    # The per-component DEMAND. Absent means UNDECLARED — the hub's gate falls
-    # back to the image-wide decoder census for this slot, and never reads
-    # absence as "accepts everything". Handles only: the hub resolves each to
-    # its descriptor DIGEST at ingest, against its own registry, which is the
-    # only moment one wheel and one hub are both pinned.
+    # The per-component DEMAND. Handles only: the hub resolves each to its
+    # descriptor DIGEST at ingest, against its own registry, which is the only
+    # moment one wheel and one hub are both pinned. Absence is no longer a
+    # state an image can ship — `validate_endpoint_lock` refuses it (A19).
     if slot.layouts:
         out["layouts"] = {
             path: list(handles) for path, handles in slot.layouts.items()
         }
+    # The explicit third rung: this slot's bytes have no registered handle,
+    # and the REASON travels rather than being lost to an absent key.
+    if getattr(slot, "layouts_undeclarable", ""):
+        out["layouts_undeclarable"] = slot.layouts_undeclarable
+    # The REQUIREMENTS axis, keyed by the handle it guards. Only DECLARED
+    # axes are emitted: an undeclared floor must not arrive at the hub as a
+    # zero, which `contractspec.DecodeEntry.MinSM` reads as "no floor".
+    requirements = {
+        handle: row.manifest_row()
+        for handle, row in (getattr(slot, "layout_requirements", None) or {}).items()
+        if row.declared()
+    }
+    if requirements:
+        out["layout_requirements"] = requirements
     return out
 
 

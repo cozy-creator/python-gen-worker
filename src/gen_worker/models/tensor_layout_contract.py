@@ -637,3 +637,233 @@ def _axis_member(text: str, *, axis: str, where: str) -> str | None:
             "internal/tensorlayout with a descriptor and a probe set before "
             f"anything may name it. Known: {', '.join(known_contracts(axis))}")
     return value
+
+
+# ── A19: the declaration is MANDATORY, and absence is not the tri-state ──────
+#
+# `layouts=None` used to mean UNDECLARED — a legitimate third rung that made
+# the hub's gate fall back to the image-wide decoder census. Measured
+# fleet-wide, that rung was not a considered choice anywhere: it was the
+# default, so "this slot has no opinion" and "nobody wrote the line" were one
+# state and no refusal could tell them apart.
+#
+# A19 (Paul, 2026-08-15) cuts the default away. A model slot states what it
+# consumes, or it states — with a reason — that no registered handle describes
+# its bytes. Both are DECLARATIONS. What no longer exists is silence.
+#
+# The escape is not a loophole and not a default: it carries a reason string,
+# it is refused when blank, and it is mutually exclusive with `layouts=`. It
+# exists because real slots hold bytes the registry genuinely does not name —
+# a tokenizer tree with no tensors at all, a GGUF quant axis th#1809 T3 has
+# not registered, a vLLM compressed-tensors checkpoint with no descriptor.
+# Inventing a handle for those would be the failure mode, not the fix.
+
+class UndeclaredSlotLayoutError(LayoutDeclarationError):
+    """A model slot that declares neither a consumed contract nor a reason."""
+
+
+def normalize_layout_undeclarable(reason: object, *, where: str) -> str:
+    """`Slot(layouts_undeclarable=...)` -> the reason, or a refusal."""
+    if not isinstance(reason, str):
+        raise LayoutDeclarationError(
+            f"{where}: layouts_undeclarable= must be a string reason, got "
+            f"{type(reason).__name__}")
+    text = reason.strip()
+    if not text:
+        raise LayoutDeclarationError(
+            f"{where}: layouts_undeclarable= needs a REASON. An empty escape "
+            "is the silence A19 removed — say which bytes this slot holds and "
+            "why no registered handle names them.")
+    return text
+
+
+def undeclared_slot_refusal(*, function: str, slot: str) -> str:
+    """The one sentence both the SDK and the manifest gate speak."""
+    return (
+        f"function {function!r}: model slot {slot!r} declares no consumed "
+        "tensor-layout contract. Every model slot states what its code can "
+        "execute — A19 is a hard cut, so ABSENT is a refusal, never the "
+        "UNDECLARED tri-state:\n"
+        f"    Slot(Pipe, layouts={{\"*\": (\"{CONTRACT_PLAIN_BF16}\",)}})\n"
+        f"Registered quant handles: {', '.join(KNOWN_CONTRACTS)}.\n"
+        "If no registered handle names this slot's bytes (a tokenizer tree "
+        "with no tensors, a GGUF quant axis, a compressed-tensors checkpoint), "
+        "declare that explicitly and say why:\n"
+        "    Slot(Pipe, layouts_undeclarable=\"gguf: the quant axis has no "
+        "registered handle (th#1809 T3)\")"
+    )
+
+
+# ── The REQUIREMENTS axis (Paul, 2026-08-15) ────────────────────────────────
+#
+# "Certain contracts can only be executed efficiently if their
+# hardware-requirements are met... other requirements might be kernels or torch
+# versions."
+#
+# A contract handle describes BYTES AT REST. Executing those bytes is a
+# separate fact, and it belongs to the code that executes them rather than to
+# the artifact — which is exactly where tensorhub already put it:
+# `contractspec.DecodeEntry.MinSM`, "the card floor this loader's kernels
+# need. 0 = no floor. It is an EXECUTION fact and lives here rather than on the
+# artifact contract, which describes bytes at rest only." So this axis speaks
+# that field's name and semantics verbatim; it does not invent a second
+# vocabulary for one fact.
+#
+# The requirement is PER (slot, handle), not per handle globally: one contract
+# has different floors in different code. `cozy.fp8-rowwise@1` is sm89 through
+# `_scaled_mm` per-tensor and sm90 rowwise (`models/w8a8.py`), and the 4-bit
+# contracts need sm100 (`models/w4a4.py: W4A4_MIN_SM = 100`). A global table
+# would have to pick one and be wrong for the other.
+#
+# NO DEFAULTS, and the same rule as every other axis: a declared requirement is
+# checked, an undeclared one is not evaluated at all. `0`/absent is not "no
+# floor asserted by the author" dressed as "runs anywhere" — it is the axis
+# nobody answered.
+#
+# EXTENSIBLE, NOT BUILT: the compact grammar is a comma-separated term list so
+# a kernel or torch-version term can be added without re-spelling every
+# declaration. Only the compute-capability term exists today, and an unknown
+# term is REFUSED by name rather than ignored — an ignored requirement is a
+# requirement that silently does not hold.
+
+#: The requirement terms this SDK understands. Growing this tuple is the whole
+#: cost of adding an axis; nothing else parses a term.
+KNOWN_REQUIREMENT_TERMS: tuple[str, ...] = ("min_sm",)
+
+_SM_TERM_RE = re.compile(r"^sm([1-9][0-9]{1,2})\+$")
+
+
+class LayoutRequirements(msgspec.Struct, frozen=True, kw_only=True):
+    """What EXECUTING one declared contract needs of the machine.
+
+    ``min_sm`` is the compute-capability floor, in tensorhub's own
+    two-or-three digit spelling (``sm_89`` -> 89, ``sm_100`` -> 100), and is
+    the value `contractspec.DecodeEntry.MinSM` compares a card against. ``0``
+    means the axis was not declared and is therefore not evaluated.
+    """
+
+    min_sm: int = 0
+
+    def declared(self) -> bool:
+        return self.min_sm > 0
+
+    def render(self) -> str:
+        """The compact spelling, so one requirement has one text form."""
+        return f"sm{self.min_sm}+" if self.min_sm else ""
+
+    def manifest_row(self) -> dict[str, int]:
+        """Only DECLARED axes reach the manifest — an undeclared axis must not
+        arrive at the hub as a zero it could read as a floor of none."""
+        return {"min_sm": self.min_sm} if self.min_sm else {}
+
+
+def _min_sm_value(value: object, *, where: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise LayoutDeclarationError(
+            f"{where}: min_sm must be an int compute-capability code "
+            f"(89, 90, 100, ...), got {type(value).__name__}")
+    if value <= 0 or value > 999:
+        raise LayoutDeclarationError(
+            f"{where}: min_sm={value} is not a compute-capability code. Use "
+            "tensorhub's spelling — sm_89 is 89, sm_100 is 100. There is no "
+            "'no floor' value: omit the requirement instead, which leaves the "
+            "axis UNDECLARED and unevaluated.")
+    return value
+
+
+def parse_layout_requirements(
+    value: object, *, where: str,
+) -> LayoutRequirements:
+    """Dual form: the compact term list, or the structured object.
+
+    ``"sm100+"`` and ``LayoutRequirements(min_sm=100)`` are the same
+    declaration; the compact form is what an author writes and what
+    :meth:`LayoutRequirements.render` produces, so a round trip is stable.
+    """
+    if isinstance(value, LayoutRequirements):
+        if not value.declared():
+            raise LayoutDeclarationError(
+                f"{where}: LayoutRequirements() declares no axis. A "
+                "requirement that requires nothing is not a declaration — "
+                "omit the entry.")
+        return LayoutRequirements(min_sm=_min_sm_value(
+            value.min_sm, where=where))
+    if isinstance(value, dict):
+        unknown = sorted(set(value) - set(KNOWN_REQUIREMENT_TERMS))
+        if unknown:
+            raise LayoutDeclarationError(
+                f"{where}: unknown requirement term(s) {unknown}. This SDK "
+                f"understands {list(KNOWN_REQUIREMENT_TERMS)}; kernel and "
+                "torch-version requirements are named in the ruling but not "
+                "built, and an ignored requirement is one that silently does "
+                "not hold.")
+        if "min_sm" not in value:
+            raise LayoutDeclarationError(
+                f"{where}: requirement mapping declares no axis; omit the "
+                "entry rather than declaring an empty one.")
+        return LayoutRequirements(
+            min_sm=_min_sm_value(value["min_sm"], where=where))
+    if not isinstance(value, str):
+        raise LayoutDeclarationError(
+            f"{where}: a requirement is the compact form 'sm100+', a "
+            f"LayoutRequirements, or a mapping — got {type(value).__name__}")
+    terms = [t.strip() for t in value.split(",")]
+    if not any(terms) or any(not t for t in terms):
+        raise LayoutDeclarationError(
+            f"{where}: {value!r} is not a requirement. The compact form is a "
+            "comma-separated term list, e.g. 'sm100+'.")
+    min_sm = 0
+    for term in terms:
+        match = _SM_TERM_RE.match(term)
+        if match is None:
+            raise LayoutDeclarationError(
+                f"{where}: unknown requirement term {term!r}. The only term "
+                "this SDK understands is the compute-capability floor "
+                "('sm89+', 'sm90+', 'sm100+'); kernel and torch-version "
+                "requirements are named in the ruling but not built, and an "
+                "ignored requirement is one that silently does not hold.")
+        if min_sm:
+            raise LayoutDeclarationError(
+                f"{where}: {value!r} states the compute-capability floor "
+                "twice")
+        min_sm = _min_sm_value(int(match.group(1)), where=where)
+    return LayoutRequirements(min_sm=min_sm)
+
+
+def normalize_layout_requirements(
+    requirements: object, *, where: str, accepted: Iterable[str],
+) -> dict[str, LayoutRequirements]:
+    """`Slot(layout_requirements=...)` -> `{handle: LayoutRequirements}`.
+
+    Keyed by HANDLE, not by component path: the floor is a property of the
+    code that decodes that contract, and the same decoder serves every
+    component the slot accepts it for.
+
+    A key naming a handle this slot does not accept is a REFUSAL rather than a
+    dead entry — it is a requirement guarding nothing, and the shapes that
+    guard nothing are the ones this whole row exists to remove.
+    """
+    if not isinstance(requirements, dict):
+        raise LayoutDeclarationError(
+            f"{where}: layout_requirements= must be a mapping of contract "
+            f"handle -> requirement, got {type(requirements).__name__}")
+    if not requirements:
+        raise LayoutDeclarationError(
+            f"{where}: layout_requirements={{}} declares nothing. Omit it to "
+            "leave every axis UNDECLARED; an empty mapping is not a statement "
+            "that this slot's contracts run anywhere.")
+    accepted_set = set(accepted)
+    out: dict[str, LayoutRequirements] = {}
+    for raw_handle, raw_value in requirements.items():
+        handle = validate_layout_handle(
+            raw_handle, where=f"{where}: layout_requirements")
+        if handle not in accepted_set:
+            raise LayoutDeclarationError(
+                f"{where}: layout_requirements[{handle!r}] guards a contract "
+                f"this slot does not accept. Its declared set is "
+                f"{sorted(accepted_set)} — add the handle to layouts= or drop "
+                "the requirement; a requirement over nothing is never checked."
+            )
+        out[handle] = parse_layout_requirements(
+            raw_value, where=f"{where}: layout_requirements[{handle!r}]")
+    return out
