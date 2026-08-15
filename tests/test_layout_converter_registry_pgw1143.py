@@ -595,7 +595,10 @@ def test_the_fence_covers_every_module_that_computes_a_compiled_graph_key() -> N
     hand-listed — the failure mode of a hand-maintained list is that the one
     file which violates the rule is the one nobody added."""
     fenced = {p.name for p in _fence_module().fenced_modules()}
-    assert {"compiled_graph_key.py", "fleet_cells.py", "boot_key.py", "aot_mint.py",
+    # pgw#1277: the key's DEFINITION left this tree for
+    # torch_compiled_graphs.identity, so no module here defines it and the
+    # fence covers exactly the CALL SITES plus the axis-input seeds.
+    assert {"fleet_cells.py", "boot_key.py", "aot_mint.py",
             "compile_cache.py"} <= fenced
     assert "aot_serve.py" not in fenced, (
         "runtime admission consumes the TCG key; it must not derive one")
@@ -621,13 +624,15 @@ def test_the_fence_fires_on_a_key_axis_that_reads_the_layout(
     against a tree that violates the fence, and a disconnected detector fails
     here.
     """
-    (tmp_path / "compiled_graph_key.py").write_text(textwrap.dedent(
+    (tmp_path / "graph_facts.py").write_text(textwrap.dedent(
         """
         from gen_worker.convert.layout_converters import LayoutId
 
 
-        def envelope_facts(block, layout: LayoutId):
-            return {"v": 1, "layout": layout.render()}
+        def axis(block, layout: LayoutId):
+            # calls an axis producer, so the fence COVERS this module by
+            # derivation rather than by being named in the seed list
+            return toolchain_axis_digest({"v": 1, "layout": layout.render()})
         """
     ), encoding="utf-8")
     result = _run_fence("--src", str(tmp_path))
@@ -641,14 +646,14 @@ def test_the_fence_fires_on_a_key_axis_that_reads_the_layout(
 def test_the_fence_fires_on_a_deferred_import_too(tmp_path: Path) -> None:
     """A string handed to `import_module` is the obvious way around an import
     check, so it is checked as a string."""
-    (tmp_path / "compiled_graph_key.py").write_text(textwrap.dedent(
+    (tmp_path / "graph_facts.py").write_text(textwrap.dedent(
         """
         import importlib
 
 
-        def envelope_facts(block):
+        def axis(block):
             mod = importlib.import_module("gen_worker.convert.layout_converters")
-            return {"v": 1, "chain": mod.conversion_provenance}
+            return toolchain_axis_digest({"v": 1, "chain": mod.conversion_provenance})
         """
     ), encoding="utf-8")
     result = _run_fence("--src", str(tmp_path))
@@ -660,14 +665,14 @@ def test_the_fence_does_not_fire_on_prose(tmp_path: Path) -> None:
     """Docstrings are excluded on purpose: a vocabulary gate that reds on the
     word appearing in an explanation teaches lanes to stop explaining
     themselves, and has already cost this repo a lane-day."""
-    (tmp_path / "compiled_graph_key.py").write_text(textwrap.dedent(
+    (tmp_path / "graph_facts.py").write_text(textwrap.dedent(
         '''
         """The cell key. Deliberately blind to Slot.layouts and to any
         LayoutId or conversion chain — see classify_layout for why."""
 
 
-        def envelope_facts(block):
-            return {"v": 1}
+        def axis(block):
+            return toolchain_axis_digest({"v": 1})
         '''
     ), encoding="utf-8")
     result = _run_fence("--src", str(tmp_path))

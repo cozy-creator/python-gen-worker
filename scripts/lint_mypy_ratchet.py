@@ -49,7 +49,9 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # endpoint image build exercises.
     # 56 -> 55: pgw#1232 moved the generic transfer journal to HashRepo.
     # 55 -> 54: pgw#1270 deleted the duplicate worker package/runner surface.
-    "disallow_any_generics": (54, 285),
+    # pgw#1277: 54 -> 53. compiled_graph_key.py was relaxed here; its successor
+    # gen_worker/graph_facts.py needs no relaxation, so the ground is kept.
+    "disallow_any_generics": (53, 285),
     # 26 -> 25: PR 6, request_context.
     "warn_return_any": (25, 48),
     # 20 -> 19: pgw#1270 deleted the duplicate worker package/runner surface.

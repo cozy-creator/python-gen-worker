@@ -33,7 +33,9 @@ import pytest
 from hashrepo import TransferReport
 
 import gen_worker.hubio.client as hub_client
-from gen_worker import compiled_graph_key, env_seal, receipts
+from torch_compiled_graphs import identity as tcg_identity
+
+from gen_worker import env_seal, graph_facts, receipts
 from gen_worker import fleet_cells as fc
 from gen_worker.hubio.client import HubPublishError
 from gen_worker.procsplit import actions
@@ -238,12 +240,12 @@ _CLASS_HASH = "a" * 16
 #: pgw#1176: the DECLARATION-wide coverage label, published as
 #: `graph_contract`. No longer a copy of the graph axis — `graph` is this
 #: entry's class hash (identity), this names the class set it belongs to.
-GRAPH_CONTRACT = compiled_graph_key.manifest_digest([_CLASS_HASH])
+GRAPH_CONTRACT = graph_facts.manifest_digest([_CLASS_HASH])
 META = {
     "family": FAMILY, "sku": "l4", "sm": "89",
     "gen_worker": "0.87.0", "kind": "aot-inductor", "format": "pt2",
     "weight_lane": "w8a8", "lora_bucket": 64, "strict_export": True,
-    compiled_graph_key.ENTRY_BLOCK_KEY: {
+    graph_facts.TCG_GRAPH_CLASS_BLOCK: {
         "name": "unet/main",
         "target": "unet", "fork": [], "class_dims": [],
         "range_digest": "r1", "class_hash": _CLASS_HASH, "graph": {"v": 2},
@@ -252,7 +254,7 @@ META = {
     "env_seal": {"v": 1, "torch": "2.9.0"},
     "toolchain": {"torch": "2.9.0", "cuda": "12.8"},
 }
-COMPILED_GRAPH_KEY = compiled_graph_key.from_entry_metadata(META).digest
+COMPILED_GRAPH_KEY = tcg_identity.from_artifact_metadata(META).value
 META["compiled_graph_key"] = COMPILED_GRAPH_KEY
 
 #: The shape every cell in the corpus was published under before pgw#1046 —
@@ -372,7 +374,7 @@ def test_publish_intent_states_the_full_arming_identity(hub, artifact):
     axes = entry["identity_axes"]
 
     # Derived from the recorded blocks, never from a second stamp.
-    assert axes["toolchain"] == compiled_graph_key.facts_digest(META["toolchain"])
+    assert axes["toolchain"] == graph_facts.facts_digest(META["toolchain"])
     assert axes["env_seal"] == env_seal.seal_digest(META["env_seal"])
     assert axes[fc.GRAPH_CONTRACT_AXIS] == GRAPH_CONTRACT
 
@@ -382,7 +384,7 @@ def test_publish_intent_states_the_full_arming_identity(hub, artifact):
     # demoted store metadata (family, lane) — pgw#1059: neither is identity.
     ck = {k: v for k, v in axes.items()
           if k in ("graph", "sm", "toolchain")}
-    assert compiled_graph_key.from_axes(ck).digest == entry["compiled_graph_key"] == COMPILED_GRAPH_KEY
+    assert tcg_identity.from_axes(ck).value == entry["compiled_graph_key"] == COMPILED_GRAPH_KEY
     assert set(axes) == {"graph", "sm", "toolchain",
                          fc.GRAPH_CONTRACT_AXIS, fc.ENV_SEAL_AXIS,
                          "family", "lane"}
@@ -452,8 +454,8 @@ def test_a_cell_with_no_class_hash_is_refused(hub, artifact):
     state its own graph axis has no identity, so it would be stored under a
     flavor nothing can request."""
     hollow = dict(META)
-    hollow[compiled_graph_key.ENTRY_BLOCK_KEY] = {
-        **META[compiled_graph_key.ENTRY_BLOCK_KEY], "class_hash": ""}
+    hollow[graph_facts.TCG_GRAPH_CLASS_BLOCK] = {
+        **META[graph_facts.TCG_GRAPH_CLASS_BLOCK], "class_hash": ""}
     with pytest.raises(fc.CellPublishRefused):
         _publisher(hub).publish(FAMILY, artifact, hollow)
     assert not hub.httpd.calls

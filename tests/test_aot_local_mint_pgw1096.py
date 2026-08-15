@@ -29,7 +29,9 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
-from gen_worker import compiled_graph_key, fleet_cells, local_cell_store
+from torch_compiled_graphs import is_compiled_graph_key
+
+from gen_worker import fleet_cells, local_cell_store
 from gen_worker.cell_adopt import AdoptOutcome
 
 KEY_A = "cg-key-v1-" + "a" * 56
@@ -100,7 +102,7 @@ def test_a_cell_is_addressed_by_the_same_ck1_key_the_hub_store_uses(
         _artifact(tmp_path), key=KEY_A, family="micro-diffusion", arm_token=ARM_A)
 
     assert cell is not None
-    assert cell.key == KEY_A and compiled_graph_key.is_key(cell.key)
+    assert cell.key == KEY_A and is_compiled_graph_key(cell.key)
     assert cell.artifact == store / "aot-cells" / KEY_A / "cell.tar.gz"
     assert cell.artifact.read_bytes() == b"packed-cell-bytes"
 

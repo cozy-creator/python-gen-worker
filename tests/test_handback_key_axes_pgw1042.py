@@ -30,7 +30,7 @@ from typing import Any, Dict, cast
 
 import pytest
 
-from gen_worker import aot_serve, compiled_graph_key, env_seal, fleet_cells
+from gen_worker import aot_serve, env_seal, fleet_cells, graph_facts
 from gen_worker.compile_cache import AdoptError
 from torch_compiled_graphs import (
     CallIngress,
@@ -62,9 +62,9 @@ def _arm_key(seal: Dict[str, Any], toolchain: Dict[str, Any]) -> fleet_cells.Arm
         aot_serve.COMPILED_GRAPH_FORMAT_KEY: str(aot_serve.COMPILED_GRAPH_FORMAT),
         "lane": "w8a8-lora64",
         "sm": "sm_89",
-        "envelope": compiled_graph_key.envelope_digest(_DECLARED_ENVELOPE),
+        "envelope": graph_facts.envelope_digest(_DECLARED_ENVELOPE),
         "env_seal": env_seal.seal_digest(seal),
-        "toolchain": compiled_graph_key.facts_digest(toolchain),
+        "toolchain": graph_facts.facts_digest(toolchain),
     }.items())))
 
 
@@ -77,7 +77,7 @@ def _envelope(seal: Dict[str, Any], toolchain: Dict[str, Any]) -> Dict[str, Any]
         "weight_lane": "w8a8",
         "lora_bucket": 64,
         "sm": "sm_89",
-        compiled_graph_key.EXPORT_ENVELOPE_KEY: dict(_DECLARED_ENVELOPE),
+        graph_facts.EXPORT_ENVELOPE_KEY: dict(_DECLARED_ENVELOPE),
         env_seal.SEAL_KEY: dict(seal),
         "toolchain": dict(toolchain),
     }
@@ -136,7 +136,7 @@ def test_the_envelope_is_deliberately_NOT_compared_at_this_seam() -> None:
     assert "envelope" not in fleet_cells.ARM_ENVIRONMENT_FACTS
 
     meta = _envelope(seal, TOOLCHAIN)
-    meta[compiled_graph_key.EXPORT_ENVELOPE_KEY] = {
+    meta[graph_facts.EXPORT_ENVELOPE_KEY] = {
         "shapes": [[128, 128]], "text_lens": [7], "guidance": [1.0]}
     assert fleet_cells.arm_axis_divergence(
         _arm_key(seal, TOOLCHAIN), meta) == ""

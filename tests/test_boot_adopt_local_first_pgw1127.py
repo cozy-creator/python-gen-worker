@@ -192,16 +192,16 @@ def _executor(tmp_path: Path) -> Any:
 
 
 def _derived() -> Any:
-    """A REAL ``DerivedKey`` — the key is built by ``compiled_graph_key.from_axes`` over
+    """A REAL ``DerivedKey`` — the key is built by ``tcg.identity.from_axes`` over
     real axes, so the address the boot hands the store is the address the store
     is addressed by everywhere else. Only the TRACE is stood in for (there is no
     card on a CI runner, and `sm` is a key axis)."""
-    from gen_worker import compiled_graph_key as ck
+    from torch_compiled_graphs import identity as ck
 
     return boot_key.DerivedKey(
         entry_keys={"a": ck.from_axes({
             "graph": "c0ffee0000000000",
-            "sm": "sm_89", "toolchain": "t" * 16}).digest},
+            "sm": "sm_89", "toolchain": "t" * 16}).value},
         workers=2, width_reason="test", traced=1, memo="miss", wall_ms=7)
 
 

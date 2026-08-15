@@ -3,7 +3,7 @@ the advertisement names what armed, and the key names the placement.
 THE GOVERNING PRINCIPLE, which is why these five changes are one change:
 
     The CELL KEY is the computation and must not OVER-split (the membership
-    axiom, ``compiled_graph_key.py``).  The ARM TOKEN is a mint obligation and a cache
+    axiom, ``tcg.identity``).  The ARM TOKEN is a mint obligation and a cache
     lookup and must not UNDER-split.  Over-splitting an obligation costs one
     re-mint; under-splitting one binds a pipeline to a cell nobody proved is
     its computation.
@@ -25,7 +25,7 @@ from typing import Any, Dict
 
 import pytest
 
-from gen_worker import boot_key, compiled_graph_key, fleet_cells, local_cell_store
+from gen_worker import boot_key, fleet_cells, graph_facts, local_cell_store
 from gen_worker.api.binding import Hub
 from gen_worker.child_contract import CompileSpec, MintSlot
 
@@ -163,7 +163,7 @@ def test_an_unstamped_pipeline_states_no_subject_and_says_so() -> None:
     ``""`` is the honest answer and it UNDER-splits, which is why the executor
     stamps every subject it can (including, for that path, all of them)."""
     assert fleet_cells.pipeline_arm_subject(_Pipe()) == ()
-    assert compiled_graph_key.subject_digest(()) == ""
+    assert graph_facts.subject_digest(()) == ""
     facts = fleet_cells.arm_identity("f", "", 0, _Cfg()).facts_dict()
     assert facts["subject"] == ""
 

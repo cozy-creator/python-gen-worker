@@ -24,7 +24,9 @@ from typing import Dict
 
 import pytest
 
-from gen_worker import compiled_graph_key, compile_cache as cc, dist_records
+from torch_compiled_graphs import identity as tcg_identity
+
+from gen_worker import compile_cache as cc, dist_records
 
 from harness.cell_meta import exported_cell_meta
 
@@ -95,9 +97,15 @@ def test_the_axis_ignores_the_library_even_when_a_cell_records_it(
     without = {k: v for k, v in TOOLCHAIN.items() if k not in MODEL_LIBRARIES}
     with_one = dict(without)
     with_one[library] = TOOLCHAIN[library]
-    assert (compiled_graph_key.toolchain_axis_digest(with_one)
-            == compiled_graph_key.toolchain_axis_digest(without))
-    assert library not in compiled_graph_key.toolchain_facts(TOOLCHAIN)
+    assert (tcg_identity.toolchain_axis_digest(with_one)
+            == tcg_identity.toolchain_axis_digest(without))
+    # ...and the component carries NO bits of its own: an axis over the model
+    # library alone is the axis over an empty block. Stated through the
+    # authority rather than by reading its canonical form, which pgw#1277
+    # deleted from this repo — a worker-side copy of TCG's membership would be
+    # the second authority this unit exists to remove.
+    assert (tcg_identity.toolchain_axis_digest({library: TOOLCHAIN[library]})
+            == tcg_identity.toolchain_axis_digest({}))
 
 
 # ---------------------------------------------------------------------------
@@ -162,11 +170,21 @@ def test_the_producer_does_not_collect_the_model_libraries(
 
 
 def test_producer_and_reader_agree_on_membership() -> None:
-    """One axis, one membership: whatever the producer collects survives the
-    reader's canonical form untouched."""
+    """One axis, one membership: everything the producer collects REACHES the
+    axis, and nothing it collects is dropped on the way in.
+
+    Proved by mutation rather than by comparing against a second canonical
+    form: drop any one collected component and the axis must move. That is the
+    same claim the old ``toolchain_facts`` equality made, stated against the
+    authority that now owns membership."""
     collected = dict(cc.toolchain_digest())
-    assert compiled_graph_key.toolchain_facts(collected) == {
-        str(k): str(v) for k, v in collected.items()}
+    assert collected, "the producer must collect something to prove anything"
+    full = tcg_identity.toolchain_axis_digest(collected)
+    for component in collected:
+        if component in MODEL_LIBRARIES:
+            continue  # evicted by design — the tests above own that claim
+        without = {k: v for k, v in collected.items() if k != component}
+        assert tcg_identity.toolchain_axis_digest(without) != full, component
 
 
 # ---------------------------------------------------------------------------
