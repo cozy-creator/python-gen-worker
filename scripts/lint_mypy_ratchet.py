@@ -74,7 +74,12 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # 309 -> 302: pgw#1235 deleted seven duplicate generic CAS test modules.
     # 302 -> 295: pgw#1246 deleted the seven component-substitution test
     # modules with the apparatus they pinned.
-    "ignore_errors": (295, 2016),
+    # 295 -> 269: pgw#1272 deleted 40 mock-heavy unit modules, 5 deletion
+    # fences for completed hard cuts, and one orphaned fixture.
+    # test_group_processes_pgw783 was NOT deleted despite scoring mock-heavy:
+    # it holds the only red-proof of `host_move_guard._refuse_if_over_budget`,
+    # a live on-by-default guard, and the only coverage of procsplit.group/merge.
+    "ignore_errors": (269, 2016),
 }
 
 #: WILDCARD patterns are structural policy, not debt, so they are not counted
