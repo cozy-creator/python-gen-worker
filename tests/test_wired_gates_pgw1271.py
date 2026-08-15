@@ -470,6 +470,24 @@ def test_a_divisible_head_count_gets_past_the_divisibility_gate() -> None:
 # delegating. That is the same guarantee in its strongest form: there is one
 # runtime probe because there is one function.
 
+
+def test_every_axis_a_pt2_is_pinned_to_is_stated_by_the_one_probe() -> None:
+    """`aot_serve.IDENTITY_AXES` names the facts an exported `.pt2` is pinned
+    to. Since pgw#1270 exactly one function can state them, so an axis the
+    probe cannot name is an artifact pinned to a fact nothing measures.
+
+    pgw#1281 (HARDCUT M2): `compile_cache` carried a SECOND axis tuple whose
+    comment claimed "the same shape as `aot_serve.IDENTITY_AXES`" — 5 entries
+    against 3, naming a `verify()` deleted two waves earlier, read by nothing.
+    A prose claim of parity is not a parity. This is the checkable one.
+    """
+    probe = set(compile_cache.runtime_key())
+    missing = [a for a in aot_serve.IDENTITY_AXES if a not in probe]
+    assert missing == [], (
+        f"{missing} pin an artifact but `compile_cache.runtime_key()` cannot "
+        f"state them; it probes {sorted(probe)}")
+
+
 # ---------------------------------------------------------------------------
 # receipts — no call that reads as the last gate and checks nothing
 # ---------------------------------------------------------------------------

@@ -1499,22 +1499,20 @@ def resolve_local_path(
     # file-oriented (allow_patterns) and has NO diffusers-layout requirement, so
     # it handles ComfyUI/DiffSynth split checkpoints the HF resolver rejects.
     if parsed.provider == "modelscope" and parsed.modelscope is not None:
-        try:
-            from modelscope import snapshot_download as _ms_snap
-        except Exception as e:
-            raise ModelResolutionError(
-                f"modelscope is required for modelscope refs ({parsed.modelscope.canonical()}): {e}"
-            ) from e
-        kwargs: Dict[str, Any] = {}
-        if parsed.modelscope.revision:
-            kwargs["revision"] = parsed.modelscope.revision
-        if allow_patterns:
-            kwargs["allow_patterns"] = list(allow_patterns)
-        if offline:
-            kwargs["local_files_only"] = True
+        from .download import download_modelscope
+        from .errors import PickleWeightRefused
+
         emit({"kind": "model_fetch.started", "ref": parsed.modelscope.canonical(), "provider": "modelscope"})
         try:
-            local = _ms_snap(model_id=parsed.modelscope.repo_id, **kwargs)
+            local = download_modelscope(
+                parsed.modelscope.repo_id,
+                revision=parsed.modelscope.revision or "",
+                allow_patterns=tuple(allow_patterns),
+                local_files_only=offline,
+            )
+        except PickleWeightRefused:
+            # Typed and terminal: a pickle repo is not a fetch failure to retry.
+            raise
         except Exception as e:
             raise ModelResolutionError(
                 f"failed to fetch modelscope ref {parsed.modelscope.canonical()}: {e}"

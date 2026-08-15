@@ -340,6 +340,16 @@ jobs:
       - name: pgw#1049 guard - torch-settings writes outside the authority
         run: uv run python scripts/lint_settings_writers.py
 
+      # GATING (HARDCUT E5): pickles are banned platform-wide, and the two
+      # scans enforcing it lived in `tests` — a job that gates nothing since
+      # pgw#1264 — and read `src/` only. This one runs here, over every Python
+      # tree, with no path allowlist: a site is permitted only where a proof of
+      # refusal sits beside it.
+      - name: HARDCUT E5 guard - nothing deserializes a pickle
+        run: |
+          uv run python scripts/lint_pickle_readers.py --selftest
+          uv run python scripts/lint_pickle_readers.py
+
       # GATING (th#1987 / HARDCUT A9): the `:tag` ref production is DELETED.
       # A surviving pin fails on a rented pod at the resolve, not at the line
       # that wrote it. The selftest proves the fence can go red, because a

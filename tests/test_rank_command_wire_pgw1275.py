@@ -97,7 +97,7 @@ def _drive(target: Any, raw: bytes) -> Any:
 
 
 def test_a_pickle_on_the_command_queue_executes_nothing(tmp_path: Path) -> None:
-    """RED before pgw#1275: `next_command` did `pickle.loads(raw)`, so this
+    """RED before pgw#1275: `next_command` unpickled `raw` directly, so this
     marker was written by the follower. The payload is exactly what rank 0
     would have produced from a hostile model-call argument."""
     marker = tmp_path / "executed-in-the-follower"
