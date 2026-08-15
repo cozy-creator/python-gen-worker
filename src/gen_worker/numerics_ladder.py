@@ -53,7 +53,7 @@ PHASE_REFUSED = "refused"
 #: An armed exported cell took no warm dispatch this boot, which is the
 #: NORMAL state of every adopted cell (the arm precedes setup) and is NOT a
 #: verdict about it. Carried on this kind so one
-#: query (`?kind=cell_numerics`) still answers what happened to every cell that
+#: query (`?kind=compiled_graph_numerics`) still answers what happened to every cell that
 #: armed on a pod, and emitted because an unannounced posture is
 #: indistinguishable from a gate that never ran.
 PHASE_ARMED_UNDISPATCHED = "armed_undispatched"
@@ -397,7 +397,7 @@ def gate(
 NUMERICS_FLOOR = 0.98
 
 #: Gray-band ceiling — at or above this the arm is silent, below it the cell
-#: arms and confesses ``cell_numerics phase=degraded``.
+#: arms and confesses ``compiled_graph_numerics phase=degraded``.
 #:
 #: Every configuration anyone has called healthy measures 0.9998+ (bf16
 #: control 0.99979, sdxl w8a8 whole-graph 0.99984), so an artifact that has

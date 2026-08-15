@@ -25,7 +25,7 @@ from typing import Any, Dict, Iterator
 
 import pytest
 
-from gen_worker import cell_key as ck
+from gen_worker import compiled_graph_key as ck
 from gen_worker import compile_cache as cc
 from gen_worker import env_seal
 from gen_worker.models import w8a8_lora
@@ -191,7 +191,7 @@ def test_burst_divergence_reproduced_execution_lane_only(burst_runtime: None) ->
     # misses at the comparison, not at the parse.
     for old in (CK2_PUBLISHED, CK2_REQUESTED_PLAIN, CK2_REQUESTED_FP8_HOOKS):
         assert ck.is_key(old)
-    with pytest.raises(ck.CellKeyError, match="has no entry-key identity"):
+    with pytest.raises(ck.CompiledGraphKeyError, match="has no entry-key identity"):
         ck.from_entry_metadata(_BURST_META)
 
 

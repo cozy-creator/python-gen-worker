@@ -48,11 +48,11 @@ SRC = ROOT / "src" / "gen_worker"
 #: refuse, naming the symbols it refuses about.
 FENCES: Tuple[str, ...] = (
     "scripts/lint_fence_symbols.py",
-    "scripts/lint_cell_key_layout_fence.py",
+    "scripts/lint_compiled_graph_key_layout_fence.py",
     "scripts/lint_serving_process_compiles.py",
     "scripts/lint_arm_state_feeders.py",
     "scripts/lint_unreached_surface.py",
-    "tests/test_cell_key_pgw1059.py",
+    "tests/test_compiled_graph_key_pgw1059.py",
 )
 
 #: Only literals that LOOK like this repo's identity/arm vocabulary are

@@ -122,10 +122,10 @@ out = {"pid": os.getpid(), "ok": artifact is not None}
 if artifact is not None:
     from gen_worker import aot_serve, compile_cache as _cc
     meta = aot_serve.unpack_metadata(artifact)
-    key = str(meta.get("cell_key") or "")
+    key = str(meta.get("compiled_graph_key") or "")
     import hashlib
     out.update({
-        "cell_key": key, "family": ep.FAMILY,
+        "compiled_graph_key": key, "family": ep.FAMILY,
         "ref": _cc.system_repo(ep.FAMILY) + "#" + key,
         "snapshot_digest": "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest(),
         "artifact_bytes": artifact.stat().st_size,
@@ -281,16 +281,16 @@ except Exception as _exc:
     print("rig-fetch: named cell unavailable: %%s" %% (_exc,), file=sys.stderr)
     cell = None
 else:
-    _key0 = str(aot_serve.unpack_metadata(_art).get("cell_key") or "")
+    _key0 = str(aot_serve.unpack_metadata(_art).get("compiled_graph_key") or "")
     cell = _CellNS(
-        artifact=_art, cell_key=_key0, family=cfg.family,
+        artifact=_art, compiled_graph_key=_key0, family=cfg.family,
         ref=_syscc.system_repo(cfg.family) + "#" + _key0,
         snapshot_digest="sha256:" + _hl.sha256(_art.read_bytes()).hexdigest())
 out = {"pid": os.getpid(), "ok": cell is not None}
 if cell is not None:
     meta = aot_serve.unpack_metadata(Path(cell.artifact))
     out.update({
-        "cell_key": cell.cell_key, "family": cell.family, "ref": cell.ref,
+        "compiled_graph_key": cell.compiled_graph_key, "family": cell.family, "ref": cell.ref,
         "snapshot_digest": cell.snapshot_digest,
         "artifact_bytes": Path(cell.artifact).stat().st_size,
         "entries": sorted((meta.get("entries") or {})),
@@ -561,16 +561,16 @@ except Exception as _exc:
     print("rig-fetch: named cell unavailable: %%s" %% (_exc,), file=sys.stderr)
     cell = None
 else:
-    _key0 = str(aot_serve.unpack_metadata(_art).get("cell_key") or "")
+    _key0 = str(aot_serve.unpack_metadata(_art).get("compiled_graph_key") or "")
     cell = _CellNS(
-        artifact=_art, cell_key=_key0, family=cfg.family,
+        artifact=_art, compiled_graph_key=_key0, family=cfg.family,
         ref=_syscc.system_repo(cfg.family) + "#" + _key0,
         snapshot_digest="sha256:" + _hl.sha256(_art.read_bytes()).hexdigest())
 out = {"pid": os.getpid(), "ok": cell is not None}
 if cell is not None:
     meta = aot_serve.unpack_metadata(Path(cell.artifact))
     out.update({
-        "cell_key": cell.cell_key, "family": cell.family, "ref": cell.ref,
+        "compiled_graph_key": cell.compiled_graph_key, "family": cell.family, "ref": cell.ref,
         "snapshot_digest": cell.snapshot_digest,
         "artifact_bytes": Path(cell.artifact).stat().st_size,
         "entries": sorted((meta.get("entries") or {})),
@@ -738,16 +738,16 @@ except Exception as _exc:
     print("rig-fetch: named cell unavailable: %%s" %% (_exc,), file=sys.stderr)
     cell = None
 else:
-    _key0 = str(aot_serve.unpack_metadata(_art).get("cell_key") or "")
+    _key0 = str(aot_serve.unpack_metadata(_art).get("compiled_graph_key") or "")
     cell = _CellNS(
-        artifact=_art, cell_key=_key0, family=cfg.family,
+        artifact=_art, compiled_graph_key=_key0, family=cfg.family,
         ref=_syscc.system_repo(cfg.family) + "#" + _key0,
         snapshot_digest="sha256:" + _hl.sha256(_art.read_bytes()).hexdigest())
 out = {"pid": os.getpid(), "ok": cell is not None}
 if cell is not None:
     meta = aot_serve.unpack_metadata(Path(cell.artifact))
     out.update({
-        "cell_key": cell.cell_key, "family": cell.family, "ref": cell.ref,
+        "compiled_graph_key": cell.compiled_graph_key, "family": cell.family, "ref": cell.ref,
         "snapshot_digest": cell.snapshot_digest,
         "artifact_bytes": Path(cell.artifact).stat().st_size,
         "entries": sorted((meta.get("entries") or {})),
@@ -902,16 +902,16 @@ except Exception as _exc:
     print("rig-fetch: named cell unavailable: %%s" %% (_exc,), file=sys.stderr)
     cell = None
 else:
-    _key0 = str(aot_serve.unpack_metadata(_art).get("cell_key") or "")
+    _key0 = str(aot_serve.unpack_metadata(_art).get("compiled_graph_key") or "")
     cell = _CellNS(
-        artifact=_art, cell_key=_key0, family=cfg.family,
+        artifact=_art, compiled_graph_key=_key0, family=cfg.family,
         ref=_syscc.system_repo(cfg.family) + "#" + _key0,
         snapshot_digest="sha256:" + _hl.sha256(_art.read_bytes()).hexdigest())
 out = {"pid": os.getpid(), "ok": cell is not None}
 if cell is not None:
     meta = aot_serve.unpack_metadata(Path(cell.artifact))
     out.update({
-        "cell_key": cell.cell_key, "family": cell.family, "ref": cell.ref,
+        "compiled_graph_key": cell.compiled_graph_key, "family": cell.family, "ref": cell.ref,
         "snapshot_digest": cell.snapshot_digest,
         "artifact_bytes": Path(cell.artifact).stat().st_size,
         "entries": sorted((meta.get("entries") or {})),
@@ -1071,16 +1071,16 @@ except Exception as _exc:
     print("rig-fetch: named cell unavailable: %%s" %% (_exc,), file=sys.stderr)
     cell = None
 else:
-    _key0 = str(aot_serve.unpack_metadata(_art).get("cell_key") or "")
+    _key0 = str(aot_serve.unpack_metadata(_art).get("compiled_graph_key") or "")
     cell = _CellNS(
-        artifact=_art, cell_key=_key0, family=cfg.family,
+        artifact=_art, compiled_graph_key=_key0, family=cfg.family,
         ref=_syscc.system_repo(cfg.family) + "#" + _key0,
         snapshot_digest="sha256:" + _hl.sha256(_art.read_bytes()).hexdigest())
 out = {"pid": os.getpid(), "ok": cell is not None}
 if cell is not None:
     meta = aot_serve.unpack_metadata(Path(cell.artifact))
     out.update({
-        "cell_key": cell.cell_key, "family": cell.family, "ref": cell.ref,
+        "compiled_graph_key": cell.compiled_graph_key, "family": cell.family, "ref": cell.ref,
         "snapshot_digest": cell.snapshot_digest,
         "artifact_bytes": Path(cell.artifact).stat().st_size,
         "entries": sorted((meta.get("entries") or {})),
@@ -1261,9 +1261,9 @@ except Exception as _exc:
     print("rig-fetch: named cell unavailable: %%s" %% (_exc,), file=sys.stderr)
     cell = None
 else:
-    _key0 = str(aot_serve.unpack_metadata(_art).get("cell_key") or "")
+    _key0 = str(aot_serve.unpack_metadata(_art).get("compiled_graph_key") or "")
     cell = _CellNS(
-        artifact=_art, cell_key=_key0, family=cfg.family,
+        artifact=_art, compiled_graph_key=_key0, family=cfg.family,
         ref=_syscc.system_repo(cfg.family) + "#" + _key0,
         snapshot_digest="sha256:" + _hl.sha256(_art.read_bytes()).hexdigest())
 out = {"pid": os.getpid(), "ok": cell is not None, "pad_classes": pads,
@@ -1271,7 +1271,7 @@ out = {"pid": os.getpid(), "ok": cell is not None, "pad_classes": pads,
 if cell is not None:
     meta = aot_serve.unpack_metadata(Path(cell.artifact))
     out.update({
-        "cell_key": cell.cell_key, "family": cell.family, "ref": cell.ref,
+        "compiled_graph_key": cell.compiled_graph_key, "family": cell.family, "ref": cell.ref,
         "snapshot_digest": cell.snapshot_digest,
         "artifact_bytes": Path(cell.artifact).stat().st_size,
         "entries": sorted((meta.get("entries") or {})),

@@ -161,7 +161,7 @@ def test_a_cell_ref_round_trips_through_the_normal_form() -> None:
 
 # pgw#1167 REMOVED `test_the_compile_cache_modules_are_byte_untouched_by_this_deletion`.
 #
-# It asserted that eight cell-KEY modules (`compile_cache`, `cell_key`,
+# It asserted that eight cell-KEY modules (`compile_cache`, `compiled_graph_key`,
 # `aot_mint`, `aot_serve`, `fleet_cells`, `local_cells`, `mint_budget` and the
 # since-deleted `trt_engine`) were byte-identical to `origin/master` — by diffing the
 # WORKING TREE against the merge-base. On pgw#1148's own branch that proved

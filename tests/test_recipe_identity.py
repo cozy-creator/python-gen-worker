@@ -31,7 +31,7 @@ GUARD_MANIFEST_BLOCK = "guard_manifest"
 
 torch = pytest.importorskip("torch")
 
-from gen_worker import cell_key as ck
+from gen_worker import compiled_graph_key as ck
 from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells as fc
 from gen_worker import guard_closure as gc
@@ -75,7 +75,7 @@ def pinned_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_static_closure_reaches_the_composition_code() -> None:
     closure = dict(cc.static_code_closure())
     # Entrypoints and their import graph (root-imports makes this sound).
-    for probe in ("gen_worker/compile_cache.py", "gen_worker/cell_key.py",
+    for probe in ("gen_worker/compile_cache.py", "gen_worker/compiled_graph_key.py",
                   "gen_worker/guard_closure.py", "gen_worker/env_seal.py",
                   "gen_worker/models/loading.py", "gen_worker/__init__.py"):
         assert probe in closure, probe
@@ -122,7 +122,7 @@ def test_cg_key_v1_axes_are_the_recipe(pinned_runtime: None,
     assert ck.is_key("ck1-" + "a" * 56)
     assert key.digest != "ck1-" + "a" * 56
     # Version-string axes are rejected outright.
-    with pytest.raises(ck.CellKeyError):
+    with pytest.raises(ck.CompiledGraphKeyError):
         ck.from_axes(dict(axes, torch="2.13.0"))
 
 
@@ -145,13 +145,13 @@ def test_metadata_roundtrips_the_recipe_key(pinned_runtime: None) -> None:
     never trusted as a stamp."""
     meta = exported_cell_meta()
     want = ck.from_entry_metadata(meta)
-    assert meta["cell_key"] == want.digest
+    assert meta["compiled_graph_key"] == want.digest
     # A cell with no toolchain block has no recipe identity.
     legacy = {k: v for k, v in meta.items() if k != "toolchain"}
-    with pytest.raises(ck.CellKeyError, match="recipe"):
+    with pytest.raises(ck.CompiledGraphKeyError, match="recipe"):
         ck.from_entry_metadata(legacy)
     # pgw#990's memo half is GONE with its subject (pgw#1181): the local JIT
-    # kind that recorded `code_closure` and carried no `cell_key` was the
+    # kind that recorded `code_closure` and carried no `compiled_graph_key` was the
     # `torch-inductor-cache` artifact, and there is no longer any kind without
     # a key. What survives is the statement below — on the exported kind,
     # which is the only kind.
@@ -203,7 +203,7 @@ def test_marked_cell_never_republishes(monkeypatch: pytest.MonkeyPatch,
     artifact.write_bytes(b"bytes")
     pub = fc.CellPublisher(
         base_url="http://hub", worker_jwt=lambda: "jwt", image_digest="")
-    meta = {"cell_key": "cg-key-v1-" + "a" * 56, fc.ADOPTION_MARK: ["foreign"]}
+    meta = {"compiled_graph_key": "cg-key-v1-" + "a" * 56, fc.ADOPTION_MARK: ["foreign"]}
     with pytest.raises(fc.CellPublishRefused, match="pgw#712"):
         pub.publish(FAMILY, artifact, meta)
 
@@ -216,7 +216,7 @@ def test_publish_complete_carries_only_what_the_hub_decodes(
     # the recorded blocks and refuses a cell that cannot state one.
     meta = exported_cell_meta(family=FAMILY, sku="l4", gen_worker="1.0.0",
                               **{GUARD_MANIFEST_BLOCK: _manifest()})
-    key = meta["cell_key"]
+    key = meta["compiled_graph_key"]
 
     class _FakeResp:
         def __init__(self, code: int, body: Dict[str, Any]) -> None:
@@ -235,7 +235,7 @@ def test_publish_complete_carries_only_what_the_hub_decodes(
             return _FakeResp(200, {
                 "repo": f"root/family-{FAMILY}", "granted": len(entries),
                 "answers": [
-                    {"cell_key": e.get("cell_key"), "status": "granted",
+                    {"compiled_graph_key": e.get("compiled_graph_key"), "status": "granted",
                      "capability_token": f"cap-{i}"}
                     for i, e in enumerate(entries)]})
         return _FakeResp(200, {"recorded": True})
@@ -270,8 +270,8 @@ def test_publish_complete_carries_only_what_the_hub_decodes(
     assert complete_url.endswith("/publish-complete")
     assert body["ok"] is True
     # pgw#807: `artifact_digest`/`manifest_digest` are GONE. The hub's
-    # publish-complete route decodes family, cell_key, checkpoint_id, ok and
+    # publish-complete route decodes family, compiled_graph_key, checkpoint_id, ok and
     # error — nothing else — so the SDK was paying a whole-artifact blake3
     # pass to send two fields no reader had, and the delta-1 seam refuses
     # unlisted body keys outright.
-    assert set(body) == {"family", "cell_key", "checkpoint_id", "ok"}
+    assert set(body) == {"family", "compiled_graph_key", "checkpoint_id", "ok"}

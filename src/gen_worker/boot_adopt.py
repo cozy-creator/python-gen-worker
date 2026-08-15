@@ -26,7 +26,7 @@ the hub can only answer by shipping bytes back to the machine that minted them.
 Why the derivation now runs with NO hub, which it refused to do before: the old
 gate reasoned that *"deriving a key nobody will answer is pure boot latency"*.
 That is false on exactly the machines §4.28 is about. It survives in the
-honest form — :data:`GATE_REASONS`' ``no_cell_source``, which refuses only when
+honest form — :data:`GATE_REASONS`' ``no_compiled_graph_source``, which refuses only when
 BOTH answerers are absent (no hub AND an empty local store).
 
 A MISS is a complete answer, not an absence: the pod serves eager,
@@ -94,7 +94,7 @@ GATE_REASONS: Tuple[str, ...] = (
     # which asked about one of the two answerers and refused on behalf of both:
     # on exactly the machines §4.28 is about, the derived ck1 key IS the local
     # store's address, so "nobody will answer" was false there.
-    "no_cell_source",
+    "no_compiled_graph_source",
     # The pod's topology forbids arming at all (pgw#775), so a compiled family
     # boots without asking. Correct, and previously indistinguishable from a
     # boot-adopt that asked and was refused.
@@ -321,7 +321,7 @@ def arm_refused(
     ))
 
 
-def no_cell_source(hub_absent: str) -> bool:
+def no_compiled_graph_source(hub_absent: str) -> bool:
     """True when NOBODY could answer a derived key, so deriving is pure latency.
 
     The honest form of the gate pgw#1127 §1b found. The old one asked *"is
@@ -490,7 +490,7 @@ def attempt(
             settled[key] = local
         elif hub_absent:
             # Derived, asked this machine, and there is nobody else. A
-            # DIFFERENT fact from `no_cell_source` (which never derived) and
+            # DIFFERENT fact from `no_compiled_graph_source` (which never derived) and
             # from `miss` (which asked a hub): this one says the key exists and
             # nothing here holds it.
             settled[key] = report(BootAdoptOutcome(
@@ -598,5 +598,5 @@ def _adopt_answer(
 __all__ = [
     "ASK_REASONS", "BootAdoptOutcome", "BootAdoption", "DERIVE_REASONS",
     "GATE_REASONS", "HIT", "LOCAL_HIT", "LOCAL_REASONS", "REASONS",
-    "arm_refused", "attempt", "no_cell_source", "refused", "report",
+    "arm_refused", "attempt", "no_compiled_graph_source", "refused", "report",
 ]

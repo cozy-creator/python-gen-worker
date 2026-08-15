@@ -1,6 +1,6 @@
 """pgw#1090 (DESIGN-RULINGS §4.29): ask the hub for a cell BY DERIVED KEY.
 
-``POST /v1/worker/cells/resolve`` — the worker half of th#1750 (hub side merged
+``POST /v1/worker/compiled-graphs/resolve`` — the worker half of th#1750 (hub side merged
 ``26275ff8``). The worker derives its key from code alone (§4.27 step 1,
 ``boot_key``) and asks the hub, which answers as the entitlement authority with
 ONE artifact or a MISS. Never a listing: pgw#904 deleted worker-side
@@ -45,7 +45,7 @@ pgw#1224 — THE BATCH WIRE (th#1834 Phase 2, hub half th#1842 PR #1118)
 ----------------------------------------------------------------------
 The request is ``{family, keys[<=256]}`` and the answer is one entry per key,
 **in request order, each independently signed**. The single-key
-``{family, cell_key}`` shape is GONE — hard cut, no alias, no dual-accept, no
+``{family, compiled_graph_key}`` shape is GONE — hard cut, no alias, no dual-accept, no
 negotiation: a client that could speak both would make the hub's own hard cut
 unprovable, and there is no released consumer to protect.
 
@@ -87,12 +87,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from . import aot_identity, boot_phases, cell_key
+from . import aot_identity, boot_phases, compiled_graph_key
 from .procsplit import broker
 
 logger = logging.getLogger(__name__)
 
-RESOLVE_PATH = "/v1/worker/cells/resolve"
+RESOLVE_PATH = "/v1/worker/compiled-graphs/resolve"
 
 #: Mandatory (``scripts/lint_http_timeouts.py``). Generous relative to the
 #: hub's own 15 s transport resolve, because the answer is on the boot path and
@@ -119,9 +119,9 @@ STATUS_TRANSPORT_UNAVAILABLE = "transport_unavailable"
 #: rather than renaming is what keeps ``boot_adopt.ASK_REASONS`` and every
 #: dashboard grouping on those codes working across the cut.
 _STATUS_REFUSAL_CODE = {
-    STATUS_AMBIGUOUS: "cell_resolve_ambiguous",
-    STATUS_INCOMPLETE: "cell_resolve_incomplete",
-    STATUS_TRANSPORT_UNAVAILABLE: "cell_resolve_transport_unavailable",
+    STATUS_AMBIGUOUS: "compiled_graph_resolve_ambiguous",
+    STATUS_INCOMPLETE: "compiled_graph_resolve_incomplete",
+    STATUS_TRANSPORT_UNAVAILABLE: "compiled_graph_resolve_transport_unavailable",
 }
 
 #: The hub's typed refusal codes. NOT misses — see the module docstring. The
@@ -129,10 +129,10 @@ _STATUS_REFUSAL_CODE = {
 #: refuse the whole batch, because each is a property of the CALLER or of the
 #: REQUEST rather than of one key.
 REFUSAL_CODES = (
-    "cell_resolve_ambiguous",
-    "cell_resolve_incomplete",
-    "cell_resolve_transport_unavailable",
-    "cell_resolve_client_supplied_field",
+    "compiled_graph_resolve_ambiguous",
+    "compiled_graph_resolve_incomplete",
+    "compiled_graph_resolve_transport_unavailable",
+    "compiled_graph_resolve_client_supplied_field",
     "compiled_graph_resolve_too_many_keys",
     "compiled_graph_resolve_duplicate_key",
     # Answered, but not to the question that was asked. Local verdicts, and
@@ -148,11 +148,11 @@ REFUSAL_CODES = (
 #: Every field an accepted answer must NAME, and why. An answer omitting one
 #: states an expectation nothing downstream can check — and the gate that
 #: would catch it sits AFTER the whole cell is downloaded.
-#: ``cell_resolve_incomplete`` is the hub's own code for this fact: the pod
+#: ``compiled_graph_resolve_incomplete`` is the hub's own code for this fact: the pod
 #: reaches the same verdict from the same evidence, so it reports it under the
 #: same name rather than inventing a second word for one condition.
 _REQUIRED: Tuple[Tuple[str, str], ...] = (
-    ("cell_key", "the admission expectation's identity axis"),
+    ("compiled_graph_key", "the admission expectation's identity axis"),
     ("toolchain_digest", "the admission expectation's toolchain axis"),
     ("env_seal_digest", "the admission expectation's environment axis"),
     ("graph_contract", "the admission expectation's graph axis"),
@@ -215,7 +215,7 @@ class ResolvedCell:
     """The hub's answer for one derived key — ONE artifact, fully stated."""
 
     family: str
-    cell_key: str
+    compiled_graph_key: str
     cell_ref: str
     checkpoint_id: str
     content_digest: str
@@ -303,7 +303,7 @@ def _cell_from(body: Mapping[str, Any]) -> ResolvedCell:
     axes = body.get("identity_axes") or {}
     return ResolvedCell(
         family=str(body.get("family") or ""),
-        cell_key=str(body.get("cell_key") or ""),
+        compiled_graph_key=str(body.get("compiled_graph_key") or ""),
         cell_ref=str(body.get("cell_ref") or ""),
         checkpoint_id=str(body.get("checkpoint_id") or ""),
         content_digest=str(body.get("content_digest") or ""),
@@ -340,7 +340,7 @@ def _require_batch(family: str, keys: Sequence[str]) -> Tuple[str, Tuple[str, ..
     seen: Set[str] = set()
     for i, raw in enumerate(keys):
         key = str(raw or "").strip()
-        if not cell_key.is_key(key):
+        if not compiled_graph_key.is_key(key):
             raise CellResolveRefused(
                 "invalid_request",
                 f"keys[{i}] is {key!r}, which is not a compiled-graph key; "
@@ -406,7 +406,7 @@ def _answer_from(
         # calls it the same thing.
         return ResolveAnswer(
             compiled_graph_key=key, status=STATUS_INCOMPLETE,
-            refusal_code="cell_resolve_incomplete",
+            refusal_code="compiled_graph_resolve_incomplete",
             detail="the answer names no " + "; no ".join(
                 f"{f} ({why})" for f, why in missing))
     logger.info(
@@ -449,7 +449,7 @@ def resolve_batch(
     fam, asked = _require_batch(family, keys)
 
     with boot_phases.span(
-        boot_phases.PHASE_CELL_HUB_RTT, function="cells.resolve",
+        boot_phases.PHASE_CELL_HUB_RTT, function="compiled_graphs.resolve",
         artifact_key=asked[0], ref=fam,
     ) if boot_phases.in_boot() else _null() as span:
         resp = broker.request(
@@ -514,7 +514,7 @@ def _answers_of(
             raise CellResolveRefused(
                 "compiled_graph_resolve_short_answer",
                 f"answers[{i}] is {type(row).__name__}, not an answer")
-        echoed = str(row.get("cell_key") or "").strip()
+        echoed = str(row.get("compiled_graph_key") or "").strip()
         if echoed != key:
             # POSITION and ECHO both, because either alone admits a batch
             # transposed by something that preserved the other.
@@ -559,7 +559,7 @@ def materialize(
         cell.content_digest,
         cell.transport,
         cache_dir=cache_dir,
-        what=what or f"boot adopt of {cell.cell_key}",
+        what=what or f"boot adopt of {cell.compiled_graph_key}",
     )
 
 

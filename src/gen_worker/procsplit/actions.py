@@ -114,15 +114,15 @@ ACTIONS: Dict[str, HubAction] = {
         # a list — it is parse-side input validation on an untrusted seam, not a
         # promise to any particular caller.
         _a(
-            "cells.receipt",
+            "compiled_graphs.receipt",
             "GET",
-            r"^/v1/worker/cells/receipt$",
-            query=("cell_key", "artifact_digest"),
+            r"^/v1/worker/compiled-graphs/receipt$",
+            query=("compiled_graph_key", "artifact_digest"),
         ),
         _a(
-            "cells.revocations",
+            "compiled_graphs.revocations",
             "GET",
-            r"^/v1/worker/cells/revocations$",
+            r"^/v1/worker/compiled-graphs/revocations$",
         ),
         # Self-mint publish (gw#587/th#910). publish-intent returns a
         # key-pinned capability token — a short-TTL, least-authority grant, the
@@ -135,17 +135,17 @@ ACTIONS: Dict[str, HubAction] = {
         # were exactly that gap; `status`/`detail`/`axes` were names on
         # `publish-complete` that no caller and no hub route ever had.
         # pgw#1224 (th#1842 PR #1121): the intent is a BATCH. `entries[]`
-        # carries the per-artifact facts — `cell_key`, `identity_axes` (all
+        # carries the per-artifact facts — `compiled_graph_key`, `identity_axes` (all
         # three key axes restated, never hoisted), `mint_duration_ms` — and
         # `axes` stays batch-level because all three of ITS members are
         # properties of the POD, not of a compiled graph. The old top-level
-        # `cell_key`/`identity_axes`/`mint_duration_ms` are GONE: a table that
+        # `compiled_graph_key`/`identity_axes`/`mint_duration_ms` are GONE: a table that
         # still admitted them would let a client speak the dead shape past the
         # one gate that can refuse it.
         _a(
-            "cells.publish_intent",
+            "compiled_graphs.publish_intent",
             "POST",
-            r"^/v1/worker/cells/publish-intent$",
+            r"^/v1/worker/compiled-graphs/publish-intent$",
             body=("family", "axes", "entries"),
             timeout_s=60.0,
         ),
@@ -153,21 +153,21 @@ ACTIONS: Dict[str, HubAction] = {
         # pull-by-key-SET. The body carries the family and the derived keys and
         # NOTHING else — every entitlement input is resolved hub-side from the
         # live session, and a body naming one is a named 400
-        # (`cell_resolve_client_supplied_field`), not an ignored field. So this
+        # (`compiled_graph_resolve_client_supplied_field`), not an ignored field. So this
         # enumeration is not a convention, it is the request: an action table
         # that admitted one more key would make the whole resolve refuse.
         _a(
-            "cells.resolve",
+            "compiled_graphs.resolve",
             "POST",
-            r"^/v1/worker/cells/resolve$",
+            r"^/v1/worker/compiled-graphs/resolve$",
             body=("family", "keys"),
             timeout_s=30.0,
         ),
         _a(
-            "cells.publish_complete",
+            "compiled_graphs.publish_complete",
             "POST",
-            r"^/v1/worker/cells/publish-complete$",
-            body=("family", "cell_key", "checkpoint_id", "ok", "error"),
+            r"^/v1/worker/compiled-graphs/publish-complete$",
+            body=("family", "compiled_graph_key", "checkpoint_id", "ok", "error"),
             timeout_s=60.0,
         ),
         # AOT cell discovery: list a system repo's checkpoints, resolve one
@@ -225,7 +225,7 @@ CONTROL_BODY_CEILING_BYTES = _MAX_JSON_BYTES
 
 #: pgw#980: the two actions that WRITE a cell into a shared family namespace.
 #: Every other action in the table reads, renews or reports.
-PUBLISH_ACTIONS = frozenset({"cells.publish_intent", "cells.publish_complete"})
+PUBLISH_ACTIONS = frozenset({"compiled_graphs.publish_intent", "compiled_graphs.publish_complete"})
 
 #: pgw#980: the env that marks a pod a LIVE-EDIT PROBE. A probe runs code that
 #: was rsync'd onto it — code that is, by construction, not any released

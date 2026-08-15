@@ -28,7 +28,7 @@ from typing import Dict, Mapping, Optional, Tuple
 
 import msgspec
 
-from . import cell_key
+from . import compiled_graph_key
 from .api.binding import ModelRef, wire_ref
 
 #: Every child progress frame is one stdout line with this prefix. Anything
@@ -108,7 +108,7 @@ class MintSlot(msgspec.Struct, frozen=True, kw_only=True):
 def slot_subjects(
     slots: Mapping[str, MintSlot],
     digests: Optional[Mapping[str, str]] = None,
-) -> Tuple[cell_key.SlotSubject, ...]:
+) -> Tuple[compiled_graph_key.SlotSubject, ...]:
     """The resolved SUBJECT of one arm or one boot trace (pgw#1113).
 
     THE single derivation, so the arm token, the local-store memo and the
@@ -118,7 +118,7 @@ def slot_subjects(
     """
     have = dict(digests or {})
     return tuple(
-        cell_key.SlotSubject(
+        compiled_graph_key.SlotSubject(
             slot=str(name),
             refs=(wire_ref(slot.ref),),
             snapshot_digest=str(have.get(str(name), "") or ""),

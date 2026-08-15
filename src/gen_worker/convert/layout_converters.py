@@ -36,7 +36,7 @@ EDGE. :func:`plan_layout_conversions` and :func:`classify_layout` are fixed
 logic — membership, then reachability — and must never gain a per-format
 branch, a similarity score or a "close enough" fallback. Neither function
 contains a literal handle string, and
-`scripts/lint_cell_key_layout_fence.py` fails if one appears.
+`scripts/lint_compiled_graph_key_layout_fence.py` fails if one appears.
 
 **4. Preference is NOT here.** The accepted
 set is a compatibility FILTER whose order carries no preference, and preference

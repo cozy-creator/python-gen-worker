@@ -14,7 +14,7 @@ then finds the artifact declaring `lora_a`/`lora_b` against an unlifted module
 and refuses `lifted_inputs_unbindable`. The gate that noticed gets named; the
 read that failed does not — a 92-minute 36/36 compile publishes nothing and the
 only trace of the real cause on the wire is the word `unreadable` in one event's
-`cell_key=` field.
+`compiled_graph_key=` field.
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ _ROW7_META: Dict[str, Any] = {
     "format": 2,
     "kind": "aot-inductor",
     "family": "sdxl",
-    "cell_key": "ck1-" + "a" * 56,
+    "compiled_graph_key": "ck1-" + "a" * 56,
     "lora_bucket": 64,
     "entries": {
         "unet/adapter=true,cfg=true/B=2,H_lat=128,T_txt=77,W_lat=128": {
@@ -90,7 +90,7 @@ def test_a_36_entry_sdxl_scale_envelope_is_readable(tmp_path: Path) -> None:
 
     meta = artifact_meta.read_metadata(artifact)
 
-    assert meta["cell_key"] == _ROW7_META["cell_key"]
+    assert meta["compiled_graph_key"] == _ROW7_META["compiled_graph_key"]
     assert meta["entries"]["unet/adapter=true,cfg=true/B=2,H_lat=128,"
                            "T_txt=77,W_lat=128"]["target"] == "unet"
 
@@ -240,7 +240,7 @@ def test_adopt_delegated_mint_refuses_an_unreadable_envelope_by_name(
 
     assert minted is None
     reason, why = fleet_cells.adopt_refusal(pending)
-    assert reason == "cell_envelope_unreadable"
+    assert reason == "compiled_graph_envelope_unreadable"
     assert artifact_meta.METADATA_NAME in why
     # (b): refused BEFORE the arm, so no gate downstream of the read can be
     # blamed for a fact it was never given.

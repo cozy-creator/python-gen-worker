@@ -344,7 +344,7 @@ def test_the_report_type_carries_no_artifact_identity() -> None:
     from gen_worker.mint_process import MintReport
 
     fields = set(measure_child.MeasureReport.__struct_fields__)
-    forbidden = {"artifact", "digest", "cell_key", "cell_ref", "content_digest"}
+    forbidden = {"artifact", "digest", "compiled_graph_key", "cell_ref", "content_digest"}
     assert fields.isdisjoint(forbidden)
     assert forbidden & set(MintReport.__struct_fields__), (
         "the mint report must still carry what this one refuses to, or the "

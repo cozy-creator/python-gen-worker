@@ -79,7 +79,7 @@ settings-declaration digest; the env seal's declaration folds in there, its
 boot/pre-trace GATES unchanged). `kind`/`format` are single-valued metadata,
 `family`/`lane` store metadata + discovery scoping, and the membership axiom
 (pgw#1059 amendment 6: "don't key on parameters that don't require us to
-recompile") is enforced by `tests/test_cell_key_pgw1059.py`.
+recompile") is enforced by `tests/test_compiled_graph_key_pgw1059.py`.
 
 `toolchain` is the COMPILER — torch/Inductor, triton, ptxas, the CUDA runtime
 wheels, the settings declaration, the boot-frozen native manifest. It is **not**

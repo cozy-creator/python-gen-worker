@@ -707,7 +707,7 @@ class _Run:
         self.check("seal.not_quarantined", not quarantined,
                    f"{len(quarantined)} matched graph(s) quarantined")
         self.check("seal.sm_recorded", bool(str(matched[0].get("sm", "")).strip()),
-                   f"sm={matched[0].get('sm')!r} on {matched[0].get('cell_key')!r}")
+                   f"sm={matched[0].get('sm')!r} on {matched[0].get('compiled_graph_key')!r}")
         try:
             failures = self.api.admin_activity_events(self.leg.release_id, "failed")
         except ApiError as exc:
@@ -1050,7 +1050,7 @@ class ContractModel:
             release = "a-release-this-rental-did-not-pin"
         digest = "" if self.break_invariant == "seal_no_artifact" else "blake3:" + self._id()[:16]
         self.cells.append({
-            "cell_key": "cg-key-v1:" + self._id()[:12], "family": "sdxl",
+            "compiled_graph_key": "cg-key-v1:" + self._id()[:12], "family": "sdxl",
             "lane": row["execution_lane"], "sm": "sm86", "sku": sku,
             "artifact_digest": digest, "minted_for_release_id": release,
             "minted_by_pod_id": pod.get("pod_id", ""), "publisher_tier": "platform",

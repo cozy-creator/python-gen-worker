@@ -115,7 +115,7 @@ class DevicePeakKey(NamedTuple):
     card: str
     sm: str
     #: The SAME digest the cell key's toolchain axis uses
-    #: (``cell_key.toolchain_axis_digest``), so a banked row and the cell it
+    #: (``compiled_graph_key.toolchain_axis_digest``), so a banked row and the cell it
     #: was measured for agree about what "this toolchain" means.
     toolchain: str
     gen_worker: str
@@ -216,7 +216,7 @@ def adopt_watermark(device: Optional[int] = None) -> Tuple[int, int]:
     """``(allocated_now, peak_so_far)`` on this device, or ``(0, 0)``.
 
     The pair an adopt brackets itself with, and the instrument behind the
-    ``cell_adopt_budget`` row — the only answer anyone has to "where does a
+    ``compiled_graph_adopt_budget`` row — the only answer anyone has to "where does a
     loaded cell's device memory go". ``max_memory_allocated`` is
     process-monotone, so the caller takes ``peak_after - allocated_before``
     and never resets the counter, which other readers on this process share.

@@ -86,11 +86,11 @@ class EagerPhase(StrEnum):
     #: export. The lane serves only from a cell, the only cell is an AOT cell,
     #: and nothing can mint one here — so the pod fails closed instead of
     #: compiling a JIT intake arm no request may be dispatched to.
-    MANDATORY_LANE_NEEDS_A_CELL = "mandatory_lane_needs_a_cell"
+    MANDATORY_LANE_NEEDS_A_COMPILED_GRAPH = "mandatory_lane_needs_a_compiled_graph"
 
     #: The tenth eager exit: it declines BEFORE `_fail_closed` (a quarantined
     #: identity must not be re-minted) and was the one that only logged.
-    CELL_QUARANTINED = "cell_quarantined"
+    COMPILED_GRAPH_QUARANTINED = "compiled_graph_quarantined"
 
     #: Eager with an END — a delegated mint child is building the cell.
     MINT_IN_PROGRESS = "mint_in_progress"
@@ -164,7 +164,7 @@ class EagerPhase(StrEnum):
     #: exactly the boot every pod did before boot-adopt existed. Measured cost
     #: of the alternative: `worker_function_unavailable`, three pods reaped
     #: `state_blocked_idle`, two replacements bought.
-    ADOPTED_CELL_REFUSED = "adopted_cell_refused"
+    ADOPTED_COMPILED_GRAPH_REFUSED = "adopted_compiled_graph_refused"
 
     #: pgw#1142 / §4.32 item 4: an OPERATOR ordered this worker to serve eager
     #: only, over the scheduler's control channel or the cozy-local CLI. It is
@@ -244,4 +244,4 @@ class CellAdoption:
     #: attempt would otherwise have no way to state, so it can still be
     #: reported instead of dropped.
     entry: str = ""
-    cell_key: str = ""
+    compiled_graph_key: str = ""

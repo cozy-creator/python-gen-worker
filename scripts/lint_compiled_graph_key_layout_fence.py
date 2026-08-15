@@ -13,9 +13,9 @@ Two fences, both structural:
 
 **FENCE 1 — no cell-key axis reads the layout vocabulary.** The fenced module
 set is DERIVED, not hand-listed: any module that calls a cell-key axis producer
-(`cell_key.from_axes`, `envelope_digest`, `toolchain_axis_digest`,
-`facts_digest`, `from_entry_metadata`, or constructs `CellKey`) is
-in it, plus `cell_key` itself. A new module that starts computing a key joins
+(`compiled_graph_key.from_axes`, `envelope_digest`, `toolchain_axis_digest`,
+`facts_digest`, `from_entry_metadata`, or constructs `CompiledGraphKey`) is
+in it, plus `compiled_graph_key` itself. A new module that starts computing a key joins
 the fence automatically — the failure mode of a hand-maintained list is that the
 one file that violates the rule is the one nobody added.
 
@@ -38,7 +38,7 @@ per-format special case; it is also the shape a similarity heuristic arrives in.
 
 Run::
 
-    python scripts/lint_cell_key_layout_fence.py
+    python scripts/lint_compiled_graph_key_layout_fence.py
 """
 
 from __future__ import annotations
@@ -69,13 +69,13 @@ AXIS_PRODUCERS: Tuple[str, ...] = (
     "from_axes",
     "toolchain_axis_digest",
     "from_entry_metadata",
-    "CellKey",
+    "CompiledGraphKey",
 )
 
 #: Always fenced, whatever they call: they DEFINE the key or one of its THREE
 #: axis inputs (graph / sm / toolchain). The envelope is not one of them.
 FENCE_SEED: Tuple[str, ...] = (
-    "cell_key.py",
+    "compiled_graph_key.py",
     "aot_mint.py",
     "env_seal.py",
     "host_isa.py",

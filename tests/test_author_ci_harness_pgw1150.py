@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
-from gen_worker import author_ci, cell_key, rigcheck, serve_posture
+from gen_worker import author_ci, compiled_graph_key, rigcheck, serve_posture
 from gen_worker.api.decorators import Compile
 
 import test_numerics_gate_pgw868 as rig  # noqa: E402
@@ -287,7 +287,7 @@ def test_a_healthy_cell_records_the_gates_own_cosine(
     # from the artifact's own facts. `"cell868"` was a harness placeholder
     # from when the key was a literal; asserting it now would assert the mint
     # failed to key its own product.
-    assert cell_key.is_key(proof["cell"]), (
+    assert compiled_graph_key.is_key(proof["cell"]), (
         f"the record names WHICH entry was measured: {proof['cell']!r}")
 
 

@@ -4,19 +4,19 @@ brain + the local-cell verdict invariants.
 Outcome-level: a key is deterministic and axis-sensitive on exactly the
 four ck1 axes; the local (torch-inductor-cache) store verdict compares
 recorded facts with the producer's own derivations; a SELF-VERIFIED cell
-that fails to arm surfaces as cell_selection_bug (never a silent eager
+that fails to arm surfaces as compiled_graph_selection_bug (never a silent eager
 fallback); foreign cells keep the compatibility-miss policy.
 
 The redefinition's own invariants (membership axiom, one-derivation fence,
 old/new non-collision, envelope canonicalization) live in
-``tests/test_cell_key_pgw1059.py``.
+``tests/test_compiled_graph_key_pgw1059.py``.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from gen_worker import cell_key as ck
+from gen_worker import compiled_graph_key as ck
 from gen_worker import compile_cache as cc
 
 
@@ -68,13 +68,13 @@ def test_key_deterministic_and_axis_sensitive():
 
 
 def test_unknown_and_missing_axes_refuse():
-    with pytest.raises(ck.CellKeyError):
+    with pytest.raises(ck.CompiledGraphKeyError):
         ck.from_axes(dict(_AXES, cuda_driver="13020"))  # host lottery axis
-    with pytest.raises(ck.CellKeyError):
+    with pytest.raises(ck.CompiledGraphKeyError):
         ck.from_axes(dict(_AXES, sku="b200"))  # observability, never identity
-    with pytest.raises(ck.CellKeyError):
+    with pytest.raises(ck.CompiledGraphKeyError):
         ck.from_axes(dict(_AXES, torch="2.13.0"))  # version axes are gone
-    with pytest.raises(ck.CellKeyError):
+    with pytest.raises(ck.CompiledGraphKeyError):
         ck.from_axes({k: v for k, v in _AXES.items() if k != "toolchain"})
 
 
@@ -139,7 +139,7 @@ def test_execution_lane_canonicalization():
 #
 # Their subject is the `torch-inductor-cache` store verdict —
 # `compile_cache.local_cell_mismatch` over `artifact_metadata`, and the
-# `cell_selection_bug` a self-requested cell of that format raised when it then
+# `compiled_graph_selection_bug` a self-requested cell of that format raised when it then
 # refused to arm. The format has had no writer since pgw#1178 deleted
 # `mint_artifact`, and pgw#1181 deleted the format: there is no local kind, no
 # verdict to render on one, and `enable` no longer takes a cell to reject.
@@ -149,6 +149,6 @@ def test_execution_lane_canonicalization():
 # sm, the declared contract, the env seal and the lane are all axes of `cg-key-v1`
 # or fold into one (pgw#1176),
 # so an entry that disagrees on any of them has a different key and never
-# resolves. `tests/test_cell_key_pgw1059.py` is where that is stated, with the
+# resolves. `tests/test_compiled_graph_key_pgw1059.py` is where that is stated, with the
 # staleness matrix naming each axis. What is left here is the key itself —
 # determinism, axis sensitivity, the cg-key-v1 scheme, and lane canonicalization.

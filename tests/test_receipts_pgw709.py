@@ -1,7 +1,7 @@
 """pgw#709: cell-receipt verification — REAL signatures, REAL HTTP, no mocks.
 
 The signer here mirrors the hub's production format byte-for-byte (RS256
-PKCS1v15/SHA256 compact JWS, kid header, cell-receipt-v1 claims); the hub
+PKCS1v15/SHA256 compact JWS, kid header, compiled-graph-receipt-v1 claims); the hub
 half's Go tests pin the same format from the signing side. The tamper cases
 are the red verification: each one asserts the gate actually REFUSES.
 """
@@ -22,7 +22,7 @@ from gen_worker import receipts
 # pgw#1122's identity seam already imported them from here, and the adopt-path
 # rig needs the same real receipt gate. Same objects, one home.
 from harness.receipt_hub import (
-    B3_HEX, CELL_KEY, FAMILY, KID, OTHER_ENDPOINT, SELF_ENDPOINT, SELF_ORG,
+    B3_HEX, COMPILED_GRAPH_KEY, FAMILY, KID, OTHER_ENDPOINT, SELF_ENDPOINT, SELF_ORG,
     SHA_HEX, SNAPSHOT,
     HubStub, _b64url, _configure, _identify, make_artifact, make_claims,
     sign_receipt, worker_jwt_for,
@@ -38,7 +38,7 @@ class TestVerifyReceiptJWS:
     def test_round_trip(self, rsa_key: rsa.RSAPrivateKey, pub_map: Dict[str, rsa.RSAPublicKey]) -> None:
         jws = sign_receipt(rsa_key, make_claims("sha256:" + SHA_HEX, 4096))
         receipt = receipts.verify_receipt_jws(jws, pub_map)
-        assert receipt.cell_key == CELL_KEY
+        assert receipt.compiled_graph_key == COMPILED_GRAPH_KEY
         assert receipt.family == FAMILY
         assert receipt.snapshot_digest == SNAPSHOT
         assert receipt.artifact_digest == "sha256:" + SHA_HEX
@@ -57,7 +57,7 @@ class TestVerifyReceiptJWS:
         # poisoning move receipts exist to prevent.
         jws = sign_receipt(rsa_key, make_claims("sha256:" + SHA_HEX, 4096))
         head, _, sig = jws.split(".")
-        forged_claims = make_claims("sha256:" + SHA_HEX, 4096, cell_key="cg-key-v1-" + "f" * 56)
+        forged_claims = make_claims("sha256:" + SHA_HEX, 4096, compiled_graph_key="cg-key-v1-" + "f" * 56)
         forged = head + "." + _b64url(json.dumps(forged_claims).encode()) + "." + sig
         with pytest.raises(receipts.ReceiptError) as exc:
             receipts.verify_receipt_jws(forged, pub_map)
@@ -83,7 +83,10 @@ class TestVerifyReceiptJWS:
         assert exc.value.reason == "receipt_signature_invalid"
 
     def test_wrong_version_refused(self, rsa_key: rsa.RSAPrivateKey, pub_map: Dict[str, rsa.RSAPublicKey]) -> None:
-        jws = sign_receipt(rsa_key, make_claims("sha256:" + SHA_HEX, 4096, crv="cell-receipt-v1"))
+        # pgw#1278: the version the hub signed BEFORE the compiled-graph
+        # wire cut. It must refuse, not be read as a v1 one.
+        jws = sign_receipt(rsa_key, make_claims("sha256:" + SHA_HEX, 4096,
+                                                crv="cell-receipt-v2"))
         with pytest.raises(receipts.ReceiptError) as exc:
             receipts.verify_receipt_jws(jws, pub_map)
         assert exc.value.reason == "receipt_version_unsupported"
@@ -128,9 +131,9 @@ class TestGateDeliveredArtifact:
             f.write(b"\x00poison")
         # Serve the original receipt under the NEW digest too, so the fetch
         # succeeds and the refusal is the digest binding, not a 404.
-        jws = hub.receipts[(original_ref, CELL_KEY)]
+        jws = hub.receipts[(original_ref, COMPILED_GRAPH_KEY)]
         new_ref = receipts.artifact_digest(artifact)
-        hub.receipts[(new_ref, CELL_KEY)] = jws
+        hub.receipts[(new_ref, COMPILED_GRAPH_KEY)] = jws
         _configure(hub)
         assert receipts.gate_delivered_artifact(artifact, FAMILY) is False
 
@@ -139,8 +142,8 @@ class TestGateDeliveredArtifact:
         # Nix Deriver lesson — key binding must be inside the signature.
         artifact = make_artifact(tmp_path)
         ref = receipts.artifact_digest(artifact)
-        claims = make_claims(ref, artifact.stat().st_size, cell_key="cg-key-v1-" + "e" * 56)
-        hub.receipts[(ref, CELL_KEY)] = sign_receipt(hub.key, claims)
+        claims = make_claims(ref, artifact.stat().st_size, compiled_graph_key="cg-key-v1-" + "e" * 56)
+        hub.receipts[(ref, COMPILED_GRAPH_KEY)] = sign_receipt(hub.key, claims)
         _configure(hub)
         assert receipts.gate_delivered_artifact(artifact, FAMILY) is False
 
@@ -154,14 +157,14 @@ class TestGateDeliveredArtifact:
         # R2: an operator recall beats a perfectly valid signature.
         artifact = make_artifact(tmp_path)
         hub.serve_receipt_for(artifact)
-        hub.revoked.append({"cell_key": CELL_KEY, "snapshot_digest": SNAPSHOT, "reason": "bad image"})
+        hub.revoked.append({"compiled_graph_key": COMPILED_GRAPH_KEY, "snapshot_digest": SNAPSHOT, "reason": "bad image"})
         _configure(hub)
         assert receipts.gate_delivered_artifact(artifact, FAMILY) is False
 
     def test_other_revocation_does_not_block(self, tmp_path: Path, hub: HubStub) -> None:
         artifact = make_artifact(tmp_path)
         hub.serve_receipt_for(artifact)
-        hub.revoked.append({"cell_key": "cg-key-v1-" + "d" * 56, "snapshot_digest": "other", "reason": "x"})
+        hub.revoked.append({"compiled_graph_key": "cg-key-v1-" + "d" * 56, "snapshot_digest": "other", "reason": "x"})
         _configure(hub)
         assert receipts.gate_delivered_artifact(artifact, FAMILY) is True
 
@@ -271,7 +274,7 @@ class TestAlgorithmAgnosticReceipts:
         # One request carrying the ALGORITHM-TAGGED digest — no per-algorithm
         # 404 retry chain, and never bare hex.
         offered, asked_key = hub.last_query
-        assert asked_key == CELL_KEY
+        assert asked_key == COMPILED_GRAPH_KEY
         assert receipts.artifact_digest(artifact) in offered
         assert receipts.gate_delivered_artifact(artifact, FAMILY) is True
 
@@ -302,7 +305,7 @@ class TestAlgorithmAgnosticReceipts:
         artifact = make_artifact(tmp_path)
         ref = receipts.artifact_digest(artifact)
         claims = make_claims("sha256:" + SHA_HEX, artifact.stat().st_size)
-        hub.receipts[(ref, CELL_KEY)] = sign_receipt(hub.key, claims)
+        hub.receipts[(ref, COMPILED_GRAPH_KEY)] = sign_receipt(hub.key, claims)
         _configure(hub)
         with pytest.raises(receipts.ReceiptError) as exc:
             receipts.verify_delivered_artifact(artifact, FAMILY)
@@ -316,7 +319,7 @@ class TestAlgorithmAgnosticReceipts:
         ref = receipts.artifact_digest(artifact)
         claims = make_claims(ref, artifact.stat().st_size)
         claims["artifact"] = {"path": "cell.tar.gz", "size_bytes": artifact.stat().st_size}
-        hub.receipts[(ref, CELL_KEY)] = sign_receipt(hub.key, claims)
+        hub.receipts[(ref, COMPILED_GRAPH_KEY)] = sign_receipt(hub.key, claims)
         _configure(hub)
         with pytest.raises(receipts.ReceiptError) as exc:
             receipts.verify_delivered_artifact(artifact, FAMILY)
@@ -466,15 +469,15 @@ class TestPublisherTrustTh1657:
             receipts.verify_delivered_artifact(artifact, FAMILY)
         assert excinfo.value.reason == "publisher_untrusted"
 
-    def test_v1_receipt_is_refused_not_defaulted(
+    def test_a_pre_cut_receipt_is_refused_not_defaulted(
         self, tmp_path: Path, hub: HubStub
     ) -> None:
-        """The trust fields are load-bearing, so a receipt minted before they
-        existed must not be read as a v2 one with them missing. That is the
-        `omitempty` collapse §4.24 point 4 names, and here it would silently
-        delete the boundary."""
+        """The trust fields are load-bearing, so a receipt minted under an
+        older version must not be read as this one with them missing. That is
+        the `omitempty` collapse §4.24 point 4 names, and here it would
+        silently delete the boundary."""
         artifact = make_artifact(tmp_path)
-        hub.serve_receipt_for(artifact, crv="cell-receipt-v1")
+        hub.serve_receipt_for(artifact, crv="cell-receipt-v2")
         _configure(hub, endpoint_id=SELF_ENDPOINT)
 
         with pytest.raises(receipts.ReceiptError) as excinfo:
@@ -499,7 +502,7 @@ class TestPublisherTrustTh1657:
         assert receipts.gate_delivered_artifact(artifact, FAMILY) is False
         assert events, "the refusal never reached the wire"
         kind, detail, phase = events[-1]
-        assert kind == "cell_receipt_refused"
+        assert kind == "compiled_graph_receipt_refused"
         assert phase == "publisher_untrusted"
         assert FAMILY in detail
 
@@ -547,7 +550,7 @@ TH1680_ADOPTION_TABLE = [
 def _receipt_for(tier: str, publisher_org: str, owning_endpoint: str = "") -> receipts.Receipt:
     """A Receipt carrying only the fields the publisher gate reads."""
     return receipts.Receipt(
-        version=receipts.RECEIPT_VERSION, family=FAMILY, cell_key=CELL_KEY,
+        version=receipts.RECEIPT_VERSION, family=FAMILY, compiled_graph_key=COMPILED_GRAPH_KEY,
         owning_endpoint_id=owning_endpoint,
         publisher_tier=receipts._normalize_publisher_tier(tier),
         publisher_org_id=publisher_org,
@@ -657,4 +660,4 @@ class TestOrgWideningTh1680:
         change is additive on the GRANT and touches no wire constant. If this
         assertion ever needs updating, the change is a COUPLED hub+fleet cut and
         must say so in its own body."""
-        assert receipts.RECEIPT_VERSION == "cell-receipt-v2"
+        assert receipts.RECEIPT_VERSION == "compiled-graph-receipt-v1"

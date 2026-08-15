@@ -8,10 +8,10 @@
 # PROJECTION a canonical object built from a genuinely different source shape.
 
 # Serve/adoption verdicts.
-src/gen_worker/executor.py::Executor._setup_locked_inner::compile_cache.record_cell_proven  VERDICT  boot proof concluded this object served its own warmup graph
-src/gen_worker/executor.py::Executor._setup_locked_inner::compile_cache.record_cell_quarantined  VERDICT  boot proof concluded the selected graph failed here
-src/gen_worker/executor.py::Executor._compile_guard_failed::compile_cache.record_cell_quarantined  VERDICT  serve-time graph-attributable failure observed by the guard
-src/gen_worker/executor.py::Executor._supervise_mint::compile_cache.record_cell_proven  VERDICT  supervised mint finalize proved its own graph
+src/gen_worker/executor.py::Executor._setup_locked_inner::compile_cache.record_compiled_graph_proven  VERDICT  boot proof concluded this object served its own warmup graph
+src/gen_worker/executor.py::Executor._setup_locked_inner::compile_cache.record_compiled_graph_quarantined  VERDICT  boot proof concluded the selected graph failed here
+src/gen_worker/executor.py::Executor._compile_guard_failed::compile_cache.record_compiled_graph_quarantined  VERDICT  serve-time graph-attributable failure observed by the guard
+src/gen_worker/executor.py::Executor._supervise_mint::compile_cache.record_compiled_graph_proven  VERDICT  supervised mint finalize proved its own graph
 src/gen_worker/fleet_cells.py::arm_from_local_store::local_cell_store.note_memo  VERDICT  local arm evidence established the arm-token to key memo
 
 # The local durable store's one producer write path.

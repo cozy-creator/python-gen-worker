@@ -53,7 +53,7 @@ from .api.binding import (
 )
 from .hubio.client import HubPublishError
 from .hub_error import HubApiError
-from . import cell_key
+from . import compiled_graph_key
 from .child_contract import MintSlot, slot_subjects
 from .wire_snapshots import index_snapshots
 from .api.errors import (
@@ -1191,7 +1191,7 @@ def _mint_origin(bg: "_BackgroundMint", spec: EndpointSpec) -> str:
     slot-resolution errors it may raise. The delegated child's twin is
     ``mint_child.mint_identity``; both exist because ``ValueError: slot
     'pipeline': no resolved model ref`` named a symptom and no mint."""
-    keys = sorted({str(getattr(p, "cell_key", "")) for p in bg.pendings.values()})
+    keys = sorted({str(getattr(p, "compiled_graph_key", "")) for p in bg.pendings.values()})
     return (
         f"in-process mint fn={spec.name!r} "
         f"key={(keys[0] if len(keys) == 1 else keys) or '(none)'!r}")
@@ -2626,7 +2626,7 @@ class Executor:
             target.active_compile_ref = ""
             target.active_compile_snapshot_digest = ""
 
-        compile_cache.record_cell_quarantined(failed_ref)
+        compile_cache.record_compiled_graph_quarantined(failed_ref)
         logger.warning(
             "compile target %s runtime guard tripped; compiled proof revoked, "
             "serving degrades to explicit eager: %s",
@@ -2672,6 +2672,9 @@ class Executor:
                 # Never erase a hardware/setup disable or another target's
                 # ownership merely because this target also named the alias.
                 continue
+            # pgw#1278: kept spelling. `FnUnavailable.reason` is a CLOSED
+            # vocabulary enumerated in the proto, so this token moves with the
+            # proto lane, not with the route/event rename.
             self.unavailable[name] = (
                 "compile_cell_failed", sanitized, {},
             )
@@ -4764,7 +4767,7 @@ class Executor:
         skip_ok = (
             allow_contract_skip
             and not cold_proof_ids
-            and all(compile_cache.cell_proven_in_process(r) for r in armed_refs)
+            and all(compile_cache.compiled_graph_proven_in_process(r) for r in armed_refs)
         )
         run_jobs, warm_mode = warmup_mod.select_runs(
             jobs,
@@ -5837,7 +5840,7 @@ class Executor:
                                 function_proofs[id(pipe)] = {spec.name}
                             proved_sel = inj.active_compile_artifacts.get(id(pipe))
                             if proved_sel is not None:
-                                compile_cache.record_cell_proven(proved_sel.ref)
+                                compile_cache.record_compiled_graph_proven(proved_sel.ref)
                             continue
                         # pgw#1141 / §4.31 + §4.32: an adopted cell arms BEFORE
                         # setup, so no dispatch can have landed by now, and
@@ -5873,12 +5876,12 @@ class Executor:
                             function_proofs[id(pipe)] = {spec.name}
                         proved_sel = inj.active_compile_artifacts.get(id(pipe))
                         if proved_sel is not None:
-                            compile_cache.record_cell_proven(proved_sel.ref)
+                            compile_cache.record_compiled_graph_proven(proved_sel.ref)
                     elif (
                         pipe_misses <= 0
                         and (inmem_sel := inj.active_compile_artifacts.get(
                             id(pipe))) is not None
-                        and compile_cache.cell_proven_in_process(inmem_sel.ref)
+                        and compile_cache.compiled_graph_proven_in_process(inmem_sel.ref)
                         and compile_cache.has_inmemory_compiled_code(pipe)
                     ):
                         # pgw#637: calls>0 with ZERO counter movement against
@@ -5928,7 +5931,7 @@ class Executor:
                     if not reason:
                         return
                     activity_mod.emit_event(
-                        activity_mod.KIND_CELL_NUMERICS,
+                        activity_mod.KIND_COMPILED_GRAPH_NUMERICS,
                         f"{spec.name}: the exported cell on slots "
                         f"{sorted(candidate.slots)} took no warm dispatch — "
                         f"{reason}. It STAYS ARMED and serves; a "
@@ -6019,11 +6022,11 @@ class Executor:
                         failed_sel = inj.active_compile_artifacts.pop(
                             id(pipe), None)
                         if failed_sel is not None:
-                            compile_cache.record_cell_quarantined(
+                            compile_cache.record_compiled_graph_quarantined(
                                 failed_sel.ref)
                         failed_pending = inj.pending_self_mints.get(id(pipe))
                         if failed_pending is not None:
-                            compile_cache.record_cell_quarantined(
+                            compile_cache.record_compiled_graph_quarantined(
                                 str(failed_pending.ref))
                         self._abandon_pending_mint(inj, pipe)
                     # gw#611: `calls` discriminates the failure classes on the
@@ -6080,7 +6083,7 @@ class Executor:
                     if quant_execution_lane:
                         # pgw#672 posture change: a failed serve/finalize
                         # proof on a mandatory (w8a8/w4a4) lane used to raise
-                        # here -> cell_quarantined -> every declared function
+                        # here -> compiled_graph_quarantined -> every declared function
                         # disabled -> pod retired -> the replacement re-mints
                         # the same key (5 cycles / 4 dead workers on the L4
                         # burst). A broken optimization must never kill a
@@ -7402,7 +7405,7 @@ class Executor:
                             # Mandatory (w8a8/w4a4) lane: self-mint also hit a
                             # genuine impossibility (no CUDA/toolchain/target).
                             # When this refusal was chained from a caught
-                            # cell_selection_bug (th#1031), report it — the
+                            # compiled_graph_selection_bug (th#1031), report it — the
                             # lane refusal must not silently swallow the
                             # loud invariant event.
                             bug = exc.__cause__
@@ -7725,7 +7728,7 @@ class Executor:
                 # the one that must confess if it does not.
                 continue
             family = str(getattr(pending, "family", "") or "")
-            key = str(getattr(pending, "cell_key", "") or "")
+            key = str(getattr(pending, "compiled_graph_key", "") or "")
             logger.error(
                 "%s: SELF_MINT_UNRESOLVED family=%s key=%s — the boot opened "
                 "a mint capture and reached readiness without packing, "
@@ -8087,7 +8090,7 @@ class Executor:
         logger.warning("adopt-fit: %s", detail)
         activity_mod.emit_event(
             "adopt_headroom_refused", detail, phase=adopt_fit.REASON,
-            cell_key=str(getattr(outcome, "ref", "") or ""),
+            compiled_graph_key=str(getattr(outcome, "ref", "") or ""),
         )
 
     async def _supervise_mint(
@@ -8215,7 +8218,7 @@ class Executor:
                     f"compiled (pgw#1113)",
                     phase="unarmed_obligation_holder",
                 )
-            compile_cache.record_cell_proven(str(minted.ref))
+            compile_cache.record_compiled_graph_proven(str(minted.ref))
 
         if not finalized:
             raise RuntimeError(
@@ -8259,13 +8262,13 @@ class Executor:
         bug_digest = (
             compile_selection.snapshot_digest
             if compile_selection is not None else "")
-        logger.error("cell_selection_bug on %s (%s): %s", spec.name, bug_ref, exc)
+        logger.error("compiled_graph_selection_bug on %s (%s): %s", spec.name, bug_ref, exc)
         await self._send(pb.WorkerMessage(
             model_event=self.store.model_event(
                 bug_ref,
                 pb.MODEL_STATE_FAILED,
                 identity=((bug_digest, 0) if bug_digest else None),
-                error=f"cell_selection_bug: {str(exc)[:300]}",
+                error=f"compiled_graph_selection_bug: {str(exc)[:300]}",
             )
         ))
 
@@ -8279,7 +8282,7 @@ class Executor:
         derivation" — which is a true statement that names nothing: no family,
         no gate, no event, and a caller unable to tell it from a pod that asked
         the hub and was told no. Three real pods on 0.103.0 called
-        ``/v1/worker/cells/resolve`` ZERO times and no artifact anywhere said
+        ``/v1/worker/compiled-graphs/resolve`` ZERO times and no artifact anywhere said
         which of these gates did it. Each one now names itself and emits.
 
         None of them is fatal, and none of them is new behaviour: every non-hit
@@ -8319,7 +8322,7 @@ class Executor:
         # fired, and the pod fell straight through to self-mint — the whole reuse
         # circle stayed open. The seam being up (`broker.active()`) is the child's
         # honest "there is somebody to ask": the resolve is a parent-mediated
-        # action (`cells.resolve`), so the parent supplies base_url + bearer and
+        # action (`compiled_graphs.resolve`), so the parent supplies base_url + bearer and
         # ignores what the child passes. Mirrors `fleet_cells.CellPublisher`'s
         # own readiness (base_url AND (local bearer OR broker.active())).
         hub_absent = ""
@@ -8335,9 +8338,9 @@ class Executor:
         # to ask. The gate survives in its honest form — refuse only when BOTH
         # answerers are absent — and `attempt` decides the rest, after the
         # local store has been asked.
-        if boot_adopt.no_cell_source(hub_absent):
+        if boot_adopt.no_compiled_graph_source(hub_absent):
             return (boot_adopt.refused(
-                "no_cell_source",
+                "no_compiled_graph_source",
                 f"{hub_absent}, and this machine's own cell store is empty",
                 family=family, function=fn),)
         work_root = Path(
@@ -8369,7 +8372,7 @@ class Executor:
     ) -> "fleet_cells.ArmOutcome":
         """Arm the best available compiled path for a freshly loaded pipeline.
 
-        gw#587: delivered cell first — a th#1031 ``cell_selection_bug``
+        gw#587: delivered cell first — a th#1031 ``compiled_graph_selection_bug``
         (self-requested cell fails contract_drift) is reported loudly but no
         longer fatal: this falls through to SELF-MINT exactly like an
         ordinary miss. The boot warmup compiles the real serving graphs
@@ -8438,8 +8441,8 @@ class Executor:
                             phase=str(getattr(extra_exc, "reason", "")
                                       or "arm_failed"),
                             family=str(getattr(cfg, "family", "") or ""),
-                            cell_key=str(
-                                getattr(extra_expected, "cell_key", "") or ""),
+                            compiled_graph_key=str(
+                                getattr(extra_expected, "compiled_graph_key", "") or ""),
                         )
                 return outcome
             except fleet_cells.OrderedArmError as exc:
@@ -8473,7 +8476,7 @@ class Executor:
                     return outcome
                 return dc_replace(
                     outcome,
-                    eager_reason=cell_adopt.EagerPhase.ADOPTED_CELL_REFUSED)
+                    eager_reason=cell_adopt.EagerPhase.ADOPTED_COMPILED_GRAPH_REFUSED)
         return fleet_cells.enable_compiled(
             pipe, cfg, self.store._cache_dir, artifact,
             publisher=self._cell_publisher(),
@@ -8488,7 +8491,7 @@ class Executor:
     def _arming_enable(
         self, pipe: Any, cfg: Any, cache_dir: Optional[Path],
         artifact: Optional[Path],
-        subject: Tuple[cell_key.SlotSubject, ...] = (),
+        subject: Tuple[compiled_graph_key.SlotSubject, ...] = (),
     ) -> "fleet_cells.ArmOutcome":
         """ArmingScope adapter: a self-loaded pipeline's ``arm_compile()``
         gets the same fleet policy (delivered cell first, self-mint on miss)
@@ -8574,7 +8577,7 @@ class Executor:
                 #
                 # `ModelEvent` is keyed by ref and genuinely cannot carry
                 # this, so the miss goes out on the channel that CAN: the
-                # typed activity event, whose family/cell_key/graph_class
+                # typed activity event, whose family/compiled_graph_key/graph_class
                 # fields (proto 18-20) land in the hub's own columns.
                 activity_mod.emit_event(
                     "aot_entry_missed",
@@ -8582,9 +8585,9 @@ class Executor:
                     f"it ({adoption.reason or 'no_cell'}"
                     f"{': ' + adoption.detail if adoption.detail else ''}); "
                     f"the class serves EAGER and is queued to compile",
-                    phase=adoption.reason or "no_cell",
+                    phase=adoption.reason or "no_compiled_graph",
                     family=str(getattr(inj, "family", "") or ""),
-                    cell_key=adoption.cell_key,
+                    compiled_graph_key=adoption.compiled_graph_key,
                     graph_class=adoption.entry,
                 )
                 continue

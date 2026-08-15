@@ -15,7 +15,7 @@ Reuse still happened — through ``arm_from_local_store``'s arm-token memo — s
 "fully offline-capable" was TRUE BY ACCIDENT of a shortcut rather than by
 design. The sequence is now **derive -> local ``lookup(key)`` -> hub
 ``resolve(key)``**, and ``no_hub`` is demoted from a pre-derive gate to two
-honest termini: ``no_cell_source`` (nobody at all, so the derive is skipped) and
+honest termini: ``no_compiled_graph_source`` (nobody at all, so the derive is skipped) and
 ``local_miss_no_hub`` (derived, this machine does not hold it, no hub either).
 
 THE STRONGEST ARGUMENT, and the row that measures it:
@@ -29,7 +29,7 @@ the proven arm. **The next key/scheme bump costs a TRACE instead of a MINT.**
 RED before this issue: every row here. `_boot_adopt` refused pre-derive with no
 hub; `local_cell_store` had no reader at boot at all; `boot_local_key` did not
 exist as a route into the store; and `local_hit`/`local_miss_no_hub`/
-`no_cell_source` were not in the pgw#1116 vocabulary, so a fence that reads
+`no_compiled_graph_source` were not in the pgw#1116 vocabulary, so a fence that reads
 refusal sites out of the tree would have failed on them.
 """
 
@@ -54,7 +54,7 @@ from gen_worker.cell_adopt import AdoptOutcome
 # pgw#1176: `cg-key-v1`, because `local_cell_store.store` refuses anything that is
 # not an entry key and a `ck1`-keyed cell is orphaned by the re-key. These
 # fixtures stored under `ck1-` and the store silently declined them, so
-# `no_cell_source` short-circuited a machine that WAS holding cells — the §1.34
+# `no_compiled_graph_source` short-circuited a machine that WAS holding cells — the §1.34
 # orphaning the re-key predicts, surfacing exactly where it should.
 KEY_A = "cg-key-v1-" + "a" * 56
 KEY_B = "cg-key-v1-" + "b" * 56
@@ -138,7 +138,7 @@ def _cell(
     p = tmp_path / name / "cell.tar.gz"
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps({
-        "kind": "aot-inductor", "cell_key": key, "family": "micro-diffusion",
+        "kind": "aot-inductor", "compiled_graph_key": key, "family": "micro-diffusion",
         "entry": {"name": entry, "graph_witness": digest},
     }).encode()
     with tarfile.open(p, mode="w:gz") as tar:
@@ -192,11 +192,11 @@ def _executor(tmp_path: Path) -> Any:
 
 
 def _derived() -> Any:
-    """A REAL ``DerivedKey`` — the key is built by ``cell_key.from_axes`` over
+    """A REAL ``DerivedKey`` — the key is built by ``compiled_graph_key.from_axes`` over
     real axes, so the address the boot hands the store is the address the store
     is addressed by everywhere else. Only the TRACE is stood in for (there is no
     card on a CI runner, and `sm` is a key axis)."""
-    from gen_worker import cell_key as ck
+    from gen_worker import compiled_graph_key as ck
 
     return boot_key.DerivedKey(
         entry_keys={"a": ck.from_axes({
@@ -252,9 +252,9 @@ def test_an_empty_store_and_no_hub_still_skips_the_derivation(
     # indexing past a set nobody checked.
     (out,) = _executor(tmp_path)._boot_adopt(_Spec(), {})
 
-    assert out.reason == "no_cell_source"
+    assert out.reason == "no_compiled_graph_source"
     assert not out.derived_key
-    assert [u.phase for u in _adopt_events(events)] == ["no_cell_source"]
+    assert [u.phase for u in _adopt_events(events)] == ["no_compiled_graph_source"]
 
 
 def test_a_machine_holding_cells_DERIVES_even_with_no_hub_at_all(
@@ -390,7 +390,7 @@ def armable(monkeypatch: pytest.MonkeyPatch) -> List[Path]:
     monkeypatch.setattr(fleet_cells.provision, "arm_aot", _arm)
     monkeypatch.setattr(
         fleet_cells.artifact_meta, "read_metadata",
-        lambda p: {"cell_key": KEY_A, "family": "micro-diffusion"})
+        lambda p: {"compiled_graph_key": KEY_A, "family": "micro-diffusion"})
     monkeypatch.setattr(fleet_cells, "arm_axis_divergence", lambda key, meta: "")
     return seen
 
@@ -429,7 +429,7 @@ def test_an_arm_scheme_bump_costs_a_TRACE_and_not_a_MINT(
         _Pipe(), _Cfg(), None, 0, _Arm(), "micro-diffusion",
         boot_local_key=KEY_A)
 
-    assert minted is not None and minted.cell_key == KEY_A
+    assert minted is not None and minted.compiled_graph_key == KEY_A
     assert armable and armable[-1] == local_cell_store.cell_dir(KEY_A) / "cell.tar.gz"
     repaired = local_cell_store.lookup_for_arm(ARM_A)
     assert repaired is not None and repaired.key == KEY_A, (
@@ -490,7 +490,7 @@ def test_the_boot_derived_key_is_threaded_to_the_arming_brain(
     monkeypatch.setattr(fleet_cells, "arm_identity", lambda *a, **k: _Arm())
     monkeypatch.setattr(
         fleet_cells.provision, "enable_compiled",
-        lambda *a, **k: AdoptOutcome.miss("no_cell", "nothing delivered"))
+        lambda *a, **k: AdoptOutcome.miss("no_compiled_graph", "nothing delivered"))
 
     fleet_cells.enable_compiled(
         _Pipe(), _Cfg(), None, publisher=None, boot_local_key=KEY_A)
@@ -511,7 +511,7 @@ def test_every_new_terminus_is_in_the_typed_vocabulary() -> None:
     for token in ("local_hit", "local_miss_no_hub"):
         assert token in boot_adopt.LOCAL_REASONS
         assert token in boot_adopt.REASONS
-    assert "no_cell_source" in boot_adopt.GATE_REASONS
+    assert "no_compiled_graph_source" in boot_adopt.GATE_REASONS
     assert "no_hub" not in boot_adopt.REASONS, (
         "the token that refused on behalf of two answerers is DELETED, not "
         "aliased — pre-launch hardcut")
@@ -536,7 +536,7 @@ def test_each_new_terminus_emits_exactly_one_typed_event(
     ex._boot_adopt(_Spec(), {})                       # this machine holds it
 
     phases = [u.phase for u in _adopt_events(events)]
-    assert phases == ["no_cell_source", "local_miss_no_hub", "local_hit"], (
+    assert phases == ["no_compiled_graph_source", "local_miss_no_hub", "local_hit"], (
         f"three different facts must read as three different phases: {phases}")
 
 
@@ -554,11 +554,11 @@ def test_a_key_that_missed_locally_is_distinguishable_from_one_never_derived(
         _cell(tmp_path, name="b"), key=KEY_B, family="other", arm_token="")
     (missed,) = ex._boot_adopt(_Spec(), {})
 
-    assert never.reason == "no_cell_source" and not never.derived_key
+    assert never.reason == "no_compiled_graph_source" and not never.derived_key
     assert missed.reason == "local_miss_no_hub"
     assert missed.derived_key == KEY_DERIVED
     details = {u.phase: u.detail for u in _adopt_events(events)}
-    assert "key=-" in details["no_cell_source"]
+    assert "key=-" in details["no_compiled_graph_source"]
     assert f"key={KEY_DERIVED}" in details["local_miss_no_hub"]
 
 

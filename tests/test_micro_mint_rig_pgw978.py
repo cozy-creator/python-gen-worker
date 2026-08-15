@@ -220,7 +220,7 @@ def test_the_full_machinery_cycle_runs_on_this_box(tmp_path: Path) -> None:
     # here would be asserting a phase this recipe does not have.
     assert float(phases.get("trace_graph", 0.0)) > 0.0
     assert float(phases.get("seal_publish", 0.0)) > 0.0
-    assert mint.facts["cell_key"], "the child sealed no cell key"
+    assert mint.facts["compiled_graph_key"], "the child sealed no cell key"
 
     publish = next(leg for leg in result.legs if leg.name == "publish")
     routes = publish.facts["routes"]
@@ -235,7 +235,7 @@ def test_the_full_machinery_cycle_runs_on_this_box(tmp_path: Path) -> None:
     assert adopt.facts["pid"] != os.getpid(), (
         "the adopt must run in a SECOND process — in-process adoption proves "
         "nothing about a cell crossing pods")
-    assert adopt.facts["cell_key"] == mint.facts["cell_key"], (
+    assert adopt.facts["compiled_graph_key"] == mint.facts["compiled_graph_key"], (
         "the cell the second process adopted is not the cell the first minted")
 
 
@@ -253,8 +253,8 @@ def test_a_probe_pod_cannot_publish_a_cell(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setenv("GEN_WORKER_PROBE", "1")
     monkeypatch.delenv("GEN_WORKER_PROBE_PUBLISH_ARMED", raising=False)
-    for path in ("/v1/worker/cells/publish-intent",
-                 "/v1/worker/cells/publish-complete"):
+    for path in ("/v1/worker/compiled-graphs/publish-intent",
+                 "/v1/worker/compiled-graphs/publish-complete"):
         with pytest.raises(actions.ActionRefused, match="disarmed"):
             actions.authorize({"method": "POST", "path": path, "json": {}})
     # Discovery is untouched: a probe must still be able to ADOPT.
@@ -273,11 +273,11 @@ def test_arming_a_probes_publish_is_explicit(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("GEN_WORKER_PROBE", "1")
     monkeypatch.setenv("GEN_WORKER_PROBE_PUBLISH_ARMED", "1")
     action, _q, _b = actions.authorize({
-        "method": "POST", "path": "/v1/worker/cells/publish-intent",
+        "method": "POST", "path": "/v1/worker/compiled-graphs/publish-intent",
         "json": {"family": "microrig", "axes": {},
-                 "entries": [{"cell_key": "cg-key-v1-" + "a" * 56,
+                 "entries": [{"compiled_graph_key": "cg-key-v1-" + "a" * 56,
                               "identity_axes": {}, "mint_duration_ms": 1}]}})
-    assert action.name == "cells.publish_intent"
+    assert action.name == "compiled_graphs.publish_intent"
 
 
 def test_a_normal_pod_is_unaffected(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -288,7 +288,7 @@ def test_a_normal_pod_is_unaffected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GEN_WORKER_PROBE_PUBLISH_ARMED", raising=False)
     assert not actions.publish_disarmed()
     action, _q, _b = actions.authorize({
-        "method": "POST", "path": "/v1/worker/cells/publish-complete",
-        "json": {"family": "microrig", "cell_key": "ck5-" + "a" * 56,
+        "method": "POST", "path": "/v1/worker/compiled-graphs/publish-complete",
+        "json": {"family": "microrig", "compiled_graph_key": "ck5-" + "a" * 56,
                  "checkpoint_id": "sha256:" + "b" * 64, "ok": True}})
-    assert action.name == "cells.publish_complete"
+    assert action.name == "compiled_graphs.publish_complete"

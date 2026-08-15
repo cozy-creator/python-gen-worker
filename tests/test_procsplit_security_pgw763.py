@@ -741,10 +741,10 @@ def test_capability_policy_passes_a_job_with_no_grant():
     "req,why",
     [
         ({"method": "GET", "path": "/v1/worker/secrets"}, "unlisted path"),
-        ({"method": "POST", "path": "/v1/worker/cells/receipt"}, "wrong method"),
+        ({"method": "POST", "path": "/v1/worker/compiled-graphs/receipt"}, "wrong method"),
         ({"method": "GET", "path": "/api/v1/repos/a/b/../../admin/resolve"},
          "traversal out of the allowlisted prefix"),
-        ({"method": "GET", "path": "/v1/worker/cells/receipt",
+        ({"method": "GET", "path": "/v1/worker/compiled-graphs/receipt",
           "query": {"blake3": "x", "owner": "root"}}, "query key not in the action"),
         ({"method": "POST", "path": "/v1/worker/c2pa/sign",
           "json": {"alg": "es256", "claim_b64": "AA", "callback_url": "http://evil"}},
@@ -766,9 +766,9 @@ def test_action_table_admits_exactly_the_named_actions():
          "json": {"request_id": "r", "attempt": 1, "capability_token": "t"}},
         {"method": "POST", "path": "/v1/worker/c2pa/sign",
          "json": {"alg": "es256", "claim_b64": "AA=="}},
-        {"method": "GET", "path": "/v1/worker/cells/receipt",
-         "query": {"cell_key": "k", "artifact_digest": ["sha256:" + "a" * 64]}},
-        {"method": "GET", "path": "/v1/worker/cells/revocations"},
+        {"method": "GET", "path": "/v1/worker/compiled-graphs/receipt",
+         "query": {"compiled_graph_key": "k", "artifact_digest": ["sha256:" + "a" * 64]}},
+        {"method": "GET", "path": "/v1/worker/compiled-graphs/revocations"},
         {"method": "GET", "path": "/api/v1/repos/root/system-sdxl/checkpoints",
          "query": {"limit": "50"}},
         {"method": "GET", "path": "/api/v1/repos/root/system-sdxl/resolve",
@@ -787,7 +787,7 @@ def test_a_compute_child_with_no_seam_refuses_to_dial_the_hub_itself(monkeypatch
     monkeypatch.setenv("GEN_WORKER_COMPUTE_CHILD", "1")
     broker.install(None)
     with pytest.raises(broker.BrokerError) as exc:
-        broker.request("GET", "/v1/worker/cells/revocations",
+        broker.request("GET", "/v1/worker/compiled-graphs/revocations",
                        base_url="http://hub", bearer="")
     assert "parent-mediated" in str(exc.value)
 

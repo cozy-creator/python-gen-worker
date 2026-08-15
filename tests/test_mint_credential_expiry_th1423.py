@@ -44,7 +44,7 @@ FAMILY = "sdxl"
 # credential-lapse legs below have to ride a cell that could genuinely publish.
 META = exported_cell_meta(family=FAMILY, gen_worker="0.76.6",
                           weight_lane="w8a8", lora_bucket=64)
-CELL_KEY = META["cell_key"]
+COMPILED_GRAPH_KEY = META["compiled_graph_key"]
 
 
 def _jwt(*, lifetime_s: float) -> str:
@@ -153,7 +153,7 @@ def test_intent_401_carries_the_hubs_status_and_code(hub, artifact):
     assert exc.code == "unauthorized"
     assert fc._publish_failure_phase(exc) == "unauthorized"
     # The refusal was really spoken over the wire, by the credential we hold.
-    assert hub.httpd.seen == [("/v1/worker/cells/publish-intent", live)]
+    assert hub.httpd.seen == [("/v1/worker/compiled-graphs/publish-intent", live)]
 
 
 def test_an_expired_credential_is_named_as_such_not_as_a_generic_401(
@@ -223,7 +223,7 @@ def test_the_background_publish_reports_the_grouped_phase(hub, artifact,
 
     thread = fc._publish_async(
         _publisher(hub, _jwt(lifetime_s=-LAPSE_S)),
-        FAMILY, artifact, dict(META), cell_key_digest=CELL_KEY)
+        FAMILY, artifact, dict(META), compiled_graph_key_digest=COMPILED_GRAPH_KEY)
     thread.join()  # the publish thread itself is the bound — no clock
 
     assert ("self_mint_publish_failed", "worker_credential_expired") in seen

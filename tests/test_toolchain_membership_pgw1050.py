@@ -24,7 +24,7 @@ from typing import Dict
 
 import pytest
 
-from gen_worker import cell_key, compile_cache as cc, dist_records
+from gen_worker import compiled_graph_key, compile_cache as cc, dist_records
 
 from harness.cell_meta import exported_cell_meta
 
@@ -65,7 +65,7 @@ def _bumped(component: str) -> Dict[str, str]:
 def _key(block: Dict[str, str]) -> str:
     """The ck1 key of a cell whose graph, envelope and sm are held fixed and
     whose toolchain block is ``block``."""
-    return str(exported_cell_meta(toolchain=block)["cell_key"])
+    return str(exported_cell_meta(toolchain=block)["compiled_graph_key"])
 
 
 # ---------------------------------------------------------------------------
@@ -95,9 +95,9 @@ def test_the_axis_ignores_the_library_even_when_a_cell_records_it(
     without = {k: v for k, v in TOOLCHAIN.items() if k not in MODEL_LIBRARIES}
     with_one = dict(without)
     with_one[library] = TOOLCHAIN[library]
-    assert (cell_key.toolchain_axis_digest(with_one)
-            == cell_key.toolchain_axis_digest(without))
-    assert library not in cell_key.toolchain_facts(TOOLCHAIN)
+    assert (compiled_graph_key.toolchain_axis_digest(with_one)
+            == compiled_graph_key.toolchain_axis_digest(without))
+    assert library not in compiled_graph_key.toolchain_facts(TOOLCHAIN)
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +165,7 @@ def test_producer_and_reader_agree_on_membership() -> None:
     """One axis, one membership: whatever the producer collects survives the
     reader's canonical form untouched."""
     collected = dict(cc.toolchain_digest())
-    assert cell_key.toolchain_facts(collected) == {
+    assert compiled_graph_key.toolchain_facts(collected) == {
         str(k): str(v) for k, v in collected.items()}
 
 

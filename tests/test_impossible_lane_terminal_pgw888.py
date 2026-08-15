@@ -99,7 +99,7 @@ def test_the_refusal_names_why_EAGER_was_not_the_answer() -> None:
                 _Pipe(),
                 "this lane serves only from a cell and this family declares "
                 "no export, so no cell can be minted for it (pgw#1010)",
-                phase=fleet_cells.EagerPhase.MANDATORY_LANE_NEEDS_A_CELL,
+                phase=fleet_cells.EagerPhase.MANDATORY_LANE_NEEDS_A_COMPILED_GRAPH,
                 permanent=True)
     finally:
         monkey.undo()
@@ -113,7 +113,7 @@ def test_the_refusal_names_why_EAGER_was_not_the_answer() -> None:
 def test_permanence_is_asked_of_the_DECLARATION_not_the_code_path() -> None:
     """The narrowing that the existing suite caught, pinned so it stays.
 
-    `MANDATORY_LANE_NEEDS_A_CELL` fires whenever the recipe is not `aot`, and
+    `MANDATORY_LANE_NEEDS_A_COMPILED_GRAPH` fires whenever the recipe is not `aot`, and
     only ONE of its causes is permanent. A delegation refusal or a
     caller-forced in-process decline reaches the SAME exit with an export
     declared — `test_delegation_declines_name_their_TRUE_cause` does exactly

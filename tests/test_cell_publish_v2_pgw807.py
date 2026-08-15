@@ -33,7 +33,7 @@ import pytest
 from hashrepo import TransferReport
 
 import gen_worker.hubio.client as hub_client
-from gen_worker import cell_key, env_seal, receipts
+from gen_worker import compiled_graph_key, env_seal, receipts
 from gen_worker import fleet_cells as fc
 from gen_worker.hubio.client import HubPublishError
 from gen_worker.procsplit import actions
@@ -105,7 +105,7 @@ class _Hub(http.server.BaseHTTPRequestHandler):
         with srv.lock:
             srv.calls.append((path, body))
 
-        if path.endswith("/v1/worker/cells/publish-intent"):
+        if path.endswith("/v1/worker/compiled-graphs/publish-intent"):
             # pgw#1224: one answer per entry, in request order, ONE TOKEN EACH.
             entries = body.get("entries") or []
             self._json(200, {
@@ -114,13 +114,13 @@ class _Hub(http.server.BaseHTTPRequestHandler):
                 "family": body.get("family"),
                 "granted": len(entries),
                 "answers": [
-                    {"cell_key": e.get("cell_key"), "status": "granted",
+                    {"compiled_graph_key": e.get("compiled_graph_key"), "status": "granted",
                      "capability_token": f"cap-token-{i}",
                      "expires_at_unix": 4102444800}
                     for i, e in enumerate(entries)],
             })
             return
-        if path.endswith("/v1/worker/cells/publish-complete"):
+        if path.endswith("/v1/worker/compiled-graphs/publish-complete"):
             self._json(200, {"recorded": True})
             return
         if path.endswith("/commits"):
@@ -238,12 +238,12 @@ _CLASS_HASH = "a" * 16
 #: pgw#1176: the DECLARATION-wide coverage label, published as
 #: `graph_contract`. No longer a copy of the graph axis — `graph` is this
 #: entry's class hash (identity), this names the class set it belongs to.
-GRAPH_CONTRACT = cell_key.manifest_digest([_CLASS_HASH])
+GRAPH_CONTRACT = compiled_graph_key.manifest_digest([_CLASS_HASH])
 META = {
     "family": FAMILY, "sku": "l4", "sm": "89",
     "gen_worker": "0.87.0", "kind": "aot-inductor", "format": "pt2",
     "weight_lane": "w8a8", "lora_bucket": 64, "strict_export": True,
-    cell_key.ENTRY_BLOCK_KEY: {
+    compiled_graph_key.ENTRY_BLOCK_KEY: {
         "name": "unet/main",
         "target": "unet", "fork": [], "class_dims": [],
         "range_digest": "r1", "class_hash": _CLASS_HASH, "graph": {"v": 2},
@@ -252,15 +252,15 @@ META = {
     "env_seal": {"v": 1, "torch": "2.9.0"},
     "toolchain": {"torch": "2.9.0", "cuda": "12.8"},
 }
-CELL_KEY = cell_key.from_entry_metadata(META).digest
-META["cell_key"] = CELL_KEY
+COMPILED_GRAPH_KEY = compiled_graph_key.from_entry_metadata(META).digest
+META["compiled_graph_key"] = COMPILED_GRAPH_KEY
 
 #: The shape every cell in the corpus was published under before pgw#1046 —
 #: `_identity_axes`' six-axis FALLBACK, carrying neither identity digest. Kept
 #: as a fixture so the refusal below is pinned against the real historical row,
 #: not against an invented one.
 TODAYS_FALLBACK_META = {
-    "cell_key": "cg-key-v1-" + "b" * 56, "family": FAMILY, "sku": "l4", "sm": "89",
+    "compiled_graph_key": "cg-key-v1-" + "b" * 56, "family": FAMILY, "sku": "l4", "sm": "89",
     "gen_worker": "0.87.0", "kind": "aot-inductor", "format": "pt2",
     "compile_mode": "regional", "weight_lane": "w8a8", "lora_bucket": 64,
 }
@@ -306,7 +306,7 @@ def test_publish_takes_the_v2_route_and_never_the_frozen_v1_one(
     assert "flavor" not in decl
     assert "tags" not in decl and "default_flavor" not in decl
     # th#1340: the cell identity is hub-derived and rides the token.
-    for forbidden in ("cell_publish", "cell_key", "family",
+    for forbidden in ("cell_publish", "compiled_graph_key", "family",
                       "owning_endpoint_id", "axes"):
         assert forbidden not in decl
 
@@ -329,7 +329,7 @@ def test_intent_carries_the_identity_axes_and_the_mint_cost(hub, artifact):
     assert intent["axes"] == {"sku": "l4", "image_digest": "sha256:" + "1" * 64,
                               "gen_worker": "0.87.0"}
     (entry,) = intent["entries"]
-    assert entry["cell_key"] == CELL_KEY
+    assert entry["compiled_graph_key"] == COMPILED_GRAPH_KEY
     assert entry["mint_duration_ms"] == 347_940
     assert entry["identity_axes"]["lane"] == "w8a8-lora64"
 
@@ -338,7 +338,7 @@ def test_intent_carries_the_identity_axes_and_the_mint_cost(hub, artifact):
     # pgw#711's artifact_digest/manifest_digest are gone: the hub's route
     # decodes no such fields, so sending them was a blake3 hash pass whose
     # result nothing read.
-    assert set(complete) == {"family", "cell_key", "checkpoint_id", "ok"}
+    assert set(complete) == {"family", "compiled_graph_key", "checkpoint_id", "ok"}
 
 
 # ---------------------------------------------------------------------------
@@ -366,7 +366,7 @@ def test_publish_intent_states_the_full_arming_identity(hub, artifact):
     axes = entry["identity_axes"]
 
     # Derived from the recorded blocks, never from a second stamp.
-    assert axes["toolchain"] == cell_key.facts_digest(META["toolchain"])
+    assert axes["toolchain"] == compiled_graph_key.facts_digest(META["toolchain"])
     assert axes["env_seal"] == env_seal.seal_digest(META["env_seal"])
     assert axes[fc.GRAPH_CONTRACT_AXIS] == GRAPH_CONTRACT
 
@@ -376,7 +376,7 @@ def test_publish_intent_states_the_full_arming_identity(hub, artifact):
     # demoted store metadata (family, lane) — pgw#1059: neither is identity.
     ck = {k: v for k, v in axes.items()
           if k in ("graph", "sm", "toolchain")}
-    assert cell_key.from_axes(ck).digest == entry["cell_key"] == CELL_KEY
+    assert compiled_graph_key.from_axes(ck).digest == entry["compiled_graph_key"] == COMPILED_GRAPH_KEY
     assert set(axes) == {"graph", "sm", "toolchain",
                          fc.GRAPH_CONTRACT_AXIS, fc.ENV_SEAL_AXIS,
                          "family", "lane"}
@@ -411,10 +411,10 @@ def test_the_pre_fix_fallback_row_shape_can_no_longer_be_published(hub, artifact
 
 
 def test_a_stamp_that_disagrees_with_the_recorded_axes_is_refused(hub, artifact):
-    """A cell whose `cell_key` does not describe its own blocks is a cell the
+    """A cell whose `compiled_graph_key` does not describe its own blocks is a cell the
     hub would index under one identity and the worker would fence on another."""
     forged = dict(META)
-    forged["cell_key"] = "cg-key-v1-" + "9" * 56
+    forged["compiled_graph_key"] = "cg-key-v1-" + "9" * 56
     with pytest.raises(fc.CellPublishRefused, match="disagrees"):
         _publisher(hub).publish(FAMILY, artifact, forged)
     assert not hub.httpd.calls
@@ -446,8 +446,8 @@ def test_a_cell_with_no_class_hash_is_refused(hub, artifact):
     state its own graph axis has no identity, so it would be stored under a
     flavor nothing can request."""
     hollow = dict(META)
-    hollow[cell_key.ENTRY_BLOCK_KEY] = {
-        **META[cell_key.ENTRY_BLOCK_KEY], "class_hash": ""}
+    hollow[compiled_graph_key.ENTRY_BLOCK_KEY] = {
+        **META[compiled_graph_key.ENTRY_BLOCK_KEY], "class_hash": ""}
     with pytest.raises(fc.CellPublishRefused):
         _publisher(hub).publish(FAMILY, artifact, hollow)
     assert not hub.httpd.calls
@@ -459,7 +459,7 @@ def test_seam_authorizes_the_live_publish_payloads(hub, artifact):
     contract: drive the publisher, then authorize exactly what it sent."""
     _publisher(hub).publish(FAMILY, artifact, dict(META), mint_duration_ms=1)
     for path, body in hub.httpd.calls:
-        if "/v1/worker/cells/" not in path:
+        if "/v1/worker/compiled-graphs/" not in path:
             continue
         actions.authorize({"method": "POST", "path": path, "json": body})
 

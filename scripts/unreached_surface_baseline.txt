@@ -14,7 +14,7 @@
 #       finding is kept verbatim because it is the clearest illustration of what
 #       delisting MEANS: "pgw#817's ADOPTION numerics gate. `api/decorators.py`
 #       declares numerics_floor and numerics_warn per family, `activity.py`
-#       declares KIND_CELL_NUMERICS, and NOTHING IN src/ IMPORTS numerics_ladder
+#       declares KIND_COMPILED_GRAPH_NUMERICS, and NOTHING IN src/ IMPORTS numerics_ladder
 #       AT ALL. A cell about to arm is supposed to be run against the eager
 #       forward it replaces and REFUSE below the floor. It never is."
 #       That sentence is now FALSE, which is the whole point — pgw#848 CP12

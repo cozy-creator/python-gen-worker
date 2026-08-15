@@ -153,7 +153,7 @@ _DECLINE_PHASES = (
     EagerPhase.NO_COMPILE_TARGET,
     EagerPhase.KEY_COMPUTATION_FAILED,
     EagerPhase.JIT_ARM_FAILED,
-    EagerPhase.MANDATORY_LANE_NEEDS_A_CELL,
+    EagerPhase.MANDATORY_LANE_NEEDS_A_COMPILED_GRAPH,
 )
 
 
@@ -194,8 +194,8 @@ def test_the_eager_phase_values_are_a_wire_contract() -> None:
         "NO_COMPILE_TARGET": "no_compile_target",
         "KEY_COMPUTATION_FAILED": "key_computation_failed",
         "JIT_ARM_FAILED": "jit_arm_failed",
-        "MANDATORY_LANE_NEEDS_A_CELL": "mandatory_lane_needs_a_cell",
-        "CELL_QUARANTINED": "cell_quarantined",
+        "MANDATORY_LANE_NEEDS_A_COMPILED_GRAPH": "mandatory_lane_needs_a_compiled_graph",
+        "COMPILED_GRAPH_QUARANTINED": "compiled_graph_quarantined",
         "MINT_IN_PROGRESS": "mint_in_progress",
         # The hub's ExecutionSpec ordered eager — the arm obeyed.
         "HUB_ORDERED_EAGER": "hub_ordered_eager",
@@ -235,7 +235,7 @@ def test_the_eager_phase_values_are_a_wire_contract() -> None:
         # booted yesterday — where before this token the refusal escaped setup
         # as `worker_function_unavailable reason=compile_cell_failed` and the
         # pod was reaped and replaced (three pods, 2026-08-11).
-        "ADOPTED_CELL_REFUSED": "adopted_cell_refused",
+        "ADOPTED_COMPILED_GRAPH_REFUSED": "adopted_compiled_graph_refused",
         # An OPERATOR ordered this worker eager-only.
         # The only member of this vocabulary that is a reversible DECISION
         # rather than a condition, and the reason it needs its own value:
@@ -294,7 +294,7 @@ def test_a_quarantined_cell_is_a_typed_event_not_a_log_line() -> None:
     quarantines its own cell serves eager for the rest of its life — the state
     the hub most needs named, and the one it could not see.
     """
-    assert _phase_uses(EagerPhase.CELL_QUARANTINED) == 1, (
+    assert _phase_uses(EagerPhase.COMPILED_GRAPH_QUARANTINED) == 1, (
         "the quarantine exit must emit a typed event")
 
 

@@ -285,7 +285,7 @@ def aot_without_the_export(
     def _stub(request: Any, pipe: Any, cfg: Any, target: Path, **kwargs: Any):
         exported.append({"family": cfg.family, "target": target})
         return mp.MintReport(
-            status="minted", artifact=str(target), cell_key=request.arm_token,
+            status="minted", artifact=str(target), compiled_graph_key=request.arm_token,
             phase="finalize", phases=mint_child._close_phases())
 
     monkeypatch.setattr(mint_child, "_mint_aot", _stub)

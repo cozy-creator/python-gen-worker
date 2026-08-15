@@ -12,7 +12,7 @@ modules that must not import the compile stack:
 
 * ``receipts`` verifies a delivered artifact before anything imports torch;
 * ``guard_closure`` sits inside the ``env_seal -> guard_closure -> compile_cache
-  -> registry -> cell_key -> env_seal`` cycle, so its own metadata read had to be
+  -> registry -> compiled_graph_key -> env_seal`` cycle, so its own metadata read had to be
   a function-local import.
 
 Callers keep their own refusal vocabulary (``AdoptError``, ``ReceiptError``, a
@@ -60,7 +60,7 @@ METADATA_NAME = "metadata.json"
 #: THE NUMBER, and its honest margin: 64 MiB is ~4.8x the largest envelope
 #: anyone has measured (the 13,377,167-byte sdxl cell above), so this is a
 #: margin, not a fit. Acceptable because exceeding it is not silent:
-#: `fleet_cells.adopt_delegated_mint` refuses `cell_envelope_unreadable` naming
+#: `fleet_cells.adopt_delegated_mint` refuses `compiled_graph_envelope_unreadable` naming
 #: this constant and the byte count, so the next envelope that outgrows it
 #: costs one typed event, not a mint. Raise it on that evidence; do not raise
 #: it on a guess.

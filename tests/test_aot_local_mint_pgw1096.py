@@ -8,7 +8,7 @@ subsequent run of that code reuses the same compiled cell."*
 What was RED before this issue, on every one of these:
 
 * a community-cloud pod minted a cell, ate the hub's
-  ``cell_publish_untrusted_tier`` 403, and ``_publish_async``'s ``finally``
+  ``compiled_graph_publish_untrusted_tier`` 403, and ``_publish_async``'s ``finally``
   rmtree'd the bytes — th#1643's SUNK case, once per boot, forever;
 * nothing in the tree could address a locally-stored AOT cell (``local_cells``
   is JIT-only and knows no ``ck1`` key);
@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
-from gen_worker import cell_key, fleet_cells, local_cell_store
+from gen_worker import compiled_graph_key, fleet_cells, local_cell_store
 from gen_worker.cell_adopt import AdoptOutcome
 
 KEY_A = "cg-key-v1-" + "a" * 56
@@ -61,7 +61,7 @@ def _artifact(tmp_path: Path, body: bytes = b"packed-cell-bytes") -> Path:
 def _armable_artifact(tmp_path: Path, *, key: str = KEY_A) -> Path:
     """A cell with a READABLE envelope — for the tests that reach the ARM.
 
-    pgw#1098: `_arm_exported_cell` refuses `cell_envelope_unreadable` before
+    pgw#1098: `_arm_exported_cell` refuses `compiled_graph_envelope_unreadable` before
     any other gate, for the local store exactly as for a child's fresh mint —
     which is precisely pgw#1096's "one gate, two sources" intent. Opaque bytes
     used to reach the arm only because the metadata read swallowed its own
@@ -74,7 +74,7 @@ def _armable_artifact(tmp_path: Path, *, key: str = KEY_A) -> Path:
     p = tmp_path / "mint" / "cell.tar.gz"
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(
-        {"kind": "aot-inductor", "cell_key": key, "family": "micro-diffusion"}
+        {"kind": "aot-inductor", "compiled_graph_key": key, "family": "micro-diffusion"}
     ).encode()
     with _tarfile.open(p, mode="w:gz") as tar:
         info = _tarfile.TarInfo("metadata.json")
@@ -100,7 +100,7 @@ def test_a_cell_is_addressed_by_the_same_ck1_key_the_hub_store_uses(
         _artifact(tmp_path), key=KEY_A, family="micro-diffusion", arm_token=ARM_A)
 
     assert cell is not None
-    assert cell.key == KEY_A and cell_key.is_key(cell.key)
+    assert cell.key == KEY_A and compiled_graph_key.is_key(cell.key)
     assert cell.artifact == store / "aot-cells" / KEY_A / "cell.tar.gz"
     assert cell.artifact.read_bytes() == b"packed-cell-bytes"
 
@@ -216,7 +216,7 @@ def test_a_stale_memo_costs_one_re_mint_and_never_a_wrong_cell(
     assert local_cell_store.lookup_for_arm(ARM_A) is None
 
     (store / "aot-cells" / local_cell_store.MEMO_DIRNAME / f"{ARM_A}.json"
-     ).write_text(json.dumps({"cell_key": "not-a-key"}))
+     ).write_text(json.dumps({"compiled_graph_key": "not-a-key"}))
     assert local_cell_store.lookup_for_arm(ARM_A) is None
 
 
@@ -366,12 +366,12 @@ def armable(monkeypatch: pytest.MonkeyPatch) -> List[Path]:
         assert verify_numerics is False, (
             "the local store's ADOPT path asked for the mint-time gate")
         seen.append(Path(artifact))
-        return AdoptOutcome.hit(str((meta or {}).get("cell_key") or ""))
+        return AdoptOutcome.hit(str((meta or {}).get("compiled_graph_key") or ""))
 
     monkeypatch.setattr(fleet_cells.provision, "arm_aot", _arm)
     monkeypatch.setattr(
         fleet_cells.artifact_meta, "try_read_metadata",
-        lambda p: {"cell_key": KEY_A, "family": "micro-diffusion"})
+        lambda p: {"compiled_graph_key": KEY_A, "family": "micro-diffusion"})
     # The pgw#1042 axis gate has its own tests (and, since pgw#1096, ONE
     # implementation shared with the delegated adopt). Here the runtime and
     # the cell agree, so the gate passes and what is under test is the
@@ -397,7 +397,7 @@ def test_a_second_boot_arms_from_this_machines_own_store_with_no_mint(
         _Pipe(), _Cfg(), None, 0, _Arm(), "micro-diffusion")  # type: ignore[arg-type]
 
     assert minted is not None
-    assert minted.cell_key == KEY_A
+    assert minted.compiled_graph_key == KEY_A
     assert minted.ref.endswith("#" + KEY_A)
     assert armable == [store / "aot-cells" / KEY_A / "cell.tar.gz"], (
         "the arm must be handed the STORE's bytes, not a copy nobody hashed")
@@ -412,7 +412,7 @@ def test_a_local_cell_that_cannot_arm_is_dropped_not_retried_forever(
         fleet_cells.provision, "arm_aot",
         lambda *a, **k: AdoptOutcome.miss("constants_unbound", "norm.weight"))
     monkeypatch.setattr(
-        fleet_cells.artifact_meta, "try_read_metadata", lambda p: {"cell_key": KEY_A})
+        fleet_cells.artifact_meta, "try_read_metadata", lambda p: {"compiled_graph_key": KEY_A})
     monkeypatch.setattr(fleet_cells, "arm_axis_divergence", lambda arm, meta, **_kw: "")
     events: List[Tuple[str, str]] = []
     monkeypatch.setattr(
@@ -424,7 +424,7 @@ def test_a_local_cell_that_cannot_arm_is_dropped_not_retried_forever(
     assert fleet_cells.arm_from_local_store(
         _Pipe(), _Cfg(), None, 0, _Arm(), "f") is None  # type: ignore[arg-type]
     assert not local_cell_store.cell_dir(KEY_A).exists()
-    assert ("local_cell_refused", "constants_unbound") in events
+    assert ("local_compiled_graph_refused", "constants_unbound") in events
 
 
 def test_a_local_cell_that_does_not_describe_this_runtime_is_refused_by_FACT(
@@ -442,7 +442,7 @@ def test_a_local_cell_that_does_not_describe_this_runtime_is_refused_by_FACT(
         lambda *a, **k: pytest.fail("a diverging cell must never reach the arm"))
     monkeypatch.setattr(
         fleet_cells.artifact_meta, "read_metadata",
-        lambda p: {"cell_key": KEY_A, "family": "micro-diffusion",
+        lambda p: {"compiled_graph_key": KEY_A, "family": "micro-diffusion",
                    "sm": "sm_120", "format": 2})
     events: List[Tuple[str, str]] = []
     monkeypatch.setattr(
@@ -453,7 +453,7 @@ def test_a_local_cell_that_does_not_describe_this_runtime_is_refused_by_FACT(
 
     assert fleet_cells.arm_from_local_store(
         _Pipe(), _Cfg(), None, 0, _Arm(), "micro-diffusion") is None  # type: ignore[arg-type]
-    assert ("local_cell_refused", "key_axis_divergence") in events
+    assert ("local_compiled_graph_refused", "key_axis_divergence") in events
     assert not local_cell_store.cell_dir(KEY_A).exists()
 
 
@@ -545,7 +545,7 @@ def test_an_untrusted_refusal_keeps_the_cell_instead_of_discarding_it(
     fleet_cells._publish_async(
         _Refusing(), "micro-diffusion",  # type: ignore[arg-type]
         local_cell_store.lookup(KEY_A).artifact,  # type: ignore[union-attr]
-        {"cell_key": KEY_A}, cell_key_digest=KEY_A, arm_token=ARM_A,
+        {"compiled_graph_key": KEY_A}, compiled_graph_key_digest=KEY_A, arm_token=ARM_A,
     ).join(timeout=30)
 
     assert local_cell_store.trust_class() == local_cell_store.TRUST_UNTRUSTED
@@ -571,7 +571,7 @@ def test_a_transport_failure_is_not_a_trust_verdict(
 
     fleet_cells._publish_async(
         _Broken(), "f", _artifact(tmp_path),  # type: ignore[arg-type]
-        {"cell_key": KEY_A}, cell_key_digest=KEY_A, arm_token=ARM_A,
+        {"compiled_graph_key": KEY_A}, compiled_graph_key_digest=KEY_A, arm_token=ARM_A,
     ).join(timeout=30)
 
     assert local_cell_store.trust_class() == ""
@@ -612,7 +612,7 @@ def test_cozy_local_keeps_its_cell_without_ever_asking_a_hub(
 def test_a_probe_pod_keeps_its_cell_because_its_publish_is_DISARMED(
     store: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """pgw#980 removes `cells.publish_intent` from the parent's allowlist, so a
+    """pgw#980 removes `compiled_graphs.publish_intent` from the parent's allowlist, so a
     probe's publish never reaches a hub and never produces a typed refusal.
     Read the predicate that OWNS that decision rather than sniffing the
     exception it raises."""

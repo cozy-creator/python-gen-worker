@@ -24,7 +24,7 @@ from gen_worker import (
     aot_serve,
     author_ci,
     boot_key,
-    cell_key,
+    compiled_graph_key,
     compile_cache,
     lifecycle,
     mint_supervisor,
@@ -96,7 +96,7 @@ class _Row:
     def __init__(self, entry: str, block: Dict[str, Any]) -> None:
         self.entry = entry
         self.key = f"cg-{entry}"
-        self.metadata = {cell_key.ENTRY_BLOCK_KEY: block}
+        self.metadata = {compiled_graph_key.ENTRY_BLOCK_KEY: block}
 
 
 class _Result:
@@ -359,7 +359,7 @@ def _report(cosine: float, *, measured: bool = True) -> numerics_probe.CompiledG
     axis = numerics_probe.ProbeAxis(entry="unet", target="unet")
     verdict = numerics_probe.AxisVerdict(
         axis=axis, comparison=comparison if measured else None,
-        reason="" if measured else "cell_forward_failed")
+        reason="" if measured else "compiled_graph_forward_failed")
     return numerics_probe.CompiledGraphNumerics(
         family="tiny", compiled_graph_key="cg-1", thresholds=thresholds,
         threshold_source=thresholds.source, verdicts=(verdict,), axes_total=1)

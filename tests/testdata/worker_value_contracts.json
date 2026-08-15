@@ -17,20 +17,20 @@
         "phase": "minted"
       }
     ],
-    "cell_resolve_hub_refusal_codes": [
-      "cell_resolve_ambiguous",
+    "compiled_graph_resolve_hub_refusal_codes": [
+      "compiled_graph_resolve_ambiguous",
       "compiled_graph_resolve_answer_out_of_order",
       "compiled_graph_resolve_batch_signature",
-      "cell_resolve_client_supplied_field",
+      "compiled_graph_resolve_client_supplied_field",
       "compiled_graph_resolve_duplicate_key",
-      "cell_resolve_incomplete",
+      "compiled_graph_resolve_incomplete",
       "compiled_graph_resolve_shared_receipt",
       "compiled_graph_resolve_short_answer",
       "compiled_graph_resolve_too_many_keys",
-      "cell_resolve_transport_unavailable",
+      "compiled_graph_resolve_transport_unavailable",
       "compiled_graph_resolve_unknown_status"
     ],
-    "cell_publish_untrusted_refusal_code": "cell_publish_untrusted_tier",
+    "compiled_graph_publish_untrusted_refusal_code": "compiled_graph_publish_untrusted_tier",
     "hardware_unsuitable_reason_classes": [
       "torch_unavailable",
       "cuda_unavailable",

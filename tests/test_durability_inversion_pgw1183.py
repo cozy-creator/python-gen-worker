@@ -48,7 +48,7 @@ def _artifact(tmp_path: Path, *, key: str = KEY_A, name: str = "mint") -> Path:
     p = tmp_path / name / "cell.tar.gz"
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(
-        {"kind": "aot-inductor", "cell_key": key, "family": "micro-diffusion"}
+        {"kind": "aot-inductor", "compiled_graph_key": key, "family": "micro-diffusion"}
     ).encode()
     with tarfile.open(p, mode="w:gz") as tar:
         info = tarfile.TarInfo("metadata.json")
@@ -224,7 +224,7 @@ def test_a_failed_publish_does_not_destroy_the_bytes(
     fleet_cells._publish_async(
         _Broken(), "micro-diffusion",  # type: ignore[arg-type]
         local_cell_store.lookup(KEY_A).artifact,  # type: ignore[union-attr]
-        {"cell_key": KEY_A}, cell_key_digest=KEY_A, arm_token=ARM_A,
+        {"compiled_graph_key": KEY_A}, compiled_graph_key_digest=KEY_A, arm_token=ARM_A,
     ).join(timeout=30)
 
     kept = local_cell_store.lookup(KEY_A)
@@ -246,7 +246,7 @@ def test_the_publish_thread_is_not_a_daemon(
     t = fleet_cells._publish_async(
         _Sink(), "f",  # type: ignore[arg-type]
         local_cell_store.lookup(KEY_A).artifact,  # type: ignore[union-attr]
-        {"cell_key": KEY_A}, cell_key_digest=KEY_A, arm_token=ARM_A)
+        {"compiled_graph_key": KEY_A}, compiled_graph_key_digest=KEY_A, arm_token=ARM_A)
     assert t.daemon is False
     t.join(timeout=30)
 

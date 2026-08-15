@@ -84,7 +84,7 @@ from typing import (
 import sys
 
 from . import (
-    cell_key, dist_records, env_seal, guard_closure, hot_swap,
+    compiled_graph_key, dist_records, env_seal, guard_closure, hot_swap,
     serve_posture, settings_authority,
 )
 from .api.errors import FatalError, RetryableError
@@ -163,12 +163,12 @@ def _cell_ref_identity(ref: str) -> str:
     family, flavor = parse_cell_ref(ref)
     if family and flavor:
 
-        if cell_key.is_key(flavor):
+        if compiled_graph_key.is_key(flavor):
             return f"{family}#{flavor}"
     return ref
 
 
-def record_cell_proven(ref: str) -> None:
+def record_compiled_graph_proven(ref: str) -> None:
     """Mark one cell identity as served-and-proven in this process."""
     identity = _cell_ref_identity(ref)
     if not identity:
@@ -177,13 +177,13 @@ def record_cell_proven(ref: str) -> None:
         _PROVEN_CELLS.add(identity)
 
 
-def cell_proven_in_process(ref: str) -> bool:
+def compiled_graph_proven_in_process(ref: str) -> bool:
     identity = _cell_ref_identity(ref)
     with _PROVEN_CELLS_LOCK:
         return bool(identity) and identity in _PROVEN_CELLS
 
 
-def record_cell_quarantined(ref: str) -> None:
+def record_compiled_graph_quarantined(ref: str) -> None:
     """Mark one cell identity as proof-failed in this process (pgw#672)."""
     identity = _cell_ref_identity(ref)
     if not identity:
@@ -193,7 +193,7 @@ def record_cell_quarantined(ref: str) -> None:
         _PROVEN_CELLS.discard(identity)
 
 
-def cell_quarantined_in_process(ref: str) -> bool:
+def compiled_graph_quarantined_in_process(ref: str) -> bool:
     identity = _cell_ref_identity(ref)
     with _PROVEN_CELLS_LOCK:
         return bool(identity) and identity in _QUARANTINED_CELLS
@@ -785,7 +785,7 @@ def execution_lane_label(weight_lane: str, lora_bucket: int = 0) -> str:
     string already carries wins — it is what was actually traced.
 
     pgw#1040: this body existed twice, byte for byte, as
-    ``cell_key._canonical_execution_lane`` and
+    ``compiled_graph_key._canonical_execution_lane`` and
     ``aot_contract.ExportSpec.execution_lane_label``; both were folded here.
     Since pgw#1059 the lane is store METADATA + discovery scoping, never a
     key axis — but the one-derivation rule stands for the same reason: a
@@ -939,7 +939,7 @@ _CLOSURE_ENTRYPOINTS = (
     "gen_worker.api.export_contract",
     "gen_worker.compile_cache",
     "gen_worker.guard_closure",
-    "gen_worker.cell_key",
+    "gen_worker.compiled_graph_key",
     "gen_worker.env_seal",
     "gen_worker.models.loading",
     "gen_worker.models.provision",
@@ -1044,11 +1044,11 @@ def toolchain_digest() -> Tuple[Tuple[str, str], ...]:
     ``transformers`` / ``peft`` rode this axis until 2026-08-11 and were
     evicted because their whole effect on a cell arrives through the traced
     graph, which the ``graph`` axis hashes node-for-node since pgw#1031 —
-    see ``cell_key``'s module docstring for the channel-by-channel argument
+    see ``compiled_graph_key``'s module docstring for the channel-by-channel argument
     and for the two fences (B1 code-only + the pgw#1097 folding fence;
     ``env_seal.assert_seal_unchanged``) that close the routes around it.
     Folded here, every model-library patch release re-keyed every cell in
-    the fleet for a graph that had not moved. ``cell_key.toolchain_facts``
+    the fleet for a graph that had not moved. ``compiled_graph_key.toolchain_facts``
     is the READER of the same membership, and the pair is what keeps one
     axis one derivation. Their versions stay RECORDED for forensics
     (:func:`_lib_versions`, ``artifact_metadata``'s ``libs`` block) — an
@@ -1220,7 +1220,7 @@ def _semantic_cache_tag(pipeline: Any, cfg: Any) -> str:
         str(SEMANTIC_TAG_FORMAT), "inductor",
         str(getattr(cfg, "family", "") or ""), execution_lane,
         "regional" if bool(getattr(cfg, "regional", False)) else "whole",
-        cell_key.facts_digest(declared_compile_facts(cfg)),
+        compiled_graph_key.facts_digest(declared_compile_facts(cfg)),
     ))
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
@@ -1475,7 +1475,7 @@ def fx_cache_failure_report() -> str:
     tar walk could only ever yield nothing, and the arithmetic did not degrade
     gracefully — it INVERTED. `fresh = live_keys - seeded` became EVERY live
     key, so **B1 was named on every boot with any FX entry at all**, while B2
-    was structurally unreportable and `cell_keys=0` (*"unreadable"*) was the
+    was structurally unreportable and `compiled_graph_keys=0` (*"unreadable"*) was the
     normal case. Measured on the real function: handed an exported cell — what
     the caller passes today — the output was byte-identical to passing
     ``None``, which is the shortest proof the argument carried no information.
@@ -1535,7 +1535,7 @@ class CellSelectionBugError(RuntimeError):
     for: the artifact's axes describe exactly the key this runtime computed
     for itself, so any arm failure is by construction a bug in the one
     shared selection/parity brain — never a compatibility outcome. Callers
-    must surface it as the ``cell_selection_bug`` event class (loud, wire-
+    must surface it as the ``compiled_graph_selection_bug`` event class (loud, wire-
     visible), never as a silent eager fallback."""
 
     def __init__(self, detail: str) -> None:
@@ -3097,10 +3097,10 @@ __all__ = [
     "execution_lane_bucket",
     "execution_lane_token",
     "runtime_key",
-    "record_cell_proven",
-    "record_cell_quarantined",
-    "cell_proven_in_process",
-    "cell_quarantined_in_process",
+    "record_compiled_graph_proven",
+    "record_compiled_graph_quarantined",
+    "compiled_graph_proven_in_process",
+    "compiled_graph_quarantined_in_process",
     "reset_target_code",
     "set_guard_failure_callback",
     "sku_slug",

@@ -39,7 +39,7 @@ from gen_worker.models import provision
 _META: Dict[str, Any] = {
     "family": "z-image",
     "weight_lane": "lora128",
-    "cell_key": "cg-key-v1-" + "0" * 56,
+    "compiled_graph_key": "cg-key-v1-" + "0" * 56,
     "entry": {"name": "transformer/e0", "target": "transformer"},
 }
 

@@ -35,8 +35,8 @@ There is no longer a mode that keeps the hub from dispatching to a probe:
 against a release nothing is routing traffic to.
 
 `GEN_WORKER_PROBE=1` is not advisory. It is read by the **control parent**, in
-`procsplit/actions.py`, and it removes `cells.publish_intent` /
-`cells.publish_complete` from the set of hub calls the parent will make on the
+`procsplit/actions.py`, and it removes `compiled_graphs.publish_intent` /
+`compiled_graphs.publish_complete` from the set of hub calls the parent will make on the
 compute child's behalf. The compute child holds no credential and can reach the
 hub only through that allowlist, so **nothing you rsync into the child can
 re-arm publishing.** That is the guarantee: it is structural, not procedural.

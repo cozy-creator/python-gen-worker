@@ -462,7 +462,7 @@ def test_an_adopted_cell_that_will_not_arm_does_not_kill_the_function(
                                   None, order)
 
     assert outcome.armed is False
-    assert outcome.eager_reason == cell_adopt.EagerPhase.ADOPTED_CELL_REFUSED
+    assert outcome.eager_reason == cell_adopt.EagerPhase.ADOPTED_COMPILED_GRAPH_REFUSED
 
     # ...and it says so ON THE WIRE, under the kind that already carries the
     # rest of this journey, with the refusing gate named (pgw#1116's shape).

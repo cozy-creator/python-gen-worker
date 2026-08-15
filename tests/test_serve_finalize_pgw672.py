@@ -330,7 +330,7 @@ def test_a_mandatory_lane_without_a_declaration_fails_closed_before_it_compiles(
 
     monkeypatch.setattr(
         provision, "enable_compiled",
-        lambda *a, **k: AdoptOutcome.miss("no_cell"))
+        lambda *a, **k: AdoptOutcome.miss("no_compiled_graph"))
     monkeypatch.setattr(fleet_cells, "_cuda_ready", lambda: True)
     monkeypatch.setattr(cc, "toolchain_present", lambda: True)
     monkeypatch.setattr(cc, "mandatory_serving", lambda pipe: True)

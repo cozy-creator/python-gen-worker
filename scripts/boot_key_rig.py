@@ -137,7 +137,7 @@ def real_weight_class_hashes(veh: Any, tree: Path) -> Dict[str, str]:
 
     THE residual risk of the whole derivation, isolated. The boot path and the
     mint path already call the identical functions (``aot_mint.keying_block`` ->
-    ``aot_serve.artifact_metadata`` -> ``cell_key.from_exported_artifact_metadata``),
+    ``aot_serve.artifact_metadata`` -> ``compiled_graph_key.from_exported_artifact_metadata``),
     so the ONLY thing a real mint can still disagree with a boot derivation
     about is whether the STRUCTURE-ONLY composition traces the same graph as the
     weight-bearing one. That question needs no compile: load the checkpoint for

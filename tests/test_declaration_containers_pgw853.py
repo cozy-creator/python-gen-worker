@@ -374,7 +374,7 @@ def test_existing_declarations_are_byte_identical() -> None:
     assert '"template"' not in _fingerprint(decl)
 
 
-def test_the_new_fields_are_absent_from_the_cell_key_contract() -> None:
+def test_the_new_fields_are_absent_from_the_compiled_graph_key_contract() -> None:
     """`declared_compile_facts` is the local declared-compile-contract block
     (pgw#1059: no longer a key-axis input). It reads shapes/targets/
     text_lens/dynamic/regional/lora_bucket/guidance — NOT input or arg rows

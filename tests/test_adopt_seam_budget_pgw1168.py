@@ -34,7 +34,7 @@ _GIB = 1 << 30
 _META: Dict[str, Any] = {
     "family": "sdxl",
     "weight_lane": "w8a8",
-    "cell_key": "cg-key-v1-" + "0" * 56,
+    "compiled_graph_key": "cg-key-v1-" + "0" * 56,
     "entry": {"name": "unet/e0", "target": "unet"},
 }
 
@@ -79,7 +79,7 @@ def _arm(tmp_path: Path, **kw: Any):
 
 
 def _row(events: List[Tuple[str, str, str]]) -> str:
-    rows = [d for k, _p, d in events if k == "cell_adopt_budget"]
+    rows = [d for k, _p, d in events if k == "compiled_graph_adopt_budget"]
     assert len(rows) == 1, f"expected exactly ONE budget row, got {len(rows)}"
     return rows[0]
 
@@ -173,7 +173,7 @@ def test_each_armed_CLASS_gets_ITS_OWN_row_never_a_pooled_one(
     _arm(tmp_path, verify_numerics=False)
     _arm(tmp_path, verify_numerics=False)
 
-    rows = [d for k, _p, d in events if k == "cell_adopt_budget"]
+    rows = [d for k, _p, d in events if k == "compiled_graph_adopt_budget"]
     assert len(rows) == 2, rows
     assert all("entries=1" in r for r in rows), rows
 

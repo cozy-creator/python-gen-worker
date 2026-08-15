@@ -3,9 +3,9 @@
 The executor runs in the compute child (pgw#783, the only execution model).
 That child holds NO credential by construction — ``worker_jwt_provider()``
 returns ``""`` (pgw#763 delta 1, ``child.py``'s ``current_worker_jwt``). The
-resolve is a PARENT-mediated action (``cells.resolve``): the parent supplies the
+resolve is a PARENT-mediated action (``compiled_graphs.resolve``): the parent supplies the
 credential and the base URL. So a ``not bearer`` gate in ``_boot_adopt`` refused
-boot-adopt on every real serving pod — derive never ran, ``/v1/worker/cells/
+boot-adopt on every real serving pod — derive never ran, ``/v1/worker/compiled-graphs/
 resolve`` never fired, the pod fell straight through to self-mint, and the whole
 compile-once-reuse-forever circle stayed open (measured on the 2026-08-11 2-pod
 run: POD B re-minted, ZERO resolve calls, no ``trace_for_key``/``key_fold``).
@@ -123,7 +123,7 @@ def test_no_bearer_and_no_seam_degrades_without_deriving(wired):
     it degrades by NAMING itself, never by returning a bare None — a
     refusal that carries no reason is how three pods refused unattributably.
 
-    pgw#1127 narrowed the token from `no_hub` to `no_cell_source`, and the
+    pgw#1127 narrowed the token from `no_hub` to `no_compiled_graph_source`, and the
     narrowing is the point: the hub is only ONE of the two things that can
     answer a derived ck1 key, and this pod's own store is the other. The
     tmp-path store this suite runs against is empty, so the fast path is
@@ -133,7 +133,7 @@ def test_no_bearer_and_no_seam_degrades_without_deriving(wired):
     ex, calls = wired
     # broker._broker is None (fixture); seam is down.
     out = _run_boot_adopt(ex)
-    assert out is not None and out.reason == "no_cell_source"
+    assert out is not None and out.reason == "no_compiled_graph_source"
     assert not out.adopted
     assert calls == []
 
