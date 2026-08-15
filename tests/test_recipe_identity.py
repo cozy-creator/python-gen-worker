@@ -76,7 +76,7 @@ def pinned_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_static_closure_reaches_the_composition_code() -> None:
     closure = dict(cc.static_code_closure())
     # Entrypoints and their import graph (root-imports makes this sound).
-    for probe in ("gen_worker/compile_cache.py", "gen_worker/compiled_graph_key.py",
+    for probe in ("gen_worker/compile_cache.py", "gen_worker/graph_facts.py",
                   "gen_worker/guard_closure.py", "gen_worker/env_seal.py",
                   "gen_worker/models/loading.py", "gen_worker/__init__.py"):
         assert probe in closure, probe
@@ -149,7 +149,7 @@ def test_metadata_roundtrips_the_recipe_key(pinned_runtime: None) -> None:
     assert meta["compiled_graph_key"] == want.value
     # A cell with no toolchain block has no recipe identity.
     legacy = {k: v for k, v in meta.items() if k != "toolchain"}
-    with pytest.raises(ck.IdentityError, match="recipe"):
+    with pytest.raises(ck.IdentityError, match="toolchain"):
         ck.from_artifact_metadata(legacy)
     # pgw#990's memo half is GONE with its subject (pgw#1181): the local JIT
     # kind that recorded `code_closure` and carried no `compiled_graph_key` was the
