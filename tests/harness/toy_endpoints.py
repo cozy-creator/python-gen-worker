@@ -191,7 +191,7 @@ class SlotIdentityFixedEndpoint:
     def slot_identity_fixed(self, ctx: RequestContext[_ToyDefaults], data: EchoIn) -> EchoOut:
         resolved = ctx.slots["pipeline"]
         ref = resolved.ref
-        return EchoOut(response=f"{ref.source}:{ref.path}:{ref.tag}")
+        return EchoOut(response=f"{ref.source}:{ref.path}@{ref.release}")
 
 
 CATALOG_DEFAULT_PIPELINE = Hub("harness/slot-catalog-default", release="prod")
@@ -212,7 +212,7 @@ class SlotIdentityCatalogEndpoint:
     def slot_identity_catalog(self, ctx: RequestContext[_ToyDefaults], data: EchoIn) -> EchoOut:
         resolved = ctx.slots["pipeline"]
         ref = resolved.ref
-        return EchoOut(response=f"{ref.source}:{ref.path}:{ref.tag}")
+        return EchoOut(response=f"{ref.source}:{ref.path}@{ref.release}")
 
 
 # ---------------------------------------------------------------------------
