@@ -487,6 +487,7 @@ module = [
   "tests.test_graph_witness_pgw1031",
   "tests.test_group_host_policy_pgw782",
   "tests.test_group_permits_pgw779",
+  "tests.test_group_processes_pgw783",
   "tests.test_group_spawn_pgw783",
   "tests.test_guard_closure_pgw681",
   "tests.test_guard_closure_pgw691",
