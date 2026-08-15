@@ -66,6 +66,11 @@ SRC = REPO / "src" / "gen_worker"
 # not a key axis, so fencing on it would fence modules that compute no key —
 # exactly the noise the note above says to avoid.
 AXIS_PRODUCERS: Tuple[str, ...] = (
+    # pgw#1277 moved this derivation out to torch_compiled_graphs.identity,
+    # so no module in src/gen_worker calls it TODAY. The entry stays on
+    # purpose: a worker calling tcg_identity.from_axes() would be computing
+    # a key axis, which is exactly what this fence covers.
+    # fence-symbol-exempt: lives in TCG now; kept to fence the next call site
     "from_axes",
     "toolchain_axis_digest",
     "from_artifact_metadata",

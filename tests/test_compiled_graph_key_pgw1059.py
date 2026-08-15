@@ -201,13 +201,13 @@ def test_single_derivation_fence_is_red_provable(tmp_path):
     rogue = tmp_path / "rogue.py"
     rogue.write_text(
         "def my_own_key(meta):\n"
-        "    return from_entry_metadata(meta)\n")
-    sites = _derivation_sites(tmp_path, "from_entry_metadata(")
+        "    return from_artifact_metadata(meta)\n")
+    sites = _derivation_sites(tmp_path, "from_artifact_metadata(")
     assert sites == {"rogue.py": 1}
     # ...and comments do not trip it (the scanner reads code, not prose).
     commented = tmp_path / "commented.py"
-    commented.write_text("# from_entry_metadata( in prose\n")
-    sites = _derivation_sites(tmp_path, "from_entry_metadata(")
+    commented.write_text("# from_artifact_metadata( in prose\n")
+    sites = _derivation_sites(tmp_path, "from_artifact_metadata(")
     assert "commented.py" not in sites
 
 
