@@ -116,7 +116,7 @@ def validate_endpoint_lock(lock_dict: Dict[str, Any]) -> EndpointLockValidationR
     )
 
 
-def undeclared_slot_layouts(lock_dict: Dict[str, Any]) -> List[str]:
+def _undeclared_slot_layouts(lock_dict: Dict[str, Any]) -> List[str]:
     """A19 — the model slots in this manifest that declare no consumed
     tensor-layout contract, each already rendered as its own refusal.
 
@@ -147,11 +147,12 @@ def undeclared_slot_layouts(lock_dict: Dict[str, Any]) -> List[str]:
 
 
 def refuse_undeclared_slot_layouts(lock_dict: Dict[str, Any]) -> None:
-    """:func:`undeclared_slot_layouts` as the typed refusal, for callers that
-    want the exception rather than a build-error list."""
+    """A19's refusal, typed. Every offender in ONE exception rather than one
+    per build — an author fixing them one image build at a time is why nobody
+    fixed them."""
     from ..models.tensor_layout_contract import UndeclaredSlotLayoutError
 
-    found = undeclared_slot_layouts(lock_dict)
+    found = _undeclared_slot_layouts(lock_dict)
     if found:
         raise UndeclaredSlotLayoutError("\n\n".join(found))
 
@@ -159,8 +160,14 @@ def refuse_undeclared_slot_layouts(lock_dict: Dict[str, Any]) -> None:
 def _check_slot_layout_declarations(
     lock_dict: Dict[str, Any], errors: List[str],
 ) -> None:
-    """The same refusal as build errors, so one run names every offender."""
-    errors.extend(undeclared_slot_layouts(lock_dict))
+    """The typed refusal, as a build error beside the others, so one run
+    surfaces it with everything else the manifest gets wrong."""
+    from ..models.tensor_layout_contract import UndeclaredSlotLayoutError
+
+    try:
+        refuse_undeclared_slot_layouts(lock_dict)
+    except UndeclaredSlotLayoutError as exc:
+        errors.append(str(exc))
 
 
 def _check_aot_preconditions(

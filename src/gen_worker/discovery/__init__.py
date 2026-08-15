@@ -6,7 +6,6 @@ from .project import ProjectConfig, load_project_config
 from .validation import (
     EndpointLockValidationResult,
     refuse_undeclared_slot_layouts,
-    undeclared_slot_layouts,
     validate_endpoint_lock,
 )
 from .walk import EndpointImportError
@@ -21,6 +20,5 @@ __all__ = [
     "load_project_config",
     "EndpointLockValidationResult",
     "refuse_undeclared_slot_layouts",
-    "undeclared_slot_layouts",
     "validate_endpoint_lock",
 ]

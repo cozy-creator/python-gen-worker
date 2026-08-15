@@ -21,7 +21,6 @@ import pytest
 
 from gen_worker.discovery import (
     refuse_undeclared_slot_layouts,
-    undeclared_slot_layouts,
     validate_endpoint_lock,
 )
 from gen_worker.models.tensor_layout_contract import (
@@ -136,10 +135,12 @@ def test_every_offender_is_named_in_one_run() -> None:
                                        {"name": "refiner"}]},
         {"name": "edit", "slots": [{"name": "pipeline"}]},
     ]}
-    found = undeclared_slot_layouts(manifest)
-    assert len(found) == 3
-    assert sum("'refiner'" in f for f in found) == 1
-    assert sum("'edit'" in f for f in found) == 1
+    with pytest.raises(UndeclaredSlotLayoutError) as excinfo:
+        refuse_undeclared_slot_layouts(manifest)
+    message = str(excinfo.value)
+    assert message.count("declares no consumed") == 3
+    assert "'refiner'" in message
+    assert "'edit'" in message
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +211,7 @@ def test_undeclarable_carries_its_reason_onto_the_manifest(
     assert slot["layouts_undeclarable"] == reason
     assert "layouts" not in slot
     assert validate_endpoint_lock(manifest).ok
-    assert undeclared_slot_layouts(manifest) == []
+    refuse_undeclared_slot_layouts(manifest)  # does not raise
 
 
 def test_the_escape_is_a_declaration_and_not_a_default() -> None:
