@@ -21,7 +21,7 @@ CUDA is touched.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, List
 
 import pytest
 
@@ -128,7 +128,7 @@ def test_a_multi_gpu_host_with_no_topology_names_the_invisible_cards(
 def test_the_fit_ladder_gates_on_the_least_free_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # DPA-7: `gate_functions` turns probe_hardware()['gpu_free_mem'] into
+    # DPA-7: `gate_functions` turns probe_hardware().vram_free_bytes into
     # serve plans for EVERY function. Card 0 carries group 0's weights plus the
     # allocator cache, so reading it planned rungs for groups 1-3 from a card
     # they never touch — and a genuinely-unfit card 0 refused functions the
@@ -149,7 +149,7 @@ def test_the_fit_ladder_gates_on_the_least_free_group(
     monkeypatch.setattr(torch.cuda, "mem_get_info",
                         lambda i: (40 * GiB, 48 * GiB))
 
-    info: Dict[str, Any] = lifecycle.probe_hardware()
-    assert info["gpu_total_mem"] == 48 * GiB
-    assert info["gpu_free_mem"] == 9 * GiB, (
+    facts = lifecycle.probe_hardware()
+    assert facts.vram_total_bytes == 48 * GiB
+    assert facts.vram_free_bytes == 9 * GiB, (
         "the gate must plan for the group with the LEAST room")

@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from . import settings_authority
+from .hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
@@ -97,10 +98,10 @@ def probe() -> str:
     """"" if the block-sparse path is runnable here, else why not. Called at
     setup so the refusal is a boot fact, not a first-request surprise."""
     try:
-        import torch
+        import torch  # noqa: F401 — the import IS the probe here
     except Exception as exc:  # noqa: BLE001
         return f"torch unimportable: {exc}"
-    if not torch.cuda.is_available():
+    if not cuda_ready():
         return "no CUDA device"
     try:
         _bits()

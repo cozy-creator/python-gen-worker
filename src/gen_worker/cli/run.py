@@ -46,6 +46,7 @@ from ..api.binding import rebind_pick
 from .sockaddr import DEFAULT_SOCKET_PATH
 from . import invoke as invoke_mod
 from .local_context import _stderr_emitter
+from ..hostfacts import cuda_ready
 
 
 # Exit codes.
@@ -794,12 +795,7 @@ def _structure_device(device: str) -> str:
     want = (device or "").strip().lower()
     if want:
         return want
-    try:
-        import torch
-
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    except Exception:  # noqa: BLE001 — torch-less environment
-        return "cpu"
+    return "cuda" if cuda_ready() else "cpu"
 
 
 def _load_injected_model(

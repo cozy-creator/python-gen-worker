@@ -53,6 +53,7 @@ from .tensor_layout_contract import (
 )
 from typing import Any, Dict, List, Optional
 import shutil
+from ..hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
@@ -346,7 +347,7 @@ def w8a8_gemm_mode() -> str:
         import torch
     except ImportError:
         return ""
-    if not torch.cuda.is_available() or not hasattr(torch, "float8_e4m3fn"):
+    if not cuda_ready() or not hasattr(torch, "float8_e4m3fn"):
         return ""
     major, minor = torch.cuda.get_device_capability()
     return _choose_gemm_mode(major * 10 + minor)

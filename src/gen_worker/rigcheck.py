@@ -52,6 +52,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
+from .hostfacts import cuda_ready
 
 __all__ = [
     "CudaUnusable",
@@ -69,13 +70,6 @@ __all__ = [
 #: never WHETHER the assertion runs.
 FLEET_LINE_FILE_ENV = "GEN_WORKER_FLEET_LINE_FILE"
 
-#: ``cuda_probe.classify_probe_failure`` classes that mean THERE IS NO CUDA
-#: DEVICE HERE, as against a device this host cannot drive. A cardless box is a
-#: different mistake and must not be reported as a host fault (pgw#1120) — but
-#: "cardless" is a fact about the PROBE, not about whether `nvidia-smi` could be
-#: read: only a host with a driver to fail can answer `driver_too_old` or
-#: `cuda_error`, so a broken diagnostic can no longer buy an exemption.
-CARDLESS_PROBE_CLASSES = frozenset({"cuda_unavailable", "torch_unavailable"})
 
 #: Wheels whose version decides whether a kernel/quantization result is about the
 #: fleet's stack or about the rig's. Reported on every run; absence is reported,
@@ -423,7 +417,7 @@ def resolve_environment() -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         env["cudnn"] = None
     try:
-        env["cuda_available"] = bool(torch.cuda.is_available())
+        env["cuda_available"] = bool(cuda_ready())
     except Exception:  # noqa: BLE001
         env["cuda_available"] = False
     if env["cuda_available"]:
@@ -553,6 +547,8 @@ def assert_fleet_line(
     # mistake") survives, on a signal a broken diagnostic cannot fake: the probe
     # says WHICH failure this is, and only a host that has a driver to fail can
     # answer `driver_too_old`/`cuda_error`.
+    from .cuda_probe import CARDLESS_PROBE_CLASSES
+
     if (env.get("cuda_usable") is False
             and str(env.get("cuda_unusable_class") or "")
             not in CARDLESS_PROBE_CLASSES):

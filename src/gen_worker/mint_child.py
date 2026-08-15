@@ -75,6 +75,7 @@ from .child_preflight import (
     select_specs,
 )
 from .file_hash import sha256_file
+from .hostfacts import cuda_ready
 from .mint_process import (
     EXIT_BAD_REQUEST,
     EXIT_MINTED,
@@ -266,7 +267,7 @@ def _release() -> None:
     try:
         import torch
 
-        if torch.cuda.is_available():
+        if cuda_ready():
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats()
     except Exception:  # noqa: BLE001 — best effort
@@ -903,12 +904,7 @@ def _device_label(request: MintRequest) -> str:
     """Where this child's tensors live — the ordinal the parent chose, or the
     card this process defaults to. ``cpu`` on a cardless box, stated rather
     than assumed: a structure built as "cpu" compiles a CPU cell."""
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return "cpu"
-    except Exception:  # noqa: BLE001 — torch-less: nothing to place
+    if not cuda_ready():
         return "cpu"
     ordinal = int(getattr(request, "device", -1) or -1)
     return f"cuda:{ordinal}" if ordinal >= 0 else "cuda"
@@ -924,7 +920,7 @@ def _reset_peak() -> None:
     try:
         import torch
 
-        if torch.cuda.is_available():
+        if cuda_ready():
             torch.cuda.reset_peak_memory_stats()
     except Exception:  # noqa: BLE001 — a probe never fails a mint
         logger.debug("mint-child: reset_peak_memory_stats failed",
@@ -943,7 +939,7 @@ def _peak_vram() -> int:
     try:
         import torch
 
-        if not torch.cuda.is_available():
+        if not cuda_ready():
             return 0
         return int(torch.cuda.max_memory_allocated())
     except Exception:  # noqa: BLE001 — a probe never fails a report

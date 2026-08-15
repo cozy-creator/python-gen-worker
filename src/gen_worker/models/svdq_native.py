@@ -65,6 +65,7 @@ from .svdq_awq import decode_awq_linear, is_awq_linear
 from .svdq_layout import LOWRANK_QUANT_KEY, LOWRANK_QUANT_SCHEMES, decode_linear
 from .native_kernels import svdq_modulation_execution_lane
 from .svdq_awq_packed import awq_packed_supported, build_awq_packed_linear
+from ..hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +106,7 @@ def svdq_native_reason() -> Optional[str]:
         import torch
     except ImportError:
         return "torch is not installed"
-    if not torch.cuda.is_available():
+    if not cuda_ready():
         return "native svdq-fp4 requires a CUDA GPU"
     if getattr(torch, "float4_e2m1fn_x2", None) is None:
         return f"torch {torch.__version__} has no float4_e2m1fn_x2 dtype"
@@ -505,7 +506,7 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
     if mode not in ("blockwise", "dense"):
         mode = "blockwise" if svdq_native_available() else "dense"
     if device is None:
-        device = ("cuda" if mode == "blockwise" and torch.cuda.is_available()
+        device = ("cuda" if mode == "blockwise" and cuda_ready()
                   else "cpu")
     dev = torch.device(device)
 

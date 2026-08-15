@@ -28,6 +28,7 @@ from ..component_vocab import denoiser_components
 from .safetensors_header import header_len_ok
 from typing import Any, Optional
 import importlib.metadata as md
+from ..hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
@@ -352,7 +353,7 @@ def check_svdq_loadable(art: SvdqArtifact) -> None:
         raise SvdqStackError(reason)
     import torch
 
-    if not torch.cuda.is_available():
+    if not cuda_ready():
         raise SvdqHardwareError("svdq artifacts require a CUDA GPU")
     major, minor = torch.cuda.get_device_capability()
     sm = major * 10 + minor

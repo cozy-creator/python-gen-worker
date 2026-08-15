@@ -1,37 +1,25 @@
 """pgw#876 §4 — the recurrence guard for "two builders for the same fact, only
 one of which is ever on the wire".
 
-`WorkerResources` is built in two places: `lifecycle.build_resources()` in the
-COMPUTE CHILD, and `procsplit.parent.ParentControl._parent_resources()` in the
-CONTROL PARENT. The process split is UNCONDITIONAL, and
-`_apply_identity_and_resources` overwrites the child's copy wholesale (or
-clears the field outright when the parent has no measurement), so **only the
-parent's copy ever reaches the hub.**
+`WorkerResources` had TWO builders — `lifecycle.build_resources()` in the
+compute child and `procsplit.parent.ParentControl._parent_resources()` in the
+control parent. The split is UNCONDITIONAL and the parent overwrote the child's
+copy wholesale, so only the parent's ever reached the hub. pgw#898 deleted the
+child's; `tests/test_hostfacts_pgw896.py` fences the count at one.
 
-The guard: a field taught to only ONE builder is dead on the wire. A pod then
-ships the protobuf default and is idle-reaped as `cold_idle_never_dispatched`
-while the real value sat in its container env the whole time.
-
-These two rows make that fingerprint a red test instead of a paid pod:
-
-* the parent's builder must assign every wire field (except the documented
-  exemption), proved at the VALUE level — feed it all-distinct inputs and no
-  field may come back at its protobuf default;
-* the two builders must assign the SAME field set, proved at the SOURCE level —
-  so teaching one of them a new field and not the other goes red here rather
-  than on a pod.
+The guard that survives: a field the ONE builder does not assign is dead on the
+wire. A pod then ships the protobuf default and is idle-reaped as
+`cold_idle_never_dispatched` while the real value sat in its container env the
+whole time. Proved at the VALUE level — feed the builder all-distinct inputs
+and no field may come back at its protobuf default.
 """
 
 from __future__ import annotations
 
-import ast
-import inspect
-import textwrap
 from pathlib import Path
 
 import pytest
 
-from gen_worker import lifecycle as lifecycle_mod
 from gen_worker.config import load_settings
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.procsplit.parent import ParentControl
@@ -48,10 +36,12 @@ _INTENTIONALLY_UNSET = frozenset({"git_commit"})
 _MEASUREMENT = {
     "hardware": {
         "gpu_count": 4,
-        "gpu_total_mem": 85899345920,
+        "vram_total_bytes": 85899345920,
+        "vram_free_bytes": 42949672960,
         "gpu_name": "NVIDIA H100 80GB HBM3",
         "gpu_sm": "90",
         "torch_version": "2.13.0+cu130",
+        "cuda_version": "13.0",
         "installed_libs": ["diffusers==0.36.0"],
         # The HOST driver. 580.159.04 is a real RunPod draw
         # and the tuple-vs-float trap (as floats 580.159 < the 580.65 floor).
@@ -120,9 +110,8 @@ def test_the_parent_builder_assigns_every_wire_field(monkeypatch: pytest.MonkeyP
     assert not unset, (
         f"the ON-THE-WIRE WorkerResources builder never assigns {sorted(unset)}. "
         "An empty value here is not a default the hub can read as a choice — it "
-        "is the signature of a field taught to `lifecycle.build_resources()` "
-        "(the compute child's builder, which the parent overwrites wholesale) "
-        "instead of to `_parent_resources()`. th#1359 Part 2 did exactly that "
+        "is the signature of a field the ONE builder was never taught. "
+        "th#1359 Part 2 did exactly that "
         "with `worker_mode` and every forge pod bought afterwards was "
         "idle-reaped as a serving pod."
     )
@@ -192,31 +181,3 @@ def test_a_wheel_that_still_sends_the_retired_fields_is_not_refused() -> None:
     assert got.ParseFromString(bytes(twire)) == len(twire)
     assert got.family == "sdxl" and got.requested_cell_key == "ck1-abc"
     assert not hasattr(got, "requested_cell_axes")
-
-
-def _assigned_field_names(func: object) -> set:
-    """The `pb.WorkerResources(...)` keyword names one builder assigns."""
-    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        target = node.func
-        name = target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")
-        if name == "WorkerResources":
-            return {kw.arg for kw in node.keywords if kw.arg}
-    raise AssertionError(f"{func!r} no longer constructs a pb.WorkerResources")
-
-
-def test_the_two_resources_builders_assign_the_same_fields() -> None:
-    """Both builders exist; only the parent's is on the wire. Until there is
-    ONE builder, they must at least stay field-for-field identical, so a lane
-    adding a fact does not have to know which of the two is live."""
-    child = _assigned_field_names(lifecycle_mod.Lifecycle.build_resources)
-    parent = _assigned_field_names(ParentControl._parent_resources)
-    assert child == parent, (
-        "the two WorkerResources builders have drifted: "
-        f"child-only={sorted(child - parent)} parent-only={sorted(parent - child)}. "
-        "`procsplit/parent.py::_parent_resources` is the one the hub receives — "
-        "the process split is unconditional and the parent overwrites the "
-        "child's copy wholesale. A field only the child sets is dead on the wire."
-    )

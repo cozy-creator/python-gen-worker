@@ -60,6 +60,7 @@ from ..config import Settings
 from ..pb import worker_scheduler_pb2 as pb
 from ..transport import FatalTransportError, Transport
 from ..topology import ExecutionTopology
+from .. import hostfacts
 from .. import postmortem
 from .. import proc_evidence
 from .. import config, worker_credential, worker_identity
@@ -1424,7 +1425,14 @@ class ParentControl:
         m = self._measurement
         if m is None:
             return None
-        hw = m.get("hardware") or {}
+        try:
+            hw = msgspec.convert(m.get("hardware") or {}, hostfacts.HostFacts)
+        except msgspec.ValidationError:
+            # An unmeasured axis is a zero, never a dead parent: the child that
+            # produced this JSON is the same wheel, so a mismatch here is a
+            # broken measurement, not a version skew.
+            logger.error("host measurement is not a HostFacts", exc_info=True)
+            hw = hostfacts.HostFacts()
         canary = None
         c = m.get("canary")
         if isinstance(c, dict):
@@ -1444,15 +1452,15 @@ class ParentControl:
             )
         return pb.WorkerResources(
             host_canary=canary,
-            gpu_count=int(hw.get("gpu_count") or 0),
-            vram_total_bytes=int(hw.get("gpu_total_mem") or 0),
-            gpu_name=str(hw.get("gpu_name") or ""),
-            gpu_sm=str(hw.get("gpu_sm") or ""),
-            torch_version=str(hw.get("torch_version") or ""),
+            gpu_count=hw.gpu_count,
+            vram_total_bytes=hw.vram_total_bytes,
+            gpu_name=hw.gpu_name,
+            gpu_sm=hw.gpu_sm,
+            torch_version=hw.torch_version,
             # The host driver, so the hub can answer "can the host we landed on
             # run this pod's CUDA line?" from a SUCCESSFUL boot, not only a corpse.
-            driver_version=str(hw.get("driver_version") or ""),
-            installed_libs=[str(x) for x in (hw.get("installed_libs") or [])],
+            driver_version=hw.driver_version,
+            installed_libs=list(hw.installed_libs),
             gen_worker_version=str(m.get("gen_worker_version") or ""),
             image_digest=self._settings.worker_image_digest,
             instance_id=self._settings.runpod_pod_id or "",
@@ -1569,14 +1577,16 @@ class ParentControl:
         resources = self._parent_resources()
         if resources is not None:
             hello.resources.CopyFrom(resources)
-        elif hello.HasField("resources"):
-            logger.error(
-                "no parent-side host measurement is available; DROPPING the "
-                "child's self-reported resources rather than relaying "
-                "tenant-reachable numbers the fleet condemns SKUs on "
-                "(pgw#763 delta 2 / th#1310)"
-            )
-            hello.ClearField("resources")
+            return
+        # The child no longer builds a second copy to fall back on (pgw#898),
+        # so an unmeasured host ships a Hello with NO resources — loudly. The
+        # alternative was relaying tenant-reachable numbers the fleet condemns
+        # SKUs on (pgw#763 delta 2 / th#1310).
+        logger.error(
+            "no parent-side host measurement is available; this Hello ships "
+            "with NO resources — the hub sees an unmeasured host"
+        )
+        hello.ClearField("resources")
 
     async def on_hello_ack(self, ack: pb.HelloAck) -> None:
         # delta 1: the hub's own base URL, for parent-mediated actions.

@@ -58,6 +58,8 @@ import contextlib
 import logging
 import threading
 from typing import Any, Dict, Iterator, Optional
+from .hostfacts import cuda_ready
+from . import hostfacts
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +81,7 @@ def _torch() -> Any:
     try:
         import torch
 
-        if not torch.cuda.is_available():
+        if not cuda_ready():
             return None
         return torch
     except Exception:  # noqa: BLE001 — a probe never changes an outcome
@@ -156,20 +158,8 @@ def headroom(device: Optional[int] = None) -> Optional[int]:
     device cannot be probed. Driver-free plus the allocator cache this process
     can return — cached blocks are headroom, and counting only ``free`` would
     refuse a card holding a large idle cache."""
-    torch = _torch()
     index = _device_index(device)
-    if torch is None or index is None:
-        return None
-    try:
-        free, _total = torch.cuda.mem_get_info(index)
-        reclaimable = max(
-            0,
-            int(torch.cuda.memory_reserved(index))
-            - int(torch.cuda.memory_allocated(index)),
-        )
-        return int(free) + reclaimable
-    except Exception:  # noqa: BLE001
-        return None
+    return None if index is None else hostfacts.headroom_bytes(index)
 
 
 def refusal(what: str, device: Optional[int] = None) -> str:

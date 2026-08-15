@@ -30,6 +30,7 @@ import logging
 import threading
 import weakref
 from typing import Any, Callable, Iterator, Optional
+from ..hostfacts import cuda_ready
 
 from .memory import (
     effective_ram_floor_gb,
@@ -213,7 +214,7 @@ def copy_stream(device: Optional[Any] = None) -> Optional[Any]:
         import torch
     except Exception:
         return None
-    if not torch.cuda.is_available():
+    if not cuda_ready():
         return None
     if device is None:
         index = int(torch.cuda.current_device())

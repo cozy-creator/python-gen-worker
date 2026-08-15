@@ -31,6 +31,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 import faulthandler
+from . import hostfacts
 from .procsplit import group_ordinal, host_siblings
 
 logger = logging.getLogger(__name__)
@@ -103,20 +104,7 @@ def cgroup_nodes(
     root: Path = _CGROUP_ROOT, proc_self_cgroup: Path = _PROC_SELF_CGROUP
 ) -> list[Path]:
     """cgroup-v2 dirs from root down to this process's own cgroup."""
-    rel = ""
-    try:
-        for line in proc_self_cgroup.read_text().splitlines():
-            if line.startswith("0::"):
-                rel = line[3:].strip().strip("/")
-                break
-    except OSError:
-        pass
-    nodes = [root]
-    node = root
-    for part in Path(rel).parts:
-        node = node / part
-        nodes.append(node)
-    return nodes
+    return hostfacts.cgroup_nodes(root, proc_self_cgroup)
 
 
 def _read_text(path: Path) -> Optional[str]:
@@ -235,71 +223,36 @@ def container_limits() -> Dict[str, Any]:
     # Every death and every boot record carries it.
     oom_group = _deepest("memory.oom.group")
     facts["memory_oom_group"] = _read_int(oom_group) if oom_group else None
-    cpu_max = _deepest("cpu.max")
-    raw_cpu = _read_text(cpu_max) if cpu_max else None
-    facts["cpu_max"] = raw_cpu
+    facts["cpu_max"] = hostfacts.cpu_quota_raw()
     facts["cpu_quota_cores"] = cpu_quota_cores()
     facts["host_cpu_count"] = os.cpu_count() or 0
     try:
         facts["affinity_cpus"] = len(os.sched_getaffinity(0))
     except (AttributeError, OSError):
         facts["affinity_cpus"] = None
-    meminfo = _read_meminfo()
+    meminfo = hostfacts.meminfo_kb()
     facts["meminfo_total_kb"] = meminfo.get("MemTotal")
     facts["meminfo_available_kb"] = meminfo.get("MemAvailable")
     return facts
 
 
-def _read_meminfo(path: Path = Path("/proc/meminfo")) -> Dict[str, int]:
-    """``/proc/meminfo`` as {key: kB} ("MemTotal:  65...  kB" -> 3 fields)."""
-    out: Dict[str, int] = {}
-    raw = _read_text(path)
-    if not raw:
-        return out
-    for line in raw.splitlines():
-        parts = line.split()
-        if len(parts) < 2 or not parts[0].endswith(":"):
-            continue
-        try:
-            out[parts[0][:-1]] = int(parts[1])
-        except ValueError:
-            continue
-    return out
-
-
 def cpu_quota_cores() -> Optional[float]:
-    """Cores this cgroup may actually use, from ``cpu.max`` (None = uncapped).
-
-    ``os.cpu_count()`` reports the HOST's cores — 32 on a pod that owns 4.
-    Anything that sizes work by core count must use THIS number.
-    """
-    p = _deepest("cpu.max")
-    raw = _read_text(p) if p else None
-    if not raw:
-        return None
-    parts = raw.split()
-    if len(parts) != 2 or parts[0] == "max":
-        return None
-    try:
-        quota, period = int(parts[0]), int(parts[1])
-    except ValueError:
-        return None
-    if period <= 0 or quota <= 0:
-        return None
-    return quota / period
+    """Cores this cgroup may actually use (None = uncapped). One reader,
+    in :mod:`hostfacts` — this module's copy had no cgroup-v1 fallback while
+    ``cpu_budget``'s had no chain walk, so a v1 host and a nested cgroup got
+    different answers from the two."""
+    return hostfacts.cpu_quota()
 
 
 def effective_cpu_count() -> int:
-    """Honest usable-core count: host cores min'd with affinity and quota."""
-    candidates = [os.cpu_count() or 1]
-    try:
-        candidates.append(len(os.sched_getaffinity(0)))
-    except (AttributeError, OSError):
-        pass
-    quota = cpu_quota_cores()
-    if quota is not None:
-        candidates.append(max(1, int(quota + 0.5)))
-    return max(1, min(candidates))
+    """Honest usable-core count: host cores min'd with affinity and quota.
+
+    ``floor``, not ``int(x + 0.5)``: this used to round a 2.5-core quota UP to
+    3 while ``cpu_budget.cpu_allowance`` kept 2.5, so the fleet planned against
+    3 and torch ran 2.5 cores' worth of threads under a throttling kernel. The
+    integer derivation is stated once, in :class:`hostfacts.CpuAllowance`.
+    """
+    return hostfacts.cpu_allowance().whole_cores
 
 
 def describe_exit(status: int) -> Dict[str, Any]:

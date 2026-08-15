@@ -51,6 +51,7 @@ from typing import Any, Callable, Dict, Optional
 from .. import kernel_path
 from .svdq_fused import fused_self_check
 from .svdq_awq_packed import awq_packed_self_check
+from ..hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +80,10 @@ def native_kernels_requested() -> Optional[bool]:
 def _cuda_gap() -> Optional[str]:
     """Why no native lane can run here at all, or None."""
     try:
-        import torch
+        import torch  # noqa: F401 — the import IS the probe here
     except ImportError:
         return "torch is not installed"
-    if not torch.cuda.is_available():
+    if not cuda_ready():
         return "native svdq kernels require a CUDA GPU"
     return None
 
@@ -258,7 +259,7 @@ def extension_available() -> bool:
         if not hasattr(ns, "probe_add_one"):
             logger.warning("native extension: loaded but probe op missing")
             return False
-        if torch.cuda.is_available():
+        if cuda_ready():
             x = torch.arange(8, device="cuda", dtype=torch.float32)
             y = ns.probe_add_one(x)
             if not torch.equal(y, x + 1):

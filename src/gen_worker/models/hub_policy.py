@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+from ..hostfacts import cuda_ready
 
 
 @dataclass(frozen=True)
@@ -58,7 +59,7 @@ def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> Ten
 
         torch_version = str(getattr(torch, "__version__", "") or "")
         cuda_version = str(getattr(getattr(torch, "version", None), "cuda", "") or "")
-        if getattr(torch, "cuda", None) is not None and torch.cuda.is_available():
+        if getattr(torch, "cuda", None) is not None and cuda_ready():
             major, minor = torch.cuda.get_device_capability()
             gpu_sm = int(major) * 10 + int(minor)
     except Exception:

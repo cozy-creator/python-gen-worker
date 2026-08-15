@@ -44,6 +44,7 @@ import msgspec
 import pytest
 
 import gen_worker
+from gen_worker.hostfacts import HostFacts
 from gen_worker import Compile
 from gen_worker import compile_cache as cc
 from gen_worker.api.binding import Hub, wire_ref
@@ -254,9 +255,9 @@ def _mint_enable(cell_ref: str, digest: str, artifact_path: Path):
 
 def _startup(ex: Executor) -> Lifecycle:
     lc = Lifecycle(Settings(orchestrator_public_addr="localhost:1"), ex)
-    lc.hardware = {"gpu_count": 1, "gpu_total_mem": 32 * 1024**3,
-                   "gpu_free_mem": 30 * 1024**3, "gpu_sm": "90",
-                   "installed_libs": []}
+    lc.hardware = HostFacts(
+        gpu_count=1, vram_total_bytes=32 * 1024**3,
+        vram_free_bytes=30 * 1024**3, gpu_sm="90")
     asyncio.run(lc.startup())
     return lc
 

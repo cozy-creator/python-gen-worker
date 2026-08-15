@@ -66,6 +66,7 @@ from typing import (
 import msgspec
 
 from . import artifact_meta
+from .hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
@@ -411,7 +412,7 @@ def device_facts() -> Tuple[int, str, str]:
     try:
         import torch
 
-        if not torch.cuda.is_available():
+        if not cuda_ready():
             return 0, "", ""
         props = torch.cuda.get_device_properties(torch.cuda.current_device())
         major, minor = torch.cuda.get_device_capability()

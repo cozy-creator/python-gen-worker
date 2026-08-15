@@ -119,6 +119,7 @@ from .compile_cache import (
 from . import compile_cache as _compile_cache
 from .models import lora_lifted
 from .models.memory import flush_memory, is_cuda_oom
+from . import hostfacts
 
 logger = logging.getLogger(__name__)
 
@@ -1867,16 +1868,14 @@ def _tensor_bytes(values: Iterable[Any]) -> int:
 
 def _device_memory_line() -> str:
     """One human line of live device memory for a typed refusal."""
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return "device=cpu"
-        free, total = torch.cuda.mem_get_info()
-        return (f"device free {free / (1 << 20):.0f} MiB of "
-                f"{total / (1 << 20):.0f} MiB")
-    except Exception:  # noqa: BLE001 — context, never a gate
+    if not hostfacts.cuda_ready():
+        return "device=cpu"
+    free = hostfacts.free_vram_bytes()
+    total = hostfacts.total_vram_bytes()
+    if free is None or total is None:
         return "device=unknown"
+    return (f"device free {free / (1 << 20):.0f} MiB of "
+            f"{total / (1 << 20):.0f} MiB")
 
 
 #: :func:`target_constant_pool`'s refusal for a resident tensor an AOTI

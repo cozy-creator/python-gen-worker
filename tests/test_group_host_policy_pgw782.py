@@ -37,7 +37,7 @@ import msgspec
 import pytest
 
 from gen_worker import RequestContext, Resources, endpoint, worker_function
-from gen_worker import cpu_budget, video_encode
+from gen_worker import cpu_budget, hostfacts, video_encode
 from gen_worker.executor import Executor
 from gen_worker.models.store import ModelStore
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -232,13 +232,19 @@ def test_four_groups_serialize_if_the_group_leaves_instance_identity(
 def test_cpu_allowance_is_the_cgroup_quota_not_the_host_cpu_count(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    quota = tmp_path / "cpu.max"
-    quota.write_text("3230000 100000\n")  # the measured A40 pod: 32.3 cores
-    monkeypatch.setattr(cpu_budget, "_CGROUP_V2", str(quota))
-    monkeypatch.setattr(cpu_budget.os, "cpu_count", lambda: 96)
-    monkeypatch.setattr(cpu_budget.os, "sched_getaffinity", lambda _pid: set(range(96)))
+    root = tmp_path / "cgroup"
+    root.mkdir()
+    (root / "cpu.max").write_text("3230000 100000\n")  # measured A40: 32.3
+    proc = tmp_path / "self_cgroup"
+    proc.write_text("0::/\n")
+    monkeypatch.setattr(hostfacts, "_CGROUP_ROOT", root)
+    monkeypatch.setattr(hostfacts, "_PROC_SELF_CGROUP", proc)
+    monkeypatch.setattr(hostfacts.os, "cpu_count", lambda: 96)
+    monkeypatch.setattr(
+        hostfacts.os, "sched_getaffinity", lambda _pid: set(range(96)))
 
-    assert cpu_budget.cgroup_cpu_quota() == pytest.approx(32.3)
+    assert hostfacts.cpu_quota(
+        root=root, proc_self_cgroup=proc) == pytest.approx(32.3)
     assert cpu_budget.cpu_allowance() == pytest.approx(32.3)
     # 96 host processors is what torch would have used; the container has 32.3.
     assert cpu_budget.per_group_threads(32.3, 4) == 8
@@ -250,14 +256,18 @@ def test_cpu_allowance_is_the_cgroup_quota_not_the_host_cpu_count(
 def test_unlimited_cgroup_falls_back_to_the_affinity_mask(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    quota = tmp_path / "cpu.max"
-    quota.write_text("max 100000\n")
-    monkeypatch.setattr(cpu_budget, "_CGROUP_V2", str(quota))
-    monkeypatch.setattr(cpu_budget, "_CGROUP_V1_QUOTA", str(tmp_path / "absent"))
-    monkeypatch.setattr(cpu_budget.os, "sched_getaffinity", lambda _pid: set(range(12)))
-    monkeypatch.setattr(cpu_budget.os, "cpu_count", lambda: 96)
+    root = tmp_path / "cgroup"
+    root.mkdir()
+    (root / "cpu.max").write_text("max 100000\n")
+    proc = tmp_path / "self_cgroup"
+    proc.write_text("0::/\n")
+    monkeypatch.setattr(hostfacts, "_CGROUP_ROOT", root)
+    monkeypatch.setattr(hostfacts, "_PROC_SELF_CGROUP", proc)
+    monkeypatch.setattr(
+        hostfacts.os, "sched_getaffinity", lambda _pid: set(range(12)))
+    monkeypatch.setattr(hostfacts.os, "cpu_count", lambda: 96)
 
-    assert cpu_budget.cgroup_cpu_quota() is None
+    assert hostfacts.cpu_quota(root=root, proc_self_cgroup=proc) is None
     assert cpu_budget.cpu_allowance() == 12.0
 
 

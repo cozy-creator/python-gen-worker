@@ -13,8 +13,15 @@ from __future__ import annotations
 from typing import Any, Optional
 
 import msgspec
+from .hostfacts import cuda_ready
 
 CUDA_PROBE_FAILED_MARKER = "GEN_WORKER_CUDA_PROBE_FAILED"
+
+#: The reason `probe_cuda` records when the predicate itself says no. Named,
+#: because `classify_probe_failure` MATCHES on it: spelling it twice is how a
+#: cardless box starts being classified `cuda_error` and condemned as a host
+#: fault (pgw#1120).
+NO_DEVICE_REASON = "hostfacts.cuda_ready() is False"
 
 #: Wall budget for one `nvidia-smi` subprocess. The exact fault this module
 #: exists for — a wedged CUDA device — is also the fault that makes `nvidia-smi`
@@ -42,8 +49,8 @@ def probe_cuda(device_index: int = 0) -> CudaProbeResult:
         return CudaProbeResult(ok=False, reason=f"torch unavailable: {e}")
 
     try:
-        if not torch.cuda.is_available():
-            return CudaProbeResult(ok=False, reason="torch.cuda.is_available() is False")
+        if not cuda_ready():
+            return CudaProbeResult(ok=False, reason=NO_DEVICE_REASON)
         t = torch.ones(2, 2, device=f"cuda:{device_index}")
         t = t + 1
         torch.cuda.synchronize(device_index)
@@ -53,6 +60,15 @@ def probe_cuda(device_index: int = 0) -> CudaProbeResult:
         return CudaProbeResult(ok=False, reason=f"{type(e).__name__}: {e}")
 
     return CudaProbeResult(ok=True)
+
+
+#: ``cuda_probe.classify_probe_failure`` classes that mean THERE IS NO CUDA
+#: DEVICE HERE, as against a device this host cannot drive. A cardless box is a
+#: different mistake and must not be reported as a host fault (pgw#1120) — but
+#: "cardless" is a fact about the PROBE, not about whether `nvidia-smi` could be
+#: read: only a host with a driver to fail can answer `driver_too_old` or
+#: `cuda_error`, so a broken diagnostic can no longer buy an exemption.
+CARDLESS_PROBE_CLASSES = frozenset({"cuda_unavailable", "torch_unavailable"})
 
 
 def classify_probe_failure(reason: str) -> str:
@@ -69,7 +85,7 @@ def classify_probe_failure(reason: str) -> str:
         return "unknown"
     if "torch unavailable" in r:
         return "torch_unavailable"
-    if "is_available() is false" in r:
+    if NO_DEVICE_REASON.lower() in r:
         return "cuda_unavailable"
     if "driver too old" in r or "found version" in r:
         return "driver_too_old"

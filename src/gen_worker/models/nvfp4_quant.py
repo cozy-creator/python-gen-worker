@@ -31,6 +31,7 @@ from __future__ import annotations
 import functools
 import logging
 from typing import Any, Optional
+from ..hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
@@ -332,9 +333,7 @@ def _arm() -> str:
         return _QUANT_MODE
     mode, op = "torch", None
     try:
-        import torch
-
-        if torch.cuda.is_available():
+        if cuda_ready():
             candidate = _build_fused_op()
             if candidate is not None and _bit_identical(candidate):
                 mode, op = "fused", candidate

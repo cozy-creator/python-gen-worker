@@ -14,6 +14,7 @@ import urllib.parse
 from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
+from ..hostfacts import cuda_ready
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -600,7 +601,7 @@ class RequestContext(Generic[D]):
             import torch
         except Exception:
             raise RuntimeError("torch is not available in this runtime") from None
-        if torch.cuda.is_available():
+        if cuda_ready():
             return torch.device(f"cuda:{torch.cuda.current_device()}")
         return torch.device("cpu")
 
