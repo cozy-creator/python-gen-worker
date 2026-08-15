@@ -288,7 +288,7 @@ def _release_compile_recipe_residents(pipeline: Any) -> Dict[str, float]:
     cuda = False
     before = 0
     try:
-        cuda = bool(torch.cuda.is_available())
+        cuda = cuda_ready()
         if cuda:
             before = int(torch.cuda.memory_reserved())
     except Exception:  # noqa: BLE001 -- telemetry never changes the release
