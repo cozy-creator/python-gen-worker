@@ -34,6 +34,7 @@ from ..config import Settings, current_or
 _STANDALONE = Settings()
 from ..stall import ProgressFloor, SilenceWindow
 from .cache_paths import tensorhub_cas_dir
+from .errors import PickleWeightRefused, first_pickle_weight_path
 from .refs import HuggingFaceRef, TensorhubRef, fold_ref, parse_model_ref
 import hashlib
 from fnmatch import fnmatch
@@ -546,6 +547,24 @@ def _run_with_stall_watchdog(
     return str(holder["local"])
 
 
+def _refuse_pickles_on_disk(root: Path, label: str) -> None:
+    """Refuse if any pickle-format weight is materialized under ``root``.
+
+    Used where there is no listing to refuse against ahead of time. Symlinks
+    are not followed: the HF cache materializes snapshots as symlinks into
+    ``blobs/``, and the name that matters is the one a loader will open.
+    """
+    try:
+        names = [p.name for p in root.rglob("*") if p.is_file() or p.is_symlink()]
+    except OSError:
+        return
+    if bad := first_pickle_weight_path(names):
+        raise PickleWeightRefused(
+            f"refusing {label}: {bad!r} is a pickle-format weight. "
+            "Unpickling is arbitrary code execution in this process."
+        )
+
+
 def _hf_progress_dir(hf_home: Optional[str], ref: HuggingFaceRef) -> Path:
     base = Path(hf_home) if hf_home else Path.home() / ".cache" / "huggingface"
     safe = ref.repo_id.replace("/", "--").replace(":", "_")
@@ -602,10 +621,16 @@ def download_hf(
             # No repo listing available offline to narrow precisely — fall
             # back to component-subfolder + root-json glob patterns.
             patterns = [f"{c}/" for c in comps] + ["*.json"]
-        return Path(snapshot_download(
+        offline = Path(snapshot_download(
             repo_id=repo_id, revision=ref.revision, local_files_only=True,
             allow_patterns=patterns or None, **kwargs,
         ))
+        # pgw#1273: this path returns before the selection-time refusal below,
+        # and offline there is no listing to refuse against — so refuse on what
+        # is actually on disk. A cache populated by an earlier build (or by
+        # hand) is exactly the "reaches a worker by another path" case.
+        _refuse_pickles_on_disk(offline, f"{repo_id}@{ref.revision or 'main'} (cached)")
+        return offline
 
     api = HfApi(token=hf_token)
     repo_files = list(api.list_repo_files(repo_id=repo_id, repo_type="model", revision=ref.revision))
@@ -639,6 +664,34 @@ def download_hf(
             # rather than silently reverting to the whole repo.
             selected = set(repo_files)
             kwargs["allow_patterns"] = repo_files
+
+    # pgw#1273 — REFUSE PICKLES BEFORE A BYTE MOVES.
+    #
+    # `selection` is the final resolved set across all three selection paths
+    # (files= patterns, select_hf_files, or the narrowed listing), so this is
+    # the one chokepoint that sees every HF fetch.
+    #
+    # The gap was structural, not an oversight: `_pick` prefers safetensors but
+    # falls back to the whole group when a component has none
+    # (`pool = st or group`), `select_hf_files` returns None -> full repo on an
+    # unrecognized layout, and `select_component_paths` — which calls itself
+    # "the ONE filter both sources apply" — filters by COMPONENT and never by
+    # extension. Nothing downstream re-checked: `use_safetensors=True` appears
+    # nowhere in this tree, so a selected `pytorch_model.bin` reaches
+    # `from_pretrained` and is unpickled in the process holding hub credentials.
+    #
+    # The tensorhub lane already refuses on the resolved manifest
+    # (cozy_snapshot._validate_resolved); the civitai lane is an allow-list.
+    # This is the same refusal on the same list, for the third provider —
+    # exactly the case PickleWeightRefused's docstring already named:
+    # "defence in depth for blobs that ... reach a worker by another path."
+    selection = selected if selected is not None else set(repo_files)
+    if bad := first_pickle_weight_path(sorted(selection)):
+        raise PickleWeightRefused(
+            f"refusing {repo_id}@{ref.revision or 'main'}: {bad!r} is a pickle-format "
+            "weight. Unpickling is arbitrary code execution in this process. "
+            "Use a safetensors revision, or ingest through the conversion endpoint."
+        )
 
     # Best-effort size guard against accidental huge downloads.
     total_hint: Optional[int] = None

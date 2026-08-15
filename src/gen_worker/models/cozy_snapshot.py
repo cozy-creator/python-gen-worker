@@ -37,7 +37,11 @@ from .. import boot_phases
 from ..capability import InsufficientDiskError
 from .cache_paths import open_worker_cas
 from .download import components_present, select_component_paths
-from .errors import PickleWeightRefused
+from .errors import (
+    PICKLE_WEIGHT_EXTENSIONS,
+    PickleWeightRefused,
+    first_pickle_weight_path,
+)
 from .hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
 from .refs import TensorhubRef
 
@@ -92,15 +96,8 @@ def _component_of(path: str) -> str:
     return head if separator else "(root)"
 
 
-PICKLE_WEIGHT_EXTENSIONS = (".bin", ".ckpt", ".pt", ".pth", ".pkl", ".pickle")
-
-
-def first_pickle_weight_path(paths: Iterable[str]) -> str:
-    for raw in paths:
-        base = str(raw or "").strip().lower().rsplit("/", 1)[-1]
-        if base.endswith(PICKLE_WEIGHT_EXTENSIONS):
-            return raw
-    return ""
+# PICKLE_WEIGHT_EXTENSIONS and first_pickle_weight_path moved to .errors
+# (pgw#1273) so the HF lane refuses on the same list this one does.
 
 
 def _manifest_entry(file: WorkerResolvedRepoFile) -> FileEntry:

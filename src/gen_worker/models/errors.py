@@ -1,6 +1,8 @@
 """Typed download-failure errors (CONTRACT §9 ModelEvent.error vocabulary)."""
 from __future__ import annotations
 
+from typing import Iterable
+
 
 class UrlExpiredError(RuntimeError):
     """A presigned download URL was rejected with a permanent 4xx (expired
@@ -30,4 +32,33 @@ class PickleWeightRefused(RuntimeError):
     for blobs that predate that refusal or reach a worker by another path."""
 
 
-__all__ = ["UrlExpiredError", "MissingSnapshotError", "PickleWeightRefused"]
+# ONE home for the extension set, beside the refusal it feeds (pgw#1273).
+#
+# There were five independent copies of this list in the tree and they had
+# already drifted: convert/writer.py carried four entries where every other
+# copy carried six, so a component holding only `weights.pkl` yielded ZERO
+# tensors instead of raising. A list that decides whether arbitrary code runs
+# must not be re-typed per call site.
+PICKLE_WEIGHT_EXTENSIONS = (".bin", ".ckpt", ".pt", ".pth", ".pkl", ".pickle")
+
+
+def first_pickle_weight_path(paths: Iterable[str]) -> str:
+    """The first pickle-format weight in ``paths``, or "" if there is none.
+
+    Matches on the BASENAME so a directory component that happens to end in a
+    pickle extension cannot mask a real one further along the path.
+    """
+    for raw in paths:
+        base = str(raw or "").strip().lower().rsplit("/", 1)[-1]
+        if base.endswith(PICKLE_WEIGHT_EXTENSIONS):
+            return raw
+    return ""
+
+
+__all__ = [
+    "UrlExpiredError",
+    "MissingSnapshotError",
+    "PickleWeightRefused",
+    "PICKLE_WEIGHT_EXTENSIONS",
+    "first_pickle_weight_path",
+]
