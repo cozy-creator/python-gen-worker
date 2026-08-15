@@ -166,7 +166,7 @@ def test_basename_matching_does_not_mask_a_later_pickle():
     assert first_pickle_weight_path(["notes.pt/readme.md", "a/b.bin"]) == "a/b.bin"
 
 
-def test_refuse_pickles_on_disk_walks_symlinks(tmp_path: Path):
+def test_refuse_pickles_on_disk_walks_symlinks(tmp_path: Path) -> None:
     """The HF cache materializes snapshots as symlinks into blobs/, so a
     check that only counted regular files would see an empty directory."""
     blob = tmp_path / "blobs" / "deadbeef"
