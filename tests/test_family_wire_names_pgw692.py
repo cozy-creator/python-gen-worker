@@ -56,7 +56,7 @@ def _resolve(raw: str) -> Any:
     return resolve_slot(
         "pipeline",
         Slot(str),
-        ref=Hub("cozy/example-model", tag="prod"),
+        ref=Hub("cozy/example-model", release="prod"),
         family="example",
         raw_metadata_json=raw,
     )

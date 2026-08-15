@@ -900,8 +900,8 @@ class CellPublisher:
 
         Steps: attested intent (worker JWT; hub corroborates the axes and mints
         a key-pinned capability token) -> the CHUNKED SHA-256 publish (declare
-        -> {have, need} -> PUT -> complete; mode=replace, no tags — the hub
-        refuses any tag bind under the claim anyway) -> publish-complete
+        -> {have, need} -> PUT -> complete; mode=replace, no release — the hub
+        refuses a release under the cell claim anyway) -> publish-complete
         bookkeeping. Raises on any failure; the caller treats every raise as
         non-fatal to serving.
 
@@ -935,7 +935,8 @@ class CellPublisher:
                 grant.detail or f"the hub refused to admit {key}",
                 code="compiled_graph_publish_key_condemned")
         try:
-            from .hubio.client import CommitFile, HubClient
+            from .hubio.client import (
+                COMPILED_GRAPH_NO_RELEASE, CommitFile, HubClient)
 
             # th#1303/pgw#807 item 3 — THE FLIP, taken. Both gates that held
             # it are discharged: th#1340 gave the v2 route the cell-publish
@@ -957,6 +958,10 @@ class CellPublisher:
                 destination_repo=repo,
                 files=[CommitFile(path=artifact.name, local_path=artifact)],
                 mode="replace",
+                # A self-minted compiled graph joins NO release: the hub
+                # selects it by the endpoint's compiled_graph_store row and
+                # answers `release_forbidden` to a body that names one.
+                release=COMPILED_GRAPH_NO_RELEASE,
                 # pgw#1159: the cell key is NOT a publish-body field. It is
                 # the capability token's cell claim (th#1340) — the hub
                 # derives the cell identity there and refuses a body that

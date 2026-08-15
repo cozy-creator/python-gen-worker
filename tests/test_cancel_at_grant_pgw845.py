@@ -61,7 +61,7 @@ def test_no_cancel_offset_around_the_ref_lock_grant_can_wedge_the_ref(
         registry = IntentRegistry("release-1", [])
         store = ModelStore(_noop_send, cache_dir=cache_dir)
         store.bind_intent_registry(registry)
-        ref = WireRef("owner/model:latest")
+        ref = WireRef("owner/model@latest")
 
         lock = store._lock(ref)
         await lock.acquire()  # a sibling materialization owns the ref

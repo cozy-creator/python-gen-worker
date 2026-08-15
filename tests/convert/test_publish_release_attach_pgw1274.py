@@ -76,14 +76,27 @@ def test_the_release_travels_VERBATIM_into_the_declare_request(
     assert _FakeHub.state["attached_releases"] == {"pub-1": RELEASE}
 
 
-def test_no_release_omits_the_field_rather_than_sending_an_empty_one(
+def test_a_publish_naming_no_release_is_refused_before_a_byte_moves(
     fake_hub: Any, tmp_path: Path
 ) -> None:
-    """An empty string is not an identifier. Sending one would make every
-    unattached publish indistinguishable from a publish naming `""`."""
+    """th#1987 made `release` mandatory. An empty string is not an identifier,
+    and the hub answers `release_required` at DECLARE — so the client refuses
+    at the call site rather than paying for the transfer first."""
+    from gen_worker.hubio.client import (
+        COMPILED_GRAPH_NO_RELEASE, HubReleaseRequiredError)
+
+    with pytest.raises(HubReleaseRequiredError) as caught:
+        _client(fake_hub).publish_v2(
+            destination_repo="acme/model", files=[_file(tmp_path)], release="")
+    assert caught.value.code == "release_required"
+    assert caught.value.retryable is False
+    assert not _FakeHub.state.get("publishes")
+
+    # The ONE legal empty release: a self-mint compiled graph joins none, and
+    # the field stays OFF the wire rather than being sent as "".
     _client(fake_hub).publish_v2(
         destination_repo="acme/model", files=[_file(tmp_path)],
-    )
+        release=COMPILED_GRAPH_NO_RELEASE)
     assert "release" not in _declaration()
 
 

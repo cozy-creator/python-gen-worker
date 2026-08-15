@@ -726,6 +726,15 @@ class RequestContext(Generic[D]):
         self._cached_repo_job_scope = result
         return result
 
+    def _repo_job_release(self) -> str:
+        """The release a repo-CAS checkpoint publish attaches to, or "".
+
+        th#1987 made it mandatory hub-side; it is the caller's
+        `destination.release`, carried through the execution hints. Empty means
+        the invoke named none — a caller-side defect the publish refuses by
+        name rather than a transfer problem."""
+        return str((self._execution_hints or {}).get("destination_release") or "").strip()
+
     def _tensor_upload_execution_kind(self) -> str:
         hints = dict(self._execution_hints or {})
         return str(hints.get("kind", "") or "").strip().lower()
@@ -1499,6 +1508,7 @@ class _PublisherMixin:
         def _get_upload_budget_gate(self) -> "BudgetGate": ...
         def _get_worker_capability_token(self) -> str: ...
         def _repo_job_upload_scope(self) -> "Optional[tuple[str, str, str]]": ...
+        def _repo_job_release(self) -> str: ...
         def _require_repo_job_scope_for_tensors(self, ref: str) -> None: ...
         def _should_stream_output_to_file_api(self, ref: str) -> bool: ...
 

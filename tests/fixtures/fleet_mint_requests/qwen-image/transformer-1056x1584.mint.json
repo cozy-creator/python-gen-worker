@@ -72,7 +72,7 @@
   "lora_fqns": [],
   "lifted_inputs": [],
   "strict": true,
-  "source_ref": "tensorhub/qwen-image:prod",
+  "source_ref": "tensorhub/qwen-image@prod",
   "source_digest": "",
   "closure_roots": [],
   "pipeline_class": "QwenImagePipeline",

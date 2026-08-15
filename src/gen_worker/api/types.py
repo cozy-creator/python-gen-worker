@@ -214,10 +214,11 @@ class SourceRepo(msgspec.Struct):
     against ``source`` instead of building from.
 
     Fields:
-      - ref: "owner/repo" | "owner/repo:tag" | "owner/repo@<checkpoint-id>".
+      - ref: "owner/repo" | "owner/repo@<release>" | "owner/repo@<checkpoint-id>".
         A ``#flavor`` selector is REFUSED (``FlavorSelectorRemoved``, th#1803):
-        a tag names an ordered SET of checkpoints and selection within it is
-        tensor-layout-contract compatibility, not an arbitrary string.
+        a release names a SET of artifacts and selection within it is
+        tensor-layout-contract compatibility, not an arbitrary string. A
+        ``:tag`` ref is refused outright (``RetiredTagRef``, th#1987).
       - checkpoint_id: explicit content-addressed checkpoint id; highest-priority selector
       - attributes: subset-containment selector against the checkpoint's attributes
         map. Well-known keys include dtype, file_layout, file_type, quant_library,
@@ -243,7 +244,7 @@ class DatasetRef(msgspec.Struct):
     token's ``reads`` claim alongside the primary source.
 
     Fields:
-      - ref: "owner/dataset" | "owner/dataset:tag" | "owner/dataset@<checkpoint-id>"
+      - ref: "owner/dataset" | "owner/dataset@<release>" | "owner/dataset@<checkpoint-id>"
       - checkpoint_id: explicit dataset checkpoint id; highest-priority selector
       - attributes: subset-containment selector against the dataset checkpoint's
         attributes map (tensorhub #229).

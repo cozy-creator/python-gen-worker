@@ -51,7 +51,7 @@ ProgressFn = Callable[[int, Optional[int]], None]
 # endpoint.lock manifest (the wire carries bare refs without a provider field).
 #
 # ONE keying function normalizes both index keys and lookups. Keys are
-# (repo, tag)-granular, with a repo-identity fallback so a hub-minted DIGEST
+# (repo, release)-granular, with a repo-identity fallback so a hub-minted DIGEST
 # pick still routes to its repo's provider.
 # ---------------------------------------------------------------------------
 
@@ -77,7 +77,7 @@ def _provider_index_keys(ref: str) -> tuple[str, str]:
             return s, s
     if parsed.tensorhub is not None:
         th = parsed.tensorhub
-        exact = TensorhubRef(owner=th.owner, repo=th.repo, tag=th.tag,
+        exact = TensorhubRef(owner=th.owner, repo=th.repo, release=th.release,
                              digest=None, flavor=th.flavor).canonical()
         return exact, th.repo_id()
     assert parsed.hf is not None
@@ -128,9 +128,9 @@ def _collect_binding_entries(bindings: Any) -> list[dict[str, Any]]:
 def build_provider_index_from_manifest(manifest: Optional[Mapping[str, Any]]) -> dict[str, str]:
     """{normal_form_ref: provider} from a loaded endpoint.lock manifest.
 
-    The entry ``tag`` side-channel field folds into the ref via the ONE
-    grammar module before keying; ``set_provider_index`` adds the
-    repo-identity fallback keys."""
+    th#1987: the release rides the ref, so there is no side-channel field to
+    fold — the entry's ref is normalized through the ONE grammar module before
+    keying and ``set_provider_index`` adds the repo-identity fallback keys."""
     index: dict[str, str] = {}
     if not isinstance(manifest, Mapping):
         return index
@@ -148,7 +148,6 @@ def build_provider_index_from_manifest(manifest: Optional[Mapping[str, Any]]) ->
             try:
                 key = str(fold_ref(
                     ref,
-                    tag=str(entry.get("tag") or ""),
                     provider=provider
                     if provider in ("tensorhub", "hf", "civitai", "modelscope")
                     else "tensorhub",

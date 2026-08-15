@@ -61,7 +61,7 @@ def _publish(ctx: _Ctx, tree: Path, **kw: Any) -> Any:
                         "quantization_library": "llm-compressor"},
         )],
         destination_repo="acme/quant",
-        tags=["prod"],
+        release=kw.pop("release", "r1"),
         **kw,
     )
 
@@ -114,7 +114,7 @@ def test_flavor_identity_and_provenance_survive_the_flip(
     fake_hub: Any, tmp_path: Path,
 ) -> None:
     """The flip is a transport change, not a semantics change: the th#597
-    selector row (flavor/dtype/tags) and the th#606 worker-addable provenance
+    selector row (dtype + release) and the th#606 worker-addable provenance
     stamp ride v2 exactly as they rode v1."""
     ctx = _Ctx(f"http://127.0.0.1:{fake_hub.server_port}")
     _publish(ctx, _tree(tmp_path))
@@ -125,7 +125,8 @@ def test_flavor_identity_and_provenance_survive_the_flip(
     assert "flavor" not in req
     assert req["dtype"] == "fp8"
     assert req["mode"] == "replace"          # th#597 C2 default, unchanged
-    assert req["tags"] == [{"tag": "prod"}]
+    assert "tags" not in req                 # th#1987 deleted the tag axis
+    assert req["release"] == "r1"
     assert req["provenance"] == {
         "quantization_method": "w8a8",
         "quantization_library": "llm-compressor",

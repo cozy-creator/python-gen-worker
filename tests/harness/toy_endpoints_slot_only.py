@@ -31,8 +31,8 @@ class EchoOut(msgspec.Struct):
     response: str
 
 
-BOOT_UNREACHABLE_PIPELINE = Hub("harness/boot-precedence-pipeline", tag="prod")
-BOOT_UNREACHABLE_VAE = Hub("harness/boot-precedence-vae", tag="prod")
+BOOT_UNREACHABLE_PIPELINE = Hub("harness/boot-precedence-pipeline", release="prod")
+BOOT_UNREACHABLE_VAE = Hub("harness/boot-precedence-vae", release="prod")
 
 
 @endpoint(models={

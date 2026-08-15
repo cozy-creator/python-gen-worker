@@ -17,14 +17,16 @@ believes there is one. That is the th#736 mechanic `api.binding.rebind_pick`'s
 own docstring warns about — *"a pick the rebound binding cannot re-mint would
 split the slot into two residency identities"*.
 
-`acme/repo:prod` is the cheapest witness: `prod` is `DEFAULT_REF_TAG`, so the
-grammar ELIDES it and both spellings are the same model by definition
+An UPPERCASE digest algorithm/hex is the cheapest witness: the grammar folds
+it to lower case, so both spellings are the same model by definition
 (`models/refs.py::TensorhubRef.canonical`). Nothing about that is exotic — a
-client that echoes back the tag it was given produces it.
+client that echoes back a digest it read out of a hub response produces it.
+(th#1987 retired the original `acme/repo:prod` witness: the tag production is
+gone and there is no elision left to exercise.)
 
 REVERT-TURNS-RED: every test below fails on the parent commit — the recorded
-residency key is `acme/repo:prod`, the snapshot lookup returns None, and the
-two spellings produce two distinct keys.
+residency key is the non-normal spelling, the snapshot lookup returns None, and
+the two spellings produce two distinct keys.
 
 Sibling context: gw#491 fixed exactly this invariant one level down, for the
 DIGEST spelling, three lines from the adapter site here (*"one adapter must
@@ -48,8 +50,9 @@ from gen_worker.pb import worker_scheduler_pb2 as pb
 
 #: The same model, spelled two legitimate ways. `prod` is the grammar default,
 #: so `canonical()` elides it — these are one model, not two.
-NORMAL = WireRef("acme/repo")
-NON_NORMAL = "acme/repo:prod"
+_HEX = "ab" * 32
+NORMAL = WireRef(f"acme/repo@sha256:{_HEX}")
+NON_NORMAL = f"acme/repo@SHA256:{_HEX.upper()}"
 
 
 class _Ctx:

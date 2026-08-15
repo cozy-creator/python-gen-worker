@@ -79,7 +79,7 @@ def test_concurrent_same_source_clones_serialize(fake_hub, tmp_path: Path, monke
         try:
             results[i] = run_clone(
                 _Ctx(fake_hub), provider="huggingface", source_ref="org/tiny",
-                destination_repo="acme/dest",
+                destination_repo="acme/dest", destination_release="r1",
             )
         except BaseException as exc:  # noqa: BLE001
             results[i] = exc

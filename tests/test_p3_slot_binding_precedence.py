@@ -185,14 +185,14 @@ def test_fixed_slot_wrong_repo_dispatch_refuses(tmp_path) -> None:
         blobs.shutdown()
 
 
-def test_fixed_slot_same_repo_tag_pick_serves(tmp_path) -> None:
+def test_fixed_slot_same_repo_release_pick_serves(tmp_path) -> None:
     """pgw#1148: the same-repo pick used to be a `#fp8` FLAVOR; §1.32(d)
-    deleted that address, so the same-repo axis a dispatch can still name is
-    the TAG."""
+    deleted that address. th#1987 re-keyed what replaced it: the same-repo
+    axis a dispatch can still name is the RELEASE."""
     blobs = BlobHost(tmp_path)
     try:
-        same_repo_other_tag = f"{DECLARED_PIPELINE.path}:canary"
-        payload = b"canary-tag-bytes"
+        same_repo_other_tag = f"{DECLARED_PIPELINE.path}@canary"
+        payload = b"canary-release-bytes"
         snap = blobs.one_file_snapshot("snap-canary", "canary", payload)
         with hub_double() as (scheduler, _harness):
             conn = scheduler.wait_connection(0)
@@ -206,10 +206,7 @@ def test_fixed_slot_same_repo_tag_pick_serves(tmp_path) -> None:
             res = conn.wait_for(is_result_for("r-flavor")).job_result
             assert res.status == pb.JOB_STATUS_OK, res.safe_message
             out = _decode(res.inline)
-            # The harness echo interpolates ref.tag UNCONDITIONALLY (it is not
-            # the normal form), so the resolved tag shows even though the
-            # normal form would elide it.
-            assert out.response == f"tensorhub:{DECLARED_PIPELINE.path}:canary"
+            assert out.response == f"tensorhub:{DECLARED_PIPELINE.path}@canary"
     finally:
         blobs.shutdown()
 
@@ -232,7 +229,7 @@ def test_catalog_slot_different_repo_pick_is_not_a_mismatch(tmp_path) -> None:
             res = conn.wait_for(is_result_for("r-catalog")).job_result
             assert res.status == pb.JOB_STATUS_OK, res.safe_message
             out = _decode(res.inline)
-            assert out.response == "tensorhub:harness/slot-catalog-pick:prod"
+            assert out.response == "tensorhub:harness/slot-catalog-pick@"
             assert CATALOG_DEFAULT_PIPELINE.path not in out.response
     finally:
         blobs.shutdown()

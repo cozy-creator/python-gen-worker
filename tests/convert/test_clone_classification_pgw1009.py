@@ -67,7 +67,7 @@ def _run(fake_hub: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
         _Ctx(fake_hub), provider="huggingface",
         source_ref="Wan-AI/Wan2.2-T2V-A14B-Diffusers",
         destination_repo="tensorhub/wan22-t2v-a14b",
-        destination_repo_tags=["prod"],
+        destination_release="r1",
         outputs=[{"dtype": "fp32", "file_layout": "multi-file",
                   "file_type": "safetensors"}],
         **kw,
@@ -83,6 +83,9 @@ def test_declared_facts_reach_the_publish_declare(
 
     assert not result.failed_flavors, result.failed_flavors
     req = _FakeHub.state["publish_request"]
+    # th#1987: the clone attaches every flavor to the release the invoke named
+    # (`destination.release`), and the hub refuses a publish without one.
+    assert req["release"] == "r1"
     assert req["objective"] == "flow"
     assert req["distilled"] is False
     assert req["mode"] == "merge"

@@ -138,13 +138,37 @@ def _publish_leg(dest: str, label: str, stage: str, facts: Mapping[str, Any]) ->
         "convert_publish", f"repo={dest} flavor={label}: {detail}", phase=stage)
 
 
+def destination_release(ctx: Any, explicit: str = "") -> str:
+    """THE release a producer's output attaches to: the explicit argument, else
+    the invoking request's ``destination.release``.
+
+    th#1987 made `release` mandatory at the hub's DECLARE, so a producer that
+    can name none has a caller-side defect. Refusing here — before a byte
+    moves — names the field the invoke must carry instead of costing the run a
+    multi-GB upload and a 400.
+    """
+    rel = str(explicit or "").strip()
+    if rel:
+        return rel
+    info = getattr(ctx, "destination", None) or {}
+    if isinstance(info, dict):
+        rel = str(info.get("release") or "").strip()
+    if not rel:
+        raise ValueError(
+            "release is required (th#1987): the invoke named no "
+            "`destination.release`, and publishing never cuts one. Cut a "
+            "release on the destination repo and invoke with "
+            "destination={ref, release}, or pass release= explicitly."
+        )
+    return rel
+
+
 def publish_flavors(
     ctx: Any,
     flavors: Iterable[ProducedFlavor],
     *,
     destination_repo: str = "",
     release: str = "",
-    tags: Iterable[str] | None = None,
     mode: str = "replace",
     metadata: Mapping[str, Any] | None = None,
     objective: str | None = None,
@@ -160,9 +184,12 @@ def publish_flavors(
     ``mode="merge"`` explicitly only for deliberate overlay publishes (e.g. a
     vae swap on top of an existing tree).
 
-    ``release`` names the ALREADY-CUT release each flavor attaches to (th#1980);
-    every flavor of one export lands in the same release and is told apart there
-    by its contract. Publishing never cuts a release, so an unknown identifier is
+    ``release`` names the ALREADY-CUT release each flavor attaches to
+    (th#1980), and it is MANDATORY (th#1987) — it falls back to the invoking
+    request's ``destination.release`` and refuses when neither states one, so
+    the producer is told at the call site instead of after the upload. Every
+    flavor of one export lands in the same release and is told apart there by
+    its contract. Publishing never cuts a release, so an unknown identifier is
     a typed ``HubReleaseNotFoundError`` — cut it and publish again, never
     re-upload. It is a first-class field on the declare request: stating it in
     ``metadata`` publishes inert prose the hub never reads.
@@ -176,6 +203,7 @@ def publish_flavors(
         dest = str((info.get("repo") if isinstance(info, dict) else "") or "").strip()
     if not dest:
         raise ValueError("destination_repo is required (payload.destination.repo)")
+    release = destination_release(ctx, release)
 
     client = HubClient.from_ctx(ctx)
     # A v2 publish mints a new identity and inherits nothing, so a publish into
@@ -245,7 +273,6 @@ def publish_flavors(
             destination_repo=dest,
             files=_flavor_files(flavor),
             release=release,
-            tags=list(tags or []),
             mode=mode,
             # The conversion producer's own legs. (The per-object liveness beat
             # lives in HashRepo's transfer progress callback, so it
@@ -266,4 +293,4 @@ def publish_flavors(
     return results
 
 
-__all__ = ["publish_flavors"]
+__all__ = ["destination_release", "publish_flavors"]

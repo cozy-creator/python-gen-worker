@@ -351,6 +351,14 @@ class _RequestOutputStream:
                 self._chunks_uploaded = parts_done
             self._maybe_emit_progress(stage="stream_upload")
 
+        release = ctx._repo_job_release()
+        if not release:
+            raise RuntimeError(
+                f"save_checkpoint({self._ref!r}) cannot publish into "
+                f"{repo_owner}/{repo}: the request named no `destination.release`, "
+                "and th#1987 made it mandatory — the hub refuses the declare with "
+                "`release_required`. Cut a release and invoke with "
+                "destination={ref, release}.")
         result = client.publish_v2(
             destination_repo=f"{repo_owner}/{repo}",
             files=[CommitFile(
@@ -358,6 +366,7 @@ class _RequestOutputStream:
                 local_path=Path(self._tmp_path),
                 size_bytes=int(file_size),
             )],
+            release=release,
             mode="merge",
             provenance=provenance,
             part_progress=_part_progress,

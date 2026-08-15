@@ -146,7 +146,7 @@ def _slots(tree: Path) -> Dict[str, MintSlot]:
 
     return {"pipeline": MintSlot(
         ref=ModelRef(source="tensorhub", path="cozy/micro-diffusion",
-                     tag="prod"),
+                     release="prod"),
         path=str(tree))}
 
 

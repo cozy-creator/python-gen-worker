@@ -51,6 +51,7 @@ def test_proxy_outage_of_any_status_is_ridden_out(
     _FakeHub.state["proxy_status"] = proxy_status
 
     res = _client(fake_hub).publish_v2(
+        release="r1",
         destination_repo="acme/repo", files=[_one_file(tmp_path)])
 
     assert res.uploaded == 1
@@ -78,6 +79,7 @@ def test_hub_refusal_stays_terminal_and_is_not_retried(
         mp.setattr(session, "post", counting_post)
         with pytest.raises(HubPublishError, match=r"publish declare failed \(404\)"):
             _client(fake_hub).publish_v2(
+                release="r1",
                 destination_repo="acme/repo", files=[_one_file(tmp_path)])
 
     assert len(posts) == 1, f"a definite hub 404 must not be retried: {posts}"
@@ -94,6 +96,7 @@ def test_outage_outliving_the_window_fails_typed(
 
     with pytest.raises(HubPublishError, match=r"publish declare failed \(503\)"):
         _client(fake_hub).publish_v2(
+            release="r1",
             destination_repo="acme/repo", files=[_one_file(tmp_path)])
 
 

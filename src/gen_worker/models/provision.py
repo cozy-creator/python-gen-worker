@@ -47,7 +47,7 @@ from .loading import (
     model_index_components,
 )
 from .memory import flush_memory, mark_shared_components, place_pipeline
-from .refs import DEFAULT_REF_TAG, parse_model_ref
+from .refs import parse_model_ref
 from .. import activity as activity_mod
 from .. import adopt_fit
 from .. import mint_workers
@@ -1304,9 +1304,11 @@ def resolve_bindings(
 
 
 def _hub_ref_map_path(cache_dir: Path, thref: Any) -> Path:
-    """CAS-local memory of tag->snapshot resolutions, so a previously-fetched
-    tag ref keeps working offline: cas/refs/<owner>/<repo>/<tag>."""
-    name = str(thref.tag or DEFAULT_REF_TAG)
+    """CAS-local memory of release->snapshot resolutions, so a
+    previously-fetched release ref keeps working offline:
+    cas/refs/<owner>/<repo>/<release>. A ref naming no release memoizes under
+    `_bare`, which is a repo-identity slot and resolves nothing on its own."""
+    name = str(thref.release or "_bare")
     safe = "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in name)
     return cache_dir / "refs" / str(thref.owner) / str(thref.repo) / safe
 
@@ -1526,7 +1528,7 @@ def resolve_local_path(
     # (optional) unlocks private repos. Offline stays CAS-only.
     if parsed.provider == "tensorhub" and parsed.tensorhub is not None:
         if offline:
-            # Tag refs: a previous online resolve remembered tag->digest.
+            # Release refs: a previous online resolve remembered release->digest.
             ref_map = _hub_ref_map_path(cache_dir, parsed.tensorhub)
             if ref_map.exists():
                 snap = cache_dir / "snapshots" / ref_map.read_text().strip()

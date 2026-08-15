@@ -26,7 +26,7 @@ class SlowOut(msgspec.Struct):
     response: str
 
 
-SLOW_DECLARED = Hub("harness/slow-pipeline", tag="prod")
+SLOW_DECLARED = Hub("harness/slow-pipeline", release="prod")
 
 # Longer than _UNREPORTED_WAIT_TIMEOUT_S=2.0 with margin, short enough for a
 # unit test. Real endpoints take minutes here.

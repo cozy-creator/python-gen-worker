@@ -244,7 +244,7 @@ def _mint_slot(tree: Path, ref_path: str) -> Any:
     from gen_worker.child_contract import MintSlot
 
     return MintSlot(
-        ref=ModelRef(source="tensorhub", path=ref_path, tag="prod"),
+        ref=ModelRef(source="tensorhub", path=ref_path, release="prod"),
         path=str(tree),
     )
 

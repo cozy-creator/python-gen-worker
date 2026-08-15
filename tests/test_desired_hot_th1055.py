@@ -44,8 +44,8 @@ from gen_worker.cell_adopt import AdoptOutcome
 from gen_worker.models import store as store_mod
 
 FAMILY = "th1055-fam"
-AUTHORED = Hub("acme/qwen-image", tag="prod")
-AUTHORED_REF = "acme/qwen-image"
+AUTHORED = Hub("acme/qwen-image", release="prod")
+AUTHORED_REF = "acme/qwen-image@prod"
 #: pgw#1148 (§1.32(d)): a hub pick can no longer change a binding's ADDRESS —
 #: the `#flavor` that used to is deleted, and th#1803's digest pin resolves
 #: the same address. What a resolution still carries is the CAST and the

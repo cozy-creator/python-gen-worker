@@ -30,9 +30,9 @@ from gen_worker.models.store import ModelStore
 from gen_worker.lifecycle import Lifecycle
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
-_BARE = "tensorhub/nova-anime-xl:prod"
-_FP8 = "tensorhub/nova-anime-xl:prod#fp8"
-_VAE = "tensorhub/sdxl-vae-fp16-fix:prod"
+_BARE = "tensorhub/nova-anime-xl@prod"
+_FP8 = "tensorhub/nova-anime-xl@prod#fp8"
+_VAE = "tensorhub/sdxl-vae-fp16-fix@prod"
 _DIGEST = "blake3:" + "a" * 64
 
 

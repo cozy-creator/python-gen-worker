@@ -71,7 +71,7 @@ def _job(checkpoint: Path, tmp_path: Path) -> pool.EntryJob:
             family=ep.FAMILY, targets=("unet",), shapes=(ep.PIXEL_SHAPE,)),
         slots={"pipeline": MintSlot(
             ref=ModelRef(source="tensorhub", path="rig/tiny-diffusion",
-                         tag="prod"),
+                         release="prod"),
             path=str(checkpoint))},
         share="share-000", share_index=0, share_count=1,
         out_dir=str(tmp_path / "artifacts"), work=str(tmp_path / "work"),

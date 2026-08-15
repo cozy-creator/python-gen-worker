@@ -30,7 +30,7 @@ from gen_worker import (
 from gen_worker.families.base import GenerationDefaults, family
 
 FAMILY = "harness-pgw1115-blocked"
-DECLARED_PIPELINE = Hub("harness/pgw1115-blocked", tag="prod")
+DECLARED_PIPELINE = Hub("harness/pgw1115-blocked", release="prod")
 
 #: The two ids every refusal on this family must name.
 OPEN_IDS = ("OQ-2-audio_timestep-rank", "OQ-3-whole-graph-OOM-unmeasured")

@@ -432,7 +432,7 @@ def _job(micro_tree: Path, report: Path, *, extra_targets: tuple = ()) -> Any:
         cfg=cfg,
         slots={"pipeline": MintSlot(
             ref=ModelRef(source="tensorhub", path="cozy/micro-diffusion",
-                         tag="prod"),
+                         release="prod"),
             path=str(micro_tree))},
         report=str(report),
         code_digest=boot_key.CODE_DIGEST,

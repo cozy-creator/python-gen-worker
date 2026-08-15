@@ -62,10 +62,10 @@ MODULE = "tests_v2.catalog"
 HOT_BINDING = Hub("catalog/hot-tiny")
 HOT_REF = wire_ref(HOT_BINDING)
 
-PINNED_DEFAULT = Hub("catalog/pinned-default", tag="prod")
+PINNED_DEFAULT = Hub("catalog/pinned-default", release="prod")
 PINNED_DEFAULT_REF = wire_ref(PINNED_DEFAULT)
 
-PICKED_DEFAULT = Hub("catalog/picked-default", tag="prod")
+PICKED_DEFAULT = Hub("catalog/picked-default", release="prod")
 PICKED_DEFAULT_REF = wire_ref(PICKED_DEFAULT)
 
 

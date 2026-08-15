@@ -40,7 +40,7 @@ def test_long_unreported_await_fails_closed_and_replays_typed_failure() -> None:
                     intent_id="materialize-1",
                     kind=pb.DESIRED_INTENT_KIND_MATERIALIZE,
                     cause=pb.DESIRED_INTENT_CAUSE_COLD_BOOT,
-                    ref="owner/model:latest",
+                    ref="owner/model@latest",
                     snapshot_digest=b"blake3:abc",
                     mandatory=True,
                 )
@@ -72,7 +72,7 @@ def test_materialization_waiter_names_the_active_ref_owner(tmp_path: Path) -> No
         registry = IntentRegistry("release-1", [])
         store = ModelStore(_noop_send, cache_dir=tmp_path)
         store.bind_intent_registry(registry)
-        ref = WireRef("owner/model:latest")
+        ref = WireRef("owner/model@latest")
         lock = store._lock(ref)
         await lock.acquire()
         owner = asyncio.create_task(store.ensure_local(ref))

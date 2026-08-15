@@ -615,7 +615,7 @@ def test_a_cold_boot_with_a_reachable_hub_actually_issues_the_resolve(
     ex.file_base_url = f"http://127.0.0.1:{hub.server_address[1]}"
     slots = {"pipeline": MintSlot(
         ref=ModelRef(source="tensorhub", path="cozy/micro-diffusion",
-                     tag="prod"),
+                     release="prod"),
         path=str(micro_tree))}
 
     # pgw#1176: three declared classes, three outcomes; this row is about
@@ -685,7 +685,7 @@ def test_the_same_boot_derives_a_key_with_accelerate_UNIMPORTABLE(
     ex.file_base_url = f"http://127.0.0.1:{hub.server_address[1]}"
     slots = {"pipeline": MintSlot(
         ref=ModelRef(source="tensorhub", path="cozy/micro-diffusion",
-                     tag="prod"),
+                     release="prod"),
         path=str(micro_tree))}
 
     # pgw#1176: three declared classes, three outcomes; this row is about

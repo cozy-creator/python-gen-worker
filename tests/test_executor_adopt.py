@@ -46,7 +46,7 @@ from gen_worker.models import store as store_mod
 
 FAMILY = "flux2-klein-4b"
 CACHE_REF = f"root/family-{FAMILY}#inductor-rtx-4090-torch2.9"
-MODEL_REF = "acme/klein-finetune:latest"
+MODEL_REF = "acme/klein-finetune@latest"
 DIGEST_A = "blake3:" + "a" * 64
 DIGEST_B = "blake3:" + "b" * 64
 MODEL_DIGEST = "blake3:" + "c" * 64
@@ -415,14 +415,14 @@ def test_target_vacate_removes_address_before_replacement(tmp_path):
 def test_dynamic_sdxl_pick_target_uses_derived_load_time_binding(tmp_path):
     authored = replace(
         _spec(Compile(shapes=((1024, 1024),), family="sdxl")),
-        models={"pipeline": Hub("tensorhub/sdxl-default", tag="prod")},
+        models={"pipeline": Hub("tensorhub/sdxl-default")},
     )
     ex, _sent = _wire_executor(authored, tmp_path, ready=False, resident=False)
     picked_ref = "tensorhub/cyberrealistic-pony"
     picked_digest = "blake3:" + "d" * 64
     derived = replace(
         authored,
-        models={"pipeline": Hub("tensorhub/cyberrealistic-pony", tag="prod")},
+        models={"pipeline": Hub("tensorhub/cyberrealistic-pony")},
     )
     rec = ex._class_record(derived)
     rec.instance = _Endpoint()
@@ -514,7 +514,7 @@ def test_same_family_base_and_lora_targets_remain_distinct(tmp_path):
     [
         [("pipeline", MODEL_REF, "")],
         [("pipeline", wire_ref(_spec().models["pipeline"]), MODEL_DIGEST),
-         ("pipeline", "acme/other:latest", DIGEST_B)],
+         ("pipeline", "acme/other@latest", DIGEST_B)],
     ],
 )
 def test_malformed_or_duplicate_target_bindings_fail_closed(tmp_path, bindings):

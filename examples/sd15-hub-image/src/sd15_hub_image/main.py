@@ -40,7 +40,7 @@ class SD15Output(msgspec.Struct):
 
 
 @endpoint(
-    model=Hub(HUB_REF, tag="prod"),
+    model=Hub(HUB_REF, release="prod"),
     resources=Resources(gpu=True),
 )
 class SD15HubImage:

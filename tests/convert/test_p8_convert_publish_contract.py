@@ -93,7 +93,7 @@ def test_explicit_dtype_mismatch_casts_not_silent_passthrough(
 
     result = run_clone(
         _Ctx(fake_hub), provider="huggingface", source_ref="org/hidream-like",
-        destination_repo="acme/dest",
+        destination_repo="acme/dest", destination_release="r1",
         outputs=[{"dtype": "bf16", "file_layout": "multi-file", "file_type": "safetensors"}],
     )
 
@@ -114,7 +114,7 @@ def test_matching_dtype_is_genuinely_zero_work(
 
     result = run_clone(
         _Ctx(fake_hub), provider="huggingface", source_ref="org/hidream-like",
-        destination_repo="acme/dest",
+        destination_repo="acme/dest", destination_release="r1",
         outputs=[{"dtype": "fp32", "file_layout": "multi-file", "file_type": "safetensors"}],
     )
     assert not result.failed_flavors
@@ -146,7 +146,7 @@ def test_non_cast_eligible_strategy_refuses_mismatch_loudly(
     with pytest.raises(RuntimeError, match="no publishable flavor"):
         run_clone(
             _Ctx(fake_hub), provider="huggingface", source_ref="org/gguf-src",
-            destination_repo="acme/dest",
+            destination_repo="acme/dest", destination_release="r1",
             outputs=[{"dtype": "bf16", "file_layout": "single-file", "file_type": "gguf"}],
         )
     assert calls == [], "a refused dtype mismatch must never reach the cast path"

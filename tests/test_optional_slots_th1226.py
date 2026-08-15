@@ -53,7 +53,7 @@ def test_defaulted_param_whose_annotation_rejects_none_is_a_decoration_error() -
 
     with pytest.raises(ValueError, match="does not admit None"):
 
-        @endpoint(models={"pipeline": Slot(str, default_checkpoint=Hub("h/p", tag="prod"))})
+        @endpoint(models={"pipeline": Slot(str, default_checkpoint=Hub("h/p", release="prod"))})
         class _Bad:
             def setup(self, pipeline: str = None) -> None:  # type: ignore[assignment]
                 self.p = pipeline

@@ -12,7 +12,10 @@ from fake_hub import _FakeHub
 
 @pytest.fixture()
 def fake_hub():
-    _FakeHub.state = {"existing_blobs": set()}
+    # th#1987: a publish attaches to an ALREADY-CUT release. The default repo
+    # this fake serves has these cut; a test that wants the `release_not_found`
+    # refusal empties the set explicitly.
+    _FakeHub.state = {"existing_blobs": set(), "releases": {"r1", "r2", "2026.08"}}
     server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeHub)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()

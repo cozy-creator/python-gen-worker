@@ -1,31 +1,37 @@
 """THE ref grammar module (gw#492): parse + format + fold, nothing else mints.
 
 Normal form — the ONE canonical string for a model ref (grammar th#597 C5,
-shared vectors ``tests/testdata/ref_grammar_vectors.json``):
+re-keyed by th#1987; shared vectors ``tests/testdata/ref_grammar_vectors.json``):
 
-    tensorhub:  owner/repo[:tag][@sha256:<hex>|@blake3:<hex>][#<cell-fragment>]
+    tensorhub:  owner/repo[@<release>|@sha256:<hex>|@blake3:<hex>][#<cell-fragment>]
     hf:         owner/repo[@revision]
 
-The tag is ELIDED when it equals ``prod`` (the grammar default) and stamped
-verbatim otherwise — including ``latest``. th#1276: ``prod`` is the STABLE
-SERVING pointer and is the grammar default; ``latest`` is the MOVING PUBLISH
-pointer that the finalize path auto-binds, so it must always be written
-explicitly. ``format(parse(s))`` is the normalization projection;
-``parse(format(v)) == v`` for every value. Every ref string the worker mints
-(wire, residency keys, cache keys, telemetry) MUST come from :func:`wire_ref`
-(bindings), :func:`fold_ref` (string + tag overlay), or
-:func:`format_model_ref` / ``.canonical()`` (parsed values). A grep-guard test
-(``tests/test_ref_normal_form.py``) rejects new ad-hoc formatter/parser sites.
+THE `:tag` PRODUCTION IS DEAD (th#1987, HARDCUT A9). A tag was a movable
+pointer with a supplied default; a release is cut once, deliberately, and is
+immutable. There is NO default and NOTHING is elided: a bare ``owner/repo``
+names a repo and no artifact inside it, and a hub resolve for one is the
+terminal ``release_not_found`` (``catalog.ResolveCheckpointSelector``). A ref
+carrying ``:`` raises :class:`RetiredTagRef` naming the remedy — the
+client-side twin of the hub's own refusal, so a stale pin is told what to
+write instead of resolving to nothing on a rented pod.
+
+``format(parse(s))`` is the normalization projection; ``parse(format(v)) == v``
+for every value. A digest WINS over a release when both are set (the digest is
+exact; the release is the set it was picked from) and they share one ``@`` slot
+because a second one destroys injectivity (th#1387). Every ref string the
+worker mints (wire, residency keys, cache keys, telemetry) MUST come from
+:func:`wire_ref` (bindings), :func:`fold_ref` (string + release overlay), or
+:func:`format_model_ref` / ``.canonical()`` (parsed values).
 
 THE FLAVOR IS DEAD AS A WEIGHT ADDRESS (§1.32(d), th#1803, pgw#1148). The
-`#` tail no longer selects a checkpoint: selection within a tag group is
+`#` tail no longer selects a checkpoint: selection within a release is
 tensor-layout contract compatibility (§1.33, ``Slot(layouts=…)``), and a
 specific checkpoint is addressed by ``owner/repo@sha256:…``. A weight ref
 carrying `#` is refused by :func:`refuse_flavor_selector` — the client-side
 twin of the hub's ``flavor_selection_removed`` 400.
 
 The `#` tail SURVIVES IN THE GRAMMAR for one reason only: COMPILE CELL refs
-are `#`-shaped (``root/family-<f>:cells#ck1-…``), exactly as tensorhub's own
+are `#`-shaped (``root/family-<f>#<key>``), exactly as tensorhub's own
 ``release.ParseCanonicalRef`` still parses them. That retirement is a
 separate item on both sides; ``TensorhubRef.flavor`` is that cell fragment
 and has no other reader.
@@ -55,6 +61,13 @@ _TENSORHUB_FRAGMENT_RE = re.compile(
     r"[a-z0-9][a-z0-9._-]{0,%d}" % (MAX_FRAGMENT_LEN - 1)
 )
 
+# The grammar's OWN delimiters. th#1387: a component carrying one destroys
+# injectivity — String() re-parses to a different value, and the hub compares
+# its minted refs against worker wire refs BYTE-WISE, so a ref that normalizes
+# two ways is a cache miss presenting as a missing model. Structural, not a
+# naming charset: it says nothing about which letters a repo may use.
+REF_GRAMMAR_SEPARATORS = "/@:#"
+
 
 class FlavorSelectorRemoved(ValueError):
     """A weight ref carried a `#` selector. §1.32(d)/th#1803: THE FLAVOR
@@ -68,14 +81,33 @@ class FlavorSelectorRemoved(ValueError):
     """
 
 
+class RetiredTagRef(ValueError):
+    """A ref carried a `:tag`. th#1987 DELETED the tag production.
+
+    The client-side twin of tensorhub's `ParseCanonicalRef` refusal. Refusing
+    here rather than letting the colon land inside the repo name matters: a
+    parsed ``repo:prod`` addresses a repo nobody has, so the defect would
+    surface as an empty resolve on a rented pod instead of at the line that
+    wrote the pin.
+    """
+
+
 def _flavor_removed_message(ref: str) -> str:
     return (
         f"model ref {ref!r} carries a `#` flavor selector, which is REMOVED "
         "(§1.32(d), th#1803 / pgw#1148 — deleted, not aliased). Selection "
-        "within a tag group is tensor-layout contract compatibility: declare "
+        "within a release is tensor-layout contract compatibility: declare "
         "what the code accepts with Slot(layouts=...) and bind "
-        "'owner/repo[:tag]', or address one exact checkpoint with "
+        "'owner/repo@<release>', or address one exact checkpoint with "
         "'owner/repo@sha256:<hex>'."
+    )
+
+
+def _retired_tag_message(ref: str) -> str:
+    return (
+        f"model ref {ref!r} carries a ':' tag; tags were deleted (th#1987) — "
+        "write 'owner/repo@<release>' (cut a release, then attach artifacts "
+        "to it). There is no default and no floating pointer to inherit."
     )
 
 
@@ -92,14 +124,6 @@ def refuse_flavor_selector(ref: str, *, where: str = "") -> None:
     msg = _flavor_removed_message(s)
     raise FlavorSelectorRemoved(f"{where}: {msg}" if where else msg)
 
-# th#1276: the ref grammar's default tag — a bare ``owner/repo`` means
-# ``owner/repo:prod``. ``prod`` is the STABLE SERVING pointer; ``latest`` is
-# the MOVING PUBLISH pointer that finalize auto-binds and must always be
-# written explicitly. This is the Python twin of tensorhub's
-# ``release.DefaultRefTag``. Use it at every GRAMMAR-COUPLED site (parse
-# default, normal-form elision) so those sites stay greppable and distinct
-# from code that genuinely means the ``latest`` publish tag.
-DEFAULT_REF_TAG = "prod"
 
 # pgw#872 / th#1388: a LENGTH-PRESERVING case fold. An index computed on
 # ``s.lower()`` is not a valid index into ``s`` — the map is 1:1 here, so it is.
@@ -121,9 +145,12 @@ WireRef = NewType("WireRef", str)
 class TensorhubRef:
     owner: str
     repo: str
-    tag: str = DEFAULT_REF_TAG
+    #: The author-chosen release identifier the non-digest ``@`` tail named.
+    #: There is NO default: "" means the ref addresses the repo and nothing
+    #: inside it, exactly as tensorhub's ``CanonicalRef.Release`` does.
+    release: str = ""
     digest: Optional[str] = None  # snapshot digest, including algorithm prefix (e.g. "blake3:<hex>")
-    #: The `#` tail. A COMPILE CELL fragment (``root/family-<f>:cells#ck1-…``)
+    #: The `#` tail. A COMPILE CELL fragment (``root/family-<f>#<key>``)
     #: and nothing else — never a weight selector (§1.32(d)). Weight paths
     #: call :func:`refuse_flavor_selector`; the compile cache is the one
     #: reader (``compile_cache.parse_cell_ref``).
@@ -133,15 +160,16 @@ class TensorhubRef:
         return f"{self.owner}/{self.repo}"
 
     def canonical(self) -> "WireRef":
-        """Normal form: ``owner/repo[:tag][@digest][#cell-fragment]``; the tag is
-        elided when it is ``prod`` (the grammar default) and stamped verbatim
-        otherwise, including ``latest``. Tensorhub is the default provider so
-        no prefix is emitted; consumers track provider separately."""
+        """Normal form: ``owner/repo[@release|@digest][#cell-fragment]``.
+
+        Nothing is elided (th#1987) and the digest takes the single ``@`` slot
+        when both are set. Tensorhub is the default provider so no prefix is
+        emitted; consumers track provider separately."""
         out = self.repo_id()
-        if self.tag and self.tag != DEFAULT_REF_TAG:
-            out = f"{out}:{self.tag}"
         if self.digest:
             out = f"{out}@{self.digest}"
+        elif self.release:
+            out = f"{out}@{self.release}"
         if self.flavor:
             out = f"{out}#{self.flavor}"
         return WireRef(out)
@@ -203,6 +231,107 @@ class ParsedModelRef:
     hf: Optional[HuggingFaceRef] = None
     civitai: Optional[CivitaiRef] = None
     modelscope: Optional[ModelScopeRef] = None
+
+
+def _parse_tensorhub_ref(raw: str, s: str) -> TensorhubRef:
+    """The tensorhub production, mirroring ``release.ParseCanonicalRef``
+    decision for decision. The order is load-bearing: fragment, digest,
+    release, then the retired-tag refusal, then owner/repo."""
+    digest = None
+    flavor = None
+
+    if "#" in s:
+        s, flavor_part = s.split("#", 1)
+        flavor_part = flavor_part.strip()
+        if "?" in flavor_part:
+            flavor_part = flavor_part.split("?", 1)[0].strip()
+        flavor_part = flavor_part.lower()
+        if not flavor_part:
+            raise ValueError("tensorhub ref fragment is empty")
+        # th#597 C5: ONE fragment token per ref, charset
+        # [a-z0-9][a-z0-9._-]{0,95} — `#a#b` is invalid (cells encode
+        # conjunction inside one token). Shared grammar vectors:
+        # tests/testdata/ref_grammar_vectors.json (byte-identical copy in
+        # tensorhub internal/orchestrator/release/testdata/, whose Go
+        # ParseCanonicalRef still parses the tail for the same reason).
+        if not _TENSORHUB_FRAGMENT_RE.fullmatch(flavor_part):
+            raise ValueError(
+                f"tensorhub ref fragment {flavor_part!r} is not a valid token"
+            )
+        flavor = flavor_part
+        s = s.strip()
+
+    # th#1387: take the EARLIEST digest marker in the string, not the first
+    # algorithm in a fixed list — scanning by algorithm made
+    # "@blake3:x@sha256:<hex>" split on the LATER marker, silently absorbing
+    # "@blake3" into the repo name.
+    #
+    # pgw#872: the index MUST come from the same string it slices.
+    # ``str.lower()`` is not length-preserving (``len("İ") == 1`` but
+    # ``len("İ".lower()) == 2``), so an index taken on a lowercased copy
+    # splits the original in the wrong place and silently truncates the
+    # digest. ``_ascii_lower`` is a 1:1 character map, so it cannot move
+    # an index.
+    low = _ascii_lower(s)
+    best_idx, best_algo = -1, ""
+    for algo in ("sha256", "blake3"):
+        idx = low.find(f"@{algo}:")
+        if idx >= 0 and (best_idx < 0 or idx < best_idx):
+            best_idx, best_algo = idx, algo
+    if best_idx >= 0:
+        hex_part = s[best_idx + len(f"@{best_algo}:"):].strip()
+        if not hex_part:
+            raise ValueError(f"tensorhub ref {best_algo} digest is empty")
+        # th#1387: the hex tail runs to end-of-string, so a second marker
+        # after it was being absorbed INTO the digest — a well-formed-looking
+        # ref addressing a CAS object that does not exist.
+        if any(c in hex_part for c in REF_GRAMMAR_SEPARATORS):
+            raise ValueError(
+                f"tensorhub ref {best_algo} digest {hex_part!r} contains a "
+                "grammar separator")
+        digest = f"{best_algo}:{hex_part.lower()}"
+        s = s[:best_idx].strip()
+
+    release = ""
+    if "@" in s:
+        # th#1987: a non-digest `@` tail is the RELEASE. th#1387's rule
+        # survives the re-key: exactly one tail, carrying no separator.
+        s, release_part = s.split("@", 1)
+        s = s.strip()
+        release = release_part.strip()
+        if not release:
+            raise ValueError("tensorhub ref release is empty")
+        if any(c in release for c in REF_GRAMMAR_SEPARATORS):
+            raise ValueError(
+                f"tensorhub ref release {release!r} contains a grammar separator")
+        # The catalog's `^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$` CHECK is enforced
+        # where a release is CUT (migration 0044), not where a ref is parsed —
+        # tensorhub's own parser applies no charset here, and duplicating it
+        # would refuse refs the hub reads fine.
+
+    # th#1987: the tag production is GONE. Refuse rather than let the colon
+    # land inside the repo name, where it would address a repo nobody has.
+    if ":" in s:
+        raise RetiredTagRef(_retired_tag_message(raw.strip()))
+
+    # th#1387: an unbounded split let "owner/repo/extra" parse with
+    # repo="repo/extra" — a path separator inside the component that builds
+    # roots/{org}/{repo}.json, whose inversion is then ambiguous.
+    if "/" not in s:
+        raise ValueError(
+            "tensorhub ref must be 'owner/repo' (optionally with @<release>, "
+            "#flavor, @sha256:<hex>, or @blake3:<hex>)")
+    owner, repo = s.split("/", 1)
+    owner = owner.strip()
+    repo = repo.strip()
+    if not owner or not repo:
+        raise ValueError("tensorhub ref must be 'owner/repo'")
+    for name, val in (("owner", owner), ("repo", repo)):
+        if any(c in val for c in REF_GRAMMAR_SEPARATORS):
+            raise ValueError(
+                f"tensorhub ref {name} {val!r} contains a grammar separator")
+    return TensorhubRef(
+        owner=owner, repo=repo, release=release, digest=digest, flavor=flavor)
 
 
 def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
@@ -267,71 +396,8 @@ def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
         )
 
     if provider == "tensorhub":
-        digest = None
-        flavor = None
-        # th#1276: the grammar default is the STABLE SERVING pointer "prod";
-        # the moving publish pointer "latest" must be written explicitly.
-        tag = DEFAULT_REF_TAG
-
-        if "#" in s:
-            s, flavor_part = s.split("#", 1)
-            flavor_part = flavor_part.strip()
-            if "?" in flavor_part:
-                flavor_part = flavor_part.split("?", 1)[0].strip()
-            flavor_part = flavor_part.lower()
-            if not flavor_part:
-                raise ValueError("tensorhub ref fragment is empty")
-            # th#597 C5: ONE fragment token per ref, charset
-            # [a-z0-9][a-z0-9._-]{0,63} — `#a#b` is invalid (cells encode
-            # conjunction inside one token). Shared grammar vectors:
-            # tests/testdata/ref_grammar_vectors.json (byte-identical copy in
-            # tensorhub internal/orchestrator/release/testdata/, whose Go
-            # ParseCanonicalRef still parses the tail for the same reason).
-            if not _TENSORHUB_FRAGMENT_RE.fullmatch(flavor_part):
-                raise ValueError(
-                    f"tensorhub ref fragment {flavor_part!r} is not a valid token"
-                )
-            flavor = flavor_part
-
-        # pgw#872: the index MUST come from the same string it slices.
-        # ``str.lower()`` is not length-preserving (``len("İ") == 1`` but
-        # ``len("İ".lower()) == 2``), so an index taken on a lowercased copy
-        # splits the original in the wrong place and silently truncates the
-        # digest. ``_ascii_lower`` is a 1:1 character map, so it cannot move
-        # an index.
-        low = _ascii_lower(s)
-        if "@sha256:" in low:
-            idx = low.index("@sha256:")
-            repo_id = s[:idx].strip()
-            dig = s[idx + len("@sha256:"):].strip()
-            if not dig:
-                raise ValueError("tensorhub ref sha256 digest is empty")
-            digest = f"sha256:{dig}"
-            s = repo_id
-        elif "@blake3:" in low:
-            idx = low.index("@blake3:")
-            repo_id = s[:idx].strip()
-            dig = s[idx + len("@blake3:"):].strip()
-            if not dig:
-                raise ValueError("tensorhub ref blake3 digest is empty")
-            digest = f"blake3:{dig}"
-            s = repo_id
-        elif "@" in s:
-            raise ValueError("tensorhub ref digest must use @sha256:<hex> or @blake3:<hex>")
-        if ":" in s:
-            repo_id, tag_part = s.rsplit(":", 1)
-            repo_id = repo_id.strip()
-            tag = tag_part.strip() or DEFAULT_REF_TAG
-        else:
-            repo_id = s
-        if "/" not in repo_id:
-            raise ValueError("tensorhub ref must be 'owner/repo' (optionally with :tag, #flavor, @sha256:<hex>, or @blake3:<hex>)")
-        owner, repo = repo_id.split("/", 1)
-        owner = owner.strip()
-        repo = repo.strip()
-        if not owner or not repo:
-            raise ValueError("tensorhub ref must be 'owner/repo'")
-        return ParsedModelRef(provider="tensorhub", tensorhub=TensorhubRef(owner=owner, repo=repo, tag=tag, digest=digest, flavor=flavor))
+        return ParsedModelRef(
+            provider="tensorhub", tensorhub=_parse_tensorhub_ref(raw, s))
 
     raise ValueError(f"unsupported model ref provider: {provider!r}")
 
@@ -356,30 +422,28 @@ def normalize_model_ref(raw: str, *, provider: str = "tensorhub") -> WireRef:
 def fold_ref(
     ref: str,
     *,
-    tag: str = "",
+    release: str = "",
     provider: str = "tensorhub",
 ) -> WireRef:
-    """Fold a side-channel ``tag`` field into a ref string and return the
-    normal form — the grammar-correct Python twin of tensorhub's
-    ``release.ModelRefWithTag``.
+    """Fold a side-channel ``release`` field into a ref string and return the
+    normal form.
 
-    An explicit non-empty tag wins over one already embedded in ``ref``; an
-    empty tag preserves whatever the ref carries. Non-tensorhub providers
-    have no tag axis. pgw#1148 deleted the ``flavor=`` overlay with the
+    An explicit non-empty release wins over one already embedded in ``ref``; an
+    empty release preserves whatever the ref carries. Non-tensorhub providers
+    have no release axis. pgw#1148 deleted the ``flavor=`` overlay with the
     flavor itself — there is no second selector to fold.
     """
     parsed = parse_model_ref(ref, provider=provider)
-    tag = (tag or "").strip()
+    release = (release or "").strip()
     if parsed.tensorhub is not None:
         th = parsed.tensorhub
-        if tag:
+        if release:
             th = TensorhubRef(
                 owner=th.owner,
                 repo=th.repo,
-                tag=tag,
+                release=release,
                 digest=th.digest,
                 flavor=th.flavor,
             )
         return th.canonical()
     return format_model_ref(parsed)
-

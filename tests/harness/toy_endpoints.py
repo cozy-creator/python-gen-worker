@@ -154,8 +154,8 @@ class RamPressureEndpoint:
 
 # Never delivered in ANY P3 test: if boot ever fetches these, the store finds
 # no snapshot registered for them and fails fast (no real network involved).
-BOOT_UNREACHABLE_PIPELINE = Hub("harness/boot-precedence-pipeline", tag="prod")
-BOOT_UNREACHABLE_VAE = Hub("harness/boot-precedence-vae", tag="prod")
+BOOT_UNREACHABLE_PIPELINE = Hub("harness/boot-precedence-pipeline", release="prod")
+BOOT_UNREACHABLE_VAE = Hub("harness/boot-precedence-vae", release="prod")
 
 
 @endpoint(models={
@@ -175,7 +175,7 @@ class SlotBootPrecedenceEndpoint:
         return EchoOut(response=weights.read_text())
 
 
-DECLARED_PIPELINE = Hub("harness/slot-identity-declared", tag="prod")
+DECLARED_PIPELINE = Hub("harness/slot-identity-declared", release="prod")
 
 
 @endpoint(models={
@@ -191,10 +191,10 @@ class SlotIdentityFixedEndpoint:
     def slot_identity_fixed(self, ctx: RequestContext[_ToyDefaults], data: EchoIn) -> EchoOut:
         resolved = ctx.slots["pipeline"]
         ref = resolved.ref
-        return EchoOut(response=f"{ref.source}:{ref.path}:{ref.tag}")
+        return EchoOut(response=f"{ref.source}:{ref.path}@{ref.release}")
 
 
-CATALOG_DEFAULT_PIPELINE = Hub("harness/slot-catalog-default", tag="prod")
+CATALOG_DEFAULT_PIPELINE = Hub("harness/slot-catalog-default", release="prod")
 
 
 @endpoint(models={
@@ -212,7 +212,7 @@ class SlotIdentityCatalogEndpoint:
     def slot_identity_catalog(self, ctx: RequestContext[_ToyDefaults], data: EchoIn) -> EchoOut:
         resolved = ctx.slots["pipeline"]
         ref = resolved.ref
-        return EchoOut(response=f"{ref.source}:{ref.path}:{ref.tag}")
+        return EchoOut(response=f"{ref.source}:{ref.path}@{ref.release}")
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +254,7 @@ class ToyComposedPipeline:
         return self
 
 
-COMPOSED_DECLARED = Hub("harness/composed-base", tag="prod")
+COMPOSED_DECLARED = Hub("harness/composed-base", release="prod")
 COMPOSED_SETUPS: list = []  # one entry per setup() run (identity-change proof)
 
 
@@ -296,7 +296,7 @@ class ToyCheckpointPipeline:
         return self
 
 
-JUGGLE_DECLARED = Hub("harness/juggle-base", tag="prod")
+JUGGLE_DECLARED = Hub("harness/juggle-base", release="prod")
 JUGGLE_SETUPS: list = []  # one entry per setup() run, in order
 
 
@@ -372,8 +372,8 @@ class BillableEndpoint:
 # with a typed, client-visible error instead of crashing setup.
 # ---------------------------------------------------------------------------
 
-OPTIONAL_T2I = Hub("harness/optional-lane-t2i", tag="prod")
-OPTIONAL_EDIT = Hub("harness/optional-lane-edit", tag="prod")
+OPTIONAL_T2I = Hub("harness/optional-lane-t2i", release="prod")
+OPTIONAL_EDIT = Hub("harness/optional-lane-edit", release="prod")
 
 
 @endpoint(models={
@@ -406,7 +406,7 @@ class OptionalExecutionLaneEndpoint:
 # a warm job that never touches ``ctx`` could not have caught it.
 # ---------------------------------------------------------------------------
 
-WARM_SLOT_PIPELINE = Hub("harness/warm-slot-base", tag="prod")
+WARM_SLOT_PIPELINE = Hub("harness/warm-slot-base", release="prod")
 
 
 @endpoint(

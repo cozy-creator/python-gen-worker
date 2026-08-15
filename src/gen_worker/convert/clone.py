@@ -45,6 +45,7 @@ from .ingest import (
     plan_huggingface,
 )
 from .keepalive import HubKeepalive
+from .publish import destination_release as _destination_release
 from .layout import canonical_model_family_from_variant, infer_model_family_variant_from_hint
 from .registry import repackage_family
 from .writer import (
@@ -68,7 +69,6 @@ _PUBLIC_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,127}$")
 # An HF shard member; `group` is dir + prefix, i.e. the set it belongs to.
 _SHARD_MEMBER_RE = re.compile(
     r"^(?P<group>.*?[^/]+)-\d{5}-of-\d{5}\.safetensors$")
-_PUBLIC_TAG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 
 _KNOWN_DTYPES = {
     # "source" = publish the source's own weights untouched (pure mirror);
@@ -116,6 +116,18 @@ class CloneResult:
 # Normalization
 # ---------------------------------------------------------------------------
 
+def _payload_destination_release(payload: Any) -> str:
+    """The release the invoke named: the reserved ``destination`` struct's
+    ``release`` (the shape the hub validates), else the flat scalar."""
+    dest = getattr(payload, "destination", None)
+    if dest is not None:
+        get = dest.get if isinstance(dest, dict) else (lambda k: getattr(dest, k, None))
+        rel = str(get("release") or "").strip()
+        if rel:
+            return rel
+    return str(getattr(payload, "destination_release", "") or "").strip()
+
+
 def normalize_destination_ref(value: str) -> str:
     ref = str(value or "").strip().lower()
     if not ref:
@@ -153,16 +165,6 @@ def normalize_source_include(value: Any) -> tuple[str, ...]:
         f"source_include must be a string or a list of strings, got {type(value).__name__}")
 
 
-def normalize_tags(values: Iterable[str] | None) -> list[str]:
-    out: list[str] = []
-    for raw in values or []:
-        tag = str(raw or "").strip().lower()
-        if not tag or tag in out:
-            continue
-        if _PUBLIC_TAG_RE.match(tag) is None:
-            raise ValueError(f"invalid destination tag: {tag!r}")
-        out.append(tag)
-    return sorted(out)
 
 
 def normalize_outputs(values: Iterable[Any] | None, *, layout_hint: str = MULTI_FILE) -> list[OutputSpec]:
@@ -713,7 +715,7 @@ def run_clone(
     source_revision: str | None = None,
     civitai_model_version_id: int | None = None,
     destination_repo: str,
-    destination_repo_tags: Iterable[str] | None = None,
+    destination_release: str = "",
     target_layout: str | None = None,
     source_dtype_preference: list[str] | None = None,
     outputs: Iterable[Any] | None = None,
@@ -729,7 +731,10 @@ def run_clone(
 
     provider = str(provider or "").strip().lower()
     destination = normalize_destination_ref(destination_repo)
-    tags = normalize_tags(destination_repo_tags)
+    # th#1987: every published artifact attaches to an ALREADY-CUT release,
+    # named by the invoking request. Resolved before the download so a clone
+    # that could never publish costs nothing.
+    release = _destination_release(ctx, destination_release)
     layout_hint = str(target_layout or MULTI_FILE).strip().lower() or MULTI_FILE
     specs = normalize_outputs(outputs, layout_hint=layout_hint)
     include = normalize_source_include(source_include)
@@ -1030,12 +1035,8 @@ def run_clone(
             commit = hubclient.publish_v2(
                 destination_repo=destination,
                 files=files,
-                tags=tags,
+                release=release,
                 mode=mode if i == 0 else "merge",
-                # The PRIMARY output owns the bare row: a variant publish joins
-                # the tag group, and the head is stated, never inferred from a
-                # flavor token.
-                head=(i == 0),
                 dtype=str(attrs.get("dtype") or spec.dtype),
                 file_layout=str(attrs.get("file_layout") or spec.file_layout),
                 file_type=str(attrs.get("file_type") or spec.file_type),
@@ -1066,7 +1067,6 @@ def run_clone(
                 # The report states the DTYPE it published, not a flavor token
                 # — the token names nothing catalog-side.
                 "dtype": dtype_label,
-                "head": i == 0,
                 "spec_label": spec.label,
                 "revision_id": commit.revision_id,
                 "checkpoint_id": commit.checkpoint_id,
@@ -1138,7 +1138,7 @@ def from_huggingface(ctx: Any, payload: Any, *, hf_token: str | None = None) -> 
         source_ref=str(getattr(payload, "huggingface_repo", "") or ""),
         source_revision=getattr(payload, "source_revision", None),
         destination_repo=str(getattr(payload, "destination_repo", "") or ""),
-        destination_repo_tags=getattr(payload, "destination_repo_tags", None),
+        destination_release=_payload_destination_release(payload),
         target_layout=getattr(payload, "target_layout", None),
         source_dtype_preference=getattr(payload, "source_dtype_preference", None),
         outputs=getattr(payload, "outputs", None),
@@ -1162,7 +1162,7 @@ def from_civitai(ctx: Any, payload: Any, *, civitai_api_key: str | None = None) 
         provider="civitai",
         civitai_model_version_id=version_id,
         destination_repo=str(getattr(payload, "destination_repo", "") or ""),
-        destination_repo_tags=getattr(payload, "destination_repo_tags", None),
+        destination_release=_payload_destination_release(payload),
         target_layout=getattr(payload, "target_layout", None),
         outputs=getattr(payload, "outputs", None),
         quantize_components=getattr(payload, "quantize_components", None),
@@ -1183,6 +1183,5 @@ __all__ = [
     "normalize_destination_ref",
     "normalize_outputs",
     "normalize_source_include",
-    "normalize_tags",
     "run_clone",
 ]

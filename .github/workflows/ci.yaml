@@ -340,6 +340,15 @@ jobs:
       - name: pgw#1049 guard - torch-settings writes outside the authority
         run: uv run python scripts/lint_settings_writers.py
 
+      # GATING (th#1987 / HARDCUT A9): the `:tag` ref production is DELETED.
+      # A surviving pin fails on a rented pod at the resolve, not at the line
+      # that wrote it. The selftest proves the fence can go red, because a
+      # sweep that only ever prints "clean" guards nothing.
+      - name: th#1987 guard - no retired `owner/repo:tag` pin survives
+        run: |
+          uv run python scripts/lint_repo_ref_pins.py --selftest
+          uv run python scripts/lint_repo_ref_pins.py
+
       # GATING (pgw#1143, §1.33): `Slot(layouts=...)` is the per-slot layout
       # DEMAND the hub's gate reads. It must be readable by the AST sweep as
       # well as by the import, so a computed declaration is refused where it

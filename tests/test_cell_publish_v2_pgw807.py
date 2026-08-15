@@ -305,6 +305,12 @@ def test_publish_takes_the_v2_route_and_never_the_frozen_v1_one(
     # pgw#1159: the cell key is the token's claim, never a body field.
     assert "flavor" not in decl
     assert "tags" not in decl and "default_flavor" not in decl
+    # th#1987/pgw#1279: a self-minted compiled graph joins NO release — it is
+    # selected by the endpoint's compiled_graph_store row, and the hub answers
+    # `release_forbidden` to a body that names one. `release` is a REQUIRED
+    # argument of publish_v2, so the exemption is stated at the call site
+    # (COMPILED_GRAPH_NO_RELEASE) and still reaches the wire as absence.
+    assert "release" not in decl
     # th#1340: the cell identity is hub-derived and rides the token.
     for forbidden in ("cell_publish", "compiled_graph_key", "family",
                       "owning_endpoint_id", "axes"):

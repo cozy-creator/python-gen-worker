@@ -151,7 +151,7 @@ from .utils import lora as lora_util
 import errno as _errno
 import inspect as _inspect
 import struct as _struct
-from .models.refs import DEFAULT_REF_TAG, parse_model_ref
+from .models.refs import parse_model_ref
 from . import compile_cache
 from .models.loading import (
     is_modular_pipeline_class,
@@ -409,7 +409,7 @@ def _hub_binding_for_wire_ref(ref: str) -> ModelRef:
     """A tensorhub-source binding for a hub-named wire ref (pgw#532).
 
     ``RunJob.models`` / desired-instance refs name hub-CAS repos in the canonical
-    ``owner/repo[:tag][@digest]`` grammar; this mints the binding the
+    ``owner/repo[@release|@digest]`` grammar; this mints the binding the
     executor materializes them through (``ensure_local`` then follows the
     tensorhub lane: orchestrator snapshots or the th#763 missing_snapshot
     re-mint — never an upstream self-fetch). Raises ``ValueError`` when
@@ -423,7 +423,7 @@ def _hub_binding_for_wire_ref(ref: str) -> ModelRef:
     return ModelRef(
         source="tensorhub",
         path=f"{th.owner}/{th.repo}",
-        tag=th.tag or DEFAULT_REF_TAG,
+        release=th.release,
     )
 
 
@@ -9468,6 +9468,14 @@ class Executor:
             dest_repo = _producer_destination_repo(payload, destination_info)
             if dest_repo:
                 execution_hints["destination_repo"] = dest_repo
+            # th#1987: a repo-CAS publish must name the release it attaches to,
+            # and the caller states it in the reserved `destination` struct the
+            # hub already validates (parseDestinationRelease). Carried beside
+            # destination_repo so `ctx.save_checkpoint` has it without reaching
+            # back into the payload.
+            dest_release = str(destination_info.get("release") or "").strip()
+            if dest_release:
+                execution_hints["destination_release"] = dest_release
             job_id = _capability_job_id(order.capability_token)
             producer_kwargs = dict(
                 source_info=source_info,

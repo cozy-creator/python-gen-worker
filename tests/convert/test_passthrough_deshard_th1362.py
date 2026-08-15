@@ -110,7 +110,7 @@ def _publish_svdq_flavor(fake_hub: Any, tmp_path: Path, *, sharded: bool):
     results = publish_flavors(
         ctx, [ProducedFlavor(path=str(tree), flavor=attrs["flavor"],
                              attributes=attrs)],
-        destination_repo="cozy/qwen-image", tags=["svdq-fp4-r128"])
+        destination_repo="cozy/qwen-image", release="r1")
     paths = sorted(f["path"] for f in _FakeHub.state["publish_request"]["files"])
     return base, tree, te, paths, results
 
@@ -204,7 +204,7 @@ def test_publish_still_refuses_a_shard_set_the_copy_cannot_collapse(
     with pytest.raises(ConversionImplementationError,
                        match="sharded_producer_output"):
         publish_flavors(ctx, [ProducedFlavor(path=str(tree), flavor="x")],
-                        destination_repo="cozy/qwen-image")
+                        destination_repo="cozy/qwen-image", release="r1")
 
 
 def test_an_index_naming_a_missing_shard_fails_the_PRODUCE(tmp_path: Path) -> None:

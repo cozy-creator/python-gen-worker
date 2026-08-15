@@ -71,10 +71,11 @@ def _manifest(*binding_blocks: dict) -> dict:
             {"bfl/FLUX.2-klein-4B": "hf"},
         ),
         (
-            # A non-default tag folds into the normal-form key.
+            # th#1987: the release rides the REF; there is no side-channel
+            # key left to fold, and the normal form keys the index.
             {"pipeline": {"kind": "fixed", "provider": "tensorhub",
-                          "ref": "acme/flux", "tag": "canary"}},
-            {"acme/flux:canary": "tensorhub"},
+                          "ref": "acme/flux@canary"}},
+            {"acme/flux@canary": "tensorhub"},
         ),
         (
             # retired dispatch-kind entries are ignored, not parsed.
@@ -110,11 +111,11 @@ def test_provider_index_extracted_from_manifest(block: dict, expect: dict) -> No
 def test_lookup_default_and_index() -> None:
     assert lookup_provider_for_ref("foo/bar") == "tensorhub"
     assert lookup_provider_for_ref("foo/bar", default="hf") == "hf"
-    set_provider_index({"acme/flux:canary": "hf"})
-    assert lookup_provider_for_ref("acme/flux:canary") == "hf"
+    set_provider_index({"acme/flux@canary": "hf"})
+    assert lookup_provider_for_ref("acme/flux@canary") == "hf"
     assert lookup_provider_for_ref("not/in-index") == "tensorhub"
     set_provider_index(None)
-    assert lookup_provider_for_ref("acme/flux:canary") == "tensorhub"  # cleared
+    assert lookup_provider_for_ref("acme/flux@canary") == "tensorhub"  # cleared
 
 
 def test_lookup_exact_tag_beats_repo_fallback() -> None:
@@ -122,12 +123,12 @@ def test_lookup_exact_tag_beats_repo_fallback() -> None:
     flavor was the sub-selector §1.32(d) deleted. The exact normal-form key
     still disambiguates, and a hub-minted DIGEST pick routes via the
     repo-identity fallback."""
-    set_provider_index({"owner/flux:latest": "hf", "owner/flux:canary": "tensorhub"})
-    assert lookup_provider_for_ref("owner/flux:canary") == "tensorhub"
-    assert lookup_provider_for_ref("owner/flux:latest") == "hf"
+    set_provider_index({"owner/flux@latest": "hf", "owner/flux@canary": "tensorhub"})
+    assert lookup_provider_for_ref("owner/flux@canary") == "tensorhub"
+    assert lookup_provider_for_ref("owner/flux@latest") == "hf"
     # normalization: the DEFAULT tag (':prod', th#1276) folds to the bare key,
     # which is not indexed here -> the repo-identity fallback.
-    assert lookup_provider_for_ref("owner/flux:prod") == "hf"
+    assert lookup_provider_for_ref("owner/flux@prod") == "hf"
     # a digest pick is not an indexed key -> repo-identity fallback
     assert lookup_provider_for_ref("owner/flux@sha256:" + "ab" * 32) == "hf"
     set_provider_index(None)
@@ -136,15 +137,15 @@ def test_lookup_exact_tag_beats_repo_fallback() -> None:
 @pytest.mark.parametrize(
     "wire_ref",
     [
-        "bfl/FLUX.2-klein-4B:latest#bf16",  # non-default tag
-        "bfl/FLUX.2-klein-4B:prod#bf16",    # the grammar default, stamped
+        "bfl/FLUX.2-klein-4B@latest#bf16",  # a release-addressed spelling
+        "bfl/FLUX.2-klein-4B@prod#bf16",    # the release that used to be the default
         "bfl/FLUX.2-klein-4B#bf16",         # bare form (no regression)
     ],
 )
-def test_lookup_tag_strip(wire_ref: str) -> None:
-    """Live 2026-05-16 failure: a runtime payload stamps a ``:tag`` onto an HF
+def test_lookup_release_strip(wire_ref: str) -> None:
+    """Live 2026-05-16 failure: a runtime payload stamps a release onto an HF
     ref but the index only carries the bare HF form, so the lookup must strip
-    the tag (tag is meaningless for HF)."""
+    it (a tensorhub release is meaningless for HF)."""
     assert lookup_provider_for_ref(wire_ref) == "tensorhub"  # default before install
     set_provider_index({"bfl/FLUX.2-klein-4B#bf16": "hf"})
     assert lookup_provider_for_ref(wire_ref) == "hf"

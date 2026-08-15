@@ -102,7 +102,7 @@ def _w8a8_tree(tmp_path: Path) -> Path:
 def _binding(path: str) -> Any:
     from gen_worker.api.binding import ModelRef
 
-    return ModelRef(source="tensorhub", path=path, tag="prod")
+    return ModelRef(source="tensorhub", path=path, release="prod")
 
 
 # ---------------------------------------------------------------------------

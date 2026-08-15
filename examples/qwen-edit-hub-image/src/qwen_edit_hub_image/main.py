@@ -40,7 +40,7 @@ class EditOutput(msgspec.Struct):
     height: int
 
 
-@endpoint(model=Hub(HUB_REF, tag="prod"), resources=Resources(gpu=True))
+@endpoint(model=Hub(HUB_REF, release="prod"), resources=Resources(gpu=True))
 class QwenImageEdit:
     def setup(self, model: QwenImageEditPlusPipeline) -> None:
         self._pipe = model

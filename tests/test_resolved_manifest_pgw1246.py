@@ -45,13 +45,13 @@ def test_the_fetch_key_is_the_composed_digest_not_the_ref() -> None:
         "d-b": _snap("d-b", "model_index.json", "vae/b.safetensors"),
     }
     out = index_snapshots(wire, [
-        pb.ModelBinding(slot="pipeline", ref="acme/sdxl:prod", manifest_digest="d-a"),
-        pb.ModelBinding(slot="refiner", ref="acme/sdxl-r:prod", manifest_digest="d-b"),
+        pb.ModelBinding(slot="pipeline", ref="acme/sdxl@prod", manifest_digest="d-a"),
+        pb.ModelBinding(slot="refiner", ref="acme/sdxl-r@prod", manifest_digest="d-b"),
     ])
-    assert out[WireRef("acme/sdxl:prod")].digest == "d-a"
-    assert out[WireRef("acme/sdxl-r:prod")].digest == "d-b"
+    assert out[WireRef("acme/sdxl@prod")].digest == "d-a"
+    assert out[WireRef("acme/sdxl-r@prod")].digest == "d-b"
     # THE WHOLE TRUTH: every file the pod puts on disk, nothing withheld.
-    assert [f.path for f in out[WireRef("acme/sdxl:prod")].files] == [
+    assert [f.path for f in out[WireRef("acme/sdxl@prod")].files] == [
         "model_index.json", "vae/a.safetensors"]
 
 
@@ -59,9 +59,9 @@ def test_an_artifact_with_no_composition_still_resolves_by_its_own_key() -> None
     """LoRA overlays and payload source refs carry no ModelBinding, so the hub
     keys them by ref. One lookup, two legitimate kinds of key — not a fallback
     ladder: the caller either holds a binding or holds a bare ref."""
-    wire = {"acme/lora:prod": _snap("dl", "adapter.safetensors")}
+    wire = {"acme/lora@prod": _snap("dl", "adapter.safetensors")}
     assert index_snapshots(wire, []) == {
-        WireRef("acme/lora:prod"): wire["acme/lora:prod"]}
+        WireRef("acme/lora@prod"): wire["acme/lora@prod"]}
 
 
 def test_one_ref_bound_to_two_manifests_refuses_typed() -> None:
@@ -70,10 +70,10 @@ def test_one_ref_bound_to_two_manifests_refuses_typed() -> None:
     wire = {"d-a": _snap("d-a", "a"), "d-b": _snap("d-b", "b")}
     with pytest.raises(AmbiguousManifestError) as err:
         index_snapshots(wire, [
-            pb.ModelBinding(slot="pipeline", ref="acme/sdxl:prod", manifest_digest="d-a"),
-            pb.ModelBinding(slot="refiner", ref="acme/sdxl:prod", manifest_digest="d-b"),
+            pb.ModelBinding(slot="pipeline", ref="acme/sdxl@prod", manifest_digest="d-a"),
+            pb.ModelBinding(slot="refiner", ref="acme/sdxl@prod", manifest_digest="d-b"),
         ])
-    assert "acme/sdxl:prod" in str(err.value)
+    assert "acme/sdxl@prod" in str(err.value)
     assert "d-a" in str(err.value) and "d-b" in str(err.value)
 
 
