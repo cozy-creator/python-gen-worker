@@ -37,9 +37,9 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
+from . import wire
 from .cp import (
     ContextParallelUnavailable,
     CpComms,
@@ -53,11 +53,9 @@ from .group import (
     RankGroupError,
     RankSpec,
     _FIRST_COMMAND_WAIT_S,
-    _OP_CLOSE,
-    _OP_RUN,
     init_rank,
 )
-from .plan import GroupPlan
+from .plan import BootPlan, GroupPlan
 from .cp import w8a8_gemm_mode
 from ..models import provision
 from ..registry import collect_endpoints
@@ -66,45 +64,10 @@ from ..hostfacts import cuda_ready
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class BootPlan:
-    """Everything a follower needs to build the SAME pipeline. Small and
-    picklable by construction — it crosses a spawn boundary."""
-
-    modules: Tuple[str, ...] = ()
-    function_name: str = ""
-    slot: str = ""
-    # slot -> the pod-shared CAS path. One copy of the bytes, N mappings.
-    path: str = ""
-    cache_dir: str = ""
-    degree: int = 1
-    dtype: str = ""
-    storage_dtype: str = ""
-
-
 # ---------------------------------------------------------------------------
-# Call marshalling: the model call must arrive at every rank IDENTICAL.
+# Call marshalling lives in `wire`: the model call must arrive at every rank
+# IDENTICAL, and its bytes must not be able to execute anything.
 # ---------------------------------------------------------------------------
-
-
-def _dehydrate(value: Any) -> Any:
-    """Make one call argument crossable. CUDA tensors go via CPU (the
-    followers own different cards); a `torch.Generator` is not picklable at
-    all and is replaced by its seed, which is the only part that has to
-    agree — every rank rebuilds an identical one."""
-    import torch
-
-    if isinstance(value, torch.Tensor):
-        return ("__tensor__", value.detach().to("cpu"))
-    if isinstance(value, torch.Generator):
-        return ("__generator__", int(value.initial_seed()))
-    if isinstance(value, (list, tuple)):
-        marshalled = [_dehydrate(v) for v in value]
-        return ("__list__", marshalled) if isinstance(value, list) else (
-            "__tuple__", marshalled)
-    if isinstance(value, dict):
-        return ("__dict__", {k: _dehydrate(v) for k, v in value.items()})
-    return value
 
 
 def _rank_device(device: int) -> str:
@@ -155,25 +118,6 @@ def _force_collectives(value: Any) -> Any:
     return value
 
 
-def _rehydrate(value: Any, device: int) -> Any:
-    import torch
-
-    dev = _rank_device(device)
-    if isinstance(value, tuple) and len(value) == 2 and isinstance(value[0], str):
-        tag, payload = value
-        if tag == "__tensor__":
-            return payload.to(dev)
-        if tag == "__generator__":
-            return torch.Generator(device=dev).manual_seed(int(payload))
-        if tag == "__list__":
-            return [_rehydrate(v, device) for v in payload]
-        if tag == "__tuple__":
-            return tuple(_rehydrate(v, device) for v in payload)
-        if tag == "__dict__":
-            return {k: _rehydrate(v, device) for k, v in payload.items()}
-    return value
-
-
 # The gated-call flag lives with the hooks it guards (cp.py); re-exported here
 # because the gate is what enters it.
 _gated_call = gated_call
@@ -199,11 +143,10 @@ def sequence_rank_main(spec: RankSpec, channel: FollowerChannel) -> None:  # pra
         torch.cuda.set_device(spec.device)
 
     first = channel.next_command(timeout=_FIRST_COMMAND_WAIT_S)
-    if not isinstance(first, dict) or first.get("op") != "arm":
+    if not isinstance(first, wire.Arm):
         raise RankGroupError(
             f"rank {spec.rank}: expected the arm command first, got {first!r}")
-    boot: BootPlan = first["boot"]
-    plan: GroupPlan = first["plan"]
+    boot, plan = first.boot, first.plan
     plan.refuse_unless_cp_safe()
     pipe = _materialize(boot, spec)
     refuse_unless_shard_invariant_quant(pipe, degree=plan.sp_degree)
@@ -229,14 +172,12 @@ def sequence_rank_main(spec: RankSpec, channel: FollowerChannel) -> None:  # pra
 
     while True:
         cmd = channel.next_command()
-        if not isinstance(cmd, dict) or cmd.get("op") == _OP_CLOSE:
+        if isinstance(cmd, wire.Close):
             return
-        if cmd.get("op") != _OP_RUN:
+        if not isinstance(cmd, wire.Run):
             logger.warning("rank %d: unknown command %r", spec.rank, cmd)
             continue
-        args = tuple(_rehydrate(a, spec.device) for a in cmd.get("args", ()))
-        kwargs = {k: _rehydrate(v, spec.device)
-                  for k, v in (cmd.get("kwargs") or {}).items()}
+        args, kwargs = wire.run_call(cmd, device=_rank_device(spec.device))
         with torch.no_grad(), _gated_call():
             pipe(*args, **kwargs)   # output discarded: rank 0 owns the output
 
@@ -333,7 +274,7 @@ class SequenceRuntime:
         self._group = RankGroup(self.devices, **kwargs)
         try:
             spec0 = self._group.form()
-            self._group.send({"op": "arm", "boot": boot, "plan": plan})
+            self._group.send(wire.Arm(boot=boot, plan=plan))
             installed = install_context_parallel(
                 pipe, degree=self.degree,
                 comms=CpComms(
@@ -371,11 +312,15 @@ class SequenceRuntime:
         group = self._group
         assert group is not None
         group.check_alive()
-        group.send({
-            "op": _OP_RUN,
-            "args": tuple(_dehydrate(a) for a in args),
-            "kwargs": {k: _dehydrate(v) for k, v in kwargs.items()},
-        })
+        # Marshalled BEFORE the queue, on this thread: an argument outside the
+        # wire's vocabulary is a typed per-request error with the group
+        # coherent, never a follower that decoded half a command.
+        try:
+            command = wire.run_command(args, kwargs)
+        except wire.UncrossableArgument as exc:
+            raise RankGroupError(
+                f"command cannot cross the rank boundary: {exc}") from exc
+        group.send(command)
         try:
             with _gated_call():
                 out = _force_collectives(base_call(pipe, *args, **kwargs))

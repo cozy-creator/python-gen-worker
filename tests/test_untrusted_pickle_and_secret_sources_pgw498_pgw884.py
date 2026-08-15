@@ -208,6 +208,49 @@ def test_there_is_no_pickle_reader_in_the_tree() -> None:
     )
 
 
+#: Modules permitted to deserialize a pickle. It starts EMPTY and it stays
+#: empty: an entry here is a decision that some byte stream in this process may
+#: name a class and reach its constructor. There is no such stream.
+_PICKLE_DESERIALIZER_ALLOWLIST: frozenset = frozenset()
+
+_PICKLE_DESERIALIZERS = ("pickle.loads", "pickle.load(", "Unpickler")
+
+
+def test_no_module_deserializes_a_pickle_directly() -> None:
+    """The scan above reads `torch.load(` ONLY — it was blind to the direct
+    `pickle` API, and `parallel/group.py` unpickled off an `mp.Queue` whose
+    writer is the process that imports tenant endpoint code and marshals
+    tenant-supplied model-call arguments (pgw#1275). Every rank-sibling
+    follower reading that queue was a deserialization gadget on
+    tenant-reachable input, and nothing in the tree could go red about it.
+
+    Scanned as a SHAPE, because that is what stops one coming back: a new site
+    is silently a gadget, and no test of the surrounding feature notices.
+    `pickle.dumps` is deliberately not scanned — writing a pickle executes
+    nothing; reading one does.
+    """
+    src_root = Path(writer.__file__).resolve().parent.parent
+    offenders: list[str] = []
+    for path in sorted(src_root.rglob("*.py")):
+        rel = str(path.relative_to(src_root))
+        if rel in _PICKLE_DESERIALIZER_ALLOWLIST:
+            continue
+        for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), 1
+        ):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if not any(name in stripped for name in _PICKLE_DESERIALIZERS):
+                continue
+            offenders.append(f"{rel}:{lineno}: {stripped}")
+    assert offenders == [], (
+        "a pickle DESERIALIZER is back. Whatever the stream is, its writer is "
+        "reachable from tenant code; carry the payload as msgspec (see "
+        "`gen_worker/parallel/wire.py`) instead:\n" + "\n".join(offenders)
+    )
+
+
 # ---------------------------------------------------------------------------
 # refused key material, at every source that can deliver it
 # ---------------------------------------------------------------------------

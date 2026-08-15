@@ -26,19 +26,23 @@ process-local default are untouchable by construction.
 **Command channel.** Rank-0 -> follower commands ride per-follower
 mp queues, NOT collectives: an idle follower parks on ``queue.get`` (no
 collective timeout to trip), teardown is a queue put + join/terminate (no
-collective that can block the event loop), and command payloads are pickled
-EAGERLY on rank 0 so an unpicklable argument is a typed per-request error
+collective that can block the event loop), and command payloads are encoded
+EAGERLY on rank 0 so an uncrossable argument is a typed per-request error
 instead of a feeder-thread mystery. Collectives happen only INSIDE the model
 call (the CP hooks) and carry the process group's timeout, so a rank that
 raises mid-call strands its peers for at most ``collective_timeout_s``, after
 which they fail loudly and the group is condemned — never a silent wedge.
+
+The channel's bytes are msgspec msgpack (:mod:`.wire`), NEVER pickle: the
+writer is the process that imports tenant endpoint code and marshals
+tenant-supplied model-call arguments, so a follower that unpickled would be a
+deserialization gadget on tenant-reachable input.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import pickle
 import queue as queue_mod
 import signal
 import time
@@ -48,6 +52,7 @@ from datetime import timedelta
 from typing import Any, Callable, List, Optional, Sequence, Tuple, cast
 import multiprocessing as mp
 
+from . import wire
 from .. import proc_evidence, settings_authority
 from ..stall import SilenceWindow
 
@@ -94,9 +99,6 @@ _FIRST_COMMAND_WAIT_S = 1800.0
 # is not the store-arrival wait, which is `_await_arrivals` above.
 _STORE_CONNECT_TIMEOUT_S = 180.0
 
-_OP_RUN = "run"
-_OP_CLOSE = "close"
-
 
 class RankGroupError(RuntimeError):
     """The group could not form, or a rank died. Fatal for the request; the
@@ -106,9 +108,11 @@ class RankGroupError(RuntimeError):
 @dataclass(frozen=True)
 class RankSpec:
     """What one rank needs to join. Deliberately tiny and picklable — it
-    crosses a spawn boundary. ``group_name`` is unique per arm so a process
-    that arms many groups over its lifetime never collides in the
-    torch.distributed registries."""
+    crosses the SPAWN boundary, which is multiprocessing's own pickle of a
+    fixed struct this process built, not the command queue (that is `wire`,
+    and it carries tenant-reachable payloads). ``group_name`` is unique per
+    arm so a process that arms many groups over its lifetime never collides
+    in the torch.distributed registries."""
 
     rank: int
     world_size: int
@@ -124,12 +128,14 @@ class RankSpec:
 class FollowerChannel:
     """A follower's half of the command plane: commands in, readiness out."""
 
-    commands: Any  # mp.Queue of pickled command bytes
+    commands: Any  # mp.Queue of msgpack-encoded `wire.Command` bytes
     ready: Any     # mp.Queue; follower puts its rank when armed
 
-    def next_command(self, timeout: Optional[float] = None) -> Any:
+    def next_command(self, timeout: Optional[float] = None) -> wire.Command:
+        """The next command, decoded as one of exactly three types. A payload
+        cannot name a class, so it cannot reach a constructor."""
         raw = self.commands.get(timeout=timeout)
-        return pickle.loads(raw)
+        return wire.decode(raw)
 
     def report_ready(self, rank: int) -> None:
         self.ready.put(int(rank))
@@ -457,21 +463,19 @@ class RankGroup:
 
     # ---- command plane (never a collective) --------------------------------
 
-    def send(self, command: Any) -> None:
+    def send(self, command: wire.Command) -> None:
         """Deliver one command to every follower.
 
-        Pickled EAGERLY here so an unpicklable payload (a closure callback,
-        a live handle) raises a typed error on THIS thread with the group
-        still coherent — the followers are parked at ``queue.get`` and simply
-        never see the command.
+        Encoded EAGERLY here so an uncrossable payload raises a typed error on
+        THIS thread with the group still coherent — the followers are parked
+        at ``queue.get`` and simply never see the command.
         """
         try:
-            raw = pickle.dumps(command)
+            raw = wire.encode(command)
         except Exception as exc:
             raise RankGroupError(
                 f"command cannot cross the rank boundary: {type(exc).__name__}: "
-                f"{exc} — pass only picklable model-call arguments (closures/"
-                "callbacks cannot be broadcast to follower ranks)"
+                f"{exc}"
             ) from exc
         for channel in self._channels:
             channel.commands.put(raw)
@@ -580,7 +584,7 @@ class RankGroup:
         group are untouched."""
         for channel in self._channels:
             try:
-                channel.commands.put(pickle.dumps({"op": _OP_CLOSE}))
+                channel.commands.put(wire.encode(wire.Close()))
             except Exception:  # noqa: BLE001 — teardown must not raise
                 pass
         deadline = time.monotonic() + grace_s
