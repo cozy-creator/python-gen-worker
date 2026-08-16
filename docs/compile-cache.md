@@ -61,9 +61,11 @@ about the WEIGHTS, not about the compiled program:
   compile under `aot_mint.CONSTANT_BINDING_CONFIGS`
   (`aot_inductor.use_runtime_constant_folding=True`, which defers the fold to
   load so inductor cannot inline a 0-dim or `<=8`-element tensor's values into
-  the kernel) and `aot_package.folded_weights` refuses, per entry, any lifted
-  weight the compiled artifact does not declare. `constant_folding_fenced` is a
-  declared axis, so a pre-fence cell is refused before a byte moves.
+  the kernel). ⚠️ **The per-entry PROOF arm is not in this repo.** This
+  paragraph named `aot_package.folded_weights` and a `constant_folding_fenced`
+  declared axis; pgw#1270 deleted `aot_package`, and neither name exists in
+  `src/` today — only the deferral flag above is verifiable here. Do not cite
+  the refusal until it is re-pointed at whatever enforces it (pgw#1304).
   Authoring rules in `docs/endpoint-authoring.md`. (pgw#857; was
   "weight-binding".)
 
@@ -204,7 +206,8 @@ because a single switch cannot say "baseline linears, packed modulation".
 
 A lane is therefore the **combination**, written `<linear>+<modulation>`
 (`baseline+packed`, `fused+dense`, …). It is measured on the card the cell is
-minted for and recorded in the cell (`gen_worker/kernel_path.py`):
+minted for and recorded in the cell (⚠️ this named `gen_worker/kernel_path.py`,
+deleted by pgw#1270 and not re-pointed — pgw#1304):
 
 - **Mint.** `mint_child.lane_verdict_for` loads the endpoint once per
   candidate combination (the swap happens at model load, so comparing lanes
@@ -212,7 +215,8 @@ minted for and recorded in the cell (`gen_worker/kernel_path.py`):
   family's dominant declared graph class, on its own declared example feed,
   under `torch.compile` — and times it with a fixed warmup/median protocol.
   The winner's pipeline is the one that gets exported. Candidates come from
-  `kernel_path.candidate_axes`, which asks only capability questions
+  a capability-only candidate walk (⚠️ named `kernel_path.candidate_axes`, which
+  no longer exists — pgw#1304), which asks only capability questions
   (Blackwell block-scaled MMA for the fused linear; triton plus a numerics
   self-check for the packed modulation, which has no SM term at all). An axis
   with one buildable value contributes no candidates, so a non-Blackwell card

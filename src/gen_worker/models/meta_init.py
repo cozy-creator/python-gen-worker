@@ -35,7 +35,7 @@ WHY THE CAPABILITY IS PROVEN AND NOT ASSUMED
 --------------------------------------------
 :func:`require_meta_init` builds a probe module and checks the invariant on the
 result. A meta-init that silently stopped moving parameters would trace real
-weights; one that started moving BUFFERS would make ``aot_package``'s literal
+weights; one that started moving BUFFERS would make the cell's literal
 constants unpackable, much later and much less legibly. Either way the answer
 is a typed :class:`MetaInitUnavailable` naming the capability, which
 ``structure_only`` turns into a refusal a boot-adopt event can distinguish from

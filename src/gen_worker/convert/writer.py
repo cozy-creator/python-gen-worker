@@ -1,7 +1,7 @@
 """The ONE streaming safetensors writer.
 
   - IncrementalSafetensorsWriter: header first, then tensor bytes — O(1) memory
-  - tensor iteration over single/sharded/pickle sources
+  - tensor iteration over single and sharded safetensors sources
   - streaming_dtype_cast / streaming_fp8_storage_cast: read one tensor,
     transform, write into the component's ONE output file (peak RAM ~ largest
     tensor)
@@ -237,7 +237,7 @@ from ..component_vocab import (
     weight_components,
 )
 
-# Tensor iteration (single / sharded / pickle inputs)
+# Tensor iteration (single / sharded safetensors inputs)
 # ---------------------------------------------------------------------------
 
 def _weight_component_dirs() -> frozenset[str]:

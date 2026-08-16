@@ -157,9 +157,10 @@ Two things close it, and you need neither in your model code:
 - every mint compiles under `aot_mint.CONSTANT_BINDING_CONFIGS`
   (`aot_inductor.use_runtime_constant_folding=True`), which defers the fold to
   load so nothing is inlined; and
-- `aot_package.folded_weights` PROVES it per entry against the artifact's own
-  constant table, and a mint that lifted a weight the package does not declare
-  is **refused by name**. A cell minted before the fence is refused at adoption
+- ⚠️ **the per-entry PROOF is not verifiable in this repo.** This bullet named
+  `aot_package.folded_weights`, deleted by pgw#1270; no such check exists in
+  `src/` today. Treat the deferral flag above as the whole of what this repo
+  enforces until the arm is re-pointed (pgw#1304). A cell minted before the fence is refused at adoption
   too — `constant_folding_fenced` is a declared axis, like
   `package_constants_in_so`.
 

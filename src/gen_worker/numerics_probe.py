@@ -241,7 +241,7 @@ def build_feed(module: Any, family: str, axis: ProbeAxis) -> Tuple[Any, ...]:
     # `aot_inputs`, NEVER `aot_mint`: `provision` is a `static_code_closure`
     # entrypoint, the closure walk follows function-level imports, and the
     # closure memo records it on every artifact. Importing the mint DRIVER here
-    # would drag `aot_wrapper_split` / `aot_run_impl_split` into cell identity,
+    # would drag the mint's own transform chain into cell identity,
     # and a compile-time transform must re-key nothing. The vocabulary lives in
     # a leaf module so the driver stays out.
     spec = aot_inputs.ExportSpec(
