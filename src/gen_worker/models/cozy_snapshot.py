@@ -422,28 +422,45 @@ class CozySnapshotDownloader:
         missing: list[TransferGrant] = []
         done = 0
         total = sum(grant.size_bytes for grant in grants)
-        for grant in grants:
+
+        # Report per grant: a counter frozen at zero reads as a stalled
+        # transfer and the pod is killed mid-progress.
+        def report_residency() -> None:
+            if progress is not None:
+                progress(done, total)
+
+        def resident(grant: TransferGrant) -> bool:
             try:
-                resident = cas.contains(grant.digest, size=grant.size_bytes)
+                return bool(cas.contains(grant.digest, size=grant.size_bytes))
             except DigestMismatch:
-                resident = False
-            if resident:
+                return False
+
+        def filled(grant: TransferGrant) -> bool:
+            if fill is None:
+                return False
+            try:
+                source = fill.verify_object(grant.digest, size=grant.size_bytes)
+                cas.put_file(source, expected=grant.digest, size=grant.size_bytes)
+                return True
+            except (DigestMismatch, FileNotFoundError, OSError):
+                return False
+
+        # Every check re-hashes the object — ~1.0s of solid CPU per GiB, and a
+        # resume re-hashes everything earlier attempts landed. On the caller's
+        # loop thread that stranded the heartbeat and every queued event until
+        # the scan ended, so each check runs off-thread and only the emission
+        # stays on the caller's thread.
+        report_residency()
+        for grant in grants:
+            if await asyncio.to_thread(resident, grant):
                 done += grant.size_bytes
                 settle(grant.digest, boot_phases.SOURCE_LOCAL)
-                continue
-            copied = False
-            if fill is not None:
-                try:
-                    source = fill.verify_object(grant.digest, size=grant.size_bytes)
-                    cas.put_file(source, expected=grant.digest, size=grant.size_bytes)
-                    copied = True
-                except (DigestMismatch, FileNotFoundError, OSError):
-                    copied = False
-            if copied:
+            elif await asyncio.to_thread(filled, grant):
                 done += grant.size_bytes
                 settle(grant.digest, boot_phases.SOURCE_VOLUME)
             else:
                 missing.append(grant)
+            report_residency()
 
         required = sum(grant.size_bytes for grant in missing) + _DISK_HEADROOM_BYTES
         free = shutil.disk_usage(cas.root).free
@@ -455,8 +472,6 @@ class CozySnapshotDownloader:
                 required_bytes=required,
                 path=str(cas.root),
             )
-        if progress is not None:
-            progress(done, total)
 
         sink = _NETWORK_BYTES_SINK.get()
         moved = 0
