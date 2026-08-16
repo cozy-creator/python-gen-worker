@@ -110,7 +110,7 @@ def test_a_component_the_tree_does_not_declare_REFUSES_by_name(
 def test_the_structure_EXPORTS_and_TCG_COMPILES(
     tree: Path, tmp_path: Path,
 ) -> None:
-    from torch_compiled_graphs import build_call_ingress
+    from gen_worker._vendor.torch_compiled_graphs import build_call_ingress
 
     from gen_worker import aot_compile_child, aot_mint
 

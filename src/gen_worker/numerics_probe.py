@@ -49,7 +49,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, List, Mapping, Optional, Sequence, Tuple
 
-from torch_compiled_graphs import CallIngress
+from gen_worker._vendor.torch_compiled_graphs import CallIngress
 
 from . import numerics_ladder
 from .numerics_ladder import Comparison, Thresholds

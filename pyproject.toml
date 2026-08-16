@@ -28,11 +28,10 @@ dependencies = [
     "psutil>=7.0.0",
     "pyyaml>=6.0.0",
     "blake3>=1.0.0",
-    "hashrepo>=0.3,<0.4",
-    # pgw#1232/pgw#1270: TCG owns compiled-graph identity, declaration, call
-    # ingress, artifact format and compile-span attribution. Pure python — it
-    # neither installs nor imports Torch.
-    "torch-compiled-graphs>=0.6,<0.7",
+    # pgw#1310: the CAS/transfer data plane (tensorfs) and the compiled-graph
+    # vocabulary (TCG) are VENDORED at src/gen_worker/_vendor, not required from
+    # an index. Both PyPI projects are permanently deleted and `[tool.uv.sources]`
+    # does not travel in a published wheel. See _vendor/VENDORED.toml.
     "huggingface-hub>=0.26.0",
     # gen_worker.convert (GGUF quantization tooling; small, pure-python)
     "gguf>=0.10.0",
@@ -165,6 +164,13 @@ mypy_path = "src"
 # Generated protobuf modules: no source of ours to fix.
 [[tool.mypy.overrides]]
 module = ["gen_worker.pb.*"]
+ignore_errors = true
+
+# pgw#1310: vendored upstream snapshots. Same class as `gen_worker.pb.*` — the
+# tree is byte-identical to the pinned ref and a digest fence refuses any edit,
+# so a finding here is fixed upstream and re-vendored, never patched in place.
+[[tool.mypy.overrides]]
+module = ["gen_worker._vendor.*"]
 ignore_errors = true
 
 # Modules moved verbatim from the old gen_worker.conversion carry that
@@ -636,9 +642,12 @@ ignore_errors = true
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-# Generated modules are lint-exempt (mirrors the mypy overrides above).
+# Generated and vendored modules are lint-exempt (mirrors the mypy overrides
+# above). `_vendor` is byte-identical to its pinned upstream ref — a lint fix
+# applied here would break the digest fence and diverge the snapshot.
 extend-exclude = [
     "src/gen_worker/pb",
+    "src/gen_worker/_vendor",
 ]
 
 [tool.ruff.lint]
@@ -682,12 +691,8 @@ torch = [
 torchvision = [
   { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
-# The hashrepo / torch-compiled-graphs PyPI projects were deleted permanently
-# (DESIGN-RULINGS "Release policy", 2026-08-16): internal consumption is
-# git-pinned, and nothing publishes to PyPI as a side effect of development.
-# These revs are the contents of the last published versions (0.3.1 / 0.6.0),
-# so the resolution is unchanged — only its source is. tensorfs is still
-# pure-python hatchling at this rev, so no Rust toolchain is pulled in.
-# #1297 / #1308 replace these with pins at CURRENT tensorfs / torchcg.
-hashrepo = { git = "https://github.com/cozy-creator/tensorfs", rev = "0d0437570aac241ed234b741e66af8c79492d872" }
-torch-compiled-graphs = { git = "https://github.com/cozy-creator/torchcg", rev = "ad5f4cb9f89bbe91d2a30ca218f70d5326630368" }
+# pgw#1310 deleted the `hashrepo` / `torch-compiled-graphs` git pins that stood
+# here. A source pin is workspace-only metadata — it is stripped from a published
+# wheel — so it fixed this repo and left every consumer of the artifact broken
+# (ie#738). Both packages are now vendored: src/gen_worker/_vendor/VENDORED.toml
+# is the single home of the fact, revs included.

@@ -4,12 +4,12 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from hashrepo import LocalCAS
+from gen_worker._vendor.tensorfs import LocalCAS
 
 from ..config import Settings, current_or
 
 if TYPE_CHECKING:
-    from torch_compiled_graphs import Engine
+    from gen_worker._vendor.torch_compiled_graphs import Engine
 
 _STANDALONE = Settings()
 
@@ -60,7 +60,7 @@ def open_worker_engine(root: Path | None = None) -> Engine:
     no caller can silently introduce a second compiled-graph store.  The import
     stays lazy because model-only commands do not require TCG at startup.
     """
-    from torch_compiled_graphs import Engine
+    from gen_worker._vendor.torch_compiled_graphs import Engine
 
     return Engine(open_worker_cas(root))
 

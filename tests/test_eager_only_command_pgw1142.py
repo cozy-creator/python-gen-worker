@@ -43,7 +43,7 @@ from gen_worker import serving_mode
 from gen_worker.cell_adopt import EagerPhase
 from gen_worker.cli import serve as serve_cli
 from gen_worker.pb import worker_scheduler_pb2 as pb
-from torch_compiled_graphs import CallIngress, CallInput, CompiledGraphRunner
+from gen_worker._vendor.torch_compiled_graphs import CallIngress, CallInput, CompiledGraphRunner
 
 
 # ---------------------------------------------------------------------------

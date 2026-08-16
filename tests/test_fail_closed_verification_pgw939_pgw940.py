@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from torch_compiled_graphs import (
+from gen_worker._vendor.torch_compiled_graphs import (
     CallIngress,
     CallInput,
     DeclarationError,

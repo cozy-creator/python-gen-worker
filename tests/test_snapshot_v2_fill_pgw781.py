@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from hashrepo import CASRef, FileEntry, LocalCAS, RepositoryManifest
+from gen_worker._vendor.tensorfs import CASRef, FileEntry, LocalCAS, RepositoryManifest
 
 import gen_worker.models.cozy_snapshot as snapshot_mod
 from gen_worker.models.cozy_snapshot import NetworkBytesScope, ensure_snapshot_async

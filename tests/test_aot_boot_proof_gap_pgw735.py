@@ -38,7 +38,7 @@ from gen_worker.models.refs import normalize_model_ref
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs
 from gen_worker.models import store as store_mod
-from torch_compiled_graphs import CallIngress, CallInput, CompiledGraphRunner
+from gen_worker._vendor.torch_compiled_graphs import CallIngress, CallInput, CompiledGraphRunner
 
 FAMILY = "sdxl"
 

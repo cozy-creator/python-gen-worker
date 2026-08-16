@@ -68,6 +68,9 @@ TOOL_ROOTS = (REPO / "scripts", REPO / "examples", REPO / "agents",
 # as reach would exempt half the tree.
 SELF = Path(__file__).resolve()
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _lint_scope import is_unowned  # noqa: E402
+
 # The RATCHET. Every entry is a live hit, recorded rather than silently
 # tolerated: the guard fails on anything NEW, and equally on an entry that has
 # since been wired up and not removed. A baseline nobody has to shrink is a
@@ -440,6 +443,7 @@ def py_files(roots) -> List[Path]:
                        if "__pycache__" not in p.parts
                        and ".venv" not in p.parts
                        and p.name != "conftest.py"
+                       and not is_unowned(p)
                        and p.resolve() != SELF)
     return sorted(out)
 

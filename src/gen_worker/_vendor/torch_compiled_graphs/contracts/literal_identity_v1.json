@@ -1,0 +1,26 @@
+{
+  "authority": {
+    "repo": "python-gen-worker",
+    "sha": "0a2c33970bd963d3f940d7664a1e96d705af0655"
+  },
+  "constant_fqns": [
+    "table"
+  ],
+  "dtype": "torch.float32",
+  "literal_values": "f0bf7306bf0a83cc13766d1b8f990c00",
+  "name": "table",
+  "shape": [
+    2,
+    2
+  ],
+  "values": [
+    [
+      1.0,
+      2.0
+    ],
+    [
+      3.0,
+      4.0
+    ]
+  ]
+}

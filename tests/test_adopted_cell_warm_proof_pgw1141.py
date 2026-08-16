@@ -65,7 +65,7 @@ from gen_worker.registry import extract_specs
 import test_numerics_gate_pgw868 as rig868  # noqa: E402
 from test_numerics_gate_pgw868 import ROWS, ProbePackage, arm, entry_name  # noqa: E402
 from gen_worker.models import store as store_mod
-from torch_compiled_graphs import CallIngress, CallInput, CompiledGraphRunner
+from gen_worker._vendor.torch_compiled_graphs import CallIngress, CallInput, CompiledGraphRunner
 
 #: pgw#868's fixtures, re-exported so this module collects them: `declared`
 #: registers the real export declaration the probe feed is built from, and

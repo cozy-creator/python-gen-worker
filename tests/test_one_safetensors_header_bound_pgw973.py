@@ -33,6 +33,13 @@ from gen_worker.models.safetensors_header import MAX_HEADER_BYTES, header_len_ok
 from gen_worker.models.svdq import _read_safetensors_metadata
 from gen_worker.models.w4a4 import _read_header as w4a4_read_header
 from gen_worker.models.w8a8 import _read_header as w8a8_read_header
+import sys
+
+# pgw#1310: one home for "which subtrees a guard may not judge" —
+# scripts/_lint_scope.py, shared with the CI lint scanners.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from _lint_scope import is_unowned  # noqa: E402
+
 
 # One tensor of one F32 element, so the header describes something real.
 _HEADER = {"t": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]}}
@@ -73,7 +80,7 @@ def test_the_bound_is_stated_exactly_once():
     owner = src / "models" / "safetensors_header.py"
     offenders = []
     for py in src.rglob("*.py"):
-        if py == owner:
+        if py == owner or is_unowned(py, src):
             continue
         for i, line in enumerate(py.read_text().splitlines(), 1):
             stripped = line.strip()

@@ -64,9 +64,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from . import activity as activity_mod
-from torch_compiled_graphs import ARTIFACT_KIND, GRAPH_CLASS_BLOCK, REQUIRED_AXES
-from torch_compiled_graphs import is_compiled_graph_key
-from torch_compiled_graphs import identity as tcg_identity
+from gen_worker._vendor.torch_compiled_graphs import ARTIFACT_KIND, GRAPH_CLASS_BLOCK, REQUIRED_AXES
+from gen_worker._vendor.torch_compiled_graphs import is_compiled_graph_key
+from gen_worker._vendor.torch_compiled_graphs import identity as tcg_identity
 
 from . import (
     aot_identity,

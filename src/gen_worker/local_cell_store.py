@@ -112,8 +112,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from torch_compiled_graphs import ARTIFACT_KIND, is_compiled_graph_key
-from torch_compiled_graphs.identity import KEY_SCHEME
+from gen_worker._vendor.torch_compiled_graphs import ARTIFACT_KIND, is_compiled_graph_key
+from gen_worker._vendor.torch_compiled_graphs.identity import KEY_SCHEME
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from torch_compiled_graphs import Engine

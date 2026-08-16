@@ -34,7 +34,7 @@ torch = pytest.importorskip("torch")
 import torch.nn as nn  # noqa: E402
 
 from gen_worker import activity, aot_serve  # noqa: E402
-from torch_compiled_graphs import (  # noqa: E402
+from gen_worker._vendor.torch_compiled_graphs import (  # noqa: E402
     CallIngress,
     CallInput,
     CompiledGraphRunner,

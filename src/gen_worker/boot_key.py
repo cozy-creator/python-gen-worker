@@ -67,7 +67,6 @@ call with it; a paragraph is not a caller.
 from __future__ import annotations
 
 import hashlib
-import importlib.metadata
 import importlib.util
 import json
 import logging
@@ -81,12 +80,13 @@ from typing import (
 
 import msgspec
 
+from ._vendor import vendored_rev
 from . import boot_phases, compile_cache as cc, graph_facts
 from .child_contract import CompileSpec, MintSlot, slot_subjects
 from . import hostfacts
 
 if TYPE_CHECKING:
-    from torch_compiled_graphs import GraphClassDeclaration
+    from gen_worker._vendor.torch_compiled_graphs import GraphClassDeclaration
 
 logger = logging.getLogger(__name__)
 
@@ -355,11 +355,14 @@ def _endpoint_source_facts(modules: Sequence[str]) -> Tuple[Tuple[str, str], ...
 
 
 def _tcg_version() -> str:
-    """Installed TCG release whose declaration semantics the memo stores."""
-    try:
-        return str(importlib.metadata.version("torch-compiled-graphs"))
-    except importlib.metadata.PackageNotFoundError:
-        return ""
+    """Vendored TCG rev whose declaration semantics the memo stores.
+
+    pgw#1310: TCG is vendored, so it has no distribution metadata to read. The
+    old `importlib.metadata.version(...)` swallowed PackageNotFoundError into
+    `""` — which, once the distribution was gone, would have silently dropped
+    TCG from the memo key and stopped a TCG change from invalidating anything.
+    """
+    return vendored_rev("torch_compiled_graphs")
 
 
 def closure_digest(
@@ -595,7 +598,7 @@ def declaration_hashes(declarations: Mapping[str, str]) -> Dict[str, str]:
     ingress, range, witness, coordinates and literals; comparing its derived
     hash to the child's stated hash catches a corrupt or drifted child wire.
     """
-    from torch_compiled_graphs import GraphClassDeclaration
+    from gen_worker._vendor.torch_compiled_graphs import GraphClassDeclaration
 
     hashes: Dict[str, str] = {}
     for name, canonical in declarations.items():
@@ -685,7 +688,7 @@ def fold(
     This parent supplies only the current ``sm`` and toolchain through TCG's
     public identity functions; no worker graph or key arithmetic remains.
     """
-    from torch_compiled_graphs.identity import from_axes, toolchain_axis_digest
+    from gen_worker._vendor.torch_compiled_graphs.identity import from_axes, toolchain_axis_digest
 
     sm = str(cc.runtime_key().get("sm") or "")
     if not sm:

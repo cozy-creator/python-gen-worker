@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from fake_hub import _client, _FakeHub
-from hashrepo import MAX_CHUNK_SIZE
+from gen_worker._vendor.tensorfs import MAX_CHUNK_SIZE
 
 from gen_worker.hubio.client import CommitFile, HubPublishError
 

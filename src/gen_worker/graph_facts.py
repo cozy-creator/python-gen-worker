@@ -37,7 +37,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Mapping, Tuple
 
-from torch_compiled_graphs import is_compiled_graph_key
+from gen_worker._vendor.torch_compiled_graphs import is_compiled_graph_key
 
 #: The MANIFEST block recording one declaration's DECLARED ENVELOPE.
 #:

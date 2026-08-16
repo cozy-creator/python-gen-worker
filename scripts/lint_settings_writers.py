@@ -50,6 +50,9 @@ from typing import Dict, List, Optional, Tuple
 
 REPO = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO / "src" / "gen_worker"
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _lint_scope import is_unowned  # noqa: E402
 ALLOWLIST = REPO / "scripts" / "settings_writers_allowlist.txt"
 
 CLASSIFICATIONS = {"SCOPED", "PLUMBING", "SCRUB"}
@@ -199,6 +202,8 @@ def scan(root: Path = SRC_ROOT) -> Dict[Tuple[str, str], int]:
     sites: Dict[Tuple[str, str], int] = {}
     for path in sorted(root.rglob("*.py")):
         if path.name in AUTHORITY_FILES and path.parent == root:
+            continue
+        if is_unowned(path, root):
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         aliases = _Aliases()

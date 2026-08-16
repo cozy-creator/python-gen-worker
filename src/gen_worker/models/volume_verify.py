@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Tuple
 
-from hashrepo import CASRef, DigestMismatch
+from gen_worker._vendor.tensorfs import CASRef, DigestMismatch
 
 from .cozy_snapshot import _norm_rel_path
 

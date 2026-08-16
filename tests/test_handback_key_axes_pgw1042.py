@@ -32,14 +32,14 @@ import pytest
 
 from gen_worker import aot_serve, env_seal, fleet_cells, graph_facts
 from gen_worker.compile_cache import AdoptError
-from torch_compiled_graphs import (
+from gen_worker._vendor.torch_compiled_graphs import (
     CallIngress,
     CallInput,
     CompiledGraphRunner,
     ConstantBindingError,
 )
-from torch_compiled_graphs import runner as tcg_runner_mod
-from torch_compiled_graphs.storage import StoredCompiledGraph
+from gen_worker._vendor.torch_compiled_graphs import runner as tcg_runner_mod
+from gen_worker._vendor.torch_compiled_graphs.storage import StoredCompiledGraph
 
 
 def _seal_dict() -> Dict[str, Any]:

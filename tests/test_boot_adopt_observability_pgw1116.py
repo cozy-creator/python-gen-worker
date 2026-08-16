@@ -338,7 +338,7 @@ def test_the_gates_are_pairwise_distinguishable(
 
 
 def _derived(wall_ms: int = 1234) -> Any:
-    from torch_compiled_graphs import identity as ck
+    from gen_worker._vendor.torch_compiled_graphs import identity as ck
 
     return boot_key.DerivedKey(
         # pgw#1176: a boot derives a KEY SET. These declarations trace to one

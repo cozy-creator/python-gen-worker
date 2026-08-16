@@ -1,0 +1,6 @@
+# sha256 of testdata/compiled_graph_key_vectors.json — the SHARED compiled-graph
+# key grammar corpus (th#1897). python-gen-worker commits this same digest beside
+# its own byte-identical copy; scripts/grammar-vector-drift.sh proves the two
+# files are equal. Changing the corpus is a coupled cross-repo cut: pgw lands
+# first, then both digests move in one window.
+a274c5702b8c167ca119758d9fb1f98c40ddfdb3dbf6c58b4aacd580803e8c2b

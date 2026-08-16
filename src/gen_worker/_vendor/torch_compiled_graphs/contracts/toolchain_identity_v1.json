@@ -1,0 +1,20 @@
+{
+  "authority": {
+    "repo": "python-gen-worker",
+    "sha": "0a2c33970bd963d3f940d7664a1e96d705af0655"
+  },
+  "block": {
+    "diffusers": "model-library-is-not-compiler",
+    "loaded_libs": "2222222222222222",
+    "nvidia-cublas-cu13": "5555555555555555",
+    "peft": "model-library-is-not-compiler",
+    "settings_declaration": "1111111111111111",
+    "torch": "3333333333333333",
+    "transformers": "model-library-is-not-compiler",
+    "triton": "4444444444444444"
+  },
+  "graph": "c59210f4ddf6b420",
+  "key": "cg-key-v1-d4c716660ec9c12c079170810bb18d830594a34b875a83beb0ab6150",
+  "sm": "sm_89",
+  "toolchain_axis": "88abf09ce9c69ecb"
+}

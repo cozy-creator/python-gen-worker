@@ -41,7 +41,7 @@ import contextlib
 import time
 from typing import Any, Dict, Iterator, List, Mapping, Tuple
 
-from torch_compiled_graphs.spans import phase_delta, phase_snapshot
+from gen_worker._vendor.torch_compiled_graphs.spans import phase_delta, phase_snapshot
 
 #: Bump when the partition changes shape, so a reader never mixes two ledgers.
 WARM_SPANS_V = 1

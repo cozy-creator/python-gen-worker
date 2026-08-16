@@ -60,7 +60,7 @@ import msgspec
 from . import activity as activity_mod
 from . import artifact_meta
 from . import boot_phases
-from torch_compiled_graphs import GRAPH_CLASS_BLOCK
+from gen_worker._vendor.torch_compiled_graphs import GRAPH_CLASS_BLOCK
 from . import compile_posture
 from . import mint_workers
 from . import progress as progress_mod

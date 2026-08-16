@@ -31,7 +31,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from hashrepo import CASRef
+from gen_worker._vendor.tensorfs import CASRef
 
 from ..api.types import Asset
 from ..models.cache_paths import open_worker_cas

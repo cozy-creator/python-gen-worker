@@ -13,7 +13,7 @@ import types
 from typing import Dict, List
 
 import pytest
-from torch_compiled_graphs import spans
+from gen_worker._vendor.torch_compiled_graphs import spans
 
 from gen_worker import warm_spans
 

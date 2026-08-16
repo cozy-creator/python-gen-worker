@@ -593,7 +593,7 @@ def test_hand_dynamic_rows_are_refused_at_declaration_time() -> None:
 def test_fork_and_row_reach_tcg_graph_class_identity() -> None:
     """Forks and static rows are TCG declaration facts, so either changing
     must change the graph-class hash before ``Engine.compile`` is called."""
-    from torch_compiled_graphs import GraphClassSpec, build_call_ingress
+    from gen_worker._vendor.torch_compiled_graphs import GraphClassSpec, build_call_ingress
 
     class Tiny(torch.nn.Module):
         def forward(self, sample: Any) -> Any:

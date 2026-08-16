@@ -27,8 +27,8 @@ import sys
 
 import pytest
 
-from torch_compiled_graphs import identity as tcg_identity
-from torch_compiled_graphs import is_compiled_graph_key
+from gen_worker._vendor.torch_compiled_graphs import identity as tcg_identity
+from gen_worker._vendor.torch_compiled_graphs import is_compiled_graph_key
 from gen_worker.compile_cache import parse_cell_ref
 from gen_worker.models.refs import parse_model_ref
 from gen_worker.refgrammar import MAX_FRAGMENT_LEN

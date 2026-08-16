@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import pytest
 
-from torch_compiled_graphs import identity as ck
-from torch_compiled_graphs import is_compiled_graph_key
+from gen_worker._vendor.torch_compiled_graphs import identity as ck
+from gen_worker._vendor.torch_compiled_graphs import is_compiled_graph_key
 from gen_worker import compile_cache as cc
 
 

@@ -29,7 +29,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from torch import nn
-from torch_compiled_graphs import CallIngress
+from gen_worker._vendor.torch_compiled_graphs import CallIngress
 
 from gen_worker import (
     aot_declaration,

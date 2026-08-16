@@ -70,8 +70,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import msgspec
-from torch_compiled_graphs import GRAPH_CLASS_BLOCK
-from torch_compiled_graphs.spans import (
+from gen_worker._vendor.torch_compiled_graphs import GRAPH_CLASS_BLOCK
+from gen_worker._vendor.torch_compiled_graphs.spans import (
     PARTITION_KEYS,
     PARTITIONS,
     SPANS_V,
@@ -396,7 +396,7 @@ def _tcg_runtime(cache_root: Optional[Path] = None) -> Tuple[Any, Any]:
     export — pgw#985. This frame only reports which of the two targets the host
     can state.
     """
-    from torch_compiled_graphs import RuntimeCompatibility
+    from gen_worker._vendor.torch_compiled_graphs import RuntimeCompatibility
 
     from . import compile_cache
     from .models.cache_paths import open_worker_engine

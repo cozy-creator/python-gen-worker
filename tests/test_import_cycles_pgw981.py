@@ -23,6 +23,12 @@ from typing import List, NamedTuple, Optional, Tuple
 
 import pytest
 
+# pgw#1310: one home for "which subtrees a guard may not judge" —
+# scripts/_lint_scope.py, shared with the CI lint scanners.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from _lint_scope import is_unowned  # noqa: E402
+
+
 SRC = Path(__file__).resolve().parents[1] / "src"
 PKG = SRC / "gen_worker"
 
@@ -54,6 +60,8 @@ class Outcome(NamedTuple):
 def _modules() -> List[str]:
     out: List[str] = []
     for path in sorted(PKG.rglob("*.py")):
+        if is_unowned(path, PKG):
+            continue
         rel = path.relative_to(SRC)
         parts = list(rel.parts)
         if any(p.startswith((".", "_pycache")) or p == "__pycache__" for p in parts):

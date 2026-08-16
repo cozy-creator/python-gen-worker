@@ -87,7 +87,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from torch_compiled_graphs import is_compiled_graph_key
+from gen_worker._vendor.torch_compiled_graphs import is_compiled_graph_key
 
 from . import aot_identity, boot_phases
 from .procsplit import broker

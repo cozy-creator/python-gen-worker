@@ -28,7 +28,7 @@ import re
 from pathlib import Path
 
 import pytest
-from torch_compiled_graphs import (
+from gen_worker._vendor.torch_compiled_graphs import (
     GRAPH_CLASS_BLOCK,
     REQUIRED_AXES,
     CallIngress,
@@ -37,12 +37,19 @@ from torch_compiled_graphs import (
     RuntimeCompatibility,
 )
 
-from torch_compiled_graphs import identity as tcg_identity
-from torch_compiled_graphs import is_compiled_graph_key
+from gen_worker._vendor.torch_compiled_graphs import identity as tcg_identity
+from gen_worker._vendor.torch_compiled_graphs import is_compiled_graph_key
 
 from gen_worker import fleet_cells, graph_facts
 
 from harness.cell_meta import exported_cell_meta
+import sys
+
+# pgw#1310: one home for "which subtrees a guard may not judge" —
+# scripts/_lint_scope.py, shared with the CI lint scanners.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from _lint_scope import is_unowned  # noqa: E402
+
 
 SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "gen_worker"
 
@@ -166,6 +173,12 @@ def _derivation_sites(root: Path, needle: str) -> dict[str, int]:
     sites: dict[str, int] = {}
     for path in sorted(root.rglob("*.py")):
         rel = str(path.relative_to(root))
+        # pgw#1310: `_vendor/torch_compiled_graphs` is the AUTHORITY these
+        # needles name. Counting it as a second derivation site inverts the
+        # rule — the rule is that nothing in gen_worker re-derives what TCG
+        # already computes, and TCG computing it is the premise.
+        if is_unowned(path, root):
+            continue
         count = 0
         for line in path.read_text().splitlines():
             stripped = line.strip()

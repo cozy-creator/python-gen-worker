@@ -35,7 +35,7 @@ import pytest
 
 from gen_worker import aot_compile_child as child
 from gen_worker import aot_compile_pool as pool
-from torch_compiled_graphs import spans
+from gen_worker._vendor.torch_compiled_graphs import spans
 
 pytestmark = pytest.mark.filterwarnings("ignore::FutureWarning")
 

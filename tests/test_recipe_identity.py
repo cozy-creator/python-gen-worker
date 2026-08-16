@@ -31,8 +31,8 @@ GUARD_MANIFEST_BLOCK = "guard_manifest"
 
 torch = pytest.importorskip("torch")
 
-from torch_compiled_graphs import identity as ck
-from torch_compiled_graphs import is_compiled_graph_key
+from gen_worker._vendor.torch_compiled_graphs import identity as ck
+from gen_worker._vendor.torch_compiled_graphs import is_compiled_graph_key
 from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells as fc
 from gen_worker import guard_closure as gc
