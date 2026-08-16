@@ -24,6 +24,7 @@ import pytest
 from gen_worker.models.refs import (
     RetiredTagRef,
     TensorhubRef,
+    fold_ref,
     format_model_ref,
     normalize_model_ref,
     parse_model_ref,
@@ -40,6 +41,19 @@ _ERR = [v for v in _VECTORS if v.get("error")]
 
 def _id(v: dict) -> str:
     return v["ref"] or "<empty>"
+
+
+def _address(v: dict) -> str:
+    """The SPEC-FREE wire form — what THIS side's ``canonical()`` mints.
+
+    th#2006: the corpus's ``canonical`` is the injective normal form (Go's
+    ``String()``, which keeps the ``?<lane-spec>``); ``address`` is the wire
+    form, which drops it. They differ only on a spec-carrying vector, so
+    ``address`` defaults to ``canonical``. Python's ``TensorhubRef.canonical()``
+    is the ADDRESS minter — the SDK must never put a `?` on a wire ref or a
+    residency key.
+    """
+    return v.get("address", v["canonical"])
 
 
 def _contract_paths() -> tuple[Path, Path]:
@@ -99,19 +113,27 @@ def test_vector_parses_to_the_declared_fields(vec: dict) -> None:
         vec["owner"], vec["repo"], vec["release"])
     assert (th.digest or "") == vec["digest"]
     assert (th.flavor or "") == vec["flavor"]
+    assert th.lane_spec == vec.get("lane_spec", "")
 
 
 @pytest.mark.parametrize("vec", _OK, ids=[_id(v) for v in _OK])
-def test_vector_mints_the_declared_canonical_form(vec: dict) -> None:
-    assert normalize_model_ref(vec["ref"]) == vec["canonical"]
+def test_vector_mints_the_declared_address(vec: dict) -> None:
+    assert normalize_model_ref(vec["ref"]) == _address(vec)
 
 
 @pytest.mark.parametrize("vec", _OK, ids=[_id(v) for v in _OK])
 def test_canonical_form_is_a_fixed_point(vec: dict) -> None:
-    """parse(canonical) == parse(ref), and normalizing twice changes nothing."""
+    """parse(canonical) == parse(ref), and re-normalizing changes nothing.
+
+    The projection lands on the ADDRESS, so a spec-carrying vector normalizes
+    to its spec-free form and stays there — the same shape the digest-wins fold
+    already has, and the reason a lossy vector's target is named in the corpus
+    rather than inferred.
+    """
     canonical = vec["canonical"]
     assert parse_model_ref(canonical).tensorhub == parse_model_ref(vec["ref"]).tensorhub
-    assert normalize_model_ref(canonical) == canonical
+    assert normalize_model_ref(canonical) == _address(vec)
+    assert normalize_model_ref(_address(vec)) == _address(vec)
 
 
 @pytest.mark.parametrize("vec", _ERR, ids=[_id(v) for v in _ERR])
@@ -154,6 +176,54 @@ def test_digest_wins_over_release_in_the_one_at_slot() -> None:
     th = parse_model_ref(f"owner/repo@r1@sha256:{hexd}").tensorhub
     assert (th.release, th.digest) == ("r1", f"sha256:{hexd}")
     assert th.canonical() == f"owner/repo@sha256:{hexd}"
+
+
+def test_lane_spec_rides_beside_the_address_never_inside_it() -> None:
+    """th#2006: the `?<lane-spec>` tail is a RESOLUTION input.
+
+    0.117.0 RAISED on it — `_parse_tensorhub_ref` split the `@` tail first and
+    the `@1` inside a quant handle tripped the separator rule — so a spec on a
+    wire ref was a `missing_snapshot` disable with a second spelling.
+    """
+    th = parse_model_ref("owner/repo@prod?quant=plain.bf16@1").tensorhub
+    assert (th.release, th.lane_spec) == ("prod", "quant=plain.bf16@1")
+    # The `@1` inside the handle is INSIDE the spec, not a second `@` tail.
+    assert th.canonical() == "owner/repo@prod"
+    assert normalize_model_ref(th.canonical()) == "owner/repo@prod"
+
+
+def test_a_fragment_side_query_is_still_discarded() -> None:
+    """The lockfile-attribution `?` on the FRAGMENT half keeps its old meaning:
+    discarded, not stored. Only a `?` on the address half is a lane spec."""
+    th = parse_model_ref("owner/repo#fp8?src=lockfile").tensorhub
+    assert (th.flavor, th.lane_spec) == ("fp8", "")
+
+
+def test_folding_a_release_onto_a_spec_ref_mints_no_double_at() -> None:
+    """th#2006's latent defect, in its pgw spelling.
+
+    tensorhub's `ModelRefWithDigest` preserved a `?suffix` across the digest
+    fold and minted `owner/repo@prod@sha256:…?quant=…` — a double-`@` ref, the
+    shape th#1387 established destroys injectivity. Every pgw fold lands on the
+    ADDRESS, so the spec cannot survive to make one.
+    """
+    folded = fold_ref("owner/repo@prod?quant=plain.bf16@1", release="staging")
+    assert folded == "owner/repo@staging"
+    hexd = "cd" * 32
+    digest_folded = fold_ref(f"owner/repo@sha256:{hexd}?quant=plain.bf16@1")
+    assert digest_folded == f"owner/repo@sha256:{hexd}"
+    for minted in (folded, digest_folded):
+        assert minted.count("@") == 1 and "?" not in minted
+        assert normalize_model_ref(minted) == minted
+
+
+def test_an_empty_lane_spec_is_refused_by_name() -> None:
+    """A bare `?` is not "any variant" — it is a caller who meant to write one
+    and did not. Both parsers refuse it and name the remedy."""
+    for ref in ("owner/repo@prod?", "owner/repo?"):
+        with pytest.raises(ValueError) as err:
+            parse_model_ref(ref)
+        assert "omit the '?' entirely" in str(err.value)
 
 
 def test_default_constructed_ref_agrees_with_the_parser() -> None:

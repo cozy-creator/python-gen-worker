@@ -3,7 +3,7 @@
 Normal form — the ONE canonical string for a model ref (grammar th#597 C5,
 re-keyed by th#1987; shared vectors ``tests/testdata/ref_grammar_vectors.json``):
 
-    tensorhub:  owner/repo[@<release>|@sha256:<hex>|@blake3:<hex>][#<cell-fragment>]
+    tensorhub:  owner/repo[@<release>|@sha256:<hex>|@blake3:<hex>][?<lane-spec>][#<cell-fragment>]
     hf:         owner/repo[@revision]
 
 THE `:tag` PRODUCTION IS DEAD (th#1987, HARDCUT A9). A tag was a movable
@@ -22,6 +22,18 @@ because a second one destroys injectivity (th#1387). Every ref string the
 worker mints (wire, residency keys, cache keys, telemetry) MUST come from
 :func:`wire_ref` (bindings), :func:`fold_ref` (string + release overlay), or
 :func:`format_model_ref` / ``.canonical()`` (parsed values).
+
+THE `?<lane-spec>` TAIL IS A RESOLUTION INPUT, NEVER AN ADDRESS (th#2006).
+It is the compact tensor-layout-contract pattern the hub's config record
+already speaks (``endpointconfig.ParseCompact`` → ``contractspec.ParsePattern``)
+and it names WHICH variant of a release the caller means when the release holds
+more than one. This module cuts it and carries it BESIDE the address, in
+:attr:`TensorhubRef.lane_spec`; :meth:`TensorhubRef.canonical` DROPS it, because
+canonical() is the wire/residency-key minter and a spec on a wire ref is an
+unread copy of a decision the hub already made. Go's ``CanonicalRef.String``
+keeps it and ``CanonicalRef.Address`` drops it — ``canonical()`` is the twin of
+``Address().String()``, not of ``String()``. No validation happens here: this
+module owns the grammar's SHAPE, the hub owns what a pattern may say.
 
 THE FLAVOR IS DEAD AS A WEIGHT ADDRESS (§1.32(d), th#1803, pgw#1148). The
 `#` tail no longer selects a checkpoint: selection within a release is
@@ -155,6 +167,11 @@ class TensorhubRef:
     #: call :func:`refuse_flavor_selector`; the compile cache is the one
     #: reader (``compile_cache.parse_cell_ref``).
     flavor: Optional[str] = None
+    #: The `?` tail (th#2006): the compact contract pattern naming WHICH
+    #: variant of the release is meant. A resolution input carried BESIDE the
+    #: address — never in :meth:`canonical`, never on the wire, never in a
+    #: residency key. "" means the ref states no preference.
+    lane_spec: str = ""
 
     def repo_id(self) -> str:
         return f"{self.owner}/{self.repo}"
@@ -163,8 +180,10 @@ class TensorhubRef:
         """Normal form: ``owner/repo[@release|@digest][#cell-fragment]``.
 
         Nothing is elided (th#1987) and the digest takes the single ``@`` slot
-        when both are set. Tensorhub is the default provider so no prefix is
-        emitted; consumers track provider separately."""
+        when both are set. The `?<lane-spec>` tail is DROPPED (th#2006): this
+        is the ADDRESS, and the spec is a resolution input. Tensorhub is the
+        default provider so no prefix is emitted; consumers track provider
+        separately."""
         out = self.repo_id()
         if self.digest:
             out = f"{out}@{self.digest}"
@@ -235,10 +254,11 @@ class ParsedModelRef:
 
 def _parse_tensorhub_ref(raw: str, s: str) -> TensorhubRef:
     """The tensorhub production, mirroring ``release.ParseCanonicalRef``
-    decision for decision. The order is load-bearing: fragment, digest,
-    release, then the retired-tag refusal, then owner/repo."""
+    decision for decision. The order is load-bearing: fragment, lane spec,
+    digest, release, then the retired-tag refusal, then owner/repo."""
     digest = None
     flavor = None
+    lane_spec = ""
 
     if "#" in s:
         s, flavor_part = s.split("#", 1)
@@ -260,6 +280,20 @@ def _parse_tensorhub_ref(raw: str, s: str) -> TensorhubRef:
             )
         flavor = flavor_part
         s = s.strip()
+
+    # th#2006: the LANE SPEC tail, `?<compact contract pattern>`. Cut AFTER the
+    # fragment split, exactly as the Go twin does, so the older "a trailing
+    # ?query on the FRAGMENT is stripped" rule (lockfile attribution refs) is
+    # untouched — only a `?` on the address half is a spec. Not validated here:
+    # this module owns the grammar's shape, `contractspec` owns the pattern.
+    if "?" in s:
+        s, spec_part = s.split("?", 1)
+        s = s.strip()
+        lane_spec = spec_part.strip()
+        if not lane_spec:
+            raise ValueError(
+                "tensorhub ref lane spec is empty; omit the '?' entirely to "
+                "mean any variant")
 
     # th#1387: take the EARLIEST digest marker in the string, not the first
     # algorithm in a fixed list — scanning by algorithm made
@@ -331,7 +365,8 @@ def _parse_tensorhub_ref(raw: str, s: str) -> TensorhubRef:
             raise ValueError(
                 f"tensorhub ref {name} {val!r} contains a grammar separator")
     return TensorhubRef(
-        owner=owner, repo=repo, release=release, digest=digest, flavor=flavor)
+        owner=owner, repo=repo, release=release, digest=digest, flavor=flavor,
+        lane_spec=lane_spec)
 
 
 def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
@@ -432,6 +467,11 @@ def fold_ref(
     empty release preserves whatever the ref carries. Non-tensorhub providers
     have no release axis. pgw#1148 deleted the ``flavor=`` overlay with the
     flavor itself — there is no second selector to fold.
+
+    The result is an ADDRESS, so a `?<lane-spec>` on the input is dropped
+    (th#2006). Keeping it across the fold is what minted tensorhub's
+    ``owner/repo@prod@sha256:…?quant=…`` — a double-``@`` ref, the shape
+    th#1387 established destroys injectivity.
     """
     parsed = parse_model_ref(ref, provider=provider)
     release = (release or "").strip()
@@ -444,6 +484,7 @@ def fold_ref(
                 release=release,
                 digest=th.digest,
                 flavor=th.flavor,
+                lane_spec=th.lane_spec,
             )
         return th.canonical()
     return format_model_ref(parsed)

@@ -23,6 +23,7 @@ the worker then acts on, and each fails SILENTLY rather than loudly.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import pathlib
 from typing import Any
@@ -36,6 +37,7 @@ from gen_worker.models.hub_client import HubResolveError, parse_chunk_list, reso
 from gen_worker.models.refs import (
     MAX_FRAGMENT_LEN,
     REF_GRAMMAR_SEPARATORS,
+    ParsedModelRef,
     format_model_ref,
     normalize_model_ref,
     parse_model_ref,
@@ -73,8 +75,9 @@ def _ref_seeds() -> list[str]:
     doc = json.loads(REF_VECTORS.read_text())
     for v in doc["vectors"]:
         seeds.append(v["ref"])
-        if v.get("canonical"):
-            seeds.append(v["canonical"])
+        for key in ("canonical", "address"):
+            if v.get(key):
+                seeds.append(v[key])
     return seeds
 
 
@@ -86,10 +89,15 @@ def _ref_seeds() -> list[str]:
 @example(f"owner/rİpo@SHA256:{HEX64}")   # pgw#872 index/slice mismatch (fixed)
 @example("owner/repo/extra")                   # th#1387 unbounded path segments
 @example("0/::")                               # th#1387 round-trip break
+@example("owner/repo@prod?quant=plain.bf16@1")  # th#2006 lane spec, `@` inside
+@example("owner/repo@prod?")                    # refused: an empty lane spec
 def test_ref_normal_form_is_a_fixed_point(raw: str) -> None:
-    """``parse(format(parse(s))) == parse(s)`` and formatting is idempotent.
+    """``parse(format(parse(s))) == address(parse(s))``, formatting idempotent.
 
-    This is the property the whole grammar exists to provide.
+    This is the property the whole grammar exists to provide. th#2006 named the
+    one thing the projection drops: a `?<lane-spec>` is a RESOLUTION input, not
+    part of what a ref addresses, so the normal form is the ADDRESS and the
+    spec does not survive it. Everything a ref NAMES does.
     """
     try:
         parsed = parse_model_ref(raw)
@@ -97,9 +105,19 @@ def test_ref_normal_form_is_a_fixed_point(raw: str) -> None:
         return  # a typed refusal is a correct outcome
     normal = format_model_ref(parsed)
     again = parse_model_ref(str(normal))
-    assert again == parsed, f"normal form is not a fixed point: {raw!r} -> {normal!r}"
+    assert again == _address_of(parsed), (
+        f"normal form is not a fixed point: {raw!r} -> {normal!r}")
     assert str(format_model_ref(again)) == str(normal), "formatting is not idempotent"
     assert str(normalize_model_ref(raw)) == str(normal)
+    assert again.tensorhub is not None and again.tensorhub.lane_spec == ""
+
+
+def _address_of(parsed: ParsedModelRef) -> ParsedModelRef:
+    """``parsed`` with its lane spec cut — what ``canonical()`` addresses."""
+    th = parsed.tensorhub
+    assert th is not None
+    return dataclasses.replace(
+        parsed, tensorhub=dataclasses.replace(th, lane_spec=""))
 
 
 @settings(max_examples=300, deadline=None, suppress_health_check=[HealthCheck.too_slow])
