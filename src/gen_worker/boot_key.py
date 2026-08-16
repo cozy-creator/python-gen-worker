@@ -544,12 +544,18 @@ def assert_memo_honest(
         f"invalidated: " + "; ".join(disagreements[:4]))
 
 
+# pgw#1299: these are `GraphClassDeclaration`'s FIELD names, not TCG's
+# artifact-metadata block. `graph_class` here is the field holding a class NAME;
+# `GRAPH_CLASS_BLOCK` is the metadata block key. Equal strings, different
+# vocabularies — substituting the block name would couple pgw's own boot-memo
+# wire format to a rename of something else entirely. A TCG field rename is
+# already loud here: `declaration.graph_class` below raises AttributeError.
 _DECLARATION_FIELDS = frozenset({
     "class_hash",
     "class_dims",
     "fork",
     "graph",
-    "graph_class",
+    "graph_class",  # tcg-vocab: declaration field name, not the metadata block
     "graph_witness",
     "literal_values",
     "lora_bucket",
@@ -563,7 +569,7 @@ _DECLARATION_FIELDS = frozenset({
 def serialize_declaration(declaration: "GraphClassDeclaration") -> str:
     """Canonical wire form of one already-validated TCG declaration."""
     payload = {
-        "graph_class": declaration.graph_class,
+        "graph_class": declaration.graph_class,  # tcg-vocab: declaration field
         "target": declaration.target,
         "graph": dict(declaration.graph),
         "graph_witness": declaration.graph_witness,
@@ -615,14 +621,14 @@ def declaration_hashes(declarations: Mapping[str, str]) -> Dict[str, str]:
             raise ValueError(
                 f"boot graph class {name!r} declaration is not canonical JSON"
             )
-        if payload.get("graph_class") != name:
+        if payload.get("graph_class") != name:  # tcg-vocab: declaration field
             raise ValueError(
                 f"boot graph class map names {name!r}, declaration names "
-                f"{payload.get('graph_class')!r}"
+                f"{payload.get('graph_class')!r}"  # tcg-vocab: declaration field
             )
         try:
             declaration = GraphClassDeclaration(
-                graph_class=payload["graph_class"],
+                graph_class=payload["graph_class"],  # tcg-vocab: declaration field
                 target=payload["target"],
                 graph=payload["graph"],
                 graph_witness=payload["graph_witness"],

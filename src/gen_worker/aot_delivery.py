@@ -28,7 +28,11 @@ from hashrepo import (
     TransferGrant,
     download,
 )
-from torch_compiled_graphs import StoreOutcome, is_compiled_graph_key
+from torch_compiled_graphs import (
+    ARTIFACT_KIND,
+    StoreOutcome,
+    is_compiled_graph_key,
+)
 
 from . import boot_phases, receipts
 from .api.errors import RetryableError
@@ -101,7 +105,7 @@ def materialize_named_artifact(
     with boot_phases.span(
         boot_phases.PHASE_CELL_FETCH,
         ref=cell_ref,
-        artifact_kind="aot-inductor",
+        artifact_kind=ARTIFACT_KIND,
         artifact_key=str(content_digest or ""),
     ) if boot_phases.in_boot() else contextlib.nullcontext() as fetch_span:
         return _materialize_named_artifact(

@@ -29,7 +29,7 @@ from typing import (
     Tuple,
 )
 
-from torch_compiled_graphs import ARTIFACT_KIND
+from torch_compiled_graphs import ARTIFACT_KIND, GRAPH_CLASS_BLOCK
 
 from ..cell_adopt import AdoptOutcome
 from ..component_vocab import denoiser_components
@@ -409,7 +409,7 @@ def arm_aot(
         # component name (pgw#740: the vocabulary is not repeated in live
         # code; a guessed name on a non-UNet family would silently skip the
         # install and waste the arm).
-        graph_class = (meta or {}).get("graph_class") or {}
+        graph_class = (meta or {}).get(GRAPH_CLASS_BLOCK) or {}
         targets: list[str] = []
         if isinstance(graph_class, Mapping):
             target = str(graph_class.get("target") or "").strip()
@@ -586,7 +586,7 @@ def arm_aot(
         # is also the first point that needs a way BACK DOWN. Both spans below
         # are abandonable: the entry de-arms, its runner is released, the
         # pipeline serves eager and the worker stays alive.
-        graph_class = (meta or {}).get("graph_class") or {}
+        graph_class = (meta or {}).get(GRAPH_CLASS_BLOCK) or {}
         _entry_name = str(
             graph_class.get("name") if isinstance(graph_class, Mapping) else ""
         )
@@ -647,7 +647,7 @@ def arm_aot(
         # condemns that class and says nothing about its siblings. The refused
         # entry de-arms sticky, its siblings keep serving compiled, and it is
         # not published.
-        graph_class = meta.get("graph_class") or {}
+        graph_class = meta.get(GRAPH_CLASS_BLOCK) or {}
         entry = str(
             graph_class.get("name") if isinstance(graph_class, Mapping) else ""
         )

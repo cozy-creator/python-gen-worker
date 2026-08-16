@@ -350,6 +350,18 @@ jobs:
           uv run python scripts/lint_pickle_readers.py --selftest
           uv run python scripts/lint_pickle_readers.py
 
+      # GATING (pgw#1299): TCG owns the compiled-graph metadata vocabulary and
+      # exports it. A respelled `"graph_class"` / `"aot-inductor"` does not fail
+      # at import when TCG renames the key — it returns None from a `.get()` on
+      # an artifact-metadata dict, the arm reads an un-armed cell as a cache
+      # miss, and the fleet silently re-mints. Filed three times (pgw#1288,
+      # pgw#1299); remembering failed. AST-based, so prose is not a finding, and
+      # a genuinely different vocabulary is classified at the line.
+      - name: pgw#1299 guard - nobody respells TCG's metadata vocabulary
+        run: |
+          uv run python scripts/lint_tcg_vocabulary.py --selftest
+          uv run python scripts/lint_tcg_vocabulary.py
+
       # GATING (th#1987 / HARDCUT A9): the `:tag` ref production is DELETED.
       # A surviving pin fails on a rented pod at the resolve, not at the line
       # that wrote it. The selftest proves the fence can go red, because a
