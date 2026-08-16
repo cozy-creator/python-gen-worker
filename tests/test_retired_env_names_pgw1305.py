@@ -20,6 +20,8 @@ the outcome retiring a name is supposed to produce.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from gen_worker.config import loader as loader_mod
@@ -70,7 +72,7 @@ def test_a_pod_still_declaring_a_retired_name_boots_and_the_name_is_NAMED(
 
 
 def test_the_instrument_can_go_red_a_file_source_DOES_refuse(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Proves the two halves of the asymmetry are really different code paths:
     the same unknown owned-namespace name that the process env merely REPORTS
@@ -90,9 +92,7 @@ def test_no_read_site_survives_for_any_retired_name() -> None:
     """A name is retired only if nothing reads it. Text fence over the package,
     not a symbol grep: a read can be `os.environ[...]` with the literal.
     """
-    import pathlib
-
-    src = pathlib.Path(loader_mod.__file__).resolve().parents[1]
+    src = Path(str(loader_mod.__file__)).resolve().parents[1]
     offenders: list[str] = []
     for py in src.rglob("*.py"):
         text = py.read_text(encoding="utf-8", errors="replace")

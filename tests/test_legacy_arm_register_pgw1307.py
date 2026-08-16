@@ -138,7 +138,7 @@ def test_scipy_is_declared_by_the_audio_extra() -> None:
     import pathlib
     import tomllib
 
-    root = pathlib.Path(__import__("gen_worker").__file__).resolve().parents[2]
+    root = pathlib.Path(str(__import__("gen_worker").__file__)).resolve().parents[2]
     data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     audio = data["project"]["optional-dependencies"]["audio"]
     assert any(d.startswith("scipy") for d in audio), audio
@@ -202,7 +202,7 @@ def test_no_or_expression_in_the_tree_has_two_identical_sides() -> None:
     import ast
     import pathlib
 
-    root = pathlib.Path(__import__("gen_worker").__file__).resolve().parent
+    root = pathlib.Path(str(__import__("gen_worker").__file__)).resolve().parent
     offenders: list[str] = []
     for py in root.rglob("*.py"):
         try:
