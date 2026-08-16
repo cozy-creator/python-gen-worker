@@ -9,6 +9,7 @@ no GPU: the fp4 GEMM is the only GPU-only piece and it is gated.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -305,71 +306,79 @@ def test_native_sm_window_is_blackwell_only() -> None:
         assert native.svdq_native_sm_supported(sm)
 
 
-def test_int4_has_no_native_engine() -> None:
-    assert svdq_mod.svdq_engine_candidates("int4") == ("nunchaku",)
-    assert svdq_mod.svdq_engine_candidates("fp4") == ("native", "nunchaku")
-    engine, reasons = svdq_mod.select_svdq_engine("int4")
-    assert engine != "native"
-    engine, reasons = svdq_mod.select_svdq_engine("int4", override="native")
-    assert engine == "" and "nvfp4 only" in reasons["native"]
+# pgw#1298 deleted the engine LADDER along with the nunchaku engine, so the
+# five selection tests that used to live here (candidate order, native
+# preference, nunchaku fallback, every-closed-door reasons, strict `override=`)
+# are gone with their subject. What replaces them is the one behaviour a
+# one-engine module still has: which artifacts it refuses, and how.
+#
+# The th#1887 `GEN_WORKER_SVDQ_ENGINE`-is-inert test also died here — its
+# subject was `select_svdq_engine`. The env is still fenced repo-wide by
+# `tests/test_behaviour_gate_visitor_th1887.py:133`, which asserts the name
+# appears in no behaviour gate anywhere; that fence is stronger than the one
+# deleted and needs no svdq-specific companion.
 
 
-def test_native_is_preferred_for_fp4_when_it_can_serve(monkeypatch) -> None:
-    """Native first: no nunchaku wheel, no diffusers window, no pin matrix."""
+def _art(precision: str) -> Any:
+    from gen_worker.models.svdq import SvdqArtifact
+
+    return SvdqArtifact(component="transformer", file=Path("m.safetensors"),
+                        model_class="NunchakuQwenImageTransformer2DModel",
+                        precision=precision, rank=128)
+
+
+def test_int4_is_a_typed_refusal_on_the_detected_artifact() -> None:
+    """int4 has no native engine and no other engine is installed, so it is
+    refused BY NAME on the artifact — not by failing to find a loader.
+
+    Behaviourally this is what already happened (the nunchaku lane died on
+    "nunchaku is not installed"); what changed is that the message now names
+    the real reason, and the type is specific enough to catch."""
+    with pytest.raises(svdq_mod.SvdqInt4Unsupported) as exc:
+        svdq_mod.check_svdq_servable(_art("int4"), "some/flavor")
+    msg = str(exc.value)
+    assert "svdq-int4" in msg
+    assert "no native implementation" in msg
+    assert "some/flavor" in msg
+    # The refusal must not depend on the host: no CUDA probe, no importlib
+    # metadata, nothing that could make it pass on a different machine.
+    assert issubclass(svdq_mod.SvdqInt4Unsupported, svdq_mod.SvdqError)
+
+
+def test_int4_is_refused_before_any_native_probe(monkeypatch) -> None:
+    """The int4 arm must precede the silicon check, so an int4 artifact on a
+    Blackwell card still gets the int4 message rather than a hardware one."""
     monkeypatch.setattr(native, "svdq_native_reason", lambda: None)
-    engine, reasons = svdq_mod.select_svdq_engine("fp4")
-    assert engine == "native", reasons
+    with pytest.raises(svdq_mod.SvdqInt4Unsupported):
+        svdq_mod.check_svdq_servable(_art("int4"))
 
 
-def test_nunchaku_is_used_when_native_cannot_serve(monkeypatch) -> None:
-    monkeypatch.setattr(native, "svdq_native_reason", lambda: "sm_89, no fp4")
-    monkeypatch.setattr(svdq_mod, "svdq_stack_reason", lambda: None)
-    engine, reasons = svdq_mod.select_svdq_engine("fp4")
-    assert engine == "nunchaku"
-    assert reasons["native"] == "sm_89, no fp4"
-
-
-def test_no_engine_reports_every_closed_door(monkeypatch) -> None:
-    monkeypatch.setattr(native, "svdq_native_reason", lambda: "no fp4 silicon")
-    monkeypatch.setattr(svdq_mod, "svdq_stack_reason",
-                        lambda: "nunchaku is not installed")
-    engine, reasons = svdq_mod.select_svdq_engine("fp4")
-    assert engine == ""
-    assert reasons == {"native": "no fp4 silicon",
-                       "nunchaku": "nunchaku is not installed"}
-
-
-def test_explicit_override_is_strict_never_substituted(monkeypatch) -> None:
-    """An operator who pins nunchaku gets nunchaku or an error — never a
-    silent switch to the other engine."""
+def test_fp4_passes_when_the_native_engine_can_serve(monkeypatch) -> None:
     monkeypatch.setattr(native, "svdq_native_reason", lambda: None)
-    monkeypatch.setattr(svdq_mod, "svdq_stack_reason",
-                        lambda: "nunchaku is not installed")
-    engine, reasons = svdq_mod.select_svdq_engine("fp4", override="nunchaku")
-    assert engine == ""
-    assert reasons == {"nunchaku": "nunchaku is not installed"}
-    with pytest.raises(svdq_mod.SvdqError, match="unknown svdq engine"):
-        svdq_mod.select_svdq_engine("fp4", override="cutlass")
+    assert svdq_mod.check_svdq_servable(_art("fp4")) is None
 
 
-def test_th1887_the_deleted_engine_env_changes_nothing(
-        monkeypatch: pytest.MonkeyPatch) -> None:
-    """th#1887: GEN_WORKER_SVDQ_ENGINE is deleted — exporting it must be inert.
+def test_fp4_carries_the_native_engine_reason_when_it_cannot(monkeypatch) -> None:
+    """One engine, one reason — and it is the NATIVE one, named verbatim, so
+    an operator reads about silicon rather than about a missing wheel."""
+    monkeypatch.setattr(native, "svdq_native_reason", lambda: "this GPU is sm_89")
+    with pytest.raises(svdq_mod.SvdqHardwareError, match="this GPU is sm_89"):
+        svdq_mod.check_svdq_servable(_art("fp4"))
 
-    Asserted against a value that WOULD have changed the outcome under the old
-    code: int4's only candidate is nunchaku, so pinning "native" used to force
-    an engine that cannot serve it and produce a different result. If the env
-    ever regains meaning, this test fails.
-    """
-    monkeypatch.delenv("GEN_WORKER_SVDQ_ENGINE", raising=False)
-    before = svdq_mod.select_svdq_engine("int4")
-    monkeypatch.setenv("GEN_WORKER_SVDQ_ENGINE", "native")
-    assert svdq_mod.select_svdq_engine("int4") == before
-    monkeypatch.setenv("GEN_WORKER_SVDQ_ENGINE", "not-an-engine")
-    assert svdq_mod.select_svdq_engine("int4") == before
-    # The TYPED per-call override survives and is still honoured strictly.
-    with pytest.raises(svdq_mod.SvdqError, match="unknown svdq engine"):
-        svdq_mod.select_svdq_engine("fp4", override="cutlass")
+
+def test_the_nunchaku_engine_is_gone() -> None:
+    """pgw#1298: the deletion, asserted rather than described. Nothing may
+    reintroduce a second engine here without this test noticing."""
+    for gone in ("load_svdq_nunchaku_pipeline", "check_svdq_stack_versions",
+                 "svdq_stack_reason", "svdq_precision_for_sm", "SvdqPin",
+                 "SvdqStackError", "SVDQ_ENGINES", "svdq_engine_candidates",
+                 "select_svdq_engine", "_PIN_MATRIX"):
+        assert not hasattr(svdq_mod, gone), f"{gone} came back"
+    # `load_svdq_pipeline` takes no engine pin: there is nothing to pin.
+    import inspect
+
+    params = inspect.signature(svdq_mod.load_svdq_pipeline).parameters
+    assert "engine" not in params
 
 
 # --- the fp4 module (CUDA) ------------------------------------------------
