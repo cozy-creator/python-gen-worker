@@ -215,7 +215,7 @@ class SourceRepo(msgspec.Struct):
 
     Fields:
       - ref: "owner/repo" | "owner/repo@<release>" | "owner/repo@<checkpoint-id>".
-        A ``#flavor`` selector is REFUSED (``FlavorSelectorRemoved``, th#1803):
+        A ``#flavor`` selector is REFUSED (``RefFragmentRemoved``, th#1803):
         a release names a SET of artifacts and selection within it is
         tensor-layout-contract compatibility, not an arbitrary string. A
         ``:tag`` ref is refused outright (``RetiredTagRef``, th#1987).

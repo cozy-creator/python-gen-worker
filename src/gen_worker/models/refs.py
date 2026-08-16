@@ -35,18 +35,16 @@ keeps it and ``CanonicalRef.Address`` drops it — ``canonical()`` is the twin o
 ``Address().String()``, not of ``String()``. No validation happens here: this
 module owns the grammar's SHAPE, the hub owns what a pattern may say.
 
-THE FLAVOR IS DEAD AS A WEIGHT ADDRESS (§1.32(d), th#1803, pgw#1148). The
-`#` tail no longer selects a checkpoint: selection within a release is
-tensor-layout contract compatibility (§1.33, ``Slot(layouts=…)``), and a
-specific checkpoint is addressed by ``owner/repo@sha256:…``. A weight ref
-carrying `#` is refused by :func:`refuse_flavor_selector` — the client-side
-twin of the hub's ``flavor_selection_removed`` 400.
-
-The `#` tail SURVIVES IN THE GRAMMAR for one reason only: COMPILE CELL refs
-are `#`-shaped (``root/family-<f>#<key>``), exactly as tensorhub's own
-``release.ParseCanonicalRef`` still parses them. That retirement is a
-separate item on both sides; ``TensorhubRef.flavor`` is that cell fragment
-and has no other reader.
+THE FLAVOR IS DEAD ENTIRELY (pgw#1290 / th#2031, completing §1.32(d)). The
+`#` tail has exactly ONE meaning left — the COMPILE CELL fragment of a
+platform cell repo, ``root/family-<f>#<key>`` — and :func:`parse_model_ref`
+REFUSES it on every other repo with :class:`RefFragmentRemoved`. The refusal
+moved into the parser because a fragment that parses and is then dropped
+resolves to the release default and reads as success; the earlier
+:func:`refuse_ref_fragment` chokepoint covered the weight paths that
+remembered to call it and nothing else. Selection within a release is the
+`?<lane-spec>` tail plus tensor-layout contract compatibility (§1.33,
+``Slot(layouts=…)``); one exact checkpoint is ``owner/repo@sha256:…``.
 """
 
 from __future__ import annotations
@@ -58,8 +56,8 @@ from typing import NewType, Optional
 from gen_worker.refgrammar import MAX_FRAGMENT_LEN as _MAX_FRAGMENT_LEN
 
 # th#597 C5: `#` fragment charset [a-z0-9][a-z0-9._-]*, bounded by
-# MAX_FRAGMENT_LEN (matches tensorhub's validation.IsValidFlavorToken). Cell
-# fragments only — see the module docstring.
+# MAX_FRAGMENT_LEN (matches tensorhub's isValidFragmentToken). Cell fragments
+# only — see the module docstring.
 #
 # th#1897/pgw#1213: the bound is 96, MIRRORING tensorhub's
 # internal/refgrammar.MaxFragmentLen byte-for-byte. It lives in
@@ -81,14 +79,14 @@ _TENSORHUB_FRAGMENT_RE = re.compile(
 REF_GRAMMAR_SEPARATORS = "/@:#"
 
 
-class FlavorSelectorRemoved(ValueError):
-    """A weight ref carried a `#` selector. §1.32(d)/th#1803: THE FLAVOR
-    SYSTEM IS DEAD — deleted, not aliased.
+class RefFragmentRemoved(ValueError):
+    """A ref carried a `#` fragment somewhere it means nothing. §1.32(d) /
+    th#1803 / th#2031: THE FLAVOR SYSTEM IS DEAD — deleted, not aliased.
 
-    The client-side twin of the hub's ``flavor_selection_removed`` /
-    ``binding_flavor_removed`` 400: the SDK refuses at the boundary rather
-    than minting a ref the hub will reject, so the caller is told what to
-    write instead of reading a server error about a selector they thought
+    The client-side twin of the hub's ``ref_fragment_removed`` /
+    ``binding_variant_selector_removed`` 400: the SDK refuses at the boundary
+    rather than minting a ref the hub will reject, so the caller is told what
+    to write instead of reading a server error about a selector they thought
     was supported.
     """
 
@@ -104,13 +102,13 @@ class RetiredTagRef(ValueError):
     """
 
 
-def _flavor_removed_message(ref: str) -> str:
+def _fragment_removed_message(ref: str) -> str:
     return (
-        f"model ref {ref!r} carries a `#` flavor selector, which is REMOVED "
-        "(§1.32(d), th#1803 / pgw#1148 — deleted, not aliased). Selection "
-        "within a release is tensor-layout contract compatibility: declare "
-        "what the code accepts with Slot(layouts=...) and bind "
-        "'owner/repo@<release>', or address one exact checkpoint with "
+        f"model ref {ref!r} carries a `#` fragment, which names a COMPILE CELL "
+        "key on root/family-<f> and nothing else (th#2031 — deleted, not "
+        "aliased). Narrow the variant with the lane-spec tail "
+        "'owner/repo@<release>?<contract pattern>', declare what the code "
+        "accepts with Slot(layouts=...), or address one exact checkpoint with "
         "'owner/repo@sha256:<hex>'."
     )
 
@@ -123,18 +121,18 @@ def _retired_tag_message(ref: str) -> str:
     )
 
 
-def refuse_flavor_selector(ref: str, *, where: str = "") -> None:
-    """Refuse a WEIGHT ref that carries a `#` selector (§1.32(d)).
+def refuse_ref_fragment(ref: str, *, where: str = "") -> None:
+    """Refuse a WEIGHT ref that carries a `#` fragment, naming the site.
 
-    THE weight-path chokepoint. Cell refs do not pass through here — the
-    compile cache parses its own `#`-shaped keys, which is the only reason
-    the tail survives in the grammar at all.
+    :func:`parse_model_ref` already refuses the same strings; this exists so
+    the message can name the binding or resolution the author wrote, and so a
+    path that never parses still refuses.
     """
     s = (ref or "").strip()
     if "#" not in s:
         return
-    msg = _flavor_removed_message(s)
-    raise FlavorSelectorRemoved(f"{where}: {msg}" if where else msg)
+    msg = _fragment_removed_message(s)
+    raise RefFragmentRemoved(f"{where}: {msg}" if where else msg)
 
 
 # pgw#872 / th#1388: a LENGTH-PRESERVING case fold. An index computed on
@@ -163,10 +161,10 @@ class TensorhubRef:
     release: str = ""
     digest: Optional[str] = None  # snapshot digest, including algorithm prefix (e.g. "blake3:<hex>")
     #: The `#` tail. A COMPILE CELL fragment (``root/family-<f>#<key>``)
-    #: and nothing else — never a weight selector (§1.32(d)). Weight paths
-    #: call :func:`refuse_flavor_selector`; the compile cache is the one
+    #: and nothing else — never a weight selector (§1.32(d), th#2031). The
+    #: parser refuses it on any other repo; the compile cache is the one
     #: reader (``compile_cache.parse_cell_ref``).
-    flavor: Optional[str] = None
+    fragment: Optional[str] = None
     #: The `?` tail (th#2006): the compact contract pattern naming WHICH
     #: variant of the release is meant. A resolution input carried BESIDE the
     #: address — never in :meth:`canonical`, never on the wire, never in a
@@ -189,8 +187,8 @@ class TensorhubRef:
             out = f"{out}@{self.digest}"
         elif self.release:
             out = f"{out}@{self.release}"
-        if self.flavor:
-            out = f"{out}#{self.flavor}"
+        if self.fragment:
+            out = f"{out}#{self.fragment}"
         return WireRef(out)
 
 
@@ -257,16 +255,16 @@ def _parse_tensorhub_ref(raw: str, s: str) -> TensorhubRef:
     decision for decision. The order is load-bearing: fragment, lane spec,
     digest, release, then the retired-tag refusal, then owner/repo."""
     digest = None
-    flavor = None
+    fragment = None
     lane_spec = ""
 
     if "#" in s:
-        s, flavor_part = s.split("#", 1)
-        flavor_part = flavor_part.strip()
-        if "?" in flavor_part:
-            flavor_part = flavor_part.split("?", 1)[0].strip()
-        flavor_part = flavor_part.lower()
-        if not flavor_part:
+        s, fragment_part = s.split("#", 1)
+        fragment_part = fragment_part.strip()
+        if "?" in fragment_part:
+            fragment_part = fragment_part.split("?", 1)[0].strip()
+        fragment_part = fragment_part.lower()
+        if not fragment_part:
             raise ValueError("tensorhub ref fragment is empty")
         # th#597 C5: ONE fragment token per ref, charset
         # [a-z0-9][a-z0-9._-]{0,95} — `#a#b` is invalid (cells encode
@@ -274,11 +272,11 @@ def _parse_tensorhub_ref(raw: str, s: str) -> TensorhubRef:
         # tests/testdata/ref_grammar_vectors.json (byte-identical copy in
         # tensorhub internal/orchestrator/release/testdata/, whose Go
         # ParseCanonicalRef still parses the tail for the same reason).
-        if not _TENSORHUB_FRAGMENT_RE.fullmatch(flavor_part):
+        if not _TENSORHUB_FRAGMENT_RE.fullmatch(fragment_part):
             raise ValueError(
-                f"tensorhub ref fragment {flavor_part!r} is not a valid token"
+                f"tensorhub ref fragment {fragment_part!r} is not a valid token"
             )
-        flavor = flavor_part
+        fragment = fragment_part
         s = s.strip()
 
     # th#2006: the LANE SPEC tail, `?<compact contract pattern>`. Cut AFTER the
@@ -354,7 +352,7 @@ def _parse_tensorhub_ref(raw: str, s: str) -> TensorhubRef:
     if "/" not in s:
         raise ValueError(
             "tensorhub ref must be 'owner/repo' (optionally with @<release>, "
-            "#flavor, @sha256:<hex>, or @blake3:<hex>)")
+            "?<lane-spec>, @sha256:<hex>, or @blake3:<hex>)")
     owner, repo = s.split("/", 1)
     owner = owner.strip()
     repo = repo.strip()
@@ -364,9 +362,20 @@ def _parse_tensorhub_ref(raw: str, s: str) -> TensorhubRef:
         if any(c in val for c in REF_GRAMMAR_SEPARATORS):
             raise ValueError(
                 f"tensorhub ref {name} {val!r} contains a grammar separator")
+
+    # th#2031 / pgw#1290: the fragment's ONE surviving meaning is the compile
+    # cell key of a platform cell repo. Anywhere else it was the dead `#flavor`
+    # selector, which parsed and was then DROPPED — resolving to whatever the
+    # release's default variant is, with no error to see. Mirrors the Go twin's
+    # placement: after owner/repo, because that is when the question is
+    # answerable.
+    if fragment and not (owner == "root" and repo.startswith("family-")
+                         and len(repo) > len("family-")):
+        raise RefFragmentRemoved(_fragment_removed_message(raw.strip()))
+
     return TensorhubRef(
-        owner=owner, repo=repo, release=release, digest=digest, flavor=flavor,
-        lane_spec=lane_spec)
+        owner=owner, repo=repo, release=release, digest=digest,
+        fragment=fragment, lane_spec=lane_spec)
 
 
 def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
@@ -397,7 +406,7 @@ def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
         # Refuse it typed rather than silently stripping it, so a caller who
         # still writes one is told, not quietly given a different repo.
         if "#" in repo:
-            raise FlavorSelectorRemoved(_flavor_removed_message(raw))
+            raise RefFragmentRemoved(_fragment_removed_message(raw))
         revision = None
         if "@" in repo:
             repo, revision = repo.split("@", 1)
@@ -483,7 +492,7 @@ def fold_ref(
                 repo=th.repo,
                 release=release,
                 digest=th.digest,
-                flavor=th.flavor,
+                fragment=th.fragment,
                 lane_spec=th.lane_spec,
             )
         return th.canonical()

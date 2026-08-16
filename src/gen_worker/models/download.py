@@ -78,7 +78,7 @@ def _provider_index_keys(ref: str) -> tuple[str, str]:
     if parsed.tensorhub is not None:
         th = parsed.tensorhub
         exact = TensorhubRef(owner=th.owner, repo=th.repo, release=th.release,
-                             digest=None, flavor=th.flavor).canonical()
+                             digest=None, fragment=th.fragment).canonical()
         return exact, th.repo_id()
     assert parsed.hf is not None
     hf = parsed.hf

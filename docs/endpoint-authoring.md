@@ -272,9 +272,10 @@ serves is deploy CONFIG, not a literal you pick here (th#980, th#1803).
 > of accepted layouts (`Slot(layouts=…)`, §1.33) and the platform grades each
 > candidate COMPATIBLE / CONVERTIBLE / PRODUCIBLE / INCOMPATIBLE ahead of time.
 > `#flavor` refs, flavored tag rows and the flavor columns are GONE, with no
-> alias. A binding that carries a `#` selector is refused where it is written
-> (`FlavorSelectorRemoved`); one exact checkpoint is addressed
-> `owner/repo@sha256:<hex>`.
+> alias. A ref that carries a `#` fragment is refused BY THE PARSER
+> (`RefFragmentRemoved`, th#2031) unless it names a compile cell on
+> `root/family-<f>`; narrow a release with the `?<lane-spec>` tail, and address
+> one exact checkpoint as `owner/repo@sha256:<hex>`.
 
 The one exception is the
 EMERGENCY rung (automatic on CUDA hosts): when
