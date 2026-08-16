@@ -42,15 +42,58 @@ from ..families.facts import ComponentDtype, component_dtypes_for_classes
 # Storage width per dtype spelling, for the ONE comparison this module makes:
 # is the requested/produced precision NARROWER than the pin? Quant dtypes are
 # all narrower than every pin, which is the answer that matters.
+#
+# pgw#1291: KEYS ARE SEPARATOR- AND CASE-FOLDED before lookup (see
+# :func:`dtype_bits`), so `fp8:e4m3`, `fp8_e4m3`, `fp8-e4m3` and `F8_E4M3` are
+# ONE entry. That is not tidiness — an unknown spelling scores 0 bits, and 0
+# bits makes :func:`is_narrowing` answer False, which turns this whole gate
+# SILENTLY OFF for the artifact it was pointed at. Four live spellings did
+# exactly that: `int8` and `uint8` (which the module docstring claims are
+# caught: "quant dtypes are all narrower than every pin"), and tensorhub's
+# canonical `fp8_e4m3`/`fp8_e5m2`, which is the vocabulary `tensorlayout`
+# derives and the catalog is moving to. Measured before the fix:
+# `dtype_bits("int8") == 0`, `is_narrowing("int8", "fp32") is False`.
+#
+# `_dtype_vocabulary_is_complete` (tests/test_dtype_pins_vocabulary_pgw1291.py)
+# is the fence: every token any producer in this repo can EMIT must have a
+# width here, so the next vocabulary addition fails a test instead of
+# disarming the gate 45 minutes into a conversion.
 DTYPE_BITS: Dict[str, int] = {
     "fp64": 64, "f64": 64, "float64": 64,
     "fp32": 32, "f32": 32, "float32": 32,
     "bf16": 16, "bfloat16": 16, "fp16": 16, "f16": 16, "float16": 16,
-    "fp8": 8, "fp8:e4m3": 8, "fp8:e5m2": 8, "q8_0": 8,
+    "fp8": 8, "fp8:e4m3": 8, "fp8:e5m2": 8, "f8:e4m3": 8, "f8:e5m2": 8,
+    "int8": 8, "uint8": 8, "i8": 8, "u8": 8, "q8_0": 8,
     "q6_k": 6, "q5_k_m": 5, "q5_k_s": 5,
     "nvfp4": 4, "int4": 4, "int4:nf4": 4, "int4:fp4": 4, "nf4": 4, "fp4": 4,
     "q4_k_m": 4, "q4_k_s": 4, "q4_0": 4, "q4_1": 4,
     "q3_k_m": 3, "q3_k_s": 3, "q2_k": 2,
+}
+
+# The separators a dtype flavor is spelled with across the four vocabularies
+# that meet here: `fp8:e4m3` (this module + clone), `fp8_e4m3` (tensorlayout /
+# the catalog), `fp8-e4m3` (producer labels), `F8_E4M3` (the safetensors
+# header). One fact, four spellings; fold them rather than enumerate them.
+_DTYPE_SEPARATORS = ("_", "-")
+
+
+def _fold_dtype(dtype: str) -> str:
+    """The lookup key: lowercased, with every flavor separator folded to ':'.
+
+    Applied to BOTH sides — the table is written with ':' and folded on load —
+    so no entry can be reachable by one spelling and not another.
+    """
+    key = str(dtype or "").strip().lower()
+    for sep in _DTYPE_SEPARATORS:
+        key = key.replace(sep, ":")
+    return key
+
+
+# Fold the table itself, once, so lookups compare like with like. Written with
+# ':' above for readability; `q4_k_m` and friends fold to `q4:k:m` and stay
+# addressable only through the same fold.
+_DTYPE_BITS_FOLDED: Dict[str, int] = {
+    _fold_dtype(k): v for k, v in DTYPE_BITS.items()
 }
 
 
@@ -77,8 +120,13 @@ class ComponentDtypePinError(ValueError):
 
 
 def dtype_bits(dtype: str) -> int:
-    """Storage width of a dtype spelling; 0 when unknown (never compared)."""
-    return DTYPE_BITS.get(str(dtype or "").strip().lower(), 0)
+    """Storage width of a dtype spelling; 0 when unknown (never compared).
+
+    Spelling-insensitive across the separator vocabularies (pgw#1291): a
+    flavored fp8 answers 8 however it is written, because answering 0 disarms
+    the caller's gate instead of failing it.
+    """
+    return _DTYPE_BITS_FOLDED.get(_fold_dtype(dtype), 0)
 
 
 def is_narrowing(requested: str, pin: str) -> bool:
