@@ -55,6 +55,24 @@ DEFAULT_POLL_INTERVAL_S = 2.0
 _HTTP_TIMEOUT_S = 60.0
 
 
+def semver_major_segment(semver_major: int) -> str:
+    """The ``vN`` path segment of a Route-1 address (th#2044/th#2045).
+
+    Endpoint tags are dead: a call names an exact semver-major, there is no
+    default and no ``latest``. Anything that is not a non-negative int raises
+    HERE, before a socket opens — the retired `tag` arm defaulted a `None` to
+    `prod` and silently routed somewhere.
+    """
+    if isinstance(semver_major, bool) or not isinstance(semver_major, int):
+        raise TypeError(
+            "semver_major must be an int naming the endpoint's semver-major "
+            f"(e.g. 0 for /v0/), got {semver_major!r}; there is no default"
+        )
+    if semver_major < 0:
+        raise ValueError(f"semver_major must be >= 0, got {semver_major}")
+    return f"v{semver_major}"
+
+
 def _parse_error_body(text: str) -> tuple[str, str]:
     """Best-effort (code, message) from a platform error response body.
 
@@ -120,12 +138,13 @@ class CalloutClient:
         function: str,
         payload: Dict[str, Any],
         *,
-        tag: str = "prod",
+        semver_major: int,
         tier: Optional[str] = None,
     ) -> str:
         """Submit one child request; returns its request id."""
         import requests  # lazy (all sites): callout is on the `import gen_worker` path; stays requests-free
 
+        version = semver_major_segment(semver_major)
         endpoint = (endpoint or "").strip().strip("/")
         if "/" not in endpoint:
             raise ValueError(
@@ -137,7 +156,7 @@ class CalloutClient:
         body = dict(payload or {})
         if tier:
             body["availability_tier"] = tier
-        url = f"{self._base_url}/{endpoint}/{function}:{(tag or 'prod').strip()}"
+        url = f"{self._base_url}/{endpoint}/{version}/{function}"
         resp = requests.post(url, headers=self._headers(), json=body, timeout=_HTTP_TIMEOUT_S)
         if resp.status_code >= 300:
             self._raise_for_error(resp.status_code, resp.text)

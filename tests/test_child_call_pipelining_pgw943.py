@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import threading
 from contextlib import asynccontextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -49,6 +50,12 @@ from harness.progress_wait import Cadence, await_count, await_progress
 #: `completed` only after `release()`), so this bounds the observation by work
 #: the system under test performed rather than by elapsed time.
 _OBSERVED_CHILD_POLLS = 100
+
+#: The Route-1 invoke grammar the hub serves after th#2045: the semver-major
+#: is a REQUIRED path segment and no `:tag` tail exists anywhere in it. The
+#: fake platform below REFUSES anything else, so every child call in this file
+#: asserts the outgoing URL rather than only the value that came back.
+_INVOKE_PATH = re.compile(r"^/[^/:]+/[^/:]+/v(?:0|[1-9][0-9]*)/[^/:]+$")
 
 
 class _In(msgspec.Struct):
@@ -103,6 +110,14 @@ class _Platform:
                 if self.path.startswith("/v1/requests/"):
                     self._reply(200, {})
                     return
+                if not _INVOKE_PATH.match(self.path):
+                    # What the hub does with a retired address, so a client
+                    # that still speaks one fails HERE and not in production.
+                    self._reply(404, {"error": {
+                        "code": "endpoint_not_found",
+                        "message": f"not the /vN/ invoke grammar: {self.path}",
+                    }})
+                    return
                 with platform._lock:
                     child_id = f"child-req-{len(platform._children) + 1}"
                     platform._children.append(child_id)
@@ -143,6 +158,14 @@ class _Platform:
     def children(self) -> List[str]:
         with self._lock:
             return list(self._children)
+
+    def submit_paths(self) -> List[str]:
+        """Every URL path a child SUBMIT actually went out on."""
+        with self._lock:
+            return [
+                path for method, path in self.calls
+                if method == "POST" and not path.startswith("/v1/requests/")
+            ]
 
     def release(self, request_id: Optional[str] = None) -> None:
         """Mark one child (or every submitted child) completed."""
@@ -199,7 +222,10 @@ class _Probe:
         self.parent_result: List[Any] = []
 
 
-_CHILD_CALL = dict(poll_interval_s=0.02, timeout_s=60.0)
+#: `semver_major` is REQUIRED on every child call (th#2044: endpoint tags are
+#: dead, there is no default and no `latest`). v0 is the common case — 24 of
+#: 27 served endpoints are on semver-major 0.
+_CHILD_CALL = dict(semver_major=0, poll_interval_s=0.02, timeout_s=60.0)
 
 
 def _endpoints(probe: _Probe, *, gpu: bool) -> List[Any]:
@@ -222,7 +248,8 @@ def _endpoints(probe: _Probe, *, gpu: bool) -> List[Any]:
     def parent_deferred(ctx: Any, payload: _In) -> _Out:
         probe.parent_entered.set()
         handle = ctx.call_endpoint(
-            "harness/child-endpoint", "child", {"tag": payload.tag}, wait=False
+            "harness/child-endpoint", "child", {"tag": payload.tag},
+            semver_major=0, wait=False
         )
         out = handle.result(60.0, poll_interval_s=0.02)
         probe.parent_resumed.set()
@@ -465,6 +492,12 @@ def test_ctx_call_endpoint_actually_reaches_the_platform() -> None:
             assert run.probe.parent_result, "ctx.call_endpoint returned no output"
             assert run.probe.parent_result[0] == ["child-ok:child-req-1"]
             assert statuses.get("req-parent") == pb.JOB_STATUS_OK
+            # th#2044/pgw#1293: assert the URL that WENT OUT. A returned value
+            # cannot tell a correct address from a fake that ignores it.
+            assert run.platform.submit_paths() == [
+                "/harness/child-endpoint/v0/child"
+            ], run.platform.submit_paths()
+            assert ":" not in run.platform.submit_paths()[0]
 
     asyncio.run(_measure())
 

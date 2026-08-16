@@ -307,15 +307,20 @@ success. Poll `GET /api/v1/endpoint-builds/{id}` to `succeeded`.
 diffusers/transformers/accelerate and its weight-generation layer is ~1 s, so
 the delta is the dependency install).
 
-### 3. Tag `prod` — BEFORE the buy
+### 3. Point semver-major 0 at the release — BEFORE the buy
 
 ```
-PUT /api/v1/endpoints/tensorhub/micro-diffusion/tags/prod  {"release_id": …}
+PUT /api/v1/endpoints/tensorhub/micro-diffusion/serving/0  {"release_id": …}
 ```
 
-Demand is tag-only (th#1315), and the worker bindings written in step 0b point
-at `tensorhub/micro-diffusion@prod` — an untagged release is a release nothing
-can invoke. **ESTIMATE: seconds.**
+**Endpoint tags are dead (th#2044): serving is one hidden pointer per
+`(endpoint, semver_major)`, moved only by an explicit author act, and demand
+and every other read resolve through it (th#2046).** `0` is the common case —
+the package's version is 0.x, and the invoke grammar in step 5 says so. A
+release no pointer names is a release nothing can invoke. The `"tag"` inside a
+binding (step 0b) is the REPO axis — a model release — and is untouched; the
+`config?tag=` query is the endpoint axis and dies with th#2048.
+**ESTIMATE: seconds.**
 
 ### 4. Buy a SERVING pod
 
@@ -333,9 +338,12 @@ POST /v1/admin/releases/<release_id>/workers?count=1&compute_class=gpu
 ### 5. Drive one request
 
 ```
-POST /tensorhub/micro-diffusion/generate
+POST /tensorhub/micro-diffusion/v0/generate
 {"prompt": "a tiny test", "size": "256x256", "steps": 2}
 ```
+
+The `vN` segment is REQUIRED and has no default (th#2045); it names the
+semver-major whose pointer step 3 wrote.
 
 `size` is an **ENUM** (`"256x256"` / `"384x384"`), not a `{"width":…,"height":…}`
 object — the object form is a `400`, and it cost a pod leg. The rows are an enum
