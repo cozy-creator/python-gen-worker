@@ -92,7 +92,7 @@ def _publish(fake_hub: Any, tmp_path: Path, flavor: str, **attrs: str) -> dict:
     publish_flavors(
         ctx,
         [ProducedFlavor(
-            path=str(_tree(tmp_path, "out")), flavor=flavor, attributes=dict(attrs),
+            path=_tree(tmp_path, "out"), flavor=flavor, attributes=dict(attrs),
         )],
         destination_repo="acme/qwen-image",
         release=RELEASE,
