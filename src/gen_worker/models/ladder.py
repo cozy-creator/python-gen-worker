@@ -9,12 +9,20 @@ Produced flavors carry their placement in ``checkpoints.metadata["placement"]``
 (stamped at publish by :func:`gen_worker.convert.publish.publish_flavors`).
 Unstamped/mirrored rows fall back to the token-derived defaults here — the
 same defaults the stamping writes, so both paths agree. The ladder WALK
-(rung ordering per arch class) lives hub-side (tensorhub's
-internal/orchestrator/precision resolver) and delivers picks via HelloAck;
-this module is the classification + placement half, plus the family lane
-policy. There is deliberately no local walk and no local AUTO fp8 fold:
-locally, fit is the loading layer's job (runtime fp8 rung + the offload
-ladder), and selection within a tag group is §1.33 contract compatibility.
+(rung ordering per arch class), the family-root table and the family lane
+policy live hub-side (tensorhub's internal/orchestrator/precision resolver
+and internal/modelfamily) and reach the worker in the resolved ref/HelloAck;
+this module is the PRODUCER half only — classification + placement stamp.
+There is deliberately no local walk and no local AUTO fp8 fold: locally, fit
+is the loading layer's job (runtime fp8 rung + the offload ladder), and
+selection within a tag group is §1.33 contract compatibility.
+
+pgw#1286: the vendored copies of hub policy that fed the deleted local fold
+(`FP8_COMPUTE_MIN_SM`, `_FAMILY_ROOT_OVERRIDES`, `CONV_UNET_W8A8_EXCLUDED_ROOTS`)
+are gone — unread since pgw#1148/#1180, and already drifted from their hub
+twins. The one fact both repos still restate is the placement stamp below,
+fenced by ``tests/convert/test_placement_stamp_pgw1286.py`` against
+tensorhub's ``precision.defaultPlacement`` mirror.
 """
 
 from __future__ import annotations
@@ -111,54 +119,18 @@ def placement_to_metadata(p: Placement) -> dict[str, Any]:
     return out
 
 
-
-# Native fp8 tensor-core compute exists on SM >= 89 (sm_89 Ada, sm_90 Hopper,
-# sm_100+/120 Blackwell). Below that, fp8 storage still SERVES (bf16-upcast
-# path) — this floor gates only the fp8-over-bf16 PREFERENCE, never admission.
-FP8_COMPUTE_MIN_SM = 89
-
-
-# --- Family-root policy — twin of tensorhub's modelfamily.Root ----
-
-# Families whose root is not derivable by normalization alone. Roots collapse
-# fine-tune/scheduler/distillation variants that keep the weight envelope.
-_FAMILY_ROOT_OVERRIDES = {
-    "sd14": "sd1", "sd15": "sd1",
-    "sdxl-turbo": "sdxl", "sdxl-pony": "sdxl", "sdxl-illustrious": "sdxl",
-    "sdxl-lightning": "sdxl", "sdxl-hyper": "sdxl", "sdxl-refiner": "sdxl",
-    "sd35-large-turbo": "sd35-large",
-    "flux1-dev": "flux1", "flux1-schnell": "flux1",
-    "flux1-kontext": "flux1", "flux1-krea": "flux1",
-    "flux2-dev": "flux2", "flux2-pro": "flux2",
-    "z-image-turbo": "z-image",
-    "svd-xt": "svd",
-}
-
-
-
-# Conv-UNet roots get no fp8-GEMM win (torch scaled_mm is Linear-only, and
-# SDXL w8a8 measured 1.9-2.7x slower than bf16): their fp8-w8a8 rows
-# are AUTO-ineligible and the scale-free #fp8 row is the family table-best
-# on sm_89+; bf16 stays the sub-floor default. Explicit pins still resolve
-# w8a8. Twin of tensorhub precision.convUNetW8A8ExcludedRoots.
-CONV_UNET_W8A8_EXCLUDED_ROOTS = frozenset({"sd1", "sd2", "sdxl"})
-
-
-
-
 # The flavor-token parses (classify_flavor_token, placement_for_flavor) are
 # package-internal choke points, not public API. They die when typed
 # descriptors are backfilled; nothing new may grow on them.
 __all__ = [
-    "FP8_COMPUTE_MIN_SM",
     "CLASS_BASE",
     "CLASS_FP8",
     "CLASS_NVFP4",
     "CLASS_NVFP4_W4A4",
     "CLASS_SVDQ_FP4",
     "CLASS_SVDQ_INT4",
-    "CONV_UNET_W8A8_EXCLUDED_ROOTS",
     "Placement",
+    "classify_flavor_token",
     "default_placement",
     "placement_to_metadata",
 ]
