@@ -10,13 +10,18 @@ not actually work.
 This one proves the claim it is: TWO fresh OS processes, sharing nothing but a
 directory on disk. Run 1 mints and keeps; run 2 starts cold, with an empty
 `_FINALIZED`, and must arm WITHOUT opening a mint. If the memo, the CAS layout
-or the digest record were wrong in any way that a warm process papers over,
+or the sidecar record were wrong in any way that a warm process papers over,
 run 2 opens a `PendingSelfMint` and this test says so.
 
-WHAT IS REAL HERE: the store (real files, real digests, real atomic replace),
-the memo, `fleet_cells._arming_policy` — the actual production arming brain,
-entered the way the executor enters it — the ordering (local check before the
-pending), and process death between the runs.
+WHAT IS REAL HERE: the store (a real TCG envelope in a real HashRepo CAS, real
+atomic replace), the memo, `fleet_cells._arming_policy` — the actual production
+arming brain, entered the way the executor enters it — the ordering (local
+check before the pending), and process death between the runs.
+
+pgw#1283 — byte custody moved to TCG, and the third run below is what that
+buys. Corruption in the CAS is a TCG STORAGE quarantine, which is repairable;
+it is deliberately NOT this worker's verdict, so a repaired CAS arms again with
+no mint. On master the same rot dropped the cell and cost a full GPU pod run.
 
 WHAT IS FAKED, and why: the COMPILE. Paul's standing rule (2026-08-10) is that
 no mint, compile or AOTI link runs on the shared dev box — those go to a pod.
@@ -40,16 +45,20 @@ REPO = Path(__file__).resolve().parent.parent
 #: under test is that the second run of one program behaves differently only
 #: because the first run left something on disk.
 _PROGRAM = r'''
-import io, json, os, sys, tarfile
+import json, os, sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
+import tcg_artifacts
 from gen_worker import fleet_cells, local_cell_store
 from gen_worker.cell_adopt import AdoptOutcome
 
 MODE = sys.argv[1]
-KEY = "cg-key-v1-" + "c" * 56
+ARTIFACT = Path(os.environ["PGW1096_ARTIFACT"])
+SOURCE = Path(os.environ["PGW1096_SOURCE"])
+CAS = Path(os.environ["PGW1096_CAS"])
+KEY = tcg_artifacts.key_of(SOURCE)
 ARM = fleet_cells.ARM_SCHEME + "-" + "9" * fleet_cells.ARM_DIGEST_HEX
 FAMILY = "micro-diffusion"
 
@@ -96,38 +105,29 @@ def _spy(*a: Any, **k: Any) -> Any:
 fleet_cells.PendingSelfMint = _spy           # type: ignore[assignment]
 
 if MODE == "mint":
-    # Stand in for the child's packed cell. On a pod this is a real .pt2
-    # tarball out of a real AOTI link. The store itself does not care what the
-    # cell IS — but run 2 ARMS this cell, and since pgw#1098 the arm refuses
-    # `compiled_graph_envelope_unreadable` before any other gate, so the stand-in has to
-    # carry a readable `metadata.json` exactly as the real thing does.
-    art = Path(os.environ["PGW1096_ARTIFACT"])
-    art.parent.mkdir(parents=True, exist_ok=True)
-    _meta = json.dumps(
-        {"kind": "aot-inductor", "compiled_graph_key": KEY, "family": FAMILY}).encode()
-    _body = b"a-real-cell-would-be-here" * 40
-    with tarfile.open(art, mode="w:gz") as _tar:
-        _mi = tarfile.TarInfo("metadata.json")
-        _mi.size = len(_meta)
-        _tar.addfile(_mi, io.BytesIO(_meta))
-        _bi = tarfile.TarInfo("payload.bin")
-        _bi.size = len(_body)
-        _tar.addfile(_bi, io.BytesIO(_body))
+    # Stand in for the child's packed cell. On a pod this comes out of a real
+    # AOTI link; here it is a real TCG envelope built without torch, because
+    # since pgw#1283 the store hands its bytes to `Engine.import_artifact` and
+    # an artifact that does not unpack and restate its own key is refused.
+    ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
+    ARTIFACT.write_bytes(SOURCE.read_bytes())
     reason = fleet_cells.no_publish_sink_reason(None)
     stored = local_cell_store.store(
-        art, key=KEY, family=FAMILY, arm_token=ARM)
+        ARTIFACT, key=KEY, family=FAMILY, arm_token=ARM, cas_root=CAS)
+    materialized = local_cell_store.materialize(KEY, cas_root=CAS)
     print("RESULT " + json.dumps({
         "run": 1, "keep_reason": reason,
         "stored": stored is not None,
-        "stored_at_path": str(stored.artifact) if stored else "",
-        "digest": stored.content_digest if stored else "",
+        "key": KEY,
+        "bytes": stored.bytes if stored else 0,
+        "stored_at_path": str(materialized or ""),
     }))
 else:
     # A COLD process: no `_FINALIZED`, no pending, nothing warm. The only
-    # thing that exists is the directory run 1 wrote.
+    # thing that exists is what run 1 wrote to disk.
     assert not fleet_cells._FINALIZED, "a fresh process must start with no index"
     minted = fleet_cells.arm_from_local_store(
-        Pipe(), Cfg(), None, 0, Arm(), FAMILY)
+        Pipe(), Cfg(), CAS, 0, Arm(), FAMILY)
     print("RESULT " + json.dumps({
         "run": 2,
         "armed": minted is not None,
@@ -135,16 +135,27 @@ else:
         "artifact": str(getattr(minted, "artifact", "")),
         "mints_opened": len(opened_mints),
         "resident": [c.key for c in local_cell_store.stored_cells()],
+        "verdict": local_cell_store.verdict_of(KEY),
     }))
 '''
 
 
-def _run(mode: str, store: Path, artifact: Path) -> dict:
+def _source(tmp_path: Path) -> Path:
+    """One real TCG artifact, built once per test."""
+    import tcg_artifacts
+
+    return tcg_artifacts.build(tmp_path / "source" / "cell.tar.gz")
+
+
+def _run(mode: str, store: Path, artifact: Path, source: Path,
+         cas: Path) -> dict:
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
         [str(REPO / "src"), str(REPO / "tests"), env.get("PYTHONPATH", "")])
     env["GEN_WORKER_LOCAL_CELLS_DIR"] = str(store)
     env["PGW1096_ARTIFACT"] = str(artifact)
+    env["PGW1096_SOURCE"] = str(source)
+    env["PGW1096_CAS"] = str(cas)
     proc = subprocess.run(
         [sys.executable, "-c", _PROGRAM, mode],
         capture_output=True, text=True, env=env, timeout=300)
@@ -155,34 +166,45 @@ def _run(mode: str, store: Path, artifact: Path) -> dict:
         f"run {mode!r} produced no result\nSTDOUT:{proc.stdout}\nSTDERR:{proc.stderr}")
 
 
+def _cas_object(cas: Path) -> Path:
+    """The one CAS object holding the artifact — the bytes TCG vouches for."""
+    objects = sorted(
+        (p for p in cas.rglob("*") if p.is_file()),
+        key=lambda p: p.stat().st_size)
+    assert objects, f"no CAS objects under {cas}"
+    return objects[-1]
+
+
 def test_run_one_mints_and_keeps_run_two_reuses_with_no_mint(
     tmp_path: Path,
 ) -> None:
     """Paul's compile-once-run-forever, across process death, measured."""
     store = tmp_path / "cozy-cells"
+    cas = tmp_path / "cas"
     artifact = tmp_path / "mint" / "cell.tar.gz"
+    source = _source(tmp_path)
 
-    one = _run("mint", store, artifact)
+    one = _run("mint", store, artifact, source, cas)
     assert one["stored"] is True
     # cozy-local's reason: no publisher was ever constructed, and no hub will
     # ever refuse this machine, because it never talks to one.
     assert one["keep_reason"] == "no_publish_sink"
-    assert one["digest"].startswith("sha256:")
+    assert one["bytes"] == source.stat().st_size
 
     # The mint's own workdir is gone, exactly as `_publish_async`'s `finally`
     # and `abandon_self_mint` leave it. Only the store survives — which is the
     # point: run 2 must not be reading the mint's leftovers.
     artifact.unlink()
 
-    two = _run("reuse", store, artifact)
+    two = _run("reuse", store, artifact, source, cas)
     assert two["armed"] is True, "the second run did not reuse the stored cell"
     assert two["mints_opened"] == 0, (
         "the second run opened a mint — compile-once-run-forever is the whole "
         "product promise and this is what breaking it looks like")
-    assert two["compiled_graph_key"] == "cg-key-v1-" + "c" * 56
+    assert two["compiled_graph_key"] == one["key"]
     assert two["artifact"].startswith(str(store)), (
         "run 2 must serve the STORE's bytes, not a leftover from the mint")
-    assert two["resident"] == ["cg-key-v1-" + "c" * 56]
+    assert two["resident"] == [one["key"]]
 
 
 def test_a_cold_run_with_an_EMPTY_store_mints_rather_than_inventing_a_hit(
@@ -191,26 +213,55 @@ def test_a_cold_run_with_an_EMPTY_store_mints_rather_than_inventing_a_hit(
     """The negative that makes the positive mean something: with nothing on
     disk the same cold process reports no arm, so `armed=True` above is the
     store's doing and not the stub's."""
-    two = _run("reuse", tmp_path / "empty-store", tmp_path / "unused.tar.gz")
+    two = _run("reuse", tmp_path / "empty-store", tmp_path / "unused.tar.gz",
+               _source(tmp_path), tmp_path / "empty-cas")
     assert two["armed"] is False
     assert two["resident"] == []
 
 
-def test_a_corrupted_store_makes_the_cold_run_refuse_and_drop(
+def test_cas_rot_refuses_the_arm_WITHOUT_becoming_this_workers_verdict(
     tmp_path: Path,
 ) -> None:
-    """RED, across processes: run 1 keeps a cell, the bytes rot on disk, and
-    the cold run refuses it, drops it and is left with an empty store — one
-    honest re-mint, never a wrong arm."""
+    """pgw#1283 criterion 4, across process death — the repairable case.
+
+    Run 1 keeps a cell. The bytes rot IN THE CAS, which is a fact about a
+    storage record: TCG quarantines it and no cold run may arm it. What must
+    NOT happen is the worker recording its own :data:`VERDICT_QUARANTINED` —
+    that verdict means "a parity/arm gate refused these bytes", it is terminal
+    by design (§1.3.4 keeps such a cell for forensics and never serves it), and
+    writing it here would strand a cell forever on a defect a re-store fixes.
+
+    Run 3 proves the repair: the same artifact is stored again, TCG repairs its
+    own record, and the cell arms — with no mint, because the worker's
+    admission was never destroyed.
+    """
     store = tmp_path / "cozy-cells"
+    cas = tmp_path / "cas"
     artifact = tmp_path / "mint" / "cell.tar.gz"
-    one = _run("mint", store, artifact)
-    stored = Path(one["stored_at_path"])
+    source = _source(tmp_path)
 
-    rotted = bytearray(stored.read_bytes())
+    one = _run("mint", store, artifact, source, cas)
+    assert one["stored"] is True
+
+    rotted = bytearray(_cas_object(cas).read_bytes())
     rotted[0] ^= 0xFF          # same length; only the content moved
-    stored.write_bytes(bytes(rotted))
+    _cas_object(cas).write_bytes(bytes(rotted))
+    # The materialized copy goes too, or TCG would hand back the export it
+    # already made instead of re-reading the record that rotted.
+    (store / "aot-cells" / one["key"] / "cell.tar.gz").unlink()
 
-    two = _run("reuse", store, artifact)
-    assert two["armed"] is False, "a corrupted cell armed on a cold boot"
-    assert two["resident"] == [], "the refused cell was not dropped"
+    two = _run("reuse", store, artifact, source, cas)
+    assert two["armed"] is False, "a cell TCG cannot verify armed on a cold boot"
+    assert two["verdict"] == "admitted", (
+        "a CAS-storage quarantine was written into this worker's verdict; a "
+        "repair can then never bring the cell back")
+    assert two["resident"] == [one["key"]], (
+        "the worker's own record must survive rot it did not cause")
+
+    three = _run("mint", store, artifact, source, cas)
+    assert three["stored"] is True, "re-storing the same artifact must repair"
+    four = _run("reuse", store, artifact, source, cas)
+    assert four["armed"] is True, (
+        "a repaired CAS record must arm again — the whole reason the two "
+        "quarantines are kept apart")
+    assert four["mints_opened"] == 0

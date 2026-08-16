@@ -35,15 +35,16 @@ refusal sites out of the tree would have failed on them.
 
 from __future__ import annotations
 
-import io
-import json
+import atexit
+import shutil
 import socket
-import tarfile
+import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import pytest
 
+import tcg_artifacts
 from gen_worker import (
     activity, boot_adopt, boot_key, cell_resolve, fleet_cells, local_cell_store,
 )
@@ -51,13 +52,31 @@ from gen_worker import executor as executor_mod
 from gen_worker.api import export_contract as export_contract_mod
 from gen_worker.cell_adopt import AdoptOutcome
 
-# pgw#1176: `cg-key-v1`, because `local_cell_store.store` refuses anything that is
-# not an entry key and a `ck1`-keyed cell is orphaned by the re-key. These
-# fixtures stored under `ck1-` and the store silently declined them, so
-# `no_compiled_graph_source` short-circuited a machine that WAS holding cells — the §1.34
-# orphaning the re-key predicts, surfacing exactly where it should.
-KEY_A = "cg-key-v1-" + "a" * 56
-KEY_B = "cg-key-v1-" + "b" * 56
+#: The graphs this pod "traced". Real values in the pgw#1031 sense: the boot's
+#: witnesses and the cell's recorded ones are compared entry by entry, and the
+#: floor is fail-closed in both directions (a silent cell is a refusal too).
+WITNESSES = {"transformer": "9f" * 8}
+(_ENTRY, _WITNESS), = WITNESSES.items()
+
+# pgw#1283: the keys are DERIVED from real TCG artifacts rather than typed.
+# `local_cell_store.store` hands its bytes to `Engine.import_artifact`, which
+# refuses an artifact whose own metadata does not restate the key it is filed
+# under — so a hand-typed `cg-key-v1-aaa…` can no longer name a storable cell,
+# and a fixture that pretended otherwise would only ever test the refusal.
+#
+# `KEY_DERIVED` is therefore both "what the boot derives" and "what this
+# machine's own artifact states" — the §4.27 identity this file is about, now
+# ENFORCED by the store instead of asserted by the fixture.
+_FIXTURE_DIR = Path(tempfile.mkdtemp(prefix="pgw1127-boot-adopt-"))
+atexit.register(shutil.rmtree, _FIXTURE_DIR, True)
+ARTIFACT_LOCAL = tcg_artifacts.build(
+    _FIXTURE_DIR / "local.tar.gz", graph_class=_ENTRY, witness=_WITNESS)
+ARTIFACT_OTHER = tcg_artifacts.build(
+    _FIXTURE_DIR / "other.tar.gz", graph_class=_ENTRY, witness=_WITNESS,
+    sm="sm_90")
+KEY_A = KEY_DERIVED = tcg_artifacts.key_of(ARTIFACT_LOCAL)
+KEY_B = tcg_artifacts.key_of(ARTIFACT_OTHER)
+assert KEY_A != KEY_B
 ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * fleet_cells.ARM_DIGEST_HEX
 
 
@@ -71,6 +90,19 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "cozy-cells"
     monkeypatch.setenv(local_cell_store.ENV_STORE_DIR, str(root))
     return root
+
+
+@pytest.fixture()
+def cas(tmp_path: Path) -> Path:
+    """The CAS the BOOT will address — ``_executor``'s own model-store root.
+
+    pgw#1283: the bytes live in the worker's CAS now, and the boot reaches it
+    through the same ``cache_dir`` the executor threads into every other TCG
+    call (``executor._boot_adopt`` -> ``boot_adopt.attempt(cache_dir=…)``).
+    Storing a cell somewhere the arm cannot resolve it is the bug this fixture
+    keeps the file honest about.
+    """
+    return tmp_path / "cas"
 
 
 @pytest.fixture()
@@ -109,42 +141,20 @@ def no_wire(monkeypatch: pytest.MonkeyPatch) -> List[Any]:
     return attempts
 
 
-#: The graphs this pod "traced". Real values in the pgw#1031 sense: the boot's
-#: witnesses and the cell's recorded ones are compared entry by entry, and the
-#: floor is fail-closed in both directions (a silent cell is a refusal too).
-WITNESSES = {"transformer": "9f" * 8}
-
-
 def _cell(
-    tmp_path: Path, *, key: str = KEY_A, name: str = "cell",
-    witnesses: Optional[Dict[str, str]] = None,
+    tmp_path: Path, *, source: Path = ARTIFACT_LOCAL, name: str = "cell",
 ) -> Path:
-    """An ENTRY artifact with a READABLE envelope AND a recorded graph witness.
+    """One real TCG artifact, staged where an earlier boot's mint left it.
 
-    `_arm_exported_cell` and the boot's own pgw#1031 floor both read the packed
-    metadata, and an entry that records no witness is refused — correctly — so a
-    fixture without one could only ever test the refusal.
-
-    pgw#1176: one artifact carries ONE class, so this records an `entry` block.
-    A multi-witness fixture is deliberately unrepresentable here: production
-    cannot pack one, and a fixture that could would be asserting against a
-    shape nothing can produce.
+    pgw#1283: this used to hand-roll a tarball carrying an ``entry`` block —
+    a shape the identity cut (pgw#1277) had already made unwritable by
+    anything in ``src/``. The envelope is now built by TCG itself, so the
+    witness the boot compares against is the witness TCG records: one shape,
+    one writer.
     """
-    rows = dict(WITNESSES if witnesses is None else witnesses)
-    if len(rows) != 1:
-        raise AssertionError(
-            f"an entry artifact carries ONE graph class; got {sorted(rows)!r}")
-    (entry, digest), = rows.items()
     p = tmp_path / name / "cell.tar.gz"
     p.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps({
-        "kind": "aot-inductor", "compiled_graph_key": key, "family": "micro-diffusion",
-        "entry": {"name": entry, "graph_witness": digest},
-    }).encode()
-    with tarfile.open(p, mode="w:gz") as tar:
-        info = tarfile.TarInfo("metadata.json")
-        info.size = len(payload)
-        tar.addfile(info, io.BytesIO(payload))
+    shutil.copyfile(source, p)
     return p
 
 
@@ -198,21 +208,17 @@ def _derived() -> Any:
     card on a CI runner, and `sm` is a key axis)."""
     from torch_compiled_graphs import identity as ck
 
+    del ck  # pgw#1283: the address comes from the artifact this machine HOLDS
     return boot_key.DerivedKey(
-        entry_keys={"a": ck.from_axes({
-            "graph": "c0ffee0000000000",
-            "sm": "sm_89", "toolchain": "t" * 16}).value},
+        entry_keys={"a": KEY_DERIVED},
         workers=2, width_reason="test", traced=1, memo="miss", wall_ms=7)
 
 
-#: The key that derivation actually produces — what the local store must be
-#: addressed by for a boot to find its own cell.
-#:
-#: pgw#1176: a boot derives a key SET. This declaration traces to one class, so
-#: the set has one member; a caller that wants "the address" takes it from
-#: `keys`, never from a `digest` property that no longer exists because there
-#: is no single key to have one.
-KEY_DERIVED = _derived().keys[0]
+# pgw#1176: a boot derives a key SET. This declaration traces to one class, so
+# the set has one member; a caller that wants "the address" takes it from
+# `keys`, never from a `digest` property that no longer exists because there is
+# no single key to have one.
+assert _derived().keys == (KEY_DERIVED,)
 
 
 @pytest.fixture()
@@ -258,7 +264,7 @@ def test_an_empty_store_and_no_hub_still_skips_the_derivation(
 
 
 def test_a_machine_holding_cells_DERIVES_even_with_no_hub_at_all(
-    store: Path, tmp_path: Path, declared: None, events: List[Any],
+    store: Path, cas: Path, tmp_path: Path, declared: None, events: List[Any],
     no_wire: List[Any], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The half that was WRONG. §4.28's machine has an answerer: itself.
@@ -267,7 +273,8 @@ def test_a_machine_holding_cells_DERIVES_even_with_no_hub_at_all(
     so the one address that could have been answered was never computed.
     """
     local_cell_store.store(
-        _cell(tmp_path), key=KEY_B, family="other", arm_token=ARM_A)
+        _cell(tmp_path, source=ARTIFACT_OTHER), key=KEY_B, family="other",
+        arm_token=ARM_A, cas_root=cas)
     monkeypatch.setattr(boot_key, "derive", lambda **kw: _derived())
 
     # pgw#1176: a boot returns ONE outcome per declared graph class. This
@@ -290,7 +297,7 @@ def test_a_machine_holding_cells_DERIVES_even_with_no_hub_at_all(
 
 
 def test_a_populated_store_and_an_unreachable_hub_makes_zero_http_attempts(
-    store: Path, tmp_path: Path, declared: None, events: List[Any],
+    store: Path, cas: Path, tmp_path: Path, declared: None, events: List[Any],
     no_wire: List[Any], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """§4.28's *"never requested"*, enforced rather than described.
@@ -300,8 +307,8 @@ def test_a_populated_store_and_an_unreachable_hub_makes_zero_http_attempts(
     its own store answers, and no connection is attempted by any layer.
     """
     local_cell_store.store(
-        _cell(tmp_path, key=KEY_DERIVED), key=KEY_DERIVED,
-        family="micro-diffusion", arm_token=ARM_A)
+        _cell(tmp_path), key=KEY_DERIVED, family="micro-diffusion",
+        arm_token=ARM_A, cas_root=cas)
     monkeypatch.setattr(boot_key, "derive", lambda **kw: _derived())
 
     ex = _executor(tmp_path)
@@ -321,14 +328,15 @@ def test_a_populated_store_and_an_unreachable_hub_makes_zero_http_attempts(
 
 
 def test_the_local_store_is_asked_BEFORE_a_perfectly_reachable_hub(
-    store: Path, tmp_path: Path, declared: None, monkeypatch: pytest.MonkeyPatch,
+    store: Path, cas: Path, tmp_path: Path, declared: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Ordering is the promise, not availability. A local-SECOND design would
     request what the machine already holds — and on a community-cloud pod that
     is the hub shipping back bytes the pod itself minted."""
     local_cell_store.store(
-        _cell(tmp_path, key=KEY_DERIVED), key=KEY_DERIVED,
-        family="micro-diffusion", arm_token=ARM_A)
+        _cell(tmp_path), key=KEY_DERIVED, family="micro-diffusion",
+        arm_token=ARM_A, cas_root=cas)
     monkeypatch.setattr(boot_key, "derive", lambda **kw: _derived())
     monkeypatch.setattr(
         cell_resolve, "resolve_batch",
@@ -342,7 +350,7 @@ def test_the_local_store_is_asked_BEFORE_a_perfectly_reachable_hub(
 
 
 def test_a_local_hit_carries_an_ADDRESS_and_never_an_adoption(
-    store: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    store: Path, cas: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A self-minted cell has no hub receipt and no publisher org, so riding the
     ``arm_ordered`` path a hub-resolved cell rides would refuse it
@@ -350,13 +358,13 @@ def test_a_local_hit_carries_an_ADDRESS_and_never_an_adoption(
     ``fleet_cells._arm_exported_cell`` — the gate a child's own mint passes —
     decides."""
     local_cell_store.store(
-        _cell(tmp_path, key=KEY_DERIVED), key=KEY_DERIVED,
-        family="micro-diffusion", arm_token=ARM_A)
+        _cell(tmp_path), key=KEY_DERIVED, family="micro-diffusion",
+        arm_token=ARM_A, cas_root=cas)
     monkeypatch.setattr(boot_key, "derive", lambda **kw: _derived())
 
     (out,) = boot_adopt.attempt(
         function="generate", modules=("micro_diffusion.main",), cfg=_Cfg(),
-        slots={}, declared_hint=1, work_root=tmp_path,
+        slots={}, declared_hint=1, work_root=tmp_path, cache_dir=cas,
         hub_absent="nobody to ask")
 
     assert out.reason == boot_adopt.LOCAL_HIT
@@ -396,7 +404,7 @@ def armable(monkeypatch: pytest.MonkeyPatch) -> List[Path]:
 
 
 def test_an_arm_scheme_bump_costs_a_TRACE_and_not_a_MINT(
-    store: Path, tmp_path: Path, armable: List[Path],
+    store: Path, cas: Path, tmp_path: Path, armable: List[Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """pgw#1127 §5 item 2 — the strongest argument for S2, measured.
@@ -412,33 +420,36 @@ def test_an_arm_scheme_bump_costs_a_TRACE_and_not_a_MINT(
     40-minute compile for a cell already on their disk.
     """
     local_cell_store.store(
-        _cell(tmp_path), key=KEY_A, family="micro-diffusion", arm_token=ARM_A)
+        _cell(tmp_path), key=KEY_A, family="micro-diffusion", arm_token=ARM_A,
+        cas_root=cas)
     # The upgrade: every memo written under the previous scheme is swept.
     removed = local_cell_store.sweep_superseded_memos("arm99")
     assert removed == 1
-    assert local_cell_store.lookup_for_arm(ARM_A) is None, "memo not swept"
-    assert local_cell_store.lookup(KEY_A) is not None, "the CELL must survive"
+    assert local_cell_store.lookup_for_arm(ARM_A, cas_root=cas) is None, (
+        "memo not swept")
+    assert local_cell_store.lookup(KEY_A, cas_root=cas) is not None, (
+        "the CELL must survive")
 
     # WITHOUT the derived key this is a miss, and a miss is a mint.
     assert fleet_cells.arm_from_local_store(
-        _Pipe(), _Cfg(), None, 0, _Arm(), "micro-diffusion") is None
+        _Pipe(), _Cfg(), cas, 0, _Arm(), "micro-diffusion") is None
 
     # WITH it, the same cell arms — and the shortcut is rewritten from the
     # proven arm, so the boot after this one is a memo hit again.
     minted = fleet_cells.arm_from_local_store(
-        _Pipe(), _Cfg(), None, 0, _Arm(), "micro-diffusion",
+        _Pipe(), _Cfg(), cas, 0, _Arm(), "micro-diffusion",
         boot_local_key=KEY_A)
 
     assert minted is not None and minted.compiled_graph_key == KEY_A
     assert armable and armable[-1] == local_cell_store.cell_dir(KEY_A) / "cell.tar.gz"
-    repaired = local_cell_store.lookup_for_arm(ARM_A)
+    repaired = local_cell_store.lookup_for_arm(ARM_A, cas_root=cas)
     assert repaired is not None and repaired.key == KEY_A, (
         "the memo must be repaired from the proven arm — otherwise every boot "
         "after a scheme bump pays the trace again")
 
 
 def test_the_boot_key_route_refuses_WITHOUT_dropping_and_the_memo_route_drops(
-    store: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    store: Path, cas: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Two routes, two different things a refusal is allowed to do.
 
@@ -452,16 +463,19 @@ def test_the_boot_key_route_refuses_WITHOUT_dropping_and_the_memo_route_drops(
         lambda *a, **k: (False, None, ("key_axis_divergence", "sm")))
 
     local_cell_store.store(
-        _cell(tmp_path), key=KEY_A, family="micro-diffusion", arm_token="")
+        _cell(tmp_path), key=KEY_A, family="micro-diffusion", arm_token="",
+        cas_root=cas)
     assert fleet_cells.arm_from_local_store(
-        _Pipe(), _Cfg(), None, 0, _Arm(), "micro-diffusion",
+        _Pipe(), _Cfg(), cas, 0, _Arm(), "micro-diffusion",
         boot_local_key=KEY_A) is None
-    assert local_cell_store.lookup(KEY_A) is not None, "route B must not drop"
+    assert local_cell_store.lookup(KEY_A, cas_root=cas) is not None, (
+        "route B must not drop")
 
     local_cell_store.note_memo(ARM_A, KEY_A)
     assert fleet_cells.arm_from_local_store(
-        _Pipe(), _Cfg(), None, 0, _Arm(), "micro-diffusion") is None
-    assert local_cell_store.lookup(KEY_A) is None, "route A must drop a stale cell"
+        _Pipe(), _Cfg(), cas, 0, _Arm(), "micro-diffusion") is None
+    assert local_cell_store.lookup(KEY_A, cas_root=cas) is None, (
+        "route A must drop a stale cell")
 
 
 # ---------------------------------------------------------------------------
@@ -518,7 +532,7 @@ def test_every_new_terminus_is_in_the_typed_vocabulary() -> None:
 
 
 def test_each_new_terminus_emits_exactly_one_typed_event(
-    store: Path, tmp_path: Path, declared: None, events: List[Any],
+    store: Path, cas: Path, tmp_path: Path, declared: None, events: List[Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One decision, one event, ``phase`` = the gate's own token. "adopt
@@ -528,11 +542,12 @@ def test_each_new_terminus_emits_exactly_one_typed_event(
 
     ex._boot_adopt(_Spec(), {})                       # empty store, no hub
     local_cell_store.store(
-        _cell(tmp_path, name="b"), key=KEY_B, family="other", arm_token="")
+        _cell(tmp_path, source=ARTIFACT_OTHER, name="b"), key=KEY_B,
+        family="other", arm_token="", cas_root=cas)
     ex._boot_adopt(_Spec(), {})                       # stored, but not this key
     local_cell_store.store(
-        _cell(tmp_path, key=KEY_DERIVED), key=KEY_DERIVED,
-        family="micro-diffusion", arm_token=ARM_A)
+        _cell(tmp_path), key=KEY_DERIVED, family="micro-diffusion",
+        arm_token=ARM_A, cas_root=cas)
     ex._boot_adopt(_Spec(), {})                       # this machine holds it
 
     phases = [u.phase for u in _adopt_events(events)]
@@ -541,7 +556,7 @@ def test_each_new_terminus_emits_exactly_one_typed_event(
 
 
 def test_a_key_that_missed_locally_is_distinguishable_from_one_never_derived(
-    store: Path, tmp_path: Path, declared: None, events: List[Any],
+    store: Path, cas: Path, tmp_path: Path, declared: None, events: List[Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """pgw#1116's regression box, on the new pair. `derived_key` is what tells
@@ -551,7 +566,8 @@ def test_a_key_that_missed_locally_is_distinguishable_from_one_never_derived(
 
     (never,) = ex._boot_adopt(_Spec(), {})
     local_cell_store.store(
-        _cell(tmp_path, name="b"), key=KEY_B, family="other", arm_token="")
+        _cell(tmp_path, source=ARTIFACT_OTHER, name="b"), key=KEY_B,
+        family="other", arm_token="", cas_root=cas)
     (missed,) = ex._boot_adopt(_Spec(), {})
 
     assert never.reason == "no_compiled_graph_source" and not never.derived_key

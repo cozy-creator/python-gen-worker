@@ -20,19 +20,26 @@ Every row here asserts the TARGET ordering and was RED on unmodified
 
 from __future__ import annotations
 
-import io
-import json
-import tarfile
+import atexit
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
+import tcg_artifacts
 from gen_worker import fleet_cells, local_cell_store
 from gen_worker.cell_adopt import AdoptOutcome
 
-KEY_A = "cg-key-v1-" + "a" * 56
+# pgw#1283: a REAL TCG envelope — the store hands its bytes to
+# ``Engine.import_artifact`` now, which refuses anything that does not unpack
+# and restate its own key.
+_FIXTURE_DIR = Path(tempfile.mkdtemp(prefix="pgw1183-durability-"))
+atexit.register(shutil.rmtree, _FIXTURE_DIR, True)
+ARTIFACT_A = tcg_artifacts.build(_FIXTURE_DIR / "a.tar.gz", witness="a" * 16)
+KEY_A = tcg_artifacts.key_of(ARTIFACT_A)
 ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * fleet_cells.ARM_DIGEST_HEX
 
 
@@ -43,17 +50,17 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
-def _artifact(tmp_path: Path, *, key: str = KEY_A, name: str = "mint") -> Path:
+@pytest.fixture()
+def cas(tmp_path: Path) -> Path:
+    """This test's worker CAS — where the bytes actually live since pgw#1283."""
+    return tmp_path / "cas"
+
+
+def _artifact(tmp_path: Path, *, name: str = "mint") -> Path:
     """A cell with readable metadata — every gate here reads the stamp."""
     p = tmp_path / name / "cell.tar.gz"
     p.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(
-        {"kind": "aot-inductor", "compiled_graph_key": key, "family": "micro-diffusion"}
-    ).encode()
-    with tarfile.open(p, mode="w:gz") as tar:
-        info = tarfile.TarInfo("metadata.json")
-        info.size = len(payload)
-        tar.addfile(info, io.BytesIO(payload))
+    shutil.copyfile(ARTIFACT_A, p)
     return p
 
 
@@ -96,12 +103,14 @@ class _Sink:
         return "ckpt-1"
 
 
-def _pending(tmp_path: Path, publisher: Any) -> fleet_cells.PendingSelfMint:
+def _pending(tmp_path: Path, publisher: Any,
+             cas: Optional[Path] = None) -> fleet_cells.PendingSelfMint:
     root = tmp_path / "mint"
     return fleet_cells.PendingSelfMint(
         family="micro-diffusion", arm_token=ARM_A, ref="r#x", cfg=_Cfg(),
         target=root / "cell.tar.gz", mint_root=root, publisher=publisher,
         arm_key=_Arm(),  # type: ignore[arg-type]
+        cache_dir=cas,
     )
 
 
@@ -128,9 +137,12 @@ def _arming(monkeypatch: pytest.MonkeyPatch, *, ok: bool,
     def _arm(pipe: Any, cfg: Any, cache_dir: Any, artifact: Path,
              bucket: int, meta: Any = None, **_kw: Any) -> AdoptOutcome:
         if observed is not None:
+            # pgw#1283: the listing is metadata-only, so residency of the BYTES
+            # is asked separately — of TCG, which is what holds them.
             observed.extend(
                 c.verdict for c in local_cell_store.stored_cells()
-                if c.key == KEY_A and c.artifact.is_file())
+                if c.key == KEY_A
+                and local_cell_store.materialize(c.key, cas_root=cache_dir))
         if ok:
             return AdoptOutcome.hit(KEY_A)
         return AdoptOutcome.miss("compile_cell_failed", "the card said no")
@@ -144,7 +156,7 @@ def _arming(monkeypatch: pytest.MonkeyPatch, *, ok: bool,
 
 
 def test_a_trusted_pod_writes_the_cell_to_local_cas(
-    store: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    store: Path, cas: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     quiet: List[Tuple[str, str]],
 ) -> None:
     """RED on master: ``local_cell_store.store`` sat behind
@@ -153,19 +165,19 @@ def test_a_trusted_pod_writes_the_cell_to_local_cas(
     only copy lived in a temp dir owned by the process most likely to die."""
     _arming(monkeypatch, ok=True)
     sink = _Sink()
-    pending = _pending(tmp_path, sink)
+    pending = _pending(tmp_path, sink, cas)
     art = _artifact(tmp_path)
 
     assert fleet_cells.adopt_delegated_mint(_Pipe(), pending, [art]) is not None
 
-    kept = local_cell_store.lookup(KEY_A)
+    kept = local_cell_store.lookup(KEY_A, cas_root=cas)
     assert kept is not None, (
         "a trusted pod finished a mint and wrote NO durable copy — the "
         "artifact exists only under the mint root every terminus rmtrees")
 
 
 def test_the_cas_copy_exists_BEFORE_the_arm_runs(
-    store: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    store: Path, cas: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     quiet: List[Tuple[str, str]],
 ) -> None:
     """§1.5's ordering is the whole point: durable BEFORE anything downstream
@@ -178,15 +190,15 @@ def test_the_cas_copy_exists_BEFORE_the_arm_runs(
     seen: List[str] = []
     _arming(monkeypatch, ok=True, observed=seen)
     fleet_cells.adopt_delegated_mint(
-        _Pipe(), _pending(tmp_path, _Sink()), [_artifact(tmp_path)])
+        _Pipe(), _pending(tmp_path, _Sink(), cas), [_artifact(tmp_path)])
     assert seen == [local_cell_store.VERDICT_UNVERIFIED], (
         "the arm ran before the artifact was durable")
-    assert local_cell_store.lookup(KEY_A) is not None, (
+    assert local_cell_store.lookup(KEY_A, cas_root=cas) is not None, (
         "the gate passed and the cell was never promoted to admitted")
 
 
 def test_an_arm_refusal_QUARANTINES_the_bytes_instead_of_deleting_them(
-    store: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    store: Path, cas: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     quiet: List[Tuple[str, str]],
 ) -> None:
     """§1.3.4: a refused entry is *kept quarantined-local for forensics*. On
@@ -194,9 +206,9 @@ def test_an_arm_refusal_QUARANTINES_the_bytes_instead_of_deleting_them(
     could explain the refusal was destroyed by the code reporting it."""
     _arming(monkeypatch, ok=False)
     assert fleet_cells.adopt_delegated_mint(
-        _Pipe(), _pending(tmp_path, _Sink()), [_artifact(tmp_path)]) is None
+        _Pipe(), _pending(tmp_path, _Sink(), cas), [_artifact(tmp_path)]) is None
 
-    assert local_cell_store.lookup(KEY_A) is None, (
+    assert local_cell_store.lookup(KEY_A, cas_root=cas) is None, (
         "a cell that failed its arm must never be armable from the store")
     quarantined = local_cell_store.quarantined_cells()
     assert [c.key for c in quarantined] == [KEY_A], (
@@ -209,13 +221,14 @@ def test_an_arm_refusal_QUARANTINES_the_bytes_instead_of_deleting_them(
 
 
 def test_a_failed_publish_does_not_destroy_the_bytes(
-    store: Path, tmp_path: Path, quiet: List[Tuple[str, str]],
+    store: Path, cas: Path, tmp_path: Path, quiet: List[Tuple[str, str]],
 ) -> None:
     """THE MONEY BUG. ``finally: shutil.rmtree(artifact.parent)`` ran on every
     exit path, so one ``connection reset`` deleted a completed mint."""
     art = _artifact(tmp_path)
     local_cell_store.store(art, key=KEY_A, family="micro-diffusion",
-                           arm_token=ARM_A, sink=local_cell_store.SINK_OWED)
+                           arm_token=ARM_A, sink=local_cell_store.SINK_OWED,
+                           cas_root=cas)
 
     class _Broken:
         def publish(self, *a: Any, **k: Any) -> str:
@@ -223,11 +236,11 @@ def test_a_failed_publish_does_not_destroy_the_bytes(
 
     fleet_cells._publish_async(
         _Broken(), "micro-diffusion",  # type: ignore[arg-type]
-        local_cell_store.lookup(KEY_A).artifact,  # type: ignore[union-attr]
+        local_cell_store.lookup(KEY_A, cas_root=cas).artifact,  # type: ignore[union-attr]
         {"compiled_graph_key": KEY_A}, compiled_graph_key_digest=KEY_A, arm_token=ARM_A,
     ).join(timeout=30)
 
-    kept = local_cell_store.lookup(KEY_A)
+    kept = local_cell_store.lookup(KEY_A, cas_root=cas)
     assert kept is not None and kept.artifact.is_file(), (
         "a transport failure destroyed the sole copy of a completed mint")
     assert kept.sink == local_cell_store.SINK_OWED, (
@@ -235,65 +248,67 @@ def test_a_failed_publish_does_not_destroy_the_bytes(
 
 
 def test_the_publish_thread_is_not_a_daemon(
-    store: Path, tmp_path: Path, quiet: List[Tuple[str, str]],
+    store: Path, cas: Path, tmp_path: Path, quiet: List[Tuple[str, str]],
 ) -> None:
     """Its own event text stated the defect: *"this pod must survive the upload
     or the cell is lost"*. A daemon thread is killed at interpreter exit with
     no unwinding at all."""
     art = _artifact(tmp_path)
     local_cell_store.store(art, key=KEY_A, family="f", arm_token=ARM_A,
-                           sink=local_cell_store.SINK_OWED)
+                           sink=local_cell_store.SINK_OWED, cas_root=cas)
     t = fleet_cells._publish_async(
         _Sink(), "f",  # type: ignore[arg-type]
-        local_cell_store.lookup(KEY_A).artifact,  # type: ignore[union-attr]
+        local_cell_store.lookup(KEY_A, cas_root=cas).artifact,  # type: ignore[union-attr]
         {"compiled_graph_key": KEY_A}, compiled_graph_key_digest=KEY_A, arm_token=ARM_A)
     assert t.daemon is False
     t.join(timeout=30)
 
 
 def test_a_pending_publish_is_retried_on_the_NEXT_boot(
-    store: Path, tmp_path: Path, quiet: List[Tuple[str, str]],
+    store: Path, cas: Path, tmp_path: Path, quiet: List[Tuple[str, str]],
 ) -> None:
     """Cross-boot retry is what makes publish failure survivable rather than
     terminal. On master a publish that never completed left nothing behind at
     all — the bytes were gone and no record said an upload was owed."""
     local_cell_store.store(_artifact(tmp_path), key=KEY_A, family="f",
-                           arm_token=ARM_A, sink=local_cell_store.SINK_OWED)
+                           arm_token=ARM_A, sink=local_cell_store.SINK_OWED,
+                           cas_root=cas)
     sink = _Sink()
 
-    for t in fleet_cells.resume_owed_publishes(sink):  # type: ignore[arg-type]
+    for t in fleet_cells.resume_owed_publishes(sink, cas):  # type: ignore[arg-type]
         t.join(timeout=30)
 
     assert [p.name for p in sink.published] == ["cell.tar.gz"]
-    kept = local_cell_store.lookup(KEY_A)
+    kept = local_cell_store.lookup(KEY_A, cas_root=cas)
     assert kept is not None
     assert kept.sink == local_cell_store.SINK_DELIVERED, (
         "a completed publish must stop being owed, or every boot re-uploads")
 
 
 def test_a_published_cell_is_not_re_uploaded_next_boot(
-    store: Path, tmp_path: Path, quiet: List[Tuple[str, str]],
+    store: Path, cas: Path, tmp_path: Path, quiet: List[Tuple[str, str]],
 ) -> None:
     local_cell_store.store(_artifact(tmp_path), key=KEY_A, family="f",
-                           arm_token=ARM_A, sink=local_cell_store.SINK_DELIVERED)
+                           arm_token=ARM_A, sink=local_cell_store.SINK_DELIVERED,
+                           cas_root=cas)
     sink = _Sink()
-    assert list(fleet_cells.resume_owed_publishes(sink)) == []  # type: ignore[arg-type]
+    assert list(fleet_cells.resume_owed_publishes(sink, cas)) == []  # type: ignore[arg-type]
     assert sink.published == []
 
 
 def test_a_cell_with_no_sink_by_design_owes_no_publish(
-    store: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    store: Path, cas: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     quiet: List[Tuple[str, str]],
 ) -> None:
     """cozy-local (§4.28) never has a sink, so its cells must be durable AND
     must not accumulate an upload obligation nothing will ever discharge."""
     _arming(monkeypatch, ok=True)
     fleet_cells.adopt_delegated_mint(
-        _Pipe(), _pending(tmp_path, None), [_artifact(tmp_path)])
-    kept = local_cell_store.lookup(KEY_A)
+        _Pipe(), _pending(tmp_path, None, cas), [_artifact(tmp_path)])
+    kept = local_cell_store.lookup(KEY_A, cas_root=cas)
     assert kept is not None
     assert kept.sink == local_cell_store.SINK_NONE
-    assert list(fleet_cells.resume_owed_publishes(None)) == []
+    assert list(fleet_cells.resume_owed_publishes(None, cas)) == []
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +317,7 @@ def test_a_cell_with_no_sink_by_design_owes_no_publish(
 
 
 def test_no_terminus_deletes_a_cell_the_store_does_not_hold(
-    store: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    store: Path, cas: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     quiet: List[Tuple[str, str]],
 ) -> None:
     """The mint root is SCRATCH once the CAS write lands, and every terminus
@@ -310,11 +325,11 @@ def test_no_terminus_deletes_a_cell_the_store_does_not_hold(
     a terminus that runs on a pending whose bytes never reached the store is
     the destruction bug rebuilt."""
     _arming(monkeypatch, ok=True)
-    pending = _pending(tmp_path, _Sink())
+    pending = _pending(tmp_path, _Sink(), cas)
     fleet_cells.adopt_delegated_mint(_Pipe(), pending, [_artifact(tmp_path)])
     fleet_cells.publish_self_mint(pending)
 
-    kept = local_cell_store.lookup(KEY_A)
+    kept = local_cell_store.lookup(KEY_A, cas_root=cas)
     assert kept is not None and kept.artifact.read_bytes(), (
         "the publish terminus destroyed the durable copy")
 

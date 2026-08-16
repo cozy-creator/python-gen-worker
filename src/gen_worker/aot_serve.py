@@ -35,6 +35,7 @@ from torch_compiled_graphs import (
 
 from . import activity as activity_mod
 from . import aot_identity
+from . import local_cell_store
 from .cell_adopt import AdoptOutcome
 from . import serve_posture
 from . import shape_growth
@@ -1490,6 +1491,23 @@ def arm_compiled_graph(
     if not is_compiled_graph_key(key):
         raise AdoptError(
             "compiled_graph_key_invalid", f"not a compiled-graph key: {key!r}"
+        )
+    # pgw#1283 criterion 4 — THE WORKER'S OWN QUARANTINE, asked before the CAS
+    # is. §1.3.4 keeps a refused cell "quarantined-local for forensics"; before
+    # the store cutover those bytes lived only in `local_cell_store`, so no
+    # load path could reach them. They are now in the very CAS this function
+    # resolves from, and TCG has no concept of a worker parity/arm refusal, so
+    # without this the runner loads a cell this worker already refused.
+    #
+    # Only the QUARANTINED verdict refuses. An unverified row is a cell that is
+    # durable but not yet proven — §1.5 stores before the gate runs, and it is
+    # this very arm that proves it — and a key this worker never recorded is
+    # every hub-delivered cell there is.
+    if local_cell_store.is_quarantined(key):
+        raise AdoptError(
+            "compiled_graph_worker_quarantined",
+            f"this worker quarantined {key!r} at its own gate (§1.3.4); its "
+            f"bytes are kept for forensics and are never armed",
         )
     engine = open_worker_engine(cache_dir)
     destination = _tcg_destination(cache_dir, key)

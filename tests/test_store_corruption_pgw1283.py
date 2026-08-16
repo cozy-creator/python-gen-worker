@@ -26,19 +26,28 @@ silence was the defect.
 
 from __future__ import annotations
 
-import io
+import atexit
 import json
 import logging
-import tarfile
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Dict
 
 import pytest
 
+import tcg_artifacts
 from gen_worker import local_cell_store
 
-KEY_A = "cg-key-v1-" + "a" * 56
-KEY_B = "cg-key-v1-" + "b" * 56
+# pgw#1283: real TCG envelopes. The store no longer holds opaque bytes, so a
+# hand-typed key and a hand-rolled tarball are refused at the seam — see this
+# file's sibling note in ``tests/tcg_artifacts.py``.
+_FIXTURE_DIR = Path(tempfile.mkdtemp(prefix="pgw1283-corruption-"))
+atexit.register(shutil.rmtree, _FIXTURE_DIR, True)
+ARTIFACT_A = tcg_artifacts.build(_FIXTURE_DIR / "a.tar.gz", witness="a" * 16)
+ARTIFACT_B = tcg_artifacts.build(_FIXTURE_DIR / "b.tar.gz", witness="b" * 16)
+KEY_A = tcg_artifacts.key_of(ARTIFACT_A)
+KEY_B = tcg_artifacts.key_of(ARTIFACT_B)
 ARM_A = "arm2-" + "1" * 40
 
 
@@ -49,26 +58,26 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
-def _artifact(tmp_path: Path, *, key: str = KEY_A, name: str = "mint") -> Path:
+@pytest.fixture()
+def cas(tmp_path: Path) -> Path:
+    return tmp_path / "cas"
+
+
+def _artifact(tmp_path: Path, *, source: Path = ARTIFACT_A,
+              name: str = "mint") -> Path:
     """A packed cell carrying its own stamp, as a real mint produces."""
     p = tmp_path / name / "cell.tar.gz"
     p.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(
-        {"kind": "aot-inductor", "compiled_graph_key": key,
-         "family": "micro-diffusion"}
-    ).encode()
-    with tarfile.open(p, mode="w:gz") as tar:
-        info = tarfile.TarInfo("metadata.json")
-        info.size = len(payload)
-        tar.addfile(info, io.BytesIO(payload))
+    shutil.copyfile(source, p)
     return p
 
 
-def _stored(tmp_path: Path, *, key: str = KEY_A, arm_token: str = "",
-            name: str = "mint") -> local_cell_store.LocalCell:
+def _stored(tmp_path: Path, cas: Path, *, source: Path = ARTIFACT_A,
+            key: str = KEY_A, arm_token: str = "",
+            name: str = "mint") -> local_cell_store.CellRecord:
     cell = local_cell_store.store(
-        _artifact(tmp_path, key=key, name=name), key=key,
-        family="micro-diffusion", arm_token=arm_token)
+        _artifact(tmp_path, source=source, name=name), key=key,
+        family="micro-diffusion", arm_token=arm_token, cas_root=cas)
     assert cell is not None, "fixture setup: the cell must store"
     return cell
 
@@ -107,7 +116,7 @@ def test_read_json_separates_absence_from_corruption(tmp_path: Path) -> None:
 
 
 def test_lookup_says_so_and_drops_when_a_record_is_unreadable(
-    store: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    store: Path, cas: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A corrupt record beside intact bytes is not silence.
 
@@ -116,14 +125,12 @@ def test_lookup_says_so_and_drops_when_a_record_is_unreadable(
     that can no longer be used is dropped, so the corruption costs one honest
     re-mint rather than an invisible one.
     """
-    _stored(tmp_path)
+    _stored(tmp_path, cas)
     record = local_cell_store.cell_dir(KEY_A) / local_cell_store.RECORD_NAME
-    artifact = local_cell_store.cell_dir(KEY_A) / local_cell_store.ARTIFACT_NAME
-    assert artifact.is_file(), "the bytes are intact; only the record rots"
     _corrupt(record)
 
     with caplog.at_level(logging.ERROR, logger=local_cell_store.__name__):
-        assert local_cell_store.lookup(KEY_A) is None
+        assert local_cell_store.lookup(KEY_A, cas_root=cas) is None
 
     assert any("unreadable" in r.message.lower() or "unreadable" in r.getMessage().lower()
                for r in caplog.records), (
@@ -134,7 +141,7 @@ def test_lookup_says_so_and_drops_when_a_record_is_unreadable(
 
 
 def test_mark_reports_the_transition_it_loses(
-    store: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    store: Path, cas: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The expensive silent case: a lost ``delivered`` means a re-upload.
 
@@ -142,7 +149,7 @@ def test_mark_reports_the_transition_it_loses(
     but a dropped state transition is now an error line naming the verdict and
     sink that were not applied.
     """
-    _stored(tmp_path)
+    _stored(tmp_path, cas)
     record = local_cell_store.cell_dir(KEY_A) / local_cell_store.RECORD_NAME
     _corrupt(record)
 
@@ -159,14 +166,14 @@ def test_mark_reports_the_transition_it_loses(
 
 
 def test_one_corrupt_record_does_not_blank_the_listing(
-    store: Path, tmp_path: Path,
+    store: Path, cas: Path, tmp_path: Path,
 ) -> None:
     """``stored_cells`` is what a ``cozy cells``-style CLI reads.
 
     One bad file must cost that entry, never the whole inventory.
     """
-    _stored(tmp_path, key=KEY_A, name="a")
-    _stored(tmp_path, key=KEY_B, name="b")
+    _stored(tmp_path, cas, source=ARTIFACT_A, key=KEY_A, name="a")
+    _stored(tmp_path, cas, source=ARTIFACT_B, key=KEY_B, name="b")
     _corrupt(local_cell_store.cell_dir(KEY_A) / local_cell_store.RECORD_NAME)
 
     listed = local_cell_store.stored_cells()
@@ -175,17 +182,17 @@ def test_one_corrupt_record_does_not_blank_the_listing(
 
 
 def test_an_unreadable_memo_is_discarded_rather_than_shadowing(
-    store: Path, tmp_path: Path,
+    store: Path, cas: Path, tmp_path: Path,
 ) -> None:
     """A memo is a shortcut, never an authority — but a corrupt one left in
     place is paid for on every boot, because ``note_memo`` only rewrites it
     once a cell arms."""
-    _stored(tmp_path, arm_token=ARM_A)
+    _stored(tmp_path, cas, arm_token=ARM_A)
     path = local_cell_store.memo_path(ARM_A)
     assert path.is_file(), "fixture setup: store writes the memo"
     _corrupt(path)
 
-    assert local_cell_store.lookup_for_arm(ARM_A) is None
+    assert local_cell_store.lookup_for_arm(ARM_A, cas_root=cas) is None
     assert not path.exists(), (
         "the corrupt shortcut must be cleared so evidence can rebuild it")
 
@@ -208,7 +215,7 @@ def test_a_corrupt_trust_class_reads_as_not_yet_known(
 
 
 def test_a_failed_memo_write_does_not_report_the_store_as_failed(
-    store: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    store: Path, cas: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``store``'s return value means "artifact and record are durable".
 
@@ -229,7 +236,7 @@ def test_a_failed_memo_write_does_not_report_the_store_as_failed(
 
     cell = local_cell_store.store(
         _artifact(tmp_path), key=KEY_A, family="micro-diffusion",
-        arm_token=ARM_A)
+        arm_token=ARM_A, cas_root=cas)
 
     assert cell is not None, (
         "the record was durable before the memo was attempted; reporting "
@@ -240,6 +247,6 @@ def test_a_failed_memo_write_does_not_report_the_store_as_failed(
         "is still reported stored")
 
     monkeypatch.setattr(local_cell_store, "_write_json_atomic", real)
-    found = local_cell_store.lookup(KEY_A)
+    found = local_cell_store.lookup(KEY_A, cas_root=cas)
     assert found is not None and found.key == KEY_A, (
         "lookup and store must agree about whether the cell exists")

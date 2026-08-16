@@ -663,7 +663,7 @@ markers = [
 # Prefer the working-tree source so a bare `pytest` never tests a stale wheel.
 # The supported command is still `uv run --extra dev pytest` (pytest is a dev
 # extra); tests/conftest.py hard-fails if gen_worker resolves outside src/.
-pythonpath = ["src"]
+pythonpath = ["src", "tests"]
 
 # NOTE: the CUDA 13.0 torch pin below is uv-only — it is read by `uv sync` /
 # `uv build` in this repo, NOT by `pip`. `pip install gen-worker[torch]`

@@ -14,15 +14,23 @@ What was RED before this issue, on every one of these:
   is JIT-only and knows no ``ck1`` key);
 * compiled-graph reuse had no single canonical HashRepo/TCG authority.
 
-The store's own guarantees are proven against REAL bytes on disk (digest,
-atomicity, drop-on-corruption). The arm is proven to be the SAME gate the
-child's own cell passes — structurally, so it cannot drift into a weaker one.
+The store's own guarantees are proven against REAL bytes on disk. pgw#1283
+moved WHICH layer holds them: TCG's CAS owns the artifact and its verification,
+this module owns the verdict and the sink obligation. So the fixtures below
+build REAL TCG envelopes (``tests/tcg_artifacts.py``, torch-free) rather than
+opaque bytes — opaque bytes are now correctly refused at the seam, and a test
+that fed them would be testing the refusal instead of the store. The arm is
+proven to be the SAME gate the child's own cell passes — structurally, so it
+cannot drift into a weaker one.
 """
 
 from __future__ import annotations
 
 import ast
+import atexit
 import json
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -31,11 +39,21 @@ import pytest
 
 from torch_compiled_graphs import is_compiled_graph_key
 
+import tcg_artifacts
 from gen_worker import fleet_cells, local_cell_store
 from gen_worker.cell_adopt import AdoptOutcome
 
-KEY_A = "cg-key-v1-" + "a" * 56
-KEY_B = "cg-key-v1-" + "b" * 56
+# Two REAL artifacts, built once for the module. Their keys are DERIVED from
+# their own metadata by TCG — a store that files bytes under a key its own
+# stamp does not restate is exactly what `Engine.import_artifact` refuses, so
+# these can no longer be hand-typed constants.
+_FIXTURE_DIR = Path(tempfile.mkdtemp(prefix="pgw1283-cells-"))
+atexit.register(shutil.rmtree, _FIXTURE_DIR, True)
+ARTIFACT_A = tcg_artifacts.build(_FIXTURE_DIR / "a.tar.gz", witness="a" * 16)
+ARTIFACT_B = tcg_artifacts.build(_FIXTURE_DIR / "b.tar.gz", witness="b" * 16)
+KEY_A = tcg_artifacts.key_of(ARTIFACT_A)
+KEY_B = tcg_artifacts.key_of(ARTIFACT_B)
+assert KEY_A != KEY_B
 # pgw#1113: spelled in the CURRENT token scheme — a predecessor-scheme memo
 # is swept by `fleet_cells._sweep_superseded_memos_once`, which is the point.
 ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * fleet_cells.ARM_DIGEST_HEX
@@ -44,45 +62,41 @@ ARM_B = fleet_cells.ARM_SCHEME + "-" + "2" * fleet_cells.ARM_DIGEST_HEX
 
 @pytest.fixture()
 def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """The store root, relocated by its env — a PATH knob, never a behavior one."""
+    """The policy root, relocated by its env — a PATH knob, never a behavior one."""
     root = tmp_path / "cozy-cells"
     monkeypatch.setenv(local_cell_store.ENV_STORE_DIR, str(root))
     return root
 
 
-def _artifact(tmp_path: Path, body: bytes = b"packed-cell-bytes") -> Path:
-    """Opaque bytes. The STORE does not care what a cell is — these tests are
-    about addressing, digests and rot, and they assert the bytes round-trip
-    unchanged, so this deliberately stays raw."""
-    p = tmp_path / "mint" / "cell.tar.gz"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_bytes(body)
-    return p
+@pytest.fixture()
+def cas(tmp_path: Path) -> Path:
+    """The worker's ONE CAS, scoped to this test.
 
-
-def _armable_artifact(tmp_path: Path, *, key: str = KEY_A) -> Path:
-    """A cell with a READABLE envelope — for the tests that reach the ARM.
-
-    pgw#1098: `_arm_exported_cell` refuses `compiled_graph_envelope_unreadable` before
-    any other gate, for the local store exactly as for a child's fresh mint —
-    which is precisely pgw#1096's "one gate, two sources" intent. Opaque bytes
-    used to reach the arm only because the metadata read swallowed its own
-    failure into `None`, so a test that ARMS has to supply a real envelope
-    while a test that only STORES does not.
+    pgw#1283: it is a SECOND root because it always was one — the CAS lives
+    under ``TENSORHUB_CACHE_DIR`` and the policy sidecar under
+    ``GEN_WORKER_LOCAL_CELLS_DIR``. What the cutover changed is that the store
+    now files its bytes in the first instead of copying them into the second.
     """
-    import io as _io
-    import tarfile as _tarfile
+    return tmp_path / "cas"
 
-    p = tmp_path / "mint" / "cell.tar.gz"
+
+def _artifact(tmp_path: Path, source: Path = ARTIFACT_A) -> Path:
+    """One real TCG artifact, staged where a mint would have left it."""
+    p = tmp_path / "mint" / source.name
     p.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(
-        {"kind": "aot-inductor", "compiled_graph_key": key, "family": "micro-diffusion"}
-    ).encode()
-    with _tarfile.open(p, mode="w:gz") as tar:
-        info = _tarfile.TarInfo("metadata.json")
-        info.size = len(payload)
-        tar.addfile(info, _io.BytesIO(payload))
+    shutil.copyfile(source, p)
     return p
+
+
+def _armable_artifact(tmp_path: Path, *, source: Path = ARTIFACT_A) -> Path:
+    """Identical to :func:`_artifact` since pgw#1283, and kept as a NAME.
+
+    It used to be a separate fixture because the store accepted opaque bytes
+    while the arm needed a readable envelope; every artifact the store will
+    now accept is armable by construction, which is the point of moving byte
+    custody to TCG.
+    """
+    return _artifact(tmp_path, source)
 
 
 # ---------------------------------------------------------------------------
@@ -91,24 +105,28 @@ def _armable_artifact(tmp_path: Path, *, key: str = KEY_A) -> Path:
 
 
 def test_a_cell_is_addressed_by_the_same_ck1_key_the_hub_store_uses(
-    store: Path, tmp_path: Path,
+    store: Path, cas: Path, tmp_path: Path,
 ) -> None:
     """§4.28's "one identity, two stores": the local address IS the stamped key.
 
     RED before: no local address existed for an AOT cell at all — `local_cells`
     keys on a flavor LABEL (sku/torch/lane), a space with no `ck1` in it.
     """
+    source = _artifact(tmp_path)
     cell = local_cell_store.store(
-        _artifact(tmp_path), key=KEY_A, family="micro-diffusion", arm_token=ARM_A)
+        source, key=KEY_A, family="micro-diffusion", arm_token=ARM_A,
+        cas_root=cas)
 
     assert cell is not None
     assert cell.key == KEY_A and is_compiled_graph_key(cell.key)
-    assert cell.artifact == store / "aot-cells" / KEY_A / "cell.tar.gz"
-    assert cell.artifact.read_bytes() == b"packed-cell-bytes"
 
-    found = local_cell_store.lookup(KEY_A)
-    assert found is not None and found.content_digest == cell.content_digest
-    assert found.family == "micro-diffusion"
+    found = local_cell_store.lookup(KEY_A, cas_root=cas)
+    assert found is not None and found.family == "micro-diffusion"
+    assert found.artifact == store / "aot-cells" / KEY_A / "cell.tar.gz"
+    # pgw#1283: the bytes came back from TCG's CAS, not from a second copy this
+    # module made — and they are the bytes that went in, which is the property
+    # the deleted worker-side digest was reaching for.
+    assert found.artifact.read_bytes() == source.read_bytes()
 
 
 def test_the_store_refuses_to_be_addressed_by_anything_that_is_not_a_key(
@@ -126,44 +144,65 @@ def test_the_store_refuses_to_be_addressed_by_anything_that_is_not_a_key(
     assert local_cell_store.lookup("../escape") is None
 
 
-def test_a_record_written_but_never_filled_is_absent_not_short(
-    store: Path, tmp_path: Path,
+def test_a_cell_with_no_policy_record_is_absent_however_intact_its_bytes(
+    store: Path, cas: Path, tmp_path: Path,
 ) -> None:
-    """The record is written LAST: a crash mid-store leaves
-    a directory the next lookup treats as absent, never as a short cell."""
-    local_cell_store.store(_artifact(tmp_path), key=KEY_A, family="f")
+    """pgw#1283's ownership rule, in its strictest direction.
+
+    Bytes are the authority on whether a cell EXISTS; the sidecar is the
+    authority on whether it may be SERVED. So bytes with no sidecar are a clean
+    miss, not a cell — a compile cell is user-generated EXECUTABLE code, and
+    "the CAS has it" is not this worker's permission to arm it.
+    """
+    local_cell_store.store(_artifact(tmp_path), key=KEY_A, family="f",
+                           cas_root=cas)
     (store / "aot-cells" / KEY_A / local_cell_store.RECORD_NAME).unlink()
-    assert local_cell_store.lookup(KEY_A) is None
+
+    assert local_cell_store.lookup(KEY_A, cas_root=cas) is None
+    assert local_cell_store.verdict_of(KEY_A) == "", (
+        "no record is no verdict — never an implied admission")
 
 
 # ---------------------------------------------------------------------------
-# 2. RED — a corrupted cell is refused, and costs exactly one re-mint
+# 2. RED — rot in the materialized copy costs a re-export, never a re-mint
 # ---------------------------------------------------------------------------
 
 
-def test_corrupting_a_stored_cell_refuses_admission_and_drops_it(
-    store: Path, tmp_path: Path,
+def test_a_rotted_materialized_copy_is_re_exported_from_the_cas_not_re_minted(
+    store: Path, cas: Path, tmp_path: Path,
 ) -> None:
-    """A persisted artifact cannot vouch for itself. The digest is RECOMPUTED
-    over the bytes on disk, so a
-    truncated, half-written or edited artifact refuses HERE rather than being
-    handed to an arm that would then serve it.
+    """pgw#1283 — what "TCG owns the bytes" buys, stated as a cost.
 
-    RED before: there was no local store, and the JIT one it succeeds compared
-    only recorded FACTS — nothing ever hashed the bytes.
+    The file under ``aot-cells/<key>/cell.tar.gz`` is now a MATERIALIZATION of
+    a CAS record, not the only copy. So an artifact that rots on disk is no
+    longer a lost cell: TCG refuses to hand back a destination that is not the
+    bytes it selected, this module discards that copy, and the SAME bytes come
+    back out of the CAS.
+
+    RED before this issue in the strong sense: the old store held the only
+    copy, recomputed its own digest over it, and DROPPED the cell — the next
+    boot paid a full GPU mint for one flipped bit.
     """
     cell = local_cell_store.store(
-        _artifact(tmp_path), key=KEY_A, family="f", arm_token=ARM_A)
-    assert cell is not None and local_cell_store.lookup(KEY_A) is not None
+        _artifact(tmp_path), key=KEY_A, family="f", arm_token=ARM_A,
+        cas_root=cas)
+    assert cell is not None
+    first = local_cell_store.lookup(KEY_A, cas_root=cas)
+    assert first is not None
+    good = first.artifact.read_bytes()
 
-    cell.artifact.write_bytes(b"packed-cell-byteZ")  # same length, one bit
+    with open(first.artifact, "r+b") as handle:  # one flipped run of bytes
+        handle.seek(200)
+        handle.write(b"\x00\x00\x00\x00")
 
-    assert local_cell_store.lookup(KEY_A) is None, "a corrupted cell armed"
-    assert not local_cell_store.cell_dir(KEY_A).exists(), (
-        "a refused cell must be DROPPED — leaving it costs a re-verify (and a "
-        "re-hash of every boot) forever, for bytes nothing can ever use")
-    assert local_cell_store.lookup_for_arm(ARM_A) is None, (
-        "the memo must not resurrect a cell the digest refused")
+    healed = local_cell_store.lookup(KEY_A, cas_root=cas)
+    assert healed is not None, "a rotted COPY must not cost the cell"
+    assert healed.artifact.read_bytes() == good
+    assert local_cell_store.verdict_of(KEY_A) == local_cell_store.VERDICT_ADMITTED, (
+        "rot in a materialization is not a gate refusal and must never be "
+        "written into this worker's verdict")
+    memo_hit = local_cell_store.lookup_for_arm(ARM_A, cas_root=cas)
+    assert memo_hit is not None and memo_hit.key == KEY_A
 
 
 # ---------------------------------------------------------------------------
@@ -172,20 +211,21 @@ def test_corrupting_a_stored_cell_refuses_admission_and_drops_it(
 
 
 def test_the_memo_turns_a_pre_trace_identity_into_the_ck1_key(
-    store: Path, tmp_path: Path,
+    store: Path, cas: Path, tmp_path: Path,
 ) -> None:
     """The `ck1` graph axis needs a trace; the pre-trace `ArmIdentity` does not.
     The memo is what lets boot 2 address the CAS without paying an export."""
     local_cell_store.store(
-        _artifact(tmp_path), key=KEY_A, family="f", arm_token=ARM_A)
+        _artifact(tmp_path), key=KEY_A, family="f", arm_token=ARM_A,
+        cas_root=cas)
 
-    hit = local_cell_store.lookup_for_arm(ARM_A)
+    hit = local_cell_store.lookup_for_arm(ARM_A, cas_root=cas)
     assert hit is not None and hit.key == KEY_A
-    assert local_cell_store.lookup_for_arm(ARM_B) is None
+    assert local_cell_store.lookup_for_arm(ARM_B, cas_root=cas) is None
 
 
 def test_a_moved_toolchain_is_an_HONEST_re_mint_and_leaves_the_old_cell_alone(
-    store: Path, tmp_path: Path,
+    store: Path, cas: Path, tmp_path: Path,
 ) -> None:
     """Paul: *"the key's toolchain/sm axes make local re-mints honest when the
     user upgrades torch or changes GPU."* The upgraded runtime computes a
@@ -193,33 +233,37 @@ def test_a_moved_toolchain_is_an_HONEST_re_mint_and_leaves_the_old_cell_alone(
     under its own key, because a user who rolls torch back must not have to
     recompile what they already compiled."""
     local_cell_store.store(
-        _artifact(tmp_path, b"cell-under-torch-A"), key=KEY_A, family="f",
-        arm_token=ARM_A)
+        _artifact(tmp_path, ARTIFACT_A), key=KEY_A, family="f",
+        arm_token=ARM_A, cas_root=cas)
 
     # The upgrade: a different toolchain digest => a different arm token.
-    assert local_cell_store.lookup_for_arm(ARM_B) is None, (
+    assert local_cell_store.lookup_for_arm(ARM_B, cas_root=cas) is None, (
         "an upgraded toolchain must not adopt the old toolchain's cell")
 
     local_cell_store.store(
-        _artifact(tmp_path, b"cell-under-torch-B"), key=KEY_B, family="f",
-        arm_token=ARM_B)
+        _artifact(tmp_path, ARTIFACT_B), key=KEY_B, family="f",
+        arm_token=ARM_B, cas_root=cas)
 
     assert {c.key for c in local_cell_store.stored_cells()} == {KEY_A, KEY_B}
-    old = local_cell_store.lookup(KEY_A)
-    assert old is not None and old.artifact.read_bytes() == b"cell-under-torch-A"
+    old = local_cell_store.lookup(KEY_A, cas_root=cas)
+    assert old is not None
+    assert old.artifact.read_bytes() == ARTIFACT_A.read_bytes()
 
 
 def test_a_stale_memo_costs_one_re_mint_and_never_a_wrong_cell(
-    store: Path, tmp_path: Path,
+    store: Path, cas: Path, tmp_path: Path,
 ) -> None:
     local_cell_store.store(
-        _artifact(tmp_path), key=KEY_A, family="f", arm_token=ARM_A)
+        _artifact(tmp_path), key=KEY_A, family="f", arm_token=ARM_A,
+        cas_root=cas)
     local_cell_store.drop(KEY_A)
-    assert local_cell_store.lookup_for_arm(ARM_A) is None
+    assert local_cell_store.lookup_for_arm(ARM_A, cas_root=cas) is None, (
+        "dropping the POLICY makes the cell unservable even though the CAS "
+        "still holds its bytes — which is what a worker drop means now")
 
     (store / "aot-cells" / local_cell_store.MEMO_DIRNAME / f"{ARM_A}.json"
      ).write_text(json.dumps({"compiled_graph_key": "not-a-key"}))
-    assert local_cell_store.lookup_for_arm(ARM_A) is None
+    assert local_cell_store.lookup_for_arm(ARM_A, cas_root=cas) is None
 
 
 # ---------------------------------------------------------------------------
@@ -386,17 +430,17 @@ def armable(monkeypatch: pytest.MonkeyPatch) -> List[Path]:
 
 
 def test_a_second_boot_arms_from_this_machines_own_store_with_no_mint(
-    store: Path, tmp_path: Path, armable: List[Path],
+    store: Path, cas: Path, tmp_path: Path, armable: List[Path],
 ) -> None:
     """The product promise, at the seam that decides a miss: compile once, run
     forever. RED before: no lookup existed, so boot 2 opened a pending and paid
     the whole export again."""
     local_cell_store.store(
         _armable_artifact(tmp_path), key=KEY_A, family="micro-diffusion",
-        arm_token=ARM_A)
+        arm_token=ARM_A, cas_root=cas)
 
     minted = fleet_cells.arm_from_local_store(
-        _Pipe(), _Cfg(), None, 0, _Arm(), "micro-diffusion")  # type: ignore[arg-type]
+        _Pipe(), _Cfg(), cas, 0, _Arm(), "micro-diffusion")  # type: ignore[arg-type]
 
     assert minted is not None
     assert minted.compiled_graph_key == KEY_A
@@ -408,7 +452,7 @@ def test_a_second_boot_arms_from_this_machines_own_store_with_no_mint(
 
 
 def test_a_local_cell_that_cannot_arm_is_dropped_not_retried_forever(
-    store: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    store: Path, cas: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         fleet_cells.provision, "arm_aot",
@@ -421,16 +465,17 @@ def test_a_local_cell_that_cannot_arm_is_dropped_not_retried_forever(
         fleet_cells.activity_mod, "emit_event",
         lambda kind, detail, phase="", duration_ms=0, **_kw: events.append((kind, phase)))
     local_cell_store.store(
-        _armable_artifact(tmp_path), key=KEY_A, family="f", arm_token=ARM_A)
+        _armable_artifact(tmp_path), key=KEY_A, family="f", arm_token=ARM_A,
+        cas_root=cas)
 
     assert fleet_cells.arm_from_local_store(
-        _Pipe(), _Cfg(), None, 0, _Arm(), "f") is None  # type: ignore[arg-type]
+        _Pipe(), _Cfg(), cas, 0, _Arm(), "f") is None  # type: ignore[arg-type]
     assert not local_cell_store.cell_dir(KEY_A).exists()
     assert ("local_compiled_graph_refused", "constants_unbound") in events
 
 
 def test_a_local_cell_that_does_not_describe_this_runtime_is_refused_by_FACT(
-    store: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    store: Path, cas: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The pgw#1042 axis gate, on the local path, with NOTHING stubbed out.
 
@@ -451,10 +496,11 @@ def test_a_local_cell_that_does_not_describe_this_runtime_is_refused_by_FACT(
         fleet_cells.activity_mod, "emit_event",
         lambda kind, detail, phase="", duration_ms=0, **_kw: events.append((kind, phase)))
     local_cell_store.store(
-        _artifact(tmp_path), key=KEY_A, family="micro-diffusion", arm_token=ARM_A)
+        _artifact(tmp_path), key=KEY_A, family="micro-diffusion",
+        arm_token=ARM_A, cas_root=cas)
 
     assert fleet_cells.arm_from_local_store(
-        _Pipe(), _Cfg(), None, 0, _Arm(), "micro-diffusion") is None  # type: ignore[arg-type]
+        _Pipe(), _Cfg(), cas, 0, _Arm(), "micro-diffusion") is None  # type: ignore[arg-type]
     assert ("local_compiled_graph_refused", "key_axis_divergence") in events
     assert not local_cell_store.cell_dir(KEY_A).exists()
 
@@ -515,7 +561,7 @@ def test_the_miss_path_consults_the_local_store_before_opening_a_mint(
 
 
 def test_an_untrusted_refusal_keeps_the_cell_instead_of_discarding_it(
-    store: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    store: Path, cas: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """th#1643 books the refusal as SUNK — *"a sealed cell was produced and
     thrown away"*. It is no longer thrown away: the machine learns its trust
@@ -529,13 +575,13 @@ def test_an_untrusted_refusal_keeps_the_cell_instead_of_discarding_it(
     refusal still teaches the machine its trust class, and it does not disturb
     the durable copy.
     """
-    artifact = _artifact(tmp_path, b"packed-cell-bytes")
+    artifact = _artifact(tmp_path)
     monkeypatch.setattr(fleet_cells.activity_mod, "emit_event",
                         lambda *a, **k: None)
     monkeypatch.setattr(fleet_cells, "_note_durable", lambda *a, **k: None)
     local_cell_store.store(
         artifact, key=KEY_A, family="micro-diffusion", arm_token=ARM_A,
-        sink=local_cell_store.SINK_OWED)
+        sink=local_cell_store.SINK_OWED, cas_root=cas)
 
     class _Refusing:
         def publish(self, family: str, art: Path, meta: dict,
@@ -546,14 +592,14 @@ def test_an_untrusted_refusal_keeps_the_cell_instead_of_discarding_it(
 
     fleet_cells._publish_async(
         _Refusing(), "micro-diffusion",  # type: ignore[arg-type]
-        local_cell_store.lookup(KEY_A).artifact,  # type: ignore[union-attr]
+        local_cell_store.lookup(KEY_A, cas_root=cas).artifact,  # type: ignore[union-attr]
         {"compiled_graph_key": KEY_A}, compiled_graph_key_digest=KEY_A, arm_token=ARM_A,
     ).join(timeout=30)
 
     assert local_cell_store.trust_class() == local_cell_store.TRUST_UNTRUSTED
-    kept = local_cell_store.lookup_for_arm(ARM_A)
+    kept = local_cell_store.lookup_for_arm(ARM_A, cas_root=cas)
     assert kept is not None and kept.key == KEY_A
-    assert kept.artifact.read_bytes() == b"packed-cell-bytes"
+    assert kept.artifact.read_bytes() == ARTIFACT_A.read_bytes()
     # And the obligation is CLOSED, not left owed: a hub that says "never"
     # must not be re-asked on every boot forever.
     assert kept.sink == local_cell_store.SINK_REFUSED
@@ -657,7 +703,7 @@ def test_a_trusted_fleet_pod_with_a_live_sink_OWES_an_upload(
 
 
 def test_nothing_evicts_and_the_accumulation_is_enumerable(
-    store: Path, tmp_path: Path,
+    store: Path, cas: Path, tmp_path: Path,
 ) -> None:
     """No GC in this lane, deliberately: a wrong sweep deletes an hour of
     compile. What accumulates is one cell per (graph x envelope x sm x
@@ -666,8 +712,9 @@ def test_nothing_evicts_and_the_accumulation_is_enumerable(
     toolchain-aware sweep needs. An AGE-based sweep would be wrong: a cell
     nobody booted for six months is still exactly the cell the next boot wants.
     """
-    for key in (KEY_A, KEY_B):
-        local_cell_store.store(_artifact(tmp_path), key=key, family="f")
+    for key, source in ((KEY_A, ARTIFACT_A), (KEY_B, ARTIFACT_B)):
+        local_cell_store.store(
+            _artifact(tmp_path, source), key=key, family="f", cas_root=cas)
 
     resident = local_cell_store.stored_cells()
     assert {c.key for c in resident} == {KEY_A, KEY_B}
