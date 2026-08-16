@@ -95,11 +95,18 @@ def test_the_executor_half_reads_the_same_key_and_only_that_key() -> None:
 
 
 @pytest.mark.parametrize(
-    "raw", ["acme/dest:tag", "acme/dest@sha256:" + HEX64, "acme/dest#fp8", "acme/dest/"]
+    "raw", ["acme/dest@sha256:" + HEX64, "acme/dest#fp8", "acme/dest/"]
 )
 def test_both_halves_strip_selectors_identically(raw: str) -> None:
     """ONE vocabulary means one normalization, or the publish addresses a repo
-    the executor never authorized."""
+    the executor never authorized.
+
+    No `owner/repo:tag` case: th#1987 DELETED that ref production and
+    `scripts/lint_repo_ref_pins.py` refuses the literal, so asserting we strip
+    it would be asserting behaviour on an input the pod refuses upstream. Both
+    halves still carry a `:` strip; whether that arm should survive th#1987 is
+    noted on pgw#1307, not decided here.
+    """
     from gen_worker.convert.publish import destination_ref
     from gen_worker.executor import _producer_destination_repo
 
