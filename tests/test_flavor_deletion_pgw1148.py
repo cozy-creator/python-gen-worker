@@ -1,13 +1,15 @@
-"""pgw#1148 / DESIGN-RULINGS §1.32(d): the flavor is dead as a WEIGHT ADDRESS,
-and alive as the COMPILE CELL fragment.
+"""pgw#1148 / DESIGN-RULINGS §1.32(d), COMPLETED BY pgw#1290 / th#2031: the
+flavor is dead ENTIRELY, and the `#` tail is alive only as the COMPILE CELL
+fragment of `root/family-<f>`.
 
 Both halves are asserted here because the whole risk of this deletion is
 mixing them up: `grep -rn flavor src/` is a four-way homonym, and the compile
 cache's cell keys are `#`-shaped. The hub made exactly this split (th#1803
-kept `release.ParseCanonicalRef`'s `#` tail for the cache and refuses the
-selector at its request surfaces with `flavor_selection_removed` /
-`binding_flavor_removed`, both 400); the SDK mirrors it client-side so a
-caller is told at the site they wrote instead of by a server error.
+kept `release.ParseCanonicalRef`'s `#` tail for the cache; th#2031 moved the
+refusal INTO both parsers, so a fragment on any non-cell repo is
+`ref_fragment_removed` / `binding_variant_selector_removed`, both 400). The
+SDK mirrors it client-side so a caller is told at the site they wrote instead
+of by a server error.
 """
 
 from __future__ import annotations
@@ -18,10 +20,10 @@ from gen_worker import compile_cache as cc
 from gen_worker.api.binding import HF, Hub, ModelRef, rebind_pick, wire_ref
 from gen_worker.models import refs
 from gen_worker.models.refs import (
-    FlavorSelectorRemoved,
+    RefFragmentRemoved,
     HuggingFaceRef,
     parse_model_ref,
-    refuse_flavor_selector,
+    refuse_ref_fragment,
 )
 
 CELL_REF = "root/family-sdxl#cg-key-v1-4f2a9b"
@@ -39,24 +41,25 @@ CELL_REF = "root/family-sdxl#cg-key-v1-4f2a9b"
     "owner/repo#gguf-q4_k_m",
 ])
 def test_hub_binding_refuses_a_flavor_selector(ref: str) -> None:
-    with pytest.raises(FlavorSelectorRemoved) as e:
+    with pytest.raises(RefFragmentRemoved) as e:
         Hub(ref)
     msg = str(e.value)
-    assert "REMOVED" in msg
+    assert "deleted, not aliased" in msg
     # The refusal must say what to write instead, or it is just a wall.
+    assert "?<contract pattern>" in msg
     assert "Slot(layouts=" in msg
     assert "@sha256:" in msg
 
 
 def test_hf_binding_refuses_a_flavor_selector() -> None:
-    with pytest.raises(FlavorSelectorRemoved):
+    with pytest.raises(RefFragmentRemoved):
         HF("black-forest-labs/FLUX.1-dev#bf16")
 
 
 def test_raw_modelref_construction_refuses_too() -> None:
     """The factories are sugar; the struct is the boundary. A
     `msgspec.structs.replace` or a direct construction must not slip past."""
-    with pytest.raises(FlavorSelectorRemoved):
+    with pytest.raises(RefFragmentRemoved):
         ModelRef(source="tensorhub", path="owner/repo#fp8")
 
 
@@ -64,22 +67,22 @@ def test_hf_parse_refuses_rather_than_silently_stripping() -> None:
     """The old parser STRIPPED the `#` tail off an HF ref and carried it as
     `HuggingFaceRef.flavor`. Silently dropping it would resolve a DIFFERENT
     repo than the caller named, so it refuses."""
-    with pytest.raises(FlavorSelectorRemoved):
+    with pytest.raises(RefFragmentRemoved):
         parse_model_ref("owner/repo#bf16", provider="hf")
 
 
 def test_a_hub_resolution_carrying_a_flavor_is_refused() -> None:
     """th#1803 makes the ladder's pick a DIGEST. A resolution that still
     carries a `#flavor` is a hub the worker must not silently obey."""
-    with pytest.raises(FlavorSelectorRemoved):
+    with pytest.raises(RefFragmentRemoved):
         rebind_pick(Hub("owner/repo"), resolved_ref="owner/repo#fp8-w8a8")
 
 
-def test_refuse_flavor_selector_is_a_valueerror() -> None:
+def test_refuse_ref_fragment_is_a_valueerror() -> None:
     """Callers that already catch ValueError on ref grammar keep working."""
-    assert issubclass(FlavorSelectorRemoved, ValueError)
-    refuse_flavor_selector("owner/repo@prod")  # no `#`: silent
-    refuse_flavor_selector("")
+    assert issubclass(RefFragmentRemoved, ValueError)
+    refuse_ref_fragment("owner/repo@prod")  # no `#`: silent
+    refuse_ref_fragment("")
 
 
 # --------------------------------------------------------------------------
@@ -140,7 +143,7 @@ def test_the_hub_resolve_no_longer_sends_or_parses_a_flavor() -> None:
 def test_the_cell_fragment_still_parses() -> None:
     th = parse_model_ref(CELL_REF).tensorhub
     assert th is not None
-    assert (th.owner, th.repo, th.release, th.flavor) == (
+    assert (th.owner, th.repo, th.release, th.fragment) == (
         "root", "family-sdxl", "", "cg-key-v1-4f2a9b")
 
 

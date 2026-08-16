@@ -137,17 +137,20 @@ def test_lookup_exact_tag_beats_repo_fallback() -> None:
 @pytest.mark.parametrize(
     "wire_ref",
     [
-        "bfl/FLUX.2-klein-4B@latest#bf16",  # a release-addressed spelling
-        "bfl/FLUX.2-klein-4B@prod#bf16",    # the release that used to be the default
-        "bfl/FLUX.2-klein-4B#bf16",         # bare form (no regression)
+        "bfl/FLUX.2-klein-4B@latest",  # a release-addressed spelling
+        "bfl/FLUX.2-klein-4B@prod",    # the release that used to be the default
+        "bfl/FLUX.2-klein-4B",         # bare form (no regression)
     ],
 )
 def test_lookup_release_strip(wire_ref: str) -> None:
     """Live 2026-05-16 failure: a runtime payload stamps a release onto an HF
     ref but the index only carries the bare HF form, so the lookup must strip
-    it (a tensorhub release is meaningless for HF)."""
+    it (a tensorhub release is meaningless for HF).
+
+    th#2031 re-spelled the fixtures: the `#bf16` tail these carried is now a
+    typed refusal, and the release strip is what the rows were ever about."""
     assert lookup_provider_for_ref(wire_ref) == "tensorhub"  # default before install
-    set_provider_index({"bfl/FLUX.2-klein-4B#bf16": "hf"})
+    set_provider_index({"bfl/FLUX.2-klein-4B": "hf"})
     assert lookup_provider_for_ref(wire_ref) == "hf"
 
 
@@ -190,7 +193,7 @@ def test_civitai_ref_routes_to_civitai_branch(tmp_path: Path, monkeypatch) -> No
 @pytest.mark.parametrize(
     "ref,index",
     [
-        ("acme/cozy-only#fp8", {"acme/cozy-only#fp8": "tensorhub"}),  # indexed tensorhub
+        ("acme/cozy-only", {"acme/cozy-only": "tensorhub"}),          # indexed tensorhub
         ("acme/unindexed", {"other/ref": "hf"}),                      # defaults to tensorhub
         ("acme/no-index", {}),                                        # no index at all
     ],

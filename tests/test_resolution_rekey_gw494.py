@@ -21,7 +21,7 @@ import pytest
 from gen_worker.hostfacts import HostFacts
 from gen_worker.api.binding import Hub, rebind_pick, wire_ref
 from gen_worker.models.records import vacate_record
-from gen_worker.models.refs import FlavorSelectorRemoved
+from gen_worker.models.refs import RefFragmentRemoved
 from gen_worker.api.decorators import Resources
 from gen_worker.executor import Executor
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -234,5 +234,5 @@ def test_rebind_pick_is_the_single_fold() -> None:
     with pytest.raises(ValueError):
         rebind_pick(b, resolved_ref="acme/OTHER")  # ref mismatch
     # A pick that still carries a `#flavor` is refused outright (§1.32(d)).
-    with pytest.raises(FlavorSelectorRemoved):
+    with pytest.raises(RefFragmentRemoved):
         rebind_pick(b, resolved_ref="acme/z-image#fp8")

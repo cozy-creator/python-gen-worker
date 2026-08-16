@@ -22,6 +22,7 @@ import sys
 import pytest
 
 from gen_worker.models.refs import (
+    RefFragmentRemoved,
     RetiredTagRef,
     TensorhubRef,
     fold_ref,
@@ -112,7 +113,7 @@ def test_vector_parses_to_the_declared_fields(vec: dict) -> None:
     assert (th.owner, th.repo, th.release) == (
         vec["owner"], vec["repo"], vec["release"])
     assert (th.digest or "") == vec["digest"]
-    assert (th.flavor or "") == vec["flavor"]
+    assert (th.fragment or "") == vec["fragment"]
     assert th.lane_spec == vec.get("lane_spec", "")
 
 
@@ -164,7 +165,7 @@ def test_bare_ref_names_no_release() -> None:
 def test_release_tail_round_trips_verbatim() -> None:
     """Nothing is elided: every release survives format(parse(...)) byte-wise —
     including `prod`, which used to BE the elision."""
-    for raw in ("owner/repo@prod", "owner/repo@latest", "owner/repo@2026.08#fp8"):
+    for raw in ("owner/repo@prod", "owner/repo@latest", "owner/repo@2026.08"):
         assert normalize_model_ref(raw) == raw
         assert parse_model_ref(normalize_model_ref(raw)).tensorhub.release != ""
 
@@ -194,9 +195,36 @@ def test_lane_spec_rides_beside_the_address_never_inside_it() -> None:
 
 def test_a_fragment_side_query_is_still_discarded() -> None:
     """The lockfile-attribution `?` on the FRAGMENT half keeps its old meaning:
-    discarded, not stored. Only a `?` on the address half is a lane spec."""
-    th = parse_model_ref("owner/repo#fp8?src=lockfile").tensorhub
-    assert (th.flavor, th.lane_spec) == ("fp8", "")
+    discarded, not stored. Only a `?` on the address half is a lane spec.
+
+    Asserted on a CELL ref, because th#2031 left the fragment no other home."""
+    th = parse_model_ref("root/family-sdxl#inductor-rtx-4090-torch2.9?src=lockfile").tensorhub
+    assert (th.fragment, th.lane_spec) == ("inductor-rtx-4090-torch2.9", "")
+
+
+def test_a_weight_ref_fragment_is_a_typed_refusal_th2031() -> None:
+    """th#2031: the `#flavor` selector is DELETED, and the refusal is the
+    point. It used to PARSE and then be dropped — every resolve body since
+    th#1803 carries no flavor field — so `owner/repo@prod#fp8` quietly
+    resolved to the release's default variant and reported success.
+
+    RED-VERIFY: drop the `RefFragmentRemoved` raise at the end of
+    `_parse_tensorhub_ref` and this test fails on the first `pytest.raises`,
+    while the corpus refusal vectors fail beside it.
+    """
+    for ref in ("owner/repo#fp8", "owner/repo@prod#fp8",
+                "owner/repo@prod?quant=plain.bf16@1#fp8",
+                "notroot/family-sdxl#inductor-rtx-4090-torch2.9",
+                "root/sdxl#inductor-rtx-4090-torch2.9"):
+        with pytest.raises(RefFragmentRemoved) as err:
+            parse_model_ref(ref)
+        assert "?<contract pattern>" in str(err.value)
+    # ...and the ONE surviving meaning still parses, on every address shape.
+    for cell in ("root/family-sdxl#inductor-rtx-4090-torch2.9",
+                 "root/family-sdxl@prod#inductor-rtx-4090-torch2.9"):
+        th = parse_model_ref(cell).tensorhub
+        assert th.fragment == "inductor-rtx-4090-torch2.9"
+        assert th.canonical() == cell
 
 
 def test_folding_a_release_onto_a_spec_ref_mints_no_double_at() -> None:

@@ -30,7 +30,7 @@ from ..models.refs import (
     fold_ref,
     normalize_model_ref,
     parse_model_ref,
-    refuse_flavor_selector,
+    refuse_ref_fragment,
 )
 
 ModelSource = Literal["tensorhub", "huggingface", "civitai", "modelscope"]
@@ -120,7 +120,7 @@ class ModelRef(msgspec.Struct, frozen=True):
         # selector and refuses typed here, at the site the author wrote — never
         # as a hub 400 three layers away. Cell refs are not bindings and never
         # reach this constructor.
-        refuse_flavor_selector(self.path, where=f"{self.source} binding")
+        refuse_ref_fragment(self.path, where=f"{self.source} binding")
         # th#1987: `release` is the TENSORHUB axis. On any other source it
         # named nothing, was fetched by nothing, and reached only `label` —
         # where it silently vanished behind a civitai `version=`. One home per
@@ -301,7 +301,7 @@ def rebind_pick(
         parsed = parse_model_ref(resolved_ref)
         if parsed.tensorhub is None:
             raise ValueError(f"resolution {resolved_ref!r} is not a tensorhub ref")
-        refuse_flavor_selector(resolved_ref, where="hub resolution")
+        refuse_ref_fragment(resolved_ref, where="hub resolution")
     try:
         if cast:
             rebound = structs.replace(rebound, storage_dtype=cast)

@@ -41,12 +41,12 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 HEX56 = "7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add7"
 
 
-def _flavor_of(ref: str) -> str:
+def _fragment_of(ref: str) -> str:
     """The parsed `#fragment`, refusing the None branch loudly — a ref that
     did not parse as a tensorhub ref is the bug these rows are about."""
     th = parse_model_ref(ref).tensorhub
     assert th is not None, ref
-    return th.flavor or ""
+    return th.fragment or ""
 
 
 def _vectors() -> list[dict]:
@@ -128,7 +128,7 @@ def test_the_real_key_length_fits() -> None:
     key = f"{tcg_identity.KEY_SCHEME}-{HEX56}"
     assert len(key) == 66
     assert is_compiled_graph_key(key)
-    assert _flavor_of(f"root/family-sdxl#{key}") == key
+    assert _fragment_of(f"root/family-sdxl#{key}") == key
 
 
 @pytest.mark.parametrize(
@@ -144,7 +144,7 @@ def test_the_fragment_bound_is_96_exactly(length: int, valid: bool) -> None:
     assert is_compiled_graph_key(key) is valid
     ref = f"root/family-sdxl#{key}"
     if valid:
-        assert _flavor_of(ref) == key
+        assert _fragment_of(ref) == key
     else:
         with pytest.raises(ValueError):
             parse_model_ref(ref)

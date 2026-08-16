@@ -873,7 +873,7 @@ def parse_cell_ref(ref: str) -> Tuple[str, str]:
     th = parsed.tensorhub
     if th is None or th.owner != "root" or not th.repo.startswith("family-"):
         return "", ""
-    return th.repo[len("family-"):], th.flavor or ""
+    return th.repo[len("family-"):], th.fragment or ""
 
 
 def family_from_ref(ref: str) -> str:
