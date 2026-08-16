@@ -19,6 +19,11 @@
   ``gen_worker.convert.publish_flavors(ctx, flavors)`` (one Tensorhub commit per
   ``ProducedFlavor``), and return a result struct. Generator handlers are
   rejected for producer kinds: nothing is ever published by yielding.
+* ``publishes=True`` declares that this function MAY write tensors/repos to
+  the hub. ONE declaration surface, shared with ``@job``: the hub mints the
+  worker-capability write grant off the declaration, never off the kind, and
+  the SDK refuses the publisher surface without it. It says MAY write; the
+  request still says WHERE.
 * ``kind="eval"`` MEASURES a candidate against a reference. It reads
   reserved refs like every non-inference kind and writes request output assets,
   but publishes no catalog repo — the hub refuses repo writes for eval tokens
@@ -1156,6 +1161,12 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     # mutable-config surface the hub validates writes against.
     config: Tuple[ConfigParam, ...] = ()
     env: Tuple[str, ...] = ()
+    # th#2049/pgw#1294: this function MAY write tensors/repos to the hub. ONE
+    # declaration surface for @endpoint and @job alike — Paul's tensor-emission
+    # ruling, which is what makes a serverless-LoRA trainer possible. It says
+    # MAY write; the request still says WHERE. The hub mints the
+    # worker-capability write grant off this declaration, never off the kind.
+    publishes: bool = False
 
 
 ATTR = "__gen_worker_endpoint__"
@@ -1576,6 +1587,7 @@ def _decorate_class(
     handles: Optional[Any] = None,
     config: Optional[Any] = None,
     env: Optional[Any] = None,
+    publishes: bool = False,
 ) -> type:
     handlers = _find_handler_methods(cls)
     for attr, member in handlers:
@@ -1602,6 +1614,7 @@ def _decorate_class(
         ),
         config=_validate_config_decl(cls.__name__, config),
         env=_validate_env_decl(cls.__name__, env),
+        publishes=bool(publishes),
     )
     setattr(cls, ATTR, decl)
     setattr(cls, "__gen_worker_handlers__", handlers)
@@ -1632,6 +1645,7 @@ def _decorate_function(
     handles: Optional[Any] = None,
     config: Optional[Any] = None,
     env: Optional[Any] = None,
+    publishes: bool = False,
 ) -> Callable[..., Any]:
     if reentrant:
         raise ValueError(
@@ -1678,6 +1692,7 @@ def _decorate_function(
         runtime_formula={"": formulas["*"]} if "*" in formulas else {},
         config=_validate_config_decl(fn.__name__, config),
         env=_validate_env_decl(fn.__name__, env),
+        publishes=bool(publishes),
     )
     setattr(fn, ATTR, decl)
     return fn
@@ -1704,6 +1719,7 @@ def endpoint(
     handles: Optional[Any] = ...,
     config: Optional[Sequence[ConfigParam]] = ...,
     env: Optional[Sequence[str]] = ...,
+    publishes: bool = ...,
 ) -> Callable[[T], T]: ...  # configured @endpoint(...) form
 
 
@@ -1724,6 +1740,7 @@ def endpoint(
     handles: Optional[Any] = None,
     config: Optional[Sequence[ConfigParam]] = None,
     env: Optional[Sequence[str]] = None,
+    publishes: bool = False,
 ) -> Any:
     """The one endpoint decorator. See the module docstring for shapes.
 
@@ -1799,6 +1816,7 @@ def endpoint(
                 child_calls=child_calls, reentrant=reentrant,
                 lora_bucket=bucket, warmup=warmup,
                 handles=handles, config=config, env=env,
+                publishes=publishes,
             )
         if inspect.isfunction(obj):
             return _decorate_function(
@@ -1808,6 +1826,7 @@ def endpoint(
                 child_calls=child_calls, reentrant=reentrant,
                 lora_bucket=bucket, warmup=warmup,
                 handles=handles, config=config, env=env,
+                publishes=publishes,
             )
         raise TypeError(
             f"@endpoint requires a function or class, got {type(obj).__name__}"

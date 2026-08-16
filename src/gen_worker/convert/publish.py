@@ -219,6 +219,12 @@ def publish_flavors(
     ``journal_path`` is where the in-flight ``publish_id`` is recorded so a
     retry on this pod re-uploads instead of re-casting. Pass the produced
     tree's own directory; omit it and the publish is unrecoverable."""
+    # The hub-write declaration, checked before anything is read or uploaded
+    # (pgw#1294). Undeclared code never had a grant minted for it, so this is
+    # that refusal arriving at the call site instead of after the bytes moved.
+    require = getattr(ctx, "_require_publish_declaration", None)
+    if callable(require):
+        require("publish_flavors")
     dest = destination_ref(ctx, destination_repo)
     release = destination_release(ctx, release)
 

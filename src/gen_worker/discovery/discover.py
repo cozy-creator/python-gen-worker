@@ -4,6 +4,7 @@ manifest as TOML on stdout. Run as ``python -m gen_worker.discovery``.
 """
 
 import hashlib
+import inspect
 import json
 import sys
 import traceback
@@ -806,6 +807,12 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         # capability grant only for declaring functions. Omitted when false.
         if es.child_calls:
             fn["child_calls"] = True
+        # The hub-write declaration (th#2049/pgw#1294), ALWAYS emitted on both
+        # row shapes. Not omit-when-false like the flags above: the hub mints
+        # a write grant off this, so "absent" must never be readable as
+        # "declared false" — absent means a wheel too old to have the concept,
+        # and those two need different answers.
+        fn["publishes"] = bool(es.publishes)
         # Payload compile axes (equivalence classes) — catalog recipes validate
         # against the declared class names at publish time; the warm plan
         # derives from classes x buckets.
@@ -926,6 +933,92 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
     return out
 
 
+def _job_source_file(spec: Any, root: Path) -> str:
+    """The job's own ``.py`` file, relative to the release root.
+
+    A POINTER, never a copy of the bytes. RECONCILED to th#2049's landed
+    correction 6: the release tarball is the source of truth and already
+    renders per-file views on read, so captured source text would be a second
+    copy that can only drift. This lane emitted the text first; the hub lane
+    landed the pointer, and the hub owns the contract.
+    """
+    path_str = inspect.getsourcefile(spec.method) or ""
+    if not path_str:
+        raise ValueError(
+            f"@job {spec.name!r}: no source file could be located — the catalog "
+            "serves a public job's code by this pointer, so it must live in a "
+            "real module on disk"
+        )
+    path = Path(path_str).resolve()
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return path.name
+
+
+def _job_entry(spec: Any, root: Path) -> Dict[str, Any]:
+    """One manifest ``jobs[]`` row.
+
+    Deliberately the same shape as a function row where the two overlap
+    (name/schemas/resources/env/publishes), because a job promoted to a
+    serverless endpoint must not change identity on the way. What it does not
+    carry is equally deliberate: no execution lanes, no compile block, no
+    slots/bindings — a job that wants a hub-resolved model NAMES it in its
+    payload.
+    """
+    res_dict: Dict[str, Any] = {}
+    project = getattr(spec.resources, "manifest_dict", None)
+    raw = project() if callable(project) else msgspec.to_builtins(spec.resources)
+    if isinstance(raw, dict):
+        res_dict.update(raw)
+    input_schema, input_sha = _schema_and_hash(spec.payload_type)
+    output_schema, output_sha = _schema_and_hash(spec.output_type)
+    return {
+        "name": spec.name,
+        "python_name": spec.python_name,
+        "module": spec.module,
+        "resources": res_dict,
+        "env": list(spec.env),
+        "resumable": bool(spec.resumable),
+        "visibility": spec.visibility,
+        "publishes": bool(spec.publishes),
+        "payload_type": _type_id(spec.payload_type),
+        "payload_schema_sha256": input_sha,
+        "input_schema": input_schema,
+        "output_type": _type_id(spec.output_type),
+        "output_schema_sha256": output_sha,
+        "output_schema": output_schema,
+        "is_async": bool(spec.is_async),
+        "source_file": _job_source_file(spec, root),
+    }
+
+
+def discover_jobs(
+    root: Path,
+    *,
+    main_module: str,
+    extra_heavy_deps: Tuple[str, ...] = (),
+) -> List[Dict[str, Any]]:
+    """Every ``@job`` under ``main_module``'s top-level package, as manifest rows.
+
+    Same heavy-dep stubbing as the endpoint walk, so a torch-less manifest
+    build derives the same set an in-image build does. Sorted by name: the
+    manifest is a published artifact and must be byte-stable across runs.
+    """
+    from ..registry import collect_jobs
+
+    top_level = main_module.split(".", 1)[0]
+    with stub_missing_heavy_deps(extra_heavy_deps):
+        try:
+            specs = collect_jobs([top_level])
+        except Exception as e:
+            raise ValueError(
+                f"failed to walk job package {top_level!r} (derived from "
+                f"[tool.gen_worker] main={main_module!r}): {e}"
+            ) from e
+    return [_job_entry(spec, root) for spec in sorted(specs, key=lambda s: s.name)]
+
+
 def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
     """
     Discover functions and load tensorhub manifest config to build complete manifest.
@@ -1001,6 +1094,13 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
         "execution_lanes": manifest_block(derived),
         "decode_set": decode_set_manifest_block(decode_set),
     }
+    # The jobs block sits BESIDE functions, never inside it: one package may
+    # carry both, publish once, submit as needed. A release with jobs and zero
+    # functions is legal (th#2049).
+    jobs = discover_jobs(
+        root, main_module=cfg.main, extra_heavy_deps=cfg.discovery_heavy_deps)
+    if jobs:
+        manifest["jobs"] = jobs
     if preconditions:
         manifest["aot_preconditions"] = [
             row.manifest_row() for row in preconditions]
@@ -1087,8 +1187,8 @@ def main() -> None:
     if not val.ok:
         _fail_build_input(*(f"error: {err}" for err in val.errors))
 
-    if not manifest.get("functions"):
-        print("warning: no @endpoint objects found", file=sys.stderr)
+    if not manifest.get("functions") and not manifest.get("jobs"):
+        print("warning: no @endpoint or @job objects found", file=sys.stderr)
 
     sys.stdout.write(msgspec.toml.encode(_strip_none(manifest)).decode("utf-8"))
     if not sys.stdout.isatty():

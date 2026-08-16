@@ -525,6 +525,7 @@ class _Endpoint:
         ctx = build_local_context(
             kind=selected.kind,
             allow_publish=self.allow_publish,
+            publishes=bool(getattr(selected.spec, "publishes", False)),
         )
         # Register BEFORE acquiring the dispatch lock so a cancel for a request
         # still queued behind a slow one trips its ctx too (the handler then
