@@ -20,6 +20,8 @@ from typing import Any, Dict, List, Tuple, cast
 
 import pytest
 
+from torch_compiled_graphs import GRAPH_CLASS_BLOCK
+
 from gen_worker import (
     aot_serve,
     author_ci,
@@ -96,7 +98,7 @@ class _Row:
     def __init__(self, entry: str, block: Dict[str, Any]) -> None:
         self.entry = entry
         self.key = f"cg-{entry}"
-        self.metadata = {graph_facts.TCG_GRAPH_CLASS_BLOCK: block}
+        self.metadata = {GRAPH_CLASS_BLOCK: block}
 
 
 class _Result:

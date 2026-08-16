@@ -29,6 +29,8 @@ from pathlib import Path
 
 import pytest
 from torch_compiled_graphs import (
+    GRAPH_CLASS_BLOCK,
+    REQUIRED_AXES,
     CallIngress,
     CallInput,
     GraphClassDeclaration,
@@ -64,12 +66,12 @@ def test_membership_axiom_the_key_is_exactly_three_axes():
     digests the UNION of the ladder across the whole declaration, which is a
     property of the collection and not of any computation.
     """
-    assert graph_facts.KEY_AXES == ("graph", "sm", "toolchain")
+    assert REQUIRED_AXES == ("graph", "sm", "toolchain")
     # Asserted against the AUTHORITY, not against a worker-side tuple:
-    # pgw#1277 deleted the duplicate, so the axiom is TCG's to enforce and the
-    # worker's wire enumeration is a fenced projection of it.
-    sample = {name: f"{name}-fact" for name in graph_facts.KEY_AXES}
-    assert tcg_identity.from_axes(sample).as_dict().keys() == set(graph_facts.KEY_AXES)
+    # pgw#1288 deleted the last worker copy, so there is nothing left to fence
+    # — the axiom is TCG's to enforce and the wire reads its export directly.
+    sample = {name: f"{name}-fact" for name in REQUIRED_AXES}
+    assert tcg_identity.from_axes(sample).as_dict().keys() == set(REQUIRED_AXES)
 
 
 def test_adding_an_axis_refuses_with_the_axiom_named():
@@ -233,7 +235,7 @@ def _old_schema_digest(meta: dict) -> str:
         # entry artifact records neither, which is itself the structural
         # reason an orphaned cell can never be re-derived.
         "targets": [str(
-            (meta.get(graph_facts.TCG_GRAPH_CLASS_BLOCK) or {}).get("target") or "")],
+            (meta.get(GRAPH_CLASS_BLOCK) or {}).get("target") or "")],
         "shapes": [[1024, 1024]],
         "text_lens": [77],
         "guidance": [7.5],
@@ -297,7 +299,7 @@ def test_pre_redefinition_artifact_is_structurally_refused():
     than a correctness precondition."""
     meta = _current_worker_meta()
     old = dict(meta)
-    entry = old.pop(graph_facts.TCG_GRAPH_CLASS_BLOCK)
+    entry = old.pop(GRAPH_CLASS_BLOCK)
     old["entries"] = {entry["name"]: entry}
     # fence-symbol-exempt: the pre-atom artifact shape, on purpose — this
     # row proves a format-2 cell cannot restate a per-entry identity.
@@ -343,7 +345,7 @@ def test_worker_publish_projection_matches_public_tcg_key() -> None:
     meta = {
         "kind": "aot-inductor",
         "sm": runtime.sm,
-        graph_facts.TCG_GRAPH_CLASS_BLOCK: {
+        GRAPH_CLASS_BLOCK: {
             "name": declaration.graph_class,
             "class_hash": declaration.class_hash,
         },
@@ -418,8 +420,8 @@ def test_only_the_graph_rekeys_and_the_envelope_no_longer_can():
     assert tcg_identity.from_artifact_metadata(wider).value == key
 
     other_graph = dict(meta)
-    other_graph[graph_facts.TCG_GRAPH_CLASS_BLOCK] = {
-        **meta[graph_facts.TCG_GRAPH_CLASS_BLOCK], "class_hash": "b" * 16}
+    other_graph[GRAPH_CLASS_BLOCK] = {
+        **meta[GRAPH_CLASS_BLOCK], "class_hash": "b" * 16}
     assert tcg_identity.from_artifact_metadata(other_graph).value != key
 
 

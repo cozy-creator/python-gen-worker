@@ -48,8 +48,6 @@ from .models.cache_paths import open_worker_engine, tensorhub_cas_dir
 from .models.memory import is_cuda_oom
 
 logger = logging.getLogger(__name__)
-
-ARTIFACT_KIND = "aot-inductor"
 #: pgw#791: an input the artifact was compiled for as 16-byte aligned arrived
 #: unaligned (or non-contiguous) and this ingress realigned it. Typed and
 #: hub-visible because the ALTERNATIVE is what shipped: AOTInductor's own
@@ -1976,7 +1974,6 @@ def unwrap(pipeline: Any) -> bool:
 
 __all__ = [
     "AdoptOutcome",
-    "ARTIFACT_KIND",
     "COMPILED_GRAPH_FORMAT",
     "COMPILED_GRAPH_FORMAT_KEY",
     "ConstantsUnboundError",

@@ -26,6 +26,8 @@ from typing import Any, List
 
 import pytest
 
+from torch_compiled_graphs import ARTIFACT_KIND
+
 from gen_worker import aot_serve, boot_phases, serving_mode
 from gen_worker.compile_cache import AdoptError
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -158,7 +160,7 @@ def test_a_typed_refusal_is_recorded_as_refused_not_failed() -> None:
     exc = AdoptError("key_mismatch", "cell was minted for sm_90, host is sm_89")
     with boot_phases.span(
         boot_phases.PHASE_CELL_ARM,
-        artifact_kind=aot_serve.ARTIFACT_KIND,
+        artifact_kind=ARTIFACT_KIND,
         artifact_key="ck1_deadbeef",
     ) as arm:
         # The shape aot_serve.enable uses: classified reason token + the
@@ -171,7 +173,7 @@ def test_a_typed_refusal_is_recorded_as_refused_not_failed() -> None:
     assert row.outcome != boot_phases.OUTCOME_FAILED
     assert row.reason == "key_mismatch"
     assert "sm_90" in row.detail
-    assert row.artifact_kind == aot_serve.ARTIFACT_KIND
+    assert row.artifact_kind == ARTIFACT_KIND
     assert row.artifact_key == "ck1_deadbeef"
 
 

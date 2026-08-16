@@ -29,6 +29,8 @@ from typing import (
     Tuple,
 )
 
+from torch_compiled_graphs import ARTIFACT_KIND
+
 from ..cell_adopt import AdoptOutcome
 from ..component_vocab import denoiser_components
 from ..api.binding import ModelRef, wire_ref
@@ -819,7 +821,7 @@ def enable_compiled(
     adopt. Staying eager rolls the branches back — canonical zeroed slots
     cost +21-32% eager (gw#547); the eager adapter path re-enables sparse
     placement per request."""
-    from .. import aot_serve, compile_cache  # lazy: keeps `import gen_worker` off the compile/pb stack
+    from .. import compile_cache  # lazy: keeps `import gen_worker` off the compile/pb stack
     # Deferred: receipts pulls +151 modules onto the `import gen_worker` path.
     from .. import receipts
 
@@ -848,7 +850,7 @@ def enable_compiled(
         # through to the ordinary inductor lane.
         meta = _compiled_graph_metadata(artifact)
         kind = str((meta or {}).get("kind") or "")
-        if kind == aot_serve.ARTIFACT_KIND:
+        if kind == ARTIFACT_KIND:
             aot = arm_aot(pipe, cfg, cache_dir, Path(artifact), bucket, meta)
             if aot.armed:
                 return aot

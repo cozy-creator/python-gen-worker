@@ -182,40 +182,6 @@ def test_the_artifact_derivation_is_pinned_by_value() -> None:
     assert tcg_identity.from_artifact_metadata(KAT_META).value == KAT_META_KEY
 
 
-def test_the_axis_projection_is_fenced_against_tcgs_refusal() -> None:
-    """``graph_facts.KEY_AXES`` is a PROJECTION, so it needs a fence.
-
-    TCG does not export its required-axis tuple, and the publish wire has to
-    name the axes. A copy nobody checks is how two enumerations start
-    disagreeing about what an entry must restate — so assert TCG accepts
-    exactly this set and refuses anything outside it.
-    """
-    sample = {name: f"{name}-fact" for name in graph_facts.KEY_AXES}
-    assert tcg_identity.from_axes(sample).as_dict().keys() == set(graph_facts.KEY_AXES)
-
-    for dropped in graph_facts.KEY_AXES:
-        with pytest.raises(tcg_identity.IdentityError):
-            tcg_identity.from_axes({k: v for k, v in sample.items() if k != dropped})
-
-    with pytest.raises(tcg_identity.IdentityError):
-        tcg_identity.from_axes({**sample, "envelope": "e" * 16})
-
-
-def test_the_graph_class_block_projection_is_fenced() -> None:
-    """``graph_facts.TCG_GRAPH_CLASS_BLOCK`` must name the block TCG reads.
-
-    This is the constant whose drift caused the defect. Prove it against TCG
-    itself rather than against another copy of the same guess: renaming the
-    block makes TCG refuse the artifact.
-    """
-    assert tcg_identity.from_artifact_metadata(TCG_METADATA).value
-
-    renamed = json.loads(json.dumps(TCG_METADATA))
-    renamed["entry"] = renamed.pop(graph_facts.TCG_GRAPH_CLASS_BLOCK)
-    with pytest.raises(tcg_identity.IdentityError):
-        tcg_identity.from_artifact_metadata(renamed)
-
-
 def test_the_worker_holds_no_second_identity_module() -> None:
     """The deletion IS the fix — a correctly-named duplicate computing wrong
     keys with nothing raising is the failure this unit removes."""
