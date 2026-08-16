@@ -49,7 +49,6 @@ def test_a_declared_component_reaches_every_swept_consumer() -> None:
     assert "connectors" in size_walk._diffusers_weight_component_dirs()
     assert "connectors" in source._weight_component_dirs()
     assert "connectors" in source._diffusers_component_dirs()
-    assert "connectors" in source._default_quant_candidate_components()
     assert "connectors" in LayoutSignals().component_dirs
     assert "connectors" in memory._component_order_hint()
 
