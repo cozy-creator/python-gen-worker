@@ -222,12 +222,43 @@ def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+class RecordUnreadable(Exception):
+    """A store file EXISTS but its bytes are not a usable record.
+
+    pgw#1283. Absence and corruption used to collapse into one ``None`` here,
+    and every caller then read that ``None`` as "nothing was ever stored". They
+    are not the same fact and they do not have the same cost: absence is the
+    normal empty-store case, while corruption means a file this store wrote is
+    no longer the file it wrote. Each caller now decides for itself, and every
+    one of them says so in the log — a store that silently re-mints is a store
+    that quietly bills a GPU pod for a defect nobody can see.
+
+    Raising is safe precisely because every call site catches it: the module's
+    rule that a cache miss must never be fatal is unchanged.
+    """
+
+
 def _read_json(path: Path) -> Optional[Dict[str, Any]]:
+    """The record at ``path``, ``None`` if it is genuinely ABSENT.
+
+    Raises :class:`RecordUnreadable` when something IS there and cannot be
+    used — unparseable bytes, a non-object payload, or an ``OSError`` that is
+    not "no such file" (a directory in the record's place, or a permission
+    failure: the file exists, we simply cannot read it).
+    """
     try:
-        loaded = json.loads(path.read_text())
-    except (OSError, ValueError):
+        text = path.read_text()
+    except (FileNotFoundError, NotADirectoryError):
         return None
-    return loaded if isinstance(loaded, dict) else None
+    except OSError as exc:
+        raise RecordUnreadable(f"{path} exists but is unreadable: {exc}") from exc
+    try:
+        loaded = json.loads(text)
+    except ValueError as exc:
+        raise RecordUnreadable(f"{path} is not JSON: {exc}") from exc
+    if not isinstance(loaded, dict):
+        raise RecordUnreadable(f"{path} holds {type(loaded).__name__}, not an object")
+    return loaded
 
 
 def store(
@@ -252,6 +283,12 @@ def store(
     Returns the stored cell, or ``None`` when the store failed: a local store
     is a cache, and failing to fill it must never take down a worker that is
     already serving compiled.
+
+    pgw#1283 — the return value means exactly "the artifact and its record are
+    durable". It used to mean less than that: the memo write sat inside the
+    same ``try``, so failing to write a SHORTCUT reported the whole store as
+    failed while ``lookup`` would happily find the cell. The memo now runs
+    after the ``try``, where it cannot rewrite this answer.
     """
     try:
         target_dir = cell_dir(key, root)
@@ -281,20 +318,27 @@ def store(
             "verdict": record.verdict,
             "sink": record.sink,
         })
-        if arm_token:
-            _write_json_atomic(
-                memo_path(arm_token, root),
-                {"compiled_graph_key": key, "noted_at": record.stored_at})
-        logger.info(
-            "local-cell-store: stored %s (%s, %.1f MB) — this machine reuses "
-            "it on every later boot with the same key, offline",
-            key, record.family, record.bytes / 1e6)
-        return record
     except Exception as exc:  # noqa: BLE001 — a cache miss must never be fatal
         logger.warning(
             "local-cell-store: could not store %s (%s); this boot serves "
             "compiled anyway and the next one re-mints", key, exc)
         return None
+    # pgw#1283 — EVERYTHING BELOW THIS LINE IS BEST-EFFORT. The record is
+    # durable at the `try`'s end, which means the cell IS stored and `lookup`
+    # will find it; anything that fails from here must not be able to turn that
+    # into a reported failure. The memo write used to sit inside the `try`
+    # above, so a failure to write a shortcut returned ``None`` while artifact
+    # and record sat on disk — `fleet_cells._stage_durable` then emitted
+    # `local_compiled_graph_store_failed` for a cell that was, in fact, stored.
+    # `note_memo` already carries the right best-effort contract, so use it
+    # rather than re-inlining the write.
+    if arm_token:
+        note_memo(arm_token, key, root)
+    logger.info(
+        "local-cell-store: stored %s (%s, %.1f MB) — this machine reuses "
+        "it on every later boot with the same key, offline",
+        key, record.family, record.bytes / 1e6)
+    return record
 
 
 def _cell_of(key: str, record: Dict[str, Any], artifact: Path,
@@ -331,7 +375,18 @@ def mark(
         target_dir = cell_dir(key, root)
     except ValueError:
         return False
-    record = _read_json(target_dir / RECORD_NAME)
+    try:
+        record = _read_json(target_dir / RECORD_NAME)
+    except RecordUnreadable as exc:
+        # pgw#1283: the transition is LOST, and that costs money in both
+        # directions — a dropped ADMITTED re-mints, a dropped DELIVERED
+        # re-uploads. It used to be indistinguishable from "no such cell".
+        logger.error(
+            "local-cell-store: LOSING a state transition for %s — verdict=%r "
+            "sink=%r were not applied because its record is unreadable (%s). "
+            "The previous state stands, which is conservative but not free",
+            key, verdict, sink, exc)
+        return False
     if record is None:
         return False
     if verdict is not None:
@@ -367,7 +422,21 @@ def lookup(key: str, root: Optional[Path] = None) -> Optional[LocalCell]:
         target_dir = cell_dir(key, root)
     except ValueError:
         return None
-    record = _read_json(target_dir / RECORD_NAME)
+    try:
+        record = _read_json(target_dir / RECORD_NAME)
+    except RecordUnreadable as exc:
+        # pgw#1283. The bytes beside it may well be intact, but the digest that
+        # would vouch for them lived in the record, and this store never arms
+        # bytes it cannot verify (module docstring: a cell is user-generated
+        # EXECUTABLE code). So the answer is still "absent" — what changes is
+        # that it is now SAID, and that the unusable directory goes, exactly as
+        # the digest-mismatch path below already does.
+        logger.error(
+            "local-cell-store: DROPPING %s — its record is unreadable (%s); "
+            "the bytes cannot vouch for themselves without it, so this costs "
+            "one honest re-mint rather than a silent one", key, exc)
+        drop(key, root)
+        return None
     artifact = target_dir / ARTIFACT_NAME
     if record is None or not artifact.is_file():
         return None
@@ -472,6 +541,20 @@ def lookup_for_arm(
         memo = _read_json(memo_path(arm_token, root))
     except ValueError:
         return None
+    except RecordUnreadable as exc:
+        # pgw#1283. A memo is a shortcut, never an authority, so an unreadable
+        # one is genuinely equivalent to no memo — but leaving the file there
+        # means paying that lookup on every boot, and `note_memo` only rewrites
+        # it once a cell arms. Delete it so the shortcut is rebuilt from
+        # evidence rather than shadowed by garbage.
+        logger.warning(
+            "local-cell-store: discarding an unreadable memo for %s (%s); the "
+            "next cell that arms rewrites it", arm_token, exc)
+        try:
+            memo_path(arm_token, root).unlink()
+        except OSError:
+            pass
+        return None
     if memo is None:
         return None
     key = str(memo.get("compiled_graph_key") or "")
@@ -504,7 +587,17 @@ def stored_cells(root: Optional[Path] = None) -> List[LocalCell]:
     for entry in sorted(base.iterdir()):
         if not entry.is_dir() or entry.name == MEMO_DIRNAME:
             continue
-        record = _read_json(entry / RECORD_NAME)
+        try:
+            record = _read_json(entry / RECORD_NAME)
+        except RecordUnreadable as exc:
+            # pgw#1283: skip the entry, never the LISTING. This is what a
+            # `cozy cells`-style CLI reads, and one bad file must not blank the
+            # inventory — but a cell missing from the accounting surface is
+            # exactly the kind of thing nobody notices, so it is logged.
+            logger.warning(
+                "local-cell-store: %s has an unreadable record (%s); it is "
+                "absent from this listing", entry.name, exc)
+            continue
         artifact = entry / ARTIFACT_NAME
         if record is None or not artifact.is_file():
             continue
@@ -582,7 +675,18 @@ def trust_class(root: Optional[Path] = None) -> str:
     publish has learned nothing, and the honest consequence is that its first
     mint attempts the publish and learns from the answer.
     """
-    recorded = _read_json((root or store_root()) / TRUST_CLASS_NAME)
+    try:
+        recorded = _read_json((root or store_root()) / TRUST_CLASS_NAME)
+    except RecordUnreadable as exc:
+        # pgw#1283: "not yet known" is the self-healing answer here — the next
+        # mint attempts the publish and re-learns the class from the hub's own
+        # refusal. That is one wasted attempt, not a wrong trust decision, so
+        # it is a warning rather than a refusal.
+        logger.warning(
+            "local-cell-store: the trust class is unreadable (%s); treating "
+            "this machine as not-yet-known, which re-learns from the hub",
+            exc)
+        return ""
     if recorded is None:
         return ""
     return str(recorded.get("class") or "")
@@ -605,6 +709,7 @@ __all__ = [
     "ENV_STORE_DIR",
     "LocalCell",
     "MEMO_DIRNAME",
+    "RecordUnreadable",
     "SINK_DELIVERED",
     "SINK_NONE",
     "SINK_OWED",
