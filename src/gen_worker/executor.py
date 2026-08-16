@@ -353,8 +353,11 @@ def _producer_destination_repo(payload: Any, destination_info: Dict[str, Any]) -
     The reserved struct (``payload.destination.ref``) wins; the flat
     ``payload.destination_repo`` scalar is the wire form gen-orchestrator
     dispatches. Tag/flavor/checkpoint selectors are stripped.
+
+    ``destination.repo`` is NOT read: it is a retired spelling no producer
+    in-tree or in any peer repo writes (pgw#1305).
     """
-    ref = str(destination_info.get("ref") or destination_info.get("repo") or "").strip()
+    ref = str(destination_info.get("ref") or "").strip()
     if not ref:
         ref = str(getattr(payload, "destination_repo", "") or "").strip()
     for sep in (":", "@", "#"):

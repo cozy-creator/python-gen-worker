@@ -432,12 +432,17 @@ def raise_dynamo_cache_limits(want: int) -> None:
 
         torch._dynamo.config.cache_size_limit = max(
             int(torch._dynamo.config.cache_size_limit), want)
-        if hasattr(torch._dynamo.config, "recompile_limit"):
-            torch._dynamo.config.recompile_limit = max(
-                int(torch._dynamo.config.recompile_limit), want)
+        # `recompile_limit` is unconditional at this repo's torch>=2.13 floor;
+        # the hasattr arm it used to carry was for a torch the fleet cannot run.
+        torch._dynamo.config.recompile_limit = max(
+            int(torch._dynamo.config.recompile_limit), want)
     except Exception:
-        logger.debug("settings authority: could not raise recompile limit",
-                     exc_info=True)
+        # NOT debug: a hub-spawned pod cannot read DEBUG, and failing here
+        # silently keeps torch's 8-graph ceiling and stops compiling declared
+        # shapes. Announce at WARNING and keep serving (pgw#1307).
+        logger.warning("settings authority: could not raise the recompile "
+                       "limit to %d — declared shapes past torch's default "
+                       "ceiling will stop compiling", want, exc_info=True)
 
 
 __all__ = [

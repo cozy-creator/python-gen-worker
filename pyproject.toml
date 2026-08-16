@@ -79,6 +79,11 @@ images = [
 audio = [
     "soundfile>=0.12",
     "numpy>=1.24",
+    # pgw#1307: `read_audio(target_sample_rate=)` advertises polyphase
+    # resampling and scipy was declared NOWHERE, so the ImportError arm was the
+    # only path and every tenant got naive linear interpolation. Declared here,
+    # so the advertised resampler is the one that runs.
+    "scipy>=1.11",
 ]
 video = [
     "av>=12",
