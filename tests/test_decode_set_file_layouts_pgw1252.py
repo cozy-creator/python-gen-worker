@@ -10,12 +10,12 @@ here would have been the fourth spelling of one axis.
 
 **A declaration nothing enforces is a declaration nothing can be wrong about.**
 The svdq decoders declare `multi-file` ONLY, and that is measured, not
-inherited from the checkpoint's shape: the nunchaku file is one flat namespace,
-but BOTH engines refuse an artifact that is only that file
-(`load_svdq_nunchaku_pipeline` / `load_svdq_native_pipeline`, `not
-art.component`). Before this axis that fact lived only in those two `raise`
-statements — reached AFTER the CUDA gate, so a GPU-less host reported "svdq
-artifacts require a CUDA GPU" for an artifact no GPU would have helped.
+inherited from the checkpoint's shape: the nunchaku-FORMAT file is one flat
+namespace, but the engine refuses an artifact that is only that file
+(`load_svdq_native_pipeline`, `not art.component`). Before this axis that fact
+lived only in a `raise` reached AFTER the CUDA gate, so a GPU-less host
+reported "svdq artifacts require a CUDA GPU" for an artifact no GPU would have
+helped. (pgw#1298 deleted the second engine; the axis is unchanged.)
 """
 
 from __future__ import annotations

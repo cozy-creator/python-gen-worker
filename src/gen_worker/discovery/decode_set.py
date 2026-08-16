@@ -448,7 +448,7 @@ class FileLayoutUnsupportedError(Exception):
     A third fact, distinct from the handle and from the key convention: the
     bytes may be exactly the right format, addressed in exactly the right
     convention, and still arrive as a shape the decoder's entry point cannot
-    open. Measured case: both svdq engines refuse a bare single-file nunchaku
+    open. Measured case: the svdq engine refuses a bare single-file
     transformer — a servable flavor must be a full diffusers tree with the
     checkpoint under its denoiser directory — and until this axis existed that
     fact lived only in two `raise` statements reached AFTER the CUDA gate, so

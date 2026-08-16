@@ -41,6 +41,17 @@ def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> Ten
 
     # Known optional libs that affect artifact compatibility.
     # Keep this hardcoded (no env config), per Cozy design.
+    #
+    # "nunchaku" STAYS after pgw#1298 deleted the nunchaku ENGINE, and dropping
+    # it would be a live outage rather than a cleanup. This list is what the
+    # hub admits against: tensorhub stamps every svdq-fp4/int4 row with
+    # `engines=["nunchaku"]` (`precision/placement.go` defaultPlacement, plus
+    # our own `models/ladder.py` stamp) and `precision/ladder.go` admitted()
+    # refuses any row whose engines are not in `installed_libs`. So the probe
+    # is an ADMISSION TOKEN now, not a capability claim — stop reporting it and
+    # `qwen-image-svdq-bench` (the one image carrying the wheel) can no longer
+    # bind the flavor it serves on our native engine. It goes when th#2055
+    # deletes the hub's placement readers, together with pgw#1300's stamp.
     known = ["bitsandbytes", "torchao", "transformer_engine",
              "nunchaku", "deepcompressor", "modelopt"]
     if extra_libs:

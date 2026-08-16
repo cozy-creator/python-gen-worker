@@ -506,12 +506,12 @@ def _decode_quantized_lowrank(
         # here would be a second home (th#1937 declined `contract.native`).
         key_topologies=(),
         # MULTI-FILE ONLY, and it is the artifact that is constrained, not the
-        # checkpoint: the nunchaku file is one flat namespace, but BOTH svdq
-        # engines refuse an artifact that is only that file —
-        # `load_svdq_nunchaku_pipeline` and `load_svdq_native_pipeline` each
-        # raise on `not art.component` ("a servable flavor must be a full
-        # diffusers tree with the checkpoint under its denoiser directory"),
-        # and `convert/svdq.py` builds exactly that.
+        # checkpoint: the nunchaku-format file is one flat namespace, but the
+        # svdq engine refuses an artifact that is only that file —
+        # `load_svdq_native_pipeline` raises on `not art.component` ("a
+        # servable flavor must be a full diffusers tree with the checkpoint
+        # under its denoiser directory"), and `convert/svdq.py` builds exactly
+        # that.
         file_layouts=(MULTI_FILE,),
         bakes=(BAKE_LOW_RANK_BRANCH,),
     ),

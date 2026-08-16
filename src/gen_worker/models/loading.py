@@ -2293,11 +2293,11 @@ def load_from_pretrained(
             cls, path, dtype=dtype, storage_dtype=storage_dtype,
             components=components, placement_mode=placement_mode,
         )
-    # SVDQuant/nunchaku 4-bit flavors: self-describing snapshots take
-    # the svdq lane — a nunchaku transformer swapped into the standard
-    # pipeline. Detection precedes every other rung; failures are typed
-    # (SvdqStackError / SvdqHardwareError / SvdqSnapshotError), never a
-    # mid-denoise crash.
+    # SVDQuant 4-bit flavors: self-describing snapshots take the svdq lane —
+    # our native decoder wired into the standard pipeline (pgw#1298 deleted
+    # the nunchaku engine; "nunchaku" survives as the FORMAT's name). Detection
+    # precedes every other rung; failures are typed (SvdqInt4Unsupported /
+    # SvdqHardwareError / SvdqNativeError), never a mid-denoise crash.
 
     svdq_art = detect_svdq_artifact(Path(path))
     if svdq_art is not None and callable(getattr(cls, "from_pretrained", None)):

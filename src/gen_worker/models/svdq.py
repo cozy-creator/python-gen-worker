@@ -1,263 +1,87 @@
-"""SVDQuant/nunchaku 4-bit loader mode.
+"""SVDQuant 4-bit loader mode.
 
 A ``#svdq-fp4-*`` / ``#svdq-int4-*`` flavor is a normal diffusers tree whose
-denoiser directory holds ONE nunchaku-format single-file checkpoint instead of
+denoiser directory holds ONE nunchaku-FORMAT single-file checkpoint instead of
 plain safetensors shards. The file self-describes in its safetensors
-``__metadata__``: ``model_class`` names the nunchaku transformer class and
+``__metadata__``: ``model_class`` names the transformer class and
 ``quantization_config`` carries ``{"method": "svdquant", "weight": {"dtype":
-"fp4_e2m1_all" | "int4"}, "rank": N}``. Loading swaps the nunchaku module into
-the standard pipeline — same pipeline class, same handler, no new endpoint.
+"fp4_e2m1_all" | "int4"}, "rank": N}``. Loading swaps the decoded denoiser
+into the standard pipeline — same pipeline class, same handler, no new
+endpoint.
 
-Hardware: fp4 kernels exist ONLY on consumer Blackwell (sm_120/121); int4 on
-sm_75–89. No sm_90/100 (no datacenter SVDQ kernels). Version coupling is
-HARD (live-hit): nunchaku wheels are per-(torch minor, CUDA) and each
-nunchaku release calls diffusers transformer forwards positionally against one
-diffusers signature window — 1.2.x/1.3.x require diffusers 0.36/0.37 and crash
-on 0.38+. The pin matrix below is enforced with typed errors both at variant
-selection (fit gating) and at load."""
+"nunchaku" here is a FORMAT LINEAGE, not a runtime. pgw#1298 deleted the
+nunchaku engine: it was slower than our own decoder (843 vs 785 ms/step on a
+5090, same seeds, equal peak VRAM), covered strictly less silicon (sm_120/121
+against native's sm_100/103/120/121), and was UNREACHABLE — the only caller
+(``models/loading.py``) never passed an engine pin, and for fp4 the ladder put
+native first on every card nunchaku could serve. Every svdq load now runs
+through :mod:`gen_worker.models.svdq_native`, which reads the same bytes
+bit-exactly.
+
+ONE fleet image still installs the nunchaku WHEEL — ``inference-endpoints/
+qwen-image-svdq-bench`` (a benchmark fixture pending teardown). That is
+deliberate and must stay until th#2055: the hub admits an svdq-fp4 row only
+when the worker reports ``nunchaku`` in ``installed_libs``
+(``models/hub_policy.py`` probes it; tensorhub ``precision/ladder.go``'s
+``admitted()`` requires it), so removing the wheel — or dropping the probe —
+would stop that endpoint BINDING a flavor it can serve perfectly well on
+native. The wheel is now purely an admission token.
+
+fp4 serves; int4 is a typed refusal (:class:`SvdqInt4Unsupported`) — the
+native module is nvfp4 block-scaled ``_scaled_mm`` and int4 svdq is a
+different (single-level, group-64) scale path. Nothing produces int4
+(``convert/svdq_produce.py`` pins ``nvfp4``), so this is the honest spelling
+of a refusal that already happened."""
 
 from __future__ import annotations
 
 import json
 import logging
-import re
 import struct
 from dataclasses import dataclass
 from pathlib import Path
 from ..component_vocab import denoiser_components
 from .safetensors_header import header_len_ok
 from typing import Any, Optional
-import importlib.metadata as md
-from ..hostfacts import cuda_ready
 
 logger = logging.getLogger(__name__)
 
 SVDQ_METHOD = "svdquant"
-# Nunchaku ships fp4 kernels for consumer Blackwell only and int4 kernels for
-# Turing→Ada. sm_90 (Hopper) and sm_100 (B200) are deliberately absent.
+# The SM windows of nunchaku's kernels. NOT a serving constraint any more —
+# nothing in this module reads them, because the native engine's own window
+# (`svdq_native.SVDQ_NATIVE_FP4_SMS`, a strict superset for fp4) is what
+# decides whether a load can run. They survive for exactly two consumers, both
+# of which die together:
+#   - `models/ladder.py:99-101`, the published placement stamp
+#   - tensorhub's `internal/wirecontract/WORKER_PARSED_CONSTANTS`, which pins
+#     these two symbol names to this file by hand
+# Both go with th#2055 + pgw#1300 (the placement-reader/producer cut). Deleting
+# them here would break that stamp and falsify the hub's peer pin, so they stay
+# until that coordinated cut, and not one line longer.
 SVDQ_FP4_SMS = (120, 121)
 SVDQ_INT4_SMS = (75, 80, 86, 89)
-
 
 
 class SvdqError(RuntimeError):
     """Base class for typed svdq loader-mode failures."""
 
 
-class SvdqStackError(SvdqError):
-    """The (nunchaku, diffusers, torch/cuda) stack violates the pin matrix."""
-
-
 class SvdqHardwareError(SvdqError):
     """The artifact's precision has no kernels on this GPU."""
 
 
-class SvdqSnapshotError(SvdqError):
-    """The flavor snapshot is not a loadable svdq tree."""
+class SvdqInt4Unsupported(SvdqError):
+    """svdq-int4: no native engine, and no other engine is installed."""
 
 
-# ---------------------------------------------------------------------------
-# Pin matrix — (nunchaku minor) -> required diffusers window.
-#
-# nunchaku calls ``super().forward(...)`` POSITIONALLY against the diffusers
-# transformer signatures it was released against; a newer diffusers inserts
-# arguments and the call crashes mid-denoise (1.2.1 on 0.38.0.dev0 and 0.39.0
-# -> "TypeError: argument of type 'int' is not iterable"). Torch/CUDA
-# coupling is carried in the wheel's local version tag (e.g.
-# ``1.2.1+cu13.0torch2.11``) and checked against the running interpreter.
-# Re-verify and extend this table on every nunchaku release.
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class SvdqPin:
-    nunchaku_minor: tuple[int, int]
-    diffusers_min: tuple[int, int]
-    diffusers_max_exclusive: tuple[int, int]
-
-
-_PIN_MATRIX: tuple[SvdqPin, ...] = (
-    # 1.2.x: CI-pinned to diffusers 0.36 (verified live).
-    SvdqPin((1, 2), (0, 36), (0, 37)),
-    # 1.3.x <-> diffusers 0.39: UNVERIFIED — static signature check only, live
-    # A/B still owed; inert until a nunchaku 1.3 wheel is actually installed.
-    # Static basis: nunchaku's forward and diffusers 0.39's HAVE drifted
-    # positionally (nunchaku keeps txt_seq_lens, 0.39 dropped it and added
-    # additional_t_cond, so position 6+ misbinds on a positional call), BUT
-    # diffusers 0.39's QwenImagePipeline calls the transformer with keyword
-    # arguments only and never passes either drifted param — so the positional
-    # hazard is void and no unexpected-kwarg error can fire on the t2i path.
-    # Numerical equivalence is NOT established by that check, and
-    # QwenImageEditPlusPipeline was not checked at all.
-    SvdqPin((1, 3), (0, 39), (0, 40)),
+SVDQ_INT4_REFUSAL = (
+    "{path} is svdq-int4. The native engine implements the nvfp4 "
+    "block-scaled path only; int4 svdq is a different (single-level, "
+    "group-64) scale path with no native implementation, so loading it would "
+    "require the nunchaku runtime this worker deliberately does not use "
+    "(pgw#1298 deleted that engine). Serve the fp4 artifact of this family, "
+    "or file int4 native support as a pgw# follow-up."
 )
-
-
-def _version_tuple(raw: str, n: int = 2) -> tuple[int, ...]:
-    """Leading numeric components of a version string ("0.38.0.dev0" ->
-    (0, 38)). Missing/unparseable parts are 0."""
-    parts: list[int] = []
-    for tok in re.split(r"[.+]", str(raw or "").strip()):
-        m = re.match(r"^(\d+)", tok)
-        if m is None:
-            break
-        parts.append(int(m.group(1)))
-        if len(parts) >= n:
-            break
-    while len(parts) < n:
-        parts.append(0)
-    return tuple(parts)
-
-
-def _wheel_local_tag(nunchaku_version: str) -> tuple[str, str]:
-    """(cuda, torch) from a nunchaku wheel version's local tag, e.g.
-    ``1.2.1+cu13.0torch2.11`` -> ("13.0", "2.11"). Empty strings when the
-    tag is absent (source builds)."""
-    if "+" not in str(nunchaku_version or ""):
-        return "", ""
-    local = str(nunchaku_version).split("+", 1)[1]
-    m = re.match(r"^cu([\d.]+)torch([\d.]+)$", local)
-    if m is None:
-        return "", ""
-    return m.group(1), m.group(2)
-
-
-def check_svdq_stack_versions(
-    *, nunchaku_version: str, diffusers_version: str,
-    torch_version: str = "", cuda_version: str = "",
-) -> None:
-    """Pure pin-matrix check over version strings. Raises SvdqStackError with
-    the precise coupling that failed; returns None when the stack is legal."""
-    nv = _version_tuple(nunchaku_version)
-    pin = next((p for p in _PIN_MATRIX if p.nunchaku_minor == nv), None)
-    if pin is None:
-        known = ", ".join(f"{a}.{b}" for a, b in (p.nunchaku_minor for p in _PIN_MATRIX))
-        raise SvdqStackError(
-            f"nunchaku {nunchaku_version} is not in the svdq pin matrix "
-            f"(known: {known}); its diffusers signature window must be "
-            f"verified and added before the svdq rung can serve on it"
-        )
-    dv = _version_tuple(diffusers_version)
-    if not (pin.diffusers_min <= dv < pin.diffusers_max_exclusive):
-        lo = ".".join(map(str, pin.diffusers_min))
-        hi = ".".join(map(str, pin.diffusers_max_exclusive))
-        raise SvdqStackError(
-            f"nunchaku {nunchaku_version} requires diffusers>={lo},<{hi} "
-            f"(positional transformer forward coupling, gw#405); installed "
-            f"diffusers is {diffusers_version}"
-        )
-    wheel_cuda, wheel_torch = _wheel_local_tag(nunchaku_version)
-    if wheel_torch and torch_version and _version_tuple(torch_version) != _version_tuple(wheel_torch):
-        raise SvdqStackError(
-            f"nunchaku wheel {nunchaku_version} was built for torch "
-            f"{wheel_torch}.x; installed torch is {torch_version}"
-        )
-    if wheel_cuda and cuda_version and _version_tuple(wheel_cuda, 1) != _version_tuple(cuda_version, 1):
-        raise SvdqStackError(
-            f"nunchaku wheel {nunchaku_version} was built for CUDA "
-            f"{wheel_cuda}; torch reports CUDA {cuda_version}"
-        )
-
-
-def svdq_stack_reason() -> Optional[str]:
-    """Non-raising stack check against the INSTALLED environment (importlib
-    metadata only — does not import nunchaku's CUDA extension). Returns the
-    failure reason, or None when the svdq lane is servable here."""
-
-    try:
-        nunchaku_version = md.version("nunchaku")
-    except md.PackageNotFoundError:
-        return "nunchaku is not installed"
-    try:
-        diffusers_version = md.version("diffusers")
-    except md.PackageNotFoundError:
-        return "diffusers is not installed"
-    torch_version = cuda_version = ""
-    try:
-        import torch
-
-        torch_version = str(torch.__version__ or "")
-        cuda_version = str(getattr(torch.version, "cuda", "") or "")
-    except ImportError:
-        pass
-    try:
-        check_svdq_stack_versions(
-            nunchaku_version=nunchaku_version,
-            diffusers_version=diffusers_version,
-            torch_version=torch_version,
-            cuda_version=cuda_version,
-        )
-    except SvdqStackError as exc:
-        return str(exc)
-    return None
-
-
-def svdq_precision_for_sm(gpu_sm: int) -> str:
-    """"fp4" / "int4" / "" — which svdq kernel family NUNCHAKU can run here."""
-    if gpu_sm in SVDQ_FP4_SMS:
-        return "fp4"
-    if gpu_sm in SVDQ_INT4_SMS:
-        return "int4"
-    return ""
-
-
-# ---------------------------------------------------------------------------
-# Engine selection: an svdq artifact serves on the native lane or on nunchaku.
-# ---------------------------------------------------------------------------
-
-SVDQ_ENGINES = ("native", "nunchaku")
-
-# th#1887: the GEN_WORKER_SVDQ_ENGINE process-wide pin is deleted. It was a
-# PROCESS-wide override of a PER-ARTIFACT decision, so one incident's pin
-# outlived the incident and silently served every later artifact on the wrong
-# engine. The typed `override=` argument below survives and is the supported
-# way to force one: it is per call, so it cannot leak into the next load.
-
-def svdq_engine_candidates(precision: str) -> tuple[str, ...]:
-    """Engines that could serve this precision, best first.
-
-    NATIVE is preferred for fp4: no nunchaku wheel, no diffusers signature
-    window, no pin-matrix row, no torch downgrade, it compiles, and it covers
-    sm_100/103 which nunchaku never
-    will. int4 has no native implementation — the native module is nvfp4
-    block-scaled ``_scaled_mm``, and int4 svdq is a different (single-level,
-    group-64) scale path."""
-    if str(precision) == "int4":
-        return ("nunchaku",)
-    return ("native", "nunchaku")
-
-
-def select_svdq_engine(precision: str, *, override: str = "",
-                       ) -> tuple[str, dict[str, str]]:
-    """Pick the engine for an svdq artifact on THIS host.
-
-    Returns ``(engine, reasons)`` — ``engine`` is "" when none can serve, and
-    ``reasons`` maps each rejected engine to why, so the caller can raise one
-    error naming every closed door. An explicit ``override`` is honored
-    strictly: if that engine cannot serve, nothing else is substituted."""
-    # Deferred: svdq_native adds +2 modules to the `import gen_worker` path.
-    from .svdq_native import svdq_native_reason
-
-    chosen = str(override or "").strip().lower()
-    if chosen and chosen not in SVDQ_ENGINES:
-        raise SvdqError(f"unknown svdq engine {chosen!r} "
-                        f"({', '.join(SVDQ_ENGINES)})")
-
-    candidates = ((chosen,) if chosen
-                  else svdq_engine_candidates(precision))
-    reasons: dict[str, str] = {}
-    for engine in candidates:
-        if engine == "native":
-            if str(precision) == "int4":
-                reasons[engine] = ("the native engine implements nvfp4 only; "
-                                   "int4 svdq is a different scale path")
-                continue
-            reason = svdq_native_reason()
-        else:
-            reason = svdq_stack_reason()
-        if reason is None:
-            return engine, reasons
-        reasons[engine] = reason
-    return "", reasons
 
 
 # ---------------------------------------------------------------------------
@@ -343,103 +167,52 @@ def detect_svdq_artifact(model_path: Path) -> Optional[SvdqArtifact]:
 
 
 # ---------------------------------------------------------------------------
-# Loading — nunchaku transformer swap into the standard pipeline
+# Loading — the native decoder wired into the standard pipeline
 # ---------------------------------------------------------------------------
 
-def check_svdq_loadable(art: SvdqArtifact) -> None:
-    """All typed gates for actually serving ``art`` on this machine."""
-    reason = svdq_stack_reason()
+def check_svdq_servable(art: SvdqArtifact, path: Any = "") -> None:
+    """Every typed refusal for ``art``, raised on the DETECTED artifact.
+
+    Called before a single weight byte is read, so an unservable flavor is
+    refused by name rather than dying inside a load. int4 is refused on the
+    artifact's own precision — no probing, no environment, no engine ladder,
+    because there is nothing to probe: the refusal is a property of the
+    checkpoint."""
+    if str(art.precision) == "int4":
+        raise SvdqInt4Unsupported(
+            SVDQ_INT4_REFUSAL.format(path=path or art.file))
+    # Deferred: svdq_native adds +2 modules to the `import gen_worker` path.
+    from .svdq_native import svdq_native_reason
+
+    reason = svdq_native_reason()
     if reason is not None:
-        raise SvdqStackError(reason)
-    import torch
-
-    if not cuda_ready():
-        raise SvdqHardwareError("svdq artifacts require a CUDA GPU")
-    major, minor = torch.cuda.get_device_capability()
-    sm = major * 10 + minor
-    expected = svdq_precision_for_sm(sm)
-    if expected != art.precision:
         raise SvdqHardwareError(
-            f"svdq-{art.precision} has no kernels on SM{sm} "
-            f"(fp4: sm_120/121, int4: sm_75-89"
-            + (f"; this GPU runs svdq-{expected}" if expected else "")
-            + ")"
-        )
+            f"cannot serve svdq-{art.precision} here — {reason}")
 
 
-def load_svdq_pipeline(cls: Any, path: Path, art: SvdqArtifact, *,
-                       engine: str = "") -> Any:
-    """Serve an svdq artifact through whichever ENGINE can run it here.
+def load_svdq_pipeline(cls: Any, path: Path, art: SvdqArtifact) -> Any:
+    """Serve an svdq artifact on the native engine.
 
-    Engine choice is :func:`select_svdq_engine` (native preferred for fp4);
-    ``engine`` pins it explicitly. Callers need no engine awareness — this is
-    the single entry point the loading layer already uses."""
-    chosen, reasons = select_svdq_engine(art.precision, override=engine)
-    if not chosen:
-        detail = "; ".join(f"{k}: {v}" for k, v in sorted(reasons.items()))
-        raise SvdqHardwareError(
-            f"no svdq engine can serve svdq-{art.precision} here — {detail}")
-    if chosen == "native":
-        from .svdq_native import load_svdq_native_pipeline
+    The single entry point the loading layer uses. There is one engine, so
+    there is nothing to select: the artifact is either servable here or it is
+    a typed refusal."""
+    check_svdq_servable(art, path)
+    from .svdq_native import load_svdq_native_pipeline
 
-        logger.info("svdq engine: native (%s %s r%d, file %s)",
-                    art.precision, art.component, art.rank, art.file.name)
-        return load_svdq_native_pipeline(cls, path, art)
-    return load_svdq_nunchaku_pipeline(cls, path, art)
-
-
-def load_svdq_nunchaku_pipeline(cls: Any, path: Path, art: SvdqArtifact) -> Any:
-    """Build the pipeline with the nunchaku transformer swapped in.
-
-    Compute dtype is pinned to bf16 — nunchaku's kernels and the surrounding
-    scales are bf16-oriented (every upstream example and our own probe used
-    bf16); honoring an fp16 binding here would change numerics silently."""
-    check_svdq_loadable(art)
-    import nunchaku
-    import torch
-
-    if not art.component:
-        raise SvdqSnapshotError(
-            f"svdq snapshot {path} is a bare single-file transformer; a "
-            f"servable #svdq flavor must be a full diffusers tree with the "
-            f"nunchaku file under its denoiser directory"
-        )
-    ncls = getattr(nunchaku, art.model_class, None)
-    if ncls is None:
-        raise SvdqStackError(
-            f"installed nunchaku has no {art.model_class} (artifact needs a "
-            f"newer nunchaku release / unsupported family)"
-        )
-    dtype = torch.bfloat16
-    logger.info(
-        "svdq loader mode: %s %s r%d via %s (file %s)",
-        art.precision, art.component, art.rank, art.model_class, art.file.name,
-    )
-    denoiser = ncls.from_pretrained(str(art.file), torch_dtype=dtype)
-    # low_cpu_mem_usage=False is nunchaku's documented requirement for the
-    # component-swap pipeline build (meta-device init breaks its buffers).
-    return cls.from_pretrained(
-        str(path), torch_dtype=dtype, low_cpu_mem_usage=False,
-        **{art.component: denoiser},
-    )
+    logger.info("svdq: native engine (%s %s r%d, file %s)",
+                art.precision, art.component, art.rank, art.file.name)
+    return load_svdq_native_pipeline(cls, path, art)
 
 
 __all__ = [
-    "SVDQ_ENGINES",
     "SVDQ_FP4_SMS",
+    "SVDQ_INT4_REFUSAL",
     "SVDQ_INT4_SMS",
     "SvdqArtifact",
     "SvdqError",
     "SvdqHardwareError",
-    "SvdqSnapshotError",
-    "SvdqStackError",
-    "check_svdq_loadable",
-    "check_svdq_stack_versions",
+    "SvdqInt4Unsupported",
+    "check_svdq_servable",
     "detect_svdq_artifact",
-    "load_svdq_nunchaku_pipeline",
     "load_svdq_pipeline",
-    "select_svdq_engine",
-    "svdq_engine_candidates",
-    "svdq_precision_for_sm",
-    "svdq_stack_reason",
 ]
