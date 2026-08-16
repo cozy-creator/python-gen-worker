@@ -3,9 +3,14 @@
 Tenants receive a ``Source`` as the reserved ``source`` parameter (and on
 additional ``Source``-typed parameters tagged with the training-private
 ``_PayloadRef`` Annotated marker).
-Source abstracts over singlefile vs diffusers layouts, handles pickle →
-safetensors conversion, resolves sharded-safetensors via .index.json, and
-provides convenience methods for loading into HF / diffusers / tokenizer APIs.
+Source abstracts over singlefile vs diffusers layouts, resolves
+sharded-safetensors via .index.json, and provides convenience methods for
+loading into HF / diffusers / tokenizer APIs.
+
+There is NO pickle -> safetensors conversion. pgw#1227 deleted the converter
+and the pickle ban is absolute (E1/E5): reading a pickle IS the banned act, so
+a pickle-only source is a typed ``pickle_only`` RepoRefusal before a byte
+moves, never a format this class quietly normalizes.
 """
 
 from __future__ import annotations
@@ -234,8 +239,8 @@ class Source:
           subdirs are skipped.
         - If ``components`` is passed, only those components are iterated.
 
-        Handles pickle → safetensors conversion and sharded-safetensors via
-        .index.json internally. Tenant sees a flat iteration.
+        Resolves sharded-safetensors via .index.json internally; the tenant
+        sees a flat iteration. A pickle weight file is REFUSED, not converted.
         """
 
         yield from iter_source_tensors(

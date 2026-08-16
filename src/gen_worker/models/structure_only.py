@@ -40,7 +40,7 @@ Measured on torch 2.13.0, not assumed (four variants, cardless rig):
 * buffers stay REAL, on the device. They are pure functions of config (rope
   tables, sinusoidal features) and they are KB-to-MB scale, and they are what
   a literal-bearing family ships INSIDE the cell: a fake buffer would make
-  ``aot_package.literal_constants`` unpackable. Keeping them real also arms the
+  the cell's literal constants unpackable. Keeping them real also arms the
   folding fence — a literal derived from a PARAMETER is fake and fails loudly,
   and a value-dependent fold over a rebindable weight is precisely what
   pgw#1056 forbids.
@@ -862,7 +862,7 @@ def under(mode: Optional[Any]) -> Iterator[None]:
 # attribute by a lazily-built device-pinned table (ie#628's call-time class).
 # That residue existed *because* a real forward had just run here. With no real
 # values in this process the same lazy build fires inside the export's fake
-# mode and produces a FAKE constant, which `aot_package` cannot pack — the
+# mode and produces a FAKE constant, which the packer cannot pack — the
 # failure is still loud, it just arrives at pack time instead of at a stray
 # walk. Nothing silently ships.
 

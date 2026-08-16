@@ -45,7 +45,7 @@ from .api.export_contract import (
 
 # Every heavier import in this module is DEFERRED into the function that needs
 # it. Discovery imports this at build time, where torch may be absent and
-# `compile_cache` (via `aot_contract`) would pull the whole model stack: a
+# `compile_cache` (via `aot_inputs`) would pull the whole model stack: a
 # precondition gate that cannot be imported in the environment it gates is not
 # a gate. The abstaining path below touches neither.
 
