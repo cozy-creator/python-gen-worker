@@ -22,6 +22,30 @@ REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "check_registry_contract.py"
 
 
+def _vendored_requirements() -> list[str]:
+    """The deps that no longer exist on PyPI, as explicit git requirements.
+
+    Paul deleted the `hashrepo` and `torch-compiled-graphs` PyPI projects
+    permanently (DESIGN-RULINGS "Release policy": internal consumers vendor by
+    git pin). A bare wheel install resolves its declared dependencies from
+    PyPI, so this test must supply those two itself. Derived from
+    `[tool.uv.sources]` at run time rather than hardcoded, so the cutover
+    repin (pgw#1297) moves this test automatically.
+    """
+
+    import tomllib
+
+    with (REPO / "pyproject.toml").open("rb") as fh:
+        sources = tomllib.load(fh).get("tool", {}).get("uv", {}).get("sources", {})
+    reqs = []
+    for name in ("hashrepo", "torch-compiled-graphs"):
+        src = sources.get(name)
+        if src and "git" in src:
+            rev = f"@{src['rev']}" if "rev" in src else ""
+            reqs.append(f"{name} @ git+{src['git']}{rev}")
+    return reqs
+
+
 # The three `uv` calls below build an isolated environment, which means
 # PyPI — the one remaining third party in this suite. It is the SAME PyPI the
 # job's own `uv sync --locked` already required, so this adds no new dependency;
@@ -59,7 +83,8 @@ def test_contract_holds_from_installed_wheel(tmp_path: Path) -> None:
     venv = tmp_path / "venv"
     _uv([uv, "venv", "--python", "3.12", str(venv)])
     py = venv / "bin" / "python"
-    _uv([uv, "pip", "install", "--python", str(py), str(wheel)])
+    _uv([uv, "pip", "install", "--python", str(py), str(wheel),
+         *_vendored_requirements()])
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     proc = subprocess.run(
         [str(py), str(SCRIPT), "--installed"],
