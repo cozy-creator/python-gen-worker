@@ -95,6 +95,11 @@ def test_foreign_keys_in_dotenv_are_still_ignored(tmp_path: Path, monkeypatch) -
     hundreds of entries belonging to other tools; refusing those would make the
     worker unusable and the rule would be turned off within a day."""
     monkeypatch.chdir(tmp_path)
+    # A real environment variable outranks the dotenv, correctly — and pgw#1283
+    # made the suite set this one for every test (the local cell store's bytes
+    # live under it now, so it has to be isolated per run). Clear it so this
+    # row still measures the dotenv it is about.
+    monkeypatch.delenv("TENSORHUB_CACHE_DIR", raising=False)
     (tmp_path / ".env").write_text(
         "TENSORHUB_CACHE_DIR=/good\nSOME_OTHER_TOOL=1\nEDITOR=vim\n")
     assert config.load_settings().tensorhub_cache_dir == "/good"

@@ -358,14 +358,35 @@ def _isolated_local_cell_store(tmp_path_factory):
     (`AttributeError: 'function' object has no attribute 'cache_clear'`).
     Save and restore the variable by hand so this fixture adds no ordering
     edge to anything.
+
+    pgw#1283 EXTENSION: the store's BYTES no longer live under that root. They
+    live in the worker's one HashRepo CAS at ``TENSORHUB_CACHE_DIR/cas``, whose
+    default is a real shared directory on a dev box. So the cache root is
+    redirected here too — isolating the policy sidecar while leaving the
+    artifacts in a shared store would isolate exactly the half that stopped
+    holding anything, and one suite run would seed another's "hit".
+
+    It is redirected through the ENV plus a republish rather than by patching
+    ``cache_paths``, because the env is the production knob and a patched
+    function is invisible to any test that imported the name
+    (``test_cozy_runtime_env_contract_pgw1237`` compares the two and caught
+    exactly that).
     """
+    from gen_worker import config as _config
+
     prior = os.environ.get("GEN_WORKER_LOCAL_CELLS_DIR")
+    prior_cache = os.environ.get("TENSORHUB_CACHE_DIR")
     os.environ["GEN_WORKER_LOCAL_CELLS_DIR"] = str(
         tmp_path_factory.mktemp("local-cell-store"))
+    os.environ["TENSORHUB_CACHE_DIR"] = str(
+        tmp_path_factory.mktemp("worker-cache"))
+    _config.reload_for_test()
     try:
         yield
     finally:
-        if prior is None:
-            os.environ.pop("GEN_WORKER_LOCAL_CELLS_DIR", None)
-        else:
-            os.environ["GEN_WORKER_LOCAL_CELLS_DIR"] = prior
+        for name, value in (("GEN_WORKER_LOCAL_CELLS_DIR", prior),
+                            ("TENSORHUB_CACHE_DIR", prior_cache)):
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value

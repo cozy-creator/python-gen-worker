@@ -24,23 +24,30 @@ only reason to prefer it to a mock.
 from __future__ import annotations
 
 import ast
-import io
-import json
+import atexit
+import shutil
 import subprocess
 import sys
-import tarfile
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import pytest
 
+import tcg_artifacts
 from gen_worker import fleet_cells, local_cell_store, local_serve, mint_supervisor
 from gen_worker.cell_adopt import AdoptOutcome
 from gen_worker.cli import run as cli_run
 from gen_worker.child_contract import MintSlot
 
-KEY_A = "cg-key-v1-" + "a" * 56
+# pgw#1283: a REAL TCG envelope, and a key DERIVED from it. `local_cell_store`
+# hands its bytes to `Engine.import_artifact` now, which refuses an artifact
+# whose metadata does not restate the key it is filed under.
+_FIXTURE_DIR = Path(tempfile.mkdtemp(prefix="pgw1127-local-serve-"))
+atexit.register(shutil.rmtree, _FIXTURE_DIR, True)
+ARTIFACT_A = tcg_artifacts.build(_FIXTURE_DIR / "a.tar.gz", witness="a" * 16)
+KEY_A = tcg_artifacts.key_of(ARTIFACT_A)
 ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * fleet_cells.ARM_DIGEST_HEX
 
 SRC = Path(fleet_cells.__file__).parent
@@ -85,18 +92,13 @@ class _Arm:
         return {}
 
 
-def _armable_artifact(tmp_path: Path, *, key: str = KEY_A) -> Path:
+def _armable_artifact(tmp_path: Path) -> Path:
     """A cell with a READABLE envelope — `_arm_exported_cell` refuses an
-    unreadable one before every other gate (pgw#1098), local store included."""
+    unreadable one before every other gate (pgw#1098), local store included.
+    Since pgw#1283 the store refuses one too, so this is TCG's own envelope."""
     p = tmp_path / "mint" / "cell.tar.gz"
     p.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(
-        {"kind": "aot-inductor", "compiled_graph_key": key, "family": "micro-diffusion"}
-    ).encode()
-    with tarfile.open(p, mode="w:gz") as tar:
-        info = tarfile.TarInfo("metadata.json")
-        info.size = len(payload)
-        tar.addfile(info, io.BytesIO(payload))
+    shutil.copyfile(ARTIFACT_A, p)
     return p
 
 
@@ -387,17 +389,19 @@ def test_storing_a_cell_imports_no_transport_at_all(tmp_path: Path) -> None:
     scan of the module cannot see — fails here.
     """
     root = tmp_path / "store"
+    cas = tmp_path / "cas"
     artifact = tmp_path / "cell.tar.gz"
-    artifact.write_bytes(b"packed")
+    shutil.copyfile(ARTIFACT_A, artifact)
     program = f"""
 import os, sys
 os.environ["GEN_WORKER_LOCAL_CELLS_DIR"] = {str(root)!r}
+from pathlib import Path
 from gen_worker import local_cell_store
 cell = local_cell_store.store(
-    {str(artifact)!r}, key={KEY_A!r}, family="micro-diffusion",
-    arm_token={ARM_A!r})
+    Path({str(artifact)!r}), key={KEY_A!r}, family="micro-diffusion",
+    arm_token={ARM_A!r}, cas_root=Path({str(cas)!r}))
 assert cell is not None, "the store refused a well-formed cell"
-assert local_cell_store.lookup({KEY_A!r}) is not None
+assert local_cell_store.lookup({KEY_A!r}, cas_root=Path({str(cas)!r})) is not None
 banned = [
     m for m in sys.modules
     if m in ("httpx", "requests", "urllib3", "boto3", "aiohttp")
@@ -417,7 +421,7 @@ print(",".join(sorted(banned)))
 
 def _store_artifact(tmp_path: Path) -> Path:
     p = tmp_path / "cell.tar.gz"
-    p.write_bytes(b"packed")
+    shutil.copyfile(ARTIFACT_A, p)
     return p
 
 

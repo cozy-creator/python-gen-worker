@@ -342,6 +342,7 @@ def no_compiled_graph_source(hub_absent: str) -> bool:
 
 def _local_answer(
     key: str, derived: "boot_key.DerivedKey", *, family: str, fn: str,
+    cache_dir: Optional[Path] = None,
 ) -> Optional[BootAdoptOutcome]:
     """This machine's own store, asked by the derived key. ``None`` = ask on.
 
@@ -356,7 +357,7 @@ def _local_answer(
     witness to compare.
     """
     try:
-        cell = local_cell_store.lookup(key)
+        cell = local_cell_store.lookup(key, cas_root=cache_dir)
     except Exception as exc:  # noqa: BLE001 — a cache read is never fatal
         logger.debug("boot-adopt: local store lookup failed", exc_info=True)
         logger.warning("boot-adopt: local store unreadable (%s)", exc)
@@ -485,7 +486,8 @@ def attempt(
     settled: Dict[str, BootAdoptOutcome] = {}
     ask: List[str] = []
     for key in keys:
-        local = _local_answer(key, derived, family=family, fn=fn)
+        local = _local_answer(
+            key, derived, family=family, fn=fn, cache_dir=cache_dir)
         if local is not None:
             settled[key] = local
         elif hub_absent:

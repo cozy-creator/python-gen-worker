@@ -1339,6 +1339,7 @@ def _mark_publish(key: str, state: str) -> None:
 
 def resume_owed_publishes(
     publisher: Optional[CellPublisher],
+    cas_root: Optional[Path] = None,
 ) -> List[threading.Thread]:
     """Re-attempt every upload this machine still OWES (pgw#1183 / §1.5).
 
@@ -1361,10 +1362,21 @@ def resume_owed_publishes(
         # too. A key whose upload is already running is owed nothing more.
         if cell.key in in_flight:
             continue
-        meta = artifact_meta.try_read_metadata(cell.artifact) or {}
+        # pgw#1283 criterion 5: the SCAN above is metadata-only — sidecar reads
+        # and nothing else — and the bytes are materialized only for the cells
+        # this actually ships. An owed scan that exported every resident
+        # artifact would make "is anything owed?" cost as much as sending it.
+        artifact = local_cell_store.materialize(cell.key, cas_root=cas_root)
+        if artifact is None:
+            logger.warning(
+                "fleet-cells: %s is owed to the sink but its bytes are not "
+                "resolvable from this machine's CAS; the obligation stands and "
+                "a later boot re-attempts it", cell.key)
+            continue
+        meta = artifact_meta.try_read_metadata(artifact) or {}
         threads.append(_publish_async(
             publisher, cell.family or str(meta.get("family") or ""),
-            cell.artifact, dict(meta), compiled_graph_key_digest=cell.key,
+            artifact, dict(meta), compiled_graph_key_digest=cell.key,
             arm_token=cell.arm_token))
     if threads:
         logger.info(
@@ -2303,13 +2315,13 @@ def arm_from_local_store(
     _sweep_superseded_memos_once()
     route = ROUTE_MEMO
     try:
-        local = local_cell_store.lookup_for_arm(arm_key.token)
+        local = local_cell_store.lookup_for_arm(arm_key.token, cas_root=cache_dir)
         if local is None and boot_local_key:
             # The memo is a SHORTCUT, never an authority (§4.28) — so when it
             # has nothing to say, the address the boot derived is asked
             # directly. Same store, same key space, same gate below.
             route = ROUTE_BOOT_KEY
-            local = local_cell_store.lookup(boot_local_key)
+            local = local_cell_store.lookup(boot_local_key, cas_root=cache_dir)
     except Exception as exc:  # noqa: BLE001 — a cache read must never be fatal
         logger.warning("fleet-cells: local cell store unreadable (%s)", exc)
         return None
@@ -2357,7 +2369,13 @@ def arm_from_local_store(
     minted = SelfMint(
         family=family, compiled_graph_key=key,
         ref=f"{cc.system_repo(family)}#{key}",
-        snapshot_digest=local.content_digest,
+        # pgw#1283: the store no longer keeps a digest of its own. It kept one
+        # so it could re-verify its own copy of the bytes, and TCG's CAS
+        # already does that for the copy it owns; the ONE consumer that still
+        # needs a self-attested digest is this advertisement, so it is computed
+        # here, once, exactly where the delegated-mint route already computes
+        # it (`adopt_delegated_mint`, same spelling).
+        snapshot_digest="sha256:" + sha256_file(local.artifact),
         artifact=local.artifact,
     )
     with _PENDING_LOCK:
@@ -2669,6 +2687,7 @@ def _stage_durable(pending: "PendingSelfMint", artifact: Path) -> str:
         verdict=local_cell_store.VERDICT_UNVERIFIED,
         sink=(local_cell_store.SINK_NONE if sink_absent
               else local_cell_store.SINK_OWED),
+        cas_root=pending.cache_dir,
     )
     if stored is None:
         # A local-store write failure is the one thing §1.5 cannot absorb
@@ -2706,7 +2725,7 @@ def _admit_durable(
     if not key or staged_key != key:
         return None
     local_cell_store.mark(key, verdict=local_cell_store.VERDICT_ADMITTED)
-    cell = local_cell_store.lookup(key)
+    cell = local_cell_store.lookup(key, cas_root=pending.cache_dir)
     if cell is None:
         return None
     activity_mod.emit_event(
