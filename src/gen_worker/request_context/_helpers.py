@@ -12,7 +12,6 @@ import hashlib
 import ipaddress
 import json
 import logging
-import re
 import socket
 import urllib.parse
 from typing import Any, Dict

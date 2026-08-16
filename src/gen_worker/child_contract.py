@@ -24,7 +24,7 @@ codes and reports stay with the driver that owns them.
 
 from __future__ import annotations
 
-from typing import Dict, Mapping, Optional, Tuple
+from typing import Mapping, Optional, Tuple
 
 import msgspec
 
