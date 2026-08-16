@@ -32,7 +32,7 @@ dependencies = [
     # pgw#1232/pgw#1270: TCG owns compiled-graph identity, declaration, call
     # ingress, artifact format and compile-span attribution. Pure python — it
     # neither installs nor imports Torch.
-    "torch-compiled-graphs>=0.4,<0.5",
+    "torch-compiled-graphs>=0.6,<0.7",
     "huggingface-hub>=0.26.0",
     # gen_worker.convert (GGUF quantization tooling; small, pure-python)
     "gguf>=0.10.0",

@@ -64,6 +64,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from . import activity as activity_mod
+from torch_compiled_graphs import ARTIFACT_KIND, GRAPH_CLASS_BLOCK, REQUIRED_AXES
 from torch_compiled_graphs import is_compiled_graph_key
 from torch_compiled_graphs import identity as tcg_identity
 
@@ -812,7 +813,7 @@ class CellPublisher:
                 raise CellPublishRefused(
                     f"entries[{i}] repeats entries[{seen[key]}]'s key {key}")
             seen[key] = i
-            for axis in graph_facts.KEY_AXES:
+            for axis in REQUIRED_AXES:
                 if not str(entry.identity_axes.get(axis) or "").strip():
                     raise CellPublishRefused(
                         f"entries[{i}].identity_axes states no {axis!r}; an "
@@ -1651,7 +1652,7 @@ def arm_ordered(
     row = CellAdoption(
         ref=delivered_ref,
         snapshot_digest=delivered_digest,
-        artifact_kind=aot_serve.ARTIFACT_KIND,
+        artifact_kind=ARTIFACT_KIND,
         arm_ms=arm_ms,
         armed=outcome.armed,
         reason=outcome.reason,
@@ -2506,7 +2507,7 @@ def adopt_delegated_mint(
             row_meta = {}
         row_key = str(row_meta.get("compiled_graph_key") or "").strip()
         entry_name = str(
-            (row_meta.get(graph_facts.TCG_GRAPH_CLASS_BLOCK) or {}).get("name") or "")
+            (row_meta.get(GRAPH_CLASS_BLOCK) or {}).get("name") or "")
         if not row_armed:
             refusals.append((entry_name or row.name, *row_refusal))
             activity_mod.emit_event(

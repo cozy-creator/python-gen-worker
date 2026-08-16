@@ -641,7 +641,7 @@ def _record_guard_miss(
 # with the pgw#1035 dead-code wave) and claimed parity with
 # `aot_serve.IDENTITY_AXES`, which was never true — 5 entries against 3, and
 # pgw#1034 had already ruled the two sets deliberately different. The cell key's
-# axes are `graph_facts.KEY_AXES`; this module's job is `runtime_key()`,
+# axes are `torch_compiled_graphs.REQUIRED_AXES`; this module's job is `runtime_key()`,
 # the ONE probe that states them.
 
 

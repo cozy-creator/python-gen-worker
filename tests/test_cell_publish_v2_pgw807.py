@@ -33,6 +33,7 @@ import pytest
 from hashrepo import TransferReport
 
 import gen_worker.hubio.client as hub_client
+from torch_compiled_graphs import GRAPH_CLASS_BLOCK, REQUIRED_AXES
 from torch_compiled_graphs import identity as tcg_identity
 
 from gen_worker import env_seal, graph_facts, receipts
@@ -245,7 +246,7 @@ META = {
     "family": FAMILY, "sku": "l4", "sm": "89",
     "gen_worker": "0.87.0", "kind": "aot-inductor", "format": "pt2",
     "weight_lane": "w8a8", "lora_bucket": 64, "strict_export": True,
-    graph_facts.TCG_GRAPH_CLASS_BLOCK: {
+    GRAPH_CLASS_BLOCK: {
         "name": "unet/main",
         "target": "unet", "fork": [], "class_dims": [],
         "range_digest": "r1", "class_hash": _CLASS_HASH, "graph": {"v": 2},
@@ -418,6 +419,29 @@ def test_the_pre_fix_fallback_row_shape_can_no_longer_be_published(hub, artifact
         fc._identity_axes(FAMILY, dict(TODAYS_FALLBACK_META))
 
 
+@pytest.mark.parametrize("dropped", REQUIRED_AXES)
+def test_an_entry_that_cannot_restate_every_key_axis_is_refused(hub, dropped):
+    """Each of the three axes is required, and each is checked SEPARATELY.
+
+    pgw#1288 deleted the worker's copy of the axis tuple, so this loop now
+    reads TCG's export directly — which means nothing worker-side pins WHICH
+    axes it iterates. Shortening the tuple to two axes left the suite green:
+    an entry with no ``toolchain`` would have reached the hub, and an entry
+    that cannot restate its own key has no identity outside its own batch.
+
+    Parametrised over the export rather than over a spelled-out list, so this
+    follows a deliberate axis change and fails only on a silent one.
+    """
+    axes = {"graph": "a" * 16, "sm": "sm_89", "toolchain": "b" * 16}
+    del axes[dropped]
+    entry = fc.PublishEntry(compiled_graph_key=COMPILED_GRAPH_KEY,
+                            identity_axes=axes)
+    with pytest.raises(fc.CellPublishRefused, match=repr(dropped)):
+        _publisher(hub).publish_intent(
+            FAMILY, [entry], sku="l4", gen_worker="0.118.0")
+    assert not hub.httpd.calls, "refused before the intent left the pod"
+
+
 def test_a_stamp_that_disagrees_with_the_recorded_axes_is_refused(hub, artifact):
     """A cell whose `compiled_graph_key` does not describe its own blocks is a cell the
     hub would index under one identity and the worker would fence on another."""
@@ -454,8 +478,8 @@ def test_a_cell_with_no_class_hash_is_refused(hub, artifact):
     state its own graph axis has no identity, so it would be stored under a
     flavor nothing can request."""
     hollow = dict(META)
-    hollow[graph_facts.TCG_GRAPH_CLASS_BLOCK] = {
-        **META[graph_facts.TCG_GRAPH_CLASS_BLOCK], "class_hash": ""}
+    hollow[GRAPH_CLASS_BLOCK] = {
+        **META[GRAPH_CLASS_BLOCK], "class_hash": ""}
     with pytest.raises(fc.CellPublishRefused):
         _publisher(hub).publish(FAMILY, artifact, hollow)
     assert not hub.httpd.calls

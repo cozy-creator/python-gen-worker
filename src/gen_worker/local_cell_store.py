@@ -91,7 +91,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from torch_compiled_graphs import is_compiled_graph_key
+from torch_compiled_graphs import ARTIFACT_KIND, is_compiled_graph_key
 from torch_compiled_graphs.identity import KEY_SCHEME
 
 logger = logging.getLogger(__name__)
@@ -126,11 +126,6 @@ MEMO_DIRNAME = ".memo"
 ARTIFACT_NAME = "cell.tar.gz"
 RECORD_NAME = "record.json"
 TRUST_CLASS_NAME = "trust-class.json"
-
-#: The only artifact class this store holds. pgw#1010/pgw#1059: an exported
-#: cell is the only kind with an identity, so it is the only kind that can be
-#: addressed — a JIT capture has no key and nothing could ever look it up.
-KIND = "aot-inductor"
 
 #: The hub's typed 403 that ASSERTS this machine may not publish. One string,
 #: from ``tensorhub``'s ``worker_cell_publish.go``; a refusal the worker does
@@ -279,7 +274,10 @@ def store(
             "arm_token": record.arm_token,
             "bytes": record.bytes,
             "stored_at": record.stored_at,
-            "kind": KIND,
+            # TCG owns this string; pgw#1010/pgw#1059: an exported cell is
+            # the only kind with an identity, so it is the only kind this
+            # store can hold — a JIT capture has no key to look up.
+            "kind": ARTIFACT_KIND,
             "verdict": record.verdict,
             "sink": record.sink,
         })
@@ -605,7 +603,6 @@ __all__ = [
     "ARTIFACT_NAME",
     "CELLS_DIRNAME",
     "ENV_STORE_DIR",
-    "KIND",
     "LocalCell",
     "MEMO_DIRNAME",
     "SINK_DELIVERED",

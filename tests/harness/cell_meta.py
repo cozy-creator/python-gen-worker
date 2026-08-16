@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from torch_compiled_graphs import ARTIFACT_KIND, GRAPH_CLASS_BLOCK
 from torch_compiled_graphs import identity as tcg_identity
 
 from gen_worker import aot_serve, graph_facts
@@ -43,10 +44,10 @@ def exported_cell_meta(
     """One exported (``aot-inductor``) cell's metadata, key stamped from it."""
     meta: Dict[str, Any] = {
         "family": family, "sku": sku, "sm": sm, "gen_worker": gen_worker,
-        "kind": aot_serve.ARTIFACT_KIND, "format": "pt2",
+        "kind": ARTIFACT_KIND, "format": "pt2",
         "weight_lane": weight_lane, "lora_bucket": int(lora_bucket),
         "strict_export": True,
-        graph_facts.TCG_GRAPH_CLASS_BLOCK: {
+        GRAPH_CLASS_BLOCK: {
             "name": "unet/main",
             "target": "unet", "fork": [], "class_dims": [],
             "range_digest": "r1", "class_hash": CLASS_HASH, "graph": {"v": 2},
