@@ -431,10 +431,52 @@ def test_model_ref_label_mirrors_registry_wire_forms() -> None:
     from gen_worker import HF, Civitai, Hub
 
     assert HF("acme/gonzalomo-xl").label == "acme/gonzalomo-xl"
-    # `prod` is the grammar default, so the normal form ELIDES it;
-    # every other tag — `latest` included — is stamped verbatim.
+    # th#1987 deleted the default AND the elision: every release is stamped.
     assert Hub("acme/wai-illustrious", release="prod").label \
         == "acme/wai-illustrious@prod"
     assert Hub("acme/wai-illustrious", release="latest").label \
         == "acme/wai-illustrious@latest"
     assert Civitai("civitai/123", version="456").label == "civitai/123@456"
+
+
+def test_model_ref_label_is_injective_ie727() -> None:
+    """ie#727's residue: the old fold appended the release only when the label
+    carried no `@` at all, so two distinct bindings could mint one label."""
+    from gen_worker import HF, Civitai, Hub, ModelScope
+    from gen_worker.api.binding import ModelRef, wire_ref
+
+    # The side channel WINS over a release riding the ref (Hub's own contract),
+    # and `label` now says the same artifact `wire_ref` fetches. The old fold
+    # saw the `@` already in `path` and reported the ref that was NOT fetched.
+    stale = Hub("acme/wai-illustrious@old", release="new")
+    assert stale.label == "acme/wai-illustrious@new" == str(wire_ref(stale))
+
+    # A digest pin keeps the digest, not the release it was picked from.
+    hexd = "ab" * 32
+    pinned = Hub(f"acme/repo@sha256:{hexd}", release="prod")
+    assert pinned.label == f"acme/repo@sha256:{hexd}" == str(wire_ref(pinned))
+
+    # Distinct revisions are distinct labels — HF's axis reached `label` only
+    # through `release`, which HF never sets, so every revision read as the
+    # bare repo.
+    assert HF("acme/xl", revision="r1").label == "acme/xl@r1"
+    assert HF("acme/xl", revision="r2").label == "acme/xl@r2"
+    assert ModelScope("acme/anima", revision="v3").label == "acme/anima@v3"
+
+    labels = {
+        b.label
+        for b in (
+            Hub("acme/repo", release="prod"),
+            Hub("acme/repo", release="staging"),
+            HF("acme/repo", revision="r1"),
+            Civitai("123", version="456"),
+            Civitai("123", version="789"),
+            Civitai("123"),
+        )
+    }
+    assert len(labels) == 6
+
+    # `release` is the tensorhub axis and nothing else fetches by it: refused
+    # where it cannot mean anything, rather than dropped inside `label`.
+    with pytest.raises(ValueError, match="no release axis"):
+        ModelRef(source="civitai", path="123", version="456", release="prod")

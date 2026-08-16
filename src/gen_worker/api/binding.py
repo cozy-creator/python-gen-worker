@@ -121,6 +121,17 @@ class ModelRef(msgspec.Struct, frozen=True):
         # as a hub 400 three layers away. Cell refs are not bindings and never
         # reach this constructor.
         refuse_flavor_selector(self.path, where=f"{self.source} binding")
+        # th#1987: `release` is the TENSORHUB axis. On any other source it
+        # named nothing, was fetched by nothing, and reached only `label` —
+        # where it silently vanished behind a civitai `version=`. One home per
+        # value: refuse it where it cannot mean anything.
+        if self.source != "tensorhub" and self.release:
+            raise ValueError(
+                f"{self.source} bindings have no release axis (release="
+                f"{self.release!r}); it is a tensorhub release identifier. Use "
+                "revision= for a huggingface/modelscope commit or version= for "
+                "a civitai model-version."
+            )
         if self.source == "tensorhub":
             if not self.path:
                 raise ValueError("Hub requires a non-empty ref")
@@ -148,13 +159,22 @@ class ModelRef(msgspec.Struct, frozen=True):
     @property
     def label(self) -> str:
         """Human-readable label for ``model_used`` metadata / logging —
-        mirrors the wire form each source's registry keys on."""
-        label = self.path
-        if self.source == "civitai" and self.version:
-            label += f"@{self.version}"
-        elif self.release and "@" not in label:
-            label += f"@{self.release}"
-        return label
+        mirrors the wire form each source's registry keys on.
+
+        INJECTIVE (ie#727 residue): two bindings that pin different artifacts
+        never share a label. The old fold appended the release only when the
+        label carried no ``@`` at all, which silently dropped it twice — off a
+        civitai ref that also pinned a ``version=``, and off a hub ref whose
+        ``path`` already carried a release the side-channel ``release=``
+        OVERRIDES. The second case made ``label`` and :func:`wire_ref` name
+        different artifacts, so ``model_used`` reported the ref that was not
+        fetched. The hub branch is now the same fold the wire uses.
+        """
+        if self.source == "tensorhub":
+            return str(fold_ref(self.path, release=self.release))
+        if self.source == "civitai":
+            return f"{self.path}@{self.version}" if self.version else self.path
+        return f"{self.path}@{self.revision}" if self.revision else self.path
 
 
 def Hub(
