@@ -642,7 +642,7 @@ requires-dist = [
     { name = "gguf", specifier = ">=0.10.0" },
     { name = "grpcio", specifier = ">=1.82.1" },
     { name = "grpcio-tools", marker = "extra == 'dev'", specifier = ">=1.82.1" },
-    { name = "hashrepo", specifier = ">=0.3,<0.4" },
+    { name = "hashrepo", git = "https://github.com/cozy-creator/tensorfs?rev=0d0437570aac241ed234b741e66af8c79492d872" },
     { name = "huggingface-hub", specifier = ">=0.26.0" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.100" },
     { name = "msgspec", specifier = ">=0.18.6" },
@@ -665,7 +665,7 @@ requires-dist = [
     { name = "tomli-w", specifier = ">=1.0.0" },
     { name = "torch", marker = "(sys_platform == 'linux' and extra == 'torch') or (sys_platform == 'win32' and extra == 'torch')", specifier = ">=2.13.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'torch'", specifier = ">=2.13.0" },
-    { name = "torch-compiled-graphs", specifier = ">=0.6,<0.7" },
+    { name = "torch-compiled-graphs", git = "https://github.com/cozy-creator/torchcg?rev=ad5f4cb9f89bbe91d2a30ca218f70d5326630368" },
     { name = "torchvision", marker = "(sys_platform == 'linux' and extra == 'vision') or (sys_platform == 'win32' and extra == 'vision')", specifier = ">=0.28.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torchvision", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'vision'", specifier = ">=0.28.0" },
     { name = "transformers", marker = "extra == 'dev'", specifier = ">=5.13" },
@@ -785,11 +785,7 @@ wheels = [
 [[package]]
 name = "hashrepo"
 version = "0.3.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/dc/5a/50245200737dea160cf162de44ce3aeaa100084a9dfc429f14befabe72fd/hashrepo-0.3.1.tar.gz", hash = "sha256:b08f5c8c31427d5a0aa981002c50e4d601041e5031c145ffaa22ffe720e5eab4", size = 23520, upload-time = "2026-08-14T09:24:23.029Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/34/67/61fb63a28e7ea6243d6a3bc4e520850f59afdf794d7c41631f02ba5a503d/hashrepo-0.3.1-py3-none-any.whl", hash = "sha256:c9450e07c96b0a060db5ab420b9202f0e1efabaa1690c66f03f56ff7b7b3847a", size = 23348, upload-time = "2026-08-14T09:24:21.734Z" },
-]
+source = { git = "https://github.com/cozy-creator/tensorfs?rev=0d0437570aac241ed234b741e66af8c79492d872#0d0437570aac241ed234b741e66af8c79492d872" }
 
 [[package]]
 name = "hf-xet"
@@ -2087,14 +2083,10 @@ wheels = [
 [[package]]
 name = "torch-compiled-graphs"
 version = "0.6.0"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/cozy-creator/torchcg?rev=ad5f4cb9f89bbe91d2a30ca218f70d5326630368#ad5f4cb9f89bbe91d2a30ca218f70d5326630368" }
 dependencies = [
     { name = "hashrepo" },
     { name = "safetensors" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/d0/02/3d9eb0001882cc746c9ce4152637954624a3151a9c3f1c55d5d88c1ef5d5/torch_compiled_graphs-0.6.0.tar.gz", hash = "sha256:07f733547e350b02ee40843bdd978656a18501a40c083cffa3ea08f6a11060b2", size = 73172, upload-time = "2026-08-16T10:58:33.382Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ab/68/8cf29d2c46997e9ed1d4f1ae3cf5bb9ac1e1b84b7a84ea452f0cb16b714d/torch_compiled_graphs-0.6.0-py3-none-any.whl", hash = "sha256:d254e5885e4dec7c97fdc6c76a5ac8d800f87adafdd3c20ada535938b4fc1309", size = 79249, upload-time = "2026-08-16T10:58:31.9Z" },
 ]
 
 [[package]]
