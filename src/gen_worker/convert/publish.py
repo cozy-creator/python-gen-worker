@@ -4,7 +4,7 @@ A conversion / dataset / training endpoint writes files locally, calls
 ``publish_flavors(ctx, flavors)``, and returns a result struct. Each flavor's
 ``path`` (file or directory) becomes ONE Tensorhub publish against the
 destination repo (explicit ``destination_repo=`` or the job payload's
-reserved ``destination.repo`` field). Nothing publishes implicitly.
+reserved ``destination.ref`` field). Nothing publishes implicitly.
 
 Publishes over the chunked sha256 CAS (``HubClient.publish_v2``).
 """
@@ -163,6 +163,37 @@ def destination_release(ctx: Any, explicit: str = "") -> str:
     return rel
 
 
+def destination_ref(ctx: Any, explicit: str = "") -> str:
+    """THE bare ``owner/repo`` a producer publishes into: the explicit
+    argument, else the invoking request's ``destination.ref``.
+
+    ONE vocabulary with ``executor._producer_destination_repo``: the reserved
+    struct's key is ``ref``, and tag/flavor/checkpoint selectors are stripped
+    so a caller that passed ``owner/repo:tag`` still addresses the repo.
+
+    pgw#1305: this used to read the retired ``destination.repo`` key and
+    nothing else, so an invoke carrying the ``destination={ref, release}``
+    that :func:`destination_release`'s own refusal asks for was told
+    ``destination_repo is required`` — the two halves of one reserved struct
+    disagreed about its key.
+    """
+    ref = str(explicit or "").strip()
+    if not ref:
+        info = getattr(ctx, "destination", None) or {}
+        if isinstance(info, dict):
+            ref = str(info.get("ref") or "").strip()
+    for sep in (":", "@", "#"):
+        ref = ref.split(sep, 1)[0]
+    ref = ref.strip().strip("/")
+    if not ref:
+        raise ValueError(
+            "destination_repo is required: the invoke named no "
+            "`destination.ref`. Invoke with destination={ref, release}, or "
+            "pass destination_repo= explicitly."
+        )
+    return ref
+
+
 def publish_flavors(
     ctx: Any,
     flavors: Iterable[ProducedFlavor],
@@ -197,12 +228,7 @@ def publish_flavors(
     ``journal_path`` is where the in-flight ``publish_id`` is recorded so a
     retry on this pod re-uploads instead of re-casting. Pass the produced
     tree's own directory; omit it and the publish is unrecoverable."""
-    dest = str(destination_repo or "").strip()
-    if not dest:
-        info = getattr(ctx, "destination", None) or {}
-        dest = str((info.get("repo") if isinstance(info, dict) else "") or "").strip()
-    if not dest:
-        raise ValueError("destination_repo is required (payload.destination.repo)")
+    dest = destination_ref(ctx, destination_repo)
     release = destination_release(ctx, release)
 
     client = HubClient.from_ctx(ctx)
@@ -293,4 +319,4 @@ def publish_flavors(
     return results
 
 
-__all__ = ["destination_release", "publish_flavors"]
+__all__ = ["destination_ref", "destination_release", "publish_flavors"]

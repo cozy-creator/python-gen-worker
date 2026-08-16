@@ -129,9 +129,14 @@ def parse_chunk_list(
     canonical manifest bytes, which cannot contain URLs because they are part of
     the content-addressed identity — plus a SEPARATE, INDEX-ALIGNED
     `chunk_urls: [...]` that exists only at resolve time. The URL is therefore
-    NOT nested inside each chunk on the REST path. (The gRPC path differs: its
-    `ChunkRef` carries `sha256`/`url`/`len` together, so a nested `url` is
-    accepted too.)
+    NOT nested inside each chunk on the REST path, though a nested `url` is
+    accepted when present.
+
+    This parser is REST-ONLY — `resolve_repo` is its single caller. The gRPC
+    dispatch path never reaches here: its `ChunkRef` (`sha256`/`url`/`len`) is
+    read off the typed proto message in `models.store`, so its field names are
+    not this function's vocabulary and must not be mirrored into these key
+    lookups (pgw#1307).
 
     Getting this wrong is not cosmetic: requiring a nested `url` made every real
     chunked checkpoint unparseable, which is how a v2 publish looks fine on the
@@ -168,10 +173,14 @@ def parse_chunk_list(
             raise HubResolveError(
                 f"{what}: {path!r} chunk[{i}] is not an object"
             )
-        digest = str(c.get("digest") or c.get("sha256") or "").strip().lower()
+        # `digest`/`len` are the ONLY spellings this route has ever emitted
+        # (`catalog.SnapshotChunk`). The mirror arms this parser used to carry
+        # were not retired spellings — they never existed here, and accepting
+        # them re-opened the vacuous guard `resolved_entry_digest` refuses.
+        digest = str(c.get("digest") or "").strip().lower()
         digest = digest.removeprefix("sha256:")
         url = str(c.get("url") or "").strip() or (url_list[i] if i < len(url_list) else "")
-        length = int(c.get("len") or c.get("length") or 0)
+        length = int(c.get("len") or 0)
         if len(digest) != 64 or not url or length <= 0:
             raise HubResolveError(
                 f"{what}: {path!r} chunk[{i}] "

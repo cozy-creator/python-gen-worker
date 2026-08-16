@@ -90,12 +90,13 @@ def read_audio(
 
     - If ``mono`` is True (default), multi-channel audio is mixed down to mono.
     - If ``target_sample_rate`` is set and differs from the source rate, the
-      signal is resampled in-process. Uses :func:`scipy.signal.resample_poly`
-      when scipy is available, otherwise falls back to a pure-numpy linear
-      resample (acceptable for typical speech-input pipelines).
+      signal is resampled in-process with :func:`scipy.signal.resample_poly`.
     """
     try:
-        import numpy as np
+        # numpy is imported for its PRESENCE: soundfile returns ndarrays, so a
+        # missing numpy must be the typed ImportError below rather than an
+        # AttributeError three lines later.
+        import numpy  # noqa: F401
         import soundfile as sf
     except ImportError as e:
         raise ImportError(
@@ -106,22 +107,17 @@ def read_audio(
     if mono and data.ndim == 2:
         data = data.mean(axis=1)
     if target_sample_rate is not None and sr != target_sample_rate:
-        try:
-            from math import gcd
+        # scipy is declared by the `audio` extra alongside soundfile/numpy, so
+        # this is the resampler that runs — there is no quieter second one to
+        # fall through to (pgw#1307).
+        from math import gcd
 
-            from scipy.signal import resample_poly
+        from scipy.signal import resample_poly
 
-            g = gcd(int(sr), int(target_sample_rate))
-            data = resample_poly(
-                data, int(target_sample_rate) // g, int(sr) // g
-            ).astype("float32")
-        except ImportError:
-            # Pure-numpy linear resample fallback.
-            duration = data.shape[0] / sr
-            new_n = int(round(duration * target_sample_rate))
-            old_t = np.linspace(0.0, duration, num=data.shape[0], endpoint=False)
-            new_t = np.linspace(0.0, duration, num=new_n, endpoint=False)
-            data = np.interp(new_t, old_t, data).astype("float32")
+        g = gcd(int(sr), int(target_sample_rate))
+        data = resample_poly(
+            data, int(target_sample_rate) // g, int(sr) // g
+        ).astype("float32")
         sr = target_sample_rate
     return data, sr
 

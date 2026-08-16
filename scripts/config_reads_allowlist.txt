@@ -167,11 +167,12 @@ src/gen_worker/aot_mint.py::PODGUARD_STATE TRIPWIRE External watchdog adapter wi
 #               is not a deletion, it is a LAUNCH. pgw#929's "delete seven kill
 #               switches" is WRONG for these, and saying so is the finding.
 #
-# ...but only together with a MEASURED declaration count. Zero fleet
-# declarations is what licenses a deletion, and it is a fact you query, not one
-# you infer from the code — `GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF` looks identical
-# to its deleted sibling in this file and was LIVE on the standing hub the last
-# time anyone asked.
+# A declaration count is worth knowing, but it does NOT gate retiring a NAME.
+# pgw#1305 measured the mechanism: an unknown owned-namespace name arriving in
+# the PROCESS environment is reported by `unrecognised_owned_env`, never
+# refused, and process env is the only way the hub delivers one. What a count
+# would gate is deleting a READ SITE whose default flips behaviour — that is
+# the DEFAULT-OFF case above, and it is a launch, not a deletion.
 #
 # VERDICTS (declaration counts measured on the standing hub 2026-08-03):
 #
@@ -186,17 +187,30 @@ src/gen_worker/aot_mint.py::PODGUARD_STATE TRIPWIRE External watchdog adapter wi
 #     GEN_WORKER_EAGER_FIRST_BOOT       pgw#671 eager-first is now unconditional
 #     GEN_WORKER_AOT_WRAPPER_SPLIT_OFF  v1 ctor-split is now unconditional
 #
-#   READ SITE GONE, NAME DELIBERATELY NOT RETIRED — pgw#1270:
+#   READ SITE AND NAME BOTH GONE — pgw#1270 then pgw#1305:
 #     GEN_WORKER_AOT_RUN_IMPL_SPLIT_OFF `aot_wrapper_split.py` read it, and TCG
-#             owns the run_impl split now, so the read site died with the module
-#             and this file's row went with it (a stale row is a hard failure of
-#             this very gate). The NAME is still accepted by
-#             `config.loader._OWNED_NON_SETTINGS`, on purpose: the 2026-08-03
-#             census recorded five SDXL releases declaring it and one live
-#             `endpoint_env_entries` row, and NOBODY HAS RE-QUERIED THE STANDING
-#             HUB SINCE. Dropping the name would make those pods fail config
-#             load on an UnknownSettingError. Retire the name only on a fresh
-#             measured count of zero. The env is inert either way.
+#     GEN_WORKER_AOT_HOST_COMPILE_JOBS  owns the run_impl split now, so the read
+#     GEN_WORKER_MINT_RESUME_DIR        sites died with their modules and this
+#     GEN_WORKER_MINT_RESUME_MAX_BYTES  file's rows went with them.
+#             pgw#1270 then held the NAMES in `_OWNED_NON_SETTINGS` pending "a
+#             fresh measured count of zero", on the stated hazard that dropping
+#             a declared name makes a deployed pod fail config load.
+#             THAT HAZARD DOES NOT EXIST, and pgw#1305 measured the mechanism
+#             instead of the count. `UnknownSettingError` is raised only from
+#             `_normalize_key(strict=True)`, whose only callers are the FILE
+#             sources — `.env`, yaml, `/run/secrets`. The process environment
+#             never reaches it: `_load_env` indexes `_ENV_TO_FIELD` and never
+#             asks about a name it does not know, and `unrecognised_owned_env`
+#             REPORTS owned-namespace residue at boot rather than refusing it,
+#             for exactly the reason stated in its docstring. Tensorhub delivers
+#             a release's declared env only as container process env (RunPod
+#             `CreatePodRequest.Env`, Vast `CreateInstanceRequest.Env`, k8s
+#             inline `corev1.EnvVar`, local `docker run -e`); it writes no
+#             `.env`, yaml or `/run/secrets` file into a worker container.
+#             So a pod still declaring one of these boots green and NAMES the
+#             name at boot — which is what retiring a name is supposed to do.
+#             The census was never the gate. Fenced by
+#             tests/test_retired_env_names_pgw1305.py.
 #
 #   NOT DELETED, and each for a stated reason:
 #     GEN_WORKER_HOST_MOVE_GUARD        ruled exception: safety guard, on by
