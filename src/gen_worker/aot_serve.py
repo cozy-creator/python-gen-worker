@@ -23,6 +23,7 @@ from typing import (
 )
 
 from torch_compiled_graphs import (
+    GRAPH_CLASS_BLOCK,
     CallIngress,
     CallInput,
     CompiledGraphRunner,
@@ -167,7 +168,7 @@ def entry_from_meta(meta: Mapping[str, Any]) -> Dict[str, Any]:
     pgw#1176: the plural ``entries_from_meta`` is GONE with the multi-entry
     artifact. A caller that wants several entries holds several artifacts.
     """
-    graph_class = meta.get("graph_class")
+    graph_class = meta.get(GRAPH_CLASS_BLOCK)
     if not isinstance(graph_class, Mapping):
         raise ValueError("compiled graph metadata has no graph_class")
     graph = graph_class.get("graph")
@@ -1503,7 +1504,7 @@ def arm_compiled_graph(
             "compiled_graph_unavailable", f"TCG could not load {key!r}"
         )
     metadata = dict(compiled_graph.metadata)
-    graph_class = metadata.get("graph_class")
+    graph_class = metadata.get(GRAPH_CLASS_BLOCK)
     if not isinstance(graph_class, Mapping):
         raise AdoptError(
             "contract_invalid",
@@ -1725,7 +1726,7 @@ def enable(
             reason, exc)
         return AdoptOutcome.miss(
             reason, f"{identity}: {type(exc).__name__}: {exc}", identity)
-    entry = dict(meta.get("graph_class") or {})
+    entry = dict(meta.get(GRAPH_CLASS_BLOCK) or {})
     armed = len(armed_entries(pipeline))
     logger.info(
         "aot-serve: armed %s entry %s (sku=%s torch=%s precision=%s, "

@@ -70,6 +70,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import msgspec
+from torch_compiled_graphs import GRAPH_CLASS_BLOCK
 from torch_compiled_graphs.spans import (
     PARTITION_KEYS,
     PARTITIONS,
@@ -434,7 +435,7 @@ def _compile_traced_class(
             f"TCG result for {traced.name!r} records key "
             f"{metadata.get('compiled_graph_key')!r}, not selected ref {key!r}"
         )
-    graph_class = metadata.get("graph_class")
+    graph_class = metadata.get(GRAPH_CLASS_BLOCK)
     if not isinstance(graph_class, dict) or graph_class.get("name") != traced.name:
         raise ValueError(
             f"TCG result for {traced.name!r} records the wrong graph_class"
