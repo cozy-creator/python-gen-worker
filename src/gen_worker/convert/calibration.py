@@ -13,8 +13,8 @@ Training functions that quantize weights fall into three buckets:
   speed over quality can set ``skip_calibration=True`` on their spec.
 
 - ``"unsupported"`` — the recipe is weight-only and never consumes
-  calibration data. Example: the fp8-E4M3 storage cast,
-  bitsandbytes ``nf4`` / ``fp4``. If the caller passes a dataset it's a
+  calibration data. Example: the fp8-E4M3 storage cast.
+  If the caller passes a dataset it's a
   mistake (wasted generation + wrong expectations about output quality);
   fail loudly rather than silently discard.
 
