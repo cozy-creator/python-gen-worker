@@ -462,11 +462,20 @@ class CozySnapshotDownloader:
                 missing.append(grant)
             report_residency()
 
-        required = sum(grant.size_bytes for grant in missing) + _DISK_HEADROOM_BYTES
+        # Every resident snapshot occupies disk TWICE: the CAS objects plus the
+        # materialized tree `_publish_snapshot` writes next. Sizing only the
+        # missing objects under-counted by exactly one whole model, and the
+        # `missing and` guard skipped the check entirely when every object was
+        # already resident — the case where the publish is the ONLY writer. A
+        # pod passed this gate and then ENOSPC'd mid-materialize.
+        fetch = sum(grant.size_bytes for grant in missing)
+        publish = sum(entry.size_bytes for entry in entries.values())
+        required = fetch + publish + _DISK_HEADROOM_BYTES
         free = shutil.disk_usage(cas.root).free
-        if missing and required > free:
+        if required > free:
             raise InsufficientDiskError(
-                f"insufficient disk for snapshot download: need {required} bytes, "
+                f"insufficient disk for snapshot: need {required} bytes "
+                f"({fetch} to fetch, {publish} to publish), "
                 f"{free} free at {cas.root}",
                 available_bytes=free,
                 required_bytes=required,
