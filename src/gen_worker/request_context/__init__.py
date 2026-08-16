@@ -802,13 +802,19 @@ class RequestContext(Generic[D]):
         function: str,
         payload: Dict[str, Any],
         *,
-        tag: str = "prod",
+        semver_major: int,
         wait: bool = True,
         timeout_s: Optional[float] = 3600.0,
         tier: Optional[str] = None,
         poll_interval_s: float = 2.0,
     ) -> Any:
         """Call another endpoint's function as a CHILD request.
+
+        ``semver_major`` addresses the callee's serving pointer for that
+        semver-major (``POST /{owner}/{name}/v{semver_major}/{function}``).
+        It is REQUIRED and has no default: endpoint tags are dead (th#2044),
+        an unassigned semver-major is a typed refusal naming the assigned
+        ones, and there is no ``latest``.
 
         The function must be declared ``@endpoint(child_calls=True)`` — the
         platform then scopes this invocation's credential for child calls.
@@ -836,7 +842,9 @@ class RequestContext(Generic[D]):
         """
         self.raise_if_cancelled()
         client = self._callout_client()
-        request_id = client.submit(endpoint, function, payload, tag=tag, tier=tier)
+        request_id = client.submit(
+            endpoint, function, payload, semver_major=semver_major, tier=tier
+        )
 
         handle = ChildRequest(client, request_id, wait_guard=self._child_call_wait)
         if not wait:

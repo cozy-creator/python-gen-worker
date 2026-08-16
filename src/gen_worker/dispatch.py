@@ -9,7 +9,6 @@ the head replaceable without touching the driver.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
 
 
 @dataclass(frozen=True)
