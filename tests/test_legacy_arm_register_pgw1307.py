@@ -126,10 +126,13 @@ def test_the_advertised_resampler_is_the_one_that_runs() -> None:
     """scipy was declared NOWHERE — not in `dependencies`, not in an extra, not
     in dev — so `from scipy.signal import resample_poly` always raised and every
     tenant got naive `np.interp` while the docstring advertised polyphase.
-    RED before pgw#1307: scipy was not importable from this package's deps.
-    """
-    from scipy.signal import resample_poly  # noqa: F401
 
+    The DELETION is asserted on the source, not on an import: CI installs the
+    base wheel without the `audio` extra, and requiring scipy here would only
+    prove which extras the runner happens to carry. That scipy is GUARANTEED
+    wherever `read_audio` can run is the next test's job — it reads the
+    manifest, which is the fact that was missing.
+    """
     import gen_worker.io as gw_io
 
     src = __import__("inspect").getsource(gw_io.read_audio)
