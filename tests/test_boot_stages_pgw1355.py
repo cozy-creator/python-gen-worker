@@ -383,13 +383,26 @@ def test_a_span_longer_than_the_process_CONFESSES_instead_of_shrinking() -> None
     RED PROOF: drop the `clamped_ms` attr and this passes while production
     quietly under-reports its dominant stage.
     """
-    uptime = boot_phases.process_uptime_ms()
+    requested = boot_phases.process_uptime_ms() + 900_000
     boot_stages.record_ending_now(
-        Stage.KEYSET, duration_ms=uptime + 900_000, label="impossible")
+        Stage.KEYSET, duration_ms=requested, label="impossible")
     span = boot_stages.recorded()[0]
-    assert span.t0_ms == 0
-    assert int(span.attrs["clamped_ms"]) >= 900_000 - 1_000, (
-        "the seconds that could not be represented are NAMED, not dropped")
+    lost = int(span.attrs["clamped_ms"])
+
+    assert span.t0_ms == 0, "a negative offset is not representable"
+    assert lost > 0, "nothing was clamped, so this case never exercised"
+    # The ACCOUNTING IDENTITY, not a tolerance: what the span ended up
+    # covering plus what it confessed losing is exactly what was asked for.
+    # Deliberately an equality rather than `lost >= 900_000 - slop` — the
+    # earlier spelling compared a measured value against a constant with a
+    # second of slack for the runner, which is the gw#666 defect: it passes on
+    # a fast box, flakes on a loaded one, and never actually checks that the
+    # confession is COMPLETE. This does, and it holds under any clock drift
+    # between reading the uptime and recording the span.
+    assert span.t1_ms + lost == requested, (
+        "the confessed loss does not account for the difference between the "
+        "duration asked for and the interval that could be represented — a "
+        "PARTIAL confession is just a quieter version of the silent truncation")
 
 
 # ---------------------------------------------------------------------------
