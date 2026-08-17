@@ -42,6 +42,11 @@ from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers only
     from ._generated.flux1_dev import Flux1Dev, Flux1DevLayout, Flux1DevResolution
+    from ._generated.flux2_klein_4b import (
+        Flux2Klein4b,
+        Flux2Klein4bLayout,
+        Flux2Klein4bTokens,
+    )
     from ._generated.sd2 import Sd2, Sd2Layout, Sd2Shape
     from ._generated.sd15 import Sd15, Sd15Layout, Sd15Shape
     from ._generated.sdxl import Sdxl, SdxlLayout, SdxlShape
@@ -52,6 +57,9 @@ _FAMILIES: Final[dict[str, str]] = {
     "Flux1Dev": "flux1_dev",
     "Flux1DevLayout": "flux1_dev",
     "Flux1DevResolution": "flux1_dev",
+    "Flux2Klein4b": "flux2_klein_4b",
+    "Flux2Klein4bLayout": "flux2_klein_4b",
+    "Flux2Klein4bTokens": "flux2_klein_4b",
     "Sd2": "sd2",
     "Sd2Layout": "sd2",
     "Sd2Shape": "sd2",
@@ -81,6 +89,9 @@ __all__ = [
     "Flux1Dev",
     "Flux1DevLayout",
     "Flux1DevResolution",
+    "Flux2Klein4b",
+    "Flux2Klein4bLayout",
+    "Flux2Klein4bTokens",
     "Sd2",
     "Sd2Layout",
     "Sd2Shape",
