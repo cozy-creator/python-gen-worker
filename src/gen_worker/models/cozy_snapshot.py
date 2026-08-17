@@ -1,9 +1,13 @@
 """Tensorhub snapshot policy composed over tensorfs.
 
-Tensorhub supplies a resolved manifest and opaque GET grants. tensorfs owns the
-chunk manifest, local object store, verified transfers, and materialization.
-This module retains only worker policy: component selection, pickle refusal,
-disk headroom, endpoint-volume fill order, and boot observability.
+Tensorhub supplies a resolved manifest and opaque GET grants. tensorfs owns
+what is true about bytes at rest -- the chunk manifest, the local object store,
+and materialization. **The transfer is OURS** (pgw#1308,
+:mod:`gen_worker.transfer.grants`): the grants are tensorhub's wire format and
+the retry ladder, fan-out width and progress emission are this worker's policy
+about this worker's uplink. This module retains the rest of that policy:
+component selection, pickle refusal, disk headroom, endpoint-volume fill order,
+and boot observability.
 """
 
 from __future__ import annotations
