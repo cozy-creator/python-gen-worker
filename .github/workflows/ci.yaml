@@ -371,6 +371,20 @@ jobs:
           uv run python scripts/lint_repo_ref_pins.py --selftest
           uv run python scripts/lint_repo_ref_pins.py
 
+      # GATING (A18 / §1.32(d), pgw#1307): the flavor axis is deleted, and the
+      # one residue that survives — `ProducedFlavor.flavor`, a PROD author
+      # surface training-endpoints constructs — may not grow a second reader
+      # while it waits for its te leg. `tests/test_flavor_deletion_pgw1148.py`
+      # asserts the same deletion and is NOT skipped (its one skipping row died
+      # at pgw#1167), but it runs in `tests`, which pgw#1264 took off the merge
+      # path — so until this step existed the required context had no opinion
+      # about the axis at all. Selftest first: the fence must prove it goes red
+      # before its green means anything.
+      - name: A18 guard - the flavor is deleted and its residue may not grow
+        run: |
+          uv run python scripts/lint_flavor_deletion.py --selftest
+          uv run python scripts/lint_flavor_deletion.py
+
       # GATING (pgw#1143, §1.33): `Slot(layouts=...)` is the per-slot layout
       # DEMAND the hub's gate reads. It must be readable by the AST sweep as
       # well as by the import, so a computed declaration is refused where it

@@ -129,17 +129,23 @@ CI-SKIPPED tests/test_mint_oom_classification_pgw848.py|the memory cap did not o
 # on every developer box.
 CI-SKIPPED tests/test_unbounded_read_guard_pgw1013.py|<hex> not in this checkout (shallow clone)
 
-# pgw#1148. `test_the_compile_cache_modules_are_byte_untouched_by_this_deletion`
-# proves the flavor deletion did not touch a single compile-cell module by
-# diffing the eight of them against `git merge-base HEAD origin/master` —
-# `actions/checkout@v4` is shallow, so there is no base commit to diff against.
-# It is REVIEWER EVIDENCE for one diff, and it runs on every developer box.
-# WHERE THE DURABLE PROPERTY IS MEASURED IN CI: the four rows beside it —
-# `test_the_cell_fragment_still_parses`, `test_parse_cell_ref_is_unchanged`
-# and `test_a_cell_ref_round_trips_through_the_normal_form` — which assert the
-# thing that actually matters forever (the `#`-shaped CELL ref grammar the
-# compile cache consumes still parses and round-trips) and run everywhere.
-CI-SKIPPED tests/test_flavor_deletion_pgw1148.py|no origin/master to diff against
+# pgw#1307 DELETED the `tests/test_flavor_deletion_pgw1148.py|no origin/master
+# to diff against` row that stood here, and the deletion is worth a note because
+# the row was doing ACTIVE harm. It classified a skip
+# `test_the_compile_cache_modules_are_byte_untouched_by_this_deletion` used to
+# take on a shallow checkout — a test pgw#1167 REMOVED. No code in this tree can
+# emit that reason any more, so the row could never be observed again; but it
+# read as a live statement, and two later lanes planned against "the flavor
+# fence is CI-SKIPPED" when the file in fact runs 19 rows, skips none, and is
+# green. A census entry nothing can produce is not a note, it is a false fact
+# with a filename attached — and this file's whole value is that its rows are
+# true. `lint_skip_census.py` cannot catch this: an unobserved row is legitimate
+# (CI and a developer box skip different things), so it prints them as expected.
+# Read a row's producing site before believing it.
+#
+# What the axis actually needs was the real finding: the fence ran, but only in
+# `tests`, which pgw#1264 took off the merge path. The REQUIRED context now
+# carries `scripts/lint_flavor_deletion.py` (`fast gates`, A18 guard).
 
 # ─── LOCAL-ONLY ───────────────────────────────────────────────────────────────
 LOCAL-ONLY tests/test_lora_lifted_pgw725.py|set gen_worker_aot_pack_tests=# (packs a real .pt#; needs g++)
