@@ -661,3 +661,58 @@ def test_the_store_indexes_and_binds_a_projected_tree(tmp_path: Path) -> None:
     # Still a projection afterwards: reading constants must not materialize.
     assert stub_at(shard) is not None
     assert shard.stat().st_size < 4096
+
+
+def test_a_device_oom_while_reading_constants_is_the_typed_adopt_miss(
+    armed_store: Tuple[Dict[str, Any], aot_constants.ConstantStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§4.33: the ATTEMPT is the headroom gate, and its verdict is one token.
+
+    The store arm allocates the WHOLE constant table before `bind` — TCG only
+    classifies an OOM inside `bind`, so without a classifier on the read this
+    is the one arm whose exhaustion reaches `provision.arm_aot` as an
+    unclassified crash instead of the `insufficient_adopt_vram` miss that
+    leaves the pod serving eager.
+    """
+
+    weights, store = armed_store
+    resolved = _patch_resolve(monkeypatch, weights)
+
+    def _exhausted(
+        _plan: Any, _store: Any, *, device: str
+    ) -> Dict[str, Any]:
+        raise RuntimeError("CUDA out of memory. Tried to allocate 20.00 GiB")
+
+    monkeypatch.setattr(aot_constants, "realize_store_constants", _exhausted)
+
+    with pytest.raises(AdoptError) as excinfo:
+        aot_serve.arm_compiled_graph_from_store(
+            SimpleNamespace(family=FAMILY), KEY, store, device="cuda"
+        )
+
+    assert excinfo.value.reason == aot_serve.ADOPT_OOM_REASON
+    assert not resolved.runner.bound  # type: ignore[attr-defined]
+
+
+def test_a_non_oom_read_failure_is_not_laundered_into_a_vram_miss(
+    armed_store: Tuple[Dict[str, Any], aot_constants.ConstantStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other direction, which matters more: `insufficient_adopt_vram` is
+    the token that tells the hub this CARD was too small. A read that failed
+    for any other reason must not wear it, or the fleet re-places a pod to fix
+    a fault that had nothing to do with memory."""
+
+    weights, store = armed_store
+    _patch_resolve(monkeypatch, weights)
+
+    def _broken(_plan: Any, _store: Any, *, device: str) -> Dict[str, Any]:
+        raise OSError("the shard vanished mid-read")
+
+    monkeypatch.setattr(aot_constants, "realize_store_constants", _broken)
+
+    with pytest.raises(OSError):
+        aot_serve.arm_compiled_graph_from_store(
+            SimpleNamespace(family=FAMILY), KEY, store, device="cuda"
+        )

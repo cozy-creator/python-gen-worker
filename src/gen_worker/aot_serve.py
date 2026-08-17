@@ -1746,6 +1746,24 @@ def arm_compiled_graph_from_store(
         constants = aot_constants.realize_store_constants(
             plan, store, device=target_device
         )
+    except Exception as exc:
+        # §4.33 / pgw#1175: the ATTEMPT is the headroom gate, and its verdict
+        # has to be the SAME token whichever half of the attempt ran out of
+        # device memory. TCG classifies an OOM inside `bind`; nothing
+        # classified one inside the READ, and the store arm allocates the
+        # whole constant table there — so without this, the one arm that does
+        # its allocating before `bind` is the one arm whose OOM reaches
+        # `provision.arm_aot` as an unclassified crash instead of a typed
+        # `insufficient_adopt_vram` miss that leaves the pod serving eager.
+        if not is_cuda_oom(exc):
+            raise
+        raise AdoptError(
+            ADOPT_OOM_REASON,
+            f"graph class {resolved.name!r}: reading {len(plan)} store-sourced "
+            f"constant(s) onto {target_device} exhausted device memory "
+            f"({type(exc).__name__}: {exc})",
+        ) from exc
+    try:
         resolved.runner.bind(constants, device=target_device)
     except ConstantBindingError as exc:
         reason = ADOPT_OOM_REASON if exc.reason == "out_of_memory" else exc.reason
