@@ -167,7 +167,7 @@ REASON_BELOW_DECLARED_MINIMUM = "below_declared_minimum"
 # The hub gates checkpoint<->function compatibility at deploy (`bindingcheck`)
 # and at request time; this reader is a version-skew backstop, and a backstop
 # that fatals turns a hub-side stamping gap into a customer-visible outage —
-# which is exactly what it did to sd15/anima/foundation-1 on 0.120.0.
+# which is exactly what it did to sd15 and anima on 0.120.0.
 # Doubles as the `serve_degrade` phase token (`memory.UNEVIDENCED_FACTS_PHASE`).
 REASON_SERVING_FACTS_UNEVIDENCED = "serving_facts_unevidenced"
 

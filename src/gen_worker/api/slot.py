@@ -475,8 +475,8 @@ def _finish_resolved(
     checkpoint whose objective this worker cannot see is the normal input to
     a degraded run: the caller confesses it through the `serve_degrade` seam
     (:func:`unevidenced_axes` names the axes) and SERVES. 0.120.0 raised on
-    absence instead, and that inversion took `sd15`, `anima` and
-    `foundation-1` down in production on checkpoints the hub had stamped
+    absence instead, and that inversion took `sd15` and `anima` down in
+    production — both MEASURED dead on checkpoints the hub had stamped
     correctly — a backstop against version skew became the outage. It is the
     same rule pgw#1315 settled for declared VRAM minimums: a declaration
     gates one thing, a config-WRITE, and that lives hub-side; at EXECUTION it

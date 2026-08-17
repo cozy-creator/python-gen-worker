@@ -5,9 +5,9 @@ serves anyway, loudly. Absence degrades; only a CONTRADICTION refuses.
 inverted. 0.118.0 read `if resolved.objective:` — an unseen objective was
 simply nothing to check. 0.120.0 rewrote it as `if allowed_objectives is not
 None:` with an inner `if not resolved.objective: raise`, so an ABSENT
-objective went from "nothing to check" to a fatal. On 2026-08-17 `sd15`,
-`anima` and `foundation-1` were republished onto that wheel, promoted, and
-pointed at `prod`; every consumer request died
+objective went from "nothing to check" to a fatal. On 2026-08-17 `sd15` and
+`anima` were republished onto that wheel, promoted, and pointed at `prod`;
+every consumer request died
 
     DeclaredSlotResolutionError: slot 'pipeline': resolved checkpoint carries
     no training objective, so there is no evidence for the invoked function's
@@ -18,8 +18,22 @@ the same digest completing on 0.118.0 against the same hub). 0.121.0 ships
 the same reader byte for byte — `api/slot.py` sha256
 `8191b9ba…` in both wheels — so the whole fleet campaign was blocked on it.
 
+**Scope, stated precisely because the original filing over-associated it.**
+`foundation-1` was named alongside the other two on the night and is NOT a
+victim of this defect: it declares no `@worker_function(objectives=/
+distilled=)` at all, so nothing here can reach it, and the fleet lane
+subsequently measured ZERO `requests`/`request_state` and ZERO `worker_pods`
+rows for it over 30 hours — it was never observed serving OR failing. The
+defect is measured on `sd15` and `anima`; everything else is association.
+Structural immunity is a claim this file can make; a cause of death for an
+unobserved endpoint is not.
+
 **The ruling this restores.** §DEGRADATION-IS-LOUD, Paul: *"the worker should
-obviously complain loudly ... but it should still work"*, and its standing
+obviously complain loudly ... but it should still work"*; the machine-
+compatibility charter, verbatim — *"it always runs, just possibly horribly
+inefficiently"*; and the CPU-offload ruling — *"we always allow it, and
+encourage it, although when it happens we should warn loudly so the error can
+be caught."* Three statements of one shape, and its standing
 gloss — the loudness is *diagnostics*, never a gate. pgw#1315 already settled
 the identical shape for VRAM: a declared minimum *"gates one thing, a
 config-WRITE, and that lives hub-side"*. A declared `objectives=` contract is

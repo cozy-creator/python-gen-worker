@@ -20,8 +20,8 @@ two states an empty string used to conflate — *the catalog says nothing* and
 the different people who can close them.
 
 **AMENDED by pgw#1339 / th#2099.** This lane also made absence a refusal, and
-that half was wrong: shipped as 0.120.0 it took three promoted production
-endpoints down on correctly-stamped checkpoints. Absence now degrades loudly
+that half was wrong: shipped as 0.120.0 it took `sd15` and `anima` down in
+production on correctly-stamped checkpoints. Absence now degrades loudly
 and serves; only a CONTRADICTION refuses. The carrying half — the type, the
 chain, the attribution — is untouched and is what the rest of this file
 proves.
@@ -151,12 +151,20 @@ def test_an_unclassified_checkpoint_SERVES(tmp_path: Path) -> None:
     the worker complains loudly and still works. The objective backstop is not
     a safety gate — the hub gates checkpoint<->function compatibility at
     deploy and at request time, and this reader's own docstring calls itself a
-    version-skew backstop. Shipping it fatal in 0.120.0 took `sd15`, `anima`
-    and `foundation-1` down in production.
+    version-skew backstop. Shipping it fatal in 0.120.0 took `sd15` and
+    `anima` down in production, both measured.
 
     So an unclassified checkpoint SERVES, and confesses. The gate that
     survives is the one against CONTRADICTION, asserted directly below and in
     `test_objective_absence_degrades_pgw1339.py`.
+
+    **AFFIRMED, do not re-litigate from §1.22.** The supersession was reviewed
+    and upheld against two of Paul's standing rulings in his own words: the
+    machine-compatibility charter — *"it always runs, just possibly horribly
+    inefficiently"* — and the CPU-offload ruling — *"we always allow it, and
+    encourage it, although when it happens we should warn loudly so the error
+    can be caught."* Serving-with-a-loud-warning on absent evidence is
+    precisely that shape.
     """
     _preflight(serving_facts.ServingFacts(), tmp_path)  # must not raise
 

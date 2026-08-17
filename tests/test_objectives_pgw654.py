@@ -259,7 +259,7 @@ def test_an_unstamped_checkpoint_SERVES_UNCHECKED() -> None:
     request the hub may still decline), while the worker is executing a
     request the hub already admitted. Refusing there does not add a gate — it
     converts a hub-side stamping gap into a customer-visible fatal, which is
-    exactly what 0.120.0 did to `sd15`, `anima` and `foundation-1`.
+    exactly what 0.120.0 did to `sd15` and `anima`.
 
     So both arms now RESOLVE, and the absence is confessed instead.
     """

@@ -27,7 +27,7 @@ distinction the two members buy is therefore in the SENTENCE, not in the
 verdict: an operator reading "the catalog classified nothing" goes and
 classifies the checkpoint, and one reading "hello_ack.go did not stamp" goes
 and fixes the hub. Both used to read as "your checkpoint is broken", and the
-one that shipped fatal took three promoted endpoints down.
+one that shipped fatal took two measured production endpoints down.
 
 The union is not optional and carries no default anywhere it is stored: a
 slot resolution that cannot say which of the two it is cannot be constructed.
