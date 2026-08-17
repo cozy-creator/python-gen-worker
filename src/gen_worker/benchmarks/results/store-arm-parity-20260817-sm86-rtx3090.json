@@ -14,7 +14,7 @@
     "python": "3.12.14",
     "cuda": "13.0"
   },
-  "device_name": "NVIDIA RTX A5000",
+  "device_name": "NVIDIA GeForce RTX 3090",
   "calls": [
     {
       "call": 0,
