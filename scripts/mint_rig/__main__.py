@@ -112,15 +112,21 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0 if row.verdict == "green" else 1
 
 
+#: `terminate` and `sweep` rent nothing, but `Rig` refuses to exist without a
+#: rail — deliberately, so no code path can construct one "just to look". A cent
+#: is the smallest honest statement of "this invocation will not buy anything".
+_NO_SPEND = 0.01
+
+
 def cmd_terminate(args: argparse.Namespace) -> int:
-    rig = Rig(rail=Rail(max_usd=0.01), lane="terminate", out_dir=Path(args.out or "."))
+    rig = Rig(rail=Rail(max_usd=_NO_SPEND), lane="terminate", out_dir=Path(args.out or "."))
     row: RigRow = rig.terminate(pod_id=args.pod, name=args.name)
     print(json.dumps(row.teardown.__dict__, indent=2))
     return 0 if row.teardown.confirmed else 1
 
 
 def cmd_sweep(args: argparse.Namespace) -> int:
-    rig = Rig(rail=Rail(max_usd=0.01), lane="sweep", out_dir=Path(args.out or "."))
+    rig = Rig(rail=Rail(max_usd=_NO_SPEND), lane="sweep", out_dir=Path(args.out or "."))
     report = rig.sweep()
     print(json.dumps(report, indent=2, sort_keys=True))
     # A live pod that NO record anywhere attends is the failure this package

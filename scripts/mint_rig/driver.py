@@ -41,7 +41,7 @@ from .rail import Rail, RailTripped
 from .row import Artifact, RigRow
 from .runpod import PodApi, PodNotFound, RunpodRest, dotenv
 from .transport import Result, SshTransport, Transport
-from .workload import POD_ROOT, Upload, Workload
+from .workload import POD_ROOT, Upload, Workload, sha256_file
 
 #: RIG-ENV §3a: `pytorch/pytorch:*-runtime` ships no sshd and an entrypoint that
 #: exits, so a rig must install one and block on it. Idempotent, because a pod
@@ -598,8 +598,6 @@ class Rig:
             artifact.local = str(base) if artifact.fetched else ""
             artifact.note = "" if artifact.fetched else result.out.strip()[-200:]
             if artifact.fetched and base.is_file():
-                from .workload import sha256_file
-
                 artifact.bytes = base.stat().st_size
                 artifact.sha256 = sha256_file(base)
             row.artifacts.append(artifact.__dict__)
