@@ -67,6 +67,7 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
         fake_kwargs,
         resolver_instances,
     )
+    from .residency import eager_modules, instance_for, instances_for
     from .runtime import (
         DecodeSession,
         Model,
@@ -153,6 +154,9 @@ _EXPORTS: Final[dict[str, tuple[str, str]]] = {
     "fake_models": ("inject", "fake_models"),
     "fake_kwargs": ("inject", "fake_kwargs"),
     "instance_resolver": ("runtime", "instance_resolver"),
+    "eager_modules": ("residency", "eager_modules"),
+    "instance_for": ("residency", "instance_for"),
+    "instances_for": ("residency", "instances_for"),
     "resolve": ("runtime", "resolve"),
     "resolve_tuned": ("runtime", "resolve_tuned"),
     "resolver_instances": ("inject", "resolver_instances"),
@@ -227,9 +231,12 @@ __all__ = [
     "bind_models",
     "bound_models",
     "declared_model_specs",
+    "eager_modules",
     "fake_models",
     "fake_kwargs",
+    "instance_for",
     "instance_resolver",
+    "instances_for",
     "resolve",
     "resolve_tuned",
     "resolver_instances",

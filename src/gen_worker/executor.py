@@ -5063,7 +5063,8 @@ class Executor:
                 )
                 for obj in objects
             }
-            handler_kwargs = await self._handler_kwargs(wj.spec, snapshots or {})
+            handler_kwargs = await self._handler_kwargs(
+                wj.spec, snapshots or {}, warm=True)
             t0 = time.monotonic()
             with tempfile.TemporaryDirectory(prefix="gw-warmup-") as tmp:
                 try:
@@ -10272,7 +10273,8 @@ class Executor:
                 effective_config,
                 snapshot=invocation_snapshot,
             )
-            kwargs = await self._handler_kwargs(spec, snapshots)
+            kwargs = await self._handler_kwargs(
+                spec, snapshots, order.slots, order.adapters)
             adapters = await self._prepare_adapters(order.adapters, spec, snapshots)
             ctx.raise_if_cancelled("canceled")
         except (asyncio.CancelledError, CanceledError):
@@ -10692,10 +10694,25 @@ class Executor:
             await asyncio.to_thread(resolve, ref)
 
     async def _handler_kwargs(
-        self, spec: EndpointSpec, snapshots: Dict[WireRef, pb.Snapshot]
+        self,
+        spec: EndpointSpec,
+        snapshots: Dict[WireRef, pb.Snapshot],
+        slots: Optional[Mapping[str, dispatch.SlotOrder]] = None,
+        adapters: Optional[Mapping[str, Tuple[dispatch.AdapterOrder, ...]]] = None,
+        warm: bool = False,
     ) -> Dict[str, Any]:
         """Per-call model injection: handler parameters (after ctx, payload)
-        whose names match model slots receive the local snapshot path."""
+        whose names match model slots receive the local snapshot path, and
+        parameters bound to a declared MODEL receive a resolved instance.
+
+        pgw#1346: the second half is what makes the typed SDK servable. It is
+        built PER CALL rather than once at setup, because a `Model` value
+        carries this request's checkpoint ref and that checkpoint's tuned
+        values — two requests on one warm pod can name two checkpoints, and an
+        instance cached across them would serve the first one's tuning forever.
+        Only the cheap half is per-call: the weights are whatever residency
+        already holds, reached through `Runner.component`.
+        """
         try:
             sig = typing.get_type_hints(spec.method)
         except Exception:
@@ -10714,7 +10731,63 @@ class Executor:
             ref = wire_ref(binding)
             path = await self.store.ensure_local(ref, snapshots.get(ref), binding=binding)
             kwargs[name] = Path(path) if sig.get(name) is Path else str(path)
+        kwargs.update(
+            self._model_instance_kwargs(spec, slots or {}, adapters or {}, warm=warm))
         return kwargs
+
+    def _model_instance_kwargs(
+        self,
+        spec: EndpointSpec,
+        slots: Mapping[str, dispatch.SlotOrder],
+        adapters: Mapping[str, Tuple[dispatch.AdapterOrder, ...]],
+        warm: bool = False,
+    ) -> Dict[str, Any]:
+        """One resolved `Model` per declared model parameter (pgw#1346).
+
+        The three inputs each come from the ONE place that already owns them,
+        rather than being re-derived here:
+
+        * the ref and the catalog-stamped tuned values from this dispatch's
+          ``SlotOrder`` — the same wire fields `ctx.defaults` reads, so a model
+          instance and the retiring context surface cannot disagree about what
+          the hub said;
+        * the weight-bearing modules from ``_slot_pipeline``, which is already
+          the single answer to "what did this slot load", including the
+          th#980 component-override case where the residency handle is a
+          ModuleDict and the pipeline identity is held separately;
+        * the armed compiled runners from the adoption seam, when the pod has
+          any. Absent, the instance is eager-only and every typed call runs the
+          eager module — which is the honest state on a pod that has not armed,
+          not a degradation to report.
+        """
+
+        if not spec.families:
+            return {}
+        from .model.residency import instances_for
+
+        refs: Dict[str, str] = {}
+        stamped: Dict[str, str] = {}
+        lora_stamped: Dict[str, tuple[str, ...]] = {}
+        trees: Dict[str, Any] = {}
+        for name in spec.families:
+            order = slots.get(name)
+            if order is not None:
+                refs[name] = order.ref
+                stamped[name] = order.inference_defaults
+            elif name in spec.models:
+                # Hub-less (`gen-worker run`, hermetic tests): the declaration's
+                # own bootstrap ref is the only resolution source, exactly as it
+                # is for every other slot on that path.
+                refs[name] = str(wire_ref(spec.models[name]))
+            lora_stamped[name] = tuple(
+                a.inference_defaults for a in adapters.get(name, ())
+                if a.inference_defaults
+            )
+            trees[name] = self._slot_pipeline(spec, name)
+        return dict(instances_for(
+            spec.families, refs=refs, trees=trees,
+            stamped=stamped, lora_stamped=lora_stamped, skip_unresolved=warm,
+        ))
 
     async def _prepare_adapters(
         self,
