@@ -122,6 +122,30 @@ def _parse(kind: str, value: object, parse: Any) -> str:
         ) from exc
 
 
+def _layout_handle(value: object) -> str:
+    """One ie#740 tensor-layout handle out of a document, validated.
+
+    NOT ``parse_layout_contract``, and the difference is pgw#1346's K4 in one
+    line: a RUNNER's ``layouts`` are torchcg contract handles and live under
+    the recipe's identifier grammar, while a MODEL's ``layouts`` are the hub's
+    registered tensor-layout contracts — ``plain.bf16@1`` — which that grammar
+    refuses on sight. Two axes, two vocabularies, and decoding one with the
+    other's parser rejects every real declaration.
+    """
+
+    from ..models.tensor_layout_contract import (
+        LayoutDeclarationError,
+        validate_layout_handle,
+    )
+
+    try:
+        return validate_layout_handle(value, where="eager model export")
+    except LayoutDeclarationError as exc:
+        raise ModelError(
+            ModelRefusal.SNAPSHOT_INVALID, f"layout handle {value!r} is not canonical: {exc}"
+        ) from exc
+
+
 @dataclass(frozen=True, slots=True)
 class ExportedOutput:
     """One tensor a variant RETURNS, as the export recorded it.
@@ -764,6 +788,194 @@ class ModelExport:
         return cls.decode(document)
 
 
+#: The schema :class:`EagerExport` implements, versioned separately from
+#: ``family_export_v1`` because it is a different document with a different
+#: field set — not a degenerate case of one.
+EAGER_VERSION: Final = 1
+
+
+@dataclass(frozen=True, slots=True)
+class EagerExport:
+    """``eager_model_v1`` — what an EAGER declaration states, with no trace.
+
+    pgw#1346 B5. ``family_export_v1`` is the record of a fake-tensor TRACE: its
+    runners, buckets, loop and signatures all exist because something was
+    exported. An eager-only :class:`~gen_worker.model.spec.ModelSpec` has none
+    of that by definition — a model served by an external binary (vLLM,
+    llama-server) or a runtime that loads itself has no graph to trace, and the
+    F3 ruling makes that a PERMANENT state rather than a waiting room. Widening
+    ``ModelExport`` to admit zero runners would have deleted the invariants
+    that make a generated ``Literal`` exhaustive, for the benefit of documents
+    that carry no ``Literal`` at all.
+
+    So this is a second, smaller document with its own closed field set, and
+    everything downstream is unchanged in shape: the declaration exports it
+    (no torch, nothing to trace), codegen is a pure function of it, both halves
+    are committed, and the fence is the same byte comparison.
+
+    What it carries is exactly what an eager declaration can honestly state:
+    the family handle, the tuned schema(s) when the model has an inference
+    vocabulary, and the three layout axes — which are the ie#740 floors, and
+    the reason this document exists at all rather than the declaration being
+    dropped on the floor at migration time.
+    """
+
+    family: FamilyName
+    tuned: TunedRef | None = None
+    lora_tuned: TunedRef | None = None
+    layouts: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    layouts_undeclarable: str = ""
+    layout_requirements: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "family", FamilyName(_parse("family name", self.family, parse_family_name))
+        )
+        components = tuple(component for component, _ in self.layouts)
+        if components != tuple(sorted(set(components))):
+            raise ModelError(
+                ModelRefusal.SNAPSHOT_INVALID,
+                "eager export layout components must be sorted and unique",
+            )
+        for component, handles in self.layouts:
+            if not handles or handles != tuple(sorted(set(handles))):
+                raise ModelError(
+                    ModelRefusal.SNAPSHOT_INVALID,
+                    f"eager export layouts[{component!r}] must be a non-empty sorted "
+                    "unique handle set",
+                )
+        if self.layouts and self.layouts_undeclarable:
+            raise ModelError(
+                ModelRefusal.SNAPSHOT_INVALID,
+                "eager export declares both layouts and layouts_undeclarable; a model "
+                "either names the contracts its code executes or says why none is "
+                "nameable, never both",
+            )
+        guarded = tuple(handle for handle, _ in self.layout_requirements)
+        if guarded != tuple(sorted(set(guarded))):
+            raise ModelError(
+                ModelRefusal.SNAPSHOT_INVALID,
+                "eager export layout_requirements must be sorted by handle and unique",
+            )
+        accepted = {handle for _, handles in self.layouts for handle in handles}
+        unknown = sorted(set(guarded) - accepted)
+        if unknown:
+            raise ModelError(
+                ModelRefusal.SNAPSHOT_INVALID,
+                f"eager export requires {unknown[0]!r}, which it does not accept; a "
+                "requirement over nothing is never checked",
+            )
+        if self.lora_tuned is not None and self.tuned is None:
+            raise ModelError(
+                ModelRefusal.SNAPSHOT_INVALID,
+                "eager export carries a lora tuned schema with no base one; a LoRA "
+                "vocabulary refines a base one and there is none here to refine",
+            )
+
+    # ---------------------------------------------------------------- writing
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "v": EAGER_VERSION,
+            "family": str(self.family),
+            "layouts": [
+                {"component": component, "contracts": list(handles)}
+                for component, handles in self.layouts
+            ],
+            "layouts_undeclarable": self.layouts_undeclarable,
+            "layout_requirements": [
+                {"contract": handle, "minimum": minimum}
+                for handle, minimum in self.layout_requirements
+            ],
+            "tuned": None if self.tuned is None else self.tuned.as_dict(),
+            "lora_tuned": None if self.lora_tuned is None else self.lora_tuned.as_dict(),
+        }
+
+    def canonical(self) -> bytes:
+        return _canonical(self.as_dict())
+
+    def digest(self) -> str:
+        """The 32-hex machine-independent digest a generated module pins."""
+
+        return hashlib.sha256(self.canonical()).hexdigest()[:_DIGEST_HEX]
+
+    def dumps(self) -> str:
+        return json.dumps(self.as_dict(), sort_keys=True, indent=2, ensure_ascii=True) + "\n"
+
+    # ---------------------------------------------------------------- decoding
+
+    @classmethod
+    def decode(cls, raw: object) -> EagerExport:
+        row = _fields(
+            "eager model export",
+            raw,
+            frozenset(
+                (
+                    "v",
+                    "family",
+                    "layouts",
+                    "layouts_undeclarable",
+                    "layout_requirements",
+                    "tuned",
+                    "lora_tuned",
+                )
+            ),
+        )
+        version = row["v"]
+        if type(version) is not int or version != EAGER_VERSION:
+            raise ModelError(
+                ModelRefusal.SNAPSHOT_VERSION_UNSUPPORTED,
+                f"eager model export v={version!r} is not v{EAGER_VERSION}; this reader "
+                "has one version",
+            )
+        for name in ("layouts", "layout_requirements"):
+            if not isinstance(row[name], list):
+                raise ModelError(
+                    ModelRefusal.SNAPSHOT_INVALID,
+                    f"eager model export {name} must be an array",
+                )
+        layouts: list[tuple[str, tuple[str, ...]]] = []
+        for entry in row["layouts"]:
+            item = _fields("eager layout demand", entry, frozenset(("component", "contracts")))
+            contracts = item["contracts"]
+            if not isinstance(contracts, list):
+                raise ModelError(
+                    ModelRefusal.SNAPSHOT_INVALID, "eager layout contracts must be an array"
+                )
+            layouts.append(
+                (
+                    str(item["component"]),
+                    tuple(_layout_handle(handle) for handle in contracts),
+                )
+            )
+        requirements: list[tuple[str, str]] = []
+        for entry in row["layout_requirements"]:
+            item = _fields(
+                "eager layout requirement", entry, frozenset(("contract", "minimum"))
+            )
+            requirements.append((_layout_handle(item["contract"]), str(item["minimum"])))
+        tuned = row["tuned"]
+        lora = row["lora_tuned"]
+        return cls(
+            family=FamilyName(str(row["family"])),
+            tuned=None if tuned is None else TunedRef.decode(tuned),
+            lora_tuned=None if lora is None else TunedRef.decode(lora),
+            layouts=tuple(layouts),
+            layouts_undeclarable=str(row["layouts_undeclarable"]),
+            layout_requirements=tuple(requirements),
+        )
+
+    @classmethod
+    def loads(cls, payload: bytes | str) -> EagerExport:
+        try:
+            document = json.loads(payload)
+        except ValueError as exc:
+            raise ModelError(
+                ModelRefusal.SNAPSHOT_INVALID, f"eager model export is not JSON: {exc}"
+            ) from exc
+        return cls.decode(document)
+
+
 def _product(rows: Sequence[tuple[int, ...]]) -> tuple[tuple[int, ...], ...]:
     out: tuple[tuple[int, ...], ...] = ((),)
     for row in rows:
@@ -772,7 +984,9 @@ def _product(rows: Sequence[tuple[int, ...]]) -> tuple[tuple[int, ...], ...]:
 
 
 __all__ = [
+    "EAGER_VERSION",
     "EXPORT_VERSION",
+    "EagerExport",
     "ExportedLoop",
     "ExportedOutput",
     "ExportedParameter",

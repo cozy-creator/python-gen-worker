@@ -1,0 +1,24 @@
+{
+  "family": "foundation_1",
+  "layout_requirements": [
+    {
+      "contract": "plain.bf16@1",
+      "minimum": "vram8g"
+    }
+  ],
+  "layouts": [
+    {
+      "component": "*",
+      "contracts": [
+        "plain.bf16@1"
+      ]
+    }
+  ],
+  "layouts_undeclarable": "",
+  "lora_tuned": null,
+  "tuned": {
+    "module": "gen_worker.model.catalog.boundary_audio",
+    "qualname": "Foundation1Tuned"
+  },
+  "v": 1
+}

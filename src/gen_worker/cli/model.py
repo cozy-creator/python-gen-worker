@@ -6,7 +6,9 @@ and different cadences:
 ``export``    runs ``torch.export`` over a model DECLARATION with fake tensors
               and writes ``<family>.export.json``. Needs torch and the model
               library; needs no GPU, no weights and no network. Run it when the
-              declaration changes.
+              declaration changes. An EAGER declaration has no graph classes to
+              trace, so the same command projects it into
+              ``<family>.eager.json`` and needs no torch at all (pgw#1346 B5).
 ``generate``  turns that document into a typed binding module. Pure, fast, and
               needs NOTHING but the document — no torch, no diffusers. Run it in
               CI to prove the committed binding is what the export implies.
@@ -31,10 +33,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from ..model.codegen import render_module
+from ..model.codegen import render_eager_module, render_module
 from ..model.errors import ModelError
-from ..model.snapshot import ModelExport
-from ..model.spec import GraphModelSpec
+from ..model.snapshot import EagerExport, ModelExport
+from ..model.spec import GraphModelSpec, ModelSpec
 
 
 def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
@@ -52,7 +54,11 @@ def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
 
     export = commands.add_parser(
         "export",
-        help="Fake-tensor export a GraphModelSpec declaration into <family>.export.json.",
+        help=(
+            "Export a declaration: a GraphModelSpec is fake-tensor traced into "
+            "<family>.export.json; an eager-only ModelSpec is projected into "
+            "<family>.eager.json with no torch at all."
+        ),
     )
     export.add_argument(
         "target",
@@ -67,9 +73,14 @@ def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
 
     generate = commands.add_parser(
         "generate",
-        help="Render the typed binding module for a committed <family>.export.json.",
+        help=(
+            "Render the typed binding module for a committed <family>.export.json "
+            "or <family>.eager.json."
+        ),
     )
-    generate.add_argument("document", help="Path to a <family>.export.json.")
+    generate.add_argument(
+        "document", help="Path to a <family>.export.json or <family>.eager.json."
+    )
     generate.add_argument(
         "--out",
         default="",
@@ -172,27 +183,42 @@ def _handle_export(args: argparse.Namespace) -> int:
     except (ImportError, AttributeError, ValueError) as exc:
         sys.stderr.write(f"gen-worker model export: cannot load {args.target!r}: {exc}\n")
         return 2
-    if not isinstance(family, GraphModelSpec):
+    if not isinstance(family, ModelSpec):
         sys.stderr.write(
-            f"gen-worker model export: {args.target!r} is a "
-            f"{type(family).__name__}, not a GraphModelSpec; an eager-only ModelSpec has no "
-            "graph classes to export\n"
+            f"gen-worker model export: {args.target!r} is a {type(family).__name__}, not a "
+            "model declaration\n"
         )
         return 2
-    from ..model.export import export_model
+    # An EAGER declaration takes the torch-free path: it has no graph classes,
+    # so there is nothing to trace and `eager_model_v1` is what it can honestly
+    # state (pgw#1346 B5). The refusal this replaces was correct about the
+    # graph tier and wrong to leave the eager tier with no export at all.
+    document: Any
+    if isinstance(family, GraphModelSpec):
+        from ..model.export import export_model
 
-    try:
-        document = export_model(family)
-    except ModelError as exc:
-        sys.stderr.write(f"gen-worker model export: {exc}\n")
-        return 1
+        try:
+            document = export_model(family)
+        except ModelError as exc:
+            sys.stderr.write(f"gen-worker model export: {exc}\n")
+            return 1
+        suffix = "export.json"
+    else:
+        from ..model.export import export_eager_model
+
+        try:
+            document = export_eager_model(family)
+        except ModelError as exc:
+            sys.stderr.write(f"gen-worker model export: {exc}\n")
+            return 1
+        suffix = "eager.json"
     out_dir = (
         Path(args.out_dir)
         if args.out_dir
         else Path(importlib.import_module(module_name).__file__ or ".").parent / "_generated"
     )
     out_dir.mkdir(parents=True, exist_ok=True)
-    destination = out_dir / f"{document.family}.export.json"
+    destination = out_dir / f"{document.family}.{suffix}"
     destination.write_text(document.dumps())
     sys.stderr.write(f"wrote {destination} ({document.digest()}); declared by {attr}\n")
     return 0
@@ -200,13 +226,18 @@ def _handle_export(args: argparse.Namespace) -> int:
 
 def _handle_generate(args: argparse.Namespace) -> int:
     document = Path(args.document)
+    # The document's own name says which tier it is, so nothing has to be
+    # passed twice and a mismatch is impossible rather than merely unlikely.
+    eager = document.name.endswith(".eager.json")
+    reader = EagerExport.loads if eager else ModelExport.loads
     try:
-        export = ModelExport.loads(document.read_bytes())
+        export: Any = reader(document.read_bytes())
     except (OSError, ModelError) as exc:
         sys.stderr.write(f"gen-worker model generate: cannot read {document}: {exc}\n")
         return 2
     spec_module, _, spec_attr = str(args.spec).partition(":")
-    rendered = render_module(export, spec_module=spec_module, spec_attr=spec_attr)
+    render = render_eager_module if eager else render_module
+    rendered = render(export, spec_module=spec_module, spec_attr=spec_attr)
     destination = Path(args.out) if args.out else document.parent / f"{export.family}.py"
     if args.check:
         current = destination.read_text() if destination.is_file() else ""

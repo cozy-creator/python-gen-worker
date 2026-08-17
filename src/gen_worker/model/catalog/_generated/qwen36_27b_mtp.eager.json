@@ -1,0 +1,12 @@
+{
+  "family": "qwen36_27b_mtp",
+  "layout_requirements": [],
+  "layouts": [],
+  "layouts_undeclarable": "GGUF: `gguf.native@1` is a TOPOLOGY handle and this axis is QUANT, which has no GGUF entry (th#1809 T3)",
+  "lora_tuned": null,
+  "tuned": {
+    "module": "gen_worker.model.catalog.boundary_llm",
+    "qualname": "Qwen36MtpTuned"
+  },
+  "v": 1
+}

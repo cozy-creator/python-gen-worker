@@ -51,7 +51,7 @@ import msgspec
 from ..families.base import GenerationDefaults
 from .backing import Backing, BackingKind, DualBacking, EagerBacking, FakeBacking
 from .errors import ModelError, ModelRefusal
-from .snapshot import ExportedVariant, ModelExport
+from .snapshot import EagerExport, ExportedVariant, ModelExport
 from .spec import ModelSpec
 
 
@@ -180,9 +180,17 @@ class Model:
     #: The declaration-export digest these bindings were generated against.
     EXPORT_DIGEST: ClassVar[str] = ""
     #: The family's tuned-value SCHEMA. Values are catalog, per release slot.
-    Tuned: ClassVar[type[GenerationDefaults]]
+    #: The bare base is the EAGER tier's honest answer for a model with no
+    #: inference vocabulary at all (pgw#1346 K5/B5): an auxiliary or
+    #: external-binary model registers no schema, so there is none to name.
+    Tuned: ClassVar[type[GenerationDefaults]] = GenerationDefaults
     #: The committed ``family_export_v1`` document, loaded once per class.
-    EXPORT: ClassVar[ModelExport]
+    #: ``None`` on an EAGER model, which declares no graph classes and
+    #: therefore exports ``eager_model_v1`` (below) instead — the F3 ruling's
+    #: permanent tier, not a partially-generated binding.
+    EXPORT: ClassVar[ModelExport | None] = None
+    #: The committed ``eager_model_v1`` document, on an eager model only.
+    EAGER: ClassVar[EagerExport | None] = None
     #: The declaration, when the catalog module that owns it is importable.
     #: ``None`` on an adopt-only serve pod, where the declaration's ``build``
     #: would import diffusers and the role forbids it (pgw#1328).
@@ -355,6 +363,28 @@ class Model:
 
     # ---------------------------------------------------------------- invocation
 
+    @classmethod
+    def _graph_export(cls, what: str) -> ModelExport:
+        """This class's ``family_export_v1``, or the eager tier's refusal.
+
+        An EAGER model declares no graph classes, so every question phrased in
+        graph vocabulary — which variant serves this bucket, what does the loop
+        thread between steps — has no answer rather than a neutral one. Naming
+        the tier in the refusal is what keeps it from reading as a broken
+        binding (pgw#1346's F3 ruling: this is a permanent citizen).
+        """
+
+        export = cls.EXPORT
+        if export is None:
+            raise ModelError(
+                ModelRefusal.FAMILY_INVALID,
+                f"model {cls.FAMILY!r} is EAGER: it declares no graph classes, so it has "
+                f"no {what}. An external-binary or non-PyTorch runtime is a permanent "
+                "eager citizen and owes no graph (pgw#1346 F3); declare a GraphModelSpec "
+                "if this model does have one.",
+            )
+        return export
+
     def variant(
         self,
         runner: str,
@@ -369,7 +399,8 @@ class Model:
         already decided.
         """
 
-        return type(self).EXPORT.runner(runner).variant(dict(bucket or {}), layout)
+        export = type(self)._graph_export("runner variants")
+        return export.runner(runner).variant(dict(bucket or {}), layout)
 
     def _invoke(
         self,
@@ -393,7 +424,7 @@ class Model:
         implying a capability the family does not have.
         """
 
-        loop = type(self).EXPORT.loop
+        loop = type(self)._graph_export("declared loop").loop
         if loop.kind.value != "host":
             raise ModelError(
                 ModelRefusal.SESSION_INVALID,

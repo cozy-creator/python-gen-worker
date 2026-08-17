@@ -44,6 +44,7 @@ from .._vendor.torchcg.recipe import (
 )
 from .errors import ModelError, ModelRefusal
 from .snapshot import (
+    EagerExport,
     ExportedLoop,
     ExportedOutput,
     ExportedParameter,
@@ -54,7 +55,7 @@ from .snapshot import (
     ModelExport,
     TunedRef,
 )
-from .spec import CallExample, GraphModelSpec, Runner
+from .spec import CallExample, GraphModelSpec, ModelSpec, Runner
 
 
 @contextlib.contextmanager
@@ -354,6 +355,51 @@ def export_model(family: GraphModelSpec) -> ModelExport:
     )
 
 
+def export_eager_model(model: ModelSpec) -> EagerExport:
+    """Export an EAGER declaration into ``eager_model_v1`` (pgw#1346 B5).
+
+    Nothing is traced, because there is nothing to trace: the F3 ruling makes
+    an external-binary or non-PyTorch model a permanent eager citizen, and it
+    has no graph to export. So this needs no torch, no fake-tensor mode and no
+    model library at all — it is a projection of the declaration's own fields,
+    which is what lets the eager half of the catalog be authored, committed and
+    fenced by a two-minute job.
+
+    A :class:`GraphModelSpec` is REFUSED rather than narrowed to its eager
+    fields: it has runners, and silently exporting the smaller document would
+    generate bindings with no typed callables for a family that has them.
+    """
+
+    if isinstance(model, GraphModelSpec):
+        raise ModelError(
+            ModelRefusal.FAMILY_INVALID,
+            f"model {model.name!r} is a GraphModelSpec; export it with export_model() so "
+            "its runners reach the bindings. eager_model_v1 carries no graph classes.",
+        )
+    requirements: list[tuple[str, str]] = []
+    for handle, declared in sorted(model.layout_requirements.items()):
+        if declared.recommended_terms().declared():
+            raise ModelError(
+                ModelRefusal.FAMILY_INVALID,
+                f"model {model.name!r} declares a RECOMMENDED requirement for "
+                f"{handle!r}. eager_model_v1 carries the compact MINIMUM, which is the "
+                "only level with a single-string spelling that round-trips; grow the "
+                "document when a declaration genuinely needs the second level.",
+            )
+        requirements.append((handle, declared.render()))
+    return EagerExport(
+        family=FamilyName(model.name),
+        tuned=None if model.tuned is None else _tuned_ref(model.tuned),
+        lora_tuned=None if model.lora_tuned is None else _tuned_ref(model.lora_tuned),
+        layouts=tuple(
+            (component, tuple(handles))
+            for component, handles in sorted((model.layouts or {}).items())
+        ),
+        layouts_undeclarable=model.layouts_undeclarable,
+        layout_requirements=tuple(requirements),
+    )
+
+
 def ingress_of(export: ModelExport, runner: str, bucket: Mapping[str, int],
                layout: str | None = None) -> CallIngress:
     """The exact declared ingress for one variant — an exact lookup, never a rank."""
@@ -363,6 +409,7 @@ def ingress_of(export: ModelExport, runner: str, bucket: Mapping[str, int],
 
 __all__ = [
     "TracedVariant",
+    "export_eager_model",
     "export_model",
     "export_variant",
     "fake_structure",
