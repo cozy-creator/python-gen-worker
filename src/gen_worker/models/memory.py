@@ -29,6 +29,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import msgspec
 
+from .. import activity as activity_mod
 from ..component_vocab import component_vocabulary
 from .structure_only import STAMP as _STRUCTURE_ONLY
 import asyncio
@@ -1382,44 +1383,50 @@ def place_pipeline(
             effective = nxt
 
 
-class CpuOffloadForbidden(RuntimeError):
-    """A CPU-offloading placement was attempted on a host that forbids it."""
+#: The phase token every pipeline-level offload activation reports under.
+#: Countable hub-side in `worker_activity_events`.
+OFFLOAD_ENGAGED_PHASE = "cpu_offload_engaged"
 
 
-_FORBID_CPU_OFFLOAD_ENV = "GEN_WORKER_FORBID_CPU_OFFLOAD"
+def _report_offload_engaged(
+    pipeline: Any, rung: str, applied: Dict[str, Any], log: logging.Logger,
+) -> None:
+    """THE offload-activation confession — one home for every route into a
+    CPU-touching rung (pgw#1312).
 
+    Paul, 2026-08-17, killing the CPU-offload env veto: *"We ALWAYS allow
+    CPU-offload, and encourage it — but when it happens we warn LOUDLY so the
+    error can be caught (we don't want to serve degraded in production)."*
+    That veto answered "may this host offload" — not a question, and a logic
+    gate in an env var. The question that IS one is "did it happen", and only
+    the OOM-triggered descent was answering it: a rung chosen against free VRAM
+    before any OOM applied the same hooks and said nothing off the pod. Every
+    route reaches `apply_low_vram_config`, so the answer belongs here.
 
-def cpu_offload_forbidden() -> bool:
-    """Whether this host refuses every CPU-touching placement.
-
-    pgw#929 AMBIGUOUS #1 — this makes a DOCUMENTED CONTRACT TRUE rather than
-    adding a knob. The workspace `CLAUDE.md` told operators and agents that
-    ``GEN_WORKER_FORBID_CPU_OFFLOAD`` *"makes gen-worker raise on any
-    CPU-touching placement"*, and the box exports it for that reason. Measured
-    2026-08-03: it had exactly ONE reader in the tree,
-    ``benchmarks/swap_latency.py`` (deleted by pgw#883), where it refused the
-    swap-latency benchmark and nothing else. The real CPU-offload ladder below
-    never consulted it, so the guard operators believed they had did not
-    exist — stale prose reaching people as fact (C3). This function is now its
-    only reader, and it is the placement boundary.
-
-    It is a TRIPWIRE, not configuration: it carries no behaviour of its own and
-    exists only to fire on a host that must never touch weights. Same shape as
-    the C2PA key-material refusal, and it is read here rather than through
-    `Settings` for the same reason a tripwire is not a setting — a control-plane
-    box exports it box-wide with no worker config in sight. Recorded, with that
-    argument, in `scripts/config_reads_allowlist.txt`.
+    Loud line for a human, typed `serve_degrade` event for the hub — derived
+    from the same numbers so the two cannot disagree. Never a gate: the
+    placement has already succeeded when this runs.
     """
-    return os.environ.get(_FORBID_CPU_OFFLOAD_ENV, "").strip() not in ("", "0", "false", "no")
-
-
-def _refuse_cpu_offload(what: str) -> None:
-    if cpu_offload_forbidden():
-        raise CpuOffloadForbidden(
-            f"refusing {what}: {_FORBID_CPU_OFFLOAD_ENV} is set on this host. "
-            f"CPU-offloading placements move weights through host RAM, which "
-            f"this machine forbids (weights-locality rule). Run it on a GPU pod."
-        )
+    needed_gb = estimate_pipeline_size_gb(pipeline)
+    free_gb = get_available_vram_gb()
+    log.warning(transition_line(
+        event="engaged", phase="load", from_rung="resident", to_rung=rung,
+        needed_gb=needed_gb, free_gb=free_gb,
+        detail=f"CPU offload ENGAGED ({_applied_summary(applied)}); every "
+               f"forward on this pipeline now moves weights over PCIe",
+    ))
+    activity_mod.emit_event(
+        activity_mod.KIND_SERVE_DEGRADE,
+        detail=(
+            f"pipeline={type(pipeline).__name__}: CPU offload ENGAGED at rung "
+            f"`{rung}` ({_applied_summary(applied)}) — ~{needed_gb:.1f} GiB of "
+            f"weights rest in host RAM against {free_gb:.1f} GiB free VRAM and "
+            f"stream to the device per forward. Offload is always allowed and "
+            f"the request still serves; this pod is serving DEGRADED and every "
+            f"request on it pays the transfer."
+        ),
+        phase=OFFLOAD_ENGAGED_PHASE,
+    )
 
 
 def apply_low_vram_config(
@@ -1503,7 +1510,6 @@ def apply_low_vram_config(
             )
 
     if effective_mode == "model_offload":
-        _refuse_cpu_offload("enable_model_cpu_offload")
         _pin_unhookable_components(pipeline, applied, log)
         ok = _call_if_present(pipeline, "enable_model_cpu_offload")
         if not ok:
@@ -1514,7 +1520,7 @@ def apply_low_vram_config(
                 log.warning("low_vram: enable_model_cpu_offload failed: %s", exc)
         applied["model_offload"] = ok
         setattr(pipeline, _COZY_MODE_ATTR, "model_offload")
-        log.info("low_vram: model_offload applied (%s)", _applied_summary(applied))
+        _report_offload_engaged(pipeline, "model_offload", applied, log)
         return applied
 
     if effective_mode == "group_offload":
@@ -1524,7 +1530,6 @@ def apply_low_vram_config(
             effective_mode = "sequential"
 
     if effective_mode == "sequential":
-        _refuse_cpu_offload("enable_sequential_cpu_offload")
         _pin_unhookable_components(pipeline, applied, log)
         _move_pipeline_to_cpu(pipeline)
         flush_memory()
@@ -1538,11 +1543,14 @@ def apply_low_vram_config(
         applied["sequential_offload"] = ok
         applied["mode"] = "sequential"
         setattr(pipeline, _COZY_MODE_ATTR, "sequential")
-        log.info("low_vram: sequential_offload applied (%s)", _applied_summary(applied))
+        _report_offload_engaged(pipeline, "sequential", applied, log)
         return applied
 
     setattr(pipeline, _COZY_MODE_ATTR, effective_mode)
-    log.info("low_vram: %s applied (%s)", effective_mode, _applied_summary(applied))
+    if touches_host_ram(effective_mode):
+        _report_offload_engaged(pipeline, effective_mode, applied, log)
+    else:
+        log.info("low_vram: %s applied (%s)", effective_mode, _applied_summary(applied))
     return applied
 
 

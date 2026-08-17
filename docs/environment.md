@@ -123,18 +123,16 @@ compile evidence.
   llama-server CUDA smoke in `tests/test_llama_runtime.py`); never read by
   worker runtime code. Real-model GPU coverage now lives in the e2e repo's
   nightly `TestJ6` cloud journey, not a gen-worker-repo GPU lane.
-- `GEN_WORKER_FORBID_CPU_OFFLOAD` — a DEV-BOX tripwire. **pgw#929 made the
-  documented contract true.** It previously had exactly one read site,
-  `benchmarks/swap_latency.py::check_on_pod()` (that benchmark was deleted by
-  pgw#883), and affected nothing else — while the workspace `CLAUDE.md` told
-  operators it "makes gen-worker raise on any CPU-touching placement". It now
-  refuses at the real placement boundary, which is its only read site:
-  `models/memory.py` raises `CpuOffloadForbidden` before
-  `enable_model_cpu_offload` and `enable_sequential_cpu_offload`. Set it on a
-  control-plane box and any CPU-offloading
-  placement refuses. It is a tripwire, not configuration — it carries no
-  behaviour of its own. `GEN_WORKER_HOST_MOVE_GUARD` (above) remains the
-  separate, always-on `Module.to`/`.cpu` guard.
+
+> **`GEN_WORKER_FORBID_CPU_OFFLOAD` NO LONGER EXISTS** (pgw#1312, Paul
+> 2026-08-17): *"There is no FORBID_CPU_OFFLOAD. Envs are only for configs +
+> secrets, they are not logic-gates. That is a logic gate. We ALWAYS allow
+> CPU-offload, and encourage it — but when it happens we warn LOUDLY so the
+> error can be caught."* Setting it does nothing. CPU offload is always
+> allowed; every activation emits a `serve_degrade` event with
+> `phase=cpu_offload_engaged` plus a `DEGRADED_MODE=engaged` line
+> (`models/memory.py::_report_offload_engaged`). `GEN_WORKER_HOST_MOVE_GUARD`
+> (above) is a DIFFERENT, correctness-class guard and is unaffected.
 
 ## Internal plumbing (raw env)
 
@@ -151,8 +149,9 @@ compile evidence.
 - `GEN_WORKER_HOST_MOVE_GUARD` — the actual CPU-placement guard
   (`host_move_guard.py`). Patches `torch.nn.Module.to`/`.cpu` and raises
   `HostRamMoveRefusedError` for moves ≥ 1 GiB that exceed the cgroup RAM
-  budget. **ON by default; `=0` disables it** (inverted polarity — do not
-  confuse this with `GEN_WORKER_FORBID_CPU_OFFLOAD`, below).
+  budget. **ON by default; `=0` disables it** (inverted polarity). It guards
+  SILENT host moves that blow the RAM budget — it is not an offload veto, and
+  offload is always allowed.
 - `GEN_WORKER_URL_FETCH_ALLOWED_HOSTS` — deployment-wide egress bound
   (`url_fetch.py`). When set, no fetch may leave those hosts; empty means no
   bound.
