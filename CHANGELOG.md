@@ -1184,6 +1184,17 @@ requires a generatable identifier because its bindings are generated.
   sink and the handler's own Asset; the fourth pins field 9's wire bytes, which is the half a
   typed assertion structurally cannot see.
 
+*Attributed after the cut (pgw#1226): the change below shipped in this version's tag and was not assembled into the section at cut time.*
+
+- **The cross-repo consumer fence stopped reading its biggest consumer, silently.**
+  `inference-endpoints` was renamed to `serverless-endpoints`, and the author-surface fence still
+  named the old path — so the sweep that proves no public symbol goes unreached quietly stopped
+  reading 29 of the fleet's 32 endpoint packages and kept passing. `scripts/lint_unreached_surface.py`
+  now names the repo it expects, with `author_surface_allowlist.txt` and `skip_census.txt`
+  following it. The hazard this closes is not the rename but the REPAIR for it: GitHub redirects the
+  retired clone URL, so re-cloning under the dead name turns the fence green over a checkout no lane
+  updates.
+
 ## 0.120.0 (2026-08-16) — **the transfer plane is OURS — gen-worker consumes tensorfs natively, and the mount client is gone.**
 
 - The tensorhub grant transfer plane is first-party at `gen_worker.transfer`. It was vendored
