@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from .._vendor.torchcg.ingress import CallIngress, IngressError, build_call_ingress
@@ -97,18 +98,56 @@ def fake_structure() -> Iterator[Any]:
         torch.set_default_dtype(restore)
 
 
-def export_variant(
+@dataclass(frozen=True, slots=True)
+class TracedVariant:
+    """One traced (runner, bucket, layout), with the PROGRAM still attached.
+
+    :func:`export_variant` throws the program away — the snapshot only needs the
+    ingress and the output shapes. The mint needs the program itself, and it
+    must be the SAME program: an ingress digest derived from a second, subtly
+    different trace would make ``drift.assert_recipe`` compare two things that
+    were never one (torchcg G16). So there is one trace function and two
+    readings of its result, rather than two tracers that agree by inspection.
+    """
+
+    runner: str
+    bucket: dict[str, int]
+    layout: str
+    program: Any
+    ingress: CallIngress
+    outputs: tuple[ExportedOutput, ...]
+    example: CallExample
+
+    def snapshot(self) -> ExportedVariant:
+        """This trace as the document row it contributes."""
+
+        return ExportedVariant(
+            bucket=tuple(
+                sorted((BucketAxisName(str(k)), int(v)) for k, v in self.bucket.items())
+            ),
+            layout=LayoutContract(str(self.layout)),
+            ingress=self.ingress,
+            ingress_digest=IngressDigest(self.ingress.digest()),
+            outputs=self.outputs,
+        )
+
+
+def trace_variant(
     runner: Runner,
     bucket: Mapping[str, int],
     layout: str,
-) -> ExportedVariant:
-    """Export ONE (runner, bucket, layout) and read its call ingress.
+) -> TracedVariant:
+    """Trace ONE (runner, bucket, layout) and read its call ingress.
 
     The module and the example call are built inside one fake mode, so the
     program's placeholders carry fake metadata and nothing on the machine is
     allocated. Failures are named rather than propagated raw: an author reading
     ``export_failed: runner 'denoiser' at bucket ...`` knows which of a
     family's thirty-six rows refused.
+
+    The program is returned STILL ALIVE and the fake mode is closed around it,
+    which is the same order the mint lane uses (``aot_mint._export_entry``
+    exports inside ``structure_only.fake_mode_of`` and compiles outside it).
     """
 
     with fake_structure():
@@ -143,13 +182,25 @@ def export_variant(
                 f"produced no call ingress: {exc}",
             ) from exc
         outputs = _outputs(runner, program)
-    return ExportedVariant(
-        bucket=tuple(sorted((BucketAxisName(str(k)), int(v)) for k, v in bucket.items())),
-        layout=LayoutContract(str(layout)),
+    return TracedVariant(
+        runner=runner.name,
+        bucket={str(name): int(value) for name, value in bucket.items()},
+        layout=str(layout),
+        program=program,
         ingress=ingress,
-        ingress_digest=IngressDigest(ingress.digest()),
         outputs=outputs,
+        example=example,
     )
+
+
+def export_variant(
+    runner: Runner,
+    bucket: Mapping[str, int],
+    layout: str,
+) -> ExportedVariant:
+    """One traced variant, as the snapshot row it contributes."""
+
+    return trace_variant(runner, bucket, layout).snapshot()
 
 
 def _outputs(runner: Runner, program: Any) -> tuple[ExportedOutput, ...]:
@@ -299,8 +350,10 @@ def ingress_of(export: FamilyExport, runner: str, bucket: Mapping[str, int],
 
 
 __all__ = [
+    "TracedVariant",
     "export_family",
     "export_variant",
     "fake_structure",
     "ingress_of",
+    "trace_variant",
 ]

@@ -16,8 +16,9 @@ from importlib import resources
 from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
-from gen_worker.family.catalog.sdxl import SdxlTuned
-from gen_worker.family.runtime import FamilyBinding, SchedulerBlock
+from gen_worker.family.catalog.sdxl_serve import SdxlTuned
+from gen_worker.family.runtime import FamilyBinding
+from gen_worker.family.scheduler import SchedulerBlock, SchedulerKind
 from gen_worker.family.snapshot import FamilyExport
 from gen_worker.family.spec import Family
 
@@ -74,7 +75,7 @@ class Sdxl(FamilyBinding):
     __slots__ = ()
 
     FAMILY: ClassVar[str] = 'sdxl'
-    EXPORT_DIGEST: ClassVar[str] = 'bd5b24bbdad7b9884cf03cd416a0b173'
+    EXPORT_DIGEST: ClassVar[str] = '8bb1091c8f87a59a2e799e6fc9643965'
     EXPORT: ClassVar[FamilyExport] = _EXPORT
     Tuned: ClassVar[type[SdxlTuned]] = SdxlTuned
     SPEC: ClassVar[Family | None] = _SPEC
@@ -86,7 +87,7 @@ class Sdxl(FamilyBinding):
     )
     LOOP_KIND: ClassVar[str] = 'staged'
     SESSION_STATE: ClassVar[str] = 'none'
-    SCHEDULER: ClassVar[str] = 'euler_discrete'
+    SCHEDULER: ClassVar[SchedulerKind] = SchedulerKind.EULER_DISCRETE
     SCHEDULER_PARAMETERS: ClassVar[SchedulerBlock] = MappingProxyType({
         'timestep_spacing': 'leading',
     })

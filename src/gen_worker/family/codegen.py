@@ -38,6 +38,7 @@ from typing import Final
 
 from .._vendor.torchcg.recipe import ParameterKind, SignatureParameter
 from .errors import FamilyError, FamilyRefusal
+from .scheduler import IMPLEMENTED, parse_kind
 from .snapshot import ExportedRunner, FamilyExport
 
 #: Emitted verbatim at the top of every generated module. It names the command
@@ -225,7 +226,10 @@ def _class_facts(export: FamilyExport) -> list[str]:
         f'{_INDENT}SESSION_STATE: ClassVar[str] = {loop.session_state.value!r}',
     ]
     if scheduler is not None:
-        lines.append(f'{_INDENT}SCHEDULER: ClassVar[str] = {scheduler.name!r}')
+        kind = parse_kind(str(scheduler.name))
+        lines.append(
+            f"{_INDENT}SCHEDULER: ClassVar[SchedulerKind] = SchedulerKind.{kind.name}"
+        )
         lines.append(
             f"{_INDENT}SCHEDULER_PARAMETERS: ClassVar[SchedulerBlock] = MappingProxyType({{"
         )
@@ -243,6 +247,29 @@ def _class_facts(export: FamilyExport) -> list[str]:
     )
     lines.append(f"{_INDENT})")
     return lines
+
+
+def _scheduler_method(implementation: str) -> list[str]:
+    """The typed accessor for a family whose scheduler the SDK implements.
+
+    The return type is the CONCRETE class, so a handler reaches flow-match
+    Euler's own API — ``schedule()``, ``step()`` — through the type checker
+    rather than through a name it typed. There is no registry lookup at request
+    time and no scheduler object: what comes back is a frozen dataclass of the
+    family's own declared constants (pgw#1331).
+    """
+
+    return [
+        "",
+        f"{_INDENT}def scheduler(self) -> {implementation}:",
+        f'{_INDENT * 2}"""This family\'s declared scheduler, as bare typed math.',
+        "",
+        f"{_INDENT * 2}Built from ``SCHEDULER_PARAMETERS`` above, which rides the export",
+        f"{_INDENT * 2}digest — so a re-declared schedule changes this family's identity",
+        f"{_INDENT * 2}instead of silently changing every request.",
+        f'{_INDENT * 2}"""',
+        f"{_INDENT * 2}return {implementation}.from_block(self.SCHEDULER_PARAMETERS)",
+    ]
 
 
 def render(export: FamilyExport, *, spec_module: str = "", spec_attr: str = "") -> str:
@@ -274,13 +301,31 @@ def render(export: FamilyExport, *, spec_module: str = "", spec_attr: str = "") 
         )
         if kind in kinds
     ]
+    scheduler = export.scheduler
+    #: The concrete bare-math class this family's declared scheduler resolves
+    #: to, or empty when the SDK implements no math for the declared name. The
+    #: miss is silent HERE and loud at the call site: the generated class simply
+    #: has no ``scheduler()``, so a handler that wants one gets an
+    #: ``AttributeError`` from its own type checker rather than a fallback that
+    #: quietly puts a model library back on the request path (pgw#1331).
+    scheduler_impl = (
+        IMPLEMENTED.get(parse_kind(str(scheduler.name))) if scheduler is not None else None
+    )
+    scheduler_names = sorted(
+        {"SchedulerBlock", "SchedulerKind", *([scheduler_impl] if scheduler_impl else [])}
+    )
     imports = sorted(
         {
-            "from gen_worker.family.runtime import FamilyBinding, SchedulerBlock",
+            "from gen_worker.family.runtime import FamilyBinding",
             "from gen_worker.family.snapshot import FamilyExport",
             "from gen_worker.family.spec import Family",
             f"from {tuned.module} import {tuned.qualname}",
         }
+        | (
+            {"from gen_worker.family.scheduler import " + ", ".join(scheduler_names)}
+            if scheduler is not None
+            else set()
+        )
     )
     stdlib = ["from importlib import resources", "from types import MappingProxyType"]
     if containers:
@@ -370,6 +415,8 @@ def render(export: FamilyExport, *, spec_module: str = "", spec_attr: str = "") 
         ]
     )
     lines.extend(_class_facts(export))
+    if scheduler_impl:
+        lines.extend(_scheduler_method(scheduler_impl))
     for runner in export.runners:
         lines.append("")
         lines.extend(_method(export, runner))

@@ -18,15 +18,21 @@ channels-last layout optimisation (measured at +7.2% on sdxl). Buckets keep
 each class statically specialised, and the closed ``Literal`` keeps the set
 exhaustive.
 
-Same rules as the Flux entry: diffusers is imported only inside ``build``, the
-config below is architecture (checkpoint-free), and the text encoders belong to
-pgw#1331.
+Same rules as the Flux entry: diffusers is imported only inside ``build`` and
+the config below is architecture (checkpoint-free). Its text encoders are still
+absent — pgw#1331 took ONE family end to end and Flux is that family; declaring
+SDXL's without a loop to serve them would be classes nothing selects.
+
+**This module is MINT-SIDE** (pgw#1331). The tuned schemas and the latent
+arithmetic the request path reads live in
+:mod:`gen_worker.family.catalog.sdxl_serve`, which imports nothing above
+``torch``; this half reads from there, never the reverse.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Final, Literal
+from typing import Any, Final
 
 from ..spec import (
     Bucket,
@@ -37,7 +43,16 @@ from ..spec import (
     Runner,
     Scheduler,
     Stage,
-    TunedValues,
+)
+from .sdxl_serve import (
+    CFG_BATCH,
+    LATENT_CHANNELS,
+    TEXT_TOKENS,
+    TIME_IDS,
+    SdxlLoraTuned,
+    SdxlTuned,
+    compute_dtype,
+    latent_edge,
 )
 
 #: SDXL's U-Net architecture. Every SDXL fine-tune shares it, which is exactly
@@ -87,67 +102,13 @@ VAE: Final[Mapping[str, Any]] = {
     "scaling_factor": 0.13025,
 }
 
-#: CLIP's pinned prompt length. Pinned, not an axis — same reason as Flux's.
-TEXT_TOKENS: Final = 77
-
-#: The VAE's spatial stride.
-VAE_STRIDE: Final = 8
-
-#: The two-batch classifier-free-guidance arity SDXL is traced at: cond and
-#: uncond ride ONE call. A CFG arity change is a different graph, so it is a
-#: fact of the declaration rather than a runtime flag.
-CFG_BATCH: Final = 2
-
-#: The micro-conditioning vector's width (original/crop/target sizes).
-TIME_IDS: Final = 6
-
-
-def latent_edge(resolution: int) -> int:
-    """Latent rows/cols for one pixel edge."""
-
-    return resolution // VAE_STRIDE
-
-
-class SdxlTuned(TunedValues, frozen=True):
-    """SDXL's tuned-value SCHEMA. Catalog stamps the values, per release slot."""
-
-    scheduler: Literal["euler_a", "dpmpp_2m_karras", "dpmpp_2m_sde_karras"] = "euler_a"
-    steps: int = 28
-    guidance: float = 6.0
-    negative: str = ""
-    #: A CLAMP, never a wire reshape.
-    max_guidance: float | None = None
-
-
-class SdxlLoraTuned(TunedValues, frozen=True):
-    """The LoRA-kind overlay: every field is "no opinion" unless stated."""
-
-    trigger_words: tuple[str, ...] = ()
-    recommended_weight: float | None = None
-    steps: int | None = None
-    guidance: float | None = None
-    scheduler: Literal["euler_a", "dpmpp_2m_karras", "dpmpp_2m_sde_karras"] | None = None
-
-
-def _compute_dtype(layout: str) -> Any:
-    """The compute dtype one layout token implies, for THIS family.
-
-    A layout token is opaque to the SDK — it records the token and never
-    interprets it (torchcg G15) — so the mapping to a torch dtype is the
-    declaration's, stated once here rather than inferred anywhere.
-    """
-
-    import torch
-
-    return torch.bfloat16 if layout == "bf16" else torch.float32
-
 
 def _denoiser(layout: str) -> Any:
     import torch
     from diffusers import UNet2DConditionModel
     from torch import nn
 
-    torch.set_default_dtype(_compute_dtype(layout))
+    torch.set_default_dtype(compute_dtype(layout))
     # Bound as a value, not called through the imported name: diffusers ships
     # no complete stubs, and this keeps the untyped boundary at ONE line per
     # build instead of a `type: ignore` on every attribute of the result.
@@ -179,12 +140,12 @@ def _denoiser(layout: str) -> Any:
 def _denoiser_example(bucket: Mapping[str, int], layout: str) -> CallExample:
     import torch
 
-    dtype = _compute_dtype(layout)
+    dtype = compute_dtype(layout)
     edge = latent_edge(int(bucket["resolution"]))
     return CallExample(
         params=("sample", "timestep", "encoder_hidden_states", "added_cond_kwargs"),
         kwargs={
-            "sample": torch.zeros(CFG_BATCH, 4, edge, edge, dtype=dtype),
+            "sample": torch.zeros(CFG_BATCH, LATENT_CHANNELS, edge, edge, dtype=dtype),
             # float32 deliberately: euler-family samplers present a float32
             # scalar timestep and ddim/dpmpp-family samplers present int64. The
             # integer -> float32 recast is `ingress_selection_v1`'s ONE
@@ -208,7 +169,7 @@ def _decoder(layout: str) -> Any:
     from diffusers import AutoencoderKL
     from torch import nn
 
-    torch.set_default_dtype(_compute_dtype(layout))
+    torch.set_default_dtype(compute_dtype(layout))
     autoencoder: Any = AutoencoderKL
 
     class _Decoder(nn.Module):
@@ -225,7 +186,7 @@ def _decoder(layout: str) -> Any:
 def _decoder_example(bucket: Mapping[str, int], layout: str) -> CallExample:
     import torch
 
-    dtype = _compute_dtype(layout)
+    dtype = compute_dtype(layout)
     edge = latent_edge(int(bucket["resolution"]))
     return CallExample(
         params=("latents",),
@@ -249,14 +210,7 @@ SDXL: Final = GraphFamily(
 )
 
 __all__ = [
-    "CFG_BATCH",
     "SDXL",
-    "TEXT_TOKENS",
-    "TIME_IDS",
     "UNET",
     "VAE",
-    "VAE_STRIDE",
-    "SdxlLoraTuned",
-    "SdxlTuned",
-    "latent_edge",
 ]

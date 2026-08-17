@@ -69,7 +69,7 @@ def test_the_declared_serve_role_cannot_reach_the_mint_lane() -> None:
         "which is the drift channel reading it out of the source exists to "
         "close")
     assert tuple(banned) == role.MINT_MACHINERY
-    seen, via = fence.closure(roots)
+    seen, via, _, _ = fence.closure(roots)
     reached = sorted(name for name in banned if name in seen)
     assert not reached, f"reached {reached} via {[via.get(n) for n in reached]}"
     assert fence.main([]) == 0

@@ -15,8 +15,9 @@ from importlib import resources
 from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
-from gen_worker.family.catalog.flux1_dev import Flux1DevTuned
-from gen_worker.family.runtime import FamilyBinding, SchedulerBlock
+from gen_worker.family.catalog.flux1_dev_serve import Flux1DevTuned
+from gen_worker.family.runtime import FamilyBinding
+from gen_worker.family.scheduler import FlowMatchEulerDiscrete, SchedulerBlock, SchedulerKind
 from gen_worker.family.snapshot import FamilyExport
 from gen_worker.family.spec import Family
 
@@ -73,26 +74,67 @@ class Flux1Dev(FamilyBinding):
     __slots__ = ()
 
     FAMILY: ClassVar[str] = 'flux1_dev'
-    EXPORT_DIGEST: ClassVar[str] = '0b12d90128648792a32da954b2c0aa6d'
+    EXPORT_DIGEST: ClassVar[str] = 'c8fbc4f9140e305739e45e8c87813842'
     EXPORT: ClassVar[FamilyExport] = _EXPORT
     Tuned: ClassVar[type[Flux1DevTuned]] = Flux1DevTuned
     SPEC: ClassVar[Family | None] = _SPEC
 
     #: Ordered stages of the declared loop: (runner, repeat, parameter).
     LOOP: ClassVar[tuple[tuple[str, str, str], ...]] = (
+        ('clip', 'once', ''),
+        ('t5', 'once', ''),
         ('denoiser', 'counted', 'steps'),
         ('decoder', 'once', ''),
     )
     LOOP_KIND: ClassVar[str] = 'staged'
     SESSION_STATE: ClassVar[str] = 'none'
-    SCHEDULER: ClassVar[str] = 'flow_match_euler_discrete'
+    SCHEDULER: ClassVar[SchedulerKind] = SchedulerKind.FLOW_MATCH_EULER_DISCRETE
     SCHEDULER_PARAMETERS: ClassVar[SchedulerBlock] = MappingProxyType({
+        'base_image_seq_len': 256,
+        'base_shift': 0.5,
+        'max_image_seq_len': 4096,
+        'max_shift': 1.15,
+        'num_train_timesteps': 1000,
         'shift': 3.0,
+        'use_dynamic_shifting': True,
     })
     #: Declared loop counts: (name, minimum, maximum), inclusive bounds.
     PARAMETERS: ClassVar[tuple[tuple[str, int, int], ...]] = (
         ('steps', 1, 100),
     )
+
+    def scheduler(self) -> FlowMatchEulerDiscrete:
+        """This family's declared scheduler, as bare typed math.
+
+        Built from ``SCHEDULER_PARAMETERS`` above, which rides the export
+        digest — so a re-declared schedule changes this family's identity
+        instead of silently changing every request.
+        """
+        return FlowMatchEulerDiscrete.from_block(self.SCHEDULER_PARAMETERS)
+
+    def clip(
+        self,
+        *,
+        input_ids: Tensor,
+    ) -> Tensor:
+        """Call the 'clip' graph class of 'flux1_dev'.
+
+        Traced layouts: bf16. A compiled backing accepts exactly its
+        traced layout; an eager backing follows the fit ladder, which is
+        host policy and not this callable's business.
+        """
+        return cast(
+            "Tensor",
+            self._invoke(
+                'clip',
+                {},
+                'bf16',
+                (),
+                {
+                    'input_ids': input_ids,
+                },
+            ),
+        )
 
     def decoder(
         self,
@@ -158,6 +200,30 @@ class Flux1Dev(FamilyBinding):
                     'img_ids': img_ids,
                     'txt_ids': txt_ids,
                     'guidance': guidance,
+                },
+            ),
+        )
+
+    def t5(
+        self,
+        *,
+        input_ids: Tensor,
+    ) -> Tensor:
+        """Call the 't5' graph class of 'flux1_dev'.
+
+        Traced layouts: bf16. A compiled backing accepts exactly its
+        traced layout; an eager backing follows the fit ladder, which is
+        host policy and not this callable's business.
+        """
+        return cast(
+            "Tensor",
+            self._invoke(
+                't5',
+                {},
+                'bf16',
+                (),
+                {
+                    'input_ids': input_ids,
                 },
             ),
         )

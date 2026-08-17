@@ -55,15 +55,6 @@ from .snapshot import ExportedVariant, FamilyExport
 from .spec import Family
 
 
-#: A scheduler block's value domain: the finite JSON scalars ``recipe_v1``
-#: permits. Defined HERE rather than inside a generated module's
-#: ``TYPE_CHECKING`` block so ``get_type_hints`` on a generated family class
-#: resolves — an annotation that only a type checker can read is a class
-#: nothing can introspect at runtime, which is a papercut waiting for the first
-#: caller that tries.
-SchedulerBlock = Mapping[str, bool | int | float | str]
-
-
 class InstanceResolver(Protocol):
     """How a dynamic ``Family.instance(ref)`` reaches real weights.
 
@@ -512,7 +503,6 @@ def resolve(payload: object, instance: FamilyBinding) -> dict[str, Any]:
 __all__ = [
     "TUNED",
     "DecodeSession",
-    "SchedulerBlock",
     "FamilyBinding",
     "InstanceResolver",
     "Tuned",

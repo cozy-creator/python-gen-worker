@@ -25,7 +25,7 @@
     ]
   },
   "lora_tuned": {
-    "module": "gen_worker.family.catalog.sdxl",
+    "module": "gen_worker.family.catalog.sdxl_serve",
     "qualname": "SdxlLoraTuned"
   },
   "parameters": [
@@ -350,7 +350,7 @@
     }
   },
   "tuned": {
-    "module": "gen_worker.family.catalog.sdxl",
+    "module": "gen_worker.family.catalog.sdxl_serve",
     "qualname": "SdxlTuned"
   },
   "v": 1

@@ -3,12 +3,20 @@
 pgw#1326's catalog rule, literally: *"instead of importing diffusers, you
 import the catalog."* An endpoint imports :class:`~gen_worker.family.catalog.
 Flux1Dev` — the generated binding beside this file — and never touches
-diffusers. This module is where diffusers is allowed, and only inside the
-``build`` callables, which run at MINT time and on an eager-capable serving
-pod. Importing this module imports no model code at all, which is what lets an
-adopt-only serve role (pgw#1328) hold the bindings without acquiring diffusers.
+diffusers. This module is where diffusers and transformers are allowed, and
+only inside the ``build`` callables, which run at MINT time and on an
+eager-capable serving pod.
 
-**Checkpoint-free, and the architecture config is why.** The block below is
+**This module is MINT-SIDE and the serve role may not import it (pgw#1331).**
+Everything the request path needs — the tuned schemas, the packing arithmetic,
+the scheduler block's constants and the loop itself — lives in
+:mod:`gen_worker.family.catalog.flux1_dev_serve`, which imports ``torch`` and
+nothing above it. The import direction is one-way: this module reads from
+there, never the reverse, so the family's shape arithmetic has exactly one
+definition and an artifact cannot be minted at a shape the loop will not ask
+for. ``scripts/lint_serve_role_closure.py`` enforces the split.
+
+**Checkpoint-free, and the architecture config is why.** The blocks below are
 FLUX.1-dev's architecture, not any checkpoint's weights: every fine-tune that
 shares it shares the graph classes, which is what lets one compiled cell serve
 sixteen of them (DESIGN-RULINGS §4.27). A checkpoint whose config DIFFERS is a
@@ -18,15 +26,18 @@ it gets its own catalog entry rather than a fork arm here.
 
 **Why the modules are wrapped.** Each ``build`` returns a thin wrapper whose
 ``forward`` is exactly the call the binding exposes. Two reasons, both
-load-bearing: diffusers' own forwards take ``return_dict`` and other
-non-tensor arguments that ``CallIngress`` v1 cannot record a pinned value for
-(torchcg G4's known limit), so an unwrapped export would emit an unconstrained
-parameter a caller has to remember to pass correctly; and the wrapper is where
-the declaration states what the graph class RETURNS, instead of leaving it to
-whatever container version of diffusers is installed.
+load-bearing: the upstream forwards take ``return_dict`` and other non-tensor
+arguments that ``CallIngress`` v1 cannot record a pinned value for (torchcg
+G4's known limit), so an unwrapped export would emit an unconstrained parameter
+a caller has to remember to pass correctly; and the wrapper is where the
+declaration states what the graph class RETURNS, instead of leaving it to
+whatever container version of a model library is installed.
 
-Text encoders are deliberately absent: minting them is pgw#1331's lane, and a
-declaration that named a runner nothing exports would fail its own build.
+**Four runners, which is the whole pipeline** (pgw#1331 closed the gap): the
+two text encoders, the denoiser, and the VAE decoder. Nothing in FLUX.1-dev's
+composition is left riding an eager model at serve time, and the scheduler that
+threads them is bare typed math in :mod:`gen_worker.family.scheduler` rather
+than an object.
 """
 
 from __future__ import annotations
@@ -43,7 +54,16 @@ from ..spec import (
     Runner,
     Scheduler,
     Stage,
-    TunedValues,
+)
+from .flux1_dev_serve import (
+    CLIP_TOKENS,
+    LATENT_CHANNELS,
+    TEXT_TOKENS,
+    Flux1DevLoraTuned,
+    Flux1DevTuned,
+    compute_dtype,
+    latent_edge,
+    packed_tokens,
 )
 
 #: FLUX.1-dev's transformer architecture. Class-level truth: no weight, no
@@ -66,7 +86,7 @@ TRANSFORMER: Final[Mapping[str, Any]] = {
 VAE: Final[Mapping[str, Any]] = {
     "in_channels": 3,
     "out_channels": 3,
-    "latent_channels": 16,
+    "latent_channels": LATENT_CHANNELS,
     "block_out_channels": (128, 256, 512, 512),
     "layers_per_block": 2,
     "down_block_types": (
@@ -87,75 +107,55 @@ VAE: Final[Mapping[str, Any]] = {
     "shift_factor": 0.1159,
 }
 
-#: Prompt tokens the T5 branch is padded to. A pinned length, not an axis: a
-#: variable text dimension reaching a statically compiled denoiser mints a new
-#: graph per prompt length — unbounded and un-warmable.
-TEXT_TOKENS: Final = 512
+#: CLIP-L's text tower — FLUX.1-dev's ``text_encoder``. It contributes ONE
+#: pooled vector, which conditions the transformer's modulation; its per-token
+#: states are unused, which is why the wrapper returns only the pooled output.
+CLIP_TEXT: Final[Mapping[str, Any]] = {
+    "vocab_size": 49408,
+    "hidden_size": 768,
+    "intermediate_size": 3072,
+    "num_hidden_layers": 12,
+    "num_attention_heads": 12,
+    "max_position_embeddings": CLIP_TOKENS,
+    "hidden_act": "quick_gelu",
+    "layer_norm_eps": 1e-5,
+    "projection_dim": 768,
+    "eos_token_id": 2,
+}
 
-#: The VAE's spatial stride, and the transformer's packing factor. Together
-#: they turn a pixel edge into a token count, which is the ONLY arithmetic this
-#: declaration does.
-VAE_STRIDE: Final = 8
-PATCH: Final = 2
+#: T5-v1.1-XXL's encoder — FLUX.1-dev's ``text_encoder_2``, and the branch that
+#: actually carries the prompt. 4.7B parameters, which is why leaving it eager
+#: was the largest single hole in the compiled coverage.
+T5_TEXT: Final[Mapping[str, Any]] = {
+    "vocab_size": 32128,
+    "d_model": 4096,
+    "d_kv": 64,
+    "d_ff": 10240,
+    "num_layers": 24,
+    "num_heads": 64,
+    "relative_attention_num_buckets": 32,
+    "relative_attention_max_distance": 128,
+    "dropout_rate": 0.0,
+    "layer_norm_epsilon": 1e-6,
+    "feed_forward_proj": "gated-gelu",
+    "is_encoder_decoder": False,
+    "use_cache": False,
+    "tie_word_embeddings": False,
+}
 
-
-def latent_edge(resolution: int) -> int:
-    """Latent rows/cols for one pixel edge."""
-
-    return resolution // VAE_STRIDE
-
-
-def packed_tokens(resolution: int) -> int:
-    """Packed transformer tokens for one pixel edge."""
-
-    edge = latent_edge(resolution) // PATCH
-    return edge * edge
-
-
-class Flux1DevTuned(TunedValues, frozen=True):
-    """FLUX.1-dev's tuned-value SCHEMA. The values are catalog, per release slot.
-
-    Every field is a knob a checkpoint may legitimately have a different
-    opinion about. Nothing here is a graph fact: a value that changed the graph
-    would belong on a bucket axis, where the type system can keep the class set
-    exhaustive.
-    """
-
-    steps: int = 28
-    guidance: float = 3.5
-    shift: float = 3.0
-    #: A CLAMP, never a wire reshape: a request asking for more is served at
-    #: this value with an adjustment recorded, not refused.
-    max_guidance: float | None = None
-
-
-class Flux1DevLoraTuned(TunedValues, frozen=True):
-    """The LoRA-kind overlay for the same family: every field is "no opinion".
-
-    ``None`` means the overlay declines to override the checkpoint's own tuned
-    value. That is why every field is optional and none carries a real default:
-    an overlay with an opinion it did not mean to have would silently retune
-    every checkpoint it is applied to.
-    """
-
-    trigger_words: tuple[str, ...] = ()
-    recommended_weight: float | None = None
-    steps: int | None = None
-    guidance: float | None = None
-    shift: float | None = None
-
-
-def _compute_dtype(layout: str) -> Any:
-    """The compute dtype one layout token implies, for THIS family.
-
-    A layout token is opaque to the SDK — it records the token and never
-    interprets it (torchcg G15) — so the mapping to a torch dtype is the
-    declaration's, stated once here rather than inferred anywhere.
-    """
-
-    import torch
-
-    return torch.bfloat16 if layout == "bf16" else torch.float32
+#: FLUX.1-dev's scheduler block, as the checkpoint's own ``scheduler/
+#: scheduler_config.json`` states it. It is DECLARED here — not hardcoded in
+#: the math — so it rides the export digest: a re-declared schedule changes the
+#: family's identity instead of silently changing every request.
+SCHEDULER: Final[Mapping[str, bool | int | float | str]] = {
+    "num_train_timesteps": 1000,
+    "shift": 3.0,
+    "use_dynamic_shifting": True,
+    "base_shift": 0.5,
+    "max_shift": 1.15,
+    "base_image_seq_len": 256,
+    "max_image_seq_len": 4096,
+}
 
 
 def _denoiser(layout: str) -> Any:
@@ -168,7 +168,7 @@ def _denoiser(layout: str) -> Any:
     # `set_default_dtype` rather than `.to(dtype)`: a fake parameter cannot be
     # swapped in place, so the dtype has to be in force while the module is
     # BUILT. `fake_structure()` restores the process default afterwards.
-    torch.set_default_dtype(_compute_dtype(layout))
+    torch.set_default_dtype(compute_dtype(layout))
     # Bound as a value, not called through the imported name: diffusers ships
     # no complete stubs, and this keeps the untyped boundary at ONE line per
     # build instead of a `type: ignore` on every attribute of the result.
@@ -206,7 +206,7 @@ def _denoiser(layout: str) -> Any:
 def _denoiser_example(bucket: Mapping[str, int], layout: str) -> CallExample:
     import torch
 
-    dtype = _compute_dtype(layout)
+    dtype = compute_dtype(layout)
     tokens = packed_tokens(int(bucket["resolution"]))
     return CallExample(
         params=(
@@ -237,7 +237,7 @@ def _decoder(layout: str) -> Any:
     from diffusers import AutoencoderKL
     from torch import nn
 
-    torch.set_default_dtype(_compute_dtype(layout))
+    torch.set_default_dtype(compute_dtype(layout))
     autoencoder: Any = AutoencoderKL
 
     class _Decoder(nn.Module):
@@ -254,39 +254,124 @@ def _decoder(layout: str) -> Any:
 def _decoder_example(bucket: Mapping[str, int], layout: str) -> CallExample:
     import torch
 
-    dtype = _compute_dtype(layout)
+    dtype = compute_dtype(layout)
     edge = latent_edge(int(bucket["resolution"]))
     return CallExample(
         params=("latents",),
-        kwargs={"latents": torch.zeros(1, 16, edge, edge, dtype=dtype)},
+        kwargs={"latents": torch.zeros(1, LATENT_CHANNELS, edge, edge, dtype=dtype)},
     )
 
 
-#: FLUX.1-dev. Buckets are pixel edges; every runner has a class at each, so
-#: the generated ``Literal`` is exhaustive and every selection resolves.
+def _clip(layout: str) -> Any:
+    """CLIP-L's text tower, wrapped down to the ONE output Flux consumes.
+
+    The wrapper returns ``pooler_output`` alone. Returning the per-token states
+    beside it would put a 77x768 tensor in the graph class's egress that no
+    caller reads, and an artifact's outputs are part of its ingress digest — so
+    an unused output is a permanent contract, not dead weight that optimizes
+    away.
+    """
+
+    import torch
+    from torch import nn
+    from transformers import CLIPTextConfig, CLIPTextModel
+
+    torch.set_default_dtype(compute_dtype(layout))
+    config: Any = CLIPTextConfig
+    text_model: Any = CLIPTextModel
+
+    class _Clip(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.text_encoder = text_model(config(**dict(CLIP_TEXT)))
+
+        def forward(self, input_ids: Any) -> Any:
+            return self.text_encoder(input_ids=input_ids).pooler_output
+
+    return _Clip().eval()
+
+
+def _clip_example(bucket: Mapping[str, int], layout: str) -> CallExample:
+    import torch
+
+    del bucket, layout  # token IDs are integers; the layout decides no dtype here
+    return CallExample(
+        params=("input_ids",),
+        kwargs={"input_ids": torch.zeros(1, CLIP_TOKENS, dtype=torch.long)},
+    )
+
+
+def _t5(layout: str) -> Any:
+    """T5-XXL's encoder, wrapped down to its last hidden state.
+
+    This is the branch that carries the prompt: 512 tokens of 4096-dim states
+    that the joint attention reads at every one of the denoiser's steps. It is
+    also 4.7B parameters run once per request — the eager tail pgw#1331 exists
+    to close.
+    """
+
+    import torch
+    from torch import nn
+    from transformers import T5Config, T5EncoderModel
+
+    torch.set_default_dtype(compute_dtype(layout))
+    config: Any = T5Config
+    encoder: Any = T5EncoderModel
+
+    class _T5(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.text_encoder = encoder(config(**dict(T5_TEXT)))
+
+        def forward(self, input_ids: Any) -> Any:
+            return self.text_encoder(input_ids=input_ids).last_hidden_state
+
+    return _T5().eval()
+
+
+def _t5_example(bucket: Mapping[str, int], layout: str) -> CallExample:
+    import torch
+
+    del bucket, layout
+    return CallExample(
+        params=("input_ids",),
+        kwargs={"input_ids": torch.zeros(1, TEXT_TOKENS, dtype=torch.long)},
+    )
+
+
+#: FLUX.1-dev. Buckets are pixel edges; every runner that declares the axis has
+#: a class at each, so the generated ``Literal`` is exhaustive and every
+#: selection resolves. The text encoders declare NO axis: their token lengths
+#: are pinned by the architecture (CLIP-L's learned positions) and by the
+#: family (T5's 512), so bucketing them would generate classes nothing selects.
 FLUX1_DEV: Final = GraphFamily(
     name="flux1_dev",
     tuned=Flux1DevTuned,
     lora_tuned=Flux1DevLoraTuned,
     buckets=(Bucket("resolution", (768, 1024)),),
     runners=(
+        Runner("clip", build=_clip, example=_clip_example),
         Runner("decoder", build=_decoder, example=_decoder_example, axes=("resolution",)),
         Runner("denoiser", build=_denoiser, example=_denoiser_example, axes=("resolution",)),
+        Runner("t5", build=_t5, example=_t5_example),
     ),
-    loop=Loop(stages=(Stage("denoiser", repeat="steps"), Stage("decoder"))),
+    loop=Loop(
+        stages=(
+            Stage("clip"),
+            Stage("t5"),
+            Stage("denoiser", repeat="steps"),
+            Stage("decoder"),
+        )
+    ),
     parameters=(Parameter("steps", minimum=1, maximum=100),),
-    scheduler=Scheduler("flow_match_euler_discrete", {"shift": 3.0}),
+    scheduler=Scheduler("flow_match_euler_discrete", SCHEDULER),
 )
 
 __all__ = [
+    "CLIP_TEXT",
     "FLUX1_DEV",
-    "PATCH",
-    "TEXT_TOKENS",
+    "SCHEDULER",
+    "T5_TEXT",
     "TRANSFORMER",
     "VAE",
-    "VAE_STRIDE",
-    "Flux1DevLoraTuned",
-    "Flux1DevTuned",
-    "latent_edge",
-    "packed_tokens",
 ]

@@ -17,15 +17,21 @@ by passing no deriver"*. It is DECLARED by the process entry point that knows
 which process it is — the same shape as :mod:`gen_worker.process_role`, whose
 wire role this one refines — and it is declared ONCE, before anything imports.
 
-THE TWO MODULE SETS, AND WHY THEY LIVE HERE
--------------------------------------------
-:data:`SERVE_ROLE_MODULES` and :data:`MINT_MACHINERY` are read by THREE
+THE MODULE SETS, AND WHY THEY LIVE HERE
+---------------------------------------
+:data:`SERVE_ROLE_MODULES`, :data:`MINT_MACHINERY`, :data:`MODEL_FREE_MODULES`,
+:data:`FORBIDDEN_LIBRARIES` and :data:`OPTIONAL_SERVE_IMPORTS` are read by THREE
 consumers: the runtime blocker (:mod:`gen_worker.serve.guard`), the CI fence
 (``scripts/lint_serve_role_closure.py``) and the tests. pgw#1176's measured
 lesson is that a fence naming symbols in its own string literals rots silently,
 and pgw#824's is that two lists of the same literals drift. So the role's own
 module declares them and everything else — including the fence, which parses
 this file — reads them from here. There is one list.
+
+Two claims, two scopes, because they are not the same claim (pgw#1331). Every
+serve-role module is asserted MINT-FREE. The family surface named in
+``MODEL_FREE_MODULES`` is additionally asserted to reach no MODEL LIBRARY —
+that subset, and not the whole role, for the reason recorded on the tuple.
 
 ``SERVE_ROLE_MODULES`` is a CLAIM, not a description: every name in it is a
 module the adopt-only path executes, asserted to be unable to reach anything in
@@ -66,6 +72,39 @@ class ServeRole(StrEnum):
     ADOPT_ONLY = "adopt_only"
 
 
+#: The subset of :data:`SERVE_ROLE_MODULES` that must reach NO model library —
+#: the typed family surface a request is actually served through (pgw#1331).
+#:
+#: **Why this is a subset and not the whole role, stated rather than hidden.**
+#: Every ``gen_worker`` import executes ``gen_worker/__init__.py``, and that
+#: package reaches ``models.loading`` / ``models.memory`` / ``view`` — the
+#: EAGER-CAPABLE worker's own guts, which import diffusers inside functions and
+#: legitimately need to, because an eager-capable pod serves eager on a miss
+#: (§4.28). Those imports never EXECUTE on an adopt-only pod, which is what
+#: :mod:`gen_worker.serve.guard` and pgw#1331's subprocess proof assert at run
+#: time. What a static walk can prove today is the property for the surface
+#: pgw#1331 built, and claiming more than that would be a fence describing a
+#: tree nobody has cut. **Owed, and named here so it is not rediscovered:**
+#: making the whole role statically model-free means making
+#: ``gen_worker/__init__`` lazy the way this package's own ``__init__`` now is.
+MODEL_FREE_MODULES: Tuple[str, ...] = (
+    "gen_worker.family",
+    "gen_worker.family.backing",
+    "gen_worker.family.errors",
+    "gen_worker.family.runtime",
+    "gen_worker.family.scheduler",
+    "gen_worker.family.snapshot",
+    "gen_worker.family.spec",
+    "gen_worker.family.tuned",
+    "gen_worker.family.catalog",
+    "gen_worker.family.catalog._generated",
+    "gen_worker.family.catalog._generated.flux1_dev",
+    "gen_worker.family.catalog._generated.sdxl",
+    "gen_worker.family.catalog.flux1_dev_serve",
+    "gen_worker.family.catalog.sdxl_serve",
+)
+
+
 #: Every module the ADOPT-ONLY serve path executes. The fence walks the
 #: transitive ``gen_worker`` import closure of these — function-local imports
 #: included, because a lazy ``from . import aot_mint`` inside a function is
@@ -102,6 +141,55 @@ SERVE_ROLE_MODULES: Tuple[str, ...] = (
     "gen_worker.process_role",
     "gen_worker.serve_posture",
     "gen_worker.serving_mode",
+    # pgw#1331: the typed family surface a request is actually SERVED through —
+    # the bindings, the backings behind them, the bare-math schedulers, and the
+    # catalog's serving halves. Roots, not incidental members: the claim this
+    # issue makes is that a Flux request runs end to end from here, so it is
+    # also asserted mint-free, and a claim that is not a root is a claim
+    # nothing walks. They are ALSO the whole of MODEL_FREE_MODULES above,
+    # spliced rather than retyped so the two sets cannot drift (pgw#824).
+    *MODEL_FREE_MODULES,
+)
+
+
+#: Third-party packages :data:`MODEL_FREE_MODULES` may not import, at module
+#: scope or inside a function (pgw#1331).
+#:
+#: ``diffusers`` is the one the issue names, and the reason is not tidiness: it
+#: is 5-15 seconds of process start and 1-2 GB of host RAM (pgw#1326's measured
+#: table) bought to run a handful of reshapes and one Euler step, and it is what
+#: makes today's serve image un-shrinkable. ``transformers`` is here for the
+#: same reason and by the same argument — the text encoders are its models, and
+#: pgw#1331 makes them graph classes precisely so the serve path stops needing
+#: the library that defines them.
+#:
+#: **This is not a claim that the modules cannot be installed.** The mint lane
+#: needs both and has both; the fence is about what the SERVE closure REACHES.
+#: The runtime half is :mod:`gen_worker.serve.guard`, which blocks these names
+#: in an adopt-only process the same way it blocks the mint lane.
+FORBIDDEN_LIBRARIES: Tuple[str, ...] = (
+    "diffusers",
+    "transformers",
+)
+
+#: The gen_worker modules a serve-role module may reach ONLY through an
+#: ``ImportError``-guarded import, and the closed list of them.
+#:
+#: A generated family binding exposes ``SPEC`` by importing its own declaration
+#: inside ``try: ... except ImportError: return None``. The declaration builds
+#: diffusers modules, so on an adopt-only pod that import fails and the binding
+#: serves without it — pgw#1339's ruling exactly: the absence of a serving fact
+#: degrades loudly and serves, it does not refuse.
+#:
+#: The fence therefore does not FOLLOW a guarded edge, which would make every
+#: binding drag its declaration into the closure and the whole guard vacuous.
+#: What it does instead is require every guarded edge to name a module in this
+#: tuple, and require every module in this tuple to actually be reached — so
+#: the hatch is an enumerated list two people can read, never an open door that
+#: any ``try: import`` can walk through.
+OPTIONAL_SERVE_IMPORTS: Tuple[str, ...] = (
+    "gen_worker.family.catalog.flux1_dev",
+    "gen_worker.family.catalog.sdxl",
 )
 
 #: The mint lane. A serve-role module that reaches ANY of these is a pod that
@@ -116,6 +204,11 @@ MINT_MACHINERY: Tuple[str, ...] = (
     "gen_worker.aot_mint",
     "gen_worker.boot_key",
     "gen_worker.boot_trace_child",
+    # pgw#1331: a family declaration mints its OWN graph classes through this
+    # bridge. It is the family surface's mint half, and the family surface is
+    # on the serve path — which is exactly why it is named here: a serve-role
+    # module that could reach it would be a pod that can compile.
+    "gen_worker.family.mint",
     "gen_worker.keyset.emit",
     "gen_worker.mint_child",
     "gen_worker.mint_process",
@@ -158,7 +251,9 @@ def _reset_for_test(role: ServeRole = ServeRole.EAGER_CAPABLE) -> None:
 
 
 __all__ = [
+    "FORBIDDEN_LIBRARIES",
     "MINT_MACHINERY",
+    "OPTIONAL_SERVE_IMPORTS",
     "SERVE_ROLE_MODULES",
     "ServeRole",
     "adopt_only",
