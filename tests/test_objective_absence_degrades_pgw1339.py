@@ -246,6 +246,38 @@ def test_the_confession_is_capable_of_going_red(
         "the sink must be genuinely fed by the emitter under test")
 
 
+def test_the_REQUEST_TIME_serving_shape_serves_and_confesses() -> None:
+    """The production path, at its own shape — not the warm/preflight one.
+
+    `executor.py:10081` builds every dispatched `RequestContext` with
+    `_resolve_slots_kwargs(spec, order.slots, order.adapters)`, i.e. WITH
+    per-dispatch `SlotOrder`s, where the tests above go through the WARM
+    shape. That distinction is exactly what th#2099 turned on — 0.118.0
+    "completing" proved the request path worked, and the same digest fatally
+    refused on 0.120.0 — so a fix asserted only on the warm shape would leave
+    the surface that actually took customer traffic unproven.
+    """
+    from gen_worker import dispatch
+    from gen_worker.warmup import resolved_slots_kwargs
+
+    chosen, siblings = _siblings()
+    # The ref reaches the spec the way a dispatch puts it there; only the
+    # FACTS are the variable under test.
+    child_preflight.bind_slots(siblings, {"pipeline": child_contract.MintSlot(
+        ref=PICKED, path="/tree", facts=UNSTAMPED)})
+    slots = {"pipeline": dispatch.SlotOrder(ref=PICKED, facts=UNSTAMPED)}
+
+    with _Events() as ev:
+        out = resolved_slots_kwargs(chosen, slots)
+
+    assert out["slot_errors"] == {}, (
+        "a dispatched request must not lose its slot — this dict becoming "
+        "non-empty is precisely how sd15 returned FATAL to a paying consumer")
+    assert out["declared_slot_errors"] == ()
+    assert out["resolved_slots"]["pipeline"].objective == ""
+    assert len(ev.unevidenced()) == 1
+
+
 # ---------------------------------------------------------------------------
 # 3. THE LINE THAT DOES NOT MOVE — contradiction still refuses
 # ---------------------------------------------------------------------------
