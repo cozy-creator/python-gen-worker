@@ -46,8 +46,34 @@ subdir = "python/src/tensorfs"
 #
 # What is LEFT is genuinely storage — `LocalCAS`, the chunk manifest, refs —
 # and it is byte-identical to `8bafdfbb` except for the `rewrites` below.
+#
+# pgw#1330: THE SNAPSHOT IS SPLIT AT TWO REVS, ON PURPOSE, AND THIS IS THE
+# ONLY RECORD OF IT. `project.py`, `tensors.py` and `gguf.py` come from
+# `read_plane_rev` below, NOT from `rev`. They are the consumption plane the
+# whole mixed-CAS cutover rests on — TFSSTUB1 render/parse, tree projection,
+# and the direct tensor reader — and they DID NOT EXIST at `8bafdfbb`.
+#
+# Why not simply bump `rev`: the newer lineage DELETED `LocalCAS.ingest_file`,
+# `LocalCAS.collect_garbage` and `LocalCAS.materialize_repository`, which are
+# live here at `hubio/client.py`, `models/disk_gc.py` and the
+# `models/cozy_snapshot.py` chokepoint. Taking them away is the chokepoint
+# flip (pgw#1308 sequencing step 6) and an ownership question about who owns
+# ingest and GC — neither is a consumption-cutover decision, and pretending
+# otherwise would put a storage rewrite inside a loader change.
+#
+# Why the split is SAFE rather than merely convenient: the three read-plane
+# modules import nothing from `local.py` at runtime beyond `object_path`,
+# `load_manifest` and `_store_lock` — all three present and unchanged at
+# `8bafdfbb` — plus `manifest.py` and `refs.py`. `refs.py` is byte-identical
+# across the two revs. `manifest.py` differs ONLY in that the newer rev drops
+# the 64 MiB cap on a chunkless entry; the older, STRICTER parser is the one
+# in force here, so nothing the read plane is handed can be a manifest the
+# storage half would have refused. `tests/test_projected_tree_pgw1330.py`
+# proves the pairing executes rather than asserting it from imports.
+read_plane_rev = "333bb10016c328c5e3a275de2a2a314dbd0abcaf"
+read_plane_files = ["gguf.py", "project.py", "tensors.py"]
 rewrites = [
-  "`__init__.py`: the `transfer`, `journal` and `daemon` re-exports are gone with the modules (pgw#1308). No other file is touched, so the remaining digests are still upstream's.",
+  "`__init__.py`: the `transfer`, `journal` and `daemon` re-exports are gone with the modules (pgw#1308), and the `project`/`tensors` re-exports are added with the read plane (pgw#1330). No other file is touched, so the remaining digests are still upstream's.",
 ]
 
 [packages.torchcg]
@@ -68,12 +94,15 @@ rewrites = [
 ]
 
 [packages.tensorfs.files]
-"__init__.py" = "45e521905b56fa570a61f10c018beb0ee48d3f75587423ba2e4f94b5e8d3cfeb"
+"__init__.py" = "51e60fc07782af7ff738c889be2fb1d9fa81224abfc0dfe546dde9d2191cf21b"
 "chunking.py" = "69333dc0836f35b05c420780b7eac205993ebde54c1b91b1afe03e55c313bd7a"
+"gguf.py" = "458927d1bd86c2c166ed0168e9369f76f85387ac09bbb1eb5ecb095cdec6e055"
 "local.py" = "92ec0d1249115f08eb02fccf554e946d36854a4ae861bde8190590d404695e0e"
 "manifest.py" = "a93ee850992c17dd90a57946441875d282367556703b9e9d1c8be057ea12bed4"
+"project.py" = "2471c26e013b287a7554cecda51ff9b42c09f71cd6d6d57dd33ed4ef242c40cd"
 "py.typed" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 "refs.py" = "f3a144543f423a6b01043294b21104ababaafdbfb31798560de678b69f27ac2f"
+"tensors.py" = "b68adf8b95161defb89ed06bdea8a778b54e21a461768a43ae658955ccc6db9d"
 
 [packages.torchcg.files]
 "__init__.py" = "401efd9450c0181f32c64ccee1d21999d78e77dc2be5ef404c27e539e350d4a9"

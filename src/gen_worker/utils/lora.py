@@ -32,6 +32,8 @@ from ..component_vocab import denoiser_components, text_encoder_components
 from ..api.errors import RefCompatibilitySurprise, ValidationError
 from dataclasses import replace
 from ..models import lora_lifted, w8a8_lora
+from ..models.projection import logical_size
+from ..models.tensor_source import load_state_dict
 
 logger = logging.getLogger(__name__)
 
@@ -306,7 +308,10 @@ def find_adapter_file(snapshot_path: Path, *, ref: str = "") -> Path:
                 ref=ref, axis="component_missing",
             )
         return p
-    files = sorted(p.rglob("*.safetensors"), key=lambda f: f.stat().st_size, reverse=True)
+    # pgw#1330: the LOGICAL size, not the inode's. Under a projected tree
+    # every candidate is a ~128 B stub, so `st_size` makes them all tie and
+    # "the largest adapter" silently becomes "whichever sorted first".
+    files = sorted(p.rglob("*.safetensors"), key=logical_size, reverse=True)
     if not files:
         raise RefCompatibilitySurprise(
             "adapter snapshot contains no .safetensors file",
@@ -365,16 +370,18 @@ def load_adapter_state_dict(path: Path, *, ref: str = "") -> Dict[str, Any]:
     keys (alpha = rank) so diffusers doesn't error. Zero-delta extractions
     are refused here — every consumer (executor overlays, BYO per-request
     loras, endpoint code) inherits the guard from this one seam."""
-    from safetensors.torch import load_file as load_safetensors
     import torch
 
-    size = Path(path).stat().st_size
+    # The DECLARED size: a stub whose model is 40 GiB must still trip the cap.
+    size = logical_size(path)
     if size > MAX_LORA_FILE_BYTES:
         raise ValidationError(
             f"lora adapter too large: {size} bytes (max {MAX_LORA_FILE_BYTES}) (ref={ref})"
         )
     try:
-        state_dict = load_safetensors(str(path))
+        state_dict = load_state_dict(
+            path, why="the adapter's every low-rank matrix comes from this read"
+        )
     except Exception as exc:
         raise RefCompatibilitySurprise(
             f"unreadable adapter safetensors: {exc}", ref=ref, axis="state_dict"

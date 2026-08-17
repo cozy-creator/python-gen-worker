@@ -77,6 +77,79 @@ def test_the_vendored_tensorfs_carries_no_transfer_plane() -> None:
         )
 
 
+def test_the_read_plane_is_recorded_at_its_own_rev() -> None:
+    """pgw#1330: the snapshot is SPLIT at two revs, and the split is declared.
+
+    `project.py`, `tensors.py` and `gguf.py` come from a rev the storage half
+    is deliberately NOT at, because the newer lineage deleted `ingest_file`,
+    `collect_garbage` and `materialize_repository` — all three live here. A
+    split that is only in a comment is a split nobody can audit, so the rev is
+    a field and the file list is a field, and the digest fence above covers
+    them like any other vendored file.
+    """
+
+    spec = MANIFEST["packages"]["tensorfs"]
+    assert spec["read_plane_rev"] != spec["rev"]
+    assert set(spec["read_plane_files"]) == {"gguf.py", "project.py", "tensors.py"}
+    for name in spec["read_plane_files"]:
+        assert name in spec["files"], f"{name} is not digest-fenced"
+
+
+def test_the_read_plane_runs_without_the_compiled_extension() -> None:
+    """The reason the split is expressible at all: this half is PURE PYTHON.
+
+    `Layout::project` is Rust and cannot travel into a source-vendored wheel,
+    so a stub that only the extension could render or parse would leave every
+    consumer here unable to read a projected tree. Proved by EXECUTING the
+    render/parse/read path with `tensorfs._tensorfs` made unimportable, not by
+    reading the import list.
+    """
+
+    import os
+    import subprocess
+    import sys
+
+    program = """
+import sys
+
+
+class Refuse:
+    # find_spec, not find_module: the latter was REMOVED in 3.12, so a finder
+    # defining it is silently ignored and the guard proves nothing.
+    def find_spec(self, name, path=None, target=None):
+        if name.rpartition(".")[2] == "_tensorfs":
+            raise AssertionError("the read plane reached the compiled extension")
+        return None
+
+
+sys.meta_path.insert(0, Refuse())
+
+# The guard must be LIVE, or everything below is vacuous.
+try:
+    __import__("_tensorfs")
+except AssertionError:
+    pass
+else:
+    raise SystemExit("the meta_path guard never fired -- this test proves nothing")
+
+from gen_worker._vendor.tensorfs import parse_stub, stub_bytes
+
+body = "ab" * 32
+stub = parse_stub(stub_bytes(body, 4096))
+assert stub is not None and stub.body_sha256 == body and stub.size == 4096
+print("ok")
+"""
+    root = VENDOR.parents[1]
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(root)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().endswith("ok")
+
+
 def test_the_transfer_plane_emits_progress_as_each_object_lands() -> None:
     """pgw#1287, now asserted against pgw's OWN code rather than a pinned rev.
 

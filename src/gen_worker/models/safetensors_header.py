@@ -1,4 +1,4 @@
-"""The one bound on a safetensors declared header length.
+"""The one way to read a safetensors header, and the one bound on its length.
 
 A safetensors file opens with an 8-byte
 little-endian header length taken straight from the file. It is attacker- or
@@ -27,6 +27,11 @@ count per shard grew by an order of magnitude.
 
 from __future__ import annotations
 
+import json
+import struct
+from pathlib import Path
+from typing import Any, Dict
+
 MAX_HEADER_BYTES: int = 100 << 20
 
 
@@ -40,4 +45,56 @@ def header_len_ok(n: int) -> bool:
     return 0 < n <= MAX_HEADER_BYTES
 
 
-__all__ = ["MAX_HEADER_BYTES", "header_len_ok"]
+def read_header(path: Path | str, *, why: str) -> Dict[str, Any]:
+    """The parsed safetensors header at ``path``, served from the MANIFEST when
+    that path is a projection stub.
+
+    ``{}`` still means "there is no readable header here", and it is still the
+    honest answer for a real file that is truncated, empty, or not
+    safetensors. What it must NEVER mean again is "this file is a pointer
+    stub". pgw#1308 counted 39 header readers in this repo that treated a
+    parse failure as no-information and fell back to a default; a stub makes
+    every one of them wrong at once, silently, on the serving path
+    (``detect_on_disk_dtype`` -> fp32 at 2x VRAM; ``_quantized_layers`` -> an
+    fp8 artifact routed to the plain bf16 lane; ``_svdq_from_file`` -> an svdq
+    checkpoint that stops being an svdq checkpoint).
+
+    ``why`` is the caller's own sentence about what it would otherwise get
+    wrong, and it appears in the refusal. Three copies of this function were
+    deleted to write this one: a fail-open that is duplicated per lane cannot
+    be fixed per lane.
+    """
+
+    from . import projection
+
+    file = Path(path)
+    if projection.stub_at(file) is not None:
+        snapshot, entry = projection.require_projection_for(file, why=why)
+        with snapshot.open_tensors(verify=False) as reader:
+            (n,) = struct.unpack("<Q", reader.read_range(entry.path, 0, 8))
+            if not header_len_ok(n) or 8 + n > entry.size_bytes:
+                return {}
+            header = json.loads(reader.read_range(entry.path, 8, n))
+        return header if isinstance(header, dict) else {}
+    try:
+        with open(file, "rb") as handle:
+            raw = handle.read(8)
+            if len(raw) < 8:
+                return {}
+            (n,) = struct.unpack("<Q", raw)
+            if not header_len_ok(n):
+                return {}
+            header = json.loads(handle.read(n))
+    except (OSError, ValueError):
+        return {}
+    return header if isinstance(header, dict) else {}
+
+
+def read_metadata(path: Path | str, *, why: str) -> Dict[str, Any]:
+    """A safetensors file's ``__metadata__`` block, stub-aware."""
+
+    meta = read_header(path, why=why).get("__metadata__")
+    return meta if isinstance(meta, dict) else {}
+
+
+__all__ = ["MAX_HEADER_BYTES", "header_len_ok", "read_header", "read_metadata"]
