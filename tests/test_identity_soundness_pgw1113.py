@@ -189,21 +189,30 @@ def test_the_stamp_accumulates_and_is_order_free() -> None:
     assert _token(a) == _token(b)
 
 
-def test_the_arm_facts_split_into_environment_and_subject() -> None:
+def test_the_arm_facts_split_into_environment_and_obligation() -> None:
     """The two halves are different axioms, so they are different tuples.
 
     ``ARM_ENVIRONMENT_FACTS`` is what a delegated child RECORDS on the cell it
     hands back, and is therefore comparable across the process boundary.
-    ``ARM_SUBJECT_FACTS`` is not on the cell and must not be: the key is the
-    computation, so one cell legally serves every checkpoint whose graph it
-    is. Demanding the cell restate its minting checkpoint would refuse exactly
-    the reuse the membership axiom exists to allow.
+    ``ARM_OBLIGATION_FACTS`` is not on the cell and must not be. For the
+    subject half (pgw#1113) that is an axiom: the key is the computation, so
+    one cell legally serves every checkpoint whose graph it is, and demanding
+    the cell restate its minting checkpoint would refuse exactly the reuse the
+    membership axiom exists to allow. For ``family``/``lane``/``env_seal``
+    (pgw#1340) it is a fact about TCG's closed artifact vocabulary, which has
+    no field for any of them — and comparing them anyway is what made every
+    `sd15` self-mint refuse after a 25-minute compile.
     """
     assert set(fleet_cells.ARM_FACTS) == (
         set(fleet_cells.ARM_ENVIRONMENT_FACTS)
-        | set(fleet_cells.ARM_SUBJECT_FACTS))
+        | set(fleet_cells.ARM_OBLIGATION_FACTS))
     assert not (set(fleet_cells.ARM_ENVIRONMENT_FACTS)
-                & set(fleet_cells.ARM_SUBJECT_FACTS))
+                & set(fleet_cells.ARM_OBLIGATION_FACTS))
+    assert set(fleet_cells.ARM_SUBJECT_FACTS) <= set(
+        fleet_cells.ARM_OBLIGATION_FACTS)
+    # The environment half is exactly what a cell can state — the invariant
+    # pgw#1340's preflight refuses a mint on, asserted here on the constants.
+    assert fleet_cells.unstateable_arm_axes() == ()
     identity = fleet_cells.arm_identity("f", "", 0, _Cfg())
     assert set(identity.facts_dict()) == set(fleet_cells.ARM_FACTS)
     assert "graph" not in identity.facts_dict()

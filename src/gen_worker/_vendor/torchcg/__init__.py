@@ -1,6 +1,10 @@
 """Mint and reuse verified PyTorch AOTInductor graphs through HashRepo."""
 
-from .artifact import COMPILED_GRAPH_FORMAT, ArtifactError
+from .artifact import (
+    ARTIFACT_METADATA_FIELDS,
+    COMPILED_GRAPH_FORMAT,
+    ArtifactError,
+)
 from .compiler import CompileError
 from .declaration import (
     DeclarationError,
@@ -40,6 +44,7 @@ from .storage import (
 
 __all__ = [
     "ARTIFACT_KIND",
+    "ARTIFACT_METADATA_FIELDS",
     "AdmissionError",
     "ArtifactError",
     "CompileError",

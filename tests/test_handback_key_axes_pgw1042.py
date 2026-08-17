@@ -92,21 +92,33 @@ def test_shared_axes_agree_is_empty() -> None:
         _arm_key(seal, TOOLCHAIN), _envelope(seal, TOOLCHAIN)) == ""
 
 
-def test_env_seal_divergence_is_named() -> None:
-    """The pod class: the child's recorded seal differs from the parent's."""
+def test_the_env_seal_is_no_longer_comparable_at_this_seam() -> None:
+    """INVERTED by pgw#1340 (th#2098), and stated rather than deleted.
+
+    This used to assert that a child whose recorded seal differs from the
+    parent's is refused ``env_seal: …`` — the measured pgw#1042 class, where
+    `torch._inductor.aot_compile` mutated global config as a side effect.
+    THE SEAL IS NO LONGER ON THE CELL AT ALL: since pgw#1270 TCG mints every
+    artifact and `validate_metadata` refuses metadata outside its closed
+    vocabulary, which has no `env_seal` field. So this comparison did not
+    catch a diverging seal — it read `{}` off every real cell, digested that,
+    and refused every handback ever made.
+
+    The pgw#1042 root fix survives where it belongs: the seal digest still
+    excludes `aot_inductor.metadata` (pinned below), so the side effect this
+    axis was watching for cannot move a seal in the first place.
+    """
     parent_seal = _seal_dict()
     child_seal = dict(parent_seal, inductor="ffff999988887777")
-    got = fleet_cells.arm_axis_divergence(
-        _arm_key(parent_seal, TOOLCHAIN), _envelope(child_seal, TOOLCHAIN))
-    assert got.startswith("env_seal: ")
-    assert env_seal.seal_digest(child_seal) in got
-    assert env_seal.seal_digest(parent_seal) in got
+    assert "env_seal" not in fleet_cells.ARM_ENVIRONMENT_FACTS
+    assert "env_seal" in fleet_cells.ARM_OBLIGATION_FACTS
+    assert fleet_cells.arm_axis_divergence(
+        _arm_key(parent_seal, TOOLCHAIN), _envelope(child_seal, TOOLCHAIN)) == ""
 
 
 @pytest.mark.parametrize("field,value,axis", [
     ("sm", "sm_80", "sm"),
-    ("family", "other-family", "family"),
-    ("lora_bucket", 0, "lane"),
+    ("toolchain", {"libtorch.so": "0000ffff"}, "toolchain"),
     (aot_serve.COMPILED_GRAPH_FORMAT_KEY, "99",
      aot_serve.COMPILED_GRAPH_FORMAT_KEY),
 ])
@@ -142,14 +154,40 @@ def test_the_envelope_is_deliberately_NOT_compared_at_this_seam() -> None:
         _arm_key(seal, TOOLCHAIN), meta) == ""
 
 
+@pytest.mark.parametrize("axis", ["family", "lane"])
+def test_the_obligation_facts_are_deliberately_NOT_compared_either(
+    axis: str,
+) -> None:
+    """pgw#1340 finished the sweep pgw#1176 started.
+
+    ``family`` and ``lane`` left for the identical reason ``envelope`` did —
+    a cell has no field for them — and leaving them behind cost th#2098:
+    ~$1.00 of L4 per burst, every burst, for two wheels. They still split the
+    obligation on the parent's side, where the arm token carries them.
+    """
+    seal = _seal_dict()
+    assert axis not in fleet_cells.ARM_ENVIRONMENT_FACTS
+    assert axis in fleet_cells.ARM_OBLIGATION_FACTS
+    meta = _envelope(seal, TOOLCHAIN)
+    meta["family"] = "other-family"
+    meta["lora_bucket"] = 0
+    assert fleet_cells.arm_axis_divergence(
+        _arm_key(seal, TOOLCHAIN), meta) == ""
+
+
 def test_adopt_refuses_typed_before_any_arm(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A diverging child cell must fail `key_axis_divergence` at the seam —
-    never reach the arm, whose C++ error was the pod's whole diagnostic."""
+    never reach the arm, whose C++ error was the pod's whole diagnostic.
+
+    pgw#1340 re-aimed this at ``sm``: the seal it used to diverge is no longer
+    a comparable axis (a cell cannot state it), so diverging it now proves
+    nothing. ``sm`` is a genuine cross-runtime divergence and the refusal is
+    unchanged — which is the point of re-aiming rather than deleting.
+    """
     seal = _seal_dict()
-    child_seal = dict(seal, inductor="ffff999988887777")
-    meta = _envelope(child_seal, TOOLCHAIN)
+    meta = dict(_envelope(seal, TOOLCHAIN), sm="sm_80")
 
     from gen_worker import artifact_meta
     from gen_worker.models import provision
@@ -180,7 +218,7 @@ def test_adopt_refuses_typed_before_any_arm(
     assert fleet_cells.adopt_delegated_mint(object(), pending, [artifact]) is None
     reason, detail = fleet_cells.adopt_refusal(pending)
     assert reason == "key_axis_divergence"
-    assert "env_seal: " in detail
+    assert "sm: " in detail
     assert meta["compiled_graph_key"] in detail
 
 
