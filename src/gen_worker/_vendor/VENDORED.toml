@@ -66,9 +66,15 @@ subdir = "python/src/tensorfs"
 #     callers. The definition below is all that is left of it, and
 #     `scripts/lint_materialization_hatch.py` declares that and refuses a new
 #     caller anywhere, `_vendor` included.
-#   * `materialize` (single file) — KEPT. It is `extract()` under the pinned
-#     rev's name: the priced escape hatch that upstream's own
-#     no-whole-tree-materialization fence deliberately exempts. Two live users
+#   * `materialize` (single file) — KEPT, and the name is now the SHARED one.
+#     The pinned rev has always called it `materialize`; upstream called the
+#     same operation `extract()` until tensorfs#107 renamed it to match
+#     (Paul's #1303 ruling). So the two-spelling hazard that once made the
+#     hatch census read zero is gone: one name here and upstream, and
+#     `.extract(` is refused outright by
+#     `scripts/lint_materialization_hatch.py`. It is tier 3 of the access
+#     ladder — permanent, not separately priced — and upstream's own
+#     no-whole-tree-materialization fence exempts it by name. Two live users
 #     (`aot_delivery.py`, vendored `torchcg/storage.py`), both declared to the
 #     lint against `docs/mixed-cas-layout.md` section 9.
 #   * `ingest_file` / `ingest_repository` — TENSORFS'S, not ours. Admission is

@@ -63,10 +63,19 @@ def resolve_gguf(source: Union[str, Path]) -> Path:
     (``-00001-of-0000N.gguf``) count as one model and the first shard is
     returned (llama.cpp discovers the rest). Multiple distinct models fail
     closed — pin a flavor instead of guessing a quant.
+
+    **The returned path is always a REAL file** (pgw#1303 tier 3). Discovery
+    runs over the projected tree — stubs carry real filenames, which is why
+    the glob and the multi-model refusal above work unchanged — and then the
+    shard group is materialized, because everything downstream of here is
+    llama.cpp: the ``llama-server -m`` argument, the ``gguf`` reader, and the
+    ``st_size`` sum that sizes the VRAM fit. None of them can read our store,
+    and a pod has no FUSE to give them file semantics, so tier 3 is the
+    answer and it is a permanent one.
     """
     p = Path(source)
     if p.suffix == ".gguf":
-        return p
+        return _real_shard_group(p)
     if not p.is_dir():
         raise FatalError(f"model binding {str(p)!r} is neither a .gguf file nor a directory")
     ggufs = sorted(q for q in p.rglob("*.gguf") if q.is_file())
@@ -78,7 +87,21 @@ def resolve_gguf(source: Union[str, Path]) -> Path:
             f"snapshot dir {str(p)!r} holds {len(stems)} distinct GGUF models "
             f"({', '.join(stems)}); pin the flavor to exactly one quant"
         )
-    return ggufs[0]
+    return _real_shard_group(ggufs[0])
+
+
+def _real_shard_group(gguf: Path) -> Path:
+    """``gguf`` as a real file, with its shard siblings made real too.
+
+    Materializes the CONTAINING DIRECTORY rather than the one file: llama.cpp
+    opens ``-00002-of-0000N`` itself, having been told only about the first
+    shard, so a per-file copy would hand it one real shard and N-1 stubs. On a
+    tree that is not projected this returns ``gguf`` unchanged, so the
+    non-projected paths (a bare download, a test fixture) are untouched.
+    """
+
+    return third_party_dir(
+        gguf.parent, why="llama.cpp wants real GGUF files") / gguf.name
 
 
 def _shard_group(gguf: Path) -> list[Path]:
@@ -116,7 +139,15 @@ def _field_int(reader: Any, key: str) -> int:
 
 
 def read_gguf_info(path: Union[str, Path]) -> GGUFInfo:
-    """Read fit metadata from a GGUF header. ``size_bytes`` sums all shards."""
+    """Read fit metadata from a GGUF header. ``size_bytes`` sums all shards.
+
+    ``size_bytes`` is what decides ``-ngl``, and it comes from ``st_size``.
+    Over a projected tree a stub's ``st_size`` is ~128 bytes REGARDLESS of the
+    model behind it, so the fit would conclude "everything fits" for a 30 GiB
+    model and never degrade — silently, since nothing fails. The whole shard
+    group is therefore made real first (pgw#1303 tier 3), and every stat below
+    is taken on the real files.
+    """
     try:
         from gguf import GGUFReader
     except ImportError as exc:  # pragma: no cover - gguf is a core dep
@@ -125,10 +156,8 @@ def read_gguf_info(path: Union[str, Path]) -> GGUFInfo:
             "install with 'pip install gen-worker'"
         ) from exc
 
-    gguf_path = Path(path)
-    reader = GGUFReader(
-        str(third_party_dir(gguf_path, why="gguf.GGUFReader wants a real file")),
-        "r")
+    gguf_path = _real_shard_group(Path(path))
+    reader = GGUFReader(str(gguf_path), "r")
     arch_field = reader.get_field("general.architecture")
     arch = str(arch_field.contents()) if arch_field is not None else ""
     n_head = _field_int(reader, f"{arch}.attention.head_count")
