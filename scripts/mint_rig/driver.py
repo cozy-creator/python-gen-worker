@@ -26,6 +26,7 @@ steps.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -160,6 +161,12 @@ class Rig:
     #: staleness: RunPod's REST record cannot distinguish an image pull from a
     #: wedged host, so there is no progress signal to be stuck on.
     boot_budget: float = 0.15
+    #: The ssh public key installed on the pod. Resolved from
+    #: `RUNPOD_SSH_PUBLIC_KEY_FILE` or `~/.ssh/runpod.pub` at CREATE time, not at
+    #: construction: a unit test builds a Rig on a machine that has no such key,
+    #: and reading it eagerly made the whole suite depend on the developer's home
+    #: directory. CI found that; this box could not have.
+    public_key: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.rail, Rail):
@@ -214,8 +221,10 @@ class Rig:
             kill.close(confirmed_dead=True, note="dry run")
             return self._bank(row)
 
-        body = self._create_body(card, image, name)
         try:
+            # INSIDE the try: a missing ssh key is a refusal with a row and a
+            # closed kill-set, not a traceback out of `run`.
+            body = self._create_body(card, image, name)
             created = guard.rent(
                 self.api_key,
                 body,
@@ -353,8 +362,23 @@ class Rig:
             body["dockerEntrypoint"] = start
         return self._api.create(body)
 
+    def _public_key(self) -> str:
+        if self.public_key:
+            return self.public_key
+        path = Path(
+            os.environ.get("RUNPOD_SSH_PUBLIC_KEY_FILE", Path.home() / ".ssh" / "runpod.pub")
+        )
+        try:
+            return path.read_text().strip()
+        except OSError:
+            raise RuntimeError(
+                f"pgw#1347: no RunPod ssh public key at {path}. Without it the pod boots "
+                "with no authorized_keys and is unreachable — a rental that could never be "
+                "used. Set RUNPOD_SSH_PUBLIC_KEY_FILE or pass public_key=."
+            ) from None
+
     def _create_body(self, card: Card, image: str, name: str) -> dict[str, Any]:
-        public_key = (Path.home() / ".ssh" / "runpod.pub").read_text().strip()
+        public_key = self._public_key()
         return {
             "name": name,
             "imageName": image,

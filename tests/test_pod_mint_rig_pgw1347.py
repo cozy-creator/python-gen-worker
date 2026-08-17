@@ -244,6 +244,10 @@ def _rig(tmp_path: Path, pods: FakePods, transport: FakeTransport, **kw: Any) ->
         api_key="k",
         out_dir=tmp_path / "runs",
         transport_factory=lambda host, port: transport,
+        # A FIXED key. Reading ~/.ssh/runpod.pub made every row in this file
+        # depend on the developer's home directory; CI has no such file and said
+        # so, 30 rows at a time.
+        public_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 pgw1347-test",
         sleep=lambda _s: None,
         log=lambda _m: None,
         tick_s=0.0,
@@ -959,6 +963,21 @@ def test_the_sm86_set_asks_for_every_ampere_sku_not_just_one(tmp_path: Path) -> 
     card = cards_mod.pick("sm86")
     assert len(card.gpu_type_ids) >= 4 and "NVIDIA A40" in card.gpu_type_ids
     assert card.sm_expected == "8.6"
+
+
+def test_a_missing_ssh_key_is_a_REFUSAL_with_a_row_not_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without an authorized key the pod boots unreachable — a rental that could
+    never be used — so it is refused before the create call, with a banked row."""
+    monkeypatch.setenv("RUNPOD_SSH_PUBLIC_KEY_FILE", str(tmp_path / "nope.pub"))
+    pods = FakePods()
+    rig = _rig(tmp_path, pods, FakeTransport())
+    rig.public_key = ""
+    row = rig.run(cards_mod.pick("sm89"), Workload(name="w", command="x"))
+    assert row.verdict == "refused" and row.failed_stage == "create"
+    assert "no RunPod ssh public key" in row.detail
+    assert pods.created_bodies == [], "nothing was rented"
 
 
 def test_unknown_card_names_the_ones_that_exist() -> None:
