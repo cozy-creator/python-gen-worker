@@ -254,6 +254,21 @@ def test_the_export_is_total_over_every_bucket_at_every_layout(
             assert len(buckets) == 2, f"{runner.name} at {layout} is not total"
 
 
+def test_exporting_the_same_declaration_twice_produces_the_same_bytes() -> None:
+    """The committed snapshot is only reviewable if it is a FUNCTION of the source.
+
+    A second trace runs the whole path again — build, example, `torch.export`,
+    ingress derivation, egress read — so a nondeterminism anywhere in it (a set
+    iterated, a dict ordered by insertion, a symbol named by a counter that does
+    not reset) shows up here as a moved digest. Without this the fence in CI
+    would fail for whoever regenerated last rather than for whoever broke it.
+    """
+    first = export_family(TOY_DIFFUSION)
+    again = export_family(TOY_DIFFUSION)
+    assert first.canonical() == again.canonical()
+    assert first.digest() == again.digest()
+
+
 def test_the_export_carries_no_class_hash_and_no_checkpoint_field(
     toy_export: FamilyExport,
 ) -> None:
