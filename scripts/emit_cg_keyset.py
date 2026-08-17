@@ -21,6 +21,29 @@ Two modes, because there are two honest producers:
     machines only" rule. Needs the endpoint importable and its slots resolved,
     because a traced graph is a function of the checkpoint's own config.
 
+    **Every slot needs BOTH halves**, and the script refuses one without the
+    other (pgw#1353): ``--slot NAME=PATH`` says where a checkpoint TREE already
+    is — the structure-only build reads ``model_index.json`` and each
+    component's config out of it — and ``--slot-ref NAME=REF`` says WHICH
+    checkpoint it is. The ref is not bookkeeping: ``keyset.closure`` folds it
+    into the closure digest, so a document derived without the ref the serving
+    pod will resolve is addressed at a closure no pod ever looks up. This mode
+    was unrunnable between pgw#1333 and pgw#1353 — it built
+    ``MintSlot(ref=None, path=path)`` against a struct that had gained a
+    required ``facts`` and required ``ref``, and raised ``TypeError`` before
+    tracing anything.
+
+WHAT THIS SCRIPT CANNOT DO, stated because it was tried (pgw#1353)
+------------------------------------------------------------------
+Run at IMAGE BUILD to bake a document into ``/app/.tensorhub``. The builder can
+state neither half of a slot: the checkpoint tree is not in the image, and the
+ref is a deploy-time hub pick (an sdxl-shaped ``Slot(selected_by=...)`` has no
+``default_checkpoint``, and the served ref lives in the deploy config). A
+document emitted there is addressed at a closure no pod resolves. The document
+reaches a fleet pod through the DURABLE ROOT instead —
+``keyset.store.durable_root()``, which the pod that traces writes and the next
+pod of the endpoint reads.
+
 The document is the SAME schema in both modes and in the pod's own cache: it is
 trusted because its closure digest matches what a pod's code would trace, never
 because of where it was found.
@@ -33,7 +56,8 @@ Usage::
 
     python scripts/emit_cg_keyset.py --from-cache ~/.cache/cozy --out build/
     python scripts/emit_cg_keyset.py --derive --module my_endpoint.main \\
-        --function generate --slot pipeline=/cas/checkpoint --out build/
+        --function generate --slot pipeline=/cas/checkpoint \\
+        --slot-ref pipeline=tensorhub/wai-illustrious@prod --out build/
 """
 
 from __future__ import annotations
@@ -41,10 +65,13 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
+
+if TYPE_CHECKING:  # pragma: no cover — typing only, keeps the import lazy
+    from gen_worker.child_contract import MintSlot
 
 
 def _merge(out_path: Path, closures: Dict[str, object]) -> int:
@@ -83,13 +110,51 @@ def from_cache(cache: Path, out: Path) -> int:
     return 0
 
 
+def resolved_slots(
+    paths: Dict[str, str], refs: Dict[str, str],
+) -> Dict[str, "MintSlot"]:
+    """Build one COMPLETE ``MintSlot`` per slot, or refuse by name.
+
+    ``MintSlot`` is "present and complete, or absent" by construction, so this
+    mirrors that rather than filling a hole: a slot missing either half is named
+    in the refusal instead of being built around a ``None`` the traced graph
+    would silently depend on. That hole is exactly what broke this mode —
+    ``MintSlot(ref=None, path=path)`` against a struct with a required ``ref``
+    and (since pgw#1333) a required ``facts``.
+    """
+    from gen_worker.api.binding import Hub
+    from gen_worker.child_contract import MintSlot
+    from gen_worker.serving_facts import FactsUnavailable
+
+    incomplete = sorted(set(paths) ^ set(refs))
+    if incomplete:
+        raise SystemExit(
+            f"every slot needs BOTH --slot NAME=PATH and --slot-ref NAME=REF; "
+            f"incomplete: {incomplete}")
+    out: Dict[str, MintSlot] = {}
+    for name in sorted(paths):
+        out[name] = MintSlot(
+            # `Hub` applies the tensorhub grammar's own validation, including
+            # the `@release` split, so a mistyped ref refuses here rather than
+            # becoming a wrong SUBJECT in the closure digest.
+            ref=Hub(refs[name].strip()),
+            path=paths[name],
+            # HONEST, not a stub: this producer never asked a catalog. `facts`
+            # is deliberately absent from the closure digest, so it cannot move
+            # a key; `facts_or_degrade` turns this into a confession naming this
+            # script if anything downstream wants the stamp.
+            facts=FactsUnavailable(owed_by="scripts/emit_cg_keyset.py"),
+        )
+    return out
+
+
 def derive(
     modules: Tuple[str, ...], function: str, slots: Dict[str, str],
-    out: Path, work: Path,
+    refs: Dict[str, str], out: Path, work: Path,
 ) -> int:
     from gen_worker import aot_declaration, boot_key, keyset
     from gen_worker.api.export_contract import export_declaration
-    from gen_worker.child_contract import CompileSpec, MintSlot
+    from gen_worker.child_contract import CompileSpec
     from gen_worker.keyset import store as keyset_store
     from gen_worker.registry import collect_endpoints
 
@@ -116,30 +181,53 @@ def derive(
             float(v) for v in (getattr(cfg, "guidance_scales", ()) or ())),
         text_lens=tuple(int(v) for v in (getattr(cfg, "text_lens", ()) or ())),
     )
-    resolved = {name: MintSlot(ref=None, path=path) for name, path in slots.items()}
+    resolved = resolved_slots(slots, refs)
     cache = work / "cache"
-    derived = boot_key.derive(
-        function=function,
-        modules=modules,
-        family=family,
-        cfg=spec,
-        slots=resolved,
-        declared_hint=len(list(aot_declaration.cell_plans(declaration))),
-        work_root=work / "trace",
-        memo_dir=cache,
-        trust_memo=False,
-        emitted_by=f"scripts/emit_cg_keyset.py {family}",
-    )
-    print(
-        f"derived {len(derived.entry_keys)} class(es) for {family} in "
-        f"{derived.wall_ms} ms (source={derived.source.value}, "
-        f"closure={derived.closure})")
-    document = keyset_store.read_document(cache / keyset.KEYSET_FILENAME)
-    row = document.closures.get(str(derived.closure))
-    if row is None:
-        print("the derivation recorded no closure — nothing to emit")
+    # The ADDRESS, stated before the traces and independently of them: it is a
+    # pure function of code plus the resolved subjects, it costs milliseconds,
+    # and having it up front is what lets the document be recovered below even
+    # when the derivation's LAST step fails.
+    closure = keyset.closure_of(
+        family=family, function=function, modules=modules, cfg=spec,
+        slots=resolved)
+    folded = ""
+    try:
+        derived = boot_key.derive(
+            function=function,
+            modules=modules,
+            family=family,
+            cfg=spec,
+            slots=resolved,
+            declared_hint=len(list(aot_declaration.cell_plans(declaration))),
+            work_root=work / "trace",
+            memo_dir=cache,
+            trust_memo=False,
+            emitted_by=f"scripts/emit_cg_keyset.py {family}",
+        )
+        folded = f"{len(derived.entry_keys)} key(s) folded, {derived.wall_ms} ms"
+    except Exception as exc:  # noqa: BLE001 — the document may exist regardless
+        # THE MINT LANE'S EMITTER DOES NOT NEED A CARD. The document is
+        # machine-INDEPENDENT — TCG class hashes, nothing folded — while the
+        # tail of `derive` folds this process's `sm` into keys THIS script never
+        # uses. On a cardless box that fold refuses `no_runtime_sm` and used to
+        # discard a complete, correct set of traces at the last step. The traces
+        # are recorded before the fold (pgw#1353), so the honest thing here is to
+        # look for what landed rather than to treat the exception as the answer.
+        folded = f"not folded ({type(exc).__name__}: {exc})"
+    try:
+        document = keyset_store.read_document(cache / keyset.KEYSET_FILENAME)
+    except keyset.KeySetError as exc:
+        print(f"the derivation recorded no document: {exc}")
         return 1
-    _merge(out, {str(derived.closure): row})
+    row = document.closures.get(str(closure))
+    if row is None:
+        print(
+            f"the derivation recorded no closure {closure} — nothing to emit "
+            f"({folded})")
+        return 1
+    print(f"derived {len(row.classes)} class(es) for {family} — {folded}")
+    print(f"closure={closure}")
+    _merge(out, {str(closure): row})
     print(f"wrote {out}")
     return 0
 
@@ -156,7 +244,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--function", default="")
     ap.add_argument(
         "--slot", action="append", default=[], metavar="NAME=PATH",
-        help="a resolved setup slot; the traced graph depends on its config")
+        help="where a resolved setup slot's checkpoint TREE is; the "
+             "structure-only build reads its configs")
+    ap.add_argument(
+        "--slot-ref", action="append", default=[], metavar="NAME=REF",
+        help="WHICH checkpoint that slot is (owner/repo@release); it rides the "
+             "closure digest, so a document derived without it is unaddressable")
     ap.add_argument("--out", default="")
     ap.add_argument("--work", default="")
     args = ap.parse_args(argv)
@@ -179,8 +272,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             if not name or not path:
                 ap.error(f"--slot must be NAME=PATH, got {item!r}")
             slots[name] = path
+        refs: Dict[str, str] = {}
+        for item in args.slot_ref:
+            name, _, ref = str(item).partition("=")
+            if not name or not ref:
+                ap.error(f"--slot-ref must be NAME=REF, got {item!r}")
+            refs[name] = ref
         work = Path(args.work or (out.parent / ".cg-keyset-work"))
-        return derive(tuple(args.module), args.function, slots, out, work)
+        return derive(tuple(args.module), args.function, slots, refs, out, work)
 
     if not args.from_cache:
         ap.error("pass --from-cache DIR or --derive")

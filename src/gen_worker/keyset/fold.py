@@ -30,13 +30,25 @@ class KeySource(enum.Enum):
     """WHERE this boot's graph axis came from. A typed state, not a tag.
 
     ``SHIPPED`` is pgw#1327's whole point: the mint lane derived these hashes and
-    this pod read them as data. ``MEMO`` is the same document out of this pod's
-    own cache — written by a trace this machine ran on an earlier boot.
-    ``TRACED`` means this process ran ``torch.export`` children, which on a serve
-    pod is the thing #1327 exists to delete.
+    this pod read them as data. ``DURABLE`` is the same document off the
+    platform-placed store root (pgw#1353) — derived by a trace some pod of THIS
+    endpoint ran, on storage that outlived the pod that paid for it. ``MEMO`` is
+    the same document out of this pod's own cache, written by a trace this
+    machine ran on an earlier boot. ``TRACED`` means this process ran
+    ``torch.export`` children, which on a serve pod is the thing #1327 exists to
+    delete.
+
+    ``DURABLE`` is a member rather than a flavour of ``MEMO`` because the two
+    answer different questions and the fleet reads the answer. ``keys_from=memo``
+    on a fleet pod is very nearly a contradiction — the pod-local cache is
+    ``/tmp`` and a fresh pod's is empty — so a durable hit reported as ``memo``
+    would be indistinguishable from the impossible case, and the ONE number this
+    issue exists to move (how many pods pay the 805 s) would be unreadable off
+    the boot events.
     """
 
     SHIPPED = "shipped"
+    DURABLE = "durable"
     MEMO = "memo"
     TRACED = "traced"
 

@@ -476,7 +476,17 @@ def test_this_machines_cache_answers_under_its_own_source(
     no_children: None,
 ) -> None:
     """§4.28's compile-once-run-forever is the SAME document out of the pod's
-    own cache — read after the shipped roots and labelled as itself."""
+    own cache — read after the shipped roots and labelled as itself.
+
+    pgw#1353: this row is about the POD-LOCAL cache, so it now states the
+    precondition that makes that the answering root — no durable root placed,
+    which is th#1813's own verdict for trusted hardware and for a provider with
+    no storage that outlives the container. With a root placed the durable copy
+    answers first and reports ``durable``, which is
+    ``test_keyset_durable_root_pgw1353`` and not this. The suite-wide conftest
+    fixture places one, so the deletion has to be explicit.
+    """
+    monkeypatch.delenv(keyset_store.ENV_LOCAL_CELLS_DIR, raising=False)
     digest = _digest()
     cache = tmp_path / "cache"
     keyset_store.write_closure(cache, digest, _row(denoiser=HASH_A))

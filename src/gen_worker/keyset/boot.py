@@ -72,12 +72,13 @@ def key_set_from_data(
         family=family, function=function, modules=modules, cfg=cfg, slots=slots)
     hit = store.lookup(digest, cache_dir=cache_dir, extra_roots=extra_roots)
     if hit is None:
+        searched = [str(root) for root in store.shipped_roots(extra=extra_roots)]
+        searched.extend(
+            str(root) for root, _source in store.writable_roots(cache_dir))
         raise KeySetError(
             "keyset_absent",
             f"no cg-keyset-v1 document holds closure {digest} for family "
-            f"{family!r}; roots searched: "
-            f"{[str(p) for p in store.shipped_roots(extra=extra_roots)]}"
-            + (f" and cache {cache_dir}" if cache_dir else ""))
+            f"{family!r}; roots searched: {searched}")
     entry_keys = fold_entry_keys(hit.closure.class_hashes, family=family)
     wall_ms = int((time.monotonic() - started) * 1000)
     logger.info(

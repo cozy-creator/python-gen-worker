@@ -642,7 +642,6 @@ def derive(
     except keyset.KeySetError as exc:
         raise BootKeyUnavailable("invalid_declaration", exc.detail) from exc
     class_hashes = keyset_emit.class_hashes_of(rows)
-    entry_keys = keyset.fold_entry_keys(class_hashes, family=family)
 
     # `trust_memo=False` is the VERIFY posture: trace anyway and rule on
     # whatever the cache held. It is the only way a stale row is caught before a
@@ -663,8 +662,18 @@ def derive(
                 verdict = keyset.MemoVerdict.VERIFIED
 
     # THE EMISSION (pgw#1327). A traced closure is recorded as a `cg-keyset-v1`
-    # document, which is both this machine's own cache and the artifact an
-    # operator bakes beside `endpoint.lock` so the NEXT fresh pod never traces.
+    # document — this machine's own cache AND, since pgw#1353, the platform's
+    # durable root, which is what carries it to the next pod of this endpoint.
+    #
+    # BEFORE THE FOLD, and that ordering is load-bearing (pgw#1353). The document
+    # is machine-INDEPENDENT by construction — TCG class hashes and nothing
+    # folded — while `fold_entry_keys` restates this process's `sm` and refuses
+    # `no_runtime_sm` when it cannot read one. With the fold first, a producer
+    # that traced all 36 classes correctly on a box with no usable card threw
+    # every one of them away at the last step: the mint-lane emitter
+    # (`scripts/emit_cg_keyset.py --derive`) could never write a document at all,
+    # which is exactly how it was found. Recording first means a failed fold
+    # costs this BOOT its adoption and costs the fleet nothing.
     keyset_emit.record_closure(
         memo_dir, digest, rows,
         family=family,
@@ -673,6 +682,7 @@ def derive(
         emitted_by=emitted_by or "gen_worker.boot_key.derive",
     )
 
+    entry_keys = keyset.fold_entry_keys(class_hashes, family=family)
     wall_ms = int((time.monotonic() - t0) * 1000)
     logger.info(
         "boot-key: %d key(s) in %d ms — %s, cache=%s",
