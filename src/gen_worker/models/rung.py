@@ -63,7 +63,11 @@ FP8_STORAGE = Rung("fp8_storage", "", "fp8", RUN_FP8_STORAGE, 1.05, False)
 MODEL_OFFLOAD = Rung("model_offload", "model_offload", "", RUN_OFFLOAD, 2.5, True)
 GROUP_OFFLOAD = Rung("group_offload", "group_offload", "", RUN_OFFLOAD, 3.0, True)
 SEQUENTIAL = Rung("sequential", "sequential", "", RUN_OFFLOAD, 4.0, True)
-CPU = Rung("cpu", "cpu", "", RUN_CPU, 40.0, False)
+# touches_host_ram: a CPU-placed pipeline keeps its WHOLE tree in host RAM —
+# that IS the rung. Declaring otherwise handed a CPU-rung load the pgw#1063
+# per-component staging discount, which is an admission lie by the same
+# arithmetic that made ie#615 a certain kernel OOM.
+CPU = Rung("cpu", "cpu", "", RUN_CPU, 40.0, True)
 
 #: The ONE ordering, best first. ``descend`` walks it; nothing else may.
 LADDER: tuple[Rung, ...] = (
@@ -72,7 +76,9 @@ LADDER: tuple[Rung, ...] = (
 
 #: The reactive placement tail, shallowest first (gw#463): a load-time CUDA
 #: OOM rolls back and retries one rung lower; a mid-inference OOM records the
-#: next rung and applies it only during a clean reload.
+#: next rung and applies it only during a clean reload. It ends at ``cpu``
+#: (pgw#1315) — the tail is every rung whose weights live on the host, and the
+#: bottom one is where the always-runs guarantee is actually kept.
 PLACEMENT_LADDER: tuple[str, ...] = tuple(
     r.name for r in LADDER if r.touches_host_ram
 )
@@ -80,10 +86,13 @@ PLACEMENT_LADDER: tuple[str, ...] = tuple(
 _BY_NAME = {r.name: r for r in LADDER}
 
 
-#: Stopped one rung above ``cpu``: it is declared in LADDER and priced, and
-#: this build cannot execute it — the reactive walk treats it as plan-time
-#: only (pgw#1212). Names OUR code, never the card.
-FLOOR_CPU_RUNG_UNEXECUTABLE = "cpu_rung_unexecutable"
+# pgw#1315 DELETED ``FLOOR_CPU_RUNG_UNEXECUTABLE``. It said the reactive walk
+# stopped one rung above ``cpu`` because this build could not execute that rung,
+# which made the always-runs guarantee true at plan time and FALSE on a descent
+# that reached the bottom. The refusal named our own code rather than the card,
+# which is what made it actionable: the fix is to execute the rung
+# (``memory.apply_low_vram_config`` mode ``cpu``), not to soften the wording.
+# A floor whose cause is gone must not be left pointing somewhere else.
 
 #: Standing on the last rung the ladder declares. Nothing is below it.
 FLOOR_LADDER_EXHAUSTED = "placement_ladder_exhausted"
@@ -115,17 +124,16 @@ def _walk(current: Optional[str]) -> tuple[Optional[Rung], Optional[str]]:
         nxt = LADDER[idx] if idx < len(LADDER) else None
     if nxt is None:
         return None, FLOOR_LADDER_EXHAUSTED
-    if nxt is CPU:
-        return None, FLOOR_CPU_RUNG_UNEXECUTABLE
     return nxt, None
 
 
 def descend(current: Optional[str]) -> Optional[Rung]:
-    """The next rung down from ``current``; None when the ladder ends.
+    """The next rung down from ``current``; None only when standing on ``cpu``.
 
     The reactive OOM path descends only through the PLACEMENT tail (a storage
     transform cannot be applied to an already-loaded object), so from any
-    resident token the next reactive rung is ``model_offload``.
+    resident token the next reactive rung is ``model_offload`` and the walk ends
+    at ``cpu``, which serves.
     """
     return _walk(current)[0]
 
@@ -136,17 +144,28 @@ def descent_floor(current: Optional[str]) -> Optional[str]:
     th#1867: A DESCENT THAT RUNS OUT MUST NAME ITS FLOOR. The proactive fit
     ladder (``Resources.vram_gb_hint``, an ESTIMATE deciding placement before
     anything is measured — §4.33) is now DELETED, so this reactive walk is the
-    only ladder and its bottom rung has stopped being theoretical. The failure
-    mode that must not happen is the descent silently falling into a rung
-    nothing can run: that converts a loud estimate-error into a quiet
-    execution-error, which is the trade §1.35 and §1.36 keep rejecting.
+    only ladder.
 
-    The refusal this feeds names OUR CODE ("this build cannot execute a CPU
-    rung"), never the card — the legitimate species under §1.35's second
-    amendment. It also makes pgw#1212's gap visible in production rather than
-    latent, which is the fastest way it gets prioritised on evidence.
+    pgw#1315 left exactly ONE floor. A descent now runs to ``cpu`` and serves
+    there, so the only way out of rungs is to be standing on the bottom one
+    already — a fact about where we are, not a refusal to go further. Nothing
+    here may ever again report that a declared rung cannot be executed: the
+    answer to that is to execute it.
     """
     return _walk(current)[1]
+
+
+def run_mode_of(name: Optional[str]) -> str:
+    """The hub-wire ``RUN_*`` projection of a rung NAME ("" when not a rung).
+
+    tensorhub matches ``FnDegraded.ran`` against its RunMode vocabulary
+    EXACTLY, and ``cpu`` is a member of it in its own right. Reporting a
+    descent onto the CPU rung under the offload tail's token is therefore a
+    wrong measurement, not a coarse one. Read the rung's own projection; never
+    assume the tail's (pgw#1315).
+    """
+    r = _BY_NAME.get(str(name or ""))
+    return r.run_mode if r is not None else ""
 
 
 def price(run_mode: str) -> float:

@@ -60,8 +60,11 @@ def test_one_ordered_ladder() -> None:
     prices = [r.latency for r in rung.LADDER]
     assert prices == sorted(prices), "price must be monotonic down the ladder"
     # Host-RAM-touching == exactly the placement tail (the pgw#1063 whole-tree
-    # host-RAM charge; it was the strict_vram boundary until th#1867).
-    assert rung.PLACEMENT_LADDER == ("model_offload", "group_offload", "sequential")
+    # host-RAM charge; it was the strict_vram boundary until th#1867). pgw#1315
+    # added `cpu`: a CPU-placed pipeline keeps its whole tree on the host, so
+    # excluding it handed that load the per-component staging discount.
+    assert rung.PLACEMENT_LADDER == (
+        "model_offload", "group_offload", "sequential", "cpu")
     for r in rung.LADDER:
         assert r.touches_host_ram == (r.name in rung.PLACEMENT_LADDER)
     # Resident flavors are not rungs: from any of them the reactive walk
@@ -73,7 +76,8 @@ def test_one_ordered_ladder() -> None:
 
 def test_descend_walks_every_rung_and_terminates() -> None:
     """From any resident token the reactive walk visits each placement rung
-    exactly once and ends — it never wraps, never skips to CPU."""
+    exactly once and ends on ``cpu`` — it never wraps and it never stops short
+    of the bottom (pgw#1315)."""
     seen = []
     cur = ""
     while True:
@@ -136,7 +140,8 @@ def _arm(monkeypatch: pytest.MonkeyPatch, serves_at: str) -> list[str]:
     return attempted
 
 
-@pytest.mark.parametrize("serves_at", ["model_offload", "group_offload", "sequential"])
+@pytest.mark.parametrize(
+    "serves_at", ["model_offload", "group_offload", "sequential", "cpu"])
 def test_oom_descends_one_rung_at_a_time_and_serves(
     serves_at: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
