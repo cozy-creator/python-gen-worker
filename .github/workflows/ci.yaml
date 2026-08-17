@@ -598,10 +598,14 @@ jobs:
             /tmp/wheelcheck/gen_worker-*.whl
           /tmp/wheelcheck/venv/bin/python - <<'PY'
           import threading
-          from gen_worker._vendor.tensorfs import CASRef, LocalCAS, TransferGrant, download
-          from gen_worker._vendor.tensorfs.transfer import _run_parallel
+          from gen_worker._vendor.tensorfs import CASRef, LocalCAS
           from gen_worker._vendor.torchcg import ARTIFACT_KIND
           from gen_worker._vendor.torchcg.contracts import read_contract
+          # pgw#1308: the transfer plane is first-party. It still has to be IN
+          # THE WHEEL, which is the property this gate exists to prove, and a
+          # first-party package can go missing from a wheel exactly as easily
+          # as a vendored one -- `[tool.hatch]` decides both.
+          from gen_worker.transfer.grants import TransferGrant, _run_parallel, download
 
           assert LocalCAS and download and ARTIFACT_KIND
           assert read_contract("KEY_GRAMMAR_DIGEST")
