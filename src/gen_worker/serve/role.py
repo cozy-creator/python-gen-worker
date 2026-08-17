@@ -32,6 +32,7 @@ this file — reads them from here. There is one list.
 Two claims, two scopes, because they are not the same claim (pgw#1331). Every
 serve-role module is asserted MINT-FREE. Each is ALSO either asserted to reach
 no MODEL LIBRARY (``MODEL_FREE_MODULES``, 57 roots) or named as still reaching
+no MODEL LIBRARY (``MODEL_FREE_MODULES``, 50 roots) or named as still reaching
 one (``MODEL_BEARING_SERVE_MODULES``, 9) — and the second list is checked to be
 TRUE, so a module that gets cut free must be moved rather than left sitting in
 an exception list nobody re-reads. The role is the union, by splice.
@@ -77,6 +78,7 @@ class ServeRole(StrEnum):
 
 #: Every serve-role module whose whole static closure reaches NO model library
 #: (pgw#1331). 57 of the role's 66 roots; the other nine are named, with their
+#: (pgw#1331). 50 of the role's 59 roots; the other nine are named, with their
 #: two causes, in :data:`MODEL_BEARING_SERVE_MODULES` directly below.
 #:
 #: This used to be 14 — the typed family surface alone — because two PACKAGE
@@ -121,6 +123,10 @@ MODEL_FREE_MODULES: Tuple[str, ...] = (
     "gen_worker.model.errors",
     "gen_worker.model.runtime",
     "gen_worker.model.scheduler",
+    # pgw#1346 B3a: the two flow-match ladder parameters the scheduler above
+    # does not read yet (Qwen-Image's `shift_terminal`), as bare typed math over
+    # the same declared block.
+    "gen_worker.model.flow_ladders",
     # HiDream-O1's flash ladder: its own module because it is NOT a member of
     # scheduler.py's closed declarable set — nothing can declare it while
     # GraphModelSpec.scheduler is single-valued (pgw#1346 K10).
@@ -130,13 +136,19 @@ MODEL_FREE_MODULES: Tuple[str, ...] = (
     "gen_worker.model.tuned",
     "gen_worker.model.catalog",
     "gen_worker.model.catalog._generated",
+    "gen_worker.model.catalog._generated.ernie",
     "gen_worker.model.catalog._generated.flux1_dev",
     "gen_worker.model.catalog._generated.flux1_schnell",
     "gen_worker.model.catalog._generated.flux2_klein_4b",
     "gen_worker.model.catalog._generated.flux2_klein_9b",
+    "gen_worker.model.catalog._generated.qwen_image",
     "gen_worker.model.catalog._generated.sd2",
     "gen_worker.model.catalog._generated.sd15",
     "gen_worker.model.catalog._generated.sdxl",
+    "gen_worker.model.catalog._generated.z_image",
+    # K9's packed shape axis, shared by the families whose graph classes are a
+    # SET of (width, height) pairs rather than a product of two axes.
+    "gen_worker.model.catalog._packed_shape",
     # pgw#1346 B3b's two EAGER models. Both halves are model-free here, not
     # only the serving one: neither declaration builds a module, because
     # neither model's code (DiffSynth-Studio's) is reachable from this SDK at
@@ -144,14 +156,17 @@ MODEL_FREE_MODULES: Tuple[str, ...] = (
     # guarded-import hatch and are held by the real walk.
     "gen_worker.model.catalog.anima",
     "gen_worker.model.catalog.anima_serve",
+    "gen_worker.model.catalog.ernie_serve",
     "gen_worker.model.catalog.flux1_dev_serve",
     "gen_worker.model.catalog.flux1_schnell_serve",
     "gen_worker.model.catalog.flux2_klein_4b_serve",
     "gen_worker.model.catalog.flux2_klein_9b_serve",
     "gen_worker.model.catalog.hidream_o1",
     "gen_worker.model.catalog.hidream_o1_serve",
+    "gen_worker.model.catalog.qwen_image_serve",
     "gen_worker.model.catalog.sd15_serve",
     "gen_worker.model.catalog.sdxl_serve",
+    "gen_worker.model.catalog.z_image_serve",
     # pgw#1346 B5: the EAGER boundary models, DECLARATIONS INCLUDED. A graph
     # declaration is model-bearing and reaches its binding only through the
     # guarded hatch above; an eager one has no `build` callable, so it is
@@ -273,6 +288,11 @@ FORBIDDEN_LIBRARIES: Tuple[str, ...] = (
 #: the hatch is an enumerated list two people can read, never an open door that
 #: any ``try: import`` can walk through.
 OPTIONAL_SERVE_IMPORTS: Tuple[str, ...] = (
+    # pgw#1346 B3a. ONE declaration module for TWO published checkpoints in
+    # each case: ERNIE-Image and ERNIE-Image-Turbo differ only in weights and
+    # recipe, and Z-Image's base and official DMD Turbo differ only in weights
+    # and a scheduler shift.
+    "gen_worker.model.catalog.ernie",
     "gen_worker.model.catalog.flux1_dev",
     # schnell DERIVES its architecture from dev's and its binding guard-imports
     # its own declaration module (pgw#1346 B1).
@@ -287,11 +307,13 @@ OPTIONAL_SERVE_IMPORTS: Tuple[str, ...] = (
     # `_name_or_path`), so the 9B binding guard-imports one declaration too
     # (pgw#1346 B3b).
     "gen_worker.model.catalog.flux2_klein_9b",
+    "gen_worker.model.catalog.qwen_image",
     # ONE declaration module for TWO bindings: `sd15.py` declares both `SD15`
     # and `SD2` (pgw#1346 B2 — same runner set, different graphs), so both
     # generated modules guard-import the same name.
     "gen_worker.model.catalog.sd15",
     "gen_worker.model.catalog.sdxl",
+    "gen_worker.model.catalog.z_image",
 )
 
 #: The mint lane. A serve-role module that reaches ANY of these is a pod that

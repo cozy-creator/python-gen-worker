@@ -1,0 +1,219 @@
+{
+  "buckets": [
+    {
+      "name": "branches",
+      "values": [
+        1,
+        2
+      ]
+    }
+  ],
+  "family": "z_image",
+  "loop": {
+    "kind": "staged",
+    "session_state": "none",
+    "stages": [
+      {
+        "parameter": "steps",
+        "repeat": "counted",
+        "runner": "denoiser"
+      }
+    ]
+  },
+  "parameters": [
+    {
+      "maximum": 80,
+      "minimum": 1,
+      "name": "steps"
+    }
+  ],
+  "runners": [
+    {
+      "axes": [
+        "branches"
+      ],
+      "name": "denoiser",
+      "variants": [
+        {
+          "bucket": {
+            "branches": 1
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "x",
+                "name": "x",
+                "param": "x",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  16,
+                  1,
+                  "2*s59",
+                  "2*s20"
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "t",
+                "name": "t",
+                "param": "t",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "cap_feats",
+                "name": "cap_feats",
+                "param": "cap_feats",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  1,
+                  512,
+                  2560
+                ]
+              }
+            ],
+            "parameters": [
+              "x",
+              "t",
+              "cap_feats"
+            ],
+            "symbols": {
+              "2*s20": [
+                90,
+                240
+              ],
+              "2*s59": [
+                90,
+                240
+              ]
+            },
+            "v": 1
+          },
+          "ingress_digest": "4f456c5f458c0d35ae3948fefc563f3f",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                16,
+                1,
+                "2*s59",
+                "2*s20"
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "branches": 2
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "x",
+                "name": "x",
+                "param": "x",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  2,
+                  16,
+                  1,
+                  "2*s59",
+                  "2*s20"
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "t",
+                "name": "t",
+                "param": "t",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  2
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "cap_feats",
+                "name": "cap_feats",
+                "param": "cap_feats",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  2,
+                  512,
+                  2560
+                ]
+              }
+            ],
+            "parameters": [
+              "x",
+              "t",
+              "cap_feats"
+            ],
+            "symbols": {
+              "2*s20": [
+                90,
+                240
+              ],
+              "2*s59": [
+                90,
+                240
+              ]
+            },
+            "v": 1
+          },
+          "ingress_digest": "61f74bc2ac4bfcd080f171233bf8423b",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                2,
+                16,
+                1,
+                "2*s59",
+                "2*s20"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "scheduler": {
+    "name": "flow_match_euler_discrete",
+    "parameters": {
+      "num_train_timesteps": 1000,
+      "shift": 6.0,
+      "use_dynamic_shifting": false
+    }
+  },
+  "tuned": {
+    "module": "gen_worker.model.catalog.z_image_serve",
+    "qualname": "ZImageTuned"
+  },
+  "v": 1
+}
