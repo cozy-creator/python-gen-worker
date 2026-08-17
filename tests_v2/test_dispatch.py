@@ -124,7 +124,7 @@ def test_dispatch_load_serve_and_upload_walk(hub, blob_host, upload_sink) -> Non
         conn.send(run_job=pb.RunJob(
             request_id="r-stage", attempt=1, function_name="staged-generate",
             input_payload=catalog.row("staged-generate").input_bytes(prompt="a cat"),
-            output_mode=pb.OUTPUT_MODE_INLINE,
+            media_bytes=pb.MEDIA_BYTES_INLINE,
             # The ~200 KiB result envelope is now always really
             # stored, so this dispatch needs the capability token every other
             # large-result dispatch needs. It passed without one only because

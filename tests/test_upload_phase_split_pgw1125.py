@@ -303,7 +303,7 @@ def test_a_real_serve_declares_the_sha256_of_the_bytes_it_uploaded() -> None:
                 request_id="r-1125-sha", attempt=1, function_name="large-usage",
                 input_payload=msgspec.msgpack.encode(EchoIn(text="x")),
                 org=org_id, capability_token="cap-token",
-                output_mode=pb.OUTPUT_MODE_INLINE,
+                media_bytes=pb.MEDIA_BYTES_INLINE,
             ))
             res = conn.wait_for(is_result_for("r-1125-sha")).job_result
             assert res.status == pb.JOB_STATUS_OK, res.safe_message

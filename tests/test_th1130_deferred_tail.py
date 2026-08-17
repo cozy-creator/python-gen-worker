@@ -42,7 +42,7 @@ def _run(conn: object, rid: str, fn: str) -> None:
     conn.send(run_job=pb.RunJob(  # type: ignore[attr-defined]
         request_id=rid, attempt=1, function_name=fn.replace("_", "-"),
         input_payload=_payload(),
-        output_mode=pb.OUTPUT_MODE_INLINE, compute=CUDA))
+        media_bytes=pb.MEDIA_BYTES_INLINE, compute=CUDA))
 
 
 def _image_bytes(res: pb.JobResult, field: str = "image") -> bytes:
