@@ -64,12 +64,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from . import activity as activity_mod
-from gen_worker._vendor.torchcg import (
-    ARTIFACT_KIND,
-    ARTIFACT_METADATA_FIELDS,
-    GRAPH_CLASS_BLOCK,
-    REQUIRED_AXES,
-)
+from gen_worker._vendor.torchcg import ARTIFACT_KIND, GRAPH_CLASS_BLOCK, REQUIRED_AXES
 from gen_worker._vendor.torchcg import is_compiled_graph_key
 from gen_worker._vendor.torchcg import identity as tcg_identity
 
@@ -227,7 +222,7 @@ class ArmIdentity:
 # the SAME reason `envelope` did one paragraph up, and the sweep that took
 # `envelope` should have taken them. Since pgw#1270 TCG mints every artifact
 # and `torchcg.artifact.validate_metadata` refuses metadata whose field set is
-# not exactly `ARTIFACT_METADATA_FIELDS` — which contains no `family`, no
+# not exactly `artifact_meta.cell_metadata_fields()` — which has no `family`, no
 # `weight_lane`/`lora_bucket` and no `env_seal`. So three of the six axes here
 # were read as `None` off every real cell and compared against a live runtime
 # fact: a seam that could only ever refuse.
@@ -300,10 +295,11 @@ def unstateable_arm_axes(
     the field of its own name — so a NEW axis added without a source entry is
     checked, never silently admitted.
     """
-    vocabulary = set(ARTIFACT_METADATA_FIELDS)
+    vocabulary = artifact_meta.cell_metadata_fields()
     return tuple(
         axis for axis in compared
         if not set(ARM_AXIS_CELL_SOURCES.get(axis, (axis,))) <= vocabulary)
+
 
 #: The pipeline attribute carrying the resolved :class:`graph_facts.SlotSubject`
 #: set the executor built this object from (pgw#1113). Stamped beside the
@@ -1989,7 +1985,7 @@ def _arming_policy(
             "artifact vocabulary is %s). Every mint under this seam would "
             "compile for 20-45 minutes and then refuse `key_axis_divergence`. "
             "Serving eager and spending nothing (pgw#1340)",
-            family, named, sorted(ARTIFACT_METADATA_FIELDS))
+            family, named, sorted(artifact_meta.cell_metadata_fields()))
         if bucket:
             cc.drop_lora_execution_lane(pipe)
         activity_mod.emit_event(
