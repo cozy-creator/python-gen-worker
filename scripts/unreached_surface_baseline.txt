@@ -294,6 +294,27 @@ gen_worker.boot_phases.servable_ms()
 # reasoning around it reads like enforcement; the ratchet has to make it say so
 # out loud.
 #
+#   pgw#1344 (this lane) — the NATIVE HF->GGUF tensor plane. `gguf_native.py`
+#   reads a snapshot's tensors through tensorfs, maps and permutes them, and
+#   composes the GGUF through `TensorWriter` so an unchanged tensor keeps the
+#   CAS objects it already has (measured in
+#   `tests/test_gguf_native_pgw1344.py`: two tensors / two objects shared with
+#   the safetensors source at f32, zero at f16, and the permuted pair correctly
+#   sharing nothing). It has no production caller for ONE reason, and it is a
+#   reason rather than an omission: `_run_gguf_inline` cannot switch to it until
+#   something produces the GGUF METADATA block — a model's vocabulary, chat
+#   template and pre-tokenizer identity — and today only `convert_hf_to_gguf.py`
+#   does. Shipping a guessed vocabulary is precisely the silent change pgw#1344
+#   exists to prevent, so the tensor half lands proven and the switch waits.
+#
+#     OWNER:  pgw#1344's follow-up — a faithful native metadata/vocabulary
+#             producer (or a reference run scoped to the tokenizer sidecars,
+#             which is a few MB rather than the multi-GB weights). The switch
+#             in `convert/convert.py::_run_gguf_inline` is one call once that
+#             exists, and `convert/gguf_tools.py`'s subprocess dies with it.
+#     EXPIRY: that issue. If these two rows outlive it, the tensor plane was
+#             never wired and this guard was right the first time.
+#
 # Delisted by WIRING under pgw#1271:
 #   boot_key.assert_memo_honest — called from `mint_supervisor.rule_on_boot_memo`
 #     at the seal/publish seam, the one moment a pod holds a freshly TRACED
@@ -314,6 +335,8 @@ gen_worker.convert.base_model_families.reset_foreign_family_maps()
 gen_worker.convert.dataset.Dataset.as_dataloader()
 gen_worker.convert.dataset.Dataset.is_prompt_corpus()
 gen_worker.convert.dataset.Dataset.iter_rows()
+gen_worker.convert.gguf_native.convert_snapshot_to_gguf()
+gen_worker.convert.gguf_native.hyperparameter_metadata()
 gen_worker.convert.layout_converters.ConversionIO.set_metadata()
 gen_worker.convert.layout_converters.classify_layout()
 gen_worker.convert.layout_converters.conversion_provenance()

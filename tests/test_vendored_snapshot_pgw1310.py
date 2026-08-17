@@ -81,17 +81,25 @@ def test_the_vendored_tensorfs_carries_no_transfer_plane() -> None:
 def test_the_read_plane_is_recorded_at_its_own_rev() -> None:
     """pgw#1330: the snapshot is SPLIT at two revs, and the split is declared.
 
-    `project.py`, `tensors.py` and `gguf.py` come from a rev the storage half
-    is deliberately NOT at: the newer lineage deleted three `LocalCAS` methods
-    this repo still calls (ingest, GC, and the whole-tree copy the chokepoint
-    uses — VENDORED.toml names them). A split that is only in a comment is a
-    split nobody can audit, so the rev is a field and the file list is a
-    field, and the digest fence above covers them like any other vendored file.
+    The consumption plane comes from a rev the storage half is deliberately NOT
+    at: the newer lineage deleted three `LocalCAS` methods this repo still
+    calls (ingest, GC, and the whole-tree copy the chokepoint uses —
+    VENDORED.toml names them). A split that is only in a comment is a split
+    nobody can audit, so the rev is a field and the file list is a field, and
+    the digest fence above covers them like any other vendored file.
+
+    pgw#1344 widened the plane rather than the split: `writer.py` joins it (the
+    GGUF/safetensors composer a conversion writes through) and `__init__.py`
+    comes from the same rev, verbatim, now that upstream no longer re-exports a
+    Python transfer plane. The membership is spelled out so a file JOINING the
+    plane is a decision somebody makes on purpose.
     """
 
     spec = MANIFEST["packages"]["tensorfs"]
     assert spec["read_plane_rev"] != spec["rev"]
-    assert set(spec["read_plane_files"]) == {"gguf.py", "project.py", "tensors.py"}
+    assert set(spec["read_plane_files"]) == {
+        "__init__.py", "gguf.py", "project.py", "tensors.py", "writer.py",
+    }
     for name in spec["read_plane_files"]:
         assert name in spec["files"], f"{name} is not digest-fenced"
 
