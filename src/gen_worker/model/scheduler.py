@@ -38,14 +38,23 @@ generated class simply has no ``scheduler()`` method, so the miss is an
 from __future__ import annotations
 
 import math
-import struct
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from functools import lru_cache
 from typing import TYPE_CHECKING, ClassVar, Final, Protocol, Self
 
 from .errors import ModelError, ModelRefusal
+from .solvers.block import SchedulerBlock, SchedulerValue
+from .solvers.block import choice as _choice
+from .solvers.block import count as _count
+from .solvers.block import flag as _flag
+from .solvers.block import real as _real
+from .solvers.block import refuse as _refuse
+from .solvers.dpm_multistep import DPMSolverMultistep, DpmSolverSchedule, MultistepHistory
+from .solvers.precision import f32 as _f32
+from .solvers.precision import round_half_even as _round_half_even
+from .solvers.precision import sigma_table as _sigma_table
+from .solvers.unipc_multistep import UniPCMultistep, UniPcHistory, UniPcSchedule
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from torch import Tensor
@@ -64,6 +73,16 @@ class SchedulerKind(StrEnum):
     #: The epsilon/v-prediction Euler schedule the U-Net families declare —
     #: SDXL, SD1.5 and SD2. Implemented by :class:`EulerDiscrete` (pgw#1346 B2).
     EULER_DISCRETE = "euler_discrete"
+    #: DPM-Solver++ (2M), on the trained beta ladder or a Karras one. The
+    #: fleet's most-selected sampler: sd15's own default is ``dpmpp_2m_karras``
+    #: and two live sdxl catalog entries stamp ``dpmpp_2m_sde_karras``.
+    #: Implemented by :class:`DPMSolverMultistep` (pgw#1346 B3).
+    DPMSOLVER_MULTISTEP = "dpmsolver_multistep"
+    #: UniPC, predictor/corrector. The video fleet's TRAINED solver — wan-2.2's
+    #: mirrors ship it on flow sigmas and substituting Euler for it is a
+    #: measured -81% sharpness. Implemented by :class:`UniPCMultistep`
+    #: (pgw#1346 B3).
+    UNIPC_MULTISTEP = "unipc_multistep"
 
 
 def parse_kind(value: object) -> SchedulerKind:
@@ -77,63 +96,6 @@ def parse_kind(value: object) -> SchedulerKind:
             f"scheduler {value!r} is not one of {[kind.value for kind in SchedulerKind]!r}; "
             "the host implements the named scheduler and this one has no name here",
         ) from None
-
-
-#: What a scheduler block's values may be — ``recipe_v1``'s finite JSON scalars.
-SchedulerValue = bool | int | float | str
-SchedulerBlock = Mapping[str, SchedulerValue]
-
-def _refuse(name: str, wanted: str, value: object) -> ModelError:
-    return ModelError(
-        ModelRefusal.SCHEDULER_INVALID,
-        f"scheduler parameter {name!r} must be {wanted}, got {value!r}",
-    )
-
-
-def _flag(block: SchedulerBlock, name: str, default: bool) -> bool:
-    """Read one declared boolean.
-
-    Checked as ``bool`` and not as ``int`` even though ``bool`` IS an ``int`` in
-    Python: a block that said ``use_dynamic_shifting: 1`` means something the
-    author did not write, and accepting it is how a schedule silently changes.
-    """
-
-    value = block.get(name, default)
-    if not isinstance(value, bool):
-        raise _refuse(name, "a boolean", value)
-    return value
-
-
-def _count(block: SchedulerBlock, name: str, default: int) -> int:
-    """Read one declared integer. ``bool`` is refused, for the reason above."""
-
-    value = block.get(name, default)
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise _refuse(name, "an integer", value)
-    return value
-
-
-def _real(block: SchedulerBlock, name: str, default: float) -> float:
-    """Read one declared real. An integer literal is a legal spelling of one."""
-
-    value = block.get(name, default)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise _refuse(name, "a real number", value)
-    return float(value)
-
-
-def _choice(block: SchedulerBlock, name: str, default: str, allowed: tuple[str, ...]) -> str:
-    """Read one declared string out of a CLOSED set.
-
-    A misspelled spacing or objective is the kind of parameter that changes the
-    ladder silently rather than loudly, so the set is checked here rather than
-    at the first step that reads it.
-    """
-
-    value = block.get(name, default)
-    if not isinstance(value, str) or value not in allowed:
-        raise _refuse(name, f"one of {list(allowed)!r}", value)
-    return value
 
 
 class Step(Protocol):
@@ -390,121 +352,25 @@ class FlowMatchEulerDiscrete:
 # is the same property ``initial_latents`` cites for CPU-seeding the noise, and
 # it is what lets a receipt's seed mean the same thing on two pods.
 #
-# The bar was 1 float32 ULP (pgw#1331). What is asserted is: **0 ULP against
-# the vectorized kernel, ≤8 against any kernel** (6 measured, 8 for margin),
-# with timesteps and ``init_noise_sigma`` exact in both — and our own ladder
-# byte-identical across kernels, which is the claim the tests fence hardest.
-# For scale: 6 float32 ULP at sigma 14.6 is ~1e-5 absolute, about four orders
-# of magnitude below ONE bf16 ULP there (~0.06), so the residual is invisible
-# to the dtype the denoiser actually runs in.
+# The bar was 1 float32 ULP (pgw#1331), and three CI cycles established that a
+# ULP bound is the wrong INSTRUMENT rather than the wrong number: the measured
+# cross-machine spread of the REFERENCE is 85 float32 ULP. What is asserted is
+# RELATIVE agreement within 2e-4 on sigmas and ``init_noise_sigma`` (~20x
+# tighter than one bf16 ULP, the precision the denoiser computes in), EXACT
+# agreement on the timestep grid (integer arithmetic), and — the claim that
+# actually matters — our own ladder byte-identical across CPU kernels, which
+# the reference is not. See ``tests/test_sd_stage1_pgw1346.py``.
 #
-# NOT implemented, deliberately, and the reason is the endpoints (pgw#1346 B2
-# enumerated every sampler the sdxl and sd15 endpoints can reach):
+# NOT implemented HERE, deliberately, and the reason is the endpoints (pgw#1346
+# B2 and B3 enumerated every sampler the fleet can reach):
 # ``use_karras_sigmas`` / ``use_exponential_sigmas`` / ``use_beta_sigmas``.
-# The karras ladder in this fleet is reached only through
+# The Karras ladder in this fleet is reached only through
 # ``dpmpp_2m_karras`` / ``dpmpp_2m_sde_karras``, which are
-# ``DPMSolverMultistepScheduler``, a different kind entirely. No euler-family
-# sampler any endpoint offers sets any of the three, so implementing them here
-# would be math with nothing measuring it.
-
-#: One float32 round-trip. ``struct`` because this module imports no array
-#: library and must not start now: it is held by an adopt-only serve role.
-_F32: Final = struct.Struct("<f")
-
-
-def _f32(value: float) -> float:
-    """``value`` rounded to the nearest float32, as a Python float."""
-
-    return float(_F32.unpack(_F32.pack(value))[0])
-
-
-def _linspace_f32(start: float, end: float, count: int) -> tuple[float, ...]:
-    """``torch.linspace(start, end, count, dtype=torch.float32)``, exactly.
-
-    Outward from both ends with a float32 step — see the note above. Both
-    endpoints land on their float32 selves, which the naive fractional form
-    does not guarantee.
-    """
-
-    first = _f32(start)
-    last = _f32(end)
-    if count == 1:
-        return (first,)
-    step = _f32((last - first) / (count - 1))
-    halfway = count // 2
-    return tuple(
-        _f32(first + step * index) if index < halfway else _f32(last - step * (count - 1 - index))
-        for index in range(count)
-    )
-
-
-def _round_half_even(value: float) -> float:
-    """numpy's ``round``: ties to even. Python's ``round`` agrees on floats."""
-
-    return float(round(value))
-
-
-@lru_cache(maxsize=32)
-def _sigma_table(
-    num_train_timesteps: int,
-    beta_start: float,
-    beta_end: float,
-    beta_schedule: str,
-    rescale_betas_zero_snr: bool,
-) -> tuple[float, ...]:
-    """The full ``num_train_timesteps``-long sigma table, ascending.
-
-    Cached: it depends on nothing per-request, costs a thousand-iteration
-    Python loop, and every request of one family asks for the same one.
-    """
-
-    if beta_schedule == "scaled_linear":
-        roots = _linspace_f32(math.sqrt(beta_start), math.sqrt(beta_end), num_train_timesteps)
-        betas = [_f32(root * root) for root in roots]
-    else:
-        betas = list(_linspace_f32(beta_start, beta_end, num_train_timesteps))
-
-    if rescale_betas_zero_snr:
-        betas = _rescale_zero_terminal_snr(betas)
-
-    cumulative = 1.0
-    alphas_cumprod: list[float] = []
-    for beta in betas:
-        cumulative *= _f32(1.0 - beta)
-        alphas_cumprod.append(_f32(cumulative))
-    if rescale_betas_zero_snr:
-        # Close to zero without being zero, so the first sigma is not inf.
-        # Upstream's value verbatim: the smallest positive fp16 subnormal.
-        alphas_cumprod[-1] = 2.0**-24
-
-    # `1 - ac` and the quotient are SEPARATE float32 tensor ops upstream, so
-    # each one narrows. Folding them into a single double expression and
-    # narrowing once is a different (more accurate, and wrong) number.
-    return tuple(
-        _f32(math.sqrt(_f32(_f32(1.0 - alpha) / alpha))) for alpha in alphas_cumprod
-    )
-
-
-def _rescale_zero_terminal_snr(betas: list[float]) -> list[float]:
-    """Rescale betas so the terminal signal-to-noise ratio is zero.
-
-    arXiv:2305.08891 Algorithm 1, and the transform ``gen_worker.view`` already
-    turns on for every v-prediction checkpoint — so a v-pred SD2 or SDXL
-    fine-tune served through this scheduler needs it to reach the same ladder
-    the diffusers path reaches. Same float32 discipline as its caller.
-    """
-
-    cumulative = 1.0
-    roots: list[float] = []
-    for beta in betas:
-        cumulative *= _f32(1.0 - beta)
-        roots.append(_f32(math.sqrt(_f32(cumulative))))
-    first, last = roots[0], roots[-1]
-    scale = _f32(first / _f32(first - last))
-    shifted = [_f32(_f32(root - last) * scale) for root in roots]
-    bars = [_f32(root * root) for root in shifted]
-    alphas = [bars[0]] + [_f32(bars[index] / bars[index - 1]) for index in range(1, len(bars))]
-    return [_f32(1.0 - alpha) for alpha in alphas]
+# ``dpmsolver_multistep`` — a different kind, implemented in
+# ``model/solvers/dpm_multistep.py``, where the ladder lives as a function in
+# ``model/solvers/ladders.py``. No euler-family sampler any endpoint offers sets
+# any of the three, so implementing them on THIS class would be math with
+# nothing measuring it.
 
 
 @dataclass(frozen=True, slots=True)
@@ -809,18 +675,26 @@ class EulerDiscrete:
 IMPLEMENTED: Final[Mapping[SchedulerKind, str]] = {
     SchedulerKind.FLOW_MATCH_EULER_DISCRETE: "FlowMatchEulerDiscrete",
     SchedulerKind.EULER_DISCRETE: "EulerDiscrete",
+    SchedulerKind.DPMSOLVER_MULTISTEP: "DPMSolverMultistep",
+    SchedulerKind.UNIPC_MULTISTEP: "UniPCMultistep",
 }
 
 
 __all__ = [
     "IMPLEMENTED",
+    "DPMSolverMultistep",
     "DiscreteSchedule",
+    "DpmSolverSchedule",
     "EulerDiscrete",
     "FlowMatchEulerDiscrete",
+    "MultistepHistory",
     "Schedule",
     "SchedulerBlock",
     "SchedulerKind",
     "SchedulerValue",
     "Step",
+    "UniPCMultistep",
+    "UniPcHistory",
+    "UniPcSchedule",
     "parse_kind",
 ]
