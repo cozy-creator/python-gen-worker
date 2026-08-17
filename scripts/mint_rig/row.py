@@ -1,6 +1,6 @@
 """The row — one rental, reduced to a record a matrix can hold.
 
-pgw#1346's W2 lanes need a table of (family, card, lane) cells; pgw#1331 needs
+pgw#1346's W2 lanes need a table of (model, card, lane) cells; pgw#1331 needs
 one row that says a real compile happened and what it produced. This is that
 row, and the fields are chosen so nobody has to re-derive anything from prose:
 

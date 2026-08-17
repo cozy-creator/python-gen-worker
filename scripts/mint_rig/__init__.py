@@ -14,7 +14,7 @@ value — and never a new pod driver.
     from mint_rig import Rig, Rail, Workload, cards
 
     rig = Rig(rail=Rail(max_usd=2.0), lane="pgw1331-clip")
-    row = rig.run(cards.pick("a40"), Workload.mint_family(...))
+    row = rig.run(cards.pick("a40"), Workload.mint_model(...))
 
 THE FOUR RULES THIS PACKAGE ENFORCES RATHER THAN DOCUMENTS
 

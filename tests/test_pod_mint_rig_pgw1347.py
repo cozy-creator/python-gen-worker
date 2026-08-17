@@ -37,7 +37,7 @@ from mint_rig.rail import Rail, RailTripped  # noqa: E402
 from mint_rig.row import Teardown  # noqa: E402
 from mint_rig.runpod import PodNotFound, RunpodRest  # noqa: E402
 from mint_rig.transport import Result, SshTransport  # noqa: E402
-from mint_rig.workload import POD_ROOT, Upload, Workload, install_sdist, mint_family  # noqa: E402
+from mint_rig.workload import POD_ROOT, Upload, Workload, install_sdist, mint_model  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # fakes: the PROVIDER, not the rig
@@ -485,8 +485,8 @@ def test_dry_run_writes_the_killset_and_rents_nothing(tmp_path: Path) -> None:
 def test_a_green_run_records_a_row_a_matrix_can_use(tmp_path: Path) -> None:
     pods, transport = FakePods(rate=0.40), FakeTransport(ssh_ready_after=2)
     guard = FakeGuard()
-    workload = mint_family(
-        "gen_worker.family.catalog.flux1_dev:FLUX1_DEV",
+    workload = mint_model(
+        "gen_worker.model.catalog.flux1_dev:FLUX1_DEV",
         runners=("clip",),
         install=("pip install -q x",),
         uploads=(Upload(local=tmp_path / "d.whl"),),
@@ -688,7 +688,7 @@ def test_the_workload_digest_covers_the_uploads_not_just_the_command(tmp_path: P
 
 
 def test_the_command_is_launched_detached_and_sources_the_compat_shim() -> None:
-    script = Workload(name="mint", command="gen-worker family mint X").launch_script()
+    script = Workload(name="mint", command="gen-worker model mint X").launch_script()
     assert "setsid nohup" in script and script.rstrip().endswith("echo RIG_LAUNCHED $!")
     # RIG-ENV §3c: a detached job inherits no login shell, so a forward-compat
     # libcuda repair is invisible to it unless it is sourced explicitly.
@@ -739,7 +739,7 @@ def test_a_command_that_dies_at_line_one_is_NOT_green(tmp_path: Path) -> None:
                 )
             return super().run(script, timeout_s=timeout_s, env=env)
 
-    workload = mint_family("m:F", runners=("clip",))
+    workload = mint_model("m:F", runners=("clip",))
     row = _rig(tmp_path, FakePods(), DiesImmediately(), stall_ticks=3).run(
         cards_mod.pick("sm89"), workload
     )
@@ -761,7 +761,7 @@ def test_a_marker_without_the_artifact_is_still_not_green(tmp_path: Path) -> Non
             return Result(0, "")
 
     row = _rig(tmp_path, FakePods(), NoArtifact()).run(
-        cards_mod.pick("sm89"), mint_family("m:F", runners=("clip",))
+        cards_mod.pick("sm89"), mint_model("m:F", runners=("clip",))
     )
     assert row.verdict == "red" and row.failed_stage == "artifacts"
     assert "minted.json" in row.detail
@@ -769,7 +769,7 @@ def test_a_marker_without_the_artifact_is_still_not_green(tmp_path: Path) -> Non
 
 def test_a_mint_that_DID_produce_its_row_is_green(tmp_path: Path) -> None:
     row = _rig(tmp_path, FakePods(), FakeTransport()).run(
-        cards_mod.pick("sm89"), mint_family("m:F", runners=("clip",))
+        cards_mod.pick("sm89"), mint_model("m:F", runners=("clip",))
     )
     assert row.verdict == "green", row.detail
 
@@ -819,13 +819,13 @@ def test_the_mint_ships_the_fleet_line_authority_because_the_sdk_is_not_one(tmp_
     files, so a pod carrying only its wheel aborts FleetLineUnknown."""
     authority = tmp_path / "fleet-floors.toml"
     authority.write_text("[floors]\ntorch = \"2.13.0\"\n")
-    workload = mint_family("m:F", runners=("clip",), fleet_line=authority)
+    workload = mint_model("m:F", runners=("clip",), fleet_line=authority)
     assert workload.env["GEN_WORKER_FLEET_LINE_FILE"] == f"{POD_ROOT}/fleet-floors.toml"
     assert any(u.local == authority for u in workload.uploads)
 
 
 def test_the_mint_workload_asserts_the_fleet_line_before_it_compiles() -> None:
-    workload = mint_family("m:F", runners=("clip",))
+    workload = mint_model("m:F", runners=("clip",))
     assert workload.command.startswith("python3 -m gen_worker.rigcheck && ")
     assert "--runner clip" in workload.command
     # A compile's progress lives in the inductor cache long before the log moves.

@@ -103,7 +103,7 @@ tasks:
       written to ~/.cache/cozy-mint-rig/killset BEFORE the pod is created.
 
         task rig:pod -- mint --gpu a40 --rail 2.00 --lane pgw1331-clip \
-          --target gen_worker.family.catalog.flux1_dev:FLUX1_DEV --runner clip
+          --target gen_worker.model.catalog.flux1_dev:FLUX1_DEV --runner clip
         task rig:pod -- sweep         # live pods vs our records; exit 1 on a leak
         task rig:pod -- terminate --pod <id>
     cmds:

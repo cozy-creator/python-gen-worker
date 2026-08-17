@@ -2,7 +2,7 @@
 """pgw#1347 — the pod mint-rig, runnable from anywhere.
 
     scripts/pod_rig.py mint --gpu a40 --rail 2.00 --lane pgw1331-clip \
-        --target gen_worker.family.catalog.flux1_dev:FLUX1_DEV --runner clip
+        --target gen_worker.model.catalog.flux1_dev:FLUX1_DEV --runner clip
     scripts/pod_rig.py sweep
     scripts/pod_rig.py terminate --pod <id>
 

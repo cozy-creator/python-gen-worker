@@ -227,7 +227,7 @@ def _pip_install(target: str, index_args: str = "") -> str:
 def install_sdist(dist: Path, extras: str = "", index_args: str = "") -> tuple[str, ...]:
     """Install the code under test from a locally built dist file.
 
-    `--no-deps` is deliberately NOT used: a family DECLARATION builds its
+    `--no-deps` is deliberately NOT used: a model DECLARATION builds its
     architecture with the model library (diffusers is allowed inside `build`),
     so an install that skipped dependencies could not trace anything.
     """
@@ -245,7 +245,7 @@ def install_wheel(spec: str, index_args: str = "") -> tuple[str, ...]:
     return (PIN_TORCH, _pip_install(spec, index_args))
 
 
-def mint_family(
+def mint_model(
     target: str,
     *,
     runners: tuple[str, ...] = (),
@@ -256,10 +256,10 @@ def mint_family(
 ) -> Workload:
     """pgw#1331's owed leg as a workload value.
 
-    `gen-worker family mint` needs a GPU and a real toolchain and needs NO
+    `gen-worker model mint` needs a GPU and a real toolchain and needs NO
     weights and NO network for the model — cell identity is checkpoint-free
     (§4.27) and the constants arrive at arm time from the store. That is what
-    makes a per-family mint pod cheap enough to be routine, and it is why this
+    makes a per-model mint pod cheap enough to be routine, and it is why this
     workload ships no checkpoint machinery at all.
     """
     only = " ".join(f"--runner {r}" for r in runners)
@@ -281,7 +281,7 @@ def mint_family(
         # two false verdicts, and its exit 90/91 is a cheaper answer than a
         # compile that succeeds against the wrong torch.
         "python3 -m gen_worker.rigcheck && "
-        f"gen-worker family mint {target} --out-dir {out} {only} "
+        f"gen-worker model mint {target} --out-dir {out} {only} "
         f"--json {POD_ROOT}/minted.json && echo RIG_DONE"
     )
     return Workload(

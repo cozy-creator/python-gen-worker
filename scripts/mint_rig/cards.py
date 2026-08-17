@@ -45,7 +45,7 @@ class Card:
     #: so a provider substituting a different card is visible.
     sm_expected: str
     #: Container disk. AOTI object caches and an inductor scratch tree are the
-    #: bulk of it, not weights: a family mint downloads no checkpoint (§4.27).
+    #: bulk of it, not weights: a model mint downloads no checkpoint (§4.27).
     disk_gb: int
     #: Last-observed whole-pod rate, for sizing a rail before renting.
     usd_per_hour_hint: float

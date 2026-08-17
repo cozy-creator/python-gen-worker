@@ -2,7 +2,7 @@
 
     # pgw#1331's owed leg: the smallest real compile, on the cheapest sm_86 card
     python -m mint_rig mint --gpu a40 --rail 2.00 --lane pgw1331-clip \
-        --target gen_worker.family.catalog.flux1_dev:FLUX1_DEV --runner clip \
+        --target gen_worker.model.catalog.flux1_dev:FLUX1_DEV --runner clip \
         --deliver sdist --issue pgw#1331
 
     # the same command against a PUBLISHED release
@@ -33,7 +33,7 @@ from . import cards as cards_mod
 from .driver import Rig, uploads_for
 from .rail import Rail
 from .row import RigRow
-from .workload import POD_ROOT, Upload, Workload, install_sdist, install_wheel, mint_family
+from .workload import POD_ROOT, Upload, Workload, install_sdist, install_wheel, mint_model
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -89,7 +89,7 @@ def cmd_mint(args: argparse.Namespace) -> int:
     install, uploads = _delivery(args)
     fleet_line = Path(args.fleet_line) if args.fleet_line else None
     # REFUSED BEFORE RENTING, because this refusal is free and the pod that
-    # taught us was not. `gen-worker family mint` asserts the fleet line first
+    # taught us was not. `gen-worker model mint` asserts the fleet line first
     # (RIG-ENV §1) and rigcheck reads endpoint.toml / fleet-floors.toml /
     # ENDPOINT dist metadata — none of which exist on a pod carrying only this
     # repo's wheel. Only `--deliver image` is exempt: an endpoint image ships
@@ -105,7 +105,7 @@ def cmd_mint(args: argparse.Namespace) -> int:
         )
     if fleet_line is not None and not fleet_line.is_file():
         raise SystemExit(f"pgw#1347: --fleet-line {fleet_line} does not exist")
-    workload = mint_family(
+    workload = mint_model(
         args.target,
         runners=tuple(args.runner),
         install=install + tuple(args.setup),
@@ -214,9 +214,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mint_rig", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    mint = sub.add_parser("mint", help="gen-worker family mint on a rented pod.")
+    mint = sub.add_parser("mint", help="gen-worker model mint on a rented pod.")
     _rent_flags(mint)
-    mint.add_argument("--target", required=True, help="module:ATTR of the GraphFamily.")
+    mint.add_argument("--target", required=True, help="module:ATTR of the GraphModelSpec.")
     mint.add_argument("--runner", action="append", default=[], help="Repeatable; omit for all.")
     mint.add_argument(
         "--fleet-line",

@@ -5,7 +5,7 @@ it down and prove it is gone.
 
 ```bash
 task rig:pod -- mint --gpu sm89 --rail 1.10 --lane pgw1331-clip \
-  --target gen_worker.family.catalog.flux1_dev:FLUX1_DEV --runner clip \
+  --target gen_worker.model.catalog.flux1_dev:FLUX1_DEV --runner clip \
   --fleet-line ~/cozy/serverless-endpoints/fleet-floors.toml
 
 task rig:pod -- run --gpu sm89 --rail 0.50 --lane adopt --name adopt \
