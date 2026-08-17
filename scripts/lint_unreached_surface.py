@@ -93,6 +93,15 @@ EXEMPT_PACKAGES: Dict[str, str] = {
     # package data so a PINNED consumer reads the exact bytes it pinned.
     # tensorhub's internal/wirecontract/peers.lock is the consumer of record.
     "gen_worker.contracts": "cross-repo contract corpora (consumers are peer repos)",
+    # pgw#1332: the typed Family SDK. Same class as `gen_worker.api`, and for
+    # the same structural reason rather than by analogy: a family is the ONE
+    # authoring contract, so its declaration vocabulary, its generated bindings
+    # and its instance surface exist to be called from an endpoint repo. `src/`
+    # reaching them would mean the worker runtime imports the catalog, which is
+    # the thing pgw#1328's adopt-only role is fenced against. The seam the
+    # worker DOES own is `set_instance_resolver`, and it is inside this package
+    # for cohesion, not because the pod is expected to be its only caller.
+    "gen_worker.family": "typed Family SDK (consumers are endpoint repos)",
 }
 
 # The same fact, one symbol at a time, WITH PROOF. `gen_worker.api` is exempt by

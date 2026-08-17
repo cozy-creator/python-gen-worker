@@ -199,8 +199,15 @@ def test_a_job_may_not_be_a_generator() -> None:
             yield BakeOut(rung="x", ctx_class="")
 
 
-def test_a_job_takes_exactly_ctx_and_payload() -> None:
-    with pytest.raises(TypeError, match=r"exactly \(ctx, payload\)"):
+def test_a_job_takes_ctx_payload_and_declared_families_only() -> None:
+    """An UNDECLARED extra parameter is still refused.
+
+    pgw#1332 widened the shape by exactly one thing — a family instance the
+    decorator declares — because `@endpoint` did, and portability between the
+    two is a requirement rather than a style. Anything else is still an error,
+    which is what this asserts.
+    """
+    with pytest.raises(TypeError, match=r"plus declared family instances"):
         @job
         def three(ctx: JobContext, spec: BakeIn, extra: int) -> BakeOut:
             raise AssertionError("never runs")

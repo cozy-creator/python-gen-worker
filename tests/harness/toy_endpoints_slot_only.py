@@ -15,7 +15,7 @@ from pathlib import Path
 import msgspec
 
 from gen_worker import Hub, RequestContext, Slot, endpoint
-from gen_worker.families.base import GenerationDefaults, family
+from gen_worker.families.base import GenerationDefaults, register_family
 
 
 def _slot_weight_bytes(slot_dir: object) -> str:
@@ -38,9 +38,11 @@ def _slot_weight_bytes(slot_dir: object) -> str:
     return (real / "model.safetensors").read_text()
 
 
-@family("harness-slot-only-testfam")
 class _ToyDefaults(GenerationDefaults, frozen=True):
     steps: int = 7
+
+
+register_family("harness-slot-only-testfam", _ToyDefaults)
 
 
 class EchoIn(msgspec.Struct):

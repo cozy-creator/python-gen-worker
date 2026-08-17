@@ -16,7 +16,7 @@ import msgspec
 import torch
 
 from gen_worker import Compile, RequestContext, Resources, Slot, endpoint
-from gen_worker.families import GenerationDefaults, family
+from gen_worker.families import GenerationDefaults, register_family
 
 from .aot_declaration_pad32 import (  # noqa: F401 — registers at import
     ARITY,
@@ -29,9 +29,11 @@ from .aot_declaration_pad32 import (  # noqa: F401 — registers at import
 from .pipeline import MicroPad32Pipeline
 
 
-@family(FAMILY)
 class MicroPad32Defaults(GenerationDefaults, frozen=True):
     steps: int = 2
+
+
+register_family(FAMILY, MicroPad32Defaults)
 
 
 class MicroPad32In(msgspec.Struct):

@@ -60,6 +60,9 @@ def _build_parser() -> argparse.ArgumentParser:
     from . import families as _families_mod
     _families_mod.add_subparser(sub)
 
+    from . import family as _family_mod
+    _family_mod.add_subparser(sub)
+
     from . import job as _job_mod
     _job_mod.add_subparser(sub)
 

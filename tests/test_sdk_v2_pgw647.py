@@ -35,15 +35,17 @@ from gen_worker.api.tree import (
     is_introspectable,
     validate_no_sibling_parts,
 )
-from gen_worker.families.base import GenerationDefaults, family
+from gen_worker.families.base import GenerationDefaults, register_family
 from gen_worker.registry import extract_specs
 from gen_worker.view import UnknownSamplerError, clone_scheduler, for_request
 
 
-@family("v2-testfam")
 class _V2Defaults(GenerationDefaults, frozen=True):
     steps: int = 28
     guidance: float = 6.0
+
+
+register_family("v2-testfam", _V2Defaults)
 
 
 class _In(msgspec.Struct):
@@ -351,7 +353,14 @@ def test_bad_ctx_annotation_is_a_walk_error():
 
 
 def test_extra_handler_params_are_rejected():
-    with pytest.raises(TypeError, match="exactly \\(self, ctx, payload\\)"):
+    """A per-handler MODEL argument is still rejected, and for the v2 reason.
+
+    pgw#1332 reopened this signature for FAMILY instances and nothing else, so
+    the refusal's wording moved. The behaviour under test did not: a slot
+    injected per call would let one live instance serve bindings it was not
+    routed for, which is exactly why `setup()` owns model state.
+    """
+    with pytest.raises(TypeError, match=r"per-handler MODEL args are rejected"):
         @endpoint(models={"pipeline": Hub("acme/ckpt")})
         class Gen:
             def setup(self, pipeline: str) -> None:
@@ -359,6 +368,23 @@ def test_extra_handler_params_are_rejected():
 
             def generate(self, ctx: RequestContext, p: _In, pipeline: str) -> _Out:
                 return _Out()
+
+
+def test_a_family_instance_param_is_the_one_permitted_extra(tmp_path):
+    """pgw#1332's carve-out, asserted beside the rule it carves out of.
+
+    The parameter's TYPE is the family, `families=` declares which checkpoints
+    exist, and placement resolves them before the request lands — none of which
+    a per-handler model argument could say.
+    """
+    from gen_worker.family.catalog import Sdxl
+
+    @endpoint(families={"sdxl": Sdxl})
+    class Gen:
+        def generate(self, ctx: RequestContext, p: _In, sdxl: Sdxl) -> _Out:
+            return _Out()
+
+    assert getattr(Gen, "__gen_worker_endpoint__").families == {"sdxl": Sdxl}
 
 
 def test_class_models_require_setup():

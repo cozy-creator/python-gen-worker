@@ -171,6 +171,80 @@ def test_the_selection_contract_is_torch_free_and_registered() -> None:
     assert proof.stdout.strip() == "ok"
 
 
+def test_the_recipe_vocabulary_is_recorded_at_its_own_rev() -> None:
+    """pgw#1332: torchcg is split at two revs too, and the split is declared.
+
+    `recipe.py` is tcg#38's `recipe_v1` and did not exist at `rev`. Bumping
+    `rev` instead would re-vendor a genesis-restart lineage whose `storage.py`,
+    `artifact.py`, `engine.py` and `identity.py` all moved, under a
+    compiled-graph adoption path that is live on the older ones — a storage
+    rewrite hidden inside an SDK change. A split that is only in a comment is a
+    split nobody can audit, so the rev is a field and the file list is a field,
+    and the digest fence above covers them like any other vendored file.
+    """
+
+    spec = MANIFEST["packages"]["torchcg"]
+    assert spec["recipe_rev"] != spec["rev"]
+    assert set(spec["recipe_files"]) == {"recipe.py"}
+    for name in spec["recipe_files"]:
+        assert name in spec["files"], f"{name} is not digest-fenced"
+
+
+def test_the_recipe_vocabulary_runs_against_the_VENDORED_identity_and_ingress() -> None:
+    """The reason the split is expressible at all: `recipe.py`'s only siblings
+    are `identity` and `ingress`, and both are compatible at the older rev.
+
+    Proved by EXECUTING the pairing — fold a pinned class through
+    `GraphClassVariant.key()` (which reaches `identity.from_axes` and
+    `toolchain_axis_digest`) and project an ingress onto a call signature —
+    rather than by reading the import list, which would pass on a tree where
+    the shared symbols had changed shape.
+    """
+    from gen_worker._vendor.torchcg.identity import is_compiled_graph_key
+    from gen_worker._vendor.torchcg.ingress import CallIngress, CallInput
+    from gen_worker._vendor.torchcg.recipe import (
+        GraphClassHash,
+        GraphClassVariant,
+        IngressDigest,
+        LayoutContract,
+        ParameterKind,
+        call_signature,
+    )
+
+    ingress = CallIngress(
+        parameters=("latents",),
+        flat_arity=1,
+        inputs=(
+            CallInput(
+                name="latents",
+                position=0,
+                param="latents",
+                param_position=0,
+                path=(),
+                exported_name="latents",
+                dtype="bfloat16",
+                shape=(1, 4, 8, 8),
+            ),
+        ),
+    )
+    variant = GraphClassVariant(
+        class_hash=GraphClassHash("0123456789abcdef"),
+        ingress_digest=IngressDigest(ingress.digest()),
+        ingress=ingress,
+        layout=LayoutContract("bf16"),
+    )
+    signature = call_signature(ingress)
+    assert signature.flat_arity == 1
+    assert signature.parameters[0].kind is ParameterKind.TENSOR
+
+    class _Runtime:
+        sm = "sm_86"
+        toolchain = {"torch": "2.13.0"}
+
+    key = variant.key(_Runtime())
+    assert is_compiled_graph_key(str(key)), str(key)
+
+
 def test_the_read_plane_runs_without_the_compiled_extension() -> None:
     """The reason the split is expressible at all: this half is PURE PYTHON.
 

@@ -1,0 +1,693 @@
+"""The authoring vocabulary: what a family DECLARES, before anything is minted.
+
+This is the one place a model family is described. A declaration states
+class-level facts only — runners, bucket axes, the loop between them, the
+scheduler block, and the SHAPE of the family's tuned values. It states nothing
+checkpoint-level (weight sets, refs, tuned VALUES) and nothing request-level:
+those are the instance's and the request's, and DESIGN-RULINGS §4.27's
+checkpoint-free layer stays checkpoint-free because the field sets here cannot
+express them.
+
+The vocabulary deliberately mirrors ``torchcg.recipe``'s: a family's runners,
+axes, loop, parameters and scheduler project onto the recipe document one for
+one, so the mint-emitted recipe and this declaration are two readings of one
+composition and ``Recipe.assert_declaration`` can compare them (torchcg G16).
+What does NOT appear here is anything the recipe refuses to carry.
+
+Two tiers, and the split is type-honest rather than cosmetic:
+
+* :class:`Family` is eager-only — a constructor and a tuned schema. It is the
+  day-0 escape hatch for a model nobody has declared graph classes for yet, and
+  it is a TRANSITIONAL state, never a destination (pgw#1326: LLM/VLM families
+  are required to be :class:`GraphFamily` citizens with sessions).
+* :class:`GraphFamily` adds the runners, the loop and the scheduler, which is
+  what makes a recipe, typed bindings, and a compiled backing possible.
+
+Both are authored identically at the call site, and an author-defined inline
+family uses this exact shape — which is what makes catalog promotion a copy
+rather than a rewrite (pgw#1326 "One SDK shape").
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
+from itertools import product
+from typing import TYPE_CHECKING, Any, Final
+
+import msgspec
+
+from .._vendor.torchcg.recipe import (
+    BucketAxisName,
+    FamilyName,
+    LoopKind,
+    ParameterName,
+    RecipeError,
+    RepeatKind,
+    RunnerName,
+    SchedulerValue,
+    SessionState,
+    parse_bucket_axis_name,
+    parse_family_name,
+    parse_layout_contract,
+    parse_parameter_name,
+    parse_runner_name,
+    parse_scheduler_name,
+)
+from ..families.base import KIND_CHECKPOINT, KIND_LORA, GenerationDefaults, register_family
+from .errors import FamilyError, FamilyRefusal
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .runtime import FamilyBinding
+
+
+#: The default tensor-layout contract a runner is traced against when the
+#: declaration names none. It is a TOKEN this package records and never
+#: interprets: the COMPATIBLE / CONVERTIBLE / PRODUCIBLE / INCOMPATIBLE verdict
+#: is the hub's join of the recipe with per-checkpoint layout metadata
+#: (DESIGN-RULINGS §1.32/§1.33, torchcg G15).
+DEFAULT_LAYOUT: Final = "bf16"
+
+
+def _identifier(kind: str, value: object, parse: Callable[[object], Any]) -> str:
+    """Parse one author-facing handle through torchcg's frozen grammar.
+
+    Codegen owns no escaping rule (torchcg G1), so a name a generator would
+    have to mangle is refused HERE — at module import, on the author's own
+    machine — instead of at generation time or, worse, on a pod.
+    """
+
+    try:
+        return str(parse(value))
+    except RecipeError as exc:
+        raise FamilyError(
+            FamilyRefusal.IDENTIFIER_INVALID,
+            f"{kind} {value!r} is not a legal generated symbol: {exc}",
+        ) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class Bucket:
+    """One family-wide shape axis and the closed set of values it may take.
+
+    Buckets are the reason a generated ``Literal`` is exhaustive: every runner
+    that declares this axis must have a variant at every one of these values,
+    at every layout it offers (torchcg G6/G15), so a selection cannot address a
+    class that does not exist.
+    """
+
+    name: str
+    values: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "name", _identifier("bucket axis", self.name, parse_bucket_axis_name)
+        )
+        values = tuple(self.values)
+        if not values or any(type(value) is not int or value <= 0 for value in values):
+            raise FamilyError(
+                FamilyRefusal.BUCKET_AXIS_INVALID,
+                f"bucket axis {self.name!r} must declare positive integer values",
+            )
+        if values != tuple(sorted(set(values))):
+            raise FamilyError(
+                FamilyRefusal.BUCKET_AXIS_INVALID,
+                f"bucket axis {self.name!r} values must be sorted and unique, got {list(values)!r}",
+            )
+        object.__setattr__(self, "values", values)
+
+    @property
+    def axis(self) -> BucketAxisName:
+        return BucketAxisName(self.name)
+
+
+@dataclass(frozen=True, slots=True)
+class CallExample:
+    """One concrete call a runner is EXPORTED against.
+
+    ``params`` is the ordered parameter axis of the call — the generated
+    callable's parameters are exactly these, in this order (torchcg G3), so it
+    is declared rather than recovered from a signature: a ``**kwargs``-shaped
+    forward would otherwise decide the binding's public shape by accident.
+
+    ``excluded`` names inputs this class REFUSES. A class that excludes an
+    input the call carries must not serve it — it would return the base model
+    and look correct (``ingress_selection_v1``'s ``input_excluded``).
+
+    ``dynamic`` is handed to ``torch.export.export(dynamic_shapes=...)``
+    UNCHANGED. This package owns no shape DSL: a symbolic axis is expressed in
+    Torch's own vocabulary, exported, and read back out of the program's range
+    constraints — so a symbol carries the bounds the exporter actually solved
+    for, never the bounds an author asserted beside it.
+    """
+
+    params: tuple[str, ...]
+    args: tuple[object, ...] = ()
+    kwargs: Mapping[str, object] = field(default_factory=dict)
+    excluded: tuple[str, ...] = ()
+    dynamic: Mapping[str, object] | None = None
+
+    def __post_init__(self) -> None:
+        params = tuple(str(name) for name in self.params)
+        if not params or len(set(params)) != len(params):
+            raise FamilyError(
+                FamilyRefusal.CLASS_INVALID,
+                "a call example must declare a non-empty, unique parameter axis",
+            )
+        object.__setattr__(self, "params", params)
+        object.__setattr__(self, "args", tuple(self.args))
+        object.__setattr__(self, "kwargs", dict(self.kwargs))
+        object.__setattr__(self, "excluded", tuple(sorted(set(self.excluded))))
+
+
+#: Builds one runner's eager module for one tensor-layout contract. It is the
+#: SAME constructor the mint traces and the eager backing serves — pgw#1326's
+#: dual backing is one declaration read two ways, never two code paths.
+#:
+#: Author-facing callables speak plain ``str``/``int``, NOT the document's
+#: ``NewType``s. The newtypes exist so a value parsed out of a document cannot
+#: be confused with an arbitrary string; a declaration author is writing the
+#: literals, so making them import a newtype to spell one would be ceremony
+#: that buys nothing and (because ``Mapping``'s key is invariant) would refuse
+#: every naturally-written signature.
+BuildFn = Callable[[str], Any]
+
+#: Builds the example call one (bucket, layout) variant is exported against.
+ExampleFn = Callable[[Mapping[str, int], str], CallExample]
+
+
+@dataclass(frozen=True, slots=True)
+class Runner:
+    """One author-facing runner handle: a named graph class family.
+
+    ONE runner generates ONE typed binding (torchcg G2). Its variants — one per
+    (bucket, layout) — may differ only in concrete dimensions and symbol
+    bounds; a trace whose layout changes the CALL rather than the weights is a
+    different runner, not another variant of this one.
+    """
+
+    name: str
+    build: BuildFn
+    example: ExampleFn
+    axes: tuple[str, ...] = ()
+    layouts: tuple[str, ...] = (DEFAULT_LAYOUT,)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _identifier("runner", self.name, parse_runner_name))
+        if not callable(self.build) or not callable(self.example):
+            raise FamilyError(
+                FamilyRefusal.CLASS_INVALID,
+                f"runner {self.name!r} needs a build() and an example() callable",
+            )
+        axes = tuple(
+            _identifier("bucket axis", name, parse_bucket_axis_name) for name in self.axes
+        )
+        if axes != tuple(sorted(set(axes))):
+            raise FamilyError(
+                FamilyRefusal.BUCKET_INVALID,
+                f"runner {self.name!r} axes must be sorted and unique, got {list(axes)!r}",
+            )
+        object.__setattr__(self, "axes", axes)
+        layouts = tuple(
+            _identifier("layout contract", name, parse_layout_contract) for name in self.layouts
+        )
+        if not layouts or layouts != tuple(sorted(set(layouts))):
+            raise FamilyError(
+                FamilyRefusal.CLASS_INVALID,
+                f"runner {self.name!r} layouts must be a non-empty sorted unique set",
+            )
+        object.__setattr__(self, "layouts", layouts)
+
+    @property
+    def handle(self) -> RunnerName:
+        return RunnerName(self.name)
+
+    def buckets(
+        self, axes: Mapping[str, tuple[int, ...]]
+    ) -> tuple[dict[str, int], ...]:
+        """Every bucket this runner must have a variant for, in canonical order.
+
+        Total by construction: the cross product of its declared axes' values.
+        A generated closed type is exhaustive exactly because this set is, and
+        a gap is refused before anything is exported.
+        """
+
+        rows = tuple(axes[name] for name in self.axes)
+        return tuple(
+            dict(zip(self.axes, combination, strict=True))
+            for combination in product(*rows)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class Stage:
+    """One ordered step of a family's loop: a runner, and how often it runs."""
+
+    runner: str
+    repeat: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "runner", _identifier("runner", self.runner, parse_runner_name))
+        if self.repeat:
+            object.__setattr__(
+                self, "repeat", _identifier("parameter", self.repeat, parse_parameter_name)
+            )
+
+    @property
+    def kind(self) -> RepeatKind:
+        return RepeatKind.COUNTED if self.repeat else RepeatKind.ONCE
+
+
+@dataclass(frozen=True, slots=True)
+class Loop:
+    """The composition's loop, or the declaration that the host owns it.
+
+    ``staged`` is what the vocabulary fully describes. ``host`` is an
+    autoregressive family: the declaration states the per-step runners in order
+    and who owns the state threaded between them, and says outright that the
+    iteration is host code. A repeat count under a host loop is REFUSED —
+    a fabricated bound reads to a second implementation as a real one.
+    """
+
+    stages: tuple[Stage, ...]
+    kind: LoopKind = LoopKind.STAGED
+    session_state: SessionState = SessionState.NONE
+
+    def __post_init__(self) -> None:
+        stages = tuple(self.stages)
+        if not stages:
+            raise FamilyError(FamilyRefusal.LOOP_INVALID, "a loop must declare its stages")
+        if self.kind is LoopKind.HOST and any(stage.repeat for stage in stages):
+            raise FamilyError(
+                FamilyRefusal.LOOP_INVALID,
+                "a host-owned loop states its per-step runners, never a repeat count: the "
+                "iteration is data-dependent and belongs to the host",
+            )
+        object.__setattr__(self, "stages", stages)
+
+
+@dataclass(frozen=True, slots=True)
+class Parameter:
+    """One integer count a counted stage reads, with inclusive bounds."""
+
+    name: str
+    minimum: int
+    maximum: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _identifier("parameter", self.name, parse_parameter_name))
+        if type(self.minimum) is not int or type(self.maximum) is not int:
+            raise FamilyError(
+                FamilyRefusal.PARAMETER_INVALID,
+                f"parameter {self.name!r} bounds must be integers",
+            )
+        if self.minimum < 1 or self.maximum < self.minimum:
+            raise FamilyError(
+                FamilyRefusal.PARAMETER_INVALID,
+                f"parameter {self.name!r} bounds must satisfy 1 <= minimum <= maximum",
+            )
+
+    @property
+    def handle(self) -> ParameterName:
+        return ParameterName(self.name)
+
+
+@dataclass(frozen=True, slots=True)
+class Scheduler:
+    """The named scheduler and its finite-scalar parameter block.
+
+    Neither this package nor torchcg interprets it: the host implements the
+    named scheduler. It rides in the declaration because two otherwise
+    identical compositions under different schedulers are different pipelines,
+    so it must be inside the digest a consumer pins.
+    """
+
+    name: str
+    parameters: Mapping[str, SchedulerValue] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _identifier("scheduler", self.name, parse_scheduler_name))
+        rows: dict[str, SchedulerValue] = {}
+        for raw_name, value in self.parameters.items():
+            parsed = _identifier("scheduler parameter", raw_name, parse_parameter_name)
+            if isinstance(value, bool) or isinstance(value, (int, str)):
+                rows[parsed] = value
+                continue
+            if isinstance(value, float) and value == value and value not in (
+                float("inf"),
+                float("-inf"),
+            ):
+                rows[parsed] = value
+                continue
+            raise FamilyError(
+                FamilyRefusal.SCHEDULER_INVALID,
+                f"scheduler parameter {parsed!r} must be a finite JSON scalar, got {value!r}",
+            )
+        object.__setattr__(self, "parameters", dict(sorted(rows.items())))
+
+
+class TunedValues(GenerationDefaults, frozen=True, kw_only=True):
+    """Base for a family's TUNED-VALUE schema — the shape, never the values.
+
+    The schema is code and the values are catalog: a release slot stamps one
+    resolved document per checkpoint and the SDK decodes it against this
+    struct, exactly as th#1116 works today. What pgw#1332 changes is the
+    DELIVERY ADDRESS — the decoded struct rides the instance as ``inst.tuned``
+    instead of the request context, because it is a checkpoint-level fact and
+    the request is not the axis it varies on.
+
+    Declared ON the family (``Flux1Dev.Tuned``), which is how the naming
+    collision with the old free-standing ``@family("...")`` decorator resolves:
+    a family owns its schema, so nothing has to register a vocabulary under a
+    name a second, unrelated struct could also claim.
+
+    Inherits ``forbid_unknown_fields`` from :class:`GenerationDefaults`, so the
+    exported JSON Schema stays closed (``additionalProperties: false``) — the
+    contract tensorhub validates repo metadata against.
+    """
+
+
+def _tuned_schema(
+    name: str, tuned: type[GenerationDefaults] | None, what: str
+) -> type[GenerationDefaults]:
+    if tuned is None:
+        raise FamilyError(
+            FamilyRefusal.TUNED_INVALID,
+            f"family {name!r} declares no {what} schema; a family owns its tuned shape",
+        )
+    if not (isinstance(tuned, type) and issubclass(tuned, GenerationDefaults)):
+        raise FamilyError(
+            FamilyRefusal.TUNED_INVALID,
+            f"family {name!r} {what} schema must be a TunedValues subclass, got {tuned!r}",
+        )
+    # `schema_version` comes from the base and carries no tuned value, so a
+    # schema declaring only it is an empty struct nobody can stamp — an
+    # authoring mistake that would otherwise surface as silently-missing
+    # catalog values at serve time rather than at import.
+    own = tuple(
+        row.name for row in msgspec.structs.fields(tuned) if row.name != "schema_version"
+    )
+    if not own:
+        raise FamilyError(
+            FamilyRefusal.TUNED_INVALID,
+            f"family {name!r} {what} schema {tuned.__name__} declares no tuned fields",
+        )
+    return tuned
+
+
+@dataclass(frozen=True)
+class Family:
+    """An EAGER-ONLY family: a constructor and a tuned schema, and that is all.
+
+    The day-0 escape hatch, made type-honest rather than left implicit. A model
+    nobody has declared graph classes for is still authored through the one
+    contract — ``@endpoint(families={...})`` — so promoting it later is adding
+    runners and a loop, never rewriting the endpoint (pgw#1326 "One SDK
+    shape"). It has no recipe, no bindings and no compiled backing, and it is
+    a TRANSITIONAL state: an LLM/VLM family that stays here is a defect, not a
+    design (pgw#1326 "LLMs/VLMs are first-class").
+    """
+
+    name: str
+    tuned: type[GenerationDefaults]
+    build: Callable[[], Any] | None = None
+    lora_tuned: type[GenerationDefaults] | None = None
+    on_load: Callable[[FamilyBinding], None] | None = None
+    runners: tuple[Runner, ...] = ()
+
+    def __post_init__(self) -> None:
+        # Validate EVERYTHING first, register last. Registration is a
+        # process-global side effect, and a declaration that raises must not
+        # leave its name claimed behind it — the next import of a corrected
+        # declaration would then read as a collision it cannot adjudicate.
+        # Subclasses extend `_validate`, never this, so the ordering holds for
+        # them too.
+        self._validate()
+        self._register()
+
+    def _validate(self) -> None:
+        object.__setattr__(self, "name", _identifier("family", self.name, parse_family_name))
+        object.__setattr__(self, "tuned", _tuned_schema(self.name, self.tuned, "tuned"))
+        if self.lora_tuned is not None:
+            object.__setattr__(
+                self, "lora_tuned", _tuned_schema(self.name, self.lora_tuned, "lora tuned")
+            )
+        if self.on_load is not None and not callable(self.on_load):
+            raise FamilyError(
+                FamilyRefusal.FAMILY_INVALID, f"family {self.name!r} on_load must be callable"
+            )
+        if type(self) is Family and self.runners:
+            raise FamilyError(
+                FamilyRefusal.FAMILY_INVALID,
+                f"family {self.name!r} declares runners but is eager-only; declare a "
+                "GraphFamily() when the composition has graph classes",
+            )
+
+    def _register(self) -> None:
+        """Publish this family's tuned schema(s) under its own name.
+
+        The registration the retired ``@family("sdxl")`` decorator used to do,
+        moved onto the object that owns the schema. The registry itself is
+        unchanged — tensorhub still validates repo metadata against the
+        exported JSON Schema and ``gen-worker families export-schemas`` still
+        finds it — but a family can no longer be registered by a struct that
+        does not belong to one, which is the collision Paul ruled on.
+        """
+
+        try:
+            register_family(self.name, self.tuned, kind=KIND_CHECKPOINT)
+            if self.lora_tuned is not None:
+                register_family(self.name, self.lora_tuned, kind=KIND_LORA)
+        except ValueError as exc:
+            raise FamilyError(FamilyRefusal.FAMILY_DUPLICATE, str(exc)) from exc
+
+    @property
+    def handle(self) -> FamilyName:
+        return FamilyName(self.name)
+
+
+@dataclass(frozen=True)
+class GraphFamily(Family):
+    """A family with declared graph classes: recipe, bindings, dual backing.
+
+    Everything :class:`Family` is, plus the composition — which runners make
+    the pipeline, the buckets they vary on, the loop between them, and the
+    scheduler that loop runs under. That is exactly ``recipe_v1``'s vocabulary,
+    so this declaration and the mint-emitted recipe are comparable documents
+    and drift between them is an assertion rather than a hope (torchcg G16).
+    """
+
+    buckets: tuple[Bucket, ...] = ()
+    loop: Loop | None = None
+    parameters: tuple[Parameter, ...] = ()
+    scheduler: Scheduler | None = None
+
+    def _validate(self) -> None:
+        Family._validate(self)
+        axis_names = tuple(bucket.name for bucket in self.buckets)
+        if axis_names != tuple(sorted(set(axis_names))):
+            raise FamilyError(
+                FamilyRefusal.BUCKET_AXIS_INVALID,
+                f"family {self.name!r} bucket axes must be sorted and unique",
+            )
+        if not self.runners:
+            raise FamilyError(
+                FamilyRefusal.FAMILY_INVALID,
+                f"graph family {self.name!r} declares no runners; declare a plain Family() "
+                "for an eager-only model rather than an empty graph family",
+            )
+        runner_names = tuple(runner.name for runner in self.runners)
+        if runner_names != tuple(sorted(set(runner_names))):
+            raise FamilyError(
+                FamilyRefusal.FAMILY_INVALID,
+                f"family {self.name!r} runners must be sorted by name and unique, "
+                f"got {list(runner_names)!r}",
+            )
+        declared = {bucket.name for bucket in self.buckets}
+        for runner in self.runners:
+            unknown = sorted(set(runner.axes) - declared)
+            if unknown:
+                raise FamilyError(
+                    FamilyRefusal.BUCKET_INVALID,
+                    f"runner {runner.name!r} buckets on axis {unknown[0]!r}, which family "
+                    f"{self.name!r} does not declare",
+                )
+        if self.loop is None:
+            raise FamilyError(
+                FamilyRefusal.LOOP_INVALID,
+                f"graph family {self.name!r} declares no loop; a composition with no stated "
+                "order is not a composition",
+            )
+        staged = {stage.runner for stage in self.loop.stages}
+        unknown_runner = sorted(staged - set(runner_names))
+        if unknown_runner:
+            raise FamilyError(
+                FamilyRefusal.LOOP_INVALID,
+                f"loop stages runner {unknown_runner[0]!r}, which family {self.name!r} "
+                "does not declare",
+            )
+        unused = sorted(set(runner_names) - staged)
+        if unused:
+            raise FamilyError(
+                FamilyRefusal.LOOP_INVALID,
+                f"runner {unused[0]!r} is declared but no loop stage runs it",
+            )
+        parameter_names = tuple(parameter.name for parameter in self.parameters)
+        if parameter_names != tuple(sorted(set(parameter_names))):
+            raise FamilyError(
+                FamilyRefusal.PARAMETER_INVALID,
+                f"family {self.name!r} parameters must be sorted by name and unique",
+            )
+        counted = {stage.repeat for stage in self.loop.stages if stage.repeat}
+        unknown_parameter = sorted(counted - set(parameter_names))
+        if unknown_parameter:
+            raise FamilyError(
+                FamilyRefusal.PARAMETER_INVALID,
+                f"a counted stage reads undeclared parameter {unknown_parameter[0]!r}",
+            )
+        idle = sorted(set(parameter_names) - counted)
+        if idle:
+            raise FamilyError(
+                FamilyRefusal.PARAMETER_INVALID,
+                f"parameter {idle[0]!r} is declared but no counted stage reads it",
+            )
+
+    @property
+    def axis_values(self) -> dict[str, tuple[int, ...]]:
+        return {bucket.name: bucket.values for bucket in self.buckets}
+
+    @property
+    def staged_loop(self) -> Loop:
+        """The declared loop, narrowed for readers that already validated it."""
+
+        assert self.loop is not None  # __post_init__ refuses a loopless graph family
+        return self.loop
+
+    def runner(self, name: str) -> Runner:
+        """Resolve one runner handle.
+
+        This exists for the GENERATOR and for diagnostics. A handler that
+        reaches a runner through a string it typed is exactly what the
+        generated bindings make unrepresentable (torchcg G7).
+        """
+
+        wanted = _identifier("runner", name, parse_runner_name)
+        for runner in self.runners:
+            if runner.name == wanted:
+                return runner
+        raise FamilyError(
+            FamilyRefusal.FAMILY_INVALID, f"family {self.name!r} declares no runner {wanted!r}"
+        )
+
+    def variants(self) -> tuple[tuple[Runner, dict[str, int], str], ...]:
+        """Every (runner, bucket, layout) this family must export, in order.
+
+        Total per layout by construction, which is what makes a generated
+        ``Literal`` exhaustive and every selection resolve (torchcg G6/G15).
+        """
+
+        axes = self.axis_values
+        rows: list[tuple[Runner, dict[str, int], str]] = []
+        for runner in self.runners:
+            for layout in runner.layouts:
+                for bucket in runner.buckets(axes):
+                    rows.append((runner, bucket, layout))
+        return tuple(rows)
+
+
+@dataclass(frozen=True, slots=True)
+class BucketMap:
+    """A typed mapping from ONE endpoint payload axis onto ONE family bucket.
+
+    Greenfield B5: the product grid is not the family's buckets. Aspect ratios,
+    megapixel tiers and pricing brackets are ENDPOINT policy; a token-count or
+    resolution graph class is FAMILY truth, and conflating them is how a
+    product decision quietly became a compile axis.
+
+    Declaring the mapping makes three things true at once: a payload value that
+    targets a bucket the family lacks fails the BUILD (not a pod), the handler
+    reaches its bucket through a typed lookup rather than arithmetic, and the
+    boot warm plan is DERIVED from the mapping instead of guessed by a
+    snap-to-nearest hack.
+    """
+
+    family: GraphFamily
+    axis: str
+    mapping: Mapping[str, int]
+
+    def __post_init__(self) -> None:
+        axis = _identifier("bucket axis", self.axis, parse_bucket_axis_name)
+        declared = self.family.axis_values.get(axis)
+        if declared is None:
+            raise FamilyError(
+                FamilyRefusal.GRID_INVALID,
+                f"family {self.family.name!r} declares no bucket axis {axis!r}; it has "
+                f"{sorted(self.family.axis_values)!r}",
+            )
+        rows = {str(key): int(value) for key, value in self.mapping.items()}
+        if not rows:
+            raise FamilyError(
+                FamilyRefusal.GRID_INVALID, f"bucket map for axis {axis!r} is empty"
+            )
+        missing = sorted(set(rows.values()) - set(declared))
+        if missing:
+            raise FamilyError(
+                FamilyRefusal.GRID_INVALID,
+                f"bucket map targets {axis}={missing[0]}, which family "
+                f"{self.family.name!r} does not declare (it has {list(declared)!r})",
+            )
+        object.__setattr__(self, "axis", axis)
+        object.__setattr__(self, "mapping", dict(sorted(rows.items())))
+
+    def bucket_for(self, value: str) -> int:
+        """The family bucket one product-grid value maps onto, or a refusal."""
+
+        try:
+            return self.mapping[str(value)]
+        except KeyError:
+            raise FamilyError(
+                FamilyRefusal.GRID_INVALID,
+                f"no bucket declared for {self.axis}={value!r}; the map covers "
+                f"{sorted(self.mapping)!r}",
+            ) from None
+
+    def warm_plan(self) -> tuple[int, ...]:
+        """The distinct buckets a boot warm-up must cover, ascending.
+
+        Derived from the mapping, so a product-grid entry nobody can serve is
+        impossible by construction and the warm plan cannot drift from the grid
+        it exists to warm.
+        """
+
+        return tuple(sorted(set(self.mapping.values())))
+
+
+def declared_families(objects: Iterable[object]) -> tuple[Family, ...]:
+    """Every :class:`Family` in ``objects``, deduplicated and sorted by name."""
+
+    rows: dict[str, Family] = {}
+    for item in objects:
+        if isinstance(item, Family):
+            rows[item.name] = item
+    return tuple(rows[name] for name in sorted(rows))
+
+
+__all__ = [
+    "DEFAULT_LAYOUT",
+    "Bucket",
+    "LoopKind",
+    "SessionState",
+    "BucketMap",
+    "BuildFn",
+    "CallExample",
+    "ExampleFn",
+    "Family",
+    "GraphFamily",
+    "Loop",
+    "Parameter",
+    "Runner",
+    "Scheduler",
+    "Stage",
+    "TunedValues",
+    "declared_families",
+]

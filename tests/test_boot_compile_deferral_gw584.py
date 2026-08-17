@@ -50,7 +50,7 @@ from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.api.slot import Slot
 from gen_worker.config.settings import Settings
 from gen_worker.executor import Executor
-from gen_worker.families.base import GenerationDefaults, family
+from gen_worker.families.base import GenerationDefaults, register_family
 from gen_worker.lifecycle import Lifecycle
 from gen_worker.models import provision
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -59,9 +59,11 @@ from gen_worker.cell_adopt import AdoptOutcome
 from gen_worker.models import store as store_mod
 
 
-@family("gw584-testfam")
 class _Fam(GenerationDefaults):
     steps: int = 7
+
+
+register_family("gw584-testfam", _Fam)
 
 
 class _StubPipeline:

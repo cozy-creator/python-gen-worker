@@ -15,7 +15,7 @@ import msgspec
 import torch
 
 from gen_worker import Compile, RequestContext, Resources, Slot, endpoint
-from gen_worker.families import GenerationDefaults, family
+from gen_worker.families import GenerationDefaults, register_family
 
 from .aot_declaration_escape import (  # noqa: F401 — registers at import
     ARITY,
@@ -28,9 +28,11 @@ from .aot_declaration_escape import (  # noqa: F401 — registers at import
 from .pipeline import MicroEscapePipeline
 
 
-@family(FAMILY)
 class MicroEscapeDefaults(GenerationDefaults, frozen=True):
     steps: int = 2
+
+
+register_family(FAMILY, MicroEscapeDefaults)
 
 
 class MicroEscapeIn(msgspec.Struct):

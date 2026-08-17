@@ -34,15 +34,17 @@ from gen_worker.models.tensor_layout_contract import (
     TOPOLOGY_COMFY_SPLITFILES,
     TOPOLOGY_DIFFUSERS_MULTIFILE,
 )
-from gen_worker.families import GenerationDefaults, family
+from gen_worker.families import GenerationDefaults, register_family
 
 FAMILY = "contractcheck"
 
 
-@family(FAMILY)
 class ContractCheckDefaults(GenerationDefaults, frozen=True):
     steps: int = 28
     guidance: float = 6.0
+
+
+register_family(FAMILY, ContractCheckDefaults)
 
 
 register_repackage_family(

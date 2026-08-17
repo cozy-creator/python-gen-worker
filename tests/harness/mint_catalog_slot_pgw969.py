@@ -40,12 +40,14 @@ import msgspec
 
 from gen_worker import RequestContext, Resources, Slot, endpoint, worker_function
 from gen_worker.api.binding import wire_ref
-from gen_worker.families.base import GenerationDefaults, family
+from gen_worker.families.base import GenerationDefaults, register_family
 
 
-@family("harness-pgw969-catalog")
 class CatalogDefaults(GenerationDefaults, frozen=True):
     steps: int = 5
+
+
+register_family("harness-pgw969-catalog", CatalogDefaults)
 
 
 class CatalogIn(msgspec.Struct):

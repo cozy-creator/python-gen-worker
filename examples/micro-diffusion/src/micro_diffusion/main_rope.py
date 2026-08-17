@@ -15,7 +15,7 @@ import msgspec
 import torch
 
 from gen_worker import Compile, RequestContext, Resources, Slot, endpoint
-from gen_worker.families import GenerationDefaults, family
+from gen_worker.families import GenerationDefaults, register_family
 
 from .aot_declaration_rope import (  # noqa: F401 — registers at import
     ARITY,
@@ -28,9 +28,11 @@ from .aot_declaration_rope import (  # noqa: F401 — registers at import
 from .pipeline import MicroRopePipeline
 
 
-@family(FAMILY)
 class MicroRopeDefaults(GenerationDefaults, frozen=True):
     steps: int = 2
+
+
+register_family(FAMILY, MicroRopeDefaults)
 
 
 class MicroRopeIn(msgspec.Struct):

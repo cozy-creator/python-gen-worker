@@ -21,7 +21,7 @@ from gen_worker import (
     RequestContext, endpoint, import_export_declaration,
     register_export_declaration,
 )
-from gen_worker.families.base import GenerationDefaults, family as family_vocab
+from gen_worker.families.base import GenerationDefaults, register_family
 
 from .blocked_declaration_parts import BLOCKER, build_declaration
 
@@ -36,9 +36,11 @@ BLOCKED_DECLARATION = build_declaration(
 
 register_export_declaration(BLOCKED_DECLARATION)
 
-@family_vocab("harness-blocked-family")
 class _BlockedDefaults(GenerationDefaults, frozen=True):
     steps: int = 4
+
+
+register_family("harness-blocked-family", _BlockedDefaults)
 
 
 class BlockedIn(msgspec.Struct):

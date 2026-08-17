@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import inspect
 import re
+import typing
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple, TypeVar, Union, get_args, overload
 
 import msgspec
@@ -54,6 +55,8 @@ from .export_contract import (
     validate_contract, validate_speed_bar,
 )
 from .formula import RuntimeFormula
+from ..family.runtime import FamilyBinding
+from ..family.spec import Family as FamilySpec
 from .slot import OBJECTIVES, TASKS, D, Slot
 from ..models import execution_lanes as lanespec
 from ..models.tensor_layout_contract import (
@@ -1138,6 +1141,14 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     # MAY write; the request still says WHERE. The hub mints the
     # worker-capability write grant off this declaration, never off the kind.
     publishes: bool = False
+    # pgw#1332: handler parameter name -> the generated family TYPE bound to it.
+    # The injected VALUE is a fully resolved FamilyInstance — graph, bound
+    # weights and catalog-stamped tuned values — so two parameters of one family
+    # type are two checkpoints with independent tuning. Declaring it statically
+    # is what lets placement prefetch the weights and verify the VRAM fit before
+    # a request lands; `Family.instance(ref)` inside a handler is the dynamic
+    # escape hatch, and it is the one parse-don't-validate boundary.
+    families: Mapping[str, type["FamilyBinding"]] = msgspec.field(default_factory=dict)
 
 
 ATTR = "__gen_worker_endpoint__"
@@ -1199,7 +1210,13 @@ def _handler_params(fn: Callable[..., Any], *, is_method: bool) -> list[inspect.
     return params
 
 
-def _validate_handler_shape(owner: str, fn: Callable[..., Any], *, is_method: bool) -> None:
+def _validate_handler_shape(
+    owner: str,
+    fn: Callable[..., Any],
+    *,
+    is_method: bool,
+    families: frozenset[str] = frozenset(),
+) -> None:
     params = _handler_params(fn, is_method=is_method)
     if len(params) < 2:
         raise TypeError(
@@ -1209,14 +1226,52 @@ def _validate_handler_shape(owner: str, fn: Callable[..., Any], *, is_method: bo
             "prefix non-handler methods with an underscore."
         )
     if is_method and len(params) > 2:
-        raise TypeError(
-            f"@endpoint: {owner} must accept exactly (self, ctx, payload) — "
-            f"got extra params {[p.name for p in params[2:]]}. SDK v2 "
-            "(pgw#647): per-handler model args are rejected; setup(self, "
-            "pipeline, ...) runs once per instance and stores "
-            "self.pipeline — one live instance == one binding set, so the "
-            "runtime routed this request here BECAUSE the bindings match."
-        )
+        # pgw#1332 reopens this, for FAMILIES and nothing else. What SDK v2
+        # rejected was a per-handler MODEL argument: a slot injected per call
+        # made one live instance able to serve bindings it was not routed for,
+        # which is why `setup()` owns model state instead.
+        #
+        # A family instance is the opposite shape and closes the same hole a
+        # different way. It is not a slot, it is not a path, and it is not
+        # decided by the request: the parameter's TYPE is the family, the
+        # decorator's `families=` declares which checkpoints exist, and
+        # placement resolves them before the request lands. Two parameters of
+        # one family type are two checkpoints on purpose — which `setup()`
+        # cannot express at all, because one attribute holds one value.
+        # A parameter clears this two ways, and both are the declaration
+        # speaking rather than a guess: `families=` NAMED it, or its annotation
+        # IS a generated family class. The first is what makes the check work
+        # before type hints resolve (a family class built at runtime, a forward
+        # reference); the second is what catches a family parameter nobody
+        # declared, which `_validate_family_params` then refuses by name.
+        extra = [
+            p.name
+            for p in params[2:]
+            if p.name not in families and not _is_family_param(fn, p.name)
+        ]
+        if extra:
+            raise TypeError(
+                f"@endpoint: {owner} must accept (self, ctx, payload) plus family "
+                f"instances — got extra params {extra}. SDK v2 (pgw#647): per-handler "
+                "MODEL args are rejected; setup(self, pipeline, ...) runs once per "
+                "instance and stores self.pipeline. A family parameter is the one "
+                "exception (pgw#1332): annotate it with a generated family class and "
+                "declare it in @endpoint(families={...})."
+            )
+
+
+def _is_family_param(fn: Callable[..., Any], name: str) -> bool:
+    """Whether ``name`` is annotated with a generated family class.
+
+    Unresolvable hints answer False rather than raising: a forward reference
+    the module cannot resolve yet is a walk-time problem, and refusing the
+    whole endpoint here would make an ordinary import order fatal.
+    """
+    try:
+        hint = typing.get_type_hints(fn).get(name)
+    except Exception:  # noqa: BLE001 - see the docstring
+        return False
+    return isinstance(hint, type) and issubclass(hint, FamilyBinding)
 
 
 def _reject_producer_generator(owner: str, fn: Callable[..., Any], kind: str) -> None:
@@ -1280,7 +1335,9 @@ def _normalize_models(
     return out_models, out_slots
 
 
-def _find_handler_methods(cls: type) -> list[tuple[str, Callable[..., Any]]]:
+def _find_handler_methods(
+    cls: type, families: frozenset[str] = frozenset()
+) -> list[tuple[str, Callable[..., Any]]]:
     out: list[tuple[str, Callable[..., Any]]] = []
     for attr, member in inspect.getmembers(cls, predicate=inspect.isfunction):
         if attr.startswith("_") or attr in RESERVED_METHODS:
@@ -1292,7 +1349,9 @@ def _find_handler_methods(cls: type) -> list[tuple[str, Callable[..., Any]]]:
             "Define at least one public method taking (self, ctx, payload)."
         )
     for handler_name, handler_fn in out:
-        _validate_handler_shape(f"{cls.__name__}.{handler_name}", handler_fn, is_method=True)
+        _validate_handler_shape(
+            f"{cls.__name__}.{handler_name}", handler_fn, is_method=True, families=families
+        )
     return out
 
 
@@ -1541,6 +1600,117 @@ def _expand_formula_map(
     return dict(formulas)
 
 
+
+def _normalize_families(
+    owner: str, families: Optional[Mapping[str, Any]]
+) -> Dict[str, type[FamilyBinding]]:
+    """Parse ``families={...}`` into handler-parameter -> generated family type.
+
+    The VALUE is the generated class, which is simultaneously the type a
+    handler parameter is annotated with and the type of the instance it
+    receives (torchcg G12). Passing a DECLARATION (a ``GraphFamily``) is
+    refused by name rather than coerced: a declaration is the authoring object
+    and has no typed callables on it, so accepting one would hand a handler
+    something that looks bound and is not.
+    """
+    if not families:
+        return {}
+    if not isinstance(families, Mapping):
+        raise TypeError(
+            f"@endpoint {owner}: families= must be a mapping of handler "
+            f"parameter name -> family type, got {type(families).__name__}"
+        )
+    out: Dict[str, type[FamilyBinding]] = {}
+    for raw_name, value in families.items():
+        name = str(raw_name or "").strip()
+        if not name or not name.isidentifier():
+            raise ValueError(
+                f"@endpoint {owner}: families= key {raw_name!r} must be a handler "
+                "parameter name"
+            )
+        if not (isinstance(value, type) and issubclass(value, FamilyBinding)):
+            if isinstance(value, FamilySpec):
+                raise TypeError(
+                    f"@endpoint {owner}: families[{name!r}] is the DECLARATION of family "
+                    f"{value.name!r}, not its generated type. A declaration has no typed "
+                    "callables on it, so binding one would hand the handler something "
+                    "that looks resolved and is not — bind the class "
+                    "`gen-worker family generate` emits."
+                )
+            raise TypeError(
+                f"@endpoint {owner}: families[{name!r}] must be a generated family class, "
+                f"got {type(value).__name__}"
+            )
+        if not value.FAMILY:
+            raise ValueError(
+                f"@endpoint {owner}: families[{name!r}] = {value.__name__} carries no "
+                "family handle; it is not a generated binding"
+            )
+        out[name] = value
+    return dict(sorted(out.items()))
+
+
+def _validate_family_params(
+    owner: str,
+    fn: Callable[..., Any],
+    families: Mapping[str, type[FamilyBinding]],
+    *,
+    is_method: bool,
+) -> None:
+    """Every declared family must be a parameter, and typed as itself.
+
+    Two directions, and both matter. A declared family with no parameter is a
+    prefetch nobody consumes — placement would pull weights for a checkpoint the
+    handler never touches. A parameter ANNOTATED with a family class but not
+    declared is the reverse: nothing prefetches it, and the failure surfaces on
+    a pod as an unbound instance rather than here, at decoration.
+
+    The annotation check is what makes `flux_a: Flux1Dev, flux_b: Flux1Dev` two
+    independent checkpoints rather than a coincidence of naming.
+    """
+    params = {p.name: p for p in _handler_params(fn, is_method=is_method)[2:]}
+    missing = sorted(set(families) - set(params))
+    if missing:
+        raise ValueError(
+            f"@endpoint {owner}: families declares {missing[0]!r} but the handler has no "
+            f"such parameter after (ctx, payload); it has {sorted(params) or 'none'}"
+        )
+    try:
+        hints = typing.get_type_hints(fn)
+    except Exception:  # noqa: BLE001 - unresolvable hints are checked at walk time
+        return
+    # The reverse direction runs even with NO declared families, which is the
+    # case that actually bites: a bare `@endpoint` over a handler that took a
+    # family instance would decorate cleanly and then have nothing prefetch it.
+    for name, declared in families.items():
+        annotation = hints.get(name)
+        if annotation is None:
+            raise ValueError(
+                f"@endpoint {owner}: parameter {name!r} binds family "
+                f"{declared.FAMILY!r} and must be annotated `{name}: {declared.__name__}` "
+                "— the family class IS the type of the instance it receives"
+            )
+        if annotation is not declared:
+            raise TypeError(
+                f"@endpoint {owner}: parameter {name!r} is annotated "
+                f"{getattr(annotation, '__name__', annotation)!r} but families binds "
+                f"{declared.__name__}"
+            )
+    for name, hint in hints.items():
+        if (
+            name in params
+            and name not in families
+            and isinstance(hint, type)
+            and issubclass(hint, FamilyBinding)
+        ):
+            raise ValueError(
+                f"@endpoint {owner}: parameter {name!r} is annotated with family type "
+                f"{hint.__name__} but families= does not declare it. Declare it so "
+                "placement can prefetch its weights, or resolve it inside the handler "
+                f"with {hint.__name__}.instance(<ref>)."
+            )
+
+
 def _decorate_class(
     cls: type,
     *,
@@ -1559,10 +1729,19 @@ def _decorate_class(
     config: Optional[Any] = None,
     env: Optional[Any] = None,
     publishes: bool = False,
+    families: Optional[Mapping[str, Any]] = None,
 ) -> type:
-    handlers = _find_handler_methods(cls)
+    # Families first: a shape check that does not know which parameters are
+    # families would reject them, and a malformed `families=` should say so
+    # rather than surface as a confusing shape error two frames later.
+    family_map = _normalize_families(f"class {cls.__name__!r}", families)
+    handlers = _find_handler_methods(cls, frozenset(family_map))
     for attr, member in handlers:
         _reject_producer_generator(f"{cls.__name__}.{attr}", member, kind)
+    for attr, member in handlers:
+        _validate_family_params(
+            f"class {cls.__name__!r}.{attr}", member, family_map, is_method=True
+        )
     models, slots = _resolve_single_slot(cls, models, slots, handlers)
     _validate_class_models(cls, models, slots)
     _validate_root_slot(cls.__name__, slots)
@@ -1586,6 +1765,7 @@ def _decorate_class(
         config=_validate_config_decl(cls.__name__, config),
         env=_validate_env_decl(cls.__name__, env),
         publishes=bool(publishes),
+        families=family_map,
     )
     setattr(cls, ATTR, decl)
     setattr(cls, "__gen_worker_handlers__", handlers)
@@ -1617,6 +1797,7 @@ def _decorate_function(
     config: Optional[Any] = None,
     env: Optional[Any] = None,
     publishes: bool = False,
+    families: Optional[Mapping[str, Any]] = None,
 ) -> Callable[..., Any]:
     if reentrant:
         raise ValueError(
@@ -1624,8 +1805,14 @@ def _decorate_function(
             "class endpoints only (stateless functions hold no instance "
             "state to single-flight)."
         )
-    _validate_handler_shape(fn.__name__, fn, is_method=False)
+    family_map = _normalize_families(f"function {fn.__name__!r}", families)
+    _validate_handler_shape(
+        fn.__name__, fn, is_method=False, families=frozenset(family_map)
+    )
     _reject_producer_generator(fn.__name__, fn, kind)
+    _validate_family_params(
+        f"function {fn.__name__!r}", fn, family_map, is_method=False
+    )
     if "" in models or "" in slots:
         injected = [p.name for p in _handler_params(fn, is_method=False)[2:]]
         if len(injected) != 1:
@@ -1664,6 +1851,7 @@ def _decorate_function(
         config=_validate_config_decl(fn.__name__, config),
         env=_validate_env_decl(fn.__name__, env),
         publishes=bool(publishes),
+        families=family_map,
     )
     setattr(fn, ATTR, decl)
     return fn
@@ -1691,6 +1879,7 @@ def endpoint(
     config: Optional[Sequence[ConfigParam]] = ...,
     env: Optional[Sequence[str]] = ...,
     publishes: bool = ...,
+    families: Optional[Mapping[str, type[FamilyBinding]]] = ...,
 ) -> Callable[[T], T]: ...  # configured @endpoint(...) form
 
 
@@ -1712,6 +1901,7 @@ def endpoint(
     config: Optional[Sequence[ConfigParam]] = None,
     env: Optional[Sequence[str]] = None,
     publishes: bool = False,
+    families: Optional[Mapping[str, type[FamilyBinding]]] = None,
 ) -> Any:
     """The one endpoint decorator. See the module docstring for shapes.
 
@@ -1787,7 +1977,7 @@ def endpoint(
                 child_calls=child_calls, reentrant=reentrant,
                 lora_bucket=bucket, warmup=warmup,
                 handles=handles, config=config, env=env,
-                publishes=publishes,
+                publishes=publishes, families=families,
             )
         if inspect.isfunction(obj):
             return _decorate_function(
@@ -1797,7 +1987,7 @@ def endpoint(
                 child_calls=child_calls, reentrant=reentrant,
                 lora_bucket=bucket, warmup=warmup,
                 handles=handles, config=config, env=env,
-                publishes=publishes,
+                publishes=publishes, families=families,
             )
         raise TypeError(
             f"@endpoint requires a function or class, got {type(obj).__name__}"

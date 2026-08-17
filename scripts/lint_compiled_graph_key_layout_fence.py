@@ -50,6 +50,10 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _lint_scope import is_unowned  # noqa: E402
+
 REPO = Path(__file__).resolve().parents[1]
 SRC = REPO / "src" / "gen_worker"
 
@@ -141,7 +145,19 @@ _HANDLE_LITERAL = re.compile(r"^[a-z0-9]+\.[a-z0-9][a-z0-9._-]*@[1-9][0-9]*$")
 
 
 def _iter_modules(root: Path) -> List[Path]:
-    return sorted(p for p in root.rglob("*.py"))
+    # pgw#1332: skip the subtrees that are not ours to change. `_vendor` is the
+    # one that matters here and it is a REAL finding shape, not a nuisance:
+    # torchcg's `recipe.py` computes a cell-key axis (`GraphClassVariant.key`)
+    # AND reads `.layouts` — but that `layouts` is the TRACED-LAYOUT axis of a
+    # graph-class row (torchcg G15), a different concept that happens to share
+    # the word with §1.33's demand/conversion vocabulary. torchcg says so
+    # explicitly: it RECORDS the token and never enumerates, interprets or forks
+    # §1.32/§1.33. Either way the snapshot is byte-identical to a pinned
+    # upstream rev under a digest fence, so a finding in it is unfixable here by
+    # construction — which is exactly what `_lint_scope` exists to say once.
+    return sorted(
+        path for path in root.rglob("*.py") if not is_unowned(path, root)
+    )
 
 
 def _called_names(tree: ast.AST) -> Set[str]:
