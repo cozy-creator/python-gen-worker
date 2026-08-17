@@ -402,6 +402,28 @@ def test_bring_up_is_bounded_by_MONEY_because_it_has_no_progress_signal() -> Non
         rail.check_sub("endpoint", 0.15, now=1500.0)
 
 
+def test_the_bringup_budget_is_PER_POD_or_every_reroll_dies_instantly() -> None:
+    """MEASURED LIVE on pgw#1348 row 2: four re-rolls, each `reroll` at $0.000
+    and 0.0 min. That reads as four dead hosts and was one arithmetic error —
+    the per-POD allowance was being measured against the CUMULATIVE total, so
+    once $0.065 was banked against a $0.06 sub-cap, every later bring-up was
+    refused before its first observation."""
+    rail = Rail(max_usd=0.60)
+    rail.observe_rate(0.74)
+    rail.clock_started(at=0.0)
+    rail.bank(now=316.0)  # ~$0.065 gone to a bad host
+    assert rail.banked_usd == pytest.approx(0.0650, abs=1e-3)
+
+    # A fresh pod. Its OWN bring-up allowance is untouched by the dead one.
+    rail.observe_rate(0.74)
+    rail.clock_started(at=1000.0)
+    rail.check_sub("endpoint", 0.10, now=1100.0)  # 100 s on THIS pod: fine
+    with pytest.raises(RailTripped):
+        rail.check_sub("endpoint", 0.10, now=1000.0 + 0.06 / 0.74 * 3600 + 1)
+    # …while the INVOCATION total still carries the dead pod forward.
+    assert rail.spent_usd(now=1100.0) > rail.pod_spent_usd(now=1100.0)
+
+
 def test_a_gate_with_no_staleness_rule_waits_as_long_as_the_rail_allows() -> None:
     calls = {"n": 0}
 

@@ -68,8 +68,22 @@ class Rail:
         self.started_at = time.time() if at is None else at
 
     def spent_usd(self, now: float | None = None) -> float:
+        """Everything this INVOCATION has spent, dead pods included."""
+        return self.banked_usd + self.pod_spent_usd(now)
+
+    def pod_spent_usd(self, now: float | None = None) -> float:
+        """What the pod currently running has cost. Excludes banked spend.
+
+        The distinction is not bookkeeping. A per-POD allowance measured against
+        the cumulative total collapses the moment anything is banked: with a
+        $0.60 rail, a 10% bring-up sub-cap of $0.06 and $0.065 already gone to
+        one bad host, EVERY later bring-up is refused before its first
+        observation. Measured live on pgw#1348 row 2 — four re-rolls, each
+        `reroll` at $0.000 and 0.0 min, which reads as four dead hosts and was
+        really one arithmetic error.
+        """
         now = time.time() if now is None else now
-        return self.banked_usd + self.rate_per_hr * max(0.0, now - self.started_at) / 3600.0
+        return self.rate_per_hr * max(0.0, now - self.started_at) / 3600.0
 
     def bank(self, now: float | None = None) -> float:
         """Close out the current pod's spend and stop its clock.
@@ -133,8 +147,11 @@ class Rail:
         a cheap A4000), it is stated, and tripping it is a `railed` verdict with
         the stage named — not a silent retry. Once the pod answers, real progress
         markers exist and :class:`~mint_rig.progress.Gate` takes over.
+
+        Measured against THIS POD's spend, not the invocation's total — see
+        :meth:`pod_spent_usd` for the four-dead-hosts incident that says why.
         """
-        spent = self.spent_usd(now)
+        spent = self.pod_spent_usd(now)
         cap = self.max_usd * fraction
         if spent >= cap:
             raise RailTripped(
