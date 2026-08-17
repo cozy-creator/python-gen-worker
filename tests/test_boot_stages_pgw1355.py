@@ -579,3 +579,34 @@ def test_the_emitter_proves_its_own_packing_parses_back() -> None:
         assert f"{key}=" in degraded, (
             f"{key} went missing with the packed table — the degradation took "
             f"the report with it instead of just the detail")
+
+
+def test_the_table_reads_as_a_timeline_not_as_the_enum() -> None:
+    """Rows are chronological.
+
+    Enum order looks right until a stage runs out of position. On a real cold
+    sdxl boot `model_load` happens THIRTEEN MINUTES after `keyset` starts, and
+    printing it above `keyset` — because `model_load` sits earlier in the
+    vocabulary — makes the reader distrust the column they came for.
+
+    RED PROOF: drop the chronological sort and `model_load` precedes `keyset`
+    in a table where it happened 804 seconds later.
+    """
+    table = _table(
+        StageSpan(stage=Stage.MODEL_LOAD, t0_ms=823_400, t1_ms=824_500),
+        StageSpan(stage=Stage.KEYSET, t0_ms=18_700, t1_ms=823_400),
+        StageSpan(stage=Stage.SNAPSHOT_PULL, t0_ms=17_600, t1_ms=18_700),
+        wall_ms=843_900,
+    )
+    order = [stage for stage, _start, _end in table.runs()]
+    assert order == [Stage.SNAPSHOT_PULL, Stage.KEYSET, Stage.MODEL_LOAD], (
+        f"the table is not chronological: {[s.value for s in order]}")
+
+    starts = [start for _stage, start, _end in table.runs()]
+    assert starts == sorted(starts), "rows must ascend in time"
+
+    # The packed table the renderer parses carries the same order, so an
+    # operator reading the hub and an operator reading a pod shell see the
+    # same sequence.
+    packed, _ = boot_stages.pack_runs(table)
+    assert packed.startswith("snapshot_pull:17600-18700,keyset:18700-823400")

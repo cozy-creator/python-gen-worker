@@ -381,11 +381,19 @@ class BootStageTable:
         return int(round(100.0 * min(1.0, self.critical_path_ms / self.wall_ms)))
 
     def runs(self) -> List[Tuple[Stage, int, int]]:
-        """Disjoint runs per stage, in walk order then time order.
+        """Disjoint runs per stage, in CHRONOLOGICAL order.
 
-        Per stage rather than globally: a stage that ran twice with a gap is a
-        different fact from one that ran once for the span of both, and
+        Merged per stage rather than globally: a stage that ran twice with a
+        gap is a different fact from one that ran once across both, and
         collapsing them would hide it.
+
+        Sorted by start time rather than by the enum, because this table is
+        read as a timeline. Enum order looks right until a stage runs out of
+        position — on a real cold sdxl boot `model_load` happens THIRTEEN
+        MINUTES after `keyset` starts, and printing it above `keyset` because
+        it sits earlier in the vocabulary makes the reader distrust the
+        column they came for. The enum is the tiebreak for runs that begin
+        together, so the order is still total and still stable.
         """
         out: List[Tuple[Stage, int, int]] = []
         for stage in STAGES:
@@ -395,6 +403,7 @@ class BootStageTable:
                 continue
             for start, end in _union_runs(intervals):
                 out.append((stage, start, end))
+        out.sort(key=lambda row: (row[1], row[2], STAGES.index(row[0])))
         return out
 
     def busy_ms(self, stage: Stage) -> int:
