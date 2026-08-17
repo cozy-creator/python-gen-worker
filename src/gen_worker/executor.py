@@ -10748,8 +10748,21 @@ class Executor:
             ref = wire_ref(binding)
             path = await self.store.ensure_local(ref, snapshots.get(ref), binding=binding)
             kwargs[name] = Path(path) if sig.get(name) is Path else str(path)
-        kwargs.update(
-            self._model_instance_kwargs(spec, slots or {}, adapters or {}, warm=warm))
+        # pgw#1346 K11: the same materialization, for a parameter bound to a
+        # declared MODEL. An eager model's serving surface IS this path — 8 of
+        # the 11 measured boundary endpoints hand it to an external binary —
+        # so it is fetched here, beside the slot-path injection that already
+        # knew how, rather than through a second route that could disagree.
+        local: Dict[str, str] = {}
+        for name in spec.families:
+            binding = spec.models.get(name)
+            if binding is None:
+                continue
+            ref = wire_ref(binding)
+            local[name] = str(await self.store.ensure_local(
+                ref, snapshots.get(ref), binding=binding))
+        kwargs.update(self._model_instance_kwargs(
+            spec, slots or {}, adapters or {}, paths=local, warm=warm))
         return kwargs
 
     def _model_instance_kwargs(
@@ -10757,6 +10770,7 @@ class Executor:
         spec: EndpointSpec,
         slots: Mapping[str, dispatch.SlotOrder],
         adapters: Mapping[str, Tuple[dispatch.AdapterOrder, ...]],
+        paths: Optional[Mapping[str, str]] = None,
         warm: bool = False,
     ) -> Dict[str, Any]:
         """One resolved `Model` per declared model parameter (pgw#1346).
@@ -10803,7 +10817,8 @@ class Executor:
             trees[name] = self._slot_pipeline(spec, name)
         return dict(instances_for(
             spec.families, refs=refs, trees=trees,
-            stamped=stamped, lora_stamped=lora_stamped, skip_unresolved=warm,
+            stamped=stamped, lora_stamped=lora_stamped, paths=paths or {},
+            skip_unresolved=warm,
         ))
 
     async def _prepare_adapters(

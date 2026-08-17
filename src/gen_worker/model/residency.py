@@ -88,6 +88,7 @@ def instance_for(
     stamped: str = "",
     lora_stamped: Sequence[str] = (),
     label: str = "",
+    path: str = "",
 ) -> M:
     """One resolved instance, from what this pod already has.
 
@@ -100,7 +101,8 @@ def instance_for(
     from .tuned import tuned_from_catalog
 
     eager = eager_modules(model.SPEC, tree)
-    if not eager and compiled is None:
+    declares_runners = bool(model.SPEC is not None and model.SPEC.runners)
+    if declares_runners and not eager and compiled is None:
         raise ModelError(
             ModelRefusal.BACKING_MISSING,
             f"model {model.FAMILY!r} bound to {ref!r} has neither an eager module "
@@ -109,12 +111,18 @@ def instance_for(
             f"(declare `Runner(..., component=...)` for each runner that has an "
             f"eager equivalent).",
         )
+    # pgw#1346 K11: a model that declares NO runners is complete without either
+    # backing. Refusing it here is what made `inst.tuned` unreachable for every
+    # eager model — and `inst.tuned` is the whole replacement for `ctx.defaults`,
+    # so the refusal blocked the ctx cut for all 11 boundary endpoints at once.
     return model.adopt(
         ref=ref,
         tuned=tuned_from_catalog(model, stamped, lora_stamped),
         eager=eager or None,
         compiled=compiled,
         label=label or ref,
+        path=path,
+        pipeline=tree if not declares_runners else None,
     )
 
 
@@ -126,6 +134,7 @@ def instances_for(
     compiled: Mapping[str, Backing] | None = None,
     stamped: Mapping[str, str] | None = None,
     lora_stamped: Mapping[str, Sequence[str]] | None = None,
+    paths: Mapping[str, str] | None = None,
     skip_unresolved: bool = False,
 ) -> dict[str, Model]:
     """One instance per declared handler parameter.
@@ -146,6 +155,7 @@ def instances_for(
     armed = compiled or {}
     values = stamped or {}
     overlays = lora_stamped or {}
+    local = paths or {}
     out: dict[str, Model] = {}
     for name, bind in binds.items():
         ref = str(refs.get(name, "") or "").strip()
@@ -165,6 +175,7 @@ def instances_for(
             stamped=values.get(name, ""),
             lora_stamped=overlays.get(name, ()),
             label=name,
+            path=local.get(name, ""),
         )
     return out
 
