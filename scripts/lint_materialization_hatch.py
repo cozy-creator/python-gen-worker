@@ -130,11 +130,16 @@ HATCH_DEFINITION = re.compile(r"^(?:async\s+)?def\s+(?:extract|materialize)\b")
 #: hatch call in an undeclared file is refused, and a declared file that no
 #: longer contains one is refused too -- so the table cannot go stale in
 #: either direction.
-VENDORED_HATCH = {
-    # `_export_archive` / `_stage_artifact` write a compiled-graph archive off
-    # the tensorfs store with the single-file arm.
-    "src/gen_worker/_vendor/torchcg/storage.py": "tcg-artifact-export",
-}
+#
+# EMPTY, and that is a result rather than an omission. pgw#1342 bumped the
+# vendored torchcg to a rev whose store keeps artifacts as whole blobs, so
+# `resolve` untars straight out of the store and only `export_artifact` — a
+# plain `copyfile` to a destination the store does not own — writes bytes
+# twice. The vendored snapshot no longer reaches the hatch at all, and the
+# check below refuses a declaration that outlives its last call. The one live
+# §9 `tcg-artifact-export` caller is first-party and carries an inline marker
+# (`aot_delivery.py`).
+VENDORED_HATCH: dict = {}
 
 #: A file reaches the hatch only if it can reach a tensor reader.
 _TENSORFS_IMPORT = re.compile(r"\b(?:from|import)\s+\S*tensorfs\b")

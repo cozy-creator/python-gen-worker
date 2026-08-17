@@ -19,6 +19,7 @@ require either deleted project from an index (ie#738).
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import threading
 import tomllib
@@ -124,22 +125,49 @@ def test_the_storage_half_still_provides_what_the_ownership_ruling_keeps() -> No
     # pinned upstream snapshot, called by nothing here. The caller census is
     # `scripts/lint_materialization_hatch.py`, in the required `fast gates`.
     assert hasattr(LocalCAS, "materialize" + "_repository")
-def test_the_selection_contract_is_recorded_at_its_own_rev() -> None:
-    """pgw#1328: the torchcg snapshot is SPLIT at two revs, and it is declared.
 
-    `selection.py` and its corpus come from tcg#37's merge; the storage half
-    deliberately does not, because the tip renames the compiled-graph ref
-    prefix and would orphan every stored artifact. A split that lives only in a
-    comment is a split nobody can audit, so the rev and the file list are
-    fields and the digest fence above covers them like any other vendored file.
+
+def test_the_torchcg_snapshot_is_one_rev() -> None:
+    """pgw#1342/tcg#39: the graft fields are GONE, and nothing may re-grow one.
+
+    Two lanes grafted a newer file over an older storage half — pgw#1328's
+    `selection_rev`, pgw#1332's `recipe_rev` — each because the tip carried a
+    storage re-key its own lane was not entitled to take. Paul ruled the re-key
+    accepted (tcg#39) and this snapshot took the tip whole, so a second rev in
+    this table is now a fork of a storage identity with no ruling behind it.
+    The digest fence above cannot see that: a graft records perfectly well.
     """
 
     spec = MANIFEST["packages"]["torchcg"]
-    assert spec["selection_rev"] != spec["rev"]
-    assert set(spec["selection_files"]) == {
-        "selection.py", "contracts/ingress_selection_v1.json"}
-    for name in spec["selection_files"]:
-        assert name in spec["files"], f"{name} is not digest-fenced"
+    extra = sorted(k for k in spec if k.endswith("_rev") and k != "rev")
+    assert extra == [], (
+        f"the torchcg snapshot grew a second rev ({extra}). One rev, per "
+        f"tcg#39 — a graft forks the compiled-graph store's identity."
+    )
+    # The rev itself is NOT restated here. VENDORED.toml says it is "the single
+    # home of the fact", and a copy of a rev in a test is a second home that
+    # drifts. What this asserts is the SHAPE the ruling fixed: one rev, and the
+    # post-rename layout it must have been taken from.
+    assert spec["subdir"] == "src/torchcg"
+
+
+def test_the_vendored_store_uses_the_frozen_ref_prefix() -> None:
+    """The re-key this bump paid for, asserted where the fleet can see it.
+
+    `torchcg/v1` is the address every compiled graph on every pod is filed
+    under. Moving it again is not a rename: it orphans every stored artifact at
+    once and costs another fleet-wide re-mint. Upstream froze it (torchcg
+    PR #41); this is the consumer-side half, so a rev bump that quietly moved
+    it could not reach a pod through this repo.
+    """
+
+    from gen_worker._vendor.torchcg import storage
+
+    key = "cg-key-v1-" + "0" * 56
+    assert storage._REF_PREFIX == "torchcg/v1"
+    assert storage._graph_ref(key) == f"torchcg/v1/graphs/{key}"
+    assert tuple(f.name for f in dataclasses.fields(storage.StoreResult)) == (
+        "outcome", "key", "artifact")
 
 
 def test_the_selection_contract_is_torch_free_and_registered() -> None:
@@ -148,9 +176,9 @@ def test_the_selection_contract_is_torch_free_and_registered() -> None:
     tcg#37's implementation reads four facts per feed (dtype, shape,
     contiguity, pointer alignment), so it needs no accelerator — which is why
     it can be a JSON corpus at all, and why an adopt-only pod can rank a call
-    before anything is loaded. It is also the reason the graft could not
-    disturb the rest of the snapshot: its only intra-package import is
-    `.ingress`, which is byte-identical across the two revs.
+    before anything is loaded. It arrived as a graft (pgw#1328) and is now part
+    of the ordinary one-rev snapshot (pgw#1342); the property that mattered
+    then still has to hold, because an adopt-only boot imports it eagerly.
     """
     import subprocess
     import sys
@@ -171,28 +199,16 @@ def test_the_selection_contract_is_torch_free_and_registered() -> None:
     assert proof.stdout.strip() == "ok"
 
 
-def test_the_recipe_vocabulary_is_recorded_at_its_own_rev() -> None:
-    """pgw#1332: torchcg is split at two revs too, and the split is declared.
-
-    `recipe.py` is tcg#38's `recipe_v1` and did not exist at `rev`. Bumping
-    `rev` instead would re-vendor a genesis-restart lineage whose `storage.py`,
-    `artifact.py`, `engine.py` and `identity.py` all moved, under a
-    compiled-graph adoption path that is live on the older ones — a storage
-    rewrite hidden inside an SDK change. A split that is only in a comment is a
-    split nobody can audit, so the rev is a field and the file list is a field,
-    and the digest fence above covers them like any other vendored file.
-    """
-
-    spec = MANIFEST["packages"]["torchcg"]
-    assert spec["recipe_rev"] != spec["rev"]
-    assert set(spec["recipe_files"]) == {"recipe.py"}
-    for name in spec["recipe_files"]:
-        assert name in spec["files"], f"{name} is not digest-fenced"
-
-
 def test_the_recipe_vocabulary_runs_against_the_VENDORED_identity_and_ingress() -> None:
-    """The reason the split is expressible at all: `recipe.py`'s only siblings
-    are `identity` and `ingress`, and both are compatible at the older rev.
+    """`recipe.py`'s only siblings are `identity` and `ingress`, and it folds
+    a real key through them.
+
+    pgw#1332 grafted this file at its own `recipe_rev` and this test guarded the
+    graft's compatibility claim. pgw#1342 took the whole package to one rev, so
+    the pairing is no longer a claim — but the EXECUTION still is, and it is the
+    half worth keeping: `recipe_v1` is the vocabulary the typed Family SDK
+    generates against, so a snapshot where the fold silently stopped producing a
+    key would be a codegen defect nothing else here notices.
 
     Proved by EXECUTING the pairing — fold a pinned class through
     `GraphClassVariant.key()` (which reaches `identity.from_axes` and

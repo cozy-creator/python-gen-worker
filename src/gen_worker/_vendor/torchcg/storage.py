@@ -1,4 +1,15 @@
-"""Exact-key compiled-graph policy over HashRepo's generic local CAS."""
+"""Exact-key compiled-graph policy over one tensorfs content-addressed store.
+
+A compiled-graph artifact is a compressed tarball, so it enters the store as one
+whole unchunked blob named by the sha256 of its bytes. An exact-key ref points
+straight at that blob: there is no per-artifact manifest, because a manifest
+holding exactly one file entry is an indirection with nothing to describe.
+
+Lookup therefore returns the blob's own immutable path. Reading an artifact
+copies nothing -- ``resolve`` untars directly out of the store. Only
+``export_artifact``, whose entire purpose is to hand a caller an independent
+file on the caller's own device, writes the bytes a second time.
+"""
 
 from __future__ import annotations
 
@@ -11,16 +22,17 @@ import shutil
 import stat
 import tempfile
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
-from ..tensorfs import CASRef, DigestMismatch, FileEntry, LocalCAS, RefConflict, RepositoryManifest
+from ..tensorfs import CASRef, DigestMismatch, LocalCAS, RefConflict
 
 from .artifact import ArtifactError, _fsync_dir, unpack_artifact
 from .identity import CompiledGraphKey, is_compiled_graph_key
 
 _COMPILED_GRAPH_PATH = "compiled_graph.tar.gz"
-_REF_PREFIX = "torch-compiled-graphs/v1"
+_REF_PREFIX = "torchcg/v1"
+_READ_BUFFER = 1 << 20
 
 
 class StorageError(RuntimeError):
@@ -31,7 +43,7 @@ class QuarantinedArtifact(StorageError):
     """An exact-key record failed integrity or admission and cannot be reused."""
 
 
-class StoreOutcome(str, Enum):
+class StoreOutcome(StrEnum):
     STORED = "stored"
     PRESENT = "present"
     REPAIRED = "repaired"
@@ -42,17 +54,17 @@ class StoreOutcome(str, Enum):
 class StoreResult:
     outcome: StoreOutcome
     key: str
-    manifest: CASRef
+    artifact: CASRef
 
 
 @dataclass(frozen=True, slots=True)
 class StoredCompiledGraph:
-    """One verified compiled graph materialized for a caller."""
+    """One verified compiled graph unpacked for a caller."""
 
     key: str
     directory: Path
     metadata: dict[str, object]
-    manifest: CASRef
+    artifact: CASRef
 
     @property
     def package(self) -> Path:
@@ -75,8 +87,18 @@ def _graph_ref(key: str) -> str:
     return f"{_REF_PREFIX}/graphs/{key}"
 
 
-def _quarantine_ref(key: str, manifest: CASRef) -> str:
-    return f"{_REF_PREFIX}/quarantine/{key}/{manifest.digest}"
+def _quarantine_ref(key: str, artifact: CASRef) -> str:
+    return f"{_REF_PREFIX}/quarantine/{key}/{artifact.digest}"
+
+
+def _digest_file(path: Path) -> CASRef:
+    """Name a file by its bytes without writing them anywhere."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(_READ_BUFFER):
+            digest.update(chunk)
+    return CASRef(digest.hexdigest())
 
 
 class _CompiledGraphStore:
@@ -85,19 +107,25 @@ class _CompiledGraphStore:
     def __init__(self, cas: LocalCAS) -> None:
         self.cas = cas
 
-    @staticmethod
-    def _file(manifest: RepositoryManifest) -> FileEntry:
-        if len(manifest.files) != 1 or manifest.files[0].path != _COMPILED_GRAPH_PATH:
-            raise StorageError("compiled-graph manifest must contain exactly its v1 artifact")
-        return manifest.files[0]
+    def _admit(self, artifact: Path) -> CASRef:
+        """Admit one whole-file blob, writing nothing when the store already holds it."""
 
-    def _is_quarantined(self, key: str, manifest: CASRef) -> bool:
-        return self.cas.read_ref(_quarantine_ref(key, manifest)) is not None
+        ref = _digest_file(artifact)
+        try:
+            if self.cas.contains(ref):
+                return ref
+        except DigestMismatch:
+            # The named blob is present but unusable; put_file replaces it atomically.
+            pass
+        return self.cas.put_file(artifact, expected=ref)
 
-    def _clear_quarantine(self, key: str, manifest: CASRef, expected: CASRef) -> bool:
+    def _is_quarantined(self, key: str, artifact: CASRef) -> bool:
+        return self.cas.read_ref(_quarantine_ref(key, artifact)) is not None
+
+    def _clear_quarantine(self, key: str, artifact: CASRef, expected: CASRef) -> bool:
         """Retire exactly one observed marker, never a newer quarantine."""
 
-        name = _quarantine_ref(key, manifest)
+        name = _quarantine_ref(key, artifact)
         try:
             self.cas.compare_and_swap_ref(name, None, expected=expected)
             return True
@@ -105,25 +133,25 @@ class _CompiledGraphStore:
             return self.cas.read_ref(name) is None
 
     def _retire_candidate_quarantine(
-        self, key: str, manifest: CASRef, observed: CASRef | None
+        self, key: str, artifact: CASRef, observed: CASRef | None
     ) -> None:
-        if observed is not None and self._clear_quarantine(key, manifest, observed):
+        if observed is not None and self._clear_quarantine(key, artifact, observed):
             return
-        if observed is None and not self._is_quarantined(key, manifest):
+        if observed is None and not self._is_quarantined(key, artifact):
             return
         raise QuarantinedArtifact(
             f"compiled graph {key} received a fresh quarantine during repair"
         )
 
-    def quarantine(self, key: str | CompiledGraphKey, manifest: CASRef) -> None:
+    def quarantine(self, key: str | CompiledGraphKey, artifact: CASRef) -> None:
         value = _key_value(key)
-        name = _quarantine_ref(value, manifest)
+        name = _quarantine_ref(value, artifact)
         marker = self.cas.put_bytes(
             json.dumps(
                 {
                     "format": 1,
                     "key": value,
-                    "manifest": str(manifest),
+                    "artifact": str(artifact),
                     "marker": secrets.token_hex(16),
                 },
                 sort_keys=True,
@@ -143,7 +171,7 @@ class _CompiledGraphStore:
 
         value = _key_value(key)
         source = Path(artifact)
-        with tempfile.TemporaryDirectory(prefix="torch-compiled-graphs-import-") as raw:
+        with tempfile.TemporaryDirectory(prefix="torchcg-import-") as raw:
             owned = Path(raw) / _COMPILED_GRAPH_PATH
             shutil.copyfile(source, owned)
             with owned.open("rb") as handle:
@@ -154,8 +182,7 @@ class _CompiledGraphStore:
                     f"artifact states key {metadata.get('compiled_graph_key')!r}, "
                     f"expected {value!r}"
                 )
-            file = self.cas.ingest_file(owned, manifest_path=_COMPILED_GRAPH_PATH)
-        candidate = self.cas.store_manifest(RepositoryManifest((file,)))
+            candidate = self._admit(owned)
         candidate_quarantine = self.cas.read_ref(_quarantine_ref(value, candidate))
         ref_name = _graph_ref(value)
         current = self.cas.read_ref(ref_name)
@@ -205,7 +232,7 @@ class _CompiledGraphStore:
 
     @staticmethod
     def _verify_archive(artifact: Path, key: str) -> None:
-        with tempfile.TemporaryDirectory(prefix="torch-compiled-graphs-export-verify-") as raw:
+        with tempfile.TemporaryDirectory(prefix="torchcg-export-verify-") as raw:
             metadata = unpack_artifact(artifact, Path(raw) / "artifact")
         if metadata.get("compiled_graph_key") != key:
             raise ArtifactError(
@@ -213,8 +240,8 @@ class _CompiledGraphStore:
             )
 
     @staticmethod
-    def _require_exact_file(target: Path, expected: FileEntry) -> None:
-        """Accept an occupied destination only when it is the selected CAS file."""
+    def _require_exact_file(target: Path, expected: CASRef, size: int) -> None:
+        """Accept an occupied destination only when it is the selected CAS blob."""
 
         try:
             if target.is_symlink():
@@ -224,7 +251,7 @@ class _CompiledGraphStore:
                 before = os.fstat(source.fileno())
                 if not stat.S_ISREG(before.st_mode):
                     raise FileExistsError(f"destination {target} is not a regular file")
-                while chunk := source.read(1 << 20):
+                while chunk := source.read(_READ_BUFFER):
                     digest.update(chunk)
                 after = os.fstat(source.fileno())
         except FileNotFoundError:
@@ -237,11 +264,7 @@ class _CompiledGraphStore:
             and before.st_size == after.st_size
             and before.st_mtime_ns == after.st_mtime_ns
         )
-        if (
-            not stable
-            or after.st_size != expected.size_bytes
-            or digest.hexdigest() != expected.digest.digest
-        ):
+        if not stable or after.st_size != size or digest.hexdigest() != expected.digest:
             raise FileExistsError(
                 f"destination {target} is not the selected compiled-graph artifact"
             )
@@ -288,8 +311,8 @@ class _CompiledGraphStore:
                         ):
                             raise FileExistsError(message)
                         while True:
-                            target_chunk = os.read(target_member, 1 << 20)
-                            expected_chunk = os.read(expected_member, 1 << 20)
+                            target_chunk = os.read(target_member, _READ_BUFFER)
+                            expected_chunk = os.read(expected_member, _READ_BUFFER)
                             if target_chunk != expected_chunk:
                                 raise FileExistsError(message)
                             if not target_chunk:
@@ -331,24 +354,30 @@ class _CompiledGraphStore:
             if target_fd is not None:
                 os.close(target_fd)
 
-    def _require_selected(self, key: str, manifest: CASRef) -> None:
+    def _require_selected(self, key: str, artifact: CASRef) -> None:
         """Fail closed if publication or quarantine moved during resolution."""
 
-        if self.cas.read_ref(_graph_ref(key)) != manifest:
+        if self.cas.read_ref(_graph_ref(key)) != artifact:
             raise StorageError(f"compiled graph {key} changed during resolution")
-        if self._is_quarantined(key, manifest):
+        if self._is_quarantined(key, artifact):
             raise QuarantinedArtifact(
                 f"compiled graph {key} received a quarantine during resolution"
             )
 
     def export_artifact(self, key: str | CompiledGraphKey, destination: str | Path) -> Path:
-        """Export one exact CAS record as a fully verified artifact envelope."""
+        """Export one exact CAS blob as an independent, fully verified envelope.
+
+        This is the one path that still writes the artifact's bytes twice, and it
+        has to: the caller names a destination the store does not own, possibly on
+        another device. Hardlinking the store's own inode out would alias canonical
+        bytes into a tree that may outlive and rewrite them, so the export copies.
+        """
 
         value = _key_value(key)
-        manifest_ref = self.cas.read_ref(_graph_ref(value))
-        if manifest_ref is None:
+        artifact_ref = self.cas.read_ref(_graph_ref(value))
+        if artifact_ref is None:
             raise StorageError(f"compiled graph {value} is not present")
-        if self._is_quarantined(value, manifest_ref):
+        if self._is_quarantined(value, artifact_ref):
             raise QuarantinedArtifact(f"compiled graph {value} is quarantined")
 
         target = Path(destination)
@@ -358,25 +387,27 @@ class _CompiledGraphStore:
         temporary = Path(temporary_name)
         try:
             try:
-                manifest = self.cas.load_manifest(manifest_ref)
-                file = self._file(manifest)
-                self.cas.materialize(file, temporary)
+                blob = self.cas.verify_object(artifact_ref)
+                size = blob.stat().st_size
+            except (DigestMismatch, FileNotFoundError, ValueError) as exc:
+                self.quarantine(value, artifact_ref)
+                raise QuarantinedArtifact(
+                    f"compiled graph {value} failed export verification: {exc}"
+                ) from exc
+            # A destination write failing here is the caller's disk, not bad CAS
+            # bytes, so it propagates as OSError and quarantines nothing.
+            shutil.copyfile(blob, temporary)
+            try:
                 self._verify_archive(temporary, value)
-            except (
-                ArtifactError,
-                DigestMismatch,
-                FileNotFoundError,
-                StorageError,
-                ValueError,
-            ) as exc:
-                self.quarantine(value, manifest_ref)
+            except (ArtifactError, StorageError, ValueError) as exc:
+                self.quarantine(value, artifact_ref)
                 raise QuarantinedArtifact(
                     f"compiled graph {value} failed export verification: {exc}"
                 ) from exc
             try:
                 os.link(temporary, target)
             except FileExistsError:
-                self._require_exact_file(target, file)
+                self._require_exact_file(target, artifact_ref, size)
             _fsync_dir(target.parent)
             return target
         finally:
@@ -385,43 +416,41 @@ class _CompiledGraphStore:
     def resolve(
         self, key: str | CompiledGraphKey, destination: str | Path
     ) -> StoredCompiledGraph | None:
-        """Materialize and fully verify one exact key, or return a clean miss."""
+        """Unpack and fully verify one exact key, or return a clean miss.
+
+        The archive is untarred straight out of the store, so acquiring an artifact
+        copies nothing. The only bytes written are the unpacked directory the
+        caller asked for.
+        """
 
         value = _key_value(key)
-        manifest_ref = self.cas.read_ref(_graph_ref(value))
-        if manifest_ref is None:
+        artifact_ref = self.cas.read_ref(_graph_ref(value))
+        if artifact_ref is None:
             return None
-        if self._is_quarantined(value, manifest_ref):
+        if self._is_quarantined(value, artifact_ref):
             raise QuarantinedArtifact(f"compiled graph {value} is quarantined")
 
         target = Path(destination)
         target.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, raw_archive = tempfile.mkstemp(
-            prefix="graph-", suffix=".tar.gz", dir=target.parent
-        )
-        os.close(descriptor)
-        archive = Path(raw_archive)
         candidate = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=target.parent))
         candidate.rmdir()
         try:
             try:
-                manifest = self.cas.load_manifest(manifest_ref)
-                file = self._file(manifest)
-                self.cas.materialize(file, archive)
+                blob = self.cas.verify_object(artifact_ref)
             except (DigestMismatch, FileNotFoundError, ValueError, StorageError) as exc:
-                self.quarantine(value, manifest_ref)
+                self.quarantine(value, artifact_ref)
                 raise QuarantinedArtifact(
                     f"compiled graph {value} failed CAS verification: {exc}"
                 ) from exc
             try:
-                metadata = unpack_artifact(archive, candidate)
+                metadata = unpack_artifact(blob, candidate)
             except ArtifactError as exc:
-                self.quarantine(value, manifest_ref)
+                self.quarantine(value, artifact_ref)
                 raise QuarantinedArtifact(
                     f"compiled graph {value} failed artifact verification: {exc}"
                 ) from exc
             if metadata.get("compiled_graph_key") != value:
-                self.quarantine(value, manifest_ref)
+                self.quarantine(value, artifact_ref)
                 raise QuarantinedArtifact(
                     f"stored artifact states key {metadata.get('compiled_graph_key')!r}, "
                     f"expected {value!r}"
@@ -432,18 +461,17 @@ class _CompiledGraphStore:
                 if exc.errno not in (errno.EEXIST, errno.ENOTEMPTY) or not target.is_dir():
                     raise
                 self._require_exact_directory(target, candidate)
-                self._require_selected(value, manifest_ref)
-                return StoredCompiledGraph(value, target, metadata, manifest_ref)
+                self._require_selected(value, artifact_ref)
+                return StoredCompiledGraph(value, target, metadata, artifact_ref)
             _fsync_dir(target.parent)
-            self._require_selected(value, manifest_ref)
-            return StoredCompiledGraph(value, target, metadata, manifest_ref)
+            self._require_selected(value, artifact_ref)
+            return StoredCompiledGraph(value, target, metadata, artifact_ref)
         except QuarantinedArtifact:
             raise
         except (OSError, ArtifactError):
             raise
         except ValueError as exc:
-            self.quarantine(value, manifest_ref)
+            self.quarantine(value, artifact_ref)
             raise QuarantinedArtifact(f"compiled graph {value} failed verification: {exc}") from exc
         finally:
-            archive.unlink(missing_ok=True)
             shutil.rmtree(candidate, ignore_errors=True)

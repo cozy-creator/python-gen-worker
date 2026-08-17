@@ -150,14 +150,18 @@ def test_a_REAL_divergence_is_still_refused_by_name(
 def test_the_vocabulary_IS_what_a_real_cell_carries() -> None:
     """pgw#1345 — the accessor is pinned to BEHAVIOUR, not to a restatement.
 
-    `artifact_meta.cell_metadata_fields()` reads a private name out of the
-    vendored torchcg (deliberately: a vendored snapshot is read, never patched
-    — pgw#1310's digest fence, which the first attempt at this violated and
-    turned master red). A private name can move under a re-vendor, so what is
-    asserted here is that the set it answers is EXACTLY the field set of a
-    metadata dict TCG itself built. If upstream renames or re-shapes it, this
-    goes red with the real cause instead of `unstateable_arm_axes()` quietly
-    answering "everything" and disabling every self-mint on the fleet.
+    `artifact_meta.cell_metadata_fields()` reads the vendored torchcg's
+    `ARTIFACT_METADATA_FIELDS`. That name is PUBLIC as of tcg#40, which is the
+    end pgw#1345 named for itself (*"when the public name is wanted it is added
+    UPSTREAM and re-vendored"*) after pgw#1340's hand-patch of the snapshot
+    turned master red on pgw#1310's digest fence.
+
+    A name can still move under a re-vendor, public or not, so what is asserted
+    here is unchanged and is the part that matters: the set it answers is
+    EXACTLY the field set of a metadata dict TCG itself built. If upstream
+    renames or re-shapes it, this goes red with the real cause instead of
+    `unstateable_arm_axes()` quietly answering "everything" and disabling every
+    self-mint on the fleet.
     """
     from gen_worker import artifact_meta
 

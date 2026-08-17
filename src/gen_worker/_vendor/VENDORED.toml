@@ -74,9 +74,11 @@ subdir = "python/src/tensorfs"
 #     `.extract(` is refused outright by
 #     `scripts/lint_materialization_hatch.py`. It is tier 3 of the access
 #     ladder — permanent, not separately priced — and upstream's own
-#     no-whole-tree-materialization fence exempts it by name. Two live users
-#     (`aot_delivery.py`, vendored `torchcg/storage.py`), both declared to the
-#     lint against `docs/mixed-cas-layout.md` section 9.
+#     no-whole-tree-materialization fence exempts it by name. ONE live user
+#     since pgw#1342 — `aot_delivery.py`, declared to the lint against
+#     `docs/mixed-cas-layout.md` section 9 with an inline marker. The vendored
+#     `torchcg/storage.py` was the second until its blob cutover; it untars
+#     straight out of the store now and reaches no hatch.
 #   * `ingest_file` / `ingest_repository` — TENSORFS'S, not ours. Admission is
 #     the store's identity contract: the chunk grid, the whole-file digest,
 #     the concurrent-mutation refusal. Upstream did not abandon it the way it
@@ -113,62 +115,64 @@ rewrites = [
 
 [packages.torchcg]
 repo = "https://github.com/cozy-creator/torchcg"
-rev = "ad5f4cb9f89bbe91d2a30ca218f70d5326630368"
-subdir = "src/torch_compiled_graphs"
-# The contents of the last published `torch-compiled-graphs` 0.6.0, i.e. what
-# `uv.lock` already resolved — vendoring changes the source, not the code.
-# Upstream `master` is likewise a genesis restart (package renamed `torchcg`).
-# pgw#1297/#1299: the LOCAL directory is `torchcg` — upstream's current name,
-# so #1295's deletion of `_vendor/` changes only the import PREFIX. `subdir` is
-# still the old path because that is where the code lived AT `ad5f4cb9`; the
-# snapshot is byte-identical to it and the file digests below are unchanged by
-# the directory rename (this package self-imports relatively, so no file
-# mentions its own package name).
+rev = "15b32a2ae59794b387feefec0e1ab990f657382c"
+subdir = "src/torchcg"
+# THE REV THAT FROZE THE ADDRESS AND GAVE THE METADATA VOCABULARY ITS HOME —
+# torchcg PR #41 (tcg#39) then PR #42 (tcg#40). The first is why one rev is safe
+# at all: upstream now fences `_REF_PREFIX`, both emitted ref shapes, the
+# quarantine marker's on-disk keys and the `artifact` field, so a later rev
+# cannot re-key this store without going red upstream first. The second deletes
+# a rewrite instead of adding one — see below.
+#
+# ONE REV. Both grafts over the older storage half are DELETED here —
+# pgw#1328's `selection_rev` and pgw#1332's `recipe_rev` — and pgw#1342/tcg#39
+# is why. Each was taken because the tip carried a storage migration its own
+# lane was not entitled to take; a third one would have been the same trade a
+# third time.
+#
+# The split existed because the tip carried a storage RE-KEY that the serve-role
+# lane was not entitled to take as a line item: `_REF_PREFIX` moved from
+# `torch-compiled-graphs/v1` to `torchcg/v1`, `StoreResult.manifest` became
+# `.artifact`, and underneath both, custody changed shape — an exact-key ref
+# used to point at a one-entry `RepositoryManifest` and now points straight at
+# the artifact blob (`put_file`/`verify_object` instead of
+# `ingest_file`/`store_manifest`). Every one of those changes the ADDRESS a
+# stored graph lives at, so bumping orphans whatever a store already holds.
+#
+# Paul ruled it on 2026-08-17 (tcg#39), verbatim: "you can delete all of the
+# existing compiled graphs from db / filesystem if you want; we're pre-launch.
+# We can also recompile everything again." So the re-key is ACCEPTED. The
+# orphaned refs are cache misses, a miss re-mints on demand, and minting is a
+# side effect of serving — the fleet repairs itself without anyone driving it.
+#
+# What makes this bump safe to leave at one rev going forward: upstream FROZE
+# the identity it just moved. torchcg PR #41 pins `_REF_PREFIX`, both emitted
+# ref shapes, the quarantine marker's on-disk keys and the `artifact` field on
+# `StoreResult`/`StoredCompiledGraph`, with the cost written at the assertion.
+# A future rev cannot re-key this store without going red upstream first, which
+# is the property the two-rev split was standing in for.
+#
+# The bump also RETIRES a `materialize` caller: the old vendored storage half
+# materialized a manifest entry to a temp file before untarring, and the new one
+# untars straight out of the store. `scripts/lint_materialization_hatch.py` and
+# tensorfs's own no-whole-tree-materialization exemption now cover exactly one
+# caller here, `aot_delivery.py`.
+#
+# AN UNDECLARED REWRITE WAS FOUND WHILE DOING THIS, AND IT IS GONE RATHER THAN
+# DECLARED. pgw#1340 had added `ARTIFACT_METADATA_FIELDS` to the vendored
+# `artifact.py` and `__init__.py` BY HAND and listed it nowhere; the digest fence
+# passed because the digests were regenerated after the patch, so an identity
+# surface was forked underneath the fence that exists to prevent exactly that.
+# torchcg#42 (tcg#40) gave it its real home — the closed metadata vocabulary is
+# torchcg's own, public for the same reason `REQUIRED_AXES` is — and this
+# snapshot takes it from upstream like every other symbol. `fleet_cells` imports
+# it because a consumer that re-declares the set reads `None` for a field TCG
+# does not write, and `None` compares unequal to a real runtime fact forever
+# (th#2098). The rewrite list is back to ONE row, and that row is a relative
+# import.
 rewrites = [
-  "`from hashrepo import ...` -> `from ..tensorfs import ...` in cli.py, engine.py, storage.py (3 lines; upstream's own dependency, vendored beside it)",
-  "`ingress_selection_v1.json` added to CONTRACT_FILES in contracts/__init__.py (1 line; the registration the selection corpus needs, taken from the same upstream rev as the corpus itself)",
+  "`from tensorfs import ...` -> `from ..tensorfs import ...` in cli.py, engine.py, storage.py (3 lines; upstream's own dependency, vendored beside it). Upstream itself dropped `hashrepo` for `tensorfs` at tcg#28, so this rewrite is now only the relative-import prefix.",
 ]
-# pgw#1328: THE SNAPSHOT IS SPLIT AT TWO REVS, like tensorfs's above and for the
-# same class of reason. `selection.py` and `contracts/ingress_selection_v1.json`
-# come from `selection_rev` (tcg#37's merge), NOT from `rev`. gen-worker's
-# `aot_serve` ADOPTS that contract as its ranking authority — tcg#37 recorded
-# the adoption as a pgw-side follow-on — and the two files are purely additive:
-# `selection.py` imports only `.ingress`, which is BYTE-IDENTICAL across the
-# two revs, so the graft cannot change any existing behaviour.
-#
-# Why not re-vendor the whole package at that rev: the tip carries an unrelated
-# storage migration — `_REF_PREFIX` moves from `torch-compiled-graphs/v1` to
-# `torchcg/v1` and `StoreResult.manifest` becomes `.artifact` — which would
-# ORPHAN every compiled-graph ref this fleet has already stored. That is a
-# migration with its own evidence bar, not a line item inside a serve-role
-# change, so the storage half stays where it is until somebody takes it
-# deliberately.
-selection_rev = "bbad172c8bb14dd703dba82d30679b08bc8a4696"
-selection_files = ["selection.py", "contracts/ingress_selection_v1.json"]
-# pgw#1332: A THIRD GRAFT, beside pgw#1328's `selection_rev` above and for the
-# same reason. `recipe.py` is tcg#38's `recipe_v1`
-# vocabulary — the class-level composition document pgw#1332's typed Family SDK
-# generates bindings against (G1-G16 in torchcg's `docs/RECIPE.md`). It did not
-# exist at `ad5f4cb9`.
-#
-# Why not simply bump `rev`: the newer lineage is a genesis restart whose
-# `storage.py`, `artifact.py`, `engine.py` and `identity.py` all moved, and this
-# repo's compiled-graph adoption path (aot_serve, aot_mint, local_cell_store,
-# boot_key) is live on the older ones. Re-vendoring the whole package is a
-# compiled-graph-adoption decision, not an authoring-SDK one, and putting it
-# inside an SDK change would hide a storage rewrite behind a codegen diff.
-#
-# Why the split is SAFE rather than merely convenient: `recipe.py` imports
-# exactly two sibling modules — `.identity` (`CompiledGraphKey`, `from_axes`,
-# `toolchain_axis_digest`) and `.ingress` (`CallIngress`, `CallInput`,
-# `IngressError`, `PathStep`). `ingress.py` is BYTE-IDENTICAL across the two
-# revs; `identity.py` differs only by ten lines of comment (verified by diff at
-# vendoring time). It imports no Torch and no `.contracts`, so nothing else in
-# the snapshot is reachable from it. `tests/test_vendored_snapshot_pgw1310.py`
-# proves the pairing EXECUTES against the vendored identity/ingress rather than
-# asserting it from the import list.
-recipe_rev = "41e38a2ad1c3e21ceda775490f102c9359b16499"
-recipe_files = ["recipe.py"]
 
 [packages.tensorfs.files]
 "__init__.py" = "51e60fc07782af7ff738c889be2fb1d9fa81224abfc0dfe546dde9d2191cf21b"
@@ -182,25 +186,26 @@ recipe_files = ["recipe.py"]
 "tensors.py" = "b68adf8b95161defb89ed06bdea8a778b54e21a461768a43ae658955ccc6db9d"
 
 [packages.torchcg.files]
-"__init__.py" = "401efd9450c0181f32c64ccee1d21999d78e77dc2be5ef404c27e539e350d4a9"
+"__init__.py" = "df715b9d245945db3edb6b65cc92c5dc195e89bbf5df1c53f47fe8471eb8e004"
 "__main__.py" = "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d"
 "_run_impl_split.py" = "c14db7289ae566ca2cfd636efce1b5b6e0d2f8f6069d993d5acc40bc0ef333b3"
-"_wrapper_split.py" = "9cd2cc594f4b2f3a782ecf2d2f9a8204b323c54247f9f7f348ad50c32a3046fd"
-"artifact.py" = "3eb4332d5865ad28b0b9a8fd2be9ea08e0911d0a7b8da55439c8151649f2815d"
-"cli.py" = "18ad75c67ad84eecf92f4470561070a5d07603674aaec59ce91c93a21efb1b4b"
+"_wrapper_split.py" = "f21e644e5345c7e2b7fd2b8f5b3ce4ac8216f263fc38768d45609469feb20870"
+"artifact.py" = "e9281e4bae4154f93694efa994133e001362c5db271855e03e921110b1fee019"
+"cli.py" = "94a4328c72fa7821f31447883de0a36196b6429ae5e93c239a12699f190f592f"
 "compiler.py" = "8450b10e90ca8c6d8c411654d963ebc16dd3580bfe1427cce3966fc2b03972a7"
 "contracts/KEY_GRAMMAR_DIGEST" = "0503f3251f2eb48b794961736f021915cd56c14930798ac844c90112fa2af69d"
-"contracts/__init__.py" = "3c5d61ca8f65a70af44cbe9acb0e834d9adf25bbea2cfdc924c9fa613f0931c5"
+"contracts/__init__.py" = "1a07e101e98c75111af3f40f6e1c011821abd07737934f0a9f389097f5c36d3f"
 "contracts/call_ingress_v1.json" = "3af3437ec20b15156892055ab89bf21621378cee9f0f72f63bc4626f69f242dc"
 "contracts/compiled_graph_key_vectors.json" = "a274c5702b8c167ca119758d9fb1f98c40ddfdb3dbf6c58b4aacd580803e8c2b"
 "contracts/graph_class_identity_v3.json" = "f3e947e5c770e0766f7dfe37b753bd8d184b1e8923f5a3995823a8427a637b30"
 "contracts/ingress_selection_v1.json" = "a0a8fc83c8c467f23b6ab81af1899547b43dabfd9c726e446cc9ef8b899c1714"
 "contracts/literal_identity_v1.json" = "50cb80e750a8124a45b982415258d8590c37f90ca804326588dfde1b368c6863"
+"contracts/recipe_v1.json" = "5806ac79b6d61ed15bdc1cf3c244f2d741b5269e714a774df41a7b95476e1cfe"
 "contracts/toolchain_identity_v1.json" = "f4114c38ae373f62ddcb2aae5498ffbee30630e80adf11fee99e68bcbdb24282"
 "declaration.py" = "187be0a12f05b8bbdca01f3c180527abff66ed60a3fb1e6281704d24d9559d79"
-"engine.py" = "3afc7c2a3b94b8852a48e660b62bceebe40156e34f66769f4c590c42f9585e87"
-"host_isa.py" = "8fbdd6250b284408e959c5c07b3ae86289c3d3e50ae46efc46b74ced24c8d725"
-"identity.py" = "6e6bb23b319bd1606bd313d7177877ba79fb16936536cf074d96049bc5a9482f"
+"engine.py" = "f9953f6039460214511ea5dad40ce62b3bd51b3d6400f31e9e9339cc5b1c2d64"
+"host_isa.py" = "679aa81547be2d60ae6593b6e8f75dd29dcd56ab85d8e858e219b5af5d0eadc4"
+"identity.py" = "ea309c7e24c7cbb0609c720742e16991ab263d772b1876bccda9b1e9fd725262"
 "ingress.py" = "3a679c046236e13965b76b391fb201272aaba297fcc49e64c6c46d41df0575a4"
 "introspection.py" = "99310298249ee2ada91544bcdbd91f06e33a44f136c525cb268ca8d7125aa9e5"
 "py.typed" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -208,4 +213,4 @@ recipe_files = ["recipe.py"]
 "runner.py" = "075d7e743a82555e7ac1b15eb7ca54df9d0bcdc914de649a675fa5d973c8c693"
 "selection.py" = "ddc1b64f36a2e9d119b2d55ac6962d0e589825a1046c1b6e7b34d90d8f2bfadb"
 "spans.py" = "7a9722b5068c36ce62350e4ffe0eea07aa4ee5506330c9816069054001a10472"
-"storage.py" = "52e785b53f7de6e2fb71d9ac104249e89974d8f1dc3f6081412058aee7b5908f"
+"storage.py" = "ccc9d6f8ac1a242b493028eaeed6a1fcd3a02a885c99ba2223bc71df7b69efe4"
