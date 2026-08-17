@@ -151,6 +151,14 @@ REASON_CUDA_OOM = "cuda_oom"
 REASON_KERNEL_UNAVAILABLE = "kernel_unavailable"
 REASON_LANE_CAST_DROPPED = "lane_cast_dropped"
 REASON_NO_CUDA = "no_cuda"
+# pgw#1315: this machine is below a lane's DECLARED minimum and the request
+# serves anyway. It is a WARNING and never a refusal — a machine below a
+# declared minimum is the normal input to a degraded run, which is what the
+# minimum being advisory-at-EXECUTION means (the minimum gates one thing, a
+# config-WRITE, and that lives hub-side). Doubles as the `serve_degrade` phase
+# token (`memory.UNDER_MINIMUM_PHASE`) so the cause is countable hub-side under
+# one spelling rather than two.
+REASON_BELOW_DECLARED_MINIMUM = "below_declared_minimum"
 
 #: Shortfall resources.
 RESOURCE_VRAM = "vram"

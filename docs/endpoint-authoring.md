@@ -701,6 +701,21 @@ is unenforceable theater; unmet, it is a degrade warning, which is what the
 offload rungs already do. A minimum is refused at the declaration site, naming
 the move.
 
+**What the worker does with a minimum it does not meet: it SERVES, and it says
+so.** (pgw#1315.) The pod measures its own facts — spelled identically to the
+terms, minus the `min_` prefix — and every declared minimum it misses becomes
+one typed `serve_degrade` event (`phase=below_declared_minimum`) plus the same
+sentence on `FnDegraded.reason`, naming the term, the declared floor and the
+measured fact. It never withdraws the function and it never suggests a card:
+only the hub knows the catalog. So a wrong minimum costs a noisy warning, not a
+dark endpoint.
+
+**Where a slot binds several lanes, those facts also pick which one runs.** Among
+the handles in `Slot(layouts=...)` that carry a `layout_requirements` entry, the
+worker prefers the lane whose minimum this machine meets, then the one whose
+`recommended` it meets. Under the minimum on all of them it takes the least-bad
+and warns — it never answers "none". An undeclared lane is not ranked at all.
+
 Declare a minimum ONLY for a genuine incapability — a function that merely runs
 *better* on newer silicon declares `recommended` and lets the ladder choose;
 over-declaring a minimum shrinks the rentable pool for no reason.

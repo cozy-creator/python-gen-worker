@@ -27,6 +27,15 @@ REACTIVE walk used to stop one rung short of CPU, so a pod that OOM'd its way
 down refused where plan time served. Both ends now reach the same bottom rung
 and it EXECUTES (`memory.apply_low_vram_config` mode `cpu`).
 
+WHAT IT DOES DECIDE, AS OF pgw#1315: which LANE. Among the lanes a release
+binds, the machine's measured facts pick the one whose declared requirements
+they best satisfy (`models/machine_fit.select_lane`), and the declared
+MINIMUMS this machine misses become a loud typed warning through pgw#1312's
+one confession home. Both are question 2 in
+`research/machine-compatibility-design.md`, and neither can refuse: a minimum
+gates a config-WRITE hub-side and NOTHING at execution, so an under-minimum
+machine is the normal input to a degraded run rather than an error.
+
 Every degraded plan carries ``wanted`` (what the function declares) and ``ran``
 (what actually runs) so the worker can report the degradation STRUCTURALLY to
 the orchestrator (FnDegraded) as OPERATOR EVIDENCE. It carries no card size:
@@ -37,14 +46,16 @@ the author's own guess, which §1.2 measured wrong in both directions.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any, Optional
+from typing import Any, Optional, Sequence, Tuple
 
 from .. import hostfacts
+from . import machine_fit
 from .hub_policy import (
     FIT_INCOMPATIBLE,
     TensorhubWorkerCapabilities,
     variant_fit,
 )
+from .memory import report_under_minimum
 
 # Run modes and prices are the One Rung ladder's; re-exported here because
 # this module is the hub-vocabulary projection.
@@ -69,14 +80,32 @@ class ServePlan:
     est_latency_multiplier: float = 1.0
     wanted: str = ""              # what the function declares (flavor, or "bf16")
     ran: str = ""                 # what actually runs (flavor when native, else run_mode)
+    # pgw#1315 deliverable 4: the lane these machine facts picked, among the
+    # ones the release binds. "" when the function binds no lane that declares
+    # a requirement — there is nothing to rank by, and ranking undeclared
+    # lanes would be the guess this program deletes.
+    lane: str = ""
+    # pgw#1315 deliverable 3: the declared MINIMUMS this machine does not meet.
+    # Non-empty means it runs anyway, degraded, having said so.
+    under_minimum: Tuple[machine_fit.Shortfall, ...] = ()
 
     @property
     def degraded(self) -> bool:
         """True when it runs, but not as planned: non-native placement,
-        or a precision pick that could not be applied
-        (``ran`` != ``wanted``, e.g. a dropped fp8 cast serving bf16)."""
+        a precision pick that could not be applied (``ran`` != ``wanted``,
+        e.g. a dropped fp8 cast serving bf16), or a machine under a declared
+        minimum.
+
+        The last one is why an under-minimum run reaches the orchestrator at
+        all: `_emit_degraded` sends `FnDegraded` for exactly the plans this
+        says yes to, carrying ``warning`` as the reason. It stays a WARNING —
+        `ran` keeps its own vocabulary, so no hub arm that switches on a
+        RunMode can read a requirement shortfall as a placement demotion.
+        """
         if not self.serveable:
             return False
+        if self.under_minimum:
+            return True
         if self.run_mode != RUN_NATIVE:
             return True
         return bool(self.wanted) and bool(self.ran) and self.ran != self.wanted
@@ -100,6 +129,9 @@ def plan_serve(
     free_vram_gb: float,
     *,
     binding: Any = None,
+    lanes: Sequence[machine_fit.LaneCandidate] = (),
+    facts: Optional[machine_fit.MachineFacts] = None,
+    scope: str = "",
 ) -> ServePlan:
     """Decide how one function serves on the actual card.
 
@@ -108,9 +140,22 @@ def plan_serve(
     :func:`variant_fit` keeps it: it is the number the deleted comparison was
     made against, and a caller that stops passing it would hide the fact that
     reintroducing the comparison is a one-line edit.
+
+    pgw#1315 adds question 2's other half. ``lanes`` are the lanes this
+    release binds for the function (``machine_fit.lane_candidates`` builds
+    them from the slot's accepted handles and their declared requirements);
+    the machine's own FACTS pick among them, and the declared MINIMUMS this
+    machine misses become a loud typed warning — never a refusal, because
+    "it always runs" is the whole answer to question 2.
+
+    ``facts`` is measured once by the caller (the gate loop plans every
+    function against ONE machine); ``None`` measures here.
     """
     needs_gpu = bool(getattr(resources, "gpu", False))
     wanted = _wanted(binding)
+    if facts is None:
+        facts = machine_fit.measure_machine_facts(caps)
+    choice = machine_fit.select_lane(tuple(lanes), facts)
 
     verdict, detail = variant_fit(resources, caps, free_vram_gb, binding=binding)
 
@@ -138,7 +183,7 @@ def plan_serve(
             f"({state.probe_class}: {state.detail})"
             if state.unreadable else "no CUDA device detected on this pod"
         )
-        return ServePlan(
+        return _confess_under_minimum(ServePlan(
             serveable=True,
             run_mode=RUN_CPU,
             fit=FIT_INCOMPATIBLE,
@@ -146,7 +191,8 @@ def plan_serve(
             est_latency_multiplier=price(RUN_CPU),
             wanted=wanted,
             ran=RUN_CPU,
-        )
+            lane=choice.lane,
+        ), resources=resources, choice=choice, facts=facts, scope=scope)
 
     # A quant library this build does not carry. Names our IMAGE; the
     # executor's own gate reports it as `missing_cuda_library`.
@@ -162,12 +208,53 @@ def plan_serve(
     # Everything else SERVES. Which rung it lands on is measured at load time
     # (models/memory.select_auto_mode) and reported through `replan`, never
     # predicted here.
-    return ServePlan(
+    return _confess_under_minimum(ServePlan(
         serveable=True,
         run_mode=RUN_NATIVE,
         fit=verdict,
         wanted=wanted,
         ran=wanted,
+        lane=choice.lane,
+    ), resources=resources, choice=choice, facts=facts, scope=scope)
+
+
+def _confess_under_minimum(
+    plan: ServePlan,
+    *,
+    resources: Any,
+    choice: machine_fit.LaneChoice,
+    facts: machine_fit.MachineFacts,
+    scope: str,
+) -> ServePlan:
+    """Serve, and SAY that a declared floor is not being met.
+
+    TWO scopes reach a worker and both are evaluated here: the FUNCTION scope
+    (`Resources(requires=)`, for code with no contract to hang a requirement
+    on) and the (slot, handle) scope of the lane the facts just picked. The
+    hub owns the third (the contract's intrinsic floor) and it can only be
+    looser, so nothing here re-derives it.
+
+    The plan is returned SERVEABLE either way — this function has no arm that
+    can refuse. The warning rides `ServePlan.warning` to `FnDegraded.reason`,
+    and the same sentence rides the typed `serve_degrade` event out of
+    pgw#1312's one confession home, so the operator's line and the hub's row
+    are one derivation.
+    """
+    declared = (resources.requirement()
+                if hasattr(resources, "requirement") else None)
+    shortfalls = (
+        machine_fit.under_minimum(declared, facts).shortfalls
+        + choice.under_minimum
+    )
+    if not shortfalls:
+        return plan
+    warning = report_under_minimum(
+        shortfalls, scope=scope or "this function", lane=choice.lane,
+        posture=plan.run_mode)
+    return replace(
+        plan,
+        under_minimum=tuple(shortfalls),
+        warning=f"{plan.warning} {warning}".strip(),
     )
 
 

@@ -891,9 +891,16 @@ def _version_tuple(value: str) -> tuple[int, ...]:
     return tuple(int(part) for part in value.split("."))
 
 
-def _term_meets(term: str, candidate: Any, floor: Any) -> bool:
+def term_meets(term: str, candidate: Any, floor: Any) -> bool:
     """Is `candidate` at least `floor` for this term? One comparator per
-    KIND, chosen by name — never one per term."""
+    KIND, chosen by name — never one per term.
+
+    PUBLIC because it is THE evaluator for this vocabulary at BOTH ends: the
+    declaration check below (recommended >= minimum) and the runtime check of
+    a measured machine FACT against a declared floor (`models.machine_fit`)
+    are the same comparison, and a second implementation of it is how the two
+    ends start disagreeing about what "meets" means.
+    """
     if term in ("min_cuda", "min_torch"):
         return _version_tuple(str(candidate)) >= _version_tuple(str(floor))
     return float(candidate) >= float(floor)
@@ -1074,7 +1081,7 @@ def parse_layout_requirements(
 
     floor = min_terms.declared_terms()
     for term, value_ in rec_terms.declared_terms().items():
-        if term in floor and not _term_meets(term, value_, floor[term]):
+        if term in floor and not term_meets(term, value_, floor[term]):
             raise LayoutDeclarationError(
                 f"{where}: recommended {term}={value_} is below minimum "
                 f"{term}={floor[term]}. A recommendation below the floor is a "

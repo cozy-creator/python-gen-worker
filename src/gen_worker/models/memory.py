@@ -31,11 +31,13 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import msgspec
 
 from .. import activity as activity_mod
+from .. import measured_posture as posture_mod
+from . import machine_fit
 from ..api.errors import HostRamMoveRefusedError
 from ..component_vocab import component_vocabulary
 from .structure_only import STAMP as _STRUCTURE_ONLY
@@ -1435,6 +1437,73 @@ def place_pipeline(
 #: Countable hub-side in `worker_activity_events`.
 OFFLOAD_ENGAGED_PHASE = "cpu_offload_engaged"
 
+#: pgw#1315: the machine is below a lane's DECLARED minimum and it serves
+#: anyway. Same confession home, its own phase token — and the token IS the
+#: machine-readable cause (`measured_posture.REASON_BELOW_DECLARED_MINIMUM`),
+#: so the reason has one spelling on both carriers.
+UNDER_MINIMUM_PHASE = posture_mod.REASON_BELOW_DECLARED_MINIMUM
+
+
+def _confess_serve_degrade(
+    *, phase: str, line: str, detail: str, log: logging.Logger,
+) -> None:
+    """THE seam every degraded-posture confession leaves this pod through.
+
+    Loud line for a human, typed `serve_degrade` event for the hub, derived
+    from the SAME numbers so the two cannot disagree. Never a gate — every
+    caller has already decided to serve. pgw#1312 built this for offload
+    activation and pgw#1315 puts the under-minimum warning through it rather
+    than beside it: a second emitter is a second answer, and the one the hub
+    banks is never the one the operator read.
+    """
+    log.warning(line)
+    activity_mod.emit_event(
+        activity_mod.KIND_SERVE_DEGRADE, detail=detail, phase=phase)
+
+
+def report_under_minimum(
+    shortfalls: "Sequence[machine_fit.Shortfall]",
+    *,
+    scope: str,
+    posture: str,
+    lane: str = "",
+    logger: Optional[logging.Logger] = None,
+) -> str:
+    """This machine is under a DECLARED minimum, and it serves anyway.
+
+    Returns the warning text the caller puts on `ServePlan.warning` (which
+    reaches the hub as `FnDegraded.reason`), having already emitted the typed
+    event — one derivation, two carriers.
+
+    It names the TERM, the declared floor, this machine's measured fact and
+    the posture taken, and it names NO card: th#1867 deleted
+    `FnDegraded.recommended_vram_gb` because the worker's suggestion was the
+    author's own guess handed back, and only the hub knows the catalog.
+    """
+    rows = tuple(shortfalls)
+    if not rows:
+        return ""
+    detail = machine_fit.summarize(rows)
+    # `scope` names the function; each ROW names its own lane (function-scope
+    # rows have none), so the head states the lane the facts PICKED rather
+    # than attributing every shortfall to it.
+    head = (
+        f"running BELOW a declared minimum for {scope}"
+        + (f" (lane picked: `{lane}`)" if lane else "")
+        + f": {detail}. The request still serves at posture `{posture}`; "
+        "this pod is serving DEGRADED and a declared floor is not being met."
+    )
+    _confess_serve_degrade(
+        phase=UNDER_MINIMUM_PHASE,
+        line=transition_line(
+            event="planned", phase="requirements",
+            from_rung="declared_minimum", to_rung=posture, detail=head,
+        ),
+        detail=head,
+        log=logger or _LOG,
+    )
+    return head
+
 
 def _report_offload_engaged(
     pipeline: Any, rung: str, applied: Dict[str, Any], log: logging.Logger,
@@ -1457,14 +1526,14 @@ def _report_offload_engaged(
     """
     needed_gb = estimate_pipeline_size_gb(pipeline)
     free_gb = get_available_vram_gb()
-    log.warning(transition_line(
-        event="engaged", phase="load", from_rung="resident", to_rung=rung,
-        needed_gb=needed_gb, free_gb=free_gb,
-        detail=f"CPU offload ENGAGED ({_applied_summary(applied)}); every "
-               f"forward on this pipeline now moves weights over PCIe",
-    ))
-    activity_mod.emit_event(
-        activity_mod.KIND_SERVE_DEGRADE,
+    _confess_serve_degrade(
+        phase=OFFLOAD_ENGAGED_PHASE,
+        line=transition_line(
+            event="engaged", phase="load", from_rung="resident", to_rung=rung,
+            needed_gb=needed_gb, free_gb=free_gb,
+            detail=f"CPU offload ENGAGED ({_applied_summary(applied)}); every "
+                   f"forward on this pipeline now moves weights over PCIe",
+        ),
         detail=(
             f"pipeline={type(pipeline).__name__}: CPU offload ENGAGED at rung "
             f"`{rung}` ({_applied_summary(applied)}) — ~{needed_gb:.1f} GiB of "
@@ -1473,7 +1542,7 @@ def _report_offload_engaged(
             f"the request still serves; this pod is serving DEGRADED and every "
             f"request on it pays the transfer."
         ),
-        phase=OFFLOAD_ENGAGED_PHASE,
+        log=log,
     )
 
 
