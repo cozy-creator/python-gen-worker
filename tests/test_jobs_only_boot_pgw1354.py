@@ -57,6 +57,9 @@ import pytest
 
 from gen_worker import entrypoint
 from gen_worker.cuda_probe import CudaProbeResult, should_probe_cuda
+# The SAME class object `entrypoint` holds (`from .worker import Worker`), so
+# patching it here is patching what the boot constructs.
+from gen_worker.worker import Worker
 
 pytest.importorskip("torch")
 
@@ -267,14 +270,14 @@ def _boot(
     monkeypatch.setattr(worker_fatal, "report_worker_fatal", _report)
 
     workers: List[Any] = []
-    real_init = entrypoint.Worker.__init__
+    real_init = Worker.__init__
 
     def _init(self: Any, *a: Any, **kw: Any) -> None:
         real_init(self, *a, **kw)
         workers.append(self)
 
-    monkeypatch.setattr(entrypoint.Worker, "__init__", _init)
-    monkeypatch.setattr(entrypoint.Worker, "run", lambda self: 0)
+    monkeypatch.setattr(Worker, "__init__", _init)
+    monkeypatch.setattr(Worker, "run", lambda self: 0)
 
     observed["code"] = entrypoint._run_main()
     observed["workers"] = workers
