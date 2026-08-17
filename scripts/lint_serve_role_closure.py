@@ -84,6 +84,17 @@ def _declared_tuple(name: str, *, source: str = "", where: Path = ROLE_FILE) -> 
                 f"statically so the role and the guard cannot disagree.")
         out: List[str] = []
         for element in value.elts:
+            # `*OTHER_TUPLE` splices another module-level declaration, which is
+            # how one set states that it CONTAINS another without retyping its
+            # rows (pgw#824's drift rule). Still literal-only: the splice
+            # resolves by reading that tuple out of this same file.
+            if isinstance(element, ast.Starred):
+                if not isinstance(element.value, ast.Name):
+                    raise SystemExit(
+                        f"{where}: {name} splices a non-name; a spliced set "
+                        f"must be another module-level tuple in this file.")
+                out.extend(_declared_tuple(element.value.id, source=source, where=where))
+                continue
             if not isinstance(element, ast.Constant) or not isinstance(
                     element.value, str):
                 raise SystemExit(
@@ -120,16 +131,96 @@ def _package_of(module: str) -> str:
     return module.rsplit(".", 1)[0]
 
 
-def _imports(path: Path, module: str) -> Set[str]:
-    """Every ``gen_worker`` module this file names, relative imports resolved."""
-    package = _package_of(module)
-    out: Set[str] = set()
-    tree = ast.parse(path.read_text(), filename=str(path))
+def _type_checking_only(tree: ast.AST) -> Set[int]:
+    """Every import node inside an ``if TYPE_CHECKING:`` body.
+
+    Those never execute. Every module in this repo carries
+    ``from __future__ import annotations``, so an annotation is a string and the
+    block exists for the type checker alone — which is exactly why a generated
+    family binding puts ``from torch import Tensor`` there. Following such an
+    edge would make this fence report imports a serve process cannot perform,
+    and reporting a library that is never loaded is how a guard loses its
+    readers.
+
+    Only the ``if`` body is skipped, never the ``else``: an ``else`` branch of a
+    ``TYPE_CHECKING`` test is the RUNTIME branch.
+    """
+    skipped: Set[int] = set()
     for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        name = (
+            test.id
+            if isinstance(test, ast.Name)
+            else test.attr if isinstance(test, ast.Attribute) else ""
+        )
+        if name != "TYPE_CHECKING":
+            continue
+        for statement in node.body:
+            for inner in ast.walk(statement):
+                if isinstance(inner, (ast.Import, ast.ImportFrom)):
+                    skipped.add(id(inner))
+    return skipped
+
+
+def _guarded(tree: ast.AST) -> Set[int]:
+    """Every import node lexically inside a ``try`` that catches ImportError.
+
+    An ``except ImportError`` around an import is a module SAYING it works
+    without the thing — pgw#1339's degrade-loudly-and-serve, which is exactly
+    how a generated family binding exposes an optional ``SPEC``. Following such
+    an edge would drag every declaration into the serve closure and make this
+    fence guard nothing, so the walk stops there and
+    :data:`role.OPTIONAL_SERVE_IMPORTS` enumerates where it is allowed to stop.
+
+    Only ``ImportError``/``ModuleNotFoundError`` count. A bare ``except`` or an
+    ``except Exception`` is NOT a declaration that the import is optional; it is
+    a module swallowing everything, and treating it as a hatch would let any
+    ``try:`` walk through this fence.
+    """
+    optional: Set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        names: Set[str] = set()
+        for handler in node.handlers:
+            for caught in (
+                handler.type.elts
+                if isinstance(handler.type, ast.Tuple)
+                else [handler.type]
+            ):
+                if isinstance(caught, ast.Name):
+                    names.add(caught.id)
+        if not names & {"ImportError", "ModuleNotFoundError"}:
+            continue
+        for statement in node.body:
+            for inner in ast.walk(statement):
+                if isinstance(inner, (ast.Import, ast.ImportFrom)):
+                    optional.add(id(inner))
+    return optional
+
+
+def _imports(path: Path, module: str) -> Tuple[Set[str], Set[str], Set[str]]:
+    """What this file imports: (required gen_worker, guarded gen_worker, libraries).
+
+    ``libraries`` is every non-``gen_worker`` top-level package the file names,
+    guarded or not — a forbidden library behind a ``try`` is still a library
+    this process would acquire whenever it is installed, which on an
+    eager-capable pod is always.
+    """
+    package = _package_of(module)
+    tree = ast.parse(path.read_text(), filename=str(path))
+    optional_nodes = _guarded(tree)
+    unexecuted = _type_checking_only(tree)
+    required: Set[str] = set()
+    guarded: Set[str] = set()
+    libraries: Set[str] = set()
+    for node in ast.walk(tree):
+        if id(node) in unexecuted:
+            continue
         if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name.startswith("gen_worker"):
-                    out.add(alias.name)
+            found = {alias.name for alias in node.names}
         elif isinstance(node, ast.ImportFrom):
             if node.level:
                 parts = package.split(".")
@@ -140,18 +231,31 @@ def _imports(path: Path, module: str) -> Set[str]:
                     prefix = f"{prefix}.{node.module}"
             else:
                 prefix = node.module or ""
-            if not prefix.startswith("gen_worker"):
-                continue
-            out.add(prefix)
-            for alias in node.names:
-                out.add(f"{prefix}.{alias.name}")
-    return out
+            found = {prefix} | {f"{prefix}.{alias.name}" for alias in node.names}
+        else:
+            continue
+        bucket = guarded if id(node) in optional_nodes else required
+        for name in found:
+            if name.startswith("gen_worker"):
+                bucket.add(name)
+            elif name:
+                libraries.add(name.split(".", 1)[0])
+    return required, guarded, libraries
 
 
-def closure(roots: Sequence[str]) -> Tuple[Set[str], Dict[str, str]]:
-    """Every gen_worker module the roots reach, and who first reached it."""
+def closure(
+    roots: Sequence[str],
+) -> Tuple[Set[str], Dict[str, str], Dict[str, Set[str]], Dict[str, Set[str]]]:
+    """Walk the REQUIRED closure, and record what it stopped at.
+
+    Returns ``(modules, who-reached-each, libraries-per-module,
+    guarded-edges-per-module)``. Guarded edges are recorded but not followed —
+    see :func:`_guarded`.
+    """
     seen: Set[str] = set()
     via: Dict[str, str] = {root: "<root>" for root in roots}
+    libraries: Dict[str, Set[str]] = {}
+    guarded: Dict[str, Set[str]] = {}
     queue: List[str] = list(roots)
     while queue:
         name = queue.pop()
@@ -161,12 +265,16 @@ def closure(roots: Sequence[str]) -> Tuple[Set[str], Dict[str, str]]:
         if path is None:
             continue
         seen.add(name)
-        for target in sorted(_imports(path, name)):
+        required, optional, used = _imports(path, name)
+        libraries[name] = used
+        if optional:
+            guarded[name] = optional
+        for target in sorted(required):
             if target in seen:
                 continue
             via.setdefault(target, name)
             queue.append(target)
-    return seen, via
+    return seen, via, libraries, guarded
 
 
 def _chain(name: str, via: Dict[str, str]) -> str:
@@ -179,6 +287,7 @@ def _chain(name: str, via: Dict[str, str]) -> str:
 
 
 def check(roots: Sequence[str], banned: Sequence[str]) -> List[str]:
+    """pgw#1328: the adopt-only serve role cannot reach the mint lane."""
     problems: List[str] = []
     for name in (*roots, *banned):
         if _module_path(name) is None:
@@ -188,7 +297,7 @@ def check(roots: Sequence[str], banned: Sequence[str]) -> List[str]:
                 f"exist passes vacuously forever (pgw#1176).")
     if problems:
         return problems
-    seen, via = closure(roots)
+    seen, via, _, _ = closure(roots)
     if not seen:
         return ["the serve-role roots resolved to NOTHING — this guard is "
                 "guarding nothing"]
@@ -200,6 +309,81 @@ def check(roots: Sequence[str], banned: Sequence[str]) -> List[str]:
                 f"routes on a miss (§4.28/§4.29) — it must not be able to "
                 f"compile. Put the call behind gen_worker.serve.mint_seam, or "
                 f"take the module out of SERVE_ROLE_MODULES and mean it.")
+
+    return problems
+
+
+def check_model_free(
+    roots: Sequence[str],
+    libraries: Sequence[str],
+    optional: Sequence[str],
+    within: Sequence[str] = (),
+) -> List[str]:
+    """pgw#1331: this surface reaches no model library, and stops nowhere else.
+
+    A SEPARATE walk from :func:`check`, rooted at the subset the claim is about.
+    Rooting it at the whole serve role would report the eager-capable worker's
+    own guts — which import diffusers inside functions and are entitled to —
+    and a fence that reports things nobody can fix is a fence people learn to
+    ignore. The scope is declared in ``role.MODEL_FREE_MODULES``, with the
+    reason on the tuple.
+    """
+    problems: List[str] = []
+    for name in (*roots, *optional):
+        if _module_path(name) is None:
+            problems.append(
+                f"`{name}` is declared in serve/role.py but is not a module "
+                f"under src/gen_worker. A fence naming a module that does not "
+                f"exist passes vacuously forever (pgw#1176).")
+    outside = sorted(set(roots) - set(within)) if within else []
+    if outside:
+        problems.append(
+            f"role.MODEL_FREE_MODULES names {outside[0]}, which is not in "
+            f"SERVE_ROLE_MODULES. A module asserted model-free but not "
+            f"asserted MINT-free is checked for the smaller of the two "
+            f"properties — splice the sets rather than keeping two lists.")
+    if problems:
+        return problems
+    seen, via, used, guarded = closure(roots)
+    if not seen:
+        return ["the model-free roots resolved to NOTHING — this guard is "
+                "guarding nothing"]
+    forbidden = set(libraries)
+    for module in sorted(seen):
+        for library in sorted(used.get(module, set()) & forbidden):
+            problems.append(
+                f"pgw#1331: the MODEL-FREE serve surface imports {library!r} in "
+                f"{module} (reached via {_chain(module, via)}). The serve path "
+                f"calls graph classes and bare math; a model library on it is "
+                f"seconds of process start and gigabytes of host RAM bought to "
+                f"run reshapes. Move the model code to the family's DECLARATION "
+                f"half, or take the module out of SERVE_ROLE_MODULES and mean it.")
+
+    # …and the ONLY places the walk is allowed to stop are the enumerated ones.
+    allowed = set(optional)
+    stopped: Set[str] = set()
+    for module in sorted(guarded):
+        if module not in seen:
+            continue
+        for target in sorted(guarded[module]):
+            if _module_path(target) is None:
+                continue  # a `from pkg import name` leaf, not a module
+            if target in seen:
+                continue  # already required by another edge; nothing is hidden
+            stopped.add(target)
+            if target not in allowed:
+                problems.append(
+                    f"pgw#1331: {module} reaches {target} through an "
+                    f"ImportError-guarded import, which this fence does not "
+                    f"follow. That hatch is a CLOSED list: add {target!r} to "
+                    f"role.OPTIONAL_SERVE_IMPORTS with a reason, or make the "
+                    f"import unguarded so the closure walks it.")
+    for target in sorted(allowed - stopped):
+        problems.append(
+            f"pgw#1331: role.OPTIONAL_SERVE_IMPORTS names {target}, but no "
+            f"serve-role module reaches it through a guarded import. An "
+            f"enumerated hatch nobody uses is a hatch nobody is checking "
+            f"(pgw#1176) — delete the row.")
     return problems
 
 
@@ -221,6 +405,7 @@ def selftest() -> int:
     how ``fleet_cells`` reached ``mint_supervisor`` before this landed).
     """
     banned = _declared_tuple("MINT_MACHINERY")
+    libraries = _declared_tuple("FORBIDDEN_LIBRARIES")
     problems = check(("gen_worker.mint_adapter",), banned)
     if not problems:
         print(
@@ -243,10 +428,42 @@ def selftest() -> int:
             "The fence would then be reading something other than the role.",
             file=sys.stderr)
         return 1
+    # pgw#1331's half: a family DECLARATION is a model-library module, so
+    # rooting the walk there must produce a forbidden-library violation. The
+    # declaration reaches diffusers exclusively through FUNCTION-LOCAL imports,
+    # so this proves the library check follows lazy imports too — the same
+    # shape the mint-lane half is proven against, one layer up.
+    declaration = "gen_worker.family.catalog.flux1_dev"
+    library_problems = [
+        line
+        for line in check_model_free((declaration,), libraries, ())
+        if "imports" in line
+    ]
+    if not library_problems:
+        print(
+            f"SELFTEST FAILED: rooting the walk at {declaration} produced no "
+            "forbidden-library violation, but that module's build callables "
+            "exist to construct diffusers and transformers modules. Either the "
+            "walk stopped following function-local imports — and this fence is "
+            "now blind — or the declaration no longer names a model library, "
+            "which would mean the catalog stopped declaring anything.",
+            file=sys.stderr)
+        return 1
+    # …and a guarded edge to an unlisted module must be refused, or the hatch
+    # is not a list, it is a door.
+    binding = "gen_worker.family.catalog._generated.flux1_dev"
+    if not [line for line in check_model_free((binding,), libraries, ()) if "guarded" in line]:
+        print(
+            f"SELFTEST FAILED: {binding} reaches its declaration through an "
+            "ImportError-guarded import, and an EMPTY OPTIONAL_SERVE_IMPORTS "
+            "accepted it. The hatch would then be open to any `try: import`.",
+            file=sys.stderr)
+        return 1
     print(
-        f"pgw#1328 selftest: the fence goes red as designed "
-        f"({len(problems)} violation(s) from a mint-reaching root, and a "
-        f"computed declaration is refused)")
+        f"pgw#1328/#1331 selftest: the fence goes red as designed "
+        f"({len(problems)} violation(s) from a mint-reaching root, "
+        f"{len(library_problems)} from a model-library root, an unlisted "
+        f"guarded edge is refused, and a computed declaration is refused)")
     return 0
 
 
@@ -258,7 +475,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return selftest()
     roots = _declared_tuple("SERVE_ROLE_MODULES")
     banned = _declared_tuple("MINT_MACHINERY")
+    model_free = _declared_tuple("MODEL_FREE_MODULES")
+    libraries = _declared_tuple("FORBIDDEN_LIBRARIES")
+    optional = _declared_tuple("OPTIONAL_SERVE_IMPORTS")
     problems = check(roots, banned)
+    problems.extend(check_model_free(model_free, libraries, optional, within=roots))
     for line in problems:
         print(line, file=sys.stderr)
     if problems:
@@ -266,11 +487,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"\n{len(problems)} adopt-only serve-role violation(s).",
             file=sys.stderr)
         return 1
-    seen, _ = closure(roots)
+    seen, _, _, _ = closure(roots)
+    free, _, _, _ = closure(model_free)
     print(
-        f"pgw#1328: the adopt-only serve role is mint-free "
-        f"({len(roots)} declared root(s), {len(seen)} gen_worker modules in "
-        f"the closure, {len(banned)} mint modules absent)")
+        f"pgw#1328: the adopt-only serve role is mint-free ({len(roots)} "
+        f"declared root(s), {len(seen)} gen_worker modules in the closure, "
+        f"{len(banned)} mint modules absent)")
+    print(
+        f"pgw#1331: the model-free serve surface holds no model library "
+        f"({len(model_free)} declared root(s), {len(free)} gen_worker modules "
+        f"in the closure, {len(libraries)} libraries absent, {len(optional)} "
+        f"enumerated guarded edge(s))")
     return 0
 
 

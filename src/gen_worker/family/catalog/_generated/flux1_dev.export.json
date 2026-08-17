@@ -14,6 +14,14 @@
     "session_state": "none",
     "stages": [
       {
+        "repeat": "once",
+        "runner": "clip"
+      },
+      {
+        "repeat": "once",
+        "runner": "t5"
+      },
+      {
         "parameter": "steps",
         "repeat": "counted",
         "runner": "denoiser"
@@ -25,7 +33,7 @@
     ]
   },
   "lora_tuned": {
-    "module": "gen_worker.family.catalog.flux1_dev",
+    "module": "gen_worker.family.catalog.flux1_dev_serve",
     "qualname": "Flux1DevLoraTuned"
   },
   "parameters": [
@@ -36,6 +44,50 @@
     }
   ],
   "runners": [
+    {
+      "axes": [],
+      "name": "clip",
+      "variants": [
+        {
+          "bucket": {},
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 1,
+            "inputs": [
+              {
+                "dtype": "int64",
+                "exported_name": "input_ids",
+                "name": "input_ids",
+                "param": "input_ids",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  77
+                ]
+              }
+            ],
+            "parameters": [
+              "input_ids"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "d9ce232c770f450414c7fad78dcba745",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                768
+              ]
+            }
+          ]
+        }
+      ]
+    },
     {
       "axes": [
         "resolution"
@@ -389,16 +441,67 @@
           ]
         }
       ]
+    },
+    {
+      "axes": [],
+      "name": "t5",
+      "variants": [
+        {
+          "bucket": {},
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 1,
+            "inputs": [
+              {
+                "dtype": "int64",
+                "exported_name": "input_ids",
+                "name": "input_ids",
+                "param": "input_ids",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  512
+                ]
+              }
+            ],
+            "parameters": [
+              "input_ids"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "86e8b8b4fc273468ea91be5337358977",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                512,
+                4096
+              ]
+            }
+          ]
+        }
+      ]
     }
   ],
   "scheduler": {
     "name": "flow_match_euler_discrete",
     "parameters": {
-      "shift": 3.0
+      "base_image_seq_len": 256,
+      "base_shift": 0.5,
+      "max_image_seq_len": 4096,
+      "max_shift": 1.15,
+      "num_train_timesteps": 1000,
+      "shift": 3.0,
+      "use_dynamic_shifting": true
     }
   },
   "tuned": {
-    "module": "gen_worker.family.catalog.flux1_dev",
+    "module": "gen_worker.family.catalog.flux1_dev_serve",
     "qualname": "Flux1DevTuned"
   },
   "v": 1

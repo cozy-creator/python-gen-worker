@@ -45,54 +45,137 @@ serve role must not acquire diffusers by accident (pgw#1328).
 
 from __future__ import annotations
 
-from .backing import (
-    Backing,
-    BackingKind,
-    CompiledBacking,
-    DualBacking,
-    EagerBacking,
-    FakeBacking,
-)
-from .drift import assert_recipe, assert_reference
-from .errors import FamilyError, FamilyRefusal
-from .inject import (
-    bind_families,
-    declared_families as bound_families,
-    fake_families,
-    fake_kwargs,
-    resolver_instances,
-)
-from .runtime import (
-    DecodeSession,
-    FamilyBinding,
-    InstanceResolver,
-    Tuned,
-    instance_resolver,
-    resolve,
-    resolve_tuned,
-    set_instance_resolver,
-    tuned_fields,
-    tuned_payload_fields,
-)
-from .snapshot import EXPORT_VERSION, FamilyExport
-from .tuned import tuned_from_catalog
-from .spec import (
-    DEFAULT_LAYOUT,
-    Bucket,
-    BucketMap,
-    CallExample,
-    Family,
-    GraphFamily,
-    Loop,
-    LoopKind,
-    Parameter,
-    Runner,
-    Scheduler,
-    SessionState,
-    Stage,
-    TunedValues,
-    declared_families,
-)
+from importlib import import_module
+from typing import TYPE_CHECKING, Any, Final
+
+if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers only
+    from .backing import (
+        Backing,
+        BackingKind,
+        CompiledBacking,
+        DualBacking,
+        EagerBacking,
+        FakeBacking,
+    )
+    from .drift import assert_recipe, assert_reference
+    from .errors import FamilyError, FamilyRefusal
+    from .inject import (
+        bind_families,
+        declared_families as bound_families,
+        fake_families,
+        fake_kwargs,
+        resolver_instances,
+    )
+    from .runtime import (
+        DecodeSession,
+        FamilyBinding,
+        InstanceResolver,
+        Tuned,
+        instance_resolver,
+        resolve,
+        resolve_tuned,
+        set_instance_resolver,
+        tuned_fields,
+        tuned_payload_fields,
+    )
+    from .snapshot import EXPORT_VERSION, FamilyExport
+    from .spec import (
+        Bucket,
+        BucketMap,
+        CallExample,
+        DEFAULT_LAYOUT,
+        Family,
+        GraphFamily,
+        Loop,
+        LoopKind,
+        Parameter,
+        Runner,
+        Scheduler,
+        SessionState,
+        Stage,
+        TunedValues,
+        declared_families,
+    )
+    from .tuned import tuned_from_catalog
+
+    #: ``FamilyInstance`` is the READING of :class:`FamilyBinding` that matters
+    #: at a handler parameter: the class is the type, the value is the instance.
+    FamilyInstance = FamilyBinding
+
+#: Exported name -> (submodule, name in it). THE package index, and the reason
+#: it exists instead of a block of eager imports (pgw#1331).
+#:
+#: ``inject`` binds declared families onto a handler's call, so it imports
+#: ``gen_worker.api.decorators`` — and through it the endpoint registry, the
+#: warm-up, and ``models.provision``. Eagerly re-exporting it here meant that
+#: importing ``gen_worker.family.runtime`` — which a generated binding does, on
+#: an adopt-only pod that will never register an endpoint — executed the whole
+#: eager-capable worker's import graph, including every module that names a
+#: model library inside a function. PEP 562 breaks that: importing this package
+#: costs nothing, and asking for a name costs exactly that one submodule.
+#:
+#: ``scripts/lint_serve_role_closure.py`` is what holds it: with the eager block
+#: back, the serve-role closure reaches ``diffusers`` through ten modules and
+#: the fence says so by name.
+_EXPORTS: Final[dict[str, tuple[str, str]]] = {
+    "Backing": ("backing", "Backing"),
+    "BackingKind": ("backing", "BackingKind"),
+    "Bucket": ("spec", "Bucket"),
+    "BucketMap": ("spec", "BucketMap"),
+    "CallExample": ("spec", "CallExample"),
+    "CompiledBacking": ("backing", "CompiledBacking"),
+    "DEFAULT_LAYOUT": ("spec", "DEFAULT_LAYOUT"),
+    "DecodeSession": ("runtime", "DecodeSession"),
+    "DualBacking": ("backing", "DualBacking"),
+    "EXPORT_VERSION": ("snapshot", "EXPORT_VERSION"),
+    "EagerBacking": ("backing", "EagerBacking"),
+    "FakeBacking": ("backing", "FakeBacking"),
+    "Family": ("spec", "Family"),
+    "FamilyBinding": ("runtime", "FamilyBinding"),
+    "FamilyError": ("errors", "FamilyError"),
+    "FamilyExport": ("snapshot", "FamilyExport"),
+    "FamilyRefusal": ("errors", "FamilyRefusal"),
+    "GraphFamily": ("spec", "GraphFamily"),
+    "InstanceResolver": ("runtime", "InstanceResolver"),
+    "Loop": ("spec", "Loop"),
+    "LoopKind": ("spec", "LoopKind"),
+    "Parameter": ("spec", "Parameter"),
+    "Runner": ("spec", "Runner"),
+    "Scheduler": ("spec", "Scheduler"),
+    "SessionState": ("spec", "SessionState"),
+    "Stage": ("spec", "Stage"),
+    "Tuned": ("runtime", "Tuned"),
+    "TunedValues": ("spec", "TunedValues"),
+    "assert_recipe": ("drift", "assert_recipe"),
+    "assert_reference": ("drift", "assert_reference"),
+    "bind_families": ("inject", "bind_families"),
+    "bound_families": ("inject", "declared_families"),
+    "declared_families": ("spec", "declared_families"),
+    "fake_families": ("inject", "fake_families"),
+    "fake_kwargs": ("inject", "fake_kwargs"),
+    "instance_resolver": ("runtime", "instance_resolver"),
+    "resolve": ("runtime", "resolve"),
+    "resolve_tuned": ("runtime", "resolve_tuned"),
+    "resolver_instances": ("inject", "resolver_instances"),
+    "set_instance_resolver": ("runtime", "set_instance_resolver"),
+    "tuned_fields": ("runtime", "tuned_fields"),
+    "tuned_from_catalog": ("tuned", "tuned_from_catalog"),
+    "tuned_payload_fields": ("runtime", "tuned_payload_fields"),
+    "FamilyInstance": ("runtime", "FamilyBinding"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    row = _EXPORTS.get(name)
+    if row is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module, origin = row
+    return getattr(import_module(f"{__name__}.{module}"), origin)
+
+
+def __dir__() -> list[str]:
+    return sorted(_EXPORTS)
+
 
 #: **Two things are spelled ``Tuned``, and both spellings are deliberate.**
 #: ``Flux1Dev.Tuned`` is the family's tuned-value SCHEMA — a class, declared on
@@ -107,8 +190,6 @@ from .spec import (
 #: handler parameter: the class is the type, the value is the instance. One
 #: object, two names, because both readings are load-bearing in the design and
 #: a reader who arrives from either finds the thing they were told to look for.
-FamilyInstance = FamilyBinding
-
 __all__ = [
     "DEFAULT_LAYOUT",
     "EXPORT_VERSION",
