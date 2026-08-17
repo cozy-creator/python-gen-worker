@@ -22,7 +22,11 @@ Steps, in order:
 5. arm B: ``arm_compiled_graph_from_store`` (store-sourced, no module),
    with ``diffusers`` fenced unimportable and ``nn.Module.__init__``
    poisoned for the duration;
-6. run both over the same pinned inputs and compare RAW BYTES.
+6. run both over the same pinned inputs and compare RAW BYTES;
+7. arm a CONTROL from a store whose `lin.weight` differs by one ULP and
+   require the output to move on exactly the inputs that can carry the
+   perturbation — an equality nothing can falsify is not a proof that the
+   store fed the graph.
 
 Bitwise means bitwise: the comparison is over ``.view(torch.uint8)``, not
 ``allclose``, and not ``torch.equal`` (which compares values, so two NaN
@@ -202,14 +206,50 @@ def run(output: Path, target: str) -> Dict[str, Any]:
         with torch.no_grad():
             store_out = [armed(sample) for sample in inputs]
 
+    # --- the NON-VACUITY control ------------------------------------------
+    # An equality proof is worth nothing until the same rig can produce an
+    # INequality. A store whose `lin.weight` differs by one ULP must move the
+    # output; if it does not, the store arm is not the thing feeding the
+    # graph and every `bitwise_equal` above is an artefact of the rig.
+    control_dir = scratch / "store-control" / TARGET
+    control_dir.mkdir(parents=True)
+    perturbed = dict(state)
+    perturbed["lin.weight"] = torch.nextafter(
+        state["lin.weight"], torch.full_like(state["lin.weight"], float("inf"))
+    )
+    save_file(perturbed, str(control_dir / "model.safetensors"))
+    control_store = aot_constants.SafetensorsConstantStore.for_component(
+        control_dir, weight_set=WEIGHT_SET + "-control", why="pgw#1329 control"
+    )
+    with _NoDiffusers():
+        control = aot_serve.arm_compiled_graph_from_store(
+            cfg, key, control_store, device=device, cache_dir=cas_root
+        )
+        with torch.no_grad():
+            control_out = [control(sample) for sample in inputs]
+    # A perturbed WEIGHT can only reach the output through a non-zero input:
+    # the all-zeros call is `lin(0) = bias`, where the weight is arithmetically
+    # unreachable. So the control's expectation is per input, and it binds in
+    # BOTH directions — a zero-input call that moved would mean the
+    # perturbation leaked somewhere it cannot legitimately reach.
+    control_moved = [
+        _raw(left) != _raw(right) for left, right in zip(store_out, control_out)
+    ]
+    control_expected = [bool(sample.abs().sum().item() > 0) for sample in inputs]
+
     rows = [
         {
             "call": index,
             "bitwise_equal": _raw(left) == _raw(right),
+            "control_differs": moved,
+            "control_expected_to_differ": expected,
+            "control_as_expected": moved == expected,
             "dtype": str(left.dtype),
             "shape": list(left.shape),
         }
-        for index, (left, right) in enumerate(zip(module_out, store_out))
+        for index, (left, right, moved, expected) in enumerate(
+            zip(module_out, store_out, control_moved, control_expected)
+        )
     ]
     row = {
         "issue": "pgw#1329",
@@ -217,18 +257,29 @@ def run(output: Path, target: str) -> Dict[str, Any]:
         "target": target,
         "graph_class": armed.graph_class,
         "weight_set": str(armed.weight_set),
+        "control_weight_set": str(control.weight_set),
         "declared_constants": len(armed.runner.declared_fqns()),
-        "store_sourced_constants": len(store.describe()),
+        "store_held_tensors": len(store.describe()),
+        "store_sourced_constants": len(armed.constants),
+        "distinct_runners": armed.runner is not control.runner,
         "toolchain": _toolchain(),
         "device_name": torch.cuda.get_device_name(0),
         "calls": rows,
         "bitwise_equal": all(entry["bitwise_equal"] for entry in rows),
+        "control_non_vacuous": any(control_moved)
+        and control_moved == control_expected,
         "constant_source": armed.meta.get("constant_source"),
     }
     output.write_text(json.dumps(row, indent=2) + "\n")
-    print(json.dumps(row, indent=2))
+    print(json.dumps(row, indent=2), flush=True)
     if not row["bitwise_equal"]:
         raise SystemExit("STORE-SOURCED ARM IS NOT BITWISE EQUAL — the bar failed")
+    if not row["control_non_vacuous"]:
+        raise SystemExit(
+            "the 1-ULP control did not move the output where it must (or moved "
+            "it where it cannot) — the equality above is vacuous and proves "
+            "nothing about the store arm"
+        )
     return row
 
 

@@ -7,10 +7,17 @@ dispatch, eager fallback, sticky de-arm, shape-growth reporting and live
 serve-state introspection.
 
 An arm resolves and creates a runner at the same destination, binds the
-resident module tensors, and only then mutates the live module. Each compiled
-graph class is independently visible through :func:`entry_states`; no
-worker-owned archive, extraction tree, package loader or compatibility store
-exists here.
+constant table, and only then mutates any live state. Each compiled graph
+class is independently visible through :func:`entry_states`; no worker-owned
+archive, extraction tree, package loader or compatibility store exists here.
+
+pgw#1329: there are TWO constant sources and they share everything else.
+:func:`arm_compiled_graph` reads a resident eager module, which is why the
+pipeline had to be loaded before anything compiled could serve;
+:func:`arm_compiled_graph_from_store` reads the store by manifest FQN, with
+no ``nn.Module`` on the path at all. Loading the eager pipeline is therefore
+a POLICY choice (eager fallback, the mint's own proofs), not a precondition
+of compiled serving.
 """
 
 from __future__ import annotations
