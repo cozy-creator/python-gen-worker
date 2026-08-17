@@ -245,7 +245,10 @@ def test_check_needs_no_git_and_reports_both_states(tmp_path: Path) -> None:
     [
         ("0.114.3 pgw1244\n", "want '<version>"),
         ("0.114\tpgw1244\n", "is not an X.Y.Z version"),
-        ("0.114.3\tpgw868-a4\n", "is not a <prefix><number>"),
+        # pgw#1339: `pgw868-a4` is now a LEGAL per-lane name; an underscore
+        # is not, and neither is a stem with no issue number.
+        ("0.114.3\tpgw868_a4\n", "is not a <prefix><number>"),
+        ("0.114.3\tpgw-a4\n", "is not a <prefix><number>"),
         ("0.114.3\tpgw1244\n0.115.0\tpgw1244\n", "recorded twice"),
     ],
 )

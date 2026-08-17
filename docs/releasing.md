@@ -203,7 +203,67 @@ now prints each fragment as `pending` or `consumed -> <version>`.
 
 **`--version` with nothing pending for it is not an error** — it is how a
 mis-attribution is repaired without cutting: the older sections are corrected, no
-new section is written, and the tool says so.
+new section is written, and the tool says so. **Nothing assembled AT ALL is a
+refusal** (exit 1, nothing written): naming a version no pending fragment belongs
+to is a mistyped invocation, not a repair.
+
+### The version is derived from the WORK, not from the fragment file (pgw#1339)
+
+**What this replaces, and it bit two cutters in two days:** attribution used to
+read the commit that added the fragment FILE. A fragment that does not exist yet —
+the case a repair is *for* — has no such commit, so it took the
+"in no tag → the version being cut" fallback, and so did every other pending
+fragment. `--version 0.121.0`, run to date one late fragment into an
+already-released section, therefore swept **every** pending fragment into
+`## 0.121.0`: 5 on the first attempt, **16** on the second, including work that
+had shipped in no wheel at all. The recipe was safe only when nothing else was
+pending, which on this repo is never.
+
+A fragment is now dated by its issue's **authored commits** — the ones whose
+SUBJECT says `pgw#1323:`, not the ones whose body mentions it — falling back to
+the fragment file's own commit only when no subject names the issue. It is
+assembled into the earliest release tag whose tree contains **all** of them; a
+note is true only once everything it describes has shipped. Work in no tag rides
+the version being cut, **and only if that version is not already released** — the
+guard that tells a repair from a cut. Anything else stays pending and is printed:
+
+```
+$ scripts/assemble_changelog.py --version 0.121.0 --dry-run
+pgw1323.md -> 0.121.0 (late; its code shipped in v0.121.0)
+1 fragment(s) pending, not in 0.121.0:
+  pgw1356.md: its work (commit subjects: e95000c7, 5c574917) is in no release tag,
+  and 0.121.0 is already released -- unshipped work cannot be dated into it
+```
+
+**Repairing a silent release note is now the documented one-liner it always
+claimed to be:** write `changelog.d/<issue>.md`, run
+`assemble_changelog.py --version <the version whose tag contains the work>`, and
+the bullet is appended to that existing section under the *attributed after the
+cut* note — one heading, in place, with every unrelated fragment left pending.
+Dry-run it first and read the pending list.
+
+### One issue, many lanes: `pgw1346-<suffix>.md` (pgw#1339)
+
+A fragment name is `<prefix><number>[-<suffix>].md`. **The suffix exists because
+`changelog.d/pgw1346.md` became a shared path again** — around ten batch lanes
+appended to the one file, which re-serialised the merge queue and ejected PRs as
+`CONFLICTING` (pgw#916 twice), the precise failure `changelog.d/` was built to
+remove. A lane of a batched issue writes its own file:
+
+```
+changelog.d/pgw1346-b3-math.md      changelog.d/pgw1346-b4-video.md
+```
+
+Disjoint paths, so they cannot conflict; the same issue number, so they are dated
+by the same commits and land **adjacent in one section**, unsuffixed file first
+then suffixes in order. **The `<prefix><number>` core is never optional** — it is
+what dates and orders the fragment — so `pgw-b3-math.md` or `b3-math.md` is
+refused by `--check` at the lane's own PR, not at the cut.
+
+`--cut-ref` (default `HEAD`) names the commit being released. Cutting from an
+older commit — which `docs/releasing.md` tells you to do when a lane's red is not
+yours — means work merged after it is not in your wheel, so pass the same ref you
+are tagging and the tool will hold those fragments for the next cut.
 
 ### SWEEP THE FRAGMENTS AGAINST `origin/master`, NOT YOUR CHECKOUT
 
