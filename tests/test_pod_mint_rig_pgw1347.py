@@ -595,28 +595,29 @@ def test_no_driver_at_all_is_also_a_reroll(tmp_path: Path) -> None:
     assert row.verdict == "reroll" and "no NVIDIA driver" in row.detail
 
 
-def test_the_rail_tears_the_pod_down_and_says_so(tmp_path: Path) -> None:
+def test_the_rail_tears_the_pod_down_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Money running out AFTER the pod came up is `railed`, not `reroll`: the
-    host was fine, the budget is gone, and a matrix lane must not retry it."""
+    host was fine, the budget is gone, and a matrix lane must not retry it.
 
-    class LateRail(Rail):
-        """Boot is affordable; the third check is not. Stated directly rather
-        than staged through a rate, because the property under test is WHICH
-        verdict a mid-run exhaustion produces, not the arithmetic (covered
-        above)."""
+    Boot is made affordable and the third check is not, stated directly rather
+    than staged through a rate — the property under test is WHICH verdict a
+    mid-run exhaustion produces, and the arithmetic that decides WHEN is covered
+    above.
+    """
+    calls = {"n": 0}
 
-        checks: int = 0
+    def late_check(self: Any, stage: str, now: float | None = None) -> None:
+        calls["n"] += 1
+        if calls["n"] > 2:
+            raise RailTripped(f"cap reached during {stage!r}")
 
-        def check_sub(self, stage: str, fraction: float, now: float | None = None) -> None:
-            return None
-
-        def check(self, stage: str, now: float | None = None) -> None:
-            self.checks += 1
-            if self.checks > 2:
-                raise RailTripped(f"cap reached during {stage!r}")
+    monkeypatch.setattr(Rail, "check", late_check)
+    monkeypatch.setattr(Rail, "check_sub", lambda *a, **k: None)
 
     pods = FakePods()
-    row = _rig(tmp_path, pods, FakeTransport(), rail=LateRail(max_usd=1.0)).run(
+    row = _rig(tmp_path, pods, FakeTransport(), rail=Rail(max_usd=1.0)).run(
         cards_mod.pick("sm89"), Workload(name="w", command="x")
     )
     assert row.verdict == "railed" and row.rail_tripped is True
@@ -793,6 +794,22 @@ def test_a_quiet_non_zero_exit_leaves_a_MARK_and_does_not_cost_a_stall_budget() 
     script = Workload(name="w", command="do_thing").launch_script()
     assert "RIG_FAIL rc=$rc" in script
     assert "RIG_FAIL" in Workload(name="w", command="x").fail_markers[1]
+
+
+def test_the_launch_payload_survives_BOTH_shells_it_crosses() -> None:
+    """It crosses the shell ssh starts on the pod AND the `bash -lc` that shell
+    launches. A double-quoted payload lets the FIRST expand the SECOND's
+    variables: measured, `rc=$?` arrived as `rc=` and the guard `[ -eq 0 ]`
+    errored, printing RIG_FAIL after every SUCCESSFUL run — a fail marker that
+    always fires is a fail marker that means nothing."""
+    script = Workload(name="mint", command="echo hi && echo RIG_DONE").launch_script()
+    payload = script.split("bash -lc ", 1)[1].split(" > ", 1)[0]
+    assert payload.startswith("'") and payload.endswith("'"), (
+        "the payload must be SINGLE-quoted; single quotes suppress every expansion"
+    )
+    assert "$rc" in payload and "$?" in payload, "which is why the variables survive verbatim"
+    # `$!` is deliberately OUTSIDE the quotes: it is for the outer shell.
+    assert script.endswith("echo RIG_LAUNCHED $!")
 
 
 def test_the_mint_ships_the_fleet_line_authority_because_the_sdk_is_not_one(tmp_path: Path) -> None:

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping
@@ -117,14 +118,23 @@ class Workload:
         # see "the token froze" then paid a full stall budget of rented pod to
         # learn what the exit code had already said. The wrapper turns every
         # non-zero exit into the FAIL marker the gate reads on its next tick.
-        wrapped = f"{{ {self.command}; }}; rc=$?; [ $rc -eq 0 ] || echo RIG_FAIL rc=$rc"
+        wrapped = f"{{ {self.command}; }}; rc=$?; [ \"$rc\" -eq 0 ] || echo RIG_FAIL rc=$rc"
         return (
             f"mkdir -p {self.workdir} && cd {self.workdir} && "
             # The forward-compat libcuda binds only at process start and a
             # detached job inherits no login shell — RIG-ENV §3c.
             "{ [ -f /etc/profile.d/zz-cuda-compat.sh ] && . /etc/profile.d/zz-cuda-compat.sh; }; "
             f"{exports}"
-            f"setsid nohup bash -lc {json.dumps(wrapped)} > {self.log} 2>&1 & "
+            # SINGLE-quoted, not json.dumps'd. This string crosses TWO shells —
+            # the one ssh starts on the pod, and the `bash -lc` it launches — and
+            # a double-quoted payload lets the FIRST one expand the SECOND one's
+            # variables. Measured: `rc=$?` arrived as `rc=` (the outer shell had
+            # already substituted an unset `$rc`), so the guard read
+            # `[ -eq 0 ]`, errored, and printed RIG_FAIL after every successful
+            # run. Single quotes suppress all expansion, so the payload reaches
+            # bash exactly as written. `$!` below is OUTSIDE the quotes and is
+            # meant for the outer shell.
+            f"setsid nohup bash -lc {shlex.quote(wrapped)} > {self.log} 2>&1 & "
             "echo RIG_LAUNCHED $!"
         )
 
