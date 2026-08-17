@@ -1203,42 +1203,41 @@ class IntentRegistry:
         error_code: "pb.LifecycleErrorCode" = pb.LIFECYCLE_ERROR_CODE_UNSPECIFIED,
     ) -> None:
         now = _now_ms()
+        # `ensure_intent` is TOTAL: it returns hub-authored work when there is
+        # any, and otherwise mints the `compat-` carrier. There is no third
+        # answer, so a drain projection never needs a fabricated goal id.
         intent_id = self.ensure_intent(pb.DESIRED_INTENT_KIND_DRAIN)
-        if intent_id:
-            state = self._intents[intent_id]
-            transition_status = {
-                pb.DRAIN_LIFECYCLE_STATUS_ACCEPTED: pb.LIFECYCLE_INTENT_STATUS_ACCEPTED,
-                pb.DRAIN_LIFECYCLE_STATUS_DRAINING: pb.LIFECYCLE_INTENT_STATUS_WAITING,
-                pb.DRAIN_LIFECYCLE_STATUS_FINALIZING: pb.LIFECYCLE_INTENT_STATUS_RUNNING,
-                pb.DRAIN_LIFECYCLE_STATUS_FLUSHING: pb.LIFECYCLE_INTENT_STATUS_RUNNING,
-                pb.DRAIN_LIFECYCLE_STATUS_DRAINED: pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
-                pb.DRAIN_LIFECYCLE_STATUS_FAILED: pb.LIFECYCLE_INTENT_STATUS_FAILED,
-            }.get(status, pb.LIFECYCLE_INTENT_STATUS_FAILED)
-            transition_stage = {
-                pb.DRAIN_LIFECYCLE_STATUS_ACCEPTED: pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
-                pb.DRAIN_LIFECYCLE_STATUS_DRAINING: pb.LIFECYCLE_INTENT_STAGE_DRAINING,
-                pb.DRAIN_LIFECYCLE_STATUS_FINALIZING: pb.LIFECYCLE_INTENT_STAGE_FINALIZING,
-                pb.DRAIN_LIFECYCLE_STATUS_FLUSHING: pb.LIFECYCLE_INTENT_STAGE_FLUSHING,
-                pb.DRAIN_LIFECYCLE_STATUS_DRAINED: pb.LIFECYCLE_INTENT_STAGE_FLUSHING,
-                pb.DRAIN_LIFECYCLE_STATUS_FAILED: pb.LIFECYCLE_INTENT_STAGE_FINALIZING,
-            }.get(status, pb.LIFECYCLE_INTENT_STAGE_FINALIZING)
-            self.transition(
-                intent_id,
-                transition_status,
-                transition_stage,
-                reason=(
-                    pb.LIFECYCLE_WAIT_REASON_TENANT_WORK
-                    if int(status) == pb.DRAIN_LIFECYCLE_STATUS_DRAINING
-                    else pb.LIFECYCLE_WAIT_REASON_UNSPECIFIED
-                ),
-                deadline_at_unix_ms=deadline_at_unix_ms,
-                error_code=error_code,
-                detail=detail,
-            )
-            goal_id = state.goal_id
-        else:
-            goal_id = self._drain.goal_id or f"legacy-drain-{self.worker_session_id}"
-            intent_id = self._drain.intent_id or goal_id
+        state = self._intents[intent_id]
+        transition_status = {
+            pb.DRAIN_LIFECYCLE_STATUS_ACCEPTED: pb.LIFECYCLE_INTENT_STATUS_ACCEPTED,
+            pb.DRAIN_LIFECYCLE_STATUS_DRAINING: pb.LIFECYCLE_INTENT_STATUS_WAITING,
+            pb.DRAIN_LIFECYCLE_STATUS_FINALIZING: pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+            pb.DRAIN_LIFECYCLE_STATUS_FLUSHING: pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+            pb.DRAIN_LIFECYCLE_STATUS_DRAINED: pb.LIFECYCLE_INTENT_STATUS_SUCCEEDED,
+            pb.DRAIN_LIFECYCLE_STATUS_FAILED: pb.LIFECYCLE_INTENT_STATUS_FAILED,
+        }.get(status, pb.LIFECYCLE_INTENT_STATUS_FAILED)
+        transition_stage = {
+            pb.DRAIN_LIFECYCLE_STATUS_ACCEPTED: pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+            pb.DRAIN_LIFECYCLE_STATUS_DRAINING: pb.LIFECYCLE_INTENT_STAGE_DRAINING,
+            pb.DRAIN_LIFECYCLE_STATUS_FINALIZING: pb.LIFECYCLE_INTENT_STAGE_FINALIZING,
+            pb.DRAIN_LIFECYCLE_STATUS_FLUSHING: pb.LIFECYCLE_INTENT_STAGE_FLUSHING,
+            pb.DRAIN_LIFECYCLE_STATUS_DRAINED: pb.LIFECYCLE_INTENT_STAGE_FLUSHING,
+            pb.DRAIN_LIFECYCLE_STATUS_FAILED: pb.LIFECYCLE_INTENT_STAGE_FINALIZING,
+        }.get(status, pb.LIFECYCLE_INTENT_STAGE_FINALIZING)
+        self.transition(
+            intent_id,
+            transition_status,
+            transition_stage,
+            reason=(
+                pb.LIFECYCLE_WAIT_REASON_TENANT_WORK
+                if int(status) == pb.DRAIN_LIFECYCLE_STATUS_DRAINING
+                else pb.LIFECYCLE_WAIT_REASON_UNSPECIFIED
+            ),
+            deadline_at_unix_ms=deadline_at_unix_ms,
+            error_code=error_code,
+            detail=detail,
+        )
+        goal_id = state.goal_id
         since = int(self._drain.since_unix_ms or now)
         next_drain = pb.DrainProjection(
             goal_id=goal_id,

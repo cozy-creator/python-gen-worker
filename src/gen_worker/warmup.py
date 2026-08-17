@@ -93,7 +93,7 @@ from .api.decorators import EndpointDecl, NoWarmup
 from .api.errors import IllegalCombination
 from .api.types import Asset, AudioAsset, ImageAsset, VideoAsset
 import inspect
-from .api.slot import resolve_slot
+from .api.slot import resolve_slot, serving_contract_governs_slot
 from .api.binding import wire_ref
 from .request_context import RequestContext
 
@@ -887,7 +887,16 @@ def resolved_slots_kwargs(
     # failure is version-independent origin evidence and gets a typed label.
     # `selected_by` slots stay untyped — the payload picks there.
     declared: list = []
+    has_selectable = any(
+        str(getattr(s, "selected_by", "") or "").strip() for s in spec.slots.values())
     for name, slot in spec.slots.items():
+        # The contract governs the slot the pick lands on, not every slot the
+        # class declares — the same scoping both hub gates apply.
+        governed = serving_contract_governs_slot(
+            selected_by=str(getattr(slot, "selected_by", "") or ""),
+            family=spec.slot_family.get(name, ""),
+            function_has_selectable_slot=has_selectable,
+        )
         try:
             resolved[name] = resolve_slot(
                 name, slot,
@@ -899,8 +908,8 @@ def resolved_slots_kwargs(
                 objective=objectives.get(name, ""),
                 distilled=distilled_facts.get(name, False),
                 distilled_status=distilled_statuses.get(name, ""),
-                allowed_objectives=spec.objectives,
-                allowed_distilled=spec.distilled,
+                allowed_objectives=spec.objectives if governed else None,
+                allowed_distilled=spec.distilled if governed else None,
             )
         except ValueError as exc:
             errors[name] = str(exc)

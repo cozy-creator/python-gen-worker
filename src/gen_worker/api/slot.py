@@ -303,8 +303,10 @@ class ResolvedSlot(Generic[D]):
 
     ``objective``/``distilled`` are the resolved checkpoint's
     hub-stamped values. ``distilled_status`` distinguishes an evidenced false
-    value from an unclassified or inconclusive one. An empty status means an
-    older hub omitted the additive field. ``ctx.for_request`` applies the
+    value from an unclassified or inconclusive one; ``"classified"`` is the
+    only value that is evidence, and an empty status is one of the unknowns —
+    the hub omits the key whenever the stored column is empty.
+    ``ctx.for_request`` applies the
     objective to the per-request scheduler view automatically; handlers may
     also branch on the distillation value and its evidence status.
     """
@@ -380,6 +382,33 @@ def _apply_lora_overrides(
     return result
 
 
+def serving_contract_governs_slot(
+    *, selected_by: str, family: str, function_has_selectable_slot: bool,
+) -> bool:
+    """Does the invoked function's serving contract apply to THIS slot?
+
+    The worker-side mirror of the hub's one rule
+    (`modelfamily.ServingContractGoverns`, applied at both hub gates —
+    deploy-time `bindingcheck` via `EffectiveBinding.ServingContractSlot` and
+    request-time `release.ServingContractGovernsSlot`):
+
+      * a `selected_by` slot is always governed — a caller-picked checkpoint is
+        the least-vetted input there is;
+      * otherwise a function that has a selectable slot elsewhere governs only
+        that one;
+      * a function with no selectable slot governs the slots that declared an
+        architecture family — the ones that can carry a training objective.
+
+    Without it the backstop asks a pipeline's tokenizer/VAE/finisher for
+    evidence the hub never demands of them, and refuses the whole warmup.
+    """
+    if str(selected_by or "").strip():
+        return True
+    if function_has_selectable_slot:
+        return False
+    return bool(str(family or "").strip())
+
+
 def _finish_resolved(
     name: str,
     ref: ModelRef,
@@ -399,11 +428,17 @@ def _finish_resolved(
     function's declared objective/distilled contract, enforce the backstop:
     the hub gates checkpoint<->function compatibility at deploy and request
     time upstream — reaching a mismatch here means version skew or a hub
-    bug, never a normal-path outcome. The backstop only fires on STAMPED
-    facts. Explicitly unknown distillation evidence fails closed when the
-    function declares that axis. Empty status preserves the old-sender
-    behavior: objective-stamped bindings treat the bool as known, while fully
-    unstamped bindings pass as they did before the additive field existed."""
+    bug, never a normal-path outcome.
+
+    Evidence is read by the hub's ONE rule (`modelfamily.StoredCheckpointFacts`):
+    the objective axis is evidenced when the objective is non-empty, and the
+    distilled axis ONLY when `distilled_status == "classified"`. An unstamped
+    status is NOT an old sender — the hub omits the key whenever the stored
+    column is empty (`slot_resolution.go` stamps it `if TrimSpace(...) != ""`),
+    so "" is a live value meaning nothing measured the axis, and a declared
+    contract on it fails closed exactly as it does at the hub's own two gates.
+    The caller is responsible for asking only about slots the contract governs
+    (:func:`serving_contract_governs_slot`)."""
     status = str(distilled_status or "").strip()
     if status not in ("", "classified", "unclassified", "inconclusive"):
         raise ObjectiveMismatchError(
@@ -414,25 +449,27 @@ def _finish_resolved(
         ref=ref, defaults=defaults, objective=objective, distilled=distilled,
         distilled_status=status,
     )
-    if resolved.objective:
-        if allowed_objectives is not None and resolved.objective not in allowed_objectives:
+    if allowed_objectives is not None:
+        if not resolved.objective:
+            raise ObjectiveMismatchError(
+                f"slot {name!r}: resolved checkpoint carries no training "
+                f"objective, so there is no evidence for the invoked "
+                f"function's declared objectives {tuple(allowed_objectives)!r}"
+            )
+        if resolved.objective not in allowed_objectives:
             raise ObjectiveMismatchError(
                 f"slot {name!r}: resolved checkpoint objective "
                 f"{resolved.objective!r} is not in the invoked function's "
                 f"declared objectives {tuple(allowed_objectives)!r}"
             )
     if allowed_distilled is not None:
-        if status in ("unclassified", "inconclusive"):
+        if status != "classified":
             raise ObjectiveMismatchError(
                 f"slot {name!r}: resolved checkpoint distillation evidence is "
-                f"{status}; the invoked function declares "
+                f"{status or 'unstamped'}; the invoked function declares "
                 f"distilled={allowed_distilled!r}"
             )
-        # Empty is an old sender. Preserve its pre-field behavior: only an
-        # objective-stamped binding treated the adjacent bool as evidenced.
-        distilled_known = (
-            status == "classified" or (not status and bool(resolved.objective)))
-        if distilled_known and resolved.distilled != allowed_distilled:
+        if resolved.distilled != allowed_distilled:
             raise ObjectiveMismatchError(
                 f"slot {name!r}: resolved checkpoint distilled="
                 f"{resolved.distilled!r} but the invoked function declares "
@@ -475,9 +512,10 @@ def resolve_slot(
 
     ``objective``/``distilled`` are the resolved checkpoint's
     hub-stamped values; ``distilled_status`` distinguishes an evidenced false
-    from unknown evidence (empty means an older sender).
+    from unknown evidence (empty means nothing measured the axis).
     ``allowed_objectives``/``allowed_distilled``, when given, are the
-    invoked function's declared ``@worker_function`` contract — see
+    invoked function's declared ``@worker_function`` contract — pass them
+    only for slots :func:`serving_contract_governs_slot` admits, and see
     :func:`_finish_resolved`.
     """
     if ref is None:
@@ -535,5 +573,5 @@ def resolve_slot(
 
 __all__ = [
     "OBJECTIVES", "ObjectiveMismatchError", "ResolvedSlot",
-    "Slot", "resolve_slot",
+    "Slot", "resolve_slot", "serving_contract_governs_slot",
 ]

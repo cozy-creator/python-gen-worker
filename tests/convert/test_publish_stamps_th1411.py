@@ -130,9 +130,16 @@ def test_unknown_source_distillation_is_not_authored_as_false(
     assert "distilled" not in req
 
 
-def test_old_hub_without_status_preserves_legacy_restatement(
+def test_absent_status_is_not_authored_as_false_either(
     fake_hub: Any, tmp_path: Path,
 ) -> None:
+    """pgw#1307 arm (4): an ABSENT `distilled_status` is one of the unknowns.
+
+    The hub omits the key whenever the stored column is empty, so absence
+    means "nothing measured the axis" — not "an old hub". Only `"classified"`
+    is evidence (`modelfamily.StoredCheckpointFacts`), so absence must not be
+    restated as an authored false on the derived checkpoint.
+    """
     body = _resolve_body(objective="", distilled=False)
     body.pop("distilled_status")
     _FakeHub.state["resolve_body"] = body
@@ -141,7 +148,7 @@ def test_old_hub_without_status_preserves_legacy_restatement(
 
     _publish(ctx, _tree(tmp_path))
 
-    assert _FakeHub.state["publish_request"]["distilled"] is False
+    assert "distilled" not in _FakeHub.state["publish_request"]
 
 
 def test_explicit_caller_override_wins(fake_hub: Any, tmp_path: Path) -> None:

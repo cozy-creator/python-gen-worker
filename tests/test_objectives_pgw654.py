@@ -242,19 +242,32 @@ def test_explicit_false_distillation_evidence_is_independent_of_objective() -> N
     assert resolved.distilled_status == "classified"
 
 
-def test_old_sender_unstamped_checkpoint_preserves_legacy_backstop() -> None:
-    # Empty status is only an older sender. Its fully unstamped binding keeps
-    # the rolling-upgrade behavior that predated the additive evidence field.
+def test_unstamped_checkpoint_fails_a_declared_contract_closed() -> None:
+    """pgw#1307 arm (3): an unstamped binding is not an old sender.
+
+    The hub omits `distilled_status` whenever the stored column is empty
+    (`slot_resolution.go` stamps it `if TrimSpace(...) != ""`), and its ONE
+    rule (`modelfamily.StoredCheckpointFacts`) counts only `"classified"` as
+    evidence — so both hub gates already refuse this binding. The backstop
+    used to PASS it, which made the worker more permissive than the authority
+    it backstops.
+    """
     from gen_worker.api.binding import HF
-    from gen_worker.api.slot import Slot, resolve_slot
+    from gen_worker.api.slot import ObjectiveMismatchError, Slot, resolve_slot
     from _example_family import ExampleDefaults
 
-    resolved = resolve_slot(
-        "pipeline", Slot(object), ref=HF("acme/plain-xl"),
-        defaults_cls=ExampleDefaults,
-        allowed_objectives=("epsilon",), allowed_distilled=False,
-    )
-    assert resolved.objective == ""
+    with pytest.raises(ObjectiveMismatchError, match="no training objective"):
+        resolve_slot(
+            "pipeline", Slot(object), ref=HF("acme/plain-xl"),
+            defaults_cls=ExampleDefaults,
+            allowed_objectives=("epsilon",),
+        )
+    with pytest.raises(ObjectiveMismatchError, match="unstamped"):
+        resolve_slot(
+            "pipeline", Slot(object), ref=HF("acme/plain-xl"),
+            defaults_cls=ExampleDefaults,
+            objective="epsilon", allowed_distilled=False,
+        )
 
 
 def test_unknown_distillation_status_is_rejected() -> None:
@@ -279,7 +292,11 @@ def test_wire_distillation_status_reaches_the_slot_backstop() -> None:
 
     @endpoint(
         models={
-            "pipeline": Slot(object, default_checkpoint=HF("acme/plain-xl")),
+            # A slot that opted into the family vocabulary — the serving
+            # contract governs exactly those (pgw#1307 arm (3)).
+            "pipeline": Slot(
+                object, family="example",
+                default_checkpoint=HF("acme/plain-xl")),
         }
     )
     class Gen:

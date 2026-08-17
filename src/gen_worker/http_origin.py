@@ -82,19 +82,21 @@ def response_is_from_hub(resp: Any) -> bool:
     # Shape 1, the common envelope: {"error": {"code": ..., ...}}.
     if isinstance(err, dict) and "code" in err:
         return True
-    # Shape 2, the PUBLISH envelope: {"error": "<code>", "message": ...}.
-    # `publishError.body()` (tensorhub `internal/api/repo_publish.go`) emits the
-    # code as a STRING, not an object — so every publish refusal was read as
-    # proxy-shaped and RETRIED under the silence window. Measured live on a v2
-    # publish: a 422 from `/publishes/{id}/complete` was retried, the
-    # retry hit the now-terminal session and returned 409 `publish_repudiated`,
-    # and the ORIGINAL 422 — the only response that said WHY — was discarded.
-    # A retry loop that converts a diagnosable refusal into a different, later
+    # Shape 2, the STRING-CODE envelope: {"error": "<code>", "message": ...}.
+    # NOT an old-hub arm — pgw#1307 re-read the hub and master still emits it
+    # from routes that never moved onto `httperrors.Write`: the binding-check
+    # 422 (`internal/api/endpoint_bindings.go`, `bindingWriteError.write`), the
+    # invoke-time model-override 400 (`modelOverrideErrorBody`), and the
+    # capability-upload 403/429 (`internal/api/capability_upload_budget.go`).
+    # Deleting this arm reinstates the pgw#743 defect on all four: measured
+    # live on a v2 publish, a 422 read as proxy-shaped was retried, the retry
+    # hit the now-terminal session and returned 409 `publish_repudiated`, and
+    # the ORIGINAL 422 — the only response that said WHY — was discarded. A
+    # retry loop that converts a diagnosable refusal into a different, later
     # error is worse than one that does not retry at all.
-    # A proxy does not synthesise a string `error` alongside a `message` either,
-    # so this stays a hub-only signature. The hub-side fix is to emit the object
-    # envelope everywhere; this must keep working regardless, because old hubs
-    # exist and the client cannot require a deploy to classify an answer.
+    # A proxy does not synthesise a string `error` alongside a `message`, so
+    # this stays a hub-only signature. It dies when the HUB emits one envelope
+    # everywhere, and not before; that is a tensorhub row, not a pgw one.
     return isinstance(err, str) and bool(err.strip()) and "message" in body
 
 
