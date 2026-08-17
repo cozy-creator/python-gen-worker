@@ -1443,6 +1443,11 @@ OFFLOAD_ENGAGED_PHASE = "cpu_offload_engaged"
 #: so the reason has one spelling on both carriers.
 UNDER_MINIMUM_PHASE = posture_mod.REASON_BELOW_DECLARED_MINIMUM
 
+#: pgw#1339: the invoked function declares a serving contract and the resolved
+#: checkpoint carries no evidence on a declared axis. Same confession home,
+#: its own phase token, for the same reason as the line above.
+UNEVIDENCED_FACTS_PHASE = posture_mod.REASON_SERVING_FACTS_UNEVIDENCED
+
 
 def _confess_serve_degrade(
     *, phase: str, line: str, detail: str, log: logging.Logger,
@@ -1498,6 +1503,68 @@ def report_under_minimum(
         line=transition_line(
             event="planned", phase="requirements",
             from_rung="declared_minimum", to_rung=posture, detail=head,
+        ),
+        detail=head,
+        log=logger or _LOG,
+    )
+    return head
+
+
+def report_unevidenced_serving_facts(
+    axes: "Sequence[str]",
+    *,
+    slot: str,
+    scope: str,
+    declared: str,
+    gap: str = "",
+    logger: Optional[logging.Logger] = None,
+) -> str:
+    """A DECLARED serving contract could not be checked, and we serve anyway.
+
+    pgw#1339 / th#2099. Returns the warning text (so a caller may also put it
+    on `ServePlan.warning`), having already emitted the typed event — one
+    derivation, two carriers, exactly as `report_under_minimum` does.
+
+    ``gap`` is the wire-gap sentence from `serving_facts.facts_or_degrade`
+    when NOBODY stamped the facts; empty when the catalog answered and simply
+    had nothing. The two are different jobs for different people, so the
+    confession says which one this is rather than flattening both into
+    "unevidenced".
+
+    The suggestion is aimed at the CATALOG, not at a card: no GPU can supply a
+    training objective, and th#1867's rule against the worker guessing on the
+    hub's behalf applies to this axis too. What would be better here is a
+    classified checkpoint, and only the hub can make one.
+    """
+    named = tuple(str(a) for a in axes if str(a))
+    if not named:
+        return ""
+    # WHAT WOULD BE BETTER, aimed at whoever can actually close THIS gap —
+    # they are different people. A wire gap is ours to fix in the sender; an
+    # unclassified checkpoint is a catalog job. One suggestion for both would
+    # send half of every report to the wrong team.
+    better = (
+        "stamp the serving facts on the binding this pod was sent"
+        if gap else
+        "classify this checkpoint in the hub catalog"
+    )
+    head = (
+        f"serving {scope} with an UNCHECKED serving contract: slot {slot!r} "
+        f"carries no evidence for the declared {', '.join(named)} "
+        f"({declared}). "
+        + (f"{gap} " if gap else
+           "The catalog answered and had nothing to say on "
+           f"{'this axis' if len(named) == 1 else 'these axes'}. ")
+        + "The request still serves — this is a diagnostic, not a gate. "
+        f"WHAT WOULD BE BETTER: {better}, so the declared contract can "
+        "actually be checked; until then the hub's own deploy-time and "
+        "request-time gates are the only ones enforcing it."
+    )
+    _confess_serve_degrade(
+        phase=UNEVIDENCED_FACTS_PHASE,
+        line=transition_line(
+            event="planned", phase="serving_contract",
+            from_rung="declared_contract", to_rung="unchecked", detail=head,
         ),
         detail=head,
         log=logger or _LOG,

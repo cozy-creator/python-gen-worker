@@ -93,7 +93,9 @@ from .api.decorators import EndpointDecl, NoWarmup
 from .api.errors import IllegalCombination
 from .api.types import Asset, AudioAsset, ImageAsset, VideoAsset
 import inspect
-from .api.slot import resolve_slot, serving_contract_governs_slot
+from .api.slot import (
+    resolve_slot, serving_contract_governs_slot, unevidenced_axes,
+)
 from .api.binding import wire_ref
 from .request_context import RequestContext
 
@@ -901,10 +903,10 @@ def resolved_slots_kwargs(
         try:
             # The catalog's answer for this slot. A slot no declaration
             # CHECKS resolves neutrally when there is no answer — nothing
-            # reads the facts, so a gap costs nothing and refusing would
-            # refuse every family that declares no serving contract. A slot a
-            # declaration does check refuses BY NAME when nothing answered,
-            # instead of resolving with `""` and blaming the checkpoint.
+            # reads the facts, so a gap costs nothing and warning would emit
+            # noise for every family that declares no serving contract. A
+            # slot a declaration DOES check confesses BY NAME when nothing
+            # answered — and then serves (pgw#1339).
             order = slot_orders.get(name)
             evidence = (
                 order.facts if order is not None
@@ -924,16 +926,36 @@ def resolved_slots_kwargs(
                 and governed
                 and (spec.objectives is not None or spec.distilled is not None)
             )
+            declared_contract = (f"function {spec.name!r} declares "
+                                 f"objectives={spec.objectives!r} "
+                                 f"distilled={spec.distilled!r}")
+            gap = ""
             if checked:
-                facts = serving_facts.facts_or_refuse(
-                    evidence, slot=name,
-                    what=f"function {spec.name!r} declares "
-                         f"objectives={spec.objectives!r} "
-                         f"distilled={spec.distilled!r}")
+                facts, gap = serving_facts.facts_or_degrade(
+                    evidence, slot=name, what=declared_contract)
             elif isinstance(evidence, serving_facts.ServingFacts):
                 facts = evidence
             else:
                 facts = serving_facts.ServingFacts()
+            # pgw#1339: a DECLARED axis with no evidence is confessed and
+            # served, never refused. Computed before the resolve so the
+            # confession happens even though the resolve no longer raises.
+            if checked:
+                missing = unevidenced_axes(
+                    objective=facts.objective,
+                    distilled_status=facts.distilled_status,
+                    allowed_objectives=spec.objectives,
+                    allowed_distilled=spec.distilled,
+                )
+                if missing:
+                    # Local import: `models.memory` owns the ONE
+                    # `serve_degrade` seam, and `warmup` must not take its
+                    # module graph at import time.
+                    from .models import memory as memory_mod
+
+                    memory_mod.report_unevidenced_serving_facts(
+                        missing, slot=name, scope=str(spec.name),
+                        declared=declared_contract, gap=gap)
             resolved[name] = resolve_slot(
                 name, slot,
                 ref=spec.models.get(name),

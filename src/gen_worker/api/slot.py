@@ -418,6 +418,33 @@ def serving_contract_governs_slot(
     return bool(str(family or "").strip())
 
 
+def unevidenced_axes(
+    *,
+    objective: str,
+    distilled_status: str,
+    allowed_objectives: Optional[Sequence[str]],
+    allowed_distilled: Optional[bool],
+) -> "tuple[str, ...]":
+    """Which DECLARED axes this checkpoint carries no evidence for.
+
+    Pure, and deliberately separate from :func:`_finish_resolved`: the reader
+    decides whether to REFUSE (only a contradiction), while the caller decides
+    what to CONFESS. Keeping the second question here rather than inside the
+    reader is what stops the confession and the gate from drifting apart —
+    they are computed from the same two predicates, in one place.
+
+    An axis the function does not declare is never listed: nothing checks it,
+    so a gap on it costs nothing and warning about it would emit noise for
+    every family that never opted into a serving contract.
+    """
+    axes = []
+    if allowed_objectives is not None and not str(objective or "").strip():
+        axes.append("objective")
+    if allowed_distilled is not None and str(distilled_status or "").strip() != "classified":
+        axes.append("distilled")
+    return tuple(axes)
+
+
 def _finish_resolved(
     name: str,
     ref: ModelRef,
@@ -441,11 +468,21 @@ def _finish_resolved(
 
     Evidence is read by the hub's ONE rule (`modelfamily.StoredCheckpointFacts`):
     the objective axis is evidenced when the objective is non-empty, and the
-    distilled axis ONLY when `distilled_status == "classified"`. An unstamped
-    status is NOT an old sender — the hub omits the key whenever the stored
-    column is empty (`slot_resolution.go` stamps it `if TrimSpace(...) != ""`),
-    so "" is a live value meaning nothing measured the axis, and a declared
-    contract on it fails closed exactly as it does at the hub's own two gates.
+    distilled axis ONLY when `distilled_status == "classified"`.
+
+    **CONTRADICTION refuses; ABSENCE does not (pgw#1339 / th#2099).** Only
+    positive evidence that DISAGREES with the declaration raises here. A
+    checkpoint whose objective this worker cannot see is the normal input to
+    a degraded run: the caller confesses it through the `serve_degrade` seam
+    (:func:`unevidenced_axes` names the axes) and SERVES. 0.120.0 raised on
+    absence instead, and that inversion took `sd15` and `anima` down in
+    production — both MEASURED dead on checkpoints the hub had stamped
+    correctly — a backstop against version skew became the outage. It is the
+    same rule pgw#1315 settled for declared VRAM minimums: a declaration
+    gates one thing, a config-WRITE, and that lives hub-side; at EXECUTION it
+    is advisory. Absence is not evidence of compatibility — it is absence,
+    and the honest response is to run and say so, loudly.
+
     The caller is responsible for asking only about slots the contract governs
     (:func:`serving_contract_governs_slot`)."""
     status = str(distilled_status or "").strip()
@@ -458,26 +495,14 @@ def _finish_resolved(
         ref=ref, defaults=defaults, objective=objective, distilled=distilled,
         distilled_status=status,
     )
-    if allowed_objectives is not None:
-        if not resolved.objective:
-            raise ObjectiveMismatchError(
-                f"slot {name!r}: resolved checkpoint carries no training "
-                f"objective, so there is no evidence for the invoked "
-                f"function's declared objectives {tuple(allowed_objectives)!r}"
-            )
+    if allowed_objectives is not None and resolved.objective:
         if resolved.objective not in allowed_objectives:
             raise ObjectiveMismatchError(
                 f"slot {name!r}: resolved checkpoint objective "
                 f"{resolved.objective!r} is not in the invoked function's "
                 f"declared objectives {tuple(allowed_objectives)!r}"
             )
-    if allowed_distilled is not None:
-        if status != "classified":
-            raise ObjectiveMismatchError(
-                f"slot {name!r}: resolved checkpoint distillation evidence is "
-                f"{status or 'unstamped'}; the invoked function declares "
-                f"distilled={allowed_distilled!r}"
-            )
+    if allowed_distilled is not None and status == "classified":
         if resolved.distilled != allowed_distilled:
             raise ObjectiveMismatchError(
                 f"slot {name!r}: resolved checkpoint distilled="
@@ -583,4 +608,5 @@ def resolve_slot(
 __all__ = [
     "OBJECTIVES", "ObjectiveMismatchError", "ResolvedSlot",
     "Slot", "resolve_slot", "serving_contract_governs_slot",
+    "unevidenced_axes",
 ]

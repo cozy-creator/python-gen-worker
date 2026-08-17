@@ -16,7 +16,15 @@ objective"*, so it was filed against the checkpoint. The checkpoint was fine.
 -> ``MintSlot`` -> back onto the child's rediscovered spec, and "nobody
 resolved them" is a distinct member of that type which NAMES its owner. The
 two states an empty string used to conflate — *the catalog says nothing* and
-*nobody asked the catalog* — now refuse with different sentences.
+*nobody asked the catalog* — now CONFESS with different sentences, aimed at
+the different people who can close them.
+
+**AMENDED by pgw#1339 / th#2099.** This lane also made absence a refusal, and
+that half was wrong: shipped as 0.120.0 it took `sd15` and `anima` down in
+production on correctly-stamped checkpoints. Absence now degrades loudly
+and serves; only a CONTRADICTION refuses. The carrying half — the type, the
+chain, the attribution — is untouched and is what the rest of this file
+proves.
 
 Every test below fails if any link in that chain drops the facts.
 """
@@ -133,14 +141,32 @@ def test_a_mismatch_still_refuses(tmp_path: Path) -> None:
     assert "is not in the invoked function's declared objectives" in str(exc.value)
 
 
-def test_an_unclassified_checkpoint_still_refuses(tmp_path: Path) -> None:
-    """The catalog ANSWERED, and the answer was "nothing measured this axis".
-    A declared contract fails closed against that exactly as the hub's own two
-    gates do (§1.22) — the fix must not turn a real absence of evidence into a
-    vacuous pass on a money surface."""
-    with pytest.raises(child_preflight.PreflightRefused) as exc:
-        _preflight(serving_facts.ServingFacts(), tmp_path)
-    assert "carries no training objective" in str(exc.value)
+def test_an_unclassified_checkpoint_SERVES(tmp_path: Path) -> None:
+    """SUPERSEDED BY pgw#1339 / th#2099 — this asserted a refusal, and the
+    refusal was the outage.
+
+    This lane read §1.22 fail-closed as governing the objective axis. It does
+    not: §4.20 says a gate whose evidence source is unavailable does the best
+    it can *without displacing the platform*, and the DEGRADATION ruling says
+    the worker complains loudly and still works. The objective backstop is not
+    a safety gate — the hub gates checkpoint<->function compatibility at
+    deploy and at request time, and this reader's own docstring calls itself a
+    version-skew backstop. Shipping it fatal in 0.120.0 took `sd15` and
+    `anima` down in production, both measured.
+
+    So an unclassified checkpoint SERVES, and confesses. The gate that
+    survives is the one against CONTRADICTION, asserted directly below and in
+    `test_objective_absence_degrades_pgw1339.py`.
+
+    **AFFIRMED, do not re-litigate from §1.22.** The supersession was reviewed
+    and upheld against two of Paul's standing rulings in his own words: the
+    machine-compatibility charter — *"it always runs, just possibly horribly
+    inefficiently"* — and the CPU-offload ruling — *"we always allow it, and
+    encourage it, although when it happens we should warn loudly so the error
+    can be caught."* Serving-with-a-loud-warning on absent evidence is
+    precisely that shape.
+    """
+    _preflight(serving_facts.ServingFacts(), tmp_path)  # must not raise
 
 
 def test_a_distilled_mismatch_still_refuses(tmp_path: Path) -> None:
@@ -154,13 +180,13 @@ def test_a_distilled_mismatch_still_refuses(tmp_path: Path) -> None:
     assert "distilled=True" in str(exc.value)
 
 
-def test_unstamped_distillation_evidence_still_refuses(tmp_path: Path) -> None:
-    """``distilled=False`` with an unstamped status is not evidence of False."""
-    with pytest.raises(child_preflight.PreflightRefused) as exc:
-        _preflight(
-            serving_facts.ServingFacts(objective="epsilon", distilled=False),
-            tmp_path)
-    assert "distillation evidence is unstamped" in str(exc.value)
+def test_unstamped_distillation_evidence_SERVES(tmp_path: Path) -> None:
+    """``distilled=False`` with an unstamped status is still not evidence of
+    False — and, per pgw#1339, still not grounds to refuse a paid request.
+    The orthogonal axis moves with the objective axis, for the same reason."""
+    _preflight(
+        serving_facts.ServingFacts(objective="epsilon", distilled=False),
+        tmp_path)  # must not raise
 
 
 def test_the_undeclared_sibling_is_unaffected(tmp_path: Path) -> None:
@@ -199,29 +225,36 @@ def test_an_undeclared_class_resolves_with_no_facts_at_all(tmp_path: Path) -> No
 # ---------------------------------------------------------------------------
 
 
-def test_a_missing_stamp_refuses_by_name_and_names_the_hub(tmp_path: Path) -> None:
+def test_a_missing_stamp_CONFESSES_by_name_and_names_the_hub(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
     """The boot half is a HUB gap: ``hello_ack.go`` builds
     ``DesiredInstance.ModelBinding`` with the three serving-fact fields left
     zero, though the proto has them and the dispatch path stamps them.
 
-    Until tensorhub fills them the worker still refuses — §1.22 fail-closed —
-    but it must refuse with a sentence naming the WIRE, not one that reads as
-    a verdict on the checkpoint. That mis-reading is what sent e2e#1892's
-    blocker at the catalog, where three independent reads showed the stamp
-    present and correct.
+    pgw#1339 turned the refusal into a confession — a gap on OUR side of the
+    wire is not grounds to decline a paid request. **The attribution this test
+    was written for is unchanged and still load-bearing**, because it is the
+    whole reason the type has two members: the sentence must name the WIRE,
+    not read as a verdict on the checkpoint. That mis-reading is what sent
+    e2e#1892's blocker at the catalog, where three independent reads showed
+    the stamp present and correct.
     """
-    with pytest.raises(child_preflight.PreflightRefused) as exc:
+    with caplog.at_level("WARNING"):
         _preflight(
             serving_facts.FactsUnavailable(owed_by=dispatch.BOOT_SENDER_OWES),
-            tmp_path)
-    msg = str(exc.value)
-    assert "crossed WITHOUT its serving facts" in msg
+            tmp_path)  # serves
+    msg = caplog.text
     assert "hello_ack.go" in msg
     assert "objective" in msg and "distilled_status" in msg
     assert "NOT a claim about the checkpoint's catalog row" in msg
     assert "carries no training objective" not in msg, (
         "the gap must not borrow the sentence that blames the checkpoint — "
         "that borrowing is what cost this bug its correct attribution")
+    assert "stamp the serving facts on the binding this pod was sent" in msg, (
+        "a wire gap must be pointed at the SENDER; telling the operator to go "
+        "classify a checkpoint that is already classified is the same "
+        "mis-attribution wearing a suggestion")
 
 
 # ---------------------------------------------------------------------------

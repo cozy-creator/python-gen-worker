@@ -14,12 +14,20 @@ read, correctly given its text, as a catalog defect. It was a wire gap.
 So the facts get a TYPE, and the gap gets a type of its own:
 
 * :class:`ServingFacts` — the catalog was asked and answered. An empty
-  ``objective`` here is a real answer ("nothing measured this axis"), and a
-  function declaring ``objectives=`` refuses against it exactly as the hub's
-  own two gates do.
+  ``objective`` here is a real answer ("nothing measured this axis").
 * :class:`FactsUnavailable` — nobody asked. ``owed_by`` names WHO owes the
   stamp, in the vocabulary of the wire field or the code path that dropped
-  it, so the refusal points at the gap instead of at the checkpoint.
+  it, so the complaint points at the gap instead of at the checkpoint.
+
+**Neither one is a refusal (pgw#1339 / th#2099).** Both are ABSENCES, and
+absence of evidence is the normal input to a degraded run — it is confessed
+through the `serve_degrade` seam and the request serves. Only a checkpoint
+that positively CONTRADICTS a declared contract still refuses. The
+distinction the two members buy is therefore in the SENTENCE, not in the
+verdict: an operator reading "the catalog classified nothing" goes and
+classifies the checkpoint, and one reading "hello_ack.go did not stamp" goes
+and fixes the hub. Both used to read as "your checkpoint is broken", and the
+one that shipped fatal took two measured production endpoints down.
 
 The union is not optional and carries no default anywhere it is stored: a
 slot resolution that cannot say which of the two it is cannot be constructed.
@@ -93,21 +101,30 @@ class FactsUnavailable(
 SlotEvidence = Union[ServingFacts, FactsUnavailable]
 
 
-def facts_or_refuse(evidence: SlotEvidence, *, slot: str, what: str) -> ServingFacts:
-    """The stamped facts, or a ``ValueError`` naming the gap.
+def facts_or_degrade(
+    evidence: SlotEvidence, *, slot: str, what: str,
+) -> "tuple[ServingFacts, str]":
+    """The stamped facts, plus the sentence to CONFESS if nobody stamped them.
 
-    The ONE place the union is collapsed, so every caller that needs the
-    three scalars either has real evidence or raises a sentence an operator
-    can act on.
+    The ONE place the union is collapsed. pgw#1333 made this raise, and the
+    attribution it built was right — the message blames the *sender* that
+    skipped the stamp, never the checkpoint's catalog row. What was wrong was
+    the refusal: a wire gap on our own side is not grounds to decline a paid
+    customer request (pgw#1339 / th#2099). So the gap now degrades — an empty
+    :class:`ServingFacts` and a non-empty reason — and the caller serves while
+    saying exactly whose stamp is missing.
+
+    An empty second element means there is nothing to confess.
     """
     if isinstance(evidence, ServingFacts):
-        return evidence
-    raise ValueError(
+        return evidence, ""
+    return ServingFacts(), (
         f"slot {slot!r}: no serving facts were resolved for this checkpoint "
         f"({what}) — {evidence.owed_by} did not stamp objective/distilled/"
         f"distilled_status, so there is no evidence to check the invoked "
         f"function's declared serving contract against. This is a wire gap, "
-        f"NOT a claim about the checkpoint's catalog row.")
+        f"NOT a claim about the checkpoint's catalog row; the request still "
+        f"serves and this slot's declared contract goes UNCHECKED.")
 
 
 __all__ = [
@@ -116,5 +133,5 @@ __all__ = [
     "FactsUnavailable",
     "ServingFacts",
     "SlotEvidence",
-    "facts_or_refuse",
+    "facts_or_degrade",
 ]
