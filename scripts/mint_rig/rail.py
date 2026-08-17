@@ -99,3 +99,32 @@ class Rail:
                 f"pgw#1347 spend rail: ${spent:.2f} reached the declared "
                 f"${self.max_usd:.2f} cap during {stage!r}. Tearing down."
             )
+
+    def check_sub(self, stage: str, fraction: float, now: float | None = None) -> None:
+        """A named sub-cap, as a fraction of the same declared rail.
+
+        WHERE THIS IS THE ONLY HONEST BOUND. :mod:`mint_rig.progress` stops work
+        that stopped progressing — but that rule needs a progress signal, and
+        POD BRING-UP HAS NONE. Measured 2026-08-17 against `rest.runpod.io/v1`:
+        a pod reports `desiredStatus: RUNNING` from the instant it is rented and
+        exposes `publicIp`/`portMappings` only when its container actually
+        starts, so a three-gigabyte image pull and a wedged host produce
+        byte-identical records for as long as either lasts. Staleness cannot
+        separate them, and a tick count that pretended to would be exactly the
+        magic timeout this package refuses.
+
+        So the bring-up bound is MONEY: a declared fraction of the operator's own
+        rail. It is derived (the same 15% is four minutes on a 4090 and eight on
+        a cheap A4000), it is stated, and tripping it is a `railed` verdict with
+        the stage named — not a silent retry. Once the pod answers, real progress
+        markers exist and :class:`~mint_rig.progress.Gate` takes over.
+        """
+        spent = self.spent_usd(now)
+        cap = self.max_usd * fraction
+        if spent >= cap:
+            raise RailTripped(
+                f"pgw#1347 {stage} budget: ${spent:.3f} spent against a "
+                f"${cap:.3f} sub-cap ({fraction:.0%} of the ${self.max_usd:.2f} rail). "
+                "Bring-up has no progress signal to be stuck on, so money is the "
+                "bound. Tearing down."
+            )

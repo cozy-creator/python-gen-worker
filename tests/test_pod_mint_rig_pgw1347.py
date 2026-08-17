@@ -112,8 +112,6 @@ class FakePods:
     def registry_auth(self, name: str, username: str, password: str) -> str:
         return "auth1"
 
-    def gpu_types(self) -> list[dict[str, Any]]:
-        return []
 
 
 class FakeGuard:
@@ -369,6 +367,40 @@ def test_gate_defers_to_the_rail() -> None:
             sleep=lambda _s: None,
             rail_check=lambda stage: rail.check(stage, now=1e9),
         ).wait()
+
+
+def test_bring_up_is_bounded_by_MONEY_because_it_has_no_progress_signal() -> None:
+    """MEASURED 2026-08-17: RunPod reports `desiredStatus: RUNNING` from the
+    instant of rent and exposes `publicIp`/`portMappings` only when the
+    container starts — so a 3 GB image pull and a wedged host produce identical
+    records. Staleness cannot separate them, and a tick count pretending to
+    would be the magic timeout this package refuses."""
+    rail = Rail(max_usd=2.0)
+    rail.observe_rate(0.74)
+    rail.clock_started(at=0.0)
+    # 15% of $2.00 is $0.30, which at $0.74/hr is ~24 minutes. DERIVED: the same
+    # fraction on a cheaper card buys proportionally longer.
+    rail.check_sub("endpoint", 0.15, now=1400.0)
+    with pytest.raises(RailTripped, match="no progress signal to be stuck on"):
+        rail.check_sub("endpoint", 0.15, now=1500.0)
+
+
+def test_a_gate_with_no_staleness_rule_waits_as_long_as_the_rail_allows() -> None:
+    calls = {"n": 0}
+
+    def probe() -> Observation:
+        calls["n"] += 1
+        return Observation(reached=calls["n"] >= 500, token="frozen solid")
+
+    Gate("endpoint", probe, stall_ticks=0, tick_s=0.0, sleep=lambda _s: None,
+         rail_check=lambda _stage: None).wait()
+    assert calls["n"] == 500, "a frozen token must not stop a gate that has no staleness rule"
+
+
+def test_a_gate_with_no_staleness_rule_and_no_rail_is_REFUSED() -> None:
+    """Unbounded is worse than a timeout, so it is not reachable."""
+    with pytest.raises(ValueError, match="must carry a rail_check"):
+        Gate("x", lambda: Observation(), stall_ticks=0, tick_s=0.0, sleep=lambda _s: None).wait()
 
 
 # --------------------------------------------------------------------------- #
@@ -678,6 +710,7 @@ def test_the_armed_start_command_is_moved_onto_the_entrypoint(tmp_path: Path) ->
     assert body["dockerEntrypoint"] == ["/bin/bash", "-lc", SSHD]
     assert "dockerStartCmd" not in body
     assert body["gpuTypeIds"] == ["NVIDIA A40"] and body["ports"] == ["22/tcp"]
+    assert body["cloudType"] == "SECURE"
     assert body["env"]["PODGUARD_CONFIG_B64"], "the guard must have armed it"
 
 
@@ -729,6 +762,23 @@ def test_ssh_argv_keeps_the_agent_socket_reachable() -> None:
     argv = seen["argv"]
     assert argv[0] == "ssh" and "root@1.2.3.4" in argv and "40022" in argv
     assert 'export HF_TOKEN="t"; echo hi' == argv[-1]
+
+
+def test_cloud_type_is_omitted_entirely_when_the_provider_should_choose(tmp_path: Path) -> None:
+    pods = FakePods()
+    _rig(tmp_path, pods, FakeTransport(), cloud_type="").run(
+        cards_mod.pick("sm86"), Workload(name="w", command="x")
+    )
+    # Omitted, not sent empty: RunPod reads "" as a cloud type it does not have.
+    assert "cloudType" not in pods.created_bodies[0]
+
+
+def test_the_sm86_set_asks_for_every_ampere_sku_not_just_one(tmp_path: Path) -> None:
+    """MEASURED: `["NVIDIA A40"]` alone answered HTTP 500 out-of-capacity, and
+    the REST API has no availability query, so the SET is the whole strategy."""
+    card = cards_mod.pick("sm86")
+    assert len(card.gpu_type_ids) >= 4 and "NVIDIA A40" in card.gpu_type_ids
+    assert card.sm_expected == "8.6"
 
 
 def test_unknown_card_names_the_ones_that_exist() -> None:

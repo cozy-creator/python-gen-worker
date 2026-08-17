@@ -64,6 +64,10 @@ CENSUS = (
 )
 
 
+def _flushing_print(message: str) -> None:
+    print(message, flush=True)
+
+
 def _rest_token(record: Mapping[str, Any]) -> str:
     """The pod's REST record reduced to the fields that MOVE during bring-up.
 
@@ -118,10 +122,25 @@ class Rig:
     #: Injected so the whole driver is testable without a network.
     transport_factory: Callable[[str, int], Transport] | None = None
     sleep: Callable[[float], None] = time.sleep
-    log: Callable[[str], None] = print
+    #: FLUSHED. A long rental is normally run with its stdout redirected to a
+    #: file, and block buffering made the console silent for the whole run —
+    #: which is indistinguishable from a hung driver at exactly the moment an
+    #: operator is deciding whether to kill a pod.
+    log: Callable[[str], None] = _flushing_print
     tick_s: float = 15.0
     stall_ticks: int = 12
     dry_run: bool = False
+    #: SECURE | COMMUNITY | "" (let the provider choose). MEASURED 2026-08-17:
+    #: SECURE has almost no sm_86 Ampere capacity — five SKUs in one create call
+    #: all answered "this machine does not have the resources". A compile proof
+    #: carries no weights and no tenant data, so COMMUNITY is a legitimate place
+    #: to buy one; a lane that needs SECURE says so and pays for the scarcity.
+    cloud_type: str = "SECURE"
+    #: Fraction of the rail bring-up may consume before the pod has answered.
+    #: See Rail.check_sub for why this phase is bounded by money and not by
+    #: staleness: RunPod's REST record cannot distinguish an image pull from a
+    #: wedged host, so there is no progress signal to be stuck on.
+    boot_budget: float = 0.15
 
     def __post_init__(self) -> None:
         if not isinstance(self.rail, Rail):
@@ -323,22 +342,32 @@ class Rig:
             "gpuTypeIds": list(card.gpu_type_ids),
             "gpuCount": 1,
             "containerDiskInGb": card.disk_gb,
-            "cloudType": "SECURE",
+            **({"cloudType": self.cloud_type} if self.cloud_type else {}),
             "supportPublicIp": True,
             "ports": ["22/tcp"],
             "env": {"PUBLIC_KEY": public_key},
         }
 
-    def _gate(self, stage: str, probe: Callable[[], Observation], *, stall_ticks: int = 0) -> Observation:
+    def _gate(
+        self,
+        stage: str,
+        probe: Callable[[], Observation],
+        *,
+        stall_ticks: int | None = None,
+        rail_check: Callable[[str], None] | None = None,
+    ) -> Observation:
         return Gate(
             stage=stage,
             probe=probe,
-            stall_ticks=stall_ticks or self.stall_ticks,
+            stall_ticks=self.stall_ticks if stall_ticks is None else stall_ticks,
             tick_s=self.tick_s,
-            rail_check=self.rail.check,
+            rail_check=rail_check or self.rail.check,
             sleep=self.sleep,
             on_tick=lambda n, obs: self.log(f"[{stage}] {n:3d} {obs.note[:150]}"),
         ).wait()
+
+    def _boot_check(self, stage: str) -> None:
+        self.rail.check_sub(stage, self.boot_budget)
 
     def _bring_up_and_run(self, api: PodApi, row: RigRow, workload: Workload, card: Card) -> None:
         row.stage("endpoint")
@@ -399,7 +428,8 @@ class Rig:
                 f"ports={(record.get('portMappings') or {})}",
             )
 
-        self._gate("endpoint", probe)
+        # Staleness DISABLED, money is the bound — see Rail.check_sub.
+        self._gate("endpoint", probe, stall_ticks=0, rail_check=self._boot_check)
         return found["ep"]
 
     def _wait_for_ssh(self, api: PodApi, row: RigRow, transport: Transport) -> None:
@@ -424,7 +454,7 @@ class Rig:
                 note=f"rc={result.rc} {reason}",
             )
 
-        self._gate("ssh", probe)
+        self._gate("ssh", probe, stall_ticks=0, rail_check=self._boot_check)
 
     def _preflight(self, transport: Transport, row: RigRow) -> None:
         """RIG-ENV §3c — probe the HOST driver before anything is downloaded.

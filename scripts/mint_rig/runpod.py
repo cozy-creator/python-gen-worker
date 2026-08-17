@@ -1,6 +1,6 @@
 """The RunPod REST layer, behind a Protocol so the driver can be tested at $0.
 
-Everything the rig needs from RunPod is these six calls. They are a
+Everything the rig needs from RunPod is these five calls. They are a
 :class:`PodApi` Protocol rather than a concrete class for one reason: the whole
 driver — bring-up gating, stall detection, rail arithmetic, teardown's three
 verdicts — is then unit-testable against a fake that answers scripted
@@ -48,7 +48,21 @@ class RestError(RuntimeError):
 
 @runtime_checkable
 class PodApi(Protocol):
-    """What the rig needs from a pod provider. Six calls, no more."""
+    """What the rig needs from a pod provider. Five calls, no more.
+
+    THERE IS NO CAPACITY QUERY, and that is a fact about the provider rather
+    than a gap here. `rest.runpod.io/v1` (openapi.json, read 2026-08-17)
+    exposes pods, endpoints, templates, network volumes, container-registry
+    auth and billing — and NO gpu-type or availability path at all. An earlier
+    draft of this Protocol had a `gpu_types()` call; the real wire answered
+    HTTP 400 *"that path does not exist in the specification"*, which is the
+    kind of thing a fake cannot tell you.
+
+    So availability is discovered the only way the API allows: ASK for a card
+    SET and read the create call's answer. `HTTP 500 "This machine does not
+    have the resources to deploy your pod"` is the out-of-capacity signal, and
+    it costs nothing — no pod is created, and the rig's name sweep confirms it.
+    """
 
     def create(self, body: Mapping[str, Any]) -> dict[str, Any]: ...
 
@@ -61,8 +75,6 @@ class PodApi(Protocol):
     def delete(self, pod_id: str) -> None: ...
 
     def registry_auth(self, name: str, username: str, password: str) -> str: ...
-
-    def gpu_types(self) -> list[dict[str, Any]]: ...
 
 
 def dotenv(names: Sequence[str], path: Path | None = None) -> dict[str, str]:
@@ -178,7 +190,3 @@ class RunpodRest:
         )
         return str((result or {}).get("id", ""))
 
-    def gpu_types(self) -> list[dict[str, Any]]:
-        result = self._call("GET", "/gputypes")
-        rows = result if isinstance(result, list) else (result or {}).get("data", [])
-        return [dict(r) for r in rows or []]

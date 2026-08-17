@@ -81,6 +81,12 @@ class Gate:
     #: Consecutive unchanged-token observations that mean STUCK. Not a duration:
     #: multiply by `tick_s` only when reading the console, never when reasoning
     #: about correctness.
+    #:
+    #: **Zero or less DISABLES the staleness rule**, for the gates whose phase
+    #: genuinely emits no progress signal (pod bring-up — see
+    #: :meth:`mint_rig.rail.Rail.check_sub`). Such a gate must be given a
+    #: `rail_check`, or it would have no bound at all; :meth:`wait` refuses
+    #: otherwise rather than looping forever.
     stall_ticks: int = 12
     tick_s: float = 15.0
     #: Called with every observation, for the console and for the row's trail.
@@ -91,6 +97,11 @@ class Gate:
     sleep: Callable[[float], None] = field(default=time.sleep)
 
     def wait(self) -> Observation:
+        if self.stall_ticks <= 0 and self.rail_check is None:
+            raise ValueError(
+                f"pgw#1347 {self.stage}: a gate with the staleness rule disabled must carry a "
+                "rail_check — otherwise it has no bound at all, which is worse than a timeout."
+            )
         stale = 0
         last: object = _UNSET
         seen = 0
@@ -111,7 +122,7 @@ class Gate:
                 stale, last = 0, observation.token
             else:
                 stale += 1
-                if stale >= self.stall_ticks:
+                if self.stall_ticks > 0 and stale >= self.stall_ticks:
                     raise Stuck(self.stage, last, stale, note)
             self.sleep(self.tick_s)
 

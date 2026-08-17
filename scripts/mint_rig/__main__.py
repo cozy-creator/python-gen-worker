@@ -47,6 +47,8 @@ def _rig(args: argparse.Namespace) -> Rig:
         tick_s=float(args.tick),
         stall_ticks=int(args.stall_ticks),
         dry_run=bool(getattr(args, "dry_run", False)),
+        cloud_type="" if getattr(args, "cloud", "") == "ANY" else getattr(args, "cloud", "SECURE"),
+        boot_budget=float(getattr(args, "boot_budget", 0.15)),
     )
 
 
@@ -137,8 +139,15 @@ def cmd_cards(_: argparse.Namespace) -> int:
 
 
 def _rent_flags(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--gpu", default="a40", choices=sorted(cards_mod.CARDS))
+    parser.add_argument("--gpu", default="sm86", choices=sorted(cards_mod.CARDS))
     parser.add_argument("--image", default=cards_mod.FLEET_IMAGE)
+    parser.add_argument(
+        "--cloud",
+        default="SECURE",
+        choices=("SECURE", "COMMUNITY", "ANY"),
+        help="ANY lets the provider choose. SECURE has little sm_86 capacity; a "
+        "compile proof carries no weights, so COMMUNITY is a legitimate place to buy one.",
+    )
     parser.add_argument("--lane", required=True)
     parser.add_argument("--issue", default="")
     parser.add_argument(
@@ -159,6 +168,13 @@ def _rent_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--spec", default="", help="pip requirement for --deliver wheel.")
     parser.add_argument("--dist", default="", help="Prebuilt dist for --deliver sdist.")
     parser.add_argument("--extras", default="", help="Extras for the shipped dist, e.g. 'torch'.")
+    parser.add_argument(
+        "--boot-budget",
+        default="0.15",
+        help="Fraction of the rail bring-up may spend before the pod answers. Bring-up "
+        "has no progress signal (RunPod cannot distinguish an image pull from a wedged "
+        "host), so money is its only honest bound. Raise it for a big single-blob image.",
+    )
     parser.add_argument("--index-args", default="", help="Extra pip index flags.")
     parser.add_argument(
         "--setup",

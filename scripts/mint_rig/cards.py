@@ -56,6 +56,31 @@ class Card:
 #: Ampere sm_86 first: it is the cheapest place a real AOTI compile can be
 #: proven, and pgw#1331's owed leg asks for exactly that.
 CARDS: dict[str, Card] = {
+    "sm86": Card(
+        slug="sm86",
+        # MEASURED 2026-08-17: asking for `["NVIDIA A40"]` alone answered
+        # HTTP 500 "This machine does not have the resources to deploy your
+        # pod" — SECURE A40 capacity, at that hour, in that region. There is no
+        # capacity query in the REST API (see PodApi), so the SET is the whole
+        # availability strategy: one create call, several acceptable machines,
+        # and the row records which one arrived.
+        gpu_type_ids=(
+            "NVIDIA A40",
+            "NVIDIA RTX A5000",
+            "NVIDIA RTX A4500",
+            "NVIDIA RTX A4000",
+            "NVIDIA GeForce RTX 3090",
+        ),
+        sm_expected="8.6",
+        disk_gb=40,
+        usd_per_hour_hint=0.30,
+        # Conservative: the set MIXES data-center (A40) and workstation parts,
+        # and NVIDIA's forward-compat libcuda is only supported on the former.
+        # Claiming True here would promise a repair rigboot cannot always make.
+        data_center_part=False,
+        note="every sm_86 RunPod sells, cheapest-acceptable-first. THE default "
+        "for a compile proof: the graph is what is under test, not the card.",
+    ),
     "a40": Card(
         slug="a40",
         gpu_type_ids=("NVIDIA A40",),
@@ -84,6 +109,25 @@ CARDS: dict[str, Card] = {
         disk_gb=60,
         usd_per_hour_hint=0.26,
         data_center_part=False,
+    ),
+    "sm89": Card(
+        slug="sm89",
+        # MEASURED 2026-08-17, in the same probe that found sm_86 empty: an Ada
+        # card was created on the first try at $0.74/hr while every sm_86 SKU
+        # answered out-of-capacity. Ada is the cheapest AVAILABLE place to prove
+        # a real compile, which is a different question from the cheapest place.
+        gpu_type_ids=(
+            "NVIDIA L4",
+            "NVIDIA RTX 4000 Ada Generation",
+            "NVIDIA GeForce RTX 4090",
+            "NVIDIA L40S",
+        ),
+        sm_expected="8.9",
+        disk_gb=40,
+        usd_per_hour_hint=0.74,
+        data_center_part=False,
+        note="every sm_89 RunPod sells, cheapest-first. The FALLBACK when sm_86 "
+        "is out of capacity — and on 2026-08-17 it was.",
     ),
     "l40s": Card(
         slug="l40s",
