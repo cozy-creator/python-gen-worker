@@ -1,0 +1,76 @@
+{
+  "why": "FLUX.2-klein-9B's class-level architecture config, cached so the catalog declaration has a durable, checkable source. pgw#1346 B1 recorded that no 9B transformer config.json exists on the authoring box and that the two klein-9b endpoints deliberately carry no checkpoint ref (ie#524/th#980 makes the ref a deploy-time binding), which left the 9B declaration with nothing to derive its width from. These are the published CONFIGS, not weights: seven JSON files, 4.8 KB in total, fetched from the serving release's own tree.",
+  "not_weights": "Every file here is a config document. No tensor bytes were fetched, and none may be added to this directory.",
+  "fetched_at": "2026-08-17",
+  "source": {
+    "kind": "tensorhub repo catalog, standing-master hub",
+    "auth": "POST /api/v1/password/login -> access_token (e2e#1892's documented flow)",
+    "route": "GET /api/v1/repos/{org}/{name}/resolve?release={release}&digest={checkpoint_id} -> per-file presigned R2 GETs; only the config-sized entries were read"
+  },
+  "releases": [
+    {
+      "role": "turbo",
+      "note": "the step-distilled checkpoint; its own model_index.json carries is_distilled=true",
+      "repo": "tensorhub/flux2-klein-9b",
+      "repo_id": "c4a707b2-f5bd-ab9a-b61d-691589ce3c3a",
+      "model_family": "flux2-klein-9b",
+      "release": "prod",
+      "cut_seq": 120,
+      "cut_at": "2026-08-15T05:57:21.905709Z",
+      "variant_contract": {"quant": "plain.bf16@1"},
+      "checkpoint_id": "sha256:9740ba3acc34aac5496cedc9fe7cc0abac5e75ec58756e7a893c409341ac04ab",
+      "files": {
+        "turbo.transformer.config.json": {
+          "path_in_tree": "transformer/config.json",
+          "size_bytes": 542,
+          "digest": "sha256:e82d0d325aff03c3b3b33a1634c47a5f88867478f53071b9c9a39c99010c5d46"
+        },
+        "turbo.model_index.json": {
+          "path_in_tree": "model_index.json",
+          "size_bytes": 446,
+          "digest": "sha256:51a76cb1cf3ed37423a1128c79c22faee8e6fbe7f5aaeb737f0a258930dbaac0"
+        },
+        "text_encoder.config.json": {
+          "path_in_tree": "text_encoder/config.json",
+          "size_bytes": 1538,
+          "digest": "sha256:57866e90a1d6328a7ed53eca732bce106f86c76ab99d7629e01f0a319fa57998"
+        },
+        "scheduler.scheduler_config.json": {
+          "path_in_tree": "scheduler/scheduler_config.json",
+          "size_bytes": 486,
+          "digest": "sha256:067afb012cef64553a763447d1efd93daeffcc0123ca7e25b09f8de20b90762e"
+        },
+        "vae.config.json": {
+          "path_in_tree": "vae/config.json",
+          "size_bytes": 821,
+          "digest": "sha256:0d6dfb69ae95a5e2ac9836284bbb63d8b38ce67b25ba2dff380752b2a10ab948"
+        }
+      }
+    },
+    {
+      "role": "base",
+      "note": "the undistilled reference checkpoint; identical tree layout, and its text_encoder/scheduler/vae configs are byte-identical to turbo's (same digests), so only its transformer config and model_index are cached separately",
+      "repo": "tensorhub/flux2-klein-base-9b",
+      "repo_id": "05c15a3b-3d64-8365-bf96-f6772026da2f",
+      "model_family": "flux2-klein-9b",
+      "release": "prod",
+      "cut_seq": 13,
+      "cut_at": "2026-08-15T05:57:21.905709Z",
+      "variant_contract": {"quant": "plain.bf16@1"},
+      "checkpoint_id": "sha256:c7d88c1639a7d429a4b378e594ba261bf3b314a67e1cebaa42ed2c66cdc175bf",
+      "files": {
+        "base.transformer.config.json": {
+          "path_in_tree": "transformer/config.json",
+          "size_bytes": 532,
+          "digest": "sha256:e32797b28b9e4ab31712e7b341f81c31e059be5db39f3d74fbbeaa168eb36edd"
+        },
+        "base.model_index.json": {
+          "path_in_tree": "model_index.json",
+          "size_bytes": 422,
+          "digest": "sha256:de1fef01845f0af3e1e2f2581cd5e86f2dfa4a4776f7f0b26b4c77feac4ee70f"
+        }
+      }
+    }
+  ],
+  "verification": "tests/test_flux2_klein_9b_pgw1346.py re-hashes every file above against the digest recorded here, so a silently edited fixture fails rather than re-keying the declaration."
+}
