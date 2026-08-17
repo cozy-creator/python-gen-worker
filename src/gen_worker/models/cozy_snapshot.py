@@ -28,6 +28,7 @@ import logging
 import re
 import shutil
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Sequence
 
@@ -45,7 +46,9 @@ from gen_worker.transfer.grants import TransferGrant, download
 
 from .. import activity as _activity
 from .. import boot_phases
+from .. import snapshot_pull
 from ..capability import InsufficientDiskError
+from ..snapshot_pull import SnapshotPullStats
 from . import projection
 from .cache_paths import open_worker_cas
 from .download import components_present, select_component_paths
@@ -386,7 +389,8 @@ class CozySnapshotDownloader:
             symlinks = await asyncio.to_thread(
                 projection.symlinks_supported, snapshots
             )
-            await self._ensure_objects(
+            started = time.monotonic()
+            stats = await self._ensure_objects(
                 open_worker_cas(base_dir),
                 selected.files,
                 progress=progress,
@@ -398,6 +402,18 @@ class CozySnapshotDownloader:
                 publish_bytes=projection.projection_write_bytes(
                     manifest, symlinks=symlinks
                 ),
+            )
+            # pgw#1351: emitted HERE and not inside `_ensure_objects`, because
+            # the snapshot id is the coordinate the measurement is keyed on and
+            # `_ensure_objects` is handed a file list, not a snapshot. A pull
+            # whose bytes cannot be attributed to a snapshot answers nothing
+            # about which models overlap.
+            snapshot_pull.emit_pull(
+                stats,
+                snapshot=selected.snapshot_digest,
+                key=key,
+                components=len(components),
+                duration_ms=int(round((time.monotonic() - started) * 1000)),
             )
             cas = open_worker_cas(base_dir)
             # Pinned BEFORE the tree exists: `projection.resolve_projection`
@@ -428,7 +444,7 @@ class CozySnapshotDownloader:
         progress: ProgressFn | None,
         fill: LocalCAS | None,
         publish_bytes: int,
-    ) -> None:
+    ) -> SnapshotPullStats:
         grants = _grants(files)
         entries = {file.path: _manifest_entry(file) for file in files}
         pending = {
@@ -505,13 +521,26 @@ class CozySnapshotDownloader:
         # loop thread that stranded the heartbeat and every queued event until
         # the scan ended, so each check runs off-thread and only the emission
         # stays on the caller's thread.
+        # pgw#1351: the residency verdict is the dedup measurement, and this
+        # loop is the only place it is ever made. Counted HERE, per object,
+        # rather than reconstructed afterwards from `len(grants) - len(missing)`
+        # — that subtraction cannot tell a pod-local CAS hit from an endpoint
+        # volume fill, and the two are the numerators of different questions.
+        resident_objects = 0
+        resident_bytes = 0
+        filled_objects = 0
+        filled_bytes = 0
         report_residency()
         for grant in grants:
             if await asyncio.to_thread(resident, grant):
                 done += grant.size_bytes
+                resident_objects += 1
+                resident_bytes += grant.size_bytes
                 settle(grant.digest, boot_phases.SOURCE_LOCAL)
             elif await asyncio.to_thread(filled, grant):
                 done += grant.size_bytes
+                filled_objects += 1
+                filled_bytes += grant.size_bytes
                 settle(grant.digest, boot_phases.SOURCE_VOLUME)
             else:
                 missing.append(grant)
@@ -562,11 +591,22 @@ class CozySnapshotDownloader:
                 progress(min(done + current, total), total)
             settle(_digest, boot_phases.SOURCE_R2)
 
+        fetched_objects = 0
+        fetched_bytes = 0
+        late_resident_objects = 0
         try:
             if missing:
                 report = await asyncio.to_thread(
                     download, tuple(missing), cas, progress=on_object
                 )
+                # pgw#1351: the wire numbers come from the transfer's OWN
+                # report, never from the grant sizes. A grant's `size_bytes` is
+                # what the object weighs; `bytes_transferred` is what was moved,
+                # and on any path where those differ the second one is the
+                # answer to "what did this pod download".
+                fetched_objects = report.succeeded
+                fetched_bytes = report.bytes_transferred
+                late_resident_objects = report.skipped_resident
                 if not report.ok:
                     reasons = [detail for _digest, detail in report.failures]
                     if report.expired:
@@ -588,6 +628,18 @@ class CozySnapshotDownloader:
                     fill.put_file(source, expected=grant.digest, size=grant.size_bytes)
                 except (DigestMismatch, OSError):
                     _log.warning("tensorfs volume fill failed for %s", grant.digest)
+
+        return SnapshotPullStats(
+            requested_objects=len(grants),
+            tree_bytes=total,
+            fetched_objects=fetched_objects,
+            fetched_bytes=fetched_bytes,
+            resident_objects=resident_objects,
+            resident_bytes=resident_bytes,
+            filled_objects=filled_objects,
+            filled_bytes=filled_bytes,
+            late_resident_objects=late_resident_objects,
+        )
 
 
 def delete_blobs(base_dir: Path, digests: Any) -> None:
