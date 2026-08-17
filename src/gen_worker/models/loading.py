@@ -27,6 +27,7 @@ import struct
 
 from ..capability import HostRamCapacityError, InsufficientHostRamError
 from . import disk_gc, load_progress
+from .materialized_view import third_party_dir
 from .file_layout import (
     MULTI_FILE,
     SINGLE_FILE,
@@ -739,14 +740,16 @@ def load_gguf_pipeline(
     denoiser_cls = getattr(importlib.import_module(str(module_name)), str(class_name))
     compute = torch.bfloat16
     denoiser = denoiser_cls.from_single_file(
-        str(gguf_file),
-        config=str(path / component),
+        str(third_party_dir(gguf_file, why="GGUF from_single_file wants a real file")),
+        config=str(third_party_dir(path / component, why="GGUF config dir")),
         quantization_config=GGUFQuantizationConfig(compute_dtype=compute),
         torch_dtype=compute,
     )
     kwargs = dict(components or {})
     kwargs[component] = denoiser
-    pipe = cls.from_pretrained(str(path), torch_dtype=compute, **kwargs)
+    pipe = cls.from_pretrained(
+        str(third_party_dir(path, why="gguf-denoiser sibling parts from_pretrained")),
+        torch_dtype=compute, **kwargs)
     for name in _fp8_text_encoder_components():
         text_encoder = getattr(pipe, name, None)
         if text_encoder is not None and hasattr(text_encoder, "parameters"):
@@ -1421,7 +1424,9 @@ def load_component(
     if torch_dtype is not None and _accepts_kwarg(
             cls.from_pretrained, "torch_dtype"):
         kwargs["torch_dtype"] = torch_dtype
-    return cls.from_pretrained(str(src), **kwargs)
+    return cls.from_pretrained(
+        str(third_party_dir(src, why="contract_loaded_component from_pretrained")),
+        **kwargs)
 
 
 def contract_loaded_component(
@@ -1940,7 +1945,12 @@ def hydrate_modular_pipeline(
         if _weightless_model_dir(src):
             skipped.append(name)
             continue
-        sources[name] = str(src)
+        # A third-party `ComponentSpec.load` reads this path itself, so it
+        # gets real files. THE #1303 CENSUS MISSED THIS SITE: it counted
+        # literal `from_pretrained(dir)` calls, and modular hydration hands
+        # the directory to diffusers through a spec field instead.
+        sources[name] = str(
+            third_party_dir(src, why=f"ComponentSpec.load({name!r})"))
 
     # Re-point the SPECS first: a later bare `pipe.load_components()` (e.g.
     # endpoint-side) must be equally incapable of reaching the index's repo
@@ -2218,7 +2228,8 @@ def _load_modular_pipeline(
         logger.info(
             "modular slot stages per component onto the device: %s",
             plan.summary())
-    pipe = cls.from_pretrained(path)
+    pipe = cls.from_pretrained(
+        third_party_dir(path, why="modular pipeline shell from_pretrained"))
     if not _is_modular_pipeline(pipe):
         raise ModularHydrationError(
             f"{getattr(cls, '__name__', cls)}.from_pretrained returned "
@@ -2437,7 +2448,9 @@ def load_from_pretrained(
     single = _single_file_checkpoint(Path(path))
     if single is not None and callable(getattr(cls, "from_single_file", None)):
         kwargs.pop("variant", None)
-        pipe = cls.from_single_file(str(single), **kwargs)
+        pipe = cls.from_single_file(
+            str(third_party_dir(single, why="from_single_file wants a real file")),
+            **kwargs)
     else:
         # A part whose dtype opinion is WIDER than the composition's compute
         # dtype must come off disk that way — upcasting a bf16-loaded
@@ -2449,7 +2462,8 @@ def load_from_pretrained(
         if per_component:
             kwargs["torch_dtype"] = per_component
         try:
-            pipe = cls.from_pretrained(path, **kwargs)
+            pipe = cls.from_pretrained(
+                third_party_dir(path, why="pipeline from_pretrained"), **kwargs)
         except (TypeError, ValueError):
             # Not every loader takes variant=/quantization_config= (transformers
             # models, single-file components); retry with the bare essentials.
@@ -2469,7 +2483,8 @@ def load_from_pretrained(
                     "composition's single compute dtype (widened parts will "
                     "load truncated)", path, getattr(cls, "__name__", cls),
                 )
-            pipe = cls.from_pretrained(path, **kwargs)
+            pipe = cls.from_pretrained(
+                third_party_dir(path, why="pipeline from_pretrained"), **kwargs)
 
     unmaterialized = meta_tensors(pipe)
     if unmaterialized:

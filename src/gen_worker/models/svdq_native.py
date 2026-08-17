@@ -53,7 +53,6 @@ from .svdq_layout import (
     split_decoded,
     to_buffers,
 )
-from pathlib import Path
 import json
 import time
 from .w4a4 import w4a4_gemm_mode
@@ -61,6 +60,7 @@ from .w4a4 import _gemm_w4a4
 from .native_kernels import svdq_linear_execution_lane
 from .svdq_fused import build_svdq_fused_linear, fused_shape_supported
 from .svdq import _read_safetensors_metadata
+from .materialized_view import third_party_dir
 from .tensor_source import open_tensor_source
 from .svdq_awq import decode_awq_linear, is_awq_linear
 from .svdq_layout import LOWRANK_QUANT_KEY, LOWRANK_QUANT_SCHEMES, decode_linear
@@ -606,7 +606,9 @@ def load_svdq_native_pipeline(cls: Any, path: Any, art: Any, *,
             f"servable flavor must be a full diffusers tree with the "
             f"checkpoint under its denoiser directory")
     denoiser = load_svdq_native_denoiser(art, compute_dtype=compute)
-    pipe = cls.from_pretrained(str(Path(path)), torch_dtype=compute,
+    pipe = cls.from_pretrained(
+        str(third_party_dir(path, why="svdq non-denoiser parts from_pretrained")),
+        torch_dtype=compute,
                               **{art.component: denoiser})
     try:
         pipe._cozy_weight_lane = (

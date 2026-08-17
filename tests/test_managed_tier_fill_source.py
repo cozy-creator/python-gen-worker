@@ -21,6 +21,7 @@ from pathlib import Path
 from gen_worker._vendor.tensorfs import CASRef
 from gen_worker.transfer.grants import TransferReport
 
+import projection_fixture
 import gen_worker.models.cozy_snapshot as snap_mod
 from gen_worker import config as gw_config
 from gen_worker.models.cache_paths import open_worker_cas, tensorhub_fill_source_dir
@@ -92,7 +93,7 @@ def test_volume_blob_preferred_over_r2(tmp_path: Path, monkeypatch) -> None:
         snap = asyncio.run(ensure_snapshot_async(
             base_dir=local, ref=ref, resolved=_resolved(), fill_source_dir=volume,
         ))
-    assert (snap / "model.safetensors").read_bytes() == _PAYLOAD
+    assert projection_fixture.bytes_at(snap, "model.safetensors") == _PAYLOAD
     assert calls == []  # no R2 fetch — the volume already had it
     assert scope.network_bytes == 0
     assert _blob(local).read_bytes() == _PAYLOAD  # copied into local CAS
@@ -109,7 +110,7 @@ def test_r2_fetch_writes_through_to_volume(tmp_path: Path, monkeypatch) -> None:
         snap = asyncio.run(ensure_snapshot_async(
             base_dir=local, ref=ref, resolved=_resolved(), fill_source_dir=volume,
         ))
-    assert (snap / "model.safetensors").read_bytes() == _PAYLOAD
+    assert projection_fixture.bytes_at(snap, "model.safetensors") == _PAYLOAD
     assert calls == [1]  # exactly one R2 fetch
     assert scope.network_bytes == len(_PAYLOAD)
     assert _blob(volume).read_bytes() == _PAYLOAD  # warmed for the next pod
@@ -129,7 +130,7 @@ def test_no_fill_source_is_byte_identical_to_pre_th850(
         snap = asyncio.run(ensure_snapshot_async(
             base_dir=local, ref=ref, resolved=_resolved(),
         ))
-    assert (snap / "model.safetensors").read_bytes() == _PAYLOAD
+    assert projection_fixture.bytes_at(snap, "model.safetensors") == _PAYLOAD
     assert calls == [1]
     assert scope.network_bytes == len(_PAYLOAD)
 
@@ -153,7 +154,7 @@ def test_corrupt_volume_blob_falls_through_to_r2(tmp_path: Path, monkeypatch) ->
         snap = asyncio.run(ensure_snapshot_async(
             base_dir=local, ref=ref, resolved=_resolved(), fill_source_dir=volume,
         ))
-    assert (snap / "model.safetensors").read_bytes() == _PAYLOAD  # real bytes
+    assert projection_fixture.bytes_at(snap, "model.safetensors") == _PAYLOAD  # real bytes
     assert calls == [1]  # fell through to R2, not the corrupt volume copy
     assert scope.network_bytes == len(_PAYLOAD)
 

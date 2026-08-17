@@ -10,6 +10,7 @@ import shutil
 import sys
 from pathlib import Path
 
+from ..models.materialized_view import third_party_dir
 from ..subproc import ProcessStalledError, run_process
 
 logger = logging.getLogger(__name__)
@@ -129,7 +130,10 @@ def run_hf_to_gguf_conversion(
     output_path: Path,
     encoding: str,
 ) -> None:
-    cmd = [sys.executable, str(script_path), str(hf_model_dir),
+    # `convert_hf_to_gguf.py` is a SUBPROCESS reading the tree itself, so it
+    # gets real files (pgw#1303's gate; pgw#1335 owns cutting this lane).
+    cmd = [sys.executable, str(script_path),
+           str(third_party_dir(hf_model_dir, why="convert_hf_to_gguf.py subprocess")),
            "--outfile", str(output_path), "--outtype", normalize_gguf_encoding(encoding)]
     try:
         returncode = run_process(

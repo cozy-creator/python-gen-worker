@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     import torch
 
 from ..models.file_layout import MULTI_FILE, SINGLE_FILE, FileLayout  # noqa: F401  (re-exported)
+from ..models.materialized_view import third_party_dir
 
 from ..component_vocab import (
     pipeline_component_dirs,
@@ -152,7 +153,8 @@ class Source:
         """
         if self._tokenizer is None:
             from transformers import AutoTokenizer
-            self._tokenizer = AutoTokenizer.from_pretrained(str(self._path))
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                str(third_party_dir(self._path, why="AutoTokenizer.from_pretrained")))
         return self._tokenizer
 
     def diffusers_variant(self) -> str | None:
@@ -185,12 +187,18 @@ class Source:
             if v := self.diffusers_variant():
                 kwargs["variant"] = v
         if model_cls is not None:
-            return model_cls.from_pretrained(str(self._path), **kwargs)
+            return model_cls.from_pretrained(
+                str(third_party_dir(self._path, why="conversion source model_cls")),
+                **kwargs)
         if self._file_layout == MULTI_FILE:
             from diffusers import DiffusionPipeline
-            return DiffusionPipeline.from_pretrained(str(self._path), **kwargs)
+            return DiffusionPipeline.from_pretrained(
+                str(third_party_dir(self._path, why="conversion source pipeline")),
+                **kwargs)
         from transformers import AutoModelForCausalLM
-        return AutoModelForCausalLM.from_pretrained(str(self._path), **kwargs)
+        return AutoModelForCausalLM.from_pretrained(
+            str(third_party_dir(self._path, why="conversion source causal LM")),
+            **kwargs)
 
     # ----- tensor access ----------------------------------------------
 

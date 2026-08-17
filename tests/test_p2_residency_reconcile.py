@@ -38,6 +38,20 @@ _RAM_PIPELINE_REF = "harness/ram-pressure-pipeline"
 _RAM_VAE_REF = "harness/ram-pressure-shared-vae"
 
 
+def _weights(slot_dir: object) -> bytes:
+    """The slot's weight bytes, on any tree shape.
+
+    A pgw#1303 author slot in miniature: handed a DIRECTORY, reads raw weight
+    bytes. After pgw#1308 step ⑥ that directory is a projected tree, so this
+    goes through the same seam a gated production site goes through.
+    """
+
+    from gen_worker.models.materialized_view import third_party_dir
+
+    real = third_party_dir(Path(str(slot_dir)), why="harness author slot")
+    return (real / "model.safetensors").read_bytes()
+
+
 def _decode(data: bytes) -> EchoOut:
     return msgspec.msgpack.decode(data, type=EchoOut)
 
@@ -59,7 +73,7 @@ class _WeightsPipe:
 
     @classmethod
     def from_pretrained(cls, path, **kwargs):
-        data = (Path(path) / "model.safetensors").read_bytes()
+        data = _weights(path)
         if data != cls.expected:
             raise OSError("Unable to load weights from checkpoint file")
         return cls()
@@ -328,7 +342,7 @@ def test_host_ram_failure_precedes_retryable_result_on_wire(tmp_path, monkeypatc
         vae_snap = blobs.one_file_snapshot("ram-vae", "vae", vae_payload)
 
         def _tree_bytes(path) -> int:
-            data = (path / "model.safetensors").read_bytes()
+            data = _weights(path)
             return (6 if data == pipeline_payload else 1) * 1024**3
 
         monkeypatch.setattr(disk_gc, "tree_bytes", _tree_bytes)
@@ -389,7 +403,7 @@ def test_structural_host_ram_shortfall_stops_reselling_the_same_pod(
         vae_snap = blobs.one_file_snapshot("ram-vae", "vae", b"small-shared-vae")
 
         def _tree_bytes(path) -> int:
-            data = (path / "model.safetensors").read_bytes()
+            data = _weights(path)
             # 40GiB of weights on a 31GiB host: no eviction can ever cover it.
             return (40 if data == pipeline_payload else 1) * 1024**3
 
@@ -478,12 +492,18 @@ def test_corrupt_load_failure_refetches_and_retries_once(tmp_path, monkeypatch) 
         store = ModelStore(lambda m: asyncio.sleep(0), cache_dir=tmp_path)
         ex = Executor([spec], lambda m: asyncio.sleep(0), store=store)
         path = await store.ensure_local(ref, snap)
-        (path / "model.safetensors").write_bytes(b"garbage-that-parses-as-nothing")
+        # Corrupt the tree the way a bad disk would. A projection
+        # artifact is installed read-only, so this unlinks first —
+        # the test is about what the STORE concludes from bad bytes,
+        # not about the artifact mode.
+        shard = path / "model.safetensors"
+        shard.unlink()
+        shard.write_bytes(b"garbage-that-parses-as-nothing")
         store._verified.discard(ref)
 
         inst = await ex.ensure_setup(spec, {ref: snap})
         assert isinstance(inst.m, _WeightsPipe)
-        assert (path / "model.safetensors").read_bytes() == content
+        assert _weights(path) == content
 
     asyncio.run(_run())
     assert calls["n"] == 2, "quarantine must trigger exactly one re-download"

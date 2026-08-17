@@ -188,7 +188,7 @@ def build(
     return Fixture(base=base, source=source, tree=tree, key=key, cas=cas, manifest=manifest)
 
 
-def materialize(base: Path, fixture: Fixture, name: str = "materialized") -> Path:
+def read_entry_tree(base: Path, fixture: Fixture, name: str = "materialized") -> Path:
     """The same manifest as a tree of REAL files, for the control arm.
 
     Built with ``read_entry``, NOT with the single-file materialization hatch:
@@ -196,6 +196,12 @@ def materialize(base: Path, fixture: Fixture, name: str = "materialized") -> Pat
     for it in a test is the example that spreads. ``read_entry`` also verifies
     the reconstruction against the manifest's whole-file digest, so the control
     arm is known-good bytes rather than merely copied ones.
+
+    NAMED for what it uses (pgw#1308 step ⑥). It was called ``materialize``,
+    which made the hatch census report it as an unpriced hatch call the moment
+    the fence learned the pinned rev's spelling — a docstring saying "this is
+    not the hatch" does not reach a grep, and a helper whose name is the thing
+    it is not is the example that spreads just as fast.
     """
 
     target = base / SNAPSHOTS_DIR / name
@@ -205,6 +211,28 @@ def materialize(base: Path, fixture: Fixture, name: str = "materialized") -> Pat
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(read_entry(fixture.cas, entry))
     return target
+
+
+def bytes_at(tree: Path, rel: str) -> bytes:
+    """What ``rel`` HOLDS in a snapshot tree, wherever its bytes really live.
+
+    The one idiom every pre-flip assertion of the form
+    ``(snapshot / "model.safetensors").read_bytes() == payload`` becomes after
+    pgw#1308 step ⑥. Reading the path directly is not a weaker assertion, it
+    is an assertion about a ~128 B pointer stub — and it fails loudly, which
+    is how these tests were found rather than silently kept.
+
+    A symlink or an ordinary file is read at the path, because that is where
+    those bytes are.
+    """
+
+    from gen_worker.models.projection import require_projection, stub_at
+
+    path = tree / rel
+    if stub_at(path) is None:
+        return path.read_bytes()
+    snapshot = require_projection(tree, why=f"test reads {rel} through the tree")
+    return read_entry(snapshot.cas, snapshot.entry(rel))
 
 
 def iter_stubs(tree: Path) -> Iterable[Path]:

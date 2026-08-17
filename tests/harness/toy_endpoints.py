@@ -23,6 +23,26 @@ from gen_worker.api.streaming import StreamResult, TokenUsage
 from gen_worker.families.base import GenerationDefaults, family
 
 
+def _slot_weight_bytes(slot_dir: object) -> str:
+    """What the slot's weights file HOLDS, on any tree shape.
+
+    A harness endpoint is the closest thing this repo has to a pgw#1303 author
+    slot: it is handed a DIRECTORY and reads raw weight bytes out of it. After
+    pgw#1308 step ⑥ that directory is a projected tree, so the file at the
+    path is a ~128 B pointer stub — which is exactly what a real third-party
+    loader gets, and exactly why #1303 is a ruling rather than a cleanup.
+
+    So these fixtures go through the SAME seam a gated production site now
+    goes through (`models.materialized_view.third_party_dir`), which is what
+    makes them evidence about the gate instead of a workaround for it.
+    """
+
+    from gen_worker.models.materialized_view import third_party_dir
+
+    real = third_party_dir(Path(str(slot_dir)), why="harness author slot")
+    return (real / "model.safetensors").read_text()
+
+
 @family("harness-testfam")
 class _ToyDefaults(GenerationDefaults, frozen=True):
     steps: int = 7
@@ -96,8 +116,7 @@ class ModelBoundEndpoint:
         self.model_path = model
 
     def model_echo(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
-        weights = Path(self.model_path) / "model.safetensors"
-        return EchoOut(response=weights.read_text())
+        return EchoOut(response=_slot_weight_bytes(self.model_path))
 
 
 # Toggled by P2's setup-failure test: True => BrokenSetupEndpoint.setup
@@ -116,8 +135,7 @@ class BrokenSetupEndpoint:
         self.model_path = model
 
     def broken_echo(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
-        weights = Path(self.model_path) / "model.safetensors"
-        return EchoOut(response=weights.read_text())
+        return EchoOut(response=_slot_weight_bytes(self.model_path))
 
 
 class _RamPressurePipeline:
@@ -171,8 +189,7 @@ class SlotBootPrecedenceEndpoint:
         self.vae_path = vae
 
     def slot_boot_precedence(self, ctx: RequestContext[_ToyDefaults], data: EchoIn) -> EchoOut:
-        weights = Path(self.pipeline_path) / "model.safetensors"
-        return EchoOut(response=weights.read_text())
+        return EchoOut(response=_slot_weight_bytes(self.pipeline_path))
 
 
 DECLARED_PIPELINE = Hub("harness/slot-identity-declared", release="prod")
@@ -386,8 +403,8 @@ class OptionalExecutionLaneEndpoint:
         self.edit_path = edit
 
     def optional_t2i(self, ctx: RequestContext[_ToyDefaults], data: EchoIn) -> EchoOut:
-        weights = Path(self.t2i_path) / "model.safetensors"
-        return EchoOut(response=f"t2i:{weights.read_text()}:edit_bound={self.edit_path is not None}")
+        return EchoOut(response=f"t2i:{_slot_weight_bytes(self.t2i_path)}"
+                                f":edit_bound={self.edit_path is not None}")
 
     def optional_edit(self, ctx: RequestContext[_ToyDefaults], data: EchoIn) -> EchoOut:
         if self.edit_path is None:
@@ -395,8 +412,7 @@ class OptionalExecutionLaneEndpoint:
                 "slot 'edit' is not bound on this release — this deploy "
                 "serves the t2i lane only"
             )
-        weights = Path(self.edit_path) / "model.safetensors"
-        return EchoOut(response=f"edit:{weights.read_text()}")
+        return EchoOut(response=f"edit:{_slot_weight_bytes(self.edit_path)}")
 
 
 # ---------------------------------------------------------------------------

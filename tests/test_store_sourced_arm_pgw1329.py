@@ -635,7 +635,7 @@ def test_the_store_indexes_and_binds_a_projected_tree(tmp_path: Path) -> None:
     from gen_worker.models.projection import stub_at
 
     built = fixture.build(tmp_path / "cas")
-    control = fixture.materialize(tmp_path / "cas", built)
+    control = fixture.read_entry_tree(tmp_path / "cas", built)
 
     shard = built.tree / "unet" / "diffusion_pytorch_model.safetensors"
     assert stub_at(shard) is not None, "the fixture stopped being a projection"

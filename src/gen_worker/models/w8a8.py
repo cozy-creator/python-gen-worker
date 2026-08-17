@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from .. import activity as activity_mod
 from ..component_vocab import denoiser_components
+from .materialized_view import third_party_dir
 from .safetensors_header import read_header
 from .tensor_source import load_state_dict, open_tensor_source
 from .file_layout import MULTI_FILE, SINGLE_FILE
@@ -735,7 +736,9 @@ def load_w8a8_pipeline(cls: Any, path: Path, art: W8a8Artifact, *,
     if len(arts) > 1:
         logger.info("w8a8: %d quantized denoisers wired (%s)", len(arts),
                     ", ".join(a.component for a in arts))
-    pipe = cls.from_pretrained(str(path), torch_dtype=compute, **kwargs)
+    pipe = cls.from_pretrained(
+        str(third_party_dir(path, why="w8a8 quantizer from_pretrained")),
+        torch_dtype=compute, **kwargs)
     try:
         pipe._cozy_weight_lane = "w8a8" if mode != "dequant" else "bf16-resident"
     except Exception:
@@ -941,7 +944,9 @@ def load_w8a8_root_pipeline(
 
     compute = compute_dtype or torch.bfloat16
     mode = w8a8_gemm_mode() or "dequant"
-    pipe = cls.from_pretrained(str(path), torch_dtype=compute)
+    pipe = cls.from_pretrained(
+        str(third_party_dir(path, why="w8a8 quantizer from_pretrained")),
+        torch_dtype=compute)
     denoiser = _root_denoiser(pipe)
     key_map = (getattr(pipe, "_cozy_w8a8_key_map", None)
                or getattr(cls, "_cozy_w8a8_key_map", None))

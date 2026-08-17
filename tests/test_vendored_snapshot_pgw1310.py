@@ -95,6 +95,37 @@ def test_the_read_plane_is_recorded_at_its_own_rev() -> None:
         assert name in spec["files"], f"{name} is not digest-fenced"
 
 
+def test_the_storage_half_still_provides_what_the_ownership_ruling_keeps() -> None:
+    """pgw#1308 step ⑥: the split is the STEADY STATE, and this says why.
+
+    The ruling (VENDORED.toml, and the issue's own section) is that admission
+    and GC are TENSORFS'S — upstream ported them to Rust rather than
+    abandoning them, and a source-vendored wheel cannot load Rust (pgw#1310).
+    So they are consumed from the pinned rev indefinitely, and a bump that
+    "finishes the migration" deletes them with no reachable successor.
+
+    A comment saying that goes stale silently. This goes red instead, and it
+    is deliberately NOT a digest check: the digest fence above would refuse
+    the bump too, but only with "a file changed", which is exactly the message
+    that gets a fence regenerated rather than read.
+    """
+
+    from gen_worker._vendor.tensorfs import LocalCAS
+
+    for kept in ("ingest_file", "ingest_repository", "collect_garbage", "materialize"):
+        assert callable(getattr(LocalCAS, kept, None)), (
+            f"LocalCAS.{kept} is gone from the vendored storage snapshot. If "
+            f"this is a `rev` bump: upstream's successor is the compiled Rust "
+            f"extension, which pgw cannot load (pgw#1310). Read the ownership "
+            f"ruling in VENDORED.toml before bumping."
+        )
+
+    # And the one that DID die with the chokepoint flip: still defined by the
+    # pinned upstream snapshot, called by nothing here. The caller census is
+    # `scripts/lint_materialization_hatch.py`, in the required `fast gates`.
+    assert hasattr(LocalCAS, "materialize" + "_repository")
+
+
 def test_the_read_plane_runs_without_the_compiled_extension() -> None:
     """The reason the split is expressible at all: this half is PURE PYTHON.
 

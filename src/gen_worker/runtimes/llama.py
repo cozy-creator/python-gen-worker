@@ -22,6 +22,7 @@ import msgspec
 
 from ..api.errors import FatalError
 from ..api.streaming import IncrementalTokenDelta, TokenUsage
+from ..models.materialized_view import third_party_dir
 from ..models.memory import get_available_vram_gb
 
 logger = logging.getLogger(__name__)
@@ -125,7 +126,9 @@ def read_gguf_info(path: Union[str, Path]) -> GGUFInfo:
         ) from exc
 
     gguf_path = Path(path)
-    reader = GGUFReader(str(gguf_path), "r")
+    reader = GGUFReader(
+        str(third_party_dir(gguf_path, why="gguf.GGUFReader wants a real file")),
+        "r")
     arch_field = reader.get_field("general.architecture")
     arch = str(arch_field.contents()) if arch_field is not None else ""
     n_head = _field_int(reader, f"{arch}.attention.head_count")

@@ -18,6 +18,26 @@ from gen_worker import Hub, RequestContext, Slot, endpoint
 from gen_worker.families.base import GenerationDefaults, family
 
 
+def _slot_weight_bytes(slot_dir: object) -> str:
+    """What the slot's weights file HOLDS, on any tree shape.
+
+    A harness endpoint is the closest thing this repo has to a pgw#1303 author
+    slot: it is handed a DIRECTORY and reads raw weight bytes out of it. After
+    pgw#1308 step ⑥ that directory is a projected tree, so the file at the
+    path is a ~128 B pointer stub — which is exactly what a real third-party
+    loader gets, and exactly why #1303 is a ruling rather than a cleanup.
+
+    So these fixtures go through the SAME seam a gated production site now
+    goes through (`models.materialized_view.third_party_dir`), which is what
+    makes them evidence about the gate instead of a workaround for it.
+    """
+
+    from gen_worker.models.materialized_view import third_party_dir
+
+    real = third_party_dir(Path(str(slot_dir)), why="harness author slot")
+    return (real / "model.safetensors").read_text()
+
+
 @family("harness-slot-only-testfam")
 class _ToyDefaults(GenerationDefaults, frozen=True):
     steps: int = 7
@@ -45,5 +65,4 @@ class SlotBootPrecedenceEndpoint:
         self.vae_path = vae
 
     def slot_boot_precedence(self, ctx: RequestContext[_ToyDefaults], data: EchoIn) -> EchoOut:
-        weights = Path(self.pipeline_path) / "model.safetensors"
-        return EchoOut(response=weights.read_text())
+        return EchoOut(response=_slot_weight_bytes(self.pipeline_path))

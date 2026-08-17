@@ -44,6 +44,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import msgspec
 
+from .materialized_view import third_party_dir
 from .safetensors_header import read_header
 from .file_layout import MULTI_FILE, SINGLE_FILE
 from .tensor_layout_contract import (
@@ -406,7 +407,10 @@ def load_hf_fp8_blockwise(
     kwargs: Dict[str, Any] = {"dtype": compute, "quantization_config": quant}
     if device_map is not None:
         kwargs["device_map"] = device_map
-    return model_cls.from_pretrained(str(path), **kwargs)
+    return model_cls.from_pretrained(
+        str(third_party_dir(path, why=f"{model_cls} fp8-blockwise from_pretrained")),
+        **kwargs,
+    )
 
 
 __all__ = [
