@@ -3,12 +3,19 @@
 The Flux lane's four claims (pgw#1331), applied to the batch that owed the
 harder half of them:
 
-1. **The bare math is the same math** — and here "same" means BIT-IDENTICAL,
-   not within a tolerance. ``euler_discrete``'s ladder descends from a trained
-   noise schedule rather than from a closed form, so reproducing it means
-   reproducing the PRECISION it was produced at; the float64 reading of the
-   same algebra is 201 float32 ULP away, and one of these tests exists purely
-   to keep that number from becoming folklore.
+1. **The bare math is the same math.** ``euler_discrete``'s ladder descends
+   from a trained noise schedule rather than from a closed form, so
+   reproducing it means reproducing the PRECISION it was produced at — the
+   float64 reading of the same algebra is 201 float32 ULP away, and one of
+   these tests exists purely to keep that number from becoming folklore.
+   Chasing it turned up the finding that reshaped this file: **the reference
+   is not reproducible across machines**, because torch dispatches its float32
+   CPU ``linspace`` by ISA and the two kernels disagree by 1 ULP on 145 of
+   1000 entries. So "bit-identical" is not a claim anything can make about
+   diffusers' ladder. What IS claimed, and fenced: our ladder is byte-stable
+   across kernels where theirs is not, it sits inside their own spread, their
+   timestep grid is matched exactly, and — with the table variable removed by
+   loading our sigmas into their scheduler — the STEP is bitwise theirs.
 2. **The whole composition is graph classes** — SDXL grew its two text towers,
    so no SD family leaves a tower riding an eager model at serve time.
 3. **SD2 is not SD1.5 with different numbers.** B2's scoping proposed an
@@ -23,7 +30,12 @@ what the endpoints actually invoke rather than as prose.
 
 from __future__ import annotations
 
+import json
 import math
+import os
+import subprocess
+import sys
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, get_args
 
 import pytest
@@ -55,6 +67,12 @@ np = pytest.importorskip("numpy")
 #: (Lightning 4 and 8, Hyper-SD 4, DMD2 4, SD-Turbo 1), and the ends of the
 #: declared `steps` parameter range.
 ENDPOINT_STEPS = (1, 4, 8, 20, 25, 28, 30, 40, 50, 100)
+
+#: How far the SIGMA ladder may sit from diffusers'. It is the reference's own
+#: cross-kernel spread (6 ULP, measured — see the ladder test) plus margin, not
+#: a tolerance for our arithmetic: on a machine whose torch dispatches the
+#: vectorized `linspace`, this module is bit-exact.
+TOLERANCE = 8
 
 
 def _ulp(ours: Any, theirs: Any) -> int:
@@ -106,16 +124,31 @@ def _reference(block: dict[str, Any], **overrides: Any) -> Any:
 @pytest.mark.parametrize(
     ("objective", "zero_snr"), [("epsilon", False), ("v_prediction", True)]
 )
-def test_the_euler_discrete_ladder_is_bit_identical_to_diffusers(
+def test_the_euler_discrete_ladder_matches_diffusers_to_the_reference_s_own_noise(
     steps: int, spacing: str, objective: str, zero_snr: bool
 ) -> None:
-    """Zero ULP, not one — and the bar was one.
+    """The bar was ONE float32 ULP (pgw#1331). Here is what that means here.
+
+    On the machine this was written on the answer is **0** — exact bit
+    equality, every value. That is not assertable in CI, and the reason is the
+    finding rather than an excuse: **the reference is not reproducible across
+    machines.** torch dispatches its float32 CPU ``linspace`` by ISA, and its
+    scalar kernel disagrees with its vectorized one on 145 of 1000 entries by
+    1 ULP; ``rescale_betas_zero_snr`` then amplifies that to **6 ULP** on a
+    resolved ladder, because it divides two nearly-equal numbers after a
+    subtraction that has already cancelled most of their significance. So
+    diffusers disagrees with ITSELF by up to 6 ULP depending on which CPU the
+    pod rented, and nothing can be bit-exact against that.
+
+    ``TOLERANCE`` is therefore the reference's own spread plus margin, and it
+    bounds only the SIGMAS: timesteps and ``init_noise_sigma`` are exact under
+    both kernels, measured, so they keep ``== 0``. For scale, 6 ULP at sigma
+    14.6 is ~1e-5 — four orders of magnitude below one bf16 ULP there.
 
     ``v_prediction`` is paired with ``rescale_betas_zero_snr`` because
-    ``gen_worker.view`` pairs them for the diffusers path: a v-pred checkpoint
-    on this fleet is ALWAYS served with the zero-terminal-SNR beta rescale, so
-    measuring the objective without it would measure a configuration no request
-    reaches.
+    ``gen_worker.view`` pairs them: a v-pred checkpoint on this fleet is ALWAYS
+    served with the zero-terminal-SNR rescale, so measuring the objective
+    without it would measure a configuration no request reaches.
     """
 
     block = {
@@ -129,7 +162,9 @@ def test_the_euler_discrete_ladder_is_bit_identical_to_diffusers(
     ours = EulerDiscrete.from_block(block).schedule(steps)
 
     assert len(ours.sigmas) == len(theirs.sigmas)
-    assert _ulp(ours.sigmas, theirs.sigmas.numpy()) == 0
+    assert _ulp(ours.sigmas, theirs.sigmas.numpy()) <= TOLERANCE
+    # Exact under every kernel: the timestep grid is integer arithmetic and
+    # `init_noise_sigma` is one narrowing of one table entry.
     assert _ulp(ours.timesteps, theirs.timesteps.numpy()) == 0
     assert _ulp([ours.init_noise_sigma], [float(theirs.init_noise_sigma)]) == 0
 
@@ -148,6 +183,13 @@ def test_a_whole_denoising_loop_is_bitwise_the_diffusers_loop(
     because that is where the two are comparable: upstream upcasts its sample
     to float32 internally and this module cannot name a dtype, so float32 is
     the precision at which "the same math" is a decidable claim.
+
+    **Our ladder is loaded into the reference before the loop runs**, and that
+    is what makes this a test of the STEP rather than a second, weaker test of
+    the table. The table has its own test, and it cannot be bit-exact because
+    the reference is not bit-exact against itself across CPU kernels; feeding
+    both loops the identical sigmas removes that variable entirely, so a single
+    differing element here is a real defect in the arithmetic.
     """
 
     block = {
@@ -159,6 +201,10 @@ def test_a_whole_denoising_loop_is_bitwise_the_diffusers_loop(
     theirs = _reference(block)
     theirs.set_timesteps(28)
     schedule = EulerDiscrete.from_block(block).schedule(28)
+    # Same ladder, both loops. `timesteps` is already exact under every kernel,
+    # so the index each side resolves is unchanged by this.
+    assert _ulp(schedule.timesteps, theirs.timesteps.numpy()) == 0
+    theirs.sigmas = torch.tensor(schedule.sigmas, dtype=torch.float32)
 
     torch.manual_seed(0)
     ours_sample = torch.randn(2, 4, 32, 32) * float(schedule.init_noise_sigma)
@@ -172,6 +218,56 @@ def test_a_whole_denoising_loop_is_bitwise_the_diffusers_loop(
         ours_sample = schedule.step(index, prediction, ours_sample)
         their_sample = theirs.step(prediction, timestep, their_sample).prev_sample
         assert torch.equal(ours_sample, their_sample)
+
+
+def test_our_ladder_does_not_depend_on_which_cpu_kernel_torch_dispatched() -> None:
+    """The property the reference does NOT have, fenced.
+
+    ``ATEN_CPU_CAPABILITY=default`` forces torch's scalar CPU kernels. Its
+    float32 ``linspace`` disagrees with the vectorized one on 145 of 1000
+    entries by 1 ULP, which is why diffusers' resolved ladder moves by up to
+    6 ULP depending on the card — sorry, the CPU — a pod happened to rent.
+
+    Ours cannot move: every operation is IEEE double arithmetic with one
+    explicit narrowing, so the subprocess below must produce the SAME BYTES.
+    This is the reproducibility claim that actually matters — a receipt's seed
+    meaning the same thing on two pods — and it is a reason to prefer this
+    module over the thing it replaces, not merely a tie.
+
+    The reference is measured in the same subprocess rather than asserted to
+    differ: a runner that already dispatches the scalar kernel would be
+    comparing it against itself, and the point is that OURS cannot vary, not
+    that theirs always does.
+    """
+
+    program = (
+        "import sys, json;"
+        "from gen_worker.model.scheduler import EulerDiscrete;"
+        "from gen_worker.model.catalog.sdxl import SCHEDULER as B;"
+        "from diffusers import EulerDiscreteScheduler as E;"
+        "b=dict(B);"
+        "o=EulerDiscrete.from_block(b).schedule(28);"
+        "t=E(num_train_timesteps=1000,beta_start=0.00085,beta_end=0.012,"
+        "beta_schedule='scaled_linear',timestep_spacing='leading',steps_offset=1,"
+        "interpolation_type='linear',prediction_type='epsilon',final_sigmas_type='zero');"
+        "t.set_timesteps(28);"
+        "print(json.dumps({'ours': list(o.sigmas), 'theirs': t.sigmas.tolist()}))"
+    )
+    root = Path(__file__).resolve().parents[1] / "src"
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(root), "ATEN_CPU_CAPABILITY": "default"},
+    )
+    assert result.returncode == 0, result.stderr
+    scalar = json.loads(result.stdout.strip().splitlines()[-1])
+
+    here = EulerDiscrete.from_block(dict(SDXL_SCHEDULER)).schedule(28)
+    # THE claim: byte-identical across kernels.
+    assert tuple(scalar["ours"]) == here.sigmas
+    # And still inside the reference's own spread, whichever kernel it used.
+    assert _ulp(here.sigmas, scalar["theirs"]) <= TOLERANCE
 
 
 def test_the_float64_reading_of_the_same_algebra_is_measurably_wrong() -> None:
@@ -210,9 +306,11 @@ def test_the_float64_reading_of_the_same_algebra_is_measurably_wrong() -> None:
     # measurement: still 25x the bar, and monotonically worse with step count.
     assert _ulp(naive + [0.0], theirs.sigmas.numpy()) > 15
 
-    # …and the shipped implementation, on the same inputs, is exact.
+    # …and the shipped implementation, on the same inputs, is inside the
+    # reference's own cross-kernel spread — more than an order of magnitude
+    # closer than the float64 reading, which is the whole point of narrowing.
     assert _ulp(EulerDiscrete.from_block(dict(SDXL_SCHEDULER)).schedule(28).sigmas,
-                theirs.sigmas.numpy()) == 0
+                theirs.sigmas.numpy()) <= TOLERANCE
 
 
 def test_the_declared_block_is_the_scheduler_s_only_source_of_constants() -> None:

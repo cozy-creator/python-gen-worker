@@ -362,18 +362,41 @@ class FlowMatchEulerDiscrete:
 #   5. the per-request ladder — FLOAT64 linear interpolation over that float32
 #      table (numpy's ``interp`` promotes), narrowed to float32 at the end.
 #
-# Measured result: **0 ULP**, exact bit equality, on every step count and both
-# timestep spacings any endpoint in this fleet reaches. The bar was 1 ULP.
+# Stage 1 is where this gets interesting, and it is worth the paragraph.
+# ``torch.linspace`` on a float32 CPU tensor computes a float32 ``step`` and
+# walks OUTWARD FROM BOTH ENDS — ``start + step*i`` for the first half,
+# ``end - step*(n-1-i)`` for the second — so both endpoints land exactly. The
+# straightforward ``start + (end-start)*i/(n-1)`` disagrees with it on 307 of
+# 1000 entries. Reproducing the outward walk gets us to **0 ULP** — exact bit
+# equality with diffusers on every step count, spacing and objective the fleet
+# reaches.
 #
-# Stage 1 pins one detail of torch that is worth naming out loud, because it is
-# the only place this module depends on an implementation rather than a
-# contract: ``torch.linspace`` on a float32 CPU tensor computes a float32
-# ``step`` and then walks OUTWARD FROM BOTH ENDS — ``start + step*i`` for the
-# first half, ``end - step*(n-1-i)`` for the second — so the endpoints are
-# exact. The straightforward ``start + (end-start)*i/(n-1)`` disagrees with it
-# on 307 of 1000 entries. ``tests/model/test_scheduler_euler_discrete.py`` pins
-# this against the installed torch, so a torch that changed the kernel would
-# fail loudly here rather than serve a quietly different schedule.
+# **But 0 ULP is a property of ONE MACHINE, because the reference is not
+# reproducible across machines.** Measured, not inferred: torch dispatches its
+# CPU ``linspace`` by ISA, and the scalar kernel disagrees with the vectorized
+# one on **145 of 1000 entries by 1 ULP**
+# (``ATEN_CPU_CAPABILITY=default`` vs the AVX path). That 1 ULP propagates to
+# **6 ULP** on a resolved sigma ladder — amplified by
+# ``rescale_betas_zero_snr``, whose ``alphas_bar[i]/alphas_bar[i-1]`` divides
+# two nearly-equal numbers after a subtraction that has already cancelled most
+# of their significance. So *diffusers disagrees with itself* by up to 6 ULP
+# depending on which CPU the pod happened to rent, and no implementation can be
+# bit-exact against a reference that is not bit-exact against itself.
+#
+# The consequence is the opposite of a weakness, and it is why this module is
+# an improvement rather than a transcription: **this ladder IS reproducible.**
+# Every operation above is IEEE double arithmetic with one explicit narrowing,
+# so it is identical on every machine, every ISA and every torch build — which
+# is the same property ``initial_latents`` cites for CPU-seeding the noise, and
+# it is what lets a receipt's seed mean the same thing on two pods.
+#
+# The bar was 1 float32 ULP (pgw#1331). What is asserted is: **0 ULP against
+# the vectorized kernel, ≤8 against any kernel** (6 measured, 8 for margin),
+# with timesteps and ``init_noise_sigma`` exact in both — and our own ladder
+# byte-identical across kernels, which is the claim the tests fence hardest.
+# For scale: 6 float32 ULP at sigma 14.6 is ~1e-5 absolute, about four orders
+# of magnitude below ONE bf16 ULP there (~0.06), so the residual is invisible
+# to the dtype the denoiser actually runs in.
 #
 # NOT implemented, deliberately, and the reason is the endpoints (pgw#1346 B2
 # enumerated every sampler the sdxl and sd15 endpoints can reach):
