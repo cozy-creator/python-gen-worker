@@ -34,6 +34,7 @@ from gen_worker._vendor.torchcg import (
 )
 
 from . import activity as activity_mod
+from . import aot_constants
 from . import aot_identity
 from . import local_cell_store
 from .cell_adopt import AdoptOutcome
@@ -1470,21 +1471,34 @@ def _tcg_destination(cache_dir: Optional[Path], compiled_graph_key: str) -> Path
     return root / "compiled-graph-runtime" / compiled_graph_key
 
 
-def arm_compiled_graph(
-    pipeline: Any,
-    cfg: Any,
-    compiled_graph_key: str,
-    cache_dir: Optional[Path] = None,
-    *,
-    declared: Sequence[str] = (),
-) -> Dict[str, Any]:
-    """Resolve, bind, then register one exact TCG graph class.
+@dataclass(frozen=True)
+class ResolvedGraphClass:
+    """One exact key, resolved and loaded, before any constant source is asked.
+
+    Everything both arms share. The two arms differ ONLY in where the
+    ``state_dict`` constants come from, so this half is written once: a
+    resolve that models the artifact differently from the arm is the
+    pgw#816/#822 class, one level up from the constant table.
+    """
+
+    key: str
+    runner: CompiledGraphRunner
+    metadata: Dict[str, Any]
+    graph_class: Mapping[str, Any]
+    graph: Mapping[str, Any]
+    name: str
+    target: str
+
+
+def _resolve_graph_class(
+    compiled_graph_key: str, cache_dir: Optional[Path]
+) -> ResolvedGraphClass:
+    """Resolve one exact key and validate its declared graph class.
 
     TCG is the only artifact/store authority. The first resolve establishes
     the immutable extraction directory and admitted metadata; ``runner`` is
     asked for the same key and the same directory, so its internal resolve
-    verifies/reuses that extraction instead of creating a second one. No live
-    module or dispatch state changes until TCG's exact constant bind succeeds.
+    verifies/reuses that extraction instead of creating a second one.
     """
 
     key = str(compiled_graph_key or "").strip()
@@ -1539,6 +1553,41 @@ def arm_compiled_graph(
         raise AdoptError(
             "contract_invalid", "TCG graph_class must name both graph class and target"
         )
+    return ResolvedGraphClass(
+        key=key,
+        runner=runner,
+        metadata=metadata,
+        graph_class=graph_class,
+        graph=graph,
+        name=name,
+        target=target,
+    )
+
+
+def arm_compiled_graph(
+    pipeline: Any,
+    cfg: Any,
+    compiled_graph_key: str,
+    cache_dir: Optional[Path] = None,
+    *,
+    declared: Sequence[str] = (),
+) -> Dict[str, Any]:
+    """Resolve, bind, then register one exact TCG graph class.
+
+    The MODULE-SOURCED arm: the live eager module supplies the constant
+    table, so the whole pipeline must be resident. That is a POLICY choice
+    (eager fallback, the mint's own parity proofs), not a property of
+    compiled serving — :func:`arm_compiled_graph_from_store` is the same arm
+    with the store as the constant source and no module at all.
+
+    No live module or dispatch state changes until TCG's exact constant bind
+    succeeds.
+    """
+
+    resolved = _resolve_graph_class(compiled_graph_key, cache_dir)
+    key, runner = resolved.key, resolved.runner
+    metadata, graph_class = resolved.metadata, resolved.graph_class
+    graph, name, target = resolved.graph, resolved.name, resolved.target
 
     family = str(getattr(cfg, "family", "") or "")
     module, attr = _target_owner(pipeline, target)
@@ -1595,6 +1644,139 @@ def arm_compiled_graph(
         key,
     )
     return serve_meta
+
+
+@dataclass(frozen=True)
+class StoreArmedGraph:
+    """One graph class armed with NO module anywhere on the path.
+
+    The record is deliberately split along the family/instance line
+    (pgw#1326, §4.27). ``key``/``graph_class``/``target`` are CLASS-level and
+    checkpoint-free — the same three for every fine-tune sharing one ``.so``.
+    ``weight_set`` and ``constants`` are INSTANCE-level: which checkpoint this
+    binding is of, and the tensors it bound. Two of these over one ``key``
+    with different ``weight_set``s are two instances of one family, which is
+    the shape a resident-module arm could not state at all.
+
+    ``constants`` is held because TCG installs the constant pointers
+    ``user_managed``: the tensors must outlive the runner, and with no module
+    to own them this record is that owner. Dropping it frees the weights out
+    from under a live AOTI container.
+    """
+
+    key: str
+    graph_class: str
+    target: str
+    family: str
+    weight_set: aot_constants.WeightSetRef
+    runner: TCGEntryRunner
+    dispatch: EntryDispatch
+    meta: Dict[str, Any]
+    constants: Dict[str, Any]
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Route one call through the ordinary ingress dispatch.
+
+        There is no module to wrap, so this record IS the call site. The
+        selection, the contract refusals and the per-entry counters are the
+        same ones a wrapped module gets — nothing about serving is special
+        because the constants came from the store.
+        """
+
+        _name, runner = self.dispatch.select(args, kwargs)
+        return runner(*args, **kwargs)
+
+
+def arm_compiled_graph_from_store(
+    cfg: Any,
+    compiled_graph_key: str,
+    store: aot_constants.ConstantStore,
+    *,
+    device: str,
+    cache_dir: Optional[Path] = None,
+    declared: Sequence[str] = (),
+) -> StoreArmedGraph:
+    """Arm one exact graph class from STORE bytes, by manifest FQN.
+
+    The same resolve, the same ingress contract and the same
+    ``CompiledGraphRunner.bind`` as :func:`arm_compiled_graph` — with the
+    constant table read out of the store the artifact's manifest names,
+    instead of out of a resident ``nn.Module``. No ``nn.Module`` and no
+    diffusers class is constructed, imported or touched on this path, which
+    is what lets an adopt-only serve host (pgw#1328) exist at all.
+
+    Order is the contract:
+
+    1. resolve the exact key (quarantine, admission, graph-class validation);
+    2. parse the declared constant table as a versioned, typed manifest;
+    3. check the WHOLE table against the store's headers — a refusal here
+       has allocated no device memory and registered no entry;
+    4. read the constants onto ``device`` and bind;
+    5. only then register the entry.
+
+    A store miss therefore costs a header read. It cannot cost a
+    half-populated constant table on a runner that ``bind`` has already
+    marked failed and un-bindable.
+    """
+
+    resolved = _resolve_graph_class(compiled_graph_key, cache_dir)
+    family = str(getattr(cfg, "family", "") or "")
+    target_device = str(device or "").strip()
+    if not target_device:
+        raise AdoptError(
+            "device_missing",
+            f"graph class {resolved.name!r}: a store-sourced arm has no module to "
+            f"take a device from, so the caller must name one",
+        )
+
+    manifest = aot_constants.parse_constant_manifest(
+        resolved.graph_class,
+        compiled_graph_format=resolved.metadata.get(COMPILED_GRAPH_FORMAT_KEY),
+    )
+    plan = aot_constants.plan_store_constants(manifest, store)
+    contract = CallIngress.from_graph(resolved.graph)
+    try:
+        constants = aot_constants.realize_store_constants(
+            plan, store, device=target_device
+        )
+        resolved.runner.bind(constants, device=target_device)
+    except ConstantBindingError as exc:
+        reason = ADOPT_OOM_REASON if exc.reason == "out_of_memory" else exc.reason
+        raise AdoptError(reason, f"graph class {resolved.name!r}: {exc}") from exc
+
+    dispatch = EntryDispatch(declared=tuple(str(item) for item in declared))
+    entry_runner = TCGEntryRunner(
+        resolved.runner, contract, resolved.target, resolved.name, family
+    )
+    dispatch.add(resolved.name, entry_runner)
+    serve_meta: Dict[str, Any] = {
+        **resolved.metadata,
+        "family": family,
+        "compiled_graph_key": resolved.key,
+        "constant_source": "store",
+        "weight_set": str(plan.weight_set),
+    }
+    logger.info(
+        "aot-serve: armed TCG graph class %s on %s from the store "
+        "(%d constants, %d store-sourced, weight_set=%s, key=%s)",
+        resolved.name,
+        resolved.target,
+        len(resolved.runner.declared_fqns),
+        len(plan),
+        plan.weight_set,
+        resolved.key,
+    )
+    return StoreArmedGraph(
+        key=resolved.key,
+        graph_class=resolved.name,
+        target=resolved.target,
+        family=family,
+        weight_set=plan.weight_set,
+        runner=entry_runner,
+        dispatch=dispatch,
+        meta=serve_meta,
+        constants=constants,
+    )
 
 
 def disarm_entry(pipeline: Any, name: str, reason: str) -> bool:
