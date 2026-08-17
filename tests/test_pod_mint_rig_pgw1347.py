@@ -761,8 +761,11 @@ def test_the_real_podguard_gate_is_the_one_we_call() -> None:
 
     try:
         podguard = load_podguard()
-    except RuntimeError as exc:  # the tracker checkout is not on a CI runner
-        pytest.skip(str(exc))
+    except RuntimeError:
+        # A STABLE reason string: the real exception names an absolute path,
+        # which would make this row's scripts/skip_census.txt key differ per
+        # machine and defeat the census that reads it.
+        pytest.skip("pgw#1347: podguard is a tracker-checkout peer, absent here")
     with pytest.raises(podguard.Unarmed):
         podguard.assert_armed({"env": {}})
     podguard.assert_armed({"env": {"PODGUARD_CONFIG_B64": "x"}})

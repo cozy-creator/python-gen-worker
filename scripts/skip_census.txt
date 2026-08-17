@@ -177,3 +177,13 @@ LOCAL-ONLY tests/test_micro_mint_rig_pgw978.py|the pgw#978 micro-mint rig is opt
 # divergence ledger parametrized over a list that has been empty since
 # 2026-08-02. None of them had ever run anywhere.
 STAGED tests/convert/test_p8_convert_publish_contract.py|pgw#566 open: normalize_adapter_state_dict only passes unet_config to converters with a named unet_config parameter (ins
+
+# pgw#1347 — the pod mint-rig's ONE row that reaches outside this repository.
+# It proves the gate the rig relies on is podguard's real `assert_armed` and not
+# a lookalike, so it needs the tracker checkout that owns podguard; a CI runner
+# has only this repo. The CONTRACT it guards (a create body without
+# PODGUARD_CONFIG_B64 is refused) is covered in CI by
+# `test_the_rest_layer_refuses_an_unarmed_create`, which fakes the guard — so
+# what is unverified on the runner is only "the real module agrees", and that is
+# verified on every developer box and before every real rental.
+CI-SKIPPED tests/test_pod_mint_rig_pgw1347.py|pgw#1347: podguard is a tracker-checkout peer, absent here
