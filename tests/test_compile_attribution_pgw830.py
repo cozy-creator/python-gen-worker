@@ -202,10 +202,19 @@ def test_pool_idle_is_accounted_separately_from_child_seconds(
 
     facts = led.facts()
     assert facts["pool_idle_s"] == pytest.approx(
-        facts["idle_staging_s"] + facts["idle_drain_s"]
-        + facts["idle_spawn_s"] + facts["idle_other_s"], abs=0.01)
-    # Spawning is parent-serial and really does hold a freed slot.
-    assert facts["spawn_total_s"] > 0.0
+        facts["idle_staging_s"] + facts["idle_source_s"]
+        + facts["idle_drain_s"] + facts["idle_spawn_s"]
+        + facts["idle_other_s"], abs=0.01)
+    # Spawning and staging are parent-serial and really do hold a freed slot.
+    #
+    # pgw#1317: asserted on the LEDGER, never on `facts()`. `facts()` rounds to
+    # milliseconds for the wire, and both of these are microsecond work — a
+    # fork is 250-450 us, staging is one json write. Read off `facts()` this is
+    # an assertion about how fast the runner is, and it duly went red on master
+    # (`assert 0.0 > 0.0`) with nothing broken. The ledger holds the
+    # measurement; rounding belongs at the render.
+    assert led.spawn_total_s > 0.0
+    assert led.stage_total_s > 0.0
 
 
 # ---------------------------------------------------------------------------
