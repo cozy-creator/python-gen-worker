@@ -522,7 +522,20 @@ def generate(self, ctx, payload: TextToImageInput) -> ImageOutput: ...
 
 `objectives` = which checkpoint training objectives the handler's code
 path serves (omit = unrestricted); `distilled` = True (only distilled) /
-False (only non-distilled) / omit (either). The boot WARM PLAN is DERIVED
+False (only non-distilled) / omit (either).
+
+**A declared axis needs EVIDENCE, and it fails closed without one.** The hub
+gates this at deploy and at dispatch; the worker backstops it at warmup with
+the same rule. A checkpoint whose `distilled_status` is anything but
+`classified` — including unstamped — has no verdict on that axis, so it does
+not satisfy `distilled=`, and a checkpoint with no training objective does not
+satisfy `objectives=`. `distilled=False` means "evidenced non-distilled", never
+"nobody looked". The contract is scoped to the slot the request's model pick
+lands on (or, on a function with no selectable slot, to the slots that declared
+a `family`), so auxiliary slots — interpolators, upscalers — are never asked
+for evidence they cannot carry.
+
+The boot WARM PLAN is DERIVED
 — defaulted fields keep their schema defaults, `CompileAxis` fields
 cross-product their classes' `warm=` representatives, required fields
 synthesize neutral values — so there is no `warmup=` payload dict to
