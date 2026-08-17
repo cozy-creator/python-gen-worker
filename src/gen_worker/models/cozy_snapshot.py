@@ -28,9 +28,8 @@ from gen_worker._vendor.tensorfs import (
     LocalCAS,
     RefConflict,
     RepositoryManifest,
-    TransferGrant,
-    download,
 )
+from gen_worker.transfer.grants import TransferGrant, download
 
 from .. import activity as _activity
 from .. import boot_phases

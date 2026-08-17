@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-from .refs import CASRef
+from gen_worker._vendor.tensorfs.refs import CASRef
 
 
 @dataclass(frozen=True, slots=True)

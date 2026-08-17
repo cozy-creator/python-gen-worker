@@ -18,7 +18,8 @@ import hashlib
 import os
 from pathlib import Path
 
-from gen_worker._vendor.tensorfs import CASRef, TransferReport
+from gen_worker._vendor.tensorfs import CASRef
+from gen_worker.transfer.grants import TransferReport
 
 import gen_worker.models.cozy_snapshot as snap_mod
 from gen_worker import config as gw_config

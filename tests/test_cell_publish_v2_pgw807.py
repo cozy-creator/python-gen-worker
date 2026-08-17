@@ -30,7 +30,7 @@ import uuid
 from pathlib import Path
 
 import pytest
-from gen_worker._vendor.tensorfs import TransferReport
+from gen_worker.transfer.grants import TransferReport
 
 import gen_worker.hubio.client as hub_client
 from gen_worker._vendor.torchcg import GRAPH_CLASS_BLOCK, REQUIRED_AXES

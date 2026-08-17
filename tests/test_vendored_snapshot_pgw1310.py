@@ -6,10 +6,12 @@ a tree the other refuses:
 1. CONTENT — every vendored file hashes to the digest recorded beside its rev.
    Catches a hand-patch, a partial re-vendor, and a rev bump whose manifest was
    not regenerated.
-2. BEHAVIOUR — the pinned `tensorfs` rev is pinned FOR the pgw#1287 progress
-   fix, so the fence asserts the fix runs, not that a string says it should.
-   A digest fence alone would happily certify a correctly-recorded snapshot of
-   the broken tree.
+2. BEHAVIOUR — a digest fence alone would happily certify a correctly-recorded
+   snapshot of a broken tree, so the pgw#1287 progress fix is asserted by
+   RUNNING it. pgw#1308 moved that code first-party (`gen_worker.transfer`),
+   which is a strengthening rather than a loss: the fence now guards pgw's own
+   source instead of fidelity to an upstream rev, and a third fence refuses
+   the transfer plane's return to the vendored snapshot.
 
 Plus the reason the vendoring exists at all: the built distribution must not
 require either deleted project from an index (ie#738).
@@ -51,16 +53,40 @@ def test_every_vendored_file_matches_its_recorded_digest() -> None:
             )
 
 
-def test_the_pinned_tensorfs_rev_emits_progress_as_each_object_lands() -> None:
-    """pgw#1287: the fix this rev is pinned for, asserted by running it.
+def test_the_vendored_tensorfs_carries_no_transfer_plane() -> None:
+    """pgw#1308: the transfer plane is FIRST-PARTY, and the fence says so.
+
+    The two modules were pinned to a lineage upstream had abandoned -- current
+    tensorfs has no Python transfer plane at all -- so a digest fence over
+    them certified fidelity to a rev nobody would ever fix. They now live at
+    `gen_worker.transfer`, where their behaviour fence (pgw#1287) went with
+    them. Re-vendoring them here would silently restore two implementations of
+    one wire.
+    """
+    import gen_worker._vendor.tensorfs as vendored
+
+    for retired in ("transfer", "journal", "daemon"):
+        assert retired not in MANIFEST["packages"]["tensorfs"]["files"], (
+            f"tensorfs/{retired}.py is back in the vendored snapshot. It is "
+            f"first-party at gen_worker/transfer/ (pgw#1308)."
+        )
+        assert not (VENDOR / "tensorfs" / f"{retired}.py").exists()
+    for symbol in ("TransferGrant", "TransferReport", "download", "upload", "MountedPath"):
+        assert not hasattr(vendored, symbol), (
+            f"{symbol} is re-exported from the vendored storage package again"
+        )
+
+
+def test_the_transfer_plane_emits_progress_as_each_object_lands() -> None:
+    """pgw#1287, now asserted against pgw's OWN code rather than a pinned rev.
 
     The second object cannot finish until the FIRST object's callback has been
     observed. Post-drain emission (the defect: a 31.6 GB download reporting
     `0 / total` until its last byte landed, so the hub's 6-minute freshness
     window condemned a healthy pod) cannot satisfy that, at any timeout.
     """
-    from gen_worker._vendor.tensorfs import CASRef, TransferGrant
-    from gen_worker._vendor.tensorfs.transfer import _run_parallel
+    from gen_worker._vendor.tensorfs import CASRef
+    from gen_worker.transfer.grants import TransferGrant, _run_parallel
 
     grants = [
         TransferGrant(
