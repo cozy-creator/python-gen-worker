@@ -265,7 +265,10 @@ def test_the_REQUEST_TIME_serving_shape_serves_and_confesses() -> None:
     # FACTS are the variable under test.
     child_preflight.bind_slots(siblings, {"pipeline": child_contract.MintSlot(
         ref=PICKED, path="/tree", facts=UNSTAMPED)})
-    slots = {"pipeline": dispatch.SlotOrder(ref=PICKED, facts=UNSTAMPED)}
+    # `SlotOrder.ref` is the WIRE string; the typed ref reaches the reader off
+    # the spec, which is why `bind_slots` above is the half that matters here.
+    slots = {"pipeline": dispatch.SlotOrder(
+        ref="tensorhub/harness/catalog-pick@prod", facts=UNSTAMPED)}
 
     with _Events() as ev:
         out = resolved_slots_kwargs(chosen, slots)
