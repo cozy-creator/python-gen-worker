@@ -4,9 +4,11 @@ The proactive fit ladder is being deleted (``Resources.vram_gb_hint`` is an
 ESTIMATE deciding placement before anything is measured — §4.33), which makes
 the reactive OOM walk in :mod:`gen_worker.models.rung` the ONLY ladder. Its
 bottom therefore stops being theoretical, and falling off it must be a typed,
-visible refusal naming OUR code rather than a silent slide into a rung nothing
-can run — the loud-estimate-error-for-quiet-execution-error trade §1.35 and
-§1.36 keep rejecting.
+visible event naming OUR code rather than a silent slide.
+
+pgw#1315 then made the bottom rung EXECUTE, which leaves exactly ONE floor —
+``FLOOR_LADDER_EXHAUSTED``, reported only when the pipeline is already standing
+on ``cpu``. No declared rung is one this build declines to run any more.
 
 Deliberately torch-free: it imports ``rung`` and nothing else, so it runs on a
 CPU-only runner and on a laptop with no CUDA. The floor it guards is exercised
@@ -26,8 +28,11 @@ ALL_TOKENS = (
     + [r.name for r in rung.LADDER]
 )
 
+#: pgw#1315 removed the second one. `FLOOR_CPU_RUNG_UNEXECUTABLE` said the walk
+#: stopped above a rung this build could not execute; the build executes it now,
+#: so the token is DELETED rather than repointed — which is the condition
+#: `test_the_cpu_floor_exists_only_because_cpu_is_unreachable` stated below.
 FLOORS = {
-    rung.FLOOR_CPU_RUNG_UNEXECUTABLE,
     rung.FLOOR_LADDER_EXHAUSTED,
 }
 
@@ -77,31 +82,32 @@ def test_upper_rungs_descend_with_no_floor(token: str) -> None:
 
 # --- the floor itself -------------------------------------------------------
 
-def test_the_last_executable_rung_names_the_cpu_floor() -> None:
-    """``sequential`` is the real bottom; ``cpu`` below it is plan-time only."""
-    assert rung.descend("sequential") is None
-    assert rung.descent_floor("sequential") == rung.FLOOR_CPU_RUNG_UNEXECUTABLE
+def test_the_last_offload_rung_descends_to_cpu() -> None:
+    """``cpu`` is the bottom and it EXECUTES (pgw#1315), so ``sequential`` has
+    somewhere to go and nothing to explain."""
+    assert rung.descend("sequential") is rung.CPU
+    assert rung.descent_floor("sequential") is None
 
 
-def test_the_cpu_floor_exists_only_because_cpu_is_unreachable() -> None:
-    """RED-PROOF FOR pgw#1212's IMPLEMENTER, not a restatement of the ladder.
+def test_the_cpu_unexecutable_floor_is_deleted_with_its_cause() -> None:
+    """The condition this file stated for pgw#1212's implementer, now met.
 
-    ``FLOOR_CPU_RUNG_UNEXECUTABLE`` is a confession that ``cpu`` is declared,
-    priced at 40x and not executable. When pgw#1212 makes the rung real the
-    token must be DELETED — a floor that no longer exists must not be left
-    pointing somewhere else, which is how a diagnostic outlives its cause.
-    This goes red the moment ``descend`` starts handing out ``cpu``.
+    It read: *"When pgw#1212 makes the rung real the token must be DELETED — a
+    floor that no longer exists must not be left pointing somewhere else, which
+    is how a diagnostic outlives its cause."* pgw#1315 made the rung real, so
+    this asserts the deletion instead of the confession.
     """
+    assert not hasattr(rung, "FLOOR_CPU_RUNG_UNEXECUTABLE")
     assert rung.LADDER[-1] is rung.CPU
-    assert rung.PLACEMENT_LADDER[-1] == rung.SEQUENTIAL.name
-    assert rung.CPU.name not in rung.PLACEMENT_LADDER
-    assert all(rung.descend(t) is not rung.CPU for t in ALL_TOKENS)
+    assert rung.PLACEMENT_LADDER[-1] == rung.CPU.name
+    assert any(rung.descend(t) is rung.CPU for t in ALL_TOKENS)
 
 
 def test_standing_on_the_bottom_rung_does_not_climb() -> None:
-    """``cpu`` is below the placement tail, so the resident-token arm must not
-    claim it. Before th#1867 this returned ``model_offload`` — the walk went
-    UP, which under pgw#1212 (where ``cpu`` becomes reachable) is a cycle."""
+    """``cpu`` is the end of the placement tail, so the resident-token arm must
+    not claim it. Before th#1867 this returned ``model_offload`` — the walk went
+    UP, which now that ``cpu`` is REACHABLE (pgw#1315) would be a live cycle,
+    not a latent one."""
     assert rung.descend("cpu") is None
     assert rung.descent_floor("cpu") == rung.FLOOR_LADDER_EXHAUSTED
 

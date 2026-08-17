@@ -2498,7 +2498,14 @@ class Executor:
                 # The rung ASKED FOR, when a descent moved off it. Absent on a
                 # proactive selection: nothing was asked, the fit decided.
                 wanted=str(placed.get("requested_mode") or ""),
+                # pgw#1315: a PROACTIVE cpu placement is `no_cuda` — there was
+                # no card to be short of. The separate `if mode == "cpu"` block
+                # that used to say so appended SECOND, and appends are
+                # idempotent per (name, component), so it was dropped in favour
+                # of a `vram_shortfall` that never happened. Silence is the
+                # pattern: the dead arm read as coverage.
                 reason=(posture_mod.REASON_CUDA_OOM if reactive
+                        else posture_mod.REASON_NO_CUDA if mode == "cpu"
                         else posture_mod.REASON_VRAM_SHORTFALL))
         if mode == "vae_only":
             # Resident, but NOT the same run: slicing changes the traced decode
@@ -2507,10 +2514,6 @@ class Executor:
             ledger.technique(
                 posture_mod.TECHNIQUE_VAE_SLICING, component="vae",
                 reason=posture_mod.REASON_VRAM_SHORTFALL)
-        if mode == "cpu":
-            ledger.technique(
-                posture_mod.TECHNIQUE_CPU, component=str(ref or ""),
-                reason=posture_mod.REASON_NO_CUDA)
         needed_gb = float(placed.get("fit_needed_gb") or 0.0)
         if needed_gb > 0.0:
             ledger.shortfall(posture_mod.ResourceShortfall.from_gb(
@@ -10440,12 +10443,18 @@ class Executor:
         if refused:
             transitions = []
         for ref, from_mode, to_mode, needed_gb in transitions:
+            # pgw#1315: the rung's OWN wire projection. The tail's `offload`
+            # token was hardcoded here, so a descent onto the CPU rung reached
+            # the hub as `ran="offload"` — a wrong measurement, not a coarse
+            # one, on the field the hub matches exactly.
+            run_mode = rungspec.run_mode_of(to_mode) or RUN_OFFLOAD
             self._record_rung_transition(
                 spec, ref=ref, phase="inference",
                 from_rung=from_mode or "resident", to_rung=to_mode,
-                run_mode=RUN_OFFLOAD, needed_gb=needed_gb,
+                run_mode=run_mode, needed_gb=needed_gb,
                 detail=f"CUDA OOM mid-inference ({type(exc).__name__}); "
-                       "quarantining this instance for a clean offloaded reload",
+                       f"quarantining this instance for a clean reload onto "
+                       f"the {to_mode} rung",
             )
         flush_memory()
         rec = self._classes.get(spec.instance_key)
@@ -10469,29 +10478,33 @@ class Executor:
             # proactive fit ladder deleted (an estimate deciding placement
             # before anything is measured — §4.33), this reactive walk is the
             # only ladder, so falling off its bottom must be a typed, visible
-            # refusal naming OUR code — never a silent slide into a rung
-            # nothing can run, which would convert a loud estimate-error into a
-            # quiet execution-error.
+            # event naming OUR code.
+            #
+            # pgw#1315 left exactly ONE floor to report. `cpu` EXECUTES now, so
+            # the walk no longer stops above it and there is no longer any rung
+            # this build declines to run. Reaching here means the pipeline is
+            # already standing on the bottom rung — a CUDA OOM on a pipeline
+            # that is not on the card is host-side pressure, and no further
+            # placement change can answer it.
             floors = {
                 rungspec.descent_floor(low_vram_mode(obj))
                 for obj in (self._slot_pipeline(spec, slot) for slot in spec.models)
                 if obj is not None
             }
             floors.discard(None)
-            if rungspec.FLOOR_CPU_RUNG_UNEXECUTABLE in floors:
+            if rungspec.FLOOR_LADDER_EXHAUSTED in floors:
                 activity_mod.emit_event(
                     activity_mod.KIND_SERVE_DEGRADE,
                     detail=(
-                        f"fn={spec.name}: the placement ladder descended to its "
-                        f"last executable rung (sequential) and the next one is "
-                        f"`cpu`, which THIS BUILD CANNOT EXECUTE — the reactive "
-                        f"walk treats it as plan-time only (pgw#1212). This is a "
-                        f"limitation of our worker, not of the card: §1.35 "
-                        f"requires every model to run on every device, CPU "
-                        f"included. The request returns retryable and the hub "
-                        f"re-places it."
+                        f"fn={spec.name}: the placement ladder is already on its "
+                        f"bottom rung (`cpu` — the whole pipeline is host "
+                        f"resident and serving there), so there is no lower "
+                        f"placement to descend to. The request returns retryable "
+                        f"and the hub re-places it. This names OUR ladder, not "
+                        f"the card: §1.35 requires every model to run on every "
+                        f"device, and on this one it already is."
                     ),
-                    phase=rungspec.FLOOR_CPU_RUNG_UNEXECUTABLE,
+                    phase=rungspec.FLOOR_LADDER_EXHAUSTED,
                 )
             logger.warning(transition_line(
                 event="engaged", fn=spec.name, phase="inference",

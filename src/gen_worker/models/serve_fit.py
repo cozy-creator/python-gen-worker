@@ -22,10 +22,10 @@ every harness endpoint declares `Resources(gpu=True)` and serves on CPU-only CI,
 and `test_boot_span_ladder_pgw797` boots one and runs a warmup forward through
 it. Withdrawing a function that demonstrably works is the opposite of §1.35
 amendment 2's bar ("the worker either serves, however slowly, or emits a typed
-defect naming what in OUR code failed"). pgw#1212's protection stays where it
-already was and where it is true: the REACTIVE walk in `models/rung` stops one
-rung short of CPU (`FLOOR_CPU_RUNG_UNEXECUTABLE`), so a pod that OOMs its way
-down refuses and names our code. Plan time is not that situation.
+defect naming what in OUR code failed"). pgw#1315 closed the other half: the
+REACTIVE walk used to stop one rung short of CPU, so a pod that OOM'd its way
+down refused where plan time served. Both ends now reach the same bottom rung
+and it EXECUTES (`memory.apply_low_vram_config` mode `cpu`).
 
 Every degraded plan carries ``wanted`` (what the function declares) and ``ran``
 (what actually runs) so the worker can report the degradation STRUCTURALLY to
@@ -123,11 +123,8 @@ def plan_serve(
     # forward. Refusing here would have withdrawn a function that demonstrably
     # WORKS, which is the opposite of §1.35 amendment 2's robustness bar.
     #
-    # pgw#1212's protection is real and stays exactly where it already was: the
-    # REACTIVE walk in `models/rung` stops one rung short of CPU
-    # (FLOOR_CPU_RUNG_UNEXECUTABLE), so a pod that OOMs its way down still
-    # refuses, naming our code. Plan time is not that situation — nothing has
-    # failed here.
+    # pgw#1315: the reactive walk reaches this same rung now, so plan time and
+    # a descent that exhausts every offload rung land on ONE answer.
     #
     # pgw#896: "no CUDA device detected" was said for BOTH a genuinely cardless
     # pod and a pod whose card would not answer, because the predicate behind
