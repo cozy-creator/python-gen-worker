@@ -326,6 +326,14 @@ jobs:
       - name: pgw#849 guard 2 - unreached public surface (aot/mint/serve)
         run: uv run python scripts/lint_unreached_surface.py
 
+      # pgw#1350: and the --siblings half must be able to REFUSE. CI has no
+      # sibling checkouts, so it can never run that mode for real — which is
+      # exactly why the 2026-08-16 rename left it scanning 5 corpora while
+      # printing "across 6 siblings, 0 unlisted consumers" and nothing noticed.
+      # The selftest forces both arms in a temp workspace (<1s, no network).
+      - name: pgw#849 guard 2 - the sibling scan can go red
+        run: uv run python scripts/lint_unreached_surface.py --siblings-selftest
+
       # GATING (pgw#931, ruling §1.18): exactly ONE component reads the
       # environment. Every other os.environ access needs a CLASSIFIED line in
       # scripts/config_reads_allowlist.txt. Also proves the loader's

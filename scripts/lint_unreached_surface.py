@@ -572,11 +572,15 @@ def reached(d: Definition, reach: Reach) -> bool:
 # consumer's dependency.
 # ---------------------------------------------------------------------------
 
-# DIRECTORY names, and a missing one is skipped silently at the loop below — so a
-# stale entry here is a consumer repo this fence stops reading without saying so.
-# `inference-endpoints` became `serverless-endpoints` on 2026-08-16;
-# `training-endpoints` becomes `jobs` when its checkout is renamed.
-SIBLINGS = ("training-endpoints", "serverless-endpoints",
+# DIRECTORY names, and this list being CLOSED is the fence. A NAMED sibling that
+# is not on disk is a REFUSAL that prints the path, never a skip — the loop below
+# used to `continue` past it, which is how the 2026-08-16 rename made this scan
+# read 5 corpora while printing "across 6 siblings, 0 unlisted consumers"
+# (pgw#1323). Renaming the entry fixed that instance; refusing fixes the class.
+#
+# `inference-endpoints` became `serverless-endpoints` on 2026-08-16 and
+# `training-endpoints` became `jobs` on 2026-08-17; both directory moves are done.
+SIBLINGS = ("jobs", "serverless-endpoints",
             "private-inference-endpoints", "tensorhub", "e2e", "cozy-local")
 def _workspace() -> Path:
     """The directory the sibling repos sit in. Walk up rather than assume
@@ -597,11 +601,24 @@ WORKSPACE = _workspace()
 PRICING = WORKSPACE / "e2e" / "manifests" / "pricing.yaml"
 
 
-def _sibling_texts(with_branches: bool,
-                   extra: Tuple[str, ...] = ()) -> List[Tuple[str, str, str]]:
-    """(repo, where, text) over every sibling checkout, and optionally over the
-    content of every REMOTE BRANCH — a call site can live on an unmerged branch
-    and is a consumer just the same.
+def _sibling_texts(
+    with_branches: bool,
+    extra: Tuple[str, ...] = (),
+    siblings: Tuple[str, ...] = (),
+    workspace: Optional[Path] = None,
+) -> Tuple[List[Tuple[str, str, str]], List[str], List[str]]:
+    """``(corpus, scanned, refusals)``.
+
+    ``corpus`` is ``(repo, where, text)`` over every sibling checkout, and
+    optionally over the content of every REMOTE BRANCH — a call site can live on
+    an unmerged branch and is a consumer just the same. ``scanned`` is the repos
+    actually READ, which is the number the report prints; ``len(SIBLINGS)`` is
+    the number it used to print, and the gap between them is the whole defect.
+
+    **A named sibling that is not on disk is a REFUSAL, not a skip.** So is a
+    ``git grep`` that fails for any reason other than "no match" (rc 1). This
+    scan's only job is to say "nobody outside this repo calls X"; a corpus it
+    silently did not read makes that sentence false while it still prints green.
 
     ``git grep`` rather than a filesystem walk: it reads the index, skips
     ``.venv`` / ``node_modules`` / build output for free, and turns a
@@ -610,6 +627,8 @@ def _sibling_texts(with_branches: bool,
     carry.
     """
     import subprocess
+    names = siblings or SIBLINGS
+    root_dir = WORKSPACE if workspace is None else workspace
     # `gen_worker` and `ctx.` alone are NOT enough: a sibling writes
     # `io.read_image(path)` on a line that mentions neither. So every finding's
     # leaf name is a pattern too — that is the whole point of the check.
@@ -617,25 +636,42 @@ def _sibling_texts(with_branches: bool,
     for name in extra:
         pats += ["-e", name]
     out: List[Tuple[str, str, str]] = []
-    for name in SIBLINGS:
-        root = WORKSPACE / name
+    scanned: List[str] = []
+    refusals: List[str] = []
+    for name in names:
+        root = root_dir / name
         if not (root / ".git").exists():
+            refusals.append(
+                f"{name}: NO CHECKOUT at {root} — this fence certifies that NOTHING outside "
+                f"this repo calls a finding, and it cannot certify a corpus it did not read. "
+                f"Clone it, or remove {name!r} from SIBLINGS deliberately (the 2026-08-16/17 "
+                f"repo renames are what made this list stale while it still printed green)")
             continue
         try:
-            blob = subprocess.run(["git", "grep", "-h", "-I", *pats], cwd=root,
-                                  capture_output=True, text=True,
-                                  timeout=180).stdout
-        except Exception:
-            blob = ""
-        if blob:
-            out.append((name, name, blob))
+            r = subprocess.run(["git", "grep", "-h", "-I", *pats], cwd=root,
+                               capture_output=True, text=True, timeout=180)
+        except Exception as e:
+            refusals.append(f"{name}: git grep failed at {root}: {e}")
+            continue
+        # rc 1 is "no match", which is a real answer. Anything above it is not.
+        if r.returncode > 1:
+            refusals.append(
+                f"{name}: git grep exited {r.returncode} at {root} "
+                f"({r.stderr.strip().splitlines()[:1]}) — unread, not clean")
+            continue
+        scanned.append(name)
+        if r.stdout:
+            out.append((name, name, r.stdout))
         if not with_branches:
             continue
         try:
             heads = subprocess.run(["git", "ls-remote", "--heads", "origin"],
                                    cwd=root, capture_output=True, text=True,
                                    timeout=180).stdout.split()
-        except Exception:
+        except Exception as e:
+            refusals.append(
+                f"{name}: --branches asked for every remote branch and ls-remote failed "
+                f"at {root}: {e} — the branch half of this repo went unread")
             continue
         for ref in [h for h in heads if h.startswith("refs/heads/")]:
             br = ref[len("refs/heads/"):]
@@ -644,21 +680,88 @@ def _sibling_texts(with_branches: bool,
                     ["git", "grep", "-h", "-I", *pats, f"origin/{br}"],
                     cwd=root, capture_output=True, text=True,
                     timeout=180).stdout
-            except Exception:
+            except Exception as e:
+                refusals.append(f"{name}@{br}: git grep failed: {e} — branch unread")
                 continue
             if blob:
                 out.append((name, f"{name}@{br}", blob))
-    return out
+    return out, scanned, refusals
+
+
+def siblings_selftest() -> int:
+    """A fence that cannot go red proves nothing. Both arms, forced.
+
+    This runs anywhere — it builds throwaway git repos in a temp directory and
+    never touches the real siblings — so CI can prove the refusal exists even
+    though CI has no checkouts to scan.
+    """
+    import subprocess
+    import tempfile
+
+    bad = 0
+    with tempfile.TemporaryDirectory() as td:
+        ws = Path(td)
+        present = ("alpha", "beta")
+        for name in present:
+            d = ws / name
+            d.mkdir()
+            (d / "use.py").write_text("from gen_worker.io import read_image\n")
+            for cmd in (["git", "init", "-q"],
+                        ["git", "add", "use.py"],
+                        ["git", "-c", "commit.gpgsign=false", "-c", "user.name=t",
+                         "-c", "user.email=t@t", "commit", "-qm", "x"]):
+                subprocess.run(cmd, cwd=d, check=True, capture_output=True)
+
+        # ARM 1 — every named sibling present: clean, and the count is the truth.
+        corpus, scanned, refusals = _sibling_texts(False, (), present, ws)
+        if refusals:
+            print(f"FAIL selftest all-present: expected no refusals, got {refusals}")
+            bad += 1
+        if sorted(scanned) != sorted(present):
+            print(f"FAIL selftest all-present: scanned {scanned}, want {list(present)}")
+            bad += 1
+        if len(corpus) != 2:
+            print(f"FAIL selftest all-present: {len(corpus)} corpora, want 2")
+            bad += 1
+
+        # ARM 2 — one named sibling absent: a REFUSAL that names the path, and a
+        # `scanned` count that is smaller than the declared list. This is the
+        # exact shape the 2026-08-16/17 repo renames created, and before this
+        # change it was a `continue` under a printed "across 6 siblings".
+        gone = ws / "jobs"
+        corpus, scanned, refusals = _sibling_texts(False, (), (*present, "jobs"), ws)
+        if not refusals:
+            print("FAIL selftest missing-sibling: a named sibling that is not on "
+                  "disk produced NO refusal — that is the silent skip this exists for")
+            bad += 1
+        elif not any(str(gone) in r for r in refusals):
+            print(f"FAIL selftest missing-sibling: refusal does not name {gone}: {refusals}")
+            bad += 1
+        if len(scanned) != 2:
+            print(f"FAIL selftest missing-sibling: scanned {scanned}, want 2 — the count "
+                  f"printed must be what was READ, never len(SIBLINGS)")
+            bad += 1
+
+    print(f"siblings selftest: {'FAILED' if bad else 'both arms hold'} ({bad} failure(s))",
+          file=sys.stderr)
+    return 1 if bad else 0
 
 
 def cross_repo_report(findings: List["Finding"], with_branches: bool) -> int:
     leaves = tuple(sorted({f.label.rstrip("()").split(".")[-1]
                            for f in findings}))
-    corpus = _sibling_texts(with_branches, leaves)
-    if not corpus:
-        print("no sibling checkouts beside this repo — nothing to check "
-              f"(looked for {', '.join(SIBLINGS)} in {WORKSPACE})", file=sys.stderr)
-        return 0
+    corpus, scanned, refusals = _sibling_texts(with_branches, leaves)
+    # A NAMED sibling this scan could not read makes its one sentence — "nothing
+    # outside this repo calls X" — false. It is a refusal that names the path,
+    # and it is the answer whether or not the readable half found anything.
+    if refusals:
+        for r in refusals:
+            print(f"CROSS-REPO SCAN REFUSED: {r}", file=sys.stderr)
+        print(f"\ncross-repo check REFUSED: read {len(scanned)} of {len(SIBLINGS)} named "
+              f"siblings ({', '.join(scanned) or 'none'}) in {WORKSPACE} — a verdict about "
+              f"consumers cannot be issued over a corpus that was not read",
+              file=sys.stderr)
+        return 1
     priced = PRICING.read_text(encoding="utf-8") if PRICING.exists() else ""
     missing: List[str] = []
     for f in findings:
@@ -690,9 +793,14 @@ def cross_repo_report(findings: List["Finding"], with_branches: bool) -> int:
     for m in sorted(set(missing)):
         print(f"CROSS-REPO CONSUMER, not in author_surface_allowlist.txt: {m}",
               file=sys.stderr)
-    print(f"\ncross-repo check: {len(corpus)} files/branches scanned across "
-          f"{len(SIBLINGS)} siblings, {len(set(missing))} unlisted consumers",
-          file=sys.stderr)
+    # THE COUNT, and it is `scanned`, never `SIBLINGS`. Printing the declared
+    # length while the loop had skipped one is precisely how this scan read 5
+    # corpora and announced 6 (pgw#1323). They can only differ now if `refusals`
+    # was empty, which the branch above guarantees — the assert says so.
+    assert len(scanned) == len(SIBLINGS), (scanned, SIBLINGS)
+    print(f"\ncross-repo check: {len(corpus)} corpora (files/branches) scanned across "
+          f"{len(scanned)}/{len(SIBLINGS)} siblings ({', '.join(scanned)}), "
+          f"{len(set(missing))} unlisted consumers", file=sys.stderr)
     return 1 if missing else 0
 
 
@@ -1042,7 +1150,14 @@ def main() -> int:
                     help="with --siblings, also scan every REMOTE BRANCH of "
                          "each sibling (slow; a call site on an unmerged "
                          "branch is a consumer too)")
+    ap.add_argument("--siblings-selftest", action="store_true",
+                    help="force both arms of the sibling scan (missing sibling "
+                         "-> refusal, all present -> the true count) in a temp "
+                         "workspace; runs anywhere, including CI")
     args = ap.parse_args()
+
+    if args.siblings_selftest:
+        return siblings_selftest()
 
     if args.inert_declarations:
         rows = inert_declarations()
