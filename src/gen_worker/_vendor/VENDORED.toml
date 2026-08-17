@@ -156,8 +156,21 @@ subdir = "src/torchcg"
 # untars straight out of the store. `scripts/lint_materialization_hatch.py` and
 # tensorfs's own no-whole-tree-materialization exemption now cover exactly one
 # caller here, `aot_delivery.py`.
+#
+# AN UNDECLARED REWRITE WAS FOUND WHILE DOING THIS, and it is declared below.
+# pgw#1340 added `ARTIFACT_METADATA_FIELDS` to the vendored `artifact.py` and
+# `__init__.py` BY HAND and listed it nowhere; the digest fence passed because
+# the digests were regenerated after the patch. That is a fork of an identity
+# surface hiding under the fence that exists to prevent one — this file's own
+# header says the snapshots are byte-identical to upstream except for the
+# rewrites listed here, and for that symbol it had quietly stopped being true.
+# It is declared now, and torchcg#42 (tcg#40) gives it its real home: the field
+# set is torchcg's own closed vocabulary, public for the same reason
+# `REQUIRED_AXES` is. When that lands, RE-VENDOR AT IT AND DELETE THE SECOND
+# ROW — it is a rewrite with an expiry, not a permanent one.
 rewrites = [
   "`from tensorfs import ...` -> `from ..tensorfs import ...` in cli.py, engine.py, storage.py (3 lines; upstream's own dependency, vendored beside it). Upstream itself dropped `hashrepo` for `tensorfs` at tcg#28, so this rewrite is now only the relative-import prefix.",
+  "`ARTIFACT_METADATA_FIELDS = _TOP_LEVEL_FIELDS` added to artifact.py and exported from `__init__.py` (pgw#1340, undeclared until pgw#1342). `fleet_cells` imports it: a consumer that re-declares the closed metadata vocabulary reads `None` for a field TCG does not write, and `None` compares unequal to a real runtime fact forever (th#2098). EXPIRES at torchcg#42 — re-vendor and delete this row.",
 ]
 
 [packages.tensorfs.files]
@@ -172,11 +185,11 @@ rewrites = [
 "tensors.py" = "b68adf8b95161defb89ed06bdea8a778b54e21a461768a43ae658955ccc6db9d"
 
 [packages.torchcg.files]
-"__init__.py" = "c35ba12adf0f260437ececce13ba30bf7ea921b279147a1970b373562f558378"
+"__init__.py" = "97baadd78d99056f2d4d1cc6bb36900db85f9d0e5daaa137f490809a72153255"
 "__main__.py" = "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d"
 "_run_impl_split.py" = "c14db7289ae566ca2cfd636efce1b5b6e0d2f8f6069d993d5acc40bc0ef333b3"
 "_wrapper_split.py" = "f21e644e5345c7e2b7fd2b8f5b3ce4ac8216f263fc38768d45609469feb20870"
-"artifact.py" = "dd1ab586fb7c0edaf02ae5bff48028d5123063ad5f0ffff14f81ecdaa58e326c"
+"artifact.py" = "815a6048419b89687df3d96447eb303148bc98e02fe65ea117ad7941dc66e736"
 "cli.py" = "94a4328c72fa7821f31447883de0a36196b6429ae5e93c239a12699f190f592f"
 "compiler.py" = "8450b10e90ca8c6d8c411654d963ebc16dd3580bfe1427cce3966fc2b03972a7"
 "contracts/KEY_GRAMMAR_DIGEST" = "0503f3251f2eb48b794961736f021915cd56c14930798ac844c90112fa2af69d"
