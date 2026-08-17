@@ -1280,9 +1280,11 @@ class EntryCompilePool:
         )
         job_path = slot / "job.json"
         job_path.write_bytes(msgspec.json.encode(job))
-        self.entry_stage_seconds[share] = round(time.monotonic() - t0, 3)
-        self.ledger.stage_total_s = round(
-            self.ledger.stage_total_s + self.entry_stage_seconds[share], 3)
+        # pgw#1317: measured RAW, rounded only where it is rendered. Rounding
+        # each charge destroyed it: staging is a json write, so every share
+        # rounded to 0.000 and the total said the pool never staged.
+        self.entry_stage_seconds[share] = time.monotonic() - t0
+        self.ledger.stage_total_s += self.entry_stage_seconds[share]
         return job, job_path
 
     def _spawn(self, job: EntryJob, job_path: Path) -> _Running:
@@ -1300,9 +1302,10 @@ class EntryCompilePool:
         finally:
             handle.close()
         started, spawn_epoch = time.monotonic(), time.time()
-        self.entry_spawn_seconds[job.share] = round(started - t0, 3)
-        self.ledger.spawn_total_s = round(
-            self.ledger.spawn_total_s + (started - t0), 3)
+        # pgw#1317: raw, like every other charge on this ledger — a fork costs
+        # 250-450 us, which `round(x, 3)` discards outright.
+        self.entry_spawn_seconds[job.share] = started - t0
+        self.ledger.spawn_total_s += started - t0
         logger.info(
             "aot-pool: %s (rows[%d::%d]) -> pid %s",
             job.share, job.share_index, job.share_count, proc.pid)
@@ -1965,8 +1968,10 @@ class EntryCompilePool:
         # staging overlaps other children, so summing it into the compile
         # total would invent seconds nobody spent compiling. Its idle FRACTION
         # is `ledger.idle_staging_s`, which is a pool number, not an entry one.
-        spans["parent_stage_s"] = self.entry_stage_seconds.get(row.entry, 0.0)
-        spans["parent_spawn_s"] = self.entry_spawn_seconds.get(row.entry, 0.0)
+        spans["parent_stage_s"] = round(
+            self.entry_stage_seconds.get(row.entry, 0.0), 3)
+        spans["parent_spawn_s"] = round(
+            self.entry_spawn_seconds.get(row.entry, 0.0), 3)
         return spans
 
 def _stderr_tail(path: Path, limit: int = 2048) -> str:
