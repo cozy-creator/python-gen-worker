@@ -81,11 +81,11 @@ def test_the_read_plane_is_recorded_at_its_own_rev() -> None:
     """pgw#1330: the snapshot is SPLIT at two revs, and the split is declared.
 
     `project.py`, `tensors.py` and `gguf.py` come from a rev the storage half
-    is deliberately NOT at, because the newer lineage deleted `ingest_file`,
-    `collect_garbage` and `materialize_repository` — all three live here. A
-    split that is only in a comment is a split nobody can audit, so the rev is
-    a field and the file list is a field, and the digest fence above covers
-    them like any other vendored file.
+    is deliberately NOT at: the newer lineage deleted three `LocalCAS` methods
+    this repo still calls (ingest, GC, and the whole-tree copy the chokepoint
+    uses — VENDORED.toml names them). A split that is only in a comment is a
+    split nobody can audit, so the rev is a field and the file list is a
+    field, and the digest fence above covers them like any other vendored file.
     """
 
     spec = MANIFEST["packages"]["tensorfs"]
