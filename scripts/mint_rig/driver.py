@@ -184,7 +184,46 @@ class Rig:
 
     # ---- the one public verb -------------------------------------------------
 
-    def run(self, card: Card, workload: Workload, *, image: str = "", pod_name: str = "") -> RigRow:
+    def run(
+        self,
+        card: Card,
+        workload: Workload,
+        *,
+        image: str = "",
+        pod_name: str = "",
+        rerolls: int = 0,
+    ) -> RigRow:
+        """Rent, run, tear down — and take another host if this one was bad.
+
+        A `reroll` is the provider's fault, not the workload's: the host's driver
+        cannot reach the fleet CUDA line, or the pod never exposed a port inside
+        the bring-up budget. MEASURED 2026-08-17 across twelve rentals: roughly
+        half of them, on one evening, on the same public image. A matrix that
+        gives up on the first bad machine measures RunPod's weather rather than
+        the code.
+
+        The re-roll gets ANOTHER HOST, never another budget: `Rail.bank()`
+        carries the dead pod's spend forward, so `--rail 2.00` means $2.00
+        however many machines it takes. Every attempt banks its own row; this
+        returns the last one, whose `stage_trail` names the attempt.
+        """
+        row = self._run_once(card, workload, image=image, pod_name=pod_name)
+        attempt = 0
+        while row.verdict == "reroll" and attempt < rerolls:
+            attempt += 1
+            spent = self.rail.bank()
+            self.log(
+                f"[reroll] attempt {attempt}/{rerolls} — ${spent:.3f} of the "
+                f"${self.rail.max_usd:.2f} rail is gone to bad hosts; taking another"
+            )
+            if spent >= self.rail.max_usd * self.rail.start_headroom:
+                row.detail += f" | re-roll {attempt} REFUSED: no budget left"
+                break
+            row = self._run_once(card, workload, image=image, pod_name="")
+            row.stage("reroll", f"attempt {attempt} of {rerolls}")
+        return row
+
+    def _run_once(self, card: Card, workload: Workload, *, image: str = "", pod_name: str = "") -> RigRow:
         api, guard = self._api, self._guard
         name = pod_name or f"mintrig-{self.lane}-{int(time.time())}"
         image = image or FLEET_IMAGE

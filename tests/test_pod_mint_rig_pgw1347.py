@@ -37,7 +37,15 @@ from mint_rig.rail import Rail, RailTripped  # noqa: E402
 from mint_rig.row import Teardown  # noqa: E402
 from mint_rig.runpod import PodNotFound, RunpodRest  # noqa: E402
 from mint_rig.transport import Result, SshTransport  # noqa: E402
-from mint_rig.workload import POD_ROOT, Upload, Workload, install_sdist, mint_model  # noqa: E402
+from mint_rig.workload import (  # noqa: E402
+    POD_REPO,
+    POD_ROOT,
+    Upload,
+    Workload,
+    install_sdist,
+    mint_model,
+    sm_probe,
+)
 
 # --------------------------------------------------------------------------- #
 # fakes: the PROVIDER, not the rig
@@ -394,6 +402,28 @@ def test_bring_up_is_bounded_by_MONEY_because_it_has_no_progress_signal() -> Non
         rail.check_sub("endpoint", 0.15, now=1500.0)
 
 
+def test_the_bringup_budget_is_PER_POD_or_every_reroll_dies_instantly() -> None:
+    """MEASURED LIVE on pgw#1348 row 2: four re-rolls, each `reroll` at $0.000
+    and 0.0 min. That reads as four dead hosts and was one arithmetic error —
+    the per-POD allowance was being measured against the CUMULATIVE total, so
+    once $0.065 was banked against a $0.06 sub-cap, every later bring-up was
+    refused before its first observation."""
+    rail = Rail(max_usd=0.60)
+    rail.observe_rate(0.74)
+    rail.clock_started(at=0.0)
+    rail.bank(now=316.0)  # ~$0.065 gone to a bad host
+    assert rail.banked_usd == pytest.approx(0.0650, abs=1e-3)
+
+    # A fresh pod. Its OWN bring-up allowance is untouched by the dead one.
+    rail.observe_rate(0.74)
+    rail.clock_started(at=1000.0)
+    rail.check_sub("endpoint", 0.10, now=1100.0)  # 100 s on THIS pod: fine
+    with pytest.raises(RailTripped):
+        rail.check_sub("endpoint", 0.10, now=1000.0 + 0.06 / 0.74 * 3600 + 1)
+    # …while the INVOCATION total still carries the dead pod forward.
+    assert rail.spent_usd(now=1100.0) > rail.pod_spent_usd(now=1100.0)
+
+
 def test_a_gate_with_no_staleness_rule_waits_as_long_as_the_rail_allows() -> None:
     calls = {"n": 0}
 
@@ -590,6 +620,36 @@ def test_a_pod_that_never_answers_is_a_REROLL_not_a_budget_overrun(tmp_path: Pat
     assert row.verdict == "reroll" and row.failed_stage == "preflight"
     assert "re-roll the host" in row.detail
     assert pods.deleted == ["pod1"]
+
+
+def test_a_reroll_takes_another_HOST_but_never_another_BUDGET(tmp_path: Path) -> None:
+    """MEASURED 2026-08-17: roughly half of twelve rentals on one evening came up
+    on a host that could not run the fleet CUDA line, or never exposed a port. A
+    matrix that gives up on the first bad machine measures the provider's weather
+    rather than the code — and one that re-rolls on a fresh budget each time has
+    no budget at all."""
+    pods = FakePods(rate=0.74)
+    rail = Rail(max_usd=1.0)
+    rig = _rig(tmp_path, pods, FakeTransport(rigboot_rc=91), rail=rail)
+    row = rig.run(cards_mod.pick("sm89"), Workload(name="w", command="x"), rerolls=2)
+
+    assert row.verdict == "reroll"
+    assert len(pods.created_bodies) == 3, "one attempt plus two re-rolls"
+    assert pods.deleted == ["pod1", "pod2", "pod3"], "every bad host is torn down"
+    # The rail carried each dead pod's spend forward rather than restarting.
+    assert rail.banked_usd > 0.0
+    assert any(s["stage"] == "reroll" for s in row.stage_trail)
+
+
+def test_rerolling_stops_when_the_budget_is_gone_not_when_the_count_runs_out(
+    tmp_path: Path,
+) -> None:
+    pods = FakePods(rate=3_600_000.0)  # $1000/s — the first pod eats the rail
+    rail = Rail(max_usd=0.05)
+    rig = _rig(tmp_path, pods, FakeTransport(rigboot_rc=91), rail=rail)
+    row = rig.run(cards_mod.pick("sm89"), Workload(name="w", command="x"), rerolls=5)
+    assert len(pods.created_bodies) < 6, "it stopped on money, not on the counter"
+    assert "no budget left" in row.detail
 
 
 def test_no_driver_at_all_is_also_a_reroll(tmp_path: Path) -> None:
@@ -978,6 +1038,51 @@ def test_a_missing_ssh_key_is_a_REFUSAL_with_a_row_not_a_traceback(
     assert row.verdict == "refused" and row.failed_stage == "create"
     assert "no RunPod ssh public key" in row.detail
     assert pods.created_bodies == [], "nothing was rented"
+
+
+# --------------------------------------------------------------------------- #
+# 8. pgw#1352 / pgw#1348 rows 1-6 — the sm-clearance probe
+# --------------------------------------------------------------------------- #
+
+
+def test_the_probe_ships_a_TREE_and_proves_it_arrived_before_paying_for_a_compile(
+    tmp_path: Path,
+) -> None:
+    """`micro_mint_rig` puts `<repo>/src` and `<repo>/tests` ahead of
+    site-packages, so the code under test is the TREE; the wheel beside it only
+    satisfies dependencies."""
+    archive = tmp_path / "repo.tar.gz"
+    archive.write_bytes(b"tarball")
+    workload = sm_probe(archive)
+    assert any(u.local == archive for u in workload.uploads)
+    untar = [line for line in workload.setup if "tar -xzf" in line]
+    assert untar and POD_REPO in untar[0]
+    guard = [line for line in workload.setup if line.startswith("test -f")]
+    assert guard and "micro_mint_rig.py" in guard[0] and "examples/micro-diffusion" in guard[0]
+    # A cell that was never written is not a cleared sm, whatever the log said.
+    assert workload.required_artifacts == (f"{POD_ROOT}/probe.json",)
+
+
+def test_the_probe_needs_no_hub_which_is_why_these_rows_are_buyable_today(tmp_path: Path) -> None:
+    """The micro vehicle publishes through an IN-PROCESS `LocalCellHub` and
+    adopts in a second OS process on the same pod, so one rental proves compile,
+    re-use and parity with nothing external to be blocked on. pgw#1348 gates
+    every other leg A on a hub wire proof; this row is exempt by construction."""
+    workload = sm_probe(tmp_path / "repo.tar.gz")
+    assert "--vehicle micro" in workload.command and "--device cuda" in workload.command
+    assert "--json" in workload.command, "the row IS the report; no report, no row"
+    assert "nice -n 19" in workload.command
+    for path in ("/root/.cache/torchinductor_root", POD_REPO):
+        assert path in workload.progress_paths
+
+
+def test_every_sm_class_the_gauntlet_names_has_a_card_set() -> None:
+    """pgw#1348 rows 1-6 are sm_86, sm_89, sm_80, sm_90, sm_100, sm_120."""
+    for slug, sm in (("sm86", "8.6"), ("sm89", "8.9"), ("sm80", "8.0"),
+                     ("sm90", "9.0"), ("sm100", "10.0"), ("sm120", "12.0")):
+        card = cards_mod.pick(slug)
+        assert card.sm_expected == sm
+        assert card.gpu_type_ids, "a pick names a SET; there is no capacity query to consult"
 
 
 def test_unknown_card_names_the_ones_that_exist() -> None:

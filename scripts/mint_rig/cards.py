@@ -129,6 +129,50 @@ CARDS: dict[str, Card] = {
         note="every sm_89 RunPod sells, cheapest-first. The FALLBACK when sm_86 "
         "is out of capacity — and on 2026-08-17 it was.",
     ),
+    "sm80": Card(
+        slug="sm80",
+        gpu_type_ids=("NVIDIA A100 80GB PCIe", "NVIDIA A100-SXM4-80GB", "NVIDIA A100-SXM4-40GB", "NVIDIA A30"),
+        sm_expected="8.0",
+        disk_gb=60,
+        usd_per_hour_hint=1.39,
+        data_center_part=True,
+        note="Ampere data-center. Forward-compat libcuda IS supported here, so a "
+        "570-driver host is a repair rather than a re-roll.",
+    ),
+    "sm90": Card(
+        slug="sm90",
+        gpu_type_ids=("NVIDIA H100 80GB HBM3", "NVIDIA H100 PCIe", "NVIDIA H100 NVL", "NVIDIA H200"),
+        sm_expected="9.0",
+        disk_gb=100,
+        usd_per_hour_hint=3.29,
+        data_center_part=True,
+    ),
+    "sm100": Card(
+        slug="sm100",
+        gpu_type_ids=("NVIDIA B200",),
+        sm_expected="10.0",
+        disk_gb=100,
+        usd_per_hour_hint=6.81,
+        data_center_part=True,
+        note="THE EXPENSIVE ONE. pgw#1084 §7.2's rule: nothing larger is bought on "
+        "an sm the micro probe has not cleared — which is what makes this a $1.84 "
+        "question rather than a $20 one.",
+    ),
+    "sm120": Card(
+        slug="sm120",
+        gpu_type_ids=(
+            "NVIDIA GeForce RTX 5090",
+            "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+            "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+        ),
+        sm_expected="12.0",
+        disk_gb=100,
+        usd_per_hour_hint=0.89,
+        data_center_part=False,
+        note="pgw#1084 §8.2 calls rtx-pro-6000 'the only mintable sm_120 SKU' and it "
+        "is NOT a registered gpu_sku_set, so sm_120 is bare-pod-only until th#2112 "
+        "lands — which is exactly the route this rig takes.",
+    ),
     "l40s": Card(
         slug="l40s",
         gpu_type_ids=("NVIDIA L40S", "NVIDIA L40"),

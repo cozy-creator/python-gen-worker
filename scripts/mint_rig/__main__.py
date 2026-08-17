@@ -33,7 +33,15 @@ from . import cards as cards_mod
 from .driver import Rig, uploads_for
 from .rail import Rail
 from .row import RigRow
-from .workload import POD_ROOT, Upload, Workload, install_sdist, install_wheel, mint_model
+from .workload import (
+    POD_ROOT,
+    Upload,
+    Workload,
+    install_sdist,
+    install_wheel,
+    mint_model,
+    sm_probe,
+)
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -113,7 +121,54 @@ def cmd_mint(args: argparse.Namespace) -> int:
         fleet_line=fleet_line,
         name=args.name,
     )
-    row = _rig(args).run(cards_mod.pick(args.gpu), workload, image=args.image)
+    row = _rig(args).run(
+        cards_mod.pick(args.gpu), workload, image=args.image, rerolls=int(args.rerolls)
+    )
+    return 0 if row.verdict == "green" else 1
+
+
+def build_repo_archive(out: Path) -> Path:
+    """`git archive` of the WORKING TREE'S COMMIT — src, tests, examples, scripts.
+
+    A tarball rather than a wheel because `micro_mint_rig` puts `<repo>/src` and
+    `<repo>/tests` ahead of site-packages: the code under test is the tree, and
+    the wheel installed beside it only satisfies dependencies. `git archive`
+    rather than `tar` of the checkout so what ships is a COMMIT — the row's
+    `repo_sha` then answers "which code cleared this sm" without anybody
+    trusting a working directory.
+    """
+    out.parent.mkdir(parents=True, exist_ok=True)
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    with out.open("wb") as fh:
+        subprocess.run(["git", "archive", "--format=tar.gz", sha], cwd=REPO, stdout=fh, check=True)
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=REPO, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    if dirty:
+        raise SystemExit(
+            "pgw#1352: the worktree is dirty, so `git archive HEAD` would ship code that is not "
+            "what you are looking at. Commit first — a probe row's whole value is naming the "
+            f"commit that cleared the sm.\n{dirty[:500]}"
+        )
+    return out
+
+
+def cmd_probe(args: argparse.Namespace) -> int:
+    """pgw#1348 rows 1-6: does this sm compile, re-use and match eager at all."""
+    install, uploads = _delivery(args)
+    archive = build_repo_archive(REPO / "dist" / "repo.tar.gz")
+    workload = sm_probe(
+        archive,
+        vehicle=args.vehicle,
+        install=install + tuple(args.setup),
+        uploads=uploads,
+        name=args.name,
+    )
+    row = _rig(args).run(
+        cards_mod.pick(args.gpu), workload, image=args.image, rerolls=int(args.rerolls)
+    )
     return 0 if row.verdict == "green" else 1
 
 
@@ -127,7 +182,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         artifacts=tuple(args.artifact) or (POD_ROOT,),
         progress_paths=tuple(args.progress) or (POD_ROOT,),
     )
-    row = _rig(args).run(cards_mod.pick(args.gpu), workload, image=args.image)
+    row = _rig(args).run(
+        cards_mod.pick(args.gpu), workload, image=args.image, rerolls=int(args.rerolls)
+    )
     return 0 if row.verdict == "green" else 1
 
 
@@ -189,6 +246,13 @@ def _rent_flags(parser: argparse.ArgumentParser) -> None:
         "Not a timeout: work that is moving is never stopped by this.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Write the kill-set and rent nothing.")
+    parser.add_argument(
+        "--rerolls",
+        default="0",
+        help="How many times to take ANOTHER HOST after a `reroll` verdict (a too-old "
+        "driver, or a pod that never answered). Not another budget: the rail carries "
+        "the dead pods' spend forward.",
+    )
     parser.add_argument("--deliver", default="sdist", choices=("sdist", "wheel", "image"))
     parser.add_argument("--spec", default="", help="pip requirement for --deliver wheel.")
     parser.add_argument("--dist", default="", help="Prebuilt dist for --deliver sdist.")
@@ -227,6 +291,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     mint.add_argument("--name", default="mint")
     mint.set_defaults(fn=cmd_mint)
+
+    probe = sub.add_parser(
+        "probe",
+        help="pgw#1348 rows 1-6: an sm-clearance probe — the micro vehicle's full "
+        "mint/publish/adopt/parity cycle on one rented card, no hub needed.",
+    )
+    _rent_flags(probe)
+    probe.add_argument("--vehicle", default="micro", help="micro | tiny | micro-lora | …")
+    probe.add_argument("--name", default="probe")
+    probe.set_defaults(fn=cmd_probe)
 
     run = sub.add_parser("run", help="Any named command on a rented pod.")
     _rent_flags(run)

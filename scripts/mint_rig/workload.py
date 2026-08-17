@@ -245,6 +245,62 @@ def install_wheel(spec: str, index_args: str = "") -> tuple[str, ...]:
     return (PIN_TORCH, _pip_install(spec, index_args))
 
 
+#: pgw#1352 / pgw#1348 rows 1-6. Where the shipped tree lands on the pod.
+POD_REPO = f"{POD_ROOT}/repo"
+
+
+def sm_probe(
+    archive: Path,
+    *,
+    vehicle: str = "micro",
+    install: tuple[str, ...] = (),
+    uploads: tuple[Upload, ...] = (),
+    name: str = "probe",
+) -> Workload:
+    """One sm-clearance probe — [[pgw#1348]] rows 1-6, on the bare-pod route.
+
+    WHY THIS VEHICLE NEEDS NO HUB, which is the whole reason these six rows are
+    buyable today while the other fifty are gated. `scripts/micro_mint_rig.py
+    --vehicle micro` runs the FULL production cycle against
+    `examples/micro-diffusion` — resolve, `MintSlot` handoff, a real child
+    interpreter, warmup, `torch.export` + AOTInductor, seal, publish, and a
+    SECOND OS process adopting the exact named cell and comparing every arm to
+    eager — and its publish leg goes to `harness.cell_hub.LocalCellHub`,
+    IN-PROCESS. So one pod proves compile AND re-use AND parity on that card,
+    with nothing external to be blocked on.
+
+    It ships the repository's own tree rather than a wheel, because the rig
+    inserts `<repo>/src` and `<repo>/tests` ahead of site-packages: the code
+    under test is the TREE, and the wheel is installed only to satisfy its
+    dependencies. Both digests land on the row.
+    """
+    root = f"{POD_ROOT}/micro-root"
+    report = f"{POD_ROOT}/{name}.json"
+    command = (
+        f"cd {POD_REPO} && nice -n 19 python3 scripts/micro_mint_rig.py "
+        f"--vehicle {vehicle} --device cuda --clean --root {root} --json {report} "
+        "&& echo RIG_DONE"
+    )
+    return Workload(
+        name=name,
+        command=command,
+        setup=install
+        + (
+            f"mkdir -p {POD_REPO} && tar -xzf {POD_ROOT}/{archive.name} -C {POD_REPO}",
+            # Proof the tree arrived whole, before a compile is paid for.
+            f"test -f {POD_REPO}/scripts/micro_mint_rig.py "
+            f"&& test -d {POD_REPO}/examples/micro-diffusion "
+            f"&& test -d {POD_REPO}/tests/harness",
+        ),
+        uploads=uploads + (Upload(local=archive),),
+        artifacts=(report, f"{POD_ROOT}/{name}.log", f"{POD_ROOT}/rigboot.json"),
+        # A cell that was never written is not a cleared sm, whatever the log says.
+        required_artifacts=(report,),
+        progress_paths=(root, "/root/.cache/torchinductor_root", "/root/.triton", POD_REPO),
+        env={"TORCHINDUCTOR_CACHE_DIR": "/root/.cache/torchinductor_root"},
+    )
+
+
 def mint_model(
     target: str,
     *,
