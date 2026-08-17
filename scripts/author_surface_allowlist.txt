@@ -52,10 +52,10 @@ models.svdq_layout.pack_vector	training-endpoints/conversion/src/conversion/quan
 models.svdq_layout.pack_wscales	training-endpoints/tests/test_foreign_quant_te134.py:166	TEST
 models.w8a8.quantize_tree_w8a8	inference-endpoints/scripts/ie543_batch_bench.py:78	PROD
 models.w8a8.sanitize_w8a8_state_dict	inference-endpoints/anima/src/anima/main.py:327	PROD
-request_context.ConversionContext.mktemp	training-endpoints/vlm_judge/src/vlm_judge/judge.py:166	PROD
+request_context.JobContext.mktemp	training-endpoints/vlm_judge/src/vlm_judge/judge.py:166	PROD
 request_context.RequestContext.call_endpoint	private-inference-endpoints/dj-pipeline/src/dj_pipeline/main.py:175	PROD
 request_context.RequestContext.workflow_checkpoint	private-inference-endpoints/dj-pipeline/src/dj_pipeline/main.py:271	PROD
-request_context.TrainingContext.training_metric	training-endpoints/image_lora_finetuner/src/image_lora_finetuner/diffsynth_loop.py:593	PROD
+request_context.JobContext.training_metric	training-endpoints/image_lora_finetuner/src/image_lora_finetuner/diffsynth_loop.py:593	PROD
 request_context._PublisherMixin.checkpoint_dir	training-endpoints/image_lora_finetuner/tests/test_diffsynth.py:1330	TEST
 runtime_config.read_snapshot	inference-endpoints/minimax-h3/tests/test_attn_config_ie678.py:7	TEST
 testing.fake_context	inference-endpoints/qwen3.6-27b-mtp-gguf/tests/test_completion.py:90	TEST

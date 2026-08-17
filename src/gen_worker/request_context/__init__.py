@@ -312,6 +312,7 @@ class RequestContext(Generic[D]):
         declared_slot_errors: Optional[Iterable[str]] = None,
         root_slot: str = "",
         boot_warmup: bool = False,
+        publishes: bool = False,
     ) -> None:
         self._request_id = str(request_id or "").strip()
         self._job_id = str(job_id or "").strip() or None
@@ -325,6 +326,16 @@ class RequestContext(Generic[D]):
         self._canceled = False
         self._boot_warmup = bool(boot_warmup)
         self._execution_lane = ""  # executing lane, set by the executor
+        # th#2049/pgw#1294: the executing function DECLARED `publishes=True`,
+        # so it may write tensors/repos to the hub. Kind stops implying write
+        # authority; this declaration is the one justification. Stamped from
+        # the spec at dispatch.
+        self._publishes = bool(publishes)
+        # Monotonic progress POSITION per phase (pgw#1294). Liveness for a job
+        # is position ADVANCE within a phase budget — never pulse, never
+        # duration — so a position that goes backwards is a lying instrument
+        # and raises rather than reports.
+        self._progress_positions: Dict[str, float] = {}
         self._config: Dict[str, Any] = {}  # effective config params
         self._config_snapshot: Optional[bytes] = None
         self._cancel_event = threading.Event()
@@ -1000,37 +1011,156 @@ class RequestContext(Generic[D]):
 
     def progress(
         self,
-        progress: float,
+        progress: Optional[float] = None,
         stage: Optional[str] = None,
         *,
         step: Optional[int] = None,
         total: Optional[int] = None,
+        position: Optional[float] = None,
+        phase: Optional[str] = None,
     ) -> None:
-        """Report request progress (best-effort, rides ``request.progress``).
+        """Report progress (best-effort, rides ``request.progress``).
 
         This is the USER-facing stream — the cozy-art job feed renders it
         directly. For platform/operator-only diagnostics use :meth:`log`.
 
-        ``progress`` is a 0..1 fraction; ``step``/``total`` carry the exact
-        step counter when known (e.g. denoise step 5 of 20) so UIs can render
-        "5 / 20" instead of a bare percentage.
+        Two spellings of ONE surface, so a body is portable between
+        ``@endpoint`` and ``@job`` unchanged (pgw#1294):
 
-        A call carrying ``step`` is ALSO a stage-timing mark, so endpoints
+        * the request spelling — ``ctx.progress(0.5, "denoise", step=5,
+          total=20)``: ``progress`` is a 0..1 fraction, ``step``/``total`` the
+          exact counter, ``stage`` the label.
+        * the job spelling — ``ctx.progress(position=4096, total=31_000_000,
+          phase="download")``: ``position`` is a MONOTONIC position within
+          ``phase`` and ``total`` its extent. The fraction is derived.
+
+        ``position`` and ``step`` are the same quantity under two names, as are
+        ``phase`` and ``stage``; passing both spellings of one quantity raises.
+        The positional job form ``ctx.progress(4096, 31_000_000, "download")``
+        is NOT accepted — the second positional argument has always been the
+        stage label and silently reinterpreting it by type is exactly the
+        lying instrument this method refuses to be.
+
+        **Position is MONOTONIC and load-bearing.** Hub liveness for a job is
+        position ADVANCE within a phase budget — never pulse, never duration
+        (th#1908) — so a position that goes BACKWARDS within a phase raises
+        :class:`~gen_worker.api.errors.NonMonotonicProgressError` here rather
+        than reporting a number nothing can trust. Restart a phase by naming a
+        new phase.
+
+        A call carrying a position is ALSO a stage-timing mark, so endpoints
         driving their own step loop get a denoise window without any endpoint
         change.
         """
-        if step is not None:
+        if position is not None and step is not None and float(position) != float(step):
+            raise ValueError(
+                "ctx.progress: position= and step= are the same quantity under "
+                f"two names and disagree ({position!r} vs {step!r}) — pass one"
+            )
+        if phase is not None and stage is not None and str(phase) != str(stage):
+            raise ValueError(
+                "ctx.progress: phase= and stage= are the same quantity under "
+                f"two names and disagree ({phase!r} vs {stage!r}) — pass one"
+            )
+        if stage is not None and not isinstance(stage, str):
+            raise TypeError(
+                f"ctx.progress: the second positional argument is the stage "
+                f"label (a str), got {stage!r}. For the job spelling pass "
+                "keywords: ctx.progress(position=..., total=..., phase=...)"
+            )
+        label = phase if phase is not None else stage
+        pos = float(position) if position is not None else (
+            float(step) if step is not None else None
+        )
+        if pos is not None:
+            self._advance_position(str(label or ""), pos)
             timer = getattr(self, "_stages", None)
-            if timer is not None:
-                timer.mark_step(str(stage or "denoise"), int(step))
-        payload: Dict[str, Any] = {"progress": progress}
-        if stage is not None:
-            payload["stage"] = stage
-        if step is not None:
-            payload["step"] = int(step)
+            if timer is not None and float(pos).is_integer():
+                timer.mark_step(str(label or "denoise"), int(pos))
+        fraction = progress
+        if fraction is None and pos is not None and total:
+            fraction = pos / float(total)
+        payload: Dict[str, Any] = {"progress": 0.0 if fraction is None else fraction}
+        if label is not None:
+            payload["stage"] = label
+        if pos is not None:
+            # `step` is the key the HUB parses off this envelope
+            # (`runtimestore.ParseRequestProgressPayload`, confirmed against
+            # th#2050's landed `forkJobProgress`), so it is emitted for EVERY
+            # position — a fractional position that only landed in `position`
+            # would be invisible to the liveness sweep that condemns the pod.
+            # `position` carries the exact value beside it.
+            payload["position"] = pos
+            payload["step"] = int(pos)
         if total is not None:
             payload["total"] = int(total)
         self._emit_event("request.progress", payload)
+
+    def _advance_position(self, phase: str, position: float) -> None:
+        """Record a monotonic position within ``phase``; refuse a regression.
+
+        The counter this feeds is what a stall detector reads, so a position
+        that moves backwards is not a cosmetic defect: it manufactures
+        apparent liveness out of a loop that is going nowhere.
+        """
+        last = self._progress_positions.get(phase)
+        if last is not None and position < last:
+            from ..api.errors import NonMonotonicProgressError
+
+            raise NonMonotonicProgressError(phase, last, position)
+        self._progress_positions[phase] = position
+        # Lazy: activity pulls in pb/psutil, and request_context is on the
+        # `import gen_worker` path the discovery build step keeps thin.
+        from .. import activity as activity_mod
+
+        activity_mod.note_progress()
+
+    def position(self, phase: str = "") -> Optional[float]:
+        """The last position reported for ``phase``, or None. Read by the job
+        runner's progress-liveness watch; also useful in tests."""
+        return self._progress_positions.get(phase)
+
+    # -- the hub-write declaration ------------------------------------------
+
+    @property
+    def publishes(self) -> bool:
+        """The executing function DECLARED ``publishes=True``.
+
+        The declaration says MAY write; the request still says WHERE. It is
+        also what justifies the hub minting the worker-capability write grant
+        at launch — grants remain the WHOLE write authority."""
+        return self._publishes
+
+    #: Producer KINDS that still imply write authority. TRANSITIONAL: th#2052
+    #: cuts it, at which point the declaration is the only justification and
+    #: this tuple (and the branch reading it) is deleted whole. Until then a
+    #: fleet endpoint that has not yet added ``publishes=True`` keeps working
+    #: and is told so, loudly, once per call.
+    _KIND_IMPLIES_PUBLISH = ("conversion", "training", "dataset")
+
+    def _require_publish_declaration(self, surface: str) -> None:
+        """Refuse the publisher surface to code that never declared it.
+
+        Typed, and BEFORE a byte moves — the hub never minted the grant for an
+        undeclared function, so this is the same refusal arriving at the call
+        site instead of after an upload.
+        """
+        if self._publishes:
+            return
+        kind = self._tensor_upload_execution_kind()
+        if kind in self._KIND_IMPLIES_PUBLISH:
+            self.log(
+                f"{surface} admitted by kind={kind!r} and NOT by declaration — "
+                "add publishes=True to the decorator. Kind stops implying "
+                "write authority at th#2052 and this call will then refuse.",
+                level="warning",
+                surface=surface,
+                kind=kind,
+            )
+            return
+        from ..api.errors import PublishNotDeclaredError
+
+        raise PublishNotDeclaredError(surface)
 
     def _emit_checkpoint_saved(
         self,
@@ -1518,6 +1648,7 @@ class _PublisherMixin:
         def _repo_job_upload_scope(self) -> "Optional[tuple[str, str, str]]": ...
         def _repo_job_release(self) -> str: ...
         def _require_repo_job_scope_for_tensors(self, ref: str) -> None: ...
+        def _require_publish_declaration(self, surface: str) -> None: ...
         def _should_stream_output_to_file_api(self, ref: str) -> bool: ...
 
     @property
@@ -1651,6 +1782,7 @@ class _PublisherMixin:
         back to the plain asset save the ``fallback`` callable provides.
         """
         ref = _normalize_output_ref(ref)
+        self._require_publish_declaration("save_checkpoint")
         self._require_repo_job_scope_for_tensors(ref)
         _enforce_output_file_size_limit(size)
         fmt = str(format or "").strip() or _infer_tensors_format(ref)
@@ -1704,6 +1836,7 @@ class _PublisherMixin:
     ) -> _RequestOutputStream:
         """Open a chunk-writable output stream that finalizes to Tensors."""
         ref = _normalize_output_ref(ref)
+        self._require_publish_declaration("open_checkpoint_stream")
         self._require_repo_job_scope_for_tensors(ref)
 
         return _RequestOutputStream(
@@ -1964,53 +2097,6 @@ class _PublisherMixin:
         return str(target_root)
 
 
-class ConversionContext(_PublisherMixin, RequestContext[GenerationDefaults]):
-    """RequestContext for ``@conversion(sub_kind="format-conversion")``
-    and similar conversion endpoints.
-
-    Carries the producer-contract RPCs needed to publish new repo revisions,
-    plus the conversion-helper surface (``mktemp``, ``checkpoint_dir``,
-    ``cancelled``). The ETL itself (ingest / cast / quant / clone / writers)
-    lives in the ``gen_worker.convert`` module — this class only carries what the
-    worker API needs.
-
-    Inference handlers receive ``RequestContext`` instead — they never need
-    these methods.
-    """
-
-    def __init__(self, *args: Any, source: Any = None, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        # ``source`` is the resolved input model handle (a gen_worker.convert
-        # ``Source``) for tenants that operate on a checkpoint; None otherwise.
-        self._source = source
-        self._mktemp_root: Optional[Path] = None
-
-    # ----- conversion-helper API --------------------------------------
-
-    def mktemp(self) -> Path:
-        """Return a job-scoped scratch directory. Contents are NOT persisted.
-
-        Auto-cleaned at job end. Each call returns a fresh subdir so tenants
-        can use it as ``out_dir`` for ``model.save_pretrained(ctx.mktemp())``
-        without collision.
-        """
-        if self._mktemp_root is None:
-            self._mktemp_root = Path(
-                tempfile.mkdtemp(
-                    prefix=f"txform-{self.request_id or 'x'}-",
-                    dir=tempfile.gettempdir(),
-                )
-            )
-        return Path(tempfile.mkdtemp(dir=str(self._mktemp_root)))
-
-class DatasetContext(_PublisherMixin, RequestContext[GenerationDefaults]):
-    """RequestContext for dataset-producing endpoints (``@dataset``).
-
-    ``resolve_dataset`` / ``save_checkpoint`` come from ``_PublisherMixin``;
-    dataset rows land as ordinary checkpoint publishes.
-    """
-
-
 class TrainingMetric(msgspec.Struct, frozen=True, kw_only=True):
     """Typed per-step training metric, payload of a
     ``request.training_metric`` event. tensorhub downsample-persists these
@@ -2029,14 +2115,31 @@ class TrainingMetric(msgspec.Struct, frozen=True, kw_only=True):
     advice: Optional[str] = None
 
 
-class TrainingContext(_PublisherMixin, RequestContext[GenerationDefaults]):
-    """RequestContext for ``@endpoint(kind="training")`` endpoints.
+class JobContext(_PublisherMixin, RequestContext[GenerationDefaults]):
+    """The context a ``@job`` body receives — and a strict SUPERSET of what a
+    producer-shaped ``@endpoint`` handler may use, under the same names.
 
-    From ``_PublisherMixin``: ``save_checkpoint``,
-    ``resolve_dataset`` / ``dataset_paths`` (the executor materializes
-    ``payload.datasets`` before the handler runs) and ``checkpoint_dir``
-    (job-scoped scratch, NOT durable — see its docstring).
-    Delegated trainers (subprocess ai-toolkit and friends) run through
+    That superset property is what makes the two decorators portable
+    (pgw#1294 / th#2049 charter constraint 1): a job promoted to a
+    bounded-recipe serverless endpoint is the SAME body wrapped in
+    ``@endpoint`` and priced, with zero body edits. It is enforced by a test
+    that registers one body both ways and runs it under both harnesses.
+
+    This class is the MERGE of what used to be three sibling contexts —
+    ``ConversionContext`` + ``TrainingContext`` + ``DatasetContext``, which are
+    now thin aliases of it and die at th#2052. It carries:
+
+    * the publisher surface from ``_PublisherMixin`` — ``save_checkpoint`` /
+      ``open_checkpoint_stream`` (and ``gen_worker.convert.publish_flavors``),
+      all of which refuse typed unless the function declared ``publishes=True``
+    * ``mktemp`` (auto-cleaned scratch) and ``checkpoint_dir`` (deterministic
+      job-scoped scratch)
+    * ``resolve_dataset`` / ``dataset_paths`` — datasets via tensorhub only
+    * ``cancelled`` / ``raise_if_cancelled`` and ``call_endpoint``
+    * ``progress`` with a MONOTONIC position (see
+      :meth:`RequestContext.progress`) and :meth:`metric`
+
+    Delegated trainers (subprocess DiffSynth and friends) run through
     ``gen_worker.subproc.run_process`` with ``ctx=self`` for cancellation.
     """
 
@@ -2045,6 +2148,85 @@ class TrainingContext(_PublisherMixin, RequestContext[GenerationDefaults]):
     metric_min_interval_s: float = 5.0
 
     _last_metric_monotonic: Optional[float] = None
+    _last_named_metric_monotonic: Optional[float] = None
+
+    def __init__(self, *args: Any, source: Any = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # ``source`` is the resolved input model handle (a gen_worker.convert
+        # ``Source``) for tenants that operate on a checkpoint; None otherwise.
+        self._source = source
+        self._mktemp_root: Optional[Path] = None
+
+    def mktemp(self) -> Path:
+        """Return a job-scoped scratch directory. Contents are NOT persisted.
+
+        Auto-cleaned at job end. Each call returns a fresh subdir so tenants
+        can use it as ``out_dir`` for ``model.save_pretrained(ctx.mktemp())``
+        without collision.
+        """
+        if self._mktemp_root is None:
+            self._mktemp_root = Path(
+                tempfile.mkdtemp(
+                    prefix=f"txform-{self.request_id or 'x'}-",
+                    dir=tempfile.gettempdir(),
+                )
+            )
+        return Path(tempfile.mkdtemp(dir=str(self._mktemp_root)))
+
+    def metric(
+        self,
+        values: Optional[Mapping[str, float]] = None,
+        *,
+        step: Optional[int] = None,
+        total: Optional[int] = None,
+        phase: Optional[str] = None,
+        **scalars: float,
+    ) -> None:
+        """Emit named scalar measurements (throttled), riding ``job.metric``.
+
+        ``training_metric`` generalized: a trainer's loss curve, a
+        quantization's per-rung cosine, a bake's kernel timings — anything a
+        UI charts. ``ctx.progress`` answers "is this advancing"; this answers
+        "how is it going"::
+
+            ctx.metric({"loss": 0.31, "lr": 1e-4}, step=120, total=2000)
+            ctx.metric(cosine=0.9987, phase="rung:w8a8")
+
+        Same throttle as :meth:`training_metric` (``metric_min_interval_s``),
+        with the first call and the last (``step >= total``) always emitted so
+        a short job is never silent and a finished one always lands its final
+        numbers.
+        """
+        merged: Dict[str, float] = {}
+        for key, value in dict(values or {}).items():
+            merged[str(key)] = float(value)
+        for key, value in scalars.items():
+            merged[str(key)] = float(value)
+        if not merged:
+            raise ValueError(
+                "ctx.metric: nothing to report — pass a {name: value} mapping "
+                "or keyword scalars"
+            )
+        now = time.monotonic()
+        last = self._last_named_metric_monotonic
+        is_last = step is not None and total is not None and total > 0 and step >= total
+        if last is not None and not is_last and (now - last) < self.metric_min_interval_s:
+            return
+        self._last_named_metric_monotonic = now
+        # ONE EVENT PER NAMED SCALAR, `{name, value, ...}`. This is the shape
+        # th#2050's landed `forkJobProgress` parses — it reads `name` and
+        # `value` off the payload and DROPS anything else, so a `{values: {…}}`
+        # envelope would have been silently discarded by the hub. They are the
+        # producer of the contract; this reconciles to what landed.
+        for name, value in sorted(merged.items()):
+            payload: Dict[str, Any] = {"name": name, "value": value}
+            if step is not None:
+                payload["step"] = int(step)
+            if total is not None:
+                payload["total"] = int(total)
+            if phase is not None:
+                payload["phase"] = str(phase)
+            self._emit_event("request.metric", payload)
 
     def training_metric(
         self,
@@ -2089,3 +2271,13 @@ class TrainingContext(_PublisherMixin, RequestContext[GenerationDefaults]):
         )
         payload = {k: v for k, v in msgspec.to_builtins(metric).items() if v is not None}
         self._emit_event("request.training_metric", payload)
+
+
+# The three producer contexts MERGED into JobContext (pgw#1294): they were
+# already the same class plus one helper each, and one surface is what makes a
+# body portable between @job and @endpoint. THIN ALIASES, deliberately and
+# temporarily — th#2052 re-authors the last producer endpoints as jobs and
+# deletes these three names whole. Nothing new should reference them.
+ConversionContext = JobContext
+DatasetContext = JobContext
+TrainingContext = JobContext

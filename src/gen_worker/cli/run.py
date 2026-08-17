@@ -1246,6 +1246,10 @@ def _run_inner(args: argparse.Namespace) -> int:
     ctx = build_local_context(
         kind=selected.kind,
         allow_publish=bool(args.allow_publish),
+        # The hub-write declaration travels into the local run (pgw#1294), so
+        # an author who forgot publishes=True meets the refusal in the dev
+        # loop instead of on a rented pod.
+        publishes=bool(getattr(selected.spec, "publishes", False)),
     )
     ctx._set_execution_lane(_local_executing_execution_lane(
         selected.bindings, getattr(args, "execution_lane", ""), selected.handles))

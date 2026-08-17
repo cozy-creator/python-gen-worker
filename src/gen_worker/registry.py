@@ -22,11 +22,12 @@ from .api.decorators import (
     ATTR, VARIANT_ATTR, WF_ATTR, Compile, ConfigParam, DynamicDim, EndpointDecl,
     Resources, VariantDecl, WorkerFunctionDecl,
 )
+from .api.jobs import JOB_ATTR, JobDecl
 from .api.formula import RuntimeFormula
 from .api.slot import Slot
 from .api.tree import derive_components, validate_no_sibling_parts
 from .discovery.names import slugify_name
-from .discovery.walk import find_endpoints
+from .discovery.walk import find_endpoints, find_jobs
 from .families.base import GenerationDefaults
 from .models.tensor_layout_contract import LAYOUT_KEY_ANY_COMPONENT
 from .warmup import validate_class_warmup
@@ -240,6 +241,10 @@ class EndpointSpec:
     # Declared config parameters (ctx.config) + declared env names.
     config: Tuple[ConfigParam, ...] = ()
     env: Tuple[str, ...] = ()
+    # The hub-write declaration (th#2049/pgw#1294). Rides the manifest row; the
+    # hub mints the write grant off it, and the SDK refuses the publisher
+    # surface without it.
+    publishes: bool = False
     module: str = ""              # declaring module
     walked_module: str = ""       # top-level package the object was found under
 
@@ -277,6 +282,93 @@ class EndpointSpec:
         return base if not self.device_group_ordinal else (
             base + (("device_group", int(self.device_group_ordinal)),)
         )
+
+
+@dataclass(frozen=True)
+class JobSpec:
+    """One submittable ``@job``: a run-once function plus its wire shape.
+
+    Deliberately the same SHAPE as :class:`EndpointSpec` where the two overlap
+    (``name``/``method``/``payload_type``/``output_type``/``resources``/
+    ``env``/``publishes``), because portability between the decorators is a
+    tested requirement, not a coincidence. What a job does NOT carry is as
+    load-bearing as what it does: no ``cls`` and no setup (the run-once
+    lifecycle forks a fresh child per job), no execution lanes, no compile
+    cell, no slots or bindings — a job that wants a hub-resolved model NAMES
+    it in its payload and fetches through the snapshot machinery.
+    """
+
+    name: str                     # submittable job name (canonical slug)
+    method: Callable[..., Any]
+    payload_type: type            # msgspec.Struct
+    output_type: type             # msgspec.Struct
+    resources: Resources = field(default_factory=Resources)
+    env: Tuple[str, ...] = ()
+    resumable: bool = False
+    visibility: str = "private"
+    publishes: bool = False
+    is_async: bool = False
+    ctx_param: str = "ctx"
+    payload_param: str = "payload"
+    python_name: str = ""
+    module: str = ""
+    walked_module: str = ""
+
+    @property
+    def needs_gpu(self) -> bool:
+        return bool(self.resources.gpu)
+
+
+def extract_job_spec(obj: Any, *, walked_module: str = "") -> Optional[JobSpec]:
+    """The JobSpec one ``@job``-decorated function declares, or None."""
+    decl: Optional[JobDecl] = getattr(obj, JOB_ATTR, None)
+    if decl is None:
+        return None
+    hints = typing.get_type_hints(obj, include_extras=False)
+    params = list(inspect.signature(obj).parameters.values())
+    slug = slugify_name(decl.name)
+    if not slug:
+        raise ValueError(f"@job name {decl.name!r} cannot be normalized")
+    return JobSpec(
+        name=slug,
+        method=obj,
+        payload_type=hints[params[1].name],
+        output_type=hints["return"],
+        resources=decl.resources,
+        env=tuple(decl.env),
+        resumable=bool(decl.resumable),
+        visibility=decl.visibility,
+        publishes=bool(decl.publishes),
+        is_async=inspect.iscoroutinefunction(obj),
+        ctx_param=params[0].name,
+        payload_param=params[1].name,
+        python_name=obj.__name__,
+        module=getattr(obj, "__module__", "") or "",
+        walked_module=walked_module or (getattr(obj, "__module__", "") or ""),
+    )
+
+
+def collect_jobs(module_names: List[str]) -> List[JobSpec]:
+    """Walk top-level modules (+ submodules) and return every JobSpec."""
+    out: List[JobSpec] = []
+    for found in find_jobs(list(module_names)):
+        spec = extract_job_spec(found.obj, walked_module=found.walked_module)
+        if spec is not None:
+            out.append(spec)
+    _assert_unique_job_names(out)
+    return out
+
+
+def _assert_unique_job_names(specs: List[JobSpec]) -> None:
+    seen: Dict[str, JobSpec] = {}
+    for s in specs:
+        prior = seen.get(s.name)
+        if prior is not None and prior.method is not s.method:
+            raise ValueError(
+                f"duplicate job name {s.name!r} "
+                f"({prior.module} and {s.module})"
+            )
+        seen[s.name] = s
 
 
 def _derive_defaults_type(
@@ -684,6 +776,7 @@ def _spec_for_handler(
         runtime_formula=runtime_formula,
         config=tuple(decl.config),
         env=tuple(decl.env),
+        publishes=bool(decl.publishes),
         module=getattr(cls or method, "__module__", "") or "",
         walked_module=walked_module,
     )

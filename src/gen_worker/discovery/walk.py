@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..api.decorators import ATTR
+from ..api.jobs import JOB_ATTR
 
 logger = logging.getLogger(__name__)
 
@@ -48,17 +49,38 @@ class EndpointImportError(ImportError):
 
 @dataclass(frozen=True)
 class FoundEndpoint:
-    """One ``@endpoint``-decorated class or function found by the walker."""
+    """One ``@endpoint``- or ``@job``-decorated object found by the walker.
+
+    One object may carry BOTH declarations — that is the portability property
+    pgw#1294 tests, not a mistake — so the two are separate fields and the
+    ``marker`` the walk selected on decides which list it lands in.
+    """
 
     obj: Any            # the live class or function object
     module: str         # declaring __module__
     qualname: str
-    decl: Any           # the EndpointDecl the decorator attached
+    decl: Any           # the EndpointDecl or JobDecl the decorator attached
     walked_module: str  # top-level package the object was found under
 
 
 def find_endpoints(module_names: list[str]) -> list[FoundEndpoint]:
-    """Walk ``module_names`` (and their submodules); return decorated objects."""
+    """Walk ``module_names`` (and their submodules); return ``@endpoint`` objects."""
+    return _walk(module_names, marker=ATTR, label="@endpoint")
+
+
+def find_jobs(module_names: list[str]) -> list[FoundEndpoint]:
+    """Walk ``module_names`` (and their submodules); return ``@job`` functions.
+
+    Same walk, same import-is-a-hard-failure rule, same re-export skip — a job
+    that vanishes silently from a release is the identical defect pgw#689 fixed
+    for endpoints, so it gets the identical treatment.
+    """
+    return _walk(module_names, marker=JOB_ATTR, label="@job")
+
+
+def _walk(
+    module_names: list[str], *, marker: str, label: str,
+) -> list[FoundEndpoint]:
     out: list[FoundEndpoint] = []
     seen_ids: set[int] = set()
 
@@ -90,6 +112,8 @@ def find_endpoints(module_names: list[str]) -> list[FoundEndpoint]:
                 walked_package_name=top_module.__name__,
                 walked_package_prefix=package_prefix,
                 seen_ids=seen_ids,
+                marker=marker,
+                label=label,
             ))
 
     out.sort(key=lambda f: (f.module, f.qualname))
@@ -102,6 +126,8 @@ def _scan_module(
     walked_package_name: str,
     walked_package_prefix: str,
     seen_ids: set[int],
+    marker: str = ATTR,
+    label: str = "@endpoint",
 ) -> list[FoundEndpoint]:
     found: list[FoundEndpoint] = []
     # Iterate __dict__ directly — inspect.getmembers triggers __getattr__,
@@ -110,7 +136,7 @@ def _scan_module(
     for _attr_name, obj in module.__dict__.items():
         if not (inspect.isclass(obj) or inspect.isfunction(obj)):
             continue
-        decl = getattr(obj, ATTR, None)
+        decl = getattr(obj, marker, None)
         if decl is None or id(obj) in seen_ids:
             continue
         obj_module = getattr(obj, "__module__", "") or ""
@@ -119,7 +145,7 @@ def _scan_module(
             and not obj_module.startswith(walked_package_prefix)
         ):
             logger.warning(
-                "SKIPPING @endpoint '%s.%s' re-exported into '%s' — it is "
+                "SKIPPING %s '%s.%s' re-exported into '%s' — it is "
                 "DEFINED in '%s', outside the walked package '%s', so it "
                 "will NOT appear in endpoint.lock or the worker's route "
                 "table. A bare `from %s import %s` never publishes: SUBCLASS "
@@ -127,6 +153,7 @@ def _scan_module(
                 "declaration and is declared here). pgw#689: this skip used "
                 "to be silent, and an SDK diagnostics endpoint went missing "
                 "for a whole release because of it.",
+                label,
                 obj_module, getattr(obj, "__name__", "<unknown>"),
                 getattr(module, "__name__", "<unknown>"),
                 obj_module, walked_package_name,

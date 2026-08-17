@@ -6,6 +6,8 @@ Subcommands:
 - ``serve``  — persistent local dev server: load models once, serve many
                requests warm over NDJSON on stdin/stdout + a Unix socket.
 - ``invoke`` — client for ``serve``: fire one request by function name.
+- ``job``    — list this package's ``@job`` functions, or run ONE of them
+               locally with no hub (``job run <name> --payload file.json``).
 
 See ``docs/local-dev.md``.
 
@@ -57,6 +59,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     from . import families as _families_mod
     _families_mod.add_subparser(sub)
+
+    from . import job as _job_mod
+    _job_mod.add_subparser(sub)
 
     return parser
 

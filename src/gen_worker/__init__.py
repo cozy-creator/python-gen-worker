@@ -7,8 +7,8 @@ One decorator, four bindings, a slim request context::
     @endpoint
     def hello(ctx: RequestContext, data: In) -> Out: ...
 
-Kind-specific contexts (``ConversionContext`` / ``DatasetContext`` /
-``TrainingContext``) add the producer-contract surface (publish, mktemp,
+``JobContext`` (aliased for now as ``ConversionContext`` / ``DatasetContext``
+/ ``TrainingContext``) adds the producer-contract surface (publish, mktemp,
 dataset resolution) via plain inheritance; the worker constructs the right
 subclass from ``@endpoint(kind=...)`` before dispatch.
 """
@@ -110,16 +110,21 @@ from .api.types import (
 from .request_context import (
     ConversionContext,
     DatasetContext,
+    JobContext,
     RequestContext,
     TrainingContext,
     TrainingMetric,
 )
+from .api.jobs import job
 from .subproc import ProcessStalledError, run_process
 
 
 __all__ = [
     # The decorators + bindings.
     "endpoint",
+    # pgw#1294: run-once submitted functions. Same (ctx, payload) -> Struct
+    # contract as @endpoint, so one body promotes between them unchanged.
+    "job",
     "variant_of",
     "worker_function",
     "AcceptsReferences",
@@ -187,6 +192,7 @@ __all__ = [
     "ObjectiveMismatchError",
     # Context types.
     "RequestContext",
+    "JobContext",
     "ConversionContext",
     "DatasetContext",
     "TrainingContext",

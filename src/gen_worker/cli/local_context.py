@@ -203,6 +203,16 @@ class LocalTrainingContext(LocalRequestContextMixin, TrainingContext):
     """Training-kind local context."""
 
 
+class LocalJobContext(LocalConversionContext):
+    """The ``gen-worker job run`` context: a real
+    :class:`~gen_worker.request_context.JobContext` with the hub-backed bits
+    stubbed, so an author's dev loop exercises the same body the pod will.
+
+    It inherits the conversion arm's local-CAS ``materialize_blob`` because the
+    two answer the same question and a second copy would drift.
+    """
+
+
 def build_local_context(
     *,
     kind: str,
@@ -210,13 +220,15 @@ def build_local_context(
     request_id: Optional[str] = None,
     owner: Optional[str] = None,
     emitter: Optional[Callable[[Dict[str, Any]], None]] = None,
+    publishes: bool = False,
 ) -> RequestContext:
     """Factory: build the right context subclass for ``kind``.
 
     ``kind`` is the endpoint's declared kind string from discover_manifest
-    (``inference`` / ``conversion`` / ``dataset`` / ``training`` / ``eval``).
-    Unknown kinds fall back to ``RequestContext`` because the SDK guarantees
-    the base methods on every variant.
+    (``inference`` / ``conversion`` / ``dataset`` / ``training`` / ``eval``),
+    or ``job`` for a ``@job`` run. Unknown kinds fall back to
+    ``RequestContext`` because the SDK guarantees the base methods on every
+    variant.
     """
     rid = request_id or _local_request_id()
     em = emitter if emitter is not None else _stderr_emitter
@@ -228,9 +240,15 @@ def build_local_context(
         # Honor local_output_dir so save_bytes routes through the resolved-
         # local-path branch on the base class (matches production semantics).
         "local_output_dir": str(_local_outputs_root()),
+        # The hub-write declaration travels into the local run too: an author
+        # who forgot publishes=True must hit the refusal HERE, in the dev
+        # loop, and not for the first time on a rented pod.
+        "publishes": bool(publishes),
     }
 
     k = (kind or "").strip().lower()
+    if k == "job":
+        return LocalJobContext(allow_publish=allow_publish, **common)
     if k in ("conversion", "eval"):
         return LocalConversionContext(allow_publish=allow_publish, **common)
     if k == "dataset":
@@ -245,6 +263,7 @@ __all__ = [
     "LocalRequestContext",
     "LocalConversionContext",
     "LocalDatasetContext",
+    "LocalJobContext",
     "LocalTrainingContext",
     "_stderr_emitter",
 ]

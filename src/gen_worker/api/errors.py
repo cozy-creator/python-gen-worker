@@ -464,3 +464,84 @@ class OutputIntegrityError(WorkerError):
             f"({self.summary}) — refused before upload so it cannot bank as a "
             f"successful render"
         )
+
+
+class PublishNotDeclaredError(ValidationError):
+    """This function reached the publisher surface without declaring
+    ``publishes=True`` (pgw#1294 / th#2049).
+
+    The hub-write declaration is ONE surface for ``@endpoint`` and ``@job``
+    alike: the decorator says the function MAY write tensors/repos, the request
+    still says WHERE. It is also what justifies the hub MINTING the
+    worker-capability write grant at launch — grants stay the whole write
+    authority, with no org-wide widening.
+
+    So this refusal is not a second gate: the hub never minted a grant for an
+    undeclared function, and the write would have failed there anyway, after
+    an upload. Raising here makes it a designed, typed refusal at the call
+    site, before a byte moves.
+
+    FATAL, not retryable: nothing about the request is wrong and no retry can
+    add a declaration to an already-published release.
+    """
+
+    def __init__(self, surface: str) -> None:
+        self.surface = str(surface or "publish")
+        super().__init__(
+            f"{self.surface} refused: this function did not declare "
+            "publishes=True. Add it to the decorator "
+            "(@job(publishes=True) / @endpoint(publishes=True)) and republish "
+            "— the declaration is what justifies the hub minting the write "
+            "grant, so without it no destination exists to write to."
+        )
+
+
+class NonMonotonicProgressError(ValidationError):
+    """``ctx.progress`` was handed a position BELOW the last one for its phase.
+
+    Hub liveness for a job is position ADVANCE within a phase budget — never
+    pulse, never duration (th#1908) — so the position is load-bearing: a stall
+    detector reads it to decide whether a pod is working or wedged. A position
+    that moves backwards manufactures apparent liveness out of a loop going
+    nowhere, and a lying instrument is worse than no instrument. Restart a
+    phase by naming a new phase.
+    """
+
+    def __init__(self, phase: str, last: float, attempted: float) -> None:
+        self.phase = str(phase or "")
+        self.last = float(last)
+        self.attempted = float(attempted)
+        where = f"phase {self.phase!r}" if self.phase else "the unnamed phase"
+        super().__init__(
+            f"ctx.progress: position went BACKWARDS in {where} "
+            f"({self.last} -> {self.attempted}). Position is monotonic and "
+            "load-bearing — name a new phase to restart the count."
+        )
+
+
+class JobProgressStalledError(RetryableError):
+    """A job phase reported no position advance within its declared budget.
+
+    pgw#1287's class, made impossible to ship silently: a transfer loop that
+    is silent for its whole duration used to look identical to a healthy one,
+    and the hub condemned pods that were downloading correctly. Under the job
+    harness a phase that declares a budget must ADVANCE inside it; not
+    advancing is the fault, and it is booked here rather than inferred from a
+    clock.
+
+    RETRYABLE: an infra stall is exactly what ``max_retries`` counts.
+    """
+
+    def __init__(self, phase: str, budget_s: float, position: float | None) -> None:
+        self.phase = str(phase or "")
+        self.budget_s = float(budget_s)
+        self.position = position
+        where = f"phase {self.phase!r}" if self.phase else "the unnamed phase"
+        seen = "never reported a position" if position is None else (
+            f"has been stuck at position {position}")
+        super().__init__(
+            f"job progress stalled: {where} {seen} for its whole "
+            f"{self.budget_s:g}s budget. Liveness is position advance, so a "
+            "loop that reports nothing is indistinguishable from a wedged one "
+            "— report ctx.progress(position=..., phase=...) as the work moves."
+        )

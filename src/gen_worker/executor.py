@@ -141,12 +141,7 @@ if typing.TYPE_CHECKING:
     from . import compile_cache
     from . import fleet_cells
     from .models.serve_fit import ServePlan
-from .request_context import (
-    ConversionContext,
-    DatasetContext,
-    RequestContext,
-    TrainingContext,
-)
+from .request_context import JobContext, RequestContext
 from .request_context._helpers import _decode_unverified_jwt_claims
 from .utils import lora as lora_util
 import errno as _errno
@@ -189,18 +184,23 @@ from . import hot_swap
 from . import mint_supervisor
 from .hostfacts import cuda_ready
 
+# pgw#1294: the three producer contexts MERGED into JobContext, so every
+# producer kind resolves to the same class under three names until th#2052
+# deletes the names. The map stays explicit rather than collapsing to one
+# entry — the KINDS are still distinct declarations and one of them (eval)
+# deliberately publishes nothing.
 _CONTEXT_BY_KIND: Dict[str, type] = {
     "inference": RequestContext,
-    "conversion": ConversionContext,
-    "dataset": DatasetContext,
-    "training": TrainingContext,
+    "conversion": JobContext,
+    "dataset": JobContext,
+    "training": JobContext,
     # th#1255: an eval materializes the same reserved refs a conversion does
     # (its `source` IS the reference arm) and writes request output assets.
     # It just publishes nothing, and there is no separate surface for that —
     # publish authority is the hub's call, and the hub refuses repo writes
     # for kind=eval. A distinct EvalContext would only restate that refusal
     # somewhere it cannot be enforced.
-    "eval": ConversionContext,
+    "eval": JobContext,
 }
 
 logger = logging.getLogger(__name__)
@@ -9626,6 +9626,7 @@ class Executor:
             },
             **_resolve_slots_kwargs(spec, order.slots, order.adapters),
             execution_hints=execution_hints,
+            publishes=bool(spec.publishes),
             **producer_kwargs,
         )
         job.ctx = ctx
