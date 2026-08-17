@@ -70,6 +70,15 @@ def is_compute_child() -> bool:
     return bool(os.environ.get(ENV_CHILD, "").strip())
 
 
+#: The compute child finished a `@job` and is leaving so the next one starts on
+#: a fresh process (pgw#1324; the run-once lifecycle stated as an exit status).
+#: It is neither a crash nor a shutdown, and the parent must read it as
+#: neither: rc 0 makes the parent stop supervising, and any other non-zero
+#: books a death against the pod's fault ledger. Job pods would then look like
+#: they crash-loop once per submission.
+EXIT_JOB_RECYCLE = 75
+
+
 __all__ = [
     "ENV_CHILD",
     "ENV_CHILD_CMD",
@@ -80,6 +89,7 @@ __all__ = [
     "ENV_SOCKET",
     "ENV_TOPOLOGY",
     "ENV_WATCHDOG_PING_S",
+    "EXIT_JOB_RECYCLE",
     "group_ordinal",
     "host_siblings",
     "is_compute_child",

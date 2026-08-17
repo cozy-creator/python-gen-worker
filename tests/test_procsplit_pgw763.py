@@ -629,6 +629,62 @@ def test_result_written_just_before_death_is_neither_lost_nor_blamed(
         h.close()
 
 
+def test_pgw1324_a_job_recycle_respawns_without_booking_a_death(
+    tmp_path, captured_dials,
+):
+    """pgw#1324: the run-once lifecycle's PARENT half.
+
+    A `@job` finishes and its compute child leaves with `EXIT_JOB_RECYCLE` so
+    the next job starts on a process that has never imported this one's world.
+    The parent must read that as neither a crash nor a shutdown, and the two
+    neighbouring codes give the wrong answer in opposite directions: rc 0 makes
+    the parent STOP SUPERVISING (`_finish_deliberate_exit` returns), and any
+    other non-zero books a death — a dial, a fault against the pod, and growing
+    backoff. A job pod would then read as crash-looping once per submission to
+    th#2014's ledger, which is the kind of self-inflicted fault signal that
+    gets healthy pods condemned.
+
+    RED by deleting the `rc == EXIT_JOB_RECYCLE` branch in
+    `parent.py::_supervise` — the respawn still happens, but `_handle_child_death`
+    dials a `compute_process_exit` post-mortem carrying `cause=exit:75` for a
+    process that left on purpose.
+    """
+    h = SplitHarness(
+        tmp_path,
+        child_cmd=[sys.executable, str(FAKE_CHILD)],
+        extra_child_env={"PGW763_FAKE_MODE": "result_then_recycle"},
+    )
+    try:
+        conn = h.scheduler.wait_connection(0, timeout=30.0)
+        conn.send(run_job=pb.RunJob(
+            request_id="r-recycle", attempt=1, function_name="echo",
+            input_payload=_payload("x")))
+        res = conn.wait_for(is_result_for("r-recycle"), timeout=30.0)
+        assert res.job_result.status == pb.JOB_STATUS_OK, res.job_result.safe_message
+        # A FRESH CHILD: the whole point of the exit.
+        await_count(
+            lambda: h.pc._spawn_count, 2,
+            what="respawn after the run-once job recycle",
+            cadence=Cadence(),
+            gone=lambda: None if h.alive else f"parent exited code={h.exit_code}",
+        )
+        # ...and the parent is still alive supervising it, which rc 0 would not
+        # have left true.
+        assert h.alive, f"parent exited code={h.exit_code}"
+        # No death was booked against the pod for a deliberate departure:
+        # `_handle_child_death` would have dialled `cause=exit:75`.
+        assert not any("exit:75" in d for d in captured_dials), captured_dials
+        # And the completed job was never re-reported as a death.
+        assert not any(
+            m.WhichOneof("msg") == "job_result"
+            and m.job_result.request_id == "r-recycle"
+            and m.job_result.status == pb.JOB_STATUS_FATAL
+            for m in conn.received
+        )
+    finally:
+        h.close()
+
+
 def test_parent_exit_with_unretired_results_is_reported_typed(
     tmp_path, captured_dials,
 ):

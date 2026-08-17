@@ -72,6 +72,7 @@ from . import (
     ENV_SESSION_ID,
     ENV_SOCKET,
     ENV_WATCHDOG_PING_S,
+    EXIT_JOB_RECYCLE,
     actions,
     attest,
     capability,
@@ -736,6 +737,22 @@ class _ChildSlot:
             if deliberate:
                 await self._finish_deliberate_exit(rc, lifetime_s=lifetime)
                 return
+            if (rc == EXIT_JOB_RECYCLE and saw_hello and not self.watchdog_fired
+                    and not p._draining):
+                # pgw#1324: a `@job` finished and its child left so the next one
+                # starts clean. Respawn WITHOUT the death dial, without counting
+                # a fault and without backoff growth — a recycle per submission
+                # is the run-once lifecycle working, and booking it as a death
+                # would make every job pod read as a crash-loop to th#2014's
+                # ledger. Anything still in flight genuinely died with the
+                # process, so it is still attributed typed.
+                await self._report_in_flight_dead("job_recycle")
+                postmortem.clear_inflight(path=self.inflight_marker_path)
+                logger.info(
+                    "compute child %s recycled after a job (run-once "
+                    "lifecycle, rc=%s); respawning", self.label, rc)
+                backoff = p._backoff_base
+                continue
             cause = await self._handle_child_death(
                 rc, oom_before=oom_before, lifetime_s=lifetime, saw_hello=saw_hello,
             )

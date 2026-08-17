@@ -36,6 +36,7 @@ from . import boot_phases as boot_mod
 from . import cell_adopt
 from . import dispatch
 from . import handler_proof
+from . import procsplit
 from .procsplit import broker as procsplit_broker
 from . import cpu_budget
 from . import measured_posture as posture_mod
@@ -128,7 +129,9 @@ from .topology import (
 from .pb import worker_scheduler_pb2 as pb
 from .redact import sanitize as _sanitize
 from .models.store import ModelStore, _ResidencyIdentity
-from .registry import EndpointSpec
+from . import jobs as jobs_mod
+from .jobs import JobDispatch, JobOutcome, execute_job
+from .registry import EndpointSpec, JobSpec
 from .runtime_config import ConfigStore, extract_job_config
 from .stage_timing import stage_ms_for_metrics
 
@@ -1316,6 +1319,10 @@ class _Job:
     request_id: str
     attempt: int
     spec: Optional[EndpointSpec]
+    # pgw#1324: exactly one of `spec` / `job_spec` is set. A dispatch is one
+    # shape or the other, and the head that admitted it already knows which —
+    # so nothing downstream has to re-derive it from a name.
+    job_spec: Optional[JobSpec] = None
     intent_id: str = ""
     ctx: Optional[RequestContext] = None
     task: Optional[asyncio.Task] = None
@@ -1634,8 +1641,27 @@ class Executor:
         store: Optional[ModelStore] = None,
         gpu_slots: Optional[int] = None,
         topology: Optional[ExecutionTopology] = None,
+        jobs: Optional[List[JobSpec]] = None,
     ) -> None:
         self.specs: Dict[str, EndpointSpec] = {s.name: s for s in specs}
+        # pgw#1324: the OTHER publishable shape this release declares. Two
+        # tables and ONE dispatch head — `RunJob.function_name` is resolved
+        # against both, because the wire carries no intent field to tell them
+        # apart (th#2052 owns that protocol leg) and because a name is unique
+        # across the release either way. Named `job_specs` because `self.jobs`
+        # already means the IN-FLIGHT dispatch map on this class.
+        self.job_specs: Dict[str, JobSpec] = {j.name: j for j in (jobs or [])}
+        collisions = sorted(set(self.specs) & set(self.job_specs))
+        if collisions:
+            # The wire carries a NAME and no intent kind, so a name that is
+            # both is a dispatch nobody can resolve correctly — the head would
+            # silently pick one and the submitter would get the other's
+            # semantics. Refused at boot, where the release can still be fixed.
+            raise ValueError(
+                f"{collisions} declared as BOTH an @endpoint and a @job in one "
+                f"release: a dispatch names a function and nothing else, so one "
+                f"name cannot mean two things. Rename one."
+            )
         self._send = send
         self._settings = settings
         self.store = store or ModelStore(send)
@@ -8771,10 +8797,18 @@ class Executor:
             run.request_id, int(run.attempt), run.function_name)
         if job is None:
             return
+        # pgw#1324: the fork. A JOB skips the whole serving apparatus — no
+        # instance, no setup, no lanes, no compile cell, because a `@job`
+        # declares none of them — and goes straight to the one run-once
+        # harness. Both arms keep the pgw#738 never-silent supervision.
+        runner: Callable[[], Awaitable[None]] = (
+            functools.partial(self._run_job_dispatch, job, run)
+            if job.job_spec is not None
+            else functools.partial(
+                self._run_job, job, functools.partial(self._legacy_order, job, run))
+        )
         job.task = asyncio.create_task(
-            self._supervise_job(
-                job, functools.partial(self._legacy_order, job, run)),
-            name=f"job-{run.request_id}")
+            self._supervise_job(job, runner), name=f"job-{run.request_id}")
         # pgw#674: the serving set may have changed — re-derive what to
         # stage next while this job computes.
         self.preloader.poke()
@@ -8856,19 +8890,28 @@ class Executor:
                 safe_message="worker draining",
             )
             return None
+        # pgw#1324: ONE head, TWO tables. The wire carries no intent kind, so
+        # the NAME is the whole routing key — which is why the refusal below
+        # has to name both inventories: before this, a dispatch naming a
+        # perfectly good JOB and a dispatch naming a typo were the same
+        # sentence, and a 29-job migration shipped unrunnable behind it.
         spec = self.specs.get(function_name)
-        if spec is None:
+        job_spec = self.job_specs.get(function_name) if spec is None else None
+        if spec is None and job_spec is None:
+            detail = (
+                f"unknown function {function_name!r} — this release serves "
+                f"endpoints {sorted(self.specs) or '[]'} and jobs "
+                f"{sorted(self.job_specs) or '[]'}"
+            )
             self._intent_transition(
                 intent_id,
                 pb.LIFECYCLE_INTENT_STATUS_FAILED,
                 pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
-                detail=f"unknown function {function_name!r}",
+                detail=detail,
             )
             await self._send_result(
-                request_id,
-                attempt,
-                pb.JOB_STATUS_INVALID,
-                safe_message=f"unknown function {function_name!r}",
+                request_id, attempt, pb.JOB_STATUS_INVALID,
+                safe_message=detail[:512],
             )
             return None
         if function_name in self.unavailable:
@@ -8891,6 +8934,7 @@ class Executor:
             request_id=request_id,
             attempt=attempt,
             spec=spec,
+            job_spec=job_spec,
             intent_id=intent_id,
         )
         self.jobs[key] = job
@@ -9383,7 +9427,7 @@ class Executor:
     # ---- job execution -----------------------------------------------------
 
     async def _supervise_job(
-        self, job: _Job, make_order: Callable[[], Awaitable[_JobOrder]],
+        self, job: _Job, runner: Callable[[], Awaitable[None]],
     ) -> None:
         """pgw#738 never-silent guarantee: a job task that ends WITHOUT having
         reported terminal state is reaped into one.
@@ -9394,12 +9438,14 @@ class Executor:
         escape from ``_run_job``'s own handlers lands here, as does a plain
         return that somehow skipped ``_finish``.
 
-        ``make_order`` is the wire head's projection (pgw#904): everything
-        from here down reads the neutral ``_JobOrder``, never a wire message.
+        ``runner`` is the admitted dispatch's own execution — the serving path
+        (whose head projects the wire message into a neutral ``_JobOrder``,
+        pgw#904) or, for a `@job`, the run-once harness. The never-silent
+        guarantee is the same guarantee for both shapes.
         """
         escaped: Optional[BaseException] = None
         try:
-            await self._run_job(job, make_order)
+            await runner()
         except asyncio.CancelledError:
             # Worker shutdown / explicit task cancellation. The stream drop is
             # itself a terminal signal to the hub and the loop is going away,
@@ -9445,6 +9491,279 @@ class Executor:
                     f"running: {detail}"
                 ),
             )
+
+    # ---- pgw#1324: the run-once JOB path -----------------------------------
+
+    async def _run_job_dispatch(self, job: _Job, run: pb.RunJob) -> None:
+        """Execute ONE dispatched ``@job`` and report its terminal outcome.
+
+        The whole difference from the serving path is what a job DOESN'T have:
+        no instance, no ``setup()``, no execution lanes, no compile cell, no
+        slots — a ``JobSpec`` declares none of them, so resolving any of them
+        here would be inventing a contract the decorator does not offer. What
+        it does have is the same admission, the same context surface, the same
+        progress/result envelopes and the same exception classifier, because a
+        job and a request are two harnesses over one body (th#2049 charter,
+        constraint 1) and two classifiers would eventually disagree.
+
+        Everything that decides anything lives in ``jobs.execute_job``: the
+        declaration stamp, the schema decode, the progress watch and the
+        run-once contract. This method is the seam that hands it a dispatch.
+        """
+        spec = job.job_spec
+        assert spec is not None
+        outcome: Optional[JobOutcome] = None
+        try:
+            self._intent_transition(
+                job.intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+            )
+            try:
+                ctx = await self._build_job_context(job, run, spec)
+                dispatch = JobDispatch(
+                    job_name=spec.name,
+                    payload=bytes(run.input_payload),
+                    # The job UUID: th#2050 puts it in `request_id` because a
+                    # job rides the request message. One id, not two.
+                    job_id=str(run.request_id),
+                    attempt=int(run.attempt),
+                    # RECORDED, never armed here — the wall cap is hub-issued
+                    # through the provider API, and a pod-side timer would be a
+                    # second home for one guarantee (jobs.JobDispatch).
+                    deadline_s=(
+                        float(run.timeout_ms) / 1000.0
+                        if int(run.timeout_ms or 0) > 0 else None),
+                    org=str(run.org or ""),
+                    invoker_id=str(run.invoker_id or ""),
+                    capability_token=str(run.capability_token or ""),
+                )
+                outcome = await self._execute_job_body(job, spec, dispatch, ctx)
+            except (asyncio.CancelledError, CanceledError):
+                await self._finish(
+                    job, pb.JOB_STATUS_CANCELED, safe_message="canceled")
+                return
+            except Exception as exc:
+                # Everything BEFORE the body: context build, input
+                # materialization, schema decode. Classified by the same
+                # `_map_exception` a request uses, so the hub's infra-vs-body
+                # retry split reads one vocabulary.
+                status, message = _map_exception(exc)
+                logger.exception("job %s failed before its body ran", spec.name)
+                await self._finish(job, status, safe_message=message)
+                return
+            await self._finish_job_outcome(job, outcome)
+        finally:
+            self._recycle_after_job(job, outcome)
+
+    async def _build_job_context(
+        self, job: _Job, run: pb.RunJob, spec: JobSpec,
+    ) -> JobContext:
+        """The context a job body receives, built ONCE and stamped by
+        ``execute_job``.
+
+        ``publishes``/``emits_media`` are deliberately NOT passed: the
+        declaration is the RELEASE's, ``_stamp_declaration`` is its one
+        projection site, and a head that also set them would be a second home
+        for the same fact — the shape that lets a job hold a valid capability
+        token and still be refused by its own SDK.
+
+        ``kind="job"`` and not a producer kind: the kind-implies-publish escape
+        hatch (`_KIND_IMPLIES_PUBLISH`) exists for pre-declaration endpoints,
+        and a job that inherited it would never reach its own typed refusal.
+        """
+        payload_view = self._job_payload_view(spec, run.input_payload)
+        destination_info = _reserved_repo_info(payload_view, "destination")
+        execution_hints: Dict[str, Any] = {"kind": "job"}
+        dest_repo = _producer_destination_repo(payload_view, destination_info)
+        if dest_repo:
+            # th#2068 rewrote this to the run's scratch repo on the WIRE, so the
+            # repo the job writes to and the repo its token authorizes are one
+            # value rather than two that agree by convention.
+            execution_hints["destination_repo"] = dest_repo
+        dest_release = str(destination_info.get("release") or "").strip()
+        if dest_release:
+            execution_hints["destination_release"] = dest_release
+        ctx = JobContext(
+            request_id=str(run.request_id),
+            job_id=_capability_job_id(run.capability_token),
+            emitter=self._make_ctx_emitter(job),
+            owner=str(run.org or "") or None,
+            invoker_id=str(run.invoker_id or "") or None,
+            file_api_base_url=self.file_base_url or None,
+            worker_capability_token=str(run.capability_token or "") or None,
+            execution_hints=execution_hints,
+            source_info=_reserved_repo_info(payload_view, "source"),
+            destination_info=destination_info,
+            text_encoder_info=_reserved_repo_info(payload_view, "text_encoder"),
+            candidate_info=_reserved_repo_info(payload_view, "candidate"),
+            resume_from_info=_reserved_repo_info(payload_view, "resume_from"),
+            hf_token=getattr(self._settings, "hf_token", "") or "",
+        )
+        job.ctx = ctx
+        if job.cancel_requested:
+            ctx._cancel()
+        await self._materialize_job_inputs(ctx, job, run, payload_view)
+        return ctx
+
+    def _job_payload_view(self, spec: JobSpec, payload: bytes) -> Any:
+        """The dispatch payload decoded against the job's PUBLISHED schema.
+
+        Decoded here as well as inside ``execute_job`` because the reserved
+        repo fields decide what the context is built with, and the context has
+        to exist before the body runs. Same decoder, same schema, so the two
+        reads cannot disagree — and a schema violation surfaces here, typed,
+        before any weight is fetched.
+        """
+        return jobs_mod.decode_payload(spec, payload)
+
+    async def _materialize_job_inputs(
+        self, ctx: JobContext, job: _Job, run: pb.RunJob, payload: Any,
+    ) -> None:
+        """Reserved repos, datasets and request media, exactly as the producer
+        serving path materializes them.
+
+        ⚠️ th#2052 DEPENDENCY, recorded rather than papered over: the job
+        dispatch carries no ``snapshots`` map, so these refs resolve WITHOUT a
+        pinned digest (``snapshots.get(ref)`` is None). The read grants are
+        minted from the payload's reserved bindings hub-side (th#2068), so the
+        fetch is authorized; what is missing is the digest pin, which needs a
+        field on the job dispatch the wire does not carry today.
+        """
+        await _to_thread_complete(
+            materialize_input_assets,
+            payload,
+            str(run.request_id),
+            attempt=int(run.attempt),
+            manifest=manifest_from_run_job(run.input_assets),
+            file_base_url=self.file_base_url or "",
+            capability_token=str(run.capability_token or ""),
+            cancel_check=lambda: ctx.cancelled,
+        )
+        ctx.raise_if_cancelled("canceled")
+        snapshots: Dict[WireRef, pb.Snapshot] = {}
+        for field_name, setter in (
+            ("source", None),
+            ("text_encoder", ctx._set_text_encoder_path),
+            ("candidate", ctx._set_candidate_path),
+            ("resume_from", ctx._set_resume_from_path),
+        ):
+            info = _reserved_repo_info(payload, field_name)
+            if info:
+                await self._materialize_source(
+                    ctx, info, snapshots,
+                    set_path=setter, field_name=field_name)
+        await self._materialize_datasets(ctx, payload)
+        ctx.raise_if_cancelled("canceled")
+
+    async def _execute_job_body(
+        self, job: _Job, spec: JobSpec, dispatch: JobDispatch, ctx: JobContext,
+    ) -> JobOutcome:
+        """Run the body under the run-once harness, holding a card only if the
+        job declared it needs one.
+
+        The GPU-vs-plan rung, as behaviour: ``Resources(gpu=True)`` takes this
+        group's permit for the whole run; a ``plan-*`` job declaring only
+        ``vcpus`` takes none, so the $0 planning half of fail-fast-before-
+        renting never queues behind a card it does not use.
+        """
+        gpu_permit: Optional[asyncio.Semaphore] = None
+        permit_token: Optional[int] = None
+        if spec.needs_gpu:
+            gpu_permit = self._gpu_permit_for_group(current_device_group())
+            await self._intent_await(
+                job.intent_id,
+                gpu_permit.acquire(),
+                operation=f"GPU permit for job {dispatch.job_id}",
+                status=pb.LIFECYCLE_INTENT_STATUS_WAITING,
+                stage=pb.LIFECYCLE_INTENT_STAGE_WAIT_GPU_SLOT,
+                reason=pb.LIFECYCLE_WAIT_REASON_GPU_SLOT,
+            )
+            permit_token = self._permits.take(
+                gpu_permit, f"job {dispatch.job_id}")
+        try:
+            job.executing = True
+            self._intent_transition(
+                job.intent_id,
+                pb.LIFECYCLE_INTENT_STATUS_RUNNING,
+                pb.LIFECYCLE_INTENT_STAGE_READY,
+                detail="executing",
+            )
+            logger.info(
+                "job %s dispatched: name=%s gpu=%s deadline_s=%s publishes=%s "
+                "emits_media=%s", dispatch.job_id, spec.name, spec.needs_gpu,
+                dispatch.deadline_s, spec.publishes, spec.emits_media)
+            # The body is a plain function: run it OFF the loop so a job that
+            # computes for hours does not starve the stream the parent holds.
+            return typing.cast(JobOutcome, await _to_thread_complete(
+                execute_job, dispatch, jobs={spec.name: spec}, ctx=ctx))
+        finally:
+            job.handler_thread_done.set()
+            job.executing = False
+            if gpu_permit is not None:
+                if permit_token is not None:
+                    self._permits.drop(gpu_permit, permit_token)
+                gpu_permit.release()
+
+    async def _finish_job_outcome(self, job: _Job, outcome: JobOutcome) -> None:
+        """One ``JobOutcome`` -> one terminal ``JobResult``."""
+        ctx = job.ctx
+        if outcome.status == "succeeded":
+            inline: Optional[bytes] = outcome.result
+            blob_ref: Optional[str] = None
+            if ctx is not None:
+                inline, blob_ref = await self._deliver_result_bytes(
+                    ctx, job.request_id, outcome.result)
+            await self._finish(
+                job, pb.JOB_STATUS_OK, inline=inline, blob_ref=blob_ref)
+            return
+        exc = outcome.exception
+        # The infra-vs-body split is made from the TYPE, never from prose: the
+        # hub retries infra faults and treats a body failure as terminal, so a
+        # RuntimeError from a recipe must not buy a second GPU boot.
+        status, message = (
+            _map_exception(exc) if exc is not None
+            else (pb.JOB_STATUS_FATAL,
+                  _sanitize(outcome.failure or "job failed")))
+        await self._finish(job, status, safe_message=message)
+
+    def _recycle_after_job(self, job: _Job, outcome: Optional[JobOutcome]) -> None:
+        """Honour ``JobOutcome.recycle_child``: leave, so the next job starts
+        on a process that has never imported this one's world.
+
+        "Nothing survives in-process between jobs by contract" is the whole
+        run-once lifecycle, and this is the only place that can enforce it —
+        the executor IS the compute child (procsplit), so the child leaving is
+        the parent forking a fresh one. A dispatch that died before producing
+        an outcome recycles too: it still ran this release's import and
+        materialization side effects in this process.
+        """
+        if outcome is not None and not outcome.recycle_child:
+            logger.info(
+                "job %s asked NOT to recycle its child; keeping the process",
+                job.request_id)
+            return
+        others = [k for k in self.in_flight_keys()
+                  if k != (job.request_id, job.attempt)]
+        if others:
+            # v1 is one job per pod at a time. If that ever stops being true,
+            # recycling here would kill somebody else's in-flight work.
+            logger.warning(
+                "job %s finished but %d other dispatch(es) are in flight; "
+                "skipping the run-once recycle", job.request_id, len(others))
+            return
+        if not procsplit.is_compute_child():
+            # `gen-worker serve` and library use have no control parent to
+            # respawn this process. Exiting there is a dead pod, not a fresh
+            # child, so the contract is REPORTED rather than executed.
+            logger.info(
+                "job %s finished; run-once recycle not executed (no control "
+                "parent in this process)", job.request_id)
+            return
+        logger.info(
+            "job %s finished; recycling this compute child (run-once "
+            "lifecycle)", job.request_id)
+        self._process_exit(procsplit.EXIT_JOB_RECYCLE)
 
     async def _run_job(
         self, job: _Job, make_order: Callable[[], Awaitable[_JobOrder]],
@@ -10898,7 +11217,15 @@ class Executor:
                 "deferred outputs reached serialization un-drained for %s — "
                 "materializing inline", request_id)
             await asyncio.to_thread(ctx._drain_deferred_outputs)
-        data = msgspec.msgpack.encode(output)
+        return await self._deliver_result_bytes(
+            ctx, request_id, msgspec.msgpack.encode(output))
+
+    async def _deliver_result_bytes(
+        self, ctx: RequestContext, request_id: str, data: bytes
+    ) -> Tuple[Optional[bytes], Optional[str]]:
+        """Encoded result -> (inline, blob_ref). Shared by the serving path
+        and the `@job` path (pgw#1324): one size threshold and one envelope
+        upload, so a job's return value is delivered exactly as a request's."""
         if len(data) <= INLINE_RESULT_MAX_BYTES:
             return data, None
         try:
