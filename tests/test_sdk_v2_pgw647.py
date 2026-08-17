@@ -384,7 +384,8 @@ def test_a_family_instance_param_is_the_one_permitted_extra(tmp_path):
         def generate(self, ctx: RequestContext, p: _In, sdxl: Sdxl) -> _Out:
             return _Out()
 
-    assert getattr(Gen, "__gen_worker_endpoint__").families == {"sdxl": Sdxl}
+    declared = getattr(Gen, "__gen_worker_endpoint__").families
+    assert {name: row.model for name, row in declared.items()} == {"sdxl": Sdxl}
 
 
 def test_class_models_require_setup():

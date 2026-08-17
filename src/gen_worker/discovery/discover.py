@@ -790,10 +790,15 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         families_block = [
             {
                 "parameter": parameter,
-                "family": str(getattr(family_type, "FAMILY", "")),
-                "export_digest": str(getattr(family_type, "EXPORT_DIGEST", "")),
+                "family": str(getattr(row.model, "FAMILY", "")),
+                "export_digest": str(getattr(row.model, "EXPORT_DIGEST", "")),
+                # pgw#1346 K3: the endpoint-coupled axis, emitted so PLACEMENT
+                # can see which payload field branches this parameter. Omitted
+                # when unset, so a model bound without one is byte-identical to
+                # what this key produced before `Bind` existed.
+                **({"selected_by": row.selected_by} if row.selected_by else {}),
             }
-            for parameter, family_type in sorted(es.families.items())
+            for parameter, row in sorted(es.families.items())
         ]
 
         fn: Dict[str, Any] = {
@@ -1023,10 +1028,11 @@ def _job_entry(spec: Any, root: Path) -> Dict[str, Any]:
                 "families": [
                     {
                         "parameter": parameter,
-                        "family": str(getattr(family_type, "FAMILY", "")),
-                        "export_digest": str(getattr(family_type, "EXPORT_DIGEST", "")),
+                        "family": str(getattr(row.model, "FAMILY", "")),
+                        "export_digest": str(getattr(row.model, "EXPORT_DIGEST", "")),
+                        **({"selected_by": row.selected_by} if row.selected_by else {}),
                     }
-                    for parameter, family_type in sorted(spec.families.items())
+                    for parameter, row in sorted(spec.families.items())
                 ]
             }
             if spec.families

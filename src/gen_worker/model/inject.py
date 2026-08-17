@@ -41,7 +41,10 @@ def declared_models(target: object) -> dict[str, type[Model]]:
         decl = getattr(target, attribute, None)
         families = getattr(decl, "families", None) if decl is not None else None
         if families:
-            return dict(families)
+            # The decorator stores a `Bind` per parameter (pgw#1346 K3); what a
+            # caller binding kwargs wants is the CLASS, so the endpoint-coupled
+            # axes are dropped here rather than leaked into every consumer.
+            return {name: row.model for name, row in families.items()}
     return {}
 
 

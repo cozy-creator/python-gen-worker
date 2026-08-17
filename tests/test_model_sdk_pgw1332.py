@@ -951,7 +951,11 @@ def test_a_handler_parameter_binds_a_resolved_instance(toy_binding: Any) -> None
         )
     )
     declared = getattr(Generate, ATTR).families
-    assert declared == {"toy": toy_binding}
+    # pgw#1346 K3: the decorator records a `Bind` per parameter — the model
+    # class plus this endpoint's own axes (selected_by / default_checkpoint /
+    # root). A bare class in the declaration normalizes to a bare `Bind`.
+    assert {name: row.model for name, row in declared.items()} == {"toy": toy_binding}
+    assert declared["toy"].selected_by == "" and not declared["toy"].root
     kwargs = fake_kwargs(Generate)
     assert set(kwargs) == {"toy"}
     result = Generate().generate(None, _In(), **kwargs)  # type: ignore[arg-type]
@@ -1066,7 +1070,8 @@ def test_a_job_binds_families_exactly_as_an_endpoint_does(toy_binding: Any) -> N
     )
     body = namespace["render"]
     declared = job(families={"toy": toy_binding})(body)
-    assert getattr(declared, JOB_ATTR).families == {"toy": toy_binding}
+    assert {n: r.model for n, r in getattr(declared, JOB_ATTR).families.items()} \
+        == {"toy": toy_binding}
     kwargs = fake_kwargs(declared)
     assert declared(None, _In(), **kwargs).shape.startswith("fake:")
 
@@ -1113,14 +1118,14 @@ def test_the_discovery_manifest_carries_the_families_a_function_binds(
         )
     )
     (spec,) = extract_specs(Generate, walked_module="tests.pgw1332")
-    assert spec.families == {"toy": toy_binding}
+    assert {n: r.model for n, r in spec.families.items()} == {"toy": toy_binding}
     block = [
         {
             "parameter": name,
-            "family": str(getattr(family, "FAMILY", "")),
-            "export_digest": str(getattr(family, "EXPORT_DIGEST", "")),
+            "family": str(getattr(row.model, "FAMILY", "")),
+            "export_digest": str(getattr(row.model, "EXPORT_DIGEST", "")),
         }
-        for name, family in sorted(spec.families.items())
+        for name, row in sorted(spec.families.items())
     ]
     assert block == [
         {
