@@ -166,9 +166,9 @@ def tree_bytes(path: Path) -> int:
     if snapshot is not None:
         from .materialized_view import view_root_for
 
-        # The manifest's objects, PLUS any priced copy a pgw#1303-gated site
-        # asked for. Both die when this ref's bytes are deleted, so both are
-        # what deleting it reclaims.
+        # The manifest's objects, PLUS any tier-3 copy a materializing site
+        # asked for (pgw#1303). Both die when this ref's bytes are deleted, so
+        # both are what deleting it reclaims.
         return sum(
             int(entry.size_bytes) for entry in snapshot.manifest.files
         ) + tree_bytes(view_root_for(p))
@@ -299,9 +299,10 @@ def delete_ref_bytes(ref: str, path: Path, cas_dir: Path) -> None:
                 cas.compare_and_swap_ref(name, None, expected=current)
             except RefConflict:
                 logger.info("disk-gc: snapshot ref %s changed while deleting", name)
-        # The pgw#1303-gated priced copy, if a gated site ever asked for one.
-        # It is keyed by this snapshot and readable only through it, so a view
-        # that outlived its tree would be disk nothing could name or reclaim.
+        # The tier-3 copy (pgw#1303), if a materializing site ever asked for
+        # one. It is keyed by this snapshot and readable only through it, so a
+        # view that outlived its tree would be disk nothing could name or
+        # reclaim.
         from .materialized_view import view_root_for
 
         shutil.rmtree(view_root_for(unit), ignore_errors=True)

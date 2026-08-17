@@ -15,24 +15,35 @@ issue that executes them. A site that is not on that list is refused, so the
 residue can only shrink -- which is the whole point of writing it down
 instead of leaving "we should stop doing this" in a design doc.
 
-**`extract()` survives as a DISCOURAGED hatch**, in Paul's words *"an escape
-hatch that lets you materialize tensors, but it's not recommended (defeats the
-whole purpose of this system)"*. `docs/mixed-cas-layout.md` §9 lists its whole
-user set, and that list — not a size limit — is the control. So a call is
-permitted only when the line NAMES the audit row it belongs to, and the row is
-one §9 actually has. A new row is a decision someone makes on purpose, in the
-design doc, not a call site that appeared in a diff.
+**`materialize()` survives as TIER 3 of the access ladder** — Paul's #1303
+ruling, 2026-08-17. The ladder is: (1) symlink snapshot + native tensorfs
+reads, (2) symlink snapshot + FUSE where FUSE exists (not on a pod), (3) this
+hatch. It is PERMANENT and it is NOT separately priced; it is simply the
+least-preferred tier, and this census is how the migration up the ladder is
+read. `docs/mixed-cas-layout.md` §9 lists the whole user set with a tier each,
+and that list — not a size limit — is the control. So a call is permitted only
+when the line NAMES the audit row it belongs to, and the row is one §9
+actually has. A new row is a decision someone makes on purpose, in the design
+doc, not a call site that appeared in a diff.
+
+**`extract()` is the RETIRED SPELLING and is refused.** The same ruling renamed
+it (tensorfs#107), so there is now ONE name for the operation upstream and
+here. A fence that quietly accepted both would let the old name drift back in
+the moment someone copies an old snippet — and the last time this fence had a
+spelling problem it read a census of ZERO while a live materialization ran
+unnoticed. It is refused rather than silently ignored so the failure is a
+message about the rename instead of a mystery.
 
 WHY A LINT AND NOT A TEST. The hatch's whole failure mode is a site nobody
-looked at: every individual `extract()` works perfectly and the suite stays
-green while the architecture erodes underneath it. Only a census notices, and
-it belongs in `fast gates` where it runs on the merge path.
+looked at: every individual call works perfectly and the suite stays green
+while the architecture erodes underneath it. Only a census notices, and it
+belongs in `fast gates` where it runs on the merge path.
 
-WHY THE HATCH SCAN IS FILE-SCOPED. `extract` is an ordinary English verb and
-this tree has unrelated ones (`guard_closure`'s, `zipfile`'s). The hatch is
-reachable only through a tensorfs tensor reader, so the scan considers a file
-only when it imports tensorfs at all. That is precise rather than broad: a
-file with no tensorfs import cannot reach it.
+WHY THE HATCH SCAN IS FILE-SCOPED. `materialize` and `extract` are ordinary
+English verbs and this tree has unrelated ones (`guard_closure`'s,
+`zipfile`'s). The hatch is reachable only through a tensorfs reader, so the
+scan considers a file only when it imports tensorfs at all. That is precise
+rather than broad: a file with no tensorfs import cannot reach it.
 
 This file exempts ITSELF and nothing else. A fence that cannot spell what it
 refuses is a worse fence, and the exemption is not a hiding place: the
@@ -97,15 +108,18 @@ RETIRED_DEFINED_IN = {
 
 #: The hatch itself, scanned only where tensorfs is imported.
 #:
-#: TWO SPELLINGS, and missing the second is how the census read zero. §9 and
-#: current upstream call the single-file hatch `extract()`; the rev this repo
-#: PINS (`_vendor/VENDORED.toml`) calls the same operation
-#: `LocalCAS.materialize(entry, destination)`. A fence that matches only the
-#: name upstream uses today matches nothing in the code it guards -- there is
-#: no `.extract(` on a tensorfs reader anywhere in this tree -- while a live
-#: first-party single-file materialization sat unpriced at
-#: `aot_delivery.py`. A guard must spell the symbol its own snapshot exports.
-HATCH = re.compile(r"\.(?:extract|materialize)\s*\(")
+#: ONE SPELLING, as of the #1303 ruling. It used to be two: §9 and upstream
+#: called the single-file hatch `extract()` while the rev this repo PINS
+#: (`_vendor/VENDORED.toml`) called the same operation
+#: `LocalCAS.materialize(entry, destination)` -- and a fence that matched only
+#: upstream's name matched NOTHING in the code it guards, reading a census of
+#: zero while a live first-party materialization ran at `aot_delivery.py`.
+#: tensorfs#107 renamed upstream's to `materialize()`, so the two names
+#: converged and the guard spells the one symbol its own snapshot exports.
+HATCH = re.compile(r"\.materialize\s*\(")
+
+#: The RETIRED spelling. Refused, not ignored -- see the module docstring.
+RETIRED_HATCH = re.compile(r"\.extract\s*\(")
 
 #: `def materialize(...)` is a definition, not a hatch call.
 HATCH_DEFINITION = re.compile(r"^(?:async\s+)?def\s+(?:extract|materialize)\b")
@@ -131,11 +145,12 @@ MARKER = "# mixed-cas-hatch:"
 #: Every row `docs/mixed-cas-layout.md` §9 admits. Adding one here without
 #: adding it there is the mistake this list exists to make visible.
 ROWS = {
-    # "tcg artifact export off-store" — §9.
+    # "tcg artifact export off-store" — §9, tier 3.
     "tcg-artifact-export",
     # "endpoint author slots reading raw weight bytes from a directory" —
-    # §9, pgw#1303. Priced or deprecated; Paul's ruling is pending, so the
-    # row is named and empty rather than absent.
+    # §9, pgw#1303. RULED 2026-08-17: tier 3, permanent, unpriced. Our own
+    # loaders that pass through this row are migration debt with a tier-1
+    # target; author code that demands a directory stays here.
     "author-slot-directory",
 }
 
@@ -200,7 +215,16 @@ def scan(roots: Tuple[Path, ...]) -> List[str]:
                         f"the named residue: {stripped}"
                     )
                     continue
-            if not reaches_tensorfs or not HATCH.search(line):
+            if not reaches_tensorfs:
+                continue
+            if RETIRED_HATCH.search(line) and not HATCH_DEFINITION.match(stripped):
+                findings.append(
+                    f"{rel}:{lineno}: `.extract(` is the RETIRED spelling of "
+                    f"the hatch — it is `.materialize(` since tensorfs#107 "
+                    f"(Paul's #1303 ruling). One name, no aliases: {stripped}"
+                )
+                continue
+            if not HATCH.search(line):
                 continue
             if HATCH_DEFINITION.match(stripped):
                 continue
@@ -257,25 +281,33 @@ def _selftest() -> int:
         ),
         (
             "unnamed.py",
-            "from gen_worker._vendor.tensorfs import open_tensors\n"
-            'reader.extract("config.json", dest)\n',
-            1,
-        ),
-        # The PINNED rev's spelling of the same hatch. Matching only
-        # `extract()` matched nothing in this tree while a real single-file
-        # materialization ran unpriced.
-        (
-            "unnamed_pinned_spelling.py",
             "from gen_worker._vendor.tensorfs import LocalCAS\n"
             "cas.materialize(entry, destination)\n",
             1,
         ),
         (
-            "named_pinned_spelling.py",
+            "named.py",
             "from gen_worker._vendor.tensorfs import LocalCAS\n"
             "cas.materialize(entry, destination)  "
             f"{MARKER} tcg-artifact-export\n",
             0,
+        ),
+        # The RETIRED spelling, refused on sight -- and refused EVEN WITH a
+        # valid row marker, because the finding is about the name, not the
+        # census. `extract()` was upstream's name until tensorfs#107 renamed
+        # it; accepting both is how an old snippet walks back in.
+        (
+            "retired_spelling.py",
+            "from gen_worker._vendor.tensorfs import open_tensors\n"
+            'reader.extract("config.json", dest)\n',
+            1,
+        ),
+        (
+            "retired_spelling_named.py",
+            "from gen_worker._vendor.tensorfs import open_tensors\n"
+            'reader.extract("artifact.so", dest)  '
+            f"{MARKER} tcg-artifact-export\n",
+            1,
         ),
         # Defining a helper called `materialize` is not reaching for the hatch.
         (
@@ -288,23 +320,22 @@ def _selftest() -> int:
         (
             "unknown_row.py",
             "from gen_worker._vendor.tensorfs import open_tensors\n"
-            'reader.extract("w.safetensors", dest)  '
+            'reader.materialize("w.safetensors", dest)  '
             f"{MARKER} because-i-said-so\n",
             1,
         ),
-        (
-            "named.py",
-            "from gen_worker._vendor.tensorfs import open_tensors\n"
-            'reader.extract("artifact.so", dest)  '
-            f"{MARKER} tcg-artifact-export\n",
-            0,
-        ),
-        # The verb is ordinary English. A file that cannot reach a tensor
+        # The verbs are ordinary English. A file that cannot reach a tensorfs
         # reader cannot reach the hatch, and a broad scan would be noise.
         (
             "unrelated.py",
             "import zipfile\n"
             'zf.extract(name, target)\n',
+            0,
+        ),
+        (
+            "unrelated_materialize.py",
+            "import pandas\n"
+            "frame.materialize(rows)\n",
             0,
         ),
     )
@@ -338,9 +369,11 @@ def _selftest() -> int:
             )
             return 1
     print(
-        "lint_materialization_hatch selftest: red on a retired copy, on a "
-        "first-party redefinition, on an unnamed hatch in either spelling and "
-        "on an unknown row; green on a named §9 row and on a plain definition"
+        "lint_materialization_hatch selftest: red on a whole-tree copy, on a "
+        "first-party redefinition, on an unnamed hatch, on an unknown row, and "
+        "on the RETIRED `.extract(` spelling with or without a valid marker; "
+        "green on a named §9 row, on a plain definition, and on the ordinary "
+        "English verbs in a file that cannot reach tensorfs"
     )
     return 0
 
@@ -357,16 +390,17 @@ def main(argv: List[str]) -> int:
             "and tensor bytes are read, never copied. Read "
             "docs/mixed-cas-layout.md §9 (in the tensorfs repo) before adding "
             "a row; a call that belongs to an existing row says which one on "
-            "its own line.\n",
+            "its own line. The hatch is spelled `materialize()` — `extract()` "
+            "is the retired name (tensorfs#107).\n",
             file=sys.stderr,
         )
         for f in findings:
             print(f, file=sys.stderr)
-        print(f"\n{len(findings)} unpriced materialization(s)", file=sys.stderr)
+        print(f"\n{len(findings)} undeclared materialization(s)", file=sys.stderr)
         return 1
     print(
-        "lint_materialization_hatch: no whole-tree materialization, and every "
-        "hatch call names a §9 row"
+        "lint_materialization_hatch: no whole-tree materialization, no retired "
+        "spelling, and every hatch call names a §9 row"
     )
     return 0
 

@@ -1,34 +1,45 @@
 """A real directory of real files, for a loader that will not read our store.
 
-**This is the pgw#1303 gate's mechanism, and it is the piece pgw#1308 step ⑥
-could not ship without.** The chokepoint now publishes a PROJECTED tree, so a
-consumer that hands a DIRECTORY to a third-party loader — `diffusers`
-`from_pretrained`, `ComponentSpec.load`, `from_single_file`, `gguf.GGUFReader`,
-`llama-server -m` — is handing it pointer stubs. Those loaders fail at their
-own parse site, correctly and loudly, and there is nothing this repo can change
-in them.
+**This is tier 3 of the file-access ladder, and it is PERMANENT.** Paul's
+#1303 ruling (2026-08-17) fixes the preference order for every consumer:
 
-pgw#1330 cut every site pgw controls to native reads. What is left is the 23
-sites that hand a path OUT, and pgw#1303 is Paul's ruling on whether they are
-priced or deprecated. **Until that ruling they stay materialized** — and this
-is where the price is paid, named, and made visible.
+1.  symlink snapshot + **native tensorfs reads** — all of our own code, all
+    tensors. `models/svdq_native.py` is the worked example.
+2.  symlink snapshot + **FUSE**, for third-party code that needs file
+    *semantics* on a tensor file. Available only where FUSE is: `cozy-local`,
+    dev boxes. **NOT on a RunPod pod** — no writable `/dev/fuse`, no
+    `CAP_SYS_ADMIN`, no API field to grant either.
+3.  **this module.** A private copy, for a consumer that has neither.
 
-## What changes even before the ruling
+So on the serving fleet, an external binary that insists on a real file —
+`llama-server -m`, `gguf.GGUFReader` inside a runtime — lands here
+permanently, and that is the honest answer rather than a debt. Our own
+loaders that still land here are MIGRATION DEBT with a tier-1 target, not a
+gate waiting on a decision: the decision is made.
+
+**The seam is not separately priced or metered.** It is simply the
+least-preferred tier. The byte counting below is not a bill — it is the
+burn-down evidence for the migration, which is why it names the caller.
+
+## Why the seam exists at all
+
+The chokepoint publishes a PROJECTED tree (pgw#1308 step ⑥), so a consumer
+that hands a DIRECTORY to a third-party loader is handing it pointer stubs.
+Those loaders fail at their own parse site, correctly and loudly, and there
+is nothing this repo can change in them.
 
 Materialization used to be UNCONDITIONAL and WHOLE-TREE: every snapshot on
 every pod carried a complete second copy, whether or not anything ever handed
 a directory to a third party (pgw#1296(a) measured the 2.000x). Now:
 
-*   nothing is copied until a gated site actually asks;
+*   nothing is copied until a tier-3 site actually asks;
 *   only the SUBTREE it asks for is copied — a `from_pretrained` on one
     component costs that component, not the model;
 *   every copy goes through the single-file hatch with its §9 row on the line,
     so `scripts/lint_materialization_hatch.py` counts it;
-*   the bytes are logged at INFO with the caller's own `why`, so a pod's 2x
-    residency has a name and a call site instead of being the default.
-
-That turns pgw#1303 from "should we allow this?" into a decision with a
-measured price per site, which is what a ruling needs.
+*   the bytes are logged at INFO with the caller's own `why`, so every
+    remaining copy has a name and a call site. That log IS the migration
+    burn-down: a site that disappears from it has moved up the ladder.
 
 ## Where the copy lives
 
@@ -71,8 +82,9 @@ def _materialize(cas: LocalCAS, entry: FileEntry, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     # The single-file hatch. It streams, it is atomic, and it verifies the
     # reconstruction against the manifest's whole-file digest before the
-    # rename — so a view is known-good bytes, not merely copied ones. The
-    # pinned rev spells `extract()` as `materialize`; see VENDORED.toml.
+    # rename — so a view is known-good bytes, not merely copied ones. One
+    # name upstream and here since tensorfs#107 renamed `extract()` to
+    # `materialize()` (Paul's #1303 ruling).
     cas.materialize(entry, destination)  # mixed-cas-hatch: author-slot-directory
 
 
@@ -87,8 +99,8 @@ def third_party_dir(path: Path | str, *, why: str) -> Path:
 
     ``why`` names the third party that needs real files. It is required and it
     is logged with the byte count, because the whole point of routing these
-    through one seam is that the pgw#1303 ruling can read what it costs and
-    where.
+    through one seam is that the migration off it can be read off a pod's own
+    logs — which sites still copy, how much, and for whom.
     """
 
     target = Path(path)
@@ -164,7 +176,7 @@ def third_party_dir(path: Path | str, *, why: str) -> Path:
 
     _log.info(
         "materialized_view snapshot=%s rel=%s bytes=%d files=%d why=%s "
-        "(pgw#1303: this is the priced copy, not the default)",
+        "(pgw#1303 tier 3: the last resort of the access ladder)",
         root.name, rel or "(whole tree)", written, len(wanted), why,
     )
     return out
