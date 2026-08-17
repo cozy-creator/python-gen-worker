@@ -204,6 +204,11 @@ MINT_MACHINERY: Tuple[str, ...] = (
     "gen_worker.aot_mint",
     "gen_worker.boot_key",
     "gen_worker.boot_trace_child",
+    # pgw#1331: a family declaration mints its OWN graph classes through this
+    # bridge. It is the family surface's mint half, and the family surface is
+    # on the serve path — which is exactly why it is named here: a serve-role
+    # module that could reach it would be a pod that can compile.
+    "gen_worker.family.mint",
     "gen_worker.keyset.emit",
     "gen_worker.mint_child",
     "gen_worker.mint_process",

@@ -161,3 +161,73 @@ with llm.session() as decode:
     decode.state["kv"] = ...          # host-owned, torn down with the session
     logits = llm.decode(context=1024, tokens=tokens)
 ```
+
+## A catalog family is two modules (pgw#1331)
+
+`<family>.py` **declares**: its `build` callables construct diffusers and
+transformers modules, so it is mint-side and the serve role may not import it.
+`<family>_serve.py` is what the request path reads — the tuned schemas, the
+shape arithmetic, the pipeline loop — and imports nothing above `torch`. The
+direction is one-way: the declaration reads from the serving half, never the
+reverse, so the family's shape arithmetic has one definition and an artifact
+cannot be minted at a shape the loop will not ask for.
+
+`scripts/lint_serve_role_closure.py` enforces it. `role.MODEL_FREE_MODULES` is
+the surface, `role.FORBIDDEN_LIBRARIES` is what it may not reach, and the walk
+follows function-local imports. `serve.guard` blocks the same names at run time.
+
+## Scheduler as bare math
+
+The recipe records a scheduler as a NAME and a block of scalars, and says the
+host implements it. `gen_worker.family.scheduler` is that host half:
+
+```python
+schedule = flux.scheduler().schedule(steps=28, image_seq_len=4096)
+for index, sigma in enumerate(schedule.sigmas[:-1]):
+    velocity = flux.denoiser(resolution=1024, timestep=..., hidden_states=latents, ...)
+    latents = schedule.step(index, velocity, latents)
+```
+
+`scheduler()` is GENERATED and its return type is the concrete class, so no
+handler spells a scheduler name. A family whose declared scheduler the SDK does
+not implement has **no** `scheduler()` method — an `AttributeError` your type
+checker reports, not a fallback that puts a model library back on the path.
+
+The constants come from the DECLARATION's `Scheduler(...)` block, which rides
+the export digest: re-declaring a schedule re-identifies the family instead of
+silently changing every request.
+
+## Serving a family end to end
+
+`gen_worker.family.catalog.flux1_dev_serve` is the worked example — tokenize,
+encode both text branches, denoise, decode, with no model library imported:
+
+```python
+from gen_worker.family.catalog import Flux1Dev, flux1_dev_serve as flux
+
+image = flux.generate(
+    instance,                    # a resolved Flux1Dev
+    resolution=1024,
+    clip_ids=flux.clip_token_ids(clip_tokens, device=device),
+    t5_ids=flux.t5_token_ids(t5_tokens, device=device),
+    steps=28, guidance=3.5, seed=seed,
+)
+```
+
+The same body runs against a compiled backing, an eager one, or `Flux1Dev.fake()`
+— which is how it is tested in CI without a card.
+
+## Minting a family
+
+```
+gen-worker family mint gen_worker.family.catalog.flux1_dev:FLUX1_DEV \
+    --out-dir ./cells --runner decoder --runner clip --json minted.json
+```
+
+A real compile: **run it on a pod, never on a shared box.** It needs a GPU and a
+toolchain; it needs no weights and no network, because cell identity is
+checkpoint-free (§4.27) and the constants arrive at arm time from the store.
+The trace is the declaration's own, so a minted class's ingress digest is the
+committed export's by construction — `family.mint.assert_matches_export` states
+that as an assertion, in the direction torchcg G16 requires: the export is the
+source and the mint is checked against it.

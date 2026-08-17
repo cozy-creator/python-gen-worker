@@ -32,7 +32,7 @@ arithmetic the request path reads live in
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Final, Literal
+from typing import Any, Final
 
 from ..spec import (
     Bucket,

@@ -534,7 +534,7 @@ def test_the_serve_boot_key_path_cannot_reach_a_tracer() -> None:
         "gen_worker.keyset.emit",
     ):
         assert tracer in banned, f"{tracer} stopped being banned"
-    seen, via = fence.closure(roots)
+    seen, via, _, _ = fence.closure(roots)
     assert len(seen) > 20, "the roots resolved to nothing — the fence rotted"
     reached = sorted(name for name in banned if name in seen)
     assert not reached, (
