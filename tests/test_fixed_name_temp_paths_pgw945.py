@@ -159,7 +159,10 @@ def test_a_failing_writer_cannot_destroy_a_concurrent_one(shard_server, tmp_path
 def test_two_ref_index_processes_merge_without_losing_an_owner(tmp_path):
     cache = tmp_path / "cache"
     cache.mkdir()
-    context = multiprocessing.get_context("fork")
+    # pgw#1316: SPAWN, never fork — an xdist worker that already ran a
+    # grpc.aio file forks with gRPC's threads live, and the child inherits a
+    # poller gRPC never got to reset.
+    context = multiprocessing.get_context("spawn")
     barrier = context.Barrier(2)
     processes = [
         context.Process(

@@ -26,6 +26,18 @@ from gen_worker.models.store import _snapshot_to_resolved
 from gen_worker.pb import worker_scheduler_pb2 as pb
 
 
+#: pgw#1316: SPAWN, never fork. These tests need two real OS processes racing
+#: on one CAS tree; they do not need the parent's address space. Under
+#: `-n 4 --dist loadfile` an xdist worker that already ran a grpc.aio file
+#: still has gRPC's event-engine threads live, and gRPC skips its
+#: `pthread_atfork` handlers whenever another thread is inside gRPC
+#: (`fork_posix.cc:71`) — the child then inherits a poller in an inconsistent
+#: state and dies on `ev_epoll1_linux.cc: Check failed: next_worker->state ==
+#: KICKED`. Spawn shares no such state. Everything crossing the boundary must
+#: stay picklable.
+_MP = multiprocessing.get_context("spawn")
+
+
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -226,11 +238,10 @@ def test_two_processes_converge_on_the_same_materialized_tree(tmp_path: Path) ->
     cas = LocalCAS(tmp_path)
     digest = cas.put_bytes(body)
     target = tmp_path / "snapshots" / "same"
-    context = multiprocessing.get_context("fork")
-    barrier = context.Barrier(2)
-    results = context.Queue()
+    barrier = _MP.Barrier(2)
+    results = _MP.Queue()
     processes = [
-        context.Process(
+        _MP.Process(
             target=_materialize_process,
             args=(str(tmp_path), str(target), digest.digest, len(body), barrier, results),
         )
@@ -281,13 +292,12 @@ def test_stale_invalid_validation_cannot_delete_a_rebuilt_tree(
     target.mkdir(parents=True)
     (target / "config.json").write_bytes(b"invalid-old-target")
 
-    context = multiprocessing.get_context("fork")
-    stale_checked = context.Event()
-    rebuilt = context.Event()
-    ensure_entered = context.Event()
-    allow_ensure = context.Event()
-    results = context.Queue()
-    stale = context.Process(
+    stale_checked = _MP.Event()
+    rebuilt = _MP.Event()
+    ensure_entered = _MP.Event()
+    allow_ensure = _MP.Event()
+    results = _MP.Queue()
+    stale = _MP.Process(
         target=_stale_invalid_process,
         args=(
             str(tmp_path),
