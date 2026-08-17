@@ -24,7 +24,7 @@ from gen_worker import (
     worker_function,
 )
 from gen_worker.api.formula import RuntimeFormula
-from gen_worker.families.base import GenerationDefaults, family
+from gen_worker.families.base import GenerationDefaults, register_family
 from gen_worker.registry import extract_specs
 
 _GUIDANCE_AXIS = CompileAxis(classes=(
@@ -381,9 +381,11 @@ def test_clamp_emits_only_when_the_value_changes() -> None:
 # ---------------------------------------------------------------------------
 
 
-@family("fam-formula")
 class FormulaDefaults(GenerationDefaults, frozen=True):
     num_inference_steps: Optional[int] = None
+
+
+register_family("fam-formula", FormulaDefaults)
 
 
 class FormulaIn(msgspec.Struct):

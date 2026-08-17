@@ -11,12 +11,11 @@ from __future__ import annotations
 
 from typing import Literal, Optional, Tuple
 
-from gen_worker.families import GenerationDefaults, family
+from gen_worker.families import GenerationDefaults, register_family
 
 ExampleScheduler = Literal["euler_a", "dpmpp_2m_karras", "lcm"]
 
 
-@family("example")
 class ExampleDefaults(GenerationDefaults, frozen=True):
     """Checkpoint-kind vocabulary for the synthetic ``example`` family."""
 
@@ -27,7 +26,9 @@ class ExampleDefaults(GenerationDefaults, frozen=True):
     max_guidance: Optional[float] = None
 
 
-@family("example", kind="lora")
+register_family("example", ExampleDefaults)
+
+
 class ExampleLoraDefaults(GenerationDefaults, frozen=True):
     """LoRA-kind overlay for the same family: every recipe field is "no opinion"."""
 
@@ -37,6 +38,9 @@ class ExampleLoraDefaults(GenerationDefaults, frozen=True):
     guidance: Optional[float] = None
     max_guidance: Optional[float] = None
     scheduler: Optional[ExampleScheduler] = None
+
+
+register_family("example", ExampleLoraDefaults, kind="lora")
 
 
 __all__ = ["ExampleDefaults", "ExampleLoraDefaults", "ExampleScheduler"]

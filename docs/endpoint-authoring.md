@@ -309,6 +309,20 @@ standalone distilled checkpoint is a separate class/endpoint.
 > baked the curated set into the endpoint image is **gone** — those names have
 > no definition in `gen_worker` and importing them fails. `Slot` replaced it.
 
+## Families: the typed authoring contract (pgw#1332)
+
+`@endpoint(families={"sdxl": Sdxl})` binds a handler parameter to a fully
+resolved family INSTANCE — graph, weights, and the checkpoint's
+catalog-stamped tuned values (`sdxl.tuned`). The generated family class is the
+parameter's type, so two parameters of one family are two checkpoints with
+independent tuning, and a runner is reached as `sdxl.denoiser(...)` rather than
+through a name typed as a string.
+
+It is the one exception to the `(self, ctx, payload)` handler shape below, and
+the only one: a per-handler MODEL argument is still rejected for the SDK v2
+reason. Full reference, including how to declare a family of your own and how
+to run a handler with no hub and no GPU: [families.md](families.md).
+
 ## `Slot`: hub-resolved model slots (SDK v2, pgw#647)
 
 `Slot(pipeline_cls, selected_by=, family=, default_checkpoint=)` resolves the model set
@@ -487,28 +501,35 @@ class Generate:
   moves and every derived artifact gets a new identity, so bytes never
   silently change under a name.
 
-**Per-family defaults vocabulary**: a typed, versioned,
-JSON-Schema-exportable struct per architecture — the shape tensorhub validates
-catalog recipe values against. `gen_worker.families` ships the REGISTRY and
-nothing else: **you declare the vocabulary in your own endpoint** (pgw#740
-moved `SdxlDefaults`/`WanDefaults` out of the SDK — a vocabulary in the library
-would need a wheel release to change). Declare it anywhere imported before
-discovery runs:
+**Per-family tuned vocabulary**: a typed, versioned, JSON-Schema-exportable
+struct per architecture — the shape tensorhub validates catalog recipe values
+against. `gen_worker.families` ships the REGISTRY and nothing else: **the
+FAMILY declares the vocabulary** (pgw#740 moved `SdxlDefaults`/`WanDefaults`
+out of the SDK — a vocabulary in the library would need a wheel release to
+change; pgw#1332 gave the remaining registration to the family that owns it):
 
 ```python
-from gen_worker.families import GenerationDefaults, family
+from gen_worker.family import GraphFamily, TunedValues
 
-@family("sdxl")
-class SdxlDefaults(GenerationDefaults, frozen=True):
+class SdxlTuned(TunedValues, frozen=True):
     scheduler: Literal["euler_a", "dpmpp_2m_karras", "dpmpp_2m_sde_karras"] = "euler_a"
     steps: int = 28
     guidance: float = 6.0
     max_guidance: float | None = None   # a CLAMP constraint, never a wire reshape
+
+SDXL = GraphFamily(name="sdxl", tuned=SdxlTuned, ...)   # see families.md
 ```
+
+The free-standing `@family("sdxl")` class decorator is **gone** (pgw#1332): it
+held the word `family` for a defaults vocabulary while the typed Family SDK
+needed it for the family itself. A vocabulary with no family object registers
+through `gen_worker.families.register_family(name, cls, kind=...)`.
 
 `gen-worker families export-schemas <dir>` writes one
 `<family>[.lora].schema.json` per registered family (LoRA-kind families get the
-`.lora` infix). Code owns this SCHEMA; the catalog owns the VALUES.
+`.lora` infix). Code owns this SCHEMA; the catalog owns the VALUES — and under
+the Family SDK the values reach a handler as `inst.tuned`, on the instance,
+because they are checkpoint-level.
 
 **Per-request views**: `ctx.for_request(self.pipeline, sampler=, seed=)`
 returns a container copy sharing every module by reference (zero weight

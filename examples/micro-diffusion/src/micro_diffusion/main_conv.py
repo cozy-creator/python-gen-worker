@@ -14,7 +14,7 @@ import msgspec
 import torch
 
 from gen_worker import Compile, RequestContext, Resources, Slot, endpoint
-from gen_worker.families import GenerationDefaults, family
+from gen_worker.families import GenerationDefaults, register_family
 
 from .aot_declaration_conv import (  # noqa: F401 — registers at import
     CFG_ARITY,
@@ -28,9 +28,11 @@ from .model_conv import NUM_TRAIN_TIMESTEPS
 from .pipeline import MicroConvPipeline
 
 
-@family(FAMILY)
 class MicroConvDefaults(GenerationDefaults, frozen=True):
     steps: int = 2
+
+
+register_family(FAMILY, MicroConvDefaults)
 
 
 class MicroConvIn(msgspec.Struct):

@@ -50,7 +50,7 @@ from gen_worker import io as gw_io
 from gen_worker.api.binding import wire_ref
 from gen_worker.api.streaming import StreamResult, TokenUsage
 from gen_worker.api.types import ImageAsset
-from gen_worker.families.base import GenerationDefaults, family
+from gen_worker.families.base import GenerationDefaults, register_family
 
 
 def _slot_weight_bytes(slot_dir: object) -> str:
@@ -85,9 +85,11 @@ PICKED_DEFAULT = Hub("catalog/picked-default", release="prod")
 PICKED_DEFAULT_REF = wire_ref(PICKED_DEFAULT)
 
 
-@family("v2-testfam")
 class _V2Defaults(GenerationDefaults, frozen=True):
     steps: int = 7
+
+
+register_family("v2-testfam", _V2Defaults)
 
 
 # ---------------------------------------------------------------------------

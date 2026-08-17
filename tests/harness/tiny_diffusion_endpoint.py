@@ -35,7 +35,7 @@ from gen_worker.api.export_contract import (
     Input,
     register_export_declaration,
 )
-from gen_worker.families.base import GenerationDefaults, family
+from gen_worker.families.base import GenerationDefaults, register_family
 
 from harness.tiny_diffusion import (
     CONTEXT_DIM,
@@ -67,9 +67,11 @@ CFG_BATCH = 2
 RESOLVED_REFS: List[str] = []
 
 
-@family(FAMILY)
 class MicroRigDefaults(GenerationDefaults, frozen=True):
     steps: int = 2
+
+
+register_family(FAMILY, MicroRigDefaults)
 
 
 class RigIn(msgspec.Struct):

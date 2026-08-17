@@ -39,11 +39,17 @@ from __future__ import annotations
 
 import inspect
 import typing
-from typing import Any, Callable, Optional, Sequence, TypeVar, overload
+from typing import Any, Callable, Mapping, Optional, Sequence, TypeVar, overload
 
 import msgspec
 
-from .decorators import Resources, _validate_env_decl
+from ..family.runtime import FamilyBinding
+from .decorators import (
+    Resources,
+    _normalize_families,
+    _validate_env_decl,
+    _validate_family_params,
+)
 
 T = TypeVar("T", bound=Callable[..., Any])
 
@@ -73,6 +79,13 @@ class JobDecl(msgspec.Struct, frozen=True, kw_only=True):
     #: This job MAY write media. Same shape, different grant
     #: (``upload_media``), and independent of ``publishes``.
     emits_media: bool = False
+    #: pgw#1332: handler parameter -> the generated family TYPE bound to it,
+    #: exactly as on ``@endpoint``. Portability is a REQUIREMENT (see the
+    #: module docstring), so a body that binds a family instance has to promote
+    #: between the two decorators unchanged — a job that could not take one
+    #: would make the promotion a rewrite for precisely the endpoints most
+    #: likely to want it.
+    families: Mapping[str, type["FamilyBinding"]] = msgspec.field(default_factory=dict)
 
 
 def _qualname_owner(fn: Callable[..., Any]) -> str:
@@ -89,7 +102,9 @@ def _qualname_owner(fn: Callable[..., Any]) -> str:
     return ""
 
 
-def _validate_job_shape(name: str, fn: Callable[..., Any]) -> tuple[type, type]:
+def _validate_job_shape(
+    name: str, fn: Callable[..., Any], families: frozenset[str] = frozenset()
+) -> tuple[type, type]:
     """-> (payload_type, output_type). Every refusal names the rule."""
     if inspect.isclass(fn):
         raise TypeError(
@@ -121,12 +136,13 @@ def _validate_job_shape(name: str, fn: Callable[..., Any]) -> tuple[type, type]:
         )
 
     params = list(inspect.signature(fn).parameters.values())
-    if len(params) != 2:
+    extra = [p.name for p in params[2:] if p.name not in families]
+    if len(params) < 2 or extra:
         raise TypeError(
-            f"@job {name!r}: must accept exactly (ctx, payload) — got params "
-            f"{[p.name for p in params]}. This is the SAME contract @endpoint "
-            "functions take, which is what makes a job promotable to a "
-            "serverless endpoint without a body edit."
+            f"@job {name!r}: must accept (ctx, payload) plus declared family "
+            f"instances — got params {[p.name for p in params]}. This is the SAME "
+            "contract @endpoint functions take, which is what makes a job "
+            "promotable to a serverless endpoint without a body edit."
         )
     try:
         hints = typing.get_type_hints(fn, include_extras=False)
@@ -165,6 +181,7 @@ def job(
     publishes: bool = ...,
     emits_media: bool = ...,
     name: Optional[str] = ...,
+    families: Optional[Mapping[str, type[FamilyBinding]]] = ...,
 ) -> Callable[[T], T]: ...
 
 
@@ -178,6 +195,7 @@ def job(
     publishes: bool = False,
     emits_media: bool = False,
     name: Optional[str] = None,
+    families: Optional[Mapping[str, type[FamilyBinding]]] = None,
 ) -> Any:
     """The one job decorator. See the module docstring for the shape."""
     if resources is not None and not isinstance(resources, Resources):
@@ -192,7 +210,11 @@ def job(
 
     def apply(obj: Any) -> Any:
         declared = str(name or getattr(obj, "__name__", "") or "")
-        _validate_job_shape(declared or "<job>", obj)
+        family_map = _normalize_families(f"job {declared or '<job>'!r}", families)
+        _validate_job_shape(declared or "<job>", obj, frozenset(family_map))
+        _validate_family_params(
+            f"job {declared or '<job>'!r}", obj, family_map, is_method=False
+        )
         if getattr(obj, JOB_ATTR, None) is not None:
             raise ValueError(f"@job: {declared!r} already carries a job declaration")
         decl = JobDecl(
@@ -203,6 +225,7 @@ def job(
             visibility=vis,
             publishes=bool(publishes),
             emits_media=bool(emits_media),
+            families=family_map,
         )
         setattr(obj, JOB_ATTR, decl)
         return obj

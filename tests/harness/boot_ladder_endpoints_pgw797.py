@@ -22,7 +22,7 @@ from pathlib import Path
 import msgspec
 
 from gen_worker import Compile, Hub, RequestContext, Resources, endpoint
-from gen_worker.families.base import GenerationDefaults, family
+from gen_worker.families.base import GenerationDefaults, register_family
 
 
 def _slot_weight_bytes(slot_dir: object) -> str:
@@ -45,9 +45,11 @@ def _slot_weight_bytes(slot_dir: object) -> str:
     return (real / "model.safetensors").read_text()
 
 
-@family("harness-pgw797-testfam")
 class _Defaults(GenerationDefaults, frozen=True):
     steps: int = 3
+
+
+register_family("harness-pgw797-testfam", _Defaults)
 
 
 class EchoIn(msgspec.Struct):

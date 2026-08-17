@@ -9,12 +9,14 @@ import time
 import msgspec
 
 from gen_worker import Hub, RequestContext, Slot, endpoint
-from gen_worker.families.base import GenerationDefaults, family
+from gen_worker.families.base import GenerationDefaults, register_family
 
 
-@family("harness-slowfam")
 class _SlowDefaults(GenerationDefaults, frozen=True):
     steps: int = 7
+
+
+register_family("harness-slowfam", _SlowDefaults)
 
 
 class SlowIn(msgspec.Struct):

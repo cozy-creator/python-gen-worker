@@ -781,6 +781,21 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
                 f"{es.name!r}: function name cannot be normalized"
             )
 
+        # pgw#1332: the families this function binds, so PLACEMENT can prefetch
+        # their weights and verify the VRAM fit before a request lands — which
+        # is the entire reason static declaration is the default and
+        # `Family.instance(ref)` is the exception. `export_digest` pins the
+        # declaration these bindings were generated against, so a pod holding a
+        # different one is detectable without loading anything.
+        families_block = [
+            {
+                "parameter": parameter,
+                "family": str(getattr(family_type, "FAMILY", "")),
+                "export_digest": str(getattr(family_type, "EXPORT_DIGEST", "")),
+            }
+            for parameter, family_type in sorted(es.families.items())
+        ]
+
         fn: Dict[str, Any] = {
             "name": function_name,
             "python_name": es.attr_name or es.method.__name__,
@@ -810,6 +825,11 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         # capability grant only for declaring functions. Omitted when false.
         if es.child_calls:
             fn["child_calls"] = True
+        # Omitted when the function binds none, so an endpoint that declares no
+        # family produces the byte-identical manifest it produced before this
+        # key existed.
+        if families_block:
+            fn["families"] = families_block
         # The hub-write declaration (th#2049/pgw#1294), ALWAYS emitted on both
         # row shapes. Not omit-when-false like the flags above: the hub mints
         # a write grant off this, so "absent" must never be readable as
@@ -998,6 +1018,20 @@ def _job_entry(spec: Any, root: Path) -> Dict[str, Any]:
         "output_schema": output_schema,
         "is_async": bool(spec.is_async),
         "source_file": _job_source_file(spec, root),
+        **(
+            {
+                "families": [
+                    {
+                        "parameter": parameter,
+                        "family": str(getattr(family_type, "FAMILY", "")),
+                        "export_digest": str(getattr(family_type, "EXPORT_DIGEST", "")),
+                    }
+                    for parameter, family_type in sorted(spec.families.items())
+                ]
+            }
+            if spec.families
+            else {}
+        ),
     }
 
 

@@ -33,7 +33,7 @@ from gen_worker import (
     StringEnum,
     endpoint,
 )
-from gen_worker.families import GenerationDefaults, family
+from gen_worker.families import GenerationDefaults, register_family
 
 from .aot_declaration import (  # noqa: F401 — registers at import, as a real endpoint does
     CFG_ARITY,
@@ -66,10 +66,12 @@ _LATENT_BY_SIZE = {
 }
 
 
-@family(FAMILY)
 class MicroDefaults(GenerationDefaults, frozen=True):
     steps: int = 2
     guidance: float = 4.0
+
+
+register_family(FAMILY, MicroDefaults)
 
 
 class MicroIn(msgspec.Struct):

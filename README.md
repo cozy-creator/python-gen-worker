@@ -170,6 +170,9 @@ hard-fails if `gen_worker` resolves outside `src/`).
 
 - [docs/endpoint-authoring.md](docs/endpoint-authoring.md) — the `@endpoint`
   reference: bindings, variants, Resources, contexts, streaming, runtimes.
+- [docs/families.md](docs/families.md) — the typed Family SDK: declare a family,
+  bind a resolved instance to a handler parameter, generate typed bindings, run
+  a handler hubless.
 - [docs/local-dev.md](docs/local-dev.md) — the CLI: `run`/`serve`/`invoke`/
   `prefetch`, `field=value` grammar, `--offline`, exit codes.
 - [docs/dockerfile.md](docs/dockerfile.md) — bring-your-own-Dockerfile contract.

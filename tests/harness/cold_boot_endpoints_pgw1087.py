@@ -21,7 +21,7 @@ from pathlib import Path
 import msgspec
 
 from gen_worker import Compile, Hub, RequestContext, Resources, endpoint
-from gen_worker.families.base import GenerationDefaults, family
+from gen_worker.families.base import GenerationDefaults, register_family
 
 #: The component directories the fixture snapshot carries, in the order a
 #: reader should expect them. `(root)` is the fourth, synthesized by
@@ -29,9 +29,11 @@ from gen_worker.families.base import GenerationDefaults, family
 COMPONENTS = ("text_encoder", "transformer", "vae")
 
 
-@family("harness-pgw1087-testfam")
 class _Defaults(GenerationDefaults, frozen=True):
     steps: int = 3
+
+
+register_family("harness-pgw1087-testfam", _Defaults)
 
 
 class EchoIn(msgspec.Struct):

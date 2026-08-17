@@ -478,6 +478,16 @@ jobs:
       - name: pgw#740 guard - registry contract
         run: uv run python scripts/check_registry_contract.py
 
+      # GATING (pgw#1332): the catalog commits two halves per family — the
+      # declaration-time export and the bindings generated from it — and an
+      # endpoint compiles against the second while a pod arms what the first
+      # describes. Codegen is a pure function of the document, so proving they
+      # still agree is a byte comparison with no torch, no GPU and no network:
+      # sub-second, which is why it belongs in the REQUIRED job rather than
+      # behind the fifteen-minute one.
+      - name: pgw#1332 guard - family bindings match their exports
+        run: uv run python scripts/check_family_bindings.py
+
       # GATING (th#1914 / pgw#1237 / cl#56): this public corpus is the
       # authority both sides bind to real path behavior. PGW pins it offline;
       # cozy-local performs the meaningful peer comparison after PGW lands.

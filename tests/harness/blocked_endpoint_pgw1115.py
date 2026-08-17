@@ -27,7 +27,7 @@ from gen_worker import (
     Compile, Dim, GraphClass, Hub, Input, MintBlocker, RequestContext,
     Resources, Slot, endpoint,
 )
-from gen_worker.families.base import GenerationDefaults, family
+from gen_worker.families.base import GenerationDefaults, register_family
 
 FAMILY = "harness-pgw1115-blocked"
 DECLARED_PIPELINE = Hub("harness/pgw1115-blocked", release="prod")
@@ -104,9 +104,11 @@ class BlockedPipeline:
         return self
 
 
-@family(FAMILY)
 class _Defaults(GenerationDefaults, frozen=True):
     steps: int = 3
+
+
+register_family(FAMILY, _Defaults)
 
 
 class EchoIn(msgspec.Struct):

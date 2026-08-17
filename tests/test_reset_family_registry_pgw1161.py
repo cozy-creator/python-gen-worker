@@ -1,6 +1,6 @@
 """A RE-IMPORT of a family declaration is not a collision.
 
-`@family` registration is an IMPORT SIDE EFFECT. A duplicate guard comparing by
+`register_family` registration is an IMPORT SIDE EFFECT. A duplicate guard comparing by
 IDENTITY (`existing is not cls`) therefore refuses a re-import, which builds a
 NEW class object for the same declaration — and endpoint suites re-import their
 declaration modules between tests.
@@ -26,15 +26,17 @@ import pytest
 from gen_worker.api.export_contract import reset_export_declarations
 from gen_worker.families import base as families_base
 from gen_worker.families.base import (
-    GenerationDefaults, family, family_for, family_registry)
+    GenerationDefaults, family_for, family_registry, register_family)
 
 _DECL_SRC = '''
-from gen_worker.families.base import GenerationDefaults, family
+from gen_worker.families.base import GenerationDefaults, register_family
 
 
-@family("pgw1161-probe")
 class ProbeDefaults(GenerationDefaults):
     pass
+
+
+register_family("pgw1161-probe", ProbeDefaults)
 '''
 
 
@@ -83,7 +85,7 @@ def test_a_GENUINE_collision_is_still_refused() -> None:
         pass
 
     with pytest.raises(ValueError, match="already registered"):
-        family("pgw1161-probe")(Other)
+        register_family("pgw1161-probe", Other)
 
 
 def test_a_different_class_in_the_SAME_module_is_still_a_collision() -> None:
@@ -97,7 +99,7 @@ def test_a_different_class_in_the_SAME_module_is_still_a_collision() -> None:
     Sibling.__module__ = first.__module__  # same file, different class
 
     with pytest.raises(ValueError, match="already registered"):
-        family("pgw1161-probe")(Sibling)
+        register_family("pgw1161-probe", Sibling)
 
 
 def test_re_decorating_the_SAME_class_is_still_idempotent() -> None:
@@ -105,7 +107,9 @@ def test_re_decorating_the_SAME_class_is_still_idempotent() -> None:
     class P(GenerationDefaults):
         pass
 
-    assert family("pgw1161-probe")(P) is family("pgw1161-probe")(P) is P
+    assert (register_family("pgw1161-probe", P)
+            is register_family("pgw1161-probe", P)
+            is P)
 
 
 # ---------------------------------------------------------------------------

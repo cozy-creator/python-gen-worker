@@ -183,6 +183,18 @@ class EndpointSpec:
     # same as a checkpoint the catalog classified as nothing — the two states
     # were one state before this field, and every governed mint refused.
     slot_facts: Dict[str, SlotEvidence] = field(default_factory=dict)
+    # pgw#1332: handler parameter -> the generated family TYPE bound to it.
+    # A handler parameter of this name receives a fully RESOLVED instance
+    # (graph + bound weights + catalog-stamped tuned values), so two parameters
+    # of one family type are two checkpoints with independent tuning. Declared
+    # statically so placement can prefetch the weights and verify the VRAM fit
+    # before a request lands.
+    #
+    # Beside `slot_facts` and NOT folded into it, deliberately: a slot fact is
+    # what the catalog says a resolved checkpoint IS, carried per REQUEST; a
+    # family binding is what a handler PARAMETER is, declared once and read by
+    # placement. Same struct, different axes.
+    families: Dict[str, type] = field(default_factory=dict)
     # The handler's DERIVED config schema — the D in `ctx: RequestContext[D]`.
     # None when the handler annotates a bare context. Catalog recipe metadata
     # decodes against this type; code owns the schema, the catalog owns the
@@ -317,6 +329,10 @@ class JobSpec:
     visibility: str = "private"
     publishes: bool = False
     emits_media: bool = False
+    # pgw#1332: the families this job binds, same shape and same meaning as
+    # EndpointSpec's — portability between the decorators is a tested
+    # requirement, so a body that takes a family instance promotes unchanged.
+    families: Dict[str, type] = field(default_factory=dict)
     is_async: bool = False
     ctx_param: str = "ctx"
     payload_param: str = "payload"
@@ -350,6 +366,7 @@ def extract_job_spec(obj: Any, *, walked_module: str = "") -> Optional[JobSpec]:
         visibility=decl.visibility,
         publishes=bool(decl.publishes),
         emits_media=bool(decl.emits_media),
+        families=dict(getattr(decl, "families", {}) or {}),
         is_async=inspect.iscoroutinefunction(obj),
         ctx_param=params[0].name,
         payload_param=params[1].name,
@@ -765,6 +782,7 @@ def _spec_for_handler(
         models=dict(models),
         slots=dict(slots),
         slot_family=slot_family,
+        families=dict(getattr(decl, "families", {}) or {}),
         defaults_type=defaults_type,
         slot_components=slot_components,
         payload_axes=payload_axes,
