@@ -28,7 +28,7 @@ import contextlib
 import threading
 import time
 from pathlib import Path
-from typing import Annotated, Any, Dict, List, Tuple
+from typing import Annotated, Any, Dict, List, Optional, Tuple
 
 import msgspec
 import pytest
@@ -52,6 +52,8 @@ from gen_worker.models.store import ModelStore
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs
 from gen_worker.models import store as store_mod
+
+from harness.progress_wait import Cadence, await_progress_async
 
 FAMILY = "sdxl"
 _ASPECT_AXIS = CompileAxis(classes=(
@@ -357,10 +359,38 @@ def test_compile_and_tenant_forward_never_overlap_and_red_verifies(
 
     async def _on() -> None:
         await h_on.boot()
-        deadline = time.monotonic() + 10.0
-        while not h_on.in_compile.is_set():
-            assert time.monotonic() < deadline, "no background compile ran"
-            await asyncio.sleep(0.005)
+        # pgw#1349: this was `deadline = time.monotonic() + 10.0`, and it red
+        # master as `assert 416.463803 < 416.463401` — a clock reporting that
+        # a loaded runner had not yet scheduled the shape-warm thread, dressed
+        # up as "no background compile ran". Nothing here is a claim about how
+        # fast the machine is; what the tape needs is that a compile STARTS.
+        # So the give-up keys on evidence: it is immediate and definitive when
+        # the background mint has finished without ever compiling (nothing can
+        # start after that), and otherwise it only bounds SILENCE.
+        def _mint_finished() -> Optional[str]:
+            # `_background_mint`'s finally clears `rec.background_mint`, so
+            # ABSENCE is the completion signal here (boot has already set it —
+            # the sibling tape asserts exactly that). Once the mint is over and
+            # nothing compiled, no compile can start, so this is definitive and
+            # needs no clock at all.
+            bg = h_on.rec.background_mint
+            if h_on.compiles or h_on.in_compile.is_set():
+                return None
+            if bg is None:
+                return "the background mint finished without compiling anything"
+            task = bg.task
+            if task is not None and task.done():
+                return ("the background mint task ended without compiling "
+                        f"anything: {task.exception()!r}")
+            return None
+
+        await await_progress_async(
+            lambda: (h_on.in_compile.is_set(), len(h_on.compiles)),
+            lambda seen: seen[0],
+            what="the shape-warm thread to enter a compile",
+            cadence=Cadence(),
+            gone=_mint_finished,
+        )
         t_admit = time.monotonic()
         # The moment the in-flight compile RELEASES, watched from beside the
         # dispatch. `in_compile` is the same signal the loop above already

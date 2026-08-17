@@ -81,6 +81,17 @@ def test_the_permit_is_released_before_the_deferred_encode_runs() -> None:
 
     # The whole encode fits inside the post-release window: the GPU was free
     # for every millisecond of it.
+    #
+    # pgw#1349: this reported `assert 87 >= 88` on master, and the cause was
+    # NOT the runner. `finalize_wall_ms` truncated its seconds while every
+    # `stage_ms` rounded, so a stage measured strictly INSIDE the finalize
+    # interval could out-round its own container by one quantum. Both sides now
+    # go through `stage_timing.ms_from_seconds`, and rounding is monotone — so
+    # containment of the intervals (which holds by construction: `released_at`
+    # is stamped before the drain and `handler_done` after it) now survives
+    # quantization, and this row is exact rather than usually-true. No slop is
+    # added here on purpose: a tolerance would have hidden the mixed quantizer
+    # instead of removing it.
     assert res.metrics.finalize_wall_ms >= encode_ms, (
         res.metrics.finalize_wall_ms, encode_ms, stages)
     # ...and the permit was NOT held for it. The slack is the stage map's OWN

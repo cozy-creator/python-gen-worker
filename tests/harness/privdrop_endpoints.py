@@ -101,11 +101,26 @@ class PrivProbe:
 
     def write_probe(self, ctx: RequestContext, data: ProbeIn) -> ProbeOut:
         """The positive control for the grant list: the child must still be
-        able to write every path it was given. `data.text` is a path."""
-        target = Path(data.text) / "pgw858-write-probe"
+        able to write every path it was given. `data.text` is a path.
+
+        pgw#1349: it CREATES A SUBDIRECTORY too, because that is the operation
+        that actually died in production. Every child-side writer under a
+        granted root reaches it through
+        ``path.parent.mkdir(parents=True, exist_ok=True)`` — the local cell
+        store's memo and sidecar writes are exactly that — and a probe that
+        only writes a file into a directory the PARENT made would have gone
+        green on the tree where the child could not make one."""
+        root = Path(data.text)
+        nested = root / "pgw858-probe-dir" / "nested"
+        target = root / "pgw858-write-probe"
         try:
+            nested.mkdir(parents=True, exist_ok=True)
+            (nested / "leaf").write_text("ok", encoding="utf-8")
             target.write_text("ok", encoding="utf-8")
             target.unlink()
+            (nested / "leaf").unlink()
+            nested.rmdir()
+            nested.parent.rmdir()
             return ProbeOut(response="ok")
         except OSError as exc:
             return ProbeOut(response=f"{type(exc).__name__}: {exc}")

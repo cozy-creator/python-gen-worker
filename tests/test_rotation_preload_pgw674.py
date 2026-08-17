@@ -26,13 +26,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import hashlib
 import msgspec
 import pytest
+
+from harness.progress_wait import Cadence, await_progress_async
 
 from gen_worker.serving_facts import FactsUnavailable as _FU
 
@@ -513,13 +514,24 @@ def test_update_desired_spawns_and_stop_kills_the_driver(
             [_instance("generate", ck)], _snapshots(ck, "d9" * 16), 1)
         task = ex.preloader._task
         assert task is not None
-        deadline = time.monotonic() + 60
         eff = _pick(ex, "generate", ck)
-        while time.monotonic() < deadline:
+
+        def _staged() -> object:
             rec = ex._classes.get(eff.instance_key)
-            if rec is not None and rec.ready:
-                break
-            await asyncio.sleep(0.02)
+            return (rec is not None, bool(rec is not None and rec.ready))
+
+        # pgw#1349: was `time.monotonic() + 60`. The preloader's own TASK is
+        # the definitive give-up — once it has ended without staging, no
+        # further sleeping can change the answer — and the record appearing
+        # before it is ready is real progress, so the wait extends only for a
+        # preloader that is actually working.
+        await await_progress_async(
+            _staged, lambda seen: seen[1],
+            what="the preloader to stage the spawned instance",
+            cadence=Cadence(),
+            gone=lambda: ("the preloader task ended without staging it: "
+                          f"{task.exception()!r}" if task.done() else None),
+        )
         rec = ex._classes.get(eff.instance_key)
         assert rec is not None and rec.ready
 

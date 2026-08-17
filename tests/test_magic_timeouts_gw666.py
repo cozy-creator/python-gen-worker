@@ -632,14 +632,12 @@ _TOKEN_EXPIRY_ARG = re.compile(
 #: on progress (``harness.progress_wait.await_count`` is the replacement). Every
 #: one of them can fail a publish the way pgw#628 did. Owned by pgw#795's
 #: follow-up; delete lines from this list, never add them.
-_DEADLINE_BURNDOWN = {
-    "test_activity_gw601.py",
-    "test_cancel_unwind_pgw687.py",
-    "test_mint_gate_pgw677.py",
-    "test_mint_reopen_pgw677.py",
-    "test_rotation_preload_pgw674.py",
-    "test_sp_group_isolation_pgw773_774.py",
-}
+#: **EMPTY as of pgw#1349, and it stays empty.** All six entries were converted
+#: to `harness.progress_wait` waits or to load-invariant bounds, and every one
+#: was red-verified by breaking the property it guards rather than the clock. The
+#: set exists so a NEW literal deadline in a test still fails this gate; a name
+#: reappearing here is a regression to argue about, not a line to add.
+_DEADLINE_BURNDOWN: set = set()
 
 #: Assertions that compare measured time to a constant. Each survives review as
 #: a HANG bound (class 3 above) with at least an order of magnitude of headroom
@@ -651,7 +649,10 @@ _ELAPSED_ASSERT_BURNDOWN = {
     "test_hardware_report.py",             # hang bound: refused connect << 10s
     "test_mint_process_pgw784.py",         # hang bound: reap must not wait out a 600s child
     "test_subprocess_stall_gw665.py",      # hang bound: stall window << 30s
-    "test_mint_reopen_pgw677.py",          # LATENCY BUDGET — anchor it next
+    # pgw#1349 deleted this file's entry. Its two LATENCY BUDGETS
+    # (`boot_wall < 6.0`, `wall < 1.0`) were undeclarable numbers — nothing the
+    # harness configures derives either — and both are now ordering/bounded-by-
+    # one-compile claims measured against THIS run's own compile intervals.
     # exposed by the widened pattern below, each reviewed:
     "test_p6_cancel_stream_backpressure.py",  # LOWER bound on 2x an induced 0.5s
                                               # handler sleep: only OVERLAP can

@@ -14,6 +14,8 @@ import time
 from pathlib import Path
 from typing import List
 
+from harness.progress_wait import Cadence, StalledError, await_count
+
 import msgspec
 import pytest
 
@@ -292,10 +294,16 @@ def test_watchdog_survives_zero_cpu_download_via_note_progress(monkeypatch):
         # Constant evidence: the watchdog thread can never heartbeat, so
         # every beat below is proof-of-life from note_progress() ticks.
         with activity.watchdog(act, interval_s=0.05, evidence=lambda: 0.0):
-            deadline = time.monotonic() + 10.0
-            while len(reports) - baseline < 3 and time.monotonic() < deadline:
-                time.sleep(0.01)
-            beats_during = len(reports) - baseline
+            # pgw#1349: a 10 s expiry here does not fail this tape, it
+            # WEAKENS it — the loop falls out with two beats and the assert
+            # below reports a silence the ticker never had. Wait on the beats.
+            beats_during = await_count(
+                lambda: len(reports) - baseline, 3,
+                what="progress heartbeats during the download tick stream",
+                cadence=Cadence(),
+                gone=lambda: (None if ticker.is_alive()
+                              else "the tick thread exited"),
+            )
     finally:
         stop.set()
         ticker.join(timeout=2)
@@ -353,12 +361,23 @@ def test_watchdog_survives_zero_cpu_disk_load_via_io_evidence():
             # first accounted write, and a 0.3s sleep turned that into a red
             # suite (CI 2026-08-03) against an activity.py byte-identical to
             # the one that passed two days earlier.
-            deadline = time.monotonic() + 10.0
-            while time.monotonic() < deadline:
+            # pgw#1349: the give-up is SWALLOWED here, on purpose and only
+            # here. On a host whose kernel reports no process I/O the beat
+            # cannot arrive at any speed, and the io_before/io_after check
+            # below is what turns that into a SKIP naming the real reason. A
+            # raised stall would convert that documented non-coverage into a
+            # red. The `assert beats_during >= 1` past the skip is what still
+            # fails when the evidence path is genuinely broken.
+            try:
+                beats_during = await_count(
+                    lambda: len(reports) - baseline, 1,
+                    what="a progress heartbeat backed by real process I/O",
+                    cadence=Cadence(),
+                    gone=lambda: (None if ticker.is_alive()
+                                  else "the disk-load thread exited"),
+                )
+            except StalledError:
                 beats_during = len(reports) - baseline
-                if beats_during >= 1:
-                    break
-                time.sleep(0.01)
         io_after = activity._process_io_evidence()
     finally:
         stop.set()

@@ -199,6 +199,7 @@ from test_procsplit_pgw763 import (  # noqa: E402,F401 — fixtures come with it
     isolated_postmortem,
 )
 
+from gen_worker import local_cell_store  # noqa: E402
 from gen_worker.procsplit import privdrop  # noqa: E402
 
 
@@ -389,6 +390,48 @@ def test_the_dropped_child_can_write_every_path_it_was_granted(dropped, tmp_path
             f"the compute child cannot write {path} — it is in the grant list "
             "(pgw#858). The answer is another entry there, never root."
         )
+
+
+@root_only
+def test_the_dropped_child_can_write_a_RELOCATED_local_cell_store(dropped):
+    """pgw#1349: the mint's own store, when an operator has moved it.
+
+    ``local_cell_store.store_root()`` defaults under ``~/.cache``, which the
+    grant list already covers through the compute uid's home — so the gap was
+    invisible for as long as nobody moved it. cozy-local DOES move it
+    (``internal/paths/paths.go`` exports ``GEN_WORKER_LOCAL_CELLS_DIR``), and a
+    relocated root is created by this root parent at 0755 and never chowned, so
+    the child's first memo write died on
+    ``PermissionError: .../aot-cells`` — mid-request, taking the stream down
+    with it. It surfaced as a NON-DETERMINISTIC red of a neighbouring row in
+    this very file, because whether the mint reached its memo write inside a
+    given tape was a race. Asserted directly here so the boundary is measured
+    instead of stumbled over.
+
+    The suite's own autouse ``_isolated_local_cell_store`` fixture is what
+    relocates it here, which makes this an honest reproduction of the operator
+    case rather than a construction: nothing in the test sets the env for the
+    test's benefit."""
+    root = os.environ.get(local_cell_store.ENV_STORE_DIR, "")
+    assert root, (
+        f"{local_cell_store.ENV_STORE_DIR} is unset, so this row would pass "
+        "for the wrong reason — the suite's autouse fixture sets it"
+    )
+    assert not os.path.exists(os.path.join(root, local_cell_store.CELLS_DIRNAME)), (
+        "this row must measure the CHILD creating the cells root — a "
+        f"{local_cell_store.CELLS_DIRNAME} this root parent made would be "
+        "root-owned and the probe would report the wrong thing"
+    )
+    # `write-probe` mkdirs a nested subtree before it writes, which is the
+    # operation that actually died: `_write_json_atomic` reaches every sidecar
+    # through `parent.mkdir(parents=True)`, and `aot-cells` is the component
+    # that did not exist yet.
+    assert _probe(dropped, "write-probe", root) == "ok", (
+        f"the compute child cannot write its own cell store at {root}. The "
+        "mint writes the memo and every per-cell sidecar there, so this is a "
+        "dead compute child on any pod whose store has been relocated "
+        "(pgw#1349). The answer is another entry in the grant list, never root."
+    )
 
 
 @root_only

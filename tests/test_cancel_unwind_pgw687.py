@@ -30,6 +30,7 @@ from gen_worker.pb import worker_scheduler_pb2 as pb
 
 from harness import stubborn_endpoints_pgw687 as wedge
 from harness.hub_double import hub_double, is_accept_for, is_ready, is_result_for
+from harness.progress_wait import Cadence, await_progress
 
 MODULE = "harness.stubborn_endpoints_pgw687"
 CUDA = pb.ResolvedCompute(accelerator="cuda", gpu_index=0)
@@ -165,13 +166,15 @@ def test_late_unwind_re_advertises_and_the_next_job_runs() -> None:
         wedge.STUBBORN_RELEASE.set()  # the unwind lands, late
         res_a = _result(conn, "r-late-a", timeout=10.0)
         assert res_a is not None and res_a.status == pb.JOB_STATUS_CANCELED
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline:
-            if harness.worker.executor.available_functions():
-                break
-            time.sleep(0.05)
-        assert harness.worker.executor.available_functions(), (
-            "a landed unwind must re-advertise the functions we took")
+        # pgw#1349: a 10 s expiry here only decided WHEN the assert below ran,
+        # so a loaded runner turned "the unwind has not landed yet" into "the
+        # unwind never re-advertised". Wait on the advertisement.
+        await_progress(
+            harness.worker.executor.available_functions,
+            bool,
+            what="the landed unwind to re-advertise the functions we took",
+            cadence=Cadence(),
+        )
         _send(conn, "r-late-d", "polite")
         res_d = _result(conn, "r-late-d", timeout=10.0)
         assert res_d is not None and res_d.status == pb.JOB_STATUS_OK
@@ -188,9 +191,13 @@ def test_thread_that_never_unwinds_recycles_the_process() -> None:
         _send(conn, "r-recycle-a", "stubborn")
         assert wedge.STUBBORN_RUNNING.wait(timeout=10.0)
         conn.send(cancel_job=pb.CancelJob(request_id="r-recycle-a", attempt=1))
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline and not exits:
-            time.sleep(0.05)
+        # pgw#1349, same shape: the process-exit call is what is being waited
+        # for, and the assert below still fails on a WRONG exit code.
+        await_progress(
+            lambda: list(exits), bool,
+            what="the recycle exit for a thread that never honours a cancel",
+            cadence=Cadence(),
+        )
         assert exits == [70], (
             "a handler thread that never honours a cancel cannot be reclaimed "
             "in-process — the pod must be replaced")

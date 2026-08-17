@@ -48,12 +48,19 @@ only reason pgw#795 was diagnosable at all, and that is the bar.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Callable, Optional
 
 from gen_worker.stall import SilenceWindow
 
-__all__ = ["Cadence", "StalledError", "await_count", "await_progress"]
+__all__ = [
+    "Cadence",
+    "StalledError",
+    "await_count",
+    "await_progress",
+    "await_progress_async",
+]
 
 
 class StalledError(TimeoutError):
@@ -163,6 +170,58 @@ def await_progress(
 
         # Re-read the window every poll: a slow advance recorded mid-wait
         # widens it, which is the calibration doing its job.
+        window.window_s = cadence.window_s
+        if window.stalled():
+            raise StalledError(
+                f"waiting for {what}: nothing advanced for "
+                f"{window.silent_for():.1f}s (staleness window "
+                f"{cadence.describe()}); last saw "
+                f"{render(value) if render else value!r}"
+            )
+
+    cadence.record(time.monotonic() - last_advance)
+    return value
+
+
+async def await_progress_async(
+    observe: Callable[[], Any],
+    settled: Callable[[Any], bool],
+    *,
+    what: str,
+    cadence: Cadence,
+    gone: Optional[Callable[[], Optional[str]]] = None,
+    render: Optional[Callable[[Any], str]] = None,
+    poll_s: float = 0.005,
+) -> Any:
+    """:func:`await_progress` for a wait that must not block the event loop.
+
+    pgw#1349. The synchronous version sleeps, and a test whose subject is an
+    asyncio task or a thread the LOOP has to start cannot use it: the sleep
+    starves the very thing being waited for, so the wait would time out on a
+    hang it caused itself. Same three endings, same self-derived window — only
+    the sleep changes.
+    """
+    window = SilenceWindow(cadence.window_s)
+    value = observe()
+    last_advance = time.monotonic()
+
+    while not settled(value):
+        reason = gone() if gone is not None else None
+        if reason is not None:
+            raise StalledError(
+                f"waiting for {what}: {reason} — last saw "
+                f"{render(value) if render else value!r}"
+            )
+        await asyncio.sleep(poll_s)
+
+        now = time.monotonic()
+        fresh = observe()
+        if fresh != value:
+            cadence.record(now - last_advance)
+            value, last_advance = fresh, now
+            window.touch()
+            continue
+
         window.window_s = cadence.window_s
         if window.stalled():
             raise StalledError(

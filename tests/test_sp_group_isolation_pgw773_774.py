@@ -39,6 +39,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 from gen_worker.parallel import RankGroupError, wire  # noqa: E402
+from harness.progress_wait import Cadence, await_progress  # noqa: E402
 from gen_worker.parallel.group import FollowerChannel, RankSpec, init_rank  # noqa: E402
 from gen_worker.parallel.plan import BootPlan, GroupPlan  # noqa: E402
 from gen_worker.parallel.runtime import SequenceRuntime  # noqa: E402
@@ -228,9 +229,14 @@ def test_rank0_exception_condemns_the_group_instead_of_wedging_it() -> None:
         assert rt.broken
         with pytest.raises(RankGroupError, match="condemned"):
             rt.call_with(_base_call, pipe, torch.ones(4, 2))
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline and rt._group is not None:
-            time.sleep(0.1)
+        # pgw#1349: was `time.monotonic() + 30`. The teardown is what is being
+        # waited for, and the assert below still fails on a group that is
+        # never torn down — it just no longer fails on a slow one.
+        await_progress(
+            lambda: rt._group is None, bool,
+            what="the condemned rank group to be torn down",
+            cadence=Cadence(),
+        )
         assert rt._group is None, "condemned group was not torn down"
     finally:
         rt.close()

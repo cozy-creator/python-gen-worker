@@ -104,3 +104,51 @@ def test_boot_fatal_ack_round_trips_before_the_child_exits(
         assert captured_reports[0].reason_class == "cuda_unavailable"
     finally:
         h.close()
+
+
+# ---------------------------------------------------------------------------
+# pgw#1349 / pgw#932: the stderr tail is captured (above) — now it is READ
+# ---------------------------------------------------------------------------
+
+
+def test_the_grpc_fork_abort_names_itself_instead_of_being_rediagnosed():
+    """pgw#932 has been diagnosed from first principles at least five times,
+    because ``cause=signal:SIGABRT`` names the symptom and nothing else. The
+    facts needed to tell it apart were already on the dial — ``saw_hello``, the
+    OOM delta, and pgw#833's stderr tail — so the discriminator that lived in
+    the issue text now lives in the parent.
+
+    RED-VERIFIABLE both ways, which is the point of the negative rows: a
+    classifier that fires on every pre-Hello abort would relabel real defects
+    as "known, rerun it", which is worse than the confusion it replaces."""
+    from gen_worker.procsplit.parent import is_grpc_fork_abort
+
+    sighting = (
+        "I0803 03:09:46.724278 11992 fork_posix.cc:71] Other threads are "
+        "currently calling into gRPC, skipping fork() handlers\n"
+        "E0803 03:09:46.728102 12039 ev_epoll1_linux.cc:373] (event_engine) "
+        "Epoll1Poller:0x278b97e0 encountered epoll_wait error: Bad file "
+        "descriptor\n"
+    )
+    poller_only = (
+        "ev_epoll1_linux.cc:373 (event_engine) Epoll1Poller encountered "
+        "epoll_wait error: Bad file descriptor"
+    )
+    def abort(*, saw_hello: bool = False, oom_delta: int = 0,
+              cause: str = "signal:SIGABRT", tail: str = "") -> bool:
+        return is_grpc_fork_abort(cause=cause, saw_hello=saw_hello,
+                                  oom_delta=oom_delta, stderr_tail=tail)
+
+    assert abort(tail=sighting)
+    # The 2026-08-17 master red carried only the poller half of the tail.
+    assert abort(tail=poller_only)
+
+    # ...and every neighbouring shape stays UNEXPLAINED, by name:
+    assert not abort(tail=sighting, saw_hello=True), (
+        "a post-Hello abort is the tenant's process dying, not the launcher's")
+    assert not abort(tail=sighting, oom_delta=2), (
+        "an OOM kill has an owner and a cost; it must never read as 'rerun it'")
+    assert not abort(tail=sighting, cause="signal:SIGSEGV"), (
+        "a SIGSEGV is the pgw#676 class, which is a real serving defect")
+    assert not abort(tail="free(): invalid pointer")
+    assert not abort(tail="")
