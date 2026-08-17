@@ -169,7 +169,10 @@ def run(output: Path, target: str) -> Dict[str, Any]:
     )
 
     scratch = Path(tempfile.mkdtemp(prefix="pgw1329-"))
-    os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", str(scratch / "inductor-cache"))
+    # The probe owns its Inductor cache outright rather than deferring to an
+    # inherited one: a warm cache from an earlier arm would make "both arms
+    # compiled the same graph" an assumption instead of a fact.
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(scratch / "inductor-cache")
     cas_root = scratch / "cas"
     engine = Engine(LocalCAS(cas_root))
     minted = engine.compile(
@@ -255,7 +258,9 @@ def run(output: Path, target: str) -> Dict[str, Any]:
         "issue": "pgw#1329",
         "key": key,
         "target": target,
-        "graph_class": armed.graph_class,
+        # a column of THIS probe's result row, off StoreArmedGraph — not a
+        # read of TCG's metadata block.
+        "graph_class": armed.graph_class,  # tcg-vocab: own result column
         "weight_set": str(armed.weight_set),
         "control_weight_set": str(control.weight_set),
         "declared_constants": len(armed.runner.declared_fqns()),
