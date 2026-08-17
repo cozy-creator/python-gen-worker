@@ -103,6 +103,10 @@ import pytest  # noqa: E402
 from gen_worker import config as gw_config  # noqa: E402
 from gen_worker import worker_goals as gw_worker_goals  # noqa: E402
 
+#: How long the per-test hot-swap fence waits for a cancelled warm job to
+#: leave its compile before failing the test that started it.
+_HOT_SWAP_QUIESCE_S = 30.0
+
 
 @pytest.fixture(autouse=True)
 def _fresh_process_settings():
@@ -156,6 +160,40 @@ def _fresh_cell_ledgers():
     _clear()
     yield
     _clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_warm_job_outlives_its_test(request):
+    """pgw#1311: a background warm compile a test started must not survive it.
+
+    `hot_swap` runs warm jobs on ONE process-global daemon thread, so the
+    thread itself is never joinable and never "ends" — what has an owner is
+    the JOB. A job whose test has finished keeps compiling and then emits
+    (`serve_degrade`, `shape_gap`) into the module-level activity sink, which
+    by then belongs to a DIFFERENT test: measured as
+    `test_mint_abort_classification_th1299`'s abandoned-mint compile failing
+    the assertion in `test_retry_activity_gw661`, on a different xdist worker,
+    with which victim it hits varying run to run.
+
+    Resetting the sink between tests cannot fix that — the emission happens
+    mid-victim, after any teardown reset. So the fence is on the WORK: cancel
+    what is queued, wait out what is compiling, and fail the OWNER (loudly,
+    here, where the leak actually is) if anything is still running at the
+    deadline. Nothing to do in the overwhelming majority of tests — the
+    default path is one uncontended lock acquisition.
+    """
+    from gen_worker import hot_swap as _hs
+
+    yield
+    outstanding = _hs.quiesce(timeout=_HOT_SWAP_QUIESCE_S)
+    if outstanding:
+        pytest.fail(
+            f"{request.node.nodeid} left {outstanding} hot-swap warm job(s) "
+            f"still running after {_HOT_SWAP_QUIESCE_S}s — they emit into the "
+            "module-level activity sink during whichever test runs next "
+            "(pgw#1311). Cancel the router (`Router.cancel_warm`) or wait it "
+            "out (`hot_swap.quiesce`) before the test ends."
+        )
 
 
 @pytest.fixture(autouse=True)

@@ -7936,6 +7936,14 @@ class Executor:
             router = hot_swap.router_of(pipe)
             if router is not None:
                 router.suspend()
+                # SUSPEND stops new eager routing; it does not reach the warm
+                # jobs already queued or compiling, and the next loop DELETES
+                # the capture directory they write into. Disown them here or
+                # the resulting FileNotFoundError reaches the hub as a
+                # serve_degrade plus a permanent shape_gap for a coverage hole
+                # this cleanup invented (pgw#1311). Non-blocking: we are on
+                # the event loop and one compile is minutes long.
+                router.cancel_warm()
         for pending in {id(p): p for p in bg.pendings.values()}.values():
             try:
                 fleet_cells_mod.abandon_self_mint(pending)
@@ -9343,6 +9351,15 @@ class Executor:
             if job.exec_task is not None:
                 job.exec_task.cancel()
             await self._finish(job, pb.JOB_STATUS_RETRYABLE, safe_message=safe_message)
+        # Background warm compiles are in-flight units too. The turn gate
+        # already refuses new ones once `draining` is set, but the one holding
+        # a turn keeps compiling and would report into a stream being torn
+        # down. Off-loop so the drain's own deadlines still tick (pgw#1311).
+        left = await asyncio.to_thread(hot_swap.quiesce)
+        if left:
+            logger.warning(
+                "drain: %d background warm compile(s) still running at the "
+                "quiesce deadline; their results are disowned", left)
 
     # ---- job execution -----------------------------------------------------
 
