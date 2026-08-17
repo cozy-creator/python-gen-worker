@@ -94,6 +94,25 @@ def _endpoint(record: Mapping[str, Any]) -> tuple[str, int] | None:
     return (str(ip), int(port)) if ip and port else None
 
 
+def _count(section: str) -> int:
+    """Sum the integers a probe section carries; anything else contributes 0.
+
+    Tolerant BY DESIGN, and the reason is the worst defect this rig has had: a
+    section that read "0\n0" (grep printing its zero count and then exiting 1
+    into an `|| echo 0`) was compared against the string "0", did not match, and
+    was reported as the done marker — a GREEN verdict for a command that died at
+    its first line. The script no longer emits that shape; this function means a
+    future variation of it cannot fabricate a success either.
+    """
+    total = 0
+    for part in section.split():
+        try:
+            total += int(part)
+        except ValueError:
+            continue
+    return total
+
+
 def _section(text: str, name: str) -> str:
     """Pull one `--RIG-<name>--` section out of the probe's single round trip."""
     marks = list(re.finditer(r"^--RIG-([A-Z]+)--$", text, re.M))
@@ -420,11 +439,17 @@ class Rig:
             self._watch(transport, workload, row)
             row.verdict = "green"
         finally:
+            # NOTE: `capture` runs here, and the required-artifact check that
+            # can DOWNGRADE this green is below it — see _require_artifacts.
             # Capture under EVERY outcome. A failed compile's log is the most
             # valuable thing the rental produced, and it is on a pod that is
             # about to be deleted.
             row.stage("capture")
             self._capture(transport, workload, row)
+        # A second, independent statement of success, checked after capture:
+        # the marker says the command believed it worked, the artifacts say it
+        # left the thing behind.
+        self._require_artifacts(workload, row)
 
     def _transport(self, host: str, port: int) -> Transport:
         assert self.transport_factory is not None
@@ -591,8 +616,8 @@ class Rig:
                 return Observation(token=("ssh-error", result.out[-80:]), note=f"probe rc={result.rc}")
             size = _section(result.out, "SIZE") or "0"
             log_bytes = _section(result.out, "BYTES") or "0"
-            done = (_section(result.out, "MARK") or "0").strip() not in ("", "0")
-            failed = any(part.strip() not in ("", "0") for part in _section(result.out, "FAIL").split())
+            done = _count(_section(result.out, "MARK")) > 0
+            failed = _count(_section(result.out, "FAIL")) > 0
             tail = _section(result.out, "TAIL")
             last = tail.strip().splitlines()[-1] if tail.strip() else ""
             return Observation(
@@ -619,6 +644,18 @@ class Rig:
                 artifact.sha256 = sha256_file(base)
             row.artifacts.append(artifact.__dict__)
         self.log(f"[capture] {sum(1 for a in row.artifacts if a['fetched'])}/{len(row.artifacts)} -> {destination}")
+
+    def _require_artifacts(self, workload: Workload, row: RigRow) -> None:
+        if row.verdict != "green" or not workload.required_artifacts:
+            return
+        fetched = {a["remote"] for a in row.artifacts if a.get("fetched")}
+        missing = [r for r in workload.required_artifacts if r not in fetched]
+        if missing:
+            row.verdict, row.failed_stage = "red", "artifacts"
+            row.detail = (
+                f"the command reported success but produced none of {missing} — "
+                "a green whose artifact is absent is not a green"
+            )
 
     def _teardown(self, api: PodApi, row: RigRow) -> None:
         """DELETE, then GET 404, then absent from the listing. All three.

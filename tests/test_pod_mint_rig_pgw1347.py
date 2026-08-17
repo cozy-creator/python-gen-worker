@@ -30,7 +30,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
 
 from mint_rig import cards as cards_mod  # noqa: E402
-from mint_rig.driver import CENSUS, SSHD, Rig, _section  # noqa: E402
+from mint_rig.driver import CENSUS, SSHD, Rig, _count, _section  # noqa: E402
 from mint_rig.killset import KillSet  # noqa: E402
 from mint_rig.progress import Failed, Gate, Observation, Stuck  # noqa: E402
 from mint_rig.rail import Rail, RailTripped  # noqa: E402
@@ -196,10 +196,14 @@ class FakeTransport:
                 tail = "waiting for the hub to answer"
             else:
                 tail = f"[{self._probe_calls}/6] minting clip"
+            # `grep -c` prints its count and exits 1 when the count is zero.
+            # The fake reproduces that shape EXACTLY, because a fake that only
+            # ever emitted a clean "0" is what let the real false-green ship.
             return Result(
                 0,
                 f"--RIG-SIZE--\n{size}\n--RIG-BYTES--\n{100 if self.frozen else size}\n"
-                f"--RIG-MARK--\n{1 if done else 0}\n--RIG-FAIL--\n{1 if fail else 0}\n0\n"
+                f"--RIG-MARK--\n{1 if done else 0}\n"
+                f"--RIG-FAIL--\n{1 if fail else 0}\n0\n"
                 f"--RIG-TAIL--\n{tail}\n",
             )
         if "setsid nohup" in script:
@@ -688,6 +692,85 @@ def test_the_command_is_launched_detached_and_sources_the_compat_shim() -> None:
     # RIG-ENV §3c: a detached job inherits no login shell, so a forward-compat
     # libcuda repair is invisible to it unless it is sourced explicitly.
     assert "/etc/profile.d/zz-cuda-compat.sh" in script
+
+
+def test_a_ZERO_COUNT_IS_NOT_A_MATCH_however_the_shell_spells_it() -> None:
+    """THE WORST DEFECT THIS RIG HAS HAD, as a row.
+
+    `grep -c X f` prints its count AND exits 1 when the count is zero, so the
+    original `grep -c X f || echo 0` emitted "0\n0" for a log with no match. The
+    done check compared the section against the string "0", did not match, and
+    reported GREEN — for a real run whose command died at its first line and
+    produced no artifact at all. A rig that can fabricate a success is worse
+    than no rig.
+
+    Fixed at both ends: the script no longer emits the second value, and the
+    parse SUMS whatever it gets, so no future variation can resurrect it.
+    """
+    assert _count("0") == 0
+    assert _count("0\n0") == 0, "the exact shape that shipped a false green"
+    assert _count("") == 0
+    assert _count("0\n0\n0") == 0
+    assert _count("1") == 1
+    assert _count("0\n3") == 3
+    assert _count("grep: no such file") == 0
+
+
+def test_the_probe_script_never_emits_a_second_zero() -> None:
+    script = Workload(name="w", command="x").probe_script()
+    assert "|| echo 0" not in script, "grep already prints its own zero"
+    assert script.count("|| true") >= 3
+
+
+def test_a_command_that_dies_at_line_one_is_NOT_green(tmp_path: Path) -> None:
+    """The regression, end to end: no marker, no artifact, therefore not green."""
+
+    class DiesImmediately(FakeTransport):
+        def run(self, script: str, *, timeout_s: float = 300.0,
+                env: Mapping[str, str] | None = None) -> Result:
+            if "--RIG-SIZE--" in script:
+                # A tiny log holding a refusal, no marker, and — as the real
+                # shell does — a zero count that grep exits 1 on.
+                return Result(
+                    0,
+                    "--RIG-SIZE--\n0\n--RIG-BYTES--\n213\n--RIG-MARK--\n0\n"
+                    "--RIG-FAIL--\n0\n0\n--RIG-TAIL--\nno fleet-line authority is reachable\n",
+                )
+            return super().run(script, timeout_s=timeout_s, env=env)
+
+    workload = mint_family("m:F", runners=("clip",))
+    row = _rig(tmp_path, FakePods(), DiesImmediately(), stall_ticks=3).run(
+        cards_mod.pick("sm89"), workload
+    )
+    assert row.verdict != "green", "a log with no marker must never read as success"
+    assert row.verdict == "stuck"
+
+
+def test_a_marker_without_the_artifact_is_still_not_green(tmp_path: Path) -> None:
+    """The second, independent statement of success. The marker says the command
+    believed it worked; the artifact says it left the thing behind."""
+
+    class NoArtifact(FakeTransport):
+        def fetch(self, remote: str, local_dir: Path, *, timeout_s: float = 1800.0) -> Result:
+            self.fetched.append(remote)
+            if remote.endswith("minted.json"):
+                return Result(1, "scp: /root/rig/minted.json: No such file or directory")
+            local_dir.mkdir(parents=True, exist_ok=True)
+            (local_dir / Path(remote).name).write_text("x\n")
+            return Result(0, "")
+
+    row = _rig(tmp_path, FakePods(), NoArtifact()).run(
+        cards_mod.pick("sm89"), mint_family("m:F", runners=("clip",))
+    )
+    assert row.verdict == "red" and row.failed_stage == "artifacts"
+    assert "minted.json" in row.detail
+
+
+def test_a_mint_that_DID_produce_its_row_is_green(tmp_path: Path) -> None:
+    row = _rig(tmp_path, FakePods(), FakeTransport()).run(
+        cards_mod.pick("sm89"), mint_family("m:F", runners=("clip",))
+    )
+    assert row.verdict == "green", row.detail
 
 
 def test_the_probe_is_ONE_round_trip_and_parses_into_the_gate_observation() -> None:

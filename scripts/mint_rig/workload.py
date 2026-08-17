@@ -78,6 +78,12 @@ class Workload:
     #: green or red. A failed compile's log is the most valuable thing the
     #: rental produced.
     artifacts: tuple[str, ...] = ()
+    #: Artifacts whose ABSENCE makes the run red no matter what the log said.
+    #: A second, independent statement of "it worked": the done marker says the
+    #: command believed it succeeded, this says it left the thing behind. They
+    #: fail independently, which is the whole point — the first real green this
+    #: rig ever printed was a command that died at line one.
+    required_artifacts: tuple[str, ...] = ()
     #: Remote paths whose byte size is polled as a progress token.
     progress_paths: tuple[str, ...] = ()
     #: Printed by the command when it has finished successfully.
@@ -127,14 +133,26 @@ class Workload:
 
         Deliberately ONE call: three separate ssh round-trips per tick is three
         chances to mistake a flaky connection for a stalled compile.
+
+        **`|| true`, never `|| echo 0`.** `grep -c` prints its count AND exits 1
+        when the count is zero, so `grep -c X f || echo 0` emits the two lines
+        "0\n0" for a log with no match. That is the bug that made this rig report
+        GREEN for a run whose command died at its first line: the done check read
+        the section as a single value, saw "0\n0" != "0", and called it a match.
+        A rig that can fabricate a success is worse than no rig, so the shape is
+        fixed at BOTH ends — the script never emits a second value, and
+        :func:`mint_rig.driver._count` sums whatever it gets.
         """
         paths = " ".join(f"'{p}'" for p in (self.progress_paths or (self.workdir,)))
         return (
             f"echo '--RIG-SIZE--'; du -sb {paths} 2>/dev/null | awk '{{s+=$1}} END {{print s+0}}'; "
-            f"echo '--RIG-BYTES--'; wc -c < '{self.log}' 2>/dev/null || echo 0; "
-            f"echo '--RIG-MARK--'; grep -c -F '{self.done_marker}' '{self.log}' 2>/dev/null || echo 0; "
+            f"echo '--RIG-BYTES--'; {{ wc -c < '{self.log}' 2>/dev/null || true; }}; "
+            f"echo '--RIG-MARK--'; {{ grep -c -F '{self.done_marker}' '{self.log}' 2>/dev/null || true; }}; "
             f"echo '--RIG-FAIL--'; "
-            + "; ".join(f"grep -c -F {json.dumps(m)} '{self.log}' 2>/dev/null || echo 0" for m in self.fail_markers)
+            + "; ".join(
+                f"{{ grep -c -F {json.dumps(m)} '{self.log}' 2>/dev/null || true; }}"
+                for m in self.fail_markers
+            )
             + f"; echo '--RIG-TAIL--'; tail -{tail_lines} '{self.log}' 2>/dev/null || true"
         )
 
@@ -262,6 +280,8 @@ def mint_family(
         setup=install,
         uploads=uploads,
         artifacts=(f"{POD_ROOT}/minted.json", f"{POD_ROOT}/{name}.log", f"{POD_ROOT}/rigboot.json"),
+        # A mint that produced no row produced nothing, whatever the log claims.
+        required_artifacts=(f"{POD_ROOT}/minted.json",),
         # The AOTI object cache and the packed cells both grow throughout the
         # compile; the log can be silent for minutes while they do.
         progress_paths=(out, f"{POD_ROOT}/work", "/root/.cache/torchinductor_root", "/root/.triton"),
