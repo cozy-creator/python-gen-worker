@@ -31,7 +31,7 @@ blind are one fact (see the scope note).
 SCOPE. This floor catches NOISE and BLANK. It is NOT a quality gate, and it is
 specifically blind to the melt class: smearing REMOVES high-frequency temporal
 variation, so a melted/over-smoothed render scores HIGHER here than a clean one
-(0.956 melted vs 0.916 clean). ``tests/test_output_integrity_pgw1094.py`` pins
+(0.956 melted vs 0.916 clean). ``tests/test_media_transport.py`` pins
 that inversion as an executable assertion so nobody re-reads this gate as a
 quality verdict.
 

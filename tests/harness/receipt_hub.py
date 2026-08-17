@@ -1,7 +1,7 @@
 """A REAL cell-receipt hub: real RSA keys, real JWS, real HTTP on localhost.
 
-Promoted out of ``test_receipts_pgw709.py`` by pgw#1152, unchanged. The signer
-mirrors the hub's production format byte-for-byte (RS256 PKCS1v15/SHA256
+Promoted out of the pgw#709 receipt tests (now ``tests/test_receipts_trust.py``)
+by pgw#1152, unchanged. The signer mirrors the hub's production format byte-for-byte (RS256 PKCS1v15/SHA256
 compact JWS, kid header, ``compiled-graph-receipt-v1+jws`` typ, ``compiled-graph-receipt-v1``
 claims); the hub half's Go tests pin the same format from the signing side.
 :class:`HubStub` serves the three real routes the worker calls — JWKS, receipt
