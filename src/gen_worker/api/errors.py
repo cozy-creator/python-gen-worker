@@ -496,6 +496,34 @@ class PublishNotDeclaredError(ValidationError):
         )
 
 
+class MediaNotDeclaredError(ValidationError):
+    """This JOB reached a media-writing surface without declaring
+    ``emits_media=True`` (th#2069).
+
+    The sibling of :class:`PublishNotDeclaredError`, on the other grant: the
+    hub mints ``upload_media`` for a job only when its release declares it, so
+    an undeclared job's token cannot upload media and the write would fail at
+    the hub after the bytes moved. Raising here makes it a typed refusal at the
+    call site instead.
+
+    Endpoints never see this: media IS an endpoint's product, so it declares
+    nothing and the authority comes with the kind.
+
+    FATAL, not retryable: no retry adds a declaration to a published release.
+    """
+
+    def __init__(self, surface: str) -> None:
+        self.surface = str(surface or "media")
+        super().__init__(
+            f"{self.surface} refused: this job did not declare "
+            "emits_media=True. Add it to the decorator "
+            "(@job(emits_media=True)) and republish — the declaration is what "
+            "justifies the hub minting the upload_media grant, so without it "
+            "there is nothing to upload against. It is independent of "
+            "publishes=: a job may emit media and write no repo."
+        )
+
+
 class NonMonotonicProgressError(ValidationError):
     """``ctx.progress`` was handed a position BELOW the last one for its phase.
 

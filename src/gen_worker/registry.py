@@ -307,6 +307,7 @@ class JobSpec:
     resumable: bool = False
     visibility: str = "private"
     publishes: bool = False
+    emits_media: bool = False
     is_async: bool = False
     ctx_param: str = "ctx"
     payload_param: str = "payload"
@@ -339,6 +340,7 @@ def extract_job_spec(obj: Any, *, walked_module: str = "") -> Optional[JobSpec]:
         resumable=bool(decl.resumable),
         visibility=decl.visibility,
         publishes=bool(decl.publishes),
+        emits_media=bool(decl.emits_media),
         is_async=inspect.iscoroutinefunction(obj),
         ctx_param=params[0].name,
         payload_param=params[1].name,

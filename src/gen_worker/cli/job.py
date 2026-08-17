@@ -116,6 +116,7 @@ def _handle_job_list(args: argparse.Namespace) -> int:
             "resumable": s.resumable,
             "visibility": s.visibility,
             "publishes": s.publishes,
+            "emits_media": s.emits_media,
         }
         for s in sorted(specs, key=lambda s: s.name)
     ]
@@ -163,6 +164,7 @@ def _handle_job_run(args: argparse.Namespace) -> int:
         allow_publish=bool(getattr(args, "allow_publish", False)),
         emitter=_stderr_emitter,
         publishes=spec.publishes,
+        emits_media=spec.emits_media,
     )
     dispatch = JobDispatch(
         job_name=spec.name,

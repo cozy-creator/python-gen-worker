@@ -959,6 +959,10 @@ def _job_source_file(spec: Any, root: Path) -> str:
 def _job_entry(spec: Any, root: Path) -> Dict[str, Any]:
     """One manifest ``jobs[]`` row.
 
+    ``emits_media`` is jobs-only: the hub mints the ``upload_media`` grant off
+    it (th#2069), where an endpoint gets media authority from being an
+    endpoint.
+
     Deliberately the same shape as a function row where the two overlap
     (name/schemas/resources/env/publishes), because a job promoted to a
     serverless endpoint must not change identity on the way. What it does not
@@ -982,6 +986,7 @@ def _job_entry(spec: Any, root: Path) -> Dict[str, Any]:
         "resumable": bool(spec.resumable),
         "visibility": spec.visibility,
         "publishes": bool(spec.publishes),
+        "emits_media": bool(spec.emits_media),
         "payload_type": _type_id(spec.payload_type),
         "payload_schema_sha256": input_sha,
         "input_schema": input_schema,

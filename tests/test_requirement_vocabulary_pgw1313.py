@@ -311,10 +311,11 @@ def test_the_function_scope_round_trips_through_a_real_discover_manifest(
         "min_sm": 80, "min_vram_gb": 80.0,
         "recommended": {"min_sm": 90, "min_host_ram_gb": 96.0},
     }
-    # The one compatibility projection, deleted by th#2072: the sm floor also
-    # travels under the key the builder parses TODAY, so this wheel cannot
-    # dark a floor the hub is already enforcing.
-    assert resources["compute_capability"] == 8.0
+    # The floor travels under ONE key. The `compute_capability` back-projection
+    # is deleted: th#2072 landed, the hub prefers `requires` wherever present,
+    # and this projection was only ever emitted when `min_sm` was declared —
+    # i.e. only when `requires` had already answered.
+    assert "compute_capability" not in resources
     assert "vram_gb" not in resources and "min_vram_gb" not in resources
     assert "ram_gb" not in resources
 
@@ -325,7 +326,6 @@ def test_manifest_dict_and_the_declaration_agree() -> None:
         "gpu": True,
         "vcpus": 8,
         "requires": {"min_sm": 100, "min_vram_gb": 24.0},
-        "compute_capability": 10.0,
     }
     assert _requirement(declared).manifest_row() == declared.manifest_dict()[
         "requires"]

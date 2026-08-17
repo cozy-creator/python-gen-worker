@@ -313,6 +313,7 @@ class RequestContext(Generic[D]):
         root_slot: str = "",
         boot_warmup: bool = False,
         publishes: bool = False,
+        emits_media: Optional[bool] = None,
     ) -> None:
         self._request_id = str(request_id or "").strip()
         self._job_id = str(job_id or "").strip() or None
@@ -331,6 +332,11 @@ class RequestContext(Generic[D]):
         # authority; this declaration is the one justification. Stamped from
         # the spec at dispatch.
         self._publishes = bool(publishes)
+        # th#2069: the media sibling, and JOBS ONLY. None = not job-scoped (an
+        # endpoint, whose product IS media); False = a job that declared none,
+        # for which the hub minted no `upload_media` grant. Stamped from the
+        # spec at dispatch, like `publishes`.
+        self._emits_media = emits_media if emits_media is None else bool(emits_media)
         # Monotonic progress POSITION per phase (pgw#1294). Liveness for a job
         # is position ADVANCE within a phase budget — never pulse, never
         # duration — so a position that goes backwards is a lying instrument
@@ -1131,6 +1137,27 @@ class RequestContext(Generic[D]):
         at launch — grants remain the WHOLE write authority."""
         return self._publishes
 
+    @property
+    def emits_media(self) -> bool:
+        """This function MAY write media.
+
+        True for every endpoint (media is the product) and for a job that
+        declared ``emits_media=True``; False only for a job that declared
+        none, whose token carries no ``upload_media`` grant."""
+        return self._emits_media is not False
+
+    def _require_media_declaration(self, surface: str) -> None:
+        """Refuse a media write to a job that declared none.
+
+        Typed, and BEFORE a byte moves — the hub minted no `upload_media`
+        grant, so this is the same refusal arriving at the call site.
+        """
+        if self._emits_media is not False:
+            return
+        from ..api.errors import MediaNotDeclaredError
+
+        raise MediaNotDeclaredError(surface)
+
     #: Producer KINDS that still imply write authority. TRANSITIONAL: th#2052
     #: cuts it, at which point the declaration is the only justification and
     #: this tuple (and the branch reading it) is deleted whole. Until then a
@@ -1253,7 +1280,7 @@ class RequestContext(Generic[D]):
     _SAVE_BYTES_INLINE_THRESHOLD = 4 * 1024 * 1024
 
     def save_bytes(self, ref: str, data: bytes) -> Asset:
-        return self._save_bytes(ref, data, allow_inline=True)
+        return self._save_bytes(ref, data, allow_inline=True, media=True)
 
     def _save_result_envelope(self, ref: str, data: bytes) -> Asset:
         """Store the RESULT ENVELOPE blob, always as a real upload.
@@ -1264,9 +1291,15 @@ class RequestContext(Generic[D]):
         `Prefer: bytes=inline` hint is about MEDIA and must not reach here, or
         a `blob_ref` names a blob that was never uploaded.
         """
-        return self._save_bytes(ref, data, allow_inline=False)
+        return self._save_bytes(ref, data, allow_inline=False, media=False)
 
-    def _save_bytes(self, ref: str, data: bytes, *, allow_inline: bool) -> Asset:
+    def _save_bytes(
+        self, ref: str, data: bytes, *, allow_inline: bool, media: bool = True,
+    ) -> Asset:
+        # `media=False` is the result envelope: worker->orchestrator transport,
+        # not a client-visible output, so it rides no media grant.
+        if media:
+            self._require_media_declaration("save_bytes")
         if not isinstance(data, (bytes, bytearray)):
             raise TypeError("save_bytes expects bytes")
         data = bytes(data)
@@ -1513,6 +1546,7 @@ class RequestContext(Generic[D]):
         return self._save_file_inner(ref, src, create=create)
 
     def _save_file_inner(self, ref: str, src: str, *, create: bool = False) -> Asset:
+        self._require_media_declaration("save_file")
         size = int(os.path.getsize(src))
         _enforce_output_file_size_limit(size)
 

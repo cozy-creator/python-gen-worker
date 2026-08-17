@@ -113,13 +113,12 @@ def test_the_floor_reaches_the_manifest_under_the_builders_own_key() -> None:
     # The successor key: the requirement ROW, declared terms only, the same
     # shape the slot scope emits. th#2072 reads it.
     assert res["requires"] == {"min_sm": 89}
-    # ...and, until th#2072 does, the floor ALSO travels under the key
-    # `internal/builder/function_requirements.go` parses today into
-    # FunctionRequirements.ComputeCapabilityMin -> requirement_payload_json's
-    # `compute_capability.min` -> req.MinGPUCapSM -> the placement filters.
-    # Deleting the emitter before the reader moved is how this floor vanished
-    # silently the FIRST time (th#1155 x6).
-    assert res["compute_capability"] == 8.9
+    # And it travels ONLY there. The `compute_capability` back-projection is
+    # deleted: the hub prefers `requires` wherever present and this method
+    # emitted the projection only when `min_sm` was declared, so the arm could
+    # never be read for a wheel built from this source. The hub keeps its own
+    # arm for PUBLISHED wheels that emit no `requires`; th#2074 retires it.
+    assert "compute_capability" not in res
     assert res["gpu"] is True
     # th#1867: nothing VRAM-shaped rides beside it. `min_vram_gb` is declarable
     # in the vocabulary but is NOT projected to the builder's buy-side key —
@@ -146,6 +145,16 @@ def test_the_projection_is_owned_by_resources() -> None:
     assert Resources(requires="sm89+", vcpus=4).manifest_dict() == {
         "gpu": True,
         "requires": {"min_sm": 89},
-        "compute_capability": 8.9,
         "vcpus": 4,
     }
+
+
+def test_no_key_but_requires_states_a_machine_requirement() -> None:
+    # The class-wide statement of the cut: `requires` is the ONE key a
+    # machine requirement rides. A second key restating the same fact is how
+    # two spellings of a floor drift, and it is what th#2074 is left holding
+    # on the hub side for already-published wheels.
+    for decl in ("sm89+", "sm90+, vram80g", "sm100+"):
+        row = Resources(requires=decl).manifest_dict()
+        assert "requires" in row
+        assert not [k for k in row if "capability" in k]

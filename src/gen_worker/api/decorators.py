@@ -187,16 +187,18 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
 
         ``requires`` travels as the requirement ROW — declared terms only, per
         level (``LayoutRequirements.manifest_row``) — under its own key, the
-        same shape the slot scope already emits. th#2072 grows the reader.
+        same shape the slot scope already emits, and the hub reads it
+        (th#2072).
 
-        ONE compatibility projection survives the fold, and only one:
-        ``compute_capability``, the dotted key
-        ``internal/builder/function_requirements.go`` parses into
-        ``FunctionRequirements.ComputeCapabilityMin`` and the placement filters
-        read. It is re-derived from ``minimum.min_sm`` — the same fact, the
-        same semantics, no laundering — so this wheel cannot dark an sm floor
-        the hub is enforcing TODAY in the window before th#2072 reads
-        ``requires``. **th#2072 deletes this projection** when it does.
+        NO compatibility projection is made. The ``compute_capability``
+        back-projection this method carried was unreachable the moment th#2072
+        landed: the hub takes ``requires`` wherever it is present and only
+        falls back to ``compute_capability`` when the vector left the axis
+        undeclared, and this method emitted the projection ONLY when
+        ``min_sm`` was declared — i.e. only when ``requires`` already answered.
+        The hub's remaining arm exists for PUBLISHED wheels (0.119.0 and
+        older) that emit no ``requires`` at all; th#2074 retires it. No wheel
+        built from this source is one of those.
 
         Two projections are deliberately NOT made, because each would resurrect
         a floor a ruling removed. ``min_host_ram_gb`` does not become the
@@ -212,9 +214,6 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
         requirement = self.requirement()
         if requirement is not None:
             out["requires"] = requirement.manifest_row()
-            min_sm = requirement.min_terms().min_sm
-            if min_sm:
-                out["compute_capability"] = round(min_sm / 10.0, 1)
         return out
 
     def requirement(self) -> LayoutRequirements | None:

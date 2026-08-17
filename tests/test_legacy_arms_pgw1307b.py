@@ -9,8 +9,10 @@ One test per cut, each red before its change:
              reads — unreachable, because ``ensure_intent`` is total;
   * arm (10) the duplicate-function-name error naming the WALKED module rather
              than the declared one;
-  * arm (13) NOT a cut: the string-code error envelope is live on master's
-             hub, so this pins the shapes that keep it load-bearing;
+  * arm (13) NOT a cut: the classifier stays. Its fixtures now carry the
+             post-th#2062 OBJECT envelope the five routes actually emit;
+  * arm (12) an unknown local-context kind refuses instead of silently
+             getting a base RequestContext;
   * addendum a keyless cell record refuses instead of adopting its directory.
 """
 
@@ -165,7 +167,7 @@ def test_duplicate_name_error_names_the_declared_module() -> None:
 
 
 # ---------------------------------------------------------------------------
-# arm (13): NOT residue — the string-code envelope is live on master's hub
+# arm (13): the routes moved to ONE envelope (th#2062); the classifier stays
 # ---------------------------------------------------------------------------
 
 
@@ -183,26 +185,55 @@ class _Resp:
     "status,body",
     [
         # internal/api/endpoint_bindings.go — bindingWriteError.write
-        (422, {"error": "binding_incompatible", "message": "family mismatch",
-               "issues": []}),
-        # internal/orchestrator/http/model_overrides.go — modelOverrideErrorBody
-        (400, {"error": "model_override_rejected", "code": "reserved_input_field",
-               "message": "resolved_models is reserved", "param": "models"}),
+        (422, {"error": {"type": "invalid_request_error",
+                         "code": "binding_incompatible",
+                         "message": "family mismatch"}}),
+        # internal/orchestrator/http — the four invoke.go model-override sites
+        (400, {"error": {"type": "invalid_request_error",
+                         "code": "reserved_input_field",
+                         "message": "resolved_models is reserved",
+                         "details": [{"field": "models"}]}}),
         # internal/api/capability_upload_budget.go
-        (403, {"error": "forbidden", "code": "no_matching_grant",
-               "message": "no capability grant authorizes this upload"}),
-        (429, {"error": "grant_exhausted", "code": "grant_exhausted",
-               "message": "capability grant budget exhausted"}),
+        (403, {"error": {"type": "invalid_request_error",
+                         "code": "no_matching_grant",
+                         "message": "no capability grant authorizes this upload"}}),
+        (429, {"error": {"type": "invalid_request_error",
+                         "code": "grant_exhausted",
+                         "message": "capability grant budget exhausted"}}),
+        # internal/api/media_presigned.go — folded in by th#2062 because
+        # leaving it flat would have kept the string branch alive alone.
+        (413, {"error": {"type": "invalid_request_error",
+                         "code": "file_too_large",
+                         "message": "file exceeds the per-file ceiling"}}),
     ],
 )
-def test_live_string_code_envelopes_are_hub_verdicts(status: int, body: Any) -> None:
-    """These four routes on master's hub emit the code as a STRING. Deleting
-    the shape-2 classifier as "old-hub residue" reinstates pgw#743 on every
-    one of them — a refusal retried until it becomes a different, later error.
+def test_the_unified_envelope_routes_are_hub_verdicts(status: int, body: Any) -> None:
+    """The five routes this parser exists for now answer with the OBJECT
+    envelope (tensorhub th#2062, PR #1349, merged). Typed codes are unchanged;
+    only the shape moved. These fixtures previously asserted the STRING shape
+    on the same five routes — true when written, false the moment #1349 landed,
+    and a fence stating something untrue about the system is worse than none.
     """
     from gen_worker.http_origin import is_definite_hub_answer, response_is_from_hub
 
     resp = _Resp(status, body)
+    assert response_is_from_hub(resp)
+    assert is_definite_hub_answer(resp)
+
+
+def test_the_string_code_branch_is_still_admitted() -> None:
+    """The classifier's string arm STAYS, and this is its only coverage.
+
+    Deleting it is a separate judgement that needs a LIVE-hub observation, not
+    a fixture edit: 17 flat `gin.H{"error": …}` bodies remain hub-side (all on
+    admin routes, none on a path this worker calls), and mis-classifying a real
+    refusal as proxy-shaped is the pgw#743 defect — the original 422 discarded,
+    the retry answered by a different, later error. This test asserts the
+    BRANCH, not a claim about which route emits it.
+    """
+    from gen_worker.http_origin import is_definite_hub_answer, response_is_from_hub
+
+    resp = _Resp(422, {"error": "binding_incompatible", "message": "family mismatch"})
     assert response_is_from_hub(resp)
     assert is_definite_hub_answer(resp)
 
@@ -249,3 +280,44 @@ def test_a_keyed_record_still_lists(tmp_path: Path) -> None:
 
     assert [c.key for c in store.stored_cells(root)] == [key]
     assert [c.key for c in store.cells_owed_to_sink(root)] == [key]
+
+
+# ---------------------------------------------------------------------------
+# arm (12): an unknown kind is a refusal, not a base context
+# ---------------------------------------------------------------------------
+
+
+def test_every_declared_kind_builds_its_own_context() -> None:
+    from gen_worker.cli.local_context import (
+        LOCAL_CONTEXT_KINDS, build_local_context,
+    )
+    from gen_worker.request_context import (
+        ConversionContext, DatasetContext, JobContext, TrainingContext,
+    )
+
+    expected = {
+        "inference": None,
+        "conversion": ConversionContext,
+        "eval": ConversionContext,
+        "dataset": DatasetContext,
+        "training": TrainingContext,
+        "job": JobContext,
+    }
+    assert set(LOCAL_CONTEXT_KINDS) == set(expected)
+    for kind, base in expected.items():
+        ctx = build_local_context(kind=kind)
+        if base is not None:
+            assert isinstance(ctx, base), kind
+
+
+def test_an_unknown_kind_refuses_instead_of_getting_a_base_context() -> None:
+    """The arm handed a typo'd kind a base RequestContext, which silently
+    lacks the surface the kind implies — the failure then arrives as a missing
+    attribute inside a tenant body instead of at the factory."""
+    from gen_worker.cli.local_context import build_local_context
+
+    for bad in ("conversions", "jobs", "", "quantize"):
+        with pytest.raises(ValueError, match="unknown kind"):
+            build_local_context(kind=bad)
+    # Whitespace/case normalization is intended and is NOT the arm.
+    build_local_context(kind=" Job ")
