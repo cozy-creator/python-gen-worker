@@ -48,10 +48,11 @@ subdir = "python/src/tensorfs"
 # and it is byte-identical to `8bafdfbb` except for the `rewrites` below.
 #
 # pgw#1330: THE SNAPSHOT IS SPLIT AT TWO REVS, ON PURPOSE, PERMANENTLY (see
-# the ownership ruling below), AND THIS IS THE ONLY RECORD OF IT. `project.py`, `tensors.py` and `gguf.py` come from
-# `read_plane_rev` below, NOT from `rev`. They are the consumption plane the
-# whole mixed-CAS cutover rests on — TFSSTUB1 render/parse, tree projection,
-# and the direct tensor reader — and they DID NOT EXIST at `8bafdfbb`.
+# the ownership ruling below), AND THIS IS THE ONLY RECORD OF IT. Every file in
+# `read_plane_files` comes from `read_plane_rev` below, NOT from `rev`. They are
+# the consumption plane the whole mixed-CAS cutover rests on — TFSSTUB1
+# render/parse, tree projection, the direct tensor reader and (pgw#1344) the
+# tensor WRITER — and they DID NOT EXIST at `8bafdfbb`.
 #
 # Why not simply bump `rev`: the newer lineage DELETED `LocalCAS.ingest_file`,
 # `LocalCAS.ingest_repository`, `LocalCAS.collect_garbage`,
@@ -107,10 +108,36 @@ subdir = "python/src/tensorfs"
 # in force here, so nothing the read plane is handed can be a manifest the
 # storage half would have refused. `tests/test_projected_tree_pgw1330.py`
 # proves the pairing executes rather than asserting it from imports.
-read_plane_rev = "333bb10016c328c5e3a275de2a2a314dbd0abcaf"
-read_plane_files = ["gguf.py", "project.py", "tensors.py"]
+#
+# pgw#1344: THE CONSUMPTION PLANE IS NOW A READ **AND WRITE** PLANE, and its
+# rev advances from `333bb10` to `21cec66` (tensorfs#106) to get `writer.py`.
+# `TensorWriter` composes a snapshot one tensor at a time in safetensors OR
+# GGUF on the seal planner's own object grid, which is the only way a converted
+# GGUF can share tensor objects with its safetensors source instead of being a
+# second copy of every byte. `convert/gguf_native.py` is its first caller.
+# `__init__.py` comes from this rev too and is now upstream's VERBATIM — the
+# pgw#1308 rewrite that used to live here is gone, because upstream itself no
+# longer re-exports a Python transfer plane. `project.py` is byte-identical at
+# both revs, so nothing about the projection half moved.
+#
+# ONE REWRITE IS REAL, and it is in `tensors.py`. At `21cec66` upstream's
+# `TensorReader._map` maps through the compiled extension
+# (`from .native import MappedObject`) and its comment says there is NO
+# fallback. pgw#1310 rules a compiled extension out of a source-vendored wheel,
+# so a straight take of that file would have deleted native tensor reads from
+# this repo outright. The rewrite restores the mapping in pure Python —
+# `_MappedObject`, an `mmap` exported through PEP 688's `__buffer__` — and it
+# is a restoration rather than a downgrade: upstream needed exactly two things
+# from the extension at that call site, a WEAK-REFERENCEABLE handle (so
+# `_maps` can stay the `WeakValueDictionary` that keeps an 8 GiB shard from
+# ending up resident) and a buffer that keeps its mapping alive for as long as
+# some view of it exists. A bare `mmap.mmap` supplies neither; a py3.12 class
+# with `__buffer__` supplies both, and py3.12 is this package's floor. Nothing
+# else in the file is touched, so every other line is still upstream's.
+read_plane_rev = "21cec66a580cb232210facbfccfa580a16d7196e"
+read_plane_files = ["__init__.py", "gguf.py", "project.py", "tensors.py", "writer.py"]
 rewrites = [
-  "`__init__.py`: the `transfer`, `journal` and `daemon` re-exports are gone with the modules (pgw#1308), and the `project`/`tensors` re-exports are added with the read plane (pgw#1330). No other file is touched, so the remaining digests are still upstream's.",
+  "`tensors.py`: `TensorReader._map` maps through a pure-Python `_MappedObject` (an `mmap` exported via PEP 688) instead of the compiled `tensorfs.native.MappedObject`, because pgw#1310 rules a compiled extension out of a source-vendored wheel. Upstream's weak-mapping ownership rule is preserved exactly; see the paragraph above. No other file is edited, so the remaining digests are upstream's verbatim.",
 ]
 
 [packages.torchcg]
@@ -175,15 +202,16 @@ rewrites = [
 ]
 
 [packages.tensorfs.files]
-"__init__.py" = "51e60fc07782af7ff738c889be2fb1d9fa81224abfc0dfe546dde9d2191cf21b"
+"__init__.py" = "a66ced3cd03e042989602b9e122e4b3988be6be6611aacdb05b852c8a968ec7b"
 "chunking.py" = "69333dc0836f35b05c420780b7eac205993ebde54c1b91b1afe03e55c313bd7a"
-"gguf.py" = "458927d1bd86c2c166ed0168e9369f76f85387ac09bbb1eb5ecb095cdec6e055"
+"gguf.py" = "ced89fc42009ab2e69406d2726c9b0caf43254c51ab16bdcf37c5ad239a2d7be"
 "local.py" = "92ec0d1249115f08eb02fccf554e946d36854a4ae861bde8190590d404695e0e"
 "manifest.py" = "a93ee850992c17dd90a57946441875d282367556703b9e9d1c8be057ea12bed4"
 "project.py" = "2471c26e013b287a7554cecda51ff9b42c09f71cd6d6d57dd33ed4ef242c40cd"
 "py.typed" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 "refs.py" = "f3a144543f423a6b01043294b21104ababaafdbfb31798560de678b69f27ac2f"
-"tensors.py" = "b68adf8b95161defb89ed06bdea8a778b54e21a461768a43ae658955ccc6db9d"
+"tensors.py" = "12ce32fdecebb1fd61b898cab0c40d9b13835af0353e2af95b4fa160bd4a4ad6"
+"writer.py" = "f44e74d983d2f642e8479f85a3682bb737dd76ffbd62c3fe7d684ae5c0c71ca1"
 
 [packages.torchcg.files]
 "__init__.py" = "df715b9d245945db3edb6b65cc92c5dc195e89bbf5df1c53f47fe8471eb8e004"

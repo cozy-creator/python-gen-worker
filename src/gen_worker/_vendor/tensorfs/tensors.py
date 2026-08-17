@@ -19,6 +19,7 @@ import math
 import mmap
 import os
 import tempfile
+import weakref
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -34,6 +35,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DTYPE_BITS",
+    "GGUF_FORMAT",
+    "SAFETENSORS_FORMAT",
     "BlockLayout",
     "FileTooLarge",
     "TensorError",
@@ -46,8 +49,10 @@ __all__ = [
 
 _SAFETENSORS_SUFFIX = ".safetensors"
 _GGUF_SUFFIX = ".gguf"
-_SAFETENSORS_FORMAT = "safetensors-v1"
-_GGUF_FORMAT = "gguf-v1"
+# The planner ids, which are also what `TensorView.format` reports and what
+# `TensorWriter` composes. Public because the write half dispatches on them.
+SAFETENSORS_FORMAT = "safetensors-v1"
+GGUF_FORMAT = "gguf-v1"
 _PREFIX_SIZE = 8
 # safetensors 0.8.0's own reader refuses header lengths above this. Matching it
 # keeps a malformed prefix from provoking a huge allocation here.
@@ -185,6 +190,35 @@ class TensorView:
         return at
 
 
+class _MappedObject:
+    """A read-only mapping of one CAS object, exported through the buffer protocol.
+
+    DECLARED REWRITE (pgw#1310): the pure-Python stand-in for
+    ``tensorfs.native.MappedObject``. Two properties are load-bearing and
+    ``mmap.mmap`` supplies neither on its own:
+
+    * it is **weak-referenceable**, so ``TensorReader._maps`` can be the
+      ``WeakValueDictionary`` upstream made it -- a strong cache there means a
+      conversion that touches every tensor of an 8 GiB shard ends with the whole
+      shard resident;
+    * the buffer it exports keeps the underlying ``mmap`` alive for exactly as
+      long as some view of it exists, so ``close()`` never has to revoke a live
+      buffer.
+
+    PEP 688's ``__buffer__`` (py3.12+, which is this package's floor) is what
+    makes both true without a C extension.
+    """
+
+    __slots__ = ("_handle", "__weakref__")
+
+    def __init__(self, path: Path) -> None:
+        with path.open("rb") as source:
+            self._handle = mmap.mmap(source.fileno(), 0, prot=mmap.PROT_READ)
+
+    def __buffer__(self, flags: int) -> memoryview:
+        return memoryview(self._handle)
+
+
 class TensorReader(Mapping[str, TensorView]):
     """Every tensor in a manifest, addressable without materializing a file.
 
@@ -206,7 +240,19 @@ class TensorReader(Mapping[str, TensorView]):
         self._entries = {entry.path: entry for entry in manifest.files}
         # (file path) -> (object start offsets, (ref, length) pairs)
         self._grid: dict[str, tuple[list[int], tuple[tuple[CASRef, int], ...]]] = {}
-        self._maps: dict[str, mmap.mmap] = {}
+        # WEAK on purpose. A mapping lives exactly as long as someone is
+        # reading through it: the `Py_buffer` a view holds keeps the mapping
+        # alive, and when the last view goes so does the mapping. A strong
+        # cache here would mean a conversion that touches every tensor of an
+        # 8 GiB shard ends with the whole shard resident. Measured with
+        # `python/benchmarks/writer_peak_rss.py --gib 8`, transforming every
+        # tensor of an 8 GiB shard: 8036.7 MiB peak RSS while this was strong,
+        # 310.1 MiB now -- and now flat in the shard's size rather than equal
+        # to it. Re-mapping an object a later read wants again is one
+        # `mmap(2)`; its digest stays in `_verified`, so it is not re-hashed.
+        self._maps: weakref.WeakValueDictionary[str, MappedObject] = (
+            weakref.WeakValueDictionary()
+        )
         self._verified: set[str] = set()
         self._index: dict[str, TensorView] | None = None
         self._closed = False
@@ -225,21 +271,16 @@ class TensorReader(Mapping[str, TensorView]):
     # -- lifecycle -------------------------------------------------------
 
     def close(self) -> None:
-        """Drop this reader's mappings.
+        """Refuse further reads. Mappings are not this object's to revoke.
 
         A mapping the caller still holds a ``memoryview`` into is *not*
-        force-unmapped — that would invalidate live buffers. It is released
-        instead, so the mapping survives exactly as long as the last view of
-        it. This is the same ownership rule the Rust reader gets from holding
-        each object in an ``Arc<Mmap>``; here refcounting supplies it.
+        force-unmapped — that would invalidate live buffers. The reader only
+        ever held weak references anyway: the ``Py_buffer`` each view carries is
+        what keeps its mapping alive, for exactly as long as the view. There is
+        no ``BufferError`` to swallow here and nothing to release.
         """
 
         self._closed = True
-        for handle in self._maps.values():
-            try:
-                handle.close()
-            except BufferError:
-                pass
         self._maps.clear()
 
     def __enter__(self) -> TensorReader:
@@ -359,6 +400,27 @@ class TensorReader(Mapping[str, TensorView]):
             return None
         return tuple(span)
 
+    def gguf_header(self, path: str) -> gguf.GGUFHeader:
+        """The GGUF directory of one file, tensor bodies untouched.
+
+        This is what a conversion hands to :class:`~tensorfs.writer.TensorWriter`
+        so the output carries the source's metadata block verbatim. A
+        conversion rewrites tensors; re-encoding model metadata it never looked
+        at would change the file for no reason.
+        """
+
+        entry = self._entry(path)
+        if not path.endswith(_GGUF_SUFFIX):
+            raise TensorError(f"{path!r} is not a GGUF file")
+
+        def read(offset: int, length: int) -> bytes:
+            return self.read_range(path, offset, length)
+
+        try:
+            return gguf.read_header(read, entry.size_bytes)
+        except gguf.GGUFError as error:
+            raise TensorError(f"{path}: {error}") from None
+
     def rekeyed(self, names: Mapping[str, str]) -> Mapping[str, TensorView]:
         """Serve these tensors under other names, admitting nothing.
 
@@ -409,7 +471,17 @@ class TensorReader(Mapping[str, TensorView]):
         return built
 
     def _map(self, ref: CASRef, size: int) -> memoryview:
-        """An mmap of one CAS object, verified at most once per reader."""
+        """An mmap of one CAS object, verified at most once per reader.
+
+        DECLARED REWRITE (pgw#1310, recorded in VENDORED.toml): upstream maps
+        through the compiled extension's ``tensorfs.native.MappedObject`` and
+        says there is no fallback. A source-vendored wheel cannot carry a
+        compiled extension, so this snapshot supplies the same object in pure
+        Python: :class:`_MappedObject` below owns an ``mmap`` and exports it
+        through PEP 688, which is the property upstream needed from the
+        extension here -- a weak-referenceable handle whose pages stay alive
+        exactly as long as some view of them does.
+        """
 
         key = ref.digest
         handle = self._maps.get(key)
@@ -419,9 +491,7 @@ class TensorReader(Mapping[str, TensorView]):
             # mapping exists the bytes are pinned by the inode, so the lock is
             # not held for the lifetime of the view.
             with self._cas._store_lock():
-                path = self._cas.object_path(ref)
-                with path.open("rb") as source:
-                    handle = mmap.mmap(source.fileno(), 0, prot=mmap.PROT_READ)
+                handle = _MappedObject(self._cas.object_path(ref))
             self._maps[key] = handle
         view = memoryview(handle)
         if len(view) != size:
@@ -504,7 +574,7 @@ class TensorReader(Mapping[str, TensorView]):
             yield TensorView(
                 name=tensor.name,
                 file=path,
-                format=_GGUF_FORMAT,
+                format=GGUF_FORMAT,
                 dtype=tensor.dtype,
                 shape=tensor.shape,
                 nbytes=tensor.nbytes,
@@ -569,7 +639,7 @@ class TensorReader(Mapping[str, TensorView]):
             yield TensorView(
                 name=name,
                 file=path,
-                format=_SAFETENSORS_FORMAT,
+                format=SAFETENSORS_FORMAT,
                 dtype=dtype,
                 shape=tuple(shape),
                 nbytes=nbytes,

@@ -1,4 +1,4 @@
-"""Content-addressed local storage, chunk manifests, and direct tensor reads."""
+"""Content-addressed local storage and direct tensor reads and writes."""
 
 from .local import DigestMismatch, LocalCAS, RefConflict
 from .manifest import MAX_CHUNK_SIZE, Chunk, FileEntry, RepositoryManifest
@@ -17,6 +17,8 @@ from .project import (
 from .refs import CASRef
 from .tensors import (
     DTYPE_BITS,
+    GGUF_FORMAT,
+    SAFETENSORS_FORMAT,
     BlockLayout,
     FileTooLarge,
     TensorError,
@@ -26,26 +28,30 @@ from .tensors import (
     open_tensors,
     read_entry,
 )
+from .writer import TensorWriter
 
 __all__ = [
+    "DTYPE_BITS",
+    "GGUF_FORMAT",
+    "SAFETENSORS_FORMAT",
+    "STUB_MAGIC",
+    "TENSOR_SUFFIXES",
+    "BlockLayout",
+    "FileTooLarge",
     "CASRef",
     "Chunk",
-    "DTYPE_BITS",
     "DigestMismatch",
-    "BlockLayout",
     "FileEntry",
-    "FileTooLarge",
     "LocalCAS",
     "MAX_CHUNK_SIZE",
     "ProjectionError",
     "RefConflict",
     "RepositoryManifest",
-    "STUB_MAGIC",
     "Stub",
-    "TENSOR_SUFFIXES",
     "TensorError",
     "TensorReader",
     "TensorView",
+    "TensorWriter",
     "dtype_itemsize",
     "is_tensor_container",
     "open_tensors",
