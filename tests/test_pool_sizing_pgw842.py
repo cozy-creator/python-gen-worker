@@ -278,7 +278,7 @@ def test_a_real_pools_width_and_ledger_land_hub_side(tmp_path: Path) -> None:
         "peak_child_rss_bytes": box.peak_rss_bytes,
     }
     table = aot_mint._mint_phase_table(
-        [], {"total_s": 12.5}, width, ledger,
+        {}, {"total_s": 12.5}, width, ledger,
     )
     updates = _relayed(table)
 
@@ -310,7 +310,7 @@ def test_a_narrow_pool_says_so_in_the_first_line() -> None:
         72, vcpus=21, available_bytes=13 * _GIB, device_lock=True)
     assert width.workers == 3 and width.underwidth == 5, width.reason
     table = aot_mint._mint_phase_table(
-        [], {"total_s": 554.78}, width, {"pool_wall_s": 453.0},
+        {}, {"total_s": 554.78}, width, {"pool_wall_s": 453.0},
     )
     updates = _relayed(table)
     detail = next(

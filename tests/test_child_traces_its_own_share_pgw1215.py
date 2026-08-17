@@ -265,6 +265,10 @@ def test_a_child_envelope_that_cannot_be_parsed_refuses(
     class _Pool:
         entry_seconds: Dict[str, float] = {}
         peak_rss_bytes = 0
+        #: pgw#1356: the phase table folds these, so a double without them is
+        #: a double of a pool that cannot say what it compiled.
+        class_spans: Dict[str, Dict[str, float]] = {}
+        entry_overlays: Dict[str, Dict[str, float]] = {}
 
         def __init__(self, *a: Any, **k: Any) -> None:
             pass
