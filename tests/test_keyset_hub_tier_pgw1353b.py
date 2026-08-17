@@ -854,3 +854,147 @@ def test_the_emitter_reports_a_publish_that_did_not_land(
     status = emit.main(
         ["--from-cache", str(cache), "--out", str(tmp_path / "b"), "--publish"])
     assert status == 1, "a publish that did not land exited 0"
+
+
+# ---------------------------------------------------------------------------
+# THE SEAM — the layer every test above is structurally blind to.
+#
+# Under the process split (which is the real fleet configuration) the compute
+# child holds no credential and NEVER NAMES A FREE-FORM PATH: the parent
+# refuses any request that does not match `procsplit/actions.py` by method AND
+# full-path regex. Every test above patches `broker.request`, so all of them
+# stay green with the tier COMPLETELY DEAD on every fleet pod — the refusal
+# would arrive as a `BrokerError`, `keyset.hub` would correctly read it as a
+# miss, and the pod would derive for 805 s exactly as it does today.
+#
+# That is pgw#1309's shape precisely (its child-PID rows were merged and green
+# for a full cycle before a live pod emitted one), so it is asserted against the
+# TABLE rather than against this client.
+# ---------------------------------------------------------------------------
+
+
+def test_the_keyset_actions_are_allowlisted_pgw1353b() -> None:
+    from gen_worker.procsplit import actions
+
+    digest = _digest()
+    path = keyset_hub.keyset_path(digest)
+
+    fetch, query, body = actions.authorize({"method": "GET", "path": path})
+    assert fetch.name == "keysets.fetch"
+    assert query == {} and body is None
+
+    document = keyset_hub.single_closure_document(digest, _row(denoiser=HASH_A))
+    publish, _q, sent = actions.authorize({
+        "method": "PUT", "path": path, "json": json.loads(document.decode())})
+    assert publish.name == "keysets.publish"
+    assert sent is not None and set(sent) == {"schema", "version", "closures"}
+
+    # The timeouts the parent will hold its own control loop for must cover the
+    # client's own bound, or the seam gives up before the call it authorized.
+    assert fetch.timeout_s >= keyset_hub.KEYSET_TIMEOUT_S
+    assert publish.timeout_s >= keyset_hub.KEYSET_TIMEOUT_S
+
+
+def test_the_allowlisted_address_grammar_is_the_closure_digests_pgw1353b() -> None:
+    """The path regex pins the ADDRESS SHAPE, and it must be the same one
+    `parse_closure_digest` admits.
+
+    A looser `[^/]+` would let a process running tenant code put anything it
+    liked into a path segment the parent attaches the pod's credential to.
+    """
+    from gen_worker.procsplit import actions
+
+    for bad in (
+        "/v1/worker/keysets/" + "A" * 32,          # uppercase
+        "/v1/worker/keysets/" + "a" * 31,          # short
+        "/v1/worker/keysets/" + "a" * 33,          # long
+        "/v1/worker/keysets/../compiled-graphs",   # traversal
+        "/v1/worker/keysets/",                     # empty address
+        "/v1/worker/keysets/" + "a" * 32 + "/x",   # extra segment
+    ):
+        for method in ("GET", "PUT"):
+            with pytest.raises(actions.ActionRefused):
+                actions.authorize({"method": method, "path": bad, "json": {}})
+
+    # …and every address `parse_closure_digest` admits is one the seam allows,
+    # which is the direction that would strand the tier if it were wrong.
+    for good in ("0" * 32, "f" * 32, "a1b2c3d4e5f60718293a4b5c6d7e8f90"):
+        digest = keyset.parse_closure_digest(good)
+        action, _q, _b = actions.authorize(
+            {"method": "GET", "path": keyset_hub.keyset_path(digest)})
+        assert action.name == "keysets.fetch"
+
+
+def test_a_keyset_publish_is_not_a_PUBLISH_ACTION_pgw1353b() -> None:
+    """A key set is not a cell, and the probe disarm must not swallow it.
+
+    pgw#980 disarms `PUBLISH_ACTIONS` on a live-edit probe because a probe
+    writing a CELL into a shared family namespace poisons every pod that later
+    adopts from it. A key set carries no artifact and no signature — it is a
+    statement about a closure the writer can already compute — and its address
+    is a pure function of the code being run, so a probe's document lands at a
+    closure only that probe resolves. Including it here would disarm the tier on
+    exactly the pods a dev loop uses most.
+    """
+    from gen_worker.procsplit import actions
+
+    assert "keysets.publish" not in actions.PUBLISH_ACTIONS
+    assert "keysets.fetch" not in actions.PUBLISH_ACTIONS
+
+
+def test_the_parent_actually_SENDS_a_PUT_body_pgw1353b(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The parent's half of the seam, at the one line that decides it.
+
+    `parent._http_call` is the ONLY place the worker JWT reaches the wire on a
+    child's behalf, and it used to attach the body ONLY on `method == "POST"` —
+    true while POST was the only verb in the action table, and silently fatal
+    the moment a PUT joined it. A key-set publish would have gone out with NO
+    BODY, the hub would have answered a typed `keyset_invalid`, and the child
+    would have read a well-formed "no" to a request it believed it sent. Nothing
+    above this test can see that: every other test in this file stops at
+    `broker.request`, which is the CHILD's side.
+
+    Asserted against the real function with `requests.request` captured, because
+    the defect is a keyword argument and only the call itself carries it.
+    """
+    from gen_worker.procsplit import parent as procsplit_parent
+
+    sent: List[Any] = []
+
+    class _Resp:
+        status_code = 201
+        text = '{"stored": true}'
+
+    import requests as _requests
+
+    def _capture(method: str, url: str, **kw: Any) -> Any:
+        sent.append((method, url, kw))
+        return _Resp()
+
+    monkeypatch.setattr(_requests, "request", _capture)
+
+    digest = _digest()
+    document = json.loads(
+        keyset_hub.single_closure_document(digest, _row(denoiser=HASH_A)).decode())
+    status, _text = procsplit_parent._http_call(
+        "PUT", "http://hub.local" + keyset_hub.keyset_path(digest),
+        "worker-jwt", {}, document, 10.0)
+
+    assert status == 201
+    assert len(sent) == 1
+    method, url, kwargs = sent[0]
+    assert method == "PUT" and url.endswith(str(digest))
+    assert kwargs["json"] == document, (
+        "the parent dropped the PUT body; the hub would receive an empty "
+        "document and the child would read a typed refusal to a request it "
+        "believes it sent")
+    assert kwargs["headers"]["Authorization"] == "Bearer worker-jwt"
+
+    # …and a GET still carries none, which is what its action declares.
+    sent.clear()
+    procsplit_parent._http_call(
+        "GET", "http://hub.local" + keyset_hub.keyset_path(digest),
+        "worker-jwt", {}, None, 10.0)
+    assert sent[0][2]["json"] is None

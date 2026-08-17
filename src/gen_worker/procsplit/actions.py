@@ -163,6 +163,40 @@ ACTIONS: Dict[str, HubAction] = {
             body=("family", "keys"),
             timeout_s=30.0,
         ),
+        # th#2123 / pgw#1353 option (b): the compiled-graph KEY SET, pulled and
+        # pushed by its CLOSURE DIGEST. Two entries, and the path regex pins the
+        # address grammar — 32 lowercase hex, the same shape
+        # `keyset.identifiers.parse_closure_digest` admits and the same one the
+        # hub's own CHECK constraint enforces. A looser `[^/]+` would let a
+        # child put anything it liked in a path segment the parent signs for.
+        #
+        # WITHOUT THESE TWO ENTRIES THE TIER IS DEAD ON EVERY FLEET POD, and it
+        # is dead SILENTLY: the split's parent refuses any path not in this
+        # table, `keyset.hub` treats a refusal as a miss (correctly — it must
+        # never block a boot), and the pod derives for 805 s exactly as it did
+        # before while every unit test that patches `broker.request` stays
+        # green. That is pgw#1309's shape precisely, which is why
+        # `test_the_keyset_actions_are_allowlisted_pgw1353b` asserts the table
+        # rather than the client.
+        #
+        # GET carries no query and no body — the address is the whole request.
+        _a(
+            "keysets.fetch",
+            "GET",
+            r"^/v1/worker/keysets/[0-9a-f]{32}$",
+            timeout_s=10.0,
+        ),
+        # PUT carries the document, whose only top-level keys are the
+        # `cg-keyset-v1` envelope. Enumerated for the same reason the resolve
+        # body is: an action table that admitted one more key would let a child
+        # smuggle a field the hub's admission never agreed to read.
+        _a(
+            "keysets.publish",
+            "PUT",
+            r"^/v1/worker/keysets/[0-9a-f]{32}$",
+            body=("schema", "version", "closures"),
+            timeout_s=10.0,
+        ),
         _a(
             "compiled_graphs.publish_complete",
             "POST",
