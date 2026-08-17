@@ -564,6 +564,26 @@ def test_a_too_old_host_driver_is_a_REROLL_verdict_not_a_torch_problem(tmp_path:
     assert pods.deleted == ["pod1"], "a re-roll kills the host immediately — that is the saving"
 
 
+def test_a_pod_that_never_answers_is_a_REROLL_not_a_budget_overrun(tmp_path: Path) -> None:
+    """A matrix lane can retry a `reroll`; it must not retry a `railed`, which
+    means the operator's money is genuinely gone. MEASURED: two pods on the same
+    image answered in ~100s while a third sat silent for six minutes."""
+
+    class NeverAnswers(FakePods):
+        def _register(self, name: str) -> dict[str, Any]:
+            record = super()._register(name)
+            record["publicIp"], record["portMappings"] = "", None
+            return record
+
+    pods = NeverAnswers(rate=3_600_000.0)  # $1000/s: the sub-cap trips at once
+    row = _rig(tmp_path, pods, FakeTransport(), rail=Rail(max_usd=1.0)).run(
+        cards_mod.pick("sm89"), Workload(name="w", command="x")
+    )
+    assert row.verdict == "reroll" and row.failed_stage == "preflight"
+    assert "re-roll the host" in row.detail
+    assert pods.deleted == ["pod1"]
+
+
 def test_no_driver_at_all_is_also_a_reroll(tmp_path: Path) -> None:
     row = _rig(tmp_path, FakePods(), FakeTransport(rigboot_rc=92)).run(
         cards_mod.pick("a40"), Workload(name="w", command="x")
@@ -572,13 +592,28 @@ def test_no_driver_at_all_is_also_a_reroll(tmp_path: Path) -> None:
 
 
 def test_the_rail_tears_the_pod_down_and_says_so(tmp_path: Path) -> None:
-    # $1000/second: the arithmetic, not a plausible card. The point is that the
-    # rail is checked at every gate observation, so an exhausted budget stops
-    # the run wherever it is.
-    pods = FakePods(rate=3_600_000.0)
-    rail = Rail(max_usd=0.01)
-    row = _rig(tmp_path, pods, FakeTransport(), rail=rail).run(
-        cards_mod.pick("a40"), Workload(name="w", command="x")
+    """Money running out AFTER the pod came up is `railed`, not `reroll`: the
+    host was fine, the budget is gone, and a matrix lane must not retry it."""
+
+    class LateRail(Rail):
+        """Boot is affordable; the third check is not. Stated directly rather
+        than staged through a rate, because the property under test is WHICH
+        verdict a mid-run exhaustion produces, not the arithmetic (covered
+        above)."""
+
+        checks: int = 0
+
+        def check_sub(self, stage: str, fraction: float, now: float | None = None) -> None:
+            return None
+
+        def check(self, stage: str, now: float | None = None) -> None:
+            self.checks += 1
+            if self.checks > 2:
+                raise RailTripped(f"cap reached during {stage!r}")
+
+    pods = FakePods()
+    row = _rig(tmp_path, pods, FakeTransport(), rail=LateRail(max_usd=1.0)).run(
+        cards_mod.pick("sm89"), Workload(name="w", command="x")
     )
     assert row.verdict == "railed" and row.rail_tripped is True
     assert pods.deleted == ["pod1"]

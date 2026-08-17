@@ -367,7 +367,24 @@ class Rig:
         ).wait()
 
     def _boot_check(self, stage: str) -> None:
-        self.rail.check_sub(stage, self.boot_budget)
+        """A boot that never happened is a RE-ROLL, not a budget overrun.
+
+        MEASURED 2026-08-17: two pods on the same image exposed port 22 in ~100
+        seconds; a third sat at `desiredStatus: RUNNING` with no `publicIp` for
+        six minutes and counting — RIG-ENV's known upstream single-blob stall
+        (8 of 11 pod creations, 2026-08-08). The money bound is what STOPS it,
+        but the verdict a caller needs is "this host is bad, take another",
+        which RIG-ENV §3c prices at ~3 minutes against 25 for finding out later.
+        A matrix lane can retry a `reroll`; it must not retry a `railed`, which
+        means the operator's budget is genuinely gone.
+        """
+        try:
+            self.rail.check_sub(stage, self.boot_budget)
+        except RailTripped as exc:
+            raise _Reroll(
+                f"the pod never answered inside the bring-up budget — {exc}. "
+                "RIG-ENV §3c: re-roll the host rather than waiting it out."
+            ) from None
 
     def _bring_up_and_run(self, api: PodApi, row: RigRow, workload: Workload, card: Card) -> None:
         row.stage("endpoint")
