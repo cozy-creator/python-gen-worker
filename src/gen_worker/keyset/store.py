@@ -13,7 +13,14 @@ Three kinds of location, and the difference is who derived the hashes:
   compile-once-run-forever promise for cozy-local reads the same document
   through the same closure digest).
 
-All three are the same document type. A key set is trusted because its closure
+A FOURTH location lives one module over, in :mod:`gen_worker.keyset.hub`: the
+platform's own store (pgw#1353 option (b) / th#2123), read after every root here
+misses and written after a derive. It is not in this module because it is not a
+FILESYSTEM location — it has no path, no ``mkdir``, and no atomic-rename story —
+but it is the same document read through the same closure address, and
+``closure_row`` below is how the row this module holds gets handed to it.
+
+All of them are the same document type. A key set is trusted because its closure
 digest matches what this pod's code would trace, never because of where it was
 found — so the locations need no separate grammar, no separate parser and no
 separate version ladder.
@@ -75,6 +82,7 @@ __all__ = [
     "KeySetHit",
     "assert_honest",
     "class_hashes",
+    "closure_row",
     "durable_root",
     "invalidate",
     "lookup",
@@ -261,6 +269,33 @@ def class_hashes(
                 break
             return closure.class_hashes
     return {}
+
+
+def closure_row(
+    cache_dir: Optional[Path], digest: ClosureDigest,
+) -> Optional[ClosureRow]:
+    """The RAW row a writable root holds for ``digest``, or ``None``.
+
+    The producer half of th#2123's hub tier reads through here. Deliberately the
+    raw :class:`ClosureRow` and not a :class:`ShippedClosure`: what travels to
+    the hub is the document a pod recorded, byte for byte, and re-deriving it
+    from a parsed view would mean this worker's writer and its reader could
+    disagree about a field neither of them reads.
+
+    Walks the SAME ``writable_roots`` ordering as everything else here, so the
+    row that gets published is the row a re-read would answer with — not one
+    from a root only this function knows about.
+    """
+    for root, _source in writable_roots(cache_dir):
+        for path in _candidate_files(root):
+            try:
+                document = read_document(path)
+            except KeySetError:
+                break
+            row = document.closures.get(str(digest))
+            if row is not None:
+                return row
+    return None
 
 
 def _publish(path: Path, document: KeySetDocument) -> None:

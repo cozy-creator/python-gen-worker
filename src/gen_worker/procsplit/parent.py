@@ -233,7 +233,16 @@ def _http_call(
         url,
         headers={"Authorization": f"Bearer {token}"},
         params=query or None,
-        json=body if method == "POST" else None,
+        # EVERY BODY-BEARING VERB, not just POST (pgw#1353b). This read
+        # `method == "POST"` while POST was the only verb in the table, so a
+        # PUT action went out with NO BODY AT ALL — and the failure is silent
+        # in the worst way: the hub receives an empty body, answers a typed
+        # refusal, and the child reads a well-formed "no" to a request it
+        # believes it sent. Which verbs may carry a body is `actions.py`'s
+        # decision (each entry enumerates its keys); this line only has to
+        # stop throwing away what that table already authorized. GET and
+        # DELETE keep sending none, which is what they declare.
+        json=body if method in ("POST", "PUT", "PATCH") else None,
         timeout=timeout,
     )
     return resp.status_code, resp.text

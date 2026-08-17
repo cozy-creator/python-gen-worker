@@ -82,6 +82,8 @@ from . import activity, aot_identity, cell_resolve, keyset, local_cell_store
 from .child_contract import CompileSpec, MintSlot
 from .keyset import DerivedKeySet, KeySetError
 from .keyset import boot as keyset_boot
+from .keyset import hub as keyset_hub
+from .keyset import store as keyset_store
 
 logger = logging.getLogger(__name__)
 
@@ -459,13 +461,24 @@ def _key_set(
     device: int,
     derive: Optional["KeyDeriver"],
     keyset_roots: Sequence[Path],
+    hub: Optional[keyset_hub.HubTier] = None,
 ) -> "DerivedKeySet | BootAdoptOutcome":
     """This boot's key set — from DATA first, from a deriver only if injected.
 
-    The order is the whole leg. A shipped ``cg-keyset-v1`` answers in
-    milliseconds and runs no exporter; this machine's own cache answers next
-    (§4.28's compile-once-run-forever, unchanged); a mint-lane deriver is asked
-    last and only when the caller handed one over.
+    The order is the whole leg: **shipped -> durable -> this pod's cache -> the
+    HUB -> derive**. A shipped ``cg-keyset-v1`` answers in milliseconds and runs
+    no exporter; the endpoint's durable root answers next (pgw#1353 row (a));
+    this machine's own cache after that (§4.28's compile-once-run-forever,
+    unchanged); th#2123's hub store after THAT, because it is the only tier an
+    ephemeral private deployment can reach and a 10 s round trip is nothing
+    against the 805 s it replaces; and a mint-lane deriver is asked last and
+    only when the caller handed one over.
+
+    **On a successful derive the document is offered to the hub, best effort.**
+    That upload is the producer half of the tier and it is the reason a fleet
+    converges instead of paying per pod — and it runs strictly AFTER the keys
+    this boot needs already exist, so no failure of it can slow, block or
+    change this boot. See :func:`_publish_derived_key_set`.
 
     Returns a refusal OUTCOME rather than raising, because every failure here
     means "boot as this pod booted yesterday" and the reason is the countable
@@ -480,6 +493,7 @@ def _key_set(
             slots=slots,
             cache_dir=Path(memo_dir) if memo_dir else None,
             extra_roots=tuple(keyset_roots),
+            hub=hub,
         )
     except KeySetError as exc:
         if exc.reason != "keyset_absent":
@@ -509,7 +523,7 @@ def _key_set(
             family=family, function=function)
 
     try:
-        return derive(
+        derived = derive(
             function=function,
             modules=tuple(str(m) for m in modules),
             family=family,
@@ -534,6 +548,60 @@ def _key_set(
             reason, detail = "derive_failed", f"{type(exc).__name__}: {exc}"
         return BootAdoptOutcome(
             reason=reason, detail=detail, family=family, function=function)
+
+    # This pod just paid for the traces. Hand the answer to the hub so the NEXT
+    # pod of this endpoint does not — the whole producer half of th#2123, in one
+    # place, after the keys already exist.
+    _publish_derived_key_set(derived, memo_dir=memo_dir, hub=hub, family=family)
+    return derived
+
+
+def _publish_derived_key_set(
+    derived: "DerivedKeySet",
+    *,
+    memo_dir: Optional[Path],
+    hub: Optional[keyset_hub.HubTier],
+    family: str,
+) -> str:
+    """Offer this boot's freshly-derived closure to the hub. BEST EFFORT.
+
+    Returns the reason it did not happen, or ``""``. **It can never block, slow
+    or fail a boot**: it runs after the key set this boot needs already exists,
+    it is wrapped whole, and every one of its own failure modes is a logged
+    sentence.
+
+    The document is read back from the writable root the deriver just wrote
+    rather than rebuilt from ``derived``. Two reasons, and the second is the
+    important one: ``DerivedKeySet`` carries FOLDED keys — this pod's ``sm`` and
+    toolchain baked in — and a document built from those would be a
+    machine-DEPENDENT answer stored at a machine-independent address, wrong for
+    every pod on a different SKU. What must travel is the row the deriver
+    recorded, and ``store`` is the one place that row exists.
+    """
+    if hub is None:
+        return "no hub tier"
+    # NO SOURCE GUARD, and that is deliberate. This runs on the DERIVE branch
+    # only — every read tier already missed to get here, INCLUDING the hub — so
+    # whatever the deriver answered with is something the hub does not have.
+    # `boot_key.derive` can legitimately answer `MEMO` (its own cache hit), and
+    # that document is exactly as worth publishing as a freshly traced one: the
+    # pod holds it and the platform does not. A "publish only TRACED" guard
+    # reads plausible and would silently strand every cozy-local memo hit.
+    try:
+        row = keyset_store.closure_row(
+            Path(memo_dir) if memo_dir else None, derived.closure)
+        if row is None:
+            return "the derivation recorded no document to publish"
+        reason = keyset_hub.publish_closure(derived.closure, row, hub)
+    except Exception as exc:  # noqa: BLE001 — never fatal, see the docstring
+        logger.debug("boot-adopt: key set publish failed", exc_info=True)
+        reason = f"{type(exc).__name__}: {exc}"
+    if reason:
+        logger.warning(
+            "boot-adopt: %s traced its key set in %d ms and could NOT hand it to "
+            "the hub (%s) — the next pod of this endpoint pays it again",
+            family, derived.wall_ms, reason)
+    return reason
 
 
 class KeyDeriver(Protocol):
@@ -616,10 +684,16 @@ def attempt(
         text_lens=tuple(int(v) for v in (getattr(cfg, "text_lens", ()) or ())),
     )
 
+    # th#2123's hub tier is built from the SAME two values the resolve call
+    # uses, and from `hub_absent` — the caller's own sentence for why there is
+    # nobody to ask. One object, so "is there a hub" is answered once per boot
+    # instead of once per call site.
+    hub = keyset_hub.HubTier(
+        base_url=base_url, bearer=bearer, absent=str(hub_absent or ""))
     outcome = _key_set(
         function=fn, modules=modules, family=family, spec=spec, slots=slots,
         declared_hint=declared_hint, work_root=work_root, memo_dir=memo_dir,
-        device=device, derive=derive, keyset_roots=keyset_roots)
+        device=device, derive=derive, keyset_roots=keyset_roots, hub=hub)
     # pgw#1355: the key set is a COLD-BOOT STAGE, recorded exactly once per
     # derive — here, where `_key_set` has just returned, rather than in
     # `report`, which runs once PER CLASS. On sdxl that is 36 calls carrying
@@ -631,7 +705,10 @@ def attempt(
     # This is the span pgw#1353 measured the absence of: the derive runs during
     # a REQUEST, after `boot_phases.in_boot()` has already gone False, so no
     # ladder row covers its 805 seconds and `worker_boot_phases` shows 871 s of
-    # silence where the dominant phase of the boot actually was.
+    # silence where the dominant phase of the boot actually was. With th#2123's
+    # hub tier the same span now also covers the hub round trip, which is the
+    # right place for it: the stage answers "what did stating a key cost this
+    # boot", and 10 s of hub is one of the answers.
     _record_keyset_stage(outcome, family=family, function=fn)
     if isinstance(outcome, BootAdoptOutcome):
         return (report(outcome),)

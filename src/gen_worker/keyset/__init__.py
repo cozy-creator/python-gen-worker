@@ -10,6 +10,7 @@ entry points, and it imports neither ``boot_key`` nor ``boot_trace_child``.
 Read in this order: :mod:`identifiers` (the grammar), :mod:`document` (the
 schema), :mod:`closure` (the address and why it is the whole safety story),
 :mod:`fold` (graph axis x runtime axes), :mod:`store` (where documents live),
+:mod:`hub` (the platform's own store, pgw#1353 option (b) / th#2123),
 :mod:`boot` (serve-side consumption), :mod:`emit` (mint-side production).
 
 ----------------------------------------------------------------------------
@@ -40,6 +41,7 @@ from .document import (
     KeySetDocument, ShippedClass, ShippedClosure, decode, empty, encode,
     parse_closure)
 from .fold import DerivedKeySet, KeySource, MemoVerdict, fold_entry_keys
+from .hub import HubTier, fetch_closure, publish_closure, single_closure_document
 from .identifiers import (
     ClassHash, ClosureDigest, CompiledGraphKey, FamilyName, GraphClassName,
     IngressDigest, KeySetError, parse_class_hash, parse_closure_digest,
@@ -57,6 +59,7 @@ __all__ = [
     "FamilyName",
     "GraphClassName",
     "GraphClassRow",
+    "HubTier",
     "IngressDigest",
     "KEYSET_FILENAME",
     "KEYSET_SCHEMA",
@@ -72,6 +75,7 @@ __all__ = [
     "decode",
     "empty",
     "encode",
+    "fetch_closure",
     "fold_entry_keys",
     "key_set_from_data",
     "parse_class_hash",
@@ -81,5 +85,7 @@ __all__ = [
     "parse_family_name",
     "parse_graph_class_name",
     "parse_ingress_digest",
+    "publish_closure",
+    "single_closure_document",
     "tcg_version",
 ]
