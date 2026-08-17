@@ -147,6 +147,11 @@ MODEL_FREE_MODULES: Tuple[str, ...] = (
     # K9's packed shape axis, shared by the families whose graph classes are a
     # SET of (width, height) pairs rather than a product of two axes.
     "gen_worker.model.catalog._packed_shape",
+    "gen_worker.model.catalog._generated.ltx23",
+    "gen_worker.model.catalog._generated.minimax_h3",
+    "gen_worker.model.catalog._generated.wan22_i2v_a14b",
+    "gen_worker.model.catalog._generated.wan22_t2v_a14b",
+    "gen_worker.model.catalog._generated.wan22_ti2v_5b",
     # pgw#1346 B3b's two EAGER models. Both halves are model-free here, not
     # only the serving one: neither declaration builds a module, because
     # neither model's code (DiffSynth-Studio's) is reachable from this SDK at
@@ -162,6 +167,12 @@ MODEL_FREE_MODULES: Tuple[str, ...] = (
     "gen_worker.model.catalog.hidream_o1",
     "gen_worker.model.catalog.hidream_o1_serve",
     "gen_worker.model.catalog.qwen_image_serve",
+    "gen_worker.model.catalog.ltx23_serve",
+    # pgw#1346 B4's EAGER model, held by the real walk for the same reason as
+    # B3b's two: MiniMax-H3's architecture is vendored in the endpoint at a
+    # pinned diffusers SHA and is not reachable from this SDK, so the
+    # declaration builds nothing and needs no guarded-import hatch.
+    "gen_worker.model.catalog.minimax_h3",
     "gen_worker.model.catalog.sd15_serve",
     "gen_worker.model.catalog.sdxl_serve",
     "gen_worker.model.catalog.z_image_serve",
@@ -188,6 +199,7 @@ MODEL_FREE_MODULES: Tuple[str, ...] = (
     "gen_worker.model.catalog._generated.qwen36_35b_a3b",
     "gen_worker.model.catalog._generated.stable_audio_open",
     "gen_worker.model.catalog._generated.trellis_3d",
+    "gen_worker.model.catalog.wan22_serve",
 )
 
 
@@ -306,12 +318,18 @@ OPTIONAL_SERVE_IMPORTS: Tuple[str, ...] = (
     # (pgw#1346 B3b).
     "gen_worker.model.catalog.flux2_klein_9b",
     "gen_worker.model.catalog.qwen_image",
+    "gen_worker.model.catalog.ltx23",
     # ONE declaration module for TWO bindings: `sd15.py` declares both `SD15`
     # and `SD2` (pgw#1346 B2 — same runner set, different graphs), so both
     # generated modules guard-import the same name.
     "gen_worker.model.catalog.sd15",
     "gen_worker.model.catalog.sdxl",
     "gen_worker.model.catalog.z_image",
+    # ONE declaration module for THREE bindings: `wan22.py` declares
+    # WAN22_T2V_A14B, WAN22_I2V_A14B and WAN22_TI2V_5B (pgw#1346 B4 — three
+    # architectures, one endpoint repo), so all three generated modules
+    # guard-import the same name.
+    "gen_worker.model.catalog.wan22",
 )
 
 #: The mint lane. A serve-role module that reaches ANY of these is a pod that
