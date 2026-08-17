@@ -18,49 +18,38 @@ from typing import Any, Iterable, Mapping
 from .. import activity as _activity
 from ..hubio.client import CommitFile, CommitResult, HubClient, files_from_tree
 from ..hubio.publish_state import JOURNAL_NAME
-from ..models.ladder import (
-    CLASS_BASE,
-    Placement,
-    classify_flavor_token,
-    default_placement,
-    placement_to_metadata,
-)
+from ..models.ladder import CLASS_BASE, classify_flavor_token
 from .dtype_pins import verify_produced_tree
 from .produced import ProducedFlavor
 from .writer import assert_one_file_per_component
 from ..models.file_layout import validate_file_layout
 
-_PLACEMENT_ATTR_KEYS = ("placement_sm_allowed", "placement_sm_min", "placement_engines")
+# pgw#1300 deleted the ``placement_*`` OVERRIDE SURFACE, not just its defaults:
+# the block no longer carries an SM allow-list, an SM floor or an engine list,
+# so there is nothing left to override. Producers still set these — e.g.
+# `training-endpoints/conversion/src/conversion/quant/modelopt.py:1263` writes
+# `placement_sm_allowed` — and an attribute pgw does not read must not land in
+# `checkpoints.metadata` as prose. They are dropped here until those producers
+# stop writing them; then this tuple goes too.
+_DEAD_PLACEMENT_ATTRS = ("placement_sm_allowed", "placement_sm_min", "placement_engines")
 
 
-def _csv_ints(raw: str) -> tuple[int, ...]:
-    return tuple(int(v) for v in (s.strip() for s in raw.split(",")) if v)
+def _precision_class_block(attrs: Mapping[str, str], label: str) -> dict[str, Any] | None:
+    """The ONE surviving key of ``checkpoints.metadata["placement"]``.
 
-
-def _csv_strs(raw: str) -> tuple[str, ...]:
-    return tuple(v for v in (s.strip() for s in raw.split(",")) if v)
-
-
-def _placement_block(attrs: Mapping[str, str], label: str) -> dict[str, Any] | None:
-    """The placement stamp — arch requirements the SKU-aware precision
-    ladder reads back at resolution. Derived from the flavor
-    token's class defaults; producers may override via explicit
-    ``precision_class`` / ``placement_*`` attrs. Base rows stay unstamped
-    (bare = runs wherever it fits, by definition)."""
-    explicit = any(attrs.get(k) for k in _PLACEMENT_ATTR_KEYS)
+    pgw#1300 / th#2055: card admission is gone — pod purchase depends only on
+    the endpoint owner's (GPU, lane) ladder — but `precision_class` survives,
+    because tensorhub's `precision.StoredPrecisionOf` reads it as its strongest
+    evidence for a stored class where no tensor-layout contract is proven.
+    Taken from the producer's explicit ``precision_class`` attr, else derived
+    from the flavor token. Base rows stay unstamped: the hub's own fallback for
+    an unstamped row is `ClassBase`, so a block would restate it.
+    """
     cls = str(attrs.get("precision_class", "") or "").strip().lower()
     cls = cls or classify_flavor_token(label)
-    if not cls or (cls == CLASS_BASE and not explicit):
+    if not cls or cls == CLASS_BASE:
         return None
-    p = default_placement(cls) or Placement(cls)
-    if explicit:
-        p = Placement(
-            cls,
-            sm_allowed=_csv_ints(attrs.get("placement_sm_allowed", "")) or p.sm_allowed,
-            sm_min=int(attrs.get("placement_sm_min", "") or 0) or p.sm_min,
-            engines=_csv_strs(attrs.get("placement_engines", "")) or p.engines,
-        )
-    return placement_to_metadata(p)
+    return {"precision_class": cls}
 
 
 def _flavor_files(flavor: ProducedFlavor) -> list[CommitFile]:
@@ -263,7 +252,7 @@ def publish_flavors(
         # precision is published either way.
         produced_dtypes = verify_produced_tree(Path(flavor.path))
         attrs = {str(k): str(v) for k, v in (flavor.attributes or {}).items()}
-        # A PRODUCER-LOCAL label. It classifies the placement stamp and names
+        # A PRODUCER-LOCAL label. It classifies the precision class and names
         # the activity leg; it is NOT sent to the hub and does not name a
         # catalog row — `dtype` + `artifact_contract` state what the bytes are.
         label = str(flavor.flavor or attrs.get("dtype") or "").strip()
@@ -276,9 +265,9 @@ def publish_flavors(
             for k in ("quantization_method", "quantization_library")
             if attrs.get(k)
         }
-        placement = _placement_block(attrs, label)
+        placement = _precision_class_block(attrs, label)
         meta = {**(dict(metadata) if metadata else {}), **attrs}
-        for k in _PLACEMENT_ATTR_KEYS:
+        for k in _DEAD_PLACEMENT_ATTRS:
             meta.pop(k, None)
         # It rides its own typed field (and is PROVEN there); a metadata copy
         # would be an unproven second statement of the same thing.

@@ -1,72 +1,40 @@
-"""Precision-ladder spec — precision classes + placement requirements.
+"""Precision classes — the producer's classification of a flavor token.
 
 A quant token's *precision class* names its quantization lane (``fp8``,
-``svdq-int4``, ...). A :class:`Placement` states which silicon can run it:
-a discrete SM allow-list (fail-closed — kernel wheels are per-arch), an
-open-ended SM floor, and the importable engine libraries the lane needs.
+``svdq-int4``, ...). Produced flavors carry it in
+``checkpoints.metadata["placement"]["precision_class"]`` (written at publish by
+:func:`gen_worker.convert.publish.publish_flavors`), which is the hub's
+strongest evidence for a stored class where no tensor-layout contract is proven
+(tensorhub ``precision.StoredPrecisionOf``). The ladder WALK, the family-root
+table and the family lane policy live hub-side and reach the worker in the
+resolved ref/HelloAck; this module is the PRODUCER half only — classification.
 
-Produced flavors carry their placement in ``checkpoints.metadata["placement"]``
-(stamped at publish by :func:`gen_worker.convert.publish.publish_flavors`).
-Unstamped/mirrored rows fall back to the token-derived defaults here — the
-same defaults the stamping writes, so both paths agree. The ladder WALK
-(rung ordering per arch class), the family-root table and the family lane
-policy live hub-side (tensorhub's internal/orchestrator/precision resolver
-and internal/modelfamily) and reach the worker in the resolved ref/HelloAck;
-this module is the PRODUCER half only — classification + placement stamp.
-There is deliberately no local walk and no local AUTO fp8 fold: locally, fit
-is the loading layer's job (runtime fp8 rung + the offload ladder), and
-selection within a tag group is §1.33 contract compatibility.
-
-pgw#1286: the vendored copies of hub policy that fed the deleted local fold
-(`FP8_COMPUTE_MIN_SM`, `_FAMILY_ROOT_OVERRIDES`, `CONV_UNET_W8A8_EXCLUDED_ROOTS`)
-are gone — unread since pgw#1148/#1180, and already drifted from their hub
-twins. The one fact both repos still restate is the placement stamp below,
-fenced by ``tests/convert/test_placement_stamp_pgw1286.py`` against
-tensorhub's ``precision.defaultPlacement`` mirror.
+pgw#1300 / th#2055: the PLACEMENT half of this module is deleted. ``Placement``,
+``default_placement`` and ``placement_to_metadata`` stamped an SM allow-list, an
+SM floor and an engine list into that same block, and the hub read them to admit
+or refuse a card. **Pod purchase now depends only on the endpoint owner's
+(GPU, lane) ladder**, so the hub deleted every reader (`PlacementFromMetadata`,
+`defaultPlacement`, `admitted()`, `AdmitLiteral`'s sm/engine arms) and
+`StoredPrecisionOf` reads `precision_class` and nothing else. The stamp was not
+merely unread — it was WRONG and vetoing: `sm_allowed=(120, 121)` plus
+`engines=("nunchaku",)` for svdq-fp4 described a kernel window and a wheel the
+native engine has not needed since pgw#685, so a B200 (sm_100) could not bind a
+flavor it serves. Correcting it was rejected: a correct allow-list still vetoes
+an owner's own rung. There is no local walk and no local AUTO fp8 fold; locally,
+fit is the loading layer's job and selection within a tag group is §1.33
+contract compatibility.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Optional
-
-from .svdq import SVDQ_FP4_SMS, SVDQ_INT4_SMS
-
 CLASS_BASE = "base"  # bare bf16/fp16/fp32 row — runs anywhere a card fits it
 CLASS_FP8 = "fp8"  # fp8-E4M3 storage; universal (bf16-upcast path needs no fp8 silicon)
-CLASS_SVDQ_FP4 = "svdq-fp4"  # nunchaku SVDQuant fp4 — consumer Blackwell only
-CLASS_SVDQ_INT4 = "svdq-int4"  # nunchaku SVDQuant int4 — sm_75-89
-CLASS_NVFP4 = "nvfp4"  # plain nvfp4 artifact — Blackwell datacenter, no serving lane (not a diffusers rung)
-# Calibrated nvfp4 with two-level scales: torch fp4 blockwise
-# scaled_mm serve lane. Blackwell-only (sm_100+ incl. sm_120 consumer) —
-# no fp4 silicon below, and the 4x dequant blow-up erases the fit story.
-CLASS_NVFP4_W4A4 = "nvfp4-w4a4"
+CLASS_SVDQ_FP4 = "svdq-fp4"  # SVDQuant fp4 — served natively (svdq_native)
+CLASS_SVDQ_INT4 = "svdq-int4"  # SVDQuant int4 — no native engine; a typed refusal
+CLASS_NVFP4 = "nvfp4"  # plain nvfp4 artifact — no serving lane (not a diffusers rung)
+CLASS_NVFP4_W4A4 = "nvfp4-w4a4"  # calibrated nvfp4, two-level scales — fp4 scaled_mm lane
 
 _BASE_TOKENS = ("", "bf16", "fp16", "fp32")
-
-
-@dataclass(frozen=True)
-class Placement:
-    """Arch requirements for one flavor. Empty fields = unconstrained.
-
-    ``sm_min = 0`` is not an absence collapse: "unconstrained" is this class's
-    STATED meaning for every empty field (`sm_allowed=()` says the same thing),
-    the placement is the flavor's own declaration rather than an operator knob,
-    and a missing floor cannot admit anything ``sm_allowed`` and the engine
-    list do not already admit.
-    """
-
-    precision_class: str
-    sm_allowed: tuple[int, ...] = ()  # discrete allow-list (gpu_sm as int, e.g. 89, 120)
-    sm_min: int = 0  # open-ended floor; 0 = none
-    engines: tuple[str, ...] = ()  # importable libraries required to load
-
-    def admits_sm(self, gpu_sm: int) -> bool:
-        if self.sm_allowed and gpu_sm not in self.sm_allowed:
-            return False
-        if self.sm_min and gpu_sm < self.sm_min:
-            return False
-        return True
 
 
 def classify_flavor_token(flavor: str) -> str:
@@ -88,40 +56,8 @@ def classify_flavor_token(flavor: str) -> str:
     return ""
 
 
-def default_placement(precision_class: str) -> Optional[Placement]:
-    """Token-derived placement defaults — the fallback for unstamped rows
-    and the source the publish-time stamp writes."""
-    if precision_class == CLASS_BASE:
-        return Placement(CLASS_BASE)
-    if precision_class == CLASS_FP8:
-        return Placement(CLASS_FP8)  # fp8-storage serves on any silicon
-    if precision_class == CLASS_SVDQ_FP4:
-        return Placement(CLASS_SVDQ_FP4, sm_allowed=tuple(SVDQ_FP4_SMS), engines=("nunchaku",))
-    if precision_class == CLASS_SVDQ_INT4:
-        return Placement(CLASS_SVDQ_INT4, sm_allowed=tuple(SVDQ_INT4_SMS), engines=("nunchaku",))
-    if precision_class == CLASS_NVFP4_W4A4:
-        return Placement(CLASS_NVFP4_W4A4, sm_min=100)
-    if precision_class == CLASS_NVFP4:
-        return Placement(CLASS_NVFP4, sm_min=100)
-    return None
-
-
-
-def placement_to_metadata(p: Placement) -> dict[str, Any]:
-    """The ``checkpoints.metadata["placement"]`` wire/storage shape."""
-    out: dict[str, Any] = {"precision_class": p.precision_class}
-    if p.sm_allowed:
-        out["sm_allowed"] = list(p.sm_allowed)
-    if p.sm_min:
-        out["sm_min"] = p.sm_min
-    if p.engines:
-        out["engines"] = list(p.engines)
-    return out
-
-
-# The flavor-token parses (classify_flavor_token, placement_for_flavor) are
-# package-internal choke points, not public API. They die when typed
-# descriptors are backfilled; nothing new may grow on them.
+# `classify_flavor_token` is a package-internal choke point, not public API. It
+# dies when typed descriptors are backfilled; nothing new may grow on it.
 __all__ = [
     "CLASS_BASE",
     "CLASS_FP8",
@@ -129,8 +65,5 @@ __all__ = [
     "CLASS_NVFP4_W4A4",
     "CLASS_SVDQ_FP4",
     "CLASS_SVDQ_INT4",
-    "Placement",
     "classify_flavor_token",
-    "default_placement",
-    "placement_to_metadata",
 ]
