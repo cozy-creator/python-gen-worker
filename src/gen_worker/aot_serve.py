@@ -26,7 +26,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
-    Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple,
+    Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple,
 )
 
 from gen_worker._vendor.torchcg import (
@@ -40,6 +40,8 @@ from gen_worker._vendor.torchcg import (
     is_compiled_graph_key,
 )
 
+from gen_worker._vendor.torchcg import selection as tcg_selection
+
 from . import activity as activity_mod
 from . import aot_constants
 from . import aot_identity
@@ -47,6 +49,9 @@ from . import local_cell_store
 from .cell_adopt import AdoptOutcome
 from . import serve_posture
 from . import shape_growth
+from .serve import role as serve_role
+from .serve import refusal as serve_refusal
+from .serve import selection as serve_selection
 from .compile_cache import (
     AdoptError,
     CompiledExecutionLaneUnavailableError,
@@ -75,8 +80,10 @@ RECAST_EVENT = "aot_input_recast"
 #: (``torch._inductor.codegen.aoti_runtime``'s ALIGNMENT). An input whose
 #: ``data_ptr()`` is not a multiple of this — diffusers hands the denoiser
 #: ``timesteps[i]``, a scalar VIEW at an odd element offset — makes the
-#: runner clone it per call. Not a knob: it is the compiler's constant.
-AOTI_ALIGNMENT = 16
+#: runner clone it per call. Not a knob: it is the compiler's constant — and
+#: since tcg#37 it is the CONTRACT's constant, stated once in
+#: ``ingress_selection_v1`` and read here rather than re-typed.
+AOTI_ALIGNMENT = tcg_selection.AOTI_ALIGNMENT
 #: THE compiled-graph artifact metadata/package version. v1 = ONE graph class
 #: per artifact: TCG metadata carries one ``graph_class`` block, never an
 #: ``entries`` map.
@@ -321,8 +328,12 @@ def excluded_inputs_present(
 #: integer. bfloat16 and float16 are deliberately NOT targets: bf16 has 8
 #: mantissa bits and would round timestep 999 to 1000, which is a numeric
 #: change, not a normalization.
-RECAST_TARGETS = ("float32", "float64")
-_INTEGER_DTYPES = ("int8", "int16", "int32", "int64", "uint8")
+#: tcg#37 owns both halves of this domain (``ingress_selection_v1``'s
+#: ``normalizations.recast``), and ``FeedNormalization.__post_init__`` refuses
+#: a target outside it — so a copy here could only ever drift away from the
+#: rule that is actually enforced.
+RECAST_TARGETS = tcg_selection.RECAST_TARGETS
+_INTEGER_DTYPES = tcg_selection.RECAST_SOURCES
 
 
 def recast_gap(spec: CallInput, value: Any) -> str:
@@ -483,19 +494,14 @@ def aligned_feeds(
 #: LAST, so an entry that matches every declared dimension sorts to the front
 #: of a refusal listing whatever its remaining complaint is. The rungs are
 #: ordinal only — nothing reads their absolute values.
+#:
+#: tcg#37 PUBLISHED this table (``ingress_selection_v1``, total over a closed
+#: ``MissReason`` enum with no default member, checked at import). It is read
+#: from there, spelled with ``str`` keys because this module's own miss reasons
+#: are strings: two copies of a ranking rule is how a second serve host and
+#: this one silently disagree about which class was closest.
 MISS_RUNGS: Mapping[str, int] = {
-    # The call fits this graph's shape and disagrees about one scalar fact.
-    "dtype_mismatch": 1,
-    "input_not_tensor": 2,
-    # A branch/adapter routing disagreement: same shape family, wrong class.
-    "input_excluded": 3,
-    # Shape disagreements — the call does not fit this graph at all.
-    "static_dim_mismatch": 4,
-    "range_violation": 4,
-    "symbol_inconsistent": 4,
-    "rank_mismatch": 5,
-    # The call does not even carry the input; nothing else was measurable.
-    "input_missing": 6,
+    reason.value: rung for reason, rung in tcg_selection.MISS_RUNGS.items()
 }
 _MISS_RUNG_DEFAULT = 9
 #: How many non-closest entries a refusal names individually before it
@@ -524,6 +530,13 @@ class IngressMiss:
 
 
 def _rung(reason: str) -> int:
+    """The contract's rung for a reason, or the floor for a worker-only one.
+
+    ``realign_unavailable`` and ``feed_arity_mismatch`` are HOST refusals with
+    no contract row (tcg#37 models the decision, not the buffers), so the
+    default survives — but it now applies only to reasons the contract
+    deliberately does not carry, instead of to anything unrecognized.
+    """
     return MISS_RUNGS.get(reason, _MISS_RUNG_DEFAULT)
 
 
@@ -775,9 +788,26 @@ class TCGEntryRunner:
 EntryRunner = TCGEntryRunner
 
 
+class _MissLike(Protocol):
+    """What the refusal SENTENCE needs off a miss, whoever produced it.
+
+    ``ingress_report`` yields this module's :class:`IngressMiss`; the tcg#37
+    selection yields ``torchcg.selection.IngressMiss``, whose ``reason`` is a
+    ``StrEnum`` over the identical tokens. Naming the two fields the wording
+    reads is what lets one renderer serve both without either type importing
+    the other.
+    """
+
+    @property
+    def reason(self) -> str: ...
+
+    @property
+    def detail(self) -> str: ...
+
+
 def no_entry_detail(
     tried: int,
-    missed: Sequence[Tuple[Tuple[int, ...], str, Tuple[IngressMiss, ...]]],
+    missed: Sequence[Tuple[Tuple[int, ...], str, Tuple[_MissLike, ...]]],
 ) -> str:
     """The ``no_entry_admits`` sentence, CLOSEST ENTRY FIRST (pgw#1074).
 
@@ -932,50 +962,84 @@ class EntryDispatch:
             names.extend(runner.declared_fqns())
         return tuple(sorted(set(names)))
 
+    def choose(
+        self, args: Sequence[Any], kwargs: Mapping[str, Any],
+    ) -> "serve_selection.EntryChoice[EntryRunner]":
+        """Rank the ARMED entries against this call through tcg#37.
+
+        The verdict is a VALUE, not an exception: the eager-capable host
+        renders it as :class:`IngressContractError` and falls back, and the
+        adopt-only role renders the same walk as a typed refusal
+        (:mod:`gen_worker.serve.refusal`) because it has no eager tier to fall
+        back to. One walk, two languages.
+        """
+        return serve_selection.choose(
+            [serve_selection.Candidate(name=name, ingress=runner.contract,
+                                       runner=runner)
+             for name, runner in self.runners],
+            args, dict(kwargs))
+
+    def refusal(
+        self, choice: "serve_selection.EntryChoice[EntryRunner]",
+        *, family: str = "", function: str = "", compiled_graph_key: str = "",
+    ) -> serve_refusal.AdoptOnlyRefusal:
+        """The adopt-only refusal a non-admitting choice means.
+
+        ``pending`` is the worker-side fact tcg#37 deliberately does not model
+        (*"selection never asks why a class is absent, unarmed or pending a
+        compile"*), and it is what separates a terminal defect from a placement
+        one: on an adopt-only pod nothing is going to compile the missing
+        class, so an unarmed declared class is somebody else's work, not a
+        refusal of the request's shape.
+        """
+        return serve_refusal.from_selection(
+            choice.outcome, choice.selection.ranked, choice.selection.ambiguous,
+            function=function, family=family,
+            compiled_graph_key=compiled_graph_key, unarmed=self.pending)
+
     def select(
         self, args: Sequence[Any], kwargs: Mapping[str, Any],
     ) -> Tuple[str, EntryRunner]:
-        admitted: List[Tuple[str, EntryRunner]] = []
-        missed: List[Tuple[str, EntryRunner]] = []
-        for name, runner in self.runners:
-            misses, _symbols = ingress_report(
-                runner.contract, args, kwargs, first_only=True)
-            if misses:
-                missed.append((name, runner))
-                continue
-            admitted.append((name, runner))
-        if not admitted:
-            # Only now is the exhaustive walk worth its cost: the call is
-            # already headed for the eager fallback, and the sentence it
-            # leaves behind is the whole diagnosis anyone will ever get.
-            ranked = [
-                (miss_distance(rep), name, rep) for name, rep in (
-                    (name, ingress_report(runner.contract, args, kwargs)[0])
-                    for name, runner in missed)]
-            pending = self.pending
-            if pending:
-                # pgw#1176: under accretion the commonest reason nothing
-                # admits a call is that its class has not been compiled YET.
-                # That is not a shape gap and must not be reported as one —
-                # the growth path would submit a class the declaration
-                # already contains.
-                raise IngressContractError(
-                    "entry_pending_compile",
-                    f"no ARMED entry admits this call ({len(self.runners)} "
-                    f"armed, {len(pending)} declared classes still pending "
-                    f"compile) — served EAGER while the background compile "
-                    f"reaches them: {list(pending)[:4]!r}. "
-                    + no_entry_detail(len(self.runners), ranked))
-            raise IngressContractError(
-                "no_entry_admits", no_entry_detail(len(self.runners), ranked))
-        if len(admitted) > 1:
-            names = sorted(name for name, _ in admitted)
+        """The eager-capable rendering of :meth:`choose`.
+
+        Raises exactly the three reasons it always did, with exactly the same
+        wording — the sentence is worker policy and tcg#37 says so outright
+        (*"a second host renders its own refusals in its own language"*). What
+        changed underneath is that the ranking, the admission rule and the rung
+        table now come from ``ingress_selection_v1`` instead of from this file.
+        """
+        choice = self.choose(args, kwargs)
+        selection = choice.selection
+        if choice.admitted and choice.runner is not None:
+            return selection.selected, choice.runner
+        if selection.outcome is tcg_selection.SelectionOutcome.CLASS_AMBIGUOUS:
+            names = sorted(selection.ambiguous)
             raise IngressContractError(
                 "entry_ambiguous",
-                f"{len(admitted)} entries admit this call ({names[:6]!r}) — "
+                f"{len(names)} entries admit this call ({names[:6]!r}) — "
                 f"the declaration does not discriminate these graph classes "
                 f"by ingress contract")
-        return admitted[0]
+        # A total miss. The exhaustive ranking is already in the selection —
+        # tcg#37 computes it ONLY on the refusal path, so the hot path still
+        # pays for one early-exit walk and not two.
+        ranked = [
+            (tuple(report.distance), report.name, tuple(report.misses))
+            for report in selection.ranked]
+        pending = self.pending
+        if pending:
+            # pgw#1176: under accretion the commonest reason nothing admits a
+            # call is that its class has not been compiled YET. That is not a
+            # shape gap and must not be reported as one — the growth path
+            # would submit a class the declaration already contains.
+            raise IngressContractError(
+                "entry_pending_compile",
+                f"no ARMED entry admits this call ({len(self.runners)} "
+                f"armed, {len(pending)} declared classes still pending "
+                f"compile) — served EAGER while the background compile "
+                f"reaches them: {list(pending)[:4]!r}. "
+                + no_entry_detail(len(self.runners), ranked))
+        raise IngressContractError(
+            "no_entry_admits", no_entry_detail(len(self.runners), ranked))
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         name, runner = self.select(args, kwargs)
@@ -1287,6 +1351,21 @@ def wrap_module(
                 phase=exc.reason,
             )
             report_ingress_refusal(state, exc.reason, str(exc))
+            if serve_role.adopt_only():
+                # pgw#1328: this role has no eager answer. Every line above
+                # still runs — the refusal is counted, evented and attributed
+                # exactly as it is on an eager-capable pod, because an
+                # adopt-only pod's telemetry must be READABLE beside the
+                # fleet's, not a separate dialect — and then it refuses
+                # instead of falling through to `original`.
+                raise serve_refusal.report(serve_refusal.AdoptOnlyRefusal(
+                    kind=serve_refusal.MissKind.CLASS_UNARMED
+                    if exc.reason == "entry_pending_compile"
+                    else serve_refusal.MissKind.NO_CLASS_ADMITS,
+                    function=label, family=str(meta.get("family") or ""),
+                    compiled_graph_key=str(
+                        meta.get("compiled_graph_key") or ""),
+                    detail=str(exc)[:400])).error() from exc
             if exc.reason == "entry_pending_compile":
                 # pgw#1176: the class IS declared; the background compile has
                 # not reached it. Submitting a shape gap here would ask the
@@ -1688,10 +1767,22 @@ class StoreArmedGraph:
         selection, the contract refusals and the per-entry counters are the
         same ones a wrapped module gets — nothing about serving is special
         because the constants came from the store.
+
+        **This is the arm with NO eager tier** (pgw#1329: no ``nn.Module``, no
+        diffusers, anywhere on the path), so a miss here cannot degrade to
+        "serve this request eager" the way a wrapped module's can. It produces
+        pgw#1328's typed refusal instead, carrying tcg#37's ranking — which is
+        the whole reason the selection returns a value before it becomes an
+        exception.
         """
 
-        _name, runner = self.dispatch.select(args, kwargs)
-        return runner(*args, **kwargs)
+        choice = self.dispatch.choose(args, dict(kwargs))
+        if choice.admitted and choice.runner is not None:
+            self.dispatch.last_selected = choice.name
+            return choice.runner(*args, **kwargs)
+        raise serve_refusal.report(self.dispatch.refusal(
+            choice, family=self.family, function=self.target,
+            compiled_graph_key=self.key)).error()
 
     def entry_states(self) -> Dict[str, Dict[str, Any]]:
         """What this pod actually serves, in the SAME vocabulary as a

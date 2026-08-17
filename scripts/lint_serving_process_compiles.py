@@ -125,6 +125,13 @@ SUPERVISED: Dict[str, str] = {
         "the serving parent's own mint driver. Supervision only: enumerate, "
         "spawn, collect, adopt, publish."
     ),
+    "mint_adapter": (
+        "pgw#1328's eager-capable side of the serve/mint seam. It is the one "
+        "module whose job is to NAME the mint lane, so it is the obvious place "
+        "for an export to grow — and it must never hold one: every method is "
+        "supervision or declaration reading, delegated to `mint_supervisor` "
+        "and `aot_mint`, which carry their own rows here."
+    ),
 }
 
 

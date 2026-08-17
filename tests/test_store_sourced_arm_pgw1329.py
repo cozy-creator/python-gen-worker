@@ -31,6 +31,7 @@ torch = pytest.importorskip("torch")
 from safetensors.torch import save_file
 
 from gen_worker import aot_constants, aot_serve
+from gen_worker.serve import refusal as serve_refusal
 from gen_worker.compile_cache import AdoptError
 from gen_worker._vendor.torchcg import CallIngress, CallInput
 
@@ -530,9 +531,18 @@ def test_the_store_arm_keeps_the_same_ingress_contract_as_the_module_arm(
     armed_store: Tuple[Dict[str, Any], aot_constants.ConstantStore],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A call outside the declared envelope is refused, exactly as it is on a
-    wrapped module: nothing about ingress is different because the constants
-    came from the store."""
+    """A call outside the declared envelope is refused, and the refusal NAMES
+    the evidence.
+
+    Ingress itself is unchanged by where the constants came from — same
+    contract, same admission rule. What is different is the ANSWER, and
+    pgw#1328 is where that became explicit: this arm has no ``nn.Module``
+    anywhere on the path, so "serve this request eager" was never available to
+    it, and a bare ``IngressContractError`` (the exception whose one documented
+    consequence is the eager fallback) was the wrong shape for it. It now
+    raises the typed refusal carrying tcg#37's ranking: which key, which
+    selection outcome, which class was closest and why.
+    """
 
     weights, store = armed_store
     _patch_resolve(monkeypatch, weights)
@@ -540,8 +550,15 @@ def test_the_store_arm_keeps_the_same_ingress_contract_as_the_module_arm(
         SimpleNamespace(family=FAMILY), KEY, store, device="cpu"
     )
     assert isinstance(armed.runner.contract, CallIngress)
-    with pytest.raises(aot_serve.IngressContractError):
+    with pytest.raises(serve_refusal.AdoptOnlyRefused) as caught:
         armed(torch.ones(4, 8))
+    refused = caught.value.refusal
+    assert refused.kind is serve_refusal.MissKind.NO_CLASS_ADMITS
+    assert refused.compiled_graph_key == KEY
+    assert refused.family == FAMILY
+    assert refused.candidates, "the refusal names no candidate at all"
+    assert refused.candidates[0].misses, "the closest candidate states no miss"
+    assert refused.reported, "the refusal never reached the wire"
 
 
 def test_the_store_sourced_path_never_touches_diffusers_or_nn_module(

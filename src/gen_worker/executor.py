@@ -186,7 +186,17 @@ from . import fleet_cells
 from . import aot_serve, numerics_ladder, shape_growth
 from . import fleet_cells as fleet_cells_mod
 from . import hot_swap
-from . import mint_supervisor
+# pgw#1328: the mint lane is reached through `serve.mint_seam` and named
+# nowhere in this module. The eager-capable implementation is REGISTERED by
+# `gen_worker.mint_adapter`, which the PROCESS ENTRY imports (`entrypoint`,
+# `cli`, `local_serve`) — the entry is what knows which process this is, and
+# an adopt-only entry imports it not at all. Keeping the edge out of here is
+# what lets an adopt-only interpreter import the serving host under
+# `serve.guard` instead of dying at this line.
+from .serve import boot_miss as serve_boot_miss
+from .serve import mint_seam
+from .serve import refusal as serve_refusal
+from .serve import role as serve_role
 from .hostfacts import cuda_ready
 
 # pgw#1294: the three producer contexts MERGED into JobContext, so every
@@ -490,6 +500,18 @@ def _map_exception(exc: BaseException) -> Tuple["pb.JobStatus", str]:
         return pb.JOB_STATUS_INVALID, _sanitize(str(exc) or "invalid input")
     if isinstance(exc, RetryableError):
         return pb.JOB_STATUS_RETRYABLE, _sanitize(str(exc) or "retryable error")
+    if isinstance(exc, serve_refusal.AdoptOnlyRefused):
+        # pgw#1328: an ADOPT-ONLY pod's miss, and its ROUTE/REFUSE disposition
+        # is the whole point of the value — it was decided once, in
+        # `serve.refusal.DISPOSITIONS`, by the site that knew whether another
+        # pod could serve this. RETRYABLE is the hub's cue to place the work
+        # elsewhere; FATAL says re-placing it buys a second identical failure.
+        # The phase token LEADS the detail so the refusal groups by a stable
+        # word rather than by prose, the way HubPublishError's code does.
+        refused = exc.refusal
+        return (
+            pb.JOB_STATUS_RETRYABLE if refused.routable else pb.JOB_STATUS_FATAL,
+            _sanitize(f"{refused.phase}: {refused.wire_detail()}")[:512])
     if isinstance(exc, ArtifactTransferError) and getattr(exc, "retryable", False):
         return pb.JOB_STATUS_RETRYABLE, _sanitize(str(exc) or "artifact transfer failed")
     if isinstance(exc, HubPublishError):
@@ -5558,6 +5580,18 @@ class Executor:
                             o.adoption for o in resolved[1:]
                             if o.adoption is not None)))
                 compile_selection = arm.selection
+            elif serve_role.adopt_only():
+                # pgw#1328: §4.28's answer to a miss — serve eager, mint in
+                # the background — is not available to this role, so the miss
+                # becomes the pod's ANSWER. `serve.boot_miss` maps every
+                # `boot_adopt` reason to refuse-or-route (total, no default),
+                # `report` puts it on the wire, and `_map_exception` turns the
+                # disposition into the job status the hub places on.
+                raise serve_refusal.report(
+                    serve_boot_miss.refusal_for(adopt)
+                    or serve_refusal.AdoptOnlyRefusal(
+                        kind=serve_refusal.MissKind.ARTIFACT_MISS,
+                        function=str(spec.name or ""))).error()
         elif arm is None and spec.compile is not None:
             # pgw#1116: a compiled family that boots WITHOUT asking is a fact
             # somebody has to be able to read. This is the only branch where
@@ -5574,6 +5608,16 @@ class Executor:
                 eager_only,
                 family=str(getattr(spec.compile, "family", "") or ""),
                 function=str(spec.name or ""))
+            if serve_role.adopt_only():
+                # The same posture, read by a role that has no eager tier to
+                # fall back into: a pod that may not arm cannot serve a
+                # compiled family at all, and another pod without that posture
+                # can — which is why ARM_FORBIDDEN routes rather than refuses.
+                raise serve_refusal.report(serve_refusal.AdoptOnlyRefusal(
+                    kind=serve_refusal.MissKind.ARM_FORBIDDEN,
+                    function=str(spec.name or ""),
+                    family=str(getattr(spec.compile, "family", "") or ""),
+                    detail=eager_only)).error()
         # Loads serialize: concurrent setups would cross-contaminate each
         # other's allocator deltas and place_pipeline's free-VRAM reads.
         async with self._intent_lock(
@@ -7875,6 +7919,16 @@ class Executor:
           lane. A delegated pending's eager tier is the untouched pipeline
           itself; the router question belongs only to an in-process capture,
           whose eager-while-compiling routing is what a router performs."""
+        if serve_role.adopt_only():
+            # pgw#1328: this role never defers a mint because it never has one
+            # to defer. A pending self-mint here means the arm path opened an
+            # obligation the seam should have refused (`NoMint.may_delegate`),
+            # so the premise of the role is already broken — say so where it
+            # happened rather than serving on and discovering it at publish.
+            if inj.pending_self_mints:
+                raise mint_seam.mint_forbidden(
+                    "an eager-first background mint", function=spec.name)
+            return False
         if not inj.pending_self_mints:
             return False
         if spec.cls is not None and callable(getattr(spec.cls, "warmup", None)):
@@ -8371,8 +8425,9 @@ class Executor:
         for pids in holders.values():
             pending = bg.pendings[pids[0]]
             pipe = bg.pipes[pids[0]]
-            result = await mint_supervisor.supervise(
-                mint_supervisor.MintTask(
+            mint = mint_seam.supervision()
+            result = await mint.supervise(
+                mint.make_task(
                     pending=pending,
                     pipe=pipe,
                     function=spec.name,
@@ -8393,7 +8448,7 @@ class Executor:
                     handler_proof=handler_proof.provenance(spec.name),
                 ),
                 act=act, abandon=bg.abandon)
-            if result.status == mint_supervisor.ABANDONED:
+            if mint.abandoned(result.status):
                 raise _MintAbandoned()
             minted = result.minted
             if not result.ok or minted is None:
@@ -8570,14 +8625,19 @@ class Executor:
         # import is local to this call so the serve-role extraction (pgw#1328)
         # cuts HERE, at one line, rather than inside the adopt path. An
         # adopt-only pod injects nothing and its key-set miss is a typed
-        # refusal. Today this executor hosts BOTH halves, so it always injects;
-        # the posture is a property of the ROLE and pgw#1328 is where it becomes
-        # one — deliberately NOT an env knob, which would be a second answer to
-        # "may this pod compile" beside the role the worker already declares on
-        # the wire (`process_role`, pgw#1309).
-        from . import boot_key
+        # refusal.
+        #
+        # pgw#1328 is where that becomes real, and it is ONE branch: the
+        # adopt-only role imports no tracer, so `serve.guard`'s blocker is
+        # never even consulted here — the promise is kept by the code and only
+        # ENFORCED by the blocker. Deliberately NOT an env knob, which would be
+        # a second answer to "may this pod compile" beside the role the worker
+        # already declares (`serve.role`, refining `process_role`, pgw#1309).
+        deriver: Optional[boot_adopt.KeyDeriver] = None
+        if not serve_role.adopt_only():
+            from . import boot_key
 
-        deriver: Optional[boot_adopt.KeyDeriver] = boot_key.derive
+            deriver = boot_key.derive
         return boot_adopt.attempt(
             function=spec.name,
             modules=_mint_modules(spec),

@@ -1,0 +1,3040 @@
+{
+  "authority": "torch-compiled-graphs ingress selection v1",
+  "contract": "ingress_selection_v1",
+  "normalizations": {
+    "realign": {
+      "alignment": 16,
+      "note": "AOTInductor's aligned-input fast path is 16 bytes and is the compiler's constant, not a knob. A misaligned feed runs correctly and copies per call, so alignment never moves admission; it only earns a staging buffer.",
+      "reasons": [
+        "non_contiguous",
+        "unaligned_16b"
+      ]
+    },
+    "recast": {
+      "note": "The only dtype normalization. Value-preserving: float32 represents every integer below 2**24 exactly, and it is the op the traced graph's own first node performs on that input. It is also the only normalization that moves ADMISSION.",
+      "rank": 0,
+      "sources": [
+        "int8",
+        "int16",
+        "int32",
+        "int64",
+        "uint8"
+      ],
+      "targets": [
+        "float32",
+        "float64"
+      ]
+    }
+  },
+  "note": "Which declared graph class serves one call, and how far the ones that do not sit from it. torchcg owns CallIngress identity; these vectors own what a serve host DOES with several of them. The reference implementation is torchcg.selection and tests/test_selection.py replays every row through it. A change to a selection implementation that is not a change to this file is a fleet that disagrees about admission, which is invisible until it serves wrong. OUT OF SCOPE by construction: eager fallback, sticky de-arm, shape-growth reporting, event emission and refusal wording are host policy; the candidate set is the host's and selection never asks why a class is absent.",
+  "rungs": {
+    "dtype_mismatch": 1,
+    "input_excluded": 3,
+    "input_missing": 6,
+    "input_not_tensor": 2,
+    "range_violation": 4,
+    "rank_mismatch": 5,
+    "static_dim_mismatch": 4,
+    "symbol_inconsistent": 4
+  },
+  "v": 1,
+  "vectors": [
+    {
+      "call": {
+        "excluded_present": [],
+        "feeds": {
+          "sample": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              4,
+              64,
+              64
+            ]
+          },
+          "text_embeds": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              77,
+              2048
+            ]
+          },
+          "timestep": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float32",
+            "shape": []
+          }
+        }
+      },
+      "candidates": [
+        {
+          "class": "denoiser.base",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        },
+        {
+          "class": "denoiser.hires",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  128,
+                  128
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        }
+      ],
+      "expect": {
+        "ambiguous": [],
+        "normalizations": [],
+        "outcome": "admitted",
+        "ranked": [],
+        "selected": "denoiser.base",
+        "symbols": {
+          "batch": 2
+        }
+      },
+      "name": "one_class_admits",
+      "note": "The base case: exactly one class admits, the symbolic batch binds, and no feed needs normalizing. Admission is the ABSENCE of a miss, so an admitted selection carries no ranking at all."
+    },
+    {
+      "call": {
+        "excluded_present": [],
+        "feeds": {
+          "sample": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              4,
+              64,
+              64
+            ]
+          },
+          "text_embeds": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              77,
+              2048
+            ]
+          },
+          "timestep": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "int64",
+            "shape": []
+          }
+        }
+      },
+      "candidates": [
+        {
+          "class": "denoiser.base",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        }
+      ],
+      "expect": {
+        "ambiguous": [],
+        "normalizations": [
+          {
+            "dtype": "float32",
+            "input": "timestep",
+            "kind": "recast",
+            "position": 1,
+            "reason": "int64_to_float32"
+          }
+        ],
+        "outcome": "admitted",
+        "ranked": [],
+        "selected": "denoiser.base",
+        "symbols": {
+          "batch": 2
+        }
+      },
+      "name": "recast_admits_an_integer_scalar",
+      "note": "An int64 rank-0 timestep against a float32-specialized scalar. The ddim/dpmpp/unipc sampler families end set_timesteps in .to(int64) while the euler families present float32, so refusing this would refuse a class that covers the call in every other respect. The recast is the ONE normalization that moves admission."
+    },
+    {
+      "call": {
+        "excluded_present": [],
+        "feeds": {
+          "sample": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              4,
+              64,
+              64
+            ]
+          },
+          "text_embeds": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              77,
+              2048
+            ]
+          },
+          "timestep": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "int32",
+            "shape": []
+          }
+        }
+      },
+      "candidates": [
+        {
+          "class": "denoiser.f64",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float64",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        }
+      ],
+      "expect": {
+        "ambiguous": [],
+        "normalizations": [
+          {
+            "dtype": "float64",
+            "input": "timestep",
+            "kind": "recast",
+            "position": 1,
+            "reason": "int32_to_float64"
+          }
+        ],
+        "outcome": "admitted",
+        "ranked": [],
+        "selected": "denoiser.f64",
+        "symbols": {
+          "batch": 2
+        }
+      },
+      "name": "recast_targets_float64_too",
+      "note": "float64 is the second permitted recast target; the reason names the exact dtype pair, never just 'recast'."
+    },
+    {
+      "call": {
+        "excluded_present": [],
+        "feeds": {
+          "sample": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              4,
+              64,
+              64
+            ]
+          },
+          "text_embeds": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              77,
+              2048
+            ]
+          },
+          "timestep": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "int64",
+            "shape": []
+          }
+        }
+      },
+      "candidates": [
+        {
+          "class": "denoiser.bf16",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        }
+      ],
+      "expect": {
+        "ambiguous": [],
+        "normalizations": [],
+        "outcome": "no_class_admits",
+        "ranked": [
+          {
+            "class": "denoiser.bf16",
+            "distance": [
+              1
+            ],
+            "misses": [
+              {
+                "input": "timestep",
+                "reason": "dtype_mismatch"
+              }
+            ],
+            "symbols": {
+              "batch": 2
+            }
+          }
+        ],
+        "selected": "",
+        "symbols": {}
+      },
+      "name": "recast_never_targets_bfloat16",
+      "note": "bf16 has 8 mantissa bits and would round timestep 999 to 1000. That is a numeric change, not a normalization, so the class refuses on dtype and the call is a total miss."
+    },
+    {
+      "call": {
+        "excluded_present": [],
+        "feeds": {
+          "sample": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              4,
+              64,
+              64
+            ]
+          },
+          "text_embeds": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              77,
+              2048
+            ]
+          },
+          "timestep": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "int64",
+            "shape": [
+              1
+            ]
+          }
+        }
+      },
+      "candidates": [
+        {
+          "class": "denoiser.base",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        }
+      ],
+      "expect": {
+        "ambiguous": [],
+        "normalizations": [],
+        "outcome": "no_class_admits",
+        "ranked": [
+          {
+            "class": "denoiser.base",
+            "distance": [
+              1,
+              5
+            ],
+            "misses": [
+              {
+                "input": "timestep",
+                "reason": "dtype_mismatch"
+              },
+              {
+                "input": "timestep",
+                "reason": "rank_mismatch"
+              }
+            ],
+            "symbols": {
+              "batch": 2
+            }
+          }
+        ],
+        "selected": "",
+        "symbols": {}
+      },
+      "name": "recast_is_rank_zero_only",
+      "note": "An integer tensor OF timesteps is not a scalar timestep. Recasting a ranked feed would be a dtype conversion of real data, so the class refuses on both dtype and rank \u2014 and two misses sort behind one."
+    },
+    {
+      "call": {
+        "excluded_present": [],
+        "feeds": {
+          "sample": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              4,
+              64,
+              64
+            ]
+          },
+          "text_embeds": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              77,
+              2048
+            ]
+          },
+          "timestep": {
+            "alignment_offset": 4,
+            "contiguous": true,
+            "dtype": "float32",
+            "shape": []
+          }
+        }
+      },
+      "candidates": [
+        {
+          "class": "denoiser.base",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        }
+      ],
+      "expect": {
+        "ambiguous": [],
+        "normalizations": [
+          {
+            "dtype": "",
+            "input": "timestep",
+            "kind": "realign",
+            "position": 1,
+            "reason": "unaligned_16b"
+          }
+        ],
+        "outcome": "admitted",
+        "ranked": [],
+        "selected": "denoiser.base",
+        "symbols": {
+          "batch": 2
+        }
+      },
+      "name": "realign_does_not_move_admission",
+      "note": "diffusers hands the denoiser timesteps[i], a scalar VIEW at an odd element offset. AOTInductor runs it correctly and copies it on every call, so alignment is a PERFORMANCE fact: the class still admits, and the plan says to stage the feed once."
+    },
+    {
+      "call": {
+        "excluded_present": [],
+        "feeds": {
+          "sample": {
+            "alignment_offset": 8,
+            "contiguous": false,
+            "dtype": "float16",
+            "shape": [
+              2,
+              4,
+              64,
+              64
+            ]
+          },
+          "text_embeds": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              77,
+              2048
+            ]
+          },
+          "timestep": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float32",
+            "shape": []
+          }
+        }
+      },
+      "candidates": [
+        {
+          "class": "denoiser.base",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        }
+      ],
+      "expect": {
+        "ambiguous": [],
+        "normalizations": [
+          {
+            "dtype": "",
+            "input": "sample",
+            "kind": "realign",
+            "position": 0,
+            "reason": "non_contiguous"
+          }
+        ],
+        "outcome": "admitted",
+        "ranked": [],
+        "selected": "denoiser.base",
+        "symbols": {
+          "batch": 2
+        }
+      },
+      "name": "non_contiguous_feeds_realign",
+      "note": "A non-contiguous feed takes the same staging path under its own reason. Contiguity is checked before the address, so a feed that is both reports the layout, which is the fact that explains the other."
+    },
+    {
+      "call": {
+        "excluded_present": [],
+        "feeds": {
+          "sample": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              4,
+              64,
+              64
+            ]
+          },
+          "text_embeds": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              77,
+              2048
+            ]
+          },
+          "timestep": {
+            "alignment_offset": 12,
+            "contiguous": false,
+            "dtype": "int64",
+            "shape": []
+          }
+        }
+      },
+      "candidates": [
+        {
+          "class": "denoiser.base",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        }
+      ],
+      "expect": {
+        "ambiguous": [],
+        "normalizations": [
+          {
+            "dtype": "float32",
+            "input": "timestep",
+            "kind": "recast",
+            "position": 1,
+            "reason": "int64_to_float32"
+          }
+        ],
+        "outcome": "admitted",
+        "ranked": [],
+        "selected": "denoiser.base",
+        "symbols": {
+          "batch": 2
+        }
+      },
+      "name": "recast_subsumes_realign",
+      "note": "A feed that needs both gets ONE normalization, the recast. A recast implies a staged copy into the declared dtype, and that buffer is aligned by construction \u2014 staging twice would pay the copy twice for a feed that ends in the same buffer either way."
+    },
+    {
+      "call": {
+        "excluded_present": [],
+        "feeds": {
+          "sample": {
+            "alignment_offset": 8,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              4,
+              64,
+              64
+            ]
+          },
+          "text_embeds": {
+            "alignment_offset": 0,
+            "contiguous": false,
+            "dtype": "float16",
+            "shape": [
+              2,
+              77,
+              2048
+            ]
+          },
+          "timestep": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "int64",
+            "shape": []
+          }
+        }
+      },
+      "candidates": [
+        {
+          "class": "denoiser.base",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        }
+      ],
+      "expect": {
+        "ambiguous": [],
+        "normalizations": [
+          {
+            "dtype": "",
+            "input": "sample",
+            "kind": "realign",
+            "position": 0,
+            "reason": "unaligned_16b"
+          },
+          {
+            "dtype": "float32",
+            "input": "timestep",
+            "kind": "recast",
+            "position": 1,
+            "reason": "int64_to_float32"
+          },
+          {
+            "dtype": "",
+            "input": "text_embeds",
+            "kind": "realign",
+            "position": 2,
+            "reason": "non_contiguous"
+          }
+        ],
+        "outcome": "admitted",
+        "ranked": [],
+        "selected": "denoiser.base",
+        "symbols": {
+          "batch": 2
+        }
+      },
+      "name": "the_plan_is_in_position_order",
+      "note": "Several normalized feeds are planned in declared POSITION order, never in the order the host happened to resolve them: a host that applies the plan top to bottom must never wonder which slot it is staging."
+    },
+    {
+      "call": {
+        "excluded_present": [
+          "lora_a",
+          "lora_b"
+        ],
+        "feeds": {
+          "lora_a": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              8,
+              320
+            ]
+          },
+          "lora_b": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              320,
+              8
+            ]
+          },
+          "sample": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              4,
+              64,
+              64
+            ]
+          },
+          "text_embeds": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              77,
+              2048
+            ]
+          },
+          "timestep": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float32",
+            "shape": []
+          }
+        }
+      },
+      "candidates": [
+        {
+          "class": "denoiser.base",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        },
+        {
+          "class": "denoiser.lora",
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 5,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "lora_a",
+                "name": "lora_a",
+                "param": "lora_a",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  8,
+                  320
+                ]
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "lora_b",
+                "name": "lora_b",
+                "param": "lora_b",
+                "param_position": 4,
+                "path": [],
+                "position": 4,
+                "shape": [
+                  320,
+                  8
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder",
+              "lora_a",
+              "lora_b"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        }
+      ],
+      "expect": {
+        "ambiguous": [],
+        "normalizations": [],
+        "outcome": "admitted",
+        "ranked": [],
+        "selected": "denoiser.lora",
+        "symbols": {
+          "batch": 2
+        }
+      },
+      "name": "an_excluded_input_routes_to_the_adapter_class",
+      "note": "The call carries lora_a, so the branchless class REFUSES it \u2014 a class fed an adapter it does not declare would return the base model and look correct. The class that declares the pair admits."
+    },
+    {
+      "call": {
+        "excluded_present": [],
+        "feeds": {
+          "sample": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float32",
+            "shape": [
+              2,
+              4,
+              64,
+              64
+            ]
+          },
+          "timestep": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float32",
+            "shape": []
+          }
+        }
+      },
+      "candidates": [
+        {
+          "class": "denoiser.base",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        }
+      ],
+      "expect": {
+        "ambiguous": [],
+        "normalizations": [],
+        "outcome": "no_class_admits",
+        "ranked": [
+          {
+            "class": "denoiser.base",
+            "distance": [
+              6
+            ],
+            "misses": [
+              {
+                "input": "text_embeds",
+                "reason": "input_missing"
+              }
+            ],
+            "symbols": {}
+          }
+        ],
+        "selected": "",
+        "symbols": {}
+      },
+      "name": "a_missing_input_is_the_only_miss",
+      "note": "The call does not carry text_embeds at all, and its sample is float32 besides. Nothing further about the class is measurable once a declared input is absent, so the report is exactly one miss at the deepest rung \u2014 not a list that invites a reader to fix the dtype first."
+    },
+    {
+      "call": {
+        "excluded_present": [],
+        "feeds": {
+          "sample": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              4,
+              64,
+              64
+            ]
+          },
+          "text_embeds": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              77,
+              2048
+            ]
+          },
+          "timestep": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "",
+            "shape": null
+          }
+        }
+      },
+      "candidates": [
+        {
+          "class": "denoiser.base",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        }
+      ],
+      "expect": {
+        "ambiguous": [],
+        "normalizations": [],
+        "outcome": "no_class_admits",
+        "ranked": [
+          {
+            "class": "denoiser.base",
+            "distance": [
+              2
+            ],
+            "misses": [
+              {
+                "input": "timestep",
+                "reason": "input_not_tensor"
+              }
+            ],
+            "symbols": {
+              "batch": 2
+            }
+          }
+        ],
+        "selected": "",
+        "symbols": {}
+      },
+      "name": "a_non_tensor_feed_ranks_rather_than_crashes",
+      "note": "A declared input presented as something with no shape (a Python float, a list, None) is a miss, not an exception. The walk continues to the remaining inputs so the report still says everything it can."
+    },
+    {
+      "call": {
+        "excluded_present": [],
+        "feeds": {
+          "sample": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              4,
+              64,
+              64
+            ]
+          },
+          "text_embeds": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              77,
+              2048
+            ]
+          },
+          "timestep": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "bfloat16",
+            "shape": []
+          }
+        }
+      },
+      "candidates": [
+        {
+          "class": "denoiser.base",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        },
+        {
+          "class": "denoiser.hires",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  128,
+                  128
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        },
+        {
+          "class": "denoiser.lora",
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 5,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "lora_a",
+                "name": "lora_a",
+                "param": "lora_a",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  8,
+                  320
+                ]
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "lora_b",
+                "name": "lora_b",
+                "param": "lora_b",
+                "param_position": 4,
+                "path": [],
+                "position": 4,
+                "shape": [
+                  320,
+                  8
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder",
+              "lora_a",
+              "lora_b"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        }
+      ],
+      "expect": {
+        "ambiguous": [],
+        "normalizations": [],
+        "outcome": "no_class_admits",
+        "ranked": [
+          {
+            "class": "denoiser.base",
+            "distance": [
+              1
+            ],
+            "misses": [
+              {
+                "input": "timestep",
+                "reason": "dtype_mismatch"
+              }
+            ],
+            "symbols": {
+              "batch": 2
+            }
+          },
+          {
+            "class": "denoiser.hires",
+            "distance": [
+              1,
+              4,
+              4
+            ],
+            "misses": [
+              {
+                "input": "sample",
+                "reason": "static_dim_mismatch"
+              },
+              {
+                "input": "sample",
+                "reason": "static_dim_mismatch"
+              },
+              {
+                "input": "timestep",
+                "reason": "dtype_mismatch"
+              }
+            ],
+            "symbols": {
+              "batch": 2
+            }
+          },
+          {
+            "class": "denoiser.lora",
+            "distance": [
+              6
+            ],
+            "misses": [
+              {
+                "input": "lora_a",
+                "reason": "input_missing"
+              }
+            ],
+            "symbols": {}
+          }
+        ],
+        "selected": "",
+        "symbols": {}
+      },
+      "name": "the_closest_class_is_the_one_whose_dims_match",
+      "note": "THE ranking case. Three classes refuse a 64x64 call whose scalar is bfloat16: the base class matches every declared dimension and disagrees about one scalar fact, the hi-res class does not fit the graph at all, and the adapter class cannot even find its inputs. Listing them in iteration order buries the one a reader needs, so the shallow rung sorts first."
+    },
+    {
+      "call": {
+        "excluded_present": [],
+        "feeds": {
+          "sample": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              4,
+              64,
+              64
+            ]
+          },
+          "text_embeds": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              77,
+              2048
+            ]
+          },
+          "timestep": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "bfloat16",
+            "shape": []
+          }
+        }
+      },
+      "candidates": [
+        {
+          "class": "denoiser.base",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        },
+        {
+          "class": "denoiser.hires",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  128,
+                  128
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        }
+      ],
+      "expect": {
+        "ambiguous": [],
+        "normalizations": [],
+        "outcome": "no_class_admits",
+        "ranked": [
+          {
+            "class": "denoiser.base",
+            "distance": [
+              1
+            ],
+            "misses": [
+              {
+                "input": "timestep",
+                "reason": "dtype_mismatch"
+              }
+            ],
+            "symbols": {
+              "batch": 2
+            }
+          },
+          {
+            "class": "denoiser.hires",
+            "distance": [
+              1,
+              4,
+              4
+            ],
+            "misses": [
+              {
+                "input": "sample",
+                "reason": "static_dim_mismatch"
+              },
+              {
+                "input": "sample",
+                "reason": "static_dim_mismatch"
+              },
+              {
+                "input": "timestep",
+                "reason": "dtype_mismatch"
+              }
+            ],
+            "symbols": {
+              "batch": 2
+            }
+          }
+        ],
+        "selected": "",
+        "symbols": {}
+      },
+      "name": "fewer_complaints_wins_at_the_same_rung",
+      "note": "Two classes share their shallowest complaint. The sorted rung tuple makes a prefix sort before its extension, so the class with fewer complaints is closer \u2014 'one dtype disagreement' beats 'one dtype disagreement and two dims'."
+    },
+    {
+      "call": {
+        "excluded_present": [],
+        "feeds": {
+          "sample": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              4,
+              64,
+              64
+            ]
+          },
+          "text_embeds": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              77,
+              2048
+            ]
+          },
+          "timestep": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "bfloat16",
+            "shape": []
+          }
+        }
+      },
+      "candidates": [
+        {
+          "class": "denoiser.zulu",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        },
+        {
+          "class": "denoiser.alpha",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        }
+      ],
+      "expect": {
+        "ambiguous": [],
+        "normalizations": [],
+        "outcome": "no_class_admits",
+        "ranked": [
+          {
+            "class": "denoiser.alpha",
+            "distance": [
+              1
+            ],
+            "misses": [
+              {
+                "input": "timestep",
+                "reason": "dtype_mismatch"
+              }
+            ],
+            "symbols": {
+              "batch": 2
+            }
+          },
+          {
+            "class": "denoiser.zulu",
+            "distance": [
+              1
+            ],
+            "misses": [
+              {
+                "input": "timestep",
+                "reason": "dtype_mismatch"
+              }
+            ],
+            "symbols": {
+              "batch": 2
+            }
+          }
+        ],
+        "selected": "",
+        "symbols": {}
+      },
+      "name": "an_exact_tie_breaks_on_the_class_name",
+      "note": "Two classes at the same distance with the same misses. The tie breaks on the class NAME ascending, so a host that offers its candidates in a different order still prints the same closest class."
+    },
+    {
+      "call": {
+        "excluded_present": [],
+        "feeds": {
+          "sample": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              16,
+              4,
+              64,
+              64
+            ]
+          },
+          "text_embeds": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              16,
+              77,
+              2048
+            ]
+          },
+          "timestep": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float32",
+            "shape": []
+          }
+        }
+      },
+      "candidates": [
+        {
+          "class": "denoiser.base",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        }
+      ],
+      "expect": {
+        "ambiguous": [],
+        "normalizations": [],
+        "outcome": "no_class_admits",
+        "ranked": [
+          {
+            "class": "denoiser.base",
+            "distance": [
+              4,
+              4
+            ],
+            "misses": [
+              {
+                "input": "sample",
+                "reason": "range_violation"
+              },
+              {
+                "input": "text_embeds",
+                "reason": "range_violation"
+              }
+            ],
+            "symbols": {}
+          }
+        ],
+        "selected": "",
+        "symbols": {}
+      },
+      "name": "a_symbolic_dim_outside_its_range_refuses",
+      "note": "batch=16 is outside the declared inclusive range [1, 8]. A range violation and a static-dim mismatch share a rung because both say the same thing: the call does not fit this graph."
+    },
+    {
+      "call": {
+        "excluded_present": [],
+        "feeds": {
+          "sample": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              4,
+              64,
+              64
+            ]
+          },
+          "text_embeds": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              3,
+              77,
+              2048
+            ]
+          },
+          "timestep": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float32",
+            "shape": []
+          }
+        }
+      },
+      "candidates": [
+        {
+          "class": "denoiser.base",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        }
+      ],
+      "expect": {
+        "ambiguous": [],
+        "normalizations": [],
+        "outcome": "no_class_admits",
+        "ranked": [
+          {
+            "class": "denoiser.base",
+            "distance": [
+              4
+            ],
+            "misses": [
+              {
+                "input": "text_embeds",
+                "reason": "symbol_inconsistent"
+              }
+            ],
+            "symbols": {
+              "batch": 2
+            }
+          }
+        ],
+        "selected": "",
+        "symbols": {}
+      },
+      "name": "one_symbol_must_take_one_value",
+      "note": "batch binds to 2 on sample and 3 on text_embeds. range_constraints cannot express this, but the graph requires it, so a call that is individually in range on both is still outside the declared envelope. The first binding wins and names the input that disagreed with it."
+    },
+    {
+      "call": {
+        "excluded_present": [],
+        "feeds": {
+          "sample": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              4,
+              64,
+              64
+            ]
+          },
+          "text_embeds": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              77,
+              2048
+            ]
+          },
+          "timestep": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float32",
+            "shape": []
+          }
+        }
+      },
+      "candidates": [
+        {
+          "class": "denoiser.a",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        },
+        {
+          "class": "denoiser.b",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        }
+      ],
+      "expect": {
+        "ambiguous": [
+          "denoiser.a",
+          "denoiser.b"
+        ],
+        "normalizations": [],
+        "outcome": "class_ambiguous",
+        "ranked": [],
+        "selected": "",
+        "symbols": {}
+      },
+      "name": "two_admitting_classes_are_a_defect",
+      "note": "The declaration failed to discriminate two graph classes by ingress. That is a defect to surface, never a coin to flip: an outcome that picked one would serve a different graph on a different pod for the same request."
+    },
+    {
+      "call": {
+        "excluded_present": [],
+        "feeds": {
+          "sample": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              4,
+              64,
+              64
+            ]
+          },
+          "text_embeds": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              77,
+              2048
+            ]
+          },
+          "timestep": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float32",
+            "shape": []
+          }
+        }
+      },
+      "candidates": [],
+      "expect": {
+        "ambiguous": [],
+        "normalizations": [],
+        "outcome": "no_class_admits",
+        "ranked": [],
+        "selected": "",
+        "symbols": {}
+      },
+      "name": "an_empty_candidate_set_is_a_total_miss",
+      "note": "A host with nothing armed yet asks the same question and gets the same answer shape. Why the set is empty \u2014 nothing compiled, everything de-armed, a cold boot \u2014 is the host's knowledge, never selection's."
+    },
+    {
+      "call": {
+        "excluded_present": [
+          "lora_a"
+        ],
+        "feeds": {
+          "sample": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              4,
+              64,
+              64
+            ]
+          },
+          "text_embeds": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float16",
+            "shape": [
+              2,
+              77,
+              2048
+            ]
+          },
+          "timestep": {
+            "alignment_offset": 0,
+            "contiguous": true,
+            "dtype": "float32",
+            "shape": []
+          }
+        }
+      },
+      "candidates": [
+        {
+          "class": "denoiser.base",
+          "ingress": {
+            "excluded_inputs": [
+              "lora_a",
+              "lora_b"
+            ],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "float16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  "batch",
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "float16",
+                "exported_name": "encoder_text_embeds",
+                "name": "text_embeds",
+                "param": "encoder",
+                "param_position": 2,
+                "path": [
+                  "text_embeds"
+                ],
+                "position": 2,
+                "shape": [
+                  "batch",
+                  77,
+                  2048
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder"
+            ],
+            "symbols": {
+              "batch": [
+                1,
+                8
+              ]
+            },
+            "v": 1
+          }
+        }
+      ],
+      "expect": {
+        "ambiguous": [],
+        "normalizations": [],
+        "outcome": "no_class_admits",
+        "ranked": [
+          {
+            "class": "denoiser.base",
+            "distance": [
+              3
+            ],
+            "misses": [
+              {
+                "input": "lora_a",
+                "reason": "input_excluded"
+              }
+            ],
+            "symbols": {}
+          }
+        ],
+        "selected": "",
+        "symbols": {}
+      },
+      "name": "an_excluded_input_no_class_declares_is_a_total_miss",
+      "note": "The call carries an adapter and the only candidate refuses adapters. The refusal names the excluded input, at its own rung: a routing disagreement is a wrong-class fact, deeper than a scalar disagreement and shallower than a shape one."
+    }
+  ]
+}

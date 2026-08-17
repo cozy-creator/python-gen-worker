@@ -448,13 +448,20 @@ jobs:
       - name: pgw#1215 guard - no export/AOTI compile in the serving process
         run: uv run python scripts/lint_serving_process_compiles.py
 
-      # GATING (pgw#1327): the serve-boot key path reads a `cg-keyset-v1`
-      # document; it may not be able to reach the tracer that produced one. The
-      # runtime proof (tests/test_cgkey_as_data_pgw1327.py) shows one boot did
-      # not export — this shows no boot can. Narrow on purpose: pgw#1328's
-      # serve-role guard names the whole role's module set and supersedes it.
-      - name: pgw#1327 guard - the serve-boot key path cannot reach a tracer
-        run: uv run python scripts/lint_serve_keyset_closure.py
+      # GATING (pgw#1328, superseding pgw#1327's narrow precursor): the
+      # ADOPT-ONLY serve role adopts by key and refuses or routes on a miss
+      # (§4.28/§4.29), so it must not be able to compile. This walks the
+      # transitive static import closure of the role's declared module set —
+      # function-local imports INCLUDED, which is how `fleet_cells` reached
+      # the lane — and reds on any reach into the mint machinery. Both lists
+      # are read out of `src/gen_worker/serve/role.py` rather than retyped
+      # here, so the role and its fence cannot drift (pgw#1176). Selftest
+      # first: it proves the walk still goes red on a mint-reaching root, so
+      # the green below means something.
+      - name: pgw#1328 guard - the adopt-only serve role cannot reach the mint lane
+        run: |
+          uv run python scripts/lint_serve_role_closure.py --selftest
+          uv run python scripts/lint_serve_role_closure.py
 
       # GATING (pgw#1176): THE GUARDS ARE GUARDED. A fence names symbols in
       # string literals; when one is renamed or deleted the fence keeps

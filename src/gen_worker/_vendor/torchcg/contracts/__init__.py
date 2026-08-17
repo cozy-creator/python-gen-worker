@@ -8,6 +8,7 @@ CONTRACT_FILES: Final = (
     "call_ingress_v1.json",
     "compiled_graph_key_vectors.json",
     "graph_class_identity_v3.json",
+    "ingress_selection_v1.json",
     "literal_identity_v1.json",
     "toolchain_identity_v1.json",
 )

@@ -28,6 +28,17 @@ import sys
 from typing import List, Optional
 
 from .. import config
+# pgw#1328: the PROCESS ENTRY is what knows whether this process may mint,
+# so it is the edge that registers §4.28's eager-capable mint supervision
+# with `serve.mint_seam`. The adopt-only entry (`python -m
+# gen_worker.serve`) declares its role and installs the import blocker
+# BEFORE this module is imported, so the branch below is what keeps that
+# process from dying on this line — and it READS the one role answer
+# rather than adding a second one.
+from ..serve import role as _serve_role
+
+if not _serve_role.adopt_only():
+    from .. import mint_adapter  # noqa: F401  (registers the mint side)
 
 
 def _build_parser() -> argparse.ArgumentParser:
