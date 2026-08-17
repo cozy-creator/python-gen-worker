@@ -25,15 +25,13 @@ distinction becomes a refusal or a pass.
 
 from __future__ import annotations
 
-import json
 import re
-import struct
 from pathlib import Path
 from typing import Iterable
 
 import msgspec
 
-from .safetensors_header import header_len_ok
+from .safetensors_header import read_header
 from .tensor_layout_contract import (
     KEYS_DIFFUSERS_SPLIT_QKV,
     KEYS_NATIVE_FUSED_QKV,
@@ -110,17 +108,11 @@ def tensor_keys(files: Iterable[Path]) -> tuple[str, ...]:
     for count, path in enumerate(files):
         if count >= _MAX_FILES:
             break
-        try:
-            with open(path, "rb") as handle:
-                raw = handle.read(8)
-                if len(raw) < 8:
-                    continue
-                (length,) = struct.unpack("<Q", raw)
-                if not header_len_ok(length):
-                    continue
-                header = json.loads(handle.read(length))
-        except (OSError, ValueError, struct.error):
-            continue
+        header = read_header(
+            path,
+            why="the tensor key names classify this checkpoint's attention "
+                "topology; an empty set silently classifies it as neither",
+        )
         if isinstance(header, dict):
             keys.extend(k for k in header if k != "__metadata__")
     return tuple(keys)

@@ -37,11 +37,10 @@ from __future__ import annotations
 
 import json
 import logging
-import struct
 from dataclasses import dataclass
 from pathlib import Path
 from ..component_vocab import denoiser_components
-from .safetensors_header import header_len_ok
+from .safetensors_header import read_metadata
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -91,19 +90,19 @@ class SvdqArtifact:
 
 
 def _read_safetensors_metadata(path: Path) -> dict:
-    try:
-        with open(path, "rb") as f:
-            raw = f.read(8)
-            if len(raw) < 8:
-                return {}
-            (n,) = struct.unpack("<Q", raw)
-            if not header_len_ok(n):
-                return {}
-            header = json.loads(f.read(n))
-    except (OSError, ValueError):
-        return {}
-    meta = header.get("__metadata__") if isinstance(header, dict) else None
-    return meta if isinstance(meta, dict) else {}
+    """One shared, stub-aware reader — see `safetensors_header.read_metadata`.
+
+    Fail-open here is the loudest of the three: this metadata is what makes an
+    svdq checkpoint AN SVDQ CHECKPOINT. `{}` means `_svdq_from_file` returns
+    None, the artifact is not detected, and a W4A4 model is loaded down the
+    plain lane.
+    """
+
+    return read_metadata(
+        path,
+        why="a checkpoint whose __metadata__ goes unread stops being detected "
+            "as svdq and is loaded down the plain bf16 lane",
+    )
 
 
 def _svdq_from_file(component: str, path: Path) -> Optional[SvdqArtifact]:

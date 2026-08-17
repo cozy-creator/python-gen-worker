@@ -57,7 +57,7 @@ from .memory import (
     probe_host_ram,
 )
 from .hf_fp8_blockwise import detect_hf_fp8_blockwise, load_hf_fp8_blockwise
-from .safetensors_header import header_len_ok
+from .safetensors_header import header_len_ok, read_header
 from .svdq import detect_svdq_artifact, load_svdq_pipeline
 from ..hostfacts import cuda_ready
 from .w4a4 import (
@@ -164,28 +164,38 @@ def detect_on_disk_dtype(model_path: Path) -> str:
     carry no dtype and mirrored repos use unsuffixed filenames, so without
     this a bf16 snapshot silently loads via diffusers' fp32 default — 2x the
     VRAM. "fp8" marks an fp8-E4M3-stored flavor whose storage precision must
-    be preserved (see :func:`apply_fp8_storage`)."""
+    be preserved (see :func:`apply_fp8_storage`).
+
+    **On a projected tree the answer comes from the MANIFEST, and a tree whose
+    manifest cannot be recovered is a refusal, never a ""** (pgw#1308). A
+    TFSSTUB1 stub carries a body digest and a size and no dtype at all, and
+    its first eight bytes are ASCII magic that ``header_len_ok`` correctly
+    rejects — so on master every weight file was skipped by a ``continue``,
+    ``counts`` stayed empty, and this returned "", i.e. exactly the silent
+    fp32 default the docstring above was written to prevent. The stub failed
+    loudly at the parse site as designed; this caller read the loud failure as
+    "no information". A guarantee about how a read fails constrains nothing
+    about what the caller concludes, so the branch has to live here."""
 
     counts: Dict[str, int] = {}
     try:
-        for p in sorted(Path(model_path).rglob("*.safetensors")):
-            with open(p, "rb") as f:
-                raw = f.read(8)
-                if len(raw) < 8:
-                    continue
-                (n,) = struct.unpack("<Q", raw)
-                if not header_len_ok(n):
-                    continue
-                header = json.loads(f.read(n))
-            for value in header.values():
-                if isinstance(value, dict) and "dtype" in value:
-                    counts[str(value["dtype"])] = counts.get(str(value["dtype"]), 0) + 1
-    except (OSError, ValueError):
+        paths = sorted(Path(model_path).rglob("*.safetensors"))
+    except OSError:
         return ""
+    for p in paths:
+        for value in read_header(p, why=_DTYPE_WHY).values():
+            if isinstance(value, dict) and "dtype" in value:
+                counts[str(value["dtype"])] = counts.get(str(value["dtype"]), 0) + 1
     if not counts:
         return ""
     top = max(counts, key=lambda k: counts[k])
     return _SAFETENSORS_DTYPE_NAMES.get(top, "")
+
+
+_DTYPE_WHY = (
+    "the weight dtype decides whether this model loads in its stored precision "
+    "or via diffusers' fp32 default, at 2x the VRAM"
+)
 
 
 def read_on_disk_quant_config(model_path: Path) -> bool:
@@ -2068,14 +2078,11 @@ def hydrate_modular_pipeline(
 
 def _safetensors_data_bytes(p: Path) -> int:
 
-    with open(p, "rb") as f:
-        raw = f.read(8)
-        if len(raw) < 8:
-            return 0
-        (n,) = struct.unpack("<Q", raw)
-        if not header_len_ok(n):
-            return 0
-        header = json.loads(f.read(n))
+    header = read_header(
+        p,
+        why="tensor bytes per component size the VRAM plan; a stub read as "
+            "zero bytes plans a model that is not there",
+    )
     total = 0
     for value in header.values():
         if isinstance(value, dict) and "data_offsets" in value:

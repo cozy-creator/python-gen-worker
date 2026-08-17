@@ -42,12 +42,13 @@ import functools
 import importlib
 import json
 import logging
-import struct
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from .. import activity as activity_mod
 from ..component_vocab import denoiser_components
-from .safetensors_header import header_len_ok
+from .safetensors_header import read_header
+from .tensor_source import load_state_dict, open_tensor_source
 from .tensor_layout_contract import unregistered_decode_path
 from typing import Any, Dict, List, Optional
 import shutil
@@ -97,19 +98,20 @@ class W4a4Artifact:
     static_input_scales: bool
 
 
+_TENSOR_WHY = (
+    "the w4a4 denoiser's packed weights and scales come from this read"
+)
+
+_HEADER_WHY = (
+    "a w4a4 artifact whose contract triple goes unseen is routed to "
+    "the plain bf16 lane and loads as the wrong model"
+)
+
+
 def _read_header(path: Path) -> dict:
-    try:
-        with open(path, "rb") as f:
-            raw = f.read(8)
-            if len(raw) < 8:
-                return {}
-            (n,) = struct.unpack("<Q", raw)
-            if not header_len_ok(n):
-                return {}
-            header = json.loads(f.read(n))
-    except (OSError, ValueError):
-        return {}
-    return header if isinstance(header, dict) else {}
+    """One shared, stub-aware reader — see `safetensors_header.read_header`."""
+
+    return read_header(path, why=_HEADER_WHY)
 
 
 def _quantized_layers(files: tuple[Path, ...]) -> tuple[tuple[str, ...], bool]:
@@ -518,7 +520,6 @@ def load_w4a4_denoiser(root: Path, art: W4a4Artifact, *,
     import torch
     import torch.nn as nn
     from accelerate import init_empty_weights
-    from safetensors.torch import load_file
 
     compute = compute_dtype or torch.bfloat16
     if mode not in ("blockwise", "dequant"):
@@ -533,7 +534,7 @@ def load_w4a4_denoiser(root: Path, art: W4a4Artifact, *,
 
     sd: Dict[str, Any] = {}
     for f in art.files:
-        sd.update(load_file(str(f)))
+        sd.update(load_state_dict(f, why=_TENSOR_WHY))
 
     lin_cls = w4a4_linear_class()
     swapped = 0
@@ -668,7 +669,6 @@ def swap_w4a4_linears(
     dequantized weights. Returns swapped count."""
     import torch
     import torch.nn as nn
-    from safetensors import safe_open
 
     compute = compute_dtype or torch.bfloat16
     lin_cls = w4a4_linear_class()
@@ -677,6 +677,10 @@ def swap_w4a4_linears(
         for name in _read_header(f):
             if name != "__metadata__":
                 where[name] = f
+    # pgw#1330: one seam for both sources. On a projected tree `src` is a
+    # ~128 B stub and the tensors come from CAS objects; the lazy per-shard
+    # open and the caching are unchanged.
+    stack = ExitStack()
     handles: Dict[Path, Any] = {}
 
     def _tensor(name: str) -> Any:
@@ -685,7 +689,9 @@ def swap_w4a4_linears(
             raise W4a4SnapshotError(f"artifact tensor {name!r} missing from shards")
         fh = handles.get(src)
         if fh is None:
-            fh = handles[src] = safe_open(str(src), framework="pt", device="cpu")
+            fh = handles[src] = stack.enter_context(
+                open_tensor_source(src, why=_TENSOR_WHY)
+            )
         return fh.get_tensor(name)
 
     swapped = 0
@@ -749,11 +755,7 @@ def swap_w4a4_linears(
             setattr(parent, leaf, new)
             swapped += 1
     finally:
-        for fh in handles.values():
-            try:
-                fh.__exit__(None, None, None)
-            except Exception:  # noqa: BLE001
-                pass
+        stack.close()
     logger.info("w4a4 swap: %d/%d quantized Linears on fp4 scaled_mm",
                 swapped, len(art.quantized))
     if skipped:

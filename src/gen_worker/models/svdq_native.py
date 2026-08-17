@@ -61,6 +61,7 @@ from .w4a4 import _gemm_w4a4
 from .native_kernels import svdq_linear_execution_lane
 from .svdq_fused import build_svdq_fused_linear, fused_shape_supported
 from .svdq import _read_safetensors_metadata
+from .tensor_source import open_tensor_source
 from .svdq_awq import decode_awq_linear, is_awq_linear
 from .svdq_layout import LOWRANK_QUANT_KEY, LOWRANK_QUANT_SCHEMES, decode_linear
 from .native_kernels import svdq_modulation_execution_lane
@@ -70,6 +71,11 @@ from ..hostfacts import cuda_ready
 logger = logging.getLogger(__name__)
 
 SVDQ_ENGINE_NATIVE = "native"
+
+_SVDQ_WHY = (
+    "the svdq denoiser's every W4A4 linear, AWQ modulation layer and plain "
+    "tensor comes from this one read; without it the model cannot be built"
+)
 
 # Blackwell fp4 tensor cores — the SAME silicon window as the #nvfp4-w4a4 lane
 # (both are block-scaled nvfp4 through torch._scaled_mm / cuBLASLt). torch's own
@@ -474,7 +480,6 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
 
     import torch
     from accelerate import init_empty_weights
-    from safetensors import safe_open
 
     compute = compute_dtype or torch.bfloat16
     meta = _read_safetensors_metadata(art.file)
@@ -516,7 +521,12 @@ def load_svdq_native_denoiser(art: Any, *, compute_dtype: Any = None,
     t0 = time.perf_counter()
     plain: Dict[str, Any] = {}
     swapped = awq = awq_packed = 0
-    with safe_open(str(art.file), framework="pt", device=str(dev)) as fh:
+    # pgw#1330, THE WORKED EXAMPLE for the weights column. This is the svdq
+    # lane's PRIMARY weight-materialization loop, and it was already the shape
+    # the cutover targets: `from_config` on meta four lines above, then fill by
+    # NAME. It never wanted a directory, so it is independent of #1303 — the
+    # whole cut is the source of the tensors, and nothing else moves.
+    with open_tensor_source(art.file, device=str(dev), why=_SVDQ_WHY) as fh:
         groups = _group_by_prefix(fh.keys())
         for prefix, leaves in sorted(groups.items()):
             tensors = {leaf: fh.get_tensor(f"{prefix}.{leaf}") for leaf in leaves}

@@ -39,13 +39,12 @@ from __future__ import annotations
 
 import json
 import math
-import struct
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import msgspec
 
-from .safetensors_header import header_len_ok
+from .safetensors_header import read_header
 from .file_layout import MULTI_FILE, SINGLE_FILE
 from .tensor_layout_contract import (
     CONTRACT_HF_FP8_BLOCKWISE,
@@ -117,20 +116,13 @@ class HfFp8BlockwiseTree(msgspec.Struct, frozen=True, kw_only=True):
 
 
 def _read_header(path: Path) -> Dict[str, Any]:
-    """Safetensors header only — bytes read are the declared length, capped
-    by §4.24's bound. No tensor data is touched."""
-    try:
-        with open(path, "rb") as f:
-            raw = f.read(8)
-            if len(raw) < 8:
-                return {}
-            (n,) = struct.unpack("<Q", raw)
-            if not header_len_ok(n):
-                return {}
-            header = json.loads(f.read(n))
-    except (OSError, ValueError):
-        return {}
-    return header if isinstance(header, dict) else {}
+    """One shared, stub-aware reader — see `safetensors_header.read_header`."""
+
+    return read_header(
+        path,
+        why="an fp8-blockwise artifact whose dtypes and shapes go unseen is "
+            "routed to the plain bf16 lane and loads as the wrong model",
+    )
 
 
 def _weight_files(d: Path) -> Tuple[Path, ...]:

@@ -28,7 +28,7 @@ from ..lifecycle_intents import IntentRegistry
 from ..pb import worker_scheduler_pb2 as pb
 from ..redact import sanitize as _sanitize
 from ..topology import current_device_group
-from . import cozy_snapshot, disk_gc, disk_telemetry
+from . import cozy_snapshot, disk_gc, disk_telemetry, projection
 from . import residency as residency_mod
 from . import staging as staging_mod
 from .cache_paths import tensorhub_cas_dir, tensorhub_fill_source_dir
@@ -44,7 +44,12 @@ from .hub_client import (
 from .loading import safetensors_file_valid
 from .refs import WireRef
 from .residency import Residency
-from .volume_verify import snapshot_verify_targets, verify_files
+from .volume_verify import (
+    snapshot_verify_targets,
+    split_projection_targets,
+    verify_files,
+    verify_projection,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1578,15 +1583,26 @@ class ModelStore:
     def _verify_snapshot_tree(
         self, path: Path, snapshot: Optional[pb.Snapshot]
     ) -> Tuple[bool, List[str]]:
-        """Integrity of a materialized snapshot (worker thread; blocking IO).
+        """Integrity of a snapshot tree (worker thread; blocking IO).
 
-        With a resolved manifest every regular file is checked against its
-        declared size AND their CONTENT DIGEST, hashed under the algorithm the
-        manifest named; files the manifest cannot cover (reassembled chunked
-        originals, merged single-file checkpoints) plus manifest-less trees
-        (hf/civitai) get the structural safetensors check (header parses +
-        every declared tensor byte present). Returns ``(ok, bad_digests)`` —
-        the digests name blobs to quarantine."""
+        With a resolved manifest every regular file holding real bytes is
+        checked against its declared size AND its CONTENT DIGEST, hashed under
+        the algorithm the manifest named; files the manifest cannot cover
+        (reassembled chunked originals, merged single-file checkpoints) plus
+        manifest-less trees (hf/civitai) get the structural safetensors check
+        (header parses + every declared tensor byte present). Returns
+        ``(ok, bad_digests)`` — the digests name blobs to quarantine.
+
+        **A PROJECTED tree is verified structurally and is NEVER hashed here**
+        (pgw#1308). Its files are pointer stubs and CAS symlinks that by
+        construction do not hold the bytes their manifest entries name, so
+        every byte-level check on them fails — and this function's caller
+        deletes the tree AND its CAS blobs and re-downloads. On master that
+        made a projected tree an infinite re-download: every boot, forever,
+        presenting as "the CAS has stopped caching". The stub format's loud
+        parse failure worked exactly as designed; it was read as corruption by
+        a handler built to trust it. See :func:`volume_verify.verify_projection`
+        for why structural is COMPLETE here rather than weaker."""
 
         p = Path(path)
         bad: List[str] = []
@@ -1612,27 +1628,42 @@ class ModelStore:
             for t in targets:
                 covered.add(t.path)
             if targets:
-                rep = verify_files(targets)
+                # Projection artifacts are split off BEFORE hashing: a stub or
+                # a CAS symlink does not hold the bytes its entry names, so
+                # hashing it at its path is not a weaker check, it is a check
+                # of the wrong thing that fails every time.
+                projected, material = split_projection_targets(targets)
+                rep = verify_files(material)
+                if projected:
+                    proj = verify_projection(projected)
+                    rep.expected += proj.expected
+                    rep.examined += proj.examined
+                    rep.projected += proj.projected
+                    rep.bad.extend(proj.bad)
+                    rep.findings.extend(proj.findings)
                 bad.extend(rep.bad)
                 for finding in rep.findings:
                     logger.warning("snapshot %s: %s", p.name, finding)
                 # DENOMINATOR GUARD, and it applies only to an otherwise-CLEAN
                 # report: a verdict that found nothing wrong is trustworthy only
                 # if it actually read the bytes. `examined` must cover every
-                # target handed in, and a clean run that hashed nothing read
-                # nothing at all. (A report that already names bad files is not
-                # vacuous -- it did its job, and folding it in here would
-                # double-report the same digest.)
+                # target handed in, and a clean run that neither hashed a byte
+                # nor checked a projection artifact read nothing at all. (A
+                # report that already names bad files is not vacuous -- it did
+                # its job, and folding it in here would double-report the same
+                # digest.)
                 vacuous = (
                     not rep.bad
                     and not rep.findings
                     and rep.hashed == 0
+                    and rep.projected == 0
                 )
                 if rep.examined != rep.expected or vacuous:
                     logger.error(
                         "snapshot %s verification is not trustworthy: examined=%d "
-                        "expected=%d hashed=%d bytes=%d -- treating as corrupt",
-                        p.name, rep.examined, rep.expected, rep.hashed, rep.bytes_hashed,
+                        "expected=%d hashed=%d projected=%d bytes=%d -- treating as corrupt",
+                        p.name, rep.examined, rep.expected, rep.hashed,
+                        rep.projected, rep.bytes_hashed,
                     )
                     already = set(bad)
                     bad.extend(t.ref for t in targets if t.ref not in already)
@@ -1642,6 +1673,11 @@ class ModelStore:
             candidates = []
         for st in candidates:
             if st in covered or st.suffix != ".safetensors":
+                continue
+            # A stub IS a valid projection artifact, not a truncated shard.
+            # `safetensors_file_valid` correctly refuses it -- and concluding
+            # "corrupt" from that correct refusal is the pgw#1308 defect.
+            if projection.stub_at(st) is not None:
                 continue
             if not safetensors_file_valid(st):
                 logger.warning("snapshot file %s structurally invalid (truncated?)", st)
