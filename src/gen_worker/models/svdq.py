@@ -19,13 +19,13 @@ through :mod:`gen_worker.models.svdq_native`, which reads the same bytes
 bit-exactly.
 
 ONE fleet image still installs the nunchaku WHEEL — ``inference-endpoints/
-qwen-image-svdq-bench`` (a benchmark fixture pending teardown). That is
-deliberate and must stay until th#2055: the hub admits an svdq-fp4 row only
-when the worker reports ``nunchaku`` in ``installed_libs``
-(``models/hub_policy.py`` probes it; tensorhub ``precision/ladder.go``'s
-``admitted()`` requires it), so removing the wheel — or dropping the probe —
-would stop that endpoint BINDING a flavor it can serve perfectly well on
-native. The wheel is now purely an admission token.
+qwen-image-svdq-bench`` (a benchmark fixture pending teardown). pgw#1298 had to
+keep it: the hub admitted an svdq-fp4 row only when the worker reported
+``nunchaku`` in ``installed_libs``, so dropping the wheel or the probe stopped
+that endpoint BINDING a flavor it serves fine on native. **th#2055 deleted that
+gate** (``precision/ladder.go``'s ``admitted()`` and ``AdmitLiteral``'s engine
+arm), pgw#1300 dropped the probe, and the wheel is now free to go — it gates
+nothing.
 
 fp4 serves; int4 is a typed refusal (:class:`SvdqInt4Unsupported`) — the
 native module is nvfp4 block-scaled ``_scaled_mm`` and int4 svdq is a
@@ -47,19 +47,12 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 SVDQ_METHOD = "svdquant"
-# The SM windows of nunchaku's kernels. NOT a serving constraint any more —
-# nothing in this module reads them, because the native engine's own window
-# (`svdq_native.SVDQ_NATIVE_FP4_SMS`, a strict superset for fp4) is what
-# decides whether a load can run. They survive for exactly two consumers, both
-# of which die together:
-#   - `models/ladder.py:99-101`, the published placement stamp
-#   - tensorhub's `internal/wirecontract/WORKER_PARSED_CONSTANTS`, which pins
-#     these two symbol names to this file by hand
-# Both go with th#2055 + pgw#1300 (the placement-reader/producer cut). Deleting
-# them here would break that stamp and falsify the hub's peer pin, so they stay
-# until that coordinated cut, and not one line longer.
-SVDQ_FP4_SMS = (120, 121)
-SVDQ_INT4_SMS = (75, 80, 86, 89)
+# pgw#1300: `SVDQ_FP4_SMS` / `SVDQ_INT4_SMS` are DELETED. They were nunchaku's
+# kernel windows, kept alive past pgw#1298 by two consumers that are now both
+# gone — `models/ladder.py`'s placement stamp (deleted here) and tensorhub's
+# `WORKER_PARSED_CONSTANTS` peer pin (deleted by th#2055 `65f0882f2`, whose
+# manifest no longer names this file). The only SM window this stack still
+# serves by is the native engine's own `svdq_native.SVDQ_NATIVE_FP4_SMS`.
 
 
 class SvdqError(RuntimeError):
@@ -205,9 +198,7 @@ def load_svdq_pipeline(cls: Any, path: Path, art: SvdqArtifact) -> Any:
 
 
 __all__ = [
-    "SVDQ_FP4_SMS",
     "SVDQ_INT4_REFUSAL",
-    "SVDQ_INT4_SMS",
     "SvdqArtifact",
     "SvdqError",
     "SvdqHardwareError",

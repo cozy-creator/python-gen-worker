@@ -42,18 +42,16 @@ def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> Ten
     # Known optional libs that affect artifact compatibility.
     # Keep this hardcoded (no env config), per Cozy design.
     #
-    # "nunchaku" STAYS after pgw#1298 deleted the nunchaku ENGINE, and dropping
-    # it would be a live outage rather than a cleanup. This list is what the
-    # hub admits against: tensorhub stamps every svdq-fp4/int4 row with
-    # `engines=["nunchaku"]` (`precision/placement.go` defaultPlacement, plus
-    # our own `models/ladder.py` stamp) and `precision/ladder.go` admitted()
-    # refuses any row whose engines are not in `installed_libs`. So the probe
-    # is an ADMISSION TOKEN now, not a capability claim — stop reporting it and
-    # `qwen-image-svdq-bench` (the one image carrying the wheel) can no longer
-    # bind the flavor it serves on our native engine. It goes when th#2055
-    # deletes the hub's placement readers, together with pgw#1300's stamp.
+    # pgw#1300: "nunchaku" is GONE from this probe. pgw#1298 kept it as an
+    # ADMISSION TOKEN — the hub refused any svdq row whose stamped
+    # `engines=["nunchaku"]` was not in `installed_libs`. th#2055 (`65f0882f2`)
+    # deleted that gate outright (`precision/ladder.go` `admitted()` and
+    # `AdmitLiteral`'s engine arm are gone), and no hub reader consults this
+    # list for `nunchaku` any more; the ones that remain ask for `torchao` /
+    # `modelopt` backends. So the token claims a capability we deleted in
+    # pgw#1298 and gates nothing — reporting it is a lie with no consumer.
     known = ["bitsandbytes", "torchao", "transformer_engine",
-             "nunchaku", "deepcompressor", "modelopt"]
+             "deepcompressor", "modelopt"]
     if extra_libs:
         known.extend(extra_libs)
     for name in known:
