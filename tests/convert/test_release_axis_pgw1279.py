@@ -20,18 +20,18 @@ from typing import Any
 import pytest
 from fake_hub import _FakeHub
 
-from gen_worker.request_context import TrainingContext
+from gen_worker.request_context import JobContext
 
 RELEASE = "2026.08"
 
 
-def _ctx(port: int, *, release: str = RELEASE) -> TrainingContext:
+def _ctx(port: int, *, release: str = RELEASE) -> JobContext:
     """A REAL producer request context: the hints the executor builds from the
     invoke's reserved `destination` struct, and nothing stubbed."""
     hints: dict[str, Any] = {"kind": "training", "destination_repo": "acme/model"}
     if release:
         hints["destination_release"] = release
-    return TrainingContext(
+    return JobContext(
         request_id="req-1",
         job_id="job-1",
         owner="acme",

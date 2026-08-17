@@ -6,7 +6,7 @@ import pytest
 from gen_worker.api.decorators import KINDS, endpoint
 from gen_worker.discovery.validation import _KNOWN_KINDS
 from gen_worker.executor import _CONTEXT_BY_KIND
-from gen_worker.request_context import ConversionContext, RequestContext
+from gen_worker.request_context import JobContext, RequestContext
 
 
 class In(msgspec.Struct, forbid_unknown_fields=True):
@@ -41,6 +41,6 @@ def test_eval_context_materializes_reserved_refs_and_is_not_the_base():
     # source_info/destination_info kwargs; a base RequestContext would raise
     # TypeError on them. Registering the kind is mandatory, not cosmetic.
     cls = _CONTEXT_BY_KIND["eval"]
-    assert cls is ConversionContext
+    assert cls is JobContext
     assert cls is not RequestContext
     assert hasattr(cls, "source") and hasattr(cls, "source_path")

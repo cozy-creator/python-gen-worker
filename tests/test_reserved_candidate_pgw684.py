@@ -229,9 +229,9 @@ def test_inference_kind_ignores_reserved_candidate(tmp_path) -> None:
 def test_producer_ctx_candidate_state_is_independent() -> None:
     """Context-level contract: `candidate`/`candidate_path` are their own
     slots, and setting one reserved path never moves another."""
-    from gen_worker.request_context import ConversionContext
+    from gen_worker.request_context import JobContext
 
-    ctx = ConversionContext(
+    ctx = JobContext(
         request_id="r1",
         source_info={"ref": "acme/dit-base"},
         candidate_info={"ref": "acme/mirrored-svdq"},

@@ -35,7 +35,7 @@ import requests
 from blake3 import blake3
 
 from gen_worker.bounded_stream import StreamTooLarge, copy_bounded, free_space_bound
-from gen_worker.request_context import ConversionContext
+from gen_worker.request_context import JobContext
 from gen_worker.request_context._datasets import _download_url_streamed
 
 # The rig always OFFERS this much body. A site that only checks after the loop
@@ -272,8 +272,8 @@ def _blob_path(digest: str) -> str:
     return f"/api/v1/blobs/{urllib.parse.quote(digest, safe=':')}/content"
 
 
-def _ctx(rig: _Rig) -> ConversionContext:
-    ctx = ConversionContext(request_id="r-pgw1013")
+def _ctx(rig: _Rig) -> JobContext:
+    ctx = JobContext(request_id="r-pgw1013")
     ctx._file_api_base_url = _url(rig, "")
     ctx._worker_capability_token = "test-token"
     return ctx

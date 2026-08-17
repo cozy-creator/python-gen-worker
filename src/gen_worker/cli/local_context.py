@@ -1,17 +1,20 @@
 """LocalRequestContext — RequestContext subclass for ``gen-worker run``.
 
-Build the right kind-specific context for the selected method (RequestContext
-for inference, ConversionContext for conversion, DatasetContext for dataset,
-TrainingContext for training). Override the orchestrator-backed bits with
-local-mode equivalents:
+Build the context for the selected method — ``LocalRequestContext`` for
+inference, ``LocalJobContext`` for every producer kind and for ``@job``.
+There are TWO classes here, not five, and that is pgw#1306's point: kind
+selects a WIRE shape, never a context class and never write authority. Override
+the orchestrator-backed bits with local-mode equivalents:
 
 - ``emitter`` writes JSON lines to stderr so ``ctx.emit / progress / log``
   events are visible without competing with the stdout result.
 - ``save_bytes`` / ``save_file`` materialize files under
   ``./.gen-worker-run/outputs/<ref>`` and return an Asset with ``local_path``
   set (no tensorhub upload).
-- ``materialize_blob`` on ConversionContext falls back to the local CAS
-  unless ``--allow-publish`` delegates to the real implementation.
+- ``materialize_blob`` on ``LocalJobContext`` falls back to the local CAS
+  unless ``--allow-publish`` delegates to the real implementation. ONE answer
+  for every producer kind — before pgw#1306 there were three, and two of them
+  were wrong (see that class's docstring).
   (Checkpoint publishing goes through ``gen_worker.convert.publish_flavors``,
   which talks to tensorhub directly and fails loudly without credentials.)
 - ``_canceled`` is toggled by the installed SIGINT handler in ``run.py``.
@@ -38,10 +41,8 @@ from ..api.types import Asset
 from ..models.cache_paths import open_worker_cas
 from ..request_context import (
     REF_ORIGIN_PAYLOAD,
-    ConversionContext,
-    DatasetContext,
+    JobContext,
     RequestContext,
-    TrainingContext,
 )
 
 _LOCAL_OUTPUT_DIR_NAME = ".gen-worker-run"
@@ -152,12 +153,25 @@ def _materialize_local_blob(digest: str, dest: str | os.PathLike[str]) -> Path:
     return output
 
 
-class LocalConversionContext(LocalRequestContextMixin, ConversionContext):
-    """Conversion-kind local context.
+class LocalJobContext(LocalRequestContextMixin, JobContext):
+    """The local context every producer body gets: ``@job`` runs and every
+    producer-kind ``@endpoint`` alike.
 
     ``materialize_blob`` is stubbed against the local CAS unless
     ``--allow-publish`` was passed (in which case we delegate to the real
     implementation — useful for round-tripping against a dev tensorhub).
+
+    **pgw#1306 collapsed three classes into this one, and the collapse fixed a
+    live defect rather than tidying names.** There used to be a
+    `LocalConversionContext` / `LocalDatasetContext` / `LocalTrainingContext`,
+    selected by kind, and the three disagreed about the same question. Measured
+    on `b7a9345a`: `conversion` honored `--allow-publish`; `dataset` had a
+    near-copy of this stub that IGNORED it; `training` overrode nothing at all,
+    so `gen-worker run --offline` on a training endpoint reached
+    `_PublisherMixin.materialize_blob` — the REAL hub-backed implementation —
+    in the loop whose entire purpose is to not have a hub. Nobody chose that;
+    it was inherited from whichever producer-kind class each local subclass
+    happened to sit on. One class cannot disagree with itself.
     """
 
     def materialize_blob(
@@ -182,42 +196,6 @@ class LocalConversionContext(LocalRequestContextMixin, ConversionContext):
             ) from None
 
 
-class LocalDatasetContext(LocalRequestContextMixin, DatasetContext):
-    """Dataset-kind local context."""
-
-    def materialize_blob(
-        self, digest: str, dest: "str | os.PathLike[str]",
-        *, origin: str = REF_ORIGIN_PAYLOAD,
-    ) -> Path:
-        # Same fallback as ConversionContext (origin is a provenance tag for
-        # breaker classification; the local CAS stub has no breaker, so it is
-        # accepted and unused here).
-        d = (digest or "").strip()
-        if not d:
-            raise ValueError("materialize_blob: empty digest")
-        try:
-            return _materialize_local_blob(d, dest)
-        except FileNotFoundError:
-            raise FileNotFoundError(
-                f"materialize_blob: blob {digest!r} not found in local CAS "
-                f"({open_worker_cas().root})"
-            ) from None
-
-
-class LocalTrainingContext(LocalRequestContextMixin, TrainingContext):
-    """Training-kind local context."""
-
-
-class LocalJobContext(LocalConversionContext):
-    """The ``gen-worker job run`` context: a real
-    :class:`~gen_worker.request_context.JobContext` with the hub-backed bits
-    stubbed, so an author's dev loop exercises the same body the pod will.
-
-    It inherits the conversion arm's local-CAS ``materialize_blob`` because the
-    two answer the same question and a second copy would drift.
-    """
-
-
 def build_local_context(
     *,
     kind: str,
@@ -228,14 +206,16 @@ def build_local_context(
     publishes: bool = False,
     emits_media: Optional[bool] = None,
 ) -> RequestContext:
-    """Factory: build the right context subclass for ``kind``.
+    """Factory: build the context for ``kind``.
 
     ``kind`` is the endpoint's declared kind string from discover_manifest, or
-    ``job`` for a ``@job`` run. An unrecognized kind is a REFUSAL, never a base
-    ``RequestContext``: the base class silently lacks the surface the kind
-    implies (``materialize_blob``, ``save_checkpoint``, the dataset writers), so
-    the substitution surfaces as a missing attribute deep inside a tenant body —
-    a typo'd kind reading as "this endpoint has no publisher".
+    ``job`` for a ``@job`` run. It answers exactly one question — *is this body
+    a producer?* — and every producer answer is the same class. An unrecognized
+    kind is a REFUSAL, never a base ``RequestContext``: the base class silently
+    lacks the producer surface (``materialize_blob``, ``save_checkpoint``, the
+    dataset writers), so the substitution surfaces as a missing attribute deep
+    inside a tenant body — a typo'd kind reading as "this endpoint has no
+    publisher".
     """
     rid = request_id or _local_request_id()
     em = emitter if emitter is not None else _stderr_emitter
@@ -257,14 +237,11 @@ def build_local_context(
     }
 
     k = (kind or "").strip().lower()
-    if k == "job":
+    # Every producer kind — and @job — gets the SAME class. The list is spelled
+    # out rather than written as `!= "inference"` so an unknown kind still hits
+    # the refusal below instead of being silently promoted to a producer.
+    if k in ("job", "conversion", "eval", "dataset", "training"):
         return LocalJobContext(allow_publish=allow_publish, **common)
-    if k in ("conversion", "eval"):
-        return LocalConversionContext(allow_publish=allow_publish, **common)
-    if k == "dataset":
-        return LocalDatasetContext(allow_publish=allow_publish, **common)
-    if k == "training":
-        return LocalTrainingContext(allow_publish=allow_publish, **common)
     if k == "inference":
         return LocalRequestContext(allow_publish=allow_publish, **common)
     raise ValueError(
@@ -278,9 +255,6 @@ def build_local_context(
 __all__ = [
     "build_local_context",
     "LocalRequestContext",
-    "LocalConversionContext",
-    "LocalDatasetContext",
     "LocalJobContext",
-    "LocalTrainingContext",
     "_stderr_emitter",
 ]

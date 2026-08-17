@@ -20,7 +20,7 @@ from PIL import Image
 from gen_worker import HF, Slot, endpoint
 from gen_worker.api.decorators import Compile, Resources
 from gen_worker.api.types import AudioAsset, ImageAsset, VideoAsset
-from gen_worker.request_context import ConversionContext, RequestContext
+from gen_worker.request_context import JobContext, RequestContext
 from gen_worker.testing import (
     Recorder,
     fake_context,
@@ -153,9 +153,9 @@ def test_recorder_covers_every_save_kind() -> None:
 
 def test_recorder_works_for_producer_context_subclasses() -> None:
     rec = Recorder()
-    ctx = fake_context(request_id="req", cls=ConversionContext, recorder=rec)
+    ctx = fake_context(request_id="req", cls=JobContext, recorder=rec)
 
-    assert isinstance(ctx, ConversionContext)
+    assert isinstance(ctx, JobContext)
     ctx.save_bytes("outputs/req/blob.bin", b"raw")
     assert rec.refs == ["outputs/req/blob.bin"]
 

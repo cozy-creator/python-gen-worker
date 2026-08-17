@@ -7,10 +7,11 @@ One decorator, four bindings, a slim request context::
     @endpoint
     def hello(ctx: RequestContext, data: In) -> Out: ...
 
-``JobContext`` (aliased for now as ``ConversionContext`` / ``DatasetContext``
-/ ``TrainingContext``) adds the producer-contract surface (publish, mktemp,
-dataset resolution) via plain inheritance; the worker constructs the right
-subclass from ``@endpoint(kind=...)`` before dispatch.
+``JobContext`` adds the producer-contract surface (publish, mktemp, dataset
+resolution) via plain inheritance. It is the ONLY producer context: every
+``@job`` body and every producer-shaped ``@endpoint`` handler receives one,
+and what a body may write comes from its declaration (``publishes`` /
+``emits_media``), never from its kind.
 """
 
 from . import io
@@ -111,11 +112,8 @@ from .api.types import (
     VideoAsset,
 )
 from .request_context import (
-    ConversionContext,
-    DatasetContext,
     JobContext,
     RequestContext,
-    TrainingContext,
     TrainingMetric,
 )
 from .api.jobs import job
@@ -200,9 +198,6 @@ __all__ = [
     # Context types.
     "RequestContext",
     "JobContext",
-    "ConversionContext",
-    "DatasetContext",
-    "TrainingContext",
     "TrainingMetric",
     # Per-step progress helper for diffusers pipelines.
     "diffusers_step_callback",

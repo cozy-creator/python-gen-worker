@@ -1614,8 +1614,8 @@ class RequestContext(Generic[D]):
 
 
 class _PublisherMixin:
-    """Producer-contract helpers shared by ConversionContext, DatasetContext
-    and TrainingContext: blob fetch by digest and ``materialize_blob``.
+    """Producer-contract helpers for ``JobContext``: blob fetch by digest and
+    ``materialize_blob``.
     Always combined with ``RequestContext`` via multiple inheritance (so
     ``self`` has ``_file_api_base_url`` / ``_owner`` /
     ``_get_worker_capability_token``).
@@ -2159,9 +2159,12 @@ class JobContext(_PublisherMixin, RequestContext[GenerationDefaults]):
     ``@endpoint`` and priced, with zero body edits. It is enforced by a test
     that registers one body both ways and runs it under both harnesses.
 
-    This class is the MERGE of what used to be three sibling contexts —
-    ``ConversionContext`` + ``TrainingContext`` + ``DatasetContext``, which are
-    now thin aliases of it and die at th#2052. It carries:
+    This class is the MERGE of what used to be three sibling contexts, one per
+    producer KIND (pgw#1294 merged them, pgw#1306 deleted the names). It is now
+    the ONLY producer context: no kind selects a different class, because no
+    kind decides what a body may write — the ``@job``/``@endpoint`` declaration
+    does (``publishes`` / ``emits_media``), and the hub mints the write grant
+    off that declaration. It carries:
 
     * the publisher surface from ``_PublisherMixin`` — ``save_checkpoint`` /
       ``open_checkpoint_stream`` (and ``gen_worker.convert.publish_flavors``),
@@ -2307,11 +2310,13 @@ class JobContext(_PublisherMixin, RequestContext[GenerationDefaults]):
         self._emit_event("request.training_metric", payload)
 
 
-# The three producer contexts MERGED into JobContext (pgw#1294): they were
-# already the same class plus one helper each, and one surface is what makes a
-# body portable between @job and @endpoint. THIN ALIASES, deliberately and
-# temporarily — th#2052 re-authors the last producer endpoints as jobs and
-# deletes these three names whole. Nothing new should reference them.
-ConversionContext = JobContext
-DatasetContext = JobContext
-TrainingContext = JobContext
+# pgw#1306: `ConversionContext` / `DatasetContext` / `TrainingContext` are GONE.
+# pgw#1294 merged them into JobContext and left the three names as thin aliases
+# with a sentence naming th#2052 as executioner; th#2052 is a tensorhub commit
+# and cannot delete Python, so this is where the sentence is carried out. The
+# names never crossed a wire — `kind` is an author declaration read from local
+# source (`@endpoint(kind=...)`, validated against a closed set in
+# `discovery/validation.py`), and `execution_hints["kind"]` is outbound-only —
+# so there is no retired shape to refuse, only a name to stop exporting.
+# `tests/test_producer_context_cut_pgw1306.py` is the text fence that keeps it
+# out.

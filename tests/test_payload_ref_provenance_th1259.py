@@ -34,7 +34,7 @@ from gen_worker.executor import _map_exception
 from gen_worker.request_context import (
     REF_ORIGIN_PAYLOAD,
     REF_ORIGIN_PLATFORM,
-    ConversionContext,
+    JobContext,
 )
 
 BLOB_BYTES = b"real blob bytes"
@@ -87,8 +87,8 @@ def hub() -> Iterator[str]:
         srv.server_close()
 
 
-def _ctx(hub_url: str) -> ConversionContext:
-    ctx = ConversionContext(request_id="r-th1259")
+def _ctx(hub_url: str) -> JobContext:
+    ctx = JobContext(request_id="r-th1259")
     ctx._file_api_base_url = hub_url
     ctx._worker_capability_token = "test-token"
     return ctx

@@ -290,27 +290,53 @@ def test_a_keyed_record_still_lists(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_every_declared_kind_builds_its_own_context() -> None:
+def test_every_declared_kind_builds_the_right_context() -> None:
+    """RE-AUTHORED by pgw#1306. As written this asserted each kind built "its
+    own" context, which pgw#1294 had already made vacuous — three of the four
+    producer bases were the same class under three names, so the test passed
+    while saying nothing. The real property is the opposite one: EVERY producer
+    kind builds the SAME class."""
     from gen_worker.cli.local_context import (
-        LOCAL_CONTEXT_KINDS, build_local_context,
+        LOCAL_CONTEXT_KINDS, LocalJobContext, build_local_context,
     )
-    from gen_worker.request_context import (
-        ConversionContext, DatasetContext, JobContext, TrainingContext,
-    )
+    from gen_worker.request_context import JobContext, RequestContext
 
-    expected = {
-        "inference": None,
-        "conversion": ConversionContext,
-        "eval": ConversionContext,
-        "dataset": DatasetContext,
-        "training": TrainingContext,
-        "job": JobContext,
-    }
-    assert set(LOCAL_CONTEXT_KINDS) == set(expected)
-    for kind, base in expected.items():
-        ctx = build_local_context(kind=kind)
-        if base is not None:
-            assert isinstance(ctx, base), kind
+    producer_kinds = {"conversion", "eval", "dataset", "training", "job"}
+    assert set(LOCAL_CONTEXT_KINDS) == producer_kinds | {"inference"}
+
+    built = {k: build_local_context(kind=k) for k in producer_kinds}
+    # One class, not five. `set` of one is the whole assertion.
+    assert {type(c) for c in built.values()} == {LocalJobContext}
+    for kind, ctx in built.items():
+        assert isinstance(ctx, JobContext), kind
+
+    inference = build_local_context(kind="inference")
+    assert isinstance(inference, RequestContext)
+    assert not isinstance(inference, JobContext)
+
+
+def test_allow_publish_reaches_materialize_blob_for_every_producer_kind() -> None:
+    """pgw#1306's red arm, kept as a fence. Before the collapse the three
+    kind-specific local contexts disagreed about this exact question: measured
+    on `b7a9345a`, `conversion` honored `--allow-publish`, `dataset` had a
+    near-copy of the stub that ignored it, and `training` overrode nothing at
+    all — so `gen-worker run` on a training endpoint reached the REAL
+    hub-backed `_PublisherMixin.materialize_blob` in the loop whose purpose is
+    to not have a hub. Nobody chose that; it fell out of which producer-kind
+    class each local subclass happened to sit on."""
+    from gen_worker.cli.local_context import LocalJobContext, build_local_context
+
+    impls = {}
+    for kind in ("conversion", "eval", "dataset", "training", "job"):
+        ctx = build_local_context(kind=kind, allow_publish=True)
+        # `getattr`, not `type(ctx).materialize_blob`: the factory is declared
+        # to return `RequestContext`, which has no such attribute — and that
+        # the producer arms DO is exactly what is under test here.
+        impls[kind] = getattr(type(ctx), "materialize_blob")
+    # One implementation, and it is the local-CAS stub — not the mixin's.
+    assert set(impls.values()) == {LocalJobContext.materialize_blob}
+    for kind, fn in impls.items():
+        assert "_local_allow_publish" in fn.__code__.co_names, kind
 
 
 def test_an_unknown_kind_refuses_instead_of_getting_a_base_context() -> None:

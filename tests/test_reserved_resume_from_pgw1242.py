@@ -255,9 +255,9 @@ def test_inference_kind_ignores_reserved_resume_from(tmp_path: Path) -> None:
 
 def test_producer_ctx_resume_from_state_is_independent() -> None:
     """Setting one reserved path never moves another."""
-    from gen_worker.request_context import ConversionContext
+    from gen_worker.request_context import JobContext
 
-    ctx = ConversionContext(
+    ctx = JobContext(
         request_id="r1",
         source_info={"ref": "acme/dit-base"},
         candidate_info={"ref": "acme/dit-candidate"},

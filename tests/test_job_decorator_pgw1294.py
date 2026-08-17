@@ -98,10 +98,8 @@ def test_one_body_carries_both_declarations() -> None:
 def test_job_context_is_a_superset_of_the_producer_endpoint_context() -> None:
     """Promotion must be a redeploy, not a rewrite: every name a producer
     endpoint handler may use has to exist on JobContext, under that name."""
-    from gen_worker.request_context import ConversionContext, JobContext as JC
+    from gen_worker.request_context import JobContext as JC
 
-    # The three producer contexts merged (they are aliases until th#2052).
-    assert ConversionContext is JC
     for name in (
         "mktemp", "checkpoint_dir", "resolve_dataset", "dataset_paths",
         "save_checkpoint", "open_checkpoint_stream", "cancelled",

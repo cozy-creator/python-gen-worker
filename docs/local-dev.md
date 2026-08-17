@@ -169,7 +169,7 @@ The `.gen-worker-run/` directory is throwaway. Add it to `.gitignore` /
 Checkpoint publishing goes through `gen_worker.convert.publish_flavors(ctx,
 flavors)`, which talks to tensorhub directly using the worker capability
 token — with no token configured (plain local runs) it fails loudly
-instead of pretending to publish. `ConversionContext.materialize_blob`
+instead of pretending to publish. `JobContext.materialize_blob`
 is stubbed against the local CAS by default; pass `--allow-publish` to
 call the real tensorhub API (useful for round-tripping against a dev
 tensorhub).

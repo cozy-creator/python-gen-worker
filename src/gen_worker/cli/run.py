@@ -120,7 +120,7 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
     p.add_argument(
         "--allow-publish", action="store_true",
         help=(
-            "Allow ConversionContext.materialize_blob to call the real "
+            "Allow JobContext.materialize_blob to call the real "
             "tensorhub APIs. Default: stubbed against the local CAS."
         ),
     )

@@ -118,7 +118,7 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
     )
     p.add_argument(
         "--allow-publish", action="store_true",
-        help="Allow ConversionContext producer RPCs to hit real tensorhub.",
+        help="Allow JobContext producer RPCs to hit real tensorhub.",
     )
     p.add_argument(
         "--no-stdin", action="store_true",
