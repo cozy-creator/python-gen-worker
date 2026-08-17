@@ -90,6 +90,17 @@ from . import (
     serve_posture, settings_authority,
 )
 from .api.errors import FatalError, RetryableError
+# pgw#1331: the READ half of this module — the marker readers and the toolchain
+# probe — lives in `compile_facts`, which imports nothing above `hostfacts`.
+# Re-exported here (not re-implemented) so `compile_cache.runtime_key` is that
+# one function and every caller, and every test that monkeypatches it on this
+# module, is unaffected. Writing the marker is still this module's alone.
+from .compile_facts import (
+    MARKER_ATTR,
+    is_compile_armed,
+    runtime_key,
+    sku_slug,
+)
 from .models import w8a8_lora
 from .models.loading import pipeline_weight_lane
 from .models.memory import low_vram_mode
@@ -118,7 +129,10 @@ logger = logging.getLogger(__name__)
 # schema without gratuitously invalidating proven non-W8A8 cells. New W8A8
 # consumers require those fields; checkpoint bytes remain deliberately absent.
 SEMANTIC_TAG_FORMAT = 2
-_MARKER_ATTR = "_cozy_compile"
+#: The marker's one definition is `compile_facts.MARKER_ATTR`; this is the
+#: private spelling four existing readers already use. An alias assignment,
+#: not a second literal.
+_MARKER_ATTR = MARKER_ATTR
 _LOCK_TYPE = type(threading.Lock())
 
 # ---------------------------------------------------------------------------
@@ -643,56 +657,6 @@ def _record_guard_miss(
 # pgw#1034 had already ruled the two sets deliberately different. The cell key's
 # axes are `torchcg.REQUIRED_AXES`; this module's job is `runtime_key()`,
 # the ONE probe that states them.
-
-
-def sku_slug(gpu_name: str) -> str:
-    """Deterministic SKU slug: ``NVIDIA GeForce RTX 4090`` -> ``rtx-4090``,
-    ``NVIDIA H100 80GB HBM3`` -> ``h100-80gb-hbm3``."""
-    s = str(gpu_name or "").lower()
-    for noise in ("nvidia", "geforce"):
-        s = s.replace(noise, " ")
-    out = "".join(c if c.isalnum() else "-" for c in s).strip("-")
-    while "--" in out:
-        out = out.replace("--", "-")
-    return out
-
-
-def runtime_key() -> Dict[str, str]:
-    """The consumer-side half of the cache key, probed from this process.
-
-    pgw#1034: no ``cuda_driver``. gw#577 ruled it a host-lottery axis and took
-    it out of every key and every gate; what was left was a fact nothing read,
-    bought with a ``libcuda.so.1`` dlopen and a ``cuInit(0)`` on each call —
-    and this function is called per ``verify()``, not once.
-    """
-    key = {
-        "sku": "", "sm": "", "torch": "", "triton": "", "cuda": "",
-        "image_digest": os.environ.get("WORKER_IMAGE_DIGEST", "").strip(),
-    }
-    try:
-        import torch
-
-        key["torch"] = str(torch.__version__)
-        key["cuda"] = str(torch.version.cuda or "")
-        if cuda_ready():
-            key["sku"] = sku_slug(torch.cuda.get_device_name(0))
-            major, minor = torch.cuda.get_device_capability(0)
-            key["sm"] = f"sm_{major}{minor}"
-    except Exception:
-        # pgw#657: silently leaving these EMPTY manufactures a different cell
-        # key than every healthy pod computes — i.e. a guaranteed cache miss
-        # (and a mint) whose cause is invisible. Say it.
-        logger.warning(
-            "compile-cache: torch/CUDA runtime-key probe failed — cell identity "
-            "falls back to empty sku/sm/torch fields; expect a cache MISS",
-            exc_info=True)
-    try:
-        import triton
-
-        key["triton"] = str(triton.__version__)
-    except Exception:
-        logger.debug("compile-cache: triton version unavailable", exc_info=True)
-    return key
 
 
 def compile_target_block() -> str:
@@ -2791,68 +2755,6 @@ def cache_hit_count(pipeline: Any) -> int:
 def cache_miss_count(pipeline: Any) -> int:
     """FX-graph cache misses observed inside this exact pipeline's guard."""
     return _proof_count(pipeline, "cache_misses")
-
-
-def is_compile_armed(pipeline: Any) -> bool:
-    """True when this pipeline is serving COMPILED code right now.
-
-    pgw#1010: the JIT INTAKE arm names no artifact, so ``active_compile_ref``
-    is empty for a pipeline that is nonetheless serving compiled code. This is
-    the fact that separates it from true eager, and ``serving_mode`` reads it
-    per request — hence the cheap attribute probe rather than a target walk.
-
-    A guard that permanently degraded this target to eager (``_guarded``'s
-    fallback) clears the answer even though the wrapper is still installed:
-    reporting a degraded pipeline as compiled is the same lie as reporting an
-    unproven cell as adopted.
-    """
-    marker = getattr(pipeline, _MARKER_ATTR, None)
-    if marker is None:
-        return False
-    signal = marker.get("failure_signal") if isinstance(marker, dict) else None
-    if isinstance(signal, dict) and signal.get("degraded"):
-        return False
-    return True
-
-
-def graph_break_reason(pipeline: Any) -> str:
-    """Torch's verbatim fullgraph refusal for this pipeline, or "".
-
-    Non-empty means the declared region did not trace whole and this process
-    permanently degraded it to eager. The executor turns it into the
-    ``graph_break`` eager posture, so every request the pod serves afterwards
-    names the real cause instead of an empty ``fallback_reason``."""
-    marker = getattr(pipeline, _MARKER_ATTR, None)
-    signal = marker.get("failure_signal") if isinstance(marker, dict) else None
-    if isinstance(signal, dict):
-        return str(signal.get("graph_break") or "")
-    return ""
-
-
-def degrade_reason(pipeline: Any) -> str:
-    """pgw#1093: why this ARMED pipeline is permanently eager, or "".
-
-    Non-empty means `apply()` DID install the compiled callables and a served
-    call then failed permanently. That is a different fact from "no target
-    was ever installed", and before this the two were the same reading:
-    `is_compile_armed` False, `metrics.lane=…+eager`,
-    `fallback_reason=uncompiled`. The executor turns this into a
-    `compiled_degraded` eager posture so the distinction survives to the wire.
-    """
-    marker = getattr(pipeline, _MARKER_ATTR, None)
-    signal = marker.get("failure_signal") if isinstance(marker, dict) else None
-    if isinstance(signal, dict):
-        return str(signal.get("degrade_reason") or "")
-    return ""
-
-
-def declared_range_refusal(pipeline: Any) -> str:
-    """The typed declared-range refusal for this pipeline, or ""."""
-    marker = getattr(pipeline, _MARKER_ATTR, None)
-    signal = marker.get("failure_signal") if isinstance(marker, dict) else None
-    if isinstance(signal, dict):
-        return str(signal.get("declared_range_exceeded") or "")
-    return ""
 
 
 def unwrap(pipeline: Any) -> bool:

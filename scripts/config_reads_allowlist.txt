@@ -47,7 +47,7 @@
 # ---------------------------------------------------------------------------
 # VIOLATION — the burn-down list. Each names its blocker.
 # ---------------------------------------------------------------------------
-src/gen_worker/compile_cache.py::WORKER_IMAGE_DIGEST VIOLATION WORKER_IMAGE_DIGEST is a Settings field AND a compile-cache KEY AXIS. runtime_key() has 21 callers and no settings; needs an install-once image identity. Latent not live: production pods receive this via env so the loader and the raw read agree - it diverges only on a deployment configuring it from yaml/.env/secrets, where the cell would silently key on "".
+src/gen_worker/compile_facts.py::WORKER_IMAGE_DIGEST VIOLATION WORKER_IMAGE_DIGEST is a Settings field AND a compile-cache KEY AXIS. runtime_key() has 21 callers and no settings; needs an install-once image identity. Latent not live: production pods receive this via env so the loader and the raw read agree - it diverges only on a deployment configuring it from yaml/.env/secrets, where the cell would silently key on "".
 src/gen_worker/models/store.py::RUNPOD_PROVIDER VIOLATION TENSORHUB_FILL_SOURCE_DIR has a Settings field; ModelStore.__init__ takes no Settings. Fix with the same pass that threads settings into the store (pgw#1206 C1 moved the read; it did not change it).
 src/gen_worker/postmortem.py::GEN_WORKER_BOOT_RECORD VIOLATION GEN_WORKER_BOOT_RECORD now HAS a field (boot_record_path). BOOT_RECORD_PATH is computed at IMPORT, before any process entry can have loaded config; needs an install-once path.
 src/gen_worker/postmortem.py::TENSORHUB_CACHE_DIR VIOLATION TENSORHUB_CACHE_DIR, same import-time constant, same fix.

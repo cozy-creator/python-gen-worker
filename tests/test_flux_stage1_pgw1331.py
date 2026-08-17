@@ -745,3 +745,190 @@ def test_mint_family_packs_one_artifact_per_declared_variant(
         {"resolution": 1024},
     ]
     family_mint.assert_matches_export(minted, Flux1Dev.EXPORT)
+
+
+# ------------------------------------------------- the WHOLE role, not a surface
+#
+# pgw#1331's owed row 3, closed as far as it honestly goes and DECLARED for the
+# rest. The model-free claim covered 14 roots — the family surface — because two
+# package roots dragged the eager-capable worker's guts into any closure that
+# named them. Both are PEP 562 lazy now and the claim covers 30 of 39; the nine
+# that remain are a CHECKED ledger, not prose.
+
+
+def test_the_package_roots_execute_no_imports_at_all() -> None:
+    """``gen_worker`` and ``gen_worker.models`` import nothing when imported.
+
+    This is the property, stated where a reader can check it: the whole cut is
+    that executing a package root costs nothing. An eager re-export block would
+    show up here as a non-empty required set, one step before the fence reports
+    the ten modules it drags in.
+    """
+
+    fence = _fence()
+    for module in ("gen_worker", "gen_worker.models"):
+        path = fence._module_path(module)
+        assert path is not None
+        required, guarded, libraries = fence._imports(path, module)
+        assert required == set(), f"{module} imports {sorted(required)} at module scope"
+        assert guarded == set()
+        # `importlib` and `typing` only — nothing that costs anything.
+        assert libraries <= {"importlib", "typing", "__future__"}, sorted(libraries)
+
+
+@pytest.mark.parametrize("package", ["gen_worker", "gen_worker.models"])
+def test_the_lazy_package_index_resolves_every_name_it_promises(package: str) -> None:
+    """PEP 562 that cannot produce a name is a rename waiting to be found in prod.
+
+    ``__all__`` is the promise; ``__getattr__`` is what keeps it. A missing row
+    in the table raises AttributeError at the call site of a consumer we do not
+    own, which is the one failure mode this shape can introduce.
+    """
+
+    import importlib
+
+    module = importlib.import_module(package)
+    for name in module.__all__:
+        assert getattr(module, name) is not None, f"{package}.{name} does not resolve"
+    assert set(module.__all__) <= set(dir(module))
+    with pytest.raises(AttributeError):
+        module.a_name_this_package_never_exported  # type: ignore[attr-defined]
+
+
+def test_importing_the_serve_surface_loads_no_model_library() -> None:
+    """The static claim, observed in a FRESH interpreter rather than asserted.
+
+    The test process has already imported everything, so this can only be seen
+    from outside — same argument as pgw#1331's subprocess proof, one layer up:
+    the thing imported here is the serve ROLE's own modules, not the family
+    surface.
+    """
+
+    program = (
+        "import sys\n"
+        "import gen_worker\n"
+        "import gen_worker.models\n"
+        "import gen_worker.serve_posture\n"
+        "import gen_worker.compile_facts\n"
+        "import gen_worker.model.catalog.flux1_dev_serve\n"
+        "leaked = sorted(n for n in ('diffusers', 'transformers', "
+        "'gen_worker.view', 'gen_worker.models.loading', "
+        "'gen_worker.models.residency') if n in sys.modules)\n"
+        "print(','.join(leaked))\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", program], capture_output=True, text=True, check=True
+    )
+    assert out.stdout.strip() == "", f"the serve surface loaded {out.stdout.strip()}"
+
+
+def test_the_model_bearing_ledger_is_exact_and_total() -> None:
+    """Every serve-role module is either asserted model-free or named as not.
+
+    Total by splice, disjoint by check. A module cannot fall out of both claims
+    by being edited into a third list (pgw#824).
+    """
+
+    fence = _fence()
+    free = set(role.MODEL_FREE_MODULES)
+    bearing = set(role.MODEL_BEARING_SERVE_MODULES)
+    assert free | bearing == set(role.SERVE_ROLE_MODULES)
+    assert free & bearing == set()
+    assert tuple(fence._declared_tuple("MODEL_BEARING_SERVE_MODULES")) == \
+        role.MODEL_BEARING_SERVE_MODULES
+    assert fence.check_bearing_ledger(
+        role.MODEL_BEARING_SERVE_MODULES, role.MODEL_FREE_MODULES,
+        role.FORBIDDEN_LIBRARIES) == []
+
+
+def test_red_a_landed_cut_left_in_the_bearing_ledger_is_refused() -> None:
+    """The ledger only shrinks. A row that got fixed goes RED until it moves.
+
+    This is the arm that stops the residue becoming an allowlist — the failure
+    mode of every owed-cut comment this repo has ever shipped (pgw#1176).
+    """
+
+    fence = _fence()
+    problems = fence.check_bearing_ledger(
+        ("gen_worker.serve.role",), (), role.FORBIDDEN_LIBRARIES)
+    assert [line for line in problems if "That cut has LANDED" in line]
+
+
+def test_red_a_module_claimed_both_ways_is_refused() -> None:
+    """One module, one claim."""
+
+    fence = _fence()
+    problems = fence.check_bearing_ledger(
+        ("gen_worker.aot_serve",), ("gen_worker.aot_serve",), role.FORBIDDEN_LIBRARIES)
+    assert [line for line in problems if "BOTH" in line]
+
+
+def test_serving_mode_does_not_import_the_arming_brain() -> None:
+    """A per-request REPORTING module, importing 3,100 lines that load weights.
+
+    ``serving_mode`` is still in the bearing ledger — it reaches a model library
+    through ``aot_serve`` — so the fence's own walk cannot hold this separation
+    yet. It is asserted directly here so the cut cannot be undone silently
+    while that is true, and it is the first half of the bearing ledger's cause 1.
+    """
+
+    fence = _fence()
+    path = fence._module_path("gen_worker.serving_mode")
+    assert path is not None
+    required, guarded, _ = fence._imports(path, "gen_worker.serving_mode")
+    assert "gen_worker.compile_cache" not in (required | guarded)
+    assert "gen_worker.compile_facts" in required
+
+
+def test_the_compile_facts_are_one_definition_not_two() -> None:
+    """``compile_cache`` re-exports them; it does not re-implement them.
+
+    Two copies of ``runtime_key`` is two cell identities (pgw#824's drift rule
+    applied to a probe rather than to a list), and every test that monkeypatches
+    ``compile_cache.runtime_key`` would silently stop covering the real caller.
+    """
+
+    from gen_worker import compile_cache, compile_facts
+
+    for name in ("runtime_key", "sku_slug", "is_compile_armed"):
+        assert getattr(compile_cache, name) is getattr(compile_facts, name), name
+    assert compile_cache._MARKER_ATTR is compile_facts.MARKER_ATTR
+    # The three readers `compile_cache` does NOT re-export: the executor asks
+    # `compile_facts` for them directly, so there is no second address at all.
+    for name in ("graph_break_reason", "degrade_reason", "declared_range_refusal"):
+        assert not hasattr(compile_cache, name), name
+        assert getattr(compile_facts, name) is not None
+    # …and the executor reads them from that one address.
+    fence = _fence()
+    path = fence._module_path("gen_worker.executor")
+    assert path is not None
+    required, _, _ = fence._imports(path, "gen_worker.executor")
+    assert "gen_worker.compile_facts" in required
+
+
+def test_the_marker_readers_still_read_the_marker() -> None:
+    """Moved, not rewritten: the four readers against a hand-built marker."""
+
+    from gen_worker import compile_facts
+
+    class _Pipe:
+        pass
+
+    bare = _Pipe()
+    assert compile_facts.is_compile_armed(bare) is False
+    assert compile_facts.graph_break_reason(bare) == ""
+
+    armed = _Pipe()
+    setattr(armed, compile_facts.MARKER_ATTR, {"originals": ()})
+    assert compile_facts.is_compile_armed(armed) is True
+
+    degraded = _Pipe()
+    setattr(degraded, compile_facts.MARKER_ATTR, {"failure_signal": {
+        "degraded": True, "graph_break": "guard on x",
+        "degrade_reason": "cuda oom", "declared_range_exceeded": "steps=99",
+    }})
+    assert compile_facts.is_compile_armed(degraded) is False
+    assert compile_facts.graph_break_reason(degraded) == "guard on x"
+    assert compile_facts.degrade_reason(degraded) == "cuda oom"
+    assert compile_facts.declared_range_refusal(degraded) == "steps=99"
+    assert compile_facts.sku_slug("NVIDIA GeForce RTX 4090") == "rtx-4090"

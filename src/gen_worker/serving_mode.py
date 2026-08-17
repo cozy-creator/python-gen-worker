@@ -30,7 +30,12 @@ from functools import lru_cache
 from typing import Any, Optional, Tuple
 
 from . import aot_serve
-from . import compile_cache
+# pgw#1331: the two FACTS this module reads, not the 3,100-line arming brain
+# that also writes them. `compile_cache` imports `models.loading`/`memory`/
+# `w8a8_lora`, so importing it here put diffusers and transformers in the
+# adopt-only serve role's static closure — through a per-request REPORTING
+# module whose own docstring promises it needs no pipeline, GPU or hub.
+from . import compile_facts
 from . import serve_posture
 from .cell_adopt import EagerPhase
 
@@ -135,7 +140,7 @@ def classify_mode(active_compile_ref: str, pipeline: Any = None) -> str:
     """
     ref = str(active_compile_ref or "").strip()
     if not ref:
-        if pipeline is not None and compile_cache.is_compile_armed(pipeline):
+        if pipeline is not None and compile_facts.is_compile_armed(pipeline):
             return MODE_JIT_CELL
         return MODE_EAGER
     try:
@@ -165,7 +170,7 @@ def normalize_sm(raw: str) -> str:
 def detect_sm() -> str:
     """This device's compute capability, or "" when there is no CUDA device.
 
-    Reads ``compile_cache.runtime_key()`` — the same source the cell key is
+    Reads ``compile_facts.runtime_key()`` — the same source the cell key is
     built from, so a request's ``sm`` and the cell it ran is keyed by can never
     disagree.
 
@@ -176,7 +181,7 @@ def detect_sm() -> str:
     a cache with a staleness question. ``detect_sm.cache_clear()`` for tests.
     """
     try:
-        return normalize_sm(str(compile_cache.runtime_key().get("sm") or ""))
+        return normalize_sm(str(compile_facts.runtime_key().get("sm") or ""))
     except Exception:
         logger.debug("sm detection failed", exc_info=True)
         return ""

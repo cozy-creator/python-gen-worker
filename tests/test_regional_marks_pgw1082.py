@@ -32,6 +32,8 @@ import pytest
 import torch
 
 from gen_worker import compile_cache as cc
+# pgw#1331: the marker READERS live beside the marker's definition.
+from gen_worker import compile_facts
 
 
 class _Dim:
@@ -221,7 +223,7 @@ def test_a_declared_range_refusal_is_readable_off_the_pipeline():
     setattr(pipeline, cc._MARKER_ATTR, {"failure_signal": signal,
                                         "originals": (), "regional_mods": ()})
     assert guarded() == "eager"
-    assert "sequence" in cc.declared_range_refusal(pipeline)
+    assert "sequence" in compile_facts.declared_range_refusal(pipeline)
     assert cc.is_compile_armed(pipeline) is False
 
 
