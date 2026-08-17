@@ -37,7 +37,15 @@ from mint_rig.rail import Rail, RailTripped  # noqa: E402
 from mint_rig.row import Teardown  # noqa: E402
 from mint_rig.runpod import PodNotFound, RunpodRest  # noqa: E402
 from mint_rig.transport import Result, SshTransport  # noqa: E402
-from mint_rig.workload import POD_ROOT, Upload, Workload, install_sdist, mint_model  # noqa: E402
+from mint_rig.workload import (  # noqa: E402
+    POD_REPO,
+    POD_ROOT,
+    Upload,
+    Workload,
+    install_sdist,
+    mint_model,
+    sm_probe,
+)
 
 # --------------------------------------------------------------------------- #
 # fakes: the PROVIDER, not the rig
@@ -978,6 +986,51 @@ def test_a_missing_ssh_key_is_a_REFUSAL_with_a_row_not_a_traceback(
     assert row.verdict == "refused" and row.failed_stage == "create"
     assert "no RunPod ssh public key" in row.detail
     assert pods.created_bodies == [], "nothing was rented"
+
+
+# --------------------------------------------------------------------------- #
+# 8. pgw#1352 / pgw#1348 rows 1-6 — the sm-clearance probe
+# --------------------------------------------------------------------------- #
+
+
+def test_the_probe_ships_a_TREE_and_proves_it_arrived_before_paying_for_a_compile(
+    tmp_path: Path,
+) -> None:
+    """`micro_mint_rig` puts `<repo>/src` and `<repo>/tests` ahead of
+    site-packages, so the code under test is the TREE; the wheel beside it only
+    satisfies dependencies."""
+    archive = tmp_path / "repo.tar.gz"
+    archive.write_bytes(b"tarball")
+    workload = sm_probe(archive)
+    assert any(u.local == archive for u in workload.uploads)
+    untar = [line for line in workload.setup if "tar -xzf" in line]
+    assert untar and POD_REPO in untar[0]
+    guard = [line for line in workload.setup if line.startswith("test -f")]
+    assert guard and "micro_mint_rig.py" in guard[0] and "examples/micro-diffusion" in guard[0]
+    # A cell that was never written is not a cleared sm, whatever the log said.
+    assert workload.required_artifacts == (f"{POD_ROOT}/probe.json",)
+
+
+def test_the_probe_needs_no_hub_which_is_why_these_rows_are_buyable_today(tmp_path: Path) -> None:
+    """The micro vehicle publishes through an IN-PROCESS `LocalCellHub` and
+    adopts in a second OS process on the same pod, so one rental proves compile,
+    re-use and parity with nothing external to be blocked on. pgw#1348 gates
+    every other leg A on a hub wire proof; this row is exempt by construction."""
+    workload = sm_probe(tmp_path / "repo.tar.gz")
+    assert "--vehicle micro" in workload.command and "--device cuda" in workload.command
+    assert "--json" in workload.command, "the row IS the report; no report, no row"
+    assert "nice -n 19" in workload.command
+    for path in ("/root/.cache/torchinductor_root", POD_REPO):
+        assert path in workload.progress_paths
+
+
+def test_every_sm_class_the_gauntlet_names_has_a_card_set() -> None:
+    """pgw#1348 rows 1-6 are sm_86, sm_89, sm_80, sm_90, sm_100, sm_120."""
+    for slug, sm in (("sm86", "8.6"), ("sm89", "8.9"), ("sm80", "8.0"),
+                     ("sm90", "9.0"), ("sm100", "10.0"), ("sm120", "12.0")):
+        card = cards_mod.pick(slug)
+        assert card.sm_expected == sm
+        assert card.gpu_type_ids, "a pick names a SET; there is no capacity query to consult"
 
 
 def test_unknown_card_names_the_ones_that_exist() -> None:
