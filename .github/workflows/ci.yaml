@@ -303,8 +303,11 @@ jobs:
       # merely unchecked — `mypy tests` REFUSED TO START on a duplicate
       # `conftest` module, so 486 test modules had zero static coverage, which
       # is where the doubles that lied about production contracts lived.
-      - name: Type check (mypy, strict by default, src + tests)
-        run: uv run mypy src/gen_worker tests tests_v2
+      # pgw#1347 adds `scripts/mint_rig`: the pod driver is control-plane code
+      # that must NOT ship in the wheel, but it spends money, so it is checked
+      # here rather than being exempt by living outside src/.
+      - name: Type check (mypy, strict by default, src + tests + the pod rig)
+        run: uv run mypy src/gen_worker tests tests_v2 scripts/mint_rig
 
       # GATING (pgw#1202): `strict = true` cannot silently stop being true, but
       # a per-module exemption list can grow one reasonable-looking name at a
@@ -315,7 +318,7 @@ jobs:
 
       - name: Lint
         continue-on-error: true  # Lint debt (mostly worker.py, being rewritten) — visible in logs, doesn't block CI.
-        run: uv run ruff check src/gen_worker
+        run: uv run ruff check src/gen_worker scripts/mint_rig
 
       # GATING (no continue-on-error): a bare HTTP call site is the gw#456
       # forever-hang reintroduced. hf_hub network use goes through

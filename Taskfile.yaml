@@ -94,6 +94,21 @@ tasks:
     cmds:
       - nice -n 10 uv run --extra dev pytest tests/test_micro_mint_rig_pgw978.py -p no:randomly -rs
 
+  rig:pod:
+    desc: |
+      pgw#1347 — THE POD MINT-RIG. Rent a pod, run one named command, bank a row.
+      This is the primitive; the compile happens on the pod, never on this box.
+
+      A spend rail is MANDATORY (--rail, in dollars) and the kill command is
+      written to ~/.cache/cozy-mint-rig/killset BEFORE the pod is created.
+
+        task rig:pod -- mint --gpu a40 --rail 2.00 --lane pgw1331-clip \
+          --target gen_worker.family.catalog.flux1_dev:FLUX1_DEV --runner clip
+        task rig:pod -- sweep         # live pods vs our records; exit 1 on a leak
+        task rig:pod -- terminate --pod <id>
+    cmds:
+      - nice -n 19 uv run python scripts/pod_rig.py {{.CLI_ARGS}}
+
   probe:sync:
     desc: |
       pgw#980 — rsync src/gen_worker onto a held probe pod and respawn its

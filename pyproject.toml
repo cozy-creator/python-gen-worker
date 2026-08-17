@@ -158,8 +158,11 @@ strict = true
 # `conftest` module name and reports nothing at all.
 explicit_package_bases = true
 # …and this keeps src/ modules resolving as `gen_worker.x`, not `src.gen_worker.x`,
-# which is what every per-module override below is keyed on.
-mypy_path = "src"
+# which is what every per-module override below is keyed on. `scripts` joins it
+# for pgw#1347's `mint_rig` package: the pod driver is control-plane code that
+# must NOT ship in the wheel (no pod needs the thing that rents pods), but it
+# spends money and it is born strict like everything else.
+mypy_path = "src:scripts"
 
 # Generated protobuf modules: no source of ours to fix.
 [[tool.mypy.overrides]]
