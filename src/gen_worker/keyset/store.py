@@ -1,28 +1,58 @@
 """Where a ``cg-keyset-v1`` document lives, and who may write one.
 
-Two kinds of location, and the difference is who derived the hashes:
+Three kinds of location, and the difference is who derived the hashes:
 
 * **Shipped roots** — read-only, produced by the MINT LANE. The baked image's
   ``/app/.tensorhub/`` (beside ``endpoint.lock``, the same place the decode-set
   and execution-lane blocks are stamped) and an explicit
-  ``GEN_WORKER_CG_KEYSET`` path. This is what makes a FRESH pod — empty cache,
-  no volume, first boot of the release — skip its traces, which the pod-local
-  memo never could.
+  ``GEN_WORKER_CG_KEYSET`` path.
+* **The DURABLE root** (pgw#1353) — ``$GEN_WORKER_LOCAL_CELLS_DIR/keysets``,
+  written by a trace some pod of THIS endpoint ran. Read after the shipped
+  roots and before the pod's own cache, and written whenever the cache is.
 * **The pod's own cache** — written by a trace THIS machine ran (§4.28's
   compile-once-run-forever promise for cozy-local reads the same document
-  through the same closure digest). Read after the shipped roots and the only
-  root anything writes.
+  through the same closure digest).
 
-Both are the same document type. A key set is trusted because its closure digest
-matches what this pod's code would trace, never because of where it was found —
-so the two locations need no separate grammar, no separate parser and no separate
-version ladder.
+All three are the same document type. A key set is trusted because its closure
+digest matches what this pod's code would trace, never because of where it was
+found — so the locations need no separate grammar, no separate parser and no
+separate version ladder.
+
+WHY THE DURABLE ROOT EXISTS, AND WHY IT IS NOT A FOURTH IDEA (pgw#1353)
+----------------------------------------------------------------------
+pgw#1327 offered a fresh pod exactly two ways to skip its traces: a document
+baked into the image, or a document this container wrote earlier. **Neither
+reaches a fleet pod.** The bake cannot be produced — the closure digest binds
+the checkpoint ref (:mod:`gen_worker.keyset.closure`), which is a deploy-time
+hub pick the image build cannot state. And the cache is
+``tensorhub_cache_dir or tempfile.gettempdir()``, which the hub deliberately
+leaves unset (th#850), so **the document a pod spends 805 s deriving is written
+to /tmp and thrown away**. Measured on four sdxl pods: `keys_from=traced`,
+778-833 s, every time, forever.
+
+The platform already solved the identical problem for compiled graphs one layer
+down. th#1813 has the hub place ``GEN_WORKER_LOCAL_CELLS_DIR`` on EVERY create,
+pointing at the most durable storage the provider can back: the endpoint
+NETWORK volume (survives the pod, shared by every pod of the endpoint) when one
+is attached, else the pod's volume disk (survives a container restart). A key
+set is the same KIND of artifact as the cells beside it — derived by a trace
+this hardware ran, addressed by a digest that fails safe on drift, worthless to
+anyone whose closure differs — so it belongs on the same root, in its own
+subtree.
+
+**It is an optimization, never a gate.** A pod with no root set, an unwritable
+volume or a corrupt document still boots: the read falls through to the cache
+and then to the deriver, exactly as before. That property is tested
+(``test_keyset_durable_root_pgw1353``) rather than asserted, because the whole
+value of the root is that the 805 s path is still THERE underneath it.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,22 +68,46 @@ from .identifiers import ClassHash, ClosureDigest, GraphClassName, KeySetError
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "DURABLE_KEYSET_DIRNAME",
     "ENV_KEYSET_PATH",
+    "ENV_LOCAL_CELLS_DIR",
     "IMAGE_KEYSET_DIR",
     "KeySetHit",
     "assert_honest",
     "class_hashes",
+    "durable_root",
     "invalidate",
     "lookup",
     "read_document",
     "shipped_roots",
     "write_closure",
+    "writable_roots",
 ]
 
 #: An explicit key set: a ``cg-keyset-v1.json`` file, or a directory holding one.
 #: Carries a VALUE (where the document is), never a decision — a key set found
 #: here is admitted by exactly the same closure match as any other.
 ENV_KEYSET_PATH = "GEN_WORKER_CG_KEYSET"
+
+#: th#1813's platform-placed durable store root. RESTATED, never imported from
+#: :mod:`gen_worker.local_cell_store`, for the same reason
+#: :data:`IMAGE_KEYSET_DIR` is restated: that module imports the vendored TCG
+#: package, and reading a key set must not drag a tracer's import graph onto a
+#: serve pod. ``test_the_durable_root_name_matches_the_cell_store`` pins the two
+#: spellings together so the restatement cannot drift.
+#:
+#: A PATH, chosen by the party that knows the hardware (th#1813: *"where an
+#: untrusted pod keeps its compiled graphs is a hardware fact the hub holds and
+#: the code running on that pod does not"*) — never a behaviour switch. Its
+#: absence means "forget sooner", never "behave differently".
+ENV_LOCAL_CELLS_DIR = "GEN_WORKER_LOCAL_CELLS_DIR"
+
+#: The key set's own subtree under the durable root. NAMESPACED rather than
+#: sharing the root directly: ``local_cell_store`` owns ``aot-cells/`` there and
+#: addresses it by ``ck1`` key, and two tiers writing sibling files into one
+#: mount is how an operator ends up unable to say which tier a stray file
+#: belongs to.
+DURABLE_KEYSET_DIRNAME = "keysets"
 
 #: The baked-image location, beside ``endpoint.lock``
 #: (``gen_worker.entrypoint.MANIFEST_PATH``'s directory — restated rather than
@@ -91,6 +145,47 @@ def shipped_roots(
     return tuple(roots)
 
 
+def durable_root() -> Optional[Path]:
+    """The platform-placed durable key-set subtree, or ``None`` when unplaced.
+
+    ``None`` is an ordinary answer and not a degraded one: th#1813 places no
+    root on trusted hardware (which publishes to the hub CAS instead) and none
+    on a provider with no storage that outlives the container, and it writes the
+    refusal at create time. A pod that gets no root derives, uses the document
+    for its own boot, and forgets it — which is exactly what every pod does
+    today.
+    """
+    env = os.environ.get(ENV_LOCAL_CELLS_DIR, "").strip()
+    if not env:
+        return None
+    return Path(env).expanduser() / DURABLE_KEYSET_DIRNAME
+
+
+def writable_roots(cache_dir: Optional[Path]) -> Tuple[Tuple[Path, KeySource], ...]:
+    """Every root a derivation records into, in READ precedence order.
+
+    THE single ordering. ``lookup``'s non-shipped leg, ``class_hashes``'
+    honesty audit, ``write_closure`` and ``invalidate`` all walk this, so a
+    root that can be read is by construction a root that can be written and
+    invalidated. A row proven dishonest that survived in one of them because
+    only three of the four functions knew it existed is precisely the failure
+    this shape rules out.
+
+    Durable before cache: on a fleet pod the cache is ``/tmp`` and the durable
+    root is the endpoint's volume, so the shared answer wins over the
+    container-local one. They can only disagree by holding different closures —
+    the same closure digest is the same class set — so the order is about which
+    is more likely to ANSWER, never about which is more likely to be right.
+    """
+    roots: List[Tuple[Path, KeySource]] = []
+    durable = durable_root()
+    if durable is not None:
+        roots.append((durable, KeySource.DURABLE))
+    if cache_dir:
+        roots.append((Path(cache_dir), KeySource.MEMO))
+    return tuple(roots)
+
+
 def read_document(path: Path) -> KeySetDocument:
     """Parse one document. Raises :class:`KeySetError` on anything unreadable."""
     try:
@@ -120,9 +215,9 @@ def lookup(
             hit = _closure_from(path, digest, KeySource.SHIPPED)
             if hit is not None:
                 return hit
-    if cache_dir:
-        for path in _candidate_files(Path(cache_dir)):
-            hit = _closure_from(path, digest, KeySource.MEMO)
+    for root, source in writable_roots(cache_dir):
+        for path in _candidate_files(root):
+            hit = _closure_from(path, digest, source)
             if hit is not None:
                 return hit
     return None
@@ -144,71 +239,130 @@ def _closure_from(
 def class_hashes(
     digest: ClosureDigest, *, cache_dir: Optional[Path],
 ) -> Dict[GraphClassName, ClassHash]:
-    """This machine's OWN cached graph axis for ``digest``, or ``{}``.
+    """The graph axis a WRITABLE root would have answered for ``digest``, or ``{}``.
 
     The mint lane's honesty comparison reads through here, and it deliberately
-    ignores shipped roots: what is being audited is what this pod's cache would
-    have ANSWERED, and a shipped document is not this pod's claim.
+    ignores shipped roots: what is being audited is what a root this pod may
+    WRITE would have answered, and a shipped document is the mint lane's claim
+    rather than this pod's.
+
+    pgw#1353: that now includes the durable root, in ``lookup``'s own order, and
+    it has to. The audit's whole job is to catch a stored row whose class hashes
+    disagree with what a real mint traced; auditing only ``/tmp`` while the pod
+    ANSWERED from the endpoint's volume would leave a proven-dishonest row on
+    the shared volume, where every future pod of the endpoint would read it.
     """
-    if not cache_dir:
-        return {}
-    for path in _candidate_files(Path(cache_dir)):
-        try:
-            document = read_document(path)
-            closure = parse_closure(document, digest)
-        except KeySetError:
-            return {}
-        return closure.class_hashes
+    for root, _source in writable_roots(cache_dir):
+        for path in _candidate_files(root):
+            try:
+                document = read_document(path)
+                closure = parse_closure(document, digest)
+            except KeySetError:
+                break
+            return closure.class_hashes
     return {}
 
 
-def write_closure(
-    cache_dir: Optional[Path], digest: ClosureDigest, row: ClosureRow,
-) -> bool:
-    """Record one closure in THIS machine's cache. Best effort, never fatal."""
-    if not cache_dir:
-        return False
-    path = Path(cache_dir) / KEYSET_FILENAME
+def _publish(path: Path, document: KeySetDocument) -> None:
+    """Replace ``path`` with ``document``, atomically and CONCURRENCY-SAFELY.
+
+    The temp name carries a random suffix, and that is not decoration. The
+    durable root can be a network volume MOUNTED BY SEVERAL PODS OF THE SAME
+    ENDPOINT AT ONCE — which is the entire reason it is worth writing to — and
+    the fixed ``cg-keyset-v1.tmp`` this replaces is a name two pods would write
+    to simultaneously. ``os.replace`` is atomic, so the reader never sees a torn
+    file either way; what a shared temp name loses is the WRITER's bytes, and it
+    can lose them by interleaving two encodes into one file. A unique temp plus
+    an atomic rename makes concurrent writers cost at most a lost MERGE (below),
+    never a corrupt document.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_bytes(encode(document))
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
+def _record(path: Path, digest: ClosureDigest, row: ClosureRow) -> bool:
+    """Merge one closure into the document at ``path``. Best effort.
+
+    The read-modify-write is NOT locked, deliberately. Two pods of one endpoint
+    deriving different closures at the same moment can lose one of the two
+    merges — and the cost of that loss is that one future boot re-derives, which
+    is the cost of not having the row at all. A lock file on a network volume
+    buys a correctness property nothing here needs and brings a stale-lock
+    failure mode that would take out the read path too.
+    """
+    try:
         try:
             document = read_document(path)
         except KeySetError:
             document = empty()
         closures = dict(document.closures)
         closures[str(digest)] = row
-        merged = KeySetDocument(
-            schema=document.schema, version=document.version, closures=closures)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_bytes(encode(merged))
-        tmp.replace(path)
+        _publish(path, KeySetDocument(
+            schema=document.schema, version=document.version, closures=closures))
         return True
     except (OSError, KeySetError):
-        logger.debug("keyset: cache write failed", exc_info=True)
+        logger.debug("keyset: write to %s failed", path, exc_info=True)
         return False
+
+
+def write_closure(
+    cache_dir: Optional[Path], digest: ClosureDigest, row: ClosureRow,
+) -> bool:
+    """Record one closure in EVERY writable root. Best effort, never fatal.
+
+    Returns whether any root took it. pgw#1353: this is the whole producer half
+    of the durable root — ``boot_key.derive`` and ``emit.record_closure`` already
+    funnel here, so a pod that pays 805 s of traces now leaves the answer
+    somewhere the next pod of its endpoint can find it, with no new call site
+    and no new argument.
+
+    An unwritable root is a slower next boot, never a wrong key, so a failure on
+    one root does not stop the other: a read-only volume must not cost this pod
+    its own ``/tmp`` memo.
+    """
+    wrote = False
+    for root, _source in writable_roots(cache_dir):
+        if _record(root / KEYSET_FILENAME, digest, row):
+            wrote = True
+    return wrote
 
 
 def invalidate(cache_dir: Optional[Path], digest: ClosureDigest) -> bool:
-    """Drop one closure from this machine's cache (a proven-dishonest row)."""
-    if not cache_dir:
-        return False
-    path = Path(cache_dir) / KEYSET_FILENAME
-    try:
-        document = read_document(path)
-    except KeySetError:
-        return False
-    if str(digest) not in document.closures:
-        return False
-    closures = {k: v for k, v in document.closures.items() if k != str(digest)}
-    try:
-        tmp = path.with_suffix(".tmp")
-        tmp.write_bytes(encode(KeySetDocument(
-            schema=document.schema, version=document.version,
-            closures=closures)))
-        tmp.replace(path)
-        return True
-    except (OSError, KeySetError):
-        return False
+    """Drop one closure from EVERY writable root (a proven-dishonest row).
+
+    Returns whether any root held it. Total across the roots on purpose: a row
+    the mint lane just PROVED dishonest surviving on the endpoint's shared
+    volume — because only the pod-local copy was dropped — would re-poison every
+    pod of the endpoint on its next boot, and this pod would have no reason to
+    look again.
+    """
+    dropped = False
+    for root, _source in writable_roots(cache_dir):
+        path = root / KEYSET_FILENAME
+        try:
+            document = read_document(path)
+        except KeySetError:
+            continue
+        if str(digest) not in document.closures:
+            continue
+        closures = {
+            key: value for key, value in document.closures.items()
+            if key != str(digest)}
+        try:
+            _publish(path, KeySetDocument(
+                schema=document.schema, version=document.version,
+                closures=closures))
+            dropped = True
+        except (OSError, KeySetError):
+            logger.debug("keyset: invalidate at %s failed", path, exc_info=True)
+    return dropped
 
 
 def assert_honest(
