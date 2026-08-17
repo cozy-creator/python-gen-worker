@@ -186,15 +186,24 @@ def check(pyproject: Path) -> List[str]:
         ]
         if not invocations:
             problems.append(f"no mypy invocation found in {workflow.name}")
-        for line in invocations:
-            for required in ("src/gen_worker", "tests", "tests_v2"):
-                if required not in line:
-                    problems.append(
-                        f"the mypy step in {workflow.name} does not check "
-                        f"`{required}`: {line!r}. Every path the config covers "
-                        f"has to actually be handed to mypy, or the exemption "
-                        f"lists below describe a check nobody runs."
-                    )
+        # The UNION of the invocations, not each one. The property being
+        # guarded is "every path the config covers is handed to mypy
+        # somewhere", and per-invocation matching is a stricter reading that
+        # forbids a legitimate shape: a SECOND, deliberately-scoped call for a
+        # tree that needs a different `MYPYPATH` (pgw#1347's `scripts/mint_rig`,
+        # which must not join the shared path — doing so makes mypy resolve
+        # every other scripts/*.py a test imports). Union is not weaker: the
+        # failure this exists for is `tests tests_v2` disappearing, and dropping
+        # them from ALL invocations still goes red.
+        covered = " ".join(invocations)
+        for required in ("src/gen_worker", "tests", "tests_v2"):
+            if required not in covered:
+                problems.append(
+                    f"no mypy step in {workflow.name} checks `{required}`; the "
+                    f"invocations found were {invocations!r}. Every path the "
+                    f"config covers has to actually be handed to mypy, or the "
+                    f"exemption lists below describe a check nobody runs."
+                )
 
     for flag, (limit, errors) in HIGH_WATER.items():
         actual = counts.get(flag, 0)
