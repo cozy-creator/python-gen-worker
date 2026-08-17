@@ -23,8 +23,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from torch_compiled_graphs import ARTIFACT_KIND, GRAPH_CLASS_BLOCK
-from torch_compiled_graphs import identity as tcg_identity
+from gen_worker._vendor.torch_compiled_graphs import ARTIFACT_KIND, GRAPH_CLASS_BLOCK
+from gen_worker._vendor.torch_compiled_graphs import identity as tcg_identity
 
 from gen_worker import aot_serve, graph_facts
 

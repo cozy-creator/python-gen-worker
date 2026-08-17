@@ -146,7 +146,7 @@ class _TinyTrace(nn.Module):
 
 def _traced_class(aot_mint: Any) -> Any:
     """One real export crossing the same TCG declaration seam as production."""
-    from torch_compiled_graphs import CallIngress, CallInput
+    from gen_worker._vendor.torch_compiled_graphs import CallIngress, CallInput
 
     example = torch.ones(2)
     program = torch.export.export(_TinyTrace(), (example,))

@@ -59,6 +59,9 @@ from pathlib import Path
 
 SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "gen_worker"
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _lint_scope import is_unowned  # noqa: E402
+
 # Calls whose result is a length taken from bytes the process did not compute.
 LENGTH_SOURCES = {"unpack", "unpack_from", "from_bytes"}
 
@@ -444,6 +447,8 @@ def scan_file(path: Path, src: str) -> list[str]:
 def main() -> int:
     findings: list[str] = []
     for py in sorted(SRC_ROOT.rglob("*.py")):
+        if is_unowned(py, SRC_ROOT):
+            continue
         findings.extend(scan_file(py, py.read_text(encoding="utf-8")))
 
     if findings:

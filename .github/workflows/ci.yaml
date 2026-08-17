@@ -522,6 +522,58 @@ jobs:
       - name: Build package
         run: uv build
 
+      # pgw#1310 / ie#738. BUILDING the wheel is not INSTALLING it, and the
+      # difference is a whole class of defect this workflow could not see: for
+      # two published releases `gen-worker`'s metadata required `hashrepo`, a
+      # PyPI project that had been DELETED, so every unlocked consumer install
+      # died at resolution while every check here stayed green. `uv sync
+      # --locked` cannot catch it — a lock resolves from sources (git pins
+      # included) that a published wheel does not carry.
+      #
+      # Deliberately in `fast gates` and not in `tests`: `tests` is neither
+      # required nor run on the queue ref, so a wheel gate living there proves
+      # nothing about what merges. ~40s, unlocked ON PURPOSE — it must resolve
+      # the artifact's own metadata against the real index, exactly as a
+      # consumer does.
+      - name: pgw#1310 gate - the built wheel installs from a clean venv
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/wheelcheck && mkdir -p /tmp/wheelcheck
+          uv build --wheel --out-dir /tmp/wheelcheck
+          uv venv --python 3.12 /tmp/wheelcheck/venv
+          uv pip install --python /tmp/wheelcheck/venv/bin/python \
+            /tmp/wheelcheck/gen_worker-*.whl
+          /tmp/wheelcheck/venv/bin/python - <<'PY'
+          import threading
+          from gen_worker._vendor.tensorfs import CASRef, LocalCAS, TransferGrant, download
+          from gen_worker._vendor.tensorfs.transfer import _run_parallel
+          from gen_worker._vendor.torch_compiled_graphs import ARTIFACT_KIND
+          from gen_worker._vendor.torch_compiled_graphs.contracts import read_contract
+
+          assert LocalCAS and download and ARTIFACT_KIND
+          assert read_contract("KEY_GRAMMAR_DIGEST")
+
+          # pgw#1287, asserted on the ARTIFACT: the second object cannot finish
+          # until the first object's progress callback has been observed.
+          grants = [TransferGrant(digest=CASRef.parse(f"sha256:{i:064x}"),
+                                  size_bytes=1024, url="https://e/x")
+                    for i in (1, 2)]
+          first, seen = threading.Event(), []
+
+          def worker(grant):
+              if grant.digest == grants[1].digest:
+                  assert first.wait(timeout=10.0), "no mid-batch progress: pgw#1287 fix absent"
+              return False
+
+          def progress(digest, size):
+              seen.append(size)
+              first.set()
+
+          report = _run_parallel(grants, worker, parallel=2, progress=progress)
+          assert report.succeeded == 2 and seen == [1024, 1024], (report, seen)
+          print("wheel installs clean; transfer path present and emitting")
+          PY
+
   # ~14m30s (measured p50 868s). The only job that can catch a behavioural
   # regression — and, since pgw#1264, NOT a required context and NOT part of the
   # merge path.

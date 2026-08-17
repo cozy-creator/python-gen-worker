@@ -24,7 +24,7 @@ from typing import Dict
 
 import pytest
 
-from torch_compiled_graphs import identity as tcg_identity
+from gen_worker._vendor.torch_compiled_graphs import identity as tcg_identity
 
 from gen_worker import compile_cache as cc, dist_records
 

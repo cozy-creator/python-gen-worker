@@ -46,6 +46,14 @@ import pytest
 
 from gen_worker import aot_serve, compile_cache as cc, env_seal
 from gen_worker import fleet_cells
+import sys
+from pathlib import Path
+
+# pgw#1310: one home for "which subtrees a guard may not judge" —
+# scripts/_lint_scope.py, shared with the CI lint scanners.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from _lint_scope import is_unowned  # noqa: E402
+
 
 SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "gen_worker"
 
@@ -155,7 +163,8 @@ def test_exactly_one_module_defines_an_artifact_format(
     definers = sorted(
         path.name
         for path in SRC.rglob("*.py")
-        if re.search(r"^COMPILED_GRAPH_FORMAT\s*=", path.read_text(), re.M)
+        if not is_unowned(path, SRC)
+        and re.search(r"^COMPILED_GRAPH_FORMAT\s*=", path.read_text(), re.M)
     )
     assert definers == ["aot_serve.py"], definers
 

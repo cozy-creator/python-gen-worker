@@ -83,7 +83,7 @@ from typing import (
 
 import sys
 
-from torch_compiled_graphs import is_compiled_graph_key
+from gen_worker._vendor.torch_compiled_graphs import is_compiled_graph_key
 
 from . import (
     dist_records, env_seal, graph_facts, guard_closure, hot_swap,

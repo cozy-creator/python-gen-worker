@@ -52,7 +52,7 @@ GUARD_MANIFEST_BLOCK = "guard_manifest"
 
 
 from harness.cell_meta import exported_cell_meta
-from hashrepo import MAX_CHUNK_SIZE
+from gen_worker._vendor.tensorfs import MAX_CHUNK_SIZE
 
 from gen_worker import fleet_cells as fc
 from gen_worker import http_origin

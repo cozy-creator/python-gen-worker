@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
-from torch_compiled_graphs import is_compiled_graph_key
+from gen_worker._vendor.torch_compiled_graphs import is_compiled_graph_key
 
 from gen_worker import author_ci, rigcheck, serve_posture
 from gen_worker.api.decorators import Compile

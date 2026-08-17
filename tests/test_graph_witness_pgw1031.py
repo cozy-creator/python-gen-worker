@@ -6,7 +6,7 @@ import inspect
 from typing import Any
 
 import pytest
-from torch_compiled_graphs import CallIngress, CallInput, GraphClassSpec
+from gen_worker._vendor.torch_compiled_graphs import CallIngress, CallInput, GraphClassSpec
 
 from gen_worker import aot_mint, boot_key, boot_trace_child
 from gen_worker.aot_inputs import ExportSpec

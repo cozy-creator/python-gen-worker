@@ -22,28 +22,13 @@ REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "check_registry_contract.py"
 
 
-def _vendored_requirements() -> list[str]:
-    """The deps that no longer exist on PyPI, as explicit git requirements.
-
-    Paul deleted the `hashrepo` and `torch-compiled-graphs` PyPI projects
-    permanently (DESIGN-RULINGS "Release policy": internal consumers vendor by
-    git pin). A bare wheel install resolves its declared dependencies from
-    PyPI, so this test must supply those two itself. Derived from
-    `[tool.uv.sources]` at run time rather than hardcoded, so the cutover
-    repin (pgw#1297) moves this test automatically.
-    """
-
-    import tomllib
-
-    with (REPO / "pyproject.toml").open("rb") as fh:
-        sources = tomllib.load(fh).get("tool", {}).get("uv", {}).get("sources", {})
-    reqs = []
-    for name in ("hashrepo", "torch-compiled-graphs"):
-        src = sources.get(name)
-        if src and "git" in src:
-            rev = f"@{src['rev']}" if "rev" in src else ""
-            reqs.append(f"{name} @ git+{src['git']}{rev}")
-    return reqs
+# pgw#1310 deleted the `_vendored_requirements()` helper that stood here. It
+# supplied the two deleted projects as explicit git requirements so this test
+# could go green — which made the ONE test that installs the artifact stop
+# measuring whether the artifact is installable. The wheel stayed unresolvable
+# for every consumer (ie#738, te#221, e2e#1893) with this test passing. The
+# install below is bare ON PURPOSE: it must resolve the wheel's own metadata
+# against the real index, exactly as a consumer does.
 
 
 # The three `uv` calls below build an isolated environment, which means
@@ -83,8 +68,7 @@ def test_contract_holds_from_installed_wheel(tmp_path: Path) -> None:
     venv = tmp_path / "venv"
     _uv([uv, "venv", "--python", "3.12", str(venv)])
     py = venv / "bin" / "python"
-    _uv([uv, "pip", "install", "--python", str(py), str(wheel),
-         *_vendored_requirements()])
+    _uv([uv, "pip", "install", "--python", str(py), str(wheel)])
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     proc = subprocess.run(
         [str(py), str(SCRIPT), "--installed"],

@@ -29,7 +29,7 @@ import pathlib
 from typing import Any
 
 import pytest
-from hashrepo import CASRef
+from gen_worker._vendor.tensorfs import CASRef
 from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 

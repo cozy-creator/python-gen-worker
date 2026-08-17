@@ -20,7 +20,7 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 
-from hashrepo import (
+from gen_worker._vendor.tensorfs import (
     CASRef,
     Chunk,
     DigestMismatch,
@@ -28,7 +28,7 @@ from hashrepo import (
     TransferGrant,
     download,
 )
-from torch_compiled_graphs import (
+from gen_worker._vendor.torch_compiled_graphs import (
     ARTIFACT_KIND,
     StoreOutcome,
     is_compiled_graph_key,

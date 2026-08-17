@@ -37,7 +37,7 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
-from torch_compiled_graphs import is_compiled_graph_key
+from gen_worker._vendor.torch_compiled_graphs import is_compiled_graph_key
 
 import tcg_artifacts
 from gen_worker import fleet_cells, local_cell_store

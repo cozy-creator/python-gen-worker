@@ -22,6 +22,7 @@ boot phases, and ``compile_cell_failed`` — the last a CLOSED
 from __future__ import annotations
 
 import pathlib
+import sys
 from typing import Dict, List, Tuple
 
 import pytest
@@ -35,7 +36,9 @@ _REPO = pathlib.Path(__file__).resolve().parents[1]
 _SRC = _REPO / "src"
 #: tensorhub's canonical proto and its generated output — a different contract
 #: with a different owner. Everything else in `src/` is this repo's vocabulary.
-_EXCLUDED = (_SRC / "gen_worker" / "pb",)
+# pgw#1310: which subtrees a guard may not judge has ONE home.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
+from _lint_scope import is_unowned  # noqa: E402
 
 #: Every dead spelling, with the successor that replaced it. A pair rather than
 #: a bare list so the failure names what to write instead.
@@ -69,7 +72,7 @@ def _src_files() -> List[pathlib.Path]:
     for p in sorted(_SRC.rglob("*")):
         if not p.is_file() or p.suffix not in {".py", ".pyi", ".json", ".txt"}:
             continue
-        if any(ex in p.parents for ex in _EXCLUDED):
+        if is_unowned(p, _SRC):
             continue
         out.append(p)
     assert out, "the source scan found nothing — the fence would be vacuous"

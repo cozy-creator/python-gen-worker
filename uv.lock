@@ -571,7 +571,6 @@ dependencies = [
     { name = "c2pa-python" },
     { name = "gguf" },
     { name = "grpcio" },
-    { name = "hashrepo" },
     { name = "huggingface-hub" },
     { name = "msgspec" },
     { name = "protobuf" },
@@ -579,7 +578,6 @@ dependencies = [
     { name = "pyyaml" },
     { name = "requests" },
     { name = "tomli-w" },
-    { name = "torch-compiled-graphs" },
 ]
 
 [package.optional-dependencies]
@@ -642,7 +640,6 @@ requires-dist = [
     { name = "gguf", specifier = ">=0.10.0" },
     { name = "grpcio", specifier = ">=1.82.1" },
     { name = "grpcio-tools", marker = "extra == 'dev'", specifier = ">=1.82.1" },
-    { name = "hashrepo", git = "https://github.com/cozy-creator/tensorfs?rev=0d0437570aac241ed234b741e66af8c79492d872" },
     { name = "huggingface-hub", specifier = ">=0.26.0" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.100" },
     { name = "msgspec", specifier = ">=0.18.6" },
@@ -665,7 +662,6 @@ requires-dist = [
     { name = "tomli-w", specifier = ">=1.0.0" },
     { name = "torch", marker = "(sys_platform == 'linux' and extra == 'torch') or (sys_platform == 'win32' and extra == 'torch')", specifier = ">=2.13.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'torch'", specifier = ">=2.13.0" },
-    { name = "torch-compiled-graphs", git = "https://github.com/cozy-creator/torchcg?rev=ad5f4cb9f89bbe91d2a30ca218f70d5326630368" },
     { name = "torchvision", marker = "(sys_platform == 'linux' and extra == 'vision') or (sys_platform == 'win32' and extra == 'vision')", specifier = ">=0.28.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torchvision", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'vision'", specifier = ">=0.28.0" },
     { name = "transformers", marker = "extra == 'dev'", specifier = ">=5.13" },
@@ -781,11 +777,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/01/ee/02a2c011bdab74c6f
 wheels = [
     { url = "https://files.pythonhosted.org/packages/04/4b/29cac41a4d98d144bf5f6d33995617b185d14b22401f75ca86f384e87ff1/h11-0.16.0-py3-none-any.whl", hash = "sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86", size = 37515, upload-time = "2025-04-24T03:35:24.344Z" },
 ]
-
-[[package]]
-name = "hashrepo"
-version = "0.3.1"
-source = { git = "https://github.com/cozy-creator/tensorfs?rev=0d0437570aac241ed234b741e66af8c79492d872#0d0437570aac241ed234b741e66af8c79492d872" }
 
 [[package]]
 name = "hf-xet"
@@ -2078,15 +2069,6 @@ wheels = [
     { url = "https://download-r2.pytorch.org/whl/cu130/torch-2.13.0%2Bcu130-cp315-cp315-manylinux_2_28_x86_64.whl", upload-time = "2026-07-08T11:20:00Z" },
     { url = "https://download-r2.pytorch.org/whl/cu130/torch-2.13.0%2Bcu130-cp315-cp315t-manylinux_2_28_aarch64.whl", upload-time = "2026-07-08T11:20:04Z" },
     { url = "https://download-r2.pytorch.org/whl/cu130/torch-2.13.0%2Bcu130-cp315-cp315t-manylinux_2_28_x86_64.whl", upload-time = "2026-07-08T11:20:04Z" },
-]
-
-[[package]]
-name = "torch-compiled-graphs"
-version = "0.6.0"
-source = { git = "https://github.com/cozy-creator/torchcg?rev=ad5f4cb9f89bbe91d2a30ca218f70d5326630368#ad5f4cb9f89bbe91d2a30ca218f70d5326630368" }
-dependencies = [
-    { name = "hashrepo" },
-    { name = "safetensors" },
 ]
 
 [[package]]

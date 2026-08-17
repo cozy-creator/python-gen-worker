@@ -8,8 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from hashrepo import LocalCAS, TransferGrant, TransferReport
-from torch_compiled_graphs import StoreOutcome
+from gen_worker._vendor.tensorfs import LocalCAS, TransferGrant, TransferReport
+from gen_worker._vendor.torch_compiled_graphs import StoreOutcome
 
 from gen_worker import aot_delivery, receipts
 

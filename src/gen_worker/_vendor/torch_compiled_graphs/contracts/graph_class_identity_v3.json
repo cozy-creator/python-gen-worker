@@ -1,0 +1,65 @@
+{
+  "authority": "torch-compiled-graphs GraphClassDeclaration with CallIngress v1",
+  "block": {
+    "class_dims": [
+      [
+        "height",
+        64
+      ],
+      [
+        "width",
+        96
+      ]
+    ],
+    "fork": [
+      [
+        "adapter",
+        false
+      ]
+    ],
+    "graph": {
+      "constant_fqns": [],
+      "lifted_inputs": [],
+      "pytree": {
+        "in": "[1, {\"type\": null, \"context\": null, \"children_spec\": [{\"type\": null, \"context\": null, \"children_spec\": []}]}]",
+        "ingress": {
+          "excluded_inputs": [],
+          "flat_arity": 1,
+          "inputs": [
+            {
+              "dtype": "float32",
+              "exported_name": "value",
+              "name": "value",
+              "param": "value",
+              "param_position": 0,
+              "path": [],
+              "position": 0,
+              "shape": [
+                2,
+                3
+              ]
+            }
+          ],
+          "parameters": [
+            "value"
+          ],
+          "symbols": {},
+          "v": 1
+        },
+        "out": "[1, {\"type\": null, \"context\": null, \"children_spec\": [{\"type\": null, \"context\": null, \"children_spec\": []}]}]"
+      },
+      "specialization": {},
+      "v": 3
+    },
+    "graph_witness": "54ceeee7225e57c9",
+    "placement": [
+      "cuda:0",
+      "cuda:1"
+    ],
+    "range_digest": "b389f4904367ba113ba552b7076fc2ff",
+    "target": "denoiser"
+  },
+  "class_hash": "16509ab34e95cfc7",
+  "lora_bucket": 8,
+  "strict": true
+}

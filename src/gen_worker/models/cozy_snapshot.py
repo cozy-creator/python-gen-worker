@@ -20,7 +20,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Sequence
 
-from hashrepo import (
+from gen_worker._vendor.tensorfs import (
     CASRef,
     Chunk,
     DigestMismatch,
@@ -445,8 +445,11 @@ class CozySnapshotDownloader:
             except (DigestMismatch, FileNotFoundError, OSError):
                 return False
 
-        # Every check re-hashes the object — ~1.0s of solid CPU per GiB, and a
-        # resume re-hashes everything earlier attempts landed. On the caller's
+        # Every check re-hashes the object — ~1.0s of solid CPU per GiB WARM,
+        # but that is the fast end of a ~14x spread: measured cold-and-contended
+        # it is ~14s/GiB (tensorfs#42), which is what puts a large resident
+        # snapshot past the hub's window. A resume re-hashes everything earlier
+        # attempts landed. On the caller's
         # loop thread that stranded the heartbeat and every queued event until
         # the scan ended, so each check runs off-thread and only the emission
         # stays on the caller's thread.

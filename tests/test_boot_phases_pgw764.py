@@ -26,7 +26,7 @@ from typing import Any, List
 
 import pytest
 
-from torch_compiled_graphs import ARTIFACT_KIND
+from gen_worker._vendor.torch_compiled_graphs import ARTIFACT_KIND
 
 from gen_worker import aot_serve, boot_phases, serving_mode
 from gen_worker.compile_cache import AdoptError

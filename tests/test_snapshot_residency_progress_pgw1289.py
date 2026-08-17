@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from hashrepo import CASRef, LocalCAS
+from gen_worker._vendor.tensorfs import CASRef, LocalCAS
 
 from gen_worker.models.cozy_snapshot import ensure_snapshot_async
 from gen_worker.models.hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile

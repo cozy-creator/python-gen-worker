@@ -34,6 +34,13 @@ import pytest
 from gen_worker import aot_compile_pool as pool
 from gen_worker import cpu_budget, cuda_probe, hostfacts, lifecycle, postmortem
 from gen_worker.models.memory import probe_host_ram
+import sys
+
+# pgw#1310: one home for "which subtrees a guard may not judge" —
+# scripts/_lint_scope.py, shared with the CI lint scanners.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from _lint_scope import is_unowned  # noqa: E402
+
 
 _GIB = 1024 ** 3
 _SRC = Path(hostfacts.__file__).parent
@@ -47,8 +54,8 @@ def _code_hits(needle: str) -> List[Tuple[str, int]]:
     """
     hits: List[Tuple[str, int]] = []
     for path in sorted(_SRC.rglob("*.py")):
-        if "/pb/" in str(path):
-            continue  # generated
+        if is_unowned(path, _SRC):
+            continue  # generated or vendored (pgw#1310)
         text = path.read_text()
         if needle not in text:
             continue
@@ -107,7 +114,7 @@ def _literal_hits(needle: str, *, exact: bool = False) -> List[str]:
     by one), docstrings excluded — so prose about the rule cannot satisfy it."""
     out: List[str] = []
     for path in sorted(_SRC.rglob("*.py")):
-        if "/pb/" in str(path):
+        if is_unowned(path, _SRC):
             continue
         text = path.read_text()
         if needle not in text:

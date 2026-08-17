@@ -93,6 +93,8 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
 #: exemption cannot be introduced by adding one line to pyproject.toml.
 DECLARED_WILDCARDS: Dict[str, str] = {
     "gen_worker.pb.*": "generated protobuf; no source of ours to fix",
+    "gen_worker._vendor.*": "vendored upstream snapshot; a digest fence refuses "
+                            "an in-place fix (pgw#1310)",
     "gen_worker.convert.*": "inherited from cozy_convert; bodies ARE checked",
     "tests.*": "test fns may be `def test_x():`; contract checks stay on",
     "tests_v2.*": "test fns may be `def test_x():`; contract checks stay on",

@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Callable, Dict, Optional
 
 import requests
-from hashrepo import CASRef, DigestMismatch
+from gen_worker._vendor.tensorfs import CASRef, DigestMismatch
 
 from ..bounded_stream import StreamTooLarge
 from ..models.errors import UrlExpiredError

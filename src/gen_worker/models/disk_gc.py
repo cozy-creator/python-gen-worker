@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
-from hashrepo import RefConflict
+from gen_worker._vendor.tensorfs import RefConflict
 
 from .cache_paths import open_worker_cas
 

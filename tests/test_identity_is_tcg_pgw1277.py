@@ -29,8 +29,8 @@ import pathlib
 from typing import Any
 
 import pytest
-from torch_compiled_graphs import identity as tcg_identity
-from torch_compiled_graphs import is_compiled_graph_key
+from gen_worker._vendor.torch_compiled_graphs import identity as tcg_identity
+from gen_worker._vendor.torch_compiled_graphs import is_compiled_graph_key
 
 from gen_worker import env_seal, fleet_cells, graph_facts
 

@@ -29,7 +29,7 @@ from typing import (
     Tuple,
 )
 
-from torch_compiled_graphs import ARTIFACT_KIND, GRAPH_CLASS_BLOCK
+from gen_worker._vendor.torch_compiled_graphs import ARTIFACT_KIND, GRAPH_CLASS_BLOCK
 
 from ..cell_adopt import AdoptOutcome
 from ..component_vocab import denoiser_components
@@ -72,7 +72,7 @@ class ModelResolutionError(Exception):
 def _compiled_graph_metadata(path: Path) -> Optional[Dict[str, Any]]:
     """Read metadata through TCG, returning ``None`` for a non-TCG artifact."""
 
-    from torch_compiled_graphs import artifact as compiled_graph_artifact
+    from gen_worker._vendor.torch_compiled_graphs import artifact as compiled_graph_artifact
 
     try:
         return dict(compiled_graph_artifact.read_metadata(Path(path)))

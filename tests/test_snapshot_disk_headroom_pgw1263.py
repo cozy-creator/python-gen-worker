@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from hashrepo import LocalCAS
+from gen_worker._vendor.tensorfs import LocalCAS
 
 from gen_worker.capability import InsufficientDiskError
 from gen_worker.models import cozy_snapshot

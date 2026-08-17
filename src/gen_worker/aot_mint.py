@@ -24,14 +24,14 @@ from pathlib import Path
 from typing import (
     Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple)
 
-from torch_compiled_graphs import (
+from gen_worker._vendor.torch_compiled_graphs import (
     GRAPH_CLASS_BLOCK,
     CallIngress,
     IngressError,
     build_call_ingress,
     exported_input_name,
 )
-from torch_compiled_graphs.identity import toolchain_axis_digest
+from gen_worker._vendor.torch_compiled_graphs.identity import toolchain_axis_digest
 
 from . import activity as activity_mod
 from . import aot_compile_pool, aot_serve, boot_phases
@@ -2261,7 +2261,7 @@ def tcg_graph_class_spec(traced: TracedClass, export_spec: ExportSpec) -> Any:
     prevents boot lookup and mint from growing two worker-side descriptions of
     the same graph class.
     """
-    from torch_compiled_graphs import GraphClassSpec
+    from gen_worker._vendor.torch_compiled_graphs import GraphClassSpec
 
     if traced.program is None:
         raise ValueError(f"graph class {traced.name!r} carries no exported program")

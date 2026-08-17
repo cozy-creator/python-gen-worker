@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, cast
 
 import requests
-from hashrepo import (
+from gen_worker._vendor.tensorfs import (
     CASRef,
     RepositoryManifest,
     TransferGrant,

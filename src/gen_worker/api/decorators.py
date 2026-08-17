@@ -29,10 +29,10 @@
 * ``runtime="vllm"`` boots an engine-hosting server subprocess before setup.
 
 Checkpoint SELECTION is a runtime payload argument, not a build-time fan-out:
-a handler whose payload declares a field typed with a ``ModelChoice`` subclass
-picks, per request, which curated checkpoint runs against the resident base
-(``gen_worker.api.model``). Divergent WIRE contracts are separate methods;
-only weight-sharing forces one class.
+a ``Slot(selected_by=..., default_checkpoint=...)`` is resolved by the hub per
+request, so one handler serves every curated checkpoint that shares the
+resident base. Divergent WIRE contracts are separate methods; only
+weight-sharing forces one class.
 """
 
 from __future__ import annotations

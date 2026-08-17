@@ -30,11 +30,11 @@ import uuid
 from pathlib import Path
 
 import pytest
-from hashrepo import TransferReport
+from gen_worker._vendor.tensorfs import TransferReport
 
 import gen_worker.hubio.client as hub_client
-from torch_compiled_graphs import GRAPH_CLASS_BLOCK, REQUIRED_AXES
-from torch_compiled_graphs import identity as tcg_identity
+from gen_worker._vendor.torch_compiled_graphs import GRAPH_CLASS_BLOCK, REQUIRED_AXES
+from gen_worker._vendor.torch_compiled_graphs import identity as tcg_identity
 
 from gen_worker import env_seal, graph_facts, receipts
 from gen_worker import fleet_cells as fc

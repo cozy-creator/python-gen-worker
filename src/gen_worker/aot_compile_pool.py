@@ -70,7 +70,7 @@ from typing import (
 
 import msgspec
 
-from torch_compiled_graphs.spans import check as check_spans
+from gen_worker._vendor.torch_compiled_graphs.spans import check as check_spans
 
 from . import aot_device_lock, env_seal
 from . import compile_posture

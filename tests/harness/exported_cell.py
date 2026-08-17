@@ -26,7 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from torch_compiled_graphs import (
+from gen_worker._vendor.torch_compiled_graphs import (
     CallIngress,
     CallInput,
     CompiledGraphRunner,
@@ -424,7 +424,7 @@ def arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decl: Any,
     truthy/falsy, so `assert outcome` reads exactly as `assert armed` did.
     """
     from gen_worker.models import provision
-    from torch_compiled_graphs import artifact as tcg_artifact
+    from gen_worker._vendor.torch_compiled_graphs import artifact as tcg_artifact
 
     metadata_by_artifact: Dict[Path, Dict[str, Any]] = {}
     metadata_by_key: Dict[str, Dict[str, Any]] = {}

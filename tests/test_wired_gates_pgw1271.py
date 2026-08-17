@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Tuple, cast
 
 import pytest
 
-from torch_compiled_graphs import GRAPH_CLASS_BLOCK
+from gen_worker._vendor.torch_compiled_graphs import GRAPH_CLASS_BLOCK
 
 from gen_worker import (
     aot_serve,

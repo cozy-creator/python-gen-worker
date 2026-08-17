@@ -51,6 +51,9 @@ import tempfile
 from pathlib import Path
 from typing import Iterator, List, Tuple
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _lint_scope import is_unowned  # noqa: E402
+
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_ROOT = REPO / "src" / "gen_worker"
 
@@ -112,8 +115,9 @@ def _python_files(roots: Iterator[Path]) -> Iterator[Path]:
             yield root
             continue
         for path in sorted(root.rglob("*.py")):
-            # Generated protobuf is owned by the .proto, not by a human.
-            if "pb" in path.relative_to(root).parts:
+            # Generated and vendored subtrees are not ours to respell — and the
+            # vendored TCG IS the authority this guard measures against.
+            if is_unowned(path, root):
                 continue
             yield path
 

@@ -1,0 +1,141 @@
+{
+  "contract": "compiled-graph key grammar (th#1897)",
+  "grammar": "<scheme>-<56 lowercase hex>, whole token <= 96 bytes of [a-z0-9][a-z0-9._-]*",
+  "authorities": [
+    "tensorhub internal/orchestrator/compilecache.IsCompiledGraphKey",
+    "python-gen-worker gen_worker.cell_key.is_key"
+  ],
+  "note": "This file is the CONTRACT between the two, vendored byte-identically in python-gen-worker (tests/testdata/) and fenced by scripts/grammar-vector-drift.sh. th#1897 exists because there was no such file: both implementations were internally consistent, they disagreed about `cg-key-v1`, and nothing in either CI could see it \u2014 the first mint on the new scheme would have compiled for 45+ minutes and been refused at publish. A change to either implementation that is not a change to this file is the same defect again.",
+  "vectors": [
+    {
+      "key": "cg-key-v1-7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add7",
+      "valid": true,
+      "note": "DESIGN-RULINGS 1.38's scheme. Hyphenated and digit-free, which is exactly what the pre-th#1897 `ck<1-2 digits>-` shape could not parse; 66 chars, which is what the pre-th#1897 64-char fragment cap could not hold."
+    },
+    {
+      "key": "cg-key-v2-3fc4ccfe745870e2c0d99f71f30ff0656c8dedd41cc1d7d3d376b0db",
+      "valid": true,
+      "note": "A FUTURE scheme this hub has never seen. th#1183: the hub refuses shape, never scheme, so a newer fleet's key is admitted and ruled on by axes."
+    },
+    {
+      "key": "ck1-7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add7",
+      "valid": true,
+      "note": "The scheme the 3 purged micro-diffusion rows carried."
+    },
+    {
+      "key": "ck12-3fc4ccfe745870e2c0d99f71f30ff0656c8dedd41cc1d7d3d376b0db",
+      "valid": true,
+      "note": "Two scheme digits \u2014 the widest the old shape allowed."
+    },
+    {
+      "key": "ek1-8b5b9db0c13db24256c829aa364aa90c6d2eba318b9232a4ab9313b9",
+      "valid": true,
+      "note": "pgw#1176's interim scheme; never minted a real artifact."
+    },
+    {
+      "key": "a-7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add7",
+      "valid": true,
+      "note": "One-character scheme. Nothing forbids it."
+    },
+    {
+      "key": "cg.key_v1-3fc4ccfe745870e2c0d99f71f30ff0656c8dedd41cc1d7d3d376b0db",
+      "valid": true,
+      "note": "'.' and '_' are fragment-charset bytes, so a scheme may carry them."
+    },
+    {
+      "key": "cg-key-v1-7692c3ad3540bb803c02-7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add7",
+      "valid": true,
+      "note": "A scheme containing a 20-hex run and three hyphens. THE REGRESSION VECTOR for splitting on '-': the digest is the SUFFIX and the scheme is whatever precedes it, so neither side may split, partition or scan for the first '-'."
+    },
+    {
+      "key": "ccccccccccccccccccccccccccccccccccccccc-7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add7",
+      "valid": true,
+      "note": "Exactly refgrammar.MaxFragmentLen (96) \u2014 the boundary, accepted."
+    },
+    {
+      "key": "",
+      "valid": false,
+      "note": "empty"
+    },
+    {
+      "key": "7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add7",
+      "valid": false,
+      "note": "A bare digest carries no scheme."
+    },
+    {
+      "key": "-7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add7",
+      "valid": false,
+      "note": "Empty scheme."
+    },
+    {
+      "key": "cg-key-v1-7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add",
+      "valid": false,
+      "note": "55 hex \u2014 one short."
+    },
+    {
+      "key": "cg-key-v1-7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add7f",
+      "valid": false,
+      "note": "57 hex \u2014 one long, and it is the tail that is read."
+    },
+    {
+      "key": "cg-key-v1_7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add7",
+      "valid": false,
+      "note": "'_' is not the separator; the separator is '-'."
+    },
+    {
+      "key": "cg-key-v1-7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0addg",
+      "valid": false,
+      "note": "'g' is not hex."
+    },
+    {
+      "key": "cg-key-v1-7692C3AD3540BB803C020B3AEE66CD8887123234EA0C6E7143C0ADDA",
+      "valid": false,
+      "note": "Uppercase hex. The digest is lowercase, byte-wise."
+    },
+    {
+      "key": "CG-KEY-V1-7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add7",
+      "valid": false,
+      "note": "Uppercase scheme; the fragment charset is lowercase."
+    },
+    {
+      "key": "cg key-v1-7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add7",
+      "valid": false,
+      "note": "A space is not in the fragment charset."
+    },
+    {
+      "key": "cg/key-v1-7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add7",
+      "valid": false,
+      "note": "'/' is a ref-grammar separator and can never be inside a fragment."
+    },
+    {
+      "key": "-cg-key-v1-7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add7",
+      "valid": false,
+      "note": "A fragment may not START with '-'."
+    },
+    {
+      "key": "cg-key-v1-7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add7-",
+      "valid": false,
+      "note": "A trailing byte after the digest \u2014 the digest is the suffix."
+    },
+    {
+      "key": "cg-key-v1-7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add7#x",
+      "valid": false,
+      "note": "'#' is a ref-grammar separator."
+    },
+    {
+      "key": "cccccccccccccccccccccccccccccccccccccccc-7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add7",
+      "valid": false,
+      "note": "One past refgrammar.MaxFragmentLen (97) \u2014 the boundary, refused."
+    },
+    {
+      "key": "root/family-sdxl#cg-key-v1-7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add7",
+      "valid": false,
+      "note": "A cell REF is not a key; KeyRef composes them, KeyFromRef splits them."
+    },
+    {
+      "key": "manifest-7692c3ad3540bb803c020b3aee66cd8887123234",
+      "valid": false,
+      "note": "The manifest digest is deliberately NOT a key (DESIGN-RULINGS 1.38: 'refused by is_key so nothing can resolve, download, verify or arm it')."
+    }
+  ]
+}

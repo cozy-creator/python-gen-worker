@@ -27,9 +27,9 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
-from torch_compiled_graphs import CallIngress, CallInput, GraphClassDeclaration
-from torch_compiled_graphs.artifact import build_metadata, pack_artifact
-from torch_compiled_graphs.host_isa import _host_requirement
+from gen_worker._vendor.torch_compiled_graphs import CallIngress, CallInput, GraphClassDeclaration
+from gen_worker._vendor.torch_compiled_graphs.artifact import build_metadata, pack_artifact
+from gen_worker._vendor.torch_compiled_graphs.host_isa import _host_requirement
 
 #: The default compiler-content facts. Two artifacts that differ only here get
 #: different ``ck1`` keys, which is how a test asks for a second cell.
@@ -160,6 +160,6 @@ def build(
 
 def key_of(artifact: Path) -> str:
     """The ``ck1`` key the artifact states about itself."""
-    from torch_compiled_graphs.artifact import read_metadata
+    from gen_worker._vendor.torch_compiled_graphs.artifact import read_metadata
 
     return str(read_metadata(artifact).get("compiled_graph_key") or "")
