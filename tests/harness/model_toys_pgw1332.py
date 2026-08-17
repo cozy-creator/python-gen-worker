@@ -103,8 +103,10 @@ TOY_DIFFUSION = GraphModelSpec(
     tuned=ToyTuned,
     buckets=(Bucket("resolution", (64, 128)),),
     runners=(
-        Runner("decoder", build=_decoder, example=_decoder_example, axes=("resolution",)),
-        Runner("denoiser", build=_denoiser, example=_denoiser_example, axes=("resolution",)),
+        Runner("decoder", build=_decoder, example=_decoder_example, axes=("resolution",),
+               component="vae.decoder"),
+        Runner("denoiser", build=_denoiser, example=_denoiser_example, axes=("resolution",),
+               component="transformer"),
     ),
     loop=Loop(stages=(Stage("denoiser", repeat="steps"), Stage("decoder"))),
     parameters=(Parameter("steps", minimum=1, maximum=100),),
@@ -160,3 +162,21 @@ TOY_AR = GraphModelSpec(
 )
 
 __all__ = ["TOY_AR", "TOY_DIFFUSION", "WIDTH", "ToyArTuned", "ToyTuned"]
+
+
+def toy_loaded_tree() -> Any:
+    """A stand-in for what the LOADER produces on a real pod.
+
+    Not a mock of the SDK: these are the declaration's own modules, built by the
+    declaration's own `build` callables, arranged the way a diffusers-style
+    pipeline arranges them — a `.transformer` and a `.vae.decoder`. That shape
+    is the whole point, because `Runner.component` is what maps a runner onto
+    it, and a test that hand-built the map would not be testing the map.
+    """
+
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        transformer=_denoiser("bf16"),
+        vae=SimpleNamespace(decoder=_decoder("bf16")),
+    )

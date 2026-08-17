@@ -202,6 +202,22 @@ class Runner:
     example: ExampleFn
     axes: tuple[str, ...] = ()
     layouts: tuple[str, ...] = (DEFAULT_LAYOUT,)
+    #: Where this runner LIVES in a loaded component tree, as a dotted
+    #: attribute path (``"transformer"``, ``"vae.decode"``, ``"text_encoder_2"``).
+    #:
+    #: pgw#1346. ``build`` constructs a WEIGHTLESS module from config, which is
+    #: what the mint traces; it cannot serve a request because it has no
+    #: weights. Serving eagerly means reaching the weight-bearing module the
+    #: loader already produced, and this is the only thing that says which one
+    #: that is. Without it a declaration can be minted and type-checked but not
+    #: served eagerly, which is exactly the gap that blocked the `Slot`
+    #: deletion.
+    #:
+    #: Empty means "this runner has no eager equivalent" — a legitimate state
+    #: for a runner that only ever exists as a compiled graph class. Such a
+    #: runner simply does not appear in the eager backing, and a call to it
+    #: with no armed cell refuses by name rather than running the wrong thing.
+    component: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", _identifier("runner", self.name, parse_runner_name))
@@ -228,6 +244,17 @@ class Runner:
                 f"runner {self.name!r} layouts must be a non-empty sorted unique set",
             )
         object.__setattr__(self, "layouts", layouts)
+        component = str(self.component or "").strip()
+        if component and not all(
+            part.isidentifier() for part in component.split(".")
+        ):
+            raise ModelError(
+                ModelRefusal.CLASS_INVALID,
+                f"runner {self.name!r} component={self.component!r} must be a dotted "
+                "attribute path in the loaded component tree, e.g. 'transformer' or "
+                "'vae.decode'",
+            )
+        object.__setattr__(self, "component", component)
 
     @property
     def handle(self) -> RunnerName:
