@@ -45,6 +45,7 @@ GENERATED = CATALOG / "_generated"
 #: whatever is still importable.
 SPECS = {
     "flux1_dev": "gen_worker.model.catalog.flux1_dev:FLUX1_DEV",
+    "flux1_schnell": "gen_worker.model.catalog.flux1_schnell:FLUX1_SCHNELL",
     "flux2_klein_4b": "gen_worker.model.catalog.flux2_klein_4b:FLUX2_KLEIN_4B",
     "flux2_klein_9b": "gen_worker.model.catalog.flux2_klein_9b:FLUX2_KLEIN_9B",
     "sd2": "gen_worker.model.catalog.sd15:SD2",

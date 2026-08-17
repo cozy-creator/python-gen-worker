@@ -44,6 +44,11 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
     from ._generated.chatterbox import Chatterbox
     from ._generated.flex2_preview import Flex2Preview
     from ._generated.flux1_dev import Flux1Dev, Flux1DevLayout, Flux1DevResolution
+    from ._generated.flux1_schnell import (
+        Flux1Schnell,
+        Flux1SchnellLayout,
+        Flux1SchnellTokens,
+    )
     from ._generated.flux2_klein_4b import (
         Flux2Klein4b,
         Flux2Klein4bLayout,
@@ -79,6 +84,9 @@ _FAMILIES: Final[dict[str, str]] = {
     "Flux1Dev": "flux1_dev",
     "Flux1DevLayout": "flux1_dev",
     "Flux1DevResolution": "flux1_dev",
+    "Flux1Schnell": "flux1_schnell",
+    "Flux1SchnellLayout": "flux1_schnell",
+    "Flux1SchnellTokens": "flux1_schnell",
     "Flux2Klein4b": "flux2_klein_4b",
     "Flux2Klein4bLayout": "flux2_klein_4b",
     "Flux2Klein4bTokens": "flux2_klein_4b",
@@ -125,6 +133,9 @@ __all__ = [
     "Flux1Dev",
     "Flux1DevLayout",
     "Flux1DevResolution",
+    "Flux1Schnell",
+    "Flux1SchnellLayout",
+    "Flux1SchnellTokens",
     "Flux2Klein4b",
     "Flux2Klein4bLayout",
     "Flux2Klein4bTokens",
