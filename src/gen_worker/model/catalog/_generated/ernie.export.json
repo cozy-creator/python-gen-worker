@@ -1,0 +1,1275 @@
+{
+  "buckets": [
+    {
+      "name": "batch",
+      "values": [
+        1,
+        2
+      ]
+    },
+    {
+      "name": "shape",
+      "values": [
+        7681376,
+        8481264,
+        8961200,
+        10241024,
+        12000896,
+        12640848,
+        13760768
+      ]
+    }
+  ],
+  "family": "ernie",
+  "loop": {
+    "kind": "staged",
+    "session_state": "none",
+    "stages": [
+      {
+        "parameter": "steps",
+        "repeat": "counted",
+        "runner": "denoiser"
+      }
+    ]
+  },
+  "parameters": [
+    {
+      "maximum": 100,
+      "minimum": 1,
+      "name": "steps"
+    }
+  ],
+  "runners": [
+    {
+      "axes": [
+        "batch",
+        "shape"
+      ],
+      "name": "denoiser",
+      "variants": [
+        {
+          "bucket": {
+            "batch": 1,
+            "shape": 7681376
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 4,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  128,
+                  86,
+                  48
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "text_bth",
+                "name": "text_bth",
+                "param": "text_bth",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  1,
+                  512,
+                  3072
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "text_lens",
+                "name": "text_lens",
+                "param": "text_lens",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  1
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "timestep",
+              "text_bth",
+              "text_lens"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "520a4c21b67759cce0f8280883a83f19",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                128,
+                86,
+                48
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "batch": 1,
+            "shape": 8481264
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 4,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  128,
+                  79,
+                  53
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "text_bth",
+                "name": "text_bth",
+                "param": "text_bth",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  1,
+                  512,
+                  3072
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "text_lens",
+                "name": "text_lens",
+                "param": "text_lens",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  1
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "timestep",
+              "text_bth",
+              "text_lens"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "d84fc793fc3d472811742dcc4d4f8e02",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                128,
+                79,
+                53
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "batch": 1,
+            "shape": 8961200
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 4,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  128,
+                  75,
+                  56
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "text_bth",
+                "name": "text_bth",
+                "param": "text_bth",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  1,
+                  512,
+                  3072
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "text_lens",
+                "name": "text_lens",
+                "param": "text_lens",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  1
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "timestep",
+              "text_bth",
+              "text_lens"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "8b86a82c1595815278ca256078cf88e6",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                128,
+                75,
+                56
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "batch": 1,
+            "shape": 10241024
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 4,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  128,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "text_bth",
+                "name": "text_bth",
+                "param": "text_bth",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  1,
+                  512,
+                  3072
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "text_lens",
+                "name": "text_lens",
+                "param": "text_lens",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  1
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "timestep",
+              "text_bth",
+              "text_lens"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "948a18f9f5a7b053143f1535973a0160",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                128,
+                64,
+                64
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "batch": 1,
+            "shape": 12000896
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 4,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  128,
+                  56,
+                  75
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "text_bth",
+                "name": "text_bth",
+                "param": "text_bth",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  1,
+                  512,
+                  3072
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "text_lens",
+                "name": "text_lens",
+                "param": "text_lens",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  1
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "timestep",
+              "text_bth",
+              "text_lens"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "5342504cf31bd8f9ea70dda5dff842ea",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                128,
+                56,
+                75
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "batch": 1,
+            "shape": 12640848
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 4,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  128,
+                  53,
+                  79
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "text_bth",
+                "name": "text_bth",
+                "param": "text_bth",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  1,
+                  512,
+                  3072
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "text_lens",
+                "name": "text_lens",
+                "param": "text_lens",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  1
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "timestep",
+              "text_bth",
+              "text_lens"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "15d627377a102ea7c7d028f8f7944493",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                128,
+                53,
+                79
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "batch": 1,
+            "shape": 13760768
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 4,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  128,
+                  48,
+                  86
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "text_bth",
+                "name": "text_bth",
+                "param": "text_bth",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  1,
+                  512,
+                  3072
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "text_lens",
+                "name": "text_lens",
+                "param": "text_lens",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  1
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "timestep",
+              "text_bth",
+              "text_lens"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "dacb7573fd23f78afccc0f1473b6bf21",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                128,
+                48,
+                86
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "batch": 2,
+            "shape": 7681376
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 4,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  2,
+                  128,
+                  86,
+                  48
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  2
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "text_bth",
+                "name": "text_bth",
+                "param": "text_bth",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  2,
+                  512,
+                  3072
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "text_lens",
+                "name": "text_lens",
+                "param": "text_lens",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  2
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "timestep",
+              "text_bth",
+              "text_lens"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "daec93a2e060482703ac546e567a795b",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                2,
+                128,
+                86,
+                48
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "batch": 2,
+            "shape": 8481264
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 4,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  2,
+                  128,
+                  79,
+                  53
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  2
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "text_bth",
+                "name": "text_bth",
+                "param": "text_bth",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  2,
+                  512,
+                  3072
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "text_lens",
+                "name": "text_lens",
+                "param": "text_lens",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  2
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "timestep",
+              "text_bth",
+              "text_lens"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "668cea8400ae65a340f5288efb14c195",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                2,
+                128,
+                79,
+                53
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "batch": 2,
+            "shape": 8961200
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 4,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  2,
+                  128,
+                  75,
+                  56
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  2
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "text_bth",
+                "name": "text_bth",
+                "param": "text_bth",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  2,
+                  512,
+                  3072
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "text_lens",
+                "name": "text_lens",
+                "param": "text_lens",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  2
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "timestep",
+              "text_bth",
+              "text_lens"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "317f37f0aa9bb5a53d1fce22c1851e16",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                2,
+                128,
+                75,
+                56
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "batch": 2,
+            "shape": 10241024
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 4,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  2,
+                  128,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  2
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "text_bth",
+                "name": "text_bth",
+                "param": "text_bth",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  2,
+                  512,
+                  3072
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "text_lens",
+                "name": "text_lens",
+                "param": "text_lens",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  2
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "timestep",
+              "text_bth",
+              "text_lens"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "2e05b6fb2368a0ee2b76a99665fd48a6",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                2,
+                128,
+                64,
+                64
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "batch": 2,
+            "shape": 12000896
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 4,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  2,
+                  128,
+                  56,
+                  75
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  2
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "text_bth",
+                "name": "text_bth",
+                "param": "text_bth",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  2,
+                  512,
+                  3072
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "text_lens",
+                "name": "text_lens",
+                "param": "text_lens",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  2
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "timestep",
+              "text_bth",
+              "text_lens"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "71f7d37c249687d9974667a5fccfa896",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                2,
+                128,
+                56,
+                75
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "batch": 2,
+            "shape": 12640848
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 4,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  2,
+                  128,
+                  53,
+                  79
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  2
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "text_bth",
+                "name": "text_bth",
+                "param": "text_bth",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  2,
+                  512,
+                  3072
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "text_lens",
+                "name": "text_lens",
+                "param": "text_lens",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  2
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "timestep",
+              "text_bth",
+              "text_lens"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "bd0865eeb06f0fe54576cd068ad479f7",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                2,
+                128,
+                53,
+                79
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "batch": 2,
+            "shape": 13760768
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 4,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  2,
+                  128,
+                  48,
+                  86
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  2
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "text_bth",
+                "name": "text_bth",
+                "param": "text_bth",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  2,
+                  512,
+                  3072
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "text_lens",
+                "name": "text_lens",
+                "param": "text_lens",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  2
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "timestep",
+              "text_bth",
+              "text_lens"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "a9b4024d73cb464010c98bc5a99b28dc",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                2,
+                128,
+                48,
+                86
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "scheduler": {
+    "name": "flow_match_euler_discrete",
+    "parameters": {
+      "base_image_seq_len": 256,
+      "base_shift": 0.5,
+      "max_image_seq_len": 4096,
+      "max_shift": 1.15,
+      "num_train_timesteps": 1000,
+      "shift": 4.0,
+      "time_shift_type": "exponential",
+      "use_dynamic_shifting": false
+    }
+  },
+  "tuned": {
+    "module": "gen_worker.model.catalog.ernie_serve",
+    "qualname": "ErnieTuned"
+  },
+  "v": 1
+}

@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers only
     from ._generated.chatterbox import Chatterbox
+    from ._generated.ernie import Ernie, ErnieBatch, ErnieLayout, ErnieShape
     from ._generated.flex2_preview import Flex2Preview
     from ._generated.flux1_dev import Flux1Dev, Flux1DevLayout, Flux1DevResolution
     from ._generated.flux1_schnell import (
@@ -66,11 +67,13 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
     from ._generated.musicgen import Musicgen
     from ._generated.qwen36_27b_mtp import Qwen3627bMtp
     from ._generated.qwen36_35b_a3b import Qwen3635bA3b
+    from ._generated.qwen_image import QwenImage, QwenImageLayout, QwenImageShape
     from ._generated.sd2 import Sd2, Sd2Layout, Sd2Shape
     from ._generated.sd15 import Sd15, Sd15Layout, Sd15Shape
     from ._generated.sdxl import Sdxl, SdxlLayout, SdxlShape
     from ._generated.stable_audio_open import StableAudioOpen
     from ._generated.trellis_3d import Trellis3d
+    from ._generated.z_image import ZImage, ZImageBranches, ZImageLayout
 
 #: Exported name -> the generated module that defines it. THE catalog index:
 #: adding a family adds rows here and nothing else changes.
@@ -80,6 +83,10 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
 #: of. The shorter row is the tier showing through the index, not an omission.
 _FAMILIES: Final[dict[str, str]] = {
     "Chatterbox": "chatterbox",
+    "Ernie": "ernie",
+    "ErnieBatch": "ernie",
+    "ErnieLayout": "ernie",
+    "ErnieShape": "ernie",
     "Flex2Preview": "flex2_preview",
     "Flux1Dev": "flux1_dev",
     "Flux1DevLayout": "flux1_dev",
@@ -100,17 +107,23 @@ _FAMILIES: Final[dict[str, str]] = {
     "Musicgen": "musicgen",
     "Qwen3627bMtp": "qwen36_27b_mtp",
     "Qwen3635bA3b": "qwen36_35b_a3b",
-    "Sd2": "sd2",
-    "Sd2Layout": "sd2",
-    "Sd2Shape": "sd2",
+    "QwenImage": "qwen_image",
+    "QwenImageLayout": "qwen_image",
+    "QwenImageShape": "qwen_image",
     "Sd15": "sd15",
     "Sd15Layout": "sd15",
     "Sd15Shape": "sd15",
+    "Sd2": "sd2",
+    "Sd2Layout": "sd2",
+    "Sd2Shape": "sd2",
     "Sdxl": "sdxl",
     "SdxlLayout": "sdxl",
     "SdxlShape": "sdxl",
     "StableAudioOpen": "stable_audio_open",
     "Trellis3d": "trellis_3d",
+    "ZImage": "z_image",
+    "ZImageBranches": "z_image",
+    "ZImageLayout": "z_image",
 }
 
 
@@ -129,6 +142,10 @@ def __dir__() -> list[str]:
 
 __all__ = [
     "Chatterbox",
+    "Ernie",
+    "ErnieBatch",
+    "ErnieLayout",
+    "ErnieShape",
     "Flex2Preview",
     "Flux1Dev",
     "Flux1DevLayout",
@@ -149,15 +166,21 @@ __all__ = [
     "Musicgen",
     "Qwen3627bMtp",
     "Qwen3635bA3b",
-    "Sd2",
-    "Sd2Layout",
-    "Sd2Shape",
+    "QwenImage",
+    "QwenImageLayout",
+    "QwenImageShape",
     "Sd15",
     "Sd15Layout",
     "Sd15Shape",
+    "Sd2",
+    "Sd2Layout",
+    "Sd2Shape",
     "Sdxl",
     "SdxlLayout",
     "SdxlShape",
     "StableAudioOpen",
     "Trellis3d",
+    "ZImage",
+    "ZImageBranches",
+    "ZImageLayout",
 ]
