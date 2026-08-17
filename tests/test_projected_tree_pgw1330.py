@@ -184,7 +184,6 @@ def test_an_unresolvable_projection_REFUSES_rather_than_defaulting(
     """The half that matters most: when the manifest cannot be recovered the
     answer is an exception, NOT "". Silence here is the whole defect."""
 
-    built = fixture.build(tmp_path)
     orphan = tmp_path / "orphan"
     orphan.mkdir()
     (orphan / "model.safetensors").write_bytes(

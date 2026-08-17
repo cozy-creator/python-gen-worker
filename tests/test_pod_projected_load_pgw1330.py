@@ -43,6 +43,7 @@ import projection_fixture as fixture  # noqa: E402
 from gen_worker._vendor.tensorfs import (  # noqa: E402
     LocalCAS,
     project_snapshot,
+    read_entry,
     tree_bytes,
 )
 from gen_worker.models import projection  # noqa: E402
@@ -149,10 +150,13 @@ def pod(tmp_path_factory: pytest.TempPathFactory) -> Dict[str, Any]:
 
     materialized = base / SNAPSHOTS_DIR / "materialized"
     materialized.mkdir(parents=True)
+    # read_entry, not the materialization hatch: the control arm's bytes come
+    # back through the CAS reader and are verified against the manifest's
+    # whole-file digest on the way.
     for entry in manifest.files:
         target = materialized / entry.path
         target.parent.mkdir(parents=True, exist_ok=True)
-        cas.materialize(entry, target)
+        target.write_bytes(read_entry(cas, entry))
 
     return {
         "base": base,

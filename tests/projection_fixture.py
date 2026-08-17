@@ -19,6 +19,7 @@ from gen_worker._vendor.tensorfs import (
     LocalCAS,
     RepositoryManifest,
     project_snapshot,
+    read_entry,
 )
 from gen_worker.models.projection import REF_PREFIX, SNAPSHOTS_DIR
 
@@ -188,14 +189,21 @@ def build(
 
 
 def materialize(base: Path, fixture: Fixture, name: str = "materialized") -> Path:
-    """The same manifest as a tree of REAL files, for the control arm."""
+    """The same manifest as a tree of REAL files, for the control arm.
+
+    Built with ``read_entry``, NOT with the single-file materialization hatch:
+    the hatch is the thing this whole program is retiring, and new code reaching
+    for it in a test is the example that spreads. ``read_entry`` also verifies
+    the reconstruction against the manifest's whole-file digest, so the control
+    arm is known-good bytes rather than merely copied ones.
+    """
 
     target = base / SNAPSHOTS_DIR / name
     target.mkdir(parents=True, exist_ok=True)
     for entry in fixture.manifest.files:
         destination = target / entry.path
         destination.parent.mkdir(parents=True, exist_ok=True)
-        fixture.cas.materialize(entry, destination)
+        destination.write_bytes(read_entry(fixture.cas, entry))
     return target
 
 
