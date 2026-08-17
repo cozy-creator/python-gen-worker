@@ -128,11 +128,13 @@ MODEL_FREE_MODULES: Tuple[str, ...] = (
     "gen_worker.model.catalog._generated",
     "gen_worker.model.catalog._generated.flux1_dev",
     "gen_worker.model.catalog._generated.flux2_klein_4b",
+    "gen_worker.model.catalog._generated.flux2_klein_9b",
     "gen_worker.model.catalog._generated.sd2",
     "gen_worker.model.catalog._generated.sd15",
     "gen_worker.model.catalog._generated.sdxl",
     "gen_worker.model.catalog.flux1_dev_serve",
     "gen_worker.model.catalog.flux2_klein_4b_serve",
+    "gen_worker.model.catalog.flux2_klein_9b_serve",
     "gen_worker.model.catalog.sd15_serve",
     "gen_worker.model.catalog.sdxl_serve",
 )
@@ -239,6 +241,11 @@ OPTIONAL_SERVE_IMPORTS: Tuple[str, ...] = (
     # (pgw#1346 B1 — byte-identical transformer configs, differing only in the
     # published recipe).
     "gen_worker.model.catalog.flux2_klein_4b",
+    # Same shape at the second width: Base and Turbo are two instances of
+    # ONE 9B model (their transformer configs differ only in
+    # `_name_or_path`), so the 9B binding guard-imports one declaration too
+    # (pgw#1346 B3b).
+    "gen_worker.model.catalog.flux2_klein_9b",
     # ONE declaration module for TWO bindings: `sd15.py` declares both `SD15`
     # and `SD2` (pgw#1346 B2 — same runner set, different graphs), so both
     # generated modules guard-import the same name.

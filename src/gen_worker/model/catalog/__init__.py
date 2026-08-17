@@ -47,6 +47,11 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
         Flux2Klein4bLayout,
         Flux2Klein4bTokens,
     )
+    from ._generated.flux2_klein_9b import (
+        Flux2Klein9b,
+        Flux2Klein9bLayout,
+        Flux2Klein9bTokens,
+    )
     from ._generated.sd2 import Sd2, Sd2Layout, Sd2Shape
     from ._generated.sd15 import Sd15, Sd15Layout, Sd15Shape
     from ._generated.sdxl import Sdxl, SdxlLayout, SdxlShape
@@ -60,6 +65,9 @@ _FAMILIES: Final[dict[str, str]] = {
     "Flux2Klein4b": "flux2_klein_4b",
     "Flux2Klein4bLayout": "flux2_klein_4b",
     "Flux2Klein4bTokens": "flux2_klein_4b",
+    "Flux2Klein9b": "flux2_klein_9b",
+    "Flux2Klein9bLayout": "flux2_klein_9b",
+    "Flux2Klein9bTokens": "flux2_klein_9b",
     "Sd2": "sd2",
     "Sd2Layout": "sd2",
     "Sd2Shape": "sd2",
@@ -92,6 +100,9 @@ __all__ = [
     "Flux2Klein4b",
     "Flux2Klein4bLayout",
     "Flux2Klein4bTokens",
+    "Flux2Klein9b",
+    "Flux2Klein9bLayout",
+    "Flux2Klein9bTokens",
     "Sd2",
     "Sd2Layout",
     "Sd2Shape",
