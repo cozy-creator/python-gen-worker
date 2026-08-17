@@ -3,7 +3,7 @@
 # BOTH repos commit this same digest, so a one-sided edit fails scripts/proto-drift-check.sh
 # offline, in the repo where it happened. Regenerate with:
 #   sha256sum internal/orchestrator/grpc/proto/worker_scheduler.proto
-2cd13a1dc6247a34538435f6720332887702d05a3a84ff4e0c1488241f289e4b
+7914d87200658d6b421bbcce4b449331d17c2df5f3e99b09434d92fbb2e5db7c
 
 # th#2082: `RunJob.output_mode` -> `media_bytes`, enum `OutputMode` ->
 # `MediaBytes` (`MEDIA_BYTES_UNSPECIFIED|URL|INLINE`). NAME ONLY — field 9 and
@@ -12,3 +12,14 @@
 # the two copies still differ by this repo's th#1941 composed-manifest hunks,
 # so the two digests remain legitimately different (tensorhub's PROTO_DIGEST
 # says the same thing from its side).
+
+# pgw#1336 / th#2052: `DesiredIntentKind.DESIRED_INTENT_KIND_RUN_JOB = 6` plus
+# `RunJob.intent_kind|intent_id|goal_id|phase_budget_s` (fields 18-21), applied
+# to this vendored copy byte-identically to tensorhub's canonical hunk at
+# `2c6f75271`. All ADDITIVE — nothing existing moves, so a hub on an older
+# build is unaffected. The two copies still differ only by th#1941's
+# composed-manifest hunks, as above.
+#
+# Do NOT "fix" the remaining divergence with scripts/vendor-proto.sh: a
+# whole-file resync would DELETE the th#1941 hunks this tree depends on. Apply
+# a peer's hunk surgically and re-record the digest, which is what this did.

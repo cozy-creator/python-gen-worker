@@ -27,6 +27,7 @@ class DesiredIntentKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     DESIRED_INTENT_KIND_CONFIG_APPLY: _ClassVar[DesiredIntentKind]
     DESIRED_INTENT_KIND_COMPILE_ADOPT: _ClassVar[DesiredIntentKind]
     DESIRED_INTENT_KIND_DRAIN: _ClassVar[DesiredIntentKind]
+    DESIRED_INTENT_KIND_RUN_JOB: _ClassVar[DesiredIntentKind]
 
 class DesiredIntentCause(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -208,6 +209,7 @@ DESIRED_INTENT_KIND_FUNCTION_READY: DesiredIntentKind
 DESIRED_INTENT_KIND_CONFIG_APPLY: DesiredIntentKind
 DESIRED_INTENT_KIND_COMPILE_ADOPT: DesiredIntentKind
 DESIRED_INTENT_KIND_DRAIN: DesiredIntentKind
+DESIRED_INTENT_KIND_RUN_JOB: DesiredIntentKind
 DESIRED_INTENT_CAUSE_UNSPECIFIED: DesiredIntentCause
 DESIRED_INTENT_CAUSE_COLD_BOOT: DesiredIntentCause
 DESIRED_INTENT_CAUSE_REQUEST: DesiredIntentCause
@@ -922,7 +924,7 @@ class CompileTargetBinding(_message.Message):
     def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., snapshot_digest: _Optional[str] = ...) -> None: ...
 
 class RunJob(_message.Message):
-    __slots__ = ("request_id", "attempt", "function_name", "input_payload", "timeout_ms", "org", "invoker_id", "capability_token", "media_bytes", "compute", "models", "snapshots", "required_compile", "lane", "input_assets", "config_generation", "config_params")
+    __slots__ = ("request_id", "attempt", "function_name", "input_payload", "timeout_ms", "org", "invoker_id", "capability_token", "media_bytes", "compute", "models", "snapshots", "required_compile", "lane", "input_assets", "config_generation", "config_params", "intent_kind", "intent_id", "goal_id", "phase_budget_s")
     class SnapshotsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -947,6 +949,10 @@ class RunJob(_message.Message):
     INPUT_ASSETS_FIELD_NUMBER: _ClassVar[int]
     CONFIG_GENERATION_FIELD_NUMBER: _ClassVar[int]
     CONFIG_PARAMS_FIELD_NUMBER: _ClassVar[int]
+    INTENT_KIND_FIELD_NUMBER: _ClassVar[int]
+    INTENT_ID_FIELD_NUMBER: _ClassVar[int]
+    GOAL_ID_FIELD_NUMBER: _ClassVar[int]
+    PHASE_BUDGET_S_FIELD_NUMBER: _ClassVar[int]
     request_id: str
     attempt: int
     function_name: str
@@ -964,7 +970,11 @@ class RunJob(_message.Message):
     input_assets: _containers.RepeatedCompositeFieldContainer[InputAsset]
     config_generation: int
     config_params: bytes
-    def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ..., function_name: _Optional[str] = ..., input_payload: _Optional[bytes] = ..., timeout_ms: _Optional[int] = ..., org: _Optional[str] = ..., invoker_id: _Optional[str] = ..., capability_token: _Optional[str] = ..., media_bytes: _Optional[_Union[MediaBytes, str]] = ..., compute: _Optional[_Union[ResolvedCompute, _Mapping]] = ..., models: _Optional[_Iterable[_Union[ModelBinding, _Mapping]]] = ..., snapshots: _Optional[_Mapping[str, Snapshot]] = ..., required_compile: _Optional[_Union[RequiredCompileExecution, _Mapping]] = ..., lane: _Optional[str] = ..., input_assets: _Optional[_Iterable[_Union[InputAsset, _Mapping]]] = ..., config_generation: _Optional[int] = ..., config_params: _Optional[bytes] = ...) -> None: ...
+    intent_kind: DesiredIntentKind
+    intent_id: str
+    goal_id: str
+    phase_budget_s: int
+    def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ..., function_name: _Optional[str] = ..., input_payload: _Optional[bytes] = ..., timeout_ms: _Optional[int] = ..., org: _Optional[str] = ..., invoker_id: _Optional[str] = ..., capability_token: _Optional[str] = ..., media_bytes: _Optional[_Union[MediaBytes, str]] = ..., compute: _Optional[_Union[ResolvedCompute, _Mapping]] = ..., models: _Optional[_Iterable[_Union[ModelBinding, _Mapping]]] = ..., snapshots: _Optional[_Mapping[str, Snapshot]] = ..., required_compile: _Optional[_Union[RequiredCompileExecution, _Mapping]] = ..., lane: _Optional[str] = ..., input_assets: _Optional[_Iterable[_Union[InputAsset, _Mapping]]] = ..., config_generation: _Optional[int] = ..., config_params: _Optional[bytes] = ..., intent_kind: _Optional[_Union[DesiredIntentKind, str]] = ..., intent_id: _Optional[str] = ..., goal_id: _Optional[str] = ..., phase_budget_s: _Optional[int] = ...) -> None: ...
 
 class InputAsset(_message.Message):
     __slots__ = ("asset_id", "source_ref", "blake3", "size_bytes", "kind", "mime_type")

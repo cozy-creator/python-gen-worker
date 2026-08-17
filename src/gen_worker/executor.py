@@ -130,7 +130,7 @@ from .pb import worker_scheduler_pb2 as pb
 from .redact import sanitize as _sanitize
 from .models.store import ModelStore, _ResidencyIdentity
 from . import jobs as jobs_mod
-from .jobs import JobDispatch, JobOutcome, execute_job
+from .jobs import DEFAULT_PHASE_BUDGET_S, JobDispatch, JobOutcome, execute_job
 from .registry import EndpointSpec, JobSpec
 from .runtime_config import ConfigStore, extract_job_config
 from .stage_timing import stage_ms_for_metrics
@@ -1645,21 +1645,29 @@ class Executor:
     ) -> None:
         self.specs: Dict[str, EndpointSpec] = {s.name: s for s in specs}
         # pgw#1324: the OTHER publishable shape this release declares. Two
-        # tables and ONE dispatch head — `RunJob.function_name` is resolved
-        # against both, because the wire carries no intent field to tell them
-        # apart (th#2052 owns that protocol leg) and because a name is unique
-        # across the release either way. Named `job_specs` because `self.jobs`
-        # already means the IN-FLIGHT dispatch map on this class.
+        # tables and ONE dispatch head; th#2052's `RunJob.intent_kind` now says
+        # which table a dispatch means (pgw#1336). Named `job_specs` because
+        # `self.jobs` already means the IN-FLIGHT dispatch map on this class.
         self.job_specs: Dict[str, JobSpec] = {j.name: j for j in (jobs or [])}
         collisions = sorted(set(self.specs) & set(self.job_specs))
         if collisions:
-            # The wire carries a NAME and no intent kind, so a name that is
-            # both is a dispatch nobody can resolve correctly — the head would
-            # silently pick one and the submitter would get the other's
-            # semantics. Refused at boot, where the release can still be fixed.
+            # pgw#1336 RULING — KEPT, on a NEW justification, and the old one
+            # is retired rather than left standing. It used to say a dispatch
+            # "names a function and nothing else", so a doubled name was
+            # unresolvable. That is now FALSE: `intent_kind` resolves it, and
+            # the head above reads exactly one table per kind.
+            #
+            # It stays because DISPATCH is not the only resolver. The published
+            # manifest carries `functions` and `jobs` side by side, the catalog
+            # and every submit surface address both BY NAME, and
+            # `gen-worker job <name>` has no intent kind to consult. A doubled
+            # name is ambiguous everywhere except the one place th#2052 fixed.
+            # This is publish hygiene now, not a dispatch-resolution necessity
+            # — cheap, boot-time, and the release can still be fixed here.
             raise ValueError(
                 f"{collisions} declared as BOTH an @endpoint and a @job in one "
-                f"release: a dispatch names a function and nothing else, so one "
+                f"release: a release publishes ONE name space and every submit "
+                f"surface but the dispatch frame resolves by name alone, so one "
                 f"name cannot mean two things. Rename one."
             )
         self._send = send
@@ -1888,15 +1896,36 @@ class Executor:
             detail=f"prepare function {spec.name}",
         )
 
-    def _job_intent(self, request_id: str, attempt: int, function_name: str) -> str:
+    def _dispatch_intent(self, run: "pb.RunJob") -> str:
+        """The lifecycle carrier this dispatch reports against.
+
+        pgw#1336 / th#2052 — **the RunJob compat minter is gone.** A JOB
+        dispatch carries the hub's own ``intent_id``/``goal_id`` and is
+        adopted; there is no worker-local id in that path any more, and a job
+        frame that arrives without one is refused rather than papered over
+        (:meth:`IntentRegistry.adopt_dispatch_intent` raises).
+
+        A SERVED REQUEST still mints a worker-local ``compat-job-*`` carrier,
+        and that is not a leftover: this protocol has no intent kind for a
+        served request and deliberately never had one — a request is what an
+        intent gets BLOCKED on (``IntentState.blocker_request``), not an intent
+        itself. th#2052 gave the JOB half a carrier and left this half exactly
+        as it was, so this half stays.
+        """
         registry = self.intent_registry
         if registry is None:
             return ""
+        if int(run.intent_kind) == pb.DESIRED_INTENT_KIND_RUN_JOB:
+            return registry.adopt_dispatch_intent(
+                str(run.intent_id or ""),
+                str(run.goal_id or ""),
+                detail=f"run job {run.request_id} attempt {int(run.attempt)}",
+            )
         return registry.ensure_local_intent(
             "job",
-            f"{request_id}\0{attempt}",
-            function_name=function_name,
-            detail=f"run request {request_id} attempt {attempt}",
+            f"{run.request_id}\0{int(run.attempt)}",
+            function_name=str(run.function_name or ""),
+            detail=f"run request {run.request_id} attempt {int(run.attempt)}",
         )
 
     def _intent_transition(
@@ -8793,8 +8822,7 @@ class Executor:
         """The LEGACY wire head. Dies whole with ``RunJob`` at th#1457's cut:
         it and the ``_legacy_order`` projection it schedules are the only
         frames on the dispatch path that read ``pb.RunJob``."""
-        job = await self._admit_dispatch(
-            run.request_id, int(run.attempt), run.function_name)
+        job = await self._admit_dispatch(run)
         if job is None:
             return
         # pgw#1324: the fork. A JOB skips the whole serving apparatus — no
@@ -8813,13 +8841,21 @@ class Executor:
         # stage next while this job computes.
         self.preloader.poke()
 
-    async def _admit_dispatch(
-        self, request_id: str, attempt: int, function_name: str,
-    ) -> Optional[_Job]:
-        """Shared admission preamble for both wire heads: retransmit re-ack,
-        stale-attempt supersede, serve-goal/drain/function gates. Returns the
-        admitted job with ``JobAccepted`` sent, or ``None`` when this
-        dispatch was answered (re-acked or refused) here."""
+    async def _admit_dispatch(self, run: "pb.RunJob") -> Optional[_Job]:
+        """The admission preamble: retransmit re-ack, stale-attempt supersede,
+        serve-goal/drain/routing gates. Returns the admitted job with
+        ``JobAccepted`` sent, or ``None`` when this dispatch was answered
+        (re-acked or refused) here.
+
+        pgw#1336 / th#2052 — **this takes the FRAME, not three fields off it.**
+        The routing decision now reads ``intent_kind``, which is the whole
+        point of the field: a dispatch SAYS whether it is a job or a served
+        request instead of leaving the worker to infer it from which inventory
+        the name happens to be in.
+        """
+        request_id = str(run.request_id)
+        attempt = int(run.attempt)
+        function_name = str(run.function_name)
         key = (request_id, attempt)
         existing = self.jobs.get(key)
         if existing is not None and not existing.superseded:
@@ -8844,7 +8880,7 @@ class Executor:
                     job.exec_task.cancel()
                 self._arm_cancel_unwind_watch(job)
 
-        intent_id = self._job_intent(request_id, attempt, function_name)
+        intent_id = self._dispatch_intent(run)
         if not worker_goals.current().serve_admitted():
             # pgw#930 (§1.17): this pod holds no SERVE goal. It is not a mode
             # check — a pod holding BOTH a serve and a mint goal passes here,
@@ -8890,19 +8926,42 @@ class Executor:
                 safe_message="worker draining",
             )
             return None
-        # pgw#1324: ONE head, TWO tables. The wire carries no intent kind, so
-        # the NAME is the whole routing key — which is why the refusal below
-        # has to name both inventories: before this, a dispatch naming a
-        # perfectly good JOB and a dispatch naming a typo were the same
-        # sentence, and a 29-job migration shipped unrunnable behind it.
-        spec = self.specs.get(function_name)
-        job_spec = self.job_specs.get(function_name) if spec is None else None
+        # pgw#1336 / th#2052: ONE head, TWO tables, and THE FRAME PICKS. When
+        # pgw#1324 wrote this the wire carried no intent kind, so the name was
+        # the whole routing key and the head had to try both inventories in
+        # turn. `intent_kind` now says which harness this dispatch is for, so
+        # each kind reads exactly ONE table and a name in the other one is a
+        # refusal that says so — a job dispatched to a release where that name
+        # is an endpoint is a hub/release disagreement, and running the
+        # endpoint instead would answer it with the wrong semantics.
+        is_job_dispatch = int(run.intent_kind) == pb.DESIRED_INTENT_KIND_RUN_JOB
+        spec = None if is_job_dispatch else self.specs.get(function_name)
+        job_spec = self.job_specs.get(function_name) if is_job_dispatch else None
         if spec is None and job_spec is None:
-            detail = (
-                f"unknown function {function_name!r} — this release serves "
-                f"endpoints {sorted(self.specs) or '[]'} and jobs "
-                f"{sorted(self.job_specs) or '[]'}"
+            declared = (
+                f"jobs {sorted(self.job_specs) or '[]'}"
+                if is_job_dispatch
+                else f"endpoints {sorted(self.specs) or '[]'}"
             )
+            crossed = (
+                function_name in (self.specs if is_job_dispatch else self.job_specs)
+            )
+            detail = (
+                f"unknown {'job' if is_job_dispatch else 'function'} "
+                f"{function_name!r} — this release serves {declared}"
+            )
+            if crossed:
+                # Distinguishable on purpose: "declared, but as the other
+                # shape" is a different fault from "not declared at all", and
+                # a submitter reading the first message would rename a name
+                # that is perfectly correct.
+                detail = (
+                    f"{function_name!r} is declared in this release as "
+                    f"{'an @endpoint' if is_job_dispatch else 'a @job'}, but "
+                    f"the dispatch asked for "
+                    f"{'a @job' if is_job_dispatch else 'an @endpoint'} "
+                    f"(intent_kind={int(run.intent_kind)})"
+                )
             self._intent_transition(
                 intent_id,
                 pb.LIFECYCLE_INTENT_STATUS_FAILED,
@@ -9537,6 +9596,19 @@ class Executor:
                     org=str(run.org or ""),
                     invoker_id=str(run.invoker_id or ""),
                     capability_token=str(run.capability_token or ""),
+                    # th#2052 / pgw#1336: the OPERATOR's position-advance
+                    # budget, when the dispatch states one. The hub's liveness
+                    # sweep kills on this same number, so a stated budget
+                    # REPLACES the wheel's compiled default and the two ends
+                    # stop answering "is this job advancing?" differently. 0 =
+                    # no instruction (a hub that has not set
+                    # `jobs.progress_budget_s`), which keeps the default. The
+                    # hub remains the kill authority either way.
+                    phase_budget_s=(
+                        float(run.phase_budget_s)
+                        if int(run.phase_budget_s or 0) > 0
+                        else DEFAULT_PHASE_BUDGET_S
+                    ),
                 )
                 outcome = await self._execute_job_body(job, spec, dispatch, ctx)
             except (asyncio.CancelledError, CanceledError):
