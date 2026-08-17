@@ -45,10 +45,20 @@ class KeySource(enum.Enum):
     would be indistinguishable from the impossible case, and the ONE number this
     issue exists to move (how many pods pay the 805 s) would be unreadable off
     the boot events.
+
+    ``HUB`` is th#2123's store, and it is a DISTINCT value for the same reason
+    ``DURABLE`` is. The four tiers answer four different operational questions:
+    ``shipped`` says the mint lane baked it, ``durable`` says this endpoint has
+    storage that outlives a pod, ``hub`` says the platform holds it for an
+    endpoint shape that has neither, and ``traced`` says somebody paid 805 s.
+    Collapsing any pair would make "which fix is actually reaching the fleet"
+    unanswerable off the boot events — which is the exact blindness pgw#1353
+    was filed to end.
     """
 
     SHIPPED = "shipped"
     DURABLE = "durable"
+    HUB = "hub"
     MEMO = "memo"
     TRACED = "traced"
 

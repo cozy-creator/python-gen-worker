@@ -52,17 +52,39 @@ Where the output goes on a pod: ``/app/.tensorhub/cg-keyset-v1.json``, beside
 ``endpoint.lock`` (``gen_worker.keyset.store.IMAGE_KEYSET_DIR``), or anywhere
 ``GEN_WORKER_CG_KEYSET`` points.
 
+``--publish`` — THE MINT LANE FILLS THE HUB (pgw#1353 option (b) / th#2123)
+--------------------------------------------------------------------------
+The staged file only helps a pod that can read the filesystem it is staged on.
+``--publish`` sends every closure this run produced to the hub's key-set store,
+``PUT /v1/worker/keysets/<closure_digest>``, which is the one tier an EPHEMERAL
+private deployment can reach — no network volume, no baked document, a fresh
+container every time. **This is what makes "a serving pod never derives" true**:
+the mint lane pays the traces once, at mint time, and every serving pod of that
+closure reads them.
+
+Best effort per closure and reported per closure. A 409 means the store already
+holds a DIFFERENT document at that address — write-once, first one stands — and
+that is worth reading rather than retrying: two runs of the same code against
+the same subjects should produce the same class hashes.
+
+Needs a hub and a credential: ``--hub URL`` (or ``$COZY_HUB_URL``) and
+``$COZY_WORKER_TOKEN``. Refused by name when either is missing, never silently
+skipped — a publish flag that quietly did nothing is how a fleet keeps paying
+805 s while a green log line says the document was emitted.
+
 Usage::
 
     python scripts/emit_cg_keyset.py --from-cache ~/.cache/cozy --out build/
+    python scripts/emit_cg_keyset.py --from-cache ~/.cache/cozy --out build/ --publish
     python scripts/emit_cg_keyset.py --derive --module my_endpoint.main \\
         --function generate --slot pipeline=/cas/checkpoint \\
-        --slot-ref pipeline=tensorhub/wai-illustrious@prod --out build/
+        --slot-ref pipeline=tensorhub/wai-illustrious@prod --out build/ --publish
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -89,6 +111,58 @@ def _merge(out_path: Path, closures: Dict[str, object]) -> int:
         schema=keyset.KEYSET_SCHEMA, version=keyset.KEYSET_VERSION,
         closures=merged)))  # type: ignore[arg-type]
     return len(merged)
+
+
+#: Where the credential comes from. Env, because it is a SECRET and secrets are
+#: config — never a flag, which lands in shell history and in CI logs.
+ENV_HUB_URL = "COZY_HUB_URL"
+ENV_HUB_TOKEN = "COZY_WORKER_TOKEN"
+
+
+def hub_tier(url: str) -> "object":
+    """The hub to publish to, or a SystemExit naming what is missing.
+
+    Refuses by name rather than degrading to "did not publish". A `--publish`
+    that silently does nothing is the failure this whole issue is about: a
+    fleet paying 805 s per pod while a green line says the document was
+    emitted.
+    """
+    from gen_worker.keyset.hub import HubTier
+
+    base = (url or os.environ.get(ENV_HUB_URL, "")).strip()
+    token = os.environ.get(ENV_HUB_TOKEN, "").strip()
+    missing = [name for name, value in (
+        (f"--hub or ${ENV_HUB_URL}", base), (f"${ENV_HUB_TOKEN}", token)) if not value]
+    if missing:
+        raise SystemExit(
+            f"--publish needs a hub and a credential; missing: {missing}")
+    return HubTier(base_url=base, bearer=token)
+
+
+def publish(out: Path, tier: "object") -> int:
+    """Offer every closure in the staged document to the hub. Returns failures.
+
+    Reads back from the STAGED FILE rather than from whatever the caller has in
+    hand, so `--publish` publishes exactly what `--out` says was produced — one
+    artifact, one claim, and no way for the two to disagree.
+    """
+    from gen_worker import keyset
+    from gen_worker.keyset import store as keyset_store
+    from gen_worker.keyset.hub import publish_closure
+
+    document = keyset_store.read_document(out)
+    failed = 0
+    for digest_text in sorted(document.closures):
+        digest = keyset.parse_closure_digest(digest_text)
+        reason = publish_closure(digest, document.closures[digest_text], tier)  # type: ignore[arg-type]
+        if reason:
+            failed += 1
+            print(f"  publish {digest}: REFUSED — {reason}")
+        else:
+            print(f"  publish {digest}: ok")
+    if failed:
+        print(f"{failed} closure(s) did not reach the hub")
+    return failed
 
 
 def from_cache(cache: Path, out: Path) -> int:
@@ -252,6 +326,15 @@ def main(argv: Optional[List[str]] = None) -> int:
              "closure digest, so a document derived without it is unaddressable")
     ap.add_argument("--out", default="")
     ap.add_argument("--work", default="")
+    ap.add_argument(
+        "--publish", action="store_true",
+        help="also PUT every emitted closure to the hub's key-set store "
+             f"(th#2123), so a pod with no volume and no baked document reads "
+             f"it instead of tracing. Needs --hub/${ENV_HUB_URL} and "
+             f"${ENV_HUB_TOKEN}.")
+    ap.add_argument(
+        "--hub", default="",
+        help=f"the hub base URL for --publish; defaults to ${ENV_HUB_URL}")
     args = ap.parse_args(argv)
 
     from gen_worker import keyset
@@ -279,11 +362,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                 ap.error(f"--slot-ref must be NAME=REF, got {item!r}")
             refs[name] = ref
         work = Path(args.work or (out.parent / ".cg-keyset-work"))
-        return derive(tuple(args.module), args.function, slots, refs, out, work)
+        # The tier is built BEFORE the traces, so a missing credential costs a
+        # refusal in the first second rather than after a full derive.
+        tier = hub_tier(args.hub) if args.publish else None
+        status = derive(tuple(args.module), args.function, slots, refs, out, work)
+        if status or tier is None:
+            return status
+        return 1 if publish(out, tier) else 0
 
     if not args.from_cache:
         ap.error("pass --from-cache DIR or --derive")
-    return from_cache(Path(args.from_cache), out)
+    tier = hub_tier(args.hub) if args.publish else None
+    status = from_cache(Path(args.from_cache), out)
+    if status or tier is None:
+        return status
+    return 1 if publish(out, tier) else 0
 
 
 if __name__ == "__main__":

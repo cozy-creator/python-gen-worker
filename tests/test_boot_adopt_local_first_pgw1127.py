@@ -299,20 +299,47 @@ def test_a_machine_holding_cells_DERIVES_even_with_no_hub_at_all(
 # ---------------------------------------------------------------------------
 
 
-def test_a_populated_store_and_an_unreachable_hub_makes_zero_http_attempts(
+def test_a_populated_store_and_an_unreachable_hub_never_ASKS_FOR_THE_CELL(
     store: Path, cas: Path, tmp_path: Path, declared: None, events: List[Any],
     no_wire: List[Any], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """§4.28's *"never requested"*, enforced rather than described.
 
     A hub URL is CONFIGURED and points nowhere — the shape that matters, since
-    "no base_url" would make the old gate accidentally right. The boot derives,
-    its own store answers, and no connection is attempted by any layer.
+    "no base_url" would make the old gate accidentally right. The boot states
+    its key, its own store answers with the CELL, and **no cell is ever
+    requested over the wire.**
+
+    NARROWED 2026-08-17 (pgw#1353 option (b) / th#2123), deliberately, with the
+    argument written down rather than the assertion quietly relaxed.
+
+    This used to assert zero connections OF ANY KIND, at the socket. That was
+    the right fence for what §4.28 states — *"local cell, local repo-CAS… never
+    requested"* — and it stayed right until a second, different question
+    acquired a hub tier: **the KEY SET**. A pod cannot ask its own store
+    anything until it can state a key, and stating a key means either reading a
+    ``cg-keyset-v1`` document or running ~805 s of ``torch.export`` (measured on
+    four sdxl pods, pgw#1353). This test's pod holds NO such document — the
+    deriver is patched to a lambda, which hides that the real one would trace —
+    so the honest description of it is *"a pod about to spend 13 minutes"*, and
+    asking the hub once, with a 10 s bound and a fallthrough to the trace, is
+    strictly better for it.
+
+    §4.28 is about the ARTIFACT, and that property is unweakened and is now
+    asserted DIRECTLY rather than through a socket proxy: `resolve_batch` is
+    never called, and the only address dialled is the key-set route. A pod
+    genuinely told there is no hub (`base_url` unset) still dials nothing at
+    all — that is the test above, and it still fences at the socket.
     """
     local_cell_store.store(
         _cell(tmp_path), key=KEY_DERIVED, family="micro-diffusion",
         arm_token=ARM_A, cas_root=cas)
     monkeypatch.setattr(boot_key, "derive", lambda **kw: _derived())
+
+    asked: List[Any] = []
+    monkeypatch.setattr(
+        cell_resolve, "resolve_batch",
+        lambda family, keys, **kw: asked.append((family, list(keys))) or ())
 
     ex = _executor(tmp_path)
     ex.file_base_url = "http://127.0.0.1:9"   # discard port: nothing listens
@@ -320,9 +347,10 @@ def test_a_populated_store_and_an_unreachable_hub_makes_zero_http_attempts(
 
     (out,) = ex._boot_adopt(_Spec(), {})
 
-    assert not no_wire, (
-        "the boot reached for the wire while holding the answer on disk: "
-        f"{no_wire}")
+    assert asked == [], (
+        f"the boot asked the hub for a CELL it was holding on disk: {asked}")
+    assert set(no_wire) <= {("127.0.0.1", 9)}, (
+        f"the boot dialled something other than the configured hub: {no_wire}")
     assert out.reason == boot_adopt.LOCAL_HIT
     assert out.local_key == KEY_DERIVED == out.derived_key
     row = _adopt_events(events)[-1]
