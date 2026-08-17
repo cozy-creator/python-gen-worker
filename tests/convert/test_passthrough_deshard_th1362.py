@@ -108,8 +108,7 @@ def _publish_svdq_flavor(fake_hub: Any, tmp_path: Path, *, sharded: bool):
         tmp_path / "flavor")
     ctx = _Ctx(f"http://127.0.0.1:{fake_hub.server_port}")
     results = publish_flavors(
-        ctx, [ProducedFlavor(path=str(tree), flavor=attrs["flavor"],
-                             attributes=attrs)],
+        ctx, [ProducedFlavor(path=str(tree), attributes=attrs)],
         destination_repo="cozy/qwen-image", release="r1")
     paths = sorted(f["path"] for f in _FakeHub.state["publish_request"]["files"])
     return base, tree, te, paths, results
@@ -203,7 +202,7 @@ def test_publish_still_refuses_a_shard_set_the_copy_cannot_collapse(
     ctx = _Ctx(f"http://127.0.0.1:{fake_hub.server_port}")
     with pytest.raises(ConversionImplementationError,
                        match="sharded_producer_output"):
-        publish_flavors(ctx, [ProducedFlavor(path=str(tree), flavor="x")],
+        publish_flavors(ctx, [ProducedFlavor(path=str(tree))],
                         destination_repo="cozy/qwen-image", release="r1")
 
 

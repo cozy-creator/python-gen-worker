@@ -16,10 +16,11 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .. import activity as _activity
+from ..api.errors import ValidationError
 from ..hubio.client import CommitFile, CommitResult, HubClient, files_from_tree
 from ..hubio.publish_state import JOURNAL_NAME
-from ..models.ladder import CLASS_BASE, classify_flavor_token
-from .dtype_pins import verify_produced_tree
+from ..models.ladder import CLASS_BASE, PRECISION_CLASSES
+from .dtype_pins import dtype_bits, verify_produced_tree
 from .produced import ProducedFlavor
 from .writer import assert_one_file_per_component
 from ..models.file_layout import validate_file_layout
@@ -34,19 +35,65 @@ from ..models.file_layout import validate_file_layout
 _DEAD_PLACEMENT_ATTRS = ("placement_sm_allowed", "placement_sm_min", "placement_engines")
 
 
-def _precision_class_block(attrs: Mapping[str, str], label: str) -> dict[str, Any] | None:
+#: A base row is bf16/fp16/fp32 — 16 bits or wider. Anything narrower is on a
+#: quantization lane, and only its producer knows which one (fp4 bytes are
+#: svdq-fp4 or nvfp4-w4a4 depending on how they were made).
+_BASE_STORAGE_BITS = 16
+
+
+class PrecisionClassRefusal(ValidationError):
+    """A publish whose precision class cannot be recorded as the hub reads it.
+
+    A18 / pgw#1319 replaced ``classify_flavor_token`` — which guessed the class
+    from a producer-local label — with a DECLARATION. A guess that missed
+    published a row with no class at all, and the hub's fallback for an
+    unstamped row is `ClassBase`: an fp8 checkpoint served as though it were
+    bf16, invisibly, for as long as nobody looked (te#225 found two such rows
+    live). So the failure mode is now a refusal at the call site, before a byte
+    moves, naming the attribute to declare.
+    """
+
+
+def _precision_class_block(
+    attrs: Mapping[str, str], produced_dtypes: Mapping[str, str],
+) -> dict[str, Any] | None:
     """The ONE surviving key of ``checkpoints.metadata["placement"]``.
 
     pgw#1300 / th#2055: card admission is gone — pod purchase depends only on
     the endpoint owner's (GPU, lane) ladder — but `precision_class` survives,
     because tensorhub's `precision.StoredPrecisionOf` reads it as its strongest
     evidence for a stored class where no tensor-layout contract is proven.
-    Taken from the producer's explicit ``precision_class`` attr, else derived
-    from the flavor token. Base rows stay unstamped: the hub's own fallback for
-    an unstamped row is `ClassBase`, so a block would restate it.
+
+    It is the producer's own ``precision_class`` attribute and nothing else.
+    Base rows stay unstamped: the hub's own fallback for an unstamped row is
+    `ClassBase`, so a block would restate it. Two refusals stand where the
+    token classifier used to guess — a class outside the vocabulary, and narrow
+    bytes nobody classified. ``produced_dtypes`` is read off the published
+    tree's own safetensors headers, so the second one is decided by the bytes
+    rather than by anything the producer says about them.
     """
     cls = str(attrs.get("precision_class", "") or "").strip().lower()
-    cls = cls or classify_flavor_token(label)
+    if cls and cls not in PRECISION_CLASSES:
+        raise PrecisionClassRefusal(
+            f"precision_class={cls!r} is not a class tensorhub reads "
+            f"({', '.join(sorted(PRECISION_CLASSES))}). Publishing it would "
+            "record prose in the checkpoint metadata and the row would serve "
+            "as base."
+        )
+    if not cls:
+        narrow = sorted(
+            f"{comp}={dt}" for comp, dt in produced_dtypes.items()
+            if 0 < dtype_bits(dt) < _BASE_STORAGE_BITS
+        )
+        if narrow:
+            raise PrecisionClassRefusal(
+                f"this tree carries sub-{_BASE_STORAGE_BITS}-bit weights "
+                f"({', '.join(narrow)}) and declares no precision class. "
+                "Declare `precision_class` in the flavor's attributes (one of "
+                f"{', '.join(sorted(PRECISION_CLASSES))}) — the bytes name the "
+                "width but only the producer knows the lane, and an unstamped "
+                "row is served as base."
+            )
     if not cls or cls == CLASS_BASE:
         return None
     return {"precision_class": cls}
@@ -116,17 +163,22 @@ def _journal_beside(flavor: ProducedFlavor) -> Path:
     return Path(flavor.path).parent / JOURNAL_NAME
 
 
-def _publish_leg(dest: str, label: str, stage: str, facts: Mapping[str, Any]) -> None:
+def _publish_leg(dest: str, artifact: str, stage: str, facts: Mapping[str, Any]) -> None:
     """One typed `convert_publish` event per LEG of the publish protocol.
 
     Without these, the highest-volume producer on the platform emits ZERO
     `worker_activity_events` legs for a multi-hour publish, and "declared 590
     objects and is moving 37 GB" is indistinguishable from "was refused before
     a byte left". Mirrors ``fleet_cells._publish_leg``.
+
+    ``artifact`` is the produced path's own name — what tells one leg of an
+    N-artifact export from another. It was the flavor token, which A18 deleted;
+    a filename is the thing that actually exists, and it is always present.
     """
     detail = " ".join(f"{k}={v}" for k, v in sorted(dict(facts).items()))
     _activity.emit_event(
-        "convert_publish", f"repo={dest} flavor={label}: {detail}", phase=stage)
+        "convert_publish", f"repo={dest} artifact={artifact}: {detail}",
+        phase=stage)
 
 
 def destination_release(ctx: Any, explicit: str = "") -> str:
@@ -258,10 +310,6 @@ def publish_flavors(
         # precision is published either way.
         produced_dtypes = verify_produced_tree(Path(flavor.path))
         attrs = {str(k): str(v) for k, v in (flavor.attributes or {}).items()}
-        # A PRODUCER-LOCAL label. It classifies the precision class and names
-        # the activity leg; it is NOT sent to the hub and does not name a
-        # catalog row — `dtype` + `artifact_contract` state what the bytes are.
-        label = str(flavor.flavor or attrs.get("dtype") or "").strip()
         # Worker-addable provenance stamp fields. Producers declare quant
         # identity in the flavor attribute bag; it rides the commit's
         # `provenance` object onto the checkpoint's node stamp (parents /
@@ -271,7 +319,7 @@ def publish_flavors(
             for k in ("quantization_method", "quantization_library")
             if attrs.get(k)
         }
-        placement = _precision_class_block(attrs, label)
+        placement = _precision_class_block(attrs, produced_dtypes)
         meta = {**(dict(metadata) if metadata else {}), **attrs}
         for k in _DEAD_PLACEMENT_ATTRS:
             meta.pop(k, None)
@@ -300,7 +348,8 @@ def publish_flavors(
             # The conversion producer's own legs. (The per-object liveness beat
             # lives in tensorfs's transfer progress callback, so it
             # cannot be lost by a caller who forgets to pass a callback.)
-            on_stage=functools.partial(_publish_leg, dest, label),
+            on_stage=functools.partial(
+                _publish_leg, dest, Path(flavor.path).name),
             journal_path=journal_path or _journal_beside(flavor),
             # When the producer declares one, the hub PROVES it against the
             # header before recording it.
@@ -316,4 +365,9 @@ def publish_flavors(
     return results
 
 
-__all__ = ["destination_ref", "destination_release", "publish_flavors"]
+__all__ = [
+    "PrecisionClassRefusal",
+    "destination_ref",
+    "destination_release",
+    "publish_flavors",
+]

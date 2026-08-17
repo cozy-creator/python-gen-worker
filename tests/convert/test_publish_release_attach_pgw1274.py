@@ -141,8 +141,7 @@ def test_publish_flavors_threads_the_release_to_every_variant(
         out.mkdir()
         (out / "diffusion.safetensors").write_bytes(label.encode() * 500)
         (out / "config.json").write_text('{"architectures": ["Fake"]}')
-        trees.append(ProducedFlavor(path=out, flavor=label,
-                                    attributes={"dtype": label}))
+        trees.append(ProducedFlavor(path=out, attributes={"dtype": label}))
 
     publish_flavors(ctx, trees, destination_repo="acme/quant", release=RELEASE)
 

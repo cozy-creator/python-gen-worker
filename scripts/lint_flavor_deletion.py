@@ -1,43 +1,32 @@
 #!/usr/bin/env python3
-"""A18 / DESIGN-RULINGS §1.32(d): the flavor dies entirely, and what is left of
-it may not GROW while it waits for its cross-repo leg.
+"""A18 / DESIGN-RULINGS §1.32(d): the flavor is deleted, and the residue is ZERO.
 
 WHY A LINT AND NOT ONLY A TEST. `tests/test_flavor_deletion_pgw1148.py` is a
 good fence and it runs — but it runs in `tests`, which pgw#1264 took off the
-merge path, so nothing in the REQUIRED context (`fast gates`) has an opinion
-about the flavor axis. A rename that regrows a reader merges green and is found
-on a pod. This runs where the merge is decided.
+merge path, so nothing in the REQUIRED context (`fast gates`) would have an
+opinion about the flavor axis. A rename that regrows a reader merges green and
+is found on a pod. This runs where the merge is decided.
 
-WHAT SURVIVES, AND WHY IT IS NOT CUT HERE. `ProducedFlavor.flavor` is a
-PRODUCTION AUTHOR SURFACE: `training-endpoints/conversion` constructs it at 14
-sites and `scripts/author_surface_allowlist.txt` pins `publish_flavors` to
-`conversion/src/conversion/_common.py:9`. The token is not decoration — it is
-the input to `classify_flavor_token`, which derives
-`checkpoints.metadata["placement"]["precision_class"]`, the hub's strongest
-evidence for a stored precision class where no tensor-layout contract is proven
-(tensorhub `precision.StoredPrecisionOf`). Deleting the field from this repo
-alone would either fail every te producer with a `TypeError` on a rented pod, or
-— worse — silently drop the precision class of every svdq/fp8/nvfp4 row whose
-producer states it only through the token. So the residue stays, NAMED, with its
-removal condition, and this fence holds it at exactly the size it is today.
-
-THE REMOVAL CONDITION, so this file states it rather than a tracker page: every
-te producer whose token classifies to a non-base class declares
-`precision_class` in its own attribute bag (te already does this once, at
-`conversion/src/conversion/quant/modelopt.py:1262`). When that lands,
-`classify_flavor_token`, the `label` read and `ProducedFlavor.flavor` all go,
-`RESIDUE` below becomes empty, and this fence becomes a pure deletion check.
+THE RESIDUE IS GONE (pgw#1319, 2026-08-17). `ProducedFlavor.flavor`,
+the `label = flavor.flavor or ...` read and `classify_flavor_token` are all
+DELETED. The cross-repo condition that held them alive is discharged: te#225
+and te#227 made `precision_class` a DECLARATION at every training-endpoints
+producer that publishes a non-base row (eight sites — the census was wrong
+twice before it was made from the tree), and `convert.publish` now REFUSES a
+publish of sub-16-bit bytes that declares no class instead of guessing one from
+a label. So this file no longer holds an allowance at a size; it asserts that
+the axis names nothing at all, and the former residue paths get NO exemption.
 
 Three rules, all AST — a grep cannot tell `X.flavor` from `flavor_label(...)`
 from `cgroup_flavor`, and this axis is a four-way homonym (the compile-cell
 `#`-fragment is the one that must NOT move).
 
   1. DELETED names stay deleted. Nothing in `src/` binds or reads a name the
-     deletion removed.
-  2. A `flavor`-shaped FIELD is declared at exactly one place, the named residue.
-  3. The token is READ at exactly the declared sites. A new reader is red even
-     though it compiles, because a second reader is how a deleted axis comes
-     back.
+     deletion removed — `classify_flavor_token` among them now.
+  2. NO `flavor`-shaped FIELD is declared anywhere. There is no residue row to
+     be excused by.
+  3. The token is READ nowhere. A new reader is red even though it compiles,
+     because a second reader is how a deleted axis comes back.
 
 Usage:
 
@@ -68,18 +57,19 @@ DELETED_NAMES = (
     "WorkerResolvedFlavor",
     "sibling_flavors",
     "default_flavor",
+    "classify_flavor_token",
 )
 
 #: Field names that name the axis. `flavors` is deliberately absent: it is the
 #: parameter of `publish_flavors`, a LIST of produced artifacts, not a selector.
 FIELD_NAMES = ("flavor", "default_flavor", "sibling_flavors")
 
-#: The A18 residue, at the size it is allowed to be. `<relpath>: <what>`.
-#: Every row dies with the te leg described in this module's docstring; a row
-#: that no longer matches anything is red too, so the list cannot outlive it.
-RESIDUE_FIELD = "convert/produced.py"          # ProducedFlavor.flavor
-RESIDUE_READERS = ("convert/publish.py",)      # the one `label = ...` derivation
-RESIDUE_CLASSIFIERS = ("convert/publish.py",)  # the one classify_flavor_token call
+#: The A18 residue, now EMPTY. Kept as named constants rather than deleted so
+#: the rules below read as "at exactly these sites, and there are none" — and
+#: so that a future lane re-adding one has to say so in this file.
+RESIDUE_FIELD = ""       # no module may declare a flavor field
+RESIDUE_READERS: Tuple[str, ...] = ()      # no module may read the token
+RESIDUE_CLASSIFIERS: Tuple[str, ...] = ()  # the classifier is deleted
 
 CLASSIFIER = "classify_flavor_token"
 
@@ -150,35 +140,25 @@ def scan(roots: Tuple[Path, ...]) -> List[str]:
                     seen_readers.append(rel)
                 else:
                     findings.append(
-                        f"{rel}:{node.lineno}: a new read of `.{node.attr}` — the "
-                        "producer-local label has ONE reader and is losing that "
-                        "one; see this script's docstring for the te leg")
+                        f"{rel}:{node.lineno}: a read of `.{node.attr}` — the "
+                        "producer-local label is DELETED and has no readers; "
+                        "the class is declared, not inferred from a label")
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
                     and node.func.id == CLASSIFIER and not is_classifier_def:
                 if rel in RESIDUE_CLASSIFIERS:
                     seen_classifiers.append(rel)
                 else:
                     findings.append(
-                        f"{rel}:{node.lineno}: a new {CLASSIFIER} caller — it is a "
-                        "package-internal choke point that dies with the token; "
-                        "nothing new may grow on it")
+                        f"{rel}:{node.lineno}: a {CLASSIFIER} caller — the "
+                        "classifier is DELETED; declare `precision_class` from a "
+                        "structural fact instead of re-deriving it from a label")
 
-    # A residue row matching nothing is stale, and a stale row reads as a fence.
-    if not seen_field:
-        findings.append(
-            f"RESIDUE_FIELD names {RESIDUE_FIELD!r}, which declares no flavor "
-            "field any more — the te leg landed: delete the row (and probably "
-            "this whole rule)")
-    for row in RESIDUE_READERS:
-        if row not in seen_readers:
-            findings.append(
-                f"RESIDUE_READERS names {row!r}, which no longer reads the token "
-                "— delete the row")
-    for row in RESIDUE_CLASSIFIERS:
-        if row not in seen_classifiers:
-            findings.append(
-                f"RESIDUE_CLASSIFIERS names {row!r}, which no longer calls "
-                f"{CLASSIFIER} — delete the row")
+    # The residue is EMPTY, so there is no staleness rule left: every match
+    # above is already a finding. These stay asserted rather than dropped so a
+    # lane that re-adds a row has to make the allowance visible here.
+    assert not seen_field and not seen_readers and not seen_classifiers, (
+        "the A18 residue is empty; a match here means a residue row was "
+        "re-added without saying so")
     return findings
 
 
@@ -207,16 +187,6 @@ def _selftest() -> int:
         for name, src, expect_red in cases:
             root = Path(tmp) / name
             root.mkdir()
-            # Satisfy the residue rows so only the planted rule can speak.
-            (root / RESIDUE_FIELD).parent.mkdir(parents=True, exist_ok=True)
-            (root / RESIDUE_FIELD).write_text(
-                "import msgspec\n\n\nclass ProducedFlavor(msgspec.Struct):\n"
-                "    flavor: str = ''\n")
-            (root / RESIDUE_READERS[0]).write_text(
-                "def publish_flavors(ctx, flavors):\n"
-                "    for f in flavors:\n"
-                "        label = f.flavor\n"
-                f"        yield {CLASSIFIER}(label)\n")
             (root / "planted.py").write_text(src)
             findings = [f for f in scan((root,)) if f.startswith("planted.py")]
             if bool(findings) != expect_red:
@@ -224,20 +194,32 @@ def _selftest() -> int:
                 verb = "did not go red" if expect_red else "went red"
                 print(f"SELFTEST FAILED: {name} {verb}: {findings}", file=sys.stderr)
 
-        # The staleness rule: a residue row that matches nothing is red.
-        root = Path(tmp) / "stale"
+        # The flip pgw#1319 makes: the residue is ZERO, so the paths that
+        # used to be excused are excused no longer. Regrow all three there and
+        # every one is red — the arm that would have gone quiet if the cut had
+        # deleted the code but left the allowance behind.
+        root = Path(tmp) / "regrown"
         (root / "convert").mkdir(parents=True)
-        (root / RESIDUE_FIELD).write_text("X = 1\n")
-        (root / RESIDUE_READERS[0]).write_text("Y = 2\n")
-        stale = scan((root,))
-        if len(stale) != 3:
+        (root / "convert" / "produced.py").write_text(
+            "import msgspec\n\n\nclass ProducedFlavor(msgspec.Struct):\n"
+            "    flavor: str = ''\n")
+        (root / "convert" / "publish.py").write_text(
+            "def publish_flavors(ctx, flavors):\n"
+            "    for f in flavors:\n"
+            "        label = f.flavor\n"
+            f"        yield {CLASSIFIER}(label)\n")
+        regrown = scan((root,))
+        # field + `.flavor` read + classifier CALL + the classifier's name read
+        # (it is a DELETED name now, so rule 1 speaks too).
+        if len(regrown) != 4:
             ok = False
-            print(f"SELFTEST FAILED: a fully-landed te leg should red all three "
-                  f"residue rows, got {stale}", file=sys.stderr)
+            print("SELFTEST FAILED: regrowing the former residue in its own "
+                  f"files must red every rule, got {regrown}", file=sys.stderr)
     if not ok:
         return 1
     print("lint_flavor_deletion selftest: red on all five regressions, green on "
-          "all four homonyms, red on a stale residue row")
+          "all four homonyms, red on a regrown residue in its own former "
+          "files (the residue is ZERO)")
     return 0
 
 
@@ -247,16 +229,18 @@ def main(argv: List[str]) -> int:
     roots = tuple(Path(a).resolve() for a in argv) or DEFAULT_ROOTS
     findings = scan(roots)
     if findings:
-        print("A18 / §1.32(d): the flavor is deleted and its residue may not "
-              "grow. See scripts/lint_flavor_deletion.py for the residue's "
-              "removal condition (a training-endpoints leg).\n", file=sys.stderr)
+        print("A18 / §1.32(d): the flavor is deleted and names nothing. The "
+              "precision class is DECLARED by the producer (`precision_class`, "
+              "checked against models.ladder.PRECISION_CLASSES); it is never "
+              "inferred from a label.\n", file=sys.stderr)
         for f in findings:
             print(f, file=sys.stderr)
         print(f"\n{len(findings)} finding(s)", file=sys.stderr)
         return 1
     print("lint_flavor_deletion: the flavor axis is deleted; the A18 residue is "
-          f"{len(RESIDUE_READERS)} reader, 1 field, "
-          f"{len(RESIDUE_CLASSIFIERS)} classifier call — unchanged")
+          f"{len(RESIDUE_READERS)} readers, "
+          f"{1 if RESIDUE_FIELD else 0} fields, "
+          f"{len(RESIDUE_CLASSIFIERS)} classifier calls — the token names nothing")
     return 0
 
 
