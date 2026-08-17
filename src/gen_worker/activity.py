@@ -206,6 +206,21 @@ KIND_AOT_MINT = "aot_mint_phases"
 # `measure_child.REASONS` token), `duration_ms` the run's wall, `detail` the
 # peaks in the mint's own vocabulary.
 KIND_MEASURE_ONLY = "measure_only"
+# pgw#1309: ONE compile child, at spawn and at collect. Same shape as
+# `aot_mint_phases`' child rows (`phase=child:start` / `child:finish`), its own
+# KIND because the two questions the pgw#1232 legs ask of it are PRESENCE
+# questions — "a compile ran, in a child, under this serving pid" on leg A and
+# "no compile ran at all" on B/C — and an absence assertion over a kind that
+# also carries width, ledger and per-class rows answers neither. `detail`
+# carries `child_pid` / `child_ppid` / `serving_pid` / `role` plus the packed
+# `compiled_graph_keys`, because no ActivityUpdate field holds a pid and the
+# th#1839 route serves `detail` verbatim (no hub change).
+KIND_COMPILE_CHILD = "compile_child"
+# pgw#1309: this process's own pid and role, stated once per sink bind. The
+# serving pid used to exist only in `entrypoint._startup_payload` and
+# `postmortem.write_boot_record`, both pod-local, so "no compile under the
+# serving PID" was unassertable off-pod even with the child rows above.
+KIND_PROCESS_ROLE = "process_role"
 # th#1322: the roll-up phase both mint routes report their TOTAL under. A
 # reader groups on (kind, phase) and must never sum a roll-up together with
 # its own children.

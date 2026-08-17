@@ -41,6 +41,7 @@ from . import cpu_budget
 from . import measured_posture as posture_mod
 from . import mint_workers
 from . import settings_authority
+from . import process_role
 from . import progress as progress_mod
 from . import serve_posture
 from . import serving_mode as serving_mode_mod
@@ -4410,6 +4411,13 @@ class Executor:
             activity_mod.bind_sink(self._send, asyncio.get_running_loop())
         except RuntimeError:
             pass
+        else:
+            # pgw#1309: THIS is the serving process — it holds the session the
+            # compile children's pid rows are read beside. Declared where the
+            # transport is bound, so the fact and the wire that carries it
+            # arrive together.
+            process_role.declare(process_role.ROLE_SERVING)
+            process_role.emit_boot_role()
         rec = self._class_record(spec)
         async with self._setup_singleflight(spec, rec) as intent_id:
             if rec.ready and not rec.stale:

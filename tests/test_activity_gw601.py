@@ -83,8 +83,11 @@ def test_executor_setup_emits_monotonic_activity_phases():
     # The boot-forward roll-up is a self-contained EVENT under its
     # own kind, not part of this activity's phase envelope. This assertion
     # read as "one activity" only because the two used to share a kind.
+    # pgw#1309's boot row (this process's pid and role) rides the same bind
+    # and is likewise not part of the phase envelope.
     assert {u.kind for u in ups} <= {
-        activity.KIND_WARMUP, activity.KIND_WARMUP_SUMMARY}
+        activity.KIND_WARMUP, activity.KIND_WARMUP_SUMMARY,
+        activity.KIND_PROCESS_ROLE}
     ups = [u for u in ups if u.kind == activity.KIND_WARMUP]
     seqs = [u.seq for u in ups]
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), seqs
