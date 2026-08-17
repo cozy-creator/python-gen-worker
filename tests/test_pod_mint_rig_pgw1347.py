@@ -667,6 +667,28 @@ def test_the_probe_is_ONE_round_trip_and_parses_into_the_gate_observation() -> N
     assert _section(sample, "NOPE") == ""
 
 
+def test_a_quiet_non_zero_exit_leaves_a_MARK_and_does_not_cost_a_stall_budget() -> None:
+    """MEASURED: the mint's rigcheck leg aborted with a one-line refusal and no
+    traceback. The log simply stopped growing, so the only signal left was the
+    frozen token — and the gate paid a full stall budget of RENTED POD to learn
+    what the exit code had already said."""
+    script = Workload(name="w", command="do_thing").launch_script()
+    assert "RIG_FAIL rc=$rc" in script
+    assert "RIG_FAIL" in Workload(name="w", command="x").fail_markers[1]
+
+
+def test_the_mint_ships_the_fleet_line_authority_because_the_sdk_is_not_one(tmp_path: Path) -> None:
+    """RIG-ENV §2: rigcheck reads endpoint.toml / fleet-floors.toml / ENDPOINT
+    dist metadata and deliberately refuses gen-worker's own requirement — an SDK
+    certifying its own floor makes every rig pass. This repo ships none of those
+    files, so a pod carrying only its wheel aborts FleetLineUnknown."""
+    authority = tmp_path / "fleet-floors.toml"
+    authority.write_text("[floors]\ntorch = \"2.13.0\"\n")
+    workload = mint_family("m:F", runners=("clip",), fleet_line=authority)
+    assert workload.env["GEN_WORKER_FLEET_LINE_FILE"] == f"{POD_ROOT}/fleet-floors.toml"
+    assert any(u.local == authority for u in workload.uploads)
+
+
 def test_the_mint_workload_asserts_the_fleet_line_before_it_compiles() -> None:
     workload = mint_family("m:F", runners=("clip",))
     assert workload.command.startswith("python3 -m gen_worker.rigcheck && ")

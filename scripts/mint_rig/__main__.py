@@ -87,11 +87,30 @@ def _delivery(args: argparse.Namespace) -> tuple[tuple[str, ...], tuple[Upload, 
 
 def cmd_mint(args: argparse.Namespace) -> int:
     install, uploads = _delivery(args)
+    fleet_line = Path(args.fleet_line) if args.fleet_line else None
+    # REFUSED BEFORE RENTING, because this refusal is free and the pod that
+    # taught us was not. `gen-worker family mint` asserts the fleet line first
+    # (RIG-ENV §1) and rigcheck reads endpoint.toml / fleet-floors.toml /
+    # ENDPOINT dist metadata — none of which exist on a pod carrying only this
+    # repo's wheel. Only `--deliver image` is exempt: an endpoint image ships
+    # its own endpoint.toml, which is the authority.
+    if fleet_line is None and args.deliver != "image":
+        raise SystemExit(
+            "pgw#1347: `mint` needs --fleet-line <endpoint.toml|fleet-floors.toml>. "
+            "gen-worker's own torch requirement is NOT an authority (rigcheck refuses "
+            "to let the SDK certify its own floor), and this repo ships neither file, so "
+            "the mint would abort FleetLineUnknown on a pod you already paid for. The "
+            "workspace's authority is ~/cozy/serverless-endpoints/fleet-floors.toml; a "
+            "per-endpoint endpoint.toml is stronger, because it also declares CUDA."
+        )
+    if fleet_line is not None and not fleet_line.is_file():
+        raise SystemExit(f"pgw#1347: --fleet-line {fleet_line} does not exist")
     workload = mint_family(
         args.target,
         runners=tuple(args.runner),
         install=install + tuple(args.setup),
         uploads=uploads,
+        fleet_line=fleet_line,
         name=args.name,
     )
     row = _rig(args).run(cards_mod.pick(args.gpu), workload, image=args.image)
@@ -199,6 +218,13 @@ def main(argv: list[str] | None = None) -> int:
     _rent_flags(mint)
     mint.add_argument("--target", required=True, help="module:ATTR of the GraphFamily.")
     mint.add_argument("--runner", action="append", default=[], help="Repeatable; omit for all.")
+    mint.add_argument(
+        "--fleet-line",
+        default="",
+        help="endpoint.toml or fleet-floors.toml to ship as the fleet-line authority "
+        "(RIG-ENV §2). REQUIRED unless --deliver image. It becomes "
+        "GEN_WORKER_FLEET_LINE_FILE on the pod.",
+    )
     mint.add_argument("--name", default="mint")
     mint.set_defaults(fn=cmd_mint)
 

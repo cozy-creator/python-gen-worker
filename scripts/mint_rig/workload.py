@@ -105,13 +105,20 @@ class Workload:
         for any length of time without costing the compile.
         """
         exports = "".join(f"export {k}={json.dumps(v)}; " for k, v in sorted(self.env.items()))
+        # A NON-ZERO EXIT MUST LEAVE A MARK. Measured 2026-08-17: the mint
+        # command's `rigcheck` leg aborted with a one-line refusal and no
+        # traceback, so the log simply stopped growing — and a gate that can only
+        # see "the token froze" then paid a full stall budget of rented pod to
+        # learn what the exit code had already said. The wrapper turns every
+        # non-zero exit into the FAIL marker the gate reads on its next tick.
+        wrapped = f"{{ {self.command}; }}; rc=$?; [ $rc -eq 0 ] || echo RIG_FAIL rc=$rc"
         return (
             f"mkdir -p {self.workdir} && cd {self.workdir} && "
             # The forward-compat libcuda binds only at process start and a
             # detached job inherits no login shell — RIG-ENV §3c.
             "{ [ -f /etc/profile.d/zz-cuda-compat.sh ] && . /etc/profile.d/zz-cuda-compat.sh; }; "
             f"{exports}"
-            f"setsid nohup bash -lc {json.dumps(self.command)} > {self.log} 2>&1 & "
+            f"setsid nohup bash -lc {json.dumps(wrapped)} > {self.log} 2>&1 & "
             "echo RIG_LAUNCHED $!"
         )
 
@@ -216,6 +223,7 @@ def mint_family(
     runners: tuple[str, ...] = (),
     install: tuple[str, ...] = (),
     uploads: tuple[Upload, ...] = (),
+    fleet_line: Path | None = None,
     name: str = "mint",
 ) -> Workload:
     """pgw#1331's owed leg as a workload value.
@@ -228,6 +236,18 @@ def mint_family(
     """
     only = " ".join(f"--runner {r}" for r in runners)
     out = f"{POD_ROOT}/cells"
+    # THE FLEET-LINE AUTHORITY HAS TO BE SHIPPED, and finding that out cost a
+    # pod. RIG-ENV §2: rigcheck reads endpoint.toml / fleet-floors.toml /
+    # ENDPOINT dist metadata, and deliberately does NOT accept `gen-worker`'s own
+    # requirement — an SDK certifying its own floor makes every rig pass. This
+    # repository contains none of those files, so a bare pod carrying only
+    # gen-worker aborts `FleetLineUnknown` before it compiles anything. The
+    # workspace's authority is ~/cozy/serverless-endpoints/fleet-floors.toml (and
+    # a per-endpoint endpoint.toml, which is the one that also declares CUDA).
+    env: dict[str, str] = {"TORCHINDUCTOR_CACHE_DIR": "/root/.cache/torchinductor_root"}
+    if fleet_line is not None:
+        uploads = uploads + (Upload(local=fleet_line),)
+        env["GEN_WORKER_FLEET_LINE_FILE"] = f"{POD_ROOT}/{fleet_line.name}"
     command = (
         # rigcheck FIRST: a mint measured off the fleet line is RIG-ENV §5's
         # two false verdicts, and its exit 90/91 is a cheaper answer than a
@@ -245,5 +265,5 @@ def mint_family(
         # The AOTI object cache and the packed cells both grow throughout the
         # compile; the log can be silent for minutes while they do.
         progress_paths=(out, f"{POD_ROOT}/work", "/root/.cache/torchinductor_root", "/root/.triton"),
-        env={"TORCHINDUCTOR_CACHE_DIR": "/root/.cache/torchinductor_root"},
+        env=env,
     )
