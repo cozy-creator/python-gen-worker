@@ -30,6 +30,7 @@ from gen_worker.models.download import (
 )
 
 from ..net import hf, install_hf_http_timeouts
+from ..models.materialized_view import third_party_dir
 from ..models.safetensors_header import header_len_ok
 from .classifier import RepoClassification, apply_source_include, classify_repo
 from .layout import detect_huggingface_source_layout
@@ -695,7 +696,8 @@ def _local_gguf_quant(path: Path) -> str:
         from gguf import GGUFReader
         from gguf.constants import LlamaFileType
 
-        reader = GGUFReader(str(path), "r")
+        reader = GGUFReader(
+            str(third_party_dir(path, why="gguf.GGUFReader wants a real file")), "r")
         field = reader.fields.get("general.file_type")
         if field is None:
             return ""

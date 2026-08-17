@@ -52,6 +52,22 @@ from gen_worker.api.streaming import StreamResult, TokenUsage
 from gen_worker.api.types import ImageAsset
 from gen_worker.families.base import GenerationDefaults, family
 
+
+def _slot_weight_bytes(slot_dir: object) -> str:
+    """What the slot's weights file HOLDS, on any tree shape.
+
+    A v2 catalog endpoint is a pgw#1303 author slot in miniature: handed a
+    DIRECTORY, reads raw weight bytes. After pgw#1308 step 6 that directory is
+    a projected tree and the file at the path is a ~128 B pointer stub — which
+    is what a real third-party loader gets. So this goes through the SAME seam
+    a gated production site now goes through.
+    """
+
+    from gen_worker.models.materialized_view import third_party_dir
+
+    real = third_party_dir(Path(str(slot_dir)), why="v2 catalog author slot")
+    return (real / "model.safetensors").read_text()
+
 #: The one module string every scenario (and baked manifest) uses.
 MODULE = "tests_v2.catalog"
 
@@ -152,8 +168,7 @@ class HotBound:
         self.model_path = model
 
     def hot_echo(self, ctx: RequestContext, data: Ping) -> Reply:
-        weights = Path(self.model_path) / "model.safetensors"
-        return Reply(response=weights.read_text())
+        return Reply(response=_slot_weight_bytes(self.model_path))
 
 
 @endpoint(models={
