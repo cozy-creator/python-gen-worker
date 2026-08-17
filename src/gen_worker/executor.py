@@ -8503,6 +8503,19 @@ class Executor:
         work_root = Path(
             self.store._cache_dir or Path.home() / ".cache" / "gen-worker"
         ) / "boot-key" / (spec.name or "endpoint")
+        # pgw#1327: the key set is DATA first. `derive` is the mint-lane
+        # fallback and it is INJECTED, never imported by `boot_adopt` — the
+        # import is local to this call so the serve-role extraction (pgw#1328)
+        # cuts HERE, at one line, rather than inside the adopt path. An
+        # adopt-only pod injects nothing and its key-set miss is a typed
+        # refusal. Today this executor hosts BOTH halves, so it always injects;
+        # the posture is a property of the ROLE and pgw#1328 is where it becomes
+        # one — deliberately NOT an env knob, which would be a second answer to
+        # "may this pod compile" beside the role the worker already declares on
+        # the wire (`process_role`, pgw#1309).
+        from . import boot_key
+
+        deriver: Optional[boot_adopt.KeyDeriver] = boot_key.derive
         return boot_adopt.attempt(
             function=spec.name,
             modules=_mint_modules(spec),
@@ -8510,6 +8523,7 @@ class Executor:
             slots=slots,
             declared_hint=declared_hint,
             work_root=work_root,
+            derive=deriver,
             # The memo lives beside the cell cache and OUTLIVES one boot on a
             # pod with a volume — which is the whole point (§4.28's
             # compile-once-run-forever promise for cozy-local reads the same

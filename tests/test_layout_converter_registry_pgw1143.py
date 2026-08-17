@@ -598,8 +598,14 @@ def test_the_fence_covers_every_module_that_computes_a_compiled_graph_key() -> N
     # pgw#1277: the key's DEFINITION left this tree for
     # torchcg.identity, so no module here defines it and the
     # fence covers exactly the CALL SITES plus the axis-input seeds.
-    assert {"fleet_cells.py", "boot_key.py", "aot_mint.py",
+    # pgw#1327: `boot_key.py` dropped OUT because the boot fold moved to
+    # `keyset/fold.py` — the fence is derived from who calls an axis producer,
+    # so it followed the arithmetic without anyone editing a list. That is the
+    # property this test exists to keep.
+    assert {"fleet_cells.py", "fold.py", "aot_mint.py",
             "compile_cache.py"} <= fenced
+    assert "boot_key.py" not in fenced, (
+        "the tracer states declarations; it no longer folds a key")
     assert "aot_serve.py" not in fenced, (
         "runtime admission consumes the TCG key; it must not derive one")
 

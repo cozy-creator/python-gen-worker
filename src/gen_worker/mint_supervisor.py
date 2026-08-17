@@ -222,13 +222,21 @@ def rule_on_boot_memo(
     """THE honesty gate (pgw#1271): what the boot memo answered, against what
     this mint TRACED. Returns the disagreement, or ``""``.
 
-    ``boot_key``'s memo path SKIPS THE TRACES and re-folds stored blocks into
-    the ``graph`` axis of every ``cg-key-v1`` this pod goes on to publish — so
-    the memo is a key generator, and the only thing standing between a stale
-    memo and a wrong published key is a comparison against a freshly traced
-    truth. ``boot_key.assert_memo_honest`` is that comparison. It had **zero
-    src/ callers**: it was written, documented as the thing that makes the memo
-    safe to have at all, exported, tested — and never invoked on a fleet pod.
+    The ``cg-keyset-v1`` cache SKIPS THE TRACES and re-folds stored class
+    hashes into the ``graph`` axis of every ``cg-key-v1`` this pod goes on to
+    publish — so the cache is a key generator, and the only thing standing
+    between a stale row and a wrong published key is a comparison against a
+    freshly traced truth. ``keyset.store.assert_honest`` is that comparison. It
+    had **zero src/ callers**: it was written, documented as the thing that
+    makes the cache safe to have at all, exported, tested — and never invoked on
+    a fleet pod.
+
+    pgw#1327 widened what it protects. The same document is now SHIPPED to pods
+    that never trace, so this gate is the fleet's only place where a stated class
+    hash meets a traced one. It rules on this machine's own cache only — a
+    shipped document is a mint-lane artifact, not this pod's claim — but a
+    shipped document is written by this same code path, so a dishonest emission
+    is caught here on the pod that made it.
 
     THIS is the moment, and there is only one: a mint is the single point in a
     pod's life where it holds a traced class set for the same closure the boot
@@ -240,17 +248,18 @@ def rule_on_boot_memo(
     manufacture disagreements:
 
     * a PARTIAL class set. Coverage accretes (pgw#1176), so a mint that packed
-      fewer classes than the declaration has cannot distinguish "the memo holds
+      fewer classes than the declaration has cannot distinguish "the cache holds
       a class we did not trace" from "we have not traced it yet", and
-      ``assert_memo_honest``'s set check would fire on every partial mint.
+      ``assert_honest``'s set check would fire on every partial mint.
     * a mint whose entries carry no keying block — nothing to compare.
 
-    Returns the reason rather than raising: a dishonest memo has already cost
-    what it can cost (the entry is invalidated, the next boot re-traces), and
+    Returns the reason rather than raising: a dishonest cache has already cost
+    what it can cost (the row is invalidated, the next boot re-derives), and
     the artifacts in hand were traced by THIS process and are correct. Killing
     a finished mint over it would turn a self-healing fault into a lost pod.
     """
-    from . import boot_key
+    from . import keyset
+    from .keyset import store as keyset_store
 
     memo_dir = getattr(task.pending, "cache_dir", None)
     if not memo_dir:
@@ -267,13 +276,25 @@ def rule_on_boot_memo(
         blocks[str(row.entry)] = dict(block)
     if len(blocks) != len(entries):
         return ""
-    digest = boot_key.closure_digest(
-        str(getattr(cfg, "family", "") or ""),
-        cfg_spec(cfg),
-        function=str(task.function or ""),
-        slots=dict(task.slots),
-    )
-    return boot_key.assert_memo_honest(Path(memo_dir), digest, blocks)
+    try:
+        digest = keyset.closure_digest(
+            str(getattr(cfg, "family", "") or ""),
+            cfg_spec(cfg),
+            function=str(task.function or ""),
+            slots=dict(task.slots),
+            # pgw#1327: `modules` was OMITTED here while every derivation passes
+            # it, so this gate addressed a closure nothing ever wrote and read an
+            # absent row on every pod — i.e. the honesty comparison that makes a
+            # cached (and now SHIPPED) class hash safe to fold has been returning
+            # "" unconditionally. Same defect class as the zero-caller one
+            # pgw#1271 found, one argument deeper.
+            modules=tuple(task.modules),
+        )
+    except keyset.KeySetError:
+        # This process cannot state its own closure, so it has no cached row to
+        # rule on. Nothing to compare is not a disagreement.
+        return ""
+    return keyset_store.assert_honest(Path(memo_dir), digest, blocks)
 
 
 def _rule_on_boot_memo(

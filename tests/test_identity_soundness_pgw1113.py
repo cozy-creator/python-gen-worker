@@ -25,7 +25,17 @@ from typing import Any, Dict
 
 import pytest
 
-from gen_worker import boot_key, fleet_cells, graph_facts, local_cell_store
+from gen_worker import boot_key, fleet_cells, graph_facts, keyset, local_cell_store
+from gen_worker.keyset import document as keyset_doc, store as keyset_store
+
+
+def _row(class_hash: str) -> Any:
+    """One closure row, as the mint lane emits it (pgw#1327)."""
+    return keyset_doc.closure_row(
+        family="q", function="fn", tcg_version=keyset.tcg_version(),
+        classes={"a": keyset_doc.GraphClassRow(
+            graph_class="a", class_hash=class_hash,
+            ingress_digest="9" * 32, target="unet")})
 from gen_worker.api.binding import Hub
 from gen_worker.child_contract import CompileSpec, MintSlot
 
@@ -221,9 +231,9 @@ def test_a_rebinding_forces_a_memo_MISS() -> None:
     a different checkpoint from reusing stale TCG class hashes.
     """
     cfg = _spec()
-    base = boot_key.closure_digest(
+    base = keyset.closure_digest(
         "qwen-image", cfg, function="generate", slots=_slots(BASE))
-    edit = boot_key.closure_digest(
+    edit = keyset.closure_digest(
         "qwen-image", cfg, function="generate", slots=_slots(EDIT))
     assert base != edit
 
@@ -235,12 +245,13 @@ def test_the_memo_row_of_one_checkpoint_does_not_answer_for_another(
     one host with a volume, one family, unchanged code and declaration, and a
     redeploy that rebinds the slot."""
     cfg = _spec()
-    was = boot_key.closure_digest("q", cfg, function="fn", slots=_slots(BASE))
-    boot_key.write_memo(tmp_path, was, {"a": "1" * 16})
-    assert boot_key.read_memo(tmp_path, was), "the memo must answer itself"
+    was = keyset.closure_digest("q", cfg, function="fn", slots=_slots(BASE))
+    keyset_store.write_closure(tmp_path, was, _row("1" * 16))
+    assert keyset_store.class_hashes(was, cache_dir=tmp_path), (
+        "the cache must answer itself")
 
-    now = boot_key.closure_digest("q", cfg, function="fn", slots=_slots(EDIT))
-    assert boot_key.read_memo(tmp_path, now) == {}, (
+    now = keyset.closure_digest("q", cfg, function="fn", slots=_slots(EDIT))
+    assert keyset_store.class_hashes(now, cache_dir=tmp_path) == {}, (
         "a rebound slot must MISS — a hit here returns the previous "
         "checkpoint's witnesses and the witness floor can only agree with them")
 
@@ -250,8 +261,8 @@ def test_the_slot_PATH_is_not_part_of_the_memo_key() -> None:
     an identity. Folding it in would miss the memo on every fresh tmpdir,
     which is how a correctness fix turns into "the memo never hits"."""
     cfg = _spec()
-    here = boot_key.closure_digest("q", cfg, slots=_slots(BASE, "/cas/a"))
-    there = boot_key.closure_digest("q", cfg, slots=_slots(BASE, "/tmp/b"))
+    here = keyset.closure_digest("q", cfg, slots=_slots(BASE, "/cas/a"))
+    there = keyset.closure_digest("q", cfg, slots=_slots(BASE, "/tmp/b"))
     assert here == there
 
 
@@ -262,13 +273,17 @@ def test_a_memo_file_from_the_previous_schema_is_discarded_whole(
     rebinding) and it must be typed: a v3 row was filed under a
     checkpoint-blind digest, so it answers a different question and is never
     read as an answer to this one."""
-    path = tmp_path / boot_key.MEMO_FILENAME
+    digest = keyset.parse_closure_digest("ab" * 16)
+    path = tmp_path / keyset.KEYSET_FILENAME
     path.write_text(json.dumps({
-        "v": boot_key.MEMO_VERSION - 1,
-        "closures": {"whatever": {"blocks": {"a": "{}"}}},
+        "schema": keyset.KEYSET_SCHEMA,
+        "version": keyset.KEYSET_VERSION - 1,
+        "closures": {str(digest): {"blocks": {"a": "{}"}}},
     }))
-    assert boot_key.read_memo(tmp_path, "whatever") == {}
-    assert boot_key.MEMO_VERSION >= 4
+    assert keyset_store.class_hashes(digest, cache_dir=tmp_path) == {}
+    # pgw#1327: the version rides the CLOSURE DIGEST input as well as the file
+    # header, so a stale row is unaddressable AND its file is discarded whole.
+    assert keyset.CLOSURE_VERSION >= 6
 
 
 # --------------------------------------------------------------------------
