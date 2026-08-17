@@ -306,6 +306,16 @@ jobs:
       - name: Type check (mypy, strict by default, src + tests)
         run: uv run mypy src/gen_worker tests tests_v2
 
+      # pgw#1347: the pod driver is control-plane code that must NOT ship in the
+      # wheel (no pod needs the thing that rents pods), but it spends money, so
+      # it is born strict like everything else. It gets its OWN invocation with
+      # `MYPYPATH=scripts` rather than joining `mypy_path` in pyproject: that
+      # path is shared, and adding `scripts` to it makes mypy resolve every
+      # other scripts/*.py a test imports, which drags 18 unrelated pre-existing
+      # errors into this gate. Same hardness, isolated blast radius.
+      - name: Type check the pod mint-rig (pgw#1347)
+        run: MYPYPATH=scripts uv run mypy scripts/mint_rig tests/test_pod_mint_rig_pgw1347.py
+
       # GATING (pgw#1202): `strict = true` cannot silently stop being true, but
       # a per-module exemption list can grow one reasonable-looking name at a
       # time until the gate means nothing. This refuses that mechanically,
@@ -315,7 +325,7 @@ jobs:
 
       - name: Lint
         continue-on-error: true  # Lint debt (mostly worker.py, being rewritten) — visible in logs, doesn't block CI.
-        run: uv run ruff check src/gen_worker
+        run: uv run ruff check src/gen_worker scripts/mint_rig
 
       # GATING (no continue-on-error): a bare HTTP call site is the gw#456
       # forever-hang reintroduced. hf_hub network use goes through

@@ -8,21 +8,32 @@ they are typed.
 
 WHAT IT LOOKS FOR is a repo-ref-shaped literal: `<owner>/<repo>:<tag>` inside a
 quoted string, in Python, JSON, TOML, YAML and Markdown. The owner segment may
-not contain a `.` — that is what keeps docker/OCI refs (`docker.io/x:1`,
-`ghcr.io/y:v2`) out; git tags, image tags and `sTAGe` substrings never match the
-shape at all.
+not contain a `.`, which keeps a registry-qualified OCI ref (`docker.io/x:1`,
+`ghcr.io/y:v2`) out.
 
-THERE IS NO ALLOWLIST, and the design point is that it needs none. The two
-places a `:tag` string legitimately survives are places that PROVE IT IS
-REFUSED, and each is recognised by that proof rather than by its path:
+An earlier version of this paragraph also claimed "image tags never match the
+shape at all". **That was wrong**, and pgw#1347 found it: a Docker Hub image in
+a user namespace — `pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime` — is
+`<owner>/<repo>:<tag>` exactly, with no dot in the owner. The shape genuinely
+cannot separate a hub model ref from a container image ref, so the separation
+has to be STATED.
+
+THERE IS NO PATH ALLOWLIST, and the design point is that it needs none. The
+three places a `:tag` string legitimately survives are recognised by what they
+PROVE, at the line, rather than by which file they are in:
 
 * a conformance vector carrying `"error": true` — the corpus's own statement
-  that the parser must reject it; and
+  that the parser must reject it;
 * a source line carrying a `# refused:` comment, which says the same thing at
-  the line where a test feeds it to the parser.
+  the line where a test feeds it to the parser; and
+* a source line carrying an `# oci-image:` comment, which states that the
+  literal is a CONTAINER IMAGE consumed by a container runtime and never
+  reaches `gen_worker.models.refs.parse_model_ref`. Write the reason after the
+  marker.
 
-A path allowlist would let a real pin hide behind a filename. Proof-of-refusal
-cannot: delete the refusal and the line goes red.
+A path allowlist would let a real pin hide behind a filename. A line-level
+claim cannot: it sits on the literal, it is visible in review, and deleting it
+turns the line red.
 
 Usage:
 
@@ -63,6 +74,10 @@ PIN_RE = re.compile(
 #: The line-level proof that a `:tag` string is an INPUT to a refusal.
 REFUSAL_MARKER = "# refused:"
 
+#: The line-level claim that a `:tag` string is a CONTAINER IMAGE, not a hub
+#: model ref — a distinction the shape cannot make (see the module docstring).
+OCI_MARKER = "# oci-image:"
+
 
 def _iter_files(roots: Tuple[Path, ...]) -> Iterator[Path]:
     for root in roots:
@@ -99,7 +114,7 @@ def scan(paths: Tuple[Path, ...]) -> List[str]:
             continue
         refused = _refused_json_vectors(path) if path.suffix == ".json" else set()
         for lineno, line in enumerate(text.splitlines(), 1):
-            if REFUSAL_MARKER in line:
+            if REFUSAL_MARKER in line or OCI_MARKER in line:
                 continue
             for m in PIN_RE.finditer(line):
                 pin = f"{m.group('owner')}/{m.group('repo')}:{m.group('tag')}"
@@ -111,6 +126,9 @@ def scan(paths: Tuple[Path, ...]) -> List[str]:
 
 
 _SELFTEST_PIN = "acme/model" + ":prod"
+#: Split the same way, and for the same reason: a fixture written as one
+#: literal would make this file its own first finding.
+_SELFTEST_IMAGE = "pytorch/pytorch" + ":2.13.0-cuda13.0"
 
 
 def _selftest() -> int:
@@ -124,17 +142,25 @@ def _selftest() -> int:
             {"vectors": [{"ref": _SELFTEST_PIN, "error": True}]}))
         (root / "docker.py").write_text('IMAGE = "docker.io/tensorhub:0.1"\n')
         (root / "clean.py").write_text('REF = "acme/model@prod"\n')
+        # pgw#1347: a namespaced Docker Hub image is ref-SHAPED. Unmarked it is
+        # red; marked it is green — the marker is the whole difference.
+        (root / "image_bare.py").write_text(f'IMAGE = "{_SELFTEST_IMAGE}"\n')
+        (root / "image_marked.py").write_text(
+            f'IMAGE = "{_SELFTEST_IMAGE}"  {OCI_MARKER} RunPod pulls this\n')
 
-        red = scan((root / "pin.py",))
-        if len(red) != 1:
-            print(f"SELFTEST FAILED: a planted pin was not caught: {red}", file=sys.stderr)
-            return 1
-        for name in ("proven.py", "corpus.json", "docker.py", "clean.py"):
+        for name in ("pin.py", "image_bare.py"):
+            red = scan((root / name,))
+            if len(red) != 1:
+                print(f"SELFTEST FAILED: a planted pin in {name} was not caught: {red}",
+                      file=sys.stderr)
+                return 1
+        for name in ("proven.py", "corpus.json", "docker.py", "clean.py", "image_marked.py"):
             green = scan((root / name,))
             if green:
                 print(f"SELFTEST FAILED: {name} flagged: {green}", file=sys.stderr)
                 return 1
-    print("lint_repo_ref_pins selftest: the fence goes red on a pin and green on a proof")
+    print("lint_repo_ref_pins selftest: red on a pin and on a bare image, "
+          "green on a refusal proof and on a marked container image")
     return 0
 
 
