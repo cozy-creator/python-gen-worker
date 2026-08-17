@@ -7,10 +7,17 @@ dispatch, eager fallback, sticky de-arm, shape-growth reporting and live
 serve-state introspection.
 
 An arm resolves and creates a runner at the same destination, binds the
-resident module tensors, and only then mutates the live module. Each compiled
-graph class is independently visible through :func:`entry_states`; no
-worker-owned archive, extraction tree, package loader or compatibility store
-exists here.
+constant table, and only then mutates any live state. Each compiled graph
+class is independently visible through :func:`entry_states`; no worker-owned
+archive, extraction tree, package loader or compatibility store exists here.
+
+pgw#1329: there are TWO constant sources and they share everything else.
+:func:`arm_compiled_graph` reads a resident eager module, which is why the
+pipeline had to be loaded before anything compiled could serve;
+:func:`arm_compiled_graph_from_store` reads the store by manifest FQN, with
+no ``nn.Module`` on the path at all. Loading the eager pipeline is therefore
+a POLICY choice (eager fallback, the mint's own proofs), not a precondition
+of compiled serving.
 """
 
 from __future__ import annotations
@@ -34,6 +41,7 @@ from gen_worker._vendor.torchcg import (
 )
 
 from . import activity as activity_mod
+from . import aot_constants
 from . import aot_identity
 from . import local_cell_store
 from .cell_adopt import AdoptOutcome
@@ -1470,21 +1478,34 @@ def _tcg_destination(cache_dir: Optional[Path], compiled_graph_key: str) -> Path
     return root / "compiled-graph-runtime" / compiled_graph_key
 
 
-def arm_compiled_graph(
-    pipeline: Any,
-    cfg: Any,
-    compiled_graph_key: str,
-    cache_dir: Optional[Path] = None,
-    *,
-    declared: Sequence[str] = (),
-) -> Dict[str, Any]:
-    """Resolve, bind, then register one exact TCG graph class.
+@dataclass(frozen=True)
+class ResolvedGraphClass:
+    """One exact key, resolved and loaded, before any constant source is asked.
+
+    Everything both arms share. The two arms differ ONLY in where the
+    ``state_dict`` constants come from, so this half is written once: a
+    resolve that models the artifact differently from the arm is the
+    pgw#816/#822 class, one level up from the constant table.
+    """
+
+    key: str
+    runner: CompiledGraphRunner
+    metadata: Dict[str, Any]
+    graph_class: Mapping[str, Any]
+    graph: Mapping[str, Any]
+    name: str
+    target: str
+
+
+def _resolve_graph_class(
+    compiled_graph_key: str, cache_dir: Optional[Path]
+) -> ResolvedGraphClass:
+    """Resolve one exact key and validate its declared graph class.
 
     TCG is the only artifact/store authority. The first resolve establishes
     the immutable extraction directory and admitted metadata; ``runner`` is
     asked for the same key and the same directory, so its internal resolve
-    verifies/reuses that extraction instead of creating a second one. No live
-    module or dispatch state changes until TCG's exact constant bind succeeds.
+    verifies/reuses that extraction instead of creating a second one.
     """
 
     key = str(compiled_graph_key or "").strip()
@@ -1539,6 +1560,41 @@ def arm_compiled_graph(
         raise AdoptError(
             "contract_invalid", "TCG graph_class must name both graph class and target"
         )
+    return ResolvedGraphClass(
+        key=key,
+        runner=runner,
+        metadata=metadata,
+        graph_class=graph_class,
+        graph=graph,
+        name=name,
+        target=target,
+    )
+
+
+def arm_compiled_graph(
+    pipeline: Any,
+    cfg: Any,
+    compiled_graph_key: str,
+    cache_dir: Optional[Path] = None,
+    *,
+    declared: Sequence[str] = (),
+) -> Dict[str, Any]:
+    """Resolve, bind, then register one exact TCG graph class.
+
+    The MODULE-SOURCED arm: the live eager module supplies the constant
+    table, so the whole pipeline must be resident. That is a POLICY choice
+    (eager fallback, the mint's own parity proofs), not a property of
+    compiled serving — :func:`arm_compiled_graph_from_store` is the same arm
+    with the store as the constant source and no module at all.
+
+    No live module or dispatch state changes until TCG's exact constant bind
+    succeeds.
+    """
+
+    resolved = _resolve_graph_class(compiled_graph_key, cache_dir)
+    key, runner = resolved.key, resolved.runner
+    metadata, graph_class = resolved.metadata, resolved.graph_class
+    graph, name, target = resolved.graph, resolved.name, resolved.target
 
     family = str(getattr(cfg, "family", "") or "")
     module, attr = _target_owner(pipeline, target)
@@ -1597,6 +1653,175 @@ def arm_compiled_graph(
     return serve_meta
 
 
+@dataclass(frozen=True)
+class StoreArmedGraph:
+    """One graph class armed with NO module anywhere on the path.
+
+    The record is deliberately split along the family/instance line
+    (pgw#1326, §4.27). ``key``/``graph_class``/``target`` are CLASS-level and
+    checkpoint-free — the same three for every fine-tune sharing one ``.so``.
+    ``weight_set`` and ``constants`` are INSTANCE-level: which checkpoint this
+    binding is of, and the tensors it bound. Two of these over one ``key``
+    with different ``weight_set``s are two instances of one family, which is
+    the shape a resident-module arm could not state at all.
+
+    ``constants`` is held because TCG installs the constant pointers
+    ``user_managed``: the tensors must outlive the runner, and with no module
+    to own them this record is that owner. Dropping it frees the weights out
+    from under a live AOTI container.
+    """
+
+    key: str
+    graph_class: str
+    target: str
+    family: str
+    weight_set: aot_constants.WeightSetRef
+    runner: TCGEntryRunner
+    dispatch: EntryDispatch
+    meta: Dict[str, Any]
+    constants: Dict[str, Any]
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Route one call through the ordinary ingress dispatch.
+
+        There is no module to wrap, so this record IS the call site. The
+        selection, the contract refusals and the per-entry counters are the
+        same ones a wrapped module gets — nothing about serving is special
+        because the constants came from the store.
+        """
+
+        _name, runner = self.dispatch.select(args, kwargs)
+        return runner(*args, **kwargs)
+
+    def entry_states(self) -> Dict[str, Dict[str, Any]]:
+        """What this pod actually serves, in the SAME vocabulary as a
+        module-armed class (pgw#1176 §1.4). A store-armed entry that the hub
+        could not see would be a pod advertising less than it serves, which is
+        the same defect as advertising more."""
+
+        return dispatch_states(self.target, self.dispatch)
+
+    def disarm(self, reason: str) -> bool:
+        """De-arm this graph class, sticky for the boot (§4.31).
+
+        The store arm's half of :func:`disarm_entry`. It drops the entry and
+        NOT the constants: the runner's installed pointers are ``user_managed``
+        and the container is still loaded, so freeing the tensors here would
+        turn a de-arm into a use-after-free."""
+
+        return self.dispatch.remove(self.graph_class, str(reason))
+
+
+def arm_compiled_graph_from_store(
+    cfg: Any,
+    compiled_graph_key: str,
+    store: aot_constants.ConstantStore,
+    *,
+    device: str,
+    cache_dir: Optional[Path] = None,
+    declared: Sequence[str] = (),
+) -> StoreArmedGraph:
+    """Arm one exact graph class from STORE bytes, by manifest FQN.
+
+    The same resolve, the same ingress contract and the same
+    ``CompiledGraphRunner.bind`` as :func:`arm_compiled_graph` — with the
+    constant table read out of the store the artifact's manifest names,
+    instead of out of a resident ``nn.Module``. No ``nn.Module`` and no
+    diffusers class is constructed, imported or touched on this path, which
+    is what lets an adopt-only serve host (pgw#1328) exist at all.
+
+    Order is the contract:
+
+    1. resolve the exact key (quarantine, admission, graph-class validation);
+    2. parse the declared constant table as a versioned, typed manifest;
+    3. check the WHOLE table against the store's headers — a refusal here
+       has allocated no device memory and registered no entry;
+    4. read the constants onto ``device`` and bind;
+    5. only then register the entry.
+
+    A store miss therefore costs a header read. It cannot cost a
+    half-populated constant table on a runner that ``bind`` has already
+    marked failed and un-bindable.
+    """
+
+    resolved = _resolve_graph_class(compiled_graph_key, cache_dir)
+    family = str(getattr(cfg, "family", "") or "")
+    target_device = str(device or "").strip()
+    if not target_device:
+        raise AdoptError(
+            "device_missing",
+            f"graph class {resolved.name!r}: a store-sourced arm has no module to "
+            f"take a device from, so the caller must name one",
+        )
+
+    manifest = aot_constants.parse_constant_manifest(
+        resolved.graph_class,
+        compiled_graph_format=resolved.metadata.get(COMPILED_GRAPH_FORMAT_KEY),
+    )
+    plan = aot_constants.plan_store_constants(manifest, store)
+    contract = CallIngress.from_graph(resolved.graph)
+    try:
+        constants = aot_constants.realize_store_constants(
+            plan, store, device=target_device
+        )
+    except Exception as exc:
+        # §4.33 / pgw#1175: the ATTEMPT is the headroom gate, and its verdict
+        # has to be the SAME token whichever half of the attempt ran out of
+        # device memory. TCG classifies an OOM inside `bind`; nothing
+        # classified one inside the READ, and the store arm allocates the
+        # whole constant table there — so without this, the one arm that does
+        # its allocating before `bind` is the one arm whose OOM reaches
+        # `provision.arm_aot` as an unclassified crash instead of a typed
+        # `insufficient_adopt_vram` miss that leaves the pod serving eager.
+        if not is_cuda_oom(exc):
+            raise
+        raise AdoptError(
+            ADOPT_OOM_REASON,
+            f"graph class {resolved.name!r}: reading {len(plan)} store-sourced "
+            f"constant(s) onto {target_device} exhausted device memory "
+            f"({type(exc).__name__}: {exc})",
+        ) from exc
+    try:
+        resolved.runner.bind(constants, device=target_device)
+    except ConstantBindingError as exc:
+        reason = ADOPT_OOM_REASON if exc.reason == "out_of_memory" else exc.reason
+        raise AdoptError(reason, f"graph class {resolved.name!r}: {exc}") from exc
+
+    dispatch = EntryDispatch(declared=tuple(str(item) for item in declared))
+    entry_runner = TCGEntryRunner(
+        resolved.runner, contract, resolved.target, resolved.name, family
+    )
+    dispatch.add(resolved.name, entry_runner)
+    serve_meta: Dict[str, Any] = {
+        **resolved.metadata,
+        "family": family,
+        "compiled_graph_key": resolved.key,
+        "constant_source": "store",
+        "weight_set": str(plan.weight_set),
+    }
+    logger.info(
+        "aot-serve: armed TCG graph class %s on %s from the store "
+        "(%d constants, %d store-sourced, weight_set=%s, key=%s)",
+        resolved.name,
+        resolved.target,
+        len(resolved.runner.declared_fqns),
+        len(plan),
+        plan.weight_set,
+        resolved.key,
+    )
+    return StoreArmedGraph(
+        key=resolved.key,
+        graph_class=resolved.name,
+        target=resolved.target,
+        family=family,
+        weight_set=plan.weight_set,
+        runner=entry_runner,
+        dispatch=dispatch,
+        meta=serve_meta,
+        constants=constants,
+    )
+
+
 def disarm_entry(pipeline: Any, name: str, reason: str) -> bool:
     """De-arm ONE graph class, sticky for the boot. True when it was armed.
 
@@ -1623,6 +1848,27 @@ def disarm_entry(pipeline: Any, name: str, reason: str) -> bool:
     return dropped
 
 
+def dispatch_states(target: str, dispatch: EntryDispatch) -> Dict[str, Dict[str, Any]]:
+    """One dispatch's per-entry serve state, in THE vocabulary.
+
+    Written once because there are now two arms and the state a pod reports
+    must not depend on which one ran. Two spellings of one verdict is the
+    pgw#1247 class, and here it would be worse than cosmetic: the hub's
+    per-entry events are built from this, so a second vocabulary is a pod
+    whose store-armed classes are invisible to the fleet.
+    """
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for name, runner in dispatch.runners:
+        out[name] = {
+            "state": "armed", "target": target, "calls": int(runner.calls)}
+    for name, why in dispatch.de_armed.items():
+        out[name] = {"state": "de_armed", "target": target, "reason": why}
+    for name in dispatch.pending:
+        out[name] = {"state": "pending", "target": target}
+    return out
+
+
 def entry_states(pipeline: Any) -> Dict[str, Dict[str, Any]]:
     """Per-entry SERVE STATE — what this pod actually serves, per graph class.
 
@@ -1630,6 +1876,11 @@ def entry_states(pipeline: Any) -> Dict[str, Dict[str, Any]]:
     ``armed`` / ``de_armed(reason)`` / ``pending`` — so there is no unit left
     that can advertise more than it serves. This is the record the per-entry
     hub events (§1.7) are built from.
+
+    This is the MODULE-armed half: it reads the pipeline marker. A
+    store-armed class has no pipeline to hang a marker on and reports through
+    :meth:`StoreArmedGraph.entry_states`, which returns the same vocabulary
+    from the same builder.
     """
     marker = getattr(pipeline, _MARKER_ATTR, None) or {}
     out: Dict[str, Dict[str, Any]] = {}
@@ -1637,13 +1888,7 @@ def entry_states(pipeline: Any) -> Dict[str, Dict[str, Any]]:
         dispatch = _dispatch_for(marker, target)
         if dispatch is None:
             continue
-        for name, runner in dispatch.runners:
-            out[name] = {
-                "state": "armed", "target": target, "calls": int(runner.calls)}
-        for name, why in dispatch.de_armed.items():
-            out[name] = {"state": "de_armed", "target": target, "reason": why}
-        for name in dispatch.pending:
-            out[name] = {"state": "pending", "target": target}
+        out.update(dispatch_states(str(target), dispatch))
     return out
 
 

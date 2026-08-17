@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
-"""Keep compiled-graph arming behind one structural seam.
+"""Keep compiled-graph arming behind the declared structural seams.
 
-``aot_serve.arm_compiled_graph`` is the only production function allowed to
-assemble live TCG serve state. It must resolve and load the exact key through
-TCG, bind constants, create or reuse an :class:`EntryDispatch`, register the
-entry, and install the module wrapper. A second constructor, registration, or
-wrapper call is red: callers submit an admitted key to the seam; they do not
-rebuild part of its state machine.
+``aot_serve``'s arm functions are the only production code allowed to assemble
+live TCG serve state. Each must resolve and load the exact key through TCG
+(directly or through the one shared resolver), bind constants, create or reuse
+an :class:`EntryDispatch` and register the entry. A second constructor,
+registration, or wrapper call anywhere else is red: callers submit an admitted
+key to a seam; they do not rebuild part of its state machine.
+
+pgw#1329 made this TWO seams, differing in exactly one axis — the constant
+SOURCE. ``arm_compiled_graph`` reads a resident eager module and therefore owns
+the wrapper swap and the pipeline marker; ``arm_compiled_graph_from_store``
+reads the store by manifest FQN and has no ``nn.Module`` at all, so the fence
+requires it to install NEITHER. "Two seams" is not a relaxation: each is
+audited for its own complete operation set, and the store arm additionally
+carries a FORBIDDEN set the module arm does not.
 
 The fence also retains two smaller invariants that are still process-global:
 compiled proof/quarantine writes must be classified, and objects with one
 canonical constructor may not acquire a second map. Deleted AOT key registries
 and their test-only hand-feed exceptions are deliberately absent.
 
-Every invocation first executes three synthetic red proofs: a seam missing a
-required operation, a second dispatch writer, and a direct marker writer. A
-green audit therefore proves the rejection paths ran before the real tree was
-accepted.
+Every invocation first executes five synthetic red proofs: each seam missing a
+required operation, the store seam claiming a module, a second dispatch writer,
+and a direct marker writer. A green audit therefore proves the rejection paths
+ran before the real tree was accepted.
 """
 
 from __future__ import annotations
@@ -33,22 +41,56 @@ REPO = Path(__file__).resolve().parents[1]
 ARM_MODULE = "aot_serve.py"
 ARM_SEAM = "arm_compiled_graph"
 
-# The operations that make an admitted TCG class live. These are deliberately
-# names, not line numbers: moving code cannot silently weaken the fence.
-REQUIRED_ARM_CALLS = frozenset({
-    "open_worker_engine",
-    "resolve",
-    "runner",
-    "bind",
-    "_marker",
-    "EntryDispatch",
-    "dispatch.add",
-    "wrap_module",
-})
+#: The scope both seams delegate their exact-key resolve to (pgw#1329). Its
+#: calls count toward EVERY seam that calls it, because the fence's subject is
+#: "did this arm resolve through TCG", not "which line did it happen on". A
+#: shared resolve is the OPPOSITE of a weakening here: two seams that each
+#: re-derived the artifact are the pgw#816/#822 class one level up.
+ARM_RESOLVER = "_resolve_graph_class"
 
-# These operations assemble the pipeline/module arm state and therefore have
-# exactly one production caller. EntryDispatch.remove is a serve-time verdict,
-# not admission, and remains owned by disarm_entry.
+#: pgw#1329: there are TWO arm seams and they differ in exactly one axis, the
+#: constant SOURCE. The fence must state both, and must state what each one
+#: may NOT do — a store-sourced arm that installed a module wrapper or a
+#: pipeline marker would be claiming a module it does not have.
+ARM_SEAMS: tuple[tuple[str, frozenset[str], frozenset[str]], ...] = (
+    (
+        # module-sourced: the eager module is the constant source, so this
+        # seam owns the wrapper swap and the pipeline marker.
+        ARM_SEAM,
+        frozenset({
+            "open_worker_engine",
+            "resolve",
+            "runner",
+            "bind",
+            "_marker",
+            "EntryDispatch",
+            "dispatch.add",
+            "wrap_module",
+        }),
+        frozenset(),
+    ),
+    (
+        # store-sourced: no nn.Module anywhere on the path, so no wrapper and
+        # no pipeline marker — asserted, not assumed.
+        "arm_compiled_graph_from_store",
+        frozenset({
+            "open_worker_engine",
+            "resolve",
+            "runner",
+            "bind",
+            "EntryDispatch",
+            "dispatch.add",
+        }),
+        frozenset({"_marker", "wrap_module"}),
+    ),
+)
+
+#: Scopes allowed to touch the exclusive operations at all.
+ARM_SEAM_SCOPES = frozenset({name for name, _required, _forbidden in ARM_SEAMS})
+
+# These operations assemble the arm state and therefore have exactly one
+# production caller EACH per seam. EntryDispatch.remove is a serve-time
+# verdict, not admission, and remains owned by disarm_entry.
 EXCLUSIVE_ARM_CALLS = frozenset({
     "_marker",
     "EntryDispatch",
@@ -276,25 +318,46 @@ def audit_arm_seam(sources: Mapping[str, str]) -> list[str]:
     modules = _parse_modules(sources)
     owner = modules.get(ARM_MODULE)
     problems: list[str] = []
-    if owner is None or ARM_SEAM not in owner.defined_scopes:
+    if owner is None:
         return [f"ARM SEAM MISSING: {ARM_MODULE}::{ARM_SEAM}"]
+    missing_seams = [
+        name for name, _required, _forbidden in ARM_SEAMS
+        if name not in owner.defined_scopes
+    ]
+    if missing_seams:
+        return [
+            f"ARM SEAM MISSING: {ARM_MODULE}::{name}" for name in missing_seams
+        ]
 
-    seam_calls = {
-        site.call for site in owner.calls if site.scope == ARM_SEAM
-    }
-    missing = sorted(REQUIRED_ARM_CALLS - seam_calls)
-    if missing:
-        problems.append(
-            f"ARM SEAM INCOMPLETE: {ARM_MODULE}::{ARM_SEAM} no longer calls "
-            f"{', '.join(missing)}; exact TCG resolve, bind, dispatch "
-            "registration, and module installation are one atomic boundary"
-        )
+    # A seam that delegates the exact-key resolve to the shared helper is
+    # credited with the helper's calls: the fence asks whether the arm
+    # resolved through TCG, not where the statement sits.
+    shared = {site.call for site in owner.calls if site.scope == ARM_RESOLVER}
+    for name, required, forbidden in ARM_SEAMS:
+        seam_calls = {site.call for site in owner.calls if site.scope == name}
+        if ARM_RESOLVER in seam_calls:
+            seam_calls |= shared
+        missing = sorted(required - seam_calls)
+        if missing:
+            problems.append(
+                f"ARM SEAM INCOMPLETE: {ARM_MODULE}::{name} no longer calls "
+                f"{', '.join(missing)}; exact TCG resolve, bind and dispatch "
+                "registration are one atomic boundary"
+            )
+        overreach = sorted(forbidden & seam_calls)
+        if overreach:
+            problems.append(
+                f"ARM SEAM OVERREACH: {ARM_MODULE}::{name} calls "
+                f"{', '.join(overreach)}; a store-sourced arm has no "
+                "nn.Module, so it must install no wrapper and no pipeline "
+                "marker"
+            )
 
     for visitor in modules.values():
         for site in visitor.calls:
             if site.call not in EXCLUSIVE_ARM_CALLS:
                 continue
-            if (site.file, site.scope) == (ARM_MODULE, ARM_SEAM):
+            if site.file == ARM_MODULE and site.scope in ARM_SEAM_SCOPES:
                 continue
             problems.append(
                 f"{site.file}:{site.line}: ARM STATE WRITE OUTSIDE SEAM: "
@@ -428,15 +491,22 @@ def check_allowlist(
 def run_red_proofs() -> int:
     """Exercise the current fence's rejection paths before auditing src."""
     good = """
-def arm_compiled_graph():
+def _resolve_graph_class():
     engine = open_worker_engine()
     engine.resolve()
-    runner = engine.runner()
-    runner.bind()
+    engine.runner()
+def arm_compiled_graph():
+    resolved = _resolve_graph_class()
+    resolved.runner.bind()
     _marker()
     dispatch = EntryDispatch()
     dispatch.add()
     wrap_module()
+def arm_compiled_graph_from_store():
+    resolved = _resolve_graph_class()
+    resolved.runner.bind()
+    dispatch = EntryDispatch()
+    dispatch.add()
 def _marker():
     setattr(object(), _MARKER_ATTR, {})
 def wrap_module():
@@ -448,6 +518,28 @@ def unwrap():
         (
             {ARM_MODULE: good.replace("    wrap_module()\n", "")},
             "ARM SEAM INCOMPLETE",
+        ),
+        (
+            # the store arm stops resolving through TCG and hand-loads: the
+            # exact-key admission is what makes an arm an arm.
+            {ARM_MODULE: good.replace(
+                "def arm_compiled_graph_from_store():\n"
+                "    resolved = _resolve_graph_class()\n",
+                "def arm_compiled_graph_from_store():\n"
+                "    resolved = load_package()\n",
+            )},
+            "ARM SEAM INCOMPLETE",
+        ),
+        (
+            # the store arm claims a module it does not have.
+            {ARM_MODULE: good.replace(
+                "def arm_compiled_graph_from_store():\n"
+                "    resolved = _resolve_graph_class()\n",
+                "def arm_compiled_graph_from_store():\n"
+                "    resolved = _resolve_graph_class()\n"
+                "    wrap_module()\n",
+            )},
+            "ARM SEAM OVERREACH",
         ),
         (
             {ARM_MODULE: good + "\ndef bypass():\n    EntryDispatch()\n"},
@@ -498,7 +590,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
     print(
         f"arm-state fence: {red_proofs} red proofs passed; "
-        f"{ARM_MODULE}::{ARM_SEAM} is the sole TCG arm seam; "
+        f"{ARM_MODULE} declares {len(ARM_SEAMS)} TCG arm seam(s), all complete; "
         f"{len(sites)} classified global/constructor site(s)"
     )
     return 0

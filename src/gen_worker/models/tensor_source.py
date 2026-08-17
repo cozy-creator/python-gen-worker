@@ -31,7 +31,12 @@ _log = logging.getLogger(__name__)
 #: safetensors dtype spelling -> torch dtype attribute name. Only the dtypes
 #: this fleet's checkpoints actually carry; an unknown one is a refusal, never
 #: a guess, because guessing an element width silently reshapes the tensor.
-_TORCH_DTYPES = {
+#:
+#: PUBLIC because a second consumer arrived (pgw#1329's constant store, which
+#: must compare a shard header's dtype against the artifact manifest's torch
+#: dtype name before it allocates). A private copy per lane is the fail-open
+#: duplication this module was written to end, one level down.
+TORCH_DTYPES = {
     "BOOL": "bool",
     "U8": "uint8",
     "I8": "int8",
@@ -75,7 +80,7 @@ class _NativeSource:
 
         view: TensorView = self._reader[name]
         try:
-            torch_dtype = getattr(torch, _TORCH_DTYPES[view.dtype])
+            torch_dtype = getattr(torch, TORCH_DTYPES[view.dtype])
         except (KeyError, AttributeError) as exc:
             raise projection.UnresolvedProjection(
                 f"{name}: safetensors dtype {view.dtype!r} has no torch dtype "
@@ -131,6 +136,7 @@ def load_state_dict(
 
 
 __all__ = [
+    "TORCH_DTYPES",
     "TensorSource",
     "load_state_dict",
     "open_tensor_source",

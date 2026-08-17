@@ -106,6 +106,7 @@ src/gen_worker/procsplit/parent.py::$ENV_WATCHDOG_PING_S IPC watchdog ping caden
 src/gen_worker/settings_authority.py::TORCHINDUCTOR_AUTOGRAD_CACHE LIBRARY TORCHINDUCTOR_AUTOGRAD_CACHE=0 (gw#608, moved from compile_cache by pgw#1049); torch offers no other API.
 src/gen_worker/compile_cache.py::CXX LIBRARY CXX host-compiler discovery, the toolchain's own convention.
 src/gen_worker/compile_cache.py::TORCHINDUCTOR_CACHE_DIR LIBRARY reads back the inductor cache dir torch was steered to.
+src/gen_worker/benchmarks/store_arm_parity.py::TORCHINDUCTOR_CACHE_DIR LIBRARY pgw#1329's GPU parity probe steers inductor at its OWN scratch dir; the env var is inductor's only API for it. A benchmark __main__ that loads no app config and never runs in a serving process, so there is no pipeline-passed Settings to take the value from.
 src/gen_worker/host_canary.py::NCCL_P2P_DISABLE LIBRARY reads NCCL_P2P_DISABLE for the canary's recorded facts.
 src/gen_worker/host_canary.py::MASTER_ADDR LIBRARY MASTER_ADDR, torch.distributed reads it at init.
 src/gen_worker/host_canary.py::MASTER_PORT LIBRARY MASTER_PORT, torch.distributed reads it at init.

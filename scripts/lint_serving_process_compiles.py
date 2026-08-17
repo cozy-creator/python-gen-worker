@@ -102,6 +102,19 @@ CHILD_ONLY: Dict[str, str] = {
 #: the keystone deleted. The supervisor now calls the pool directly from the
 #: serving loop, so their status changed from "exempt" to "must be clean", and
 #: a stale exemption would have been indistinguishable from a real one.
+#: Modules that are a standalone ENTRY POINT: a `python -m` probe whose whole
+#: process exists to compile and measure, and which no serving-package module
+#: imports. That last half is the difference between this and an exemption —
+#: it is a CHECKED claim, and a serving module that starts importing one of
+#: these goes red here even though the probe itself never changed.
+STANDALONE_ENTRY: Dict[str, str] = {
+    "benchmarks.store_arm_parity": (
+        "pgw#1329's GPU parity probe. It mints one small graph and arms it "
+        "twice to compare bytes; the compile IS the measurement, and the "
+        "process serves nothing. Not CHILD_ONLY: no serving parent spawns it."
+    ),
+}
+
 SUPERVISED: Dict[str, str] = {
     "aot_compile_pool": (
         "the K-wide pool. `mint_supervisor` constructs and drives it on the "
@@ -155,7 +168,7 @@ def main() -> int:
                 hits.append((node.lineno, ".".join(dotted)))
         if not hits:
             continue
-        if module in CHILD_ONLY:
+        if module in CHILD_ONLY or module in STANDALONE_ENTRY:
             seen_allowed.add(module)
             continue
         for lineno, name in hits:
@@ -170,7 +183,7 @@ def main() -> int:
     # A fence that names a DELETED module guards nothing and passes vacuously
     # forever (th#1834's census records the ratchet trap of exactly this
     # shape: a stale name prints `unused section(s)` and EXITS 0).
-    stale = sorted(set(CHILD_ONLY) - seen_allowed)
+    stale = sorted((set(CHILD_ONLY) | set(STANDALONE_ENTRY)) - seen_allowed)
     for module in stale:
         violations.append(
             f"CHILD_ONLY names `{module}`, which no longer calls any banned "
@@ -187,7 +200,36 @@ def main() -> int:
             f"SUPERVISED names `{module}`, which is not a module in "
             f"src/gen_worker. Drop the row or fix the name — it is asserting "
             f"the serving-process rule over a file that does not exist.")
-    overlap = sorted(set(SUPERVISED) & set(CHILD_ONLY))
+    # The standalone claim, CHECKED: nothing in the serving package may import
+    # a module that is allowed to compile because it is nobody's dependency.
+    for file in sorted(SRC.rglob("*.py")):
+        module = _module_name(file)
+        if module in STANDALONE_ENTRY:
+            continue
+        imported: set[str] = set()
+        for node in ast.walk(ast.parse(file.read_text(), filename=str(file))):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                base = node.module or ""
+                imported.add(base)
+                imported.update(f"{base}.{alias.name}" for alias in node.names)
+        for entry in STANDALONE_ENTRY:
+            # `benchmarks.store_arm_parity` reached as itself, as
+            # `gen_worker.benchmarks.store_arm_parity`, or as a relative
+            # `from .benchmarks import store_arm_parity`.
+            if not any(
+                name == entry or name.endswith(f".{entry}")
+                for name in imported
+            ):
+                continue
+            violations.append(
+                f"{file.relative_to(REPO)}: imports `{entry}`, which "
+                f"STANDALONE_ENTRY exempts from the serving-process compile "
+                f"fence precisely because nothing imports it. Either drop the "
+                f"import or drop the exemption.")
+
+    overlap = sorted(set(SUPERVISED) & (set(CHILD_ONLY) | set(STANDALONE_ENTRY)))
     for module in overlap:
         violations.append(
             f"`{module}` is in BOTH CHILD_ONLY and SUPERVISED — it cannot be "
@@ -203,7 +245,7 @@ def main() -> int:
         return 1
     print(
         f"serving-process compile fence: clean "
-        f"({len(seen_allowed)} declared child-only module(s), "
+        f"({len(seen_allowed)} declared child-only/standalone module(s), "
         f"{len(SUPERVISED)} supervised module(s) proven clean)")
     return 0
 
