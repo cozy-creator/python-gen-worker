@@ -107,6 +107,36 @@ rented a card. The recipe a mint emits is the drift assertion
 (`gen_worker.family.assert_recipe`): same runners, same ingress digests, or
 refuse.
 
+## `Tuned[...]`: stop writing the precedence by hand
+
+Every handler used to open with a line per field:
+
+```python
+steps = p.steps if p.steps is not None else ctx.defaults.steps
+```
+
+which is once per place the precedence can be written backwards. Annotate the
+payload field instead:
+
+```python
+from gen_worker.family import Tuned, resolve
+
+class In(msgspec.Struct):
+    prompt: str = ""
+    steps: Tuned[int] = None
+    guidance: Tuned[float] = None
+
+...
+values = resolve(p, sdxl)      # {"steps": ..., "guidance": ...}
+```
+
+An explicit payload value wins; `None` means "no opinion" and falls through to
+the checkpoint's tuned value. `Tuned[int]` is an `Annotated` alias of
+`int | None`, so msgspec decodes it unchanged and the exported JSON Schema is
+byte-identical to the plain optional's — the annotation adds derivability, not
+a wire shape. A field added to the payload participates without anybody
+updating a second list.
+
 ## Product grid ≠ family buckets
 
 Aspect ratios and megapixel tiers are endpoint policy; a resolution graph class
