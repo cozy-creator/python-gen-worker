@@ -6,8 +6,8 @@ orchestrator contact kills the pod invisibly to every layer of telemetry. This
 module sends ONE ``HardwareUnsuitable`` ``WorkerMessage`` on the Connect stream, in
 place of Hello, so the hub can attribute the death and reschedule/blacklist
 the host. Bounded best-effort: a couple of short retries, then give up — the
-silent exit remains the fallback (unreachable hub, or an old hub that
-predates this field and rejects the connection for not sending Hello first).
+silent exit remains the fallback when the hub cannot be REACHED at all, which
+is the one condition no report can route around.
 """
 
 from __future__ import annotations
@@ -166,10 +166,9 @@ async def _send_once(
 ) -> bool:
     """One dial attempt: open Connect, write the report, half-close, and wait
     for the hub to end the call. Returns True only on a clean, unrejected
-    round trip (delivered); any exception (unreachable, UNAUTHENTICATED, an old
-    hub rejecting the missing Hello with FAILED_PRECONDITION) is
-    "not delivered" — the caller retries or falls through to the silent
-    exit."""
+    round trip (delivered); any exception (unreachable, UNAUTHENTICATED, a
+    refused connection) is "not delivered" — the caller retries or falls
+    through to the silent exit."""
     channel = (
         grpc.aio.secure_channel(target, grpc.ssl_channel_credentials())
         if use_tls

@@ -95,13 +95,15 @@ def _source_stamps(ctx: Any, client: HubClient) -> tuple[str | None, bool | None
         if th is None:
             return None, None
         resolved = resolve_repo(th, base_url=client.base_url, token=client.token)
-        # A new hub tells us whether false is evidence or merely the wire
-        # default. Never turn unknown/inconclusive into an authored false on
-        # the derived checkpoint. Empty status is an old hub, whose behavior
-        # remains unchanged for rolling compatibility.
+        # `distilled_status` tells us whether false is evidence or merely the
+        # wire default. Never turn unknown into an authored false on the
+        # derived checkpoint. Only "classified" is evidence — the hub's own
+        # rule (`modelfamily.StoredCheckpointFacts`), and an EMPTY status is
+        # one of the unknowns: the resolve route omits the key whenever the
+        # stored column is empty, so "" means nothing measured the axis.
         distilled = (
             resolved.distilled
-            if resolved.distilled_status in ("", "classified")
+            if resolved.distilled_status == "classified"
             else None
         )
         return resolved.objective, distilled

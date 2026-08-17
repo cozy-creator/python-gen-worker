@@ -500,9 +500,12 @@ def _assert_unique_function_names(functions: List[Dict[str, Any]]) -> None:
         return
     lines = []
     for nm, fns in sorted(dupes.items()):
+        # `declared_module` first, like the dedup key below: `module` is where
+        # the WALK found the object, which for a re-exported handler is a
+        # package `__init__` — the wrong file to send an author to.
         where = ", ".join(
             f"{f.get('class_name') or '<module-level>'} in "
-            f"{f.get('module') or f.get('declared_module') or '?'}"
+            f"{f.get('declared_module') or f.get('module') or '?'}"
             for f in fns
         )
         lines.append(f"  {nm!r}: defined {len(fns)}x ({where})")

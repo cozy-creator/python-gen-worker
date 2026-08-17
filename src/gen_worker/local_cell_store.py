@@ -786,8 +786,19 @@ def stored_cells(root: Optional[Path] = None) -> List[CellRecord]:
             continue
         if raw is None:
             continue
-        out.append(_record_of(
-            str(raw.get("compiled_graph_key") or entry.name), raw))
+        key = str(raw.get("compiled_graph_key") or "").strip()
+        if not key:
+            # A record REFUSES rather than borrowing the directory it sits in.
+            # `_record_payload` always writes the key, so a sidecar without one
+            # is not something this store wrote — and a fabricated identity is
+            # worse than an absent one here, because `cells_owed_to_sink` reads
+            # this listing and would hand the invented key to an upload.
+            logger.warning(
+                "local-cell-store: %s holds a record with no "
+                "compiled_graph_key; it is absent from this listing",
+                entry.name)
+            continue
+        out.append(_record_of(key, raw))
     return out
 
 
