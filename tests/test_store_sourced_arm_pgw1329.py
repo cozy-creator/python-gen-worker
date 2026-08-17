@@ -613,3 +613,51 @@ def test_two_weight_sets_over_one_key_are_two_instances_of_one_class(
     assert not torch.equal(
         armed[0].constants["lin.weight"], armed[1].constants["lin.weight"]
     )
+
+
+# ---------------------------------------------------------------------------
+# A PROJECTED component — the store the fleet will actually arm from
+# ---------------------------------------------------------------------------
+
+
+def test_the_store_indexes_and_binds_a_projected_tree(tmp_path: Path) -> None:
+    """The point of sourcing constants from the store rather than a module.
+
+    On a projected snapshot the component's shard is a ~128 B pointer stub and
+    the weights are CAS objects, so an index built by parsing the file's first
+    eight bytes reads the stub magic as a header length and concludes the
+    component holds nothing. Through pgw#1330's one reader the same directory
+    indexes by FQN and binds — byte-identical to the materialized control,
+    with no tensor byte ever at a filesystem path.
+    """
+
+    import projection_fixture as fixture
+    from gen_worker.models.projection import stub_at
+
+    built = fixture.build(tmp_path / "cas")
+    control = fixture.materialize(tmp_path / "cas", built)
+
+    shard = built.tree / "unet" / "diffusion_pytorch_model.safetensors"
+    assert stub_at(shard) is not None, "the fixture stopped being a projection"
+
+    projected_store = aot_constants.SafetensorsConstantStore.for_component(
+        built.tree / "unet", weight_set=WEIGHT_SET, why="projected component"
+    )
+    control_store = aot_constants.SafetensorsConstantStore.for_component(
+        control / "unet", weight_set=WEIGHT_SET, why="materialized control"
+    )
+
+    assert projected_store.describe() == control_store.describe()
+    assert sorted(str(name) for name in projected_store.describe()) == [
+        "unet.block.0.bias",
+        "unet.block.0.weight",
+    ]
+    for name in projected_store.describe():
+        left = projected_store.read(name, device="cpu")
+        right = control_store.read(name, device="cpu")
+        assert left.dtype == torch.bfloat16
+        assert torch.equal(left.view(torch.uint8), right.view(torch.uint8))
+
+    # Still a projection afterwards: reading constants must not materialize.
+    assert stub_at(shard) is not None
+    assert shard.stat().st_size < 4096

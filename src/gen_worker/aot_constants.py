@@ -22,15 +22,15 @@ must cost a header read, not a half-populated 20 GiB constant table and a
 runner that can never be un-bound (``CompiledGraphRunner.bind`` is
 once-only and marks itself failed).
 
-Nothing here imports ``torch.nn``, diffusers, or any model class. ``torch`` is
-imported lazily inside the read path, for dtype objects only.
+The bytes come through pgw#1330's one reader: ``read_header`` for the index
+and ``open_tensor_source`` for the values, so a component whose weights are
+CAS objects behind projection stubs indexes and binds without materializing
+anything. Nothing here imports ``torch.nn``, diffusers, or any model class.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import struct
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -45,6 +45,9 @@ from typing import (
     Sequence,
     Tuple,
 )
+
+from .models.safetensors_header import read_header
+from .models.tensor_source import TORCH_DTYPES, open_tensor_source
 
 logger = logging.getLogger(__name__)
 
@@ -64,34 +67,6 @@ CONSTANT_MANIFEST_FORMAT = 1
 #: a row with an extra field is an artifact from a format this reader does not
 #: understand, not a row to read three keys out of and hope.
 _ROW_FIELDS = frozenset(("fqn", "source", "dtype", "shape"))
-
-#: safetensors dtype spelling -> the torch dtype attribute name AOTInductor
-#: stamps into ``constants_info_[i].dtype``. Only the dtypes this fleet's
-#: checkpoints actually carry; an unknown one is a refusal, never a guess,
-#: because guessing an element width silently reshapes the tensor.
-SAFETENSORS_TO_TORCH_DTYPE: Mapping[str, str] = {
-    "BOOL": "bool",
-    "U8": "uint8",
-    "I8": "int8",
-    "F8_E4M3": "float8_e4m3fn",
-    "F8_E5M2": "float8_e5m2",
-    "I16": "int16",
-    "U16": "uint16",
-    "F16": "float16",
-    "BF16": "bfloat16",
-    "I32": "int32",
-    "U32": "uint32",
-    "F32": "float32",
-    "I64": "int64",
-    "U64": "uint64",
-    "F64": "float64",
-}
-
-#: Largest plausible safetensors header. Same bound as
-#: ``models.safetensors_header.MAX_HEADER_BYTES``, restated rather than
-#: imported so this module stays free of the model-loading package.
-_MAX_HEADER_BYTES = 100 << 20
-
 
 # ---------------------------------------------------------------------------
 # Validated identifiers — parse, never a bare ``str``
@@ -498,38 +473,28 @@ def realize_store_constants(
 # ---------------------------------------------------------------------------
 
 
-def _read_header(path: Path) -> Mapping[str, Any]:
-    """One safetensors header, fail-CLOSED.
+def _read_header(path: Path, why: str) -> Mapping[str, Any]:
+    """One safetensors header, projection-aware and fail-CLOSED.
 
-    The fail-open spelling of this loop is the pgw#1330 defect: a header that
-    will not parse is skipped, the file contributes no keys, and the caller
-    concludes the tensor is absent rather than that the shard is unreadable.
+    ``safetensors_header.read_header`` is the ONE reader (pgw#1330) and it
+    serves a projected tree's stub from the manifest, which is what lets this
+    store index a component whose bytes are CAS objects rather than files.
+    Its ``{}`` means "no readable header here" — the honest answer for a
+    truncated or non-safetensors file, and a fail-open its own callers need.
+
+    It is NOT an answer this store may keep. A component shard that will not
+    report a header contributes no FQNs, and a caller that reads that as
+    "these constants are absent" refuses the wrong thing (or, worse, plans
+    around a table it never saw). Here the empty header is a refusal.
     """
 
-    try:
-        with open(path, "rb") as handle:
-            raw = handle.read(8)
-            if len(raw) < 8:
-                raise ConstantStoreError(
-                    "shard_unreadable", f"{path}: shorter than a safetensors header length"
-                )
-            (length,) = struct.unpack("<Q", raw)
-            if not 0 < length <= _MAX_HEADER_BYTES:
-                raise ConstantStoreError(
-                    "shard_unreadable",
-                    f"{path}: declares a {length}-byte header, which is not a header length",
-                )
-            header = json.loads(handle.read(length))
-    except OSError as exc:
-        raise ConstantStoreError("shard_unreadable", f"{path}: {exc}") from exc
-    except (ValueError, struct.error) as exc:
-        if isinstance(exc, ConstantStoreError):
-            raise
+    header = read_header(path, why=why)
+    if not header:
         raise ConstantStoreError(
-            "shard_unreadable", f"{path}: header is not JSON ({exc})"
-        ) from exc
-    if not isinstance(header, dict):
-        raise ConstantStoreError("shard_unreadable", f"{path}: header is not an object")
+            "shard_unreadable",
+            f"{path}: no readable safetensors header. A shard that will not "
+            f"report its tensors is unreadable, not empty ({why})",
+        )
     return header
 
 
@@ -539,7 +504,7 @@ def _facts_from_header_row(path: Path, name: str, row: object) -> TensorFacts:
             "shard_unreadable", f"{path}: header entry {name!r} is not an object"
         )
     raw_dtype = row.get("dtype")
-    if not isinstance(raw_dtype, str) or raw_dtype not in SAFETENSORS_TO_TORCH_DTYPE:
+    if not isinstance(raw_dtype, str) or raw_dtype not in TORCH_DTYPES:
         raise ConstantStoreError(
             "dtype_unknown",
             f"{path}: tensor {name!r} has safetensors dtype {raw_dtype!r}, whose "
@@ -553,7 +518,7 @@ def _facts_from_header_row(path: Path, name: str, row: object) -> TensorFacts:
             "shard_unreadable", f"{path}: tensor {name!r} has no integer shape"
         )
     return TensorFacts(
-        dtype=TorchDtype(SAFETENSORS_TO_TORCH_DTYPE[raw_dtype]),
+        dtype=TorchDtype(TORCH_DTYPES[raw_dtype]),
         shape=tuple(int(dimension) for dimension in raw_shape),
     )
 
@@ -587,7 +552,7 @@ class SafetensorsConstantStore:
         self._index: Dict[ConstantFQN, TensorFacts] = {}
         self._holder: Dict[ConstantFQN, Path] = {}
         for shard in self._shards:
-            for name, row in _read_header(shard).items():
+            for name, row in _read_header(shard, self._why).items():
                 if name == "__metadata__":
                     continue
                 fqn = ConstantFQN(str(name))
@@ -631,10 +596,8 @@ class SafetensorsConstantStore:
                 f"{fqn!r} is not in this store; only planned constants may be read",
                 (str(fqn),),
             )
-        from safetensors import safe_open
-
-        with safe_open(str(shard), framework="pt", device=str(device)) as handle:
-            return handle.get_tensor(str(fqn))
+        with open_tensor_source(shard, device=str(device), why=self._why) as source:
+            return source.get_tensor(str(fqn))
 
 
 __all__ = [
@@ -648,7 +611,6 @@ __all__ = [
     "ConstantStore",
     "ConstantStoreError",
     "GraphClassName",
-    "SAFETENSORS_TO_TORCH_DTYPE",
     "SafetensorsConstantStore",
     "StoreConstantPlan",
     "TensorFacts",
