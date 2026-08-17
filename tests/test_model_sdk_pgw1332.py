@@ -1145,6 +1145,8 @@ CATALOG = Path(__file__).resolve().parents[1] / "src/gen_worker/model/catalog"
 GENERATED = CATALOG / "_generated"
 CATALOG_SPECS = {
     "flux1_dev": "gen_worker.model.catalog.flux1_dev:FLUX1_DEV",
+    "sd2": "gen_worker.model.catalog.sd15:SD2",
+    "sd15": "gen_worker.model.catalog.sd15:SD15",
     "sdxl": "gen_worker.model.catalog.sdxl:SDXL",
 }
 
@@ -1271,11 +1273,19 @@ def test_every_catalog_family_is_callable_hubless(family: str) -> None:
 
     binding = getattr(catalog, class_name(family))
     instance = binding.fake()
-    variant = binding.EXPORT.runner("decoder").variant({"resolution": 1024}, "bf16")
+    # The bucket is READ off the export, not spelled here. pgw#1346 B2 gave the
+    # SD families a packed `shape` axis where Flux has a square `resolution`
+    # one, and a test that hardcoded one axis would fail every family that
+    # declares a different one — which is a fact about the test, not the SDK.
+    runner = binding.EXPORT.runner("decoder")
+    variant = runner.variants[0]
+    bucket = dict(variant.bucket)
     (spec,) = variant.ingress.inputs
     latents = torch.zeros(*[int(d) for d in spec.shape], dtype=getattr(torch, spec.dtype))
-    image = instance.decoder(resolution=1024, latents=latents)
-    assert tuple(image.shape) == (1, 3, 1024, 1024)
+    image = instance.decoder(latents=latents, **bucket)
+    (out,) = variant.outputs
+    assert tuple(image.shape) == tuple(int(d) for d in out.shape)
+    assert image.shape[1] == 3
 
 
 def test_the_catalog_index_and_its_exports_agree() -> None:

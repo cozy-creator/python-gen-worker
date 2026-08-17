@@ -99,8 +99,11 @@ MODEL_FREE_MODULES: Tuple[str, ...] = (
     "gen_worker.model.catalog",
     "gen_worker.model.catalog._generated",
     "gen_worker.model.catalog._generated.flux1_dev",
+    "gen_worker.model.catalog._generated.sd2",
+    "gen_worker.model.catalog._generated.sd15",
     "gen_worker.model.catalog._generated.sdxl",
     "gen_worker.model.catalog.flux1_dev_serve",
+    "gen_worker.model.catalog.sd15_serve",
     "gen_worker.model.catalog.sdxl_serve",
 )
 
@@ -189,6 +192,10 @@ FORBIDDEN_LIBRARIES: Tuple[str, ...] = (
 #: any ``try: import`` can walk through.
 OPTIONAL_SERVE_IMPORTS: Tuple[str, ...] = (
     "gen_worker.model.catalog.flux1_dev",
+    # ONE declaration module for TWO bindings: `sd15.py` declares both `SD15`
+    # and `SD2` (pgw#1346 B2 — same runner set, different graphs), so both
+    # generated modules guard-import the same name.
+    "gen_worker.model.catalog.sd15",
     "gen_worker.model.catalog.sdxl",
 )
 

@@ -3,30 +3,24 @@
     {
       "name": "shape",
       "values": [
-        6401536,
-        7681344,
-        8321216,
-        8961152,
-        10241024,
-        11520896,
-        12160832,
-        13440768,
-        15360640
+        4320768,
+        4800640,
+        5120512,
+        5120768,
+        6400480,
+        7680432,
+        7680512
       ]
     }
   ],
-  "family": "sdxl",
+  "family": "sd15",
   "loop": {
     "kind": "staged",
     "session_state": "none",
     "stages": [
       {
         "repeat": "once",
-        "runner": "clip_l"
-      },
-      {
-        "repeat": "once",
-        "runner": "clip_g"
+        "runner": "clip"
       },
       {
         "parameter": "steps",
@@ -40,8 +34,8 @@
     ]
   },
   "lora_tuned": {
-    "module": "gen_worker.model.catalog.sdxl_serve",
-    "qualname": "SdxlLoraTuned"
+    "module": "gen_worker.model.catalog.sd15_serve",
+    "qualname": "Sd15LoraTuned"
   },
   "parameters": [
     {
@@ -53,59 +47,7 @@
   "runners": [
     {
       "axes": [],
-      "name": "clip_g",
-      "variants": [
-        {
-          "bucket": {},
-          "ingress": {
-            "excluded_inputs": [],
-            "flat_arity": 1,
-            "inputs": [
-              {
-                "dtype": "int64",
-                "exported_name": "input_ids",
-                "name": "input_ids",
-                "param": "input_ids",
-                "param_position": 0,
-                "path": [],
-                "position": 0,
-                "shape": [
-                  1,
-                  77
-                ]
-              }
-            ],
-            "parameters": [
-              "input_ids"
-            ],
-            "symbols": {},
-            "v": 1
-          },
-          "ingress_digest": "d9ce232c770f450414c7fad78dcba745",
-          "layout": "bf16",
-          "outputs": [
-            {
-              "dtype": "bfloat16",
-              "shape": [
-                1,
-                77,
-                1280
-              ]
-            },
-            {
-              "dtype": "bfloat16",
-              "shape": [
-                1,
-                1280
-              ]
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "axes": [],
-      "name": "clip_l",
+      "name": "clip",
       "variants": [
         {
           "bucket": {},
@@ -156,315 +98,7 @@
       "variants": [
         {
           "bucket": {
-            "shape": 6401536
-          },
-          "ingress": {
-            "excluded_inputs": [],
-            "flat_arity": 1,
-            "inputs": [
-              {
-                "dtype": "bfloat16",
-                "exported_name": "latents",
-                "name": "latents",
-                "param": "latents",
-                "param_position": 0,
-                "path": [],
-                "position": 0,
-                "shape": [
-                  1,
-                  4,
-                  192,
-                  80
-                ]
-              }
-            ],
-            "parameters": [
-              "latents"
-            ],
-            "symbols": {},
-            "v": 1
-          },
-          "ingress_digest": "843787230c320d29a6148f17a9bde783",
-          "layout": "bf16",
-          "outputs": [
-            {
-              "dtype": "bfloat16",
-              "shape": [
-                1,
-                3,
-                1536,
-                640
-              ]
-            }
-          ]
-        },
-        {
-          "bucket": {
-            "shape": 7681344
-          },
-          "ingress": {
-            "excluded_inputs": [],
-            "flat_arity": 1,
-            "inputs": [
-              {
-                "dtype": "bfloat16",
-                "exported_name": "latents",
-                "name": "latents",
-                "param": "latents",
-                "param_position": 0,
-                "path": [],
-                "position": 0,
-                "shape": [
-                  1,
-                  4,
-                  168,
-                  96
-                ]
-              }
-            ],
-            "parameters": [
-              "latents"
-            ],
-            "symbols": {},
-            "v": 1
-          },
-          "ingress_digest": "d1231be0791279068fa66e47dd84579a",
-          "layout": "bf16",
-          "outputs": [
-            {
-              "dtype": "bfloat16",
-              "shape": [
-                1,
-                3,
-                1344,
-                768
-              ]
-            }
-          ]
-        },
-        {
-          "bucket": {
-            "shape": 8321216
-          },
-          "ingress": {
-            "excluded_inputs": [],
-            "flat_arity": 1,
-            "inputs": [
-              {
-                "dtype": "bfloat16",
-                "exported_name": "latents",
-                "name": "latents",
-                "param": "latents",
-                "param_position": 0,
-                "path": [],
-                "position": 0,
-                "shape": [
-                  1,
-                  4,
-                  152,
-                  104
-                ]
-              }
-            ],
-            "parameters": [
-              "latents"
-            ],
-            "symbols": {},
-            "v": 1
-          },
-          "ingress_digest": "67772323bcfac4f1bbeb7e99275f8915",
-          "layout": "bf16",
-          "outputs": [
-            {
-              "dtype": "bfloat16",
-              "shape": [
-                1,
-                3,
-                1216,
-                832
-              ]
-            }
-          ]
-        },
-        {
-          "bucket": {
-            "shape": 8961152
-          },
-          "ingress": {
-            "excluded_inputs": [],
-            "flat_arity": 1,
-            "inputs": [
-              {
-                "dtype": "bfloat16",
-                "exported_name": "latents",
-                "name": "latents",
-                "param": "latents",
-                "param_position": 0,
-                "path": [],
-                "position": 0,
-                "shape": [
-                  1,
-                  4,
-                  144,
-                  112
-                ]
-              }
-            ],
-            "parameters": [
-              "latents"
-            ],
-            "symbols": {},
-            "v": 1
-          },
-          "ingress_digest": "c616eb82d42641377e199692678a84c6",
-          "layout": "bf16",
-          "outputs": [
-            {
-              "dtype": "bfloat16",
-              "shape": [
-                1,
-                3,
-                1152,
-                896
-              ]
-            }
-          ]
-        },
-        {
-          "bucket": {
-            "shape": 10241024
-          },
-          "ingress": {
-            "excluded_inputs": [],
-            "flat_arity": 1,
-            "inputs": [
-              {
-                "dtype": "bfloat16",
-                "exported_name": "latents",
-                "name": "latents",
-                "param": "latents",
-                "param_position": 0,
-                "path": [],
-                "position": 0,
-                "shape": [
-                  1,
-                  4,
-                  128,
-                  128
-                ]
-              }
-            ],
-            "parameters": [
-              "latents"
-            ],
-            "symbols": {},
-            "v": 1
-          },
-          "ingress_digest": "895bc730bb1751b250cc87cdfdd3739d",
-          "layout": "bf16",
-          "outputs": [
-            {
-              "dtype": "bfloat16",
-              "shape": [
-                1,
-                3,
-                1024,
-                1024
-              ]
-            }
-          ]
-        },
-        {
-          "bucket": {
-            "shape": 11520896
-          },
-          "ingress": {
-            "excluded_inputs": [],
-            "flat_arity": 1,
-            "inputs": [
-              {
-                "dtype": "bfloat16",
-                "exported_name": "latents",
-                "name": "latents",
-                "param": "latents",
-                "param_position": 0,
-                "path": [],
-                "position": 0,
-                "shape": [
-                  1,
-                  4,
-                  112,
-                  144
-                ]
-              }
-            ],
-            "parameters": [
-              "latents"
-            ],
-            "symbols": {},
-            "v": 1
-          },
-          "ingress_digest": "b98fc2c26c7336206403481c81c0a065",
-          "layout": "bf16",
-          "outputs": [
-            {
-              "dtype": "bfloat16",
-              "shape": [
-                1,
-                3,
-                896,
-                1152
-              ]
-            }
-          ]
-        },
-        {
-          "bucket": {
-            "shape": 12160832
-          },
-          "ingress": {
-            "excluded_inputs": [],
-            "flat_arity": 1,
-            "inputs": [
-              {
-                "dtype": "bfloat16",
-                "exported_name": "latents",
-                "name": "latents",
-                "param": "latents",
-                "param_position": 0,
-                "path": [],
-                "position": 0,
-                "shape": [
-                  1,
-                  4,
-                  104,
-                  152
-                ]
-              }
-            ],
-            "parameters": [
-              "latents"
-            ],
-            "symbols": {},
-            "v": 1
-          },
-          "ingress_digest": "b4dc26474f66c0001c577c8c5727b62d",
-          "layout": "bf16",
-          "outputs": [
-            {
-              "dtype": "bfloat16",
-              "shape": [
-                1,
-                3,
-                832,
-                1216
-              ]
-            }
-          ]
-        },
-        {
-          "bucket": {
-            "shape": 13440768
+            "shape": 4320768
           },
           "ingress": {
             "excluded_inputs": [],
@@ -482,7 +116,7 @@
                   1,
                   4,
                   96,
-                  168
+                  54
                 ]
               }
             ],
@@ -492,7 +126,7 @@
             "symbols": {},
             "v": 1
           },
-          "ingress_digest": "1546e22018fe948766977ccbdf2b0325",
+          "ingress_digest": "6ace620307ef1626785fc4e5733c815f",
           "layout": "bf16",
           "outputs": [
             {
@@ -501,14 +135,14 @@
                 1,
                 3,
                 768,
-                1344
+                432
               ]
             }
           ]
         },
         {
           "bucket": {
-            "shape": 15360640
+            "shape": 4800640
           },
           "ingress": {
             "excluded_inputs": [],
@@ -526,7 +160,7 @@
                   1,
                   4,
                   80,
-                  192
+                  60
                 ]
               }
             ],
@@ -536,7 +170,7 @@
             "symbols": {},
             "v": 1
           },
-          "ingress_digest": "bec367567102fe1f10dd21af802b45e3",
+          "ingress_digest": "e287b9fd3b65c2e2bb095d6b355db003",
           "layout": "bf16",
           "outputs": [
             {
@@ -545,7 +179,227 @@
                 1,
                 3,
                 640,
-                1536
+                480
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "shape": 5120512
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 1,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "latents",
+                "name": "latents",
+                "param": "latents",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  4,
+                  64,
+                  64
+                ]
+              }
+            ],
+            "parameters": [
+              "latents"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "350961d610dfbe67d67dad036c3ade4f",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                3,
+                512,
+                512
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "shape": 5120768
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 1,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "latents",
+                "name": "latents",
+                "param": "latents",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  4,
+                  96,
+                  64
+                ]
+              }
+            ],
+            "parameters": [
+              "latents"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "4ba629ec24032c79739124431da52568",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                3,
+                768,
+                512
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "shape": 6400480
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 1,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "latents",
+                "name": "latents",
+                "param": "latents",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  4,
+                  60,
+                  80
+                ]
+              }
+            ],
+            "parameters": [
+              "latents"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "b21694b609ed3e580389941664067288",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                3,
+                480,
+                640
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "shape": 7680432
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 1,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "latents",
+                "name": "latents",
+                "param": "latents",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  4,
+                  54,
+                  96
+                ]
+              }
+            ],
+            "parameters": [
+              "latents"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "877073d7b61fbfdbcdddedc2b3b9ea23",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                3,
+                432,
+                768
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "shape": 7680512
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 1,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "latents",
+                "name": "latents",
+                "param": "latents",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  4,
+                  64,
+                  96
+                ]
+              }
+            ],
+            "parameters": [
+              "latents"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "dade18b3ca77e1a3de131261323e8a09",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                3,
+                512,
+                768
               ]
             }
           ]
@@ -560,11 +414,11 @@
       "variants": [
         {
           "bucket": {
-            "shape": 6401536
+            "shape": 4320768
           },
           "ingress": {
             "excluded_inputs": [],
-            "flat_arity": 5,
+            "flat_arity": 3,
             "inputs": [
               {
                 "dtype": "bfloat16",
@@ -577,7 +431,287 @@
                 "shape": [
                   2,
                   4,
-                  192,
+                  96,
+                  54
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "encoder_hidden_states",
+                "name": "encoder_hidden_states",
+                "param": "encoder_hidden_states",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  2,
+                  77,
+                  768
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder_hidden_states"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "872fc3b6b215783be9934b0fddb4c1d7",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                2,
+                4,
+                96,
+                54
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "shape": 4800640
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  2,
+                  4,
+                  80,
+                  60
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "encoder_hidden_states",
+                "name": "encoder_hidden_states",
+                "param": "encoder_hidden_states",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  2,
+                  77,
+                  768
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder_hidden_states"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "49016decad29c464c3ceef8ca48edfa6",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                2,
+                4,
+                80,
+                60
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "shape": 5120512
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  2,
+                  4,
+                  64,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "encoder_hidden_states",
+                "name": "encoder_hidden_states",
+                "param": "encoder_hidden_states",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  2,
+                  77,
+                  768
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder_hidden_states"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "969d1b427df4240cea5d01f87043342d",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                2,
+                4,
+                64,
+                64
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "shape": 5120768
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  2,
+                  4,
+                  96,
+                  64
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": []
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "encoder_hidden_states",
+                "name": "encoder_hidden_states",
+                "param": "encoder_hidden_states",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  2,
+                  77,
+                  768
+                ]
+              }
+            ],
+            "parameters": [
+              "sample",
+              "timestep",
+              "encoder_hidden_states"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "524a4fd44213a72e21cdf54da9b6274b",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                2,
+                4,
+                96,
+                64
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "shape": 6400480
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "sample",
+                "name": "sample",
+                "param": "sample",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  2,
+                  4,
+                  60,
                   80
                 ]
               },
@@ -602,50 +736,19 @@
                 "shape": [
                   2,
                   77,
-                  2048
-                ]
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "added_cond_kwargs_text_embeds",
-                "name": "text_embeds",
-                "param": "added_cond_kwargs",
-                "param_position": 3,
-                "path": [
-                  "text_embeds"
-                ],
-                "position": 3,
-                "shape": [
-                  2,
-                  1280
-                ]
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "added_cond_kwargs_time_ids",
-                "name": "time_ids",
-                "param": "added_cond_kwargs",
-                "param_position": 3,
-                "path": [
-                  "time_ids"
-                ],
-                "position": 4,
-                "shape": [
-                  2,
-                  6
+                  768
                 ]
               }
             ],
             "parameters": [
               "sample",
               "timestep",
-              "encoder_hidden_states",
-              "added_cond_kwargs"
+              "encoder_hidden_states"
             ],
             "symbols": {},
             "v": 1
           },
-          "ingress_digest": "ec96c6c0338e45e52699d17b706c1511",
+          "ingress_digest": "f9e414a5c28f18d73ee43e41a8bf6ef3",
           "layout": "bf16",
           "outputs": [
             {
@@ -653,7 +756,7 @@
               "shape": [
                 2,
                 4,
-                192,
+                60,
                 80
               ]
             }
@@ -661,11 +764,11 @@
         },
         {
           "bucket": {
-            "shape": 7681344
+            "shape": 7680432
           },
           "ingress": {
             "excluded_inputs": [],
-            "flat_arity": 5,
+            "flat_arity": 3,
             "inputs": [
               {
                 "dtype": "bfloat16",
@@ -678,7 +781,7 @@
                 "shape": [
                   2,
                   4,
-                  168,
+                  54,
                   96
                 ]
               },
@@ -703,50 +806,19 @@
                 "shape": [
                   2,
                   77,
-                  2048
-                ]
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "added_cond_kwargs_text_embeds",
-                "name": "text_embeds",
-                "param": "added_cond_kwargs",
-                "param_position": 3,
-                "path": [
-                  "text_embeds"
-                ],
-                "position": 3,
-                "shape": [
-                  2,
-                  1280
-                ]
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "added_cond_kwargs_time_ids",
-                "name": "time_ids",
-                "param": "added_cond_kwargs",
-                "param_position": 3,
-                "path": [
-                  "time_ids"
-                ],
-                "position": 4,
-                "shape": [
-                  2,
-                  6
+                  768
                 ]
               }
             ],
             "parameters": [
               "sample",
               "timestep",
-              "encoder_hidden_states",
-              "added_cond_kwargs"
+              "encoder_hidden_states"
             ],
             "symbols": {},
             "v": 1
           },
-          "ingress_digest": "cdc35fdb95df72510f418a59d581d352",
+          "ingress_digest": "0e2e3523e32e500fec444c7df8a5b57d",
           "layout": "bf16",
           "outputs": [
             {
@@ -754,7 +826,7 @@
               "shape": [
                 2,
                 4,
-                168,
+                54,
                 96
               ]
             }
@@ -762,11 +834,11 @@
         },
         {
           "bucket": {
-            "shape": 8321216
+            "shape": 7680512
           },
           "ingress": {
             "excluded_inputs": [],
-            "flat_arity": 5,
+            "flat_arity": 3,
             "inputs": [
               {
                 "dtype": "bfloat16",
@@ -779,8 +851,8 @@
                 "shape": [
                   2,
                   4,
-                  152,
-                  104
+                  64,
+                  96
                 ]
               },
               {
@@ -804,50 +876,19 @@
                 "shape": [
                   2,
                   77,
-                  2048
-                ]
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "added_cond_kwargs_text_embeds",
-                "name": "text_embeds",
-                "param": "added_cond_kwargs",
-                "param_position": 3,
-                "path": [
-                  "text_embeds"
-                ],
-                "position": 3,
-                "shape": [
-                  2,
-                  1280
-                ]
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "added_cond_kwargs_time_ids",
-                "name": "time_ids",
-                "param": "added_cond_kwargs",
-                "param_position": 3,
-                "path": [
-                  "time_ids"
-                ],
-                "position": 4,
-                "shape": [
-                  2,
-                  6
+                  768
                 ]
               }
             ],
             "parameters": [
               "sample",
               "timestep",
-              "encoder_hidden_states",
-              "added_cond_kwargs"
+              "encoder_hidden_states"
             ],
             "symbols": {},
             "v": 1
           },
-          "ingress_digest": "ff9e79836c23ff008ccdcb02186532b3",
+          "ingress_digest": "3fdceff9aae5d824777a2a40fbc42c41",
           "layout": "bf16",
           "outputs": [
             {
@@ -855,614 +896,8 @@
               "shape": [
                 2,
                 4,
-                152,
-                104
-              ]
-            }
-          ]
-        },
-        {
-          "bucket": {
-            "shape": 8961152
-          },
-          "ingress": {
-            "excluded_inputs": [],
-            "flat_arity": 5,
-            "inputs": [
-              {
-                "dtype": "bfloat16",
-                "exported_name": "sample",
-                "name": "sample",
-                "param": "sample",
-                "param_position": 0,
-                "path": [],
-                "position": 0,
-                "shape": [
-                  2,
-                  4,
-                  144,
-                  112
-                ]
-              },
-              {
-                "dtype": "float32",
-                "exported_name": "timestep",
-                "name": "timestep",
-                "param": "timestep",
-                "param_position": 1,
-                "path": [],
-                "position": 1,
-                "shape": []
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "encoder_hidden_states",
-                "name": "encoder_hidden_states",
-                "param": "encoder_hidden_states",
-                "param_position": 2,
-                "path": [],
-                "position": 2,
-                "shape": [
-                  2,
-                  77,
-                  2048
-                ]
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "added_cond_kwargs_text_embeds",
-                "name": "text_embeds",
-                "param": "added_cond_kwargs",
-                "param_position": 3,
-                "path": [
-                  "text_embeds"
-                ],
-                "position": 3,
-                "shape": [
-                  2,
-                  1280
-                ]
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "added_cond_kwargs_time_ids",
-                "name": "time_ids",
-                "param": "added_cond_kwargs",
-                "param_position": 3,
-                "path": [
-                  "time_ids"
-                ],
-                "position": 4,
-                "shape": [
-                  2,
-                  6
-                ]
-              }
-            ],
-            "parameters": [
-              "sample",
-              "timestep",
-              "encoder_hidden_states",
-              "added_cond_kwargs"
-            ],
-            "symbols": {},
-            "v": 1
-          },
-          "ingress_digest": "c1a20d66e1e5d0b07dfd67466579796f",
-          "layout": "bf16",
-          "outputs": [
-            {
-              "dtype": "bfloat16",
-              "shape": [
-                2,
-                4,
-                144,
-                112
-              ]
-            }
-          ]
-        },
-        {
-          "bucket": {
-            "shape": 10241024
-          },
-          "ingress": {
-            "excluded_inputs": [],
-            "flat_arity": 5,
-            "inputs": [
-              {
-                "dtype": "bfloat16",
-                "exported_name": "sample",
-                "name": "sample",
-                "param": "sample",
-                "param_position": 0,
-                "path": [],
-                "position": 0,
-                "shape": [
-                  2,
-                  4,
-                  128,
-                  128
-                ]
-              },
-              {
-                "dtype": "float32",
-                "exported_name": "timestep",
-                "name": "timestep",
-                "param": "timestep",
-                "param_position": 1,
-                "path": [],
-                "position": 1,
-                "shape": []
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "encoder_hidden_states",
-                "name": "encoder_hidden_states",
-                "param": "encoder_hidden_states",
-                "param_position": 2,
-                "path": [],
-                "position": 2,
-                "shape": [
-                  2,
-                  77,
-                  2048
-                ]
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "added_cond_kwargs_text_embeds",
-                "name": "text_embeds",
-                "param": "added_cond_kwargs",
-                "param_position": 3,
-                "path": [
-                  "text_embeds"
-                ],
-                "position": 3,
-                "shape": [
-                  2,
-                  1280
-                ]
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "added_cond_kwargs_time_ids",
-                "name": "time_ids",
-                "param": "added_cond_kwargs",
-                "param_position": 3,
-                "path": [
-                  "time_ids"
-                ],
-                "position": 4,
-                "shape": [
-                  2,
-                  6
-                ]
-              }
-            ],
-            "parameters": [
-              "sample",
-              "timestep",
-              "encoder_hidden_states",
-              "added_cond_kwargs"
-            ],
-            "symbols": {},
-            "v": 1
-          },
-          "ingress_digest": "70c842475b613b5c537df60cc3341166",
-          "layout": "bf16",
-          "outputs": [
-            {
-              "dtype": "bfloat16",
-              "shape": [
-                2,
-                4,
-                128,
-                128
-              ]
-            }
-          ]
-        },
-        {
-          "bucket": {
-            "shape": 11520896
-          },
-          "ingress": {
-            "excluded_inputs": [],
-            "flat_arity": 5,
-            "inputs": [
-              {
-                "dtype": "bfloat16",
-                "exported_name": "sample",
-                "name": "sample",
-                "param": "sample",
-                "param_position": 0,
-                "path": [],
-                "position": 0,
-                "shape": [
-                  2,
-                  4,
-                  112,
-                  144
-                ]
-              },
-              {
-                "dtype": "float32",
-                "exported_name": "timestep",
-                "name": "timestep",
-                "param": "timestep",
-                "param_position": 1,
-                "path": [],
-                "position": 1,
-                "shape": []
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "encoder_hidden_states",
-                "name": "encoder_hidden_states",
-                "param": "encoder_hidden_states",
-                "param_position": 2,
-                "path": [],
-                "position": 2,
-                "shape": [
-                  2,
-                  77,
-                  2048
-                ]
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "added_cond_kwargs_text_embeds",
-                "name": "text_embeds",
-                "param": "added_cond_kwargs",
-                "param_position": 3,
-                "path": [
-                  "text_embeds"
-                ],
-                "position": 3,
-                "shape": [
-                  2,
-                  1280
-                ]
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "added_cond_kwargs_time_ids",
-                "name": "time_ids",
-                "param": "added_cond_kwargs",
-                "param_position": 3,
-                "path": [
-                  "time_ids"
-                ],
-                "position": 4,
-                "shape": [
-                  2,
-                  6
-                ]
-              }
-            ],
-            "parameters": [
-              "sample",
-              "timestep",
-              "encoder_hidden_states",
-              "added_cond_kwargs"
-            ],
-            "symbols": {},
-            "v": 1
-          },
-          "ingress_digest": "f1077835692ac749371d95900d8a230e",
-          "layout": "bf16",
-          "outputs": [
-            {
-              "dtype": "bfloat16",
-              "shape": [
-                2,
-                4,
-                112,
-                144
-              ]
-            }
-          ]
-        },
-        {
-          "bucket": {
-            "shape": 12160832
-          },
-          "ingress": {
-            "excluded_inputs": [],
-            "flat_arity": 5,
-            "inputs": [
-              {
-                "dtype": "bfloat16",
-                "exported_name": "sample",
-                "name": "sample",
-                "param": "sample",
-                "param_position": 0,
-                "path": [],
-                "position": 0,
-                "shape": [
-                  2,
-                  4,
-                  104,
-                  152
-                ]
-              },
-              {
-                "dtype": "float32",
-                "exported_name": "timestep",
-                "name": "timestep",
-                "param": "timestep",
-                "param_position": 1,
-                "path": [],
-                "position": 1,
-                "shape": []
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "encoder_hidden_states",
-                "name": "encoder_hidden_states",
-                "param": "encoder_hidden_states",
-                "param_position": 2,
-                "path": [],
-                "position": 2,
-                "shape": [
-                  2,
-                  77,
-                  2048
-                ]
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "added_cond_kwargs_text_embeds",
-                "name": "text_embeds",
-                "param": "added_cond_kwargs",
-                "param_position": 3,
-                "path": [
-                  "text_embeds"
-                ],
-                "position": 3,
-                "shape": [
-                  2,
-                  1280
-                ]
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "added_cond_kwargs_time_ids",
-                "name": "time_ids",
-                "param": "added_cond_kwargs",
-                "param_position": 3,
-                "path": [
-                  "time_ids"
-                ],
-                "position": 4,
-                "shape": [
-                  2,
-                  6
-                ]
-              }
-            ],
-            "parameters": [
-              "sample",
-              "timestep",
-              "encoder_hidden_states",
-              "added_cond_kwargs"
-            ],
-            "symbols": {},
-            "v": 1
-          },
-          "ingress_digest": "4a9a6471c12ef1f2e315a79476074308",
-          "layout": "bf16",
-          "outputs": [
-            {
-              "dtype": "bfloat16",
-              "shape": [
-                2,
-                4,
-                104,
-                152
-              ]
-            }
-          ]
-        },
-        {
-          "bucket": {
-            "shape": 13440768
-          },
-          "ingress": {
-            "excluded_inputs": [],
-            "flat_arity": 5,
-            "inputs": [
-              {
-                "dtype": "bfloat16",
-                "exported_name": "sample",
-                "name": "sample",
-                "param": "sample",
-                "param_position": 0,
-                "path": [],
-                "position": 0,
-                "shape": [
-                  2,
-                  4,
-                  96,
-                  168
-                ]
-              },
-              {
-                "dtype": "float32",
-                "exported_name": "timestep",
-                "name": "timestep",
-                "param": "timestep",
-                "param_position": 1,
-                "path": [],
-                "position": 1,
-                "shape": []
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "encoder_hidden_states",
-                "name": "encoder_hidden_states",
-                "param": "encoder_hidden_states",
-                "param_position": 2,
-                "path": [],
-                "position": 2,
-                "shape": [
-                  2,
-                  77,
-                  2048
-                ]
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "added_cond_kwargs_text_embeds",
-                "name": "text_embeds",
-                "param": "added_cond_kwargs",
-                "param_position": 3,
-                "path": [
-                  "text_embeds"
-                ],
-                "position": 3,
-                "shape": [
-                  2,
-                  1280
-                ]
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "added_cond_kwargs_time_ids",
-                "name": "time_ids",
-                "param": "added_cond_kwargs",
-                "param_position": 3,
-                "path": [
-                  "time_ids"
-                ],
-                "position": 4,
-                "shape": [
-                  2,
-                  6
-                ]
-              }
-            ],
-            "parameters": [
-              "sample",
-              "timestep",
-              "encoder_hidden_states",
-              "added_cond_kwargs"
-            ],
-            "symbols": {},
-            "v": 1
-          },
-          "ingress_digest": "74d4f5348afcfbb8c4360fb6b7fe17aa",
-          "layout": "bf16",
-          "outputs": [
-            {
-              "dtype": "bfloat16",
-              "shape": [
-                2,
-                4,
-                96,
-                168
-              ]
-            }
-          ]
-        },
-        {
-          "bucket": {
-            "shape": 15360640
-          },
-          "ingress": {
-            "excluded_inputs": [],
-            "flat_arity": 5,
-            "inputs": [
-              {
-                "dtype": "bfloat16",
-                "exported_name": "sample",
-                "name": "sample",
-                "param": "sample",
-                "param_position": 0,
-                "path": [],
-                "position": 0,
-                "shape": [
-                  2,
-                  4,
-                  80,
-                  192
-                ]
-              },
-              {
-                "dtype": "float32",
-                "exported_name": "timestep",
-                "name": "timestep",
-                "param": "timestep",
-                "param_position": 1,
-                "path": [],
-                "position": 1,
-                "shape": []
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "encoder_hidden_states",
-                "name": "encoder_hidden_states",
-                "param": "encoder_hidden_states",
-                "param_position": 2,
-                "path": [],
-                "position": 2,
-                "shape": [
-                  2,
-                  77,
-                  2048
-                ]
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "added_cond_kwargs_text_embeds",
-                "name": "text_embeds",
-                "param": "added_cond_kwargs",
-                "param_position": 3,
-                "path": [
-                  "text_embeds"
-                ],
-                "position": 3,
-                "shape": [
-                  2,
-                  1280
-                ]
-              },
-              {
-                "dtype": "bfloat16",
-                "exported_name": "added_cond_kwargs_time_ids",
-                "name": "time_ids",
-                "param": "added_cond_kwargs",
-                "param_position": 3,
-                "path": [
-                  "time_ids"
-                ],
-                "position": 4,
-                "shape": [
-                  2,
-                  6
-                ]
-              }
-            ],
-            "parameters": [
-              "sample",
-              "timestep",
-              "encoder_hidden_states",
-              "added_cond_kwargs"
-            ],
-            "symbols": {},
-            "v": 1
-          },
-          "ingress_digest": "681d7b9d79a2d9abe1d0cfb32fc69aa7",
-          "layout": "bf16",
-          "outputs": [
-            {
-              "dtype": "bfloat16",
-              "shape": [
-                2,
-                4,
-                80,
-                192
+                64,
+                96
               ]
             }
           ]
@@ -1484,8 +919,8 @@
     }
   },
   "tuned": {
-    "module": "gen_worker.model.catalog.sdxl_serve",
-    "qualname": "SdxlTuned"
+    "module": "gen_worker.model.catalog.sd15_serve",
+    "qualname": "Sd15Tuned"
   },
   "v": 1
 }
