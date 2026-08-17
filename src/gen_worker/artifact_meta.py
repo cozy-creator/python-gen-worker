@@ -133,33 +133,39 @@ def cell_metadata_fields() -> FrozenSet[str]:
     ever satisfy is refused for $0 instead of after a 25-minute paid compile
     (th#2098 / pgw#1340).
 
-    THE PRIVATE NAME IS THE POINT, and pgw#1345 is the receipt. The first
-    attempt exported ``ARTIFACT_METADATA_FIELDS`` from the vendored snapshot —
-    which pgw#1310's digest fence refuses by design (*"a vendored snapshot is
-    fixed upstream and re-vendored, never patched here"*), and refuses in the
-    de-required ``tests`` suite, so it merged and turned master red. A vendored
-    tree is READ, never edited; when the public name is wanted it is added
-    UPSTREAM and re-vendored.
+    THE PUBLIC NAME EXISTS NOW, and it is read here. pgw#1340 first exported
+    ``ARTIFACT_METADATA_FIELDS`` by editing the vendored snapshot, which
+    pgw#1310's digest fence refuses by design (*"a vendored snapshot is fixed
+    upstream and re-vendored, never patched here"*) and which turned master red;
+    pgw#1345 repaired that by reading the private ``_TOP_LEVEL_FIELDS`` and said
+    what the real fix was: *"when the public name is wanted it is added UPSTREAM
+    and re-vendored."* tcg#40 (torchcg#42, vendored here at pgw#1342) did exactly
+    that, so this reads the public name and the ``getattr`` shim is gone.
 
-    Reading ``_TOP_LEVEL_FIELDS`` is therefore the correct shape and the
-    precedent already exists — ``tests/tcg_artifacts.py`` reads
-    ``host_isa._host_requirement`` for the same reason, deliberately. It is
-    sited HERE, in the one first-party module that owns cell-metadata reads, so
-    the coupling has exactly one address to fix if upstream renames it.
+    That matters beyond tidiness. A private name is a name upstream owes nobody
+    anything about; a public one is fenced upstream against the behaviour it
+    claims — torchcg asserts ``ARTIFACT_METADATA_FIELDS`` against
+    ``validate_metadata``'s real refusals, so a drift between the set and the
+    validator goes red THERE, before it can reach a pod as a $1.00-a-burst
+    unstateable-axis bug.
+
+    Still sited HERE, in the one first-party module that owns cell-metadata
+    reads, so the coupling has exactly one address.
 
     Refuses loudly rather than answering an empty set: an empty vocabulary
     would make every axis look unstateable and silently disable every self-mint
     on the fleet.
     """
-    from gen_worker._vendor.torchcg import artifact as tcg_artifact
+    from gen_worker._vendor import torchcg as tcg
 
-    fields = getattr(tcg_artifact, "_TOP_LEVEL_FIELDS", None)
+    fields = getattr(tcg, "ARTIFACT_METADATA_FIELDS", None)
     if not fields:
         raise ArtifactMetadataError(
             "the vendored torchcg states no artifact-metadata vocabulary "
-            "(`_TOP_LEVEL_FIELDS`); nothing can decide which arm axes a cell "
-            "is able to state, and guessing would either refuse every mint or "
-            "admit a comparison that can never succeed")
+            "(`ARTIFACT_METADATA_FIELDS`, public since tcg#40); nothing can "
+            "decide which arm axes a cell is able to state, and guessing would "
+            "either refuse every mint or admit a comparison that can never "
+            "succeed")
     return frozenset(str(name) for name in fields)
 
 
