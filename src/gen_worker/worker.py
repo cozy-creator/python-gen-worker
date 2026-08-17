@@ -18,7 +18,7 @@ from .executor import Executor
 from .models.store import ModelStore
 from .lifecycle import Lifecycle
 from .pb import worker_scheduler_pb2 as pb
-from .registry import collect_endpoints
+from .registry import collect_endpoints, collect_jobs
 from .topology import ExecutionTopology, delivered_topology
 from .transport import (
     DEFAULT_QUEUE_MAXSIZE as _DEFAULT_QUEUE_MAXSIZE,
@@ -130,16 +130,22 @@ class Worker:
             set_provider_index(build_provider_index_from_manifest(manifest))
 
         specs = collect_endpoints(list(user_module_names))
-        if not specs:
+        # pgw#1324: the SAME walk, at the same place, for the other publishable
+        # shape. te#218 re-authored every conversion package as jobs-only, so a
+        # boot that demands an `@endpoint` refuses the packages the jobs program
+        # exists to run.
+        jobs = collect_jobs(list(user_module_names))
+        if not specs and not jobs:
             raise ValueError(
-                f"no endpoint classes found in modules {list(user_module_names)!r}"
+                f"no @endpoint classes and no @job functions found in modules "
+                f"{list(user_module_names)!r}"
             )
         store = ModelStore(
             self._send, hf_home=settings.hf_home, hf_token=settings.hf_token
         )
         self.executor = Executor(
             specs, self._send, settings=settings, store=store,
-            gpu_slots=gpu_slots, topology=self.topology,
+            gpu_slots=gpu_slots, topology=self.topology, jobs=jobs,
         )
         if (settings.config_snapshot_path or "").strip():
             from .runtime_config import ConfigStore
@@ -177,7 +183,8 @@ class Worker:
         # slice unattributed.
         boot_phases.mark_once(
             boot_phases.PHASE_SDK_READY,
-            detail=f"endpoints={len(specs)} modules={len(user_module_names)}")
+            detail=f"endpoints={len(specs)} jobs={len(jobs)} "
+                   f"modules={len(user_module_names)}")
 
     async def _send(self, msg: pb.WorkerMessage) -> None:
         await self.transport.send(msg)

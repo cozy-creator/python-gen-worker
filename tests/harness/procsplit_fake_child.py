@@ -12,6 +12,11 @@ Behaviour is chosen by PGW763_FAKE_MODE:
                     immediately (frame and death adjacent).
   result_then_exit: accept + OK result, then exit 0 (deliberate exit with a
                     result the parent still owes the hub).
+  result_then_recycle
+                  : accept + OK result, then exit EXIT_JOB_RECYCLE (pgw#1324's
+                    run-once lifecycle). The parent must RESPAWN — this is
+                    neither a crash nor a shutdown, and rc 0 or a plain
+                    non-zero would give the wrong one.
   ignore_sigterm  : serve nothing, ignore SIGTERM forever (TimeoutStopSec).
   spontaneous_result_then_exit
                   : write one JobResult on connect and exit 0 immediately, so
@@ -42,7 +47,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "src"))
 
 from gen_worker.pb import worker_scheduler_pb2 as pb  # noqa: E402
-from gen_worker.procsplit import frames  # noqa: E402
+from gen_worker.procsplit import EXIT_JOB_RECYCLE, frames  # noqa: E402
 
 MODE = os.environ.get("PGW763_FAKE_MODE", "result_then_die")
 WORKER_ID = os.environ.get("PGW763_WORKER_ID", "split-fake-child")
@@ -158,6 +163,8 @@ async def main() -> int:
             os.kill(os.getpid(), signal.SIGKILL)
         if MODE == "result_then_exit":
             os._exit(0)
+        if MODE == "result_then_recycle":
+            os._exit(EXIT_JOB_RECYCLE)
     return 0
 
 

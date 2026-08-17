@@ -84,6 +84,11 @@ class JobOutcome:
     data: whoever drives this dispatch must not reuse the process for a second
     job. It is a field rather than a comment so the caller either honours it or
     visibly ignores it.
+
+    ``exception`` carries the failure OBJECT, not just its name, because the
+    infra-vs-body split the scheduler makes is a TYPE question and the worker
+    already owns one classifier for it (``executor._map_exception``). Rebuilding
+    that decision from ``error_type`` prose would be a second home for it.
     """
 
     job_name: str
@@ -93,6 +98,7 @@ class JobOutcome:
     failure: str = ""
     error_type: str = ""
     recycle_child: bool = True
+    exception: Optional[BaseException] = None
 
 
 class ProgressWatch:
@@ -210,7 +216,7 @@ def _outcome(spec: JobSpec, dispatch: JobDispatch, result: bytes) -> JobOutcome:
 def _failure(spec: JobSpec, dispatch: JobDispatch, exc: BaseException) -> JobOutcome:
     return JobOutcome(
         job_name=spec.name, job_id=dispatch.job_id, status="failed",
-        failure=str(exc), error_type=type(exc).__name__,
+        failure=str(exc), error_type=type(exc).__name__, exception=exc,
     )
 
 
