@@ -214,17 +214,21 @@ def test_distilled_mismatch_raises_typed_backstop_error() -> None:
 
 
 @pytest.mark.parametrize("status", ["unclassified", "inconclusive"])
-def test_unknown_distillation_evidence_fails_closed(status: str) -> None:
+def test_unknown_distillation_evidence_SERVES_UNCHECKED(status: str) -> None:
+    """pgw#1339: `unclassified`/`inconclusive` are ABSENCES of evidence, not
+    contradictions of the declaration, so they degrade rather than refuse.
+    The status still rides through onto the resolved slot, so a handler that
+    wants to branch on it can — the fact is reported, never invented."""
     from gen_worker.api.binding import HF
-    from gen_worker.api.slot import ObjectiveMismatchError, Slot, resolve_slot
+    from gen_worker.api.slot import Slot, resolve_slot
     from _example_family import ExampleDefaults
 
-    with pytest.raises(ObjectiveMismatchError, match=status):
-        resolve_slot(
-            "pipeline", Slot(object), ref=HF("acme/plain-xl"),
-            defaults_cls=ExampleDefaults,
-            distilled=False, distilled_status=status, allowed_distilled=False,
-        )
+    resolved = resolve_slot(
+        "pipeline", Slot(object), ref=HF("acme/plain-xl"),
+        defaults_cls=ExampleDefaults,
+        distilled=False, distilled_status=status, allowed_distilled=False,
+    )
+    assert resolved.distilled_status == status
 
 
 def test_explicit_false_distillation_evidence_is_independent_of_objective() -> None:
@@ -244,32 +248,40 @@ def test_explicit_false_distillation_evidence_is_independent_of_objective() -> N
     assert resolved.distilled_status == "classified"
 
 
-def test_unstamped_checkpoint_fails_a_declared_contract_closed() -> None:
-    """pgw#1307 arm (3): an unstamped binding is not an old sender.
+def test_an_unstamped_checkpoint_SERVES_UNCHECKED() -> None:
+    """SUPERSEDED BY pgw#1339 / th#2099 — was
+    `test_unstamped_checkpoint_fails_a_declared_contract_closed`.
 
-    The hub omits `distilled_status` whenever the stored column is empty
-    (`slot_resolution.go` stamps it `if TrimSpace(...) != ""`), and its ONE
-    rule (`modelfamily.StoredCheckpointFacts`) counts only `"classified"` as
-    evidence — so both hub gates already refuse this binding. The backstop
-    used to PASS it, which made the worker more permissive than the authority
-    it backstops.
+    pgw#1307 arm (3) reasoned that because both HUB gates refuse an unstamped
+    binding, the worker-side backstop passing it made the worker "more
+    permissive than the authority it backstops". The premise is right and the
+    conclusion does not follow: the hub gates ADMISSION (a config-write, and a
+    request the hub may still decline), while the worker is executing a
+    request the hub already admitted. Refusing there does not add a gate — it
+    converts a hub-side stamping gap into a customer-visible fatal, which is
+    exactly what 0.120.0 did to `sd15`, `anima` and `foundation-1`.
+
+    So both arms now RESOLVE, and the absence is confessed instead.
     """
     from gen_worker.api.binding import HF
-    from gen_worker.api.slot import ObjectiveMismatchError, Slot, resolve_slot
+    from gen_worker.api.slot import Slot, resolve_slot
     from _example_family import ExampleDefaults
 
-    with pytest.raises(ObjectiveMismatchError, match="no training objective"):
-        resolve_slot(
-            "pipeline", Slot(object), ref=HF("acme/plain-xl"),
-            defaults_cls=ExampleDefaults,
-            allowed_objectives=("epsilon",),
-        )
-    with pytest.raises(ObjectiveMismatchError, match="unstamped"):
-        resolve_slot(
-            "pipeline", Slot(object), ref=HF("acme/plain-xl"),
-            defaults_cls=ExampleDefaults,
-            objective="epsilon", allowed_distilled=False,
-        )
+    no_objective = resolve_slot(
+        "pipeline", Slot(object), ref=HF("acme/plain-xl"),
+        defaults_cls=ExampleDefaults,
+        allowed_objectives=("epsilon",),
+    )
+    assert no_objective.objective == "", (
+        "serving without the fact is the fix; INVENTING one would be a far "
+        "worse bug than the refusal it replaced")
+
+    no_status = resolve_slot(
+        "pipeline", Slot(object), ref=HF("acme/plain-xl"),
+        defaults_cls=ExampleDefaults,
+        objective="epsilon", allowed_distilled=False,
+    )
+    assert no_status.distilled_status == ""
 
 
 def test_unknown_distillation_status_is_rejected() -> None:
@@ -321,8 +333,10 @@ def test_wire_distillation_status_reaches_the_slot_backstop() -> None:
 
     result = resolved_slots_kwargs(spec, slots)
 
-    assert "pipeline" not in result["resolved_slots"]
-    assert "unclassified" in result["slot_errors"]["pipeline"]
+    # pgw#1339: the wire value still REACHES the backstop — that is what this
+    # test is for — but an unevidenced axis no longer takes the slot out.
+    assert result["slot_errors"] == {}
+    assert result["resolved_slots"]["pipeline"].distilled_status == "unclassified"
     assert pb.ModelBinding.DISTILLED_STATUS_FIELD_NUMBER == 8
 
 
