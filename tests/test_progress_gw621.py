@@ -199,8 +199,13 @@ def test_hub_sees_cpu_quiet_download_then_confession(monkeypatch):
 
         # Local behavior unchanged (the hub owns the kill): setup finishes
         # after the freeze and the activity completes normally.
+        # KIND-scoped, because a self-contained EVENT is also a COMPLETED
+        # envelope: this used to match whichever landed first, and pgw#1309's
+        # `process_role` row (emitted at sink bind, before setup runs at all)
+        # made "an activity completed" true while setup was still going.
         conn.wait_for(
             lambda m: m.WhichOneof("msg") == "activity_update"
+            and m.activity_update.kind == activity.KIND_WARMUP
             and m.activity_update.state
             == pb.ActivityState.ACTIVITY_STATE_COMPLETED,
             timeout=20,
