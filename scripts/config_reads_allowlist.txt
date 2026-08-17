@@ -97,6 +97,7 @@ src/gen_worker/host_canary.py::$k IPC restores the child's saved env after the c
 
 src/gen_worker/lifecycle.py::$ENV_VAR IPC WORKER_EXECUTION_TOPOLOGY (topology.ENV_VAR), the hub-delivered multi-GPU topology JSON, re-read only to decide whether the "GPUs are invisible" warning applies. Absent is legal and means one slot - which is why an unset value on a multi-GPU pod needs the warning at all.
 src/gen_worker/procsplit/parent.py::$ENV_WATCHDOG_PING_S IPC watchdog ping cadence handed down to the child.
+src/gen_worker/procsplit/parent.py::GEN_WORKER_LOCAL_CELLS_DIR IPC GEN_WORKER_LOCAL_CELLS_DIR, read to prepare the exec boundary rather than to steer this process. `_spawn_child` builds the child's environment from `dict(os.environ)`, so the value the CHILD will resolve its cell store to is whatever this process carries - and the parent must chown that root to the compute uid while it is still root. Reading it anywhere but here would be reading it after the only moment it can be acted on (pgw#1349). Same shape and same justification as the TENSORHUB_CACHE_DIR / GEN_WORKER_BOOT_RECORD reads in the same function; it is listed separately because the unit here is one file reading one variable.
 # ---------------------------------------------------------------------------
 # LIBRARY — torch / inductor / triton / NCCL read env at import. Accepted as a
 # MECHANISM. The VALUES are authored constants scattered across nine files,

@@ -245,6 +245,41 @@ def _http_call(
 _set_pdeathsig = privdrop.set_pdeathsig
 
 
+def is_grpc_fork_abort(
+    *, cause: str, saw_hello: bool, oom_delta: int, stderr_tail: str,
+) -> bool:
+    """pgw#932's WRITTEN DISCRIMINATOR, applied by the parent instead of by a
+    human reading logs.
+
+    The defect: gRPC registers ``pthread_atfork`` handlers that SKIP when
+    another thread is inside gRPC, and the forked-but-not-yet-exec'd child then
+    aborts out of the polling engine on an fd it must not touch. It is
+    self-inflicted — nothing about the pod, image, card or tenant is
+    implicated — but ``cause=signal:SIGABRT`` names the symptom and says
+    nothing about the reason, so it has been diagnosed from first principles at
+    least five separate times, twice by a lane spending a triage session on a
+    red it did not cause.
+
+    The discriminator was written down after the fourth sighting; this is that
+    text in code, so the sixth reader is TOLD rather than left to re-derive.
+
+    Deliberately NOT keyed on the ~0.8 s lifetime that accompanies every
+    recorded sighting: a duration inside a classifier is the same
+    magic-timeout-as-evidence shape pgw#1349 exists to remove, it would
+    misclassify on a slower box, and it adds nothing — gRPC's fork marks are
+    already specific to this path.
+
+    Narrow on purpose. A SIGABRT with no Hello and no OOM that does NOT carry
+    those marks is a different, unexplained defect and must keep saying so.
+    """
+    if saw_hello or oom_delta > 0 or cause != "signal:SIGABRT":
+        return False
+    tail = stderr_tail or ""
+    if "fork_posix" in tail or "skipping fork() handlers" in tail:
+        return True
+    return "Epoll1Poller" in tail and "Bad file descriptor" in tail
+
+
 class _ChildLink:
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.reader = reader
@@ -960,6 +995,21 @@ class _ChildSlot:
         # channel that survives a pre-Hello death on a provider with no
         # container-logs API.
         stderr_tail = self.stderr_tail_text()
+        known = is_grpc_fork_abort(
+            cause=cause, saw_hello=saw_hello, oom_delta=oom_delta,
+            stderr_tail=stderr_tail,
+        )
+        if known:
+            logger.error(
+                "compute child %s: this is pgw#932 — gRPC's fork handlers were "
+                "skipped because another thread was inside gRPC, and the "
+                "forked child aborted out of the polling engine before exec. "
+                "SELF-INFLICTED and transient: nothing about this pod, image, "
+                "card or tenant is implicated, the respawn below is the "
+                "correct response, and a CI run that fails on it wants a "
+                "rerun, not a diagnosis. The real fix is the exec-first "
+                "launcher, gated on pgw#909.", self.label,
+            )
         detail = postmortem.format_detail(
             phase="compute_process_exit",
             verdict=verdict,
@@ -972,6 +1022,7 @@ class _ChildSlot:
                 "in_flight": sorted(f"{r}#{a}" for (r, a) in died_jobs),
                 "spawn_count": self.spawn_count,
                 "saw_hello": saw_hello,
+                **({"known_defect": "pgw#932:grpc_fork_abort"} if known else {}),
                 **({"child_stderr_tail": stderr_tail} if stderr_tail else {}),
             },
         )
@@ -1326,6 +1377,20 @@ class ParentControl:
                 self._child_env.get("GEN_WORKER_BOOT_RECORD", "")
                 or self._settings.boot_record_path
             ),
+            # The local compiled-cell store: the CHILD mints, and the mint
+            # writes the memo and the per-cell sidecar under this root. Its
+            # DEFAULT (``~/.cache/cozy/compile-cells``) already resolves inside
+            # the compute uid's own home, so nothing needed granting while the
+            # default stood — which is exactly why the gap survived: cozy-local
+            # RELOCATES it by env (`internal/paths/paths.go`), and a relocated
+            # root lands outside every other entry in this list. pgw#1349: the
+            # dropped child then dies mid-request on
+            # ``PermissionError: .../aot-cells``, root-owned 0755 because the
+            # parent created it. Read from the child's env — the same rule the
+            # cache root above follows — never by importing the store, which
+            # would pull the model layer into this torch-free process.
+            self._child_env.get("GEN_WORKER_LOCAL_CELLS_DIR", "")
+            or os.environ.get("GEN_WORKER_LOCAL_CELLS_DIR", ""),
             # The mutable-config snapshot: the CHILD atomically rewrites
             # it on every config-generation push (tmp file in the SAME dir plus
             # os.replace, so the directory itself must be writable), and unlike

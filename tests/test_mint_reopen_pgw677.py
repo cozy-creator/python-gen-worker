@@ -56,6 +56,13 @@ from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs
 from gen_worker.models import store as store_mod
 
+#: pgw#1349. Slack for comparing two clocks that measure the SAME run — the
+#: worker's stage map against this harness's own compile intervals — never
+#: patience for a slow machine. Both sides of every comparison below stretch
+#: together under load, so this bounds rounding and scheduling jitter only.
+#: Same constant and same justification as `test_mint_gate_pgw677`'s.
+_CLOCK_SLOP_MS = 100.0
+
 FAMILY = "sdxl"
 _ASPECT_AXIS = CompileAxis(classes=(
     AxisClass("sq", match=lambda v: v == "1:1", warm="1:1"),
@@ -357,20 +364,47 @@ def test_w8a8_stamp_with_hub_execution_lane_boots_eager_first(
         weight_lane="w8a8", hub_execution_lane="fp8-w8a16+eager")
 
     async def _run() -> None:
-        boot_t0 = time.monotonic()
         await h.boot()
-        boot_wall = time.monotonic() - boot_t0
         # Eager-first: READY without paying the plan's compiles foreground.
         assert h.rec.background_mint is not None, (
             "w8a8-stamped pipe with hub lane fp8-w8a16+eager was refused "
             "eager-first — the foreground compile-then-serve mint is the "
             "reopen's measured 26-minute starvation")
-        assert boot_wall < 6.0, f"boot paid the plan foreground: {boot_wall:.1f}s"
-        # A tenant request mid-mint completes at serving latency.
+        # pgw#1349: `assert boot_wall < 6.0` and `assert wall < 1.0` stood here
+        # and are the two entries `_ELAPSED_ASSERT_BURNDOWN` marked "LATENCY
+        # BUDGET — anchor it next". Both were claims about how fast the machine
+        # is: 6.0 and 1.0 are not derivable from anything this harness
+        # configures, and on a loaded four-core runner a correct tree can
+        # exceed either. The doctrine they stand for is CAUSAL — boot did not
+        # wait for the mint, and neither did the tenant — so both are asserted
+        # as ordering against THIS run's own mint, which a slow machine moves
+        # together with everything else. Same correction pgw#1249 made to the
+        # sibling file's `>= 100` floor.
+        mint_task = h.rec.background_mint.task
+        assert mint_task is not None and not mint_task.done(), (
+            "boot returned only after the mint finished — that IS the "
+            "foreground compile-then-serve path this test forbids")
+        # A tenant request mid-mint completes at serving latency: it lands
+        # while the mint is still running, so it cannot have waited for it.
         res, wall = await h.dispatch("r-live", aspect="16:9")
         assert res.status == pb.JOB_STATUS_OK, res.safe_message
-        assert wall < 1.0, f"tenant starved during mint: {wall:.2f}s"
         await h.wait_mint()
+        # A tenant arriving mid-mint is BOUNDED BY ONE COMPILE, not by the
+        # plan — measured against the longest compile THIS run performed, so
+        # a slow machine stretches both sides together. (Observed here: 321 ms
+        # of gate wait against a 400 ms compile, 22 ms of runtime.)
+        stages = dict(res.metrics.stage_ms)
+        gate_wait_ms = int(stages.get("instance_gate_wait", 0))
+        assert h.compiles, "no compile ran, so nothing bounded the wait"
+        longest_compile_ms = max(
+            int((end - start) * 1000) for _, _, start, end in h.compiles)
+        assert gate_wait_ms <= longest_compile_ms + _CLOCK_SLOP_MS, (
+            "the tenant waited longer than one compile — it is sitting behind "
+            "the PLAN, which is the reopen's live break",
+            gate_wait_ms, longest_compile_ms, stages)
+        # ...and that wait is not billed to the tenant as runtime.
+        assert res.metrics.runtime_ms + gate_wait_ms <= wall * 1000 + _CLOCK_SLOP_MS, (
+            res.metrics.runtime_ms, gate_wait_ms, wall)
         assert h.ex.serving_tiers() == {"generate": "compiled"}
 
     asyncio.run(_run())
@@ -458,9 +492,19 @@ def test_compile_steal_is_announced_on_the_wire(
         await h.boot()
         assert h.rec.background_mint is not None
         pending_task: Any = None
-        deadline = time.monotonic() + 30.0
+        # pgw#1349: this loop was bounded by `time.monotonic() + 30.0`, and it
+        # is where `test_compile_steal_is_announced_on_the_wire` flaked — green
+        # in isolation, red beside four xdist siblings. The doctrine says
+        # "under truly CONTINUOUS DEMAND", and demand is counted in REQUESTS,
+        # not in seconds: a loaded runner serves each dispatch more slowly, so
+        # a wall clock silently shortens the stream the property is about until
+        # the tape asserts something it never drove. The bound is now the
+        # stream itself, which is what a slow machine cannot shrink. It is a
+        # HANG bound: the steal lands on dispatch 10 here (measured), so 250
+        # is 25x headroom and only a steal that never comes ends the loop.
+        _MAX_DISPATCHES = 250
         i = 0
-        while time.monotonic() < deadline:
+        while i < _MAX_DISPATCHES:
             nxt = asyncio.create_task(h.dispatch(f"r-{i}", aspect="16:9"))
             if pending_task is not None:
                 res, _wall = await pending_task
@@ -472,7 +516,8 @@ def test_compile_steal_is_announced_on_the_wire(
         if pending_task is not None:
             await pending_task
         assert h.events("bg_turn_steal"), (
-            "a compile steal under continuous demand must be announced")
+            "a compile steal under continuous demand must be announced; "
+            f"{i} back-to-back dispatches produced none")
 
     asyncio.run(_run())
 

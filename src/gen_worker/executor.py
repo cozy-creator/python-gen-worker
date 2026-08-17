@@ -134,7 +134,7 @@ from . import jobs as jobs_mod
 from .jobs import DEFAULT_PHASE_BUDGET_S, JobDispatch, JobOutcome, execute_job
 from .registry import EndpointSpec, JobSpec
 from .runtime_config import ConfigStore, extract_job_config
-from .stage_timing import stage_ms_for_metrics
+from .stage_timing import ms_from_seconds, stage_ms_for_metrics
 
 #: pgw#848 item 1: cadence for the publish-durability wait. A POLL interval,
 #: not a deadline — nothing here decides when a publish has taken too long;
@@ -10287,7 +10287,7 @@ class Executor:
             await self._finish(job, status, safe_message=msg)
             return
 
-        queue_ms = int((time.monotonic() - job.admitted_at) * 1000)
+        queue_ms = ms_from_seconds(time.monotonic() - job.admitted_at)
         lease: Optional[_GpuSlotLease] = None
         started = time.monotonic()
         alloc_at_start = 0
@@ -10557,10 +10557,12 @@ class Executor:
                 if released_at is not None:
                     # gw#516 typed split of runtime_ms: how long the GPU slot
                     # was actually held vs the slotless finalize tail.
-                    metrics.slot_held_ms = max(
-                        0, int((released_at - started) * 1000))
-                    metrics.finalize_wall_ms = max(
-                        0, int((handler_done - released_at) * 1000))
+                    # pgw#1349: the SAME quantizer the stage map uses. These two
+                    # bracket stages the map also reports, so a second rounding
+                    # rule here makes a contained stage out-round its container.
+                    metrics.slot_held_ms = ms_from_seconds(released_at - started)
+                    metrics.finalize_wall_ms = ms_from_seconds(
+                        handler_done - released_at)
                 if released_at is not None and handler_done > released_at:
                     # The encode/upload tail ran slotless, overlapping the next
                     # request. `handoff` says who ended the GPU phase: the
@@ -11443,7 +11445,7 @@ class Executor:
         runtime_terms: "Optional[Dict[str, float]]" = None,
         peak_vram_bytes: "Optional[int]" = None,
     ) -> pb.JobMetrics:
-        runtime_ms = int((time.monotonic() - started) * 1000)
+        runtime_ms = ms_from_seconds(time.monotonic() - started)
         # rss_at_end_bytes (pgw#513): instantaneous RSS, honestly named — the
         # OS gives no per-process peak-RSS reset, so this is NOT a per-job
         # peak (unlike peak_vram_bytes below, reset at handler start).

@@ -432,12 +432,29 @@ def _stage_name(name: str) -> str:
     return str(name or "").strip().replace(".", "_")
 
 
-def _ms(seconds: float) -> int:
+def ms_from_seconds(seconds: float) -> int:
+    """THE quantizer for every millisecond a request reports.
+
+    pgw#1349: it is public because ``JobMetrics``'s own top-level terms
+    (``runtime_ms``, ``queue_ms``, ``slot_held_ms``, ``finalize_wall_ms``) are
+    compared against these stages — by ``procsplit.attest``, by the hub, and by
+    the suite — and they used to TRUNCATE while every stage here ROUNDS. Two
+    quantizers over nested spans breaks the one relation the numbers exist to
+    express: an inner span can out-round its container by 1 ms, so
+    ``finalize_wall_ms >= stage_ms["image_encode"]`` — true of the intervals by
+    construction — reported ``87 >= 88`` and turned master red. Rounding is
+    monotone, so one shared quantizer makes containment survive quantization
+    instead of surviving it most of the time.
+    """
     return int(round(max(0.0, float(seconds)) * 1000.0))
+
+
+_ms = ms_from_seconds
 
 
 __all__ = [
     "StageTimer",
+    "ms_from_seconds",
     "stage_of",
     "record_phase_of",
     "stage_ms_for_metrics",

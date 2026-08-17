@@ -32,6 +32,8 @@ from gen_worker.executor import Executor, _to_thread_complete
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs
 
+from harness.progress_wait import Cadence, await_progress_async
+
 
 class _In(msgspec.Struct):
     prompt: str = "x"
@@ -113,7 +115,18 @@ def test_cancelled_to_thread_join_releases_result() -> None:
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=_POOL_WIDTH)
         asyncio.get_running_loop().set_default_executor(pool)
         task = asyncio.create_task(_to_thread_complete(load))
-        await asyncio.to_thread(started.wait, 10)
+        # pgw#1349, same reason as the sibling below: a 10 s expiry here
+        # cancels before `load` ran, and every assertion afterwards then
+        # describes a tree that was never exercised.
+        await await_progress_async(
+            started.is_set,
+            bool,
+            what="the load to start on a pool thread",
+            cadence=Cadence(),
+            gone=lambda: (
+                "the load task ended without ever starting"
+                if task.done() and not started.is_set() else None),
+        )
         task.cancel()
         release.set()
         with pytest.raises(asyncio.CancelledError) as excinfo:
@@ -167,19 +180,45 @@ def test_cancelled_setup_frees_prior_attempt_before_retry() -> None:
 
     async def run() -> None:
         task = asyncio.create_task(ex.ensure_setup(specs[0]))
-        await asyncio.to_thread(entered.wait, 10)
+        # pgw#1349: this was `await asyncio.to_thread(entered.wait, 10)`, and a
+        # 10-second give-up here does not FAIL the tape — it silently rewrites
+        # it. Cancelling before `setup()` was entered leaves `refs` empty, so
+        # attempt 2 takes the FIRST branch, records nothing, and the test dies
+        # far below on `assert [] == [False]` naming a leak that never
+        # happened. That is how it red master from a merge ref (banked as an
+        # unattributed observation against pgw#1328). The wait now ends on the
+        # EVENT, on the setup task ending without entering `setup()`, or on a
+        # silence window this wait measured for itself.
+        await await_progress_async(
+            entered.is_set,
+            bool,
+            what="the first attempt to enter setup()",
+            cadence=Cadence(),
+            gone=lambda: (
+                "the setup task ended without ever entering setup()"
+                if task.done() and not entered.is_set() else None),
+        )
         task.cancel()
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await task
         await ex.ensure_setup(specs[0])
 
+    # Only the executor's OWN purge may pass this test, so the generational
+    # collector is off for the duration. Restored to what it WAS rather than
+    # unconditionally enabled: this is process-global state and an xdist worker
+    # runs many modules through it.
+    gc_was_enabled = gc.isenabled()
     gc.disable()
     try:
         asyncio.run(run())
     finally:
-        gc.enable()
+        if gc_was_enabled:
+            gc.enable()
 
     assert alive_at_second_attempt == [False], (
         "the cancelled attempt's partial load survived into the retry — "
-        "retries stack allocations until OOM (gw#624)")
+        "retries stack allocations until OOM (gw#624)"
+        if alive_at_second_attempt else
+        "attempt 2 never judged attempt 1: the first attempt was cancelled "
+        "before it allocated, so this run measured nothing (gw#624)")
