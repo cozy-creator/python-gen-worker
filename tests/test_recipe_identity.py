@@ -37,7 +37,7 @@ from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells as fc
 from gen_worker import guard_closure as gc
 from gen_worker.registry import CompileCell
-from harness.cell_meta import exported_cell_meta
+from harness.cell_meta import exported_cell_meta, exported_cell_provenance
 
 FAMILY = "toyfam"
 
@@ -206,7 +206,7 @@ def test_marked_cell_never_republishes(monkeypatch: pytest.MonkeyPatch,
         base_url="http://hub", worker_jwt=lambda: "jwt", image_digest="")
     meta = {"compiled_graph_key": "cg-key-v1-" + "a" * 56, fc.ADOPTION_MARK: ["foreign"]}
     with pytest.raises(fc.CellPublishRefused, match="pgw#712"):
-        pub.publish(FAMILY, artifact, meta)
+        pub.publish(FAMILY, artifact, meta, exported_cell_provenance())
 
 
 def test_publish_complete_carries_only_what_the_hub_decodes(
@@ -215,8 +215,10 @@ def test_publish_complete_carries_only_what_the_hub_decodes(
     posts: list = []
     # pgw#1046: a real exported-cell envelope — publish recomputes the key from
     # the recorded blocks and refuses a cell that cannot state one.
-    meta = exported_cell_meta(family=FAMILY, sku="l4", gen_worker="1.0.0",
-                              **{GUARD_MANIFEST_BLOCK: _manifest()})
+    # pgw#1341: the ARTIFACT half is TCG's; the unbounded block is added HERE,
+    # visibly, because this test is about the declare bound stripping it —
+    # never hidden inside a fixture that could pretend a cell carries it.
+    meta = dict(exported_cell_meta(), **{GUARD_MANIFEST_BLOCK: _manifest()})
     key = meta["compiled_graph_key"]
 
     class _FakeResp:
@@ -265,7 +267,9 @@ def test_publish_complete_carries_only_what_the_hub_decodes(
     artifact.write_bytes(b"cell-bytes")
     pub = fc.CellPublisher(
         base_url="http://hub", worker_jwt=lambda: "jwt", image_digest="")
-    assert pub.publish(FAMILY, artifact, meta) == "cp-1"
+    assert pub.publish(
+        FAMILY, artifact, meta,
+        exported_cell_provenance(sku="l4", gen_worker="1.0.0")) == "cp-1"
 
     complete_url, body = posts[-1]
     assert complete_url.endswith("/publish-complete")

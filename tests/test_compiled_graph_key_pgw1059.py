@@ -268,13 +268,20 @@ def _old_schema_digest(meta: dict) -> str:
         ).encode()
         return hashlib.sha256(encoded).hexdigest()[:16]
 
+    # pgw#1341: `format`, `family` and `env_seal` are spelled out rather than
+    # read off `meta`, for the same reason `combined_graph_hash` above is —
+    # TCG's closed vocabulary has no field for any of them, so a current
+    # artifact cannot supply them and reading `meta` would only find `None`.
+    # Their VALUES are irrelevant to the claim (the axis NAME SETS differ, so
+    # a collision needs a SHA-256 collision); what matters is that the payload
+    # is the dead one.
     axes = {
-        "format": str(meta["format"]),
+        "format": "pt2",
         "kind": "aot-inductor",
-        "family": meta["family"],
+        "family": "fam",
         "sm": meta["sm"],
         "contract": _digest16(contract_facts),
-        "env_seal": _digest16(dict(meta["env_seal"])),
+        "env_seal": _digest16({"v": 1, "torch": "2.9.0"}),
         "toolchain": _digest16(dict(meta["toolchain"])),
     }
     canonical = json.dumps(

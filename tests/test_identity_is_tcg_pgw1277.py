@@ -32,7 +32,7 @@ import pytest
 from gen_worker._vendor.torchcg import identity as tcg_identity
 from gen_worker._vendor.torchcg import is_compiled_graph_key
 
-from gen_worker import env_seal, fleet_cells, graph_facts
+from gen_worker import env_seal, fleet_cells, graph_facts, local_cell_store
 
 #: Exactly the metadata shape ``aot_mint`` records for a minted graph class:
 #: TCG's ``graph_class`` block, never an ``entry`` block.
@@ -45,11 +45,16 @@ TCG_METADATA: dict[str, Any] = {
     "sm": "sm_89",
     "graph_class": {"name": "unet", "target": "unet", "class_hash": "a" * 16},
     "toolchain": dict(TCG_TOOLCHAIN),
-    # A wire fact the hub's ArtifactIdentity requires by name, not a key axis
-    # (pgw#1059 amendment 4). The publish path fails closed without it, which
-    # is a separate refusal from the identity one this file is about.
-    env_seal.SEAL_KEY: {"v": 4, "matmul_precision": "high"},
 }
+
+#: pgw#1341: the env-seal digest the hub's ArtifactIdentity requires by name is
+#: NOT a key axis (pgw#1059 amendment 4) and NOT a metadata field — TCG's closed
+#: vocabulary has none. It rides the mint provenance the local store holds, and
+#: the publish path fails closed without it, which is a separate refusal from
+#: the identity one this file is about.
+PROVENANCE = local_cell_store.MintProvenance(
+    env_seal=env_seal.seal_digest({"v": 4, "matmul_precision": "high"}),
+    lane="bf16-w16a16", sku="l4", gen_worker="0.123.0")
 
 VECTORS = pathlib.Path(__file__).parent / "testdata" / "compiled_graph_key_vectors.json"
 
@@ -76,7 +81,7 @@ def test_the_worker_publish_path_keys_a_real_tcg_artifact() -> None:
     Mutate ``graph_class`` back to ``entry`` and this fails — which is the
     regression, stated as a test rather than as a comment.
     """
-    axes = fleet_cells._identity_axes("toy", dict(TCG_METADATA))
+    axes = fleet_cells._identity_axes("toy", dict(TCG_METADATA), PROVENANCE)
     expected = tcg_identity.from_artifact_metadata(TCG_METADATA)
     assert axes["graph"] == "a" * 16
     assert axes["sm"] == "sm_89"

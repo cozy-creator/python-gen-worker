@@ -976,6 +976,7 @@ class CellPublisher:
             repo=repo, family=family, grants=tuple(grants))
 
     def publish(self, family: str, artifact: Path, meta: dict,
+                provenance: local_cell_store.MintProvenance,
                 mint_duration_ms: int = 0) -> str:
         """Publish ONE self-minted compiled graph. Returns the checkpoint id.
 
@@ -993,7 +994,8 @@ class CellPublisher:
         mint at once — :func:`aot_mint.publish` — asks for every token in one
         round trip.
         """
-        entry, sku, gen_worker = intent_entry(family, meta, mint_duration_ms)
+        entry, sku, gen_worker = intent_entry(
+            family, meta, provenance, mint_duration_ms)
         batch = self.publish_intent(
             family, [entry], sku=sku, gen_worker=gen_worker)
         return self.publish_granted(
@@ -1086,13 +1088,20 @@ class CellPublisher:
 
 
 def intent_entry(
-    family: str, meta: dict, mint_duration_ms: int = 0,
+    family: str, meta: dict, provenance: local_cell_store.MintProvenance,
+    mint_duration_ms: int = 0,
 ) -> Tuple[PublishEntry, str, str]:
-    """One artifact's metadata -> its entry plus the two pod axes it declares.
+    """One artifact + its mint provenance -> the entry and the two pod axes.
 
     The pod axes come back separately because they are BATCH-level on the wire:
     ``sku`` and ``gen_worker`` describe the pod, so a caller batching a whole
     mint reads them once and the hub attests them once.
+
+    pgw#1341: they come from ``provenance``, not from the metadata dict and not
+    from this process. They describe the POD THAT MINTED — and
+    :func:`resume_owed_publishes` ships from a later boot, so reading them live
+    would attest a different pod's card and a different wheel's version against
+    somebody else's bytes.
     """
     # pgw#712 (kept under the exact-identity ruling as defense-in-depth): a
     # cell whose metadata carries a foreign adoption provenance must never
@@ -1112,11 +1121,11 @@ def intent_entry(
     return (
         PublishEntry(
             compiled_graph_key=key,
-            identity_axes=_identity_axes(family, meta),
+            identity_axes=_identity_axes(family, meta, provenance),
             mint_duration_ms=max(0, int(mint_duration_ms or 0)),
         ),
-        str(meta.get("sku") or ""),
-        str(meta.get("gen_worker") or ""),
+        provenance.sku,
+        provenance.gen_worker,
     )
 
 
@@ -1190,9 +1199,11 @@ def _recomputed_key(meta: Mapping[str, Any]) -> tcg_identity.CompiledGraphKey:
             "(pgw#1046)") from exc
 
 
-def _identity_axes(family: str, meta: dict) -> Dict[str, str]:
-    """The identity map the hub records for this cell, RECOMPUTED from the
-    artifact's own facts.
+def _identity_axes(
+    family: str, meta: dict, provenance: local_cell_store.MintProvenance,
+) -> Dict[str, str]:
+    """The identity map the hub records for this cell: the artifact's own key
+    axes, plus the MINT's recorded provenance for everything else.
 
     This is not inventory. th#1457's producer builds the worker's
     ``ExecutionSpec`` out of exactly this map: ``ArtifactFromCellRecord`` reads
@@ -1216,6 +1227,17 @@ def _identity_axes(family: str, meta: dict) -> Dict[str, str]:
     ``graph_contract`` names the class SET this entry belongs to (coverage).
     Fusing them is what made adding one aspect ratio re-mint 35 unchanged
     classes.
+
+    pgw#1341 — WHERE EACH HALF COMES FROM, and why it is two sources and not
+    one. The three key axes are recomputed FROM THE ARTIFACT, because the
+    artifact is what the key is about and a cell must corroborate its own
+    identity. Everything else is read from :class:`~.local_cell_store.MintProvenance`,
+    because TCG's closed vocabulary has no field for any of it — this function
+    read ``env_seal``, ``manifest_digest``, ``family`` and ``weight_lane`` off
+    the metadata dict, and since pgw#1270 mints every artifact through TCG,
+    that made the seal check raise for EVERY real cell, unconditionally: a pod
+    that armed its own graph still could not hand it to the fleet, so every pod
+    re-minted what one pod had already compiled.
     """
     key = _recomputed_key(meta)
     stamped = str(meta.get("compiled_graph_key") or "").strip()
@@ -1224,25 +1246,27 @@ def _identity_axes(family: str, meta: dict) -> Dict[str, str]:
             f"compiled_graph_key stamp {stamped} disagrees with the key its recorded "
             f"axes describe ({key.value}); refusing to publish an identity "
             "the artifact does not corroborate")
+    if not provenance.stated:
+        # NARROWED, not deleted (pgw#939: absence is a verdict). The refusal
+        # used to fire on a metadata field no cell can carry — i.e. always.
+        # It now fires on the genuine case it was written for: this machine
+        # holds bytes it cannot say anything about, which is what a publish
+        # under invented axes would hide. The hub's ArtifactFromCellRecord
+        # requires the seal digest and pgw#904's consumer refuses an identity
+        # without it, so a row published here is a cell the fleet can never arm.
+        raise CellPublishRefused(
+            f"this machine recorded no mint provenance for {key.value}; the "
+            "hub's ArtifactIdentity requires the env-seal digest "
+            "(pgw#903/pgw#1046) and a TCG artifact carries none, so the "
+            "publish has nothing to state it from (pgw#1341)")
     axes = {k: str(v) for k, v in key.as_dict().items()}
     # The manifest label — telemetry/coverage, never identity. Empty is
     # HONEST for an entry minted by a pod that has not folded its whole
     # declaration, so it is not a publish refusal.
-    axes[GRAPH_CONTRACT_AXIS] = str(meta.get("manifest_digest") or "").strip()
-    seal = meta.get(env_seal.SEAL_KEY)
-    if not isinstance(seal, dict) or not seal:
-        # The seal left the KEY (pgw#1059 amendment 4) but not the wire: the
-        # hub's ArtifactFromCellRecord requires the entry, and a row without
-        # it is a cell the fleet can never arm — same fail-closed rule as
-        # the axes above.
-        raise CellPublishRefused(
-            "cell records no env_seal block; the hub's ArtifactIdentity "
-            "requires its digest (pgw#903/pgw#1046)")
-    axes[ENV_SEAL_AXIS] = env_seal.seal_digest(seal)
-    axes["family"] = str(meta.get("family") or family or "")
-    axes["lane"] = cc.execution_lane_label(
-        str(meta.get("weight_lane") or ""),
-        int(meta.get("lora_bucket") or 0))
+    axes[GRAPH_CONTRACT_AXIS] = provenance.graph_contract
+    axes[ENV_SEAL_AXIS] = provenance.env_seal
+    axes["family"] = str(family or "")
+    axes["lane"] = provenance.lane
     return axes
 
 
@@ -1301,6 +1325,7 @@ def publishes_in_flight() -> Dict[str, Tuple[str, float]]:
 
 def _publish_async(
     publisher: CellPublisher, family: str, artifact: Path, meta: dict,
+    provenance: local_cell_store.MintProvenance,
     compiled_graph_key_digest: str = "", mint_duration_ms: int = 0,
     arm_token: str = "",
 ) -> threading.Thread:
@@ -1345,7 +1370,7 @@ def _publish_async(
         t0 = time.monotonic()
         try:
             checkpoint_id = publisher.publish(
-                family, artifact, meta, mint_duration_ms)
+                family, artifact, meta, provenance, mint_duration_ms)
         except CellPublishRefused as exc:
             logger.warning("fleet-cells: publish refused (hub decision): %s", exc)
             # pgw#1096/§4.28: the hub has just ASSERTED this hardware's trust
@@ -1451,9 +1476,16 @@ def resume_owed_publishes(
                 "a later boot re-attempts it", cell.key)
             continue
         meta = artifact_meta.try_read_metadata(artifact) or {}
+        # pgw#1341: the MINT's own facts, read back from the sidecar the mint
+        # wrote. This is the boundary the design exists for — a different boot,
+        # a different process, possibly a different pod — so nothing here is
+        # re-derived from the live runtime. A record that states none is
+        # refused by name inside the publish, not published under this
+        # machine's guesses.
         threads.append(_publish_async(
-            publisher, cell.family or str(meta.get("family") or ""),
-            artifact, dict(meta), compiled_graph_key_digest=cell.key,
+            publisher, cell.family,
+            artifact, dict(meta), cell.provenance,
+            compiled_graph_key_digest=cell.key,
             arm_token=cell.arm_token))
     if threads:
         logger.info(
@@ -2516,6 +2548,7 @@ def arm_from_local_store(
 
 def adopt_delegated_mint(
     pipe: Any, pending: "PendingSelfMint", artifacts: Sequence[Path],
+    manifest: str = "",
 ) -> Optional[SelfMint]:
     """pgw#784: adopt a cell a CHILD PROCESS just built, then publish it.
 
@@ -2534,10 +2567,22 @@ def adopt_delegated_mint(
 
     ``None`` = not adoptable. The caller treats that exactly like a disproven
     candidate (the mint failed, the worker keeps serving).
+
+    ``manifest`` is the mint's declaration-wide contract digest
+    (``aot_mint.MintResult.manifest``). It is a PARAMETER rather than something
+    read back off a cell because a TCG artifact has no field for it — pgw#1341
+    — and the caller is the only object that ever holds it.
     """
     state = pending._state
     if "minted" in state:
         return state["minted"]
+    # pgw#1341: ONE provenance for the whole mint, computed before the first
+    # byte is staged. Every row of one mint shares a family, a lane, a seal, a
+    # card and a wheel by construction, so a per-row derivation could only ever
+    # disagree with itself — and it is written with each row's sidecar so a
+    # crash between rows leaves no cell that cannot say what made it.
+    provenance = mint_provenance(pending, manifest=manifest)
+    state["provenance"] = provenance
 
     rows = [Path(a) for a in artifacts]
     if not rows:
@@ -2569,7 +2614,7 @@ def adopt_delegated_mint(
     # than the set, and a class that refuses is quarantined without touching a
     # sibling that armed.
     _durable_keys: Dict[Path, str] = {
-        row: _stage_durable(pending, row) for row in rows}
+        row: _stage_durable(pending, row, provenance) for row in rows}
     # pgw#1096: ONE gate for every self-produced cell — the child's, and the
     # local store's (§4.28). pgw#999's classification, pgw#1042's pre-arm axis
     # divergence and pgw#805's AOT-only arm all live in `_arm_exported_cell`;
@@ -2774,7 +2819,51 @@ def adopt_delegated_mint(
 # ---------------------------------------------------------------------------
 
 
-def _stage_durable(pending: "PendingSelfMint", artifact: Path) -> str:
+def mint_provenance(
+    pending: "PendingSelfMint", *, manifest: str = "",
+) -> local_cell_store.MintProvenance:
+    """The mint-time facts this cell's publish will need, stated ONCE (pgw#1341).
+
+    Every one of them is knowable HERE — in the parent of the mint, on the pod
+    that owns the card — and by NOBODY later: TCG's closed artifact vocabulary
+    has no field for any of them (:func:`artifact_meta.cell_metadata_fields`),
+    and ``resume_owed_publishes`` runs on a later boot in another process. So
+    this is the one derivation, and its output is written beside the bytes.
+
+    ``env_seal`` and ``lane`` are taken from the pending's OWN arm token rather
+    than recomputed, for the reason pgw#1042 gives about every axis at this
+    seam: two derivations of one fact is how an axis silently becomes two
+    facts. The token already states them, it is what split this obligation from
+    every other, and it was computed before the child was spawned.
+
+    ``manifest`` is the declaration-wide contract digest the mint just folded
+    (``aot_mint.MintResult.manifest``) — the class SET this entry belongs to.
+    Absent is HONEST (a pod that folded no manifest publishes an empty
+    ``graph_contract``, which is coverage telemetry, never identity) and is not
+    a refusal.
+    """
+    facts = pending.arm_key.facts_dict() if pending.arm_key is not None else {}
+    try:
+        sku = str(cc.runtime_key().get("sku") or "")
+    except Exception:  # noqa: BLE001 — a probe failure never fails a mint
+        sku = ""
+    try:
+        version = cc.gen_worker_version()
+    except Exception:  # noqa: BLE001
+        version = ""
+    return local_cell_store.MintProvenance(
+        env_seal=str(facts.get("env_seal") or ""),
+        lane=str(facts.get("lane") or ""),
+        graph_contract=str(manifest or ""),
+        sku=sku,
+        gen_worker=str(version or ""),
+    )
+
+
+def _stage_durable(
+    pending: "PendingSelfMint", artifact: Path,
+    provenance: local_cell_store.MintProvenance,
+) -> str:
     """Write a freshly minted artifact to the local CAS, UNVERIFIED.
 
     Returns the stamped ``ck1`` key the bytes were filed under, or ``""`` when
@@ -2785,7 +2874,9 @@ def _stage_durable(pending: "PendingSelfMint", artifact: Path) -> str:
     Unconditional, on every tier (§1.5). The publish state is decided here and
     only here: a machine with a live sink OWES an upload from this moment,
     which is what makes :func:`resume_owed_publishes` able to finish a
-    transfer the minting process never did.
+    transfer the minting process never did — and pgw#1341 is what makes it able
+    to STATE that transfer's axes: ``provenance`` lands in the same sidecar
+    write as the obligation, so the two can never be separated.
     """
     try:
         key = str((artifact_meta.try_read_metadata(artifact) or {}).get(
@@ -2801,6 +2892,7 @@ def _stage_durable(pending: "PendingSelfMint", artifact: Path) -> str:
         verdict=local_cell_store.VERDICT_UNVERIFIED,
         sink=(local_cell_store.SINK_NONE if sink_absent
               else local_cell_store.SINK_OWED),
+        provenance=provenance,
         cas_root=pending.cache_dir,
     )
     if stored is None:
@@ -2906,6 +2998,10 @@ def publish_self_mint(pending: "PendingSelfMint") -> None:
             # upload a race against the cleanup.
             getattr(state.get("minted"), "artifact", pending.target),
             dict(state.get("meta") or {}),
+            # pgw#1341: THE SAME record the local store holds, so the immediate
+            # publish and a later boot's `resume_owed_publishes` state
+            # byte-identical axes for the same bytes.
+            state.get("provenance") or local_cell_store.MintProvenance(),
             compiled_graph_key_digest=str(
                 getattr(state.get("minted"), "compiled_graph_key", "")
                 or pending.arm_token),

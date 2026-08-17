@@ -1,64 +1,82 @@
-"""pgw#1046: build a REAL exported-cell envelope for the publish-path tests.
+"""The publish path's fixture, built by TCG — never by hand (pgw#1046/pgw#1341).
 
 The publish path recomputes a cell's identity from its own recorded blocks and
-refuses anything that cannot state one — because the axis map it declares is
-what tensorhub's RunAttempt producer builds ``Arm.artifact`` /
+refuses anything that cannot state one, because the axis map it declares is what
+tensorhub's RunAttempt producer builds ``Arm.artifact`` /
 ``Arm.graph_contract_digest`` out of, and pgw#904's landed consumer refuses an
-``ArtifactIdentity`` missing any of them. A stub ``{"compiled_graph_key": …, "sku": …}``
-is therefore no longer a publishable cell in any tree, and a test that ships one
-proves only that an unarmable row still uploads.
+``ArtifactIdentity`` missing any of them.
 
-This is the minimal envelope that IS one: the same blocks ``aot_mint`` records
-(``aot_serve.entry_metadata`` + ``shared_identity_blocks``), at fixture
-scale. The ``compiled_graph_key`` is COMPUTED by TCG, never invented, so the stamp and the axes
-agree — which is itself one of the publish path's refusals.
+**THE FIXTURE FENCE, and why this module was rewritten.** Until pgw#1341 this
+built the envelope BY HAND — a dict with ``family``, ``sku``, ``gen_worker``,
+``weight_lane``, ``manifest_digest`` and ``env_seal`` in it. Since pgw#1270 TCG
+mints every artifact and ``torchcg.artifact.validate_metadata`` refuses metadata
+whose field set is not exactly ``artifact_meta.cell_metadata_fields()`` — which
+holds none of those six names. So the fixture described a cell that cannot
+exist, and the whole publish path was tested against it: ``_identity_axes``
+raised ``CellPublishRefused("cell records no env_seal block")`` for every real
+artifact on the fleet while this file kept CI green. That is pgw#1277's finding
+verbatim (*"CI stayed green because every fixture built the obsolete shape"*),
+one seam further along.
 
-pgw#1176: one artifact is ONE graph class, so this builds an ``entry`` block
-and no ``entries`` map. There is deliberately no way to ask this harness for a
-multi-entry artifact: production cannot pack one any more, and a fixture that
-could would be testing a shape nothing can produce.
+The metadata therefore comes from ``tcg_artifacts.metadata()``, i.e. from
+``torchcg.artifact.build_metadata`` — the same builder production uses — and
+there is deliberately no keyword here for a field TCG does not accept.
+
+Everything the publish needs and the artifact cannot say now lives in
+:func:`exported_cell_provenance`, which is the object production writes beside
+the bytes (``local_cell_store.MintProvenance``).
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Mapping, Optional
 
-from gen_worker._vendor.torchcg import ARTIFACT_KIND, GRAPH_CLASS_BLOCK
-from gen_worker._vendor.torchcg import identity as tcg_identity
+from gen_worker import graph_facts
+from gen_worker.local_cell_store import MintProvenance
 
-from gen_worker import aot_serve, graph_facts
+import tcg_artifacts
 
-CLASS_HASH = "a" * 16
+#: The fixture's graph-class hash, derived by TCG from the declaration
+#: ``tcg_artifacts`` builds — read, never asserted, so a TCG fold change moves
+#: this with the key instead of leaving a stale literal behind.
+CLASS_HASH = str(tcg_artifacts.metadata()["graph_class"]["class_hash"])
 
 
 def exported_cell_meta(
     *,
-    family: str = "fam",
-    sku: str = "l4",
-    sm: str = "89",
-    gen_worker: str = "0.87.0",
-    weight_lane: str = "",
-    lora_bucket: int = 0,
-    **extra: Any,
+    sm: str = "sm_89",
+    graph_class: str = tcg_artifacts.GRAPH_CLASS,
+    witness: str = "fedcba9876543210",
+    toolchain: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, Any]:
-    """One exported (``aot-inductor``) cell's metadata, key stamped from it."""
-    meta: Dict[str, Any] = {
-        "family": family, "sku": sku, "sm": sm, "gen_worker": gen_worker,
-        "kind": ARTIFACT_KIND, "format": "pt2",
-        "weight_lane": weight_lane, "lora_bucket": int(lora_bucket),
-        "strict_export": True,
-        GRAPH_CLASS_BLOCK: {
-            "name": "unet/main",
-            "target": "unet", "fork": [], "class_dims": [],
-            "range_digest": "r1", "class_hash": CLASS_HASH, "graph": {"v": 2},
-        },
-        # The declaration-wide coverage LABEL. Telemetry, never identity —
-        # `_identity_axes` publishes it as `graph_contract`, and it may repeat
-        # across the entries of one declaration by construction.
-        "manifest_digest": graph_facts.manifest_digest([CLASS_HASH]),
-        "env_seal": {"v": 1, "torch": "2.9.0"},
-        "toolchain": {"torch": "2.9.0", "cuda": "12.8"},
-    }
-    meta.update(extra)
-    meta["compiled_graph_key"] = tcg_identity.from_artifact_metadata(meta).value
-    return meta
+    """One exported (``aot-inductor``) cell's metadata, as TCG builds it.
+
+    Every keyword is an axis a REAL artifact carries. There is no keyword for
+    ``family``/``sku``/``gen_worker``/``weight_lane``: a cell states none of
+    them, and a fixture that let a test pretend otherwise is what hid pgw#1341
+    for two wheels.
+    """
+    return tcg_artifacts.metadata(
+        graph_class=graph_class, witness=witness, sm=sm, toolchain=toolchain)
+
+
+def exported_cell_provenance(
+    *,
+    lane: str = "bf16-w16a16",
+    sku: str = "l4",
+    gen_worker: str = "0.87.0",
+    env_seal: str = "seal-" + "1" * 16,
+    graph_contract: str = "",
+) -> MintProvenance:
+    """The mint facts that ride BESIDE the artifact (pgw#1341).
+
+    Production writes this into the local store's sidecar at the moment the
+    bytes become durable, and both the immediate publish and a later boot's
+    ``resume_owed_publishes`` read it back. A test that publishes must supply
+    one for the same reason a pod must: the artifact cannot.
+    """
+    return MintProvenance(
+        env_seal=env_seal, lane=lane,
+        graph_contract=(graph_contract
+                        or graph_facts.manifest_digest([CLASS_HASH])),
+        sku=sku, gen_worker=gen_worker)

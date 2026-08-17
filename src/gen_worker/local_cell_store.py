@@ -71,6 +71,11 @@ record and carry it:
   — the upload obligation, recorded beside the bytes rather than held in a
   thread, so it survives process death and pod retirement
   (:func:`cells_owed_to_sink` is what the next boot reads).
+* :class:`MintProvenance` (pgw#1341) — the mint-time facts a TCG artifact has
+  no field for (env seal, lane, manifest digest, sku, gen_worker). An owed
+  upload is discharged by a LATER boot, so the publish must read the facts of
+  the mint that produced the bytes, never the runtime that happens to be
+  shipping them.
 
 LAYOUT (one directory per cell, so a cell and the facts about it move as a
 unit)::
@@ -214,6 +219,80 @@ def _engine(cas_root: Optional[Path] = None) -> "Engine":
 
 
 @dataclass(frozen=True)
+class MintProvenance:
+    """What the MINT knew and the ARTIFACT cannot say (pgw#1341).
+
+    ``torchcg.artifact.validate_metadata`` refuses metadata outside its closed
+    vocabulary (``artifact_meta.cell_metadata_fields``), which holds the three
+    key axes and the host facts and NOTHING else. Every remaining fact the
+    fleet publish must state — the env seal the mint ran under, the execution
+    lane, the declaration-wide manifest digest, and the two pod axes the hub
+    attests — is therefore unstateable BY the cell, exactly as pgw#1340 found
+    for the arm seam. The answer is the same one: state it on the side of the
+    boundary that can, and make it durable there.
+
+    DURABLE is the load-bearing word. ``fleet_cells.resume_owed_publishes``
+    ships an owed cell on a LATER BOOT, in a different process, possibly on a
+    different pod, so re-deriving these from the live runtime would publish one
+    machine's facts about another machine's mint. They are written beside the
+    bytes at store time, read back by whoever ships them, and a cell that has
+    none is REFUSED rather than published under invented axes.
+
+    Empty strings are honest absences, not defaults: :func:`stated` is what
+    decides whether a publish may proceed, and it asks for the one fact whose
+    absence the hub's ``ArtifactIdentity`` cannot survive.
+    """
+
+    #: ``env_seal.seal_digest`` of the seal in force when the mint ran — the
+    #: DIGEST, not the block: the digest is what the wire carries, and it is
+    #: what the parent's own arm token already states.
+    env_seal: str = ""
+    #: ``compile_cache.execution_lane_label`` of the lane that was traced.
+    lane: str = ""
+    #: ``graph_facts.manifest_digest`` — which class SET this entry belongs to.
+    graph_contract: str = ""
+    #: The two POD axes the hub attests at publish-intent.
+    sku: str = ""
+    gen_worker: str = ""
+
+    @property
+    def stated(self) -> bool:
+        """True when this record can carry a publish at all.
+
+        The env seal is the criterion because it is the one the hub REQUIRES:
+        ``ArtifactFromCellRecord`` builds ``ArtifactIdentity.env_seal_digest``
+        from it and pgw#904's consumer refuses an identity without it. The
+        others degrade a row; this one makes it unarmable.
+        """
+        return bool(self.env_seal)
+
+    def as_dict(self) -> Dict[str, str]:
+        return {
+            "env_seal": self.env_seal, "lane": self.lane,
+            "graph_contract": self.graph_contract,
+            "sku": self.sku, "gen_worker": self.gen_worker,
+        }
+
+    @classmethod
+    def of(cls, raw: Any) -> "MintProvenance":
+        """The provenance a record file states; an empty one for anything else.
+
+        A record written before this field existed, or one whose block is not
+        an object, states NOTHING — which is a refusal at publish, never a
+        silently blank row.
+        """
+        if not isinstance(raw, dict):
+            return cls()
+        return cls(
+            env_seal=str(raw.get("env_seal") or ""),
+            lane=str(raw.get("lane") or ""),
+            graph_contract=str(raw.get("graph_contract") or ""),
+            sku=str(raw.get("sku") or ""),
+            gen_worker=str(raw.get("gen_worker") or ""),
+        )
+
+
+@dataclass(frozen=True)
 class CellRecord:
     """The POLICY facts this worker recorded about one cell. No bytes.
 
@@ -231,6 +310,9 @@ class CellRecord:
     verdict: str = VERDICT_ADMITTED
     #: One of the ``SINK_*`` constants.
     sink: str = SINK_NONE
+    #: pgw#1341: the mint facts the artifact cannot carry, durable here so a
+    #: later boot's publish states the MINT's facts and not its own.
+    provenance: MintProvenance = MintProvenance()
 
 
 @dataclass(frozen=True)
@@ -245,6 +327,7 @@ class LocalCell:
     stored_at: float
     verdict: str = VERDICT_ADMITTED
     sink: str = SINK_NONE
+    provenance: MintProvenance = MintProvenance()
 
 
 def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
@@ -323,6 +406,7 @@ def _record_of(key: str, raw: Dict[str, Any]) -> CellRecord:
         stored_at=float(raw.get("stored_at") or 0.0),
         verdict=str(raw.get("verdict") or VERDICT_ADMITTED),
         sink=str(raw.get("sink") or SINK_NONE),
+        provenance=MintProvenance.of(raw.get("provenance")),
     )
 
 
@@ -338,6 +422,9 @@ def _record_payload(record: CellRecord) -> Dict[str, Any]:
         "kind": ARTIFACT_KIND,
         "verdict": record.verdict,
         "sink": record.sink,
+        # pgw#1341: written with the bytes, on every tier, because the process
+        # that ships them may not be the process that minted them.
+        "provenance": record.provenance.as_dict(),
     }
 
 
@@ -395,6 +482,7 @@ def is_quarantined(key: str, root: Optional[Path] = None) -> bool:
 def store(
     artifact: Path, *, key: str, family: str, arm_token: str = "",
     verdict: str = VERDICT_ADMITTED, sink: str = SINK_NONE,
+    provenance: Optional[MintProvenance] = None,
     root: Optional[Path] = None, cas_root: Optional[Path] = None,
 ) -> Optional[CellRecord]:
     """Admit ``artifact`` to TCG under its STAMPED ``key`` and record the policy.
@@ -443,6 +531,7 @@ def store(
             key=key, family=str(family or ""), arm_token=str(arm_token or ""),
             bytes=Path(artifact).stat().st_size, stored_at=time.time(),
             verdict=str(verdict), sink=str(sink),
+            provenance=provenance or MintProvenance(),
         )
         _write_json_atomic(target_dir / RECORD_NAME, _record_payload(record))
     except Exception as exc:  # noqa: BLE001 — a cache miss must never be fatal
@@ -625,7 +714,8 @@ def lookup(
     return LocalCell(
         key=record.key, artifact=artifact, family=record.family,
         arm_token=record.arm_token, bytes=artifact.stat().st_size,
-        stored_at=record.stored_at, verdict=record.verdict, sink=record.sink)
+        stored_at=record.stored_at, verdict=record.verdict, sink=record.sink,
+        provenance=record.provenance)
 
 
 def note_memo(
@@ -906,6 +996,7 @@ __all__ = [
     "ENV_STORE_DIR",
     "LocalCell",
     "MEMO_DIRNAME",
+    "MintProvenance",
     "RECORD_NAME",
     "RecordUnreadable",
     "SINK_DELIVERED",

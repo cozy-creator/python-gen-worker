@@ -42,6 +42,15 @@ ARTIFACT_A = tcg_artifacts.build(_FIXTURE_DIR / "a.tar.gz", witness="a" * 16)
 KEY_A = tcg_artifacts.key_of(ARTIFACT_A)
 ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * fleet_cells.ARM_DIGEST_HEX
 
+#: pgw#1341: the mint facts the local store holds beside the bytes. These rows
+#: are about the TRANSFER, not about the axes, so one honest record serves them
+#: all — but the publish takes it as an ARGUMENT now, because a TCG artifact
+#: cannot state any of it and a later boot must ship the MINT's facts.
+_PROVENANCE = local_cell_store.MintProvenance(
+    env_seal="seal-" + "9" * 16, lane="bf16-w16a16",
+    graph_contract="manifest-" + "8" * 8, sku="l4", gen_worker="0.123.0")
+
+
 
 @pytest.fixture()
 def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -93,13 +102,17 @@ class _Sink:
     def __init__(self, on: bool = True) -> None:
         self._on = on
         self.published: List[Path] = []
+        self.provenances: List[Any] = []
 
     def enabled(self) -> bool:
         return self._on
 
     def publish(self, family: str, art: Path, meta: dict,
-                mint_duration_ms: int = 0) -> str:
+                provenance: Any = None, mint_duration_ms: int = 0) -> str:
         self.published.append(Path(art))
+        # pgw#1341: what a later boot ships is what the MINT recorded, so the
+        # sink records it and the retry row below can assert on it.
+        self.provenances.append(provenance)
         return "ckpt-1"
 
 
@@ -237,7 +250,8 @@ def test_a_failed_publish_does_not_destroy_the_bytes(
     fleet_cells._publish_async(
         _Broken(), "micro-diffusion",  # type: ignore[arg-type]
         local_cell_store.lookup(KEY_A, cas_root=cas).artifact,  # type: ignore[union-attr]
-        {"compiled_graph_key": KEY_A}, compiled_graph_key_digest=KEY_A, arm_token=ARM_A,
+        {"compiled_graph_key": KEY_A}, _PROVENANCE,
+        compiled_graph_key_digest=KEY_A, arm_token=ARM_A,
     ).join(timeout=30)
 
     kept = local_cell_store.lookup(KEY_A, cas_root=cas)
@@ -259,7 +273,8 @@ def test_the_publish_thread_is_not_a_daemon(
     t = fleet_cells._publish_async(
         _Sink(), "f",  # type: ignore[arg-type]
         local_cell_store.lookup(KEY_A, cas_root=cas).artifact,  # type: ignore[union-attr]
-        {"compiled_graph_key": KEY_A}, compiled_graph_key_digest=KEY_A, arm_token=ARM_A)
+        {"compiled_graph_key": KEY_A}, _PROVENANCE,
+        compiled_graph_key_digest=KEY_A, arm_token=ARM_A)
     assert t.daemon is False
     t.join(timeout=30)
 
@@ -272,13 +287,17 @@ def test_a_pending_publish_is_retried_on_the_NEXT_boot(
     all — the bytes were gone and no record said an upload was owed."""
     local_cell_store.store(_artifact(tmp_path), key=KEY_A, family="f",
                            arm_token=ARM_A, sink=local_cell_store.SINK_OWED,
-                           cas_root=cas)
+                           provenance=_PROVENANCE, cas_root=cas)
     sink = _Sink()
 
     for t in fleet_cells.resume_owed_publishes(sink, cas):  # type: ignore[arg-type]
         t.join(timeout=30)
 
     assert [p.name for p in sink.published] == ["cell.tar.gz"]
+    # pgw#1341: the retry ships the MINT's facts, read back off the sidecar.
+    # Re-deriving them here would attest THIS boot's card and wheel against
+    # bytes another boot compiled.
+    assert sink.provenances == [_PROVENANCE]
     kept = local_cell_store.lookup(KEY_A, cas_root=cas)
     assert kept is not None
     assert kept.sink == local_cell_store.SINK_DELIVERED, (
