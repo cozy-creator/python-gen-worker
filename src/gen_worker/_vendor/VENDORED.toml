@@ -120,7 +120,25 @@ subdir = "src/torch_compiled_graphs"
 # mentions its own package name).
 rewrites = [
   "`from hashrepo import ...` -> `from ..tensorfs import ...` in cli.py, engine.py, storage.py (3 lines; upstream's own dependency, vendored beside it)",
-]
+  "`ingress_selection_v1.json` added to CONTRACT_FILES in contracts/__init__.py (1 line; the registration the selection corpus needs, taken from the same upstream rev as the corpus itself)",
+]#
+# pgw#1328: THE SNAPSHOT IS SPLIT AT TWO REVS, like tensorfs's above and for the
+# same class of reason. `selection.py` and `contracts/ingress_selection_v1.json`
+# come from `selection_rev` (tcg#37's merge), NOT from `rev`. gen-worker's
+# `aot_serve` ADOPTS that contract as its ranking authority — tcg#37 recorded
+# the adoption as a pgw-side follow-on — and the two files are purely additive:
+# `selection.py` imports only `.ingress`, which is BYTE-IDENTICAL across the
+# two revs, so the graft cannot change any existing behaviour.
+#
+# Why not re-vendor the whole package at that rev: the tip carries an unrelated
+# storage migration — `_REF_PREFIX` moves from `torch-compiled-graphs/v1` to
+# `torchcg/v1` and `StoreResult.manifest` becomes `.artifact` — which would
+# ORPHAN every compiled-graph ref this fleet has already stored. That is a
+# migration with its own evidence bar, not a line item inside a serve-role
+# change, so the storage half stays where it is until somebody takes it
+# deliberately.
+selection_rev = "bbad172c8bb14dd703dba82d30679b08bc8a4696"
+selection_files = ["selection.py", "contracts/ingress_selection_v1.json"]
 
 [packages.tensorfs.files]
 "__init__.py" = "51e60fc07782af7ff738c889be2fb1d9fa81224abfc0dfe546dde9d2191cf21b"
@@ -142,10 +160,11 @@ rewrites = [
 "cli.py" = "18ad75c67ad84eecf92f4470561070a5d07603674aaec59ce91c93a21efb1b4b"
 "compiler.py" = "8450b10e90ca8c6d8c411654d963ebc16dd3580bfe1427cce3966fc2b03972a7"
 "contracts/KEY_GRAMMAR_DIGEST" = "0503f3251f2eb48b794961736f021915cd56c14930798ac844c90112fa2af69d"
-"contracts/__init__.py" = "aab5aa1680ac4761f12e7da8695c370c4b4aea0c8fbee849a6a301184b1c7350"
+"contracts/__init__.py" = "3c5d61ca8f65a70af44cbe9acb0e834d9adf25bbea2cfdc924c9fa613f0931c5"
 "contracts/call_ingress_v1.json" = "3af3437ec20b15156892055ab89bf21621378cee9f0f72f63bc4626f69f242dc"
 "contracts/compiled_graph_key_vectors.json" = "a274c5702b8c167ca119758d9fb1f98c40ddfdb3dbf6c58b4aacd580803e8c2b"
 "contracts/graph_class_identity_v3.json" = "f3e947e5c770e0766f7dfe37b753bd8d184b1e8923f5a3995823a8427a637b30"
+"contracts/ingress_selection_v1.json" = "a0a8fc83c8c467f23b6ab81af1899547b43dabfd9c726e446cc9ef8b899c1714"
 "contracts/literal_identity_v1.json" = "50cb80e750a8124a45b982415258d8590c37f90ca804326588dfde1b368c6863"
 "contracts/toolchain_identity_v1.json" = "f4114c38ae373f62ddcb2aae5498ffbee30630e80adf11fee99e68bcbdb24282"
 "declaration.py" = "187be0a12f05b8bbdca01f3c180527abff66ed60a3fb1e6281704d24d9559d79"
@@ -156,5 +175,6 @@ rewrites = [
 "introspection.py" = "99310298249ee2ada91544bcdbd91f06e33a44f136c525cb268ca8d7125aa9e5"
 "py.typed" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 "runner.py" = "075d7e743a82555e7ac1b15eb7ca54df9d0bcdc914de649a675fa5d973c8c693"
+"selection.py" = "ddc1b64f36a2e9d119b2d55ac6962d0e589825a1046c1b6e7b34d90d8f2bfadb"
 "spans.py" = "7a9722b5068c36ce62350e4ffe0eea07aa4ee5506330c9816069054001a10472"
 "storage.py" = "52e785b53f7de6e2fb71d9ac104249e89974d8f1dc3f6081412058aee7b5908f"

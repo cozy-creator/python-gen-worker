@@ -512,33 +512,51 @@ def test_a_shipped_root_wins_over_this_machines_cache(tmp_path: Path) -> None:
 
 def test_the_serve_boot_key_path_cannot_reach_a_tracer() -> None:
     """The static half of the same claim as the sentinel above: a runtime test
-    proves one boot did not export; this proves no boot can."""
-    sys.path.insert(0, str(REPO / "scripts"))
-    import lint_serve_keyset_closure as fence
+    proves one boot did not export; this proves no boot can.
 
-    seen, via = fence.closure()
+    pgw#1328 SUPERSEDED the narrow fence this used to read
+    (`lint_serve_keyset_closure`, whose own docstring nominated its
+    replacement). The claim is unchanged and is asserted here against the
+    successor's declarations, so pgw#1327's guarantee keeps its own test
+    instead of being folded into somebody else's suite: the boot-adopt and
+    keyset roots must still be present, and the three tracer modules must
+    still be banned.
+    """
+    sys.path.insert(0, str(REPO / "scripts"))
+    import lint_serve_role_closure as fence
+
+    roots = fence._declared_tuple("SERVE_ROLE_MODULES")
+    banned = fence._declared_tuple("MINT_MACHINERY")
+    for root in ("gen_worker.boot_adopt", "gen_worker.keyset"):
+        assert root in roots, f"{root} left the serve role's declared set"
+    for tracer in (
+        "gen_worker.boot_key", "gen_worker.boot_trace_child",
+        "gen_worker.keyset.emit",
+    ):
+        assert tracer in banned, f"{tracer} stopped being banned"
+    seen, via = fence.closure(roots)
     assert len(seen) > 20, "the roots resolved to nothing — the fence rotted"
-    reached = sorted(name for name in fence.BANNED if name in seen)
+    reached = sorted(name for name in banned if name in seen)
     assert not reached, (
         f"the serve-boot key path reaches {reached} "
         f"(via {[via.get(n) for n in reached]})")
     # THE GATE'S OWN GREEN, through the entry point CI invokes — a detector
     # disconnected from `main()` would pass every assertion above and guard
     # nothing (the th#1820 shape this repo has already been bitten by).
-    assert fence.main() == 0
+    assert fence.main([]) == 0
 
 
-def test_the_tracer_fence_actually_fires(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_the_tracer_fence_actually_fires() -> None:
     """THE GATE'S OWN RED. A root that legitimately reaches the tracer must
-    make `main()` non-zero; if it does not, the fence is decoration."""
+    make the check non-zero; if it does not, the fence is decoration."""
     sys.path.insert(0, str(REPO / "scripts"))
-    import lint_serve_keyset_closure as fence
+    import lint_serve_role_closure as fence
 
-    monkeypatch.setattr(
-        fence, "ROOTS", fence.ROOTS + ("gen_worker.boot_trace_child",))
-    assert fence.main() == 1
+    banned = fence._declared_tuple("MINT_MACHINERY")
+    problems = fence.check(
+        ("gen_worker.boot_adopt", "gen_worker.boot_trace_child"), banned)
+    assert problems, "a root that IS a tracer produced no violation"
+    assert any("boot_trace_child" in line for line in problems)
 
 
 def test_boot_adopts_vocabulary_carries_every_key_set_terminus() -> None:

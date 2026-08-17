@@ -1,0 +1,66 @@
+{
+  "issue": "pgw#1328",
+  "key": "cg-key-v1-c706d27b1340ac564be918283d69f4177dfc3c1cbb2bf8ad80829d07",
+  "target": "sm_86",
+  "device_name": "NVIDIA RTX A5000",
+  "toolchain": {
+    "torch": "2.13.0+cu130",
+    "python": "3.12.3",
+    "cuda": "13.0"
+  },
+  "reference_graph_class": "probe-block",
+  "child": {
+    "blocked": {
+      "gen_worker.aot_compile_child": "gen_worker.aot_compile_child",
+      "gen_worker.aot_compile_pool": "gen_worker.aot_compile_pool",
+      "gen_worker.aot_mint": "gen_worker.aot_mint",
+      "gen_worker.boot_key": "gen_worker.boot_key",
+      "gen_worker.boot_trace_child": "gen_worker.boot_trace_child",
+      "gen_worker.keyset.emit": "gen_worker.keyset.emit",
+      "gen_worker.mint_child": "gen_worker.mint_child",
+      "gen_worker.mint_process": "gen_worker.mint_process",
+      "gen_worker.mint_supervisor": "gen_worker.mint_supervisor"
+    },
+    "resident_after": [],
+    "supervision": "NoMint",
+    "served": [
+      "c6d389befcd8a1bedb5f5bbc8d5679bd1eaa243f0a349abe705d793e223b76beb14d093d5f76433d318930bea83325bd5c1785be39c324be74ca85be89511e3fc73515be10927bbe833949be1d4091b92009383eac7e39be8e03693db1dff03ef8d6fe3c162db33ddcfc1cbe39d5593ffaab203eb736f73f5afb2fbe5ee72bbd5ecd2c40630197bd0a00233e4cb1943b362decbd54d6f8bd8f939abdb54bd13fe3c5d8bdba05f2bdf667b4bd8b4c08404b0a0c3f759bbbbdd228a2bdad461ebd13084c3e8f49043e95230d3e79423bbc2665583ea5fc603d99f79d3fab7c303fe4d6be3df40e673d3b163440915932404859453fd6bbd13d5c9c4d3eb88da93d",
+      "0816abbe64ca84bebb0b34be18d043be99f8eb3c9ce793be88a780bd27df97be1cfadcbda351d5bd5cb819be2b5e07becd737ebec3d8fbbd519d5cbe3f57e83c4667cbbdd0be2bbea44008be3d5ea2bd69aa34bdaaed51be53b183bd6e19c23dfa8055bdcc017cbbfd79dbbd7984433edbf0193d60e1033f44b5a1bdb60857bca71f523f2fbc01bb01b82d3d6a381bbeebae30bd3237b4bdd021fabdd726ea3edcdabbbd9c603dbd6c4d44bd41e12b3f426f743e164834bc4b282d3ca5008bbd6519283e3f8c88bdfdd62c3e11930cbdc027233e3faed13df662bb3e845ca83eefa716bdb7193d3e37cc5a3f9cf5443f67dfc03ee8e9b43b22b108bcd12c643e",
+      "700b74be4bb258be2b9d70be7dd174be8a2d41be62ac6bbe78ae31be1ccb66bedfc527be961a27be42770dbedf772dbef7592fbe9d35d0bd49c30fbe535f1ebe61e194bd03e281bd382ab7bdfa3ce6bd8036fbbdc2e99cbdb0c6e3bdfc7227bdd19fb1bd6d812fbdc81b9ebdbf93eebc8fa64abcae55f73ba4f7993c32b0223b5656893d893a2f3d4bc6b0bb43e2273dc63e3b3ca5b1923deb19173bc825893d51dfb33c99d3b23d77b9253ec3011a3e28bff73d7bbf8d3db352bc3dbc95823d2b15173e91e4c63d0d923d3e449a193e9acb0a3e05bf043e5823d63d7729463ea92f113eab468b3e4b9b4c3ebc1f163e03706b3e7082813e131c243e693ea43e"
+    ],
+    "graph_class": "probe-block",
+    "weight_set": "probe://adopt-only-1328/v1",
+    "store_sourced_constants": 4,
+    "miss": {
+      "kind": "no_class_admits",
+      "disposition": "refuse",
+      "key": "cg-key-v1-c706d27b1340ac564be918283d69f4177dfc3c1cbb2bf8ad80829d07",
+      "selection": "no_class_admits",
+      "candidates": [
+        {
+          "graph_class": "probe-block",
+          "distance": [
+            4
+          ],
+          "misses": [
+            "value:static_dim_mismatch"
+          ]
+        }
+      ],
+      "reported": true,
+      "wire_detail": "function=denoiser family=adopt-only-1328 key=cg-key-v1-c706d27b1340ac564be918283d69f4177dfc3c1cbb2bf8ad80829d07 disposition=refuse selection=no_class_admits closest=probe-block[4] value:static_dim_mismatch"
+    },
+    "mint": {
+      "reason": "mint_forbidden",
+      "disposition": "refuse"
+    }
+  },
+  "guard_blocked_every_mint_module": true,
+  "no_mint_module_resident_in_child": true,
+  "supervision_is_no_mint": true,
+  "served_bitwise_equal": true,
+  "miss_refused_not_served": true,
+  "miss_names_the_key": true,
+  "miss_carries_candidates": true,
+  "mint_forbidden": true
+}

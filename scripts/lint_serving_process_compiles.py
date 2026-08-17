@@ -108,6 +108,14 @@ CHILD_ONLY: Dict[str, str] = {
 #: it is a CHECKED claim, and a serving module that starts importing one of
 #: these goes red here even though the probe itself never changed.
 STANDALONE_ENTRY: Dict[str, str] = {
+    "benchmarks.adopt_only_serve": (
+        "pgw#1328's GPU bar. Its FIRST phase mints one small graph so its "
+        "SECOND — a child process that declared the adopt-only role and "
+        "installed the import blocker — has something to adopt; the compile "
+        "IS the fixture, and the process serves no tenant. The claim this row "
+        "makes is narrow and checked: the export lives in the eager-capable "
+        "parent, and no serving-package module imports this probe."
+    ),
     "benchmarks.store_arm_parity": (
         "pgw#1329's GPU parity probe. It mints one small graph and arms it "
         "twice to compare bytes; the compile IS the measurement, and the "
@@ -124,6 +132,13 @@ SUPERVISED: Dict[str, str] = {
     "mint_supervisor": (
         "the serving parent's own mint driver. Supervision only: enumerate, "
         "spawn, collect, adopt, publish."
+    ),
+    "mint_adapter": (
+        "pgw#1328's eager-capable side of the serve/mint seam. It is the one "
+        "module whose job is to NAME the mint lane, so it is the obvious place "
+        "for an export to grow — and it must never hold one: every method is "
+        "supervision or declaration reading, delegated to `mint_supervisor` "
+        "and `aot_mint`, which carry their own rows here."
     ),
 }
 

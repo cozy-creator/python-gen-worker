@@ -168,6 +168,16 @@ KIND_APPLIED_ATTENTION = "applied_attention"
 # (`boot_adopt.REASONS`, countable hub-side); `detail` names family, function,
 # derived key and the sentence; `duration_ms` is the derivation's own wall.
 KIND_BOOT_ADOPT = "boot_adopt"
+# pgw#1328: the ADOPT-ONLY role's answer where an eager-capable pod would have
+# served eager and minted (§4.28). It is the only thing that role produces on a
+# miss, so it must be readable off-pod or the role is unobservable. `phase` is
+# the `serve.refusal.MissKind` token (countable, closed, and each one carries a
+# ROUTE/REFUSE disposition decided once in `serve.refusal.DISPOSITIONS`);
+# `detail` names the function, family, derived key, the tcg#37 selection
+# outcome and the ranked candidate classes that missed. Deliberately NOT a
+# `serve_degrade` phase: nothing degraded — the pod answered completely and the
+# fleet is expected to act on it.
+KIND_ADOPT_REFUSED = "adopt_refused"
 # pgw#1271: the boot-key MEMO honesty verdict, ruled at the one moment a pod
 # holds both halves — what the memo answered at boot, and what this mint just
 # traced. `boot_key`'s memo path SKIPS THE TRACES and produces the `graph` axis

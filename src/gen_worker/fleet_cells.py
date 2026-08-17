@@ -90,6 +90,20 @@ from .models import loading, lora_lifted, provision
 from .procsplit import broker
 from .request_context._helpers import _decode_unverified_jwt_claims
 from .hostfacts import cuda_ready
+from .serve import mint_seam
+from .serve import role as serve_role
+
+# pgw#1328: the mint lane is reached through `serve.mint_seam` and named
+# nowhere else in this module. Importing `mint_adapter` is what REGISTERS
+# §4.28's eager-capable implementation with the seam, and it happens HERE —
+# in a module that calls the seam — rather than in a process entry, because
+# a registration that depends on some other module having been imported
+# first is an ordering hazard, not a dependency. The branch reads the ONE
+# role answer and adds no second one: an adopt-only process declares its
+# role and installs `serve.guard` before this module is imported, so the
+# import below is what would otherwise kill it on this line.
+if not serve_role.adopt_only():
+    from . import mint_adapter  # noqa: F401  (registers the mint side)
 
 logger = logging.getLogger(__name__)
 
@@ -1730,9 +1744,7 @@ def _arming_policy(
         # here means the executor's call is unchanged, every existing arming
         # double keeps working, and there is exactly one place the decision
         # lives. The parameter stays for tests that need to force either shape.
-        from . import mint_supervisor
-
-        delegate_refusal = mint_supervisor.delegation_refusal()
+        delegate_refusal = mint_seam.supervision().may_delegate()
         delegate = not delegate_refusal
     elif not delegate:
         delegate_refusal = "caller_forced_in_process"
@@ -3076,10 +3088,6 @@ def mint_recipe(
     if blocked:
         return _decline("declaration_blocked", blocker_refusal(family, blocked))
 
-    # CYCLE: aot_mint imports CellPublisher from this module at module scope,
-    # so this direction of the pair must stay deferred.
-    from . import aot_mint
-
     spec = aot_export_spec(pipe, cfg)
     # pgw#850/#879: there is NO lane admission here. The lane this pod serves
     # was chosen by the hub's resolution tree and observed off the composed
@@ -3104,7 +3112,8 @@ def mint_recipe(
     # child, no pod and no compile can resolve it, so spending one to
     # rediscover the sentence is pure waste. Declines only the mint; the
     # pipeline serves eager exactly as it did.
-    decl_gaps = aot_mint.declaration_module_gaps(pipe, spec, decl)
+    decl_gaps = mint_seam.supervision().declaration_module_gaps(
+        pipe, spec, decl)
     if decl_gaps:
         return _decline(
             "declaration_module_mismatch",
@@ -3128,10 +3137,6 @@ def aot_export_spec(pipe: Any, cfg: Any) -> "Any":
     (the class rows, coordinates, dynamic contracts and input bindings) — so
     nothing here is a per-pod guess.
     """
-    # CYCLE: aot_mint imports CellPublisher from this module at module scope,
-    # so this direction of the pair must stay deferred.
-    from . import aot_mint
-
     # pgw#1087: composing the declaration a mint will trace against. Expected
     # to be trivial and never proven so — and if it is not (an endpoint whose
     # `export_declaration()` does real work at compose time), that is exactly
@@ -3140,13 +3145,14 @@ def aot_export_spec(pipe: Any, cfg: Any) -> "Any":
         boot_mod.PHASE_DECLARATION_COMPOSE,
         ref=str(getattr(cfg, "family", "") or ""),
     ) if boot_mod.in_boot() else contextlib.nullcontext():
-        return _aot_export_spec(aot_mint, pipe, cfg)
+        return _aot_export_spec(mint_seam.supervision(), pipe, cfg)
 
 
-def _aot_export_spec(aot_mint: Any, pipe: Any, cfg: Any) -> "Any":
+def _aot_export_spec(mint: Any, pipe: Any, cfg: Any) -> "Any":
     execution_lane = loading.pipeline_weight_lane(pipe)
     bucket = int(getattr(cfg, "lora_bucket", 0) or 0)
-    return aot_mint.ExportSpec(
+    return mint.export_spec(
+        pipe, cfg,
         family=str(getattr(cfg, "family", "") or ""),
         target="",
         weight_lane=execution_lane,

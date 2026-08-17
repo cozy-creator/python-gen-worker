@@ -124,6 +124,51 @@ def test_the_storage_half_still_provides_what_the_ownership_ruling_keeps() -> No
     # pinned upstream snapshot, called by nothing here. The caller census is
     # `scripts/lint_materialization_hatch.py`, in the required `fast gates`.
     assert hasattr(LocalCAS, "materialize" + "_repository")
+def test_the_selection_contract_is_recorded_at_its_own_rev() -> None:
+    """pgw#1328: the torchcg snapshot is SPLIT at two revs, and it is declared.
+
+    `selection.py` and its corpus come from tcg#37's merge; the storage half
+    deliberately does not, because the tip renames the compiled-graph ref
+    prefix and would orphan every stored artifact. A split that lives only in a
+    comment is a split nobody can audit, so the rev and the file list are
+    fields and the digest fence above covers them like any other vendored file.
+    """
+
+    spec = MANIFEST["packages"]["torchcg"]
+    assert spec["selection_rev"] != spec["rev"]
+    assert set(spec["selection_files"]) == {
+        "selection.py", "contracts/ingress_selection_v1.json"}
+    for name in spec["selection_files"]:
+        assert name in spec["files"], f"{name} is not digest-fenced"
+
+
+def test_the_selection_contract_is_torch_free_and_registered() -> None:
+    """The property that made the graft safe, executed rather than asserted.
+
+    tcg#37's implementation reads four facts per feed (dtype, shape,
+    contiguity, pointer alignment), so it needs no accelerator — which is why
+    it can be a JSON corpus at all, and why an adopt-only pod can rank a call
+    before anything is loaded. It is also the reason the graft could not
+    disturb the rest of the snapshot: its only intra-package import is
+    `.ingress`, which is byte-identical across the two revs.
+    """
+    import subprocess
+    import sys
+
+    src = str(Path(__file__).resolve().parents[1] / "src")
+    proof = subprocess.run(
+        [sys.executable, "-c",
+         "import sys;"
+         f"sys.path.insert(0, {src!r});"
+         "from gen_worker._vendor.torchcg import selection;"
+         "from gen_worker._vendor.torchcg.contracts import CONTRACT_FILES;"
+         "assert selection.SELECTION_CONTRACT_FILE in CONTRACT_FILES;"
+         "assert selection.selection_vectors();"
+         "assert 'torch' not in sys.modules;"
+         "print('ok')"],
+        capture_output=True, text=True, check=False)
+    assert proof.returncode == 0, proof.stderr
+    assert proof.stdout.strip() == "ok"
 
 
 def test_the_read_plane_runs_without_the_compiled_extension() -> None:
