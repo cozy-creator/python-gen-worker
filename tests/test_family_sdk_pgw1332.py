@@ -1292,7 +1292,10 @@ def test_a_family_owns_its_tuned_schema_registration() -> None:
         "the `@family(...)` class decorator is back; pgw#1332 resolved the name "
         "in favour of the family-owned schema"
     )
-    from gen_worker.family.catalog.sdxl import SDXL, SdxlLoraTuned, SdxlTuned
+    from gen_worker.family.catalog.sdxl import SDXL
+    # pgw#1331 moved the schemas to the family's SERVING half: they are read
+    # on every request and the serve role may not import the declaration.
+    from gen_worker.family.catalog.sdxl_serve import SdxlLoraTuned, SdxlTuned
 
     assert families.family_for("sdxl") is SdxlTuned
     assert families.family_for("sdxl", kind="lora") is SdxlLoraTuned

@@ -364,7 +364,7 @@ def test_minting_an_eager_only_family_is_refused_rather_than_invented() -> None:
     class _Tuned(TunedValues, frozen=True):
         steps: int = 1
 
-    eager = Family(name="pgw1331_eager_only", tuned=_Tuned)
+    eager: Any = Family(name="pgw1331_eager_only", tuned=_Tuned)
     try:
         with pytest.raises(FamilyError) as caught:
             family_mint.mint_family(eager, out_dir=Path("/nowhere"), work=Path("/nowhere"))
@@ -372,7 +372,7 @@ def test_minting_an_eager_only_family_is_refused_rather_than_invented() -> None:
     finally:
         from gen_worker.families import base as families_base
 
-        families_base._REGISTRY.pop("pgw1331_eager_only", None)
+        families_base._REGISTRY.pop(("pgw1331_eager_only", "checkpoint"))
 
 
 def test_a_runner_the_family_does_not_declare_is_refused() -> None:
@@ -633,19 +633,21 @@ def test_a_flux_endpoint_generates_through_the_declared_family_binding() -> None
 
     kwargs = fake_kwargs(Generate)
     assert set(kwargs) == {"flux"}
-    assert isinstance(kwargs["flux"], Flux1Dev)
+    flux = kwargs["flux"]
+    assert isinstance(flux, Flux1Dev)
+    ctx: Any = None
 
     # No opinion in the payload: the checkpoint's catalog-stamped tuned values
     # win, and they arrive on the INSTANCE rather than on ctx.
-    defaulted = Generate().generate(None, _In(prompt="a cat"), **kwargs)  # type: ignore[arg-type]
+    defaulted = Generate().generate(ctx, _In(prompt="a cat"), flux)
     assert defaulted.shape == "(1, 3, 1024, 1024)"
     assert defaulted.steps == Flux1Dev.Tuned().steps
     assert defaulted.guidance == Flux1Dev.Tuned().guidance
 
     # An explicit payload value wins, resolved once in the SDK.
-    overridden = Generate().generate(  # type: ignore[arg-type]
-        None, _In(prompt="a cat", steps=3, guidance=1.5), **fake_kwargs(Generate)
-    )
+    second = fake_kwargs(Generate)["flux"]
+    assert isinstance(second, Flux1Dev)
+    overridden = Generate().generate(ctx, _In(prompt="a cat", steps=3, guidance=1.5), second)
     assert (overridden.steps, overridden.guidance) == (3, 1.5)
 
 
@@ -660,3 +662,84 @@ def test_the_handler_source_names_no_model_library() -> None:
         assert library not in body
     assert "FluxPipeline" not in body
     assert "scheduler" not in body  # the loop asks the family for its own
+
+
+# ------------------------------------------------- the bridge, through to pack
+
+
+class _StubEngine:
+    """The compile child's engine contract, without the compile.
+
+    The same shape ``tests/test_tcg_compile_child_pgw1270.py`` uses, and for the
+    same reason: a real AOTInductor compile needs a card and belongs on a pod
+    (``gen-worker family mint``), so the bar CI can hold is that everything on
+    either side of ``Engine.compile`` is real — a real declaration, a real
+    trace, a real ``GraphClassSpec``, a real packed row. That is exactly the bar
+    the production compile child is held to, and this bridge is not entitled to
+    a weaker one.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.specs: list[Any] = []
+
+    def compile(self, spec: Any, runtime: Any, destination: Path) -> Any:
+        from types import SimpleNamespace
+
+        del runtime, destination
+        self.specs.append(spec)
+        key = "cg-key-v1-" + f"{len(self.specs):056d}"
+        return SimpleNamespace(
+            outcome=SimpleNamespace(value="minted"),
+            compiled_graph=SimpleNamespace(
+                key=key,
+                metadata={
+                    "compiled_graph_key": key,
+                    "compiled_graph_format": 1,
+                    "graph_class": {"name": spec.graph_class},
+                },
+            ),
+        )
+
+    def export_artifact(self, key: str, destination: Path) -> Path:
+        del key
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"tcg-artifact")
+        return destination
+
+
+def test_mint_family_packs_one_artifact_per_declared_variant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole bridge: declaration in, packed rows out, digests agreeing."""
+
+    from gen_worker import aot_compile_child
+
+    engine = _StubEngine(tmp_path)
+    monkeypatch.setattr(
+        aot_compile_child, "_tcg_runtime", lambda cache_root=None: (engine, object())
+    )
+
+    minted = family_mint.mint_family(
+        FLUX1_DEV, out_dir=tmp_path / "cells", work=tmp_path / "work", only=("decoder",)
+    )
+
+    assert [row.graph_class for row in minted] == [
+        "decoder.resolution768.bf16",
+        "decoder.resolution1024.bf16",
+    ]
+    assert [dict(row.bucket) for row in minted] == [{"resolution": 768}, {"resolution": 1024}]
+    assert all(row.artifact.read_bytes() == b"tcg-artifact" for row in minted)
+    assert all(row.key.startswith("cg-key-v1-") for row in minted)
+    assert len({row.key for row in minted}) == 2
+    assert all(row.metadata["graph_class"]["name"] == row.graph_class for row in minted)
+    assert all(not row.reused for row in minted)
+    # The specs handed to the engine are REAL torchcg declarations built from
+    # the declaration's own trace, and every minted row's ingress digest is the
+    # committed export's.
+    assert [spec.target for spec in engine.specs] == ["decoder", "decoder"]
+    assert [dict(spec.class_dims) for spec in engine.specs] == [
+        {"resolution": 768},
+        {"resolution": 1024},
+    ]
+    family_mint.assert_matches_export(minted, Flux1Dev.EXPORT)
