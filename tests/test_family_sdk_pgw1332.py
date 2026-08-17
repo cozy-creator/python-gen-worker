@@ -144,6 +144,39 @@ def test_a_tuned_schema_with_no_tuned_fields_is_refused() -> None:
     assert _reason(exc) is FamilyRefusal.TUNED_INVALID
 
 
+def test_a_REFUSED_declaration_leaves_no_registration_behind() -> None:
+    """Registration is a process-global side effect and runs LAST, on purpose.
+
+    A declaration that raises after claiming its name would make the next
+    import of the CORRECTED declaration read as a collision — one nothing can
+    adjudicate, because both sides are the same family.
+    """
+    import gen_worker.families as families
+
+    class RefusedTuned(TunedValues, frozen=True):
+        steps: int = 1
+
+    with pytest.raises(FamilyError):
+        GraphFamily(
+            name="toy_refused",
+            tuned=RefusedTuned,
+            buckets=(Bucket("resolution", (64,)),),
+            runners=(TOY_DIFFUSION.runner("denoiser"),),
+            loop=Loop(stages=(Stage("nonexistent"),)),
+        )
+    assert families.family_for("toy_refused") is None
+
+    # ...and the corrected declaration registers cleanly rather than colliding.
+    GraphFamily(
+        name="toy_refused",
+        tuned=RefusedTuned,
+        buckets=(Bucket("resolution", (64, 128)),),
+        runners=(TOY_DIFFUSION.runner("denoiser"),),
+        loop=Loop(stages=(Stage("denoiser"),)),
+    )
+    assert families.family_for("toy_refused") is RefusedTuned
+
+
 def test_a_loop_that_stages_an_undeclared_runner_is_refused() -> None:
     with pytest.raises(FamilyError) as exc:
         GraphFamily(

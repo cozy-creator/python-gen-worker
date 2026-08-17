@@ -416,6 +416,16 @@ class Family:
     runners: tuple[Runner, ...] = ()
 
     def __post_init__(self) -> None:
+        # Validate EVERYTHING first, register last. Registration is a
+        # process-global side effect, and a declaration that raises must not
+        # leave its name claimed behind it — the next import of a corrected
+        # declaration would then read as a collision it cannot adjudicate.
+        # Subclasses extend `_validate`, never this, so the ordering holds for
+        # them too.
+        self._validate()
+        self._register()
+
+    def _validate(self) -> None:
         object.__setattr__(self, "name", _identifier("family", self.name, parse_family_name))
         object.__setattr__(self, "tuned", _tuned_schema(self.name, self.tuned, "tuned"))
         if self.lora_tuned is not None:
@@ -432,7 +442,6 @@ class Family:
                 f"family {self.name!r} declares runners but is eager-only; declare a "
                 "GraphFamily() when the composition has graph classes",
             )
-        self._register()
 
     def _register(self) -> None:
         """Publish this family's tuned schema(s) under its own name.
@@ -473,8 +482,8 @@ class GraphFamily(Family):
     parameters: tuple[Parameter, ...] = ()
     scheduler: Scheduler | None = None
 
-    def __post_init__(self) -> None:
-        Family.__post_init__(self)
+    def _validate(self) -> None:
+        Family._validate(self)
         axis_names = tuple(bucket.name for bucket in self.buckets)
         if axis_names != tuple(sorted(set(axis_names))):
             raise FamilyError(
