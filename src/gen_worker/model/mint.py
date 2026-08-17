@@ -118,7 +118,10 @@ class MintedVariant:
 
 
 def variants_of(
-    family: GraphModelSpec, *, only: Sequence[str] = ()
+    family: GraphModelSpec,
+    *,
+    only: Sequence[str] = (),
+    buckets: Mapping[str, Sequence[int]] | None = None,
 ) -> tuple[tuple[Runner, dict[str, int], str], ...]:
     """Every (runner, bucket, layout) to mint, in the declaration's own order.
 
@@ -126,24 +129,62 @@ def variants_of(
     the cheap classes first and the 12-billion-parameter one last, or when a
     previous attempt already banked half the set. A name the family does not
     declare is REFUSED rather than silently minting nothing.
+
+    ``buckets`` narrows the AXIS VALUES, and it exists because pgw#1346 B2 made
+    the gap expensive: SDXL's shape axis carries the endpoint's nine real
+    buckets, so a ``--runner denoiser`` mint is NINE compiles. A gauntlet row
+    proving one card serves one shape wants one of them, and paying 9x for it
+    is money spent on classes the row will never adopt. Same refusal
+    discipline: an axis the family does not declare, or a value outside its
+    closed set, is refused rather than silently minting nothing.
     """
 
     rows = family.variants()
-    if not only:
+    if only:
+        wanted = {str(name) for name in only}
+        unknown = sorted(wanted - {runner.name for runner in family.runners})
+        if unknown:
+            raise ModelError(
+                ModelRefusal.FAMILY_INVALID,
+                f"family {family.name!r} declares no runner {unknown[0]!r}; it has "
+                f"{sorted(runner.name for runner in family.runners)!r}",
+            )
+        rows = tuple(row for row in rows if row[0].name in wanted)
+    if not buckets:
         return rows
-    wanted = {str(name) for name in only}
-    unknown = sorted(wanted - {runner.name for runner in family.runners})
-    if unknown:
-        raise ModelError(
-            ModelRefusal.FAMILY_INVALID,
-            f"family {family.name!r} declares no runner {unknown[0]!r}; it has "
-            f"{sorted(runner.name for runner in family.runners)!r}",
+    declared = family.axis_values
+    for axis, values in buckets.items():
+        if axis not in declared:
+            raise ModelError(
+                ModelRefusal.BUCKET_AXIS_INVALID,
+                f"family {family.name!r} declares no bucket axis {axis!r}; it has "
+                f"{sorted(declared)!r}",
+            )
+        outside = sorted(set(values) - set(declared[axis]))
+        if outside:
+            raise ModelError(
+                ModelRefusal.BUCKET_AXIS_INVALID,
+                f"bucket axis {axis!r} has no value {outside[0]!r}; it declares "
+                f"{list(declared[axis])!r}",
+            )
+    return tuple(
+        row
+        for row in rows
+        # A runner that does not DECLARE the narrowed axis is kept: SDXL's text
+        # towers have no shape axis, and dropping them would turn "mint one
+        # shape" into "mint no text encoder", which is a different request.
+        if all(
+            axis not in row[1] or row[1][axis] in set(values)
+            for axis, values in buckets.items()
         )
-    return tuple(row for row in rows if row[0].name in wanted)
+    )
 
 
 def traced_classes(
-    family: GraphModelSpec, *, only: Sequence[str] = ()
+    family: GraphModelSpec,
+    *,
+    only: Sequence[str] = (),
+    buckets: Mapping[str, Sequence[int]] | None = None,
 ) -> Iterator[tuple[TracedVariant, ExportSpec, Any]]:
     """Trace every selected variant, yielding one at a time.
 
@@ -156,7 +197,12 @@ def traced_classes(
 
     from .. import aot_mint
 
-    for runner, bucket, layout in variants_of(family, only=only):
+    selected = variants_of(family, only=only, buckets=buckets)
+    # The count THIS RUN will compile, not the family's whole declared set: the
+    # phase table's "[3/20]" is a progress bar, and a narrowed mint that
+    # counted to 20 while compiling 3 reads as a mint that silently skipped 17.
+    declared = len(selected)
+    for runner, bucket, layout in selected:
         traced = trace_variant(runner, bucket, layout)
         spec = export_spec_for(family, runner, bucket, layout)
         row = aot_mint.TracedClass(
@@ -164,7 +210,7 @@ def traced_classes(
             block=aot_mint.keying_block(traced.program, traced.ingress, spec),
             nodes=len(list(traced.program.graph_module.graph.nodes)),
             program=traced.program,
-            declared=len(variants_of(family)),
+            declared=declared,
         )
         yield traced, spec, row
 
@@ -176,6 +222,7 @@ def mint_model(
     work: Path,
     cache_root: Path | None = None,
     only: Sequence[str] = (),
+    buckets: Mapping[str, Sequence[int]] | None = None,
     on_class: Any = None,
 ) -> tuple[MintedVariant, ...]:
     """Compile and pack every declared graph class of ``family``.
@@ -201,7 +248,7 @@ def mint_model(
     work.mkdir(parents=True, exist_ok=True)
     engine, runtime = aot_compile_child._tcg_runtime(cache_root)
     minted: list[MintedVariant] = []
-    for traced, spec, row in traced_classes(family, only=only):
+    for traced, spec, row in traced_classes(family, only=only, buckets=buckets):
         if on_class is not None:
             on_class(row.name, len(minted), row.declared)
         result = aot_compile_child.compile_traced_class(

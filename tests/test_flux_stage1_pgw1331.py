@@ -177,20 +177,22 @@ def test_a_scheduler_block_is_parsed_not_coerced(block: dict[str, Any], wanted: 
     assert wanted in str(caught.value)
 
 
-def test_an_unimplemented_scheduler_is_an_absent_method_not_a_fallback() -> None:
-    """SDXL declares ``euler_discrete``; the SDK implements no math for it.
+def test_every_declarable_scheduler_now_has_math_behind_it() -> None:
+    """The gap this test was written for is CLOSED (pgw#1346 B2).
 
-    The gap's SHAPE is the point: ``Sdxl`` has no ``scheduler()``, so an author
-    who wants one is told by their own type checker. A base-class fallback that
-    returned "some scheduler" would put a model library back on the path at the
-    one moment nobody is looking.
+    It used to assert ``Sdxl`` had no ``scheduler()`` because
+    ``euler_discrete`` was a name with no implementation. Both names in the
+    closed set carry math now, so the claim inverts: ``IMPLEMENTED`` is TOTAL
+    over ``SchedulerKind``, which is the property that makes "declared but
+    unimplemented" impossible to reach rather than merely absent today. The
+    absent-method MECHANISM is still fenced, at the generator, in
+    ``tests/test_sd_stage1_pgw1346.py``.
     """
 
     assert Flux1Dev.SCHEDULER is SchedulerKind.FLOW_MATCH_EULER_DISCRETE
     assert Sdxl.SCHEDULER is SchedulerKind.EULER_DISCRETE
     assert isinstance(Flux1Dev.fake().scheduler(), FlowMatchEulerDiscrete)
-    assert not hasattr(Sdxl, "scheduler")
-    assert set(IMPLEMENTED) == {SchedulerKind.FLOW_MATCH_EULER_DISCRETE}
+    assert set(IMPLEMENTED) == set(SchedulerKind)
     with pytest.raises(ModelError):
         parse_kind("ddim")
 

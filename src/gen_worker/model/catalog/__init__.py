@@ -42,7 +42,9 @@ from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers only
     from ._generated.flux1_dev import Flux1Dev, Flux1DevLayout, Flux1DevResolution
-    from ._generated.sdxl import Sdxl, SdxlLayout, SdxlResolution
+    from ._generated.sd2 import Sd2, Sd2Layout, Sd2Shape
+    from ._generated.sd15 import Sd15, Sd15Layout, Sd15Shape
+    from ._generated.sdxl import Sdxl, SdxlLayout, SdxlShape
 
 #: Exported name -> the generated module that defines it. THE catalog index:
 #: adding a family adds rows here and nothing else changes.
@@ -50,9 +52,15 @@ _FAMILIES: Final[dict[str, str]] = {
     "Flux1Dev": "flux1_dev",
     "Flux1DevLayout": "flux1_dev",
     "Flux1DevResolution": "flux1_dev",
+    "Sd2": "sd2",
+    "Sd2Layout": "sd2",
+    "Sd2Shape": "sd2",
+    "Sd15": "sd15",
+    "Sd15Layout": "sd15",
+    "Sd15Shape": "sd15",
     "Sdxl": "sdxl",
     "SdxlLayout": "sdxl",
-    "SdxlResolution": "sdxl",
+    "SdxlShape": "sdxl",
 }
 
 
@@ -73,7 +81,13 @@ __all__ = [
     "Flux1Dev",
     "Flux1DevLayout",
     "Flux1DevResolution",
+    "Sd2",
+    "Sd2Layout",
+    "Sd2Shape",
+    "Sd15",
+    "Sd15Layout",
+    "Sd15Shape",
     "Sdxl",
     "SdxlLayout",
-    "SdxlResolution",
+    "SdxlShape",
 ]

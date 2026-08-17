@@ -123,9 +123,36 @@ def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
         ),
     )
     mint.add_argument(
+        "--bucket",
+        action="append",
+        default=[],
+        metavar="AXIS=VALUE",
+        help=(
+            "Mint only this bucket-axis value; repeatable, and repeatable on one "
+            "axis to name several. Omit an axis to mint all of its values. "
+            "A gauntlet row proving ONE shape on ONE card wants one value: sdxl's "
+            "shape axis carries nine, so omitting this is a nine-fold compile."
+        ),
+    )
+    mint.add_argument(
         "--json", default="", help="Write the minted rows to this path as JSON."
     )
     mint.set_defaults(_handler=_handle_mint)
+
+
+def _parse_buckets(rows: list[str]) -> dict[str, list[int]]:
+    """``["shape=10241024"]`` -> ``{"shape": [10241024]}``. Refuses anything else."""
+
+    parsed: dict[str, list[int]] = {}
+    for row in rows:
+        axis, sep, value = str(row).partition("=")
+        if not sep or not axis.strip():
+            raise ValueError(f"--bucket {row!r} must be AXIS=VALUE, e.g. shape=10241024")
+        try:
+            parsed.setdefault(axis.strip(), []).append(int(value))
+        except ValueError:
+            raise ValueError(f"--bucket {row!r} value must be an integer") from None
+    return parsed
 
 
 def _load(target: str) -> tuple[str, str, Any]:
@@ -221,12 +248,18 @@ def _handle_mint(args: argparse.Namespace) -> int:
         sys.stderr.flush()
 
     try:
+        buckets = _parse_buckets(list(args.bucket))
+    except ValueError as exc:
+        sys.stderr.write(f"gen-worker model mint: {exc}\n")
+        return 2
+    try:
         minted = mint_model(
             family,
             out_dir=out_dir,
             work=work,
             cache_root=Path(args.cache_root) if args.cache_root else None,
             only=tuple(args.runner),
+            buckets=buckets,
             on_class=beat,
         )
     except ModelError as exc:
