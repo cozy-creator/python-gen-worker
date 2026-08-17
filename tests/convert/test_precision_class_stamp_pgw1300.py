@@ -41,20 +41,20 @@ from gen_worker.models import ladder
 #: Cut by `tests/convert/conftest.py`'s fake repo.
 RELEASE = "2026.08"
 
-#: The block the hub must receive, per flavor token. Written as literals: a
-#: fence that derived them from `classify_flavor_token` would agree with itself.
-#: `None` = no block at all, which is exact — the hub's fallback for an
-#: unstamped row is `ClassBase`.
+#: The block the hub must receive, per DECLARED class (A18 / pgw#1319: the
+#: flavor token is deleted and the class is stated by the producer). Written as
+#: literals: a fence that derived them from the module under test would agree
+#: with itself. `None` = no block at all, which is exact — the hub's fallback
+#: for an unstamped row is `ClassBase`, so `base` and "declared nothing" are
+#: the same wire shape on purpose.
 EXPECTED: dict[str, dict[str, Any] | None] = {
-    "bf16": None,
-    "fp16": None,
+    "": None,
+    "base": None,
     "fp8": {"precision_class": "fp8"},
-    "fp8-w8a8": {"precision_class": "fp8"},
     "svdq-int4": {"precision_class": "svdq-int4"},
     "svdq-fp4": {"precision_class": "svdq-fp4"},
+    "nvfp4": {"precision_class": "nvfp4"},
     "nvfp4-w4a4": {"precision_class": "nvfp4-w4a4"},
-    # Unrecognized tokens stay opaque and are never ladder rungs.
-    "q4_k_m": None,
 }
 
 #: The keys th#2055 stopped reading. Any of them at the wire is the regression.
@@ -78,12 +78,14 @@ def _tree(tmp_path: Path, name: str) -> Path:
     return out
 
 
-def _publish(fake_hub: Any, tmp_path: Path, flavor: str, **attrs: str) -> dict:
+def _publish(fake_hub: Any, tmp_path: Path, cls: str, **attrs: str) -> dict:
     ctx = _Ctx(f"http://127.0.0.1:{fake_hub.server_port}")
+    if cls:
+        attrs = {"precision_class": cls, **attrs}
     publish_flavors(
         ctx,
         [ProducedFlavor(
-            path=_tree(tmp_path, "out"), flavor=flavor, attributes=dict(attrs),
+            path=_tree(tmp_path, "out"), attributes=dict(attrs),
         )],
         destination_repo="acme/qwen-image",
         release=RELEASE,
@@ -91,19 +93,19 @@ def _publish(fake_hub: Any, tmp_path: Path, flavor: str, **attrs: str) -> dict:
     return dict(_FakeHub.state["publish_request"].get("metadata") or {})
 
 
-@pytest.mark.parametrize("token", sorted(EXPECTED))
+@pytest.mark.parametrize("cls", sorted(EXPECTED))
 def test_the_declared_block_is_precision_class_and_nothing_else(
-    fake_hub: Any, tmp_path: Path, token: str
+    fake_hub: Any, tmp_path: Path, cls: str
 ) -> None:
     """Read off the declare request the fake hub actually receives: every
     laddered class carries its `precision_class`, and no class carries an
     admission key the hub deleted."""
-    meta = _publish(fake_hub, tmp_path, token)
+    meta = _publish(fake_hub, tmp_path, cls)
 
-    expected = EXPECTED[token]
+    expected = EXPECTED[cls]
     if expected is None:
         assert "placement" not in meta, (
-            f"{token!r} is not a ladder rung; a block here restates the hub's "
+            f"{cls!r} is not a ladder rung; a block here restates the hub's "
             "own ClassBase fallback")
         return
     assert meta["placement"] == expected
@@ -112,28 +114,26 @@ def test_the_declared_block_is_precision_class_and_nothing_else(
         "unread JSON at best and a resurrected purchase veto at worst")
 
 
-@pytest.mark.parametrize("token", ["svdq-fp4", "svdq-int4", "nvfp4-w4a4", "fp8"])
+@pytest.mark.parametrize("cls", ["svdq-fp4", "svdq-int4", "nvfp4-w4a4", "fp8"])
 def test_no_admission_key_survives_at_the_wire(
-    fake_hub: Any, tmp_path: Path, token: str
+    fake_hub: Any, tmp_path: Path, cls: str
 ) -> None:
     """The pgw#1300 defect, stated as the thing that must not come back: the
     svdq-fp4 row used to declare `sm_allowed=[120, 121]` + `engines=
     ["nunchaku"]`, which refused a B200 (sm_100) the native engine serves."""
-    block = _publish(fake_hub, tmp_path, token)["placement"]
+    block = _publish(fake_hub, tmp_path, cls)["placement"]
     present = [k for k in DELETED_ADMISSION_KEYS if k in block]
-    assert present == [], f"{token!r} re-stamped deleted admission keys: {present}"
+    assert present == [], f"{cls!r} re-stamped deleted admission keys: {present}"
 
 
-def test_a_producer_precision_class_attr_still_wins_over_the_token(
+def test_the_dead_placement_override_attrs_are_dropped_not_published(
     fake_hub: Any, tmp_path: Path
 ) -> None:
-    """A producer that knows its class states it; the token is the fallback.
-    The DELETED `placement_*` override attrs are dropped rather than published
-    as prose — `training-endpoints`' modelopt quantizer still writes
+    """The DELETED `placement_*` override attrs are dropped rather than
+    published as prose — `training-endpoints`' modelopt quantizer still writes
     `placement_sm_allowed`, and an attr pgw no longer reads is not metadata."""
     meta = _publish(
-        fake_hub, tmp_path, "q4_k_m",
-        precision_class="nvfp4-w4a4",
+        fake_hub, tmp_path, "nvfp4-w4a4",
         placement_sm_allowed="89", placement_engines="nunchaku,triton",
     )
 
@@ -151,7 +151,7 @@ def test_the_ladder_module_no_longer_exports_a_placement() -> None:
 
     assert set(ladder.__all__) == {
         "CLASS_BASE", "CLASS_FP8", "CLASS_NVFP4", "CLASS_NVFP4_W4A4",
-        "CLASS_SVDQ_FP4", "CLASS_SVDQ_INT4", "classify_flavor_token",
+        "CLASS_SVDQ_FP4", "CLASS_SVDQ_INT4", "PRECISION_CLASSES",
     }
     leftovers = [n for n in vars(ladder) if "PLACEMENT" in n.upper()]
     assert leftovers == [], f"placement survived the cut: {leftovers}"

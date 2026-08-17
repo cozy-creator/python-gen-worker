@@ -64,7 +64,7 @@ from .repack_spec import (
     RepackageFamily,
     SinglefileTarget,
 )
-from .publish import publish_flavors
+from .publish import PrecisionClassRefusal, publish_flavors
 from .source import Source
 from .svdq import build_svdq_flavor_tree, fetch_svdq_checkpoint
 from .writer import (
@@ -97,6 +97,7 @@ __all__ = [
     "ingest_civitai",
     "clone",
     "CloneResult",
+    "PrecisionClassRefusal",
     "publish_flavors",
     # Family declarations: the endpoint declares, the SDK executes.
     "CIVITAI",

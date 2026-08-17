@@ -76,5 +76,13 @@ convert.publish.publish_flavors	training-endpoints/conversion/src/conversion/_co
 convert.source.Source	training-endpoints/conversion/src/conversion/_common.py:9	PROD
 convert.svdq.build_svdq_flavor_tree	training-endpoints/conversion/src/conversion/quant/svdq.py:36	PROD
 convert.svdq.fetch_svdq_checkpoint	training-endpoints/conversion/src/conversion/quant/svdq.py:36	PROD
+# A18 RESIDUE, pgw#1319. `svdq_flavor_label` renders the DEAD token
+# (`svdq-fp4-r128`) and `build_svdq_flavor_tree` puts it in the attribute bag
+# as `attrs["flavor"]`. Neither is logic any more — the precision class is
+# DECLARED from `svdq_precision` (te#225) — but te's committed producers still
+# read both to fill the `flavor=` kwarg this repo just deleted, and `src/` is
+# not a delete authority for surface another repo calls. They die in the te
+# repin lane, in the same commit that drops te's `flavor=` kwargs.
+convert.svdq.svdq_flavor_label	training-endpoints/conversion/src/conversion/quant/h3_svdq.py:126	PROD
 convert.writer.streaming_fp8_snapshot	training-endpoints/tests/test_fuse_lora.py:317	TEST
 convert.writer.verify_w8a8_snapshot	training-endpoints/conversion/src/conversion/quant/modelopt.py:872	PROD

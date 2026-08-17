@@ -7,11 +7,14 @@ Cozy Creator's model ETL: hub ingest (HF + Civitai), dtype cast / quantization, 
 > inside an endpoint's `setup()` is deleted, not kept as a fallback (it lengthens every cold boot
 > and wastes transfer — fetch 30 GB of bf16, discard 15 GB).
 >
-> **`flavor` as a selector is dead** (DESIGN-RULINGS §1.33): what a producer emits is an artifact
-> carrying a tensor-layout contract, and consumers select within a tag group by contract
-> compatibility, not by an arbitrary `#flavor` string. The `ProducedFlavor` / `publish_flavors` /
-> `#fp8` spellings below are the current API, not the target one — th#1809 (hub) and pgw#1143 (SDK)
-> own the replacement.
+> **`flavor` is dead, selector AND label** (DESIGN-RULINGS §1.32(d)/§1.33; A18, pgw#1319): what a
+> producer emits is an artifact carrying a tensor-layout contract, and consumers select within a
+> tag group by contract compatibility, not by an arbitrary `#flavor` string. `ProducedFlavor` has
+> no `flavor` field: what the bytes ARE is the `dtype` attribute plus an `artifact_contract`, and
+> what LANE they are on is a `precision_class` attribute the producer DECLARES from a structural
+> fact. A tree of sub-16-bit weights that declares none is a typed refusal, never an unstamped
+> publish — the hub reads an unstamped row as base. The struct's NAME is the last of the word;
+> th#1809 (hub) and pgw#1143 (SDK) own the rest of the replacement.
 
 - **Ingest**: HuggingFace (`HfApi.list_repo_files` + classifier + `snapshot_download(allow_patterns=…)`) and Civitai (bounded provider API).
 - **Convert**: streaming dtype cast + fp8-E4M3 storage cast (`#fp8` flavor), GGUF (llama.cpp toolchain), singlefile↔diffusers repackage.

@@ -92,7 +92,9 @@ fp8-E4M3 storage with per-layer upcast to the compute `dtype` (half the VRAM
 on any card); fp8-stored artifacts get the same treatment automatically.
 Quantization itself is ahead-of-time only — a conversion endpoint produces the
 artifact, never `setup()` (th#1803) — and the `flavor` axis is DELETED
-(§1.32(d), pgw#1148): selection within a tag group is tensor-layout-contract
+(§1.32(d), pgw#1148, finished by pgw#1319: the producer DECLARES a
+`precision_class` and nothing infers one from a label): selection within a tag
+group is tensor-layout-contract
 compatibility, declared per slot as `Slot(layouts=…)` (§1.33, pgw#1143). See
 [docs/endpoint-authoring.md](docs/endpoint-authoring.md).
 

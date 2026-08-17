@@ -56,8 +56,9 @@ def _publish(ctx: _Ctx, tree: Path, **kw: Any) -> Any:
     return publish_flavors(
         ctx,
         [ProducedFlavor(
-            path=str(tree), flavor="fp8-w8a8",
-            attributes={"dtype": "fp8", "quantization_method": "w8a8",
+            path=str(tree),
+            attributes={"dtype": "fp8", "precision_class": "fp8",
+                        "quantization_method": "w8a8",
                         "quantization_library": "llm-compressor"},
         )],
         destination_repo="acme/quant",

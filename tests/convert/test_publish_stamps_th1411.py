@@ -71,7 +71,7 @@ def _publish(ctx: _Ctx, tree: Path, **kw: Any) -> Any:
     kw.setdefault("release", RELEASE)
     return publish_flavors(
         ctx,
-        [ProducedFlavor(path=str(tree), flavor="fp8")],
+        [ProducedFlavor(path=str(tree), attributes={"precision_class": "fp8"})],
         destination_repo="acme/qwen-image",
         **kw,
     )

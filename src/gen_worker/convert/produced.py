@@ -48,27 +48,17 @@ class ProducedFlavor(msgspec.Struct):
         what belongs here vs what belongs in the orchestrator job record.
       - extra_files: rare escape hatch — sibling artifacts attached to the
         same flavor (e.g. a tokenizer.json next to a non-tree output).
-      - flavor: optional PRODUCER-LOCAL label such as ``bf16``, ``fp8`` or
-        ``int4``. It is NOT published and it names no catalog row — a flavor
-        is not an address. It derives the ``precision_class`` stamp
-        (:func:`gen_worker.models.ladder.classify_flavor_token`) and names the
-        publish's activity legs; when empty the ``dtype`` attribute is used.
-        What the bytes ARE is stated by the ``dtype`` attribute and, when the
-        producer knows it, an ``artifact_contract`` attribute (``ns.name@N``,
-        PROVEN hub-side against the safetensors header — §1.33).
 
-        **A18 RESIDUE, with its removal condition.** §1.32(d) rules the flavor
-        dead entirely — contract-spec is the only variant selector — and this
-        field is what is left. It survives only because the derivation above is
-        the sole statement of precision class for producers that do not declare
-        one, and dropping the field from this repo alone would silently unstamp
-        every svdq/fp8/nvfp4 row those producers publish. It dies when every
-        training-endpoints producer whose token classifies non-base declares
-        ``precision_class`` in ``attributes`` (te already does at
-        ``conversion/src/conversion/quant/modelopt.py:1262``); then this field,
-        the ``label`` read in ``publish.py`` and ``classify_flavor_token`` go in
-        one cut. Held at exactly this size by
-        ``scripts/lint_flavor_deletion.py`` — nothing new may read it.
+    **A18 / §1.32(d), pgw#1319: there is no ``flavor`` field.** It was the last
+    of the axis — a producer-local label that named no catalog row but still
+    decided the ``precision_class`` stamp through
+    ``classify_flavor_token``, which is deleted with it. What the bytes ARE is
+    stated by the ``dtype`` attribute and, when the producer knows it, an
+    ``artifact_contract`` attribute (``ns.name@N``, PROVEN hub-side against the
+    safetensors header — §1.33); what LANE they are on is stated by a
+    ``precision_class`` attribute, DECLARED from a structural fact and checked
+    against :data:`gen_worker.models.ladder.PRECISION_CLASSES`. A tree of
+    sub-16-bit bytes that declares none is a refusal, not an unstamped publish.
 
     A job that emits several artifacts hands over several ``ProducedFlavor``
     entries: N publishes joining ONE tag group. There is no flavor-label set
@@ -78,7 +68,6 @@ class ProducedFlavor(msgspec.Struct):
     path: _PathField
     attributes: dict = msgspec.field(default_factory=dict)
     extra_files: list[_PathField] = msgspec.field(default_factory=list)
-    flavor: str = ""
 
 
 __all__ = ["ProducedFlavor"]
