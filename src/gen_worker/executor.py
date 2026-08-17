@@ -4711,7 +4711,24 @@ class Executor:
             # trying to shrink and which nothing measured. Distinct from
             # `first_request_servable`, which additionally requires the hub to
             # have been told (a worker the hub cannot reach is not servable).
-            boot_mod.mark_once(boot_mod.PHASE_EAGER_READY, function=spec.name)
+            if boot_mod.mark_once(
+                    boot_mod.PHASE_EAGER_READY, function=spec.name):
+                # pgw#1355: THE cold-boot report, emitted at the one instant
+                # that is actually "ready". Deliberately NOT at
+                # `first_request_servable`, which lifecycle marks when a
+                # StateDelta advertises a function — on this eager-first boot
+                # that happens before the model is loaded at all, and pgw#1353
+                # measured the consequence: 871 s of silence between the two,
+                # filled entirely by a key-set derive that no channel reported.
+                # Ready means "could have answered a request", so the wall this
+                # ships is the number Paul asked for.
+                from . import boot_stages
+
+                # No `family=` here on purpose: the executor knows the endpoint
+                # function, not the compiled-graph family. The family reaches
+                # the roll-up from the KEYSET stage, which is the thing that
+                # actually learned it.
+                boot_stages.emit()
             bg = rec.background_mint
             if bg is not None and bg.task is None:
                 # pgw#671 eager-first boot: READY is advertised now (eager

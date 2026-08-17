@@ -243,6 +243,21 @@ KIND_PROCESS_ROLE = "process_role"
 # ActivityUpdate field holds them and the th#1839 route serves `detail`
 # verbatim, so this needs no hub change.
 KIND_SNAPSHOT_PULL = "snapshot_pull"
+# pgw#1355: the COLD BOOT's own decomposition — per-stage spans carrying
+# start/end offsets from OS process start, plus one terminal roll-up. Its own
+# KIND because it is the only row that answers "where did this pod's cold start
+# go" without a join: e2e#1892 assembled an 877 s cold serve out of FOUR event
+# kinds by hand (request-row timestamps, `worker_boot_phases` load spans,
+# `boot_adopt.duration_ms`, `compute_ms`/`finalize_ms`), and the largest stage
+# of all — pgw#1353's 805 s key-set derive — had no span on any channel.
+# `phase=stage:<name>` is one span, `phase=ready` the roll-up carrying the
+# packed table; `duration_ms` is that stage's wall, and the roll-up's is
+# wall-to-ready. The stage vocabulary is CLOSED (`boot_stages.Stage`) because a
+# renderer in another repo binds to these tokens. `detail` is the same `k=v`
+# grammar `snapshot_pull` uses, served verbatim by the th#1839 route, so this
+# needs no hub schema change. See `boot_stages.py` for why the total is a UNION
+# and never a sum.
+KIND_BOOT_STAGES = "boot_stages"
 # th#1322: the roll-up phase both mint routes report their TOTAL under. A
 # reader groups on (kind, phase) and must never sum a roll-up together with
 # its own children.
