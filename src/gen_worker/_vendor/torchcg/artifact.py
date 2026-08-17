@@ -12,7 +12,7 @@ import tempfile
 import zlib
 from collections.abc import Iterator, Mapping
 from pathlib import Path
-from typing import Any, BinaryIO, cast
+from typing import IO, Any, BinaryIO, cast
 
 from .declaration import DeclarationError, GraphClassDeclaration, _update_literal_digest
 from .host_isa import HostISAError, _validate_host_facts
@@ -36,6 +36,7 @@ PACKAGE_NAME = "model.pt2"
 LITERALS_NAME = "constants.safetensors"
 _REQUIRED_MEMBERS = frozenset((METADATA_NAME, PACKAGE_NAME))
 _MEMBERS = _REQUIRED_MEMBERS | {LITERALS_NAME}
+_COPY_BUFFER = 1 << 20
 _MAX_METADATA_BYTES = 8 << 20
 _MAX_SAFETENSORS_HEADER_BYTES = 8 << 20
 # A code-only AOTI package must not carry model weights. Sixteen GiB is four
@@ -181,7 +182,7 @@ def _bounded_chunks(source: BinaryIO, offset: int, size: int) -> Iterator[bytes]
     source.seek(offset)
     remaining = size
     while remaining:
-        chunk = source.read(min(1 << 20, remaining))
+        chunk = source.read(min(_COPY_BUFFER, remaining))
         if not chunk:
             raise ArtifactError("safetensors tensor data is truncated")
         remaining -= len(chunk)
@@ -633,7 +634,7 @@ def _validate_single_gzip_member(artifact: Path) -> None:
             while compressed := source.read(1 << 16):
                 pending = compressed
                 while pending:
-                    output = decoder.decompress(pending, 1 << 20)
+                    output = decoder.decompress(pending, _COPY_BUFFER)
                     uncompressed += len(output)
                     if uncompressed > _MAX_TAR_BYTES:
                         raise ArtifactError(
@@ -692,7 +693,7 @@ def _members(artifact: Path) -> tuple[tarfile.TarFile, dict[str, tarfile.TarInfo
         if not 0 <= remaining_padding <= tarfile.RECORDSIZE:
             raise ArtifactError("artifact has a non-canonical USTAR end marker")
         while remaining_padding:
-            trailer = archive.fileobj.read(min(1 << 20, remaining_padding))
+            trailer = archive.fileobj.read(min(_COPY_BUFFER, remaining_padding))
             if not trailer:
                 raise ArtifactError("artifact has truncated USTAR padding")
             if trailer.strip(b"\0"):
@@ -768,30 +769,42 @@ def _verify_materialized(directory: Path) -> dict[str, Any]:
     return checked
 
 
+def _read_member(source: IO[bytes], info: tarfile.TarInfo, remaining: int) -> bytes:
+    """Read one chunk of an archive member, naming a read failure as bad bytes."""
+
+    try:
+        return source.read(min(_COPY_BUFFER, remaining))
+    except (EOFError, OSError, tarfile.TarError) as exc:
+        raise ArtifactError(f"cannot read artifact member {info.name!r}: {exc}") from exc
+
+
 def _copy_member(
     archive: tarfile.TarFile,
     info: tarfile.TarInfo,
     destination: Path,
 ) -> None:
+    """Write one archive member out, keeping read and write failures distinct.
+
+    A failure reading the archive means the stored bytes are bad and raises
+    ``ArtifactError``, which callers treat as grounds to quarantine. A failure
+    writing the destination -- ENOSPC above all -- is the caller's disk and stays
+    an ``OSError``, because it is no evidence at all about the stored bytes.
+    """
+
     extracted = archive.extractfile(info)
     if extracted is None:
         raise ArtifactError(f"artifact member {info.name!r} is unreadable")
     remaining = info.size
-    try:
-        with extracted as source:
-            with destination.open("wb") as output:
-                while remaining:
-                    chunk = source.read(min(1 << 20, remaining))
-                    if not chunk:
-                        raise ArtifactError(f"artifact member {info.name!r} is truncated")
-                    output.write(chunk)
-                    remaining -= len(chunk)
-                output.flush()
-                os.fsync(output.fileno())
-    except ArtifactError:
-        raise
-    except (EOFError, OSError, tarfile.TarError) as exc:
-        raise ArtifactError(f"cannot read artifact member {info.name!r}: {exc}") from exc
+    with extracted as source:
+        with destination.open("wb") as output:
+            while remaining:
+                chunk = _read_member(source, info, remaining)
+                if not chunk:
+                    raise ArtifactError(f"artifact member {info.name!r} is truncated")
+                output.write(chunk)
+                remaining -= len(chunk)
+            output.flush()
+            os.fsync(output.fileno())
 
 
 def unpack_artifact(artifact: str | Path, destination: str | Path) -> dict[str, Any]:

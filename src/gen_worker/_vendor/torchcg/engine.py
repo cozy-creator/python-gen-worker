@@ -5,7 +5,7 @@ from __future__ import annotations
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
 
@@ -37,7 +37,7 @@ class AdmissionError(StorageError):
     """Materialized bytes do not exactly satisfy their requested graph plan."""
 
 
-class EnsureOutcome(str, Enum):
+class EnsureOutcome(StrEnum):
     REUSED = "reused"
     MINTED = "minted"
 
@@ -143,7 +143,7 @@ def _admit_constant_table(plan: _GraphClassPlan, constants: tuple[DeclaredConsta
 
 
 class Engine:
-    """One local compiled-graph engine backed exclusively by HashRepo."""
+    """One local compiled-graph engine backed exclusively by one tensorfs store."""
 
     def __init__(self, cas: LocalCAS) -> None:
         self._store = _CompiledGraphStore(cas)
@@ -250,13 +250,13 @@ class Engine:
             )
 
     def import_artifact(self, key: str | CompiledGraphKey, artifact: str | Path) -> StoreResult:
-        """Fully verify and attach bytes fetched by HashRepo under one exact key."""
+        """Fully verify and attach bytes admitted to the store under one exact key."""
 
         self._admit_host_metadata(read_metadata(artifact))
         return self._store.store(key, artifact)
 
     def export_artifact(self, key: str | CompiledGraphKey, destination: str | Path) -> Path:
-        """Export a fully verified artifact without exposing HashRepo ref layout."""
+        """Export a fully verified artifact without exposing the store's ref layout."""
 
         return self._store.export_artifact(key, destination)
 
@@ -271,7 +271,7 @@ class Engine:
     def _mint(self, plan: _GraphClassPlan) -> StoreResult:
         """Compile, package, verify, and publish one plan into the local CAS."""
 
-        with tempfile.TemporaryDirectory(prefix="torch-compiled-graphs-mint-") as raw:
+        with tempfile.TemporaryDirectory(prefix="torchcg-mint-") as raw:
             workspace = Path(raw)
             package = _compile_package(plan, workspace)
             constants = declared_constants(package, plan.declaration.graph_class)

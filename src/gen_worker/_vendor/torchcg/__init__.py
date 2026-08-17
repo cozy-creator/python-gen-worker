@@ -1,4 +1,4 @@
-"""Mint and reuse verified PyTorch AOTInductor graphs through HashRepo."""
+"""Mint and reuse verified PyTorch AOTInductor graphs through tensorfs."""
 
 from .artifact import COMPILED_GRAPH_FORMAT, ArtifactError
 from .compiler import CompileError
@@ -30,6 +30,22 @@ from .ingress import (
     exported_input_name,
 )
 from .runner import CompiledGraphRunner, ConstantBindingError
+from .selection import (
+    ClassReport,
+    FeedNormalization,
+    GraphClassCandidate,
+    IngressMiss,
+    MissReason,
+    NormalizationKind,
+    PresentedCall,
+    PresentedValue,
+    RealignReason,
+    Selection,
+    SelectionError,
+    SelectionOutcome,
+    describe_call,
+    select,
+)
 from .storage import (
     QuarantinedArtifact,
     StorageError,
@@ -48,24 +64,38 @@ __all__ = [
     "CompiledGraphRunner",
     "CallIngress",
     "CallInput",
+    "ClassReport",
     "ConstantBindingError",
     "DeclarationError",
     "Engine",
     "EnsureOutcome",
     "EnsureResult",
+    "FeedNormalization",
     "GRAPH_CLASS_BLOCK",
+    "GraphClassCandidate",
     "GraphClassDeclaration",
     "GraphClassSpec",
     "IdentityError",
     "REQUIRED_AXES",
     "IngressError",
+    "IngressMiss",
+    "MissReason",
+    "NormalizationKind",
+    "PresentedCall",
+    "PresentedValue",
     "QuarantinedArtifact",
+    "RealignReason",
     "RuntimeCompatibility",
+    "Selection",
+    "SelectionError",
+    "SelectionOutcome",
     "StorageError",
     "StoreOutcome",
     "StoreResult",
     "StoredCompiledGraph",
     "build_call_ingress",
+    "describe_call",
     "exported_input_name",
     "is_compiled_graph_key",
+    "select",
 ]

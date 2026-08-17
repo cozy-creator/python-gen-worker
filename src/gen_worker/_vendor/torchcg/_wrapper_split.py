@@ -65,7 +65,7 @@ _TEMPLATE_LINE = "template <typename ConstantsInfoT_>"
 
 #: Banner emitted once, immediately above the first helper.
 _BANNER = (
-    "// torch-compiled-graphs: constants_info_ moved out of the constructor.",
+    "// torchcg: constants_info_ moved out of the constructor.",
     "// Same statements, same order; grouped so gcc's superlinear",
     "// per-function cost stops dominating this translation unit.",
 )

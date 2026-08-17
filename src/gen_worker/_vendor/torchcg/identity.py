@@ -15,6 +15,16 @@ _TOOLCHAIN_DIGEST_HEX = 16
 #: The v1 identity axes, in canonical order. Public because consumers otherwise
 #: re-declare it and fence the copy; a duplicate that drifts is how a correctly
 #: named module computes wrong keys with nothing raising.
+#:
+#: These three are the whole canonical fingerprint: the toolchain block's
+#: MEMBERS are the caller's to choose, not this package's. The measured
+#: rationale — a 2026-08-16 pod matrix, 10 conclusive rows, 3 hosts — lives in
+#: `benchmarks/host_fingerprint/README.md`. It found os_release/glibc/
+#: libstdc++/c++-compiler load-breaking in both directions, python_abi and
+#: triton inert on a CPU target, and torch_config_digest unstable across hosts
+#: for the same wheel. Every one of those is a caller-supplied member; the
+#: facts this package does own (`machine`, `host_isa_*`) went unmeasured and
+#: stay fail-closed.
 REQUIRED_AXES: tuple[str, ...] = ("graph", "sm", "toolchain")
 
 #: The artifact-metadata block carrying graph-class facts. Public for the same

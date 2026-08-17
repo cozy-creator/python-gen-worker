@@ -390,8 +390,11 @@ jobs:
       # fence and not a sweep. Text-based on purpose, unlike the AST fence
       # above: here the prose IS the defect, because a docstring naming a module
       # nobody can import sends the reader nowhere. `_vendor/` is exempt
-      # structurally — the vendored ref namespace still carries the old spelling
-      # on disk and must NEVER be respelled, or every stored graph is orphaned.
+      # structurally: a vendored file is fixed upstream and re-vendored, never
+      # respelled here, and the digest fence refuses a hand-patch. pgw#1342: the
+      # vendored ref namespace is `torchcg/v1` now — the re-key that renaming it
+      # would have caused was taken deliberately under tcg#39 and is frozen
+      # upstream, so this exemption no longer stands in for an old spelling.
       # The script's own spellings are listed in `RETIRED`; see its docstring.
       - name: pgw#1297 guard - no retired package name survives
         run: |

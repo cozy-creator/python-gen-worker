@@ -145,7 +145,7 @@ def _fresh_thread_value(function: Any) -> object:
     def read() -> None:
         value.append(function())
 
-    thread = threading.Thread(target=read, name="torch-compiled-graphs-isa-readback", daemon=True)
+    thread = threading.Thread(target=read, name="torchcg-isa-readback", daemon=True)
     thread.start()
     thread.join()
     if not value:

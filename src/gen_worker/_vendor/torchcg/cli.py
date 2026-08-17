@@ -15,7 +15,7 @@ from .engine import Engine
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="torch-compiled-graphs")
+    parser = argparse.ArgumentParser(prog="torchcg")
     commands = parser.add_subparsers(dest="command", required=True)
 
     inspect = commands.add_parser("inspect", help="print an artifact's validated metadata")
@@ -24,7 +24,9 @@ def _parser() -> argparse.ArgumentParser:
     verify = commands.add_parser("verify", help="fully verify an artifact and its AOTI package")
     verify.add_argument("artifact", type=Path)
 
-    resolve = commands.add_parser("resolve", help="materialize one exact key from local HashRepo")
+    resolve = commands.add_parser(
+        "resolve", help="unpack one exact key from the local tensorfs store"
+    )
     resolve.add_argument("key")
     resolve.add_argument("destination", type=Path)
     resolve.add_argument("--cas-root", type=Path, required=True)
@@ -42,7 +44,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print(read_metadata(args.artifact))
         return 0
     if args.command == "verify":
-        with tempfile.TemporaryDirectory(prefix="torch-compiled-graphs-cli-") as raw:
+        with tempfile.TemporaryDirectory(prefix="torchcg-cli-") as raw:
             _print(unpack_artifact(args.artifact, Path(raw) / "artifact"))
         return 0
     if args.command == "resolve":
