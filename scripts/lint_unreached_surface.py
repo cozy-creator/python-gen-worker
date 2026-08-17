@@ -563,7 +563,11 @@ def reached(d: Definition, reach: Reach) -> bool:
 # consumer's dependency.
 # ---------------------------------------------------------------------------
 
-SIBLINGS = ("training-endpoints", "inference-endpoints",
+# DIRECTORY names, and a missing one is skipped silently at the loop below — so a
+# stale entry here is a consumer repo this fence stops reading without saying so.
+# `inference-endpoints` became `serverless-endpoints` on 2026-08-16;
+# `training-endpoints` becomes `jobs` when its checkout is renamed.
+SIBLINGS = ("training-endpoints", "serverless-endpoints",
             "private-inference-endpoints", "tensorhub", "e2e", "cozy-local")
 def _workspace() -> Path:
     """The directory the sibling repos sit in. Walk up rather than assume
