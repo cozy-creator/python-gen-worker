@@ -85,7 +85,10 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # a live on-by-default guard, and the only coverage of procsplit.group/merge.
     # 269 -> 255: pgw#1270 deleted the implementation-only tests of the worker
     # package/runner/resume authorities TCG now owns.
-    "ignore_errors": (255, 2016),
+    # 255 -> 242: pgw#1362 wave 1 folded 27 incident-named hub-wire test
+    # modules into 5 domain modules and typed them clean, so the 13 of them
+    # that were unchecked came off the list and nothing went back on.
+    "ignore_errors": (242, 2016),
 }
 
 #: WILDCARD patterns are structural policy, not debt, so they are not counted
