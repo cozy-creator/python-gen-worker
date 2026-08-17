@@ -72,6 +72,20 @@ _TOP_LEVEL_FIELDS = frozenset(
     )
 )
 
+#: The artifact-metadata vocabulary, PUBLIC. `validate_metadata` refuses any
+#: metadata whose field set is not exactly this, so it is not a convention a
+#: consumer may extend — it is the closed answer to "what can a compiled graph
+#: state about itself".
+#:
+#: Public for the same reason `REQUIRED_AXES` and `GRAPH_CLASS_BLOCK` are: a
+#: consumer that re-declares the set fences a COPY, and the copy drifts. The
+#: field set needs it more sharply than the axes do, because the failure is
+#: silent — a consumer that assumes a field this package does not write reads
+#: `None`, and `None` compares unequal to a real runtime fact forever. That is
+#: gen-worker's th#2098, where an arm seam compared three axes no artifact can
+#: carry and refused every self-mint AFTER paying for its compile.
+ARTIFACT_METADATA_FIELDS: frozenset[str] = _TOP_LEVEL_FIELDS
+
 _SAFETENSORS_DTYPES: dict[str, tuple[str, int]] = {
     "BOOL": ("bool", 1),
     "U8": ("uint8", 1),
