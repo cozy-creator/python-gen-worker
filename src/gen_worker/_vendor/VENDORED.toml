@@ -158,7 +158,7 @@ selection_files = ["selection.py", "contracts/ingress_selection_v1.json"]
 # `IngressError`, `PathStep`). `ingress.py` is BYTE-IDENTICAL across the two
 # revs; `identity.py` differs only by ten lines of comment (verified by diff at
 # vendoring time). It imports no Torch and no `.contracts`, so nothing else in
-# the snapshot is reachable from it. `tests/test_family_recipe_pgw1332.py`
+# the snapshot is reachable from it. `tests/test_vendored_snapshot_pgw1310.py`
 # proves the pairing EXECUTES against the vendored identity/ingress rather than
 # asserting it from the import list.
 recipe_rev = "41e38a2ad1c3e21ceda775490f102c9359b16499"
