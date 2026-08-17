@@ -49,7 +49,7 @@ import torch
 from safetensors.torch import save_file
 from torch import nn
 
-from gen_worker import aot_constants, aot_serve
+from gen_worker import aot_constants, aot_serve, hostfacts
 from gen_worker._vendor.tensorfs import LocalCAS
 from gen_worker._vendor.torchcg import (
     Engine,
@@ -146,8 +146,21 @@ class _NoDiffusers:
 
 
 def run(output: Path, target: str) -> Dict[str, Any]:
-    if not torch.cuda.is_available():
+    # `hostfacts` is the ONE home for these three questions (pgw#896). Asking
+    # torch directly here would be the 75th raw `is_available()` call site, and
+    # it would also format `sm_NN` a second way — the axis the artifact is
+    # keyed on must not have two spellings in the one program that proves the
+    # artifact.
+    device_name, host_sm = hostfacts.device_identity()
+    if not hostfacts.cuda_ready() or not host_sm:
         raise SystemExit("this probe is the GPU bar; it must not run on CPU")
+    if target != host_sm:
+        # An artifact minted for one sm and executed on another is the exact
+        # confusion `cg-key-v1` exists to make impossible; a probe that allowed
+        # it could report a bitwise verdict about a pairing no pod can have.
+        raise SystemExit(
+            f"--target {target} but this card is {host_sm} ({device_name})"
+        )
     device = "cuda"
     torch.manual_seed(1329)
 
@@ -268,7 +281,7 @@ def run(output: Path, target: str) -> Dict[str, Any]:
         "store_sourced_constants": len(armed.constants),
         "distinct_runners": armed.runner is not control.runner,
         "toolchain": _toolchain(),
-        "device_name": torch.cuda.get_device_name(0),
+        "device_name": device_name,
         "calls": rows,
         "bitwise_equal": all(entry["bitwise_equal"] for entry in rows),
         "control_non_vacuous": any(control_moved)
@@ -293,10 +306,9 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("row.json"))
     parser.add_argument("--target", default="", help="concrete sm_NN; derived when empty")
     arguments = parser.parse_args()
-    target = arguments.target
+    target = arguments.target or hostfacts.device_identity()[1]
     if not target:
-        major, minor = torch.cuda.get_device_capability(0)
-        target = f"sm_{major}{minor}"
+        raise SystemExit("no CUDA device to derive a target from")
     run(arguments.output, target)
 
 
