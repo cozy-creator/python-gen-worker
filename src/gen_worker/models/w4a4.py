@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from .. import activity as activity_mod
 from ..component_vocab import denoiser_components
+from .materialized_view import third_party_dir
 from .safetensors_header import read_header
 from .tensor_source import load_state_dict, open_tensor_source
 from .tensor_layout_contract import unregistered_decode_path
@@ -608,7 +609,9 @@ def load_w4a4_pipeline(cls: Any, path: Path, art: W4a4Artifact, *,
     denoiser = load_w4a4_denoiser(path, art, compute_dtype=compute, mode=mode)
     kwargs: Dict[str, Any] = dict(components or {})
     kwargs[art.component] = denoiser
-    pipe = cls.from_pretrained(str(path), torch_dtype=compute, **kwargs)
+    pipe = cls.from_pretrained(
+        str(third_party_dir(path, why="w4a4 quantizer from_pretrained")),
+        torch_dtype=compute, **kwargs)
     try:
         pipe._cozy_weight_lane = (
             "w4a4" if mode != "dequant" else "bf16-resident")
@@ -796,7 +799,9 @@ def load_w4a4_root_pipeline(
 
     compute = compute_dtype or torch.bfloat16
     mode = w4a4_gemm_mode() or "dequant"
-    pipe = cls.from_pretrained(str(path), torch_dtype=compute)
+    pipe = cls.from_pretrained(
+        str(third_party_dir(path, why="w4a4 quantizer from_pretrained")),
+        torch_dtype=compute)
     denoiser = _root_denoiser(pipe)
     if mode != "dequant":
         if not swap_w4a4_linears(denoiser, art, compute_dtype=compute):

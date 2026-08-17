@@ -201,7 +201,13 @@ def _materialize_named_artifact(
             failures = "; ".join(detail for _digest, detail in report.failures)
             raise RuntimeError(failures or "artifact grants expired")
         dest_dir.mkdir(parents=True, exist_ok=True)
-        cas.materialize(file_entry, dest)
+        # A compiled-graph artifact leaving the tensorfs store for torchcg's
+        # own cell store. Priced under §9's `tcg artifact export off-store`
+        # row: the destination is a different store's file, not a path inside
+        # a projected snapshot, so there is nothing here to point a stub at.
+        # The pinned rev spells the single-file hatch `materialize`; §9 and
+        # current upstream spell it `extract`.
+        cas.materialize(file_entry, dest)  # mixed-cas-hatch: tcg-artifact-export
     except NamedArtifactUnavailable:
         raise
     except (ValueError, RuntimeError, OSError) as exc:

@@ -127,7 +127,7 @@ def test_a_truncated_materialized_shard_is_still_corrupt(tmp_path: Path) -> None
     mandatory hash."""
 
     built = fixture.build(tmp_path)
-    tree = fixture.materialize(tmp_path, built)
+    tree = fixture.read_entry_tree(tmp_path, built)
     ok, bad = _verify(tmp_path, tree, built.snapshot_message())
     assert ok, f"an intact materialized tree was scored corrupt: {bad}"
 
@@ -174,7 +174,7 @@ def test_dtype_is_identical_projected_and_materialized(tmp_path: Path) -> None:
     """The projection must not change the answer — the point of the layout."""
 
     built = fixture.build(tmp_path)
-    material = fixture.materialize(tmp_path, built)
+    material = fixture.read_entry_tree(tmp_path, built)
     assert detect_on_disk_dtype(built.tree) == detect_on_disk_dtype(material) == "bf16"
 
 
@@ -225,7 +225,7 @@ def test_a_quantized_artifact_is_still_detected_as_quantized(tmp_path: Path) -> 
     from gen_worker.models.w8a8 import detect_w8a8_artifacts
 
     built = fixture.build(tmp_path, fp8=True)
-    material = fixture.materialize(tmp_path, built)
+    material = fixture.read_entry_tree(tmp_path, built)
 
     projected = detect_w8a8_artifacts(built.tree)
     baseline = detect_w8a8_artifacts(material)
@@ -240,7 +240,7 @@ def test_component_weight_bytes_are_the_real_bytes(tmp_path: Path) -> None:
     from gen_worker.models.loading import snapshot_component_weight_bytes
 
     built = fixture.build(tmp_path)
-    material = fixture.materialize(tmp_path, built)
+    material = fixture.read_entry_tree(tmp_path, built)
     projected = snapshot_component_weight_bytes(built.tree)
     assert projected == snapshot_component_weight_bytes(material)
     assert projected and all(v > 0 for v in projected.values())

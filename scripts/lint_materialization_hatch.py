@@ -70,22 +70,57 @@ DEFAULT_ROOTS = (
 #: Whole-tree materialization -- the symbol upstream deleted (tensorfs#58).
 RETIRED = re.compile(r"\bmaterialize" r"_repository\b")
 
+#: A line that DEFINES the retired symbol rather than reaching for it. Only
+#: the vendored storage snapshot may do that: it is a byte-identical copy of
+#: an upstream rev, fixed upstream and re-vendored, never patched here.
+RETIRED_DEFINITION = re.compile(r"^(?:async\s+)?def\s+materialize" r"_repository\b")
+
 #: The residue, NAMED. Each entry is a path that may still mention the retired
 #: symbol, with the issue that deletes it. Not an allowlist for new debt: a
 #: path not on this list is refused, and the list only ever shrinks.
-RETIRED_RESIDUE = {
-    # The chokepoint itself. pgw#1295 replaces this one line with a projected
-    # tree; it is gated on pgw#1303 (Paul's ruling on author slots that demand
-    # a real model DIRECTORY), because every `from_pretrained(path)` consumer
-    # downstream of it reads weights through the tree today.
-    "src/gen_worker/models/cozy_snapshot.py",
-    # Its test scaffolding: a LocalCAS subclass that counts and interrupts the
-    # copy. Dies in the same commit as the caller it exercises.
-    "tests/test_snapshot_v2_fill_pgw781.py",
+#:
+#: **IT IS EMPTY**, as of pgw#1308 step ⑥. The chokepoint projects
+#: (`models/cozy_snapshot.py:_publish_snapshot`) and its test scaffolding went
+#: with it. Nothing in this repo, first-party or vendored, CALLS whole-tree
+#: materialization; the only surviving trace is the definition in the pinned
+#: storage snapshot, declared below.
+RETIRED_RESIDUE: set[str] = set()
+
+#: Where the retired symbol may still be DEFINED, and why. Declared rather
+#: than merely unseen: `_lint_scope` excludes `_vendor` from every other
+#: guard, so without this line the census would read "gone" when the code is
+#: still shipped in the wheel with zero callers. It leaves when the vendored
+#: storage rev moves, which VENDORED.toml explains is NOT gated on this issue.
+RETIRED_DEFINED_IN = {
+    "src/gen_worker/_vendor/tensorfs/local.py",
 }
 
 #: The hatch itself, scanned only where tensorfs is imported.
-HATCH = re.compile(r"\.extract\s*\(")
+#:
+#: TWO SPELLINGS, and missing the second is how the census read zero. §9 and
+#: current upstream call the single-file hatch `extract()`; the rev this repo
+#: PINS (`_vendor/VENDORED.toml`) calls the same operation
+#: `LocalCAS.materialize(entry, destination)`. A fence that matches only the
+#: name upstream uses today matches nothing in the code it guards -- there is
+#: no `.extract(` on a tensorfs reader anywhere in this tree -- while a live
+#: first-party single-file materialization sat unpriced at
+#: `aot_delivery.py`. A guard must spell the symbol its own snapshot exports.
+HATCH = re.compile(r"\.(?:extract|materialize)\s*\(")
+
+#: `def materialize(...)` is a definition, not a hatch call.
+HATCH_DEFINITION = re.compile(r"^(?:async\s+)?def\s+(?:extract|materialize)\b")
+
+#: Vendored files that legitimately call the hatch, with their §9 row. A
+#: vendored call cannot carry an inline marker (the snapshot is byte-identical
+#: to upstream), so it is declared HERE instead of being invisible. A vendored
+#: hatch call in an undeclared file is refused, and a declared file that no
+#: longer contains one is refused too -- so the table cannot go stale in
+#: either direction.
+VENDORED_HATCH = {
+    # `_export_archive` / `_stage_artifact` write a compiled-graph archive off
+    # the tensorfs store with the single-file arm.
+    "src/gen_worker/_vendor/torchcg/storage.py": "tcg-artifact-export",
+}
 
 #: A file reaches the hatch only if it can reach a tensor reader.
 _TENSORFS_IMPORT = re.compile(r"\b(?:from|import)\s+\S*tensorfs\b")
@@ -105,17 +140,27 @@ ROWS = {
 }
 
 
-def _iter_files(roots: Tuple[Path, ...]) -> Iterator[Path]:
+def _iter_files(roots: Tuple[Path, ...]) -> Iterator[Tuple[Path, bool]]:
+    """Every scannable file, with whether a guard may JUDGE it.
+
+    `_vendor` is scanned rather than skipped, unlike every other guard here.
+    That exclusion is right for architecture measurements -- vendored code is
+    not evidence about ours -- and wrong for a CENSUS, whose whole job is to
+    say what is present. So vendored files are read, and what they may contain
+    is decided by the declaration tables above instead of by an inline marker
+    they cannot carry.
+    """
+
     for root in roots:
         if root.is_file():
-            yield root
+            yield root, is_unowned(root)
             continue
         for p in sorted(root.rglob("*.py")):
             if not p.is_file() or "__pycache__" in p.parts:
                 continue
-            if is_unowned(p) or p.resolve() == SELF:
+            if p.resolve() == SELF:
                 continue
-            yield p
+            yield p, is_unowned(p)
 
 
 def _row_of(line: str) -> str:
@@ -125,26 +170,57 @@ def _row_of(line: str) -> str:
 
 def scan(roots: Tuple[Path, ...]) -> List[str]:
     findings: List[str] = []
-    for path in _iter_files(roots):
+    vendored_hatch_seen: set[str] = set()
+    for path, vendored in _iter_files(roots):
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        reaches_tensorfs = bool(_TENSORFS_IMPORT.search(text))
+        reaches_tensorfs = bool(_TENSORFS_IMPORT.search(text)) or vendored
         rel = path.relative_to(REPO) if path.is_relative_to(REPO) else path
         rel_key = rel.as_posix()
         for lineno, line in enumerate(text.splitlines(), 1):
             stripped = line.strip()
             if stripped.startswith("#"):
                 continue
-            if RETIRED.search(line) and rel_key not in RETIRED_RESIDUE:
-                findings.append(
-                    f"{rel}:{lineno}: whole-tree materialization is retired "
-                    f"(pgw#1295/#1296a, tensorfs#58) and this file is not in "
-                    f"the named residue: {stripped}"
-                )
-                continue
+            if RETIRED.search(line):
+                if RETIRED_DEFINITION.match(stripped):
+                    if rel_key not in RETIRED_DEFINED_IN:
+                        findings.append(
+                            f"{rel}:{lineno}: whole-tree materialization is "
+                            f"retired (pgw#1296a, tensorfs#58) and this file "
+                            f"is not the pinned upstream snapshot that still "
+                            f"defines it: {stripped}"
+                        )
+                    continue
+                if rel_key not in RETIRED_RESIDUE:
+                    findings.append(
+                        f"{rel}:{lineno}: whole-tree materialization is retired "
+                        f"(pgw#1296a, tensorfs#58) and this file is not in "
+                        f"the named residue: {stripped}"
+                    )
+                    continue
             if not reaches_tensorfs or not HATCH.search(line):
+                continue
+            if HATCH_DEFINITION.match(stripped):
+                continue
+            if vendored:
+                # A vendored line cannot carry a marker without breaking the
+                # digest fence, so its row is declared in the table above.
+                row = VENDORED_HATCH.get(rel_key, "")
+                if not row:
+                    findings.append(
+                        f"{rel}:{lineno}: a vendored snapshot reaches the "
+                        f"single-file materialization hatch and no §9 row is "
+                        f"declared for it in VENDORED_HATCH: {stripped}"
+                    )
+                elif row not in ROWS:
+                    findings.append(
+                        f"{rel}:{lineno}: declared hatch row {row!r} is not in "
+                        f"docs/mixed-cas-layout.md §9: {stripped}"
+                    )
+                else:
+                    vendored_hatch_seen.add(rel_key)
                 continue
             if MARKER not in line:
                 findings.append(
@@ -158,6 +234,14 @@ def scan(roots: Tuple[Path, ...]) -> List[str]:
                     f"{rel}:{lineno}: hatch row {row!r} is not in "
                     f"docs/mixed-cas-layout.md §9 (known: {sorted(ROWS)}): {stripped}"
                 )
+    # A declaration that no longer describes anything is a census that has
+    # stopped being read. It goes when its last call goes, not later.
+    if any(root == REPO / "src" for root in roots):
+        for declared in sorted(set(VENDORED_HATCH) - vendored_hatch_seen):
+            findings.append(
+                f"{declared}: declared in VENDORED_HATCH but no longer calls "
+                f"the hatch — delete the declaration, the row is now empty"
+            )
     return findings
 
 
@@ -176,6 +260,30 @@ def _selftest() -> int:
             "from gen_worker._vendor.tensorfs import open_tensors\n"
             'reader.extract("config.json", dest)\n',
             1,
+        ),
+        # The PINNED rev's spelling of the same hatch. Matching only
+        # `extract()` matched nothing in this tree while a real single-file
+        # materialization ran unpriced.
+        (
+            "unnamed_pinned_spelling.py",
+            "from gen_worker._vendor.tensorfs import LocalCAS\n"
+            "cas.materialize(entry, destination)\n",
+            1,
+        ),
+        (
+            "named_pinned_spelling.py",
+            "from gen_worker._vendor.tensorfs import LocalCAS\n"
+            "cas.materialize(entry, destination)  "
+            f"{MARKER} tcg-artifact-export\n",
+            0,
+        ),
+        # Defining a helper called `materialize` is not reaching for the hatch.
+        (
+            "defines_one.py",
+            "from gen_worker._vendor.tensorfs import read_entry\n"
+            "def materialize(base, fixture):\n"
+            "    return read_entry(fixture.cas, entry)\n",
+            0,
         ),
         (
             "unknown_row.py",
@@ -212,9 +320,27 @@ def _selftest() -> int:
                     file=sys.stderr,
                 )
                 return 1
+    # The `def` of the retired symbol is permitted ONLY in the pinned storage
+    # snapshot, and refused anywhere else -- otherwise "define it here and
+    # call it" walks straight through the definition exemption.
+    with tempfile.TemporaryDirectory() as tmp:
+        planted = Path(tmp) / "redefines.py"
+        planted.write_text(
+            "from gen_worker._vendor.tensorfs import LocalCAS\n"
+            "def " + "materialize" + "_repository(manifest, target):\n"
+            "    ...\n"
+        )
+        if len(scan((planted,))) != 1:
+            print(
+                "SELFTEST FAILED: a first-party redefinition of the retired "
+                "symbol was not refused",
+                file=sys.stderr,
+            )
+            return 1
     print(
-        "lint_materialization_hatch selftest: red on a retired copy, on an "
-        "unnamed hatch and on an unknown row; green on a named §9 row"
+        "lint_materialization_hatch selftest: red on a retired copy, on a "
+        "first-party redefinition, on an unnamed hatch in either spelling and "
+        "on an unknown row; green on a named §9 row and on a plain definition"
     )
     return 0
 

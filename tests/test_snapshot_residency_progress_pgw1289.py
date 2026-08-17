@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from gen_worker._vendor.tensorfs import CASRef, LocalCAS
 
+import projection_fixture
 from gen_worker.models.cozy_snapshot import ensure_snapshot_async
 from gen_worker.models.hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
 from gen_worker.models.refs import TensorhubRef
@@ -99,7 +100,7 @@ def test_a_resident_grant_advances_progress_before_the_scan_finishes(
     )
 
     assert (path / "config.json").read_bytes() == first
-    assert (path / "weights.safetensors").read_bytes() == second
+    assert projection_fixture.bytes_at(path, "weights.safetensors") == second
     # The total is known before any byte is hashed, and the counter reaches it.
     assert beats[0] == (0, total)
     assert beats[-1] == (total, total)

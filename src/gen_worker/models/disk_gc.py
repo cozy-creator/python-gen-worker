@@ -144,8 +144,34 @@ class RefIndex:
 
 
 def tree_bytes(path: Path) -> int:
-    """Bytes under ``path`` (file or tree), hardlinked inodes counted once."""
+    """Bytes under ``path`` (file or tree), hardlinked inodes counted once.
+
+    **A PROJECTED snapshot tree is sized from its MANIFEST** (pgw#1308 step
+    ⑥), not by walking it. The walk would answer with the stubs and the
+    symlink targets it happens to reach — a few hundred bytes plus the
+    non-tensor files — for a model of any size. Every caller of this function
+    is asking "how much disk does this ref hold", and the honest answer is the
+    objects the tree's manifest pins, because deleting the tree drops its ref
+    and `sweep_orphan_blobs` then reclaims exactly those. Answering ~0 would
+    make eviction believe a resident 30 GiB model frees nothing, and a pod
+    that cannot reclaim disk does not fail loudly — it fills up.
+    """
     p = Path(path)
+    try:
+        from . import projection
+
+        snapshot = projection.resolve_projection(p)
+    except Exception:  # a probe must never be the thing that fails
+        snapshot = None
+    if snapshot is not None:
+        from .materialized_view import view_root_for
+
+        # The manifest's objects, PLUS any priced copy a pgw#1303-gated site
+        # asked for. Both die when this ref's bytes are deleted, so both are
+        # what deleting it reclaims.
+        return sum(
+            int(entry.size_bytes) for entry in snapshot.manifest.files
+        ) + tree_bytes(view_root_for(p))
     try:
         if p.is_file():
             return int(p.stat().st_size)
@@ -273,6 +299,12 @@ def delete_ref_bytes(ref: str, path: Path, cas_dir: Path) -> None:
                 cas.compare_and_swap_ref(name, None, expected=current)
             except RefConflict:
                 logger.info("disk-gc: snapshot ref %s changed while deleting", name)
+        # The pgw#1303-gated priced copy, if a gated site ever asked for one.
+        # It is keyed by this snapshot and readable only through it, so a view
+        # that outlived its tree would be disk nothing could name or reclaim.
+        from .materialized_view import view_root_for
+
+        shutil.rmtree(view_root_for(unit), ignore_errors=True)
     if unit.is_dir():
         shutil.rmtree(unit, ignore_errors=True)
     else:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import errno
 import hashlib
 import http.server
 import multiprocessing
@@ -12,9 +11,16 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from gen_worker._vendor.tensorfs import CASRef, FileEntry, LocalCAS, RepositoryManifest
+from gen_worker._vendor.tensorfs import (
+    CASRef,
+    FileEntry,
+    LocalCAS,
+    RepositoryManifest,
+    read_entry,
+)
 
 import gen_worker.models.cozy_snapshot as snapshot_mod
+from gen_worker.models import projection
 from gen_worker.models.cozy_snapshot import NetworkBytesScope, ensure_snapshot_async
 from gen_worker.models.hub_client import (
     WorkerResolvedChunk,
@@ -111,32 +117,34 @@ def test_grpc_adapter_keeps_ordered_lengths_and_drops_fixed_layout_scalar() -> N
     assert not hasattr(file, "chunk_size_bytes")
 
 
-class _BarrierCAS(LocalCAS):
-    def __init__(self, root: Path, barrier: Any) -> None:
-        super().__init__(root)
-        self._barrier = barrier
-
-    def materialize_repository(
-        self, manifest: RepositoryManifest, destination: str | Path
-    ) -> Path:
-        if Path(destination).exists():
-            raise FileExistsError(destination)
-        self._barrier.wait(30)
-        return super().materialize_repository(manifest, destination)
-
-
-def _materialize_process(
+def _publish_process(
     root: str, target: str, digest: str, size: int, barrier: Any, results: Any
 ) -> None:
-    cas = _BarrierCAS(Path(root), barrier)
+    """One process publishing the snapshot, released with the other.
+
+    The barrier is OUTSIDE `_publish_snapshot`, not inside it: the publish
+    holds an exclusive flock on the target, so a barrier inside would hold the
+    lock while waiting for a process the lock is keeping out, and the test
+    would deadlock rather than race.
+
+    Both arms report what they READ back through the tree, so a loser that
+    converged on the winner's tree is distinguishable from a loser that got a
+    path with nothing behind it.
+    """
+
+    cas = LocalCAS(Path(root))
     manifest = RepositoryManifest(
         (FileEntry("config.json", size, CASRef(digest)),)
     )
     try:
-        path = snapshot_mod._materialize_repository(cas, manifest, Path(target))
-        results.put(("ok", (path / "config.json").read_bytes()))
+        barrier.wait(30)
+        path = snapshot_mod._publish_snapshot(
+            cas, manifest, Path(target), symlinks=True
+        )
+        link = path / "config.json"
+        results.put(("ok", link.is_symlink(), link.read_bytes()))
     except BaseException as exc:
-        results.put(("error", f"{type(exc).__name__}: {exc}"))
+        results.put(("error", False, f"{type(exc).__name__}: {exc}".encode()))
 
 
 def _resident_resolved(digest: str, size: int) -> WorkerResolvedRepo:
@@ -233,16 +241,17 @@ def test_whole_file_downloads_into_tensorfs_and_reuses_it(tmp_path: Path) -> Non
         server.close()
 
 
-def test_two_processes_converge_on_the_same_materialized_tree(tmp_path: Path) -> None:
+def test_two_processes_converge_on_the_same_projected_tree(tmp_path: Path) -> None:
     body = b"cross-process-winner"
     cas = LocalCAS(tmp_path)
     digest = cas.put_bytes(body)
     target = tmp_path / "snapshots" / "same"
+    target.parent.mkdir(parents=True, exist_ok=True)
     barrier = _MP.Barrier(2)
     results = _MP.Queue()
     processes = [
         _MP.Process(
-            target=_materialize_process,
+            target=_publish_process,
             args=(str(tmp_path), str(target), digest.digest, len(body), barrier, results),
         )
         for _ in range(2)
@@ -253,32 +262,68 @@ def test_two_processes_converge_on_the_same_materialized_tree(tmp_path: Path) ->
         process.join(timeout=30)
         assert process.exitcode == 0
     assert [results.get(timeout=5) for _ in processes] == [
-        ("ok", body),
-        ("ok", body),
+        ("ok", True, body),
+        ("ok", True, body),
     ]
 
 
-def test_materialization_collision_refuses_an_invalid_winner(tmp_path: Path) -> None:
-    good = b"expected"
-    digest = CASRef.digest_bytes(good)
-    manifest = RepositoryManifest((FileEntry("config.json", len(good), digest),))
-    target = tmp_path / "snapshot"
+def test_publish_keeps_a_preflip_materialized_tree_it_finds(tmp_path: Path) -> None:
+    """A pod that upgrades ACROSS the flip meets its own old tree.
 
-    class _DivergentCAS(LocalCAS):
-        def materialize_repository(
-            self, _manifest: RepositoryManifest, destination: str | Path
-        ) -> Path:
-            winner = Path(destination)
-            winner.mkdir(parents=True)
-            (winner / "config.json").write_bytes(b"diverged")
-            raise OSError(errno.ENOTEMPTY, "another process published")
+    Under the same snapshot key, because the key is the snapshot digest. That
+    tree holds exactly the bytes the manifest names, so the publish converges
+    on it rather than deleting and re-projecting: `_entry_matches` hashes a
+    path that carries real bytes and checks a projection artifact structurally.
+    Deleting it would be safe but pointless; deleting it while another process
+    reads it would not be, which is why this path never removes a tree it has
+    just found to be correct.
+    """
 
-    with pytest.raises(OSError) as caught:
-        snapshot_mod._materialize_repository(
-            _DivergentCAS(tmp_path / "cas"), manifest, target
-        )
-    assert caught.value.errno == errno.ENOTEMPTY
-    assert (target / "config.json").read_bytes() == b"diverged"
+    body = b"published-before-the-flip"
+    cas = LocalCAS(tmp_path)
+    digest = cas.put_bytes(body)
+    manifest = RepositoryManifest(
+        (FileEntry("config.json", len(body), digest),)
+    )
+    target = tmp_path / "snapshots" / "preflip"
+    target.mkdir(parents=True)
+    (target / "config.json").write_bytes(body)
+    marker = (target / "config.json").stat().st_ino
+
+    published = snapshot_mod._publish_snapshot(
+        cas, manifest, target, symlinks=True
+    )
+
+    assert published == target
+    assert not (target / "config.json").is_symlink()
+    assert (target / "config.json").stat().st_ino == marker
+    assert (target / "config.json").read_bytes() == body
+
+
+def test_publish_replaces_a_tree_that_is_not_this_manifest(tmp_path: Path) -> None:
+    """A tree under this key that does not match is replaced by a projection.
+
+    The flock is held across the check and the replacement, so the decision to
+    remove cannot be taken against a tree someone else has since rebuilt (the
+    stale-validation defect below).
+    """
+
+    body = b"the-real-bytes"
+    cas = LocalCAS(tmp_path)
+    digest = cas.put_bytes(body)
+    manifest = RepositoryManifest(
+        (FileEntry("config.json", len(body), digest),)
+    )
+    target = tmp_path / "snapshots" / "diverged"
+    target.mkdir(parents=True)
+    (target / "config.json").write_bytes(b"not-this-manifest")
+
+    published = snapshot_mod._publish_snapshot(
+        cas, manifest, target, symlinks=True
+    )
+
+    assert (published / "config.json").is_symlink()
+    assert (published / "config.json").read_bytes() == body
 
 
 def test_stale_invalid_validation_cannot_delete_a_rebuilt_tree(
@@ -409,8 +454,17 @@ def test_chunked_file_uses_manifest_recorded_variable_lengths(tmp_path: Path) ->
             ensure_snapshot_async(base_dir=tmp_path, ref=_ref(), resolved=resolved)
         )
         output = path / "weights.safetensors"
-        assert output.stat().st_size == len(first) + len(second)
-        assert hashlib.sha256(output.read_bytes()).hexdigest() == whole
+        # A tensor container is a POINTER STUB after the chokepoint flip
+        # (pgw#1308 step ⑥). Its own `st_size` is the stub's, so the size the
+        # manifest recorded is read from what the stub DECLARES, and the bytes
+        # are reassembled out of the CAS at the recorded variable lengths --
+        # which is this test's actual subject, and is now asserted where the
+        # bytes really are instead of at a path that no longer holds them.
+        assert projection.stub_at(output) is not None
+        assert projection.logical_size(output) == len(first) + len(second)
+        snapshot = projection.require_projection(path, why="pgw#781 chunk test")
+        rebuilt = read_entry(snapshot.cas, snapshot.entry("weights.safetensors"))
+        assert hashlib.sha256(rebuilt).hexdigest() == whole
         assert all(server.hits(digest) == 1 for digest in blobs)
     finally:
         server.close()

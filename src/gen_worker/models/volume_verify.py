@@ -185,7 +185,7 @@ def split_projection_targets(
     projected: List[VerifyTarget] = []
     material: List[VerifyTarget] = []
     for t in targets:
-        if t.path.is_symlink() or projection.stub_at(t.path) is not None:
+        if projection.is_projection_artifact(t.path):
             projected.append(t)
         else:
             material.append(t)
@@ -211,54 +211,31 @@ def verify_projection(targets: Sequence[VerifyTarget]) -> VerifyReport:
 
     Re-hashing the objects instead would re-read every resident model on every
     boot to re-derive a fact the store already refused to store wrongly.
+
+    What a correct artifact IS lives in :func:`projection.projection_fault`,
+    which the snapshot chokepoint's convergence check reads too. This function
+    owns the report shape and the wire-digest parse; it does not own a second
+    opinion about the rule.
     """
 
     rep = VerifyReport(expected=len(targets))
     for t in targets:
         label = t.label or t.ref
+        rep.examined += 1
         try:
             want = CASRef.parse(t.ref)
         except ValueError as exc:
-            rep.examined += 1
             rep.bad.append(label)
             rep.findings.append(f"{t.path.name}: unreadable digest {t.ref!r}: {exc}")
             continue
-        stub = projection.stub_at(t.path)
-        if stub is not None:
-            rep.examined += 1
-            if stub.body_sha256 != want.digest:
-                rep.bad.append(label)
-                rep.findings.append(
-                    f"{t.path.name}: stub names body {stub.body_sha256[:16]}…, "
-                    f"manifest says {want.digest[:16]}…"
-                )
-            elif t.size and stub.size != t.size:
-                rep.bad.append(label)
-                rep.findings.append(
-                    f"{t.path.name}: stub declares {stub.size} bytes, "
-                    f"manifest declares {t.size}"
-                )
-            else:
-                rep.projected += 1
-            continue
-        got = projection.object_of_symlink(t.path)
-        rep.examined += 1
-        if got is None:
-            rep.bad.append(label)
-            rep.findings.append(
-                f"{t.path.name}: symlink does not resolve into the CAS objects tree"
-            )
-        elif got.digest != want.digest:
-            rep.bad.append(label)
-            rep.findings.append(
-                f"{t.path.name}: links to object {got.digest[:16]}…, "
-                f"manifest says {want.digest[:16]}…"
-            )
-        elif not t.path.exists():
-            rep.bad.append(label)
-            rep.findings.append(f"{t.path.name}: linked object {got.digest[:16]}… is absent")
-        else:
+        fault = projection.projection_fault(
+            t.path, digest=want.digest, size=t.size
+        )
+        if fault is None:
             rep.projected += 1
+        else:
+            rep.bad.append(label)
+            rep.findings.append(f"{t.path.name}: {fault}")
     _log.info(
         "projection_verify examined=%d/%d projected=%d bad=%d",
         rep.examined, rep.expected, rep.projected, len(rep.bad),

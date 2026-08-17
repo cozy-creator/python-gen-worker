@@ -2,19 +2,26 @@
 
 Tensorhub supplies a resolved manifest and opaque GET grants. tensorfs owns
 what is true about bytes at rest -- the chunk manifest, the local object store,
-and materialization. **The transfer is OURS** (pgw#1308,
+and the PROJECTION of a manifest into a tree. **The transfer is OURS**
+(pgw#1308,
 :mod:`gen_worker.transfer.grants`): the grants are tensorhub's wire format and
 the retry ladder, fan-out width and progress emission are this worker's policy
 about this worker's uplink. This module retains the rest of that policy:
 component selection, pickle refusal, disk headroom, endpoint-volume fill order,
 and boot observability.
+
+**A snapshot this module publishes is a PROJECTED tree** (pgw#1308 step ⑥):
+symlinks into ``objects/`` for everything that is not a tensor container,
+~128 B TFSSTUB1 pointer stubs for everything that is, and no tensor byte at
+any path in it. Whole-tree materialization -- the second complete copy this
+used to write -- has no caller left in this repo, and
+``scripts/lint_materialization_hatch.py`` refuses its return.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextvars
-import errno
 import fcntl
 import hashlib
 import logging
@@ -32,12 +39,14 @@ from gen_worker._vendor.tensorfs import (
     LocalCAS,
     RefConflict,
     RepositoryManifest,
+    project_snapshot,
 )
 from gen_worker.transfer.grants import TransferGrant, download
 
 from .. import activity as _activity
 from .. import boot_phases
 from ..capability import InsufficientDiskError
+from . import projection
 from .cache_paths import open_worker_cas
 from .download import components_present, select_component_paths
 from .errors import (
@@ -231,41 +240,67 @@ def _file_matches(path: Path, entry: FileEntry) -> bool:
         return False
 
 
+def _entry_matches(path: Path, entry: FileEntry) -> bool:
+    """Whether the tree already holds this entry, projected or materialized.
+
+    A projected artifact is judged structurally against the manifest
+    (:func:`projection.projection_fault`); anything holding real bytes is
+    hashed. Both arms are live on purpose: a pod that upgrades across the
+    chokepoint flip meets its own pre-flip MATERIALIZED tree under the same
+    key, and converging on it is correct — it holds the bytes the manifest
+    names. This function never WRITES a materialized tree, and nothing else
+    here can either.
+    """
+
+    if projection.is_projection_artifact(path):
+        return (
+            projection.projection_fault(
+                path, digest=entry.digest.digest, size=entry.size_bytes
+            )
+            is None
+        )
+    return _file_matches(path, entry)
+
+
 def _tree_matches(path: Path, manifest: RepositoryManifest) -> bool:
     try:
         actual = {
             candidate.relative_to(path).as_posix()
             for candidate in path.rglob("*")
-            if candidate.is_file()
+            # A symlink into `objects/` IS this entry's file. A BROKEN one is
+            # not, and dropping it here is what makes the set comparison
+            # refuse a tree whose store was swept underneath it.
+            if candidate.is_file() or candidate.is_symlink()
         }
     except OSError:
         return False
     expected = {entry.path for entry in manifest.files}
     return actual == expected and all(
-        _file_matches(path / entry.path, entry) for entry in manifest.files
+        _entry_matches(path / entry.path, entry) for entry in manifest.files
     )
 
 
-def _materialize_repository(
-    cas: LocalCAS, manifest: RepositoryManifest, target: Path
-) -> Path:
-    """Publish or converge on another process's exact winning tree."""
-    try:
-        return cas.materialize_repository(manifest, target)
-    except OSError as exc:
-        if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
-            raise
-        if _tree_matches(target, manifest):
-            return target
-        # The winner is not this manifest. Never delete a tree another process
-        # may own; preserve the publication collision as the failure.
-        raise
-
-
 def _publish_snapshot(
-    cas: LocalCAS, manifest: RepositoryManifest, target: Path
+    cas: LocalCAS,
+    manifest: RepositoryManifest,
+    target: Path,
+    *,
+    symlinks: bool,
 ) -> Path:
-    """Revalidate and publish one target under its process-shared lock."""
+    """Project one snapshot tree under its process-shared lock.
+
+    **This is pgw#1308 step ⑥ — the chokepoint.** It used to ask the store for
+    a whole-tree materialization, writing a complete second copy of every byte
+    the store already held, so a resident model occupied disk twice
+    (pgw#1296(a)). It now projects: non-tensor files are relative symlinks
+    into ``objects/``, tensor containers are ~128 B TFSSTUB1 pointer stubs,
+    and the tensors are read out of the CAS through
+    :func:`gen_worker.models.tensor_source.open_tensor_source`.
+
+    ``symlinks`` is the caller's ONE probe of the target filesystem, passed
+    through rather than re-probed, so the disk check upstream of this sized
+    the tree this writes (:func:`projection.projection_write_bytes`).
+    """
 
     lock_path = target.parent / f".{target.name}.lock"
     with lock_path.open("a+b") as lock:
@@ -277,7 +312,7 @@ def _publish_snapshot(
                 # This exact target is protected by the flock. Never remove a
                 # tree based on validation performed before acquiring it.
                 shutil.rmtree(target)
-            return _materialize_repository(cas, manifest, target)
+            return project_snapshot(cas, manifest, target, symlinks=symlinks)
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
@@ -346,6 +381,11 @@ class CozySnapshotDownloader:
                     _TRUSTED_SNAPSHOTS.add(trust_key)
                     return target
 
+            # Probed ONCE, here, and passed to both the disk check and the
+            # projector: the two must agree about what the tree will cost.
+            symlinks = await asyncio.to_thread(
+                projection.symlinks_supported, snapshots
+            )
             await self._ensure_objects(
                 open_worker_cas(base_dir),
                 selected.files,
@@ -355,10 +395,18 @@ class CozySnapshotDownloader:
                     if fill_source_dir is not None
                     else None
                 ),
+                publish_bytes=projection.projection_write_bytes(
+                    manifest, symlinks=symlinks
+                ),
             )
             cas = open_worker_cas(base_dir)
+            # Pinned BEFORE the tree exists: `projection.resolve_projection`
+            # recovers a tree's manifest through this ref, so a tree readable
+            # before its ref is a tree every stub-aware consumer must refuse.
             await asyncio.to_thread(_pin_manifest, cas, key, manifest)
-            await asyncio.to_thread(_publish_snapshot, cas, manifest, target)
+            await asyncio.to_thread(
+                _publish_snapshot, cas, manifest, target, symlinks=symlinks
+            )
             if len(_TRUSTED_SNAPSHOTS) >= _TRUST_CAP:
                 _TRUSTED_SNAPSHOTS.clear()
             _TRUSTED_SNAPSHOTS.add(trust_key)
@@ -379,6 +427,7 @@ class CozySnapshotDownloader:
         *,
         progress: ProgressFn | None,
         fill: LocalCAS | None,
+        publish_bytes: int,
     ) -> None:
         grants = _grants(files)
         entries = {file.path: _manifest_entry(file) for file in files}
@@ -468,14 +517,23 @@ class CozySnapshotDownloader:
                 missing.append(grant)
             report_residency()
 
-        # Every resident snapshot occupies disk TWICE: the CAS objects plus the
-        # materialized tree `_publish_snapshot` writes next. Sizing only the
-        # missing objects under-counted by exactly one whole model, and the
-        # `missing and` guard skipped the check entirely when every object was
-        # already resident — the case where the publish is the ONLY writer. A
-        # pod passed this gate and then ENOSPC'd mid-materialize.
+        # SIZE WHAT IS ACTUALLY WRITTEN, and nothing else. This arithmetic has
+        # been wrong in both directions (pgw#1296(b)): it first sized only the
+        # MISSING objects while `_publish_snapshot` wrote a full second copy
+        # with no check at all, and pgw#1263 then corrected it to
+        # fetch + one whole model. Step ⑥ deleted that second copy — a
+        # projection writes stubs, symlinks and the CAS objects themselves —
+        # so charging a whole model here would now over-reserve by exactly the
+        # model and refuse boots that fit. `publish_bytes` is
+        # `projection.projection_write_bytes` over the SAME symlink probe the
+        # projector is given, so the two cannot disagree.
+        #
+        # The `missing and` guard that once skipped this check entirely stays
+        # gone: fully-resident is still a real case, and it is now the case
+        # where the requirement is genuinely near zero rather than the case
+        # where the publish is the only writer.
         fetch = sum(grant.size_bytes for grant in missing)
-        publish = sum(entry.size_bytes for entry in entries.values())
+        publish = publish_bytes
         required = fetch + publish + _DISK_HEADROOM_BYTES
         free = shutil.disk_usage(cas.root).free
         if required > free:

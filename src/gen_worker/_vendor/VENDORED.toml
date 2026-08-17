@@ -47,19 +47,48 @@ subdir = "python/src/tensorfs"
 # What is LEFT is genuinely storage — `LocalCAS`, the chunk manifest, refs —
 # and it is byte-identical to `8bafdfbb` except for the `rewrites` below.
 #
-# pgw#1330: THE SNAPSHOT IS SPLIT AT TWO REVS, ON PURPOSE, AND THIS IS THE
-# ONLY RECORD OF IT. `project.py`, `tensors.py` and `gguf.py` come from
+# pgw#1330: THE SNAPSHOT IS SPLIT AT TWO REVS, ON PURPOSE, PERMANENTLY (see
+# the ownership ruling below), AND THIS IS THE ONLY RECORD OF IT. `project.py`, `tensors.py` and `gguf.py` come from
 # `read_plane_rev` below, NOT from `rev`. They are the consumption plane the
 # whole mixed-CAS cutover rests on — TFSSTUB1 render/parse, tree projection,
 # and the direct tensor reader — and they DID NOT EXIST at `8bafdfbb`.
 #
 # Why not simply bump `rev`: the newer lineage DELETED `LocalCAS.ingest_file`,
-# `LocalCAS.collect_garbage` and `LocalCAS.materialize_repository`, which are
-# live here at `hubio/client.py`, `models/disk_gc.py` and the
-# `models/cozy_snapshot.py` chokepoint. Taking them away is the chokepoint
-# flip (pgw#1308 sequencing step 6) and an ownership question about who owns
-# ingest and GC — neither is a consumption-cutover decision, and pretending
-# otherwise would put a storage rewrite inside a loader change.
+# `LocalCAS.ingest_repository`, `LocalCAS.collect_garbage`,
+# `LocalCAS.materialize` and `LocalCAS.materialize_repository`.
+#
+# pgw#1308 STEP 6 ANSWERED THE OWNERSHIP QUESTION, and the answer is NOT the
+# one this file used to imply. It said the split ends when the chokepoint
+# flips. It does not:
+#
+#   * `materialize_repository` — DEAD. The chokepoint projects (pgw#1308 step
+#     6, `models/cozy_snapshot.py:_publish_snapshot`), so this repo has zero
+#     callers. The definition below is all that is left of it, and
+#     `scripts/lint_materialization_hatch.py` declares that and refuses a new
+#     caller anywhere, `_vendor` included.
+#   * `materialize` (single file) — KEPT. It is `extract()` under the pinned
+#     rev's name: the priced escape hatch that upstream's own
+#     no-whole-tree-materialization fence deliberately exempts. Two live users
+#     (`aot_delivery.py`, vendored `torchcg/storage.py`), both declared to the
+#     lint against `docs/mixed-cas-layout.md` section 9.
+#   * `ingest_file` / `ingest_repository` — TENSORFS'S, not ours. Admission is
+#     the store's identity contract: the chunk grid, the whole-file digest,
+#     the concurrent-mutation refusal. Upstream did not abandon it the way it
+#     abandoned the Python transfer plane; it PORTED it to Rust
+#     (`Plan`/`HashedPlan`/`AdmittedObject`/`ObjectStore`) and added
+#     `TensorWriter`. Forking it first-party would put a second implementation
+#     of the rule that decides hub dedup in this repo.
+#   * `collect_garbage` — TENSORFS'S, same shape. Reachability over the
+#     store's own ref and manifest formats; its own docstring says tensorfs
+#     owns no retention policy, and the retention policy is already
+#     first-party in `models/disk_gc.py`.
+#
+# So the split at two revs is the STEADY STATE. It ends when pgw can depend on
+# a PUBLISHED, COMPILED tensorfs — upstream's successors for ingest and GC are
+# the Rust extension, and pgw#1310 rules a compiled extension out of a
+# source-vendored wheel. That is a release-policy decision (Paul), not a lane's.
+# Do not "finish the bump": it would delete two symbols with no reachable
+# successor.
 #
 # Why the split is SAFE rather than merely convenient: the three read-plane
 # modules import nothing from `local.py` at runtime beyond `object_path`,
