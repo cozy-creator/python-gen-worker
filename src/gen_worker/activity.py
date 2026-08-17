@@ -231,6 +231,18 @@ KIND_COMPILE_CHILD = "compile_child"
 # `postmortem.write_boot_record`, both pod-local, so "no compile under the
 # serving PID" was unassertable off-pod even with the child rows above.
 KIND_PROCESS_ROLE = "process_role"
+# pgw#1351: ONE snapshot pull, rolled up at completion — what the pod actually
+# TRANSFERRED, against what the snapshot weighs. e2e#1892 tried to measure
+# warm-boot dedup across three pods and could not: nothing on this channel
+# reported wire bytes, and `tree on disk` is identical on a pod that fetched
+# everything and a pod that fetched nothing. Its own KIND because the question
+# is a RATIO over one pull — `fetched_bytes` against `tree_bytes`, with
+# `resident_objects` as the evidence — and folding it into a boot or download
+# activity would put the numerator and the denominator in different rows.
+# `detail` carries the counts as `k=v` (see `snapshot_pull.py`); no
+# ActivityUpdate field holds them and the th#1839 route serves `detail`
+# verbatim, so this needs no hub change.
+KIND_SNAPSHOT_PULL = "snapshot_pull"
 # th#1322: the roll-up phase both mint routes report their TOTAL under. A
 # reader groups on (kind, phase) and must never sum a roll-up together with
 # its own children.
