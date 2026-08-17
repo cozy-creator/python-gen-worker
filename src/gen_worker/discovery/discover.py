@@ -796,10 +796,13 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             "input_schema": input_schema,
             "moderation": moderation,
             "expected_outputs": expected_outputs,
-            "output_mode": "incremental" if incremental else "single",
             "output_type": _type_id(output_type),
             "output_schema_sha256": output_sha,
             "output_schema": output_schema,
+            # The output-cardinality fact, in the ONE spelling the hub decodes
+            # (builder/manifest_contract.go). pgw#1320 deleted the sibling
+            # `output_mode: "incremental"|"single"` key beside it — a third
+            # value space for this bit that no hub reader has ever named.
             "incremental_output": incremental,
             "is_async": es.is_async,
         }
