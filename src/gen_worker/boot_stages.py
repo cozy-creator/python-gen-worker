@@ -646,9 +646,48 @@ def parse_runs(packed: str) -> Tuple[Tuple[Stage, int, int], ...]:
     return tuple(out)
 
 
+def _packed_or_refused(table: BootStageTable) -> Tuple[str, bool, bool]:
+    """Pack the table and PROVE the packed form parses back.
+
+    The renderer that consumes ``runs=`` lives in another repository, on a
+    release cadence this worker knows nothing about. If a packing bug ever
+    ships, the symptom over there is a parse error on a pod that is otherwise
+    healthy — days later, in somebody else's lane, with no way to tell a broken
+    emitter from a broken reader.
+
+    So the emitter checks its own output against its own parser before shipping
+    it. A token that does not round-trip is DROPPED and confessed as
+    ``runs_unpackable=1``, never shipped in the hope that the reader copes:
+    pgw#1339's rule, that a degradation is loud and the surviving report still
+    serves. Every scalar total is stated independently of ``runs=``, so a
+    reader that loses the packed table still gets the wall, the critical path
+    and the overlap.
+
+    Returns ``(packed, truncated, unpackable)``.
+    """
+    packed, truncated = pack_runs(table)
+    try:
+        parsed = parse_runs(packed)
+    except Exception:
+        logger.warning(
+            "[boot] the packed stage table does not parse back and was DROPPED "
+            "— the totals still ship; this is an emitter bug (pgw#1355)",
+            exc_info=True)
+        return "-", truncated, True
+    expected = table.runs()
+    if not truncated and list(parsed) != [
+            (stage, start, end) for stage, start, end in expected]:
+        logger.warning(
+            "[boot] the packed stage table round-tripped to a DIFFERENT table "
+            "and was dropped: %d run(s) in, %d out (pgw#1355)",
+            len(expected), len(parsed))
+        return "-", truncated, True
+    return packed, truncated, False
+
+
 def rollup_detail(table: BootStageTable) -> str:
     """The terminal roll-up's ``detail`` line."""
-    packed, truncated = pack_runs(table)
+    packed, truncated, unpackable = _packed_or_refused(table)
     parts = [
         f"v={SCHEMA_VERSION}",
         f"wall_ms={table.wall_ms}",
@@ -667,6 +706,8 @@ def rollup_detail(table: BootStageTable) -> str:
             parts.append(f"{key}={value}")
     if truncated:
         parts.append("runs_truncated=1")
+    if unpackable:
+        parts.append("runs_unpackable=1")
     parts.append(f"runs={packed}")
     return " ".join(parts)
 

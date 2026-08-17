@@ -540,3 +540,42 @@ def test_truncation_keeps_the_spans_worth_reading() -> None:
         "the 805 s stage was dropped in favour of sixty-odd 1 ms ones — a "
         "truncation rule that can discard the finding is worse than no rows")
     assert kept[0].duration_ms == 805_000
+
+
+def test_the_emitter_proves_its_own_packing_parses_back() -> None:
+    """The renderer that consumes `runs=` lives in another repository, on a
+    release cadence this worker knows nothing about.
+
+    If a packing bug ships, the symptom over there is a parse error on an
+    otherwise healthy pod — days later, in somebody else's lane, with no way to
+    tell a broken emitter from a broken reader. So the emitter checks its own
+    output against its own parser before shipping it, and a token that does not
+    round-trip is DROPPED and confessed rather than shipped hopefully.
+
+    RED PROOF: skip the round-trip check and a corrupt token ships silently.
+    """
+    table = _table(
+        StageSpan(stage=Stage.KEYSET, t0_ms=0, t1_ms=805_000),
+        wall_ms=830_000)
+    good = boot_stages.rollup_detail(table)
+    assert "runs_unpackable" not in good
+    assert "runs=keyset:0-805000" in good
+
+    # A packer that emits a stage token this vocabulary does not admit.
+    original = boot_stages.pack_runs
+    try:
+        boot_stages.pack_runs = lambda _t: ("warp_core:0-1", False)  # type: ignore[assignment]
+        degraded = boot_stages.rollup_detail(table)
+    finally:
+        boot_stages.pack_runs = original  # type: ignore[assignment]
+
+    assert "runs_unpackable=1" in degraded, (
+        "a table that does not parse back was shipped anyway — the reader in "
+        "the other repo would fail on it with no way to place the blame")
+    assert "runs=-" in degraded, "the corrupt token must be DROPPED, not shipped"
+    # And the report still serves: every scalar total is stated independently
+    # of the packed table, so losing it costs detail and never the answer.
+    for key in ("wall_ms", "critical_path_ms", "overlap_ms", "unmeasured_ms"):
+        assert f"{key}=" in degraded, (
+            f"{key} went missing with the packed table — the degradation took "
+            f"the report with it instead of just the detail")
