@@ -64,7 +64,12 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from . import activity as activity_mod
-from gen_worker._vendor.torchcg import ARTIFACT_KIND, GRAPH_CLASS_BLOCK, REQUIRED_AXES
+from gen_worker._vendor.torchcg import (
+    ARTIFACT_KIND,
+    ARTIFACT_METADATA_FIELDS,
+    GRAPH_CLASS_BLOCK,
+    REQUIRED_AXES,
+)
 from gen_worker._vendor.torchcg import is_compiled_graph_key
 from gen_worker._vendor.torchcg import identity as tcg_identity
 
@@ -218,8 +223,25 @@ class ArmIdentity:
 # whole declaration, not about one graph class — so comparing it here would
 # compare a value the child can no longer state against one the parent can,
 # and refuse every handback by construction.
-ARM_ENVIRONMENT_FACTS = ("family", aot_serve.COMPILED_GRAPH_FORMAT_KEY,
-                         "lane", "sm", "env_seal", "toolchain")
+# pgw#1340 / th#2098: `family`, `lane` and `env_seal` LEFT this comparison for
+# the SAME reason `envelope` did one paragraph up, and the sweep that took
+# `envelope` should have taken them. Since pgw#1270 TCG mints every artifact
+# and `torchcg.artifact.validate_metadata` refuses metadata whose field set is
+# not exactly `ARTIFACT_METADATA_FIELDS` — which contains no `family`, no
+# `weight_lane`/`lora_bucket` and no `env_seal`. So three of the six axes here
+# were read as `None` off every real cell and compared against a live runtime
+# fact: a seam that could only ever refuse.
+#
+# It was not theory. MEASURED on the standing `master` hub (2026-08-17):
+# `aot_entry_arm_failed key_axis_divergence — family: child cell states '',
+# this runtime computed 'sd15'`, 224 rows on sd15 and 28 on ernie across wheels
+# 0.117.0 and 0.118.0. EVERY self-mint that reached the seam, none published,
+# each one paying ~25 minutes of L4 for the compile it then discarded — ~$1.00
+# per burst against 57.7 GPU-seconds of the inference it was meant to speed up.
+#
+# What is left is exactly the three axes TCG keys the artifact ON, which is
+# what makes them the three that can genuinely refuse a foreign cell.
+ARM_ENVIRONMENT_FACTS = (aot_serve.COMPILED_GRAPH_FORMAT_KEY, "sm", "toolchain")
 
 #: The SUBJECT half (pgw#1113): WHAT this obligation compiles, as opposed to
 #: what runtime it compiles on. ``subject`` is the resolved slot identity
@@ -235,8 +257,53 @@ ARM_ENVIRONMENT_FACTS = ("family", aot_serve.COMPILED_GRAPH_FORMAT_KEY,
 #: key, which is the traced computation, is what says the computation matches.
 ARM_SUBJECT_FACTS = ("subject", "targets", "dynamic", "regional")
 
+#: Every fact the obligation states that a CELL never can, and therefore that
+#: nothing compares across the handback boundary (pgw#1340). This is not a
+#: weaker check — it is the same check moved to the side of the boundary that
+#: can perform it. `family`, `lane` and `env_seal` are in the arm TOKEN, and
+#: the token is what splits the pending, the delegated child and the local
+#: store's memo row, so two families or two lanes still never share one mint.
+#: The cell's own `ck1` key is what says the COMPUTATION matches.
+ARM_OBLIGATION_FACTS = ("family", "lane", "env_seal") + ARM_SUBJECT_FACTS
+
 #: Every fact in the token, in report order.
-ARM_FACTS = ARM_ENVIRONMENT_FACTS + ARM_SUBJECT_FACTS
+ARM_FACTS = ARM_ENVIRONMENT_FACTS + ARM_OBLIGATION_FACTS
+
+#: Each arm axis -> the CELL-METADATA fields its child-side derivation reads.
+#: The one table both :func:`arm_axis_divergence` and
+#: :func:`unstateable_arm_axes` consult, so "what this axis is read from" and
+#: "can a cell state it" can never be two answers.
+ARM_AXIS_CELL_SOURCES: Dict[str, Tuple[str, ...]] = {
+    aot_serve.COMPILED_GRAPH_FORMAT_KEY: (aot_serve.COMPILED_GRAPH_FORMAT_KEY,),
+    "sm": ("sm",),
+    "toolchain": ("toolchain",),
+    "family": ("family",),
+    "lane": ("weight_lane", "lora_bucket"),
+    "env_seal": (env_seal.SEAL_KEY,),
+}
+
+
+def unstateable_arm_axes(
+    compared: Sequence[str] = ARM_ENVIRONMENT_FACTS,
+) -> Tuple[str, ...]:
+    """The compared axes a packed cell's metadata CANNOT state — the $0 answer.
+
+    A pure function of two compile-time constants: the axes this seam compares,
+    and TCG's closed artifact vocabulary. So a seam that is unsatisfiable is
+    knowable BEFORE a child process is spawned, before an export, before a
+    single second of inductor — which is the whole of th#2098's second ask.
+    :func:`enable_compiled` refuses the obligation on a non-empty answer; the
+    alternative, measured, is 20-45 minutes of paid GPU per pod per boot ending
+    in `key_axis_divergence` forever.
+
+    An axis with no entry in :data:`ARM_AXIS_CELL_SOURCES` is read as reading
+    the field of its own name — so a NEW axis added without a source entry is
+    checked, never silently admitted.
+    """
+    vocabulary = set(ARTIFACT_METADATA_FIELDS)
+    return tuple(
+        axis for axis in compared
+        if not set(ARM_AXIS_CELL_SOURCES.get(axis, (axis,))) <= vocabulary)
 
 #: The pipeline attribute carrying the resolved :class:`graph_facts.SlotSubject`
 #: set the executor built this object from (pgw#1113). Stamped beside the
@@ -1897,6 +1964,48 @@ def _arming_policy(
             pipe, f"self-mint identity computation failed: {exc}", selection_bug,
             phase=EagerPhase.KEY_COMPUTATION_FAILED)
 
+    # pgw#1340 / th#2098 — THE $0 PREFLIGHT, and it is sited here because this
+    # is the last line before anything is spent. Everything below opens a
+    # pending, spawns a child and buys 20-45 minutes of the card this pod is
+    # paying for; the question "can the cell that child returns ever satisfy
+    # the seam that admits it" is answered by two compile-time constants and
+    # costs nothing to ask.
+    #
+    # It is not hypothetical. pgw#1270 moved the artifact vocabulary to TCG and
+    # left three axes in the comparison that no cell can state, and the fleet
+    # paid the full compile to rediscover it on every boot of every pod for two
+    # wheels: 224 `sd15` rows and 28 `ernie` rows of
+    # `aot_entry_arm_failed key_axis_divergence`, zero publishes, ~$1.00 of L4
+    # per burst against 57.7 GPU-seconds of the inference it was accelerating.
+    #
+    # DEGRADE, never fail the worker (§4.33): the pod serves eager, which is
+    # what it was doing anyway — the only thing this removes is the bill.
+    unstateable = unstateable_arm_axes()
+    if unstateable:
+        named = ", ".join(unstateable)
+        logger.error(
+            "fleet-cells: REFUSING to open a self-mint for %s — the handback "
+            "seam compares %s, which a packed cell cannot state (TCG's "
+            "artifact vocabulary is %s). Every mint under this seam would "
+            "compile for 20-45 minutes and then refuse `key_axis_divergence`. "
+            "Serving eager and spending nothing (pgw#1340)",
+            family, named, sorted(ARTIFACT_METADATA_FIELDS))
+        if bucket:
+            cc.drop_lora_execution_lane(pipe)
+        activity_mod.emit_event(
+            "self_mint_skipped",
+            f"family={family} arm_key={key} axes={named}: the arm-axis "
+            f"comparison demands {named}, which no packed cell can state — "
+            f"this worker refuses the mint at ARM time rather than paying "
+            f"for a compile that provably cannot arm. Nothing is spent, "
+            f"serving stays eager, and this is a code defect (an axis outside "
+            f"the artifact vocabulary), not a property of this pod or release",
+            phase=EagerPhase.ARM_AXES_UNSTATEABLE,
+        )
+        return ArmOutcome(
+            armed=False, selection_bug=selection_bug,
+            eager_reason=EagerPhase.ARM_AXES_UNSTATEABLE)
+
     # pgw#672: consult the process ledgers BEFORE opening a capture.
     #
     # pgw#1033: TWO identities can be quarantined for one arm, and the gate
@@ -2080,24 +2189,21 @@ def arm_axis_divergence(
     against the traced fact was the attempt-28 phantom divergence
     (pgw#1059). Every compared fact uses the SAME derivation on both sides.
 
-    :data:`ARM_SUBJECT_FACTS` are equally deliberately NOT compared
-    (pgw#1113). A cell records no subject and must not: the key is the traced
-    computation, so one cell legally serves every checkpoint whose graph it
-    is, and demanding the cell restate the checkpoint it was minted from
-    would refuse exactly the reuse the membership axiom exists to allow. The
-    subject splits the obligation on THIS side of the boundary; what crosses
-    it is compared here.
+    :data:`ARM_OBLIGATION_FACTS` are equally deliberately NOT compared
+    (pgw#1113 for the subject half, pgw#1340 for `family`/`lane`/`env_seal`).
+    A cell records no subject and must not: the key is the traced computation,
+    so one cell legally serves every checkpoint whose graph it is, and
+    demanding the cell restate the checkpoint it was minted from would refuse
+    exactly the reuse the membership axiom exists to allow. `family`, `lane`
+    and `env_seal` are not in TCG's artifact vocabulary AT ALL, so comparing
+    them read `None` off every real cell — th#2098, one production burst at a
+    time. The obligation facts split the obligation on THIS side of the
+    boundary; what crosses it is compared here.
     """
     child: Dict[str, str] = {
-        "family": str(meta.get("family") or ""),
         aot_serve.COMPILED_GRAPH_FORMAT_KEY: str(
             meta.get(aot_serve.COMPILED_GRAPH_FORMAT_KEY) or ""),
-        "lane": cc.execution_lane_label(
-            str(meta.get("weight_lane") or ""),
-            int(meta.get("lora_bucket") or 0)),
         "sm": str(meta.get("sm") or ""),
-        "env_seal": env_seal.seal_digest(
-            dict(meta.get(env_seal.SEAL_KEY) or {})),
         "toolchain": tcg_identity.toolchain_axis_digest(
             dict(meta.get("toolchain") or {})),
     }

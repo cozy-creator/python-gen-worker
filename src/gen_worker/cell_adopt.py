@@ -92,6 +92,19 @@ class EagerPhase(StrEnum):
     #: identity must not be re-minted) and was the one that only logged.
     COMPILED_GRAPH_QUARANTINED = "compiled_graph_quarantined"
 
+    #: pgw#1340 / th#2098: the handback seam compares an axis a packed cell
+    #: structurally cannot state, so the arm can only ever refuse. The mint is
+    #: declined at obligation-open, for $0, instead of after 20-45 minutes of
+    #: paid GPU — which is what it cost on `sd15` for two wheels running:
+    #: `family: child cell states '', this runtime computed 'sd15'`, every
+    #: mint, nothing published, ~$1.00 of L4 per burst.
+    #:
+    #: A pod reporting this is reporting a CODE defect with a named owner
+    #: (an axis outside `torchcg.ARTIFACT_METADATA_FIELDS`), never a
+    #: capability, a card or a release — which is why it does not share a
+    #: token with the mint-impossibility exits above.
+    ARM_AXES_UNSTATEABLE = "arm_axes_unstateable"
+
     #: Eager with an END — a delegated mint child is building the cell.
     MINT_IN_PROGRESS = "mint_in_progress"
 

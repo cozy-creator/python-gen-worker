@@ -196,6 +196,12 @@ def test_the_eager_phase_values_are_a_wire_contract() -> None:
         "JIT_ARM_FAILED": "jit_arm_failed",
         "MANDATORY_LANE_NEEDS_A_COMPILED_GRAPH": "mandatory_lane_needs_a_compiled_graph",
         "COMPILED_GRAPH_QUARANTINED": "compiled_graph_quarantined",
+        # pgw#1340 / th#2098: the seam compares an axis no cell can state, so
+        # the mint is refused for $0 at obligation-open instead of after the
+        # compile. A NEW value, deliberately — grouping it with the
+        # mint-impossibility tokens would put a code defect in the same bucket
+        # as "this pod has no toolchain".
+        "ARM_AXES_UNSTATEABLE": "arm_axes_unstateable",
         "MINT_IN_PROGRESS": "mint_in_progress",
         # The hub's ExecutionSpec ordered eager — the arm obeyed.
         "HUB_ORDERED_EAGER": "hub_ordered_eager",
