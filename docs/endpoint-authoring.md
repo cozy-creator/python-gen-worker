@@ -750,11 +750,18 @@ payload key and its own hub readers.
 
 ## Kinds
 
-`@endpoint(kind="conversion" | "training" | "dataset")` selects the context
-subclass the handler receives: `ConversionContext` adds `save_checkpoint` /
-`mktemp` / `source` / `destination`; `DatasetContext` adds
-`publish_dataset_revision` / `resolve_dataset`; `TrainingContext` adds the
-typed training-metric emitter.
+`@endpoint(kind="conversion" | "training" | "dataset")` declares a producer,
+and every producer receives the SAME context — `JobContext`, the one a `@job`
+body gets. It carries `save_checkpoint` / `mktemp` / `source` / `destination`,
+`publish_dataset_revision` / `resolve_dataset`, and the typed training-metric
+emitter, all on one class.
+
+There were once three kind-specific subclasses (`ConversionContext`,
+`DatasetContext`, `TrainingContext`). They were merged by pgw#1294 and the
+names deleted by pgw#1306; **do not reintroduce a per-kind context.** The kind
+describes the WIRE shape. What a body may write is its own declaration —
+`publishes=True` (and `emits_media=True` for a job) — and the hub mints the
+write grant off that declaration, never off the kind.
 
 Producer endpoints publish **explicitly**: write files locally, call
 `gen_worker.convert.publish_flavors(ctx, flavors)` — one Tensorhub commit per
@@ -763,7 +770,7 @@ Producer endpoints publish **explicitly**: write files locally, call
 ```python
 @endpoint(kind="conversion")
 class Convert:
-    def run(self, ctx: ConversionContext, p: In) -> Out:
+    def run(self, ctx: JobContext, p: In) -> Out:
         out_dir = ctx.mktemp()
         ...  # write model files under out_dir
         commits = publish_flavors(

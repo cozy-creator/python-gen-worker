@@ -130,8 +130,9 @@ Full reference: [docs/endpoint-authoring.md](docs/endpoint-authoring.md).
 - Compile envelope (the declared serving region — resolutions, text lengths,
   guidance, batch): `Compile`, `CompileAxis`, `AxisClass`, `DynamicDim`,
   `pad_text_sequence`; per-request views: `ctx.for_request` / `gen_worker.view`
-- Contexts: `RequestContext` (≤15 members), `ConversionContext`,
-  `DatasetContext`, `TrainingContext`
+- Contexts: `RequestContext` (≤15 members) and `JobContext`, the one producer
+  context — every `@job` body and every producer-kind `@endpoint` handler gets
+  it, and what it may write comes from the declaration, not the kind
 - Errors: `ValidationError`, `RetryableError`, `CanceledError`, `FatalError`
 - Streaming: `BatchItemDelta`, `IncrementalTokenDelta`, `Done`, `Error`
 - Value types: `Asset`, `ImageAsset`, `AudioAsset`, `VideoAsset`

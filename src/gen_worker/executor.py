@@ -204,11 +204,15 @@ if not serve_role.adopt_only():
     from . import mint_adapter  # noqa: F401  (registers the mint side)
 from .hostfacts import cuda_ready
 
-# pgw#1294: the three producer contexts MERGED into JobContext, so every
-# producer kind resolves to the same class under three names until th#2052
-# deletes the names. The map stays explicit rather than collapsing to one
-# entry — the KINDS are still distinct declarations and one of them (eval)
-# deliberately publishes nothing.
+# pgw#1294 MERGED the three producer contexts into JobContext; pgw#1306 deleted
+# the three names, so this map is now the whole truth: producer -> JobContext,
+# inference -> RequestContext, and nothing in between. It stays a map rather
+# than `kind != "inference"` because the KINDS are still distinct wire
+# declarations and an unknown one must not be promoted to a producer by a
+# negation. What it does NOT do any more is decide write authority: a body may
+# write because its @job/@endpoint declaration says `publishes=True`, and the
+# hub mints the grant off that declaration. `eval` is the illustration — same
+# class, same surface, and the hub refuses its repo writes.
 _CONTEXT_BY_KIND: Dict[str, type] = {
     "inference": RequestContext,
     "conversion": JobContext,

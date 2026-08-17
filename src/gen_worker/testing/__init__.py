@@ -291,8 +291,8 @@ _RECORDING_CLASSES: Dict[type, type] = {}
 
 
 def _recording_class(cls: type) -> type:
-    """``RecordingRequestContext`` / ``RecordingConversionContext`` / ... —
-    built once per context class so ``isinstance(ctx, cls)`` still holds."""
+    """``RecordingRequestContext`` / ``RecordingJobContext`` — built once per
+    context class so ``isinstance(ctx, cls)`` still holds."""
     built = _RECORDING_CLASSES.get(cls)
     if built is None:
         built = type(f"Recording{cls.__name__}", (_RecordingMixin, cls), {})
@@ -308,9 +308,9 @@ def fake_context(
     recorder: Optional[Recorder] = None,
     **kwargs: Any,
 ) -> C:
-    """Build a :class:`RequestContext` (or ``cls=``, a producer-kind
-    subclass: ``ConversionContext``/``DatasetContext``/``TrainingContext``)
-    for a handler unit test, with ``ctx.slots`` pre-populated.
+    """Build a :class:`RequestContext` (or ``cls=JobContext``, the producer
+    context every ``@job`` body and producer-kind handler receives) for a
+    handler unit test, with ``ctx.slots`` pre-populated.
 
     ``slots`` maps slot name -> ``(ref, defaults)`` — exactly what a
     ``Slot``-declared endpoint's handler reads via
