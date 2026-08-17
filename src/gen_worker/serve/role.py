@@ -131,6 +131,7 @@ MODEL_FREE_MODULES: Tuple[str, ...] = (
     "gen_worker.model.catalog",
     "gen_worker.model.catalog._generated",
     "gen_worker.model.catalog._generated.flux1_dev",
+    "gen_worker.model.catalog._generated.flux1_schnell",
     "gen_worker.model.catalog._generated.flux2_klein_4b",
     "gen_worker.model.catalog._generated.flux2_klein_9b",
     "gen_worker.model.catalog._generated.sd2",
@@ -144,6 +145,7 @@ MODEL_FREE_MODULES: Tuple[str, ...] = (
     "gen_worker.model.catalog.anima",
     "gen_worker.model.catalog.anima_serve",
     "gen_worker.model.catalog.flux1_dev_serve",
+    "gen_worker.model.catalog.flux1_schnell_serve",
     "gen_worker.model.catalog.flux2_klein_4b_serve",
     "gen_worker.model.catalog.flux2_klein_9b_serve",
     "gen_worker.model.catalog.hidream_o1",
@@ -272,6 +274,9 @@ FORBIDDEN_LIBRARIES: Tuple[str, ...] = (
 #: any ``try: import`` can walk through.
 OPTIONAL_SERVE_IMPORTS: Tuple[str, ...] = (
     "gen_worker.model.catalog.flux1_dev",
+    # schnell DERIVES its architecture from dev's and its binding guard-imports
+    # its own declaration module (pgw#1346 B1).
+    "gen_worker.model.catalog.flux1_schnell",
     # ONE declaration for TWO checkpoints: Base and Turbo are instances of this
     # model, not two models, so the Turbo binding guard-imports the same name
     # (pgw#1346 B1 — byte-identical transformer configs, differing only in the

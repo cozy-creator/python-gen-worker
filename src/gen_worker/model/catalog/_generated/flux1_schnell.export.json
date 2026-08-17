@@ -1,0 +1,608 @@
+{
+  "buckets": [
+    {
+      "name": "tokens",
+      "values": [
+        3888,
+        4032,
+        4056,
+        4096
+      ]
+    }
+  ],
+  "family": "flux1_schnell",
+  "loop": {
+    "kind": "staged",
+    "session_state": "none",
+    "stages": [
+      {
+        "repeat": "once",
+        "runner": "clip"
+      },
+      {
+        "repeat": "once",
+        "runner": "t5"
+      },
+      {
+        "parameter": "steps",
+        "repeat": "counted",
+        "runner": "denoiser"
+      }
+    ]
+  },
+  "lora_tuned": {
+    "module": "gen_worker.model.catalog.flux1_schnell_serve",
+    "qualname": "Flux1SchnellLoraTuned"
+  },
+  "parameters": [
+    {
+      "maximum": 4,
+      "minimum": 1,
+      "name": "steps"
+    }
+  ],
+  "runners": [
+    {
+      "axes": [],
+      "name": "clip",
+      "variants": [
+        {
+          "bucket": {},
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 1,
+            "inputs": [
+              {
+                "dtype": "int64",
+                "exported_name": "input_ids",
+                "name": "input_ids",
+                "param": "input_ids",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  77
+                ]
+              }
+            ],
+            "parameters": [
+              "input_ids"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "d9ce232c770f450414c7fad78dcba745",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                768
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "axes": [
+        "tokens"
+      ],
+      "name": "denoiser",
+      "variants": [
+        {
+          "bucket": {
+            "tokens": 3888
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 6,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  3888,
+                  64
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "encoder_hidden_states",
+                "name": "encoder_hidden_states",
+                "param": "encoder_hidden_states",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  1,
+                  256,
+                  4096
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "pooled_projections",
+                "name": "pooled_projections",
+                "param": "pooled_projections",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  1,
+                  768
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "img_ids",
+                "name": "img_ids",
+                "param": "img_ids",
+                "param_position": 4,
+                "path": [],
+                "position": 4,
+                "shape": [
+                  3888,
+                  3
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "txt_ids",
+                "name": "txt_ids",
+                "param": "txt_ids",
+                "param_position": 5,
+                "path": [],
+                "position": 5,
+                "shape": [
+                  256,
+                  3
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "encoder_hidden_states",
+              "pooled_projections",
+              "timestep",
+              "img_ids",
+              "txt_ids"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "3e2b90f056e074bbc941e117029b0fce",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                3888,
+                64
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "tokens": 4032
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 6,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  4032,
+                  64
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "encoder_hidden_states",
+                "name": "encoder_hidden_states",
+                "param": "encoder_hidden_states",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  1,
+                  256,
+                  4096
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "pooled_projections",
+                "name": "pooled_projections",
+                "param": "pooled_projections",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  1,
+                  768
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "img_ids",
+                "name": "img_ids",
+                "param": "img_ids",
+                "param_position": 4,
+                "path": [],
+                "position": 4,
+                "shape": [
+                  4032,
+                  3
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "txt_ids",
+                "name": "txt_ids",
+                "param": "txt_ids",
+                "param_position": 5,
+                "path": [],
+                "position": 5,
+                "shape": [
+                  256,
+                  3
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "encoder_hidden_states",
+              "pooled_projections",
+              "timestep",
+              "img_ids",
+              "txt_ids"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "b1b193a6b77a4dde04c4eda96511c0a9",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                4032,
+                64
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "tokens": 4056
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 6,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  4056,
+                  64
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "encoder_hidden_states",
+                "name": "encoder_hidden_states",
+                "param": "encoder_hidden_states",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  1,
+                  256,
+                  4096
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "pooled_projections",
+                "name": "pooled_projections",
+                "param": "pooled_projections",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  1,
+                  768
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "img_ids",
+                "name": "img_ids",
+                "param": "img_ids",
+                "param_position": 4,
+                "path": [],
+                "position": 4,
+                "shape": [
+                  4056,
+                  3
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "txt_ids",
+                "name": "txt_ids",
+                "param": "txt_ids",
+                "param_position": 5,
+                "path": [],
+                "position": 5,
+                "shape": [
+                  256,
+                  3
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "encoder_hidden_states",
+              "pooled_projections",
+              "timestep",
+              "img_ids",
+              "txt_ids"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "8c7e3d5a45ec01a90612210ef897bfcc",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                4056,
+                64
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "tokens": 4096
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 6,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  4096,
+                  64
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "encoder_hidden_states",
+                "name": "encoder_hidden_states",
+                "param": "encoder_hidden_states",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  1,
+                  256,
+                  4096
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "pooled_projections",
+                "name": "pooled_projections",
+                "param": "pooled_projections",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  1,
+                  768
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "img_ids",
+                "name": "img_ids",
+                "param": "img_ids",
+                "param_position": 4,
+                "path": [],
+                "position": 4,
+                "shape": [
+                  4096,
+                  3
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "txt_ids",
+                "name": "txt_ids",
+                "param": "txt_ids",
+                "param_position": 5,
+                "path": [],
+                "position": 5,
+                "shape": [
+                  256,
+                  3
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "encoder_hidden_states",
+              "pooled_projections",
+              "timestep",
+              "img_ids",
+              "txt_ids"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "18dc45ab267e3b9a80e9dbe2337dc914",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                4096,
+                64
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "axes": [],
+      "name": "t5",
+      "variants": [
+        {
+          "bucket": {},
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 1,
+            "inputs": [
+              {
+                "dtype": "int64",
+                "exported_name": "input_ids",
+                "name": "input_ids",
+                "param": "input_ids",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  256
+                ]
+              }
+            ],
+            "parameters": [
+              "input_ids"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "fc003a9e21666896736480c61ea46b85",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                256,
+                4096
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "scheduler": {
+    "name": "flow_match_euler_discrete",
+    "parameters": {
+      "base_image_seq_len": 256,
+      "base_shift": 0.5,
+      "max_image_seq_len": 4096,
+      "max_shift": 1.15,
+      "num_train_timesteps": 1000,
+      "shift": 1.0,
+      "use_dynamic_shifting": false
+    }
+  },
+  "tuned": {
+    "module": "gen_worker.model.catalog.flux1_schnell_serve",
+    "qualname": "Flux1SchnellTuned"
+  },
+  "v": 1
+}

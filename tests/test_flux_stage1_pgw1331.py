@@ -543,6 +543,12 @@ def test_the_blocker_refuses_to_promise_something_already_false() -> None:
 
     from gen_worker.serve import guard
 
+    # Established HERE rather than inherited from whichever earlier test
+    # happened to trace a graph. The precondition IS the premise of this test,
+    # so a run that does not establish it was asserting nothing — which is what
+    # made this fail the moment a new test file changed xdist's distribution.
+    import diffusers  # noqa: F401  - imported for its side effect on sys.modules
+
     previous = role.current()
     try:
         role._reset_for_test(role.ServeRole.ADOPT_ONLY)
