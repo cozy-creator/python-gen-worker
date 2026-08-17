@@ -60,6 +60,14 @@ RELEASE_TAG = re.compile(r"^v(?P<version>\d+\.\d+\.\d+)$")
 # `pgw#1323: ...`, `th#2082 follow-up: ...` -- an issue reference in a commit
 # SUBJECT. Bodies are excluded on purpose: a body cites related issues, a
 # subject claims authorship of the change.
+#
+# Every ref in the subject counts, not just the leading one: 8 of the last 451
+# subjects here trail it (`ci: fence the launch boundary (pgw#1239)`), and
+# dropping those would date those fragments by the wrong signal. The cost is
+# that a subject cross-referencing a second issue (67 of 451) lends it a commit
+# it did not author -- which the all-commits rule below fails SAFE on: a stray
+# commit outside a tag only ever moves a fragment LATER or into the printed
+# pending list, never into a wheel that lacks the change.
 SUBJECT_REF = re.compile(r"(?<![0-9a-z])(?P<prefix>[a-z]+)#0*(?P<number>\d+)(?![0-9])")
 
 LEDGER = "consumed.tsv"
