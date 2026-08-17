@@ -47,7 +47,7 @@ def test_put_verdict_is_the_one_table() -> None:
 def test_media_put_path_projects_from_it() -> None:
     """Worker-owned media transport keeps one status table.
 
-    Repository-object transfer lives in HashRepo and is tested there.
+    Repository-object transfer lives in tensorfs and is tested there.
     """
     import inspect
 

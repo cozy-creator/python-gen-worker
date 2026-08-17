@@ -28,7 +28,7 @@ from gen_worker._vendor.tensorfs import (
     TransferGrant,
     download,
 )
-from gen_worker._vendor.torch_compiled_graphs import (
+from gen_worker._vendor.torchcg import (
     ARTIFACT_KIND,
     StoreOutcome,
     is_compiled_graph_key,
@@ -194,7 +194,7 @@ def _materialize_named_artifact(
     except ValueError as exc:
         raise NamedArtifactUnavailable(
             "artifact_fetch_failed",
-            f"{what}: named cell {cell_ref!r} has invalid HashRepo transport: {exc}",
+            f"{what}: named cell {cell_ref!r} has invalid tensorfs transport: {exc}",
         ) from exc
     try:
         report = download(grants, cas)

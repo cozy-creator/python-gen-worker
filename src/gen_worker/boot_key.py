@@ -86,7 +86,7 @@ from .child_contract import CompileSpec, MintSlot, slot_subjects
 from . import hostfacts
 
 if TYPE_CHECKING:
-    from gen_worker._vendor.torch_compiled_graphs import GraphClassDeclaration
+    from gen_worker._vendor.torchcg import GraphClassDeclaration
 
 logger = logging.getLogger(__name__)
 
@@ -362,7 +362,7 @@ def _tcg_version() -> str:
     `""` — which, once the distribution was gone, would have silently dropped
     TCG from the memo key and stopped a TCG change from invalidating anything.
     """
-    return vendored_rev("torch_compiled_graphs")
+    return vendored_rev("torchcg")
 
 
 def closure_digest(
@@ -598,7 +598,7 @@ def declaration_hashes(declarations: Mapping[str, str]) -> Dict[str, str]:
     ingress, range, witness, coordinates and literals; comparing its derived
     hash to the child's stated hash catches a corrupt or drifted child wire.
     """
-    from gen_worker._vendor.torch_compiled_graphs import GraphClassDeclaration
+    from gen_worker._vendor.torchcg import GraphClassDeclaration
 
     hashes: Dict[str, str] = {}
     for name, canonical in declarations.items():
@@ -688,7 +688,7 @@ def fold(
     This parent supplies only the current ``sm`` and toolchain through TCG's
     public identity functions; no worker graph or key arithmetic remains.
     """
-    from gen_worker._vendor.torch_compiled_graphs.identity import from_axes, toolchain_axis_digest
+    from gen_worker._vendor.torchcg.identity import from_axes, toolchain_axis_digest
 
     sm = str(cc.runtime_key().get("sm") or "")
     if not sm:

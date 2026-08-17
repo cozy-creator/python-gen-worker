@@ -596,7 +596,7 @@ def test_the_fence_covers_every_module_that_computes_a_compiled_graph_key() -> N
     file which violates the rule is the one nobody added."""
     fenced = {p.name for p in _fence_module().fenced_modules()}
     # pgw#1277: the key's DEFINITION left this tree for
-    # torch_compiled_graphs.identity, so no module here defines it and the
+    # torchcg.identity, so no module here defines it and the
     # fence covers exactly the CALL SITES plus the axis-input seeds.
     assert {"fleet_cells.py", "boot_key.py", "aot_mint.py",
             "compile_cache.py"} <= fenced

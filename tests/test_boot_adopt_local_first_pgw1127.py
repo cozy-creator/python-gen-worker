@@ -206,7 +206,7 @@ def _derived() -> Any:
     real axes, so the address the boot hands the store is the address the store
     is addressed by everywhere else. Only the TRACE is stood in for (there is no
     card on a CI runner, and `sm` is a key axis)."""
-    from gen_worker._vendor.torch_compiled_graphs import identity as ck
+    from gen_worker._vendor.torchcg import identity as ck
 
     del ck  # pgw#1283: the address comes from the artifact this machine HOLDS
     return boot_key.DerivedKey(

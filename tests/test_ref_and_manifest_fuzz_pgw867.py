@@ -11,7 +11,7 @@ the worker then acts on, and each fails SILENTLY rather than loudly.
   FORM IS A FIXED POINT, because hub-minted refs and worker wire refs are
   compared byte-wise, so a ref that normalizes two ways is a cache miss that
   presents as a missing model.
-* **CAS refs** (``hashrepo.CASRef``): a bare hex
+* **CAS refs** (``tensorfs.CASRef``): a bare hex
   string must not default to ``blake3:``. ``len(digest) == 64`` cannot tell
   blake3 from sha256 — both are 32 bytes — so a length check is not a
   discriminator, it only looks like one.

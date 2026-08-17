@@ -1,4 +1,4 @@
-"""Tensorhub publish policy composed over HashRepo's public API."""
+"""Tensorhub publish policy composed over tensorfs's public API."""
 
 from __future__ import annotations
 
@@ -20,8 +20,8 @@ def _write(root: Path, name: str, data: bytes) -> CommitFile:
     return CommitFile(path=name, local_path=path, size_bytes=len(data))
 
 
-def test_small_file_publishes_as_one_hashrepo_object(fake_hub, tmp_path: Path) -> None:
-    data = b'{"model":"hashrepo"}'
+def test_small_file_publishes_as_one_tensorfs_object(fake_hub, tmp_path: Path) -> None:
+    data = b'{"model":"tensorfs"}'
     result = _client(fake_hub).publish_v2(
         release="r1",
         destination_repo="acme/model",
@@ -37,7 +37,7 @@ def test_small_file_publishes_as_one_hashrepo_object(fake_hub, tmp_path: Path) -
     assert result.uploaded == 1
 
 
-def test_non_safetensors_file_uses_bounded_hashrepo_chunks(fake_hub, tmp_path: Path) -> None:
+def test_non_safetensors_file_uses_bounded_tensorfs_chunks(fake_hub, tmp_path: Path) -> None:
     data = b"a" * MAX_CHUNK_SIZE + b"tail"
     result = _client(fake_hub).publish_v2(
         release="r1",

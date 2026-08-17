@@ -105,10 +105,14 @@ def test_no_deleted_project_is_required_from_an_index() -> None:
     requirements = list(project["dependencies"])
     for extra in project.get("optional-dependencies", {}).values():
         requirements.extend(extra)
+    # This fence's denylist must NAME the dead projects in order to refuse
+    # them; respelling it would delete the refusal.
     dead = [r for r in requirements if r.split()[0].split(">")[0].split("=")[0].strip()
+            # retired-name: the denylist above.
             in {"hashrepo", "tensorfs", "torch-compiled-graphs", "torchcg"}]
     assert dead == [], f"deleted PyPI projects required from an index: {dead}"
     assert "[tool.uv.sources]" in text
+    # retired-name: same denylist, same reason.
     for name in ("hashrepo =", "torch-compiled-graphs =", "tensorfs =", "torchcg ="):
         assert name not in text, (
             f"a `{name}` source pin is back in pyproject.toml. A source pin is "
@@ -119,7 +123,7 @@ def test_no_deleted_project_is_required_from_an_index() -> None:
 
 @pytest.mark.parametrize(
     "module",
-    ["gen_worker._vendor.tensorfs", "gen_worker._vendor.torch_compiled_graphs"],
+    ["gen_worker._vendor.tensorfs", "gen_worker._vendor.torchcg"],
 )
 def test_the_vendored_packages_import_with_no_third_party_present(module: str) -> None:
     __import__(module)

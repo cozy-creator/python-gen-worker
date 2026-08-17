@@ -235,7 +235,7 @@ def _preflight_cache_dirs() -> Dict[str, str]:
         primary_cache_dir=primary,
     )
 
-    ok, details = _check_cache_path("HashRepo CAS", primary)
+    ok, details = _check_cache_path("tensorfs CAS", primary)
     if not ok:
         raise RuntimeError(
             "worker cache preflight failed for tensorhub CAS path "

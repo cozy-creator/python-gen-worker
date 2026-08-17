@@ -602,11 +602,11 @@ class ModelStore:
     ) -> List[Tuple[str, int]]:
         """Materialized tree bytes the disk GC can certainly free.
 
-        HashRepo owns content deduplication under ``objects/`` and materializes
+        tensorfs owns content deduplication under ``objects/`` and materializes
         independent snapshot trees. Deleting an inactive tree therefore frees
         its indexed bytes even when another manifest references the same
         objects. Any newly unreachable objects are an additional conservative
-        gain once HashRepo collects them; they are not counted here.
+        gain once tensorfs collects them; they are not counted here.
         """
         out: List[Tuple[str, int]] = []
         for ref in self.disk_refs():
@@ -1510,7 +1510,7 @@ class ModelStore:
                         source = boot_mod.SOURCE_R2
                     elif known_total > 0:
                         # A CAS snapshot materialized with zero network bytes:
-                        # every object was already in HashRepo (local CAS) or
+                        # every object was already in tensorfs (local CAS) or
                         # came off the endpoint's warm datacenter volume.
                         source = (
                             boot_mod.SOURCE_VOLUME if self._fill_source_dir

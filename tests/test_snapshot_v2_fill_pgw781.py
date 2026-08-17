@@ -1,4 +1,4 @@
-"""Tensorhub's resolved-manifest adapter over the public HashRepo API."""
+"""Tensorhub's resolved-manifest adapter over the public tensorfs API."""
 
 from __future__ import annotations
 
@@ -188,8 +188,8 @@ def _stale_invalid_process(
         ensure_entered.set()
 
 
-def test_whole_file_downloads_into_hashrepo_and_reuses_it(tmp_path: Path) -> None:
-    body = b"hashrepo-worker-adapter"
+def test_whole_file_downloads_into_tensorfs_and_reuses_it(tmp_path: Path) -> None:
+    body = b"tensorfs-worker-adapter"
     digest = _sha(body)
     server = BlobServer({digest: body})
     try:

@@ -11,7 +11,7 @@ A mint hour with one name on it cannot be optimised — you cannot tell a
 compile-bound mint from a warm plan that is simply running too many diffusion
 steps. This module measures the split.
 
-Same instrument as the AOT path (:mod:`torch_compiled_graphs.spans`): deltas
+Same instrument as the AOT path (:mod:`torchcg.spans`): deltas
 of dynamo's process-global ``compilation_time_metrics`` across a span. The KEY
 SET is different and that difference is the whole point — the AOT partition
 was derived for ``aot_compile`` and **silently under-reports a JIT compile**.
@@ -41,7 +41,7 @@ import contextlib
 import time
 from typing import Any, Dict, Iterator, List, Mapping, Tuple
 
-from gen_worker._vendor.torch_compiled_graphs.spans import phase_delta, phase_snapshot
+from gen_worker._vendor.torchcg.spans import phase_delta, phase_snapshot
 
 #: Bump when the partition changes shape, so a reader never mixes two ledgers.
 WARM_SPANS_V = 1

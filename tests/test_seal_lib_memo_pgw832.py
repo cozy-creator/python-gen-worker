@@ -32,7 +32,7 @@ from typing import Dict, Iterator
 import pytest
 
 from gen_worker import aot_compile_pool as pool
-from gen_worker._vendor.torch_compiled_graphs import spans
+from gen_worker._vendor.torchcg import spans
 from gen_worker import env_seal
 
 torch = pytest.importorskip("torch")

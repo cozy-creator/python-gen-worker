@@ -398,7 +398,7 @@ def _isolated_local_cell_store(tmp_path_factory):
     edge to anything.
 
     pgw#1283 EXTENSION: the store's BYTES no longer live under that root. They
-    live in the worker's one HashRepo CAS at ``TENSORHUB_CACHE_DIR/cas``, whose
+    live in the worker's one tensorfs CAS at ``TENSORHUB_CACHE_DIR/cas``, whose
     default is a real shared directory on a dev box. So the cache root is
     redirected here too — isolating the policy sidecar while leaving the
     artifacts in a shared store would isolate exactly the half that stopped

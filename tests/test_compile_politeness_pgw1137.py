@@ -632,7 +632,7 @@ def test_a_stopped_local_mint_reuses_only_the_canonical_tcg_store(
 ) -> None:
     """Ctrl-C may cost the in-flight class, never a second resume substrate.
 
-    Every completed class is already in TCG's canonical HashRepo CAS. The
+    Every completed class is already in TCG's canonical tensorfs CAS. The
     worker request therefore carries no private bank path, and the compile
     child opens the same production engine factory as import and serving.
     """

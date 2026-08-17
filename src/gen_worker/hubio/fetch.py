@@ -12,7 +12,7 @@ One place for the whole discipline:
 - algorithm-tagged digest verification, dispatching on the tag;
 - durable atomic finalize (fsync data, rename, fsync directory).
 
-NOT this primitive: HashRepo repository-object transfer, the SSRF-guarded
+NOT this primitive: tensorfs repository-object transfer, the SSRF-guarded
 input-asset fetch (``input_assets`` applies the guarded opener per hop), and
 the hf_hub-owned HF branch.
 """

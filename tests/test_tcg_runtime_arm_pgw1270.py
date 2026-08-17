@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from gen_worker import aot_delivery, aot_serve, receipts
-from gen_worker._vendor.torch_compiled_graphs import StoreOutcome
+from gen_worker._vendor.torchcg import StoreOutcome
 
 FAMILY = "runtime-arm"
 KEY = "cg-key-v1-" + "a" * 56
@@ -96,7 +96,7 @@ def test_delivery_never_imports_an_unkeyed_ref(
 def test_serve_handoff_removes_only_delivery_staging(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from gen_worker._vendor.torch_compiled_graphs import artifact as artifact_mod
+    from gen_worker._vendor.torchcg import artifact as artifact_mod
 
     incoming = tmp_path / "compiled-graph-transfer" / ".incoming"
     incoming.mkdir(parents=True)

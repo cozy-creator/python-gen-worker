@@ -13,13 +13,13 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
-from gen_worker._vendor.torch_compiled_graphs import (
+from gen_worker._vendor.torchcg import (
     CallIngress,
     CallInput,
     GraphClassDeclaration,
     build_call_ingress,
 )
-from gen_worker._vendor.torch_compiled_graphs.spans import SpanLedger
+from gen_worker._vendor.torchcg.spans import SpanLedger
 
 from gen_worker import aot_compile_child as child
 from gen_worker import aot_compile_pool as pool
@@ -344,7 +344,7 @@ def test_retry_filters_held_classes_before_export(
 def test_runtime_uses_the_canonical_worker_cas(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from gen_worker._vendor import torch_compiled_graphs
+    from gen_worker._vendor import torchcg
 
     from gen_worker import compile_cache
     from gen_worker.models import cache_paths
@@ -357,7 +357,7 @@ def test_runtime_uses_the_canonical_worker_cas(
             captured["target"] = target
             captured["toolchain"] = toolchain
 
-    monkeypatch.setattr(torch_compiled_graphs, "RuntimeCompatibility", _Runtime)
+    monkeypatch.setattr(torchcg, "RuntimeCompatibility", _Runtime)
     monkeypatch.setattr(
         cache_paths,
         "open_worker_engine",
@@ -397,7 +397,7 @@ def test_the_LANE_CHOICE_is_not_made_here_and_the_decline_is_named(
     before any export (its end-to-end red-proof is
     `test_mint_recipe_parity_pgw984_pgw985`).
     """
-    from gen_worker._vendor import torch_compiled_graphs
+    from gen_worker._vendor import torchcg
 
     from gen_worker import compile_cache
     from gen_worker.hostfacts import (
@@ -408,7 +408,7 @@ def test_the_LANE_CHOICE_is_not_made_here_and_the_decline_is_named(
     targets: list[str] = []
     monkeypatch.setattr(compile_cache, "runtime_key", lambda: {"sm": ""})
     monkeypatch.setattr(
-        torch_compiled_graphs, "RuntimeCompatibility",
+        torchcg, "RuntimeCompatibility",
         lambda target, **kw: targets.append(target))
     monkeypatch.setattr(
         cache_paths, "open_worker_engine", lambda root=None: object())

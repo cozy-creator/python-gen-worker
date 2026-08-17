@@ -495,7 +495,7 @@ def _attempt_all(monkeypatch, tmp_path, *, derive=None, resolve_batch=None,
 def _derived_multi() -> Any:
     """A declaration that traced THREE graph classes — the shape the batch wire
     exists for, and the one a single-key loop would bill three round trips."""
-    from gen_worker._vendor.torch_compiled_graphs import identity as ck
+    from gen_worker._vendor.torchcg import identity as ck
 
     from gen_worker import boot_key
 
@@ -509,7 +509,7 @@ def _derived_multi() -> Any:
 
 
 def _derived(digest: str = KEY) -> Any:
-    from gen_worker._vendor.torch_compiled_graphs import identity as ck
+    from gen_worker._vendor.torchcg import identity as ck
 
     from gen_worker import boot_key
 

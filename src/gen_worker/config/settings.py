@@ -107,7 +107,7 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # workers get orchestrator-resolved manifests and never dial these.
     tensorhub_url: str = ""        # TENSORHUB_URL
     tensorhub_token: str = ""      # TENSORHUB_TOKEN
-    # The single cache root moves all Tensorhub state, including HashRepo's
+    # The single cache root moves all Tensorhub state, including tensorfs's
     # local CAS, off /tmp (cozy local persists weights across reboots).
     tensorhub_cache_dir: str = ""  # TENSORHUB_CACHE_DIR
     # Endpoint-scoped datacenter-warm fill source (RunPod network volume mount),

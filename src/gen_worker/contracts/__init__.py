@@ -8,7 +8,7 @@ byte copy and fence it with a drift script that fetched a moving branch tip.
 
 Shipping them here makes the pin possible: a consumer installs a pinned version
 and reads the exact bytes it pinned. The accessor shape deliberately matches
-``torch_compiled_graphs.contracts`` so the two authorities read identically.
+``torchcg.contracts`` so the two authorities read identically.
 
 Corpus CONTENT is owned by the issue that introduced each corpus; this package
 only makes the existing bytes importable.

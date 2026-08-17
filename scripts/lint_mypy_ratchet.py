@@ -47,7 +47,7 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # 60 -> 56: PR 7 cleared the BUILD-TIME surface (registry,
     # discovery.discover, discovery.execution_lanes, entrypoint) — what an
     # endpoint image build exercises.
-    # 56 -> 55: pgw#1232 moved the generic transfer journal to HashRepo.
+    # 56 -> 55: pgw#1232 moved the generic transfer journal to tensorfs.
     # 55 -> 54: pgw#1270 deleted the duplicate worker package/runner surface.
     # pgw#1277: 54 -> 53. compiled_graph_key.py was relaxed here; its successor
     # gen_worker/graph_facts.py needs no relaxation, so the ground is kept.

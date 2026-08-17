@@ -34,7 +34,7 @@ from pathlib import Path
 import pytest
 
 from gen_worker import aot_compile_pool as pool
-from gen_worker._vendor.torch_compiled_graphs import spans
+from gen_worker._vendor.torchcg import spans
 from harness import fake_compile_child
 
 _DECLARED = 6

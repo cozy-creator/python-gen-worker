@@ -53,8 +53,8 @@ from torch._dynamo import exc as dexc
 
 import gen_worker.executor as executor_mod
 from gen_worker import Compile, activity as activity_mod
-from gen_worker._vendor.torch_compiled_graphs import identity as compiled_graph_key_mod
-from gen_worker._vendor.torch_compiled_graphs import is_compiled_graph_key
+from gen_worker._vendor.torchcg import identity as compiled_graph_key_mod
+from gen_worker._vendor.torchcg import is_compiled_graph_key
 from gen_worker import compile_cache as cc
 from gen_worker import fleet_cells, hot_swap
 from gen_worker.api.binding import Hub, wire_ref

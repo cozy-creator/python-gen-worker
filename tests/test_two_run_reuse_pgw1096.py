@@ -13,7 +13,7 @@ directory on disk. Run 1 mints and keeps; run 2 starts cold, with an empty
 or the sidecar record were wrong in any way that a warm process papers over,
 run 2 opens a `PendingSelfMint` and this test says so.
 
-WHAT IS REAL HERE: the store (a real TCG envelope in a real HashRepo CAS, real
+WHAT IS REAL HERE: the store (a real TCG envelope in a real tensorfs CAS, real
 atomic replace), the memo, `fleet_cells._arming_policy` — the actual production
 arming brain, entered the way the executor enters it — the ordering (local
 check before the pending), and process death between the runs.

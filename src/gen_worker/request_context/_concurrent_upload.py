@@ -2,7 +2,7 @@
 
 There is NO file-level upload parallelism: files are uploaded serially and the
 fan-out lives *inside* one file (S3 parts in ``presigned_upload.py``, CAS chunks
-in HashRepo), each with its own bounded, process-wide PUT
+in tensorfs), each with its own bounded, process-wide PUT
 budget.
 
 What lives here is ``BudgetGate``: the ``max_total_bytes`` /

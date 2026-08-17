@@ -5,7 +5,7 @@ pgw#1277 split the old ``compiled_graph_key`` module along the boundary it had
 always described but never enforced. Compiled-graph IDENTITY — the three
 ``cg-key-v1`` axes, their canonical fold, the key grammar and the derivation of
 a key from an artifact's recorded facts — belongs to
-:mod:`torch_compiled_graphs.identity` and lives there only. What survives here
+:mod:`torchcg.identity` and lives there only. What survives here
 is everything the worker owns because TCG has no concept of it:
 
 * the DECLARED ENVELOPE (:func:`envelope_facts`) — the serving region an author
@@ -37,7 +37,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Mapping, Tuple
 
-from gen_worker._vendor.torch_compiled_graphs import is_compiled_graph_key
+from gen_worker._vendor.torchcg import is_compiled_graph_key
 
 #: The MANIFEST block recording one declaration's DECLARED ENVELOPE.
 #:

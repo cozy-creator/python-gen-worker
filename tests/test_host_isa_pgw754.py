@@ -31,7 +31,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from gen_worker._vendor.torch_compiled_graphs import build_call_ingress
+from gen_worker._vendor.torchcg import build_call_ingress
 
 from gen_worker import aot_compile_child, aot_mint, env_seal, host_isa
 

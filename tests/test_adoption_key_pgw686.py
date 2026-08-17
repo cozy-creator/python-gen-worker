@@ -25,8 +25,8 @@ from typing import Any, Dict, Iterator
 
 import pytest
 
-from gen_worker._vendor.torch_compiled_graphs import identity as ck
-from gen_worker._vendor.torch_compiled_graphs import is_compiled_graph_key
+from gen_worker._vendor.torchcg import identity as ck
+from gen_worker._vendor.torchcg import is_compiled_graph_key
 from gen_worker import compile_cache as cc
 from gen_worker import env_seal
 from gen_worker.models import w8a8_lora

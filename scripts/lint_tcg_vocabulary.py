@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """pgw#1299: TCG owns the compiled-graph metadata vocabulary; nobody respells it.
 
-`torch_compiled_graphs` exports `GRAPH_CLASS_BLOCK` and `ARTIFACT_KIND` for one
+`torchcg` exports `GRAPH_CLASS_BLOCK` and `ARTIFACT_KIND` for one
 reason: a consumer that spells the string instead of importing it does not fail
 at import when TCG renames the key. It fails at run time, silently, and in the
 worst possible shape — every one of these sites is a `.get(...)` on an
@@ -57,7 +57,7 @@ from _lint_scope import is_unowned  # noqa: E402
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_ROOT = REPO / "src" / "gen_worker"
 
-#: value -> the authority a consumer must import from `torch_compiled_graphs`.
+#: value -> the authority a consumer must import from `torchcg`.
 OWNED: dict[str, str] = {
     "graph_class": "GRAPH_CLASS_BLOCK",
     "aot-inductor": "ARTIFACT_KIND",
@@ -164,7 +164,7 @@ def main(argv: List[str]) -> int:
         for line, value, authority in scan_text(path.read_text(), str(path)):
             findings.append(
                 f"{path.relative_to(REPO)}:{line}: {value!r} is TCG's vocabulary — "
-                f"import {authority} from torch_compiled_graphs"
+                f"import {authority} from torchcg"
             )
     if findings:
         print("pgw#1299: compiled-graph vocabulary respelled as a literal\n")

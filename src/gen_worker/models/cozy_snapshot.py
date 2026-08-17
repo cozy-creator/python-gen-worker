@@ -1,6 +1,6 @@
-"""Tensorhub snapshot policy composed over HashRepo.
+"""Tensorhub snapshot policy composed over tensorfs.
 
-Tensorhub supplies a resolved manifest and opaque GET grants. HashRepo owns the
+Tensorhub supplies a resolved manifest and opaque GET grants. tensorfs owns the
 chunk manifest, local object store, verified transfers, and materialization.
 This module retains only worker policy: component selection, pickle refusal,
 disk headroom, endpoint-volume fill order, and boot observability.
@@ -84,10 +84,10 @@ class _SnapshotEntry:
 
 
 def _norm_rel_path(path: str) -> str:
-    """Tensorhub path adapter; HashRepo performs the authoritative check."""
+    """Tensorhub path adapter; tensorfs performs the authoritative check."""
 
     value = str(path or "").strip()
-    # Constructing an entry applies HashRepo's complete portable-path policy.
+    # Constructing an entry applies tensorfs's complete portable-path policy.
     return FileEntry(value, 0, CASRef("0" * 64)).path
 
 
@@ -127,7 +127,7 @@ def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> Worke
         if entry.path.endswith(".parts.json") or re.search(r"\.part\d{4}$", entry.path):
             raise ValueError(
                 f"resolved model file {entry.path}: legacy split-file snapshots are not "
-                "part of HashRepo v1; republish the repository"
+                "part of tensorfs v1; republish the repository"
             )
         if not file.chunks and not str(file.url or "").strip():
             raise ValueError(f"resolved model file missing transfer: {entry.path}")
@@ -513,7 +513,7 @@ class CozySnapshotDownloader:
                             f"expired grants: {', '.join(map(str, report.expired))}"
                         )
                     raise RuntimeError(
-                        "HashRepo download failed: " + "; ".join(reasons)
+                        "tensorfs download failed: " + "; ".join(reasons)
                     )
         except BaseException:
             if comp_spans is not None:
@@ -526,7 +526,7 @@ class CozySnapshotDownloader:
                     source = cas.verify_object(grant.digest, size=grant.size_bytes)
                     fill.put_file(source, expected=grant.digest, size=grant.size_bytes)
                 except (DigestMismatch, OSError):
-                    _log.warning("HashRepo volume fill failed for %s", grant.digest)
+                    _log.warning("tensorfs volume fill failed for %s", grant.digest)
 
 
 def delete_blobs(base_dir: Path, digests: Any) -> None:

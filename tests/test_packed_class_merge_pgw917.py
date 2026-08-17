@@ -32,7 +32,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 import pytest
-from gen_worker._vendor.torch_compiled_graphs import CallIngress, CallInput, GraphClassDeclaration
+from gen_worker._vendor.torchcg import CallIngress, CallInput, GraphClassDeclaration
 
 from gen_worker import aot_mint
 

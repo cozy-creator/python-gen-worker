@@ -280,7 +280,7 @@ def delete_ref_bytes(ref: str, path: Path, cas_dir: Path) -> None:
 
 
 def sweep_orphan_blobs(cas_dir: Path) -> int:
-    """Collect unpinned HashRepo objects after the writer safety grace."""
+    """Collect unpinned tensorfs objects after the writer safety grace."""
 
     return int(
         open_worker_cas(cas_dir).collect_garbage(
@@ -300,7 +300,7 @@ def sweep_stale_writer_temp(
 ) -> int:
     """Remove abandoned snapshot-materialization staging directories.
 
-    HashRepo owns transfer temporaries under its ``tmp/`` namespace. The
+    tensorfs owns transfer temporaries under its ``tmp/`` namespace. The
     worker owns the product-level ``snapshots/`` destination, including an
     atomic materialization that died before rename. Only directories idle past
     ``older_than_s`` are removed.
@@ -308,7 +308,7 @@ def sweep_stale_writer_temp(
     removed = 0
     root = Path(cas_dir)
     now = time.time()
-    # HashRepo owns objects/ and tmp/. This worker scans only its product-level
+    # tensorfs owns objects/ and tmp/. This worker scans only its product-level
     # materialization namespace; generic transfer-temporary cleanup belongs to
     # the library.
     for base_name in ("snapshots",):
