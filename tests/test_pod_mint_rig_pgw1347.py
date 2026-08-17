@@ -1072,6 +1072,10 @@ def test_the_probe_needs_no_hub_which_is_why_these_rows_are_buyable_today(tmp_pa
     assert "--vehicle micro" in workload.command and "--device cuda" in workload.command
     assert "--json" in workload.command, "the row IS the report; no report, no row"
     assert "nice -n 19" in workload.command
+    # The load gate is a SHARED-BOX rule. A rented pod is dedicated and its load
+    # is high precisely because the install just finished; measured on row 2, the
+    # gate refused at 26.2 after four paid-for re-rolls had reached a good host.
+    assert "--force-load" in workload.command
     for path in ("/root/.cache/torchinductor_root", POD_REPO):
         assert path in workload.progress_paths
 
