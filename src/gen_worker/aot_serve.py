@@ -1693,6 +1693,24 @@ class StoreArmedGraph:
         _name, runner = self.dispatch.select(args, kwargs)
         return runner(*args, **kwargs)
 
+    def entry_states(self) -> Dict[str, Dict[str, Any]]:
+        """What this pod actually serves, in the SAME vocabulary as a
+        module-armed class (pgw#1176 §1.4). A store-armed entry that the hub
+        could not see would be a pod advertising less than it serves, which is
+        the same defect as advertising more."""
+
+        return dispatch_states(self.target, self.dispatch)
+
+    def disarm(self, reason: str) -> bool:
+        """De-arm this graph class, sticky for the boot (§4.31).
+
+        The store arm's half of :func:`disarm_entry`. It drops the entry and
+        NOT the constants: the runner's installed pointers are ``user_managed``
+        and the container is still loaded, so freeing the tensors here would
+        turn a de-arm into a use-after-free."""
+
+        return self.dispatch.remove(self.graph_class, str(reason))
+
 
 def arm_compiled_graph_from_store(
     cfg: Any,
@@ -1830,6 +1848,27 @@ def disarm_entry(pipeline: Any, name: str, reason: str) -> bool:
     return dropped
 
 
+def dispatch_states(target: str, dispatch: EntryDispatch) -> Dict[str, Dict[str, Any]]:
+    """One dispatch's per-entry serve state, in THE vocabulary.
+
+    Written once because there are now two arms and the state a pod reports
+    must not depend on which one ran. Two spellings of one verdict is the
+    pgw#1247 class, and here it would be worse than cosmetic: the hub's
+    per-entry events are built from this, so a second vocabulary is a pod
+    whose store-armed classes are invisible to the fleet.
+    """
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for name, runner in dispatch.runners:
+        out[name] = {
+            "state": "armed", "target": target, "calls": int(runner.calls)}
+    for name, why in dispatch.de_armed.items():
+        out[name] = {"state": "de_armed", "target": target, "reason": why}
+    for name in dispatch.pending:
+        out[name] = {"state": "pending", "target": target}
+    return out
+
+
 def entry_states(pipeline: Any) -> Dict[str, Dict[str, Any]]:
     """Per-entry SERVE STATE — what this pod actually serves, per graph class.
 
@@ -1837,6 +1876,11 @@ def entry_states(pipeline: Any) -> Dict[str, Dict[str, Any]]:
     ``armed`` / ``de_armed(reason)`` / ``pending`` — so there is no unit left
     that can advertise more than it serves. This is the record the per-entry
     hub events (§1.7) are built from.
+
+    This is the MODULE-armed half: it reads the pipeline marker. A
+    store-armed class has no pipeline to hang a marker on and reports through
+    :meth:`StoreArmedGraph.entry_states`, which returns the same vocabulary
+    from the same builder.
     """
     marker = getattr(pipeline, _MARKER_ATTR, None) or {}
     out: Dict[str, Dict[str, Any]] = {}
@@ -1844,13 +1888,7 @@ def entry_states(pipeline: Any) -> Dict[str, Dict[str, Any]]:
         dispatch = _dispatch_for(marker, target)
         if dispatch is None:
             continue
-        for name, runner in dispatch.runners:
-            out[name] = {
-                "state": "armed", "target": target, "calls": int(runner.calls)}
-        for name, why in dispatch.de_armed.items():
-            out[name] = {"state": "de_armed", "target": target, "reason": why}
-        for name in dispatch.pending:
-            out[name] = {"state": "pending", "target": target}
+        out.update(dispatch_states(str(target), dispatch))
     return out
 
 

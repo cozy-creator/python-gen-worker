@@ -716,3 +716,41 @@ def test_a_non_oom_read_failure_is_not_laundered_into_a_vram_miss(
         aot_serve.arm_compiled_graph_from_store(
             SimpleNamespace(family=FAMILY), KEY, store, device="cuda"
         )
+
+
+def test_a_store_armed_class_reports_in_the_same_vocabulary(
+    armed_store: Tuple[Dict[str, Any], aot_constants.ConstantStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pgw#1176 §1.4, for the arm that has no pipeline marker.
+
+    The hub's per-entry events are built from this record. A store-armed class
+    the hub cannot see is a pod advertising LESS than it serves, which is the
+    same defect as advertising more — and a second vocabulary for the same
+    verdict is the pgw#1247 class.
+    """
+
+    weights, store = armed_store
+    _patch_resolve(monkeypatch, weights)
+    armed = aot_serve.arm_compiled_graph_from_store(
+        SimpleNamespace(family=FAMILY), KEY, store, device="cpu"
+    )
+
+    assert armed.entry_states() == {
+        GRAPH_CLASS: {"state": "armed", "target": TARGET, "calls": 0}
+    }
+    armed(torch.ones(1, 8))
+    assert armed.entry_states()[GRAPH_CLASS]["calls"] == 1
+
+    assert armed.disarm("numerics") is True
+    assert armed.entry_states() == {
+        GRAPH_CLASS: {"state": "de_armed", "target": TARGET, "reason": "numerics"}
+    }
+    # §4.31's de-arm is sticky for the boot: the same class cannot re-join.
+    with pytest.raises(AdoptError) as excinfo:
+        armed.dispatch.add(GRAPH_CLASS, armed.runner)
+    assert excinfo.value.reason == "entry_de_armed"
+    # The constants outlive the de-arm on purpose: the AOTI container still
+    # holds their pointers user-managed, so freeing them here is a
+    # use-after-free, not a cleanup.
+    assert set(armed.constants) == set(weights)
