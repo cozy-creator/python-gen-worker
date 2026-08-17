@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 import msgspec
 from .hostfacts import cuda_ready
+from .manifest_blocks import declaration_rows
 
 CUDA_PROBE_FAILED_MARKER = "GEN_WORKER_CUDA_PROBE_FAILED"
 
@@ -97,15 +98,23 @@ def should_probe_cuda(
 ) -> bool:
     """Whether this concrete worker image must pass the CUDA health probe.
 
-    A manifest may contain both CPU and GPU functions because one endpoint
+    Read off EVERY declaration the image carries — ``@endpoint`` functions and
+    ``@job`` functions alike, via ``manifest_blocks.declaration_rows``. Both
+    row shapes carry the same ``resources.gpu``, so the question is one
+    question. pgw#1354: this walked ``functions[]`` alone, so a jobs-only GPU
+    image (10 of 27 conversion jobs declare ``gpu=True``) returned False and
+    was never probed — the gw#529 bad-host guard silently did not apply to the
+    whole jobs program.
+
+    A manifest may contain both CPU and GPU declarations because one endpoint
     release can publish separate ``accelerator=none`` and ``accelerator=cuda``
     images.  In that mixed case the installed torch build is the authoritative
     signal: probe CUDA images and let CPU-only images serve the CPU lane.  A
     GPU-only manifest is always probed so an accidentally CPU-built image
     fails before it can register.
     """
-    functions = (manifest or {}).get("functions", []) or []
-    gpu_requirements = [bool((fn.get("resources") or {}).get("gpu")) for fn in functions]
+    rows = declaration_rows(manifest)
+    gpu_requirements = [bool((row.get("resources") or {}).get("gpu")) for row in rows]
     if not any(gpu_requirements):
         return False
     if all(gpu_requirements):
