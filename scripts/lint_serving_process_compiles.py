@@ -88,14 +88,14 @@ CHILD_ONLY: Dict[str, str] = {
         "banned calls all sit under `_export_entry`, which only "
         "`trace_for_key` reaches and only a child calls."
     ),
-    "family.export": (
+    "model.export": (
         "pgw#1332's DECLARATION-TIME export. It is not reached from a serving "
         "process at all, and the claim is structural rather than a promise: "
-        "`gen_worker.family`'s facade does not import it, the generated "
-        "bindings do not import it, and `cli/family.py` imports it inside the "
+        "`gen_worker.model`'s facade does not import it, the generated "
+        "bindings do not import it, and `cli/model.py` imports it inside the "
         "`export` handler — so the only way to run it is to type "
-        "`gen-worker family export`, which is a catalog BUILD step whose output "
-        "is committed. `tests/test_family_sdk_pgw1332.py::"
+        "`gen-worker model export`, which is a catalog BUILD step whose output "
+        "is committed. `tests/test_model_sdk_pgw1332.py::"
         "test_the_family_facade_does_not_import_the_exporter` executes that "
         "claim instead of restating it. The trace is fake-tensor only: no "
         "weights, no GPU, no compile, so even run by hand it is shape "

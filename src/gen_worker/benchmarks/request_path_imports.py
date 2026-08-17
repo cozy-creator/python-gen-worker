@@ -43,9 +43,9 @@ BEFORE: tuple[str, ...] = ("diffusers:FluxPipeline",)
 
 #: The AFTER arm: the typed family surface, and that is the whole list.
 AFTER: tuple[str, ...] = (
-    "gen_worker.family.catalog:Flux1Dev",
-    "gen_worker.family.catalog.flux1_dev_serve:generate",
-    "gen_worker.family.scheduler:FlowMatchEulerDiscrete",
+    "gen_worker.model.catalog:Flux1Dev",
+    "gen_worker.model.catalog.flux1_dev_serve:generate",
+    "gen_worker.model.scheduler:FlowMatchEulerDiscrete",
 )
 
 #: Run inside a fresh interpreter. Imports torch, takes a baseline, imports the

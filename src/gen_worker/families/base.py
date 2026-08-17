@@ -11,7 +11,7 @@ A family struct is declared once per architecture and shared by every
 endpoint that serves it. **The struct belongs to a family object** — pgw#1332,
 Paul's naming ruling — so the family declares it and the family registers it::
 
-    from gen_worker.family import GraphFamily, TunedValues
+    from gen_worker.model import GraphModelSpec, TunedValues
 
     class SdxlTuned(TunedValues):
         scheduler: Literal["euler_a", "dpmpp_2m_karras", "dpmpp_2m_sde_karras"] = "euler_a"
@@ -19,14 +19,14 @@ Paul's naming ruling — so the family declares it and the family registers it::
         guidance: float = 6.0
         max_guidance: float | None = None  # a CLAMP, never a wire reshape
 
-    SDXL = GraphFamily(name="sdxl", tuned=SdxlTuned, ...)
+    SDXL = GraphModelSpec(name="sdxl", tuned=SdxlTuned, ...)
 
 **The free-standing ``@family("sdxl")`` class decorator is GONE** (pgw#1332).
 It owned the word ``family`` while describing only a defaults vocabulary, and
-the typed Family SDK needs that word for the thing that actually is a family —
+the typed ModelSpec SDK needs that word for the thing that actually is a family —
 graph classes, buckets, loop, instances. Resolving the collision in favour of
 the family-owned schema means the registrar is now the plain function
-:func:`register_family`, which :class:`gen_worker.family.Family` calls for its
+:func:`register_family`, which :class:`gen_worker.model.ModelSpec` calls for its
 own schemas. Nothing about the REGISTRY changed: same ``(name, kind)`` key,
 same idempotent-re-import rule, same exported JSON Schema, same
 ``gen-worker families export-schemas``. What changed is that a struct can no
@@ -35,7 +35,7 @@ longer claim a family name it does not belong to.
 **Kind axis.** A family name has (up to) two vocabularies: the CHECKPOINT
 recipe (``kind="checkpoint"``, the default) and the
 LORA overlay's recipe OPINIONS (``kind="lora"``), a separate typed struct
-sharing the same family name — declared as ``Family(lora_tuned=...)``.
+sharing the same family name — declared as ``ModelSpec(lora_tuned=...)``.
 
 A separate KIND axis rather than a second family namespace (``"sdxl-lora"``):
 a LoRA targets the SAME architecture root as its base checkpoint
@@ -137,7 +137,7 @@ def register_family(
     the checkpoint one.
 
     **Call it through a family**, not directly:
-    :class:`gen_worker.family.Family` registers its own ``tuned`` and
+    :class:`gen_worker.model.ModelSpec` registers its own ``tuned`` and
     ``lora_tuned`` schemas from ``__post_init__``. This function is the
     mechanism, and it stays public only because the CLI, the fences and the
     hub-side contract check need a registrar that does not require a whole

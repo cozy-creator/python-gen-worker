@@ -321,7 +321,7 @@ through a name typed as a string.
 It is the one exception to the `(self, ctx, payload)` handler shape below, and
 the only one: a per-handler MODEL argument is still rejected for the SDK v2
 reason. Full reference, including how to declare a family of your own and how
-to run a handler with no hub and no GPU: [families.md](families.md).
+to run a handler with no hub and no GPU: [models.md](models.md).
 
 ## `Slot`: hub-resolved model slots (SDK v2, pgw#647)
 
@@ -509,7 +509,7 @@ out of the SDK — a vocabulary in the library would need a wheel release to
 change; pgw#1332 gave the remaining registration to the family that owns it):
 
 ```python
-from gen_worker.family import GraphFamily, TunedValues
+from gen_worker.model import GraphModelSpec, TunedValues
 
 class SdxlTuned(TunedValues, frozen=True):
     scheduler: Literal["euler_a", "dpmpp_2m_karras", "dpmpp_2m_sde_karras"] = "euler_a"
@@ -517,18 +517,18 @@ class SdxlTuned(TunedValues, frozen=True):
     guidance: float = 6.0
     max_guidance: float | None = None   # a CLAMP constraint, never a wire reshape
 
-SDXL = GraphFamily(name="sdxl", tuned=SdxlTuned, ...)   # see families.md
+SDXL = GraphModelSpec(name="sdxl", tuned=SdxlTuned, ...)   # see models.md
 ```
 
 The free-standing `@family("sdxl")` class decorator is **gone** (pgw#1332): it
-held the word `family` for a defaults vocabulary while the typed Family SDK
+held the word `family` for a defaults vocabulary while the typed ModelSpec SDK
 needed it for the family itself. A vocabulary with no family object registers
 through `gen_worker.families.register_family(name, cls, kind=...)`.
 
 `gen-worker families export-schemas <dir>` writes one
 `<family>[.lora].schema.json` per registered family (LoRA-kind families get the
 `.lora` infix). Code owns this SCHEMA; the catalog owns the VALUES — and under
-the Family SDK the values reach a handler as `inst.tuned`, on the instance,
+the ModelSpec SDK the values reach a handler as `inst.tuned`, on the instance,
 because they are checkpoint-level.
 
 **Per-request views**: `ctx.for_request(self.pipeline, sampler=, seed=)`

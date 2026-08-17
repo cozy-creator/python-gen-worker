@@ -784,7 +784,7 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         # pgw#1332: the families this function binds, so PLACEMENT can prefetch
         # their weights and verify the VRAM fit before a request lands — which
         # is the entire reason static declaration is the default and
-        # `Family.instance(ref)` is the exception. `export_digest` pins the
+        # `ModelSpec.instance(ref)` is the exception. `export_digest` pins the
         # declaration these bindings were generated against, so a pod holding a
         # different one is detectable without loading anything.
         families_block = [

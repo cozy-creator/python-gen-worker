@@ -31,13 +31,13 @@ import msgspec
 import pytest
 
 from gen_worker import RequestContext
-from gen_worker.family import Tuned, resolve
-from gen_worker.family import mint as family_mint
-from gen_worker.family.catalog import Flux1Dev, Sdxl
-from gen_worker.family.catalog import flux1_dev_serve as fx
-from gen_worker.family.catalog.flux1_dev import FLUX1_DEV, SCHEDULER
-from gen_worker.family.errors import FamilyError, FamilyRefusal
-from gen_worker.family.scheduler import (
+from gen_worker.model import Tuned, resolve
+from gen_worker.model import mint as family_mint
+from gen_worker.model.catalog import Flux1Dev, Sdxl
+from gen_worker.model.catalog import flux1_dev_serve as fx
+from gen_worker.model.catalog.flux1_dev import FLUX1_DEV, SCHEDULER
+from gen_worker.model.errors import ModelError, ModelRefusal
+from gen_worker.model.scheduler import (
     IMPLEMENTED,
     FlowMatchEulerDiscrete,
     Schedule,
@@ -120,9 +120,9 @@ def test_the_euler_step_is_one_line_of_arithmetic() -> None:
     velocity = torch.full((2, 3), 4.0)
     assert torch.equal(schedule.step(0, velocity, sample), sample + (0.5 - 1.0) * velocity)
     assert torch.equal(schedule.step(1, velocity, sample), sample + (0.0 - 0.5) * velocity)
-    with pytest.raises(FamilyError) as caught:
+    with pytest.raises(ModelError) as caught:
         schedule.step(2, velocity, sample)
-    assert caught.value.reason is FamilyRefusal.SCHEDULER_INVALID
+    assert caught.value.reason is ModelRefusal.SCHEDULER_INVALID
 
 
 @pytest.mark.parametrize("resolution", [768, 1024])
@@ -146,7 +146,7 @@ def test_the_packing_arithmetic_is_bitwise_the_pipeline_s(resolution: int) -> No
 def test_a_schedule_terminating_anywhere_but_zero_is_refused() -> None:
     """The terminal zero is part of the ladder, not a special case in ``step``."""
 
-    with pytest.raises(FamilyError) as caught:
+    with pytest.raises(ModelError) as caught:
         Schedule(sigmas=(1.0, 0.5), num_train_timesteps=1000)
     assert "terminate at sigma 0.0" in str(caught.value)
 
@@ -156,7 +156,7 @@ def test_dynamic_shifting_refuses_to_guess_a_sequence_length() -> None:
 
     scheduler = FlowMatchEulerDiscrete.from_block(SCHEDULER)
     assert scheduler.use_dynamic_shifting
-    with pytest.raises(FamilyError) as caught:
+    with pytest.raises(ModelError) as caught:
         scheduler.schedule(4)
     assert "image_seq_len" in str(caught.value)
 
@@ -172,7 +172,7 @@ def test_dynamic_shifting_refuses_to_guess_a_sequence_length() -> None:
 def test_a_scheduler_block_is_parsed_not_coerced(block: dict[str, Any], wanted: str) -> None:
     """``use_dynamic_shifting: 1`` means something the author did not write."""
 
-    with pytest.raises(FamilyError) as caught:
+    with pytest.raises(ModelError) as caught:
         FlowMatchEulerDiscrete.from_block(block)
     assert wanted in str(caught.value)
 
@@ -191,7 +191,7 @@ def test_an_unimplemented_scheduler_is_an_absent_method_not_a_fallback() -> None
     assert isinstance(Flux1Dev.fake().scheduler(), FlowMatchEulerDiscrete)
     assert not hasattr(Sdxl, "scheduler")
     assert set(IMPLEMENTED) == {SchedulerKind.FLOW_MATCH_EULER_DISCRETE}
-    with pytest.raises(FamilyError):
+    with pytest.raises(ModelError):
         parse_kind("ddim")
 
 
@@ -352,22 +352,22 @@ def test_a_mint_whose_digest_drifted_from_the_export_is_refused() -> None:
         compile_s=1.0,
         reuse_s=0.0,
     )
-    with pytest.raises(FamilyError) as caught:
+    with pytest.raises(ModelError) as caught:
         family_mint.assert_matches_export([row], Flux1Dev.EXPORT)
     assert "never becomes the source" in str(caught.value)
     family_mint.assert_matches_export([], Flux1Dev.EXPORT)
 
 
 def test_minting_an_eager_only_family_is_refused_rather_than_invented() -> None:
-    from gen_worker.family.spec import Family, TunedValues
+    from gen_worker.model.spec import ModelSpec, TunedValues
 
     class _Tuned(TunedValues, frozen=True):
         steps: int = 1
 
-    eager: Any = Family(name="pgw1331_eager_only", tuned=_Tuned)
+    eager: Any = ModelSpec(name="pgw1331_eager_only", tuned=_Tuned)
     try:
-        with pytest.raises(FamilyError) as caught:
-            family_mint.mint_family(eager, out_dir=Path("/nowhere"), work=Path("/nowhere"))
+        with pytest.raises(ModelError) as caught:
+            family_mint.mint_model(eager, out_dir=Path("/nowhere"), work=Path("/nowhere"))
         assert "eager-only" in str(caught.value)
     finally:
         from gen_worker.families import base as families_base
@@ -376,7 +376,7 @@ def test_minting_an_eager_only_family_is_refused_rather_than_invented() -> None:
 
 
 def test_a_runner_the_family_does_not_declare_is_refused() -> None:
-    with pytest.raises(FamilyError) as caught:
+    with pytest.raises(ModelError) as caught:
         family_mint.variants_of(FLUX1_DEV, only=("unet",))
     assert "declares no runner 'unet'" in str(caught.value)
 
@@ -384,7 +384,7 @@ def test_a_runner_the_family_does_not_declare_is_refused() -> None:
 def test_the_mint_bridge_is_declared_mint_machinery() -> None:
     """A serve-role module that could reach it would be a pod that can compile."""
 
-    assert "gen_worker.family.mint" in role.MINT_MACHINERY
+    assert "gen_worker.model.mint" in role.MINT_MACHINERY
 
 
 # ------------------------------------------------------------------- the fence
@@ -411,7 +411,7 @@ def test_red_the_fence_fires_on_a_declaration_that_names_a_model_library() -> No
 
     fence = _fence()
     problems = fence.check_model_free(
-        ("gen_worker.family.catalog.flux1_dev",), role.FORBIDDEN_LIBRARIES, ()
+        ("gen_worker.model.catalog.flux1_dev",), role.FORBIDDEN_LIBRARIES, ()
     )
     assert [line for line in problems if "diffusers" in line]
     assert [line for line in problems if "transformers" in line]
@@ -422,7 +422,7 @@ def test_red_an_unlisted_guarded_import_is_refused() -> None:
 
     fence = _fence()
     problems = fence.check_model_free(
-        ("gen_worker.family.catalog._generated.flux1_dev",), role.FORBIDDEN_LIBRARIES, ()
+        ("gen_worker.model.catalog._generated.flux1_dev",), role.FORBIDDEN_LIBRARIES, ()
     )
     assert [line for line in problems if "guarded import" in line]
 
@@ -465,9 +465,9 @@ def test_type_checking_imports_are_not_followed() -> None:
     """They never execute; reporting them would report a cost nobody pays."""
 
     fence = _fence()
-    binding = REPO / "src/gen_worker/family/catalog/_generated/flux1_dev.py"
+    binding = REPO / "src/gen_worker/model/catalog/_generated/flux1_dev.py"
     assert "from torch import Tensor" in binding.read_text()
-    _, _, libraries = fence._imports(binding, "gen_worker.family.catalog._generated.flux1_dev")
+    _, _, libraries = fence._imports(binding, "gen_worker.model.catalog._generated.flux1_dev")
     assert "torch" not in libraries
 
 
@@ -491,9 +491,9 @@ for name in role.FORBIDDEN_LIBRARIES:
         raise SystemExit("IMPORTED " + name)
 
 # The whole serving surface, in a process that cannot acquire a model library.
-from gen_worker.family.catalog import Flux1Dev
-from gen_worker.family.catalog import flux1_dev_serve as fx
-from gen_worker.family.scheduler import FlowMatchEulerDiscrete
+from gen_worker.model.catalog import Flux1Dev
+from gen_worker.model.catalog import flux1_dev_serve as fx
+from gen_worker.model.scheduler import FlowMatchEulerDiscrete
 
 instance = Flux1Dev.fake()
 assert isinstance(instance.scheduler(), FlowMatchEulerDiscrete)
@@ -610,7 +610,7 @@ def test_a_flux_endpoint_generates_through_the_declared_family_binding() -> None
     """
 
     from gen_worker import endpoint
-    from gen_worker.family import fake_kwargs
+    from gen_worker.model import fake_kwargs
 
     @endpoint(families={"flux": Flux1Dev})
     class Generate:
@@ -672,7 +672,7 @@ class _StubEngine:
 
     The same shape ``tests/test_tcg_compile_child_pgw1270.py`` uses, and for the
     same reason: a real AOTInductor compile needs a card and belongs on a pod
-    (``gen-worker family mint``), so the bar CI can hold is that everything on
+    (``gen-worker model mint``), so the bar CI can hold is that everything on
     either side of ``Engine.compile`` is real — a real declaration, a real
     trace, a real ``GraphClassSpec``, a real packed row. That is exactly the bar
     the production compile child is held to, and this bridge is not entitled to
@@ -720,7 +720,7 @@ def test_mint_family_packs_one_artifact_per_declared_variant(
         aot_compile_child, "_tcg_runtime", lambda cache_root=None: (engine, object())
     )
 
-    minted = family_mint.mint_family(
+    minted = family_mint.mint_model(
         FLUX1_DEV, out_dir=tmp_path / "cells", work=tmp_path / "work", only=("decoder",)
     )
 

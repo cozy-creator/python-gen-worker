@@ -55,8 +55,8 @@ from .export_contract import (
     validate_contract, validate_speed_bar,
 )
 from .formula import RuntimeFormula
-from ..family.runtime import FamilyBinding
-from ..family.spec import Family as FamilySpec
+from ..model.runtime import Model
+from ..model.spec import ModelSpec as FamilySpec
 from .slot import OBJECTIVES, TASKS, D, Slot
 from ..models import execution_lanes as lanespec
 from ..models.tensor_layout_contract import (
@@ -1142,13 +1142,13 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     # worker-capability write grant off this declaration, never off the kind.
     publishes: bool = False
     # pgw#1332: handler parameter name -> the generated family TYPE bound to it.
-    # The injected VALUE is a fully resolved FamilyInstance — graph, bound
+    # The injected VALUE is a fully resolved Model — graph, bound
     # weights and catalog-stamped tuned values — so two parameters of one family
     # type are two checkpoints with independent tuning. Declaring it statically
     # is what lets placement prefetch the weights and verify the VRAM fit before
-    # a request lands; `Family.instance(ref)` inside a handler is the dynamic
+    # a request lands; `ModelSpec.instance(ref)` inside a handler is the dynamic
     # escape hatch, and it is the one parse-don't-validate boundary.
-    families: Mapping[str, type["FamilyBinding"]] = msgspec.field(default_factory=dict)
+    families: Mapping[str, type["Model"]] = msgspec.field(default_factory=dict)
 
 
 ATTR = "__gen_worker_endpoint__"
@@ -1271,7 +1271,7 @@ def _is_family_param(fn: Callable[..., Any], name: str) -> bool:
         hint = typing.get_type_hints(fn).get(name)
     except Exception:  # noqa: BLE001 - see the docstring
         return False
-    return isinstance(hint, type) and issubclass(hint, FamilyBinding)
+    return isinstance(hint, type) and issubclass(hint, Model)
 
 
 def _reject_producer_generator(owner: str, fn: Callable[..., Any], kind: str) -> None:
@@ -1603,12 +1603,12 @@ def _expand_formula_map(
 
 def _normalize_families(
     owner: str, families: Optional[Mapping[str, Any]]
-) -> Dict[str, type[FamilyBinding]]:
+) -> Dict[str, type[Model]]:
     """Parse ``families={...}`` into handler-parameter -> generated family type.
 
     The VALUE is the generated class, which is simultaneously the type a
     handler parameter is annotated with and the type of the instance it
-    receives (torchcg G12). Passing a DECLARATION (a ``GraphFamily``) is
+    receives (torchcg G12). Passing a DECLARATION (a ``GraphModelSpec``) is
     refused by name rather than coerced: a declaration is the authoring object
     and has no typed callables on it, so accepting one would hand a handler
     something that looks bound and is not.
@@ -1620,7 +1620,7 @@ def _normalize_families(
             f"@endpoint {owner}: families= must be a mapping of handler "
             f"parameter name -> family type, got {type(families).__name__}"
         )
-    out: Dict[str, type[FamilyBinding]] = {}
+    out: Dict[str, type[Model]] = {}
     for raw_name, value in families.items():
         name = str(raw_name or "").strip()
         if not name or not name.isidentifier():
@@ -1628,14 +1628,14 @@ def _normalize_families(
                 f"@endpoint {owner}: families= key {raw_name!r} must be a handler "
                 "parameter name"
             )
-        if not (isinstance(value, type) and issubclass(value, FamilyBinding)):
+        if not (isinstance(value, type) and issubclass(value, Model)):
             if isinstance(value, FamilySpec):
                 raise TypeError(
                     f"@endpoint {owner}: families[{name!r}] is the DECLARATION of family "
                     f"{value.name!r}, not its generated type. A declaration has no typed "
                     "callables on it, so binding one would hand the handler something "
                     "that looks resolved and is not — bind the class "
-                    "`gen-worker family generate` emits."
+                    "`gen-worker model generate` emits."
                 )
             raise TypeError(
                 f"@endpoint {owner}: families[{name!r}] must be a generated family class, "
@@ -1653,7 +1653,7 @@ def _normalize_families(
 def _validate_family_params(
     owner: str,
     fn: Callable[..., Any],
-    families: Mapping[str, type[FamilyBinding]],
+    families: Mapping[str, type[Model]],
     *,
     is_method: bool,
 ) -> None:
@@ -1701,7 +1701,7 @@ def _validate_family_params(
             name in params
             and name not in families
             and isinstance(hint, type)
-            and issubclass(hint, FamilyBinding)
+            and issubclass(hint, Model)
         ):
             raise ValueError(
                 f"@endpoint {owner}: parameter {name!r} is annotated with family type "
@@ -1879,7 +1879,7 @@ def endpoint(
     config: Optional[Sequence[ConfigParam]] = ...,
     env: Optional[Sequence[str]] = ...,
     publishes: bool = ...,
-    families: Optional[Mapping[str, type[FamilyBinding]]] = ...,
+    families: Optional[Mapping[str, type[Model]]] = ...,
 ) -> Callable[[T], T]: ...  # configured @endpoint(...) form
 
 
@@ -1901,7 +1901,7 @@ def endpoint(
     config: Optional[Sequence[ConfigParam]] = None,
     env: Optional[Sequence[str]] = None,
     publishes: bool = False,
-    families: Optional[Mapping[str, type[FamilyBinding]]] = None,
+    families: Optional[Mapping[str, type[Model]]] = None,
 ) -> Any:
     """The one endpoint decorator. See the module docstring for shapes.
 

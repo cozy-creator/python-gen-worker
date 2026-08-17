@@ -433,7 +433,7 @@ def selftest() -> int:
     # declaration reaches diffusers exclusively through FUNCTION-LOCAL imports,
     # so this proves the library check follows lazy imports too — the same
     # shape the mint-lane half is proven against, one layer up.
-    declaration = "gen_worker.family.catalog.flux1_dev"
+    declaration = "gen_worker.model.catalog.flux1_dev"
     library_problems = [
         line
         for line in check_model_free((declaration,), libraries, ())
@@ -451,7 +451,7 @@ def selftest() -> int:
         return 1
     # …and a guarded edge to an unlisted module must be refused, or the hatch
     # is not a list, it is a door.
-    binding = "gen_worker.family.catalog._generated.flux1_dev"
+    binding = "gen_worker.model.catalog._generated.flux1_dev"
     if not [line for line in check_model_free((binding,), libraries, ()) if "guarded" in line]:
         print(
             f"SELFTEST FAILED: {binding} reaches its declaration through an "

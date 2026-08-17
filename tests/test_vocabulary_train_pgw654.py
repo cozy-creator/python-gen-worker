@@ -66,7 +66,7 @@ TurboIn.__annotations__["aspect_ratio"] = GenIn.__annotations__["aspect_ratio"]
     resources=Resources(gpu=True),
     compile=Compile(family="fam-x", shapes=((1024, 1024),), targets=("unet",), text_len=77),
 )
-class Family:
+class ToyEndpoint:
     def setup(self, pipeline: object) -> None:
         self.pipeline = pipeline
 
@@ -85,7 +85,7 @@ class Family:
 
 
 def test_sibling_functions_share_one_compile_contract() -> None:
-    specs = {s.attr_name: s for s in extract_specs(Family)}
+    specs = {s.attr_name: s for s in extract_specs(ToyEndpoint)}
     a = specs["generate"].compile_cell()
     b = specs["generate_turbo"].compile_cell()
     assert a.guidance_scales == b.guidance_scales == (0.0, 5.0)
@@ -281,7 +281,7 @@ def test_lora_bucket_with_converter_decorates() -> None:
 def test_derived_warm_plan_cross_products_axes_per_function() -> None:
     from gen_worker import warmup as warmup_mod
 
-    specs = extract_specs(Family)
+    specs = extract_specs(ToyEndpoint)
     jobs, skips = warmup_mod.plan(specs, decl_warmup=None)
     assert not skips
     by_fn: dict = {}
