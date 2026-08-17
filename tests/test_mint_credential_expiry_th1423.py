@@ -34,7 +34,7 @@ import pytest
 
 from gen_worker import fleet_cells as fc
 from gen_worker.hubio.client import HubPublishError
-from harness.cell_meta import exported_cell_meta
+from harness.cell_meta import exported_cell_meta, exported_cell_provenance
 
 LAPSE_S = 150  # how far past `exp` the presented credential is, in the JWT
 FAMILY = "sdxl"
@@ -42,8 +42,11 @@ FAMILY = "sdxl"
 # a real exported-cell envelope. The publish path recomputes the key
 # from the recorded blocks and refuses a cell that cannot state one, so the
 # credential-lapse legs below have to ride a cell that could genuinely publish.
-META = exported_cell_meta(family=FAMILY, gen_worker="0.76.6",
-                          weight_lane="w8a8", lora_bucket=64)
+META = exported_cell_meta()
+# pgw#1341: what the mint recorded beside the bytes. The credential legs below
+# have to ride a cell that could genuinely publish, and since pgw#1270 that
+# means an artifact TCG built PLUS the provenance the store holds.
+PROVENANCE = exported_cell_provenance(lane="w8a8-lora64", gen_worker="0.76.6")
 COMPILED_GRAPH_KEY = META["compiled_graph_key"]
 
 
@@ -146,7 +149,7 @@ def test_intent_401_carries_the_hubs_status_and_code(hub, artifact):
     `HubPublishError` never existed and `.status`/`.code` did not either."""
     live = _jwt(lifetime_s=900)
     with pytest.raises(HubPublishError) as caught:
-        _publisher(hub, live).publish(FAMILY, artifact, dict(META))
+        _publisher(hub, live).publish(FAMILY, artifact, dict(META), PROVENANCE)
 
     exc = caught.value
     assert exc.status == 401
@@ -165,7 +168,7 @@ def test_an_expired_credential_is_named_as_such_not_as_a_generic_401(
     RED before the fix: `_publish_failure_phase` returned `RuntimeError`."""
     dead = _jwt(lifetime_s=-LAPSE_S)
     with pytest.raises(HubPublishError) as caught:
-        _publisher(hub, dead).publish(FAMILY, artifact, dict(META))
+        _publisher(hub, dead).publish(FAMILY, artifact, dict(META), PROVENANCE)
 
     exc = caught.value
     assert exc.status == 401
@@ -186,7 +189,7 @@ def test_the_lapse_is_on_the_wire_before_the_intent_is_spent(
 
     with pytest.raises(HubPublishError):
         _publisher(hub, _jwt(lifetime_s=-LAPSE_S)).publish(
-            FAMILY, artifact, dict(META))
+            FAMILY, artifact, dict(META), PROVENANCE)
 
     legs = [(k, p, d) for k, p, d in seen if p == "credential_expired"]
     assert len(legs) == 1, seen
@@ -202,7 +205,7 @@ def test_a_live_credential_publishes_no_lapse_leg(hub, artifact, monkeypatch):
 
     with pytest.raises(HubPublishError):
         _publisher(hub, _jwt(lifetime_s=900)).publish(
-            FAMILY, artifact, dict(META))
+            FAMILY, artifact, dict(META), PROVENANCE)
 
     assert not [p for _, p in seen if p == "credential_expired"]
 
@@ -223,7 +226,8 @@ def test_the_background_publish_reports_the_grouped_phase(hub, artifact,
 
     thread = fc._publish_async(
         _publisher(hub, _jwt(lifetime_s=-LAPSE_S)),
-        FAMILY, artifact, dict(META), compiled_graph_key_digest=COMPILED_GRAPH_KEY)
+        FAMILY, artifact, dict(META), PROVENANCE,
+        compiled_graph_key_digest=COMPILED_GRAPH_KEY)
     thread.join()  # the publish thread itself is the bound — no clock
 
     assert ("self_mint_publish_failed", "worker_credential_expired") in seen

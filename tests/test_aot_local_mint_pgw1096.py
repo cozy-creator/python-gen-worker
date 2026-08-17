@@ -57,6 +57,15 @@ assert KEY_A != KEY_B
 # pgw#1113: spelled in the CURRENT token scheme — a predecessor-scheme memo
 # is swept by `fleet_cells._sweep_superseded_memos_once`, which is the point.
 ARM_A = fleet_cells.ARM_SCHEME + "-" + "1" * fleet_cells.ARM_DIGEST_HEX
+
+#: pgw#1341: the mint facts the local store holds beside the bytes. These rows
+#: are about the TRANSFER, not about the axes, so one honest record serves them
+#: all — but the publish takes it as an ARGUMENT now, because a TCG artifact
+#: cannot state any of it and a later boot must ship the MINT's facts.
+_PROVENANCE = local_cell_store.MintProvenance(
+    env_seal="seal-" + "9" * 16, lane="bf16-w16a16",
+    graph_contract="manifest-" + "8" * 8, sku="l4", gen_worker="0.123.0")
+
 ARM_B = fleet_cells.ARM_SCHEME + "-" + "2" * fleet_cells.ARM_DIGEST_HEX
 
 
@@ -585,7 +594,7 @@ def test_an_untrusted_refusal_keeps_the_cell_instead_of_discarding_it(
 
     class _Refusing:
         def publish(self, family: str, art: Path, meta: dict,
-                    mint_duration_ms: int = 0) -> str:
+                    provenance: Any = None, mint_duration_ms: int = 0) -> str:
             raise fleet_cells.CellPublishRefused(
                 "publish-intent refused (403): community_tier",
                 status=403, code=local_cell_store.UNTRUSTED_REFUSAL_CODE)
@@ -593,7 +602,8 @@ def test_an_untrusted_refusal_keeps_the_cell_instead_of_discarding_it(
     fleet_cells._publish_async(
         _Refusing(), "micro-diffusion",  # type: ignore[arg-type]
         local_cell_store.lookup(KEY_A, cas_root=cas).artifact,  # type: ignore[union-attr]
-        {"compiled_graph_key": KEY_A}, compiled_graph_key_digest=KEY_A, arm_token=ARM_A,
+        {"compiled_graph_key": KEY_A}, _PROVENANCE,
+        compiled_graph_key_digest=KEY_A, arm_token=ARM_A,
     ).join(timeout=30)
 
     assert local_cell_store.trust_class() == local_cell_store.TRUST_UNTRUSTED
@@ -614,12 +624,13 @@ def test_a_transport_failure_is_not_a_trust_verdict(
 
     class _Broken:
         def publish(self, family: str, art: Path, meta: dict,
-                    mint_duration_ms: int = 0) -> str:
+                    provenance: Any = None, mint_duration_ms: int = 0) -> str:
             raise RuntimeError("connection reset")
 
     fleet_cells._publish_async(
         _Broken(), "f", _artifact(tmp_path),  # type: ignore[arg-type]
-        {"compiled_graph_key": KEY_A}, compiled_graph_key_digest=KEY_A, arm_token=ARM_A,
+        {"compiled_graph_key": KEY_A}, _PROVENANCE,
+        compiled_graph_key_digest=KEY_A, arm_token=ARM_A,
     ).join(timeout=30)
 
     assert local_cell_store.trust_class() == ""

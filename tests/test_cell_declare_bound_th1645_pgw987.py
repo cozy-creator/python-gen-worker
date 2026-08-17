@@ -51,7 +51,7 @@ import pytest
 GUARD_MANIFEST_BLOCK = "guard_manifest"
 
 
-from harness.cell_meta import exported_cell_meta
+from harness.cell_meta import exported_cell_meta, exported_cell_provenance
 from gen_worker._vendor.tensorfs import MAX_CHUNK_SIZE
 
 from gen_worker import fleet_cells as fc
@@ -61,9 +61,13 @@ from gen_worker.hubio.client import HubPublishError
 FAMILY = "sdxl"
 # pgw#1046: computed from `_meta()`'s identity blocks, never invented — the
 # publish path refuses a stamp its recorded axes do not describe.
-COMPILED_GRAPH_KEY = exported_cell_meta(
-    family=FAMILY, sku="rtx-4090", gen_worker="0.91.0",
-    weight_lane="w8a8", lora_bucket=64)["compiled_graph_key"]
+COMPILED_GRAPH_KEY = exported_cell_meta()["compiled_graph_key"]
+
+# pgw#1341: the mint facts a TCG artifact cannot carry. They ride the local
+# store's sidecar in production and are an ARGUMENT to the publish here, which
+# is why they are not in `_meta()` below any more.
+PROVENANCE = exported_cell_provenance(
+    lane="w8a8-lora64", sku="rtx-4090", gen_worker="0.91.0")
 
 # The hub's group-wide default (internal/api/api.go: `maxRequestBodyMiddleware(32 << 20)`).
 HUB_BODY_CAP = 32 << 20
@@ -287,9 +291,7 @@ def _meta() -> dict:
     # pgw#1046: the identity blocks are REAL (the publish path recomputes the
     # key from them and refuses a cell that cannot state one); everything after
     # them is the measured bulk this test exists to size.
-    meta = exported_cell_meta(
-        family=FAMILY, sku="rtx-4090", gen_worker="0.91.0",
-        weight_lane="w8a8", lora_bucket=64)
+    meta = exported_cell_meta()
     meta |= {
         "torch": "2.9.0+cu128", "triton": "3.5.0", "cuda": "12.8",
         "cuda_driver": "570.86", "storage_dtype": "fp8", "source_ref": "root/sdxl",
@@ -396,7 +398,7 @@ def test_a_real_200mb_cell_publishes_through_the_real_cap(hub, artifact, monkeyp
     monkeypatch.setattr(fc.broker, "active", lambda: False)
     assert artifact.stat().st_size == ARTIFACT_BYTES
 
-    checkpoint = _publisher(hub).publish(FAMILY, artifact, _meta(), 354_450)
+    checkpoint = _publisher(hub).publish(FAMILY, artifact, _meta(), PROVENANCE, 354_450)
 
     assert checkpoint == "sha256:" + "c" * 64
     assert hub.httpd.refusals == [], (
@@ -476,7 +478,7 @@ def test_an_oversized_publish_stops_on_the_first_refusal(artifact, monkeypatch):
     hub = _Server(body_cap=2048)
     try:
         with pytest.raises(HubPublishError) as excinfo:
-            _publisher(hub).publish(FAMILY, artifact, _meta(), 0)
+            _publisher(hub).publish(FAMILY, artifact, _meta(), PROVENANCE, 0)
     finally:
         hub.close()
 

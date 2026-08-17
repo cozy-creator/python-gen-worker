@@ -804,7 +804,12 @@ async def supervise(
             # stages each durable, verifies, arms and stores it in turn, and a
             # class that refuses costs itself.
             minted = fleet_cells.adopt_delegated_mint(
-                task.pipe, pending, [row.artifact for row in result.entries])
+                task.pipe, pending, [row.artifact for row in result.entries],
+                # pgw#1341: the declaration-wide contract digest this mint just
+                # folded. It is the `graph_contract` axis of every row's
+                # publish, no artifact can carry it, and this is the one object
+                # that holds it.
+                manifest=str(result.manifest or ""))
             if minted is not None:
                 return SupervisedResult(
                     status=ADOPTED, minted=minted, attempts=attempts,

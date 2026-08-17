@@ -21,6 +21,7 @@ Run: pytest tests/test_cell_publish_v2_pgw807.py -q
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import http.server
 import json
@@ -40,6 +41,7 @@ from gen_worker import env_seal, graph_facts, receipts
 from gen_worker import fleet_cells as fc
 from gen_worker.hubio.client import HubPublishError
 from gen_worker.procsplit import actions
+from harness.cell_meta import exported_cell_meta, exported_cell_provenance
 
 FAMILY = "sdxl"
 
@@ -233,30 +235,26 @@ def artifact(tmp_path: Path) -> Path:
     return out
 
 
-# pgw#1046: a REAL exported-cell envelope, not the identity-less stub this
-# fixture used to carry. The publish path now recomputes the cell's key from
-# these blocks and refuses anything that cannot state one, so a stub here would
-# only prove that a cell the fleet can never arm still uploads.
-_CLASS_HASH = "a" * 16
+# pgw#1046 / pgw#1341: a REAL exported-cell envelope — built by TCG, never by
+# hand. This block used to be a literal dict carrying `family`, `sku`,
+# `gen_worker`, `weight_lane`, `manifest_digest` and `env_seal`; TCG's closed
+# vocabulary has none of those, so the fixture described a cell that cannot
+# exist and the publish path was green here while refusing every real artifact
+# on the fleet. What the artifact cannot say now rides `PROVENANCE`.
+META = exported_cell_meta()
+_CLASS_HASH = str(META[GRAPH_CLASS_BLOCK]["class_hash"])
 #: pgw#1176: the DECLARATION-wide coverage label, published as
 #: `graph_contract`. No longer a copy of the graph axis — `graph` is this
 #: entry's class hash (identity), this names the class set it belongs to.
 GRAPH_CONTRACT = graph_facts.manifest_digest([_CLASS_HASH])
-META = {
-    "family": FAMILY, "sku": "l4", "sm": "89",
-    "gen_worker": "0.87.0", "kind": "aot-inductor", "format": "pt2",
-    "weight_lane": "w8a8", "lora_bucket": 64, "strict_export": True,
-    GRAPH_CLASS_BLOCK: {
-        "name": "unet/main",
-        "target": "unet", "fork": [], "class_dims": [],
-        "range_digest": "r1", "class_hash": _CLASS_HASH, "graph": {"v": 2},
-    },
-    "manifest_digest": GRAPH_CONTRACT,
-    "env_seal": {"v": 1, "torch": "2.9.0"},
-    "toolchain": {"torch": "2.9.0", "cuda": "12.8"},
-}
 COMPILED_GRAPH_KEY = tcg_identity.from_artifact_metadata(META).value
-META["compiled_graph_key"] = COMPILED_GRAPH_KEY
+#: The env seal the mint ran under, as the mint recorded its DIGEST.
+SEAL_DIGEST = env_seal.seal_digest({"v": 1, "torch": "2.9.0"})
+#: pgw#1341: what the local store holds beside the bytes — the only source the
+#: publish has for the five facts a TCG artifact cannot carry.
+PROVENANCE = exported_cell_provenance(
+    lane="w8a8-lora64", sku="l4", gen_worker="0.87.0",
+    env_seal=SEAL_DIGEST, graph_contract=GRAPH_CONTRACT)
 
 #: The shape every cell in the corpus was published under before pgw#1046 —
 #: `_identity_axes`' six-axis FALLBACK, carrying neither identity digest. Kept
@@ -288,7 +286,7 @@ def test_publish_takes_the_v2_route_and_never_the_frozen_v1_one(
     the frozen v1 route is never touched. (RED: this same server answers
     /commits with the live 410, which is what the v1 publisher got.)"""
     seen = _events(monkeypatch)
-    ckpt = _publisher(hub).publish(FAMILY, artifact, dict(META),
+    ckpt = _publisher(hub).publish(FAMILY, artifact, dict(META), PROVENANCE,
                                    mint_duration_ms=347_940)
     assert ckpt == "sha256:" + "c" * 64
 
@@ -329,7 +327,8 @@ def test_publish_takes_the_v2_route_and_never_the_frozen_v1_one(
 
 
 def test_intent_carries_the_identity_axes_and_the_mint_cost(hub, artifact):
-    _publisher(hub).publish(FAMILY, artifact, dict(META), mint_duration_ms=347_940)
+    _publisher(hub).publish(FAMILY, artifact, dict(META), PROVENANCE,
+                            mint_duration_ms=347_940)
     intent = next(b for p, b in hub.httpd.calls if p.endswith("publish-intent"))
     # pgw#1224: the three ATTESTED axes are batch-level (all three are
     # properties of the POD); the key, the identity axes and the mint cost are
@@ -369,14 +368,14 @@ def test_publish_intent_states_the_full_arming_identity(hub, artifact):
     RED before the fix: `identity_axes` was
     ``{family, kind, format, sm, mode, lane}`` and this asserts on three keys
     that were not in it."""
-    _publisher(hub).publish(FAMILY, artifact, dict(META))
+    _publisher(hub).publish(FAMILY, artifact, dict(META), PROVENANCE)
     intent = next(b for p, b in hub.httpd.calls if p.endswith("publish-intent"))
     (entry,) = intent["entries"]
     axes = entry["identity_axes"]
 
     # Derived from the recorded blocks, never from a second stamp.
-    assert axes["toolchain"] == graph_facts.facts_digest(META["toolchain"])
-    assert axes["env_seal"] == env_seal.seal_digest(META["env_seal"])
+    assert axes["toolchain"] == graph_facts.facts_digest(dict(META["toolchain"]))
+    assert axes["env_seal"] == SEAL_DIGEST
     assert axes[fc.GRAPH_CONTRACT_AXIS] == GRAPH_CONTRACT
 
     # ...and the KEY axes hash to the key the cell is published under, so
@@ -409,14 +408,14 @@ def test_the_pre_fix_fallback_row_shape_can_no_longer_be_published(hub, artifact
     REFUSAL of a row shape that already exists in the store. This test guards
     the other end — that the worker can no longer create one."""
     with pytest.raises(fc.CellPublishRefused) as exc:
-        _publisher(hub).publish(FAMILY, artifact, dict(TODAYS_FALLBACK_META))
+        _publisher(hub).publish(FAMILY, artifact, dict(TODAYS_FALLBACK_META), PROVENANCE)
     assert "no computable identity" in str(exc.value)
     assert not hub.httpd.calls, "refused before the intent left the pod"
 
     # And the shape itself is unreachable: nothing in the publish path can
     # still emit an axis map without the two identity digests.
     with pytest.raises(fc.CellPublishRefused):
-        fc._identity_axes(FAMILY, dict(TODAYS_FALLBACK_META))
+        fc._identity_axes(FAMILY, dict(TODAYS_FALLBACK_META), PROVENANCE)
 
 
 @pytest.mark.parametrize("dropped", REQUIRED_AXES)
@@ -448,7 +447,7 @@ def test_a_stamp_that_disagrees_with_the_recorded_axes_is_refused(hub, artifact)
     forged = dict(META)
     forged["compiled_graph_key"] = "cg-key-v1-" + "9" * 56
     with pytest.raises(fc.CellPublishRefused, match="disagrees"):
-        _publisher(hub).publish(FAMILY, artifact, forged)
+        _publisher(hub).publish(FAMILY, artifact, forged, PROVENANCE)
     assert not hub.httpd.calls
 
 
@@ -467,9 +466,9 @@ def test_a_cell_with_no_manifest_digest_PUBLISHES(hub, artifact):
     What must still be refused is an entry with no IDENTITY, and the row below
     this one asserts exactly that.
     """
-    hollow = dict(META)
-    hollow["manifest_digest"] = ""
-    _publisher(hub).publish(FAMILY, artifact, hollow)
+    _publisher(hub).publish(
+        FAMILY, artifact, dict(META),
+        dataclasses.replace(PROVENANCE, graph_contract=""))
     assert hub.httpd.calls
 
 
@@ -481,7 +480,7 @@ def test_a_cell_with_no_class_hash_is_refused(hub, artifact):
     hollow[GRAPH_CLASS_BLOCK] = {
         **META[GRAPH_CLASS_BLOCK], "class_hash": ""}
     with pytest.raises(fc.CellPublishRefused):
-        _publisher(hub).publish(FAMILY, artifact, hollow)
+        _publisher(hub).publish(FAMILY, artifact, hollow, PROVENANCE)
     assert not hub.httpd.calls
 
 
@@ -489,7 +488,8 @@ def test_seam_authorizes_the_live_publish_payloads(hub, artifact):
     """The delta-1 allowlist REFUSES an unlisted body key, and the compute
     child is the process that publishes. So the table and the payloads are one
     contract: drive the publisher, then authorize exactly what it sent."""
-    _publisher(hub).publish(FAMILY, artifact, dict(META), mint_duration_ms=1)
+    _publisher(hub).publish(FAMILY, artifact, dict(META), PROVENANCE,
+                            mint_duration_ms=1)
     for path, body in hub.httpd.calls:
         if "/v1/worker/compiled-graphs/" not in path:
             continue
@@ -500,11 +500,11 @@ def test_republish_of_identical_bytes_uploads_nothing(hub, artifact):
     """Staged/dedup semantics: the second publish's need set is empty, so a
     pod re-run after a lost publish costs no transfer at all."""
     pub = _publisher(hub)
-    pub.publish(FAMILY, artifact, dict(META))
+    pub.publish(FAMILY, artifact, dict(META), PROVENANCE)
     first = list(hub.httpd.puts)
     assert first
     hub.httpd.puts.clear()
-    pub.publish(FAMILY, artifact, dict(META))
+    pub.publish(FAMILY, artifact, dict(META), PROVENANCE)
     assert hub.httpd.puts == [], "a re-publish of resident bytes re-uploaded"
 
 
@@ -519,7 +519,7 @@ def test_a_corrupted_chunk_is_refused_by_the_store_and_fails_the_publish(
 
     seen = _events(monkeypatch)
     with pytest.raises(HubPublishError) as exc:
-        _publisher(hub).publish(FAMILY, artifact, dict(META))
+        _publisher(hub).publish(FAMILY, artifact, dict(META), PROVENANCE)
     assert "failed to upload" in str(exc.value)
     # The poisoned object never landed; every honest one did.
     assert ("sha256:" + digest) not in hub.httpd.objects
@@ -536,7 +536,7 @@ def test_complete_over_missing_objects_is_a_typed_repudiation(hub, artifact,
     `code` + `retryable` bit and puts THAT on the wire as the failure phase."""
     monkeypatch.setattr(hub_client, "upload", lambda *a, **k: TransferReport())
     with pytest.raises(HubPublishError) as exc:
-        _publisher(hub).publish(FAMILY, artifact, dict(META))
+        _publisher(hub).publish(FAMILY, artifact, dict(META), PROVENANCE)
     assert exc.value.code == "objects_missing"
     assert exc.value.retryable is False
     assert fc._publish_failure_phase(exc.value) == "objects_missing"
