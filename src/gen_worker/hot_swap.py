@@ -103,6 +103,10 @@ _MAX_SIGS = 256
 # shape class) — healing cannot converge, so route it eager permanently instead
 # of thrashing compile churn.
 _GUARD_MISS_HEAL_LIMIT = 2
+# Default bound for `quiesce`. Long enough for a warm job to leave a stubbed
+# or already-finishing compile, short enough that a drain never hangs on a
+# real inductor run it cannot interrupt.
+_QUIESCE_S = 30.0
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +237,10 @@ class _WarmJob:
     # defaulted fields above: there is no ungated warm job any more, so this
     # field can no longer be absent and `_run_warm` has no ungated branch.
     turn: TurnGate = field(kw_only=True)
+    # The router generation this job was enqueued in. `Router.cancel_warm`
+    # bumps the generation, which DISOWNS every job stamped with an older
+    # one — see that method for why a background compile has an owner at all.
+    epoch: int = field(kw_only=True, default=0)
 
 
 class Router:
@@ -278,6 +286,10 @@ class Router:
         # enqueue a warm job ungated (:meth:`route` refuses typed). It is not
         # a mode.
         self.turn_gate: Optional[TurnGate] = None
+        # Background-warm ownership (pgw#1311): the generation a queued job is
+        # stamped with. :meth:`cancel_warm` bumps it to disown every job this
+        # router still has out. Read under `lock`.
+        self.epoch = 0
 
     def set_turn_gate(self, turn_gate: TurnGate) -> None:
         """Wire the executor's background turn. Idempotent; ``None`` is not a
@@ -315,6 +327,40 @@ class Router:
             self.closed = True
             self.concurrent = False
             self.on_warmed = None
+            self.epoch += 1
+
+    def cancel_warm(self) -> None:
+        """Disown every background warm job this router has outstanding.
+
+        A warm job outlives the call that enqueued it: it sits in the
+        process-global queue and then compiles for as long as inductor takes.
+        So whoever is about to destroy the state the job runs against — the
+        mint capture directory (``fleet_cells.abandon_self_mint`` rmtree's
+        it), the guarded wrappers (``compile_cache.unwrap``) — has to say so,
+        or the job reports its own teardown as a fleet-wide fact.
+
+        Queued jobs are dropped at pickup; the one already compiling runs to
+        its own end (an inductor compile is not interruptible) but its RESULT
+        is disowned: it never marks a signature warm, never republishes a
+        cell, never books a coverage gap, and never emits a ``serve_degrade``.
+        Measured (pgw#1311): abandoning a mint left its in-flight warm compile
+        writing into the capture directory the abandonment had just deleted,
+        and the resulting ``FileNotFoundError`` reached the hub as a
+        ``serve_degrade`` plus a permanent ``shape_gap`` — a coverage hole
+        invented by our own cleanup.
+
+        NON-BLOCKING by contract: every production caller is on the executor's
+        event loop and one compile is minutes long. :func:`quiesce` is the
+        bounded WAIT, for a caller that is off the loop (the worker drain)."""
+        with self.lock:
+            self.epoch += 1
+
+    def disowned(self, job: "_WarmJob") -> bool:
+        """Has this job's owner moved on? Checked at pickup and again at the
+        end of the compile — the end check is the load-bearing one, because a
+        cancel can always land while the compile is already running."""
+        with self.lock:
+            return self.closed or job.epoch != self.epoch
 
     def suspend(self) -> None:
         """Stop concurrent routing WITHOUT discarding warm/pending state: novel
@@ -397,13 +443,14 @@ class Router:
                     f"target={label}: a background compile was enqueued on a "
                     f"router with no turn gate (pgw#677/pgw#1215)")
             self.pending.add(sig)
+            epoch = self.epoch
         try:
             job = _WarmJob(
                 router=self, label=label, sig=sig, compiled=compiled,
                 args=_dummy_value(args), kwargs=_dummy_value(kwargs),
                 device=device, grad_mode=_grad_mode(),
                 autocast_dtype=_autocast_dtype(),
-                num_threads=_num_threads(), turn=turn,
+                num_threads=_num_threads(), turn=turn, epoch=epoch,
             )
         except Exception:
             with self.lock:
@@ -488,13 +535,14 @@ class Router:
                     f"target={label}: a guard-miss heal was scheduled on a "
                     f"router with no turn gate (pgw#680/pgw#1215)")
             self.pending.add(sig)
+            epoch = self.epoch
         try:
             job = _WarmJob(
                 router=self, label=label, sig=sig, compiled=compiled,
                 args=_dummy_value(args), kwargs=_dummy_value(kwargs),
                 device=_first_cuda_device(args, kwargs),
                 grad_mode=_grad_mode(), autocast_dtype=_autocast_dtype(),
-                num_threads=_num_threads(), turn=turn,
+                num_threads=_num_threads(), turn=turn, epoch=epoch,
             )
         except Exception:
             logger.warning(
@@ -526,6 +574,12 @@ class Router:
 _QUEUE: "queue.Queue[_WarmJob]" = queue.Queue(maxsize=_QUEUE_MAX)
 _WORKER_LOCK = threading.Lock()
 _WORKER: Optional[threading.Thread] = None
+# Outstanding = queued PLUS in the worker's hands. The worker thread itself is
+# a process-global daemon that never exits, so "is the background work done"
+# can only be asked of the WORK, never of the thread (pgw#1311).
+_IDLE = threading.Condition(threading.Lock())
+_OUTSTANDING = 0
+_CURRENT: Optional[_WarmJob] = None
 
 
 def _grad_mode() -> str:
@@ -562,26 +616,81 @@ def _num_threads() -> Optional[int]:
 
 
 def _submit(job: _WarmJob) -> bool:
-    global _WORKER
+    global _WORKER, _OUTSTANDING
     with _WORKER_LOCK:
         if _WORKER is None or not _WORKER.is_alive():
             _WORKER = threading.Thread(
                 target=_worker_loop, name="shape-warm", daemon=True)
             _WORKER.start()
-    try:
-        _QUEUE.put_nowait(job)
-        return True
-    except queue.Full:
-        return False
+    with _IDLE:
+        try:
+            _QUEUE.put_nowait(job)
+        except queue.Full:
+            return False
+        _OUTSTANDING += 1
+    return True
+
+
+def _job_done(job: _WarmJob) -> None:
+    global _OUTSTANDING, _CURRENT
+    with _IDLE:
+        if _CURRENT is job:
+            _CURRENT = None
+        _OUTSTANDING -= 1
+        if not _OUTSTANDING:
+            _IDLE.notify_all()
+
+
+def quiesce(timeout: float = _QUIESCE_S, *, cancel: bool = True) -> int:
+    """Stop the process's background warm work and wait for it, bounded.
+
+    Returns the number of jobs still outstanding at the deadline — 0 means
+    quiet. With ``cancel`` (the default) queued jobs are dropped without
+    running and the one already compiling is DISOWNED
+    (:meth:`Router.cancel_warm`), so the wait is for a compile to end rather
+    than for a backlog to drain.
+
+    This is the process-wide half of the ownership seam: `Router.cancel_warm`
+    speaks for one pipeline, this speaks for the whole worker. The suite's
+    per-test fence calls it, because a warm job a test started and did not
+    account for emits into the module-level activity sink DURING a later test
+    (pgw#1311) — the leak whose owner is gone by the time it lands."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    if cancel:
+        while True:
+            try:
+                job = _QUEUE.get_nowait()
+            except queue.Empty:
+                break
+            job.router.cancel_warm()
+            with job.router.lock:
+                job.router.pending.discard(job.sig)
+                job.router.healing.discard(job.sig)
+            _QUEUE.task_done()
+            _job_done(job)
+        with _IDLE:
+            running = _CURRENT
+        if running is not None:
+            running.router.cancel_warm()
+    with _IDLE:
+        while _OUTSTANDING:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return _OUTSTANDING
+            _IDLE.wait(remaining)
+    return 0
 
 
 def _worker_loop() -> None:
+    global _CURRENT
     try:  # background compile must never contend evenly with serving CPU
         os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 10)
     except Exception:
         pass
     while True:
         job = _QUEUE.get()
+        with _IDLE:
+            _CURRENT = job
         try:
             _run_warm(job)
         except Exception as exc:
@@ -596,6 +705,7 @@ def _worker_loop() -> None:
             )
         finally:
             _QUEUE.task_done()
+            _job_done(job)
 
 
 def _ensure_headroom(device: Optional[int]) -> None:
@@ -616,10 +726,11 @@ def _ensure_headroom(device: Optional[int]) -> None:
 
 def _run_warm(job: _WarmJob) -> None:
     router = job.router
-    with router.lock:
-        if router.closed:
+    if router.disowned(job):
+        with router.lock:
             router.pending.discard(job.sig)
-            return
+            router.healing.discard(job.sig)
+        return
     # The compile + dummy forward execute the SAME modules the serving path
     # runs (and inductor benchmarks on the same device). Ungated, that races
     # live tenant forwards: 8.6x tenant latency during mints, and an sm_86
@@ -629,10 +740,11 @@ def _run_warm(job: _WarmJob) -> None:
     # branch beside this one any more — `job.turn` is a required field.
     try:
         with job.turn("compile"):
-            with router.lock:
-                if router.closed:
+            if router.disowned(job):
+                with router.lock:
                     router.pending.discard(job.sig)
-                    return
+                    router.healing.discard(job.sig)
+                return
             _ensure_headroom(job.device)
             _run_warm_gated(job)
     except TurnGateBusy:
@@ -699,13 +811,15 @@ def _run_warm_compile(job: _WarmJob) -> None:
             else:
                 job.compiled(*job.args, **job.kwargs)
     except BaseException as exc:  # noqa: BLE001 — contained per-signature
+        disowned = router.disowned(job)
         with router.lock:
             router.pending.discard(job.sig)
             # A failed guard-miss heal keeps the signature eager via bg_failed
             # (concurrent routers); the healing veto must not outlive its job on
             # the non-concurrent ones.
             router.healing.discard(job.sig)
-            router.bg_failed.add(job.sig)
+            if not disowned:
+                router.bg_failed.add(job.sig)
         try:
             import torch
 
@@ -713,6 +827,18 @@ def _run_warm_compile(job: _WarmJob) -> None:
                 torch.cuda.empty_cache()
         except Exception:
             pass
+        if disowned:
+            # The owner cancelled this job (mint abandoned, pipeline
+            # unwrapped) and then destroyed what it was compiling against.
+            # Reporting that as a degrade or a coverage gap would put OUR
+            # teardown in the hub's ledger as a shape the fleet cannot cover
+            # (pgw#1311) — and would strand the signature in `bg_failed`.
+            logger.info(
+                "hot-swap: background compile for %s ended after its owner "
+                "disowned it (%s: %s); not reported — the failure is the "
+                "cancellation, not a shape gap", job.label,
+                type(exc).__name__, exc)
+            return
         logger.warning(
             "hot-swap: background compile for %s failed (%s: %s); that "
             "signature stays eager for this process",
@@ -737,6 +863,18 @@ def _run_warm_compile(job: _WarmJob) -> None:
             reason=shape_growth.REASON_UNCOVERED,
             detail=f"background warm failed: {type(exc).__name__}: {exc}",
         ))
+        return
+    if router.disowned(job):
+        # Same cancellation, winning end: marking the signature warm would
+        # route later requests into a compiled path whose pipeline has been
+        # unwrapped, and `on_warmed` would republish a cell for a mint whose
+        # capture is already gone.
+        with router.lock:
+            router.pending.discard(job.sig)
+            router.healing.discard(job.sig)
+        logger.info(
+            "hot-swap: background compile for %s finished after its owner "
+            "disowned it; the result is discarded", job.label)
         return
     router.mark_warm(job.sig)
     with router.lock:
