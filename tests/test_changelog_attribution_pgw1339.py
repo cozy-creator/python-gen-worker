@@ -269,6 +269,72 @@ def test_work_outside_the_cut_ref_rides_the_next_cut(repair_repo: Path) -> None:
     assert f"is not in {cut_ref}" in done.stdout
 
 
+# --------------------------------------------------------------------------
+# per-lane fragment names: one issue, many lanes, no shared path
+# --------------------------------------------------------------------------
+
+
+def test_per_lane_fragments_of_one_issue_fold_into_one_section(
+    repair_repo: Path,
+) -> None:
+    """pgw#1346's ~10 lanes shared `pgw1346.md` and re-serialised the queue.
+
+    Disjoint files, one issue: both are dated by `pgw#1346`'s commits, both land
+    in the same section, adjacent and ordered, each with its own ledger row.
+    """
+    work(repair_repo, "pgw1346", "the B3 math half")
+    fragment(repair_repo, "pgw1346-b4-video", "the video half")
+    fragment(repair_repo, "pgw1346-b3-math", "the math half")
+    fragment(repair_repo, "pgw1346", "the roll-up")
+
+    done = assemble(repair_repo, "--version", "0.122.0")
+    assert done.returncode == 0, done.stderr
+
+    body = section((repair_repo / "CHANGELOG.md").read_text(), "0.122.0")
+    for stem in ("pgw1346", "pgw1346-b3-math", "pgw1346-b4-video"):
+        assert stem in body
+    # unsuffixed first, then suffixes in order, and all three adjacent -- the
+    # section must not depend on filesystem order.
+    assert (
+        body.index("pgw1346:")
+        < body.index("pgw1346-b3-math:")
+        < body.index("pgw1346-b4-video:")
+    )
+    assert body.index("pgw1346-b4-video:") < body.index("pgw1350:")
+
+    rows = [
+        ln
+        for ln in (repair_repo / LEDGER).read_text().splitlines()
+        if not ln.startswith("#")
+    ]
+    assert "0.122.0\tpgw1346" in rows
+    assert "0.122.0\tpgw1346-b3-math" in rows
+    assert "0.122.0\tpgw1346-b4-video" in rows
+
+
+def test_a_suffixed_fragment_is_dated_by_its_ISSUE_not_its_suffix(
+    repair_repo: Path,
+) -> None:
+    """The suffix is a filename. `pgw#1323`'s tag is what dates the lane file."""
+    fragment(repair_repo, "pgw1323-fence", "the cross-repo consumer fence")
+
+    done = assemble(repair_repo, "--version", "0.121.0")
+    assert done.returncode == 0, done.stderr
+    assert "pgw1323-fence" in section(
+        (repair_repo / "CHANGELOG.md").read_text(), "0.121.0"
+    )
+
+
+@pytest.mark.parametrize("stem", ["pgw-b3-math", "b3-math", "pgw1346-B3", "pgw1346-"])
+def test_a_name_with_no_issue_number_is_refused(repair_repo: Path, stem: str) -> None:
+    """A suffix may not become an escape hatch: no number, nothing to date it."""
+    (repair_repo / "changelog.d" / f"{stem}.md").write_text("- **a lane half**\n")
+
+    done = assemble(repair_repo, "--check")
+    assert done.returncode != 0
+    assert "must be <prefix><number>[-<suffix>].md" in done.stdout + done.stderr
+
+
 def test_an_issue_with_no_subject_commit_falls_back_to_the_fragments_own_commit(
     repair_repo: Path,
 ) -> None:

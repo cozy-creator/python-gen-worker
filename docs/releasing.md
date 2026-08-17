@@ -242,6 +242,24 @@ the bullet is appended to that existing section under the *attributed after the
 cut* note — one heading, in place, with every unrelated fragment left pending.
 Dry-run it first and read the pending list.
 
+### One issue, many lanes: `pgw1346-<suffix>.md` (pgw#1339)
+
+A fragment name is `<prefix><number>[-<suffix>].md`. **The suffix exists because
+`changelog.d/pgw1346.md` became a shared path again** — around ten batch lanes
+appended to the one file, which re-serialised the merge queue and ejected PRs as
+`CONFLICTING` (pgw#916 twice), the precise failure `changelog.d/` was built to
+remove. A lane of a batched issue writes its own file:
+
+```
+changelog.d/pgw1346-b3-math.md      changelog.d/pgw1346-b4-video.md
+```
+
+Disjoint paths, so they cannot conflict; the same issue number, so they are dated
+by the same commits and land **adjacent in one section**, unsuffixed file first
+then suffixes in order. **The `<prefix><number>` core is never optional** — it is
+what dates and orders the fragment — so `pgw-b3-math.md` or `b3-math.md` is
+refused by `--check` at the lane's own PR, not at the cut.
+
 `--cut-ref` (default `HEAD`) names the commit being released. Cutting from an
 older commit — which `docs/releasing.md` tells you to do when a lane's red is not
 yours — means work merged after it is not in your wheel, so pass the same ref you

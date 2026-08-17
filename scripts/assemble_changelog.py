@@ -23,6 +23,11 @@ change; the change is the thing a release note dates. So
     that version is not itself already released and the work is in the cut ref.
     Otherwise the fragment stays PENDING and is listed, never swept.
 
+A fragment name may carry a per-lane suffix -- `pgw1346-b3-math.md` -- so the
+lanes of one batched issue write DISJOINT paths instead of queueing behind a
+shared `pgw1346.md`. The `<prefix><number>` core is what dates and orders it, so
+it stays mandatory; the suffix is only a filename.
+
 Two failures this kills, both observed:
 
   * 0.114.3 shipped pgw#1244's code with changelog.d/pgw1244.md unconsumed, and
@@ -52,8 +57,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# <prefix><number>.md -- prefix names the id space (pgw, th, te, ...).
-NAME = re.compile(r"^(?P<prefix>[a-z]+)(?P<number>\d+)$")
+# <prefix><number>[-<suffix>].md -- prefix names the id space (pgw, th, te, ...).
+#
+# The optional suffix is pgw#1346's lesson: ~10 lanes of one batched issue were
+# all appending to a single `pgw1346.md`, which re-serialised the merge queue on
+# a shared path and cost repeated CONFLICTING ejections -- the exact failure
+# `changelog.d/` exists to remove. `pgw1346-b3-math.md` and `pgw1346-b4-video.md`
+# are disjoint files that still resolve to issue pgw#1346 for dating, and land
+# adjacent in the section. The <prefix><number> core stays mandatory: it is what
+# attribution keys on, so a suffix can never smuggle in an undatable fragment.
+NAME = re.compile(
+    # A 2+ letter prefix, so a suffixed name cannot be read as one: `b3-math`
+    # would otherwise parse as issue b#3 and be dated by nothing.
+    r"^(?P<prefix>[a-z]{2,})(?P<number>\d+)(?:-(?P<suffix>[a-z0-9][a-z0-9-]*))?$"
+)
 UNRELEASED = re.compile(r"^## Unreleased\b.*?(?=^## )", re.M | re.S)
 VERSION = re.compile(r"^\d+\.\d+\.\d+$")
 RELEASE_TAG = re.compile(r"^v(?P<version>\d+\.\d+\.\d+)$")
@@ -111,7 +128,10 @@ def read_ledger(root: Path) -> list[tuple[str, str]]:
         if not VERSION.match(version):
             sys.exit(f"{path}:{lineno}: {version!r} is not an X.Y.Z version")
         if not NAME.match(stem):
-            sys.exit(f"{path}:{lineno}: {stem!r} is not a <prefix><number> fragment")
+            sys.exit(
+                f"{path}:{lineno}: {stem!r} is not a "
+                "<prefix><number>[-<suffix>] fragment"
+            )
         if stem in seen:
             sys.exit(f"{path}:{lineno}: {stem} is recorded twice")
         seen.add(stem)
@@ -124,10 +144,16 @@ def write_ledger(root: Path, rows: list[tuple[str, str]]) -> None:
     ledger_path(root).write_text(LEDGER_HEADER + body)
 
 
-def collect(root: Path) -> tuple[list[tuple[int, str, Path]], list[tuple[str, Path]]]:
-    """(pending, consumed) fragments -- pending ordered by issue NUMBER."""
+def collect(
+    root: Path,
+) -> tuple[list[tuple[int, str, str, Path]], list[tuple[str, Path]]]:
+    """(pending, consumed) fragments.
+
+    Pending is ordered by issue NUMBER, then by suffix -- so one issue's
+    per-lane fragments land adjacent in the section, unsuffixed one first.
+    """
     consumed_at = {stem: version for version, stem in read_ledger(root)}
-    pending: list[tuple[int, str, Path]] = []
+    pending: list[tuple[int, str, str, Path]] = []
     consumed: list[tuple[str, Path]] = []
     for path in fragments_dir(root).glob("*.md"):
         if path.name == "README.md":
@@ -135,15 +161,17 @@ def collect(root: Path) -> tuple[list[tuple[int, str, Path]], list[tuple[str, Pa
         m = NAME.match(path.stem)
         if not m:
             sys.exit(
-                f"{path}: name must be <prefix><number>.md (e.g. pgw968.md); "
-                "the number is what orders the release section."
+                f"{path}: name must be <prefix><number>[-<suffix>].md "
+                "(e.g. pgw968.md, or pgw1346-b3-math.md for one lane of a "
+                "batched issue); the number is what orders the release section "
+                "and what dates the fragment, so it is never optional."
             )
         if not path.read_text().strip():
             sys.exit(f"{path}: empty fragment")
         if path.stem in consumed_at:
             consumed.append((consumed_at[path.stem], path))
             continue
-        pending.append((int(m["number"]), m["prefix"], path))
+        pending.append((int(m["number"]), m["prefix"], m["suffix"] or "", path))
     return sorted(pending), sorted(consumed)
 
 
@@ -215,6 +243,7 @@ class Work:
     """What a fragment's issue actually shipped in, derived from git."""
 
     stem: str
+    issue: str  # `pgw#1346` -- the suffix does not date anything
     commits: tuple[str, ...]
     from_subject: bool
     released_in: str | None  # earliest release tag containing ALL of `commits`
@@ -226,6 +255,7 @@ def resolve(
     m = NAME.match(path.stem)
     assert m is not None, path  # collect() already refused anything else
     key = f"{m['prefix']}{int(m['number'])}"
+    issue = f"{m['prefix']}#{int(m['number'])}"
     commits = list(dict.fromkeys(index.get(key, [])))
     from_subject = bool(commits)
     if not commits and (added := added_commit(root, path)):
@@ -236,7 +266,7 @@ def resolve(
             cache[commit] = containing_versions(root, commit)
         contained = cache[commit] if contained is None else contained & cache[commit]
     released_in = min(contained, key=version_key) if contained else None
-    return Work(path.stem, tuple(commits), from_subject, released_in)
+    return Work(path.stem, issue, tuple(commits), from_subject, released_in)
 
 
 def render(body: list[Path]) -> str:
@@ -273,7 +303,7 @@ def held_reason(work: Work, cutting: str, cutting_released: bool, ref: str) -> s
     """Why a fragment is not being assembled -- printed, never silent."""
     if not work.commits:
         return (
-            f"no commit subject names {work.stem}, and the fragment file is not "
+            f"no commit subject names {work.issue}, and the fragment file is not "
             f"committed: nothing proves it shipped in {cutting}"
         )
     where = "commit subjects" if work.from_subject else "the fragment's add commit"
@@ -288,7 +318,7 @@ def held_reason(work: Work, cutting: str, cutting_released: bool, ref: str) -> s
 
 def plan_versions(
     root: Path,
-    pending: list[tuple[int, str, Path]],
+    pending: list[tuple[int, str, str, Path]],
     cutting: str,
     cutting_released: bool,
     cut_ref: str,
@@ -298,7 +328,7 @@ def plan_versions(
     by_version: dict[str, list[Path]] = {}
     held: list[tuple[Path, str]] = []
     cache: dict[str, set[str]] = {}
-    for _, _, path in pending:
+    for *_, path in pending:
         work = resolve(root, path, index, cache)
         if work.released_in is not None:
             by_version.setdefault(work.released_in, []).append(path)
@@ -333,7 +363,7 @@ def main() -> int:
     pending, consumed = collect(root)
 
     if args.check:
-        for _, _, path in pending:
+        for *_, path in pending:
             print(f"pending  {path.relative_to(root)}")
         for version, path in consumed:
             print(f"consumed {path.relative_to(root)} -> {version}")
