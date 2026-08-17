@@ -54,6 +54,13 @@ SPECS = {
     "sd15": "gen_worker.model.catalog.sd15:SD15",
     "sdxl": "gen_worker.model.catalog.sdxl:SDXL",
     "z_image": "gen_worker.model.catalog.z_image:Z_IMAGE",
+    "ltx23": "gen_worker.model.catalog.ltx23:LTX23",
+    "sd2": "gen_worker.model.catalog.sd15:SD2",
+    "sd15": "gen_worker.model.catalog.sd15:SD15",
+    "sdxl": "gen_worker.model.catalog.sdxl:SDXL",
+    "wan22_i2v_a14b": "gen_worker.model.catalog.wan22:WAN22_I2V_A14B",
+    "wan22_t2v_a14b": "gen_worker.model.catalog.wan22:WAN22_T2V_A14B",
+    "wan22_ti2v_5b": "gen_worker.model.catalog.wan22:WAN22_TI2V_5B",
 }
 
 #: The same map for the EAGER tier (pgw#1346 B5), kept separate rather than
@@ -69,6 +76,7 @@ EAGER_SPECS = {
     "hunyuan3d": "gen_worker.model.catalog.boundary_3d:HUNYUAN3D",
     "internvl_u": "gen_worker.model.catalog.boundary_llm:INTERNVL_U",
     "joycaption": "gen_worker.model.catalog.boundary_llm:JOYCAPTION",
+    "minimax_h3": "gen_worker.model.catalog.minimax_h3:MINIMAX_H3",
     "musicgen": "gen_worker.model.catalog.boundary_audio:MUSICGEN",
     "qwen36_27b_mtp": "gen_worker.model.catalog.boundary_llm:QWEN36_27B_MTP",
     "qwen36_35b_a3b": "gen_worker.model.catalog.boundary_llm:QWEN36_35B_A3B",

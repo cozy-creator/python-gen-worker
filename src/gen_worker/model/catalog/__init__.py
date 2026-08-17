@@ -64,6 +64,8 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
     from ._generated.hunyuan3d import Hunyuan3d
     from ._generated.internvl_u import InternvlU
     from ._generated.joycaption import Joycaption
+    from ._generated.ltx23 import Ltx23, Ltx23AudioTokens, Ltx23Layout, Ltx23VideoTokens
+    from ._generated.minimax_h3 import MinimaxH3
     from ._generated.musicgen import Musicgen
     from ._generated.qwen36_27b_mtp import Qwen3627bMtp
     from ._generated.qwen36_35b_a3b import Qwen3635bA3b
@@ -74,6 +76,24 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
     from ._generated.stable_audio_open import StableAudioOpen
     from ._generated.trellis_3d import Trellis3d
     from ._generated.z_image import ZImage, ZImageBranches, ZImageLayout
+    from ._generated.wan22_i2v_a14b import (
+        Wan22I2vA14b,
+        Wan22I2vA14bFrames,
+        Wan22I2vA14bLayout,
+        Wan22I2vA14bShape,
+    )
+    from ._generated.wan22_t2v_a14b import (
+        Wan22T2vA14b,
+        Wan22T2vA14bFrames,
+        Wan22T2vA14bLayout,
+        Wan22T2vA14bShape,
+    )
+    from ._generated.wan22_ti2v_5b import (
+        Wan22Ti2v5b,
+        Wan22Ti2v5bFrames,
+        Wan22Ti2v5bLayout,
+        Wan22Ti2v5bShape,
+    )
 
 #: Exported name -> the generated module that defines it. THE catalog index:
 #: adding a family adds rows here and nothing else changes.
@@ -104,18 +124,23 @@ _FAMILIES: Final[dict[str, str]] = {
     "Hunyuan3d": "hunyuan3d",
     "InternvlU": "internvl_u",
     "Joycaption": "joycaption",
+    "MinimaxH3": "minimax_h3",
     "Musicgen": "musicgen",
     "Qwen3627bMtp": "qwen36_27b_mtp",
     "Qwen3635bA3b": "qwen36_35b_a3b",
     "QwenImage": "qwen_image",
     "QwenImageLayout": "qwen_image",
     "QwenImageShape": "qwen_image",
-    "Sd15": "sd15",
-    "Sd15Layout": "sd15",
-    "Sd15Shape": "sd15",
+    "Ltx23": "ltx23",
+    "Ltx23AudioTokens": "ltx23",
+    "Ltx23Layout": "ltx23",
+    "Ltx23VideoTokens": "ltx23",
     "Sd2": "sd2",
     "Sd2Layout": "sd2",
     "Sd2Shape": "sd2",
+    "Sd15": "sd15",
+    "Sd15Layout": "sd15",
+    "Sd15Shape": "sd15",
     "Sdxl": "sdxl",
     "SdxlLayout": "sdxl",
     "SdxlShape": "sdxl",
@@ -124,6 +149,18 @@ _FAMILIES: Final[dict[str, str]] = {
     "ZImage": "z_image",
     "ZImageBranches": "z_image",
     "ZImageLayout": "z_image",
+    "Wan22I2vA14b": "wan22_i2v_a14b",
+    "Wan22I2vA14bFrames": "wan22_i2v_a14b",
+    "Wan22I2vA14bLayout": "wan22_i2v_a14b",
+    "Wan22I2vA14bShape": "wan22_i2v_a14b",
+    "Wan22T2vA14b": "wan22_t2v_a14b",
+    "Wan22T2vA14bFrames": "wan22_t2v_a14b",
+    "Wan22T2vA14bLayout": "wan22_t2v_a14b",
+    "Wan22T2vA14bShape": "wan22_t2v_a14b",
+    "Wan22Ti2v5b": "wan22_ti2v_5b",
+    "Wan22Ti2v5bFrames": "wan22_ti2v_5b",
+    "Wan22Ti2v5bLayout": "wan22_ti2v_5b",
+    "Wan22Ti2v5bShape": "wan22_ti2v_5b",
 }
 
 
@@ -163,18 +200,23 @@ __all__ = [
     "Hunyuan3d",
     "InternvlU",
     "Joycaption",
+    "MinimaxH3",
     "Musicgen",
     "Qwen3627bMtp",
     "Qwen3635bA3b",
     "QwenImage",
     "QwenImageLayout",
     "QwenImageShape",
-    "Sd15",
-    "Sd15Layout",
-    "Sd15Shape",
+    "Ltx23",
+    "Ltx23AudioTokens",
+    "Ltx23Layout",
+    "Ltx23VideoTokens",
     "Sd2",
     "Sd2Layout",
     "Sd2Shape",
+    "Sd15",
+    "Sd15Layout",
+    "Sd15Shape",
     "Sdxl",
     "SdxlLayout",
     "SdxlShape",
@@ -183,4 +225,16 @@ __all__ = [
     "ZImage",
     "ZImageBranches",
     "ZImageLayout",
+    "Wan22I2vA14b",
+    "Wan22I2vA14bFrames",
+    "Wan22I2vA14bLayout",
+    "Wan22I2vA14bShape",
+    "Wan22T2vA14b",
+    "Wan22T2vA14bFrames",
+    "Wan22T2vA14bLayout",
+    "Wan22T2vA14bShape",
+    "Wan22Ti2v5b",
+    "Wan22Ti2v5bFrames",
+    "Wan22Ti2v5bLayout",
+    "Wan22Ti2v5bShape",
 ]

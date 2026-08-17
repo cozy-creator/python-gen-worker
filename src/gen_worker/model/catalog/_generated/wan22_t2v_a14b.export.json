@@ -1,0 +1,371 @@
+{
+  "buckets": [
+    {
+      "name": "frames",
+      "values": [
+        81
+      ]
+    },
+    {
+      "name": "shape",
+      "values": [
+        7201280,
+        12800720
+      ]
+    }
+  ],
+  "family": "wan22_t2v_a14b",
+  "loop": {
+    "kind": "staged",
+    "session_state": "none",
+    "stages": [
+      {
+        "parameter": "steps_high",
+        "repeat": "counted",
+        "runner": "denoiser_high"
+      },
+      {
+        "parameter": "steps_low",
+        "repeat": "counted",
+        "runner": "denoiser_low"
+      }
+    ]
+  },
+  "parameters": [
+    {
+      "maximum": 80,
+      "minimum": 1,
+      "name": "steps_high"
+    },
+    {
+      "maximum": 80,
+      "minimum": 1,
+      "name": "steps_low"
+    }
+  ],
+  "runners": [
+    {
+      "axes": [
+        "frames",
+        "shape"
+      ],
+      "name": "denoiser_high",
+      "variants": [
+        {
+          "bucket": {
+            "frames": 81,
+            "shape": 7201280
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  16,
+                  21,
+                  160,
+                  90
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "encoder_hidden_states",
+                "name": "encoder_hidden_states",
+                "param": "encoder_hidden_states",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  1,
+                  512,
+                  4096
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "timestep",
+              "encoder_hidden_states"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "28beec9b59986656f22be25ca56487e4",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                16,
+                21,
+                160,
+                90
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "frames": 81,
+            "shape": 12800720
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  16,
+                  21,
+                  90,
+                  160
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "encoder_hidden_states",
+                "name": "encoder_hidden_states",
+                "param": "encoder_hidden_states",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  1,
+                  512,
+                  4096
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "timestep",
+              "encoder_hidden_states"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "cab5e5f347d83dade332e565645a4784",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                16,
+                21,
+                90,
+                160
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "axes": [
+        "frames",
+        "shape"
+      ],
+      "name": "denoiser_low",
+      "variants": [
+        {
+          "bucket": {
+            "frames": 81,
+            "shape": 7201280
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  16,
+                  21,
+                  160,
+                  90
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "encoder_hidden_states",
+                "name": "encoder_hidden_states",
+                "param": "encoder_hidden_states",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  1,
+                  512,
+                  4096
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "timestep",
+              "encoder_hidden_states"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "28beec9b59986656f22be25ca56487e4",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                16,
+                21,
+                160,
+                90
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "frames": 81,
+            "shape": 12800720
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 3,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  16,
+                  21,
+                  90,
+                  160
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "encoder_hidden_states",
+                "name": "encoder_hidden_states",
+                "param": "encoder_hidden_states",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  1,
+                  512,
+                  4096
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "timestep",
+              "encoder_hidden_states"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "cab5e5f347d83dade332e565645a4784",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                16,
+                21,
+                90,
+                160
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "tuned": {
+    "module": "gen_worker.model.catalog.wan22_serve",
+    "qualname": "Wan22Tuned"
+  },
+  "v": 1
+}

@@ -1,0 +1,909 @@
+{
+  "buckets": [
+    {
+      "name": "audio_tokens",
+      "values": [
+        126,
+        251
+      ]
+    },
+    {
+      "name": "video_tokens",
+      "values": [
+        65280,
+        261120
+      ]
+    }
+  ],
+  "family": "ltx23",
+  "loop": {
+    "kind": "staged",
+    "session_state": "none",
+    "stages": [
+      {
+        "parameter": "stage1_steps",
+        "repeat": "counted",
+        "runner": "denoiser"
+      },
+      {
+        "parameter": "stage2_steps",
+        "repeat": "counted",
+        "runner": "denoiser"
+      }
+    ]
+  },
+  "parameters": [
+    {
+      "maximum": 50,
+      "minimum": 1,
+      "name": "stage1_steps"
+    },
+    {
+      "maximum": 50,
+      "minimum": 1,
+      "name": "stage2_steps"
+    }
+  ],
+  "runners": [
+    {
+      "axes": [
+        "audio_tokens",
+        "video_tokens"
+      ],
+      "name": "denoiser",
+      "variants": [
+        {
+          "bucket": {
+            "audio_tokens": 126,
+            "video_tokens": 65280
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 12,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  65280,
+                  128
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "audio_hidden_states",
+                "name": "audio_hidden_states",
+                "param": "audio_hidden_states",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  1,
+                  126,
+                  128
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "encoder_hidden_states",
+                "name": "encoder_hidden_states",
+                "param": "encoder_hidden_states",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  1,
+                  1024,
+                  4096
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "audio_encoder_hidden_states",
+                "name": "audio_encoder_hidden_states",
+                "param": "audio_encoder_hidden_states",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  1,
+                  1024,
+                  2048
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 4,
+                "path": [],
+                "position": 4,
+                "shape": [
+                  1,
+                  65280
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "audio_timestep",
+                "name": "audio_timestep",
+                "param": "audio_timestep",
+                "param_position": 5,
+                "path": [],
+                "position": 5,
+                "shape": [
+                  1,
+                  1
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "sigma",
+                "name": "sigma",
+                "param": "sigma",
+                "param_position": 6,
+                "path": [],
+                "position": 6,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "audio_sigma",
+                "name": "audio_sigma",
+                "param": "audio_sigma",
+                "param_position": 7,
+                "path": [],
+                "position": 7,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "encoder_attention_mask",
+                "name": "encoder_attention_mask",
+                "param": "encoder_attention_mask",
+                "param_position": 8,
+                "path": [],
+                "position": 8,
+                "shape": [
+                  1,
+                  1024
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "audio_encoder_attention_mask",
+                "name": "audio_encoder_attention_mask",
+                "param": "audio_encoder_attention_mask",
+                "param_position": 9,
+                "path": [],
+                "position": 9,
+                "shape": [
+                  1,
+                  1024
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "video_coords",
+                "name": "video_coords",
+                "param": "video_coords",
+                "param_position": 10,
+                "path": [],
+                "position": 10,
+                "shape": [
+                  1,
+                  3,
+                  65280,
+                  2
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "audio_coords",
+                "name": "audio_coords",
+                "param": "audio_coords",
+                "param_position": 11,
+                "path": [],
+                "position": 11,
+                "shape": [
+                  1,
+                  1,
+                  126,
+                  2
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "audio_hidden_states",
+              "encoder_hidden_states",
+              "audio_encoder_hidden_states",
+              "timestep",
+              "audio_timestep",
+              "sigma",
+              "audio_sigma",
+              "encoder_attention_mask",
+              "audio_encoder_attention_mask",
+              "video_coords",
+              "audio_coords"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "51a9f69a9ac1f33a681dd9ecb316d05c",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                65280,
+                128
+              ]
+            },
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                126,
+                128
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "audio_tokens": 126,
+            "video_tokens": 261120
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 12,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  261120,
+                  128
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "audio_hidden_states",
+                "name": "audio_hidden_states",
+                "param": "audio_hidden_states",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  1,
+                  126,
+                  128
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "encoder_hidden_states",
+                "name": "encoder_hidden_states",
+                "param": "encoder_hidden_states",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  1,
+                  1024,
+                  4096
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "audio_encoder_hidden_states",
+                "name": "audio_encoder_hidden_states",
+                "param": "audio_encoder_hidden_states",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  1,
+                  1024,
+                  2048
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 4,
+                "path": [],
+                "position": 4,
+                "shape": [
+                  1,
+                  261120
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "audio_timestep",
+                "name": "audio_timestep",
+                "param": "audio_timestep",
+                "param_position": 5,
+                "path": [],
+                "position": 5,
+                "shape": [
+                  1,
+                  1
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "sigma",
+                "name": "sigma",
+                "param": "sigma",
+                "param_position": 6,
+                "path": [],
+                "position": 6,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "audio_sigma",
+                "name": "audio_sigma",
+                "param": "audio_sigma",
+                "param_position": 7,
+                "path": [],
+                "position": 7,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "encoder_attention_mask",
+                "name": "encoder_attention_mask",
+                "param": "encoder_attention_mask",
+                "param_position": 8,
+                "path": [],
+                "position": 8,
+                "shape": [
+                  1,
+                  1024
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "audio_encoder_attention_mask",
+                "name": "audio_encoder_attention_mask",
+                "param": "audio_encoder_attention_mask",
+                "param_position": 9,
+                "path": [],
+                "position": 9,
+                "shape": [
+                  1,
+                  1024
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "video_coords",
+                "name": "video_coords",
+                "param": "video_coords",
+                "param_position": 10,
+                "path": [],
+                "position": 10,
+                "shape": [
+                  1,
+                  3,
+                  261120,
+                  2
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "audio_coords",
+                "name": "audio_coords",
+                "param": "audio_coords",
+                "param_position": 11,
+                "path": [],
+                "position": 11,
+                "shape": [
+                  1,
+                  1,
+                  126,
+                  2
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "audio_hidden_states",
+              "encoder_hidden_states",
+              "audio_encoder_hidden_states",
+              "timestep",
+              "audio_timestep",
+              "sigma",
+              "audio_sigma",
+              "encoder_attention_mask",
+              "audio_encoder_attention_mask",
+              "video_coords",
+              "audio_coords"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "05dffd8dfc69452d041db8f3e82fd9f4",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                261120,
+                128
+              ]
+            },
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                126,
+                128
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "audio_tokens": 251,
+            "video_tokens": 65280
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 12,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  65280,
+                  128
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "audio_hidden_states",
+                "name": "audio_hidden_states",
+                "param": "audio_hidden_states",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  1,
+                  251,
+                  128
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "encoder_hidden_states",
+                "name": "encoder_hidden_states",
+                "param": "encoder_hidden_states",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  1,
+                  1024,
+                  4096
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "audio_encoder_hidden_states",
+                "name": "audio_encoder_hidden_states",
+                "param": "audio_encoder_hidden_states",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  1,
+                  1024,
+                  2048
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 4,
+                "path": [],
+                "position": 4,
+                "shape": [
+                  1,
+                  65280
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "audio_timestep",
+                "name": "audio_timestep",
+                "param": "audio_timestep",
+                "param_position": 5,
+                "path": [],
+                "position": 5,
+                "shape": [
+                  1,
+                  1
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "sigma",
+                "name": "sigma",
+                "param": "sigma",
+                "param_position": 6,
+                "path": [],
+                "position": 6,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "audio_sigma",
+                "name": "audio_sigma",
+                "param": "audio_sigma",
+                "param_position": 7,
+                "path": [],
+                "position": 7,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "encoder_attention_mask",
+                "name": "encoder_attention_mask",
+                "param": "encoder_attention_mask",
+                "param_position": 8,
+                "path": [],
+                "position": 8,
+                "shape": [
+                  1,
+                  1024
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "audio_encoder_attention_mask",
+                "name": "audio_encoder_attention_mask",
+                "param": "audio_encoder_attention_mask",
+                "param_position": 9,
+                "path": [],
+                "position": 9,
+                "shape": [
+                  1,
+                  1024
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "video_coords",
+                "name": "video_coords",
+                "param": "video_coords",
+                "param_position": 10,
+                "path": [],
+                "position": 10,
+                "shape": [
+                  1,
+                  3,
+                  65280,
+                  2
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "audio_coords",
+                "name": "audio_coords",
+                "param": "audio_coords",
+                "param_position": 11,
+                "path": [],
+                "position": 11,
+                "shape": [
+                  1,
+                  1,
+                  251,
+                  2
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "audio_hidden_states",
+              "encoder_hidden_states",
+              "audio_encoder_hidden_states",
+              "timestep",
+              "audio_timestep",
+              "sigma",
+              "audio_sigma",
+              "encoder_attention_mask",
+              "audio_encoder_attention_mask",
+              "video_coords",
+              "audio_coords"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "55e82e78d2d4c3af402f09bd1fc6f3e0",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                65280,
+                128
+              ]
+            },
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                251,
+                128
+              ]
+            }
+          ]
+        },
+        {
+          "bucket": {
+            "audio_tokens": 251,
+            "video_tokens": 261120
+          },
+          "ingress": {
+            "excluded_inputs": [],
+            "flat_arity": 12,
+            "inputs": [
+              {
+                "dtype": "bfloat16",
+                "exported_name": "hidden_states",
+                "name": "hidden_states",
+                "param": "hidden_states",
+                "param_position": 0,
+                "path": [],
+                "position": 0,
+                "shape": [
+                  1,
+                  261120,
+                  128
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "audio_hidden_states",
+                "name": "audio_hidden_states",
+                "param": "audio_hidden_states",
+                "param_position": 1,
+                "path": [],
+                "position": 1,
+                "shape": [
+                  1,
+                  251,
+                  128
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "encoder_hidden_states",
+                "name": "encoder_hidden_states",
+                "param": "encoder_hidden_states",
+                "param_position": 2,
+                "path": [],
+                "position": 2,
+                "shape": [
+                  1,
+                  1024,
+                  4096
+                ]
+              },
+              {
+                "dtype": "bfloat16",
+                "exported_name": "audio_encoder_hidden_states",
+                "name": "audio_encoder_hidden_states",
+                "param": "audio_encoder_hidden_states",
+                "param_position": 3,
+                "path": [],
+                "position": 3,
+                "shape": [
+                  1,
+                  1024,
+                  2048
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "timestep",
+                "name": "timestep",
+                "param": "timestep",
+                "param_position": 4,
+                "path": [],
+                "position": 4,
+                "shape": [
+                  1,
+                  261120
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "audio_timestep",
+                "name": "audio_timestep",
+                "param": "audio_timestep",
+                "param_position": 5,
+                "path": [],
+                "position": 5,
+                "shape": [
+                  1,
+                  1
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "sigma",
+                "name": "sigma",
+                "param": "sigma",
+                "param_position": 6,
+                "path": [],
+                "position": 6,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "audio_sigma",
+                "name": "audio_sigma",
+                "param": "audio_sigma",
+                "param_position": 7,
+                "path": [],
+                "position": 7,
+                "shape": [
+                  1
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "encoder_attention_mask",
+                "name": "encoder_attention_mask",
+                "param": "encoder_attention_mask",
+                "param_position": 8,
+                "path": [],
+                "position": 8,
+                "shape": [
+                  1,
+                  1024
+                ]
+              },
+              {
+                "dtype": "int64",
+                "exported_name": "audio_encoder_attention_mask",
+                "name": "audio_encoder_attention_mask",
+                "param": "audio_encoder_attention_mask",
+                "param_position": 9,
+                "path": [],
+                "position": 9,
+                "shape": [
+                  1,
+                  1024
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "video_coords",
+                "name": "video_coords",
+                "param": "video_coords",
+                "param_position": 10,
+                "path": [],
+                "position": 10,
+                "shape": [
+                  1,
+                  3,
+                  261120,
+                  2
+                ]
+              },
+              {
+                "dtype": "float32",
+                "exported_name": "audio_coords",
+                "name": "audio_coords",
+                "param": "audio_coords",
+                "param_position": 11,
+                "path": [],
+                "position": 11,
+                "shape": [
+                  1,
+                  1,
+                  251,
+                  2
+                ]
+              }
+            ],
+            "parameters": [
+              "hidden_states",
+              "audio_hidden_states",
+              "encoder_hidden_states",
+              "audio_encoder_hidden_states",
+              "timestep",
+              "audio_timestep",
+              "sigma",
+              "audio_sigma",
+              "encoder_attention_mask",
+              "audio_encoder_attention_mask",
+              "video_coords",
+              "audio_coords"
+            ],
+            "symbols": {},
+            "v": 1
+          },
+          "ingress_digest": "bf709b06dea946eb529a34291f3882f3",
+          "layout": "bf16",
+          "outputs": [
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                261120,
+                128
+              ]
+            },
+            {
+              "dtype": "bfloat16",
+              "shape": [
+                1,
+                251,
+                128
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "scheduler": {
+    "name": "flow_match_euler_discrete",
+    "parameters": {
+      "num_train_timesteps": 1000
+    }
+  },
+  "tuned": {
+    "module": "gen_worker.model.catalog.ltx23_serve",
+    "qualname": "Ltx23Tuned"
+  },
+  "v": 1
+}

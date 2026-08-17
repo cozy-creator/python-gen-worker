@@ -327,7 +327,15 @@ def render(export: ModelExport, *, spec_module: str = "", spec_attr: str = "") -
             else set()
         )
     )
-    stdlib = ["from importlib import resources", "from types import MappingProxyType"]
+    # `MappingProxyType` has exactly one use — freezing `SCHEDULER_PARAMETERS`
+    # — so a family that declares no scheduler block must not import it.
+    # pgw#1346 B4 surfaced this: the three Wan models are the catalog's first
+    # scheduler-less families (K10 — one model, two per-checkpoint solvers, so
+    # a single-valued block would name the wrong one), and every generated
+    # module before them happened to declare one.
+    stdlib = ["from importlib import resources"]
+    if scheduler is not None:
+        stdlib.append("from types import MappingProxyType")
     if containers:
         # Imported at RUNTIME, not under TYPE_CHECKING: `collections.abc` is
         # stdlib and free, and a container alias that only a type checker can
