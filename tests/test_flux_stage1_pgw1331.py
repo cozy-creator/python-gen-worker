@@ -27,8 +27,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import msgspec
 import pytest
 
+from gen_worker import RequestContext
+from gen_worker.family import Tuned, resolve
 from gen_worker.family import mint as family_mint
 from gen_worker.family.catalog import Flux1Dev, Sdxl
 from gen_worker.family.catalog import flux1_dev_serve as fx
@@ -572,3 +575,88 @@ def test_the_after_arm_of_the_measurement_loads_no_model_library() -> None:
     assert not after.transformers_loaded
     assert after.import_s < after.torch_s
     assert json.dumps([target for target in measurement.BEFORE])  # the arm is nameable
+
+
+# ------------------------------------------------------- request -> instance
+
+# The payload structs are MODULE-level, and that is load-bearing rather than
+# tidy: `tuned_payload_fields` resolves annotations through `get_type_hints`,
+# which cannot see a class defined inside a function body — so a locally
+# declared payload resolves NO tuned fields and every fallback silently stops
+# working. An endpoint author writes these at module scope for the same reason.
+
+
+class _In(msgspec.Struct):
+    prompt: str = ""
+    steps: Tuned[int] = None
+    guidance: Tuned[float] = None
+
+
+class _Out(msgspec.Struct):
+    shape: str = ""
+    steps: int = 0
+    guidance: float = 0.0
+
+
+def test_a_flux_endpoint_generates_through_the_declared_family_binding() -> None:
+    """The whole request path, as an endpoint author writes it.
+
+    ``@endpoint(families={...})`` is the ONE authoring contract, so this is not
+    a demonstration beside the real thing — it is the real thing, driven the way
+    placement drives it. The handler names no pipeline, no component, no graph
+    and no scheduler: it takes a resolved ``Flux1Dev``, resolves its tuned
+    values, and calls the composition. ``diffusers`` appears nowhere in it, and
+    the subprocess done-test above proves the process it runs in never loads one.
+    """
+
+    from gen_worker import endpoint
+    from gen_worker.family import fake_kwargs
+
+    @endpoint(families={"flux": Flux1Dev})
+    class Generate:
+        def generate(self, ctx: RequestContext, p: _In, flux: Flux1Dev) -> _Out:
+            values = resolve(p, flux)
+            image = fx.generate(
+                flux,
+                resolution=1024,
+                clip_ids=fx.clip_token_ids([1, 2, 3], device="cpu"),
+                t5_ids=fx.t5_token_ids([4, 5, 6], device="cpu"),
+                steps=int(values["steps"]),
+                guidance=float(values["guidance"]),
+                seed=1234,
+            )
+            return _Out(
+                shape=str(tuple(image.shape)),
+                steps=int(values["steps"]),
+                guidance=float(values["guidance"]),
+            )
+
+    kwargs = fake_kwargs(Generate)
+    assert set(kwargs) == {"flux"}
+    assert isinstance(kwargs["flux"], Flux1Dev)
+
+    # No opinion in the payload: the checkpoint's catalog-stamped tuned values
+    # win, and they arrive on the INSTANCE rather than on ctx.
+    defaulted = Generate().generate(None, _In(prompt="a cat"), **kwargs)  # type: ignore[arg-type]
+    assert defaulted.shape == "(1, 3, 1024, 1024)"
+    assert defaulted.steps == Flux1Dev.Tuned().steps
+    assert defaulted.guidance == Flux1Dev.Tuned().guidance
+
+    # An explicit payload value wins, resolved once in the SDK.
+    overridden = Generate().generate(  # type: ignore[arg-type]
+        None, _In(prompt="a cat", steps=3, guidance=1.5), **fake_kwargs(Generate)
+    )
+    assert (overridden.steps, overridden.guidance) == (3, 1.5)
+
+
+def test_the_handler_source_names_no_model_library() -> None:
+    """The catalog rule, literally: an endpoint imports a family, not diffusers."""
+
+    import inspect
+
+    source = inspect.getsource(test_a_flux_endpoint_generates_through_the_declared_family_binding)
+    body = source.split('"""', 2)[-1]
+    for library in role.FORBIDDEN_LIBRARIES:
+        assert library not in body
+    assert "FluxPipeline" not in body
+    assert "scheduler" not in body  # the loop asks the family for its own
