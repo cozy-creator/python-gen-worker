@@ -252,7 +252,7 @@ def test_the_pools_own_measurement_reaches_the_bank_over_the_real_relay(
     width = pool.entry_workers(
         2, vcpus=16, available_bytes=64 * _GIB, device_lock=True, limit=2)
     table = aot_mint._mint_phase_table(
-        [], {"total_s": 1.0}, width,
+        {}, {"total_s": 1.0}, width,
         {"peak_child_rss_bytes": 6 * _GIB, "pool_workers": 2},
     )
     assert table["pool"]["peak_child_rss_bytes"] == 6 * _GIB, (

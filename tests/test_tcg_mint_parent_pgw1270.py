@@ -33,6 +33,16 @@ def _drive(
     class _Pool:
         entry_seconds: dict[str, float] = {}
         peak_rss_bytes = 0
+        #: pgw#1356: the phase table is folded out of the pool's per-CLASS
+        #: spans, so a double that omits them is a double of a pool that
+        #: cannot report what it compiled.
+        class_spans: dict[str, dict[str, float]] = {
+            name: {"export_s": 1.0, "compile_s": 2.0, "lowering_s": 0.5}
+            for name in packed
+        }
+        entry_overlays: dict[str, dict[str, float]] = {
+            "share-000": {"autotune_s": 0.25},
+        }
 
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             pass

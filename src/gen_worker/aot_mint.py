@@ -1261,7 +1261,21 @@ class MintProgress:
     on_progress: Optional[Callable[[str, int, int, str], None]] = None
     t_mint: Optional[float] = None
     timings: Dict[str, float] = field(default_factory=dict)
-    minted: List[_MintedEntry] = field(default_factory=list)
+    #: pgw#1356: per GRAPH CLASS, and BOUND TO THE POOL'S OWN LIVE DICT
+    #: (:attr:`aot_compile_pool.EntryCompilePool.class_spans`) rather than
+    #: copied into. This replaces the ``minted: List[_MintedEntry]`` the
+    #: serial driver appended to — a driver pgw#1215 deleted, leaving the
+    #: field with no writer and every phase table reporting ``n_entries: 0``.
+    #: Sharing the dict is what makes pgw#848 true: the snapshot written on
+    #: every beat names the classes that have LANDED, so a mint the pod kills
+    #: at class 30 of 36 reports thirty rows instead of none.
+    class_spans: Mapping[str, Mapping[str, float]] = field(
+        default_factory=dict)
+    #: Per SHARE (:attr:`aot_compile_pool.EntryCompilePool.entry_overlays`),
+    #: bound live for the same reason. Share granularity is the granularity
+    #: the child measures overlays at.
+    share_overlays: Mapping[str, Mapping[str, float]] = field(
+        default_factory=dict)
     width: Optional[aot_compile_pool.PoolWidth] = None
     #: pgw#842: the pool's own ledger (pgw#830) once it has run, carried here
     #: so it reaches the phase table — and therefore the hub — instead of
@@ -1334,18 +1348,20 @@ def partial_phase_table(
     Empty dict when there is nothing yet — "no measurement" and "zero" must
     not read the same.
     """
-    minted = list(progress.minted)
+    class_spans = {
+        name: dict(spans) for name, spans in progress.class_spans.items()}
     timings = dict(progress.timings)
     started = progress.t_mint
     where = dict(progress.at)
-    if not minted and not timings and not where:
+    if not class_spans and not timings and not where:
         return {}
     if started is not None:
         # The mint's OWN wall clock, so an aborted total is comparable
         # with a completed one rather than being a sum of entry seconds.
         timings["total_s"] = round(time.monotonic() - float(started), 2)
     table = _mint_phase_table(
-        minted, timings, progress.width, progress.pool_ledger)
+        class_spans, timings, progress.width, progress.pool_ledger,
+        progress.share_overlays)
     table["terminus"] = terminus
     if where:
         # pgw#824 x pgw#825: the entries block names what FINISHED; this
@@ -1591,6 +1607,13 @@ def mint_graph_classes(
     progress.t_mint = t_mint
     pool = aot_compile_pool.EntryCompilePool(
         Path(workdir), width=width, python=python)
+    # pgw#1356: BOUND, not copied. The pool mutates these as each share's
+    # report lands, so every beat's on-disk snapshot names the graph classes
+    # that have landed so far — which is what pgw#848 promised a killed mint
+    # would leave behind and has not delivered since pgw#1215 deleted the
+    # serial driver that fed `MintProgress.minted`.
+    progress.class_spans = pool.class_spans
+    progress.share_overlays = pool.entry_overlays
     progress.beat(
         PHASE_INDUCTOR_COMPILE, 0, width.workers,
         f"{width.workers} compile child(ren), one share each — {width.reason}")
@@ -1712,11 +1735,19 @@ def mint_graph_classes(
         if keep != name:
             absorbed_by.setdefault(keep, []).append(name)
 
+    absorbed = {n for names in absorbed_by.values() for n in names}
+    # pgw#1356: the table is built from the classes this mint actually
+    # produced — SURVIVORS, so an absorbed duplicate is not double-counted the
+    # way it would be if this summed the pool's raw rows. A `held` class
+    # carried in from an earlier attempt has no spans in THIS pool, and stays
+    # absent rather than being invented as a zero: `n_entries` is what this
+    # attempt measured, and coverage is the manifest's question.
     phase_table = _mint_phase_table(
-        [], timings, width, progress.pool_ledger)
+        {name: spans for name, spans in pool.class_spans.items()
+         if name in metas and name not in absorbed},
+        timings, width, progress.pool_ledger, pool.entry_overlays)
     entries: List[MintedArtifact] = []
     blocks: Dict[str, Dict[str, Any]] = {}
-    absorbed = {n for names in absorbed_by.values() for n in names}
     for name in sorted(metas):
         if name in absorbed:
             continue
@@ -2292,10 +2323,11 @@ def tcg_graph_class_spec(traced: TracedClass, export_spec: ExportSpec) -> Any:
 
 
 def _mint_phase_table(
-    minted: Sequence[_MintedEntry],
+    class_spans: Mapping[str, Mapping[str, float]],
     timings: Mapping[str, float],
     width: Optional[aot_compile_pool.PoolWidth] = None,
     pool_ledger: Optional[Mapping[str, Any]] = None,
+    share_overlays: Optional[Mapping[str, Mapping[str, float]]] = None,
 ) -> Dict[str, Any]:
     """The per-mint phase table (#757's instrument-first deliverable): one
     readable record of where the mint's seconds went, per entry and in
@@ -2304,32 +2336,60 @@ def _mint_phase_table(
 
     pgw#809 adds the ``pool`` block: the K this mint ran at AND the budget
     that chose it. Without it a mint's wall clock is uninterpretable —
-    two mints of the same cell on two pods legitimately differ by 4x."""
-    entries = {
-        row.name: dict(row.timings) for row in minted}
+    two mints of the same cell on two pods legitimately differ by 4x.
+
+    pgw#1356 REBASES THE INPUT ONTO THE ONLY PROCESS THAT MEASURES IT. This
+    took ``Sequence[_MintedEntry]`` — rows the SERIAL driver appended to
+    ``MintProgress.minted`` as it exported in-process. pgw#1215 deleted that
+    driver (``aot_mint.mint`` no longer exists) and nothing has written
+    ``minted`` since, so every caller passed an empty sequence and this
+    answered ``n_entries: 0``, ``entries: {}``, ``phases: {}`` for mints of
+    any size. Measured on the A40 mint of 2026-08-17: 36 of 36 graph classes
+    compiled, ``exit=0``, and the roll-up on the wire read
+    ``n_entries=0 phases={} overlays={}``.
+
+    What replaces it is what the K-wide pool actually holds:
+    ``EntryCompilePool.class_spans``, per GRAPH CLASS, straight off each
+    child's report — and it is the same live dict the pool mutates, so the
+    on-disk snapshot a KILLED mint leaves behind names the classes that had
+    landed rather than reporting zero (pgw#848's own promise, unmet since
+    pgw#1215).
+
+    The spans are FLAT (``export_s``/``compile_s``/``reuse_s``/``nodes`` plus
+    ``torchcg.spans.PARTITION_KEYS`` labels), because that is the shape
+    ``aot_compile_child`` writes. So ``phases`` folds the partition labels out
+    of the flat rows rather than out of a nested ``phases`` block no child has
+    ever written.
+
+    ``share_overlays`` is per SHARE (``EntryCompilePool.entry_overlays``), not
+    per class, and is reported at the granularity it is measured at: the child
+    discards its per-class overlay split (``aot_compile_child`` names it
+    ``_overlays``), so claiming a per-class attribution here would be an
+    invention. Kept OUT of ``phases`` for pgw#830's reason — overlays nest
+    inside partition members, and summing them in was the original
+    attribution bug.
+    """
+    entries = {name: dict(spans) for name, spans in class_spans.items()}
     totals: Dict[str, float] = {
-        "export_s": round(sum(
-            float(row.timings.get("export_s") or 0) for row in minted), 2),
-        "compile_s": round(sum(
-            float(row.timings.get("compile_s") or 0) for row in minted), 2),
-        "warm_s": round(sum(
-            float(row.timings.get("warm_s") or 0) for row in minted), 2),
+        label: round(sum(
+            float(spans.get(label) or 0) for spans in entries.values()), 2)
+        for label in ("export_s", "compile_s", "warm_s")
     }
     phase_totals: Dict[str, float] = {}
+    for spans in entries.values():
+        for label in _PHASE_KEYS:
+            value = float(spans.get(label) or 0)
+            if value:
+                phase_totals[label] = round(
+                    phase_totals.get(label, 0.0) + value, 3)
     overlay_totals: Dict[str, float] = {}
-    for row in minted:
-        for label, value in (row.timings.get("phases") or {}).items():
-            phase_totals[label] = round(
-                phase_totals.get(label, 0.0) + float(value), 3)
-        # Kept OUT of `phases` on purpose (pgw#830): overlays nest inside
-        # partition members, and summing them in was the original
-        # attribution bug. Reported beside it, never inside it.
-        for label, value in (row.timings.get("overlays") or {}).items():
+    for overlays in (share_overlays or {}).values():
+        for label, value in overlays.items():
             overlay_totals[label] = round(
                 overlay_totals.get(label, 0.0) + float(value), 3)
     return {
         "v": 1,
-        "n_entries": len(minted),
+        "n_entries": len(entries),
         "compiler_owner": "torchcg",
         "totals": {**totals, **{k: v for k, v in timings.items()}},
         "phases": phase_totals,

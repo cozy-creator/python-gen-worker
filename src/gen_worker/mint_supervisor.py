@@ -852,10 +852,23 @@ def _mint_phase_table_of(result: Any) -> Dict[str, Any]:
     ``mint_graph_classes`` stamps the same table onto every entry it returns
     (it is the RESULT's view, never the packed envelope's — the artifact
     deliberately carries no wall clocks), so any entry answers.
+
+    pgw#1356: READ OFF THE TYPED FIELD, which is where the writer has always
+    put it. This read ``entry.metadata["mint_phases"]`` — and ``metadata`` is
+    TCG's CLOSED artifact vocabulary, which has no such field and cannot be
+    extended (``test_tcg_mint_parent_pgw1270`` asserts ``"mint_phases" not in
+    survivor.metadata`` by name). So the reader could never find the table,
+    ``phase_table`` fell through to the on-disk snapshot on EVERY successful
+    mint, and the roll-up on the wire announced a completed mint as
+    ``status=in_flight`` — ``in_flight`` being the terminus
+    :func:`aot_mint.write_phase_snapshot` stamps on a beat. Measured on the
+    2026-08-17 A40 mint: 36 of 36 classes ``status=compiled exit=0``, roll-up
+    ``aot_mint_phases in_flight n_entries=0``, and the operator reading it
+    could not tell a finished mint from a killed one.
     """
     for entry in getattr(result, "entries", ()):
-        rows = dict(entry.metadata or {}).get("mint_phases")
-        if isinstance(rows, dict):
+        rows = getattr(entry, "mint_phases", None)
+        if isinstance(rows, dict) and rows:
             return dict(rows)
     return {}
 

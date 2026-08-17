@@ -212,7 +212,7 @@ def test_a_real_oom_killed_entry_child_is_a_retryable_shortfall_that_teaches_the
         assert facts["oom_basis"] == failure.basis
         assert facts["peak_child_rss_bytes"] == box.peak_rss_bytes > 0
         table = aot_mint._mint_phase_table(
-            [], {"total_s": 1.0}, width, facts,
+            {}, {"total_s": 1.0}, width, facts,
         )
         assert table["pool"]["oom_entry"] == "share-000"
 

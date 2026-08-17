@@ -325,6 +325,10 @@ def _drive_tcg_pool(
     class _Pool:
         entry_seconds: dict[str, float] = {}
         peak_rss_bytes = 0
+        #: pgw#1356: the phase table folds these, so a double without them is
+        #: a double of a pool that cannot say what it compiled.
+        class_spans: dict[str, dict[str, float]] = {}
+        entry_overlays: dict[str, dict[str, float]] = {}
 
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             pass
