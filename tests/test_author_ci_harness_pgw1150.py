@@ -10,7 +10,7 @@ the dispatch, `ctx.stage` -> `stage_ms` timing, the serve-posture order and its
 release, `Compile.blockers` read through `export_contract.open_blockers`, the
 parity gate (`provision.gate_cell_numerics` against pgw#868's real armed cell,
 real ladder, real declared floor), the record's TOML, and — where the sibling
-repo is checked out — `inference-endpoints/scripts/lint_author_ci.py` itself,
+repo is checked out — `serverless-endpoints/scripts/lint_author_ci.py` itself,
 imported and run against what this harness emitted.
 
 WHAT IS FAKED, and why: the COMPILE and the model load. Paul's standing rule is
@@ -433,9 +433,9 @@ def test_median_and_p95_are_both_reported_and_the_tail_is_not_hidden():
 # ---------------------------------------------------------------------------
 
 def _lint() -> Any:
-    """`inference-endpoints/scripts/lint_author_ci.py`, imported for real."""
+    """`serverless-endpoints/scripts/lint_author_ci.py`, imported for real."""
     candidates = [os.environ.get("AUTHOR_CI_LINT", "")]
-    candidates += [str(base / "inference-endpoints" / "scripts"
+    candidates += [str(base / "serverless-endpoints" / "scripts"
                        / "lint_author_ci.py")
                    for base in (REPO.parent, REPO.parents[2], Path.home() / "cozy")
                    if base is not None]
@@ -447,7 +447,7 @@ def _lint() -> Any:
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             return module
-    pytest.skip("inference-endpoints is not checked out beside this repo")
+    pytest.skip("serverless-endpoints is not checked out beside this repo")
 
 
 def _through_the_lint(lint: Any, tmp_path: Path, record: Path) -> int:
