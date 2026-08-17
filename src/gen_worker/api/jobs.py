@@ -26,6 +26,13 @@ registers one body under both decorators and runs it under both harnesses.
 tensors/repos to the hub, on ``@job`` and ``@endpoint`` alike. It says MAY
 write; the request still says WHERE. Undeclared code reaching the publisher
 surface is refused typed at the SDK before a byte moves.
+
+``emits_media=True`` is its SIBLING, and jobs only: this job writes MEDIA (a
+report, a contact sheet, a sample grid) rather than — or as well as — a repo.
+An endpoint's product IS media, so it declares nothing; a job's is not, so the
+hub mints the ``upload_media`` grant only for a job whose release declares it
+(th#2069). The two are independent: an eval job that writes no repo declares
+``emits_media=True, publishes=False``, and a quality-matrix job declares both.
 """
 
 from __future__ import annotations
@@ -63,6 +70,9 @@ class JobDecl(msgspec.Struct, frozen=True, kw_only=True):
     #: worker-capability grant off this declaration; the SDK refuses the
     #: publisher surface without it.
     publishes: bool = False
+    #: This job MAY write media. Same shape, different grant
+    #: (``upload_media``), and independent of ``publishes``.
+    emits_media: bool = False
 
 
 def _qualname_owner(fn: Callable[..., Any]) -> str:
@@ -153,6 +163,7 @@ def job(
     resumable: bool = ...,
     visibility: str = ...,
     publishes: bool = ...,
+    emits_media: bool = ...,
     name: Optional[str] = ...,
 ) -> Callable[[T], T]: ...
 
@@ -165,6 +176,7 @@ def job(
     resumable: bool = False,
     visibility: str = "private",
     publishes: bool = False,
+    emits_media: bool = False,
     name: Optional[str] = None,
 ) -> Any:
     """The one job decorator. See the module docstring for the shape."""
@@ -190,6 +202,7 @@ def job(
             resumable=bool(resumable),
             visibility=vis,
             publishes=bool(publishes),
+            emits_media=bool(emits_media),
         )
         setattr(obj, JOB_ATTR, decl)
         return obj

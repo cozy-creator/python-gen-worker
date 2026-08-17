@@ -83,20 +83,18 @@ def response_is_from_hub(resp: Any) -> bool:
     if isinstance(err, dict) and "code" in err:
         return True
     # Shape 2, the STRING-CODE envelope: {"error": "<code>", "message": ...}.
-    # NOT an old-hub arm — pgw#1307 re-read the hub and master still emits it
-    # from routes that never moved onto `httperrors.Write`: the binding-check
-    # 422 (`internal/api/endpoint_bindings.go`, `bindingWriteError.write`), the
-    # invoke-time model-override 400 (`modelOverrideErrorBody`), and the
-    # capability-upload 403/429 (`internal/api/capability_upload_budget.go`).
-    # Deleting this arm reinstates the pgw#743 defect on all four: measured
+    # th#2062 moved every route this worker calls onto `httperrors.Write`'s
+    # object envelope, so no route we touch emits this today. It stays because
+    # 17 flat bodies remain hub-side (admin routes) and because unreachability
+    # here is a LIVE-hub observation, not a source read.
+    # Deleting this arm reinstates the pgw#743 defect: measured
     # live on a v2 publish, a 422 read as proxy-shaped was retried, the retry
     # hit the now-terminal session and returned 409 `publish_repudiated`, and
     # the ORIGINAL 422 — the only response that said WHY — was discarded. A
     # retry loop that converts a diagnosable refusal into a different, later
     # error is worse than one that does not retry at all.
     # A proxy does not synthesise a string `error` alongside a `message`, so
-    # this stays a hub-only signature. It dies when the HUB emits one envelope
-    # everywhere, and not before; that is a tensorhub row, not a pgw one.
+    # this stays a hub-only signature.
     return isinstance(err, str) and bool(err.strip()) and "message" in body
 
 

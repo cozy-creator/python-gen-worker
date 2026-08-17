@@ -33,6 +33,7 @@ from typing import Any, Callable, Dict, Optional
 
 from gen_worker._vendor.tensorfs import CASRef
 
+from ..api.decorators import KINDS
 from ..api.types import Asset
 from ..models.cache_paths import open_worker_cas
 from ..request_context import (
@@ -44,6 +45,10 @@ from ..request_context import (
 )
 
 _LOCAL_OUTPUT_DIR_NAME = ".gen-worker-run"
+
+#: Every kind this factory builds a context for: the @endpoint vocabulary
+#: (one home, `api.decorators.KINDS`) plus `job`, which is @job's own.
+LOCAL_CONTEXT_KINDS = KINDS + ("job",)
 
 
 def _local_request_id() -> str:
@@ -221,14 +226,16 @@ def build_local_context(
     owner: Optional[str] = None,
     emitter: Optional[Callable[[Dict[str, Any]], None]] = None,
     publishes: bool = False,
+    emits_media: Optional[bool] = None,
 ) -> RequestContext:
     """Factory: build the right context subclass for ``kind``.
 
-    ``kind`` is the endpoint's declared kind string from discover_manifest
-    (``inference`` / ``conversion`` / ``dataset`` / ``training`` / ``eval``),
-    or ``job`` for a ``@job`` run. Unknown kinds fall back to
-    ``RequestContext`` because the SDK guarantees the base methods on every
-    variant.
+    ``kind`` is the endpoint's declared kind string from discover_manifest, or
+    ``job`` for a ``@job`` run. An unrecognized kind is a REFUSAL, never a base
+    ``RequestContext``: the base class silently lacks the surface the kind
+    implies (``materialize_blob``, ``save_checkpoint``, the dataset writers), so
+    the substitution surfaces as a missing attribute deep inside a tenant body —
+    a typo'd kind reading as "this endpoint has no publisher".
     """
     rid = request_id or _local_request_id()
     em = emitter if emitter is not None else _stderr_emitter
@@ -244,6 +251,9 @@ def build_local_context(
         # who forgot publishes=True must hit the refusal HERE, in the dev
         # loop, and not for the first time on a rented pod.
         "publishes": bool(publishes),
+        # Jobs only, and the same argument: an author who forgot
+        # emits_media=True meets the refusal in the dev loop, not on a pod.
+        "emits_media": emits_media,
     }
 
     k = (kind or "").strip().lower()
@@ -255,7 +265,14 @@ def build_local_context(
         return LocalDatasetContext(allow_publish=allow_publish, **common)
     if k == "training":
         return LocalTrainingContext(allow_publish=allow_publish, **common)
-    return LocalRequestContext(allow_publish=allow_publish, **common)
+    if k == "inference":
+        return LocalRequestContext(allow_publish=allow_publish, **common)
+    raise ValueError(
+        f"build_local_context: unknown kind {kind!r}. The declared kinds are "
+        f"{', '.join(LOCAL_CONTEXT_KINDS)} — a kind this factory does not know "
+        f"is a typo or an unported kind, and handing it a base RequestContext "
+        f"would drop the surface its handler is written against."
+    )
 
 
 __all__ = [
