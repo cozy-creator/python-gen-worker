@@ -206,24 +206,28 @@ def main() -> int:
         module = _module_name(file)
         if module in STANDALONE_ENTRY:
             continue
-        source = file.read_text()
+        imported: set[str] = set()
+        for node in ast.walk(ast.parse(file.read_text(), filename=str(file))):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                base = node.module or ""
+                imported.add(base)
+                imported.update(f"{base}.{alias.name}" for alias in node.names)
         for entry in STANDALONE_ENTRY:
-            leaf = entry.rpartition(".")[2]
-            tree = ast.parse(source, filename=str(file))
-            for node in ast.walk(tree):
-                names: List[str] = []
-                if isinstance(node, ast.Import):
-                    names = [alias.name for alias in node.names]
-                elif isinstance(node, ast.ImportFrom):
-                    base = node.module or ""
-                    names = [f"{base}.{alias.name}" for alias in node.names]
-                    names.append(base)
-                if any(name.endswith(entry) or name.endswith(f".{leaf}") and entry.endswith(f".{leaf}") for name in names):
-                    violations.append(
-                        f"{file.relative_to(REPO)}: imports `{entry}`, which "
-                        f"STANDALONE_ENTRY exempts from the serving-process "
-                        f"compile fence precisely because nothing imports it. "
-                        f"Either drop the import or drop the exemption.")
+            # `benchmarks.store_arm_parity` reached as itself, as
+            # `gen_worker.benchmarks.store_arm_parity`, or as a relative
+            # `from .benchmarks import store_arm_parity`.
+            if not any(
+                name == entry or name.endswith(f".{entry}")
+                for name in imported
+            ):
+                continue
+            violations.append(
+                f"{file.relative_to(REPO)}: imports `{entry}`, which "
+                f"STANDALONE_ENTRY exempts from the serving-process compile "
+                f"fence precisely because nothing imports it. Either drop the "
+                f"import or drop the exemption.")
 
     overlap = sorted(set(SUPERVISED) & (set(CHILD_ONLY) | set(STANDALONE_ENTRY)))
     for module in overlap:
