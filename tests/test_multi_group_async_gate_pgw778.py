@@ -25,6 +25,7 @@ import pytest
 from gen_worker.hostfacts import HostFacts
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker import Hub, Resources
+from gen_worker.api.slot import Slot
 from gen_worker.executor import EndpointSpec, Executor
 from gen_worker.topology import ExecutionTopology
 
@@ -48,7 +49,10 @@ def _specs() -> List[EndpointSpec]:
     common = dict(
         kind="inference", payload_type=_In, output_mode="single", cls=_Fake,
         models={"pipeline": Hub("acme/sdxl")}, resources=Resources(gpu=True),
-        slots=("pipeline",),
+        # `EndpointSpec.slots` is {slot: Slot}. This fixture spelled it as a
+        # tuple of names — truthy, which was all `available_functions` needed,
+        # and wrong the moment pgw#1315 asked the slot for its declared lanes.
+        slots={"pipeline": Slot(_Fake, selected_by="model")},
     )
     return [
         EndpointSpec(name="sync_fn", method=_Fake.sync_gen, **common),

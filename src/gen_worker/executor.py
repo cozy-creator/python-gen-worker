@@ -158,6 +158,7 @@ from .preload import Preloader
 from .api.binding import rebind_pick
 from . import hostfacts
 from .models.hub_policy import TensorhubWorkerCapabilities
+from .models import machine_fit
 from .models.serve_fit import (RUN_FP8_STORAGE,
                                    RUN_OFFLOAD, plan_serve)
 from . import postmortem
@@ -2221,6 +2222,12 @@ class Executor:
             torch_version=facts.torch_version,
             installed_libs=list(libs),
         )
+        # pgw#1315: THE machine, measured once for every function this gate
+        # plans. `vram_gb` is the card's TOTAL — a requirement compared
+        # against free VRAM would pass or fail depending on who else was
+        # loading, and moments are the rung walk's input, not a floor's.
+        machine = machine_fit.measure_machine_facts(
+            caps, vram_gb=total_vram_gb)
         # pgw#676: per-pod native-crash streaks (SIGSEGV & friends recorded
         # by the supervisor/boot-record post-mortem). A function that keeps
         # killing the PROCESS on this card is refused here — loudly, typed —
@@ -2311,8 +2318,17 @@ class Executor:
             # Serve-time plan. th#1867: this no longer asks a size question —
             # `plan_serve` returns non-serveable ONLY for the two gates that
             # name our own code.
-            primary = next(iter(spec.models.values()), None)
-            plan = plan_serve(r, caps, free_vram_gb, binding=primary)
+            # pgw#1315 deliverable 4: the lanes THIS release binds for the
+            # function are its primary model slot's accepted contract handles,
+            # and the machine's facts pick among them. The slot's set order
+            # carries no preference (§1.33 point 2), so `select_lane`'s
+            # tie-break is determinism and not a ranking — the author's ladder
+            # is the one authority on preference and it lives hub-side.
+            primary_slot = next(iter(spec.models), "")
+            primary = spec.models.get(primary_slot)
+            lanes = machine_fit.lane_candidates(spec.slots.get(primary_slot))
+            plan = plan_serve(r, caps, free_vram_gb, binding=primary,
+                              lanes=lanes, facts=machine, scope=name)
             self.serve_plans[name] = plan
             self._gate_serve_plans[name] = plan
             if not plan.serveable:
