@@ -303,8 +303,10 @@ class ResolvedSlot(Generic[D]):
 
     ``objective``/``distilled`` are the resolved checkpoint's
     hub-stamped values. ``distilled_status`` distinguishes an evidenced false
-    value from an unclassified or inconclusive one. An empty status means an
-    older hub omitted the additive field. ``ctx.for_request`` applies the
+    value from an unclassified or inconclusive one; ``"classified"`` is the
+    only value that is evidence, and an empty status is one of the unknowns —
+    the hub omits the key whenever the stored column is empty.
+    ``ctx.for_request`` applies the
     objective to the per-request scheduler view automatically; handlers may
     also branch on the distillation value and its evidence status.
     """

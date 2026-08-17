@@ -96,7 +96,9 @@ class WorkerResolvedRepo:
     # ...) — drives the local family lane policy. "" on hubs not sending it.
     # resolved objective and distillation value plus the
     # evidence status that distinguishes explicit false from unknown. Empty
-    # status is the backward-compatible shape from an older hub.
+    # status is NOT an old hub: the hub stamps the key only when the stored
+    # column is non-empty, so "" means nothing measured the axis — and only
+    # "classified" is evidence (`modelfamily.StoredCheckpointFacts`).
     objective: str = ""
     distilled: bool = False
     distilled_status: str = ""
