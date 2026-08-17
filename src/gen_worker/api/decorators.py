@@ -56,6 +56,7 @@ from .export_contract import (
 )
 from .formula import RuntimeFormula
 from ..model.runtime import Model
+from ..model.bind import Bind
 from ..model.spec import ModelSpec as FamilySpec
 from .slot import OBJECTIVES, TASKS, D, Slot
 from ..models import execution_lanes as lanespec
@@ -1148,7 +1149,7 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     # is what lets placement prefetch the weights and verify the VRAM fit before
     # a request lands; `ModelSpec.instance(ref)` inside a handler is the dynamic
     # escape hatch, and it is the one parse-don't-validate boundary.
-    families: Mapping[str, type["Model"]] = msgspec.field(default_factory=dict)
+    families: Mapping[str, "Bind[Any]"] = msgspec.field(default_factory=dict)
 
 
 ATTR = "__gen_worker_endpoint__"
@@ -1603,8 +1604,12 @@ def _expand_formula_map(
 
 def _normalize_families(
     owner: str, families: Optional[Mapping[str, Any]]
-) -> Dict[str, type[Model]]:
-    """Parse ``families={...}`` into handler-parameter -> generated family type.
+) -> Dict[str, "Bind[Any]"]:
+    """Parse ``families={...}`` into handler-parameter -> :class:`Bind`.
+
+    A value is either a generated model class or a ``Bind`` wrapping one; both
+    normalize to a ``Bind`` HERE, once, so no downstream reader has to know the
+    mapping value has two shapes (pgw#1346 K3).
 
     The VALUE is the generated class, which is simultaneously the type a
     handler parameter is annotated with and the type of the instance it
@@ -1620,14 +1625,16 @@ def _normalize_families(
             f"@endpoint {owner}: families= must be a mapping of handler "
             f"parameter name -> family type, got {type(families).__name__}"
         )
-    out: Dict[str, type[Model]] = {}
-    for raw_name, value in families.items():
+    out: Dict[str, "Bind[Any]"] = {}
+    for raw_name, entry in families.items():
         name = str(raw_name or "").strip()
         if not name or not name.isidentifier():
             raise ValueError(
                 f"@endpoint {owner}: families= key {raw_name!r} must be a handler "
                 "parameter name"
             )
+        bind = entry if isinstance(entry, Bind) else None
+        value = bind.model if bind is not None else entry
         if not (isinstance(value, type) and issubclass(value, Model)):
             if isinstance(value, FamilySpec):
                 raise TypeError(
@@ -1646,14 +1653,29 @@ def _normalize_families(
                 f"@endpoint {owner}: families[{name!r}] = {value.__name__} carries no "
                 "family handle; it is not a generated binding"
             )
-        out[name] = value
+        out[name] = bind if bind is not None else Bind(model=value)
+    roots = sorted(n for n, b in out.items() if b.root)
+    if len(roots) > 1:
+        raise ValueError(
+            f"@endpoint {owner}: {len(roots)} models are marked root={roots}. Exactly "
+            "one model of a multi-model endpoint is THE root; an ambiguous root is a "
+            "decoration-time error, never a silent pick."
+        )
+    # No "you must mark one" rule, deliberately — and this is where the model
+    # surface is genuinely smaller than the `Slot` one it replaces. A root slot
+    # had to be picked because `ctx.defaults` and `ctx.for_request` resolve
+    # against ONE slot with nothing in the call naming it. A handler names every
+    # model it binds, by parameter, so there is no ambiguity for a root to
+    # settle: `root=` exists only to answer the residual `ctx` questions while
+    # they still exist, and an endpoint binding four models and marking none is
+    # a perfectly determined declaration.
     return dict(sorted(out.items()))
 
 
 def _validate_family_params(
     owner: str,
     fn: Callable[..., Any],
-    families: Mapping[str, type[Model]],
+    families: Mapping[str, "Bind[Any]"],
     *,
     is_method: bool,
 ) -> None:
@@ -1682,7 +1704,8 @@ def _validate_family_params(
     # The reverse direction runs even with NO declared families, which is the
     # case that actually bites: a bare `@endpoint` over a handler that took a
     # family instance would decorate cleanly and then have nothing prefetch it.
-    for name, declared in families.items():
+    for name, row in families.items():
+        declared = row.model
         annotation = hints.get(name)
         if annotation is None:
             raise ValueError(
@@ -1879,7 +1902,7 @@ def endpoint(
     config: Optional[Sequence[ConfigParam]] = ...,
     env: Optional[Sequence[str]] = ...,
     publishes: bool = ...,
-    families: Optional[Mapping[str, type[Model]]] = ...,
+    families: Optional[Mapping[str, "type[Model] | Bind[Any]"]] = ...,
 ) -> Callable[[T], T]: ...  # configured @endpoint(...) form
 
 
@@ -1901,7 +1924,7 @@ def endpoint(
     config: Optional[Sequence[ConfigParam]] = None,
     env: Optional[Sequence[str]] = None,
     publishes: bool = False,
-    families: Optional[Mapping[str, type[Model]]] = None,
+    families: Optional[Mapping[str, "type[Model] | Bind[Any]"]] = None,
 ) -> Any:
     """The one endpoint decorator. See the module docstring for shapes.
 

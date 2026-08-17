@@ -236,3 +236,54 @@ The trace is the declaration's own, so a minted class's ingress digest is the
 committed export's by construction — `family.mint.assert_matches_export` states
 that as an assertion, in the direction torchcg G16 requires: the export is the
 source and the mint is checked against it.
+
+## Declaring what the model's code can execute
+
+Three axes ride the DECLARATION, because they describe the model's own code and
+two endpoints binding one model state one demand:
+
+```python
+SDXL = GraphModelSpec(
+    name="sdxl", tuned=SdxlTuned, runners=(...),
+    layouts={"*": ("plain.bf16@1",),
+             "text_encoder": ("cozy.fp8-rowwise@1", "plain.bf16@1")},
+    layout_requirements={"cozy.fp8-rowwise@1": "sm89+, vram24g"},
+)
+```
+
+* `layouts` — per COMPONENT PATH, the set of tensor-layout contract handles this
+  model's code can execute. `"*"` is the whole-tree default. The set is a
+  compatibility FILTER and its order carries no preference, so handles are
+  stored in canonical order.
+* `layouts_undeclarable` — the explicit third rung, a REASON string, mutually
+  exclusive with `layouts`. For bytes no registered handle names: a tokenizer
+  tree with no tensors, a GGUF quant axis, a compressed-tensors checkpoint.
+* `layout_requirements` — keyed by the HANDLE it guards, what EXECUTING that
+  contract needs of the machine. The compact term list IS the minimum;
+  `recommended` is additive and gates nothing. A key naming a handle `layouts`
+  does not accept is refused — a requirement guarding nothing is never checked.
+
+`Runner.layouts` is a different axis and keeps its own meaning: which layouts
+that GRAPH CLASS has traced variants for. A model may accept fp8 bytes for a
+component it has no fp8 graph class for.
+
+## Declaring what only the ENDPOINT knows
+
+Three axes cannot live on a shared model, because they name this endpoint's
+payload and this deployment. They ride `Bind`:
+
+```python
+@endpoint(models={"pipeline": Sdxl})                        # the common case
+@endpoint(models={"pipeline": Bind(Krea2, selected_by="model")})
+```
+
+* `selected_by` — the `str`-typed payload field that branches which checkpoint
+  serves this parameter.
+* `default_checkpoint` — the code-side bootstrap ref, and the only resolution
+  source in hub-less mode. A live hub mapping always wins.
+* `root` — which model answers the residual `ctx` questions that resolve against
+  one. Marking none is normal: a handler names every model it binds, so there is
+  nothing for a root to disambiguate. Marking two is a decoration-time error.
+
+`optional` is still DERIVED, never passed: a model is optional exactly when its
+handler parameter carries a default.

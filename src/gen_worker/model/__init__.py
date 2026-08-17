@@ -57,6 +57,7 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
         EagerBacking,
         FakeBacking,
     )
+    from .bind import Bind, as_bind
     from .drift import assert_recipe, assert_reference
     from .errors import ModelError, ModelRefusal
     from .inject import (
@@ -142,6 +143,8 @@ _EXPORTS: Final[dict[str, tuple[str, str]]] = {
     "Stage": ("spec", "Stage"),
     "Tuned": ("runtime", "Tuned"),
     "TunedValues": ("spec", "TunedValues"),
+    "Bind": ("bind", "Bind"),
+    "as_bind": ("bind", "as_bind"),
     "assert_recipe": ("drift", "assert_recipe"),
     "assert_reference": ("drift", "assert_reference"),
     "bind_models": ("inject", "bind_models"),
@@ -193,6 +196,7 @@ __all__ = [
     "EXPORT_VERSION",
     "Backing",
     "BackingKind",
+    "Bind",
     "Bucket",
     "BucketMap",
     "CallExample",
@@ -217,6 +221,7 @@ __all__ = [
     "Stage",
     "Tuned",
     "TunedValues",
+    "as_bind",
     "assert_recipe",
     "assert_reference",
     "bind_models",

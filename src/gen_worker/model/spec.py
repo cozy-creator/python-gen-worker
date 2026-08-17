@@ -35,7 +35,7 @@ rather than a rewrite (pgw#1326 "One SDK shape").
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import product
 from typing import TYPE_CHECKING, Any, Final
@@ -60,6 +60,12 @@ from .._vendor.torchcg.recipe import (
     parse_scheduler_name,
 )
 from ..families.base import KIND_CHECKPOINT, KIND_LORA, GenerationDefaults, register_family
+from ..models.tensor_layout_contract import (
+    LayoutDeclarationError,
+    normalize_layout_demand,
+    normalize_layout_requirements,
+    normalize_layout_undeclarable,
+)
 from .errors import ModelError, ModelRefusal
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -420,18 +426,36 @@ class ModelSpec:
     * AUXILIARY models an endpoint loads beside its checkpoint — a frame
       interpolator, a latent upsampler, a tokenizer tree. These are the K5
       class of pgw#1346's W2 plan, and they belong HERE rather than in a second
-      non-model spelling. They carry no inference vocabulary, so landing them
-      needs ``tuned`` to become optional — the one declaration change the
-      ``Slot`` deletion still owes, and it is NOT made here (see the pgw#1346
-      W1 report: the deletion is blocked on handler injection, not on this).
+      non-model spelling. They carry no inference vocabulary, which is why
+      ``tuned`` is optional.
+
+    **The layout axes are the model's, not the endpoint's** (pgw#1346 K1/K2/K4).
+    ``layouts`` / ``layouts_undeclarable`` / ``layout_requirements`` move here
+    from the retired ``Slot`` unchanged — same keys, same normalizers, same
+    refusals — because what bytes a model's CODE can execute, and what
+    executing them needs of the machine, are properties of the code. Two
+    endpoints binding one model state one demand. The three endpoint-COUPLED
+    axes (`selected_by`, `default_checkpoint`, `root`) went the other way, onto
+    :class:`~gen_worker.model.bind.Bind`, because they name a payload field and
+    a deploy rather than the model.
+
+    ``layouts`` stays keyed by COMPONENT PATH rather than by runner (K4). A
+    ``GraphModelSpec``'s runners and its component tree are not 1:1 — `SDXL`
+    declares two runners over a four-component tree — so collapsing the demand
+    onto ``Runner.layouts`` would make a per-text-encoder demand inexpressible.
+    ``Runner.layouts`` is a different axis and keeps its meaning: which layouts
+    that GRAPH CLASS has traced variants for.
     """
 
     name: str
-    tuned: type[GenerationDefaults]
+    tuned: type[GenerationDefaults] | None = None
     build: Callable[[], Any] | None = None
     lora_tuned: type[GenerationDefaults] | None = None
     on_load: Callable[[Model], None] | None = None
     runners: tuple[Runner, ...] = ()
+    layouts: Mapping[str, Sequence[str]] | None = None
+    layouts_undeclarable: str = ""
+    layout_requirements: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # Validate EVERYTHING first, register last. Registration is a
@@ -445,7 +469,15 @@ class ModelSpec:
 
     def _validate(self) -> None:
         object.__setattr__(self, "name", _identifier("family", self.name, parse_family_name))
-        object.__setattr__(self, "tuned", _tuned_schema(self.name, self.tuned, "tuned"))
+        if self.tuned is not None:
+            object.__setattr__(self, "tuned", _tuned_schema(self.name, self.tuned, "tuned"))
+        elif self.lora_tuned is not None:
+            raise ModelError(
+                ModelRefusal.TUNED_INVALID,
+                f"model {self.name!r} declares lora_tuned= without tuned=. A LoRA "
+                "vocabulary refines a base one; there is none here to refine.",
+            )
+        self._validate_layouts()
         if self.lora_tuned is not None:
             object.__setattr__(
                 self, "lora_tuned", _tuned_schema(self.name, self.lora_tuned, "lora tuned")
@@ -461,6 +493,49 @@ class ModelSpec:
                 "GraphModelSpec() when the composition has graph classes",
             )
 
+    def _validate_layouts(self) -> None:
+        """The three layout axes, with ``Slot``'s own normalizers (pgw#1346).
+
+        Deliberately the SAME functions, not a re-implementation: the ie#740
+        production floors — sdxl's ``vram12g``, krea-2's ``vram72g``,
+        minimax-h3's th#1754 ``vram78g``, flux.1-schnell's ``vram36g`` — migrate
+        onto this declaration BY VALUE, and a second parser is how a floor
+        silently stops meaning what the incident made it mean.
+        """
+
+        where = f"{type(self).__name__}({self.name!r})"
+        if self.layouts is not None and str(self.layouts_undeclarable or "").strip():
+            raise LayoutDeclarationError(
+                f"{where}: layouts= and layouts_undeclarable= are mutually exclusive "
+                "— a model either names the contracts its code executes or says why "
+                "none is nameable, never both."
+            )
+        object.__setattr__(
+            self, "layouts",
+            None if self.layouts is None
+            else normalize_layout_demand(self.layouts, where=where),
+        )
+        object.__setattr__(
+            self, "layouts_undeclarable",
+            "" if self.layouts_undeclarable == ""
+            else normalize_layout_undeclarable(self.layouts_undeclarable, where=where),
+        )
+        if not self.layout_requirements:
+            object.__setattr__(self, "layout_requirements", {})
+        elif self.layouts is None:
+            raise LayoutDeclarationError(
+                f"{where}: layout_requirements= without layouts=. A requirement "
+                "guards a declared contract; there is none here to guard."
+            )
+        else:
+            object.__setattr__(
+                self, "layout_requirements",
+                normalize_layout_requirements(
+                    self.layout_requirements, where=where,
+                    accepted={h for hs in self.layouts.values() for h in hs},
+                ),
+            )
+
     def _register(self) -> None:
         """Publish this family's tuned schema(s) under its own name.
 
@@ -472,6 +547,13 @@ class ModelSpec:
         does not belong to one, which is the collision Paul ruled on.
         """
 
+        if self.tuned is None:
+            # An auxiliary or external-runtime model has no inference
+            # vocabulary, so there is no schema to publish and nothing for
+            # tensorhub to validate repo metadata against. Registering an empty
+            # one would put a name into the hub's vocabulary that answers no
+            # question — pgw#1346 K8: only a model with tuned values reaches it.
+            return
         try:
             register_family(self.name, self.tuned, kind=KIND_CHECKPOINT)
             if self.lora_tuned is not None:
@@ -502,6 +584,15 @@ class GraphModelSpec(ModelSpec):
 
     def _validate(self) -> None:
         ModelSpec._validate(self)
+        if self.tuned is None:
+            raise ModelError(
+                ModelRefusal.TUNED_INVALID,
+                f"graph model {self.name!r} declares no tuned= schema. `tuned` is "
+                "optional only on the EAGER tier, where an auxiliary or "
+                "external-runtime model genuinely has no inference vocabulary; a "
+                "declared graph serves generation requests and its parameters are "
+                "exactly what a tuned schema names.",
+            )
         axis_names = tuple(bucket.name for bucket in self.buckets)
         if axis_names != tuple(sorted(set(axis_names))):
             raise ModelError(

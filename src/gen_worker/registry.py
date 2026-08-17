@@ -194,7 +194,7 @@ class EndpointSpec:
     # what the catalog says a resolved checkpoint IS, carried per REQUEST; a
     # family binding is what a handler PARAMETER is, declared once and read by
     # placement. Same struct, different axes.
-    families: Dict[str, type] = field(default_factory=dict)
+    families: Dict[str, Any] = field(default_factory=dict)
     # The handler's DERIVED config schema — the D in `ctx: RequestContext[D]`.
     # None when the handler annotates a bare context. Catalog recipe metadata
     # decodes against this type; code owns the schema, the catalog owns the
@@ -332,7 +332,7 @@ class JobSpec:
     # pgw#1332: the families this job binds, same shape and same meaning as
     # EndpointSpec's — portability between the decorators is a tested
     # requirement, so a body that takes a family instance promotes unchanged.
-    families: Dict[str, type] = field(default_factory=dict)
+    families: Dict[str, Any] = field(default_factory=dict)
     is_async: bool = False
     ctx_param: str = "ctx"
     payload_param: str = "payload"

@@ -279,6 +279,15 @@ def _tuned_ref(schema: type) -> TunedRef:
     return TunedRef(module=schema.__module__, qualname=schema.__qualname__)
 
 
+def _require_tuned(family: GraphModelSpec) -> type:
+    if family.tuned is None:  # pragma: no cover - GraphModelSpec._validate refuses it
+        raise ModelError(
+            ModelRefusal.TUNED_INVALID,
+            f"graph model {family.name!r} carries no tuned schema to export",
+        )
+    return family.tuned
+
+
 def export_model(family: GraphModelSpec) -> ModelExport:
     """Export every declared variant of ``family`` into one snapshot.
 
@@ -321,7 +330,10 @@ def export_model(family: GraphModelSpec) -> ModelExport:
                 for stage in loop.stages
             ),
         ),
-        tuned=_tuned_ref(family.tuned),
+        # A GraphModelSpec always carries one — `GraphModelSpec._validate`
+        # refuses `tuned=None`, because the optional tier is the eager one and
+        # a graph model's parameters are exactly what a tuned schema names.
+        tuned=_tuned_ref(_require_tuned(family)),
         parameters=tuple(
             ExportedParameter(
                 name=ParameterName(parameter.name),
