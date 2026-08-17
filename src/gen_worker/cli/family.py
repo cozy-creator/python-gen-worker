@@ -237,7 +237,11 @@ def _handle_mint(args: argparse.Namespace) -> int:
             "runner": row.runner,
             "bucket": {name: value for name, value in row.bucket},
             "layout": row.layout,
-            "graph_class": row.graph_class,
+            # This report's OWN column name for a MintedVariant field, not a
+            # read of TCG's metadata block: the value is a handle the mint
+            # bridge assigned, and TCG's block key is read once, by name, in
+            # aot_compile_child.
+            "graph_class": row.graph_class,  # tcg-vocab: this report's column
             "key": row.key,
             "artifact": str(row.artifact),
             "ingress_digest": row.ingress_digest,
@@ -251,6 +255,7 @@ def _handle_mint(args: argparse.Namespace) -> int:
         Path(args.json).write_text(json.dumps(rows, indent=2, sort_keys=True) + "\n")
     for row in rows:
         cost = "reused" if row["reused"] else f"{row['compile_s']}s"
-        sys.stderr.write(f"{row['graph_class']}  {row['key']}  {cost}\n")
+        name = row["graph_class"]  # tcg-vocab: this report's column, see above
+        sys.stderr.write(f"{name}  {row['key']}  {cost}\n")
     sys.stderr.write(f"minted {len(rows)} graph class(es) from {attr}\n")
     return 0
