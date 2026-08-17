@@ -121,7 +121,9 @@ def cmd_mint(args: argparse.Namespace) -> int:
         fleet_line=fleet_line,
         name=args.name,
     )
-    row = _rig(args).run(cards_mod.pick(args.gpu), workload, image=args.image)
+    row = _rig(args).run(
+        cards_mod.pick(args.gpu), workload, image=args.image, rerolls=int(args.rerolls)
+    )
     return 0 if row.verdict == "green" else 1
 
 
@@ -164,7 +166,9 @@ def cmd_probe(args: argparse.Namespace) -> int:
         uploads=uploads,
         name=args.name,
     )
-    row = _rig(args).run(cards_mod.pick(args.gpu), workload, image=args.image)
+    row = _rig(args).run(
+        cards_mod.pick(args.gpu), workload, image=args.image, rerolls=int(args.rerolls)
+    )
     return 0 if row.verdict == "green" else 1
 
 
@@ -178,7 +182,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         artifacts=tuple(args.artifact) or (POD_ROOT,),
         progress_paths=tuple(args.progress) or (POD_ROOT,),
     )
-    row = _rig(args).run(cards_mod.pick(args.gpu), workload, image=args.image)
+    row = _rig(args).run(
+        cards_mod.pick(args.gpu), workload, image=args.image, rerolls=int(args.rerolls)
+    )
     return 0 if row.verdict == "green" else 1
 
 
@@ -240,6 +246,13 @@ def _rent_flags(parser: argparse.ArgumentParser) -> None:
         "Not a timeout: work that is moving is never stopped by this.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Write the kill-set and rent nothing.")
+    parser.add_argument(
+        "--rerolls",
+        default="0",
+        help="How many times to take ANOTHER HOST after a `reroll` verdict (a too-old "
+        "driver, or a pod that never answered). Not another budget: the rail carries "
+        "the dead pods' spend forward.",
+    )
     parser.add_argument("--deliver", default="sdist", choices=("sdist", "wheel", "image"))
     parser.add_argument("--spec", default="", help="pip requirement for --deliver wheel.")
     parser.add_argument("--dist", default="", help="Prebuilt dist for --deliver sdist.")

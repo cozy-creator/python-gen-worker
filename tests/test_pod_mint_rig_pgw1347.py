@@ -600,6 +600,36 @@ def test_a_pod_that_never_answers_is_a_REROLL_not_a_budget_overrun(tmp_path: Pat
     assert pods.deleted == ["pod1"]
 
 
+def test_a_reroll_takes_another_HOST_but_never_another_BUDGET(tmp_path: Path) -> None:
+    """MEASURED 2026-08-17: roughly half of twelve rentals on one evening came up
+    on a host that could not run the fleet CUDA line, or never exposed a port. A
+    matrix that gives up on the first bad machine measures the provider's weather
+    rather than the code — and one that re-rolls on a fresh budget each time has
+    no budget at all."""
+    pods = FakePods(rate=0.74)
+    rail = Rail(max_usd=1.0)
+    rig = _rig(tmp_path, pods, FakeTransport(rigboot_rc=91), rail=rail)
+    row = rig.run(cards_mod.pick("sm89"), Workload(name="w", command="x"), rerolls=2)
+
+    assert row.verdict == "reroll"
+    assert len(pods.created_bodies) == 3, "one attempt plus two re-rolls"
+    assert pods.deleted == ["pod1", "pod2", "pod3"], "every bad host is torn down"
+    # The rail carried each dead pod's spend forward rather than restarting.
+    assert rail.banked_usd > 0.0
+    assert any(s["stage"] == "reroll" for s in row.stage_trail)
+
+
+def test_rerolling_stops_when_the_budget_is_gone_not_when_the_count_runs_out(
+    tmp_path: Path,
+) -> None:
+    pods = FakePods(rate=3_600_000.0)  # $1000/s — the first pod eats the rail
+    rail = Rail(max_usd=0.05)
+    rig = _rig(tmp_path, pods, FakeTransport(rigboot_rc=91), rail=rail)
+    row = rig.run(cards_mod.pick("sm89"), Workload(name="w", command="x"), rerolls=5)
+    assert len(pods.created_bodies) < 6, "it stopped on money, not on the counter"
+    assert "no budget left" in row.detail
+
+
 def test_no_driver_at_all_is_also_a_reroll(tmp_path: Path) -> None:
     row = _rig(tmp_path, FakePods(), FakeTransport(rigboot_rc=92)).run(
         cards_mod.pick("a40"), Workload(name="w", command="x")

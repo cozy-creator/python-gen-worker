@@ -38,6 +38,11 @@ class Rail:
     start_headroom: float = 0.85
     rate_per_hr: float = 0.0
     started_at: float = field(default_factory=time.time)
+    #: Spend from EARLIER pods of the same invocation. A re-roll takes another
+    #: host but does not get another budget: the rail is per-INVOCATION, and a
+    #: caller who declared $2 means $2 however many bad machines the provider
+    #: hands out.
+    banked_usd: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.max_usd > 0:
@@ -64,7 +69,17 @@ class Rail:
 
     def spent_usd(self, now: float | None = None) -> float:
         now = time.time() if now is None else now
-        return self.rate_per_hr * max(0.0, now - self.started_at) / 3600.0
+        return self.banked_usd + self.rate_per_hr * max(0.0, now - self.started_at) / 3600.0
+
+    def bank(self, now: float | None = None) -> float:
+        """Close out the current pod's spend and stop its clock.
+
+        Called when a pod is torn down and another may be rented in its place.
+        Returns the total spent so far.
+        """
+        self.banked_usd = self.spent_usd(now)
+        self.rate_per_hr = 0.0
+        return self.banked_usd
 
     def remaining_usd(self, now: float | None = None) -> float:
         return self.max_usd - self.spent_usd(now)
@@ -79,7 +94,7 @@ class Rail:
         """
         if self.rate_per_hr <= 0:
             return float("inf")
-        return self.max_usd / self.rate_per_hr * 3600.0
+        return max(0.0, self.max_usd - self.banked_usd) / self.rate_per_hr * 3600.0
 
     def may_start(self, stage: str, now: float | None = None) -> None:
         """Refuse to begin `stage` when there is no headroom left to finish it."""
