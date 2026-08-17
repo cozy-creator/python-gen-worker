@@ -431,6 +431,51 @@ def test_the_eager_capable_role_gets_the_registered_implementation() -> None:
     assert mint_seam.supervision().may_delegate() == ""
 
 
+@pytest.mark.parametrize(
+    "module", ["gen_worker.fleet_cells", "gen_worker.executor"])
+def test_the_seam_is_registered_by_whoever_calls_it(module: str) -> None:
+    """A registration that depends on some OTHER module having been imported
+    first is an ordering hazard, not a dependency — and this one bit.
+
+    The first shape of this seam registered from the three process entries
+    (`entrypoint`, `cli`, `local_serve`). Every test that drives a background
+    mint then depended on one of those having been imported into the same
+    pytest worker by some unrelated file, so `test_executor_adopt` passed in
+    one file ordering and failed in another with the mint never completing.
+    Registration now happens in the modules that CALL the seam, and this
+    proves it in a process that imports exactly one of them and nothing else.
+    """
+    proof = subprocess.run(
+        [sys.executable, "-c",
+         "import sys;"
+         f"sys.path.insert(0, {str(SRC)!r});"
+         f"import {module};"
+         "from gen_worker.serve import mint_seam;"
+         "print(type(mint_seam.supervision()).__name__)"],
+        capture_output=True, text=True, check=False)
+    assert proof.returncode == 0, proof.stderr
+    assert proof.stdout.strip() == "EagerCapableMint", proof.stdout + proof.stderr
+
+
+def test_red_an_unregistered_eager_capable_process_refuses_loudly() -> None:
+    """…and when nothing registered, the seam does NOT improvise.
+
+    The alternative failure mode is the one that cost the ordering hazard its
+    invisibility: a `supervision()` that quietly answered `NoMint` in the
+    eager-capable role would turn "nobody registered" into "this pod stopped
+    minting", which is a silent capability loss rather than an error.
+    """
+    from gen_worker.serve import mint_seam as seam
+
+    saved = seam._registered
+    seam._registered = None
+    try:
+        with pytest.raises(seam.MintSupervisionUnregistered):
+            seam.supervision()
+    finally:
+        seam._registered = saved
+
+
 def test_the_adopt_only_role_refuses_even_when_the_lane_is_registered() -> None:
     """The role is about what a pod MAY do, not only about what it imported."""
     from gen_worker import mint_adapter  # noqa: F401  (registers)

@@ -186,17 +186,22 @@ from . import fleet_cells
 from . import aot_serve, numerics_ladder, shape_growth
 from . import fleet_cells as fleet_cells_mod
 from . import hot_swap
-# pgw#1328: the mint lane is reached through `serve.mint_seam` and named
-# nowhere in this module. The eager-capable implementation is REGISTERED by
-# `gen_worker.mint_adapter`, which the PROCESS ENTRY imports (`entrypoint`,
-# `cli`, `local_serve`) — the entry is what knows which process this is, and
-# an adopt-only entry imports it not at all. Keeping the edge out of here is
-# what lets an adopt-only interpreter import the serving host under
-# `serve.guard` instead of dying at this line.
 from .serve import boot_miss as serve_boot_miss
 from .serve import mint_seam
 from .serve import refusal as serve_refusal
 from .serve import role as serve_role
+
+# pgw#1328: the mint lane is reached through `serve.mint_seam` and named
+# nowhere else in this module. Importing `mint_adapter` is what REGISTERS
+# §4.28's eager-capable implementation with the seam, and it happens HERE —
+# in a module that calls the seam — rather than in a process entry, because
+# a registration that depends on some other module having been imported
+# first is an ordering hazard, not a dependency. The branch reads the ONE
+# role answer and adds no second one: an adopt-only process declares its
+# role and installs `serve.guard` before this module is imported, so the
+# import below is what would otherwise kill it on this line.
+if not serve_role.adopt_only():
+    from . import mint_adapter  # noqa: F401  (registers the mint side)
 from .hostfacts import cuda_ready
 
 # pgw#1294: the three producer contexts MERGED into JobContext, so every
