@@ -149,11 +149,8 @@ def boot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     The applier is stubbed for the reason `test_rung_ladder_pgw1206` stubs it
     (the established th#1043 seam): the diffusers placement hooks are not the
-    code under test, and a box that exports `GEN_WORKER_FORBID_CPU_OFFLOAD`
-    makes the real applier RAISE. That export is a ratified weights-locality
-    tripwire (pgw#929) and this dev box sets it, so without this seam these
-    three tests fail here and pass in CI — measuring the box rather than the
-    boot. Stubbing at `place_pipeline`'s applier call is the only seam that
+    code under test and a cardless box cannot run them.
+    Stubbing at `place_pipeline`'s applier call is the only seam that
     works: pinning free VRAM high instead would select the resident rung and
     route into `pipeline.to("cuda")`, which a cardless box cannot satisfy.
     """

@@ -112,8 +112,7 @@ def test_floor_only_deepens() -> None:
 
 # --- OOM at each rung: descend, never die -----------------------------------
 # The seam is apply_low_vram_config (the established th#1043 pattern): the
-# ladder WALK is the code under test; the diffusers hooks are not, and this
-# box exports GEN_WORKER_FORBID_CPU_OFFLOAD, which the real applier honors.
+# ladder WALK is the code under test; the diffusers placement hooks are not.
 
 
 def _arm(monkeypatch: pytest.MonkeyPatch, serves_at: str) -> list[str]:

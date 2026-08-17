@@ -255,10 +255,6 @@ BEHAVIOUR_GATES: Dict[Tuple[str, str], str] = {
     ("src/gen_worker/supervisor.py", "GEN_WORKER_SUPERVISED"):
         "BOOTSTRAP. Pre-fork re-entry guard; without it the supervisor forks "
         "itself forever.",
-    ("src/gen_worker/models/memory.py", "GEN_WORKER_FORBID_CPU_OFFLOAD"):
-        "TRIPWIRE at the real placement boundary. Read as env rather than "
-        "Settings because a control-plane box exports it box-wide with no worker "
-        "config in sight. Threat: a CPU-offloading run on the shared dev box.",
     ("src/gen_worker/lifecycle.py", "$ENV_VAR"):
         "READ-ONLY WARNING PREDICATE. Re-reads the hub-delivered topology only "
         "to decide whether the 'GPUs are invisible' warning applies. Selects a "
