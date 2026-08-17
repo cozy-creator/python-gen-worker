@@ -125,14 +125,17 @@ def test_the_storage_half_still_provides_what_the_ownership_ruling_keeps() -> No
     # pinned upstream snapshot, called by nothing here. The caller census is
     # `scripts/lint_materialization_hatch.py`, in the required `fast gates`.
     assert hasattr(LocalCAS, "materialize" + "_repository")
-def test_the_torchcg_snapshot_is_one_rev() -> None:
-    """pgw#1342/tcg#39: the two-rev split is GONE, and nothing may re-grow it.
 
-    pgw#1328 grafted `selection.py` over an older storage half because the tip
-    carried a storage re-key it was not entitled to take. Paul ruled the re-key
-    accepted (tcg#39) and this snapshot took it whole, so a second rev in this
-    table is now a fork of a storage identity with no ruling behind it. The
-    digest fence above cannot see that: a graft records perfectly well.
+
+def test_the_torchcg_snapshot_is_one_rev() -> None:
+    """pgw#1342/tcg#39: the graft fields are GONE, and nothing may re-grow one.
+
+    Two lanes grafted a newer file over an older storage half — pgw#1328's
+    `selection_rev`, pgw#1332's `recipe_rev` — each because the tip carried a
+    storage re-key its own lane was not entitled to take. Paul ruled the re-key
+    accepted (tcg#39) and this snapshot took the tip whole, so a second rev in
+    this table is now a fork of a storage identity with no ruling behind it.
+    The digest fence above cannot see that: a graft records perfectly well.
     """
 
     spec = MANIFEST["packages"]["torchcg"]
@@ -141,7 +144,10 @@ def test_the_torchcg_snapshot_is_one_rev() -> None:
         f"the torchcg snapshot grew a second rev ({extra}). One rev, per "
         f"tcg#39 — a graft forks the compiled-graph store's identity."
     )
-    assert spec["rev"] == "41e38a2ad1c3e21ceda775490f102c9359b16499"
+    # The rev itself is NOT restated here. VENDORED.toml says it is "the single
+    # home of the fact", and a copy of a rev in a test is a second home that
+    # drifts. What this asserts is the SHAPE the ruling fixed: one rev, and the
+    # post-rename layout it must have been taken from.
     assert spec["subdir"] == "src/torchcg"
 
 

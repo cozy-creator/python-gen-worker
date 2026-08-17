@@ -115,13 +115,19 @@ rewrites = [
 
 [packages.torchcg]
 repo = "https://github.com/cozy-creator/torchcg"
-rev = "41e38a2ad1c3e21ceda775490f102c9359b16499"
+rev = "94a7872870274dc59de9be2c272ce8bdd208a3ef"
 subdir = "src/torchcg"
+# THE REV THAT FROZE THE ADDRESS (torchcg PR #41). Its `src/` tree is
+# byte-identical to `41e38a2` — the freeze added only tests and docs — so the
+# digests below are the same either way. It is recorded as the rev because
+# this snapshot is only safe at ONE rev while upstream fences the identity,
+# and that is the first commit where it does.
+#
 # ONE REV. Both grafts over the older storage half are DELETED here —
-# pgw#1328's `selection_rev` and pgw#1332's `recipe_rev` — and
-# pgw#1342/tcg#39 is why. Each was taken because the tip carried a storage
-# migration its own lane was not entitled to take; a third one would have
-# been the same trade a third time.
+# pgw#1328's `selection_rev` and pgw#1332's `recipe_rev` — and pgw#1342/tcg#39
+# is why. Each was taken because the tip carried a storage migration its own
+# lane was not entitled to take; a third one would have been the same trade a
+# third time.
 #
 # The split existed because the tip carried a storage RE-KEY that the serve-role
 # lane was not entitled to take as a line item: `_REF_PREFIX` moved from
