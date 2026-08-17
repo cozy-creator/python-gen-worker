@@ -1460,6 +1460,10 @@ class ParentControl:
             # The host driver, so the hub can answer "can the host we landed on
             # run this pod's CUDA line?" from a SUCCESSFUL boot, not only a corpse.
             driver_version=hw.driver_version,
+            # Same shape, same reason (pgw#1314): `min_cuda` is a requirement
+            # term, so the fact has to arrive from a LIVE worker and not only
+            # from `HardwareUnsuitable`. Unmeasurable stays "" -> off the wire.
+            cuda_version=hw.cuda_version,
             installed_libs=list(hw.installed_libs),
             gen_worker_version=str(m.get("gen_worker_version") or ""),
             image_digest=self._settings.worker_image_digest,

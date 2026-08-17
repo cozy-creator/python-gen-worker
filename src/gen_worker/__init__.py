@@ -49,6 +49,9 @@ from .api.derive import (
 from .api.formula import RuntimeFormula
 from .api.slot import OBJECTIVES, ObjectiveMismatchError, ResolvedSlot, Slot, resolve_slot
 from .families import GenerationDefaults
+from .models.tensor_layout_contract import (
+    LayoutDeclarationError, LayoutRequirements, RequirementTerms,
+)
 from .models.provision import (arm_compile, report_applied_attention,
                                report_applied_lane, report_attention_backend)
 from .text_pin import TextLengthExceededError, pad_text_sequence
@@ -129,6 +132,10 @@ __all__ = [
     "worker_function",
     "AcceptsReferences",
     "Resources",
+    # pgw#1313 — the one requirement vocabulary, at both levels.
+    "LayoutRequirements",
+    "RequirementTerms",
+    "LayoutDeclarationError",
     "Compile",
     "CompileAxis",
     "AxisClass",

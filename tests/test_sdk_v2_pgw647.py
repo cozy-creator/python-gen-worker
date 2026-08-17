@@ -272,25 +272,27 @@ def test_contract_digest_changes_with_the_contract():
 
 
 def test_resources_v2_deleted_fields_raise():
-    # `vram_gb` and `ram_gb` stay deleted; their successors are the explicitly
-    # non-binding `ram_gb_hint` (pgw#670); th#1867 deleted the VRAM markers.
-    for kw in ({"vram_gb": 12}, {"ram_gb": 48}, {"min_compute_capability": 8.0}):
+    # `vram_gb` and `ram_gb` stay deleted; th#1867 deleted the VRAM markers.
+    # pgw#1313 deleted the last two bespoke axes — `compute_capability` and
+    # `ram_gb_hint` — into the one requirement vocabulary. No aliases.
+    for kw in ({"vram_gb": 12}, {"ram_gb": 48}, {"min_compute_capability": 8.0},
+               {"compute_capability": 8.9}, {"ram_gb_hint": 64}):
         with pytest.raises(TypeError):
             Resources(**kw)
 
 
-def test_resources_v2_compute_capability_is_restored_as_a_hard_floor():
+def test_resources_v2_the_arch_floor_survives_as_a_requirement_term():
     # pgw#660 REVERSED this part of the v2 cut (Paul, 2026-07-26). The cut was
     # right that precision-per-card is the ladder's call and wrong that an
     # architecture floor is the same thing: scaled_mm below sm_89 is
     # incapability, not a slower rung, and the hub placed the fp8 producer on
     # sm_80 A100s for want of the declaration. See test_compute_capability_pgw660.
-    assert Resources(compute_capability=8.9).compute_capability == 8.9
-    assert Resources(compute_capability=8.9).gpu is True
+    assert Resources(requires="sm89+").requirement().min_terms().min_sm == 89
+    assert Resources(requires="sm89+").gpu is True
 
 
 def test_resources_v2_hint_and_gpu_count_imply_gpu():
-    assert Resources(compute_capability=8.9).gpu is True
+    assert Resources(requires="sm89+").gpu is True
     assert Resources(gpu_count=2).gpu is True
     assert Resources().gpu is False
     with pytest.raises(ValueError):

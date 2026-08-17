@@ -196,6 +196,17 @@ message WorkerResources {
   // when the CUDA runtime is not. Additive: old workers send it unset and the
   // hub records the census verdict as "unknown", never as "fine".
   string driver_version = 13;
+  // pgw#1314: the CUDA runtime this worker's torch was BUILT against, e.g.
+  // "13.0". Measured already (HostFacts.cuda_version) and, until now, LOCAL
+  // ONLY — the hub could learn a worker's CUDA version from exactly one
+  // carrier, HardwareUnsuitable.torch_cuda_version, i.e. only from a worker
+  // that had already died. It is a requirement TERM in the one compatibility
+  // vocabulary (`min_cuda`), so the fact it is compared against has to reach
+  // the hub from a LIVE worker or the term silently does not hold. Additive:
+  // old workers send it unset, and ABSENT stays distinguishable from a
+  // measured value — an unreadable CUDA runtime leaves the field off the
+  // wire rather than shipping "" as an answer.
+  string cuda_version = 14;
 }
 
 // Worker -> orchestrator: this worker's boot-time hardware suitability probe

@@ -162,12 +162,36 @@ def _check_requirements(
                 f"{where}: layout_requirements= key must be a handle literal "
                 f"or a constant imported from {VOCABULARY_MODULE}")
             continue
-        if not (isinstance(item, ast.Constant) and isinstance(item.value, str)):
-            problems.append(
-                f"{path}:{item.lineno}: layout_requirements= value must be "
-                "the compact string form (e.g. \'sm100+\'); a computed "
-                "requirement is unreviewable exactly where it matters")
+        problems.extend(_check_requirement_value(path, item))
     return problems
+
+
+def _check_requirement_value(
+    path: Path, item: ast.expr, kwarg: str = "layout_requirements",
+) -> List[str]:
+    """A requirement is reviewable in the diff or it is not declared: the
+    compact string literal, or `LayoutRequirements(minimum=..., recommended=
+    ...)` whose levels are themselves compact string literals."""
+    bad = [
+        f"{path}:{item.lineno}: {kwarg}= value must be the "
+        "compact string form (e.g. 'sm100+'), or LayoutRequirements("
+        "minimum='sm80+', recommended='sm90+, vram80g') with string-literal "
+        "levels; a computed requirement is unreviewable exactly where it "
+        "matters"
+    ]
+    if isinstance(item, ast.Constant) and isinstance(item.value, str):
+        return []
+    if not (isinstance(item, ast.Call)
+            and _call_name(item) == "LayoutRequirements"
+            and not item.args):
+        return bad
+    for kw in item.keywords:
+        if kw.arg not in ("minimum", "recommended"):
+            return bad
+        if not (isinstance(kw.value, ast.Constant)
+                and isinstance(kw.value.value, str)):
+            return bad
+    return [] if item.keywords else bad
 
 
 def _call_name(call: ast.Call) -> str:
@@ -187,7 +211,17 @@ def scan(path: Path) -> List[str]:
     vocabulary = _vocabulary_names(tree)
     problems: List[str] = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or _call_name(node) != "Slot":
+        if not isinstance(node, ast.Call):
+            continue
+        # The FUNCTION scope of the same vocabulary (pgw#1313), reviewed by
+        # the same rule — the grammar is one grammar or it is two.
+        if _call_name(node) == "Resources":
+            for kw in node.keywords:
+                if kw.arg == "requires":
+                    problems.extend(
+                        _check_requirement_value(path, kw.value, "requires"))
+            continue
+        if _call_name(node) != "Slot":
             continue
         declared = False
         for kw in node.keywords:

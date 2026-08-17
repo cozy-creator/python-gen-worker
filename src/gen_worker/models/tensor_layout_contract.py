@@ -721,40 +721,182 @@ def undeclared_slot_refusal(*, function: str, slot: str) -> str:
 # nobody answered.
 #
 # EXTENSIBLE, NOT BUILT: the compact grammar is a comma-separated term list so
-# a kernel or torch-version term can be added without re-spelling every
-# declaration. Only the compute-capability term exists today, and an unknown
+# a kernel term can be added without re-spelling every declaration. An unknown
 # term is REFUSED by name rather than ignored — an ignored requirement is a
 # requirement that silently does not hold.
+#
+# pgw#1313 — ONE VOCABULARY AT TWO LEVELS. A requirement term and the machine
+# fact it is compared against carry the SAME NAME, so evaluating a requirement
+# is a name lookup and never a bespoke comparator per term (the fact half is
+# `hostfacts.HostFacts`; pgw#1314). `LayoutRequirements` is now the PAIR
+# {minimum, recommended} over one term bag (`RequirementTerms`).
+#
+#   * the COMPACT form is the MINIMUM, unchanged — the fleet's `"sm89+"` /
+#     `"sm100+"` declarations keep their meaning byte-for-byte and their
+#     manifest row byte-for-byte. `recommended` is purely additive.
+#   * a declared MINIMUM gates ADMISSION (a config-write check on a pick a
+#     human is making) and NEVER execution. A declared RECOMMENDED gates
+#     nothing, ever: `recommended_vram_gb` was deleted (th#1867) because the
+#     hub learned a monotone buy floor from it (th#1720), and preference has
+#     exactly one authority — the author's ladder ORDER.
+#   * `recommended` >= `minimum` on every declared term, refused here: a
+#     recommendation below the floor is a contradiction, not a preference.
+#   * `kernels` is NAMED AND REFUSED, NOT BUILT: there is no runtime
+#     kernel-capability probe in this worker, so a `kernels` floor would be a
+#     requirement with no fact behind it.
 
 #: The requirement terms this SDK understands. Growing this tuple is the whole
 #: cost of adding an axis; nothing else parses a term.
-KNOWN_REQUIREMENT_TERMS: tuple[str, ...] = ("min_sm",)
+KNOWN_REQUIREMENT_TERMS: tuple[str, ...] = (
+    "min_sm", "min_vram_gb", "min_host_ram_gb", "min_cuda", "min_torch")
+
+#: The two levels of the same vocabulary.
+REQUIREMENT_LEVELS: tuple[str, ...] = ("minimum", "recommended")
+
+#: Terms named in the ruling with no runtime fact to compare against. Refused
+#: BY NAME with this reason rather than accepted and never evaluated.
+_UNBUILT_TERMS: tuple[str, ...] = ("kernels",)
 
 _SM_TERM_RE = re.compile(r"^sm([1-9][0-9]{1,2})\+$")
+_VRAM_TERM_RE = re.compile(r"^vram([0-9]+(?:\.[0-9]+)?)g$")
+_RAM_TERM_RE = re.compile(r"^ram([0-9]+(?:\.[0-9]+)?)g$")
+_CUDA_TERM_RE = re.compile(r"^cuda([0-9]+(?:\.[0-9]+)*)\+$")
+_TORCH_TERM_RE = re.compile(r"^torch([0-9]+(?:\.[0-9]+)*)\+$")
+
+_TERM_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
+    ("min_sm", _SM_TERM_RE),
+    ("min_vram_gb", _VRAM_TERM_RE),
+    ("min_host_ram_gb", _RAM_TERM_RE),
+    ("min_cuda", _CUDA_TERM_RE),
+    ("min_torch", _TORCH_TERM_RE),
+)
+
+_COMPACT_EXAMPLES = "'sm100+', 'vram80g', 'ram64g', 'cuda12.8+', 'torch2.9+'"
 
 
-class LayoutRequirements(msgspec.Struct, frozen=True, kw_only=True):
-    """What EXECUTING one declared contract needs of the machine.
+class RequirementTerms(msgspec.Struct, frozen=True, kw_only=True,
+                       omit_defaults=True):
+    """The term bag — ONE machine axis per field, at ONE level.
 
-    ``min_sm`` is the compute-capability floor, in tensorhub's own
-    two-or-three digit spelling (``sm_89`` -> 89, ``sm_100`` -> 100), and is
-    the value `contractspec.DecodeEntry.MinSM` compares a card against. ``0``
-    means the axis was not declared and is therefore not evaluated.
+    ``min_sm`` is the compute-capability floor in tensorhub's own
+    two-or-three digit spelling (``sm_89`` -> 89, ``sm_100`` -> 100), the
+    value `contractspec.DecodeEntry.MinSM` compares a card against. That bare
+    spelling is THE wire spelling for this axis on both sides (pgw#1314):
+    dotted ``8.9`` is a normalization at whatever boundary produces it, never
+    a second stored form.
+
+    ``min_cuda`` / ``min_torch`` are dotted version strings compared
+    component-wise. Every field's zero/empty is UNDECLARED and unevaluated —
+    never "no floor asserted" dressed as "runs anywhere".
     """
 
     min_sm: int = 0
+    min_vram_gb: float = 0.0
+    min_host_ram_gb: float = 0.0
+    min_cuda: str = ""
+    min_torch: str = ""
 
     def declared(self) -> bool:
-        return self.min_sm > 0
+        return bool(self.declared_terms())
+
+    def declared_terms(self) -> dict[str, Any]:
+        """Only the axes this bag actually states, in vocabulary order."""
+        out: dict[str, Any] = {}
+        for term in KNOWN_REQUIREMENT_TERMS:
+            value = getattr(self, term)
+            if value:
+                out[term] = value
+        return out
 
     def render(self) -> str:
         """The compact spelling, so one requirement has one text form."""
-        return f"sm{self.min_sm}+" if self.min_sm else ""
+        parts: list[str] = []
+        if self.min_sm:
+            parts.append(f"sm{self.min_sm}+")
+        if self.min_vram_gb:
+            parts.append(f"vram{_render_gb(self.min_vram_gb)}g")
+        if self.min_host_ram_gb:
+            parts.append(f"ram{_render_gb(self.min_host_ram_gb)}g")
+        if self.min_cuda:
+            parts.append(f"cuda{self.min_cuda}+")
+        if self.min_torch:
+            parts.append(f"torch{self.min_torch}+")
+        return ", ".join(parts)
 
-    def manifest_row(self) -> dict[str, int]:
-        """Only DECLARED axes reach the manifest — an undeclared axis must not
-        arrive at the hub as a zero it could read as a floor of none."""
-        return {"min_sm": self.min_sm} if self.min_sm else {}
+
+class LayoutRequirements(msgspec.Struct, frozen=True, kw_only=True,
+                         omit_defaults=True):
+    """What EXECUTING one declared contract needs of the machine, at both
+    levels of one vocabulary.
+
+    The compact form IS the minimum::
+
+        "sm100+, vram24g"
+        LayoutRequirements(minimum="sm80+, vram48g",
+                           recommended="sm90+, vram80g")
+
+    Both levels accept the compact string, a mapping of terms, or a
+    :class:`RequirementTerms`; :func:`parse_layout_requirements` normalizes
+    them. A directly-constructed instance is UNVALIDATED — the parser is the
+    one validator, so the refusal can name the declaration site.
+    """
+
+    minimum: Any = None
+    recommended: Any = None
+
+    def declared(self) -> bool:
+        return bool(self.min_terms().declared()
+                    or self.recommended_terms().declared())
+
+    def min_terms(self) -> RequirementTerms:
+        return self.minimum if isinstance(
+            self.minimum, RequirementTerms) else RequirementTerms()
+
+    def recommended_terms(self) -> RequirementTerms:
+        return self.recommended if isinstance(
+            self.recommended, RequirementTerms) else RequirementTerms()
+
+    def render(self) -> str:
+        """The MINIMUM's compact spelling.
+
+        A round trip through :func:`parse_layout_requirements` is stable
+        exactly when nothing but the minimum is declared — `recommended` has
+        no single-string form and is not invented one.
+        """
+        return self.min_terms().render()
+
+    def manifest_row(self) -> dict[str, Any]:
+        """Only DECLARED axes reach the manifest, per term AND per level — an
+        undeclared axis must not arrive at the hub as a zero it could read as
+        a floor of none.
+
+        The MINIMUM's terms sit flat, which is where th#2030's ingest already
+        reads `min_sm`: an existing `"sm100+"` declaration emits exactly the
+        `{"min_sm": 100}` it emits today, so repinning this wheel can never
+        silently drop a floor the hub is already enforcing. `recommended`
+        nests under its own key and is additive — th#2072 grows the reader.
+        """
+        row: dict[str, Any] = dict(self.min_terms().declared_terms())
+        recommended = self.recommended_terms().declared_terms()
+        if recommended:
+            row["recommended"] = recommended
+        return row
+
+
+def _render_gb(value: float) -> str:
+    return f"{value:g}"
+
+
+def _version_tuple(value: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in value.split("."))
+
+
+def _term_meets(term: str, candidate: Any, floor: Any) -> bool:
+    """Is `candidate` at least `floor` for this term? One comparator per
+    KIND, chosen by name — never one per term."""
+    if term in ("min_cuda", "min_torch"):
+        return _version_tuple(str(candidate)) >= _version_tuple(str(floor))
+    return float(candidate) >= float(floor)
 
 
 def _min_sm_value(value: object, *, where: str) -> int:
@@ -771,63 +913,175 @@ def _min_sm_value(value: object, *, where: str) -> int:
     return value
 
 
-def parse_layout_requirements(
-    value: object, *, where: str,
-) -> LayoutRequirements:
-    """Dual form: the compact term list, or the structured object.
+def _gb_value(term: str, value: object, *, where: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise LayoutDeclarationError(
+            f"{where}: {term} must be a number of GB, got "
+            f"{type(value).__name__}")
+    out = float(value)
+    if not out > 0 or out != out or out in (float("inf"), float("-inf")):
+        raise LayoutDeclarationError(
+            f"{where}: {term}={value!r} is not a floor. There is no 'no "
+            "floor' value: omit the term, which leaves the axis UNDECLARED "
+            "and unevaluated.")
+    return out
 
-    ``"sm100+"`` and ``LayoutRequirements(min_sm=100)`` are the same
-    declaration; the compact form is what an author writes and what
-    :meth:`LayoutRequirements.render` produces, so a round trip is stable.
+
+def _version_value(term: str, value: object, *, where: str) -> str:
+    text = str(value).strip() if isinstance(value, (str, int, float)) else ""
+    if isinstance(value, bool) or not text:
+        raise LayoutDeclarationError(
+            f"{where}: {term} must be a dotted version ('12.8', '2.9'), got "
+            f"{value!r}")
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", text):
+        raise LayoutDeclarationError(
+            f"{where}: {term}={value!r} is not a dotted version. Write the "
+            "version the runtime reports ('12.8', '2.9'), with no operator "
+            "and no suffix.")
+    return text
+
+
+def _term_value(term: str, value: object, *, where: str) -> Any:
+    if term == "min_sm":
+        return _min_sm_value(value, where=where)
+    if term in ("min_vram_gb", "min_host_ram_gb"):
+        return _gb_value(term, value, where=where)
+    return _version_value(term, value, where=where)
+
+
+def _unknown_term_refusal(named: list[str], *, where: str) -> str:
+    unbuilt = [t for t in named
+               if t in _UNBUILT_TERMS or t.removeprefix("min_") in _UNBUILT_TERMS]
+    tail = ""
+    if unbuilt:
+        tail = (f" {unbuilt} is named in the ruling and deliberately NOT "
+                "built: there is no runtime kernel-capability probe in this "
+                "worker, so it would be a floor with no fact behind it.")
+    return (f"{where}: unknown requirement term(s) {named}. This SDK "
+            f"understands {list(KNOWN_REQUIREMENT_TERMS)}; an ignored "
+            f"requirement is one that silently does not hold.{tail}")
+
+
+def parse_requirement_terms(
+    value: object, *, where: str,
+) -> RequirementTerms:
+    """One LEVEL's term bag, from the compact list, a mapping, or the struct.
+
+    ``"sm100+, vram80g"``, ``{"min_sm": 100, "min_vram_gb": 80}`` and
+    ``RequirementTerms(min_sm=100, min_vram_gb=80)`` are one declaration.
     """
-    if isinstance(value, LayoutRequirements):
-        if not value.declared():
-            raise LayoutDeclarationError(
-                f"{where}: LayoutRequirements() declares no axis. A "
-                "requirement that requires nothing is not a declaration — "
-                "omit the entry.")
-        return LayoutRequirements(min_sm=_min_sm_value(
-            value.min_sm, where=where))
+    if isinstance(value, RequirementTerms):
+        value = value.declared_terms()
     if isinstance(value, dict):
-        unknown = sorted(set(value) - set(KNOWN_REQUIREMENT_TERMS))
+        named = sorted(str(k) for k in value)
+        unknown = [t for t in named if t not in KNOWN_REQUIREMENT_TERMS]
         if unknown:
             raise LayoutDeclarationError(
-                f"{where}: unknown requirement term(s) {unknown}. This SDK "
-                f"understands {list(KNOWN_REQUIREMENT_TERMS)}; kernel and "
-                "torch-version requirements are named in the ruling but not "
-                "built, and an ignored requirement is one that silently does "
-                "not hold.")
-        if "min_sm" not in value:
+                _unknown_term_refusal(unknown, where=where))
+        if not named:
             raise LayoutDeclarationError(
                 f"{where}: requirement mapping declares no axis; omit the "
                 "entry rather than declaring an empty one.")
-        return LayoutRequirements(
-            min_sm=_min_sm_value(value["min_sm"], where=where))
+        return RequirementTerms(**{
+            term: _term_value(term, value[term], where=where)
+            for term in named})
     if not isinstance(value, str):
         raise LayoutDeclarationError(
             f"{where}: a requirement is the compact form 'sm100+', a "
-            f"LayoutRequirements, or a mapping — got {type(value).__name__}")
+            f"LayoutRequirements, a RequirementTerms, or a mapping — got "
+            f"{type(value).__name__}")
     terms = [t.strip() for t in value.split(",")]
     if not any(terms) or any(not t for t in terms):
         raise LayoutDeclarationError(
             f"{where}: {value!r} is not a requirement. The compact form is a "
-            "comma-separated term list, e.g. 'sm100+'.")
-    min_sm = 0
+            f"comma-separated term list, e.g. {_COMPACT_EXAMPLES}.")
+    parsed: dict[str, Any] = {}
     for term in terms:
-        match = _SM_TERM_RE.match(term)
-        if match is None:
+        for name, pattern in _TERM_PATTERNS:
+            match = pattern.match(term)
+            if match is None:
+                continue
+            if name in parsed:
+                raise LayoutDeclarationError(
+                    f"{where}: {value!r} states {name} twice")
+            parsed[name] = _term_value(name, (
+                int(match.group(1)) if name == "min_sm"
+                else float(match.group(1)) if name.endswith("_gb")
+                else match.group(1)), where=where)
+            break
+        else:
             raise LayoutDeclarationError(
-                f"{where}: unknown requirement term {term!r}. The only term "
-                "this SDK understands is the compute-capability floor "
-                "('sm89+', 'sm90+', 'sm100+'); kernel and torch-version "
+                f"{where}: unknown requirement term {term!r}. The terms this "
+                f"SDK understands are {_COMPACT_EXAMPLES}; kernel "
                 "requirements are named in the ruling but not built, and an "
                 "ignored requirement is one that silently does not hold.")
-        if min_sm:
+    return RequirementTerms(**parsed)
+
+
+def parse_layout_requirements(
+    value: object, *, where: str,
+) -> LayoutRequirements:
+    """Dual form at two levels: the compact term list IS the minimum.
+
+    ``"sm100+"``, ``{"min_sm": 100}`` and
+    ``LayoutRequirements(minimum="sm100+")`` are the same declaration, and
+    :meth:`LayoutRequirements.render` puts the compact form back, so a
+    minimum-only round trip is stable.
+    """
+    minimum: object = None
+    recommended: object = None
+    if isinstance(value, LayoutRequirements):
+        minimum, recommended = value.minimum, value.recommended
+        if minimum is None and recommended is None:
             raise LayoutDeclarationError(
-                f"{where}: {value!r} states the compute-capability floor "
-                "twice")
-        min_sm = _min_sm_value(int(match.group(1)), where=where)
-    return LayoutRequirements(min_sm=min_sm)
+                f"{where}: LayoutRequirements() declares no axis. A "
+                "requirement that requires nothing is not a declaration — "
+                "omit the entry.")
+    elif isinstance(value, dict) and any(k in REQUIREMENT_LEVELS for k in value):
+        stray = sorted(str(k) for k in value if k not in REQUIREMENT_LEVELS)
+        if stray:
+            raise LayoutDeclarationError(
+                f"{where}: {stray} sit beside {list(REQUIREMENT_LEVELS)} in "
+                "one mapping. A bare term list IS the minimum; naming a level "
+                "means naming every term under one.")
+        minimum = value.get("minimum")
+        recommended = value.get("recommended")
+    else:
+        minimum = value
+
+    min_terms = (RequirementTerms() if minimum is None
+                 else parse_requirement_terms(
+                     minimum, where=f"{where}: minimum"))
+    rec_terms = (RequirementTerms() if recommended is None
+                 else parse_requirement_terms(
+                     recommended, where=f"{where}: recommended"))
+    if not min_terms.declared() and not rec_terms.declared():
+        raise LayoutDeclarationError(
+            f"{where}: the requirement declares no axis at either level; omit "
+            "the entry rather than declaring an empty one.")
+
+    # Host RAM is declarable at RECOMMENDED only. Paul 2026-07-11: RunPod GPU
+    # pods cannot select or guarantee host RAM, so a declared minimum was
+    # unenforceable theater and the standing instruction is not to rebuild a
+    # boot-time RAM gate. It survives as a shopping preference (vast CAN
+    # filter on RAM) and a degrade warning when unmet.
+    if min_terms.min_host_ram_gb:
+        raise LayoutDeclarationError(
+            f"{where}: min_host_ram_gb is declarable as RECOMMENDED only "
+            "(Paul, 2026-07-11: RunPod GPU pods cannot select or guarantee "
+            "host RAM, so a minimum is unenforceable theater). Move it: "
+            "recommended='ram64g'.")
+
+    floor = min_terms.declared_terms()
+    for term, value_ in rec_terms.declared_terms().items():
+        if term in floor and not _term_meets(term, value_, floor[term]):
+            raise LayoutDeclarationError(
+                f"{where}: recommended {term}={value_} is below minimum "
+                f"{term}={floor[term]}. A recommendation below the floor is a "
+                "contradiction, not a preference.")
+    return LayoutRequirements(
+        minimum=min_terms if min_terms.declared() else None,
+        recommended=rec_terms if rec_terms.declared() else None)
 
 
 def normalize_layout_requirements(

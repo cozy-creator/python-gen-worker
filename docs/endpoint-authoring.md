@@ -411,8 +411,15 @@ class Generate:
   ```python
   Slot(QwenImagePipeline, selected_by="model",
        layouts={"*": (CONTRACT_PLAIN_BF16, CONTRACT_COZY_SVDQ_NVFP4_LR8)},
-       layout_requirements={CONTRACT_COZY_SVDQ_NVFP4_LR8: "sm100+"})
+       layout_requirements={
+           CONTRACT_COZY_SVDQ_NVFP4_LR8: "sm100+, vram24g",
+           CONTRACT_PLAIN_BF16: LayoutRequirements(
+               minimum="sm80+, vram48g", recommended="sm90+, vram80g"),
+       })
   ```
+
+  Same vocabulary, same two levels, same refusals as `Resources(requires=)`
+  below — one grammar, one evaluator, three declaration scopes.
 
   A handle names bytes at rest; the floor its kernels need is an EXECUTION
   fact, which is why it lives on the slot and not on the artifact contract —
@@ -421,9 +428,10 @@ class Generate:
   reads for rung admission. Per (slot, handle), because one contract has
   different floors in different code (`cozy.fp8-rowwise@1` is sm89 per-tensor
   and sm90 rowwise). A key naming a handle `layouts=` does not accept is
-  refused — a requirement guarding nothing is never checked. Kernel and
-  torch-version requirements are named in the ruling and NOT built; the
-  compact grammar is a comma-separated term list so they can be added without
+  refused — a requirement guarding nothing is never checked. `kernels` is
+  named in the ruling and NOT built — there is no runtime kernel-capability
+  probe in this worker, so it would be a floor with no fact behind it; the
+  compact grammar is a comma-separated term list so it can be added without
   re-spelling a declaration, and an unknown term is refused rather than
   ignored. **No defaults on this axis either**: a declared requirement is
   checked, an undeclared one is not evaluated, and there is no "no floor"
@@ -604,8 +612,8 @@ assert decl.resources.gpu is True       # your declaration — keep asserting th
 
 A hand-written `assert not hasattr(decl.resources, "vram_gb")` is a copy of
 that list which no SDK change can update: `compute_capability` was deleted
-at 0.60 and RESTORED at 0.75 (pgw#660), and every stale copy of the list
-had to be found by hand.
+at 0.60, RESTORED at 0.75 (pgw#660) and folded into `requires=` by pgw#1313,
+and every stale copy of the list had to be found by hand.
 
 ## Lanes: multi-model classes with shared components (gw#479)
 
@@ -633,8 +641,8 @@ Resources(gpu=True, libraries=("nunchaku",))
 ```
 
 Fields: `gpu`, `gpu_count`, `max_gpu_count`,
-`max_gpus_per_execution_group`, `parallel`, `libraries`, `vcpus`,
-the hard floor `compute_capability`, and the allocation hint `ram_gb_hint`.
+`max_gpus_per_execution_group`, `parallel`, `libraries`, `vcpus`, and
+`requires` — the FUNCTION scope of the one requirement vocabulary.
 `max_gpus_per_execution_group` / `parallel` are the multi-GPU axis — see
 [multi-gpu.md](multi-gpu.md).
 
@@ -658,33 +666,51 @@ OPERATOR — who curates the ordered (GPU, lane) preference list from benchmarks
 — not a declaration for you to make. Every degraded serve is already reported
 structurally (`FnDegraded`: what was wanted, what ran, how much slower).
 
-**`compute_capability` survives, and the distinction is the whole point.**
+### `requires=` — the FUNCTION scope of the requirement vocabulary
 
-An sm floor says which KERNELS exist in our build: a producer whose kernel is
-`torch._scaled_mm` cannot run below sm_89 at any precision, on any rung, ever.
-That is a statement about our code. A card SIZE is a statement about the card,
-and §1.35 rules that we never make it.
+`Resources(requires=)` is the same grammar and the same terms as
+`Slot(layout_requirements={handle: ...})`, for code with no contract to hang a
+requirement on: trainers, converters, encoders. Terms:
+`min_sm`, `min_vram_gb`, `min_host_ram_gb`, `min_cuda`, `min_torch`, spelled
+compactly as `sm100+`, `vram80g`, `ram64g`, `cuda12.8+`, `torch2.9+`.
 
 ```python
 # scaled_mm is sm_89+ or nothing — an incapability, not a slow rung.
-Resources(gpu=True, compute_capability=8.9, libraries=("modelopt",))
+Resources(gpu=True, requires="sm89+", libraries=("modelopt",))
+
+Resources(gpu=True, requires=LayoutRequirements(
+    minimum="sm80+, vram48g", recommended="sm90+, vram80g, ram64g"))
 ```
 
-Declare the dotted capability the way NVIDIA writes it (`8.9`, `"8.9"`, or
-`"sm_89"`, never the bare SM code `89`). It implies `gpu=True`. Declare it ONLY
-for a genuine incapability — a function that merely runs *better* on newer
-silicon declares nothing and lets the ladder choose; over-declaring shrinks the
-rentable pool for no reason.
+**The compact form is the MINIMUM.** A minimum gates ADMISSION — a
+config-write check on a pick a human is making, with nothing rented and
+nothing queued — and NEVER execution: a pod that exists always runs, degraded.
+A `recommended` gates nothing at all, ever; it informs display and a default
+pick, and preference has exactly one authority, the operator's ladder ORDER.
+`recommended` below `minimum` on any term is refused where it is written.
 
-`ram_gb_hint` (pgw#670) is a HOST-side allocation ask and does not imply
-`gpu=True`; it survives because it sizes the pod, not the card. There is no
-disk axis — `min_disk_gb` was deleted unused (HARDCUT C3); the hub sizes
-container disk from the bytes a job will materialize.
+`min_sm` is the BARE sm code (`89`, `100`) — tensorhub's own spelling, the same
+one `WorkerResources.gpu_sm` and `contractspec.DecodeEntry.MinSM` use. The
+dotted `8.9` of the old `compute_capability=` is gone rather than kept as a
+second form. `min_sm` and `min_vram_gb` imply `gpu=True`; `min_host_ram_gb`
+does not.
 
-The v1 spellings `vram_gb` and `ram_gb` were deleted by SDK v2 and are still
-gone; `min_compute_capability` is rejected by the hub outright. Nothing
-VRAM-shaped is emitted into the manifest any more, so nothing lands on the
-hub's `min_vram_gb` fold.
+**`min_host_ram_gb` is declarable as `recommended` only.** RunPod GPU pods
+cannot select or guarantee host RAM (Paul, 2026-07-11), so a host-RAM MINIMUM
+is unenforceable theater; unmet, it is a degrade warning, which is what the
+offload rungs already do. A minimum is refused at the declaration site, naming
+the move.
+
+Declare a minimum ONLY for a genuine incapability — a function that merely runs
+*better* on newer silicon declares `recommended` and lets the ladder choose;
+over-declaring a minimum shrinks the rentable pool for no reason.
+
+There is no disk axis — `min_disk_gb` was deleted unused (HARDCUT C3); the hub
+sizes container disk from the bytes a job will materialize. The v1 spellings
+`vram_gb` and `ram_gb` were deleted by SDK v2 and are still gone, and
+`compute_capability=` / `ram_gb_hint=` were folded into `requires=` by
+pgw#1313 with no alias — each was a bespoke axis with its own parser, its own
+payload key and its own hub readers.
 
 ## Kinds
 

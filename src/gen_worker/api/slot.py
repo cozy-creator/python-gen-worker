@@ -178,12 +178,16 @@ class Slot(Generic[D]):
 
     ``layout_requirements`` is the REQUIREMENTS axis (Paul, 2026-08-15): what
     EXECUTING a declared contract needs of the machine, keyed by the handle it
-    guards. Dual form — the compact ``"sm100+"`` or the structured
-    ``LayoutRequirements(min_sm=100)``::
+    guards. Dual form at TWO levels (pgw#1313) — the compact term list IS the
+    minimum, ``recommended`` is additive and gates nothing::
 
         Slot(QwenImagePipeline, selected_by="model",
              layouts={"*": (CONTRACT_PLAIN_BF16, CONTRACT_COZY_SVDQ_NVFP4_LR8)},
-             layout_requirements={CONTRACT_COZY_SVDQ_NVFP4_LR8: "sm100+"})
+             layout_requirements={
+                 CONTRACT_COZY_SVDQ_NVFP4_LR8: "sm100+, vram24g",
+                 CONTRACT_PLAIN_BF16: LayoutRequirements(
+                     minimum="sm80+, vram48g", recommended="sm90+, vram80g"),
+             })
 
     A handle names bytes at rest; the floor its kernels need is an EXECUTION
     fact, which is why it lives here and not on the artifact contract — the
