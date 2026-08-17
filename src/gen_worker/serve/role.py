@@ -31,8 +31,7 @@ this file — reads them from here. There is one list.
 
 Two claims, two scopes, because they are not the same claim (pgw#1331). Every
 serve-role module is asserted MINT-FREE. Each is ALSO either asserted to reach
-no MODEL LIBRARY (``MODEL_FREE_MODULES``, 57 roots) or named as still reaching
-no MODEL LIBRARY (``MODEL_FREE_MODULES``, 50 roots) or named as still reaching
+no MODEL LIBRARY (``MODEL_FREE_MODULES``, 67 roots) or named as still reaching
 one (``MODEL_BEARING_SERVE_MODULES``, 9) — and the second list is checked to be
 TRUE, so a module that gets cut free must be moved rather than left sitting in
 an exception list nobody re-reads. The role is the union, by splice.
@@ -77,8 +76,7 @@ class ServeRole(StrEnum):
 
 
 #: Every serve-role module whose whole static closure reaches NO model library
-#: (pgw#1331). 57 of the role's 66 roots; the other nine are named, with their
-#: (pgw#1331). 50 of the role's 59 roots; the other nine are named, with their
+#: (pgw#1331). 67 of the role's 76 roots; the other nine are named, with their
 #: two causes, in :data:`MODEL_BEARING_SERVE_MODULES` directly below.
 #:
 #: This used to be 14 — the typed family surface alone — because two PACKAGE

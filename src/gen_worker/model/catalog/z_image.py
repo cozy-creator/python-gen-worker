@@ -219,7 +219,17 @@ Z_IMAGE: Final = GraphModelSpec(
     },
     buckets=(Bucket("branches", BRANCH_BUCKETS),),
     runners=(
-        Runner("denoiser", build=_denoiser, example=_denoiser_example, axes=("branches",)),
+        Runner(
+            "denoiser",
+            build=_denoiser,
+            example=_denoiser_example,
+            axes=("branches",),
+            # W1b-2's serving fact: `build` makes a WEIGHTLESS module from
+            # config, so serving eagerly means reaching the weight-bearing one
+            # the loader produced. It is NOT exported — the digest beside this
+            # file is unchanged by it.
+            component="transformer",
+        ),
     ),
     loop=Loop(stages=(Stage("denoiser", repeat="steps"),)),
     # The base function's declared payload range. The two turbo functions cap

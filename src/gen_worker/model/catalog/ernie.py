@@ -190,6 +190,11 @@ ERNIE: Final = GraphModelSpec(
             build=_denoiser,
             example=_denoiser_example,
             axes=("batch", "shape"),
+            # W1b-2's serving fact: `build` makes a WEIGHTLESS module from
+            # config, so serving eagerly means reaching the weight-bearing one
+            # the loader produced. It is NOT exported — the digests beside this
+            # file are unchanged by it.
+            component="transformer",
         ),
     ),
     loop=Loop(stages=(Stage("denoiser", repeat="steps"),)),
