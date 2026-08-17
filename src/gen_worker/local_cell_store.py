@@ -112,11 +112,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from gen_worker._vendor.torch_compiled_graphs import ARTIFACT_KIND, is_compiled_graph_key
-from gen_worker._vendor.torch_compiled_graphs.identity import KEY_SCHEME
+from gen_worker._vendor.torchcg import ARTIFACT_KIND, is_compiled_graph_key
+from gen_worker._vendor.torchcg.identity import KEY_SCHEME
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from gen_worker._vendor.torch_compiled_graphs import Engine
+    from gen_worker._vendor.torchcg import Engine
 
 logger = logging.getLogger(__name__)
 
@@ -423,7 +423,7 @@ def store(
     holding. Which of TCG's three success outcomes came back is a fact for the
     log, never a branch that skips work.
     """
-    from gen_worker._vendor.torch_compiled_graphs.storage import StoreOutcome
+    from gen_worker._vendor.torchcg.storage import StoreOutcome
 
     try:
         target_dir = cell_dir(key, root)
@@ -526,7 +526,7 @@ def materialize(
     so it must NOT be written into this worker's verdict (pgw#1283
     criterion 4).
     """
-    from gen_worker._vendor.torch_compiled_graphs.storage import QuarantinedArtifact, StorageError
+    from gen_worker._vendor.torchcg.storage import QuarantinedArtifact, StorageError
 
     try:
         destination = cell_dir(key, root) / ARTIFACT_NAME

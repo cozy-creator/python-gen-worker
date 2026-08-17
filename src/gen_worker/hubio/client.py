@@ -540,7 +540,7 @@ class HubClient:
         ``journal_path`` turns "the upload died" into "re-upload"
         rather than "re-run the cast". The session id is recorded beside the
         produced bytes BEFORE the first PUT, so a retry on this pod re-adopts
-        the same HashRepo session (same staging prefix) and re-plans it instead
+        the same tensorfs session (same staging prefix) and re-plans it instead
         of declaring a fresh one.
         """
 
@@ -559,7 +559,7 @@ class HubClient:
 
         repo_path = self._repo_path(destination_repo)
 
-        # HashRepo owns the local objects and manifest. A by-reference add has
+        # tensorfs owns the local objects and manifest. A by-reference add has
         # no bytes to ingest and therefore cannot enter this protocol.
         cas = open_worker_cas()
         entries = []
@@ -574,7 +574,7 @@ class HubClient:
         manifest_ref = manifest.digest()
 
         def _tensorhub_file(entry: Any) -> dict[str, object]:
-            """Adapt HashRepo v1 to Tensorhub's ordered-sha256 request shape."""
+            """Adapt tensorfs v1 to Tensorhub's ordered-sha256 request shape."""
             raw = cast(dict[str, object], entry.to_dict())
             chunks = raw.get("chunks")
             if isinstance(chunks, list):

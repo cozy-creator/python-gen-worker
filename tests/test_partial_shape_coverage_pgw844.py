@@ -49,7 +49,7 @@ from gen_worker import (  # noqa: E402
     endpoint,
 )
 from gen_worker import aot_serve  # noqa: E402
-from gen_worker._vendor.torch_compiled_graphs import (  # noqa: E402
+from gen_worker._vendor.torchcg import (  # noqa: E402
     CallIngress,
     CallInput,
     CompiledGraphRunner,

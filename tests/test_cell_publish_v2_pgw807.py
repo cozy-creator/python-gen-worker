@@ -33,8 +33,8 @@ import pytest
 from gen_worker._vendor.tensorfs import TransferReport
 
 import gen_worker.hubio.client as hub_client
-from gen_worker._vendor.torch_compiled_graphs import GRAPH_CLASS_BLOCK, REQUIRED_AXES
-from gen_worker._vendor.torch_compiled_graphs import identity as tcg_identity
+from gen_worker._vendor.torchcg import GRAPH_CLASS_BLOCK, REQUIRED_AXES
+from gen_worker._vendor.torchcg import identity as tcg_identity
 
 from gen_worker import env_seal, graph_facts, receipts
 from gen_worker import fleet_cells as fc
@@ -222,7 +222,7 @@ def hub():
 
 @pytest.fixture()
 def artifact(tmp_path: Path) -> Path:
-    """Deterministic artifact bytes for the real HashRepo transfer path.
+    """Deterministic artifact bytes for the real tensorfs transfer path.
 
     TCG owns compiled-graph packaging and admission.  This suite owns the
     client transport contract, so it passes the publisher an already-admitted
@@ -301,7 +301,7 @@ def test_publish_takes_the_v2_route_and_never_the_frozen_v1_one(
     (f,) = decl["files"]
     assert f["digest"].startswith("sha256:")
     assert f["size_bytes"] == artifact.stat().st_size
-    # This small control-plane artifact is one HashRepo object.
+    # This small control-plane artifact is one tensorfs object.
     assert "chunks" not in f
     assert hub.httpd.puts == [f["digest"].split(":", 1)[1]]
     assert decl["mode"] == "replace"

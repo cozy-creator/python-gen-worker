@@ -362,6 +362,22 @@ jobs:
           uv run python scripts/lint_tcg_vocabulary.py --selftest
           uv run python scripts/lint_tcg_vocabulary.py
 
+      # GATING (pgw#1297): the CAS and compiled-graph libraries were renamed to
+      # `tensorfs` and `torchcg`, and BOTH old PyPI projects are permanently
+      # deleted — so an old spelling never points at anything that exists. This
+      # rename half-landed twice (pgw#1310 repointed every import and left the
+      # vendored directory and a dozen docstrings behind), which is why it is a
+      # fence and not a sweep. Text-based on purpose, unlike the AST fence
+      # above: here the prose IS the defect, because a docstring naming a module
+      # nobody can import sends the reader nowhere. `_vendor/` is exempt
+      # structurally — the vendored ref namespace still carries the old spelling
+      # on disk and must NEVER be respelled, or every stored graph is orphaned.
+      # The script's own spellings are listed in `RETIRED`; see its docstring.
+      - name: pgw#1297 guard - no retired package name survives
+        run: |
+          uv run python scripts/lint_retired_package_names.py --selftest
+          uv run python scripts/lint_retired_package_names.py
+
       # GATING (th#1987 / HARDCUT A9): the `:tag` ref production is DELETED.
       # A surviving pin fails on a rented pod at the resolve, not at the line
       # that wrote it. The selftest proves the fence can go red, because a
@@ -524,6 +540,8 @@ jobs:
 
       # pgw#1310 / ie#738. BUILDING the wheel is not INSTALLING it, and the
       # difference is a whole class of defect this workflow could not see: for
+      # Naming what WAS required is the whole point of the sentence below.
+      # retired-name: historical rationale, not a live reference.
       # two published releases `gen-worker`'s metadata required `hashrepo`, a
       # PyPI project that had been DELETED, so every unlocked consumer install
       # died at resolution while every check here stayed green. `uv sync
@@ -547,8 +565,8 @@ jobs:
           import threading
           from gen_worker._vendor.tensorfs import CASRef, LocalCAS, TransferGrant, download
           from gen_worker._vendor.tensorfs.transfer import _run_parallel
-          from gen_worker._vendor.torch_compiled_graphs import ARTIFACT_KIND
-          from gen_worker._vendor.torch_compiled_graphs.contracts import read_contract
+          from gen_worker._vendor.torchcg import ARTIFACT_KIND
+          from gen_worker._vendor.torchcg.contracts import read_contract
 
           assert LocalCAS and download and ARTIFACT_KIND
           assert read_contract("KEY_GRAMMAR_DIGEST")

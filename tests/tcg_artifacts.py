@@ -1,4 +1,4 @@
-"""Real ``torch-compiled-graphs`` artifacts, built without torch (pgw#1283).
+"""Real ``torchcg`` artifacts, built without torch (pgw#1283).
 
 The local cell store used to hold OPAQUE bytes — it hashed whatever it was
 handed and re-hashed it on the way out — so every test about it could feed it
@@ -10,11 +10,11 @@ real envelope.
 Building one needs no torch and no GPU: the envelope is a gzip+USTAR tar of a
 metadata block and a code-only AOTInductor ``.pt2`` zip, and TCG's introspection
 reads the wrapper source and the ELF section table rather than loading either.
-The ELF and wrapper shapes below are the minimum ``torch_compiled_graphs``
+The ELF and wrapper shapes below are the minimum ``torchcg``
 accepts; they are ported from TCG's own ``tests/test_artifact.py`` fixture,
 which is the authority on that shape.
 
-``host_isa`` is taken from :func:`torch_compiled_graphs.host_isa._host_requirement`
+``host_isa`` is taken from :func:`torchcg.host_isa._host_requirement`
 — a private symbol, deliberately: an artifact stamped with a hard-coded
 ``x86-64-v3`` would be refused on an arm64 runner, and a fixture whose
 admissibility depends on which machine ran it is a flake, not a fence.
@@ -27,9 +27,9 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
-from gen_worker._vendor.torch_compiled_graphs import CallIngress, CallInput, GraphClassDeclaration
-from gen_worker._vendor.torch_compiled_graphs.artifact import build_metadata, pack_artifact
-from gen_worker._vendor.torch_compiled_graphs.host_isa import _host_requirement
+from gen_worker._vendor.torchcg import CallIngress, CallInput, GraphClassDeclaration
+from gen_worker._vendor.torchcg.artifact import build_metadata, pack_artifact
+from gen_worker._vendor.torchcg.host_isa import _host_requirement
 
 #: The default compiler-content facts. Two artifacts that differ only here get
 #: different ``ck1`` keys, which is how a test asks for a second cell.
@@ -160,6 +160,6 @@ def build(
 
 def key_of(artifact: Path) -> str:
     """The ``ck1`` key the artifact states about itself."""
-    from gen_worker._vendor.torch_compiled_graphs.artifact import read_metadata
+    from gen_worker._vendor.torchcg.artifact import read_metadata
 
     return str(read_metadata(artifact).get("compiled_graph_key") or "")

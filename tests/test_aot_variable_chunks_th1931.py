@@ -1,4 +1,4 @@
-"""AOT delivery consumes recorded HashRepo object lengths, never a fixed layout."""
+"""AOT delivery consumes recorded tensorfs object lengths, never a fixed layout."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 from gen_worker._vendor.tensorfs import LocalCAS, TransferGrant, TransferReport
-from gen_worker._vendor.torch_compiled_graphs import StoreOutcome
+from gen_worker._vendor.torchcg import StoreOutcome
 
 from gen_worker import aot_delivery, receipts
 

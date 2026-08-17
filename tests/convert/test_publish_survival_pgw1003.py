@@ -1,4 +1,4 @@
-"""HashRepo journals transfer identity; worker policy retains produced trees."""
+"""tensorfs journals transfer identity; worker policy retains produced trees."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def _sessions(path: Path) -> list[dict[str, str]]:
     return list(json.loads(path.read_text()).get("sessions") or [])
 
 
-def test_transport_failure_keeps_hashrepo_session_and_staged_bytes(
+def test_transport_failure_keeps_tensorfs_session_and_staged_bytes(
     fake_hub, tmp_path: Path
 ) -> None:
     _FakeHub.state["fail_puts"] = 999
@@ -41,7 +41,7 @@ def test_transport_failure_keeps_hashrepo_session_and_staged_bytes(
     assert _FakeHub.state.get("aborts", []) == []
 
 
-def test_retry_replans_the_same_hashrepo_session(fake_hub, tmp_path: Path) -> None:
+def test_retry_replans_the_same_tensorfs_session(fake_hub, tmp_path: Path) -> None:
     journal = tmp_path / JOURNAL_NAME
     file = _file(tmp_path)
     _FakeHub.state["fail_puts"] = 999

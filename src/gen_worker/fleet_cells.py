@@ -64,9 +64,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from . import activity as activity_mod
-from gen_worker._vendor.torch_compiled_graphs import ARTIFACT_KIND, GRAPH_CLASS_BLOCK, REQUIRED_AXES
-from gen_worker._vendor.torch_compiled_graphs import is_compiled_graph_key
-from gen_worker._vendor.torch_compiled_graphs import identity as tcg_identity
+from gen_worker._vendor.torchcg import ARTIFACT_KIND, GRAPH_CLASS_BLOCK, REQUIRED_AXES
+from gen_worker._vendor.torchcg import is_compiled_graph_key
+from gen_worker._vendor.torchcg import identity as tcg_identity
 
 from . import (
     aot_identity,
@@ -2953,7 +2953,7 @@ def abandon_self_mint(pending: "PendingSelfMint") -> None:
     proven sibling already finalized the shared capture (the artifact and
     its publish must survive).
 
-    Completed graph classes are already durable in TCG's canonical HashRepo
+    Completed graph classes are already durable in TCG's canonical tensorfs
     CAS before this handoff exists. Abandonment removes only the attempt-local
     capture; a retry reuses exact classes from TCG and re-derives any class
     that never reached the CAS."""

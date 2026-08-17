@@ -9,7 +9,7 @@ from gen_worker._vendor.tensorfs import LocalCAS
 from ..config import Settings, current_or
 
 if TYPE_CHECKING:
-    from gen_worker._vendor.torch_compiled_graphs import Engine
+    from gen_worker._vendor.torchcg import Engine
 
 _STANDALONE = Settings()
 
@@ -42,7 +42,7 @@ def tensorhub_cas_dir() -> Path:
 
 
 def open_worker_cas(root: Path | None = None) -> LocalCAS:
-    """Open the worker's one HashRepo store.
+    """Open the worker's one tensorfs store.
 
     Production callers omit ``root`` and therefore share
     :func:`tensorhub_cas_dir`. The override exists for an explicitly scoped
@@ -54,13 +54,13 @@ def open_worker_cas(root: Path | None = None) -> LocalCAS:
 
 
 def open_worker_engine(root: Path | None = None) -> Engine:
-    """Open TCG on the worker's one canonical HashRepo store.
+    """Open TCG on the worker's one canonical tensorfs store.
 
     Compile, import, resolve, and runner construction all cross this factory so
     no caller can silently introduce a second compiled-graph store.  The import
     stays lazy because model-only commands do not require TCG at startup.
     """
-    from gen_worker._vendor.torch_compiled_graphs import Engine
+    from gen_worker._vendor.torchcg import Engine
 
     return Engine(open_worker_cas(root))
 

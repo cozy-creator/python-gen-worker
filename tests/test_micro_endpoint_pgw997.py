@@ -42,7 +42,7 @@ from micro_diffusion.weights import (  # noqa: E402
 )
 
 from gen_worker import aot_declaration as ad  # noqa: E402
-from gen_worker._vendor.torch_compiled_graphs import build_call_ingress  # noqa: E402
+from gen_worker._vendor.torchcg import build_call_ingress  # noqa: E402
 from gen_worker.aot_mint import ExportSpec  # noqa: E402
 
 EXPECTED_ENTRIES = ["decoder", "transformer/cfg=false", "transformer/cfg=true"]

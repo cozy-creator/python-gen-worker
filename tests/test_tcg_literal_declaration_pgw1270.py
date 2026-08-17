@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from gen_worker._vendor.torch_compiled_graphs import (
+from gen_worker._vendor.torchcg import (
     DeclarationError,
     GraphClassSpec,
     build_call_ingress,

@@ -12,7 +12,7 @@ What was RED before this issue, on every one of these:
   rmtree'd the bytes — th#1643's SUNK case, once per boot, forever;
 * nothing in the tree could address a locally-stored AOT cell (``local_cells``
   is JIT-only and knows no ``ck1`` key);
-* compiled-graph reuse had no single canonical HashRepo/TCG authority.
+* compiled-graph reuse had no single canonical tensorfs/TCG authority.
 
 The store's own guarantees are proven against REAL bytes on disk. pgw#1283
 moved WHICH layer holds them: TCG's CAS owns the artifact and its verification,
@@ -37,7 +37,7 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
-from gen_worker._vendor.torch_compiled_graphs import is_compiled_graph_key
+from gen_worker._vendor.torchcg import is_compiled_graph_key
 
 import tcg_artifacts
 from gen_worker import fleet_cells, local_cell_store

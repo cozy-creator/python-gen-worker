@@ -28,7 +28,7 @@ import re
 from pathlib import Path
 
 import pytest
-from gen_worker._vendor.torch_compiled_graphs import (
+from gen_worker._vendor.torchcg import (
     GRAPH_CLASS_BLOCK,
     REQUIRED_AXES,
     CallIngress,
@@ -37,8 +37,8 @@ from gen_worker._vendor.torch_compiled_graphs import (
     RuntimeCompatibility,
 )
 
-from gen_worker._vendor.torch_compiled_graphs import identity as tcg_identity
-from gen_worker._vendor.torch_compiled_graphs import is_compiled_graph_key
+from gen_worker._vendor.torchcg import identity as tcg_identity
+from gen_worker._vendor.torchcg import is_compiled_graph_key
 
 from gen_worker import fleet_cells, graph_facts
 
@@ -126,7 +126,7 @@ _DERIVATION_ALLOWLIST = {
         "graph_facts.py",    # def
     },
     # the exported-ENTRY key: definition plus retained publish projection.
-    # pgw#1277: the DEFINITION moved to torch_compiled_graphs.identity, which
+    # pgw#1277: the DEFINITION moved to torchcg.identity, which
     # is outside src/gen_worker — so the worker now has exactly ONE call site
     # and no definition to fence.
     "from_artifact_metadata(": {
@@ -173,7 +173,7 @@ def _derivation_sites(root: Path, needle: str) -> dict[str, int]:
     sites: dict[str, int] = {}
     for path in sorted(root.rglob("*.py")):
         rel = str(path.relative_to(root))
-        # pgw#1310: `_vendor/torch_compiled_graphs` is the AUTHORITY these
+        # pgw#1310: `_vendor/torchcg` is the AUTHORITY these
         # needles name. Counting it as a second derivation site inverts the
         # rule — the rule is that nothing in gen_worker re-derives what TCG
         # already computes, and TCG computing it is the premise.

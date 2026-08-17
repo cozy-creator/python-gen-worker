@@ -292,7 +292,7 @@ def publish_flavors(
             release=release,
             mode=mode,
             # The conversion producer's own legs. (The per-object liveness beat
-            # lives in HashRepo's transfer progress callback, so it
+            # lives in tensorfs's transfer progress callback, so it
             # cannot be lost by a caller who forgets to pass a callback.)
             on_stage=functools.partial(_publish_leg, dest, label),
             journal_path=journal_path or _journal_beside(flavor),

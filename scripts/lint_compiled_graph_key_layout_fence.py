@@ -66,7 +66,7 @@ SRC = REPO / "src" / "gen_worker"
 # not a key axis, so fencing on it would fence modules that compute no key —
 # exactly the noise the note above says to avoid.
 AXIS_PRODUCERS: Tuple[str, ...] = (
-    # pgw#1277 moved this derivation out to torch_compiled_graphs.identity,
+    # pgw#1277 moved this derivation out to torchcg.identity,
     # so no module in src/gen_worker calls it TODAY. The entry stays on
     # purpose: a worker calling tcg_identity.from_axes() would be computing
     # a key axis, which is exactly what this fence covers.
@@ -81,7 +81,7 @@ AXIS_PRODUCERS: Tuple[str, ...] = (
 #: axis inputs (graph / sm / toolchain). The envelope is not one of them.
 #:
 #: pgw#1277: the KEY's own definition left this tree for
-#: ``torch_compiled_graphs.identity``, so it has no seed entry here any more.
+#: ``torchcg.identity``, so it has no seed entry here any more.
 #: ``graph_facts.py`` deliberately does NOT replace it — it defines the
 #: declared envelope and the coverage label, and neither is a key axis.
 FENCE_SEED: Tuple[str, ...] = (

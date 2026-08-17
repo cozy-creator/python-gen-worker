@@ -8216,7 +8216,7 @@ class Executor:
         sibling-coverage rule, and advertise the identity on the live compile
         targets. Everything between is ``mint_supervisor``'s — deliberately,
         because that is the compiled-graph interior and it is the surface the
-        ``torch-compiled-graphs`` extraction lifts whole. Residency (which pipe,
+        ``torchcg`` extraction lifts whole. Residency (which pipe,
         which target, what the wire is told) does not leak into it.
 
         Raises what ``_background_mint`` handles and nothing else:

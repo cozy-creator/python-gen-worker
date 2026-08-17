@@ -1,7 +1,7 @@
 """Tensorhub policy for retaining an expensive produced tree.
 
-HashRepo owns transfer sessions and their durable journal.  The worker adds
-only the product fact HashRepo cannot know: which completed producer output may
+tensorfs owns transfer sessions and their durable journal.  The worker adds
+only the product fact tensorfs cannot know: which completed producer output may
 be reused instead of paying for the cast again.
 """
 
@@ -33,7 +33,7 @@ class ProducedTree:
 
 
 class ProducerRecovery:
-    """Durable producer metadata keyed by HashRepo transfer-session id."""
+    """Durable producer metadata keyed by tensorfs transfer-session id."""
 
     def __init__(self, journal_path: str | Path) -> None:
         path = Path(journal_path)

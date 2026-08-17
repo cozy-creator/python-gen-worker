@@ -8,7 +8,7 @@ from typing import Any, cast
 import pytest
 
 from gen_worker import aot_serve as aot
-from gen_worker._vendor.torch_compiled_graphs import CallIngress, CallInput, CompiledGraphRunner
+from gen_worker._vendor.torchcg import CallIngress, CallInput, CompiledGraphRunner
 
 FAMILY = "sdxl-base"
 KEY = "cg-key-v1-" + "7" * 56
@@ -215,7 +215,7 @@ def test_failed_bind_does_not_mutate_the_live_module(
 ) -> None:
     class Refusing(FakeTCGRunner):
         def bind(self, state: dict[str, Any], *, device: str) -> None:
-            from gen_worker._vendor.torch_compiled_graphs import ConstantBindingError
+            from gen_worker._vendor.torchcg import ConstantBindingError
 
             raise ConstantBindingError("constant_unresolved", "weight absent")
 

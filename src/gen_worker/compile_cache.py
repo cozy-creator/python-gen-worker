@@ -83,7 +83,7 @@ from typing import (
 
 import sys
 
-from gen_worker._vendor.torch_compiled_graphs import is_compiled_graph_key
+from gen_worker._vendor.torchcg import is_compiled_graph_key
 
 from . import (
     dist_records, env_seal, graph_facts, guard_closure, hot_swap,
@@ -641,7 +641,7 @@ def _record_guard_miss(
 # with the pgw#1035 dead-code wave) and claimed parity with
 # `aot_serve.IDENTITY_AXES`, which was never true — 5 entries against 3, and
 # pgw#1034 had already ruled the two sets deliberately different. The cell key's
-# axes are `torch_compiled_graphs.REQUIRED_AXES`; this module's job is `runtime_key()`,
+# axes are `torchcg.REQUIRED_AXES`; this module's job is `runtime_key()`,
 # the ONE probe that states them.
 
 
@@ -1046,7 +1046,7 @@ def toolchain_digest() -> Tuple[Tuple[str, str], ...]:
     ``transformers`` / ``peft`` rode this axis until 2026-08-11 and were
     evicted because their whole effect on a cell arrives through the traced
     graph, which the ``graph`` axis hashes node-for-node since pgw#1031 —
-    see ``torch_compiled_graphs.identity``'s membership rules for the channel-by-channel argument
+    see ``torchcg.identity``'s membership rules for the channel-by-channel argument
     and for the two fences (B1 code-only + the pgw#1097 folding fence;
     ``env_seal.assert_seal_unchanged``) that close the routes around it.
     Folded here, every model-library patch release re-keyed every cell in

@@ -70,7 +70,7 @@ from typing import (
 
 import msgspec
 
-from gen_worker._vendor.torch_compiled_graphs.spans import check as check_spans
+from gen_worker._vendor.torchcg.spans import check as check_spans
 
 from . import aot_device_lock, env_seal
 from . import compile_posture
@@ -98,7 +98,7 @@ PACKAGE_ROOT = str(Path(__file__).resolve().parent.parent)
 
 #: The two LOCAL modules that define the parent/child contract: the child's own
 #: entrypoint and this module (the job/report structs). The span partition left
-#: for ``torch_compiled_graphs.spans`` (pgw#1270) and is pinned by the wheel
+#: for ``torchcg.spans`` (pgw#1270) and is pinned by the wheel
 #: rather than digested here — the stray-tree hazard pgw#840 guards against is a
 #: second ``gen_worker`` on the path, not a second TCG; the report carries
 #: ``spans_v`` for the partition's own shape.
@@ -605,7 +605,7 @@ class EntryJob(msgspec.Struct, frozen=True, kw_only=True):
     Three fields died with the round trip and are not coming back, because the
     thing they repaired is not happening: ``program`` (the staged file),
     ``symbol_values`` and ``symbol_labels`` (pgw#998 — the ShapeEnv values
-    ``torch.export``'s save/load loses). See ``torch_compiled_graphs.spans`` for the
+    ``torch.export``'s save/load loses). See ``torchcg.spans`` for the
     matching hole in the span partition.
     """
 
@@ -1961,7 +1961,7 @@ class EntryCompilePool:
                 row.entry, "; ".join(violations))
         spans["child_interp_s"] = spans.get("child_interp_s", 0.0)
         # Parent-side work for THIS entry. Prefixed, and listed in
-        # `torch_compiled_graphs.spans.SUBSPANS`, because it is not inside `compile_s`:
+        # `torchcg.spans.SUBSPANS`, because it is not inside `compile_s`:
         # staging overlaps other children, so summing it into the compile
         # total would invent seconds nobody spent compiling. Its idle FRACTION
         # is `ledger.idle_staging_s`, which is a pool number, not an entry one.

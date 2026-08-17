@@ -27,7 +27,7 @@ from typing import Any, Dict, List
 
 import msgspec
 import pytest
-from gen_worker._vendor.torch_compiled_graphs import spans
+from gen_worker._vendor.torchcg import spans
 
 torch = pytest.importorskip("torch")
 

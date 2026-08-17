@@ -921,7 +921,7 @@ def _install_posture(request: MintRequest) -> None:
     closed terminal leaves a full-speed compile tree running with nobody left
     to reap it: the exact "my machine is at a crawl and I don't know why"
     support ticket politeness exists to prevent. TCG publishes each completed
-    graph class into the canonical HashRepo CAS before the worker exports its
+    graph class into the canonical tensorfs CAS before the worker exports its
     handoff, so a restart reuses committed classes without a second worker
     resume bank.
 

@@ -22,7 +22,7 @@ from typing import (
     Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple,
 )
 
-from gen_worker._vendor.torch_compiled_graphs import (
+from gen_worker._vendor.torchcg import (
     GRAPH_CLASS_BLOCK,
     CallIngress,
     CallInput,
@@ -1650,7 +1650,7 @@ def entry_states(pipeline: Any) -> Dict[str, Dict[str, Any]]:
 def _adopt_identity(artifact: Path) -> str:
     """Best-effort exact TCG key for a typed adopt event."""
     try:
-        from gen_worker._vendor.torch_compiled_graphs.artifact import read_metadata
+        from gen_worker._vendor.torchcg.artifact import read_metadata
 
         meta = read_metadata(artifact)
     except Exception:  # noqa: BLE001 - identity is diagnostic on a refusal
@@ -1667,7 +1667,7 @@ def _import_and_arm(
     expected: "Optional[aot_identity.ExpectedIdentity]",
     declared: Sequence[str],
 ) -> Dict[str, Any]:
-    from gen_worker._vendor.torch_compiled_graphs.artifact import read_metadata
+    from gen_worker._vendor.torchcg.artifact import read_metadata
 
     transfer_staging = (
         artifact.parent.name == ".incoming"

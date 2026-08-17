@@ -14,7 +14,9 @@
 # for, so neither fence can pass on a stale or hand-patched tree.
 #
 # To re-vendor: `git archive <rev> <subdir> | tar -x` into the package
-# directory, re-apply `rewrites`, then regenerate the `files` tables.
+# directory (whose name is the TABLE KEY below, which is upstream's CURRENT
+# package name and not necessarily `subdir`'s last component), re-apply
+# `rewrites`, then regenerate the `files` tables.
 
 [packages.tensorfs]
 repo = "https://github.com/cozy-creator/tensorfs"
@@ -31,13 +33,19 @@ subdir = "python/src/tensorfs"
 # the package rename, the new `daemon` module, and that fix. Nothing else.
 rewrites = []
 
-[packages.torch_compiled_graphs]
+[packages.torchcg]
 repo = "https://github.com/cozy-creator/torchcg"
 rev = "ad5f4cb9f89bbe91d2a30ca218f70d5326630368"
 subdir = "src/torch_compiled_graphs"
 # The contents of the last published `torch-compiled-graphs` 0.6.0, i.e. what
 # `uv.lock` already resolved — vendoring changes the source, not the code.
 # Upstream `master` is likewise a genesis restart (package renamed `torchcg`).
+# pgw#1297/#1299: the LOCAL directory is `torchcg` — upstream's current name,
+# so #1295's deletion of `_vendor/` changes only the import PREFIX. `subdir` is
+# still the old path because that is where the code lived AT `ad5f4cb9`; the
+# snapshot is byte-identical to it and the file digests below are unchanged by
+# the directory rename (this package self-imports relatively, so no file
+# mentions its own package name).
 rewrites = [
   "`from hashrepo import ...` -> `from ..tensorfs import ...` in cli.py, engine.py, storage.py (3 lines; upstream's own dependency, vendored beside it)",
 ]
@@ -53,7 +61,7 @@ rewrites = [
 "refs.py" = "f3a144543f423a6b01043294b21104ababaafdbfb31798560de678b69f27ac2f"
 "transfer.py" = "5a365ec55d3cedefa088171eb4c9554edf0c951a3b0a1cad390dba486924a143"
 
-[packages.torch_compiled_graphs.files]
+[packages.torchcg.files]
 "__init__.py" = "401efd9450c0181f32c64ccee1d21999d78e77dc2be5ef404c27e539e350d4a9"
 "__main__.py" = "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d"
 "_run_impl_split.py" = "c14db7289ae566ca2cfd636efce1b5b6e0d2f8f6069d993d5acc40bc0ef333b3"
