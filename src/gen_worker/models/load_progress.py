@@ -53,8 +53,12 @@ COUNTER_NAME = "load:staged_bytes"
 #: A load phase STARTED (``duration_ms`` 0 — nothing is measured yet). This
 #: is the row that names the component a hung load is hung on.
 EVENT_PHASE = "load_phase"
-#: A load phase FINISHED, carrying its measured span (the number goes in the
-#: column, never interpolated into the detail).
+#: A load phase ENDED, carrying its measured span (the number goes in the
+#: column, never interpolated into the detail). pgw#1334: "done" here means
+#: the phase is over, NOT that it succeeded and NOT that any tree is complete
+#: — `stop()` fires it from `provision.load_slot`'s `finally`, so the row a
+#: failed load emits is this one. Nothing on this path measures completeness
+#: of anything; the detail says which way it ended.
 EVENT_PHASE_DONE = "load_phase_done"
 #: This phase is RE-READING its own set instead of staging it — the
 #: direct-reclaim crawl, confessed while the worker is still alive.
@@ -160,29 +164,52 @@ class LoadProgressReporter:
 
     # -- phase events -------------------------------------------------------
 
+    def _progress(self) -> str:
+        """This phase's byte line, in words that say what the numbers ARE.
+
+        pgw#1334: it used to read ``staged 0.55 GiB of 6.31 GiB``, and a pod's
+        blocker was filed as "the loader ran against a 9%-staged tree". Neither
+        number is a staging fraction. The left is this PROCESS's resident anon
+        memory (or its /proc read delta, whichever is smaller —
+        :meth:`_tick`); the right is ``os.walk`` over the tree that is ALREADY
+        on disk, measured after staging finished. Their ratio is a
+        memory-residency observation about a complete tree, and it cannot go
+        to 100% for a load that mmaps. Reading it as progress-toward-complete
+        is reading a number that does not exist, so the row no longer offers
+        the words for it.
+        """
+        return (f"resident {_gib(self._staged)} anon; tree on disk "
+                f"{_gib(self.total_bytes)}")
+
     def _announce_phase(self) -> None:
         try:
             sized = f", {_gib(self._phase_bytes)} tree" if self._phase_bytes else ""
             activity_mod.emit_event(
                 EVENT_PHASE,
-                f"{self.label}: {self._phase}{sized}; staged "
-                f"{_gib(self._staged)} of {_gib(self.total_bytes)}",
+                f"{self.label}: {self._phase}{sized}; {self._progress()}",
                 phase=self._phase,
             )
         except Exception:  # noqa: BLE001 - reporting must never break a load
             logger.debug("load-phase event dropped", exc_info=True)
 
-    def _close_phase(self) -> None:
+    def _close_phase(self, outcome: str = "") -> None:
+        """Close the current phase's span.
+
+        ``outcome`` is set only by :meth:`stop` — a mid-load ``set_phase``
+        transition ends a phase but decides nothing about the LOAD, so it
+        says nothing. pgw#1334.
+        """
         try:
             span_ms = int(max(0.0, time.monotonic() - self._phase_started) * 1000)
             # "ended", never "complete": `load_slot` stops the reporter from a
             # `finally`, so this row also closes a phase that RAISED. The span
             # is the honest fact either way; the outcome is the raised error's
-            # to report.
+            # to report. pgw#1334 read one of these as a completion claim,
+            # which is why the sentence now says which way it ended.
             activity_mod.emit_event(
                 EVENT_PHASE_DONE,
-                f"{self.label}: {self._phase} ended; staged "
-                f"{_gib(self._staged)} of {_gib(self.total_bytes)}",
+                f"{self.label}: {self._phase} ended{outcome}; "
+                f"{self._progress()}",
                 phase=self._phase, duration_ms=span_ms,
             )
         except Exception:  # noqa: BLE001 - reporting must never break a load
@@ -205,7 +232,16 @@ class LoadProgressReporter:
         t.start()
         return self
 
-    def stop(self, *, clean: bool) -> None:
+    def stop(self, *, clean: bool, raised: bool = False) -> None:
+        """``clean`` clears the death breadcrumb; ``raised`` says the load
+        this reporter wrapped is unwinding.
+
+        pgw#1334: the two are INDEPENDENT and were conflated by absence.
+        ``load_slot`` stops from a ``finally`` with ``clean=True`` on both
+        paths — the breadcrumb has done its job either way — so ``clean`` was
+        never evidence about the outcome, and the closing row said nothing at
+        all. A pod's `load_phase_done` was then read as a completion claim.
+        """
         global _active
         self._stop.set()
         t = self._thread
@@ -217,7 +253,7 @@ class LoadProgressReporter:
         # The last phase closes on ANY stop: a raise is still a span that
         # ended, and the event names where the time went. Only a kernel kill
         # skips this — that one is the breadcrumb's job.
-        self._close_phase()
+        self._close_phase(" on a RAISE" if raised else " without error")
         try:
             c = activity_mod.scoped_counter(
                 COUNTER_NAME, "bytes", self.total_bytes)

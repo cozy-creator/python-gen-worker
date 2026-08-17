@@ -42,6 +42,8 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple, cast
 import msgspec
 import pytest
 
+from harness.slot_facts import TEST_FACTS as _TEST_FACTS
+
 from gen_worker import boot_adopt, cell_resolve, compile_cache as cc, keyset
 from gen_worker.child_contract import CompileSpec
 from gen_worker.keyset import document as doc_mod, store as keyset_store
@@ -635,7 +637,7 @@ def test_the_minted_key_set_is_the_key_set_a_fresh_pod_reads(
     slots = {"pipeline": MintSlot(
         ref=ModelRef(source="tensorhub", path="cozy/micro-diffusion",
                      release="prod"),
-        path=str(micro_tree))}
+        path=str(micro_tree), facts=_TEST_FACTS)}
     declaration = export_declaration(str(cfg.family))
     assert declaration is not None
 

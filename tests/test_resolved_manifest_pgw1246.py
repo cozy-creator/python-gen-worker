@@ -106,9 +106,18 @@ def test_the_wire_has_no_syntax_left_for_subtraction() -> None:
 def test_the_child_contract_carries_no_second_tree() -> None:
     """A composed manifest names a COHERENT tree, so there is no second tree
     for four child processes to be handed — and no field for them to speak
-    that the parent stopped sending."""
+    that the parent stopped sending.
+
+    Pinned as "exactly ONE location field", not as a field count: pgw#1333
+    added `facts` (what the catalog says the checkpoint IS), which is neither
+    a tree nor a narrowing of one. A count would have gone red for it and
+    said "second tree", which is the wrong sentence.
+    """
     assert "component_paths" not in MintSlot.__struct_fields__
-    assert MintSlot.__struct_fields__ == ("ref", "path")
+    located = [f for f in MintSlot.__struct_fields__
+               if f in ("path", "component_paths", "paths", "trees", "root")]
+    assert located == ["path"], MintSlot.__struct_fields__
+    assert set(MintSlot.__struct_fields__) == {"ref", "path", "facts"}
 
 
 def test_a_binding_pins_exactly_one_ref() -> None:

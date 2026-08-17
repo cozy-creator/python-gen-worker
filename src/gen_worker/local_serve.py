@@ -35,6 +35,7 @@ from . import compile_cache as cc
 from . import compile_posture, fleet_cells, handler_proof
 from . import local_cell_store, mint_supervisor
 from .child_contract import MintFrame, MintSlot
+from .serving_facts import FactsUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -390,13 +391,22 @@ def slot_map(
     a hole in it — ``MintSlot`` refuses to be constructed without both halves,
     and ``child_preflight.assert_slots_resolvable`` refuses a declared,
     non-optional slot that never arrived.
+
+    pgw#1333: a hub-less local serve consults no catalog, so it has no serving
+    facts to forward and says exactly that. A local run of a function that
+    DECLARES ``objectives=`` therefore refuses by name — which is honest: the
+    declaration is checked against evidence, and there is none here.
     """
     out: Dict[str, MintSlot] = {}
     for slot, path in paths.items():
         binding = bindings.get(slot)
         if binding is None or not str(path or ""):
             continue
-        out[slot] = MintSlot(ref=binding, path=str(path))
+        out[slot] = MintSlot(
+            ref=binding, path=str(path),
+            facts=FactsUnavailable(
+                owed_by="a hub-less local serve (no catalog resolves this "
+                        "slot's objective/distilled facts)"))
     return out
 
 

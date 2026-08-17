@@ -242,10 +242,15 @@ def _mint_slot(tree: Path, ref_path: str) -> Any:
     """
     from gen_worker.api.binding import ModelRef
     from gen_worker.child_contract import MintSlot
+    from gen_worker.serving_facts import FactsUnavailable
 
     return MintSlot(
         ref=ModelRef(source="tensorhub", path=ref_path, release="prod"),
         path=str(tree),
+        # pgw#1333: a rig resolves no catalog, and says so rather than
+        # asserting an unclassified checkpoint. The micro vehicles declare no
+        # serving contract, so nothing checks these facts.
+        facts=FactsUnavailable(owed_by="micro_mint_rig (no catalog)"),
     )
 
 

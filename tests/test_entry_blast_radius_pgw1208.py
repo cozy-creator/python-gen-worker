@@ -26,6 +26,8 @@ from typing import Any, Dict, List
 
 import pytest
 
+from harness.slot_facts import TEST_FACTS as _TEST_FACTS
+
 torch = pytest.importorskip("torch")
 
 import torch.nn as nn  # noqa: E402
@@ -138,7 +140,7 @@ def _drive_to_load(
         slots={"pipeline": child_contract.MintSlot(
             ref=ModelRef(source="tensorhub", path="harness/composed",
                          release="prod"),
-            path=str(tree))},
+            path=str(tree), facts=_TEST_FACTS)},
     )
     with pytest.raises(BaseException):
         mint_child.mint(request)

@@ -34,6 +34,8 @@ from typing import Dict, Tuple
 import msgspec
 import pytest
 
+from harness.slot_facts import TEST_FACTS as _TEST_FACTS
+
 from gen_worker import child_preflight
 from gen_worker import child_contract
 from gen_worker import mint_child, mint_process
@@ -84,7 +86,7 @@ def _request(checkpoint: Path, workdir: Path, *, bucket: int) -> mp.MintRequest:
         slots={"pipeline": child_contract.MintSlot(
             ref=ModelRef(source="tensorhub", path="rig/tiny-diffusion",
                          release="prod"),
-            path=str(checkpoint))},
+            path=str(checkpoint), facts=_TEST_FACTS)},
         device=-1, execution_lane="", configs={})
     request = mint_process.build_request(task, workdir=workdir)
     return msgspec.json.decode(msgspec.json.encode(request), type=mp.MintRequest)

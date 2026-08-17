@@ -28,6 +28,8 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
+from harness.slot_facts import TEST_FACTS as _TEST_FACTS
+
 torch = pytest.importorskip("torch")
 
 from gen_worker import aot_compile_child as child  # noqa: E402
@@ -72,7 +74,7 @@ def _job(checkpoint: Path, tmp_path: Path) -> pool.EntryJob:
         slots={"pipeline": MintSlot(
             ref=ModelRef(source="tensorhub", path="rig/tiny-diffusion",
                          release="prod"),
-            path=str(checkpoint))},
+            path=str(checkpoint), facts=_TEST_FACTS)},
         share="share-000", share_index=0, share_count=1,
         out_dir=str(tmp_path / "artifacts"), work=str(tmp_path / "work"),
         report=str(tmp_path / "report.json"))

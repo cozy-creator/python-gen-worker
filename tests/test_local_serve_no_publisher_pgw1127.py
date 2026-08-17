@@ -35,6 +35,8 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
+from harness.slot_facts import TEST_FACTS as _TEST_FACTS
+
 import tcg_artifacts
 from gen_worker import fleet_cells, local_cell_store, local_serve, mint_supervisor
 from gen_worker.cell_adopt import AdoptOutcome
@@ -158,7 +160,7 @@ def armable(monkeypatch: pytest.MonkeyPatch) -> List[Path]:
 def _ctx() -> local_serve.LocalMintContext:
     return local_serve.mint_context(
         function="generate", module="micro_diffusion.endpoint",
-        slots={"pipeline": MintSlot(ref="cozy/micro#1", path="/tmp/micro")},
+        slots={"pipeline": MintSlot(ref="cozy/micro#1", path="/tmp/micro", facts=_TEST_FACTS)},
     )
 
 

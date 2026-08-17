@@ -36,8 +36,11 @@ from typing import Any, List, Tuple
 import msgspec
 import pytest
 
+from harness.slot_facts import TEST_FACTS as _TEST_FACTS
+
 from gen_worker import child_preflight
 from gen_worker import child_contract
+from gen_worker import serving_facts
 from gen_worker import handler_proof
 from gen_worker import mint_child, mint_process, registry, warmup
 from gen_worker import mint_process as mp
@@ -89,7 +92,15 @@ def served(tmp_path: Path) -> Tuple[Path, ModelRef]:
                 request_id="r-969", attempt=1,
                 function_name="catalog-generate",
                 input_payload=msgspec.msgpack.encode(catalog.CatalogIn()),
-                models=[pb.ModelBinding(slot="pipeline", ref=PICK_REF)],
+                models=[pb.ModelBinding(
+                    slot="pipeline", ref=PICK_REF,
+                    # pgw#1333: the hub's dispatch stamp. `catalog_generate`
+                    # declares objectives=(epsilon, v_prediction) — WITHOUT
+                    # these three fields the parent's own dispatch refuses,
+                    # which is the defect this fixture now proves absent.
+                    objective=catalog.CATALOG_OBJECTIVE,
+                    distilled=False,
+                    distilled_status=catalog.CATALOG_DISTILLED_STATUS)],
                 snapshots={PICK_REF: snap},
             ))
             res = conn.wait_for(is_result_for("r-969")).job_result
@@ -113,8 +124,16 @@ def served(tmp_path: Path) -> Tuple[Path, ModelRef]:
     return trees[0], _hub_binding_for_wire_ref(PICK_REF)
 
 
+#: What the parent resolved for the catalog slot — the same triple the hub
+#: stamped on the dispatch above (pgw#1333).
+CATALOG_FACTS = serving_facts.ServingFacts(
+    objective=catalog.CATALOG_OBJECTIVE, distilled=False,
+    distilled_status=catalog.CATALOG_DISTILLED_STATUS)
+
+
 def _request(
     tree: Path, binding: Any, tmp_path: Path, *, function: str = "catalog-generate",
+    facts: serving_facts.SlotEvidence = CATALOG_FACTS,
 ) -> mp.MintRequest:
     """The child's request, built through the REAL parent chain and
     round-tripped through msgspec — the boundary IS a file.
@@ -134,7 +153,8 @@ def _request(
         spec=SimpleNamespace(name=function), instance=object(), snapshots=None,
         pendings={}, pipes={},
         modules=(CATALOG_MODULE,),
-        slots=({"pipeline": child_contract.MintSlot(ref=binding, path=str(tree))}
+        slots=({"pipeline": child_contract.MintSlot(
+                    ref=binding, path=str(tree), facts=facts)}
                if binding is not None else {}),
     )
     task = mint_process.MintTask(
@@ -338,7 +358,7 @@ def test_a_bound_slot_that_still_fails_names_the_divergence(
     request = msgspec.structs.replace(
         request, slots={"nonexistent-slot": child_contract.MintSlot(
             ref=ModelRef(source="tensorhub", path="harness/pick", release="prod"),
-            path=str(tmp_path))})
+            path=str(tmp_path), facts=CATALOG_FACTS)})
     with pytest.raises(child_preflight.PreflightRefused) as exc:
         _child_specs(request)
     assert "sent no resolved binding" in str(exc.value)
@@ -368,7 +388,7 @@ def test_a_code_default_never_stands_in_for_the_parents_pick(
     assert wire_ref(chosen.models["pipeline"]) == declared
 
     child_preflight.bind_slots(siblings, {"pipeline": child_contract.MintSlot(
-        ref=picked, path=str(tmp_path))})
+        ref=picked, path=str(tmp_path), facts=CATALOG_FACTS)})
     with __import__("tempfile").TemporaryDirectory() as tmp:
         ctx = warmup.warm_context(
             chosen, request_id="mint-child-x", local_output_dir=tmp)
@@ -415,15 +435,24 @@ def test_a_slot_with_bytes_and_no_identity_cannot_be_constructed() -> None:
     with two defaults. ``ref`` and ``path`` now have none.
     """
     with pytest.raises(TypeError):
-        child_contract.MintSlot(path="/cas/snapshots/sha256:cafe")   # type: ignore[call-arg]
+        child_contract.MintSlot(                                     # type: ignore[call-arg]
+            path="/cas/snapshots/sha256:cafe", facts=CATALOG_FACTS)
     with pytest.raises(TypeError):
         child_contract.MintSlot(ref=ModelRef(                        # type: ignore[call-arg]
-            source="tensorhub", path="harness/pick", release="prod"))
+            source="tensorhub", path="harness/pick", release="prod"),
+            facts=CATALOG_FACTS)
+    # pgw#1333: and the third half — a ref and a tree with no statement about
+    # what the checkpoint IS. The child holds the declaration and would have
+    # nothing to check it against.
+    with pytest.raises(TypeError):
+        child_contract.MintSlot(                                     # type: ignore[call-arg]
+            ref=ModelRef(source="tensorhub", path="harness/pick", release="prod"),
+            path="/cas/snapshots/sha256:cafe")
     # ...and the degenerate spelling of the same lie.
     with pytest.raises(ValueError):
         child_contract.MintSlot(
             ref=ModelRef(source="tensorhub", path="harness/pick", release="prod"),
-            path="")
+            path="", facts=CATALOG_FACTS)
 
 
 def test_the_pods_wire_no_longer_decodes(

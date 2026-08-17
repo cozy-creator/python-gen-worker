@@ -46,6 +46,8 @@ from typing import Any, Dict, Iterator, List, Tuple
 import msgspec
 import pytest
 
+from harness.slot_facts import TEST_FACTS as _TEST_FACTS
+
 from gen_worker import child_preflight
 from gen_worker import activity, aot_compile_child, boot_trace_child, boot_key
 from gen_worker import measure_child, mint_child
@@ -147,7 +149,7 @@ def _slots(tree: Path) -> Dict[str, MintSlot]:
     return {"pipeline": MintSlot(
         ref=ModelRef(source="tensorhub", path="cozy/micro-diffusion",
                      release="prod"),
-        path=str(tree))}
+        path=str(tree), facts=_TEST_FACTS)}
 
 
 def _measure_job(tree: Path) -> measure_child.MeasureJob:

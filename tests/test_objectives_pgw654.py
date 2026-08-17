@@ -16,6 +16,8 @@ from pathlib import Path
 import msgspec
 import pytest
 
+from gen_worker.serving_facts import ServingFacts
+
 
 @pytest.fixture()
 def tmp_pkg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -313,8 +315,7 @@ def test_wire_distillation_status_reaches_the_slot_backstop() -> None:
     slots = {
         "pipeline": dispatch.SlotOrder(
             ref="acme/plain-xl",
-            distilled=False,
-            distilled_status="unclassified",
+            facts=ServingFacts(distilled=False, distilled_status="unclassified"),
         )
     }
 

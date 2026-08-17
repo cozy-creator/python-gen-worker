@@ -50,6 +50,10 @@ from typing import Any, Dict, List, Tuple, cast
 import msgspec
 import pytest
 
+from gen_worker.serving_facts import FactsUnavailable as _FU
+
+_NO_FACTS = _FU(owed_by="a test that resolves no catalog")
+
 import gen_worker
 import gen_worker.executor as ex_mod
 from gen_worker import RequestContext, Resources, Slot, endpoint, worker_function
@@ -379,7 +383,7 @@ def _boot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 
     spec = ex.specs["generate"]
     eff = ex._dispatched_spec(
-        spec, {"pipeline": dispatch_mod.SlotOrder(ref=ref)})
+        spec, {"pipeline": dispatch_mod.SlotOrder(ref=ref, facts=_NO_FACTS)})
     snaps = {normalize_model_ref(ref): pb.Snapshot(
         digest="d1" * 16,
         files=[pb.SnapshotFile(

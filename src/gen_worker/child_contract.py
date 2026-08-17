@@ -30,6 +30,7 @@ import msgspec
 
 from . import graph_facts
 from .api.binding import ModelRef, wire_ref
+from .serving_facts import SlotEvidence
 
 #: Every child progress frame is one stdout line with this prefix. Anything
 #: else the child (or a library it imports) prints is diagnostic tail, never
@@ -90,6 +91,18 @@ class MintSlot(msgspec.Struct, frozen=True, kw_only=True):
       the child never touches the network: a mint is compute, and a mint
       process that could download is one that can stall on a lemon host.
 
+    * ``facts`` — WHAT the catalog says the checkpoint IS (pgw#1333). The
+      child re-runs discovery, so it holds the @worker_function
+      ``objectives=``/``distilled=`` DECLARATION and nothing to check it
+      against; before this field the check ran against a hardcoded ``None``
+      slot map, which made every governed slot resolve with objective ``""``
+      and refused EVERY mint of EVERY function that declares a serving
+      contract — on any catalog data, because no catalog data was ever
+      consulted. Like ``ref`` it carries no default: a slot that cannot say
+      whether the facts were answered or never asked cannot be constructed,
+      and :class:`~gen_worker.serving_facts.FactsUnavailable` makes "never
+      asked" a sentence naming its owner rather than an empty string.
+
     th#1941: nothing rides beside them. The hub composes the manifest, so
     ``path`` names a COHERENT tree by construction — there is no second tree
     for the child to be handed and no narrowing for it to detect.
@@ -97,6 +110,7 @@ class MintSlot(msgspec.Struct, frozen=True, kw_only=True):
 
     ref: ModelRef
     path: str
+    facts: SlotEvidence
 
     def __post_init__(self) -> None:
         if not self.path:

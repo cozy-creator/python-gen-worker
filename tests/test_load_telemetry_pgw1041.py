@@ -218,6 +218,41 @@ def test_a_refused_phase_is_closed_as_ended_not_complete(tmp_path, monkeypatch):
     assert all("complete" not in ev.detail for ev in done), [
         ev.detail for ev in done]
     assert done[-1].phase.startswith("hydrate:")
+    # pgw#1334: "ended" was not enough. A pod's `load_phase_done ... staged
+    # 0.55 GiB of 6.31 GiB` was read as "the load finished with 9% of the tree
+    # on disk", and the blocker was filed as an incomplete-stage hazard. The
+    # row must SAY it is the raising path.
+    assert "on a RAISE" in done[-1].detail, done[-1].detail
+    # ...and a mid-load phase transition decides nothing about the LOAD, so
+    # it claims nothing either way.
+    assert all(
+        "on a RAISE" not in ev.detail and "without error" not in ev.detail
+        for ev in done[:-1]), [ev.detail for ev in done[:-1]]
+    assert all("staged" not in ev.detail for ev in done), [
+        ev.detail for ev in done]
+
+
+def test_the_byte_line_says_what_its_numbers_are(tmp_path, monkeypatch):
+    """pgw#1334, the other half. Neither number in the byte line is a staging
+    fraction: the left is this process's anon RSS and the right is `os.walk`
+    over a tree that is ALREADY on disk. Their ratio is a memory-residency
+    observation about a COMPLETE tree, so the row must not offer the word
+    "staged" for someone to read a progress fraction out of."""
+    monkeypatch.setattr(postmortem, "LOAD_PROGRESS_PATH", tmp_path / "m.json")
+    with _PhaseEvents() as events:
+        rep = load_progress.LoadProgressReporter(
+            "pipeline:test/tiny@latest", 6 * 1024 ** 3,
+            marker_path=tmp_path / "m.json", interval_s=0.5).start()
+        rep.stop(clean=True)
+    rows = (events.of_kind(load_progress.EVENT_PHASE)
+            + events.of_kind(load_progress.EVENT_PHASE_DONE))
+    assert rows
+    for ev in rows:
+        assert "staged" not in ev.detail, ev.detail
+        assert "resident" in ev.detail and "tree on disk" in ev.detail, ev.detail
+    done = events.of_kind(load_progress.EVENT_PHASE_DONE)
+    assert all("without error" in ev.detail for ev in done), [
+        ev.detail for ev in done]
 
 
 def test_component_admission_refuses_structural(tmp_path, monkeypatch):

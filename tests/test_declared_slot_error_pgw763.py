@@ -27,7 +27,7 @@ from gen_worker.request_context import RequestContext
 
 
 class _FakeSpec:
-    """The two fields ``resolved_slots_kwargs`` reads for this path.
+    """The fields ``resolved_slots_kwargs`` reads for this path.
 
     Neither slot has a ``default_checkpoint`` and the warm shape supplies no
     hub binding, so both fail resolution at ``resolve_slot``'s ``ref is None``
@@ -42,8 +42,13 @@ class _FakeSpec:
         self.models: dict = {}
         self.defaults_type = None
         self.slot_family: dict = {}
+        # pgw#1333: what the catalog said about each slot. Empty here — no
+        # dispatch and no desired instance bound this spec, which is exactly
+        # the shape under test.
+        self.slot_facts: dict = {}
         self.objectives = None
         self.distilled = None
+        self.name = "fake"
 
 
 def _kwargs() -> dict:

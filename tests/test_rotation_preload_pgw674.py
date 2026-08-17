@@ -34,6 +34,10 @@ import hashlib
 import msgspec
 import pytest
 
+from gen_worker.serving_facts import FactsUnavailable as _FU
+
+_NO_FACTS = _FU(owed_by="a test that resolves no catalog")
+
 from gen_worker.models.refs import WireRef
 from gen_worker import Hub, RequestContext, Slot, endpoint, worker_function
 from gen_worker.executor import Executor, _Job
@@ -186,7 +190,7 @@ def _orders(run):
     from gen_worker import dispatch
 
     return {
-        b.slot: dispatch.SlotOrder(ref=b.ref.strip())
+        b.slot: dispatch.SlotOrder(ref=b.ref.strip(), facts=_NO_FACTS)
         for b in run.models if b.slot
     }
 

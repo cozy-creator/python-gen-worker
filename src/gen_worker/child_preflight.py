@@ -25,6 +25,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 from .child_contract import MintSlot
+from .serving_facts import FactsUnavailable
 
 
 class PreflightRefused(RuntimeError):
@@ -93,11 +94,18 @@ def bind_slots(specs: Sequence[Any], resolved: Mapping[str, MintSlot]) -> None:
     live property over ``spec.models``, so binding the chosen function alone
     would move its key out from under its siblings and silently narrow the
     class-scoped warm plan (pgw#654) to one lane.
+
+    pgw#1333: the SERVING FACTS install in the same statement as the ref. The
+    child holds the ``@worker_function(objectives=...)`` DECLARATION from its
+    own discovery and had nothing to check it against — every governed slot
+    resolved with objective ``""`` and every such mint refused, on any catalog
+    data. A binding without its facts is half a resolution.
     """
     for spec in specs:
         for slot, res in resolved.items():
             if slot in spec.slots or slot in spec.models:
                 spec.models[slot] = res.ref
+                spec.slot_facts[slot] = res.facts
 
 
 def assert_slots_resolvable(
@@ -147,7 +155,19 @@ def assert_slots_resolvable(
         errors = warmup_mod.resolved_slots_kwargs(spec, None)["slot_errors"]
         for name, why in sorted(errors.items()):
             resolved = slots.get(name)
-            if resolved is not None:
+            if resolved is None:
+                continue
+            if isinstance(resolved.facts, FactsUnavailable):
+                # NOT a divergence between the two processes: the parent sent
+                # a ref with no serving facts beside it, so there is nothing
+                # here to check the declaration against. Named separately
+                # because the generic sentence reads as "this checkpoint is
+                # bad" and cost a paid pod's blocker its correct attribution.
+                problems.append(
+                    f"slot {name!r} of {spec.name!r}: the parent's binding "
+                    f"{resolved.ref.path!r} crossed WITHOUT its serving facts "
+                    f"— {why}")
+            else:
                 problems.append(
                     f"slot {name!r} of {spec.name!r}: the parent's binding "
                     f"{resolved.ref.path!r} "

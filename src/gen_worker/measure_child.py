@@ -69,6 +69,7 @@ import msgspec
 
 from . import activity
 from .child_contract import CompileSpec, MintSlot
+from .serving_facts import FactsUnavailable
 from .hostfacts import cuda_ready
 from .child_preflight import (
     PreflightRefused,
@@ -348,6 +349,13 @@ def _parse_slot_flag(raw: str) -> Tuple[str, str, str]:
     return name, value.strip(), tail.strip()
 
 
+#: pgw#1333: a measure run names a tree on this machine; no catalog is
+#: consulted and none is available offline. Saying so by name is what keeps a
+#: declared serving contract from being checked against a fabricated blank.
+_OPERATOR_FACTS = FactsUnavailable(
+    owed_by="a --slot operator argument (a measure run consults no catalog)")
+
+
 def _slot_from_value(name: str, value: str, ref_text: str) -> MintSlot:
     """One resolved slot from ``VALUE`` — a local tree, or a ref already here.
 
@@ -367,7 +375,8 @@ def _slot_from_value(name: str, value: str, ref_text: str) -> MintSlot:
     if Path(value).is_dir():
         return MintSlot(
             ref=ModelRef(source="tensorhub", path=ref_text or f"local/{name}"),
-            path=str(Path(value)))
+            path=str(Path(value)),
+            facts=_OPERATOR_FACTS)
     ref = ModelRef(source="tensorhub", path=value)
     try:
         path = resolve_local_path(
@@ -380,7 +389,7 @@ def _slot_from_value(name: str, value: str, ref_text: str) -> MintSlot:
             f"({type(exc).__name__}: {exc}). A measure run never downloads — "
             f"it is compute, exactly as a mint is — so name a tree this pod "
             f"already fetched: --slot {name}=/path/to/tree") from exc
-    return MintSlot(ref=ref, path=str(path))
+    return MintSlot(ref=ref, path=str(path), facts=_OPERATOR_FACTS)
 
 
 def _target_owner(spec: Any, targets: Sequence[str]) -> str:

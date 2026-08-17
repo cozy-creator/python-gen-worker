@@ -25,6 +25,8 @@ from typing import Any
 import msgspec
 import pytest
 
+from gen_worker.serving_facts import ServingFacts
+
 from gen_worker import RequestContext, Slot, endpoint, worker_function  # noqa: E402
 
 
@@ -95,10 +97,11 @@ def test_an_ungoverned_slot_is_never_asked_for_evidence() -> None:
     spec = extract_specs(Gen)[0]
     slots = {
         "pipeline": dispatch.SlotOrder(
-            ref="acme/plain-xl", distilled=False,
-            distilled_status="classified"),
+            ref="acme/plain-xl", facts=ServingFacts(
+                distilled=False, distilled_status="classified")),
         "interpolator": dispatch.SlotOrder(
-            ref="acme/rife", distilled=False, distilled_status="unclassified"),
+            ref="acme/rife", facts=ServingFacts(
+                distilled=False, distilled_status="unclassified")),
     }
 
     result = resolved_slots_kwargs(spec, slots)
