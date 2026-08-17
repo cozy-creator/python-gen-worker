@@ -484,3 +484,59 @@ def test_the_render_is_pasteable_and_states_its_own_totals() -> None:
     assert "critical_path_ms=" in text
     assert "span_sum_ms=" in text, (
         "the sum is shown BESIDE the union, never instead of it")
+
+
+def test_the_report_can_never_cost_more_than_the_boot_it_reports_on() -> None:
+    """A pathological boot must not become a two-thousand-message burst on the
+    worker->hub stream at the exact moment the pod is trying to start serving.
+
+    `boot_phases` buffers up to 2048 rows, so this bound is a real one, not a
+    stylistic cap. The ROLL-UP survives truncation — it carries the packed
+    table and is what the question is actually asked of — and the drop is
+    stated rather than left for a reader to infer from a short series.
+
+    RED PROOF: emit every span unconditionally and the row count blows past the
+    bound.
+    """
+    events = _Events()
+    events.install()
+    spans = [
+        StageSpan(stage=Stage.SNAPSHOT_PULL, t0_ms=i, t1_ms=i + 1,
+                  attrs={"component": f"c{i}"})
+        for i in range(boot_stages.MAX_STAGE_ROWS + 40)
+    ]
+    boot_stages.emit(_table(*spans, wall_ms=9_000))
+
+    rows = events.of_kind(boot_stages.KIND)
+    stage_rows = [
+        r for r in rows if r.phase.startswith(boot_stages.PHASE_STAGE_PREFIX)]
+    assert len(stage_rows) == boot_stages.MAX_STAGE_ROWS
+
+    rollup = [r for r in rows if r.phase == boot_stages.PHASE_READY]
+    assert len(rollup) == 1, "the roll-up is never the row that gets dropped"
+    assert "rows_truncated=40" in rollup[0].detail, (
+        "a truncated series must SAY it was truncated — otherwise a stage with "
+        "fewer rows than spans reads as a stage that ran fewer times")
+
+
+def test_truncation_keeps_the_spans_worth_reading() -> None:
+    """Longest first. Dropping an arbitrary tail would be as likely to discard
+    an 805 s derive as a 2 ms fold, and the whole point of the report is that
+    the expensive stage is the one you can see."""
+    events = _Events()
+    events.install()
+    spans = [
+        StageSpan(stage=Stage.ARM, t0_ms=i, t1_ms=i + 1)
+        for i in range(boot_stages.MAX_STAGE_ROWS + 10)
+    ]
+    spans.append(StageSpan(
+        stage=Stage.KEYSET, t0_ms=0, t1_ms=805_000, label="the whole finding"))
+    boot_stages.emit(_table(*spans, wall_ms=830_000))
+
+    kept = [
+        r for r in events.of_kind(boot_stages.KIND)
+        if r.phase == boot_stages.PHASE_STAGE_PREFIX + Stage.KEYSET.value]
+    assert kept, (
+        "the 805 s stage was dropped in favour of sixty-odd 1 ms ones — a "
+        "truncation rule that can discard the finding is worse than no rows")
+    assert kept[0].duration_ms == 805_000

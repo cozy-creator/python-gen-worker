@@ -113,6 +113,22 @@ PHASE_STAGE_PREFIX: Final[str] = "stage:"
 #: carry the full fidelity either way.
 MAX_PACKED_RUNS: Final[int] = 32
 
+#: How many per-stage rows one boot may put on the wire.
+#:
+#: NOT a stylistic cap. `boot_phases` buffers up to 2048 rows, and a
+#: pathological boot (a checkpoint with hundreds of components, a pod that
+#: reconnected repeatedly) would turn `emit` into a two-thousand-message burst
+#: on the worker->hub stream at exactly the moment the pod is trying to start
+#: serving. The report must never be able to cost more than the thing it
+#: reports on.
+#:
+#: The ROLL-UP is never dropped — it is emitted after the children and carries
+#: the packed table, so a truncated series still answers the question the whole
+#: event exists for. What is lost is per-span detail, and `rows_truncated=` says
+#: so rather than leaving a reader to wonder why a stage has fewer rows than
+#: spans.
+MAX_STAGE_ROWS: Final[int] = 64
+
 
 class Stage(StrEnum):
     """The closed cold-boot stage vocabulary.
@@ -698,13 +714,22 @@ def emit(table: Optional[BootStageTable] = None, *, family: str = "") -> bool:
 
         if table is None:
             table = collect()
-        for span in table.spans:
+        # Longest spans first, so a truncated series keeps the rows an operator
+        # would actually have read. Dropping the tail of an arbitrary order
+        # would be as likely to discard the 805 s derive as a 2 ms fold.
+        ordered = sorted(
+            table.spans, key=lambda s: s.duration_ms, reverse=True)
+        dropped = max(0, len(ordered) - MAX_STAGE_ROWS)
+        for span in ordered[:MAX_STAGE_ROWS]:
             activity_mod.emit_event(
                 KIND, stage_detail(span),
                 phase=PHASE_STAGE_PREFIX + span.stage.value,
                 duration_ms=span.duration_ms, family=family)
+        detail = rollup_detail(table)
+        if dropped:
+            detail = f"{detail} rows_truncated={dropped}"
         activity_mod.emit_event(
-            KIND, rollup_detail(table), phase=PHASE_READY,
+            KIND, detail, phase=PHASE_READY,
             duration_ms=table.wall_ms, family=family)
         logger.info("[boot] stages:\n%s", render(table))
         return True
