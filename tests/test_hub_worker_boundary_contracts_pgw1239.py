@@ -26,7 +26,10 @@ _SOURCE_PATHS = {
     "topology": _ROOT / "src" / "gen_worker" / "topology.py",
     "procsplit": _ROOT / "src" / "gen_worker" / "procsplit" / "__init__.py",
     "discovery": _ROOT / "src" / "gen_worker" / "discovery" / "discover.py",
-    "compile_cache": _ROOT / "src" / "gen_worker" / "compile_cache.py",
+    # pgw#1331: `runtime_key()` moved to `compile_facts`, the READ half of the
+    # compile cache — `compile_cache` re-exports it. The raw launch-value read
+    # is checked where it lives, not where it is re-exported from.
+    "compile_facts": _ROOT / "src" / "gen_worker" / "compile_facts.py",
     "model_store": _ROOT / "src" / "gen_worker" / "models" / "store.py",
     "provision": _ROOT / "src" / "gen_worker" / "models" / "provision.py",
 }
@@ -155,8 +158,8 @@ def _assert_contracts(document: dict[str, Any], sources: dict[str, str]) -> None
     for env_name, field_name in active.items():
         assert loader_map.get(env_name) == field_name, env_name
         assert field_name in settings_fields, field_name
-    assert "WORKER_IMAGE_DIGEST" in _raw_environ_gets(trees["compile_cache"]), (
-        "compile_cache must consume the raw WORKER_IMAGE_DIGEST launch value"
+    assert "WORKER_IMAGE_DIGEST" in _raw_environ_gets(trees["compile_facts"]), (
+        "compile_facts must consume the raw WORKER_IMAGE_DIGEST launch value"
     )
 
     external_secret_fields = {
@@ -341,7 +344,7 @@ def test_each_contract_class_has_semantic_red_pgw1239(tmp_path: Path, contract_c
             'BUILD_INPUT_FAILURE_MARKER = "BROKEN_BUILD_INPUT_FAILURE"',
         ),
         (
-            "compile_cache",
+            "compile_facts",
             'os.environ.get("WORKER_IMAGE_DIGEST", "")',
             'os.environ.get("BROKEN_WORKER_IMAGE_DIGEST", "")',
         ),

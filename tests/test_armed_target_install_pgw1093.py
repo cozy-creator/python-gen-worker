@@ -52,6 +52,8 @@ from gen_worker import (
     worker_function,
 )
 from gen_worker import compile_cache as cc
+# pgw#1331: the marker READERS live beside the marker's definition.
+from gen_worker import compile_facts
 from gen_worker.executor import Executor
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import extract_specs
@@ -337,7 +339,7 @@ def test_a_boot_warmup_degrade_is_named_not_reported_as_uncompiled(
         )
         pipe = next(iter(rec.compile_targets.values())).pipeline
         assert cc.is_compile_armed(pipe) is False, "the guard degraded it"
-        assert "fa3 kernel refuses" in cc.degrade_reason(pipe)
+        assert "fa3 kernel refuses" in compile_facts.degrade_reason(pipe)
 
         assert rec.eager_posture == cell_adopt.EagerPhase.COMPILED_DEGRADED.value, (
             "0.98.0 leaves this EMPTY, so `_eager_posture` falls through to "

@@ -20,8 +20,9 @@ wire role this one refines — and it is declared ONCE, before anything imports.
 THE MODULE SETS, AND WHY THEY LIVE HERE
 ---------------------------------------
 :data:`SERVE_ROLE_MODULES`, :data:`MINT_MACHINERY`, :data:`MODEL_FREE_MODULES`,
-:data:`FORBIDDEN_LIBRARIES` and :data:`OPTIONAL_SERVE_IMPORTS` are read by THREE
-consumers: the runtime blocker (:mod:`gen_worker.serve.guard`), the CI fence
+:data:`MODEL_BEARING_SERVE_MODULES`, :data:`FORBIDDEN_LIBRARIES` and
+:data:`OPTIONAL_SERVE_IMPORTS` are read by THREE consumers: the runtime blocker
+(:mod:`gen_worker.serve.guard`), the CI fence
 (``scripts/lint_serve_role_closure.py``) and the tests. pgw#1176's measured
 lesson is that a fence naming symbols in its own string literals rots silently,
 and pgw#824's is that two lists of the same literals drift. So the role's own
@@ -29,9 +30,11 @@ module declares them and everything else — including the fence, which parses
 this file — reads them from here. There is one list.
 
 Two claims, two scopes, because they are not the same claim (pgw#1331). Every
-serve-role module is asserted MINT-FREE. The family surface named in
-``MODEL_FREE_MODULES`` is additionally asserted to reach no MODEL LIBRARY —
-that subset, and not the whole role, for the reason recorded on the tuple.
+serve-role module is asserted MINT-FREE. Each is ALSO either asserted to reach
+no MODEL LIBRARY (``MODEL_FREE_MODULES``, 33 roots) or named as still reaching
+one (``MODEL_BEARING_SERVE_MODULES``, 9) — and the second list is checked to be
+TRUE, so a module that gets cut free must be moved rather than left sitting in
+an exception list nobody re-reads. The role is the union, by splice.
 
 ``SERVE_ROLE_MODULES`` is a CLAIM, not a description: every name in it is a
 module the adopt-only path executes, asserted to be unable to reach anything in
@@ -72,22 +75,47 @@ class ServeRole(StrEnum):
     ADOPT_ONLY = "adopt_only"
 
 
-#: The subset of :data:`SERVE_ROLE_MODULES` that must reach NO model library —
-#: the typed family surface a request is actually served through (pgw#1331).
+#: Every serve-role module whose whole static closure reaches NO model library
+#: (pgw#1331). 33 of the role's 42 roots; the other nine are named, with their
+#: two causes, in :data:`MODEL_BEARING_SERVE_MODULES` directly below.
 #:
-#: **Why this is a subset and not the whole role, stated rather than hidden.**
-#: Every ``gen_worker`` import executes ``gen_worker/__init__.py``, and that
-#: package reaches ``models.loading`` / ``models.memory`` / ``view`` — the
-#: EAGER-CAPABLE worker's own guts, which import diffusers inside functions and
-#: legitimately need to, because an eager-capable pod serves eager on a miss
-#: (§4.28). Those imports never EXECUTE on an adopt-only pod, which is what
-#: :mod:`gen_worker.serve.guard` and pgw#1331's subprocess proof assert at run
-#: time. What a static walk can prove today is the property for the surface
-#: pgw#1331 built, and claiming more than that would be a fence describing a
-#: tree nobody has cut. **Owed, and named here so it is not rediscovered:**
-#: making the whole role statically model-free means making
-#: ``gen_worker/__init__`` lazy the way this package's own ``__init__`` now is.
+#: This used to be 14 — the typed family surface alone — because two PACKAGE
+#: ROOTS dragged the eager-capable worker's guts into every closure that named
+#: them. ``gen_worker/__init__`` eagerly re-exported ``view`` and
+#: ``models.provision``; ``gen_worker/models/__init__`` eagerly re-exported
+#: ``residency`` and through it ``loading``. Both are PEP 562 lazy now, so
+#: importing a package costs nothing and asking for a name costs exactly the
+#: submodule that defines it. ``serving_mode`` separately stopped importing
+#: ``compile_cache`` — 3,100 lines of arming brain — to read two facts, which
+#: now live in :mod:`gen_worker.compile_facts`.
 MODEL_FREE_MODULES: Tuple[str, ...] = (
+    # The role itself.
+    "gen_worker.serve",
+    "gen_worker.serve.guard",
+    "gen_worker.serve.mint_seam",
+    "gen_worker.serve.refusal",
+    "gen_worker.serve.role",
+    "gen_worker.serve.selection",
+    # §4.27 steps 1-3, the parts that state and materialize a key set.
+    "gen_worker.local_cell_store",
+    "gen_worker.keyset.document",
+    "gen_worker.keyset.identifiers",
+    # The arm's constants (pgw#1329) and the adopt outcome vocabulary.
+    "gen_worker.aot_constants",
+    "gen_worker.cell_adopt",
+    # The compile facts a serving process READS — the arm marker and the
+    # toolchain probe — with none of the machinery that writes them.
+    "gen_worker.compile_facts",
+    # The neutral dispatch order the wire head projects into, and the wire
+    # facts a refusal is reported as.
+    "gen_worker.activity",
+    "gen_worker.dispatch",
+    "gen_worker.process_role",
+    "gen_worker.serve_posture",
+    # pgw#1331: the typed family surface a request is actually SERVED through —
+    # the bindings, the backings behind them, the bare-math schedulers, and the
+    # catalog's serving halves. Roots, not incidental members: the claim this
+    # issue makes is that a Flux request runs end to end from here.
     "gen_worker.model",
     "gen_worker.model.backing",
     "gen_worker.model.errors",
@@ -108,50 +136,62 @@ MODEL_FREE_MODULES: Tuple[str, ...] = (
 )
 
 
+#: The serve-role modules that still reach a model library, and this is a
+#: LEDGER, not an allowlist: ``lint_serve_role_closure.py`` asserts every row
+#: really does reach one TODAY, so a row that gets fixed goes red until it is
+#: deleted. The list can only shrink. An owed cut written as prose rots
+#: (pgw#1176); written here it is checked on every PR.
+#:
+#: **Nine rows, TWO causes, and neither is a design question — both are moves
+#: too big to smuggle into the lane that measured them.**
+#:
+#: 1. **``compile_cache``, for seven of the nine.** It is the eager-capable
+#:    arming brain: it imports ``models.loading`` / ``models.memory`` /
+#:    ``models.w8a8_lora``, which construct diffusers and transformers objects
+#:    inside their functions and are entitled to, because an eager-capable pod
+#:    serves eager on a miss (§4.28). It is ALSO where the compile-cache
+#:    IDENTITY functions live — ``toolchain_digest``, ``content_keys``,
+#:    ``static_code_closure``, ``parse_cell_ref`` — and the key set folds a
+#:    cell key from those, so ``keyset.fold`` and ``keyset.closure`` import the
+#:    arming brain to do arithmetic and everything rooted at them inherits it
+#:    (``keyset``, ``keyset.boot``, ``keyset.store``, ``boot_adopt``;
+#:    ``cell_resolve`` reaches it through ``aot_delivery``). **The cut:** the
+#:    identity half of ``compile_cache`` moves out, the way its READ half
+#:    already did — :mod:`gen_worker.compile_facts` holds ``runtime_key`` and
+#:    the marker readers and imports nothing above ``hostfacts``.
+#: 2. **``aot_serve``'s three model-layer edges, for it and ``serving_mode``.**
+#:    ``models.memory`` (``is_cuda_oom``, a pure exception predicate that needs
+#:    no model library), ``compile_cache`` (four names, per cause 1) and
+#:    ``models.lora_lifted`` — which is the only one of the three that is a
+#:    real question rather than a move, because LoRA lifting genuinely belongs
+#:    to the eager model layer and the adopt-only arm's use of it has to be
+#:    read before it is relocated.
+MODEL_BEARING_SERVE_MODULES: Tuple[str, ...] = (
+    "gen_worker.boot_adopt",
+    "gen_worker.cell_resolve",
+    "gen_worker.keyset",
+    "gen_worker.keyset.boot",
+    "gen_worker.keyset.closure",
+    "gen_worker.keyset.fold",
+    "gen_worker.keyset.store",
+    "gen_worker.aot_serve",
+    "gen_worker.serving_mode",
+)
+
+
 #: Every module the ADOPT-ONLY serve path executes. The fence walks the
 #: transitive ``gen_worker`` import closure of these — function-local imports
 #: included, because a lazy ``from . import aot_mint`` inside a function is
 #: exactly the shape a re-coupling would take — and refuses any reach into
 #: :data:`MINT_MACHINERY`.
+#:
+#: Spliced from the two tuples above rather than retyped, so the model-free
+#: claim and the role are TOTAL by construction: every serve-role module is
+#: either asserted model-free or named as bearing one, and a module cannot fall
+#: out of both by being edited into a third list (pgw#824's drift rule).
 SERVE_ROLE_MODULES: Tuple[str, ...] = (
-    # The role itself.
-    "gen_worker.serve",
-    "gen_worker.serve.guard",
-    "gen_worker.serve.mint_seam",
-    "gen_worker.serve.refusal",
-    "gen_worker.serve.role",
-    "gen_worker.serve.selection",
-    # §4.27 steps 1-3: state the key set (as DATA since pgw#1327), ask this
-    # machine, ask the hub, materialize.
-    "gen_worker.boot_adopt",
-    "gen_worker.cell_resolve",
-    "gen_worker.local_cell_store",
-    "gen_worker.keyset",
-    "gen_worker.keyset.boot",
-    "gen_worker.keyset.closure",
-    "gen_worker.keyset.document",
-    "gen_worker.keyset.fold",
-    "gen_worker.keyset.identifiers",
-    "gen_worker.keyset.store",
-    # The arm (pgw#1329) and the dispatch it produces.
-    "gen_worker.aot_constants",
-    "gen_worker.aot_serve",
-    "gen_worker.cell_adopt",
-    # The neutral dispatch order the wire head projects into, and the wire
-    # facts a refusal is reported as.
-    "gen_worker.activity",
-    "gen_worker.dispatch",
-    "gen_worker.process_role",
-    "gen_worker.serve_posture",
-    "gen_worker.serving_mode",
-    # pgw#1331: the typed family surface a request is actually SERVED through —
-    # the bindings, the backings behind them, the bare-math schedulers, and the
-    # catalog's serving halves. Roots, not incidental members: the claim this
-    # issue makes is that a Flux request runs end to end from here, so it is
-    # also asserted mint-free, and a claim that is not a root is a claim
-    # nothing walks. They are ALSO the whole of MODEL_FREE_MODULES above,
-    # spliced rather than retyped so the two sets cannot drift (pgw#824).
     *MODEL_FREE_MODULES,
+    *MODEL_BEARING_SERVE_MODULES,
 )
 
 
@@ -260,6 +300,8 @@ def _reset_for_test(role: ServeRole = ServeRole.EAGER_CAPABLE) -> None:
 __all__ = [
     "FORBIDDEN_LIBRARIES",
     "MINT_MACHINERY",
+    "MODEL_BEARING_SERVE_MODULES",
+    "MODEL_FREE_MODULES",
     "OPTIONAL_SERVE_IMPORTS",
     "SERVE_ROLE_MODULES",
     "ServeRole",

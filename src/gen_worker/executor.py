@@ -153,6 +153,10 @@ import inspect as _inspect
 import struct as _struct
 from .models.refs import parse_model_ref
 from . import compile_cache
+# pgw#1331: the marker READERS live beside the marker's definition in
+# `compile_facts`, which imports nothing above `hostfacts`. Read from there,
+# not through `compile_cache`'s re-export, so the fact and its home agree.
+from . import compile_facts
 from .models.loading import (
     is_modular_pipeline_class,
     plan_streamed_hydration,
@@ -2718,8 +2722,8 @@ class Executor:
         # arm names no artifact by construction (pgw#1010), so that gate
         # returns early for exactly the lane this defect lives on — and the
         # graph-broken pod would keep reporting an empty `fallback_reason`.
-        broke = compile_cache.graph_break_reason(target.pipeline)
-        out_of_range = compile_cache.declared_range_refusal(target.pipeline)
+        broke = compile_facts.graph_break_reason(target.pipeline)
+        out_of_range = compile_facts.declared_range_refusal(target.pipeline)
         if broke:
             self._note_eager_posture(
                 rec, cell_adopt.EagerPhase.GRAPH_BREAK.value,
@@ -3015,9 +3019,9 @@ class Executor:
         falls through to the generic `uncompiled`. This reads the reason
         straight off the pipeline's own failure signal instead.
         """
-        broke = compile_cache.graph_break_reason(pipeline)
-        out_of_range = compile_cache.declared_range_refusal(pipeline)
-        reason = compile_cache.degrade_reason(pipeline)
+        broke = compile_facts.graph_break_reason(pipeline)
+        out_of_range = compile_facts.declared_range_refusal(pipeline)
+        reason = compile_facts.degrade_reason(pipeline)
         if broke:
             self._note_eager_posture(
                 rec, cell_adopt.EagerPhase.GRAPH_BREAK.value,
@@ -3062,7 +3066,7 @@ class Executor:
             f"{type(p).__name__} armed={compile_cache.is_compile_armed(p)} "
             f"targets_resolve="
             f"{compile_cache.has_compile_target(p, spec.compile_cell())} "
-            f"degrade={compile_cache.degrade_reason(p) or '-'}"
+            f"degrade={compile_facts.degrade_reason(p) or '-'}"
             for p in orphans
         )
         logger.error(
@@ -4097,7 +4101,7 @@ class Executor:
         # identically to a never-installed one. Live, because a degrade can
         # land after boot on a target whose guard callback was never bound.
         for target in rec.compile_targets.values():
-            if compile_cache.degrade_reason(target.pipeline):
+            if compile_facts.degrade_reason(target.pipeline):
                 return cell_adopt.EagerPhase.COMPILED_DEGRADED.value
         if not any(
             s.compile is not None and s.compile.family for s in rec.specs

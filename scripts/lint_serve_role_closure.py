@@ -201,6 +201,14 @@ def _guarded(tree: ast.AST) -> Set[int]:
     return optional
 
 
+#: Parsed-import memo, keyed by (path, module). The model-bearing ledger walks
+#: one closure per declared row, and every walk re-parses the same ~150 files;
+#: memoizing takes the whole fence from 21s to under 3s, which is the
+#: difference between it fitting the required-gate budget and not. Results are
+#: read-only everywhere they are used.
+_IMPORT_MEMO: Dict[Tuple[str, str], Tuple[Set[str], Set[str], Set[str]]] = {}
+
+
 def _imports(path: Path, module: str) -> Tuple[Set[str], Set[str], Set[str]]:
     """What this file imports: (required gen_worker, guarded gen_worker, libraries).
 
@@ -209,6 +217,9 @@ def _imports(path: Path, module: str) -> Tuple[Set[str], Set[str], Set[str]]:
     this process would acquire whenever it is installed, which on an
     eager-capable pod is always.
     """
+    memo = _IMPORT_MEMO.get((str(path), module))
+    if memo is not None:
+        return memo
     package = _package_of(module)
     tree = ast.parse(path.read_text(), filename=str(path))
     optional_nodes = _guarded(tree)
@@ -240,6 +251,7 @@ def _imports(path: Path, module: str) -> Tuple[Set[str], Set[str], Set[str]]:
                 bucket.add(name)
             elif name:
                 libraries.add(name.split(".", 1)[0])
+    _IMPORT_MEMO[(str(path), module)] = (required, guarded, libraries)
     return required, guarded, libraries
 
 
@@ -387,6 +399,50 @@ def check_model_free(
     return problems
 
 
+def check_bearing_ledger(
+    bearing: Sequence[str],
+    free: Sequence[str],
+    libraries: Sequence[str],
+) -> List[str]:
+    """pgw#1331: every module EXCUSED from the model-free claim still needs it.
+
+    ``MODEL_BEARING_SERVE_MODULES`` is the residue of the model-free cut, and
+    an unchecked residue is the exact shape pgw#1176 measured rotting: prose
+    naming an owed cut, green forever, describing a tree that has moved. So the
+    list is asserted TRUE in both directions.
+
+    * A row that no longer reaches a forbidden library goes RED here. The only
+      way to make it green is to move it into ``MODEL_FREE_MODULES``, where the
+      real walk then holds it. **The list can only shrink.**
+    * A row that is also in ``MODEL_FREE_MODULES`` goes red: a module cannot
+      both be asserted model-free and be excused from the assertion.
+    """
+    problems: List[str] = []
+    overlap = sorted(set(bearing) & set(free))
+    if overlap:
+        problems.append(
+            f"pgw#1331: {overlap[0]} is in BOTH role.MODEL_FREE_MODULES and "
+            f"role.MODEL_BEARING_SERVE_MODULES. One module, one claim — the "
+            f"model-free walk would assert it while the ledger excuses it.")
+    forbidden = set(libraries)
+    for name in bearing:
+        if _module_path(name) is None:
+            problems.append(
+                f"`{name}` is declared in serve/role.py but is not a module "
+                f"under src/gen_worker. A fence naming a module that does not "
+                f"exist passes vacuously forever (pgw#1176).")
+            continue
+        seen, _, used, _ = closure((name,))
+        if not any(used.get(module, set()) & forbidden for module in seen):
+            problems.append(
+                f"pgw#1331: role.MODEL_BEARING_SERVE_MODULES names {name}, but "
+                f"its closure no longer reaches any of {sorted(forbidden)}. "
+                f"That cut has LANDED — move {name!r} into "
+                f"role.MODEL_FREE_MODULES so the real walk holds it. This "
+                f"ledger only ever shrinks; it is not an allowlist.")
+    return problems
+
+
 _SELFTEST_ROLE = '''
 SERVE_ROLE_MODULES = ("gen_worker.serve.role",)
 MINT_MACHINERY = ("gen_worker.aot_mint",)
@@ -459,11 +515,30 @@ def selftest() -> int:
             "accepted it. The hatch would then be open to any `try: import`.",
             file=sys.stderr)
         return 1
+    # …and the model-bearing LEDGER must go red in both of its directions, or
+    # the residue of the model-free cut is an allowlist that rots (pgw#1176).
+    # `serve.role` itself is model-FREE, so naming it as bearing must be
+    # refused — that is the arm which forces a landed cut to be recorded.
+    if not check_bearing_ledger(("gen_worker.serve.role",), (), libraries):
+        print(
+            "SELFTEST FAILED: a model-FREE module was accepted into "
+            "MODEL_BEARING_SERVE_MODULES. The ledger would then be an "
+            "allowlist that never shrinks, which is the prose it replaced.",
+            file=sys.stderr)
+        return 1
+    if not check_bearing_ledger((declaration,), (declaration,), libraries):
+        print(
+            "SELFTEST FAILED: a module claimed BOTH model-free and "
+            "model-bearing was accepted. One module, one claim.",
+            file=sys.stderr)
+        return 1
     print(
         f"pgw#1328/#1331 selftest: the fence goes red as designed "
         f"({len(problems)} violation(s) from a mint-reaching root, "
         f"{len(library_problems)} from a model-library root, an unlisted "
-        f"guarded edge is refused, and a computed declaration is refused)")
+        f"guarded edge is refused, a landed cut left in the bearing ledger is "
+        f"refused, a double-claimed module is refused, and a computed "
+        f"declaration is refused)")
     return 0
 
 
@@ -476,10 +551,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     roots = _declared_tuple("SERVE_ROLE_MODULES")
     banned = _declared_tuple("MINT_MACHINERY")
     model_free = _declared_tuple("MODEL_FREE_MODULES")
+    bearing = _declared_tuple("MODEL_BEARING_SERVE_MODULES")
     libraries = _declared_tuple("FORBIDDEN_LIBRARIES")
     optional = _declared_tuple("OPTIONAL_SERVE_IMPORTS")
     problems = check(roots, banned)
     problems.extend(check_model_free(model_free, libraries, optional, within=roots))
+    problems.extend(check_bearing_ledger(bearing, model_free, libraries))
     for line in problems:
         print(line, file=sys.stderr)
     if problems:
@@ -495,9 +572,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{len(banned)} mint modules absent)")
     print(
         f"pgw#1331: the model-free serve surface holds no model library "
-        f"({len(model_free)} declared root(s), {len(free)} gen_worker modules "
-        f"in the closure, {len(libraries)} libraries absent, {len(optional)} "
-        f"enumerated guarded edge(s))")
+        f"({len(model_free)} of {len(roots)} declared root(s), {len(free)} "
+        f"gen_worker modules in the closure, {len(libraries)} libraries "
+        f"absent, {len(optional)} enumerated guarded edge(s))")
+    print(
+        f"pgw#1331: the model-bearing ledger is exact ({len(bearing)} root(s) "
+        f"named as still reaching a model library, every one of them verified "
+        f"to still reach one — the list only shrinks)")
     return 0
 
 
