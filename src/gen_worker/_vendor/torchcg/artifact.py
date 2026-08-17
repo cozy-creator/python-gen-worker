@@ -71,20 +71,6 @@ _TOP_LEVEL_FIELDS = frozenset(
     )
 )
 
-#: The artifact metadata vocabulary, EXPORTED (pgw#1340). `validate_metadata`
-#: refuses any metadata whose field set is not exactly this, so the set is not
-#: a convention a consumer may extend — it is the closed answer to "what can a
-#: cell state about itself".
-#:
-#: pgw#1299 already ruled that a consumer imports TCG's vocabulary rather than
-#: spelling it, for keys. The FIELD SET needs the same treatment for a sharper
-#: reason: a consumer that assumes a field TCG does not write reads `None`, and
-#: `None` compares unequal to a real runtime fact forever. That is th#2098 —
-#: `fleet_cells.arm_axis_divergence` compared `family`, `weight_lane` and
-#: `env_seal` against a cell that structurally cannot carry them, so every
-#: self-mint refused after its compile: ~$1.00 of L4 per burst, for nothing.
-ARTIFACT_METADATA_FIELDS: frozenset[str] = _TOP_LEVEL_FIELDS
-
 _SAFETENSORS_DTYPES: dict[str, tuple[str, int]] = {
     "BOOL": ("bool", 1),
     "U8": ("uint8", 1),

@@ -147,6 +147,24 @@ def test_a_REAL_divergence_is_still_refused_by_name(
     assert got.startswith(f"{axis}: "), got
 
 
+def test_the_vocabulary_IS_what_a_real_cell_carries() -> None:
+    """pgw#1345 — the accessor is pinned to BEHAVIOUR, not to a restatement.
+
+    `artifact_meta.cell_metadata_fields()` reads a private name out of the
+    vendored torchcg (deliberately: a vendored snapshot is read, never patched
+    — pgw#1310's digest fence, which the first attempt at this violated and
+    turned master red). A private name can move under a re-vendor, so what is
+    asserted here is that the set it answers is EXACTLY the field set of a
+    metadata dict TCG itself built. If upstream renames or re-shapes it, this
+    goes red with the real cause instead of `unstateable_arm_axes()` quietly
+    answering "everything" and disabling every self-mint on the fleet.
+    """
+    from gen_worker import artifact_meta
+
+    assert artifact_meta.cell_metadata_fields() == frozenset(
+        _real_cell_metadata())
+
+
 def test_the_compared_set_is_not_empty() -> None:
     """A comparison narrowed to nothing would pass every cell and read green.
 

@@ -100,7 +100,7 @@ class EagerPhase(StrEnum):
     #: mint, nothing published, ~$1.00 of L4 per burst.
     #:
     #: A pod reporting this is reporting a CODE defect with a named owner
-    #: (an axis outside `torchcg.ARTIFACT_METADATA_FIELDS`), never a
+    #: (an axis outside `artifact_meta.cell_metadata_fields()`), never a
     #: capability, a card or a release — which is why it does not share a
     #: token with the mint-impossibility exits above.
     ARM_AXES_UNSTATEABLE = "arm_axes_unstateable"

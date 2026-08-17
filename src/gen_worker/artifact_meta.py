@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import tarfile
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, FrozenSet, Optional, Union
 
 #: The packed envelope's member name, at the tar root, for every artifact kind.
 METADATA_NAME = "metadata.json"
@@ -122,10 +122,52 @@ def try_read_metadata(artifact: Union[str, Path]) -> Optional[Dict[str, Any]]:
         return None
 
 
+def cell_metadata_fields() -> FrozenSet[str]:
+    """TCG's CLOSED artifact-metadata vocabulary — what a cell can state.
+
+    ``torchcg.artifact.validate_metadata`` refuses any metadata whose field set
+    is not exactly this, so it is not a convention a consumer may extend. That
+    makes it the answer to a question worth $1.00 a burst: **can this axis be
+    compared across the handback boundary at all?** ``fleet_cells``
+    ``unstateable_arm_axes`` asks it at obligation-open, so a seam no cell could
+    ever satisfy is refused for $0 instead of after a 25-minute paid compile
+    (th#2098 / pgw#1340).
+
+    THE PRIVATE NAME IS THE POINT, and pgw#1345 is the receipt. The first
+    attempt exported ``ARTIFACT_METADATA_FIELDS`` from the vendored snapshot —
+    which pgw#1310's digest fence refuses by design (*"a vendored snapshot is
+    fixed upstream and re-vendored, never patched here"*), and refuses in the
+    de-required ``tests`` suite, so it merged and turned master red. A vendored
+    tree is READ, never edited; when the public name is wanted it is added
+    UPSTREAM and re-vendored.
+
+    Reading ``_TOP_LEVEL_FIELDS`` is therefore the correct shape and the
+    precedent already exists — ``tests/tcg_artifacts.py`` reads
+    ``host_isa._host_requirement`` for the same reason, deliberately. It is
+    sited HERE, in the one first-party module that owns cell-metadata reads, so
+    the coupling has exactly one address to fix if upstream renames it.
+
+    Refuses loudly rather than answering an empty set: an empty vocabulary
+    would make every axis look unstateable and silently disable every self-mint
+    on the fleet.
+    """
+    from gen_worker._vendor.torchcg import artifact as tcg_artifact
+
+    fields = getattr(tcg_artifact, "_TOP_LEVEL_FIELDS", None)
+    if not fields:
+        raise ArtifactMetadataError(
+            "the vendored torchcg states no artifact-metadata vocabulary "
+            "(`_TOP_LEVEL_FIELDS`); nothing can decide which arm axes a cell "
+            "is able to state, and guessing would either refuse every mint or "
+            "admit a comparison that can never succeed")
+    return frozenset(str(name) for name in fields)
+
+
 __all__ = [
     "MAX_METADATA_BYTES",
     "METADATA_NAME",
     "ArtifactMetadataError",
+    "cell_metadata_fields",
     "read_metadata",
     "try_read_metadata",
 ]
