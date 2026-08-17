@@ -1,4 +1,4 @@
-"""pgw#767: OUTPUT_MODE_INLINE must not decide whether the result envelope's
+"""pgw#767: MEDIA_BYTES_INLINE must not decide whether the result envelope's
 blob actually exists.
 
 The client's `Prefer: bytes=inline` hint is about MEDIA outputs. It reached
@@ -43,7 +43,7 @@ def test_inline_dispatch_over_the_envelope_ceiling_still_really_uploads() -> Non
                 request_id="r-inline-big", attempt=1, function_name="large-usage",
                 input_payload=msgspec.msgpack.encode(EchoIn(text="x")),
                 org=org_id, capability_token="cap-token",
-                output_mode=pb.OUTPUT_MODE_INLINE,
+                media_bytes=pb.MEDIA_BYTES_INLINE,
             ))
             res = conn.wait_for(is_result_for("r-inline-big")).job_result
             assert res.status == pb.JOB_STATUS_OK, res.safe_message

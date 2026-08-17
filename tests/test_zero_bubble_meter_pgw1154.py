@@ -49,7 +49,7 @@ def _payload() -> bytes:
 def _run(conn, request_id: str, function_name: str):
     conn.send(run_job=pb.RunJob(
         request_id=request_id, attempt=1, function_name=function_name,
-        input_payload=_payload(), output_mode=pb.OUTPUT_MODE_INLINE,
+        input_payload=_payload(), media_bytes=pb.MEDIA_BYTES_INLINE,
         org=ORG, capability_token="cap-token"))
     return conn.wait_for(is_result_for(request_id)).job_result
 

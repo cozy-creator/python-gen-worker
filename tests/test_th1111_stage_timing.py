@@ -31,7 +31,7 @@ def _payload() -> bytes:
 
 def test_stage_map_reconciles_with_runtime_ms_on_the_real_serve_path() -> None:
     # This test used to need no file API at all. Under
-    # OUTPUT_MODE_INLINE the image AND the (~200 KiB) result envelope both took
+    # MEDIA_BYTES_INLINE the image AND the (~200 KiB) result envelope both took
     # the inline shortcut, and the envelope's shortcut was the defect — it
     # returned a ref for bytes that were never uploaded. With the envelope now
     # always really stored, the stage-timing path needs a real upload sink like
@@ -44,7 +44,7 @@ def test_stage_map_reconciles_with_runtime_ms_on_the_real_serve_path() -> None:
             conn.wait_for(is_ready)
             conn.send(run_job=pb.RunJob(
                 request_id="r-stage", attempt=1, function_name="staged-generate",
-                input_payload=_payload(), output_mode=pb.OUTPUT_MODE_INLINE,
+                input_payload=_payload(), media_bytes=pb.MEDIA_BYTES_INLINE,
                 org="00000000-0000-0000-0000-000000000001",
                 capability_token="cap-token"))
             res = conn.wait_for(is_result_for("r-stage")).job_result

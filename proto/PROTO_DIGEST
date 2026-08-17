@@ -3,4 +3,12 @@
 # BOTH repos commit this same digest, so a one-sided edit fails scripts/proto-drift-check.sh
 # offline, in the repo where it happened. Regenerate with:
 #   sha256sum internal/orchestrator/grpc/proto/worker_scheduler.proto
-c043f828f80edf84f12eca8d577d08fbea6c24e08e96920ce4c5ff6526b89bef
+2cd13a1dc6247a34538435f6720332887702d05a3a84ff4e0c1488241f289e4b
+
+# th#2082: `RunJob.output_mode` -> `media_bytes`, enum `OutputMode` ->
+# `MediaBytes` (`MEDIA_BYTES_UNSPECIFIED|URL|INLINE`). NAME ONLY — field 9 and
+# the enum numbers 0/1/2 are unchanged, so the wire is byte-identical and a hub
+# on an older build is unaffected. tensorhub lands the same hunk in lockstep;
+# the two copies still differ by this repo's th#1941 composed-manifest hunks,
+# so the two digests remain legitimately different (tensorhub's PROTO_DIGEST
+# says the same thing from its side).

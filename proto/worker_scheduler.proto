@@ -789,7 +789,7 @@ message RunJob {
   string org     = 6;    // canonical UUID of the org that owns job outputs
   string invoker_id = 7;    // surfaced read-only as ctx.invoker_id
   string capability_token = 8; // per-job worker capability token for tensorhub HTTP calls
-  OutputMode output_mode = 9;  // client's inline-vs-url preference for media outputs
+  MediaBytes media_bytes = 9;  // client's `Prefer: bytes=inline|url` media-delivery preference
   ResolvedCompute compute = 10;
   repeated ModelBinding models = 11; // slot -> ref bindings resolved by the orchestrator
   // th#1941: presigned snapshots keyed by COMPOSED MANIFEST DIGEST, not by
@@ -838,10 +838,17 @@ message RequiredCompileExecution {
   string contract_digest = 4;
 }
 
-enum OutputMode {
-  OUTPUT_MODE_UNSPECIFIED = 0;
-  OUTPUT_MODE_URL         = 1; // upload media, return refs (default behavior)
-  OUTPUT_MODE_INLINE      = 2; // small outputs inline in the result payload
+// th#2082: this is the client's `Prefer: bytes=` header and nothing else — how
+// MEDIA outputs are delivered, decided before the job runs. It is NOT the
+// function's output cardinality (`EndpointSpec.output_mode`, pgw#1320) and NOT
+// the SSE terminal payload's `delivery` key (th#2079); all three wore one
+// generic name until those issues split them. Field 9 and the enum numbers are
+// unchanged by the rename, so the wire is untouched and a hub or worker on an
+// older build still parses it.
+enum MediaBytes {
+  MEDIA_BYTES_UNSPECIFIED = 0;
+  MEDIA_BYTES_URL         = 1; // upload media, return refs (default behavior)
+  MEDIA_BYTES_INLINE      = 2; // small outputs inline in the result payload
 }
 
 // Resolved hardware for this invocation: accelerator gates the worker's GPU

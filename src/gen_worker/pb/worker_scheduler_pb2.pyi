@@ -158,11 +158,11 @@ class WorkerPhase(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     WORKER_PHASE_READY: _ClassVar[WorkerPhase]
     WORKER_PHASE_ERROR: _ClassVar[WorkerPhase]
 
-class OutputMode(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+class MediaBytes(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
-    OUTPUT_MODE_UNSPECIFIED: _ClassVar[OutputMode]
-    OUTPUT_MODE_URL: _ClassVar[OutputMode]
-    OUTPUT_MODE_INLINE: _ClassVar[OutputMode]
+    MEDIA_BYTES_UNSPECIFIED: _ClassVar[MediaBytes]
+    MEDIA_BYTES_URL: _ClassVar[MediaBytes]
+    MEDIA_BYTES_INLINE: _ClassVar[MediaBytes]
 
 class JobStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -305,9 +305,9 @@ WORKER_PHASE_LOADING_PIPELINES: WorkerPhase
 WORKER_PHASE_WARMING: WorkerPhase
 WORKER_PHASE_READY: WorkerPhase
 WORKER_PHASE_ERROR: WorkerPhase
-OUTPUT_MODE_UNSPECIFIED: OutputMode
-OUTPUT_MODE_URL: OutputMode
-OUTPUT_MODE_INLINE: OutputMode
+MEDIA_BYTES_UNSPECIFIED: MediaBytes
+MEDIA_BYTES_URL: MediaBytes
+MEDIA_BYTES_INLINE: MediaBytes
 JOB_STATUS_UNSPECIFIED: JobStatus
 JOB_STATUS_OK: JobStatus
 JOB_STATUS_INVALID: JobStatus
@@ -922,7 +922,7 @@ class CompileTargetBinding(_message.Message):
     def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., snapshot_digest: _Optional[str] = ...) -> None: ...
 
 class RunJob(_message.Message):
-    __slots__ = ("request_id", "attempt", "function_name", "input_payload", "timeout_ms", "org", "invoker_id", "capability_token", "output_mode", "compute", "models", "snapshots", "required_compile", "lane", "input_assets", "config_generation", "config_params")
+    __slots__ = ("request_id", "attempt", "function_name", "input_payload", "timeout_ms", "org", "invoker_id", "capability_token", "media_bytes", "compute", "models", "snapshots", "required_compile", "lane", "input_assets", "config_generation", "config_params")
     class SnapshotsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -938,7 +938,7 @@ class RunJob(_message.Message):
     ORG_FIELD_NUMBER: _ClassVar[int]
     INVOKER_ID_FIELD_NUMBER: _ClassVar[int]
     CAPABILITY_TOKEN_FIELD_NUMBER: _ClassVar[int]
-    OUTPUT_MODE_FIELD_NUMBER: _ClassVar[int]
+    MEDIA_BYTES_FIELD_NUMBER: _ClassVar[int]
     COMPUTE_FIELD_NUMBER: _ClassVar[int]
     MODELS_FIELD_NUMBER: _ClassVar[int]
     SNAPSHOTS_FIELD_NUMBER: _ClassVar[int]
@@ -955,7 +955,7 @@ class RunJob(_message.Message):
     org: str
     invoker_id: str
     capability_token: str
-    output_mode: OutputMode
+    media_bytes: MediaBytes
     compute: ResolvedCompute
     models: _containers.RepeatedCompositeFieldContainer[ModelBinding]
     snapshots: _containers.MessageMap[str, Snapshot]
@@ -964,7 +964,7 @@ class RunJob(_message.Message):
     input_assets: _containers.RepeatedCompositeFieldContainer[InputAsset]
     config_generation: int
     config_params: bytes
-    def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ..., function_name: _Optional[str] = ..., input_payload: _Optional[bytes] = ..., timeout_ms: _Optional[int] = ..., org: _Optional[str] = ..., invoker_id: _Optional[str] = ..., capability_token: _Optional[str] = ..., output_mode: _Optional[_Union[OutputMode, str]] = ..., compute: _Optional[_Union[ResolvedCompute, _Mapping]] = ..., models: _Optional[_Iterable[_Union[ModelBinding, _Mapping]]] = ..., snapshots: _Optional[_Mapping[str, Snapshot]] = ..., required_compile: _Optional[_Union[RequiredCompileExecution, _Mapping]] = ..., lane: _Optional[str] = ..., input_assets: _Optional[_Iterable[_Union[InputAsset, _Mapping]]] = ..., config_generation: _Optional[int] = ..., config_params: _Optional[bytes] = ...) -> None: ...
+    def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ..., function_name: _Optional[str] = ..., input_payload: _Optional[bytes] = ..., timeout_ms: _Optional[int] = ..., org: _Optional[str] = ..., invoker_id: _Optional[str] = ..., capability_token: _Optional[str] = ..., media_bytes: _Optional[_Union[MediaBytes, str]] = ..., compute: _Optional[_Union[ResolvedCompute, _Mapping]] = ..., models: _Optional[_Iterable[_Union[ModelBinding, _Mapping]]] = ..., snapshots: _Optional[_Mapping[str, Snapshot]] = ..., required_compile: _Optional[_Union[RequiredCompileExecution, _Mapping]] = ..., lane: _Optional[str] = ..., input_assets: _Optional[_Iterable[_Union[InputAsset, _Mapping]]] = ..., config_generation: _Optional[int] = ..., config_params: _Optional[bytes] = ...) -> None: ...
 
 class InputAsset(_message.Message):
     __slots__ = ("asset_id", "source_ref", "blake3", "size_bytes", "kind", "mime_type")

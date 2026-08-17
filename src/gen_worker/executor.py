@@ -8982,7 +8982,7 @@ class Executor:
             org=str(run.org or ""),
             invoker_id=str(run.invoker_id or ""),
             capability_token=str(run.capability_token or ""),
-            inline_output=run.output_mode == pb.OUTPUT_MODE_INLINE,
+            inline_output=run.media_bytes == pb.MEDIA_BYTES_INLINE,
             accelerator=str(compute.accelerator) if compute is not None else "",
             gpu_index=int(compute.gpu_index) if compute is not None else 0,
             lane_report=str(run.lane or ""),
