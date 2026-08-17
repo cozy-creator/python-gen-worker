@@ -169,7 +169,18 @@ PIN_TORCH = (
 def _pip_install(target: str, index_args: str = "") -> str:
     # `--no-input` so a prompt is a failure rather than a hang, and `-q` so the
     # log's byte growth means work rather than progress bars.
-    parts = ["pip install -q --no-input", f"-c {POD_ROOT}/constraints.txt"]
+    # `--break-system-packages`: MEASURED 2026-08-17 on
+    # pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime — its interpreter is a
+    # Debian EXTERNALLY-MANAGED one, so PEP 668 refuses the install outright and
+    # tells you to build a venv. A venv is the wrong answer here: the image's
+    # site-packages is where the fleet's own torch lives, and an isolated venv
+    # would either shadow it or re-resolve it from an index, which is RIG-ENV
+    # §3a's single most common way a rig drifts. The pod is disposable and
+    # single-purpose; breaking "the system" is the intended outcome.
+    parts = [
+        "pip install -q --no-input --break-system-packages",
+        f"-c {POD_ROOT}/constraints.txt",
+    ]
     if index_args:
         parts.append(index_args)
     # QUOTED: an extras suffix (`…whl[torch]`) is a glob pattern to bash, and an

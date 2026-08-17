@@ -472,18 +472,26 @@ class Rig:
         shipped = transport.put([boot], POD_ROOT)
         if not shipped.ok:
             raise Failed("preflight", f"could not ship rigboot.py: {shipped.out[-400:]}")
+        # rigboot prints its record AND writes it to --json, so a naive
+        # "first { to last }" parse spans two documents and silently yields
+        # nothing — which is how the first real run reported an empty driver
+        # version next to a perfectly good probe. Send its console to a file and
+        # read the record from exactly one place.
         result = transport.run(
-            f"cd {POD_ROOT} && python3 rigboot.py --cuda {FLEET_CUDA} --json {POD_ROOT}/rigboot.json; "
-            f"echo RIG_RC=$?; cat {POD_ROOT}/rigboot.json 2>/dev/null",
+            f"cd {POD_ROOT} && python3 rigboot.py --cuda {FLEET_CUDA} "
+            f"--json {POD_ROOT}/rigboot.json > {POD_ROOT}/rigboot.out 2>&1; "
+            f"echo RIG_RC=$?; cat {POD_ROOT}/rigboot.json 2>/dev/null; "
+            f"echo '--RIG-BOOTLOG--'; tail -20 {POD_ROOT}/rigboot.out",
             timeout_s=900,
         )
         rc_match = re.search(r"RIG_RC=(\d+)", result.out)
         rc = int(rc_match.group(1)) if rc_match else result.rc
+        head, _, bootlog = result.out.partition("--RIG-BOOTLOG--")
         record: dict[str, Any] = {}
-        brace = result.out.find("{")
+        brace = head.find("{")
         if brace >= 0:
             try:
-                record = json.loads(result.out[brace : result.out.rfind("}") + 1])
+                record = json.loads(head[brace : head.rfind("}") + 1])
             except json.JSONDecodeError:
                 record = {}
         row.cuda_path = str(record.get("path") or ("native" if rc == 0 else "reroll"))
@@ -493,11 +501,12 @@ class Rig:
             raise _Reroll(
                 f"host driver {row.driver_version} has no usable path to CUDA {FLEET_CUDA} "
                 "(RIG-ENV §3c: re-roll the host, do NOT downgrade torch)"
+                f"\n{bootlog[-500:]}"
             )
         if rc == 92:
             raise _Reroll("no NVIDIA driver on this host — wrong pod type")
         if rc != 0:
-            raise Failed("preflight", f"rigboot rc={rc}: {result.out[-500:]}")
+            raise Failed("preflight", f"rigboot rc={rc}: {bootlog[-800:] or result.out[-800:]}")
 
     def _census(self, transport: Transport, row: RigRow, card: Card) -> None:
         """What we ACTUALLY got. Evidence, never a gate.

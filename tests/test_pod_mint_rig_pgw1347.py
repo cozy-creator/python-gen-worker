@@ -177,8 +177,9 @@ class FakeTransport:
                 return Result(255, "ssh: connect to host 10.0.0.1 port 40022: Connection refused")
             return Result(0, "")
         if "rigboot.py" in script:
+            # Shaped like the real one: the record, then the bootlog section.
             body = json.dumps({"path": self.rigboot_path, "driver": "580.65.06"})
-            return Result(0, f"RIG_RC={self.rigboot_rc}\n{body}")
+            return Result(0, f"RIG_RC={self.rigboot_rc}\n{body}\n--RIG-BOOTLOG--\n{{not json}}\n")
         if "nvidia-smi" in script:
             return Result(0, "NVIDIA A40, 580.65.06, 8.6\n")
         if "--RIG-SIZE--" in script:
@@ -673,6 +674,25 @@ def test_the_mint_workload_asserts_the_fleet_line_before_it_compiles() -> None:
     # A compile's progress lives in the inductor cache long before the log moves.
     assert "/root/.cache/torchinductor_root" in workload.progress_paths
     assert workload.env["TORCHINDUCTOR_CACHE_DIR"] == "/root/.cache/torchinductor_root"
+
+
+def test_the_preflight_reads_the_record_and_not_the_bootlog_after_it(tmp_path: Path) -> None:
+    """The first real run reported an EMPTY driver beside a perfectly good
+    probe: rigboot prints its record AND writes it to --json, so a naive
+    first-brace-to-last-brace parse spanned two documents and yielded nothing."""
+    row = _rig(tmp_path, FakePods(), FakeTransport()).run(
+        cards_mod.pick("sm89"), Workload(name="w", command="x")
+    )
+    assert row.cuda_path == "native"
+
+
+def test_pip_breaks_the_system_because_the_pod_IS_the_system() -> None:
+    """MEASURED: the fleet base image's interpreter is Debian
+    EXTERNALLY-MANAGED, so PEP 668 refuses the install and recommends a venv —
+    which would shadow or re-resolve the fleet's own torch, RIG-ENV §3a's single
+    most common way a rig drifts."""
+    lines = install_sdist(Path("/tmp/gen_worker-9.whl"))
+    assert "--break-system-packages" in lines[1]
 
 
 def test_the_torch_pin_is_read_from_the_installed_interpreter_not_hardcoded() -> None:
