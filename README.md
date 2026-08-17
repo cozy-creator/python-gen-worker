@@ -76,9 +76,10 @@ class Generate:
 ```
 
 `Resources` declares only what the endpoint CANNOT run without (`gpu`,
-`gpu_count`, `libraries`, `strict_vram`, `vcpus`); VRAM requirements are
-MEASURED by the platform's profiling gate, not declared (`vram_gb_hint` is
-an optional first-build placement hint only). Handlers are exactly
+`gpu_count`, `libraries`, `vcpus`) plus `requires=` — the function scope of
+the one requirement vocabulary, `"sm89+, vram80g"` style, minimum and
+recommended. A minimum gates a config WRITE, never execution: the worker runs
+on whatever machine it is handed, degraded and complaining. Handlers are exactly
 `(self, ctx, payload)`; per-request state (sampler, seed, scheduler) lives
 in a `ctx.for_request` view over shared weights — never assigned onto the
 instance.

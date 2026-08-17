@@ -56,6 +56,9 @@ from .export_contract import (
 from .formula import RuntimeFormula
 from .slot import OBJECTIVES, TASKS, D, Slot
 from ..models import execution_lanes as lanespec
+from ..models.tensor_layout_contract import (
+    LayoutRequirements, parse_layout_requirements,
+)
 from ..runtimes.server import ServerHandle
 from .tree import is_introspectable
 
@@ -67,46 +70,12 @@ KINDS = ("inference", "training", "dataset", "conversion", "eval")
 RESERVED_METHODS = frozenset({"setup", "warmup", "shutdown"})
 
 
-# The dotted capability (8.9) is the author-facing unit, the way NVIDIA writes
-# it. `sm_89` is accepted because that is how kernels and error messages spell
-# it; the bare SM code is not — 89 and 8.9 are a silent factor-of-ten apart.
-_MAX_COMPUTE_CAPABILITY = 20.0
-
-
-def _normalize_compute_capability(raw: float | str) -> float:
-    if isinstance(raw, bool):
-        raise ValueError(f"compute_capability must be numeric, got {raw!r}")
-    if isinstance(raw, str):
-        s = raw.strip().lower()
-        if not s:
-            raise ValueError("compute_capability is empty")
-        if s.startswith("sm"):
-            code = s[2:].lstrip("_").strip()
-            if not code.isdigit():
-                raise ValueError(
-                    f"compute_capability {raw!r} is not an SM code (e.g. 'sm_89')")
-            value = int(code) / 10.0
-        else:
-            try:
-                value = float(s)
-            except ValueError:
-                raise ValueError(
-                    f"compute_capability must be numeric, got {raw!r}") from None
-    else:
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            raise ValueError(
-                f"compute_capability must be numeric, got {raw!r}") from None
-    if value != value or value in (float("inf"), float("-inf")):
-        raise ValueError(f"compute_capability must be finite, got {raw!r}")
-    if value <= 0:
-        raise ValueError(f"compute_capability must be positive, got {raw!r}")
-    if value > _MAX_COMPUTE_CAPABILITY:
-        raise ValueError(
-            f"compute_capability {raw!r} looks like a bare SM code — declare the "
-            "dotted capability (8.9, 12.0) or the prefixed code ('sm_89')")
-    return round(value, 1)
+# pgw#1313: `compute_capability` and `ram_gb_hint` are GONE as separate axes.
+# Each was a bespoke axis with its own parser, its own payload key and its own
+# set of hub readers; both fold into `Resources(requires=)`, which speaks the
+# one requirement vocabulary (`models.tensor_layout_contract`). The fold also
+# ends the `ram_gb_hint` misnomer — a field named `_hint` the hub enforced as a
+# pod-create minimum.
 
 
 # The parallel mechanisms the PLATFORM implements, kept in lockstep with the
@@ -138,47 +107,37 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     anima declared 8 GB against a 10.6 GiB peak, sdxl declared 20 against a
     proven 9.3 GiB run on a 16 GB A4000.
 
-    ``compute_capability`` is NOT one of them and survives untouched: an sm
-    floor is a statement about which KERNELS exist in our build, not about how
-    big a card is (§2.4 ruling 1).
+    ``requires`` is the FUNCTION scope of the one requirement vocabulary
+    (pgw#1313) — the same grammar and the same terms as
+    ``Slot(layout_requirements={handle: ...})``, for code with no contract to
+    hang a requirement on: trainers, converters, encoders. It exists because
+    training-endpoints has ZERO ``Slot(...)`` model slots (te#209), so its
+    endpoints cannot express a floor any other way::
 
-    ``ram_gb_hint`` (pgw#670) is its HOST-side twin, restored after the v2
-    cut deleted ``ram_gb`` on the reasoning that host RAM is an
-    opportunistic latency tier. For ltx-video-2.3 it was neither
-    opportunistic nor a guess: ie#484 measured 179-301 s mp4-encode and
-    147 s VAE-decode tails on host-starved allocations at IDENTICAL GPU
-    step-ms, ie#492 sized the floor at 64 GB from that failure, and the hub
-    consumed it (pod-create minimum + th#740 read-back-and-reject). Without
-    it a starved allocation DEGRADES SILENTLY — a slow request, not a
-    refused pod — which is exactly what the declaration existed to prevent.
-    It is an ALLOCATION-time ask (the hub's ``min_ram_gb``), never a runtime
-    gate: nothing refuses a request because host RAM is low. That distinction
-    is why it survives th#1867 while every VRAM marker went — the deleted
-    fields were sizing a CARD, which §1.35 rules is never the question. It does not imply ``gpu=True`` — the components are
-    pinned host staging, model-load staging, frame/encoder buffers and
-    page-cache headroom, and a CPU-only encode lane needs them too.
-    Asymmetry note: ``vcpus`` survived the v2 cut and covers the CPU side of
-    the very same encode tail, which is what made the RAM deletion read as
-    accidental rather than principled.
+        Resources(requires="sm89+, vram80g")
+        Resources(requires=LayoutRequirements(
+            minimum="sm80+, vram48g", recommended="sm90+, vram80g, ram64g"))
 
-    ``compute_capability`` (pgw#660) is the HARD GPU-architecture floor,
-    restored after the v2 cut deleted it. The cut's reasoning — "precision
-    per card is the fit ladder's call, never a placement gate" — is right
-    about precision SELECTION and wrong about INCAPABILITY: a producer whose
-    kernel is ``torch._scaled_mm`` cannot run below sm_89 at any precision,
-    on any rung, ever. With no carrier the hub emitted no
-    ``compute_capability`` in ``requirement_payload_json`` and the scheduler
-    placed the fp8 producer on sm_80 A100s (th#1155 six times; te#125
-    again). This is NOT a hint and has no ``_hint`` suffix: the scheduler
-    filters offers on it and refuses to rent below it. th#1867 deleted the
-    VRAM markers and deliberately LEFT this one (§2.4 ruling 1): an sm floor
-    says which kernels exist in our build, which is a statement about our
-    code — a card size is a statement about the card.
-    Declare the DOTTED capability the way NVIDIA writes it — ``8.9``,
-    ``"8.9"``, or ``"sm_89"`` — never the bare SM code. Declaring it implies
-    ``gpu=True``. Declare it ONLY for a genuine incapability; a function that
-    merely runs BETTER on newer silicon declares nothing and lets the ladder
-    choose.
+    The compact form is the MINIMUM. A minimum gates ADMISSION — a
+    config-write check on a pick a human is making — and NEVER execution; a
+    ``recommended`` gates nothing at all, ever (th#1867/th#1720: the hub
+    learned a monotone buy floor from the last recommendation that travelled).
+    Declaring ``min_sm`` or ``min_vram_gb`` implies ``gpu=True``;
+    ``min_host_ram_gb`` does not, and is declarable at ``recommended`` only.
+
+    It SUBSUMES the two axes deleted with it. ``compute_capability`` (pgw#660)
+    was the hard GPU-architecture floor — a producer whose kernel is
+    ``torch._scaled_mm`` cannot run below sm_89 at any precision, on any rung,
+    ever, and with no carrier the scheduler placed the fp8 producer on sm_80
+    A100s (th#1155 six times; te#125 again). That floor survives verbatim as
+    ``min_sm``, in tensorhub's own BARE spelling (89, 100), which is the one
+    wire spelling for the axis on both sides; the dotted 8.9 is gone rather
+    than kept as a second form. ``ram_gb_hint`` (pgw#670, sized at 64 GB from
+    ie#484's 179-301 s host-starved encode tails) survives as
+    ``min_host_ram_gb``, at the recommended level: Paul 2026-07-11 ruled that
+    RunPod GPU pods cannot select or guarantee host RAM, so a host-RAM
+    MINIMUM is unenforceable theater. Unmet, it is a degrade warning, which is
+    what the offload rungs already do.
 
     There is no disk axis. ``min_disk_gb`` (pgw#732) existed for two releases
     and no endpoint in any repo ever declared it — th#1233 sizes a pod's
@@ -218,8 +177,7 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     gpu_count: int = 1
     libraries: tuple[str, ...] = ()
     vcpus: int | None = None
-    ram_gb_hint: float | None = None
-    compute_capability: float | str | None = None
+    requires: Any = None
     max_gpu_count: int | None = None
     max_gpus_per_execution_group: int | None = None
     parallel: tuple[str, ...] = ()
@@ -227,32 +185,42 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     def manifest_dict(self) -> Dict[str, Any]:
         """The manifest ``resources{}`` projection.
 
-        The declaration and the wire name differ for exactly one field: the
-        builder's host-floor key is ``ram_gb`` (which it maps to the
-        scheduler's ``min_ram_gb``), so ``ram_gb_hint`` is projected under
-        that name. One mapping, in one place, rather than a second spelling
-        for endpoint authors to get wrong.
+        ``requires`` travels as the requirement ROW — declared terms only, per
+        level (``LayoutRequirements.manifest_row``) — under its own key, the
+        same shape the slot scope already emits. th#2072 grows the reader.
 
-        th#1867: nothing VRAM-shaped is projected any more. The hub still has
-        a ``min_vram_gb`` fold in ``function_requirements.go`` and a buy-side
-        candidate filter behind it; both are th#1867 S4's to delete, and after
-        this change no manifest reaches them. That absence is NAMED here rather
-        than left to be discovered, because a hub gate reading a key nobody
-        emits is exactly how pgw#660's gate vanished silently the first time.
+        ONE compatibility projection survives the fold, and only one:
+        ``compute_capability``, the dotted key
+        ``internal/builder/function_requirements.go`` parses into
+        ``FunctionRequirements.ComputeCapabilityMin`` and the placement filters
+        read. It is re-derived from ``minimum.min_sm`` — the same fact, the
+        same semantics, no laundering — so this wheel cannot dark an sm floor
+        the hub is enforcing TODAY in the window before th#2072 reads
+        ``requires``. **th#2072 deletes this projection** when it does.
 
-        ``compute_capability`` needs no remap: it is already the key
-        ``internal/builder/function_requirements.go`` parses (scalar or
-        ``{"min": ...}``) into ``FunctionRequirements.ComputeCapabilityMin``.
-        Note ``min_compute_capability`` — v1's author-facing spelling — is
-        typed-REJECTED by the builder (th#1015 ``ErrMinComputeCapabilityRemoved``),
-        so it must never appear on the wire.
+        Two projections are deliberately NOT made, because each would resurrect
+        a floor a ruling removed. ``min_host_ram_gb`` does not become the
+        builder's ``ram_gb`` (a recommendation must never become an
+        allocation minimum — that is th#1720 exactly), and ``min_vram_gb``
+        does not become the builder's ``min_vram_gb`` (th#1867 deleted every
+        VRAM marker on this struct; arming the lane VRAM floor is th#2073's,
+        with the buy-side fail-open closed in the same change).
         """
         raw = msgspec.to_builtins(self)
         out: Dict[str, Any] = dict(raw) if isinstance(raw, dict) else {}
-        ram = out.pop("ram_gb_hint", None)
-        if ram is not None:
-            out["ram_gb"] = ram
+        out.pop("requires", None)
+        requirement = self.requirement()
+        if requirement is not None:
+            out["requires"] = requirement.manifest_row()
+            min_sm = requirement.min_terms().min_sm
+            if min_sm:
+                out["compute_capability"] = round(min_sm / 10.0, 1)
         return out
+
+    def requirement(self) -> LayoutRequirements | None:
+        """The parsed function-scope requirement, or None if undeclared."""
+        return self.requires if isinstance(
+            self.requires, LayoutRequirements) else None
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
@@ -264,16 +232,20 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
         if n_gpu <= 0:
             raise ValueError(f"gpu_count must be positive, got {self.gpu_count}")
         force(self, "gpu_count", n_gpu)
-        if self.compute_capability is not None:
-            force(self, "compute_capability",
-                  _normalize_compute_capability(self.compute_capability))
-        if n_gpu > 1 or self.compute_capability is not None:
+        # The FUNCTION scope of the one requirement vocabulary. Normalized
+        # here, at the declaration site, so the traceback names the
+        # `Resources(...)` the author wrote rather than a manifest key.
+        if self.requires is not None:
+            force(self, "requires", parse_layout_requirements(
+                self.requires, where="Resources(requires=)"))
+        requirement = self.requirement()
+        implies_gpu = requirement is not None and bool(
+            requirement.min_terms().min_sm
+            or requirement.min_terms().min_vram_gb
+            or requirement.recommended_terms().min_sm
+            or requirement.recommended_terms().min_vram_gb)
+        if n_gpu > 1 or implies_gpu:
             force(self, "gpu", True)
-        if self.ram_gb_hint is not None:
-            r = float(self.ram_gb_hint)
-            if r <= 0:
-                raise ValueError(f"ram_gb_hint must be positive, got {r}")
-            force(self, "ram_gb_hint", r)
         if self.vcpus is not None:
             c = int(self.vcpus)
             if c <= 0:

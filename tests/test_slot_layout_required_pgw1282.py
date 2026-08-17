@@ -290,7 +290,7 @@ def test_the_two_forms_of_a_requirement_are_one_declaration() -> None:
     the compact form back so a round trip is stable."""
     compact = parse_layout_requirements("sm100+", where="t")
     structured = parse_layout_requirements(
-        LayoutRequirements(min_sm=100), where="t")
+        LayoutRequirements(minimum="sm100+"), where="t")
     mapping = parse_layout_requirements({"min_sm": 100}, where="t")
     assert compact == structured == mapping
     assert compact.render() == "sm100+"
@@ -298,14 +298,15 @@ def test_the_two_forms_of_a_requirement_are_one_declaration() -> None:
 
 
 def test_an_unbuilt_requirement_term_is_refused_not_ignored() -> None:
-    """Kernel and torch-version requirements are named in the ruling and NOT
-    built. An ignored one is a requirement that silently does not hold, so
-    the grammar refuses it by name and stays extensible for when it exists."""
+    """`kernels` is named in the ruling and NOT built — there is no runtime
+    kernel-capability probe in this worker, so it would be a floor with no
+    fact behind it. An ignored requirement is one that silently does not
+    hold, so the grammar refuses it by name and stays extensible."""
     for term in ("torch>=2.13", "kernels", "sm100", "sm_100+", ""):
         with pytest.raises(LayoutDeclarationError):
             parse_layout_requirements(term, where="t")
-    with pytest.raises(LayoutDeclarationError, match="unknown requirement"):
-        parse_layout_requirements({"min_torch": "2.13"}, where="t")
+    with pytest.raises(LayoutDeclarationError, match="not.*built"):
+        parse_layout_requirements({"kernels": ["sa2"]}, where="t")
     # and there is no "no floor" value — absence is the undeclared axis
     for bad in (0, -1, True, "  "):
         with pytest.raises(LayoutDeclarationError):
