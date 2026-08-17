@@ -314,7 +314,7 @@ jobs:
       # other scripts/*.py a test imports, which drags 18 unrelated pre-existing
       # errors into this gate. Same hardness, isolated blast radius.
       - name: Type check the pod mint-rig (pgw#1347)
-        run: MYPYPATH=scripts uv run mypy scripts/mint_rig tests/test_pod_mint_rig_pgw1347.py
+        run: MYPYPATH=scripts uv run mypy scripts/mint_rig scripts/micro_mint_rig.py tests/test_pod_mint_rig_pgw1347.py
 
       # GATING (pgw#1202): `strict = true` cannot silently stop being true, but
       # a per-module exemption list can grow one reasonable-looking name at a
