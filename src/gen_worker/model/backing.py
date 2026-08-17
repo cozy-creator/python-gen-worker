@@ -42,6 +42,10 @@ class BackingKind(StrEnum):
     EAGER = "eager"
     COMPILED = "compiled"
     FAKE = "fake"
+    #: pgw#1346 K11: the model declares no runners at all. Not a missing
+    #: backing — the ABSENCE of graph classes, which is a permanent and
+    #: legitimate state for an external-binary or non-PyTorch model.
+    NONE = "none"
 
 
 @runtime_checkable
@@ -272,6 +276,47 @@ class FakeBacking:
                 "does not determine; the fake backing refuses rather than invent one",
             )
         return bound
+
+
+class NoGraphBacking:
+    """The backing of a model that declares NO runners (pgw#1346 K11).
+
+    The eager tier's honest bottom. `musicgen`, `joycaption`, a GGUF LLM served
+    by llama-server: there is no graph to call, and the instance's value is its
+    ref, its catalog-stamped `tuned`, and the bytes it points at (`inst.path`)
+    or the object the worker built (`inst.pipeline`).
+
+    This exists instead of `DualBacking(None, None)` — which refuses — and
+    instead of an empty `EagerBacking`, whose refusal would say "no eager module
+    bound for runner 'x'; it has []" and send the reader hunting for a
+    registration that was never supposed to happen. The distinction is worth a
+    class: "not armed yet" and "there is nothing to arm, by declaration" are
+    different answers, and only one of them is a defect.
+    """
+
+    @property
+    def kind(self) -> BackingKind:
+        return BackingKind.NONE
+
+    def serves(self, runner: str, variant: ExportedVariant) -> bool:
+        del runner, variant
+        return False
+
+    def invoke(
+        self,
+        runner: str,
+        variant: ExportedVariant,
+        args: tuple[object, ...],
+        kwargs: Mapping[str, object],
+    ) -> Any:
+        del variant, args, kwargs
+        raise ModelError(
+            ModelRefusal.BACKING_MISSING,
+            f"runner {runner!r} was called on a model that declares NO runners. This is "
+            "an eager-tier model: it has no graph classes and owes none, so it serves "
+            "through `inst.path` / `inst.pipeline` and its tuned values, never a typed "
+            "runner call.",
+        )
 
 
 class DualBacking:

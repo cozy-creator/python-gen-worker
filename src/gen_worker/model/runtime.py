@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Iterator, Mapping
+from pathlib import Path as _PathType
 from typing import (
     Annotated,
     Any,
@@ -49,7 +50,14 @@ from typing import (
 import msgspec
 
 from ..families.base import GenerationDefaults
-from .backing import Backing, BackingKind, DualBacking, EagerBacking, FakeBacking
+from .backing import (
+    Backing,
+    BackingKind,
+    DualBacking,
+    EagerBacking,
+    FakeBacking,
+    NoGraphBacking,
+)
 from .errors import ModelError, ModelRefusal
 from .snapshot import EagerExport, ExportedVariant, ModelExport
 from .spec import ModelSpec
@@ -152,6 +160,24 @@ class DecodeSession:
         self._state.clear()
 
 
+def _adopted_backing(
+    eager: Mapping[str, Any] | None, compiled: Backing | None
+) -> Backing:
+    """The backing for one adopted instance.
+
+    Both halves absent is NOT an error here, unlike inside `DualBacking`: a
+    model that declares no runners has nothing to arm and nothing to call, and
+    saying so with a `NoGraphBacking` is the difference between "this model is
+    eager-tier" and "this pod failed to load something" (pgw#1346 K11).
+    """
+
+    if eager is None and compiled is None:
+        return NoGraphBacking()
+    return DualBacking(
+        eager=None if eager is None else EagerBacking(eager), compiled=compiled
+    )
+
+
 class Model:
     """Base of every GENERATED model class: the type IS the class, the value
     IS the instance.
@@ -196,10 +222,14 @@ class Model:
     #: would import diffusers and the role forbids it (pgw#1328).
     SPEC: ClassVar[ModelSpec | None] = None
 
-    __slots__ = ("_backing", "_label", "_ref", "_tuned")
+    __slots__ = ("_backing", "_label", "_path", "_pipeline", "_ref", "_tuned")
 
     _backing: Backing
     _label: str
+    #: The local snapshot path, when the worker materialized one. pgw#1346 K11.
+    _path: str
+    #: The constructed object, when the worker loaded one.
+    _pipeline: Any
     _ref: str
     _tuned: GenerationDefaults
 
@@ -222,6 +252,8 @@ class Model:
         tuned: GenerationDefaults,
         backing: Backing,
         label: str = "",
+        path: str = "",
+        pipeline: Any = None,
     ) -> Self:
         """Build one instance. The ONLY way an instance comes into existence."""
 
@@ -236,6 +268,8 @@ class Model:
         object.__setattr__(self, "_tuned", tuned)
         object.__setattr__(self, "_backing", backing)
         object.__setattr__(self, "_label", str(label or ref))
+        object.__setattr__(self, "_path", str(path or ""))
+        object.__setattr__(self, "_pipeline", pipeline)
         spec = cls.SPEC
         if spec is not None and spec.on_load is not None:
             spec.on_load(self)
@@ -275,6 +309,8 @@ class Model:
         eager: Mapping[str, Any] | None = None,
         compiled: Backing | None = None,
         label: str = "",
+        path: str = "",
+        pipeline: Any = None,
     ) -> Self:
         """Build an instance from backings the caller already has.
 
@@ -286,10 +322,10 @@ class Model:
         return cls._materialize(
             ref=ref,
             tuned=tuned if tuned is not None else cls.Tuned(),
-            backing=DualBacking(
-                eager=None if eager is None else EagerBacking(eager), compiled=compiled
-            ),
+            backing=_adopted_backing(eager, compiled),
             label=label,
+            path=path,
+            pipeline=pipeline,
         )
 
     @classmethod
@@ -323,6 +359,50 @@ class Model:
         """A human-readable name for receipts and logs; the ref when unnamed."""
 
         return self._label
+
+    @property
+    def path(self) -> _PathType:
+        """The LOCAL SNAPSHOT PATH of this checkpoint's bytes (pgw#1346 K11).
+
+        The eager tier's serving surface, and the majority one: measured across
+        the boundary batch, 8 of 11 weight-bearing endpoints hand a path to an
+        external binary or a custom loader rather than calling a graph. Those
+        endpoints have no runner to invoke and never will — this is what they
+        are bound FOR.
+
+        Refuses rather than returning an empty path. A handler that shells out
+        to `llama-server` with `""` fails somewhere far away and confusingly;
+        the answer "this instance was not materialized with local bytes" is
+        only useful at the point it stops being true.
+        """
+
+        if not self._path:
+            raise ModelError(
+                ModelRefusal.BACKING_MISSING,
+                f"model {self.FAMILY!r} bound to {self._ref!r} has no local path on this "
+                "instance. A path is materialized by the worker when it resolves the "
+                "checkpoint; `.fake()` and a bare `.instance(ref)` do not produce one.",
+            )
+        return _PathType(self._path)
+
+    @property
+    def pipeline(self) -> Any:
+        """The CONSTRUCTED object the worker loaded for this checkpoint.
+
+        The other eager shape (3 of the 11 measured): a model whose serving is a
+        library object the worker built, not a graph this SDK traced and not a
+        path a binary reads. Kept deliberately untyped — the whole point of the
+        eager tier is that the SDK makes no claim about a shape it never saw.
+        """
+
+        if self._pipeline is None:
+            raise ModelError(
+                ModelRefusal.BACKING_MISSING,
+                f"model {self.FAMILY!r} bound to {self._ref!r} carries no constructed "
+                "object. Declare what to construct on the model, or read `.path` if this "
+                "model is bytes an external runtime loads itself.",
+            )
+        return self._pipeline
 
     @property
     def tuned(self) -> GenerationDefaults:
