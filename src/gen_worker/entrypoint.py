@@ -77,6 +77,12 @@ from . import config
 from . import worker_credential
 from .cuda_probe import CUDA_PROBE_FAILED_MARKER, probe_cuda, should_probe_cuda
 from .hardware_report import report_hardware_unsuitable
+from .manifest_blocks import (
+    DECLARATION_BLOCKS,
+    block_counts,
+    declaration_rows,
+    declared_row_count,
+)
 from .models.cache_paths import tensorhub_cas_dir
 try:
     from .worker import Worker
@@ -184,10 +190,17 @@ def load_manifest(path: Path = MANIFEST_PATH) -> Optional[Dict[str, Any]]:
 
 
 def get_modules_from_manifest(manifest: Dict[str, Any]) -> List[str]:
-    """Extract unique module names from the manifest."""
+    """Every user module this image must import, from BOTH declaration blocks.
+
+    pgw#1354: this walked ``functions[]`` alone, so a jobs-only package
+    (te#218 re-authored every conversion package that way — 27 jobs, 0
+    functions) yielded no modules and the boot below refused before hello.
+    Extended rather than paired with a second jobs walk: `manifest_blocks`
+    owns the one row derivation, and both this and the CUDA probe feed off it.
+    """
     modules = set()
-    for func in manifest.get("functions", []):
-        module = func.get("module")
+    for row in declaration_rows(manifest):
+        module = row.get("module")
         if module:
             modules.add(module)
     return sorted(modules)
@@ -424,11 +437,15 @@ def _run_main() -> int:
             logger.error(str(e))
             return 1
         user_modules = get_modules_from_manifest(manifest)
+        counts = block_counts(manifest)
         _log_startup_phase(
             "manifest_loaded",
             status="ok",
             manifest_path=str(manifest_path),
-            function_count=len(manifest.get("functions", [])),
+            function_count=counts["functions"],
+            # A boot log that counted only functions read "0 declarations" on
+            # the images the jobs program exists to run (pgw#1354).
+            job_count=counts["jobs"],
             module_count=len(user_modules),
         )
     else:
@@ -521,12 +538,43 @@ def _run_main() -> int:
         logger.info("  Local Model Cache Dir: %s", cache_cfg["local_model_cache_dir"])
 
     if not user_modules:
-        logger.error(
-            "No user function modules found. A baked manifest at %s is required.\n"
-            "Your Dockerfile should run discovery at build time:\n"
-            "  RUN mkdir -p /app/.tensorhub && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock\n"
-            "(non-container runs: set ENDPOINT_LOCK_PATH to the generated file)",
-            manifest_path,
+        # pgw#1354: this exit used to be a bare `logger.error` + `return 1`.
+        # RunPod exposes no container-logs API, so the hub saw `exit:1` with no
+        # reason class and condemned the pod `[hardware-unsuitable]` with empty
+        # driver/gpu — a boot bug wearing a hardware verdict, and it cost a paid
+        # pod to find. Every other fatal in this function dials typed; so does
+        # this one. The message DISCRIMINATES the two gaps, because they have
+        # different owners: no manifest at all is a Dockerfile that never ran
+        # discovery, while declarations-without-modules is a manifest this wheel
+        # cannot read (a block it does not walk, or rows with no `module`).
+        counts = block_counts(manifest)
+        declared = declared_row_count(manifest)
+        if manifest and declared:
+            reason = (
+                f"the manifest at {manifest_path} declares "
+                f"{counts['functions']} function(s) and {counts['jobs']} job(s) "
+                f"but no row carries a `module`, so this image has nothing to "
+                f"import. Declaration blocks this build walks: "
+                f"{', '.join(DECLARATION_BLOCKS)}."
+            )
+        elif manifest:
+            reason = (
+                f"the manifest at {manifest_path} declares no functions and no "
+                f"jobs — this image publishes nothing and cannot serve."
+            )
+        else:
+            reason = (
+                f"no baked manifest at {manifest_path}. Your Dockerfile should "
+                f"run discovery at build time:\n"
+                f"  RUN mkdir -p /app/.tensorhub && python -m gen_worker.discovery"
+                f" > /app/.tensorhub/endpoint.lock\n"
+                f"(non-container runs: set ENDPOINT_LOCK_PATH to the generated file)"
+            )
+        message = f"no user modules to import: {reason}"
+        logger.error("%s", message)
+        _log_worker_fatal(
+            "no_user_modules", RuntimeError(message), exit_code=1,
+            settings=settings,
         )
         return 1
 

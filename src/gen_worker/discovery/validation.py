@@ -63,7 +63,12 @@ def validate_endpoint_lock(lock_dict: Dict[str, Any]) -> EndpointLockValidationR
             ok=False,
             errors=("endpoint lock missing 'functions' list",),
         )
-    if len(functions) == 0:
+    if len(functions) == 0 and not (lock_dict.get("jobs") or ()):
+        # Jobs-aware (pgw#1354): a jobs-only release is legal (th#2049) and
+        # advertises 27 things, so the bare function count must not call it
+        # empty. Everything BELOW is function-shape by construction — slots,
+        # bindings, wire routes and compile cells are concepts a job does not
+        # declare (`_job_entry`) — so those walks stay functions-only.
         warnings.append("no functions discovered (endpoint will advertise nothing)")
 
     # Per-class accumulator for the "two methods slugify to the same route"
