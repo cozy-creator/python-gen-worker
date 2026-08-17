@@ -16,10 +16,12 @@ Each section names the one-line edit that turns it RED:
    `function_name` against `self.specs` alone in `_admit_dispatch` — which is
    exactly what master did.
 2. **Two tables, one head, and a refusal that can tell them apart.** A name in
-   NEITHER table is refused INVALID naming both inventories, and a name in BOTH
-   is refused at boot — a dispatch carries a name and no intent kind, so one
-   name cannot mean two things. RED by dropping the job inventory from the
-   refusal message, or by allowing the collision.
+   NEITHER table is refused INVALID naming that KIND's inventory, and a name in
+   BOTH is refused at boot. AMENDED by pgw#1336: th#2052 grew
+   `RunJob.intent_kind`, so the head reads one table per kind and the refusal
+   names one inventory instead of the union — see
+   `tests/test_runjob_intent_pgw1336.py` for the routing fence. RED by
+   allowing the collision, or by making a refusal name the wrong inventory.
 3. **The declaration is the RELEASE's.** `execute_job._stamp_declaration` — not
    the dispatch head — projects `publishes`/`emits_media` onto the context, so
    an undeclared job's `save_checkpoint` refuses typed before a byte moves.
@@ -162,9 +164,21 @@ class _Harness:
         self.sent.append(msg)
 
     def frame(self, name: str, **kw: Any) -> pb.RunJob:
+        request_id = kw.pop("request_id", "job-uuid-1")
+        attempt = int(kw.pop("attempt", 0))
+        # pgw#1336 / th#2052: the frame SAYS what it is. Stamped here exactly
+        # as `JobWire.Dispatch` stamps it hub-side — a job carries
+        # DESIRED_INTENT_KIND_RUN_JOB and the hub-authored carrier
+        # `job-<id>-<attempt>` under goal `job-<id>`; a served request carries
+        # UNSPECIFIED and no carrier. Callers override either by passing the
+        # field explicitly, which is how the cross-table cases are written.
+        if "intent_kind" not in kw and name in self.ex.job_specs:
+            kw["intent_kind"] = pb.DESIRED_INTENT_KIND_RUN_JOB
+            kw.setdefault("intent_id", f"job-{request_id}-{attempt}")
+            kw.setdefault("goal_id", f"job-{request_id}")
         return pb.RunJob(
-            request_id=kw.pop("request_id", "job-uuid-1"),
-            attempt=int(kw.pop("attempt", 0)),
+            request_id=request_id,
+            attempt=attempt,
             function_name=name,
             input_payload=msgspec.msgpack.encode(In(rung=kw.pop("rung", "w8a8"))),
             **kw,
@@ -238,24 +252,46 @@ def test_an_endpoint_still_dispatches_through_the_same_head() -> None:
 # ---- 2. a name in NEITHER table is distinguishable -------------------------
 
 
-def test_a_name_in_neither_table_names_both_inventories() -> None:
-    async def scenario() -> pb.JobResult:
-        h = _Harness()
-        return await h.dispatch("no-such-thing")
+def test_a_name_in_neither_table_names_THAT_kind_s_inventory() -> None:
+    """UPDATED by pgw#1336 (th#2052 landed the intent kind).
 
-    result = asyncio.run(scenario())
-    assert result.status == pb.JOB_STATUS_INVALID
-    msg = result.safe_message
-    assert "no-such-thing" in msg
-    # BOTH inventories, so "unknown name" and "known job name" stop looking
-    # identical — which is how this stayed quiet for a whole migration.
-    assert "generate" in msg and "plan-h3-svdq" in msg
+    pgw#1324 made the refusal name BOTH inventories, because the head had to
+    try both and "unknown name" and "known job name" were the same sentence.
+    The frame now says which kind it is, so the head reads ONE table and the
+    refusal names THAT one — the ambiguity the union was compensating for is
+    gone. What pgw#1324 actually bought (a good job name is never "unknown")
+    is proven by the headline test above and by the crossed-name case in
+    `tests/test_runjob_intent_pgw1336.py`.
+    """
+
+    async def scenario() -> Tuple[pb.JobResult, pb.JobResult]:
+        h = _Harness()
+        as_request = await h.dispatch("no-such-thing", request_id="req-a")
+        as_job = await h.dispatch(
+            "no-such-job", request_id="job-b",
+            intent_kind=pb.DESIRED_INTENT_KIND_RUN_JOB,
+            intent_id="job-job-b-0", goal_id="job-job-b",
+        )
+        return as_request, as_job
+
+    as_request, as_job = asyncio.run(scenario())
+    assert as_request.status == pb.JOB_STATUS_INVALID
+    assert "no-such-thing" in as_request.safe_message
+    assert "generate" in as_request.safe_message
+    assert "plan-h3-svdq" not in as_request.safe_message
+    assert as_job.status == pb.JOB_STATUS_INVALID
+    assert "no-such-job" in as_job.safe_message
+    assert "plan-h3-svdq" in as_job.safe_message
+    assert "generate" not in as_job.safe_message
 
 
 def test_one_name_cannot_be_both_an_endpoint_and_a_job() -> None:
-    """The wire carries a name and no intent kind, so a colliding name is a
-    dispatch nobody can resolve. Refused at BOOT, where it is still fixable —
-    not at 3am on a rented pod."""
+    """KEPT by pgw#1336 on a NEW justification, stated so it is not read as an
+    inherited habit. `intent_kind` resolves a doubled name at DISPATCH, so this
+    is no longer a resolution necessity — but the manifest, the catalog, every
+    submit surface and `gen-worker job <name>` all address by name alone, so a
+    doubled name is still ambiguous everywhere else. Publish hygiene, refused
+    at BOOT where it is still fixable — not at 3am on a rented pod."""
 
     async def send(msg: pb.WorkerMessage) -> None:  # pragma: no cover
         raise AssertionError("nothing should be sent")

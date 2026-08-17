@@ -30,6 +30,16 @@ _UNREPORTED_WAIT_TIMEOUT_S = 2.0
 # hub's shadow validator rejects a WAITING state carrying none of
 # blocker/retry/deadline), so this fills a protocol hole and the hub owns what
 # it decides at expiry. Changing it is a protocol change, not a tuning.
+#
+# pgw#1336 RE-READ IT AGAINST th#2052's `RunJob.phase_budget_s` and KEPT IT:
+# they answer different questions and are not two spellings of one number.
+# This one fills a REQUIRED FIELD on a WAITING report — every WAITING intent
+# needs one of blocker/retry/deadline or the hub's shadow validator rejects
+# the frame, whoever authored the intent. `phase_budget_s` is the operator's
+# POSITION-ADVANCE budget for one job's body (`jobs.ProgressWatch`), applies
+# only to a job, and kills nothing here either. Deleting this with the RunJob
+# compat minter would have made every blockerless WAITING report invalid,
+# including hub-authored ones.
 _WAITING_DEADLINE_FALLBACK_MS = 60_000
 _ACTIVE_INTENT_STATES = {
     pb.LIFECYCLE_INTENT_STATUS_ACCEPTED,
@@ -657,10 +667,22 @@ class IntentRegistry:
     ) -> str:
         """Create a bounded worker-local compatibility obligation.
 
-        These intents cover legacy operations that protocol v5 cannot yet own
-        directly, such as a RunJob (the wire lacks a job intent kind/owner
-        field). Their IDs are deterministic for one operation identity, but
-        they never impersonate a hub-authored DesiredIntent.
+        These intents cover operations protocol v5 does not carry an intent
+        for: ``setup`` / ``materialize`` and their single-flight waiters (the
+        hub opens FUNCTION_READY / MATERIALIZE intents when it commands the
+        work, and none at all when the worker reaches it on its own), plus a
+        SERVED REQUEST, which has no intent kind on this protocol by design —
+        a request is what an intent gets BLOCKED on (``IntentState
+        .blocker_request``), never an intent itself.
+
+        **A JOB is no longer one of them** (pgw#1336 / th#2052). The docstring
+        that stood here said these cover "a RunJob (the wire lacks a job intent
+        kind/owner field)"; the wire grew that field, so a job dispatch arrives
+        owning a hub-authored carrier and goes through
+        :meth:`adopt_dispatch_intent` instead.
+
+        Their IDs are deterministic for one operation identity, but they never
+        impersonate a hub-authored DesiredIntent.
         """
         raw = f"{scope}\0{identity}\0{function_name}".encode()
         base_intent_id = f"compat-{scope}-{hashlib.sha256(raw).hexdigest()[:24]}"
@@ -678,6 +700,65 @@ class IntentRegistry:
         state = pb.IntentState(
             worker_session_id=self.worker_session_id,
             goal_id=f"compat-{scope}-{self.worker_session_id}",
+            intent_id=intent_id,
+            release_id=self.release_id,
+            config_generation=self._target_config_generation,
+            status=pb.LIFECYCLE_INTENT_STATUS_ACCEPTED,
+            stage=pb.LIFECYCLE_INTENT_STAGE_VALIDATING,
+            since_unix_ms=now,
+            updated_at_unix_ms=now,
+            detail=detail,
+        )
+        state.state_seq = self._touch()
+        self._intents[intent_id] = state
+        self._trim_intents()
+        return intent_id
+
+    def adopt_dispatch_intent(
+        self,
+        intent_id: str,
+        goal_id: str,
+        *,
+        detail: str = "",
+    ) -> str:
+        """Register the HUB-AUTHORED lifecycle carrier a dispatch names.
+
+        th#2052 put ``intent_kind`` / ``intent_id`` / ``goal_id`` on ``RunJob``,
+        so a job dispatch now arrives owning its carrier and the worker reports
+        against THAT id instead of minting a worker-local ``compat-*`` one.
+        That minting is what pgw#1307 arm (8) could not delete, and the reason
+        it could not was this exact absence.
+
+        **The id is never renamed.** The compat minter appended a ``-N`` suffix
+        when it found a terminal state under the id it wanted, because the id
+        was its own to choose. This one is the hub's: a redelivery naming an id
+        the registry already holds terminal is the hub saying "this obligation
+        again", so the entry is REPLACED under the same id rather than reported
+        under a second one the hub has never heard of. An id it holds ACTIVE is
+        the same live obligation and is returned untouched.
+
+        Deliberately NOT written into ``_desired_intents``/``_intent_digests``:
+        those are the command-born set, rebuilt wholesale by every
+        ``apply_command`` and superseded on a generation bump. An in-flight
+        job's carrier must survive both. For the same reason
+        ``DESIRED_INTENT_KIND_RUN_JOB`` is deliberately absent from
+        ``_SUPPORTED_INTENT_KINDS``: the hub stamps it on the DISPATCH, never
+        opens it as a DesiredIntent in a command, so accepting one there would
+        be claiming support for a shape the hub does not send.
+        """
+        intent_id = str(intent_id or "").strip()
+        if not intent_id:
+            raise ValueError(
+                "adopt_dispatch_intent requires the hub-authored intent id; "
+                "a dispatch that carries none has no carrier to adopt"
+            )
+        existing = self._intents.get(intent_id)
+        if existing is not None and int(existing.status) in _ACTIVE_INTENT_STATES:
+            return intent_id
+        now = _now_ms()
+        state = pb.IntentState(
+            worker_session_id=self.worker_session_id,
+            goal_id=str(goal_id or ""),
             intent_id=intent_id,
             release_id=self.release_id,
             config_generation=self._target_config_generation,
@@ -744,10 +825,10 @@ class IntentRegistry:
         else:
             state.blocker_request.CopyFrom(blocker_request)
         # A WAITING state MUST carry a blocker, a retry time, or a deadline —
-        # the hub's shadow validator requires one of the three, and
-        # compat-synthesized intents minted outside a DesiredStateCommand have
-        # none of their own. Guaranteed at this single choke point rather than
-        # at each call site.
+        # the hub's shadow validator requires one of the three, and an intent
+        # minted outside a DesiredStateCommand (a compat carrier, or th#2052's
+        # adopted dispatch carrier) has none of its own. Guaranteed at this
+        # single choke point rather than at each call site.
         if int(status) == pb.LIFECYCLE_INTENT_STATUS_WAITING:
             blocked = bool(state.blocker_intent_id) or bool(
                 state.blocker_request.request_id

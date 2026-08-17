@@ -377,6 +377,12 @@ enum DesiredIntentKind {
   DESIRED_INTENT_KIND_CONFIG_APPLY = 3;
   DESIRED_INTENT_KIND_COMPILE_ADOPT = 4;
   DESIRED_INTENT_KIND_DRAIN = 5;
+  // th#2052: one RunJob dispatch that is a JOB submission, not a served
+  // request. It exists so a worker has a hub-authored carrier to report a job
+  // against; before it, `RunJob` carried no intent and pgw synthesized a
+  // worker-local `compat-*` intent because "the wire lacks a job intent
+  // kind/owner field" (pgw#1307 arm 8, quoting its own docstring).
+  DESIRED_INTENT_KIND_RUN_JOB = 6;
 }
 
 enum DesiredIntentCause {
@@ -820,6 +826,33 @@ message RunJob {
   // msgpack map name -> value. Surfaced read-only as ctx.config; workers
   // never cache them.
   bytes config_params = 17;
+
+  // ---- th#2052, the jobs protocol leg. All four ADDITIVE; a worker on an
+  // older wheel ignores them and behaves exactly as it does today.
+
+  // WHAT THIS DISPATCH IS. Until now `function_name` was the whole routing
+  // key: a worker had to resolve the name against BOTH its endpoint and job
+  // inventories to learn which harness to run, and pgw#1324 has to refuse a
+  // name declared as both at BOOT because a dispatch carrying only a name is
+  // otherwise unresolvable. UNSPECIFIED means a served request (every
+  // dispatch before this field existed, and every request dispatch after);
+  // DESIRED_INTENT_KIND_RUN_JOB means a job submission.
+  DesiredIntentKind intent_kind = 18;
+  // The HUB-AUTHORED lifecycle carrier for this dispatch, and its owner.
+  // Non-empty on a job: `job-<job-id>-<attempt>` under goal `job-<job-id>`.
+  // A worker that receives them reports this dispatch's lifecycle against
+  // them instead of minting its own `compat-*` intent — which is the whole
+  // reason pgw could not delete that minter (pgw#1307 arm 8).
+  string intent_id = 19;
+  string goal_id = 20;
+  // POSITION-ADVANCE BUDGET, in seconds. The operator's `jobs.progress_budget_s`
+  // — the same number the hub's own liveness sweep kills on — so the worker's
+  // watch and the hub's kill read ONE value instead of the worker falling back
+  // to the wheel's compiled DEFAULT_PHASE_BUDGET_S. 0 = no instruction (the
+  // worker's own default), which is every request dispatch. th#2050 already
+  // carried this value to the wire boundary and dropped it here for want of a
+  // field; the hub remains the kill authority either way.
+  int64 phase_budget_s = 21;
 }
 
 message InputAsset {
