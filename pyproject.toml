@@ -158,11 +158,17 @@ strict = true
 # `conftest` module name and reports nothing at all.
 explicit_package_bases = true
 # …and this keeps src/ modules resolving as `gen_worker.x`, not `src.gen_worker.x`,
-# which is what every per-module override below is keyed on. `scripts` joins it
-# for pgw#1347's `mint_rig` package: the pod driver is control-plane code that
-# must NOT ship in the wheel (no pod needs the thing that rents pods), but it
-# spends money and it is born strict like everything else.
-mypy_path = "src:scripts"
+# which is what every per-module override below is keyed on.
+#
+# `scripts` is deliberately NOT here. pgw#1347's `mint_rig` package is checked —
+# it is control-plane code that must not ship in the wheel, but it spends money —
+# and it gets its own `MYPYPATH=scripts` invocation in ci.yaml instead. Putting
+# `scripts` on the shared path makes mypy suddenly RESOLVE every other
+# `scripts/*.py` that a test imports (measured: `micro_mint_rig`,
+# `lint_unbounded_reads`, 18 errors), which turns one lane's new module into an
+# unrelated burn-down. Those findings are real and someone should take them; they
+# are not this lane's to smuggle in or to silence.
+mypy_path = "src"
 
 # Generated protobuf modules: no source of ours to fix.
 [[tool.mypy.overrides]]

@@ -303,11 +303,18 @@ jobs:
       # merely unchecked — `mypy tests` REFUSED TO START on a duplicate
       # `conftest` module, so 486 test modules had zero static coverage, which
       # is where the doubles that lied about production contracts lived.
-      # pgw#1347 adds `scripts/mint_rig`: the pod driver is control-plane code
-      # that must NOT ship in the wheel, but it spends money, so it is checked
-      # here rather than being exempt by living outside src/.
-      - name: Type check (mypy, strict by default, src + tests + the pod rig)
-        run: uv run mypy src/gen_worker tests tests_v2 scripts/mint_rig
+      - name: Type check (mypy, strict by default, src + tests)
+        run: uv run mypy src/gen_worker tests tests_v2
+
+      # pgw#1347: the pod driver is control-plane code that must NOT ship in the
+      # wheel (no pod needs the thing that rents pods), but it spends money, so
+      # it is born strict like everything else. It gets its OWN invocation with
+      # `MYPYPATH=scripts` rather than joining `mypy_path` in pyproject: that
+      # path is shared, and adding `scripts` to it makes mypy resolve every
+      # other scripts/*.py a test imports, which drags 18 unrelated pre-existing
+      # errors into this gate. Same hardness, isolated blast radius.
+      - name: Type check the pod mint-rig (pgw#1347)
+        run: MYPYPATH=scripts uv run mypy scripts/mint_rig tests/test_pod_mint_rig_pgw1347.py
 
       # GATING (pgw#1202): `strict = true` cannot silently stop being true, but
       # a per-module exemption list can grow one reasonable-looking name at a
