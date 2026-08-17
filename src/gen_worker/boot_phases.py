@@ -266,10 +266,29 @@ def _resolve_process_start() -> float:
 
 _process_start_unix = _resolve_process_start()
 
+#: Wall clock at THIS MODULE's import (pgw#1355). The earliest instant any
+#: gen_worker code can observe, so `process start -> here` is the interpreter +
+#: `site` + the import chain up to the recorder — the one window that is
+#: structurally unspannable, because nothing can open a span before the module
+#: that opens spans exists. `sdk_ready` already names the whole pre-SDK window
+#: as ONE lump; this splits it into "the interpreter came up" and "we imported
+#: torch and built an executor", which have completely different fixes.
+_module_import_unix: float = time.time()
+
 
 def process_start_unix() -> float:
     """Wall-clock OS process start for this worker."""
     return _process_start_unix
+
+
+def module_import_ms() -> int:
+    """ms from OS process start to this module's import.
+
+    Never negative and never past `sdk_ready`: `_resolve_process_start` falls
+    back to import time when psutil cannot read /proc, which would make the two
+    the same instant rather than an inverted interval.
+    """
+    return max(0, int(round((_module_import_unix - _process_start_unix) * 1000.0)))
 
 
 def process_uptime_ms() -> int:

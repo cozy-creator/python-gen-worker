@@ -270,6 +270,49 @@ class BootAdoptOutcome:
         return self.adoption is not None
 
 
+def _record_keyset_stage(
+    outcome: "BootAdoptOutcome | DerivedKeySet",
+    *,
+    family: str,
+    function: str,
+) -> None:
+    """Record the key set as one :data:`gen_worker.boot_stages.Stage.KEYSET`
+    span (pgw#1355).
+
+    Takes either half of ``_key_set``'s return: a refusal still consumed real
+    wall, and a stage that only appears on the happy path cannot answer "why
+    was this boot slow" on the boot that was slow AND failed.
+
+    ``keys_from`` is carried because it is the axis that separates a 805 s boot
+    from a 5 ms one — pgw#1353's whole finding is that every production pod
+    reported ``traced``, the FALLBACK, and nothing made that visible while it
+    was happening.
+
+    Never raises: telemetry never fails a boot.
+    """
+    try:
+        from . import boot_stages
+
+        wall_ms = int(getattr(outcome, "derive_ms", 0)
+                      or getattr(outcome, "wall_ms", 0) or 0)
+        source = getattr(outcome, "key_source", None) or getattr(
+            outcome, "source", None)
+        entry_keys = getattr(outcome, "entry_keys", None)
+        boot_stages.record_ending_now(
+            boot_stages.Stage.KEYSET,
+            duration_ms=wall_ms,
+            label="boot_adopt.key_set",
+            family=family,
+            function=function,
+            keys_from=(source.value if source is not None else "-"),
+            classes=(len(entry_keys) if entry_keys is not None else ""),
+            workers=getattr(outcome, "workers", "") or "",
+            memo=getattr(getattr(outcome, "memo", None), "value", "") or "",
+        )
+    except Exception:  # pragma: no cover — telemetry never fails a boot
+        logger.debug("keyset stage span dropped", exc_info=True)
+
+
 def report(outcome: BootAdoptOutcome) -> BootAdoptOutcome:
     """Emit this decision as ONE typed event, and return it unchanged.
 
@@ -577,6 +620,19 @@ def attempt(
         function=fn, modules=modules, family=family, spec=spec, slots=slots,
         declared_hint=declared_hint, work_root=work_root, memo_dir=memo_dir,
         device=device, derive=derive, keyset_roots=keyset_roots)
+    # pgw#1355: the key set is a COLD-BOOT STAGE, recorded exactly once per
+    # derive — here, where `_key_set` has just returned, rather than in
+    # `report`, which runs once PER CLASS. On sdxl that is 36 calls carrying
+    # the same `derive_ms`, and 36 identical spans would report a boot whose
+    # stages sum to 36x its own wall. The union would still be right; the
+    # overlap figure would be nonsense, and a figure that is nonsense on the
+    # normal path is a figure nobody trusts on the abnormal one.
+    #
+    # This is the span pgw#1353 measured the absence of: the derive runs during
+    # a REQUEST, after `boot_phases.in_boot()` has already gone False, so no
+    # ladder row covers its 805 seconds and `worker_boot_phases` shows 871 s of
+    # silence where the dominant phase of the boot actually was.
+    _record_keyset_stage(outcome, family=family, function=fn)
     if isinstance(outcome, BootAdoptOutcome):
         return (report(outcome),)
     derived = outcome
