@@ -38,6 +38,7 @@ import pytest
 from gen_worker.model.catalog import Flux2Klein9b
 from gen_worker.model.catalog import flux2_klein_4b_serve as kl
 from gen_worker.model.catalog import flux2_klein_9b_serve as kl9
+from gen_worker.model.catalog.flux2_klein_4b import FLUX2_KLEIN_4B
 from gen_worker.model.catalog.flux2_klein_4b import TRANSFORMER as TRANSFORMER_4B
 from gen_worker.model.catalog.flux2_klein_9b import (
     FLUX2_KLEIN_9B,
@@ -241,8 +242,11 @@ def test_base_and_turbo_are_two_instances_of_one_model() -> None:
     )
     assert type(base) is type(turbo) is Flux2Klein9b
     assert base.tuned != turbo.tuned
-    assert base.tuned.steps == 28 and base.tuned.guidance == 4.0
-    assert turbo.tuned.steps == 4 and turbo.tuned.distilled is True
+    base_tuned, turbo_tuned = base.tuned, turbo.tuned
+    assert isinstance(base_tuned, kl9.Flux2Klein9bTuned)
+    assert isinstance(turbo_tuned, kl9.Flux2Klein9bTuned)
+    assert base_tuned.steps == 28 and base_tuned.guidance == 4.0
+    assert turbo_tuned.steps == 4 and turbo_tuned.distilled is True
     for tokens in kl9.packed_tokens(1024, 1024), kl9.packed_tokens(2048, 2048):
         assert (
             base.variant("denoiser", {"tokens": tokens}).layout
@@ -384,7 +388,12 @@ def test_the_tuned_schema_is_its_own_and_carries_the_endpoints_values() -> None:
     """
 
     assert FLUX2_KLEIN_9B.tuned is kl9.Flux2Klein9bTuned
-    assert FLUX2_KLEIN_9B.tuned is not kl.Flux2Klein4bTuned
+    # A tuned schema is published under the MODEL's own name, so 4B's cannot
+    # be reused here even though the two structs are field-identical. mypy
+    # already proves the classes are unrelated; this asserts the REGISTRATION
+    # consequence, which is the part that would actually break the hub.
+    assert FLUX2_KLEIN_9B.tuned is not FLUX2_KLEIN_4B.tuned
+    assert FLUX2_KLEIN_9B.name != FLUX2_KLEIN_4B.name
     neutral = kl9.Flux2Klein9bTuned()
     assert neutral.steps == ENDPOINT_NEUTRAL_STEPS
     assert neutral.guidance == ENDPOINT_NEUTRAL_GUIDANCE

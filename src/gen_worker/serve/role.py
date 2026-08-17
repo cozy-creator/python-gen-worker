@@ -121,6 +121,10 @@ MODEL_FREE_MODULES: Tuple[str, ...] = (
     "gen_worker.model.errors",
     "gen_worker.model.runtime",
     "gen_worker.model.scheduler",
+    # HiDream-O1's flash ladder: its own module because it is NOT a member of
+    # scheduler.py's closed declarable set — nothing can declare it while
+    # GraphModelSpec.scheduler is single-valued (pgw#1346 K10).
+    "gen_worker.model.scheduler_hidream",
     "gen_worker.model.snapshot",
     "gen_worker.model.spec",
     "gen_worker.model.tuned",
@@ -132,9 +136,18 @@ MODEL_FREE_MODULES: Tuple[str, ...] = (
     "gen_worker.model.catalog._generated.sd2",
     "gen_worker.model.catalog._generated.sd15",
     "gen_worker.model.catalog._generated.sdxl",
+    # pgw#1346 B3b's two EAGER models. Both halves are model-free here, not
+    # only the serving one: neither declaration builds a module, because
+    # neither model's code (DiffSynth-Studio's) is reachable from this SDK at
+    # all — which is one of the reasons they are eager. So they take no
+    # guarded-import hatch and are held by the real walk.
+    "gen_worker.model.catalog.anima",
+    "gen_worker.model.catalog.anima_serve",
     "gen_worker.model.catalog.flux1_dev_serve",
     "gen_worker.model.catalog.flux2_klein_4b_serve",
     "gen_worker.model.catalog.flux2_klein_9b_serve",
+    "gen_worker.model.catalog.hidream_o1",
+    "gen_worker.model.catalog.hidream_o1_serve",
     "gen_worker.model.catalog.sd15_serve",
     "gen_worker.model.catalog.sdxl_serve",
 )
