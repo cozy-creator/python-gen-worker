@@ -206,7 +206,7 @@ def test_the_recipe_vocabulary_runs_against_the_VENDORED_identity_and_ingress() 
     pgw#1332 grafted this file at its own `recipe_rev` and this test guarded the
     graft's compatibility claim. pgw#1342 took the whole package to one rev, so
     the pairing is no longer a claim — but the EXECUTION still is, and it is the
-    half worth keeping: `recipe_v1` is the vocabulary the typed Family SDK
+    half worth keeping: `recipe_v1` is the vocabulary the typed ModelSpec SDK
     generates against, so a snapshot where the fold silently stopped producing a
     key would be a codegen defect nothing else here notices.
 

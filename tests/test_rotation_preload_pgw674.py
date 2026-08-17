@@ -63,7 +63,7 @@ CALLS: List[Tuple[str, str]] = []
 
 
 @endpoint(models={"pipeline": Slot(str, selected_by="model")})
-class Family:
+class ToyEndpoint:
     def setup(self, pipeline: str) -> None:
         self.pipeline = pipeline
 
@@ -249,7 +249,7 @@ def test_preload_double_buffers_next_instance_while_busy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     CALLS.clear()
-    ex = _executor(tmp_path, monkeypatch, Family)
+    ex = _executor(tmp_path, monkeypatch, ToyEndpoint)
     # Fake CUDA budget: both instances fit -> tier 2 (true double-buffer).
     ex.store.residency._vram_budget = 64 * _GiB
 
@@ -291,7 +291,7 @@ def test_preload_skips_ref_resident_under_moved_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     CALLS.clear()
-    ex = _executor(tmp_path, monkeypatch, Family)
+    ex = _executor(tmp_path, monkeypatch, ToyEndpoint)
     ex.store.residency._vram_budget = 64 * _GiB
 
     async def _run() -> None:
@@ -504,7 +504,7 @@ def test_copy_stream_is_none_off_cuda() -> None:
 def test_update_desired_spawns_and_stop_kills_the_driver(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ex = _executor(tmp_path, monkeypatch, Family)
+    ex = _executor(tmp_path, monkeypatch, ToyEndpoint)
     ex.store.residency._vram_budget = 64 * _GiB
 
     async def _run() -> None:
@@ -538,7 +538,7 @@ def test_update_desired_spawns_and_stop_kills_the_driver(
 def test_stale_generation_ignored(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ex = _executor(tmp_path, monkeypatch, Family)
+    ex = _executor(tmp_path, monkeypatch, ToyEndpoint)
     pl = ex.preloader
     snaps_new: Dict[WireRef, pb.Snapshot] = {}
     pl._generation = 5

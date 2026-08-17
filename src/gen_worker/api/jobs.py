@@ -43,7 +43,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence, TypeVar, overload
 
 import msgspec
 
-from ..family.runtime import FamilyBinding
+from ..model.runtime import Model
 from .decorators import (
     Resources,
     _normalize_families,
@@ -85,7 +85,7 @@ class JobDecl(msgspec.Struct, frozen=True, kw_only=True):
     #: between the two decorators unchanged — a job that could not take one
     #: would make the promotion a rewrite for precisely the endpoints most
     #: likely to want it.
-    families: Mapping[str, type["FamilyBinding"]] = msgspec.field(default_factory=dict)
+    families: Mapping[str, type["Model"]] = msgspec.field(default_factory=dict)
 
 
 def _qualname_owner(fn: Callable[..., Any]) -> str:
@@ -181,7 +181,7 @@ def job(
     publishes: bool = ...,
     emits_media: bool = ...,
     name: Optional[str] = ...,
-    families: Optional[Mapping[str, type[FamilyBinding]]] = ...,
+    families: Optional[Mapping[str, type[Model]]] = ...,
 ) -> Callable[[T], T]: ...
 
 
@@ -195,7 +195,7 @@ def job(
     publishes: bool = False,
     emits_media: bool = False,
     name: Optional[str] = None,
-    families: Optional[Mapping[str, type[FamilyBinding]]] = None,
+    families: Optional[Mapping[str, type[Model]]] = None,
 ) -> Any:
     """The one job decorator. See the module docstring for the shape."""
     if resources is not None and not isinstance(resources, Resources):

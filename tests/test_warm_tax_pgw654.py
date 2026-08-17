@@ -88,7 +88,7 @@ CALLS: List[Tuple[str, str, Optional[float], int, str]] = []
     models={"pipeline": Slot(str)},
     resources=Resources(gpu=True),
 )
-class Family:
+class ToyEndpoint:
     def setup(self, pipeline: str) -> None:
         self.pipeline = pipeline
 
@@ -115,7 +115,7 @@ def _executor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Executor:
     async def _send(msg: pb.WorkerMessage) -> None:
         sent.append(msg)
 
-    specs = extract_specs(Family)
+    specs = extract_specs(ToyEndpoint)
     ex = Executor(specs, _send)
     ex.store._cache_dir = tmp_path / "cas"
 
@@ -236,7 +236,7 @@ def test_warm_contract_key_splits_on_execution_lane_and_overrides_not_ref(
 
 
 def _family_jobs() -> List[warmup_mod.WarmupJob]:
-    jobs, skips = warmup_mod.plan(extract_specs(Family), decl_warmup=None)
+    jobs, skips = warmup_mod.plan(extract_specs(ToyEndpoint), decl_warmup=None)
     assert not skips
     return jobs
 

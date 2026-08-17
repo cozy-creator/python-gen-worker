@@ -1,12 +1,12 @@
 """Per-family inference-defaults vocabulary.
 
 This package ships the REGISTRY and nothing else. A family's vocabulary is
-declared by the FAMILY that owns it — ``gen_worker.family.Family(tuned=...)``
+declared by the FAMILY that owns it — ``gen_worker.model.ModelSpec(tuned=...)``
 registers it through :func:`register_family` — anywhere that gets imported
 before ``gen-worker families export-schemas --module <endpoint>`` or a build's
 discovery walk runs. The old free-standing ``@family("...")`` class decorator
 is gone (pgw#1332): it held the word ``family`` for a defaults vocabulary while
-the typed Family SDK needed it for the family itself.
+the typed ModelSpec SDK needed it for the family itself.
 
 ``SdxlDefaults`` / ``WanDefaults`` used to ship here. No SDK code
 ever consumed them, and a vocabulary in the library is a vocabulary that needs a

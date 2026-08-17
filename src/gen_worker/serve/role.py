@@ -88,20 +88,20 @@ class ServeRole(StrEnum):
 #: making the whole role statically model-free means making
 #: ``gen_worker/__init__`` lazy the way this package's own ``__init__`` now is.
 MODEL_FREE_MODULES: Tuple[str, ...] = (
-    "gen_worker.family",
-    "gen_worker.family.backing",
-    "gen_worker.family.errors",
-    "gen_worker.family.runtime",
-    "gen_worker.family.scheduler",
-    "gen_worker.family.snapshot",
-    "gen_worker.family.spec",
-    "gen_worker.family.tuned",
-    "gen_worker.family.catalog",
-    "gen_worker.family.catalog._generated",
-    "gen_worker.family.catalog._generated.flux1_dev",
-    "gen_worker.family.catalog._generated.sdxl",
-    "gen_worker.family.catalog.flux1_dev_serve",
-    "gen_worker.family.catalog.sdxl_serve",
+    "gen_worker.model",
+    "gen_worker.model.backing",
+    "gen_worker.model.errors",
+    "gen_worker.model.runtime",
+    "gen_worker.model.scheduler",
+    "gen_worker.model.snapshot",
+    "gen_worker.model.spec",
+    "gen_worker.model.tuned",
+    "gen_worker.model.catalog",
+    "gen_worker.model.catalog._generated",
+    "gen_worker.model.catalog._generated.flux1_dev",
+    "gen_worker.model.catalog._generated.sdxl",
+    "gen_worker.model.catalog.flux1_dev_serve",
+    "gen_worker.model.catalog.sdxl_serve",
 )
 
 
@@ -188,8 +188,8 @@ FORBIDDEN_LIBRARIES: Tuple[str, ...] = (
 #: the hatch is an enumerated list two people can read, never an open door that
 #: any ``try: import`` can walk through.
 OPTIONAL_SERVE_IMPORTS: Tuple[str, ...] = (
-    "gen_worker.family.catalog.flux1_dev",
-    "gen_worker.family.catalog.sdxl",
+    "gen_worker.model.catalog.flux1_dev",
+    "gen_worker.model.catalog.sdxl",
 )
 
 #: The mint lane. A serve-role module that reaches ANY of these is a pod that
@@ -208,7 +208,7 @@ MINT_MACHINERY: Tuple[str, ...] = (
     # bridge. It is the family surface's mint half, and the family surface is
     # on the serve path — which is exactly why it is named here: a serve-role
     # module that could reach it would be a pod that can compile.
-    "gen_worker.family.mint",
+    "gen_worker.model.mint",
     "gen_worker.keyset.emit",
     "gen_worker.mint_child",
     "gen_worker.mint_process",

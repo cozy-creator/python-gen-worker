@@ -377,7 +377,7 @@ def test_a_family_instance_param_is_the_one_permitted_extra(tmp_path):
     exist, and placement resolves them before the request lands — none of which
     a per-handler model argument could say.
     """
-    from gen_worker.family.catalog import Sdxl
+    from gen_worker.model.catalog import Sdxl
 
     @endpoint(families={"sdxl": Sdxl})
     class Gen:

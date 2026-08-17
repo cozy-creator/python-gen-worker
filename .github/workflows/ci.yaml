@@ -401,6 +401,18 @@ jobs:
           uv run python scripts/lint_retired_package_names.py --selftest
           uv run python scripts/lint_retired_package_names.py
 
+      # GATING (pgw#1346): the typed SDK's `Family*` spellings are DELETED, with
+      # no alias — `Model`, `ModelSpec`, `GraphModelSpec`, `gen_worker.model`.
+      # A separate fence from the one above because the retired word here is a
+      # word this tree still uses correctly everywhere else (`recipe_v1`'s
+      # `family`, `family_export_v1`, `gen_worker.families`), so the sweep has to
+      # be symbol-by-symbol rather than substring. The selftest proves it can go
+      # red, and proves the wire vocabulary stays clean.
+      - name: pgw#1346 guard - no retired SDK spelling survives
+        run: |
+          uv run python scripts/lint_retired_sdk_spellings.py --selftest
+          uv run python scripts/lint_retired_sdk_spellings.py
+
       # GATING (th#1987 / HARDCUT A9): the `:tag` ref production is DELETED.
       # A surviving pin fails on a rented pod at the resolve, not at the line
       # that wrote it. The selftest proves the fence can go red, because a
@@ -489,7 +501,7 @@ jobs:
       # sub-second, which is why it belongs in the REQUIRED job rather than
       # behind the fifteen-minute one.
       - name: pgw#1332 guard - family bindings match their exports
-        run: uv run python scripts/check_family_bindings.py
+        run: uv run python scripts/check_model_bindings.py
 
       # GATING (th#1914 / pgw#1237 / cl#56): this public corpus is the
       # authority both sides bind to real path behavior. PGW pins it offline;
