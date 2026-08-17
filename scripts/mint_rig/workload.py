@@ -276,10 +276,17 @@ def sm_probe(
     """
     root = f"{POD_ROOT}/micro-root"
     report = f"{POD_ROOT}/{name}.json"
+    # `--force-load`, with the reason the flag asks for: `micro_mint_rig`'s load
+    # gate refuses above 1-minute load 24 because THIS BOX is shared with other
+    # agent sessions. A rented pod is the opposite of that — it is dedicated,
+    # single-purpose and disposable, and its load is high precisely BECAUSE the
+    # install we just ran finished seconds ago. MEASURED on pgw#1348 row 2: the
+    # gate refused at load 26.2 on a pod nobody else could touch, after four
+    # re-rolls had already been paid for to reach a host that worked.
     command = (
         f"cd {POD_REPO} && nice -n 19 python3 scripts/micro_mint_rig.py "
-        f"--vehicle {vehicle} --device cuda --clean --root {root} --json {report} "
-        "&& echo RIG_DONE"
+        f"--vehicle {vehicle} --device cuda --clean --force-load --root {root} "
+        f"--json {report} && echo RIG_DONE"
     )
     return Workload(
         name=name,

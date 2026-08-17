@@ -296,7 +296,7 @@ RIG_STRIPPED_ENV = ("HF_TOKEN",)
 
 def hub_delivered_env(
     base: Dict[str, str], entries: Optional[Dict[str, str]] = None,
-) -> tuple:
+) -> "tuple[Dict[str, str], List[Dict[str, str]]]":
     """(env, withheld) as the hub would resolve them for this rig's release."""
     sys.path.insert(0, str(REPO / "tests"))
     from harness import hub_env as _hub
@@ -420,7 +420,8 @@ def run_cycle(
         "phase_seconds": dict(report.phases) if report else {},
         "peak_vram_bytes": int(report.peak_vram_bytes) if report else 0,
         "compiled_graph_key": str(report.compiled_graph_key) if report else "",
-        "artifact": str(outcome.artifact or ""),
+        "artifact": str(_first_artifact(outcome)),
+        "artifacts": [str(p) for p in (getattr(outcome, "artifacts", ()) or ())],
         "detail": outcome.detail[:500],
         "stderr_tail": outcome.stderr_tail[-1200:],
         # Never implied away: a cell sealed under a supplied `sm` is a PLUMBING
@@ -432,10 +433,11 @@ def run_cycle(
         result.total_s = time.monotonic() - t0
         return result
     warm = float((report.phases if report else {}).get("warmup_forward", 0.0))
-    from gen_worker import aot_serve as _serve
+    from gen_worker import artifact_meta as _meta
 
-    packed = sorted(
-        (_serve.unpack_metadata(Path(outcome.artifact or "")).get("entries") or {}))
+    # `aot_serve.unpack_metadata` is gone; `artifact_meta.read_metadata` is the
+    # reader production uses.
+    packed = sorted((_meta.read_metadata(_first_artifact(outcome)).get("entries") or {}))
     leg.facts["packed_entries"] = packed
     # The guard is a SUBSET check, not equality. A bucket-bearing mint adds
     # adapter arms whose exact set depends on composed branch-capability; what
@@ -449,7 +451,7 @@ def run_cycle(
         result.total_s = time.monotonic() - t0
         return result
     leg.detail = (
-        f"minted {Path(outcome.artifact or '').name} "
+        f"minted {_first_artifact(outcome).name} "
         f"key={(report.compiled_graph_key if report else '')[:20]} "
         f"warm={warm:.2f}s peak={leg.facts['peak_vram_bytes'] / 1e9:.2f}GB "
         f"entries={len(packed)}")
@@ -483,7 +485,7 @@ def run_cycle(
         hb_root = root / "handback"
         hb_root.mkdir(parents=True, exist_ok=True)
         hb_artifact = hb_root / "cell.tar.gz"
-        shutil.copy2(str(outcome.artifact), hb_artifact)
+        shutil.copy2(str(_first_artifact(outcome)), hb_artifact)
         pipe, hb_cfg = veh.parent_pipe(
             tree, "cuda" if dev["device_kind"] == "cuda" else "cpu")
         bucket = int(getattr(hb_cfg, "lora_bucket", 0) or 0)
@@ -496,7 +498,9 @@ def run_cycle(
             cfg=hb_cfg, target=hb_root / "adopted.tar.gz",
             mint_root=hb_root / "mint-root", publisher=None,
             cache_dir=hb_root / "cache", arm_key=arm)
-        minted = _fc.adopt_delegated_mint(pipe, pending, hb_artifact)
+        # `artifacts` is a SEQUENCE (pgw#1176); a bare Path here silently
+        # iterates as characters.
+        minted = _fc.adopt_delegated_mint(pipe, pending, [hb_artifact])
         leg.seconds = time.monotonic() - g0
         reason, why = _fc.adopt_refusal(pending)
         leg.ok = minted is not None
@@ -532,7 +536,7 @@ def run_cycle(
     try:
         leg = result.add(Leg("publish"))
         g0 = time.monotonic()
-        checkpoint_id = _publish(hub, request, Path(outcome.artifact or ""))
+        checkpoint_id = _publish(hub, request, _first_artifact(outcome), report)
         leg.ok, leg.seconds = True, time.monotonic() - g0
         leg.facts = {"checkpoint_id": checkpoint_id,
                      "routes": hub.routes(),
@@ -577,15 +581,58 @@ def run_cycle(
     return result
 
 
-def _publish(hub: Any, request: Any, artifact: Path) -> str:
-    """The real `CellPublisher`, against the local hub."""
-    from gen_worker import aot_serve, fleet_cells
+def _first_artifact(outcome: Any) -> Path:
+    """The cell tarball the child produced.
+
+    pgw#1176 turned `MintOutcome.artifact` into `artifacts: Tuple[Path, ...]`
+    ("every entry artifact the child produced, in report order") and this rig
+    was never updated — so `task rig:mint`, `task rig:micro`, `task rig:gauntlet`
+    and pgw#1348's whole probe row set have been dying on
+    `AttributeError: 'MintOutcome' object has no attribute 'artifact'` ever
+    since. Nothing saw it: `scripts/` is not on mypy's shared path and the rig
+    is never run in CI, so the first thing to notice was a rented pod.
+
+    Read in ONE place, so the next vocabulary change is one edit.
+    """
+    packed = tuple(getattr(outcome, "artifacts", ()) or ())
+    return Path(packed[0]) if packed else Path("")
+
+
+def _publish(hub: Any, request: Any, artifact: Path, report: Any = None) -> str:
+    """The real `CellPublisher`, against the local hub.
+
+    pgw#1341 made PROVENANCE a required argument: the env seal, the lane, the
+    manifest digest and the two pod axes are facts the ARTIFACT cannot state
+    (torchcg's metadata vocabulary is closed), so the publisher takes them
+    alongside the bytes and REFUSES a cell that has none. This rig had not been
+    updated and was calling the four-argument form; nothing noticed, because
+    `scripts/` is off mypy's shared path and the rig never runs in CI.
+
+    The record is built from what the MINT reported, not re-derived here: a
+    stand-in would publish this process's facts about the child's mint.
+    """
+    from gen_worker import artifact_meta as _meta
+    from gen_worker import fleet_cells, local_cell_store
 
     # The cell's OWN recorded envelope, read back off the packed tarball —
     # never a dict rebuilt here. `CellPublisher` derives the key, the axes and
     # the identity axes from it, so a hand-built stand-in would publish a cell
     # describing something other than the bytes beside it.
-    meta = aot_serve.unpack_metadata(artifact)
+    meta = _meta.read_metadata(artifact)
+    provenance = local_cell_store.MintProvenance(
+        env_seal=str(getattr(report, "env_seal", "") or meta.get("env_seal") or ""),
+        lane=str(getattr(report, "execution_lane", "") or ""),
+        graph_contract=str(getattr(report, "manifest", "") or ""),
+        sku=str(meta.get("sku") or ""),
+        gen_worker=str(meta.get("gen_worker") or ""),
+    )
+    if not provenance.stated:
+        # The one field the hub's ArtifactIdentity cannot survive without.
+        # Refusing here is the rig reporting pgw#1341's shape rather than
+        # publishing a cell under invented axes.
+        raise RigRefused(
+            "the mint reported no env seal, so this cell is unpublishable "
+            "(pgw#1341: MintProvenance.stated is False)")
     publisher = fleet_cells.CellPublisher(
         base_url=hub.base,
         worker_jwt=lambda: "local-rig-worker-jwt",
@@ -593,7 +640,7 @@ def _publish(hub: Any, request: Any, artifact: Path) -> str:
     )
     if not publisher.enabled():
         raise RigRefused("the publisher reports no sink; the local hub is up")
-    return publisher.publish(request.family, artifact, meta)
+    return publisher.publish(request.family, artifact, meta, provenance)
 
 
 def _declared_entries(veh: Any) -> List[str]:
@@ -680,7 +727,7 @@ def _adopt_in_subprocess(
                 # difference between "no cell" and "twelve cells, all rejected
                 # on one axis".
                 out["miss_log"] = _adopt_miss_log(proc.stderr)
-            return out
+            return dict(out)
     return {"ok": False,
             "error": (proc.stderr or proc.stdout or "no adopt line")[-1500:]}
 
