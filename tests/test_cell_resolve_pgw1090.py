@@ -438,10 +438,13 @@ def test_materialize_delegates_and_adds_nothing(monkeypatch, stub) -> None:
 
 def _attempt(monkeypatch, tmp_path, *, derive=None, resolve_batch=None,
              materialize=None) -> Any:
-    from gen_worker import boot_adopt, boot_key
+    from gen_worker import boot_adopt
 
-    if derive is not None:
-        monkeypatch.setattr(boot_key, "derive", derive)
+    # pgw#1327: the deriver is INJECTED, not imported — `boot_adopt` no longer
+    # names `boot_key`, so patching that module reaches nothing. These rows are
+    # about the ASK/materialize termini, so they hand `attempt` a deriver
+    # directly and the key-set-as-data path is exercised by
+    # `tests/test_cgkey_as_data_pgw1327.py`.
     if resolve_batch is not None:
         monkeypatch.setattr(cell_resolve, "resolve_batch", resolve_batch)
     if materialize is not None:
@@ -462,17 +465,20 @@ def _attempt(monkeypatch, tmp_path, *, derive=None, resolve_batch=None,
     (out,) = boot_adopt.attempt(
         function="txt2img", modules=("m",), cfg=_Cfg(), slots={},
         declared_hint=3,
-        work_root=tmp_path)
+        work_root=tmp_path, derive=derive)
     return out
 
 
 def _attempt_all(monkeypatch, tmp_path, *, derive=None, resolve_batch=None,
                  materialize=None) -> Any:
     """Every outcome, for the declarations that trace to more than one class."""
-    from gen_worker import boot_adopt, boot_key
+    from gen_worker import boot_adopt
 
-    if derive is not None:
-        monkeypatch.setattr(boot_key, "derive", derive)
+    # pgw#1327: the deriver is INJECTED, not imported — `boot_adopt` no longer
+    # names `boot_key`, so patching that module reaches nothing. These rows are
+    # about the ASK/materialize termini, so they hand `attempt` a deriver
+    # directly and the key-set-as-data path is exercised by
+    # `tests/test_cgkey_as_data_pgw1327.py`.
     if resolve_batch is not None:
         monkeypatch.setattr(cell_resolve, "resolve_batch", resolve_batch)
     if materialize is not None:
@@ -489,7 +495,7 @@ def _attempt_all(monkeypatch, tmp_path, *, derive=None, resolve_batch=None,
     return boot_adopt.attempt(
         function="txt2img", modules=("m",), cfg=_Cfg(), slots={},
         declared_hint=3,
-        work_root=tmp_path)
+        work_root=tmp_path, derive=derive)
 
 
 def _derived_multi() -> Any:
@@ -497,29 +503,34 @@ def _derived_multi() -> Any:
     exists for, and the one a single-key loop would bill three round trips."""
     from gen_worker._vendor.torchcg import identity as ck
 
-    from gen_worker import boot_key
+    from gen_worker import keyset
 
     axes = [{"graph": g, "sm": "sm_89", "toolchain": "t" * 16}
             for g in ("c0ffee0000000000", "beef000000000000",
                       "dead000000000000")]
-    return boot_key.DerivedKey(
-        entry_keys={f"e{i}": ck.from_axes(a).value
-                    for i, a in enumerate(axes)},
-        workers=2, width_reason="test", traced=3, memo="miss", wall_ms=1234)
+    return keyset.DerivedKeySet(
+        entry_keys={keyset.GraphClassName(f"e{i}"): keyset.CompiledGraphKey(
+            ck.from_axes(a).value) for i, a in enumerate(axes)},
+        source=keyset.KeySource.SHIPPED,
+        closure=keyset.parse_closure_digest("ab" * 16),
+        workers=2, width_reason="test", traced=3, wall_ms=1234)
 
 
 def _derived(digest: str = KEY) -> Any:
     from gen_worker._vendor.torchcg import identity as ck
 
-    from gen_worker import boot_key
+    from gen_worker import keyset
 
-    return boot_key.DerivedKey(
+    return keyset.DerivedKeySet(
         # pgw#1176: a boot derives a KEY SET. These declarations trace to one
         # class, so the set has one member and callers take it from `keys`.
-        entry_keys={"a": ck.from_axes({
-            "graph": "c0ffee0000000000",
-            "sm": "sm_89", "toolchain": "t" * 16}).value},
-        workers=2, width_reason="test", traced=1, memo="miss", wall_ms=1234)
+        entry_keys={keyset.GraphClassName("a"): keyset.CompiledGraphKey(
+            ck.from_axes({
+                "graph": "c0ffee0000000000",
+                "sm": "sm_89", "toolchain": "t" * 16}).value)},
+        source=keyset.KeySource.SHIPPED,
+        closure=keyset.parse_closure_digest("ab" * 16),
+        workers=2, width_reason="test", traced=1, wall_ms=1234)
 
 
 def test_an_underivable_key_degrades_with_the_reason(

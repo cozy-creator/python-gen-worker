@@ -143,7 +143,13 @@ _DERIVATION_ALLOWLIST = {
     # two ends can disagree about membership.
     "toolchain_axis_digest(": {
         "fleet_cells.py",  # arm_identity + arm_axis_divergence
-        "boot_key.py",     # boot compatibility closure
+        # pgw#1327: the boot fold MOVED, it did not multiply. `boot_key.py` no
+        # longer names this — `keyset/fold.py` is the single place a graph axis
+        # meets this pod's runtime axes, and every route into it (a shipped
+        # document, this machine's cache, a fresh trace) converges there, which
+        # is a strictly stronger form of the one-derivation rule than the
+        # tracer owning it was.
+        "keyset/fold.py",  # boot compatibility closure
         # pgw#1205: the device-peak census's provenance. Added CONSCIOUSLY,
         # which is what this fence's own message offers as the alternative to
         # reading a stamped value — and here there is no stamped value to

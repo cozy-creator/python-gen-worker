@@ -28,6 +28,7 @@ from gen_worker import (
     boot_key,
     graph_facts,
     compile_cache,
+    keyset,
     lifecycle,
     mint_supervisor,
     numerics_ladder,
@@ -36,6 +37,7 @@ from gen_worker import (
     receipts,
     rigcheck,
 )
+from gen_worker.keyset import document as keyset_doc, store as keyset_store
 from gen_worker.api.errors import ArtifactTransferError
 from gen_worker.hubio.transport import TransportError
 from gen_worker.parallel.cp import (
@@ -130,11 +132,28 @@ def _runtime_key(monkeypatch: pytest.MonkeyPatch) -> None:
     })
 
 
-def _write_memo(tmp_path: Path, hashes: Dict[str, str]) -> str:
+def _write_memo(tmp_path: Path, hashes: Dict[str, str]) -> Any:
+    """The pod-local `cg-keyset-v1` row this machine would have answered with.
+
+    pgw#1327: `modules` is passed HERE and at the seam. It was omitted at the
+    seam while every derivation passed it, so the gate addressed a closure
+    nothing ever wrote and read an absent row on every pod — i.e. these four
+    rows were green over a comparison that never happened. The task's own
+    `modules` is the value both ends must agree on.
+    """
     cfg = _Cfg()
-    digest = boot_key.closure_digest(
-        "tiny", mint_supervisor.cfg_spec(cfg), function="generate", slots={})
-    assert boot_key.write_memo(tmp_path, digest, hashes)
+    digest = keyset.closure_digest(
+        "tiny", mint_supervisor.cfg_spec(cfg), function="generate", slots={},
+        modules=_mint_task(tmp_path).modules)
+    assert keyset_store.write_closure(
+        tmp_path, digest, keyset_doc.closure_row(
+            family="tiny", function="generate",
+            tcg_version=keyset.tcg_version(),
+            classes={
+                name: keyset_doc.GraphClassRow(
+                    graph_class=name, class_hash=class_hash,
+                    ingress_digest="9" * 32, target="denoiser")
+                for name, class_hash in hashes.items()}))
     return digest
 
 
@@ -157,9 +176,9 @@ def test_the_mint_publish_seam_rules_on_a_DISHONEST_boot_memo(
         _mint_task(tmp_path), _Cfg(),
         _Result([_Row("a", _entry_block(dim=128))]), declared=1)
 
-    assert "DISHONEST" in reason and "a: memo" in reason
+    assert "DISHONEST" in reason and "a: cached" in reason
     # The entry is GONE: the next boot re-traces instead of answering from it.
-    assert boot_key.read_memo(tmp_path, digest) == {}
+    assert keyset_store.class_hashes(digest, cache_dir=tmp_path) == {}
 
 
 def test_an_HONEST_boot_memo_is_silence_at_the_publish_seam(
@@ -172,7 +191,7 @@ def test_an_HONEST_boot_memo_is_silence_at_the_publish_seam(
         _mint_task(tmp_path), _Cfg(),
         _Result([_Row("a", _entry_block(dim=64))]), declared=1) == ""
     # An honest memo SURVIVES — the whole economic point of having one.
-    assert boot_key.read_memo(tmp_path, digest) == hashes
+    assert keyset_store.class_hashes(digest, cache_dir=tmp_path) == hashes
 
 
 def test_a_PARTIAL_class_set_rules_on_nothing(
@@ -188,7 +207,7 @@ def test_a_PARTIAL_class_set_rules_on_nothing(
     assert mint_supervisor.rule_on_boot_memo(
         _mint_task(tmp_path), _Cfg(),
         _Result([_Row("a", _entry_block(dim=64))]), declared=2) == ""
-    assert boot_key.read_memo(tmp_path, digest) == hashes
+    assert keyset_store.class_hashes(digest, cache_dir=tmp_path) == hashes
 
 
 def test_the_dishonest_verdict_reaches_the_wire_as_a_TYPED_EVENT(

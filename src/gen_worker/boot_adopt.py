@@ -3,9 +3,13 @@
 ONE function, and it is the whole of §4.27's first three steps for a serving
 pod:
 
-1. **Derive** the ``cg-key-v1`` key SET from code alone — ``boot_key.derive``,
-   process-parallel structure-only traces, no weight resident anywhere. One key
-   per graph class (pgw#1176), not one per pod.
+1. **State** the ``cg-key-v1`` key SET from code alone — since pgw#1327 by
+   READING the ``cg-keyset-v1`` document the mint lane emitted
+   (``keyset.key_set_from_data``), folded with this pod's own sm/toolchain. One
+   key per graph class (pgw#1176), not one per pod. **Zero ``torch.export``
+   calls, zero child processes, no endpoint model code imported.** A pod whose
+   closure is not in any shipped document hands the miss to an injected
+   mint-lane deriver, and an adopt-only role injects none.
 2. **Ask THIS MACHINE first** (pgw#1127 S2, §4.28) — ``local_cell_store.
    lookup(key)``. The derived key is the local store's own address, so an
    offline machine holding the exact cell it needs answers here and no hub is
@@ -71,10 +75,13 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Any, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple)
 
-from . import activity, aot_identity, boot_key, cell_resolve, local_cell_store
+from . import activity, aot_identity, cell_resolve, keyset, local_cell_store
 from .child_contract import CompileSpec, MintSlot
+from .keyset import DerivedKeySet, KeySetError
+from .keyset import boot as keyset_boot
 
 logger = logging.getLogger(__name__)
 
@@ -127,10 +134,25 @@ LOCAL_REASONS: Tuple[str, ...] = (
     "local_miss_no_hub",
 )
 
-#: Step 1 — the derivation. ``boot_key.BootKeyUnavailable.reason`` tokens,
+#: Step 1, the MINT-LANE fallback only. ``BootKeyUnavailable.reason`` tokens,
 #: including the ones a trace child names in its own report
-#: (``boot_trace_child._fail``), which ``boot_key.derive`` re-raises verbatim.
+#: (``boot_trace_child._fail``), which the deriver re-raises verbatim. Named as
+#: strings and NOT imported: this module states the vocabulary a deriver may
+#: answer in without importing the tracer that answers (pgw#1327/#1328).
 DERIVE_REASONS: Tuple[str, ...] = (
+    # pgw#1327 — the two termini of the key set AS DATA, and they are the two
+    # that matter on an adopt-only pod. `keyset_absent`: no shipped document
+    # holds this pod's closure and no mint-lane deriver was injected, so this
+    # boot states no key and adopts nothing. `keyset_invalid`: a document was
+    # found and is malformed or a version this worker does not read — a
+    # mint-lane defect, reported as itself rather than degraded to a miss.
+    "keyset_absent", "keyset_invalid",
+    # The closure itself could not be stated (trace-contract source unreadable),
+    # so there is no address at which a key set could be looked up.
+    "closure_unavailable",
+    # The graph axis is in hand but this process cannot read a compute
+    # capability, so folding would produce a key naming graphs no card made.
+    "no_runtime_sm",
     "no_classes", "code_drift", "class_set_disagreement", "class_set_gap",
     "trace_failed", "bad_report", "child_died", "refused", "child_error",
     "slots_unresolvable", "structure_unsupported", "no_compile_target",
@@ -182,12 +204,11 @@ HIT = "hit"
 #: does so on a box with no network at all.
 LOCAL_HIT = "local_hit"
 
-
 @dataclass(frozen=True)
 class BootAdoption:
     """A cell this boot resolved by its OWN derived key, ready to arm."""
 
-    derived: boot_key.DerivedKey
+    derived: DerivedKeySet
     cell: cell_resolve.ResolvedCell
     artifact: Path
 
@@ -237,6 +258,12 @@ class BootAdoptOutcome:
     #: the event never has to join it back to anything (pgw#1116).
     family: str = ""
     function: str = ""
+    #: pgw#1327: WHERE this boot's key set came from — shipped data, this
+    #: machine's cache, or ``torch.export`` children. ``None`` on every terminus
+    #: that never got one. This is the field that makes "did any pod in the
+    #: fleet still trace at boot" a query rather than an inference, and it is the
+    #: fleet-side half of the zero-export acceptance.
+    key_source: Optional[keyset.KeySource] = None
 
     @property
     def adopted(self) -> bool:
@@ -258,7 +285,8 @@ def report(outcome: BootAdoptOutcome) -> BootAdoptOutcome:
     """
     detail = (
         f"family={outcome.family or '?'} function={outcome.function or '?'} "
-        f"key={outcome.derived_key or '-'}"
+        f"key={outcome.derived_key or '-'} "
+        f"keys_from={outcome.key_source.value if outcome.key_source else '-'}"
         + (f" — {outcome.detail}" if outcome.detail else "")
     )
     activity.emit_event(
@@ -318,6 +346,7 @@ def arm_refused(
         derive_ms=outcome.derive_ms,
         family=outcome.family,
         function=outcome.function,
+        key_source=outcome.key_source,
     ))
 
 
@@ -341,7 +370,7 @@ def no_compiled_graph_source(hub_absent: str) -> bool:
 
 
 def _local_answer(
-    key: str, derived: "boot_key.DerivedKey", *, family: str, fn: str,
+    key: str, derived: DerivedKeySet, *, family: str, fn: str,
     cache_dir: Optional[Path] = None,
 ) -> Optional[BootAdoptOutcome]:
     """This machine's own store, asked by the derived key. ``None`` = ask on.
@@ -371,7 +400,123 @@ def _local_answer(
             f"({cell.bytes / 1e6:.1f} MB); it arms from disk with no mint, no "
             f"hub and no network (§4.28)"),
         derived_key=key, local_key=key, derive_ms=derived.wall_ms,
-        family=family, function=fn))
+        family=family, function=fn, key_source=derived.source))
+
+
+def _key_set(
+    *,
+    function: str,
+    modules: Sequence[str],
+    family: str,
+    spec: CompileSpec,
+    slots: Mapping[str, MintSlot],
+    declared_hint: int,
+    work_root: Path,
+    memo_dir: Optional[Path],
+    device: int,
+    derive: Optional["KeyDeriver"],
+    keyset_roots: Sequence[Path],
+) -> "DerivedKeySet | BootAdoptOutcome":
+    """This boot's key set — from DATA first, from a deriver only if injected.
+
+    The order is the whole leg. A shipped ``cg-keyset-v1`` answers in
+    milliseconds and runs no exporter; this machine's own cache answers next
+    (§4.28's compile-once-run-forever, unchanged); a mint-lane deriver is asked
+    last and only when the caller handed one over.
+
+    Returns a refusal OUTCOME rather than raising, because every failure here
+    means "boot as this pod booted yesterday" and the reason is the countable
+    token for why.
+    """
+    try:
+        return keyset_boot.key_set_from_data(
+            family=family,
+            function=function,
+            modules=modules,
+            cfg=spec,
+            slots=slots,
+            cache_dir=Path(memo_dir) if memo_dir else None,
+            extra_roots=tuple(keyset_roots),
+        )
+    except KeySetError as exc:
+        if exc.reason != "keyset_absent":
+            # A malformed or unreadable document, or a pod that cannot state its
+            # own closure / compute capability. Never degraded to a miss: it is a
+            # mint-lane or image defect and it must be visible as itself.
+            return BootAdoptOutcome(
+                reason=exc.reason, detail=exc.detail,
+                family=family, function=function)
+        absent = exc.detail
+    except Exception as exc:  # noqa: BLE001 — never fatal, see the docstring
+        logger.debug("boot-adopt: key set unreadable", exc_info=True)
+        return BootAdoptOutcome(
+            reason="keyset_invalid", detail=f"{type(exc).__name__}: {exc}",
+            family=family, function=function)
+
+    if derive is None:
+        # The adopt-only terminus (pgw#1328): no document, and this role holds
+        # no tracer. A complete answer — the pod serves as it booted before —
+        # and the REASON is what tells the fleet that a release shipped without
+        # its key set.
+        return BootAdoptOutcome(
+            reason="keyset_absent",
+            detail=(
+                f"{absent}; this role holds no key deriver, so it states no key "
+                f"and adopts nothing (pgw#1327/#1328)"),
+            family=family, function=function)
+
+    try:
+        return derive(
+            function=function,
+            modules=tuple(str(m) for m in modules),
+            family=family,
+            cfg=spec,
+            slots=dict(slots),
+            declared_hint=int(declared_hint),
+            work_root=Path(work_root),
+            memo_dir=Path(memo_dir) if memo_dir else None,
+            device=int(device),
+        )
+    except Exception as exc:  # noqa: BLE001 — never fatal, see the docstring
+        # The deriver's own typed refusal rides through by DUCK TYPE, not by
+        # `except boot_key.BootKeyUnavailable`: this module does not import the
+        # tracer it is falling back to. `structure_unsupported` and
+        # `slots_unresolvable` are the two tokens that name a family the boot
+        # path cannot key at all, and they are the whole point of not
+        # collapsing this to "derive failed".
+        reason = str(getattr(exc, "reason", "") or "")
+        detail = str(getattr(exc, "detail", "") or f"{type(exc).__name__}: {exc}")
+        if reason not in DERIVE_REASONS:
+            logger.debug("boot-adopt: key derivation failed", exc_info=True)
+            reason, detail = "derive_failed", f"{type(exc).__name__}: {exc}"
+        return BootAdoptOutcome(
+            reason=reason, detail=detail, family=family, function=function)
+
+
+class KeyDeriver(Protocol):
+    """A MINT-LANE key derivation, injected — never imported.
+
+    ``boot_key.derive`` satisfies this. Stating it as a Protocol is the whole
+    structural half of pgw#1327: this module is the serve path's boot-adopt, and
+    it no longer names, imports or transitively reaches a tracer. An adopt-only
+    serve role (pgw#1328) passes ``None`` and gets a typed refusal on a key-set
+    miss; a mint-capable pod passes its deriver and behaves as it always did.
+    """
+
+    def __call__(
+        self,
+        *,
+        function: str,
+        modules: Sequence[str],
+        family: str,
+        cfg: CompileSpec,
+        slots: Mapping[str, MintSlot],
+        declared_hint: int,
+        work_root: Path,
+        memo_dir: Optional[Path] = ...,
+        device: int = ...,
+    ) -> DerivedKeySet:
+        ...
 
 
 def attempt(
@@ -388,16 +533,23 @@ def attempt(
     bearer: str = "",
     device: int = -1,
     hub_absent: str = "",
+    derive: Optional[KeyDeriver] = None,
+    keyset_roots: Sequence[Path] = (),
 ) -> Tuple[BootAdoptOutcome, ...]:
-    """Derive the KEY SET, then for each key ask THIS MACHINE, ask the hub and
+    """State the KEY SET, then for each key ask THIS MACHINE, ask the hub and
     materialize. Never raises.
 
-    pgw#1176: returns ONE outcome per declared graph class. A derivation
-    failure is a single-element tuple, because it is the one failure that is
-    genuinely about the declaration rather than about a class.
+    pgw#1327: the key set is READ, from the ``cg-keyset-v1`` document the mint
+    lane emitted. ``derive`` is the fallback for the pod that has no document —
+    i.e. the first pod of a release, which is the pod that mints (§4.28). Pass
+    ``None`` and a key-set miss is a typed refusal instead of 60 s of traces.
+
+    pgw#1176: returns ONE outcome per declared graph class. A key-set failure is
+    a single-element tuple, because it is the one failure that is genuinely
+    about the declaration rather than about a class.
 
     ``declared_hint`` is ``len(aot_declaration.cell_plans(decl))`` — it sizes
-    the trace pool and nothing else.
+    the trace pool of the fallback deriver and nothing else.
 
     ``hub_absent`` (pgw#1127) is the caller's own sentence for why there is
     nobody to ask over the wire, "" when there is. It is a DETAIL, not a
@@ -421,32 +573,13 @@ def attempt(
         text_lens=tuple(int(v) for v in (getattr(cfg, "text_lens", ()) or ())),
     )
 
-    try:
-        derived = boot_key.derive(
-            function=str(function),
-            modules=tuple(str(m) for m in modules),
-            family=family,
-            cfg=spec,
-            slots=dict(slots),
-            declared_hint=int(declared_hint),
-            work_root=Path(work_root),
-            memo_dir=Path(memo_dir) if memo_dir else None,
-            device=int(device),
-        )
-    except boot_key.BootKeyUnavailable as exc:
-        # The reason is a trace child's own token when a child refused
-        # (`boot_trace_child._fail`) — `structure_unsupported` and
-        # `slots_unresolvable` are the two that name a family the boot path
-        # cannot key at all, and they are the whole point of not collapsing
-        # this to "derive failed".
-        return (report(BootAdoptOutcome(
-            reason=exc.reason, detail=exc.detail,
-            family=family, function=fn)),)
-    except Exception as exc:  # noqa: BLE001 — never fatal, see the docstring
-        logger.debug("boot-adopt: key derivation failed", exc_info=True)
-        return (report(BootAdoptOutcome(
-            reason="derive_failed", detail=f"{type(exc).__name__}: {exc}",
-            family=family, function=fn)),)
+    outcome = _key_set(
+        function=fn, modules=modules, family=family, spec=spec, slots=slots,
+        declared_hint=declared_hint, work_root=work_root, memo_dir=memo_dir,
+        device=device, derive=derive, keyset_roots=keyset_roots)
+    if isinstance(outcome, BootAdoptOutcome):
+        return (report(outcome),)
+    derived = outcome
 
     # ── pgw#1176: a boot derives a KEY SET, and asks per key ──────────────
     #
@@ -465,17 +598,18 @@ def attempt(
     # (a local stat, no wire) and the hub is asked ONCE for everything the
     # machine did not already hold. A 36-class sdxl boot went from 36 resolve
     # round trips to one; minimax-h3 from 198 to one.
-    keys = derived.keys
+    keys = [str(key) for key in derived.keys]
     if not keys:
         return (report(BootAdoptOutcome(
             reason="derive_failed",
-            detail="the declaration traced to no graph class at all",
-            derive_ms=derived.wall_ms, family=family, function=fn)),)
+            detail="the declaration named no graph class at all",
+            derive_ms=derived.wall_ms, family=family, function=fn,
+            key_source=derived.source)),)
     logger.info(
-        "boot-adopt: %s asking for %d key(s) (%d class(es), "
-        "K=%d, memo=%s, derived in %d ms)",
-        family, len(keys), len(derived.entry_keys), derived.workers,
-        derived.memo, derived.wall_ms)
+        "boot-adopt: %s asking for %d key(s) (%d class(es), source=%s, K=%d, "
+        "cache=%s, stated in %d ms)",
+        family, len(keys), len(derived.entry_keys), derived.source.value,
+        derived.workers, derived.memo.value, derived.wall_ms)
 
     # ── §4.28 / pgw#1127: THIS MACHINE, before the wire ────────────────────
     # The derived key is the local store's own address. A machine that minted
@@ -498,7 +632,7 @@ def attempt(
             settled[key] = report(BootAdoptOutcome(
                 reason="local_miss_no_hub", detail=hub_absent,
                 derived_key=key, derive_ms=derived.wall_ms,
-                family=family, function=fn))
+                family=family, function=fn, key_source=derived.source))
         else:
             ask.append(key)
 
@@ -531,7 +665,8 @@ def attempt(
         if refused[0]:
             out.append(report(BootAdoptOutcome(
                 reason=refused[0], detail=refused[1], derived_key=key,
-                derive_ms=derived.wall_ms, family=family, function=fn)))
+                derive_ms=derived.wall_ms, family=family, function=fn,
+                key_source=derived.source)))
             continue
         out.append(_adopt_answer(
             answers[key], derived, family=family, fn=fn, cache_dir=cache_dir))
@@ -540,7 +675,7 @@ def attempt(
 
 def _adopt_answer(
     answer: cell_resolve.ResolveAnswer,
-    derived: "boot_key.DerivedKey",
+    derived: DerivedKeySet,
     *,
     family: str,
     fn: str,
@@ -563,7 +698,7 @@ def _adopt_answer(
         return report(BootAdoptOutcome(
             reason=answer.refusal_code, detail=answer.detail,
             derived_key=key, derive_ms=derived.wall_ms,
-            family=family, function=fn))
+            family=family, function=fn, key_source=derived.source))
     cell = answer.cell
     if cell is None:
         # A pod that DERIVED a key and was told MISS is a different fact from a
@@ -573,7 +708,7 @@ def _adopt_answer(
             reason="miss",
             detail=f"the hub holds no entitled compiled graph for {key}",
             derived_key=key, derive_ms=derived.wall_ms,
-            family=family, function=fn))
+            family=family, function=fn, key_source=derived.source))
 
     try:
         artifact = cell_resolve.materialize(
@@ -584,7 +719,7 @@ def _adopt_answer(
         return report(BootAdoptOutcome(
             reason="materialize_failed", detail=f"{type(exc).__name__}: {exc}",
             derived_key=key, derive_ms=derived.wall_ms,
-            family=family, function=fn))
+            family=family, function=fn, key_source=derived.source))
 
     return report(BootAdoptOutcome(
         adoption=BootAdoption(derived=derived, cell=cell, artifact=artifact),
@@ -594,11 +729,12 @@ def _adopt_answer(
             f"materialized at {artifact} — arming with ZERO dispatches having "
             f"occurred"),
         derived_key=key, derive_ms=derived.wall_ms,
-        family=family, function=fn))
+        family=family, function=fn, key_source=derived.source))
 
 
 __all__ = [
     "ASK_REASONS", "BootAdoptOutcome", "BootAdoption", "DERIVE_REASONS",
-    "GATE_REASONS", "HIT", "LOCAL_HIT", "LOCAL_REASONS", "REASONS",
-    "arm_refused", "attempt", "no_compiled_graph_source", "refused", "report",
+    "GATE_REASONS", "HIT", "KeyDeriver", "LOCAL_HIT", "LOCAL_REASONS",
+    "REASONS", "arm_refused", "attempt", "no_compiled_graph_source", "refused",
+    "report",
 ]

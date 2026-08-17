@@ -46,7 +46,8 @@ import pytest
 
 import tcg_artifacts
 from gen_worker import (
-    activity, boot_adopt, boot_key, cell_resolve, fleet_cells, local_cell_store,
+    activity, boot_adopt, boot_key, cell_resolve, fleet_cells, keyset,
+    local_cell_store,
 )
 from gen_worker import executor as executor_mod
 from gen_worker.api import export_contract as export_contract_mod
@@ -209,9 +210,11 @@ def _derived() -> Any:
     from gen_worker._vendor.torchcg import identity as ck
 
     del ck  # pgw#1283: the address comes from the artifact this machine HOLDS
-    return boot_key.DerivedKey(
-        entry_keys={"a": KEY_DERIVED},
-        workers=2, width_reason="test", traced=1, memo="miss", wall_ms=7)
+    return keyset.DerivedKeySet(
+        entry_keys={keyset.GraphClassName("a"): keyset.CompiledGraphKey(
+            KEY_DERIVED)},
+        source=keyset.KeySource.SHIPPED, closure=keyset.parse_closure_digest("ab" * 16),
+        workers=2, width_reason="test", traced=1, wall_ms=7)
 
 
 # pgw#1176: a boot derives a key SET. This declaration traces to one class, so
@@ -360,12 +363,13 @@ def test_a_local_hit_carries_an_ADDRESS_and_never_an_adoption(
     local_cell_store.store(
         _cell(tmp_path), key=KEY_DERIVED, family="micro-diffusion",
         arm_token=ARM_A, cas_root=cas)
-    monkeypatch.setattr(boot_key, "derive", lambda **kw: _derived())
-
+    # pgw#1327: the deriver is injected, not imported. This row is about the
+    # LOCAL STORE terminus, so it hands `attempt` a deriver directly rather than
+    # shipping a key set — either route produces the same `DerivedKeySet`.
     (out,) = boot_adopt.attempt(
         function="generate", modules=("micro_diffusion.main",), cfg=_Cfg(),
         slots={}, declared_hint=1, work_root=tmp_path, cache_dir=cas,
-        hub_absent="nobody to ask")
+        hub_absent="nobody to ask", derive=lambda **kw: _derived())
 
     assert out.reason == boot_adopt.LOCAL_HIT
     assert out.adoption is None and not out.adopted, (

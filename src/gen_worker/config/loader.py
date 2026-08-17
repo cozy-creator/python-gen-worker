@@ -142,6 +142,7 @@ _OWNED_NON_SETTINGS: frozenset[str] = frozenset(REFUSED_KEY_MATERIAL) | frozense
     # Library/standalone-tool knobs; see scripts/config_reads_allowlist.txt.
     "GEN_WORKER_LOG_LEVEL",
     "GEN_WORKER_LOCAL_CELLS_DIR",
+    "GEN_WORKER_CG_KEYSET",
     "GEN_WORKER_LOCAL_OUTPUT_DIR",
     "GEN_WORKER_NATIVE_KERNELS",
     "GEN_WORKER_NATIVE_KERNELS_LIB",

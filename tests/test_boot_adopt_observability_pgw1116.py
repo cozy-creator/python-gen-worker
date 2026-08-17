@@ -340,14 +340,18 @@ def test_the_gates_are_pairwise_distinguishable(
 def _derived(wall_ms: int = 1234) -> Any:
     from gen_worker._vendor.torchcg import identity as ck
 
-    return boot_key.DerivedKey(
+    from gen_worker import keyset
+
+    return keyset.DerivedKeySet(
         # pgw#1176: a boot derives a KEY SET. These declarations trace to one
         # class, so the set has one member and callers take it from `keys`.
-        entry_keys={"a": ck.from_axes({
-            "graph": "c0ffee0000000000",
-            "sm": "sm_89", "toolchain": "t" * 16}).value},
-        workers=2, width_reason="test", traced=1, memo="miss",
-        wall_ms=wall_ms)
+        entry_keys={keyset.GraphClassName("a"): keyset.CompiledGraphKey(
+            ck.from_axes({
+                "graph": "c0ffee0000000000",
+                "sm": "sm_89", "toolchain": "t" * 16}).value)},
+        source=keyset.KeySource.TRACED,
+        closure=keyset.parse_closure_digest("ab" * 16),
+        workers=2, width_reason="test", traced=1, wall_ms=wall_ms)
 
 
 class _Cell:
@@ -367,8 +371,11 @@ def _attempt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **wires: Any) -> A
     all of them. Rows that care about per-class divergence index the tuple;
     `test_the_verdict_is_bisectable_to_ONE_named_axis` is the one that does.
     """
-    if "derive" in wires:
-        monkeypatch.setattr(boot_key, "derive", wires["derive"])
+    # pgw#1327: the deriver is INJECTED, not imported — `boot_adopt` no longer
+    # names `boot_key`, so patching that module reaches nothing. These rows are
+    # about the terminus VOCABULARY, so they hand `attempt` a deriver directly;
+    # the key-set-as-data route has its own file
+    # (`tests/test_cgkey_as_data_pgw1327.py`).
     if "resolve" in wires:
         # pgw#1224: the wire is a BATCH. The per-key wires below are lifted to
         # the batch shape here rather than rewritten one by one, so each row
@@ -380,7 +387,7 @@ def _attempt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **wires: Any) -> A
     return boot_adopt.attempt(
         function="generate", modules=("micro_diffusion.main",), cfg=_Cfg(),
         slots={}, declared_hint=3,
-        work_root=tmp_path)[0]
+        work_root=tmp_path, derive=wires.get("derive"))[0]
 
 
 def _batched(per_key: Any) -> Any:

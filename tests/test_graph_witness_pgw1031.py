@@ -9,6 +9,7 @@ import pytest
 from gen_worker._vendor.torchcg import CallIngress, CallInput, GraphClassSpec
 
 from gen_worker import aot_mint, boot_key, boot_trace_child
+from gen_worker.keyset import emit as keyset_emit
 from gen_worker.aot_inputs import ExportSpec
 
 torch: Any = pytest.importorskip("torch")
@@ -90,7 +91,8 @@ def test_boot_and_compile_share_one_worker_to_tcg_translation() -> None:
     assert shared == direct
 
     wire = boot_key.serialize_declaration(shared)
-    assert boot_key.declaration_hashes({"model": wire}) == {
+    assert keyset_emit.class_hashes_of(
+        keyset_emit.rows_from_declarations({"model": wire})) == {
         "model": shared.class_hash,
     }
 
@@ -108,9 +110,15 @@ def test_boot_wire_reconstructs_every_public_tcg_fact() -> None:
     ).declare()
     wire = boot_key.serialize_declaration(declaration)
 
-    assert boot_key.declaration_hashes({"nested/model": wire}) == {
+    rows = keyset_emit.rows_from_declarations({"nested/model": wire})
+    assert keyset_emit.class_hashes_of(rows) == {
         "nested/model": declaration.class_hash,
     }
+    # pgw#1327: the row a shipped key set carries is built from the SAME
+    # reconstruction — the ingress digest is TCG's `range_digest`, not a
+    # second derivation.
+    assert rows["nested/model"].ingress_digest == declaration.range_digest
+    assert rows["nested/model"].target == declaration.target
 
 
 def test_boot_child_has_no_worker_graph_identity_implementation() -> None:

@@ -31,9 +31,11 @@ TCG_REV_BEFORE_THE_RENAME = "ad5f4cb9f89bbe91d2a30ca218f70d5326630368"
 
 
 def test_the_vendored_table_rename_did_not_move_the_compile_memo_key() -> None:
-    from gen_worker.boot_key import _tcg_version
+    # pgw#1327: the TCG component of `closure_digest` moved with the digest
+    # itself into `gen_worker.keyset`; the VALUE it returns must not have moved.
+    from gen_worker.keyset import tcg_version
 
-    assert _tcg_version() == TCG_REV_BEFORE_THE_RENAME, (
+    assert tcg_version() == TCG_REV_BEFORE_THE_RENAME, (
         "the TCG component of `closure_digest` moved. The pgw#1297 rename was "
         "supposed to change a lookup key and nothing else — a moved component "
         "invalidates every boot memo on the fleet and re-mints every family."
