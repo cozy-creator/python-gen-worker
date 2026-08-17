@@ -245,7 +245,11 @@ class Preloader:
                 ref = pick[0]
             if not slot or not ref:
                 return None
-            orders[slot] = dispatch.SlotOrder(ref=ref)
+            # pgw#1333: the whole binding, not just its ref — the rotation
+            # preload derives the SAME effective spec the validated warm path
+            # does, and a spec whose slot facts differ is a different spec.
+            orders[slot] = dispatch.order_from_binding(
+                m, ref=ref, owed_by=dispatch.BOOT_SENDER_OWES)
         try:
             return ex._dispatched_spec(spec, orders)
         except Exception:

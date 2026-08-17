@@ -32,6 +32,10 @@ from typing import Any, List
 
 import msgspec
 import pytest
+
+from gen_worker.serving_facts import FactsUnavailable as _FU
+
+_NO_FACTS = _FU(owed_by="a test that resolves no catalog")
 import torch
 
 import gen_worker
@@ -200,7 +204,7 @@ def boot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     eff = ex._dispatched_spec(
         ex.specs["generate"],
-        {"pipeline": dispatch.SlotOrder(ref=REF)},
+        {"pipeline": dispatch.SlotOrder(ref=REF, facts=_NO_FACTS)},
     )
     snaps = {
         REF: pb.Snapshot(

@@ -40,6 +40,7 @@ from typing import Any, Dict, Generic, Mapping, Optional, Sequence, Type, TypeVa
 import msgspec
 
 from .binding import ModelRef
+from ..serving_facts import OBJECTIVES as _OBJECTIVES
 from ..families.base import KIND_LORA, GenerationDefaults, family_for
 from ..models.tensor_layout_contract import (
     LayoutDeclarationError,
@@ -65,7 +66,11 @@ D = TypeVar("D", bound=GenerationDefaults)
 # v-pred fact). Drives the recipe (few steps, CFG off), the graph choice
 # (cfg_off/batch-1 class) and adapter policy (never stack a distillation
 # LoRA onto already-distilled weights).
-OBJECTIVES = ("epsilon", "v_prediction", "flow")
+# pgw#1333: the vocabulary itself lives in ``gen_worker.serving_facts``,
+# beside the type that validates against it, so a struct cannot be built with
+# an objective this gate would later reject as "not in the declared
+# objectives" — a decode bug wearing a compatibility refusal's clothes.
+OBJECTIVES = _OBJECTIVES
 
 # SERVING TASKS — what a handler asks the model to DO, as opposed to
 # what the model IS. Orthogonal to both facts above: qwen-image-edit and

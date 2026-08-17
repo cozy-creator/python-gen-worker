@@ -34,6 +34,7 @@ from .warmup import validate_class_warmup
 import dataclasses
 from .api.compile_axis import warm_guidance_values
 from .graph_facts import facts_digest
+from .serving_facts import SlotEvidence
 from .api.export_contract import (
     declares_export_contract, register_export_declaration, registered_entry,
 )
@@ -174,6 +175,14 @@ class EndpointSpec:
     # the handler's derived config schema's @family registration) —
     # precomputed once here so ctx.slots doesn't need EndpointDecl.compile.
     slot_family: Dict[str, str] = field(default_factory=dict)
+    # pgw#1333: per-slot SERVING FACTS — what the catalog says the resolved
+    # checkpoint IS. Never authored and never discovered: `_dispatched_spec`
+    # folds them in from the neutral orders exactly as it folds in `models`,
+    # and `child_preflight.bind_slots` reinstalls them in a child that re-ran
+    # discovery. A slot absent from this map has no EVIDENCE, which is not the
+    # same as a checkpoint the catalog classified as nothing — the two states
+    # were one state before this field, and every governed mint refused.
+    slot_facts: Dict[str, SlotEvidence] = field(default_factory=dict)
     # The handler's DERIVED config schema — the D in `ctx: RequestContext[D]`.
     # None when the handler annotates a bare context. Catalog recipe metadata
     # decodes against this type; code owns the schema, the catalog owns the

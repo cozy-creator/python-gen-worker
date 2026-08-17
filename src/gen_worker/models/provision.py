@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -273,7 +274,11 @@ def load_slot(
             reporter.set_phase("place")
             out.placed = place_pipeline(pipe, mode=mode, ref=ref)
     finally:
-        reporter.stop(clean=True)
+        # pgw#1334: the closing row says which way the load ended. `clean`
+        # only ever meant "clear the breadcrumb" — it is True on both paths —
+        # so without this the raising load and the succeeding one emitted the
+        # same sentence, and a pod's was read as a completion claim.
+        reporter.stop(clean=True, raised=sys.exc_info()[0] is not None)
     return out
 
 

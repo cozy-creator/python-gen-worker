@@ -39,6 +39,8 @@ from typing import Any, Dict, List, Tuple
 import msgspec
 import pytest
 
+from harness.slot_facts import TEST_FACTS as _TEST_FACTS
+
 from gen_worker import child_preflight
 from gen_worker import child_contract
 from gen_worker import compile_cache as cc
@@ -179,7 +181,7 @@ def _request(
         slots={"pipeline": child_contract.MintSlot(
             ref=ModelRef(source="tensorhub", path="rig/tiny-diffusion",
                          release="prod"),
-            path=str(checkpoint))},
+            path=str(checkpoint), facts=_TEST_FACTS)},
         device=-1, execution_lane="", configs={})
     request = mint_process.build_request(task, workdir=workdir)
     # The boundary IS a file: round-trip it exactly as the child decodes it.

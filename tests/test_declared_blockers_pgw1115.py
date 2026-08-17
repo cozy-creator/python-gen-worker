@@ -38,6 +38,8 @@ from typing import Any, List, Tuple
 import msgspec
 import pytest
 
+from harness.slot_facts import TEST_FACTS as _TEST_FACTS
+
 from gen_worker import child_preflight
 from gen_worker import child_contract
 from gen_worker import Compile, MintBlocker, fleet_cells
@@ -370,7 +372,7 @@ def _blocked_request(tmp_path: Path) -> mp.MintRequest:
         pending=pending, pipe=object(), function="blocked-echo",
         modules=(HARNESS_MODULE,),
         slots={"pipeline": child_contract.MintSlot(
-            ref=blocked.DECLARED_PIPELINE, path=str(tree))},
+            ref=blocked.DECLARED_PIPELINE, path=str(tree), facts=_TEST_FACTS)},
         execution_lane="w8a8", device=-1)
     request = mint_process.build_request(
         task, workdir=tmp_path / "w")

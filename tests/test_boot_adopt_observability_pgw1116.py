@@ -42,6 +42,8 @@ from typing import Any, Dict, Iterator, List
 
 import pytest
 
+from harness.slot_facts import TEST_FACTS as _TEST_FACTS
+
 from gen_worker import activity, boot_adopt, boot_key, cell_resolve
 from gen_worker import executor as executor_mod
 from gen_worker.api import export_contract as export_contract_mod
@@ -623,7 +625,7 @@ def test_a_cold_boot_with_a_reachable_hub_actually_issues_the_resolve(
     slots = {"pipeline": MintSlot(
         ref=ModelRef(source="tensorhub", path="cozy/micro-diffusion",
                      release="prod"),
-        path=str(micro_tree))}
+        path=str(micro_tree), facts=_TEST_FACTS)}
 
     # pgw#1176: three declared classes, three outcomes; this row is about
     # the terminus, which every class reaches identically here.
@@ -693,7 +695,7 @@ def test_the_same_boot_derives_a_key_with_accelerate_UNIMPORTABLE(
     slots = {"pipeline": MintSlot(
         ref=ModelRef(source="tensorhub", path="cozy/micro-diffusion",
                      release="prod"),
-        path=str(micro_tree))}
+        path=str(micro_tree), facts=_TEST_FACTS)}
 
     # pgw#1176: three declared classes, three outcomes; this row is about
     # the terminus, which every class reaches identically here.

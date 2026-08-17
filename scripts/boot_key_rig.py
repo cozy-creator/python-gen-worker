@@ -73,10 +73,13 @@ def _vehicle(name: str) -> Any:
 def _slots(veh: Any, tree: Path) -> Dict[str, Any]:
     from gen_worker.api.binding import ModelRef
     from gen_worker.child_contract import MintSlot
+    from gen_worker.serving_facts import FactsUnavailable
 
     return {"pipeline": MintSlot(
         ref=ModelRef(source="tensorhub", path=veh.ref_path, tag="prod"),
-        path=str(tree))}
+        path=str(tree),
+        # pgw#1333: no catalog was consulted by a rig.
+        facts=FactsUnavailable(owed_by="boot_key_rig (no catalog)"))}
 
 
 def _declared_hint(family: str) -> int:

@@ -25,6 +25,8 @@ from typing import Any, Dict
 
 import pytest
 
+from harness.slot_facts import TEST_FACTS as _TEST_FACTS
+
 from gen_worker import boot_key, fleet_cells, graph_facts, keyset, local_cell_store
 from gen_worker.keyset import document as keyset_doc, store as keyset_store
 
@@ -219,7 +221,7 @@ def _spec() -> CompileSpec:
 
 
 def _slots(ref: Any, path: str = "/cas/a") -> Dict[str, MintSlot]:
-    return {"pipeline": MintSlot(ref=ref, path=path)}
+    return {"pipeline": MintSlot(ref=ref, path=path, facts=_TEST_FACTS)}
 
 
 def test_a_rebinding_forces_a_memo_MISS() -> None:

@@ -45,6 +45,7 @@ from . import settings_authority
 from . import process_role
 from . import progress as progress_mod
 from . import serve_posture
+from . import serving_facts
 from . import serving_mode as serving_mode_mod
 from . import warmup
 from . import worker_credential
@@ -411,6 +412,13 @@ _ALL_COMPONENTS = _AllComponents()
 #: several tests call them here; there is one implementation.
 _resolve_slots_kwargs = warmup.resolved_slots_kwargs
 _spec_root_slot = warmup.spec_root_slot
+
+#: A setup slot that reached ``_setup_locked_inner`` with no order at all —
+#: a hub-less local boot, or a code ``default_checkpoint``. Nothing asked a
+#: catalog, and the sentence says exactly that.
+_UNBOUND_SLOT_FACTS = serving_facts.FactsUnavailable(
+    owed_by="nothing resolved this slot against a catalog (no dispatch order "
+            "and no desired-instance binding reached this setup)")
 
 
 def _hub_binding_for_wire_ref(ref: str) -> ModelRef:
@@ -3933,14 +3941,24 @@ class Executor:
         re-runs for the pick and setup-held state (``self.pipeline``) stays
         coherent per checkpoint while the LRU machinery evicts whole
         instances. Function-shaped (``cls=None``) specs rebind too — their
-        slots inject via ``_handler_kwargs``, which reads ``spec.models``."""
+        slots inject via ``_handler_kwargs``, which reads ``spec.models``.
+
+        pgw#1333: an order's SERVING FACTS are folded in by the same loop that
+        folds in its ref, into ``spec.slot_facts``. They used to be dropped
+        here, and the drop was invisible because the only consumer that
+        noticed was a CHILD process, which re-derived them from a hardcoded
+        ``None`` and got ``""``."""
         if not spec.slots:
             return spec
         run_refs = {
             slot: so.ref for slot, so in slots.items() if slot and so.ref
         }
+        facts = dict(spec.slot_facts)
         effective = dict(spec.models)
         for slot, decl in spec.slots.items():
+            order = slots.get(slot)
+            if order is not None:
+                facts[slot] = order.facts
             if decl.optional and not run_refs.get(slot, ""):
                 # Unbound optional slot: the deploy chose not to serve this
                 # lane, and the deploy decides (th#980/ie#524) — a code
@@ -3952,9 +3970,9 @@ class Executor:
                 effective.pop(slot, None)
                 continue
             effective[slot] = self._bound_slot(spec, slot, run_refs.get(slot, ""))
-        if effective == spec.models:
+        if effective == spec.models and facts == spec.slot_facts:
             return spec
-        return dc_replace(spec, models=effective)
+        return dc_replace(spec, models=effective, slot_facts=facts)
 
     def _effective_config(
         self, spec: EndpointSpec,
@@ -4330,7 +4348,17 @@ class Executor:
                 f"{sorted(spec.models)!r}); got {sorted(bindings)!r}"
             )
 
-        orders = {m.slot: dispatch.SlotOrder(ref=m.ref) for m in remapped}
+        # pgw#1333: the DesiredInstance bindings carry the same
+        # `ModelBinding` fields the dispatch path stamps, and this path read
+        # exactly one of them. It reads all of them now; `owed_by` names the
+        # hub because a wholly zero-valued triple from THIS sender is (today)
+        # the boot gap, and proto3 scalars have no presence to tell it from a
+        # genuinely unclassified row.
+        orders = {
+            m.slot: dispatch.order_from_binding(
+                m, ref=m.ref, owed_by=dispatch.BOOT_SENDER_OWES)
+            for m in remapped
+        }
         effective = self._dispatched_spec(spec, orders)
         mismatched = {
             slot: wire_ref(effective.models[slot])
@@ -5432,7 +5460,12 @@ class Executor:
                 ref, snap, binding=binding)
             slot_identities[slot] = materialized.identity
             resolved_slots[slot] = MintSlot(
-                ref=binding, path=str(materialized.path))
+                ref=binding, path=str(materialized.path),
+                # pgw#1333: the third half of ONE resolution. A slot whose
+                # facts the parent never received says so by name here rather
+                # than defaulting to a blank objective the child would read
+                # as "the catalog classified this checkpoint as nothing".
+                facts=spec.slot_facts.get(slot, _UNBOUND_SLOT_FACTS))
         paths: Dict[str, str] = {
             slot: res.path for slot, res in resolved_slots.items()}
         topology_eager = self._eager_only_reason()
@@ -9048,13 +9081,10 @@ class Executor:
         for b in run.models:
             if not b.slot:
                 continue
-            slots[b.slot] = dispatch.SlotOrder(
-                ref=str(b.ref or "").strip(),
-                inference_defaults=str(b.inference_defaults or ""),
-                objective=str(b.objective or ""),
-                distilled=bool(b.distilled),
-                distilled_status=str(b.distilled_status or ""),
-            )
+            # The dispatch path is the sender that STAMPS: a zero-valued
+            # triple here is the catalog's answer, not a wire gap, so no
+            # `owed_by` (pgw#1333).
+            slots[b.slot] = dispatch.order_from_binding(b)
             if b.loras:
                 adapters[b.slot] = tuple(
                     dispatch.AdapterOrder(

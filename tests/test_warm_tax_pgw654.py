@@ -32,6 +32,10 @@ from typing import Annotated, Any, List, Optional, Tuple
 import msgspec
 import pytest
 
+from gen_worker.serving_facts import FactsUnavailable as _FU
+
+_NO_FACTS = _FU(owed_by="a test that resolves no catalog")
+
 from gen_worker import (
     AxisClass,
     CompileAxis,
@@ -131,7 +135,7 @@ def _orders(run):
     from gen_worker import dispatch
 
     return {
-        b.slot: dispatch.SlotOrder(ref=b.ref.strip())
+        b.slot: dispatch.SlotOrder(ref=b.ref.strip(), facts=_NO_FACTS)
         for b in run.models if b.slot
     }
 

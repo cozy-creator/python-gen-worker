@@ -27,6 +27,8 @@ from typing import Any, Dict, List
 
 import msgspec
 import pytest
+
+from harness.slot_facts import TEST_FACTS as _TEST_FACTS
 from gen_worker._vendor.torchcg import spans
 
 torch = pytest.importorskip("torch")
@@ -104,7 +106,7 @@ def _request(tmp_path: Path) -> Any:
         report=str(tmp_path / "report.json"),
         cfg=CompileSpec(family=FAMILY, targets=("unet",), shapes=((4, 4),)),
         slots={"pipeline": MintSlot(
-            ref=_ref(), path=str(tmp_path / "tree"))},
+            ref=_ref(), path=str(tmp_path / "tree"), facts=_TEST_FACTS)},
         phases_snapshot=str(tmp_path / "phases.json"),
         compiled_graph_peak_rss_bytes=1024 ** 3,
     )
@@ -289,7 +291,7 @@ def test_compile_spec_and_slots_survive_the_wire() -> None:
     job = pool.EntryJob(
         function="generate", modules=("a", "b"),
         cfg=CompileSpec(family=FAMILY, targets=("unet",), shapes=((4, 4),)),
-        slots={"pipeline": MintSlot(ref=_ref(), path="/tree")},
+        slots={"pipeline": MintSlot(ref=_ref(), path="/tree", facts=_TEST_FACTS)},
         share="share-000", share_index=0, share_count=2,
         out_dir="/out")
     back = msgspec.json.decode(msgspec.json.encode(job), type=pool.EntryJob)

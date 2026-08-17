@@ -47,6 +47,8 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 import msgspec
 import pytest
 
+from harness.slot_facts import TEST_FACTS as _TEST_FACTS
+
 from gen_worker import (
     aot_compile_child, aot_compile_pool, compile_cache, compile_posture,
     local_serve, mint_child, mint_process, mint_supervisor)
@@ -145,7 +147,7 @@ def test_the_local_serve_entry_DECLARES_the_user_machine_posture(
 
     ctx = local_serve.mint_context(
         function="generate", module="micro_diffusion.endpoint",
-        slots={"pipeline": MintSlot(ref="cozy/micro#1", path="/tmp/micro")})
+        slots={"pipeline": MintSlot(ref="cozy/micro#1", path="/tmp/micro", facts=_TEST_FACTS)})
     local_serve._mint_here(object(), _Pending(), ctx)  # type: ignore[arg-type]
 
     assert cap.task is not None, "the local path must build a MintTask"

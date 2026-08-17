@@ -32,6 +32,8 @@ from typing import Any, Dict
 import msgspec
 import pytest
 
+from harness.slot_facts import TEST_FACTS as _TEST_FACTS
+
 torch = pytest.importorskip("torch")
 
 import torch.nn as nn  # noqa: E402
@@ -433,7 +435,7 @@ def _job(micro_tree: Path, report: Path, *, extra_targets: tuple = ()) -> Any:
         slots={"pipeline": MintSlot(
             ref=ModelRef(source="tensorhub", path="cozy/micro-diffusion",
                          release="prod"),
-            path=str(micro_tree))},
+            path=str(micro_tree), facts=_TEST_FACTS)},
         report=str(report),
         code_digest=boot_key.CODE_DIGEST,
     )
