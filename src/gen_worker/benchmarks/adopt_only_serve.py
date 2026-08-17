@@ -29,9 +29,17 @@ The verdicts, and each one can fail on its own:
 4. asking the seam to mint produces ``mint_forbidden``, not an ``ImportError``
    somebody has to attribute.
 
-Run on the pod::
+Run on the pod, on the fleet line (research/RIG-ENV.md: torch 2.13.0 / CUDA
+13.0, upstream `pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime` on RunPod)::
 
+    apt-get install -y build-essential      # AOTI links a real .so
+    python -m gen_worker.cuda_root          # the runtime base ships no CUDA tree
     python -m gen_worker.benchmarks.adopt_only_serve --output row.json
+
+Both setup lines are load-bearing and were each learned by a failed run: the
+runtime bases carry no `g++` and no CUDA root at all — `cuda_root`'s own
+docstring is the record of why, and this probe is exactly the "PAID failure"
+it describes if you skip it.
 
 Bitwise means bitwise: ``.view(torch.uint8)``, not ``allclose`` and not
 ``torch.equal`` (which compares VALUES, so a ``-0.0``/``0.0`` pair or two NaN
