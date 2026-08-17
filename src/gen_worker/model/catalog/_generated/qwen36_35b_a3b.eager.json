@@ -1,0 +1,12 @@
+{
+  "family": "qwen36_35b_a3b",
+  "layout_requirements": [],
+  "layouts": [],
+  "layouts_undeclarable": "vLLM compressed-tensors fp8 has no registered quant descriptor; inventing one is the failure mode, not the fix",
+  "lora_tuned": null,
+  "tuned": {
+    "module": "gen_worker.model.catalog.boundary_llm",
+    "qualname": "Qwen36A3bTuned"
+  },
+  "v": 1
+}

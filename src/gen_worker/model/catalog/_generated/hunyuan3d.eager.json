@@ -1,0 +1,12 @@
+{
+  "family": "hunyuan3d",
+  "layout_requirements": [],
+  "layouts": [],
+  "layouts_undeclarable": "pickle .ckpt \u2014 unclassifiable by the header-reading derivation, and reading one to find out is the banned act",
+  "lora_tuned": null,
+  "tuned": {
+    "module": "gen_worker.model.catalog.boundary_3d",
+    "qualname": "Hunyuan3dTuned"
+  },
+  "v": 1
+}

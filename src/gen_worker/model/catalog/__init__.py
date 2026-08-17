@@ -41,6 +41,8 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers only
+    from ._generated.chatterbox import Chatterbox
+    from ._generated.flex2_preview import Flex2Preview
     from ._generated.flux1_dev import Flux1Dev, Flux1DevLayout, Flux1DevResolution
     from ._generated.flux2_klein_4b import (
         Flux2Klein4b,
@@ -52,13 +54,28 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
         Flux2Klein9bLayout,
         Flux2Klein9bTokens,
     )
+    from ._generated.foundation_1 import Foundation1
+    from ._generated.hunyuan3d import Hunyuan3d
+    from ._generated.internvl_u import InternvlU
+    from ._generated.joycaption import Joycaption
+    from ._generated.musicgen import Musicgen
+    from ._generated.qwen36_27b_mtp import Qwen3627bMtp
+    from ._generated.qwen36_35b_a3b import Qwen3635bA3b
     from ._generated.sd2 import Sd2, Sd2Layout, Sd2Shape
     from ._generated.sd15 import Sd15, Sd15Layout, Sd15Shape
     from ._generated.sdxl import Sdxl, SdxlLayout, SdxlShape
+    from ._generated.stable_audio_open import StableAudioOpen
+    from ._generated.trellis_3d import Trellis3d
 
 #: Exported name -> the generated module that defines it. THE catalog index:
 #: adding a family adds rows here and nothing else changes.
+#:
+#: The EAGER models (pgw#1346 B5) contribute ONE name each and no ``Layout`` or
+#: bucket alias, because they declare no graph classes to have traced variants
+#: of. The shorter row is the tier showing through the index, not an omission.
 _FAMILIES: Final[dict[str, str]] = {
+    "Chatterbox": "chatterbox",
+    "Flex2Preview": "flex2_preview",
     "Flux1Dev": "flux1_dev",
     "Flux1DevLayout": "flux1_dev",
     "Flux1DevResolution": "flux1_dev",
@@ -68,6 +85,13 @@ _FAMILIES: Final[dict[str, str]] = {
     "Flux2Klein9b": "flux2_klein_9b",
     "Flux2Klein9bLayout": "flux2_klein_9b",
     "Flux2Klein9bTokens": "flux2_klein_9b",
+    "Foundation1": "foundation_1",
+    "Hunyuan3d": "hunyuan3d",
+    "InternvlU": "internvl_u",
+    "Joycaption": "joycaption",
+    "Musicgen": "musicgen",
+    "Qwen3627bMtp": "qwen36_27b_mtp",
+    "Qwen3635bA3b": "qwen36_35b_a3b",
     "Sd2": "sd2",
     "Sd2Layout": "sd2",
     "Sd2Shape": "sd2",
@@ -77,6 +101,8 @@ _FAMILIES: Final[dict[str, str]] = {
     "Sdxl": "sdxl",
     "SdxlLayout": "sdxl",
     "SdxlShape": "sdxl",
+    "StableAudioOpen": "stable_audio_open",
+    "Trellis3d": "trellis_3d",
 }
 
 
@@ -94,6 +120,8 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "Chatterbox",
+    "Flex2Preview",
     "Flux1Dev",
     "Flux1DevLayout",
     "Flux1DevResolution",
@@ -103,6 +131,13 @@ __all__ = [
     "Flux2Klein9b",
     "Flux2Klein9bLayout",
     "Flux2Klein9bTokens",
+    "Foundation1",
+    "Hunyuan3d",
+    "InternvlU",
+    "Joycaption",
+    "Musicgen",
+    "Qwen3627bMtp",
+    "Qwen3635bA3b",
     "Sd2",
     "Sd2Layout",
     "Sd2Shape",
@@ -112,4 +147,6 @@ __all__ = [
     "Sdxl",
     "SdxlLayout",
     "SdxlShape",
+    "StableAudioOpen",
+    "Trellis3d",
 ]

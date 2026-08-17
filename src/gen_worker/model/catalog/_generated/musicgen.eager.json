@@ -1,0 +1,21 @@
+{
+  "family": "musicgen",
+  "layout_requirements": [
+    {
+      "contract": "plain.bf16@1",
+      "minimum": "vram12g"
+    }
+  ],
+  "layouts": [
+    {
+      "component": "*",
+      "contracts": [
+        "plain.bf16@1"
+      ]
+    }
+  ],
+  "layouts_undeclarable": "",
+  "lora_tuned": null,
+  "tuned": null,
+  "v": 1
+}

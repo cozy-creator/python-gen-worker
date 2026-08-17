@@ -31,7 +31,7 @@ this file — reads them from here. There is one list.
 
 Two claims, two scopes, because they are not the same claim (pgw#1331). Every
 serve-role module is asserted MINT-FREE. Each is ALSO either asserted to reach
-no MODEL LIBRARY (``MODEL_FREE_MODULES``, 33 roots) or named as still reaching
+no MODEL LIBRARY (``MODEL_FREE_MODULES``, 57 roots) or named as still reaching
 one (``MODEL_BEARING_SERVE_MODULES``, 9) — and the second list is checked to be
 TRUE, so a module that gets cut free must be moved rather than left sitting in
 an exception list nobody re-reads. The role is the union, by splice.
@@ -76,7 +76,7 @@ class ServeRole(StrEnum):
 
 
 #: Every serve-role module whose whole static closure reaches NO model library
-#: (pgw#1331). 33 of the role's 42 roots; the other nine are named, with their
+#: (pgw#1331). 57 of the role's 66 roots; the other nine are named, with their
 #: two causes, in :data:`MODEL_BEARING_SERVE_MODULES` directly below.
 #:
 #: This used to be 14 — the typed family surface alone — because two PACKAGE
@@ -150,6 +150,29 @@ MODEL_FREE_MODULES: Tuple[str, ...] = (
     "gen_worker.model.catalog.hidream_o1_serve",
     "gen_worker.model.catalog.sd15_serve",
     "gen_worker.model.catalog.sdxl_serve",
+    # pgw#1346 B5: the EAGER boundary models, DECLARATIONS INCLUDED. A graph
+    # declaration is model-bearing and reaches its binding only through the
+    # guarded hatch above; an eager one has no `build` callable, so it is
+    # ordinary model-free Python and its binding imports it directly. Naming
+    # both halves here is what turns "an eager declaration is import-cheap"
+    # from a convention into something the fence checks — and the day one of
+    # these grows a diffusers import, this list goes red instead of the claim
+    # quietly becoming false.
+    "gen_worker.model.catalog.boundary_3d",
+    "gen_worker.model.catalog.boundary_audio",
+    "gen_worker.model.catalog.boundary_llm",
+    "gen_worker.model.catalog.flex2_preview",
+    "gen_worker.model.catalog._generated.chatterbox",
+    "gen_worker.model.catalog._generated.flex2_preview",
+    "gen_worker.model.catalog._generated.foundation_1",
+    "gen_worker.model.catalog._generated.hunyuan3d",
+    "gen_worker.model.catalog._generated.internvl_u",
+    "gen_worker.model.catalog._generated.joycaption",
+    "gen_worker.model.catalog._generated.musicgen",
+    "gen_worker.model.catalog._generated.qwen36_27b_mtp",
+    "gen_worker.model.catalog._generated.qwen36_35b_a3b",
+    "gen_worker.model.catalog._generated.stable_audio_open",
+    "gen_worker.model.catalog._generated.trellis_3d",
 )
 
 

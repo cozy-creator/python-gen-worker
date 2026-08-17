@@ -39,7 +39,7 @@ from typing import Final
 from .._vendor.torchcg.recipe import ParameterKind, SignatureParameter
 from .errors import ModelError, ModelRefusal
 from .scheduler import IMPLEMENTED, parse_kind
-from .snapshot import ExportedRunner, ModelExport
+from .snapshot import EagerExport, ExportedRunner, ModelExport
 
 #: Emitted verbatim at the top of every generated module. It names the command
 #: that rewrites the file, because a "do not edit" banner with no instructions
@@ -367,31 +367,7 @@ def render(export: ModelExport, *, spec_module: str = "", spec_attr: str = "") -
         ")",
         "",
     ]
-    if spec_module and spec_attr:
-        lines.extend(
-            [
-                "",
-                "def _declaration() -> ModelSpec | None:",
-                f'{_INDENT}"""The declaration, when its module is importable here.',
-                "",
-                f"{_INDENT}It imports the model code, so an adopt-only serve role does not",
-                f"{_INDENT}have it and must not fail for want of it: the bindings carry the",
-                f"{_INDENT}export, which is all a compiled backing needs.",
-                f'{_INDENT}"""',
-                "",
-                f"{_INDENT}try:",
-                f"{_INDENT * 2}from {spec_module} import {spec_attr}",
-                f"{_INDENT}except ImportError:",
-                f"{_INDENT * 2}return None",
-                f"{_INDENT}return {spec_attr}",
-                "",
-                "",
-                "_SPEC = _declaration()",
-                "",
-            ]
-        )
-    else:
-        lines.extend(["", "_SPEC: ModelSpec | None = None", ""])
+    lines.extend(_lazy_declaration(spec_module, spec_attr))
     lines.append("")
     lines.extend(_aliases(export))
     lines.extend(
@@ -427,6 +403,145 @@ def render(export: ModelExport, *, spec_module: str = "", spec_attr: str = "") -
     return "\n".join(lines)
 
 
+def _lazy_declaration(spec_module: str, spec_attr: str) -> list[str]:
+    """The GRAPH tier's guarded ``SPEC`` accessor, or a bare ``None``.
+
+    A graph declaration builds diffusers modules inside its ``build``
+    callables, and an adopt-only serve role must not acquire a model library by
+    importing a binding (pgw#1328) — so the edge is ``ImportError``-guarded and
+    enumerated in ``serve.role.OPTIONAL_SERVE_IMPORTS``. The eager tier does
+    NOT use this: an eager declaration has no ``build``, so there is nothing to
+    guard against and a guard there would be ceremony that also made the
+    binding's own tuned-schema import (which is unguarded, and must be) read as
+    inconsistent.
+    """
+
+    if not (spec_module and spec_attr):
+        return ["", "_SPEC: ModelSpec | None = None", ""]
+    return [
+        "",
+        "def _declaration() -> ModelSpec | None:",
+        f'{_INDENT}"""The declaration, when its module is importable here.',
+        "",
+        f"{_INDENT}It imports the model code, so an adopt-only serve role does not",
+        f"{_INDENT}have it and must not fail for want of it: the bindings carry the",
+        f"{_INDENT}export, which is all a compiled backing needs.",
+        f'{_INDENT}"""',
+        "",
+        f"{_INDENT}try:",
+        f"{_INDENT * 2}from {spec_module} import {spec_attr}",
+        f"{_INDENT}except ImportError:",
+        f"{_INDENT * 2}return None",
+        f"{_INDENT}return {spec_attr}",
+        "",
+        "",
+        "_SPEC = _declaration()",
+        "",
+    ]
+
+
+def render_eager(
+    export: EagerExport, *, spec_module: str = "", spec_attr: str = ""
+) -> str:
+    """Render the binding module for one EAGER model export (pgw#1346 B5).
+
+    The generated class carries identity, the tuned schema and the declaration,
+    and **no typed callables** — an eager model declares no graph classes, so
+    there is nothing to call through. That absence is the F3 ruling made
+    visible in the type: a handler annotated with one of these gets ``ref``,
+    ``label`` and ``tuned``, and reaches for a runner method it will not find
+    at type-check time rather than at request time.
+    """
+
+    family = str(export.family)
+    name = class_name(family)
+    document = f"{family}.eager.json"
+    command = f"gen-worker model generate <path>/{document}" + (
+        f" --spec {spec_module}:{spec_attr}" if spec_module and spec_attr else ""
+    )
+    tuned = export.tuned
+    tuned_type = "GenerationDefaults" if tuned is None else tuned.qualname
+    declared = bool(spec_module and spec_attr)
+    imports = sorted(
+        {
+            "from gen_worker.model.runtime import Model",
+            "from gen_worker.model.snapshot import EagerExport",
+            "from gen_worker.model.spec import ModelSpec",
+        }
+        | (
+            {f"from {tuned.module} import {tuned.qualname}"}
+            if tuned is not None
+            else {"from gen_worker.families.base import GenerationDefaults"}
+        )
+        | ({f"from {spec_module} import {spec_attr}"} if declared else set())
+    )
+    lines: list[str] = [
+        f'"""Typed bindings for the EAGER {family!r} model — {BANNER}.',
+        "",
+        "DO NOT EDIT. Regenerate with:",
+        "",
+        f"    {command}",
+        "",
+        "This model has no graph classes and owes none (pgw#1346's F3 ruling: an",
+        "external-binary or non-PyTorch runtime is a PERMANENT eager citizen). The",
+        "source of these bindings is therefore the declaration itself, projected",
+        "into `eager_model_v1` beside this file — there was nothing to trace.",
+        "",
+        "The declaration is imported DIRECTLY here, unlike a graph binding's",
+        "`ImportError`-guarded `_declaration()`. An eager declaration has no `build`",
+        "callable to construct a model library inside, so there is nothing for an",
+        "adopt-only serve role to acquire — and the module is named in",
+        "`serve.role.MODEL_FREE_MODULES`, where the fence checks that claim rather",
+        "than taking it (pgw#1328/#1331).",
+        '"""',
+        "",
+        "from __future__ import annotations",
+        "",
+        "from importlib import resources",
+        "from typing import ClassVar",
+        "",
+        *imports,
+        "",
+        f'_EXPORT_FILE = "{document}"',
+        "_EAGER = EagerExport.loads(",
+        f"{_INDENT}resources.files(__package__).joinpath(_EXPORT_FILE).read_bytes()",
+        ")",
+        "",
+        f"_SPEC: ModelSpec | None = {spec_attr if declared else 'None'}",
+        "",
+    ]
+    lines.extend(
+        [
+            "",
+            f"class {name}(Model):",
+            f'{_INDENT}"""The eager {family!r} model: the TYPE of a handler parameter.',
+            "",
+            f"{_INDENT}A VALUE of this type is a resolved instance — the checkpoint ref it",
+            f"{_INDENT}is bound to and that checkpoint's catalog-stamped tuned values. It",
+            f"{_INDENT}exposes NO runner callable, because the declaration states none.",
+            "",
+            f"{_INDENT}There is no public constructor. Declare it in",
+            f"{_INDENT}``@endpoint(models={{...}})`` so placement prefetches its weights,",
+            f"{_INDENT}resolve one per request with ``{name}.instance(ref)``, or run a test",
+            f"{_INDENT}hubless with ``{name}.fake()``.",
+            f'{_INDENT}"""',
+            "",
+            f"{_INDENT}__slots__ = ()",
+            "",
+            f"{_INDENT}FAMILY: ClassVar[str] = {family!r}",
+            f"{_INDENT}EXPORT_DIGEST: ClassVar[str] = {export.digest()!r}",
+            f"{_INDENT}EAGER: ClassVar[EagerExport] = _EAGER",
+            f"{_INDENT}Tuned: ClassVar[type[{tuned_type}]] = {tuned_type}",
+            f"{_INDENT}SPEC: ClassVar[ModelSpec | None] = _SPEC",
+            "",
+            "",
+            f"__all__ = [{name!r}]",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
 _TRAILING = re.compile(r"[ \t]+$", re.MULTILINE)
 
 
@@ -437,4 +552,20 @@ def render_module(export: ModelExport, *, spec_module: str = "", spec_attr: str 
     return body.rstrip("\n") + "\n"
 
 
-__all__ = ["BANNER", "class_name", "render", "render_module"]
+def render_eager_module(
+    export: EagerExport, *, spec_module: str = "", spec_attr: str = ""
+) -> str:
+    """:func:`render_eager`, normalized the same way :func:`render_module` is."""
+
+    body = _TRAILING.sub("", render_eager(export, spec_module=spec_module, spec_attr=spec_attr))
+    return body.rstrip("\n") + "\n"
+
+
+__all__ = [
+    "BANNER",
+    "class_name",
+    "render",
+    "render_eager",
+    "render_eager_module",
+    "render_module",
+]
