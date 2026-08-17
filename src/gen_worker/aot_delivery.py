@@ -25,9 +25,8 @@ from gen_worker._vendor.tensorfs import (
     Chunk,
     DigestMismatch,
     FileEntry,
-    TransferGrant,
-    download,
 )
+from gen_worker.transfer.grants import TransferGrant, download
 from gen_worker._vendor.torchcg import (
     ARTIFACT_KIND,
     StoreOutcome,

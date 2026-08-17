@@ -32,14 +32,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, cast
 
 import requests
-from gen_worker._vendor.tensorfs import (
-    CASRef,
-    RepositoryManifest,
-    TransferGrant,
-    TransferJournal,
-    TransferSession,
-    upload,
-)
+from gen_worker._vendor.tensorfs import CASRef, RepositoryManifest
+from gen_worker.transfer.grants import TransferGrant, upload
+from gen_worker.transfer.journal import TransferJournal, TransferSession
 
 from .. import activity as _activity
 from ..http_origin import is_definite_hub_answer

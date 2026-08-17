@@ -16,8 +16,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from .local import DigestMismatch, LocalCAS
-from .refs import CASRef
+from gen_worker._vendor.tensorfs.local import DigestMismatch, LocalCAS
+from gen_worker._vendor.tensorfs.refs import CASRef
 
 _DEFAULT_PARALLEL = 8
 _PROCESS_TRANSFER_BUDGET = threading.BoundedSemaphore(16)
@@ -119,20 +119,6 @@ class TransferGrant:
             headers=headers,
             expires_at=expires_at,
         )
-
-    def to_wire(self) -> dict[str, object]:
-        if not self.staging_key:
-            raise ValueError("wire upload grants require a staging key")
-        if self.expires_at is None:
-            raise ValueError("wire upload grants require an expiry")
-        return {
-            "digest": str(self.digest),
-            "size_bytes": self.size_bytes,
-            "staging_key": self.staging_key,
-            "url": self.url,
-            "headers": dict(self.headers),
-            "expires_at": self.expires_at,
-        }
 
 
 class _GrantTransport(Protocol):

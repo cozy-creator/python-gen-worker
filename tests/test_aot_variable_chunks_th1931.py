@@ -8,7 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from gen_worker._vendor.tensorfs import LocalCAS, TransferGrant, TransferReport
+from gen_worker._vendor.tensorfs import LocalCAS
+from gen_worker.transfer.grants import TransferGrant, TransferReport
 from gen_worker._vendor.torchcg import StoreOutcome
 
 from gen_worker import aot_delivery, receipts

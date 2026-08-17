@@ -434,7 +434,7 @@ def test_corrupt_load_failure_refetches_and_retries_once(tmp_path, monkeypatch) 
     import json
     import struct
 
-    from gen_worker._vendor.tensorfs import TransferReport
+    from gen_worker.transfer.grants import TransferReport
 
     import gen_worker.models.cozy_snapshot as snap_mod
     from gen_worker.api.binding import Hub as HubRef

@@ -358,6 +358,18 @@ jobs:
           uv run python scripts/lint_test_fork_start_method.py --selftest
           uv run python scripts/lint_test_fork_start_method.py
 
+      # GATING (pgw#1308): under mixed-CAS a resident model occupies disk ONCE
+      # — non-tensor files are symlinks into the object store and tensor bytes
+      # are read, never copied. The hatch that undoes that works perfectly at
+      # every individual call site, so no test ever goes red while the
+      # architecture erodes; only a census notices. Whole-tree materialization
+      # is down to a NAMED residue (one caller, one test), and every
+      # `extract()` must say which `docs/mixed-cas-layout.md` §9 row it is.
+      - name: pgw#1308 guard - the materialization hatch does not grow
+        run: |
+          uv run python scripts/lint_materialization_hatch.py --selftest
+          uv run python scripts/lint_materialization_hatch.py
+
       # GATING (pgw#1299): TCG owns the compiled-graph metadata vocabulary and
       # exports it. A respelled `"graph_class"` / `"aot-inductor"` does not fail
       # at import when TCG renames the key — it returns None from a `.get()` on
@@ -586,10 +598,14 @@ jobs:
             /tmp/wheelcheck/gen_worker-*.whl
           /tmp/wheelcheck/venv/bin/python - <<'PY'
           import threading
-          from gen_worker._vendor.tensorfs import CASRef, LocalCAS, TransferGrant, download
-          from gen_worker._vendor.tensorfs.transfer import _run_parallel
+          from gen_worker._vendor.tensorfs import CASRef, LocalCAS
           from gen_worker._vendor.torchcg import ARTIFACT_KIND
           from gen_worker._vendor.torchcg.contracts import read_contract
+          # pgw#1308: the transfer plane is first-party. It still has to be IN
+          # THE WHEEL, which is the property this gate exists to prove, and a
+          # first-party package can go missing from a wheel exactly as easily
+          # as a vendored one -- `[tool.hatch]` decides both.
+          from gen_worker.transfer.grants import TransferGrant, _run_parallel, download
 
           assert LocalCAS and download and ARTIFACT_KIND
           assert read_contract("KEY_GRAMMAR_DIGEST")

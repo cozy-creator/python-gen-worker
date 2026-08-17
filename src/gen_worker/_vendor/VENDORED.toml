@@ -29,9 +29,26 @@ subdir = "python/src/tensorfs"
 # (`626a3de` per-object emission + `6c1f2ab` resident objects advance too).
 # A 31.6 GB snapshot reporting `0 / total` for its whole duration is what got
 # correctly-downloading pods condemned by the hub's 6-minute freshness window.
-# The delta from the last published `hashrepo` 0.3.1 (`0d043757`) is exactly:
-# the package rename, the new `daemon` module, and that fix. Nothing else.
-rewrites = []
+#
+# pgw#1308: the TRANSFER PLANE LEFT THIS SNAPSHOT and is now first-party at
+# `gen_worker/transfer/`. It was never storage — `TransferGrant.from_wire`
+# parses TENSORHUB's grant JSON, and the retry ladder, the fan-out width and
+# the per-object progress emission are this worker's policy about this
+# worker's uplink. Upstream agrees: current tensorfs has no Python transfer
+# plane at all (its client is the Rust `sync.rs` pack/blob lane, which a
+# pure-Python wheel cannot carry). So the two modules were pinned to a
+# lineage upstream had ABANDONED, and calling that a "vendored snapshot" was
+# the part that had stopped being true — a digest fence certifying fidelity
+# to a rev nobody would ever fix. The `daemon` module went with them, for the
+# adjacent reason: it is a FUSE client in a wheel that provably cannot mount
+# (pgw#1295 — `CAP_SYS_ADMIN` absent from the container's bounding set,
+# measured on a real pod), and nothing in this repo imported it.
+#
+# What is LEFT is genuinely storage — `LocalCAS`, the chunk manifest, refs —
+# and it is byte-identical to `8bafdfbb` except for the `rewrites` below.
+rewrites = [
+  "`__init__.py`: the `transfer`, `journal` and `daemon` re-exports are gone with the modules (pgw#1308). No other file is touched, so the remaining digests are still upstream's.",
+]
 
 [packages.torchcg]
 repo = "https://github.com/cozy-creator/torchcg"
@@ -51,15 +68,12 @@ rewrites = [
 ]
 
 [packages.tensorfs.files]
-"__init__.py" = "7cb8f071b7864a92f55e1b4472fc13d4b7e46923db23b063139671ac9fbf6fa2"
+"__init__.py" = "45e521905b56fa570a61f10c018beb0ee48d3f75587423ba2e4f94b5e8d3cfeb"
 "chunking.py" = "69333dc0836f35b05c420780b7eac205993ebde54c1b91b1afe03e55c313bd7a"
-"daemon.py" = "0af2b1b740dbedd49ff8afdc76d444fb5cd7c66369fe6979528c3d63c1ce5359"
-"journal.py" = "e2da6aa608d1a690f46af8d1ed7b2d61492df093a7866e0fd73894133b5f198e"
 "local.py" = "92ec0d1249115f08eb02fccf554e946d36854a4ae861bde8190590d404695e0e"
 "manifest.py" = "a93ee850992c17dd90a57946441875d282367556703b9e9d1c8be057ea12bed4"
 "py.typed" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 "refs.py" = "f3a144543f423a6b01043294b21104ababaafdbfb31798560de678b69f27ac2f"
-"transfer.py" = "5a365ec55d3cedefa088171eb4c9554edf0c951a3b0a1cad390dba486924a143"
 
 [packages.torchcg.files]
 "__init__.py" = "401efd9450c0181f32c64ccee1d21999d78e77dc2be5ef404c27e539e350d4a9"
