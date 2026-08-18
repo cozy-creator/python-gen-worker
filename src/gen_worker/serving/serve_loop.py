@@ -39,6 +39,7 @@ from .envelope import DecodedRequest, decode_envelope
 from .host import ServeDispatchError
 from .loader import LoadedEndpoint
 from .model import Model, lane_handle, model_type
+from .placement import warn_if_degraded
 from .residency import InstanceSizer, ResidencyManager
 
 logger = logging.getLogger(__name__)
@@ -83,12 +84,24 @@ class _InstanceBackend:
         self,
         model_cls: type,
         load_context: LoadContext[Any],
+        lane: Any = None,
     ) -> None:
         self.model_cls = model_cls
         self.load_context = load_context
         self.model: Optional[Model[Any]] = None
+        self.lane = lane
+        #: Unmet machine floors, measured once at residency-admit. Non-empty
+        #: means this instance is serving DEGRADED, and every request it
+        #: serves says so (`invoke` warns the caller with these).
+        self.degraded: Tuple[str, ...] = ()
 
     def load(self) -> None:
+        # Residency-admit is where the lane is picked and the load begins, so
+        # it is where the machine is compared against the lane's declared
+        # floors — BEFORE any weight moves, so the warning precedes the
+        # slowness it predicts rather than explaining it afterwards. It never
+        # refuses: any model, any machine (Paul, 2026-08-18).
+        self.degraded = warn_if_degraded(self.model_cls, self.lane)
         model: Model[Any] = self.model_cls()  # cheap __init__ — no GPU, by contract
         model.load(self.load_context)
         self.model = model
@@ -176,6 +189,7 @@ class ServeLoop:
                     engine=self._engine,
                     compile_sink=sink,
                 ),
+                lane,
             )
             with self._backends_lock:
                 self._backends[key] = backend
@@ -221,6 +235,10 @@ class ServeLoop:
         with ExitStack() as leases:
             models: Dict[str, Model[Any]] = {}
             primary_binding: Optional[DeployBinding] = None
+            #: Unmet machine floors of the instances this request actually
+            #: uses — a load-time fact, so it stains EVERY request the
+            #: degraded instance serves, not just the one that loaded it.
+            degraded: list[str] = []
             # STABLE SLOT-NAME ORDER — the multi-model deadlock rule: every
             # request over the same slot set acquires in one global order.
             # pgw#1392: a WEIGHTLESS entrypoint's slot set is EMPTY, so this
@@ -254,6 +272,7 @@ class ServeLoop:
                         f"admission; the residency ledger is inconsistent"
                     )
                 models[slot_name] = backend.model
+                degraded.extend(backend.degraded)
                 if primary_binding is None:
                     # The FIRST slot in signature order is the request's
                     # primary routing fact (ctx.checkpoint_ref).
@@ -263,6 +282,8 @@ class ServeLoop:
                     )
 
             ctx = self._make_context(request_id, primary_binding)
+            for warning in degraded:
+                ctx.warn(warning)
             arguments = [
                 models[slot.name] if slot.kind == "model" else adapters[slot.name]
                 for slot in spec.slots

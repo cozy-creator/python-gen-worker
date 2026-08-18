@@ -103,11 +103,14 @@ def test_fixture_imports_clean_and_extracts_the_declared_surface() -> None:
     ]
     assert len(lanes) == 2
 
-    # ie#740 placement floors, per lane, from the same header — statically
-    # extractable, so a deployment is sized without running author code.
+    # ie#740 placement floors, per lane, from the SAME `lanes=` declaration
+    # (pgw#1404 merged them) — statically extractable, so a deployment is sized
+    # without running author code. VRAM only: the sm floor is derived from each
+    # contract's dtype, and both fixture stand-ins declare float32 (CPU, fake
+    # weights), which derives no floor.
     assert {h: r.render() for h, r in model_requires(SdxlModel).items()} == {
         "sdxl.diffusers-bf16@1": "vram12g",
-        "cozy.sdxl-fp8-rowwise@1": "sm89+, vram8g",
+        "cozy.sdxl-fp8-rowwise@1": "vram8g",
     }
 
 
@@ -170,9 +173,24 @@ def test_model_header_declarations_and_refusals() -> None:
 
     assert lane_handle(AnonymousContract()) == "sha256:" + "a" * 64
 
-    # A floor over a lane this model does not declare guards nothing.
-    with pytest.raises(ModelDeclarationError, match="does not.*declare"):
+    # pgw#1404: a floor over a lane this model does not declare no longer NEEDS
+    # a check — a floor is the value of its own lane key, so it cannot name a
+    # stamp the model does not serve. `requires=` is deleted, typed, and the
+    # refusal names the merged spelling.
+    with pytest.raises(ModelDeclarationError, match="requires.*is DELETED"):
         class StrayFloor(Model[SDXL], lanes=(), requires={"sdxl.other@1": "vram8g"}):
+            pass
+
+    # The merged spelling: one dict, lane -> VRAM floor. The compute-capability
+    # floor is DERIVED from the contract's dtype and is NOT author-writable
+    # (Paul 2026-08-18: "the sm_x compute floor should fall out of the contract
+    # itself... Only the VRAM requirement needs a separate annotation").
+    from gen_worker._vendor.tensorfs import contracts as _contracts
+
+    with pytest.raises(ModelDeclarationError, match="min_sm is DERIVED"):
+        class HandWrittenSm(
+            Model[SDXL], lanes={_contracts.SDXL_DIFFUSERS_BF16: "vram8g, sm90+"}
+        ):
             pass
 
     # Cheap __init__: constructing a model does not load anything.

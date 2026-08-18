@@ -267,11 +267,21 @@ def test_a_lane_naming_no_document_refuses_at_declaration() -> None:
         class Claimed(Model[SDXL], lanes=(nope,)):
             def load(self, ctx: object) -> None: ...
 
-    # ...and a `requires=` floor keyed to a stamp this model does not serve,
-    # which used to be accepted outright whenever `lanes=` was omitted.
-    with pytest.raises(ModelDeclarationError, match="does not declare"):
+    # A floor keyed to a lane the model does not serve is now UNREACHABLE
+    # rather than refused: pgw#1404 merged the two kwargs, so a floor is
+    # written as the VALUE of its own lane and cannot name a second stamp.
+    # `requires=` is deleted, and the refusal names the spelling that replaces
+    # it — a silently-ignored floor is exactly what this class of bug was.
+    with pytest.raises(ModelDeclarationError, match="requires.*is DELETED"):
 
         class Floored(Model[SDXL], requires={"nope.not-a-document@1": "vram12g"}):
+            def load(self, ctx: object) -> None: ...
+
+    # ...and the same missing document refuses through the merged spelling,
+    # so folding the kwargs did not cost this fence anything.
+    with pytest.raises(ModelDeclarationError, match="DOES NOT EXIST"):
+
+        class ClaimedWithFloor(Model[SDXL], lanes={nope: "vram12g"}):
             def load(self, ctx: object) -> None: ...
 
 

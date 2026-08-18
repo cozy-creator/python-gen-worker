@@ -232,12 +232,15 @@ class SdxlModel(
     Model[SDXL],
     # A lane IS a tensorfs layout contract — an imported object carrying the
     # actual layout. Omitting lanes= means one lane: SDXL's canonical contract.
-    lanes=(contracts.SDXL_DIFFUSERS_BF16, contracts.COZY_SDXL_FP8_ROWWISE),
-    # What each lane needs of the machine (ie#740 grammar). Per-lane because
-    # the fp8 lane both fits smaller and needs the newer decoder.
-    requires={
+    # pgw#1404: the lane and what it needs of a machine are ONE declaration,
+    # and the value is the lane's VRAM floor ONLY. Per-lane because the fp8
+    # lane fits smaller. The compute-capability floor is DERIVED from each
+    # contract's own load dtype and is not written here — it reads 0 for both
+    # of these because the stand-ins declare float32 (this fixture serves on
+    # CPU with fake weights), which is exactly the derivation being honest.
+    lanes={
         contracts.SDXL_DIFFUSERS_BF16: "vram12g",
-        contracts.COZY_SDXL_FP8_ROWWISE: "sm89+, vram8g",
+        contracts.COZY_SDXL_FP8_ROWWISE: "vram8g",
     },
 ):
     """The stateful half: weights, compile-marked modules, defaults. One

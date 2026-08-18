@@ -111,9 +111,31 @@ def test_the_envelope_serves_end_to_end_with_fake_tensors(tmp_path: Path) -> Non
     assert result.loras == []
     saved = tmp_path / "outputs" / result.image.ref
     assert saved.is_file() and saved.stat().st_size > 0
-    assert outcome.warnings == ()
     # The instance is resident under its reservation (weights + headroom).
     assert manager.tier_of(DREAM, "SdxlModel/sdxl.diffusers-bf16@1") is Tier.VRAM
+
+    # pgw#1404 degraded mode, end to end on the REAL serve path. This test host
+    # has no CUDA device at all, and the fixture's bf16 lane declares vram12g —
+    # so the machine is under the floor by every measure. Paul, 2026-08-18:
+    # "we should be able to place any model on any machine; if the machine is a
+    # poor match, it will complain and warn loudly when it enters degraded
+    # mode, but still run anyway." Both halves are asserted here: the request
+    # SUCCEEDED (everything above this line), and it says why it will be slow.
+    assert len(outcome.warnings) == 1
+    warning = outcome.warnings[0]
+    assert warning.startswith("DEGRADED PLACEMENT: ")
+    assert "sdxl.diffusers-bf16@1" in warning  # the lane
+    assert "12.0 GiB" in warning               # the declared floor
+    assert "0.0 GiB" in warning                # what this machine actually has
+    assert "cpu (no CUDA device)" in warning   # the card
+    assert "Running anyway" in warning         # the consequence, not a refusal
+    # It rides the adjustment ledger (JobResult.adjustments), field-less, so
+    # the hub records it against the request rather than the caller inferring
+    # it from a latency graph.
+    assert [
+        row for row in outcome.adjustments
+        if row["field"] == "" and row["reason"] == warning
+    ]
 
 
 def test_adapters_ride_the_envelope_and_the_scopes_restore(tmp_path: Path) -> None:
