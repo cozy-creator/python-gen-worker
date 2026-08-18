@@ -417,9 +417,9 @@ def test_the_dropped_child_can_write_a_RELOCATED_local_compiled_graph_store(drop
         f"{local_compiled_graph_store.ENV_STORE_DIR} is unset, so this row would pass "
         "for the wrong reason — the suite's autouse fixture sets it"
     )
-    assert not os.path.exists(os.path.join(root, local_compiled_graph_store.CELLS_DIRNAME)), (
+    assert not os.path.exists(os.path.join(root, local_compiled_graph_store.COMPILED_GRAPHS_DIRNAME)), (
         "this row must measure the CHILD creating the compiled graphs root — a "
-        f"{local_compiled_graph_store.CELLS_DIRNAME} this root parent made would be "
+        f"{local_compiled_graph_store.COMPILED_GRAPHS_DIRNAME} this root parent made would be "
         "root-owned and the probe would report the wrong thing"
     )
     # `write-probe` mkdirs a nested subtree before it writes, which is the
