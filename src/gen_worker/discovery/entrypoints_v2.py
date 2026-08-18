@@ -1,36 +1,54 @@
 """Publish-time extraction for the pgw#1382 author surface.
 
 The v1 walk looks for ``__gen_worker_endpoint__``; ``@entrypoint`` stamps
-``__cozy_entrypoint__`` and ``Model[MT]`` stamps its class header. Nothing
-read the new attributes, so a v2 endpoint discovered ZERO functions, the
-builder warned and exited 0, and hub admission refused a manifest that
-declared neither ``functions[]`` nor ``jobs[]`` nine minutes later (pgw#1387).
+``__cozy_entrypoint__``. Nothing read the new attribute, so a v2 endpoint
+discovered ZERO functions, the builder warned and exited 0, and hub admission
+refused the empty manifest nine minutes later (pgw#1387).
 
-This module is that missing half. It emits the NEW manifest shape — an
-``entrypoints[]`` block whose rows carry the payload/return schemas, the
-ordered slots with their kinds, and each referenced model's LANES as tensorfs
-contract stamps with their ie#740 placement floors. It deliberately does NOT
-map onto the retired ``(execution_lane, artifact_contract, decoder,
-key_topologies)`` quant vocabulary: that shape describes the pre-pgw#1382
-world, and translating into it would make the new surface lie in the old
-words. The hub reads the new rows (th#2140/th#2133 already read release
-metadata).
+``entrypoints[]`` IS ``functions[]``' SUCCESSOR SPELLING, NOT A SECOND
+DOCUMENT SPACE (th#2146). The hub folds the key into ``Functions`` at its one
+decode site (``builder.ParseManifest``) and nothing downstream learns a second
+word — so the ITEM shape here must be the item shape ``_extract_entries``
+already emits, key for key. Emitting a bespoke row shape (or wrapping the list
+in a ``{"v": …}`` envelope) does not merely lose fields: ``entrypoints`` decodes
+into ``[]manifestFunction``, so a JSON object where the hub expects an array
+fails ``ParseManifest`` outright and the release does not admit.
 
-WIRE FIELD NAMES ARE A CROSS-REPO CONTRACT. Everything below is what the hub
-side must key on; changing a name here is a two-repo change.
+A manifest carrying BOTH keys is refused by the hub rather than silently
+merged, so this module emits ``entrypoints`` only for a package that HAS a v2
+surface, and the v1 path is byte-identical when it does not.
+
+**LANES ARE NOT HERE.** A v2 lane is a tensorfs layout contract, and it travels
+as ``{stamp, document}`` on the release-derive document's ``lane_contracts``,
+where the hub interns the document content-addressed and needs no prior
+knowledge of the layout (th#2146's `docs/lane-vocabulary.md`). Making that
+``document`` non-null is pgw#964's, not this module's. What DOES belong on a
+slot is the ie#740 floor `requires=` declares, in the machinereq term shape
+the hub's one parser reads — and because the hub refuses a requirement over a
+handle the slot does not accept, the accepted set is emitted beside it.
 """
 
 from __future__ import annotations
 
+import ast
 import importlib
+import inspect
 import pkgutil
+import textwrap
 from typing import Any, Dict, List, Set
 
 from .schema import type_schema_and_hash
 
-#: One manifest block, one version. Bumped only when a row's MEANING changes;
-#: additive fields do not bump it (lenient decode, pgw#1376's evolution rule).
-ENTRYPOINTS_BLOCK_VERSION = 1
+#: A v2 entrypoint is an inference handler. The vocabulary is the hub's
+#: (`validation._KNOWN_KINDS`); the v2 surface declares no other kind today,
+#: and inventing one here would be a value space no hub reader names.
+ENTRYPOINT_KIND = "inference"
+
+#: The component path a whole-model lane declaration lands under. The v1 slot
+#: vocabulary is per-component (`pipeline`, `pipeline.vae`, …); a v2 `lanes=`
+#: is a statement about the WHOLE pipeline, so it declares exactly the root and
+#: never invents a component tree the author did not write.
+PIPELINE_PATH = "pipeline"
 
 
 class EntrypointDiscoveryError(ValueError):
@@ -41,7 +59,7 @@ def _entrypoint_specs(module: Any) -> List[Any]:
     from ..serving.entrypoints import ENTRYPOINT_ATTR
 
     out: List[Any] = []
-    for name, value in vars(module).items():
+    for value in vars(module).values():
         spec = getattr(value, ENTRYPOINT_ATTR, None)
         if spec is None:
             continue
@@ -53,79 +71,142 @@ def _entrypoint_specs(module: Any) -> List[Any]:
     return out
 
 
-def _lane_rows(model_cls: type) -> List[Dict[str, Any]]:
-    """One row per declared lane: the tensorfs contract stamp plus the
-    ie#740 floor the class header declared for it, when it declared one."""
-    from ..serving import lane_handle, model_lanes, model_requires
+def _pipeline_class(model_cls: type) -> str:
+    """The dotted pipeline class ``load()`` builds, read STATICALLY.
 
-    requires = model_requires(model_cls)
-    rows: List[Dict[str, Any]] = []
-    for lane in model_lanes(model_cls):
-        stamp = lane_handle(lane)
-        row: Dict[str, Any] = {"contract": stamp}
-        floor = requires.get(stamp)
-        if floor is not None:
-            row["requires"] = floor.render()
-        rows.append(row)
-    return rows
+    The hub requires `pipeline_class` on a model slot. In v1 it was a `Slot`
+    field; in v2 the author writes ``self.pipe = ctx.load(SomePipeline)`` inside
+    ``load``, so it is recovered by parsing that call — no author code runs
+    beyond the import that already happened, which is the same promise the
+    class header makes. Unreadable (a dynamic class, no ``load``) returns "",
+    and the caller decides what an absent one means; guessing a pipeline here
+    would be a manifest that lies about what the worker will build.
+    """
+    load = getattr(model_cls, "load", None)
+    if load is None:
+        return ""
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(load)))
+    except (OSError, TypeError, SyntaxError):
+        return ""
+    module = inspect.getmodule(model_cls)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if not (isinstance(fn, ast.Attribute) and fn.attr == "load"):
+            continue
+        if not node.args:
+            continue
+        arg = node.args[0]
+        if not isinstance(arg, ast.Name):
+            continue
+        target = getattr(module, arg.id, None)
+        if isinstance(target, type):
+            return f"{target.__module__}.{target.__qualname__}"
+    return ""
 
 
-def _model_row(model_cls: type) -> Dict[str, Any]:
-    from ..serving import model_type
+def _lane_stamps(model_cls: type) -> List[str]:
+    from ..serving import lane_handle, model_lanes
 
-    declared = model_type(model_cls)
-    lanes = _lane_rows(model_cls)
-    return {
-        "class": model_cls.__name__,
-        "module": model_cls.__module__,
-        "model_type": getattr(declared, "name", None) or declared.__name__,
-        "lanes": lanes,
-        # `lanes=()` is the author STATING eager-permanent, and after Paul's
-        # F3 narrowing (2026-08-20) that tier means external-binary runtimes
-        # only. It is a declaration, never an inference about the model.
-        "eager_permanent": not lanes,
+    return [lane_handle(lane) for lane in model_lanes(model_cls)]
+
+
+def _model_slot(slot: Any) -> Dict[str, Any]:
+    """A model slot in the hub's `functions[].slots[]` vocabulary."""
+    from ..serving import model_requires, model_type
+
+    model_cls = slot.annotation
+    out: Dict[str, Any] = {
+        "name": slot.name,
+        # `kind` is omitted rather than spelled "model": empty IS model on the
+        # hub side (th#2140 5c) and every pre-5c manifest means exactly that.
+        "pipeline_class": _pipeline_class(model_cls),
     }
+    declared = model_type(model_cls)
+    family = getattr(declared, "name", "") or ""
+    if family:
+        out["family"] = family
+    stamps = _lane_stamps(model_cls)
+    if stamps:
+        # The accepted layout set. `layout_requirements` below is refused by
+        # the hub for a handle absent from here, which is the same rule the
+        # class header already enforces on `requires=`.
+        out["layouts"] = {PIPELINE_PATH: stamps}
+    requirements = {
+        stamp: row.manifest_row()
+        for stamp, row in model_requires(model_cls).items()
+        if row.declared()
+    }
+    if requirements:
+        out["layout_requirements"] = requirements
+    return out
 
 
-def _slot_row(slot: Any) -> Dict[str, Any]:
+def _adapter_slot(slot: Any) -> Dict[str, Any]:
     from ..serving.context import DistillationAdapter
 
-    row: Dict[str, Any] = {
+    return {
         "name": slot.name,
-        "kind": slot.kind,
-        "required": bool(slot.required),
-    }
-    if slot.kind == "model":
-        row["model_class"] = slot.annotation.__name__
-    else:
-        # The typed takeover guard is a WIRE fact: the hub refuses an envelope
+        "kind": "adapter",
+        # The typed takeover guard as a WIRE fact: the hub refuses an envelope
         # pick whose adapter row is not distillation-marked for this slot.
-        row["distillation"] = slot.annotation is DistillationAdapter
-    return row
+        "adapter_kind": (
+            "distillation" if slot.annotation is DistillationAdapter else "general"
+        ),
+        "multiple": slot.kind == "adapters",
+    }
 
 
 def _entrypoint_row(spec: Any) -> Dict[str, Any]:
-    payload_schema, payload_hash = type_schema_and_hash(spec.payload_type)
-    return_schema, return_hash = type_schema_and_hash(spec.return_type)
+    input_schema, input_sha = type_schema_and_hash(spec.payload_type)
+    output_schema, output_sha = type_schema_and_hash(spec.return_type)
+    slots: List[Dict[str, Any]] = []
+    for slot in spec.slots:
+        slots.append(_model_slot(slot) if slot.kind == "model" else _adapter_slot(slot))
     return {
         "name": spec.name,
-        "module": spec.fn.__module__,
         "python_name": spec.fn.__name__,
-        "payload_schema": payload_schema,
-        "payload_schema_hash": payload_hash,
-        "return_schema": return_schema,
-        "return_schema_hash": return_hash,
-        "slots": [_slot_row(slot) for slot in spec.slots],
-        "models": [_model_row(cls) for cls in spec.model_classes],
+        "module": spec.fn.__module__,
+        "declared_module": spec.fn.__module__,
+        "class_name": "",
+        "kind": ENTRYPOINT_KIND,
+        "input_schema": input_schema,
+        "payload_schema_sha256": input_sha,
+        "output_schema": output_schema,
+        "output_schema_sha256": output_sha,
+        # A v2 entrypoint returns one struct; streaming is not part of the
+        # ratified surface, so the cardinality fact is stated, never omitted.
+        "incremental_output": False,
+        "slots": slots,
     }
+
+
+def _pipeline_class_or_refuse(rows: List[Dict[str, Any]]) -> None:
+    """The hub hard-fails a model slot with no `pipeline_class`, after the
+    build and push. Refuse here instead, naming the author's own line."""
+    for row in rows:
+        for slot in row["slots"]:
+            if slot.get("kind") == "adapter" or slot.get("pipeline_class"):
+                continue
+            raise EntrypointDiscoveryError(
+                f"@entrypoint {row['name']!r} slot {slot['name']!r}: could not "
+                "read the pipeline class from the model's load(). Publish "
+                "needs it, so write the ONE spelling with a plain class name: "
+                "`self.pipe = ctx.load(StableDiffusionXLPipeline)`"
+            )
 
 
 def discover_entrypoints(main_module: str) -> List[Dict[str, Any]]:
     """Walk ``main_module``'s top-level package; return the manifest
-    ``entrypoints`` rows. Empty list = this package has no v2 surface, which
-    is a legal answer for a v1 endpoint and NOT an error here — the
-    empty-manifest refusal belongs to the caller that knows about jobs and v1
-    functions too (:func:`assert_manifest_advertises_something`)."""
+    ``entrypoints`` rows — a FLAT LIST in ``functions[]``' item shape.
+
+    An empty list means the package has no v2 surface, which is a legal answer
+    for a v1 endpoint and not an error here; the empty-manifest refusal belongs
+    to the caller that knows about jobs and v1 functions too
+    (:func:`assert_manifest_advertises_something`).
+    """
     top_level = main_module.split(".", 1)[0]
     try:
         top = importlib.import_module(top_level)
@@ -169,28 +250,23 @@ def discover_entrypoints(main_module: str) -> List[Dict[str, Any]]:
                 "routes by this name, so one would silently shadow the other"
             )
         names[row["name"]] = f"{row['module']}.{row['python_name']}"
-    rows.sort(key=lambda r: r["name"])
+    _pipeline_class_or_refuse(rows)
+    rows.sort(key=lambda r: str(r["name"]))
     return rows
-
-
-def entrypoints_block(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    return {"v": ENTRYPOINTS_BLOCK_VERSION, "entrypoints": rows}
 
 
 def assert_manifest_advertises_something(manifest: Dict[str, Any]) -> None:
     """A release that advertises NOTHING is a build failure, not a warning.
 
     pgw#1387, measured: the builder printed "no functions discovered", exited
-    0, spent 9m20s baking, pushed, and only then did hub admission refuse with
-    "manifest declares neither functions[] nor jobs[]". The refusal is
-    correct; discovering it after the build is the defect. An endpoint that
-    advertises nothing cannot serve anything, so there is no shape of release
-    for which shipping it is the right answer.
+    0, spent 9m20s baking, pushed, and only then did hub admission refuse. The
+    refusal is correct; discovering it after the build is the defect.
     """
-    functions = manifest.get("functions") or []
-    jobs = manifest.get("jobs") or []
-    entrypoints = (manifest.get("entrypoints") or {}).get("entrypoints") or []
-    if functions or jobs or entrypoints:
+    if (
+        (manifest.get("functions") or [])
+        or (manifest.get("jobs") or [])
+        or (manifest.get("entrypoints") or [])
+    ):
         return
     raise EntrypointDiscoveryError(
         "this endpoint advertises NOTHING: discovery found no @entrypoint "
@@ -202,8 +278,14 @@ def assert_manifest_advertises_something(manifest: Dict[str, Any]) -> None:
     )
 
 
+def entrypoints_block(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The manifest value for ``entrypoints``. A FLAT LIST — the hub decodes
+    this key into ``[]manifestFunction`` and folds it into ``Functions``."""
+    return rows
+
+
 __all__ = [
-    "ENTRYPOINTS_BLOCK_VERSION",
+    "ENTRYPOINT_KIND",
     "EntrypointDiscoveryError",
     "assert_manifest_advertises_something",
     "discover_entrypoints",
