@@ -21,6 +21,11 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
         tensorhub_cache_dir,
         tensorhub_cas_dir,
     )
+    from .model_types import (
+        SDXL,
+        Knob,
+        ModelType,
+    )
     from .download import (
         build_provider_index_from_manifest,
         ensure_local,
@@ -53,8 +58,8 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
 _EXPORTS: Final[dict[str, str]] = {
     "HuggingFaceRef": "refs",
     "Knob": "model_types",
+    "ModelType": "model_types",
     "SDXL": "model_types",
-    "SamplerName": "model_types",
     "LoadedComponentKey": "residency",
     "ParsedModelRef": "refs",
     "RefFragmentRemoved": "refs",
@@ -91,8 +96,8 @@ def __dir__() -> list[str]:
 
 __all__ = [
     "Knob",
+    "ModelType",
     "SDXL",
-    "SamplerName",
     "tensorhub_cache_dir",
     "tensorhub_cas_dir",
     "ensure_local",

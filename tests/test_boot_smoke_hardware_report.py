@@ -1,4 +1,4 @@
-"""gw#619/th#988 end-to-end: a REAL ``python -m gen_worker.entrypoint``
+"""gw#619/th#988 end-to-end: a REAL ``python -m gen_worker.worker_main``
 subprocess whose boot-time CUDA probe fails must dial a real hub socket with
 a HardwareUnsuitable report before exiting — the exact wire path production
 pods take, not an in-process shortcut. Extends the gw#591 boot-smoke

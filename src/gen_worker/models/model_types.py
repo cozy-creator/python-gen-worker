@@ -1,167 +1,151 @@
-"""Thin model types for the ship-code-as-is author surface (pgw#1370 seam).
+"""Model types — the pgw#1377 seam, minimal until that lane lands.
 
-``main_v2``-shape endpoints say ``ctx.checkpoint_defaults(SDXL)`` and read a
-typed ``SDXL.Defaults``: per-checkpoint serving values are MUTABLE PLATFORM
-DEPLOY STATE (hub rows validated against the schema the release EXPORTS —
-``gen-worker release derive`` stamps ``msgspec`` JSON Schema of this struct),
-and the zero-arg construction IS the platform fallback.
+A MODEL TYPE (``SDXL``) classifies checkpoints and carries the typed
+serving-defaults vocabulary; a MODEL CLASS (``SdxlModel(Model[SDXL])``) is
+the runnable the author writes (pgw#1382). This module holds the seam shape
+pgw#1377 builds out: ``ModelType`` (generic over its ``Defaults`` struct, so
+``LoadContext[SDXL].defaults()`` types statically), ``Knob`` (the one
+clamp/default surface), and the ``SDXL`` launch type. The hub-row decode
+matrix, the schema/name export emitter and the ingest assist are pgw#1377's;
+nothing here may grow compile-related fields (pgw#1367 — the catalog stays
+dead).
 
-This module is deliberately minimal: it is the seam pgw#1370's derive and the
-Paul-reviewed sdxl ``main_v2.py`` build against. The full defaults design
-program (pgw#1376) and the model-type package shape (pgw#1377) own the final
-form; coordinate there before widening it.
+Every ``Defaults`` zero-arg construction is SERVABLE values — platform
+fallbacks double as publish-time trace fixtures (pgw#1376 rule), never
+sentinel garbage.
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal, Optional, Union
+from typing import Any, ClassVar, Generic, Literal, Protocol, TypeVar
 
 import msgspec
 
-Number = Union[int, float]
+#: The declared schedule vocabulary for step-distilled recipes; schedule ->
+#: scheduler-class construction stays endpoint code (the main_v2 pattern).
+Schedule = Literal["euler_trailing", "lcm"]
 
-#: The PLATFORM-WIDE sampler vocabulary (checkpoint metadata is written in
-#: it). An endpoint types its REQUEST field with its own served subset; a
-#: metadata value the endpoint does not serve warns and falls through to the
-#: tree's shipped scheduler (main_v2 three-layer resolution).
-SamplerName = Literal[
-    "dpmpp_2m_karras", "dpmpp_2m", "dpmpp_sde_karras", "euler",
-    "euler_trailing", "euler_a", "unipc", "ddim", "lcm", "heun",
-]
+N = TypeVar("N", int, float)
+DT_co = TypeVar("DT_co", bound=msgspec.Struct, covariant=True)
 
 
-class Knob(msgspec.Struct, frozen=True):
-    """One resolvable serving knob: a default plus the checkpoint's range.
+class SupportsAdjust(Protocol):
+    """The caller-visibility half of ``Knob.resolve`` — any context whose
+    ``clamp`` records an adjustment row the caller sees."""
 
-    ``resolve(None) -> default``; a caller value is CLAMPED into
-    ``[lo, hi]`` caller-visibly via ``ctx.clamp`` — the API declares no
-    bounds of its own, the checkpoint's knob owns the constraint.
+    def clamp(
+        self,
+        field: str,
+        requested: float,
+        *,
+        lo: float | None = None,
+        hi: float | None = None,
+        reason: str = "",
+    ) -> float: ...
+
+
+class Knob(msgspec.Struct, Generic[N], frozen=True):
+    """A reusable (default, lo, hi) triple — the one clamp/default surface.
+
+    ``resolve(value, ctx)``: ``None`` -> the default; a value -> clamped into
+    [lo, hi] with a caller-visible adjustment via ``ctx``. It ASSUMES the
+    value already passed the endpoint's own ``msgspec.Meta`` API envelope
+    (which REJECTS with a typed 400) — resolve itself never rejects
+    (pgw#1377 point 4, Paul's two-layer contract).
     """
 
-    default: Number
-    lo: Optional[Number] = None
-    hi: Optional[Number] = None
-    name: str = ""
+    default: N
+    lo: N | None = None
+    hi: N | None = None
+    field: str = ""
 
-    def resolve(self, value: Optional[Number], ctx: Any) -> Number:
+    def __set_name__(self, owner: type, name: str) -> None:
+        # Struct-default instances learn their field name for the
+        # caller-visible adjustment row; decode-created Knobs carry the name
+        # from the wire (or none — pgw#1377 polishes the decode side).
+        if not self.field:
+            msgspec.structs.force_setattr(self, "field", name)
+
+    def resolve(self, value: N | None, ctx: SupportsAdjust) -> N:
         if value is None:
             return self.default
-        clamped: Any = ctx.clamp(
-            self.name or "value",
-            value,
-            lo=self.lo,
-            hi=self.hi,
-            reason="outside the checkpoint's declared range",
+        applied = ctx.clamp(
+            self.field or "value",
+            float(value),
+            lo=None if self.lo is None else float(self.lo),
+            hi=None if self.hi is None else float(self.hi),
+            reason="outside this checkpoint's supported range",
         )
-        # ctx.clamp answers float; keep an int knob's integer arithmetic.
-        if isinstance(self.default, int) and float(clamped).is_integer():
-            return int(clamped)
-        return float(clamped)
+        out: N = type(self.default)(applied)
+        return out
 
 
-#: INTERIM dtype resolution for lanes spelled as bare contract HANDLES.
-#: A lane is a tensorfs layout contract; when the author imports the
-#: contract OBJECT (``tensorfs.contracts.*``), dtype rides on it and this
-#: table is not consulted. Bare handles resolve here until the canonical
-#: per-model-type entries land in tensorfs ``spec/v1/contracts``
-#: (coordinate: pgw#1376/pgw#1377 defaults+model-type design lane).
-CONTRACT_DTYPES: dict[str, Any] = {}
+class ModelType(Generic[DT_co]):
+    """Base for model types. Subclasses set ``name`` (the wire string), nest
+    a ``Defaults`` struct (field defaults ARE the platform fallbacks), and —
+    once tensorfs#111 ships contract objects — ``canonical_contract`` (the
+    lane a model class gets when ``lanes=`` is omitted; an import, never a
+    pointer-string)."""
 
+    name: ClassVar[str] = ""
+    #: The imported tensorfs Contract OBJECT, or None until tensorfs#111.
+    canonical_contract: ClassVar[Any] = None
+    #: tensorfs contract-name patterns — the ingest fingerprint (pgw#1377).
+    contracts: ClassVar[tuple[str, ...]] = ()
 
-def register_contract_dtype(handle: str, dtype: Any) -> None:
-    known = CONTRACT_DTYPES.get(handle)
-    if known is not None and known != dtype:
-        raise ValueError(
-            f"contract {handle!r} already resolves to {known!r}; refusing to "
-            f"re-register it as {dtype!r}"
+    def __init__(self) -> None:  # pragma: no cover - defensive
+        raise TypeError(
+            f"{type(self).__name__} is a model TYPE (a classification), "
+            "never instantiated; write a model CLASS instead: "
+            f"class MyModel(Model[{type(self).__name__}])"
         )
-    CONTRACT_DTYPES[handle] = dtype
 
 
-def _seed_sdxl_contracts() -> None:
-    try:
-        import torch
-    except ImportError:  # pragma: no cover - torch-less installs never derive
-        return
-    register_contract_dtype("sdxl.diffusers-bf16@1", torch.bfloat16)
-    # The fp8-rowwise lane LOADS bf16 (the quantized artifact path is the fp8
-    # pipeline's; the serve host's from_pretrained dtype stays bf16).
-    register_contract_dtype("cozy.sdxl-fp8-rowwise@1", torch.bfloat16)
+class SDXL(ModelType["SDXL.Defaults"]):
+    name = "sdxl"
 
+    class Defaults(msgspec.Struct, frozen=True):
+        """SDXL serving defaults — Paul's launch fields (pgw#1377 point 2).
 
-class _SdxlRecipe(msgspec.Struct, frozen=True):
-    """One SERVING RECIPE: the typed axes that drive a request, whichever
-    source it came from (the checkpoint's own defaults, or a riding
-    distillation adapter's). Both Defaults types inherit it, so endpoint
-    code holds ONE type, never a union (main_v2 pattern)."""
+        ``scheduler`` is deliberately NOT a field: endpoint code owns
+        schedulers (the main_v2 turbo pattern). ``schedule``/``timesteps``
+        are the checkpoint's OWN distilled recipe, used when ``cfg`` is off
+        (a fused step-distilled merge) — distillation is EITHER-OR (Paul
+        ruling): recipe from the adapter OR from these fields; stacking is a
+        typed refusal, endpoint-side. Declared name-and-type compatible with
+        ``SDXL.Lora.Defaults`` so entrypoints type a recipe as
+        ``SDXL.Lora.Defaults | SDXL.Defaults`` and read the shared fields.
+        """
 
-    # cfg=False -> guidance-off serving (batch-1; no unconditional branch).
-    cfg: bool = True
-    steps: Knob = msgspec.field(
-        default_factory=lambda: Knob(
-            default=28, lo=1, hi=80, name="num_inference_steps"
-        )
-    )
-    guidance: Knob = msgspec.field(
-        default_factory=lambda: Knob(
-            default=6.0, lo=1.0, hi=15.0, name="guidance_scale"
-        )
-    )
-    # Checkpoint metadata sampler preference, platform vocabulary; None =
-    # the tree's shipped scheduler stands.
-    sampler: Optional[SamplerName] = None
-    # Pinned denoising ladder (belongs to the recipe's sampler).
-    timesteps: tuple[int, ...] = ()
-
-
-class _SdxlDefaults(_SdxlRecipe, frozen=True):
-    """Per-checkpoint deploy row over platform fallbacks; zero-arg = the
-    platform opinion (the schema the release exports)."""
-
-    positive_preamble: str = ""
-    negative_preamble: str = ""
-    # A STEP-distilled checkpoint refuses a stacked step-distillation
-    # adapter (cfg is a separate axis: guidance-distilled full-step
-    # checkpoints have cfg off but step_distilled False).
-    step_distilled: bool = False
-
-
-class _SdxlLoraDefaults(_SdxlRecipe, frozen=True):
-    """A distillation adapter's own recipe metadata (what ``turbo.defaults``
-    reads as; the derive's fake-adapter enumeration instantiates it)."""
-
-    cfg: bool = False
-    steps: Knob = msgspec.field(
-        default_factory=lambda: Knob(
-            default=4, lo=1, hi=12, name="num_inference_steps"
-        )
-    )
-    sampler: Optional[SamplerName] = "euler_trailing"
-
-
-class SDXL:
-    """The SDXL model type: today, its recipe/defaults schema."""
-
-    #: The canonical layout contract (what omitting lanes= means).
-    CANONICAL_CONTRACT = "sdxl.diffusers-bf16@1"
-
-    Recipe = _SdxlRecipe
-    Defaults = _SdxlDefaults
+        steps: Knob[int] = Knob(30, lo=15, hi=60, field="num_inference_steps")
+        guidance: Knob[float] = Knob(6.0, lo=1.5, hi=12.0, field="guidance_scale")
+        cfg: bool = True
+        positive_preamble: str = ""
+        negative_preamble: str = ""
+        schedule: Schedule | None = None
+        timesteps: tuple[int, ...] = ()
 
     class Lora:
-        """SDXL adapter metadata (distillation LoRAs et al.)."""
+        """Adapter-of-base scoping: ``SDXL.Lora.Defaults`` (wire ``sdxl.lora``)."""
 
-        Defaults = _SdxlLoraDefaults
+        name = "sdxl.lora"
 
+        class Defaults(msgspec.Struct, frozen=True):
+            """LoRA overlay defaults (pgw#1377 point 7). Zero-arg
+            construction is the trace fixture: Lightning-4-step-ish
+            servable platform values."""
 
+            trigger_words: tuple[str, ...] = ()
+            strength: Knob[float] = Knob(1.0, lo=0.0, hi=2.0, field="strength")
+            steps: Knob[int] = Knob(4, lo=1, hi=12, field="num_inference_steps")
+            schedule: Schedule = "euler_trailing"
+            timesteps: tuple[int, ...] = ()  # empty = derive from steps
 
-
-_seed_sdxl_contracts()
 
 __all__ = [
-    "CONTRACT_DTYPES",
     "Knob",
-    "Number",
+    "ModelType",
     "SDXL",
-    "register_contract_dtype",
+    "Schedule",
+    "SupportsAdjust",
 ]

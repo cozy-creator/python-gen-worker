@@ -1004,7 +1004,7 @@ def test_hello_carries_the_parent_session_id_at_G1_and_G2():
 
 
 def test_each_group_gets_its_own_inductor_and_triton_dir(monkeypatch, tmp_path):
-    from gen_worker.entrypoint import _isolate_group_inductor_cache
+    from gen_worker.worker_main import _isolate_group_inductor_cache
 
     monkeypatch.setenv("TENSORHUB_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv(ENV_HOST_SIBLINGS, "4")
@@ -1025,7 +1025,7 @@ def test_each_group_gets_its_own_inductor_and_triton_dir(monkeypatch, tmp_path):
 def test_a_single_child_keeps_the_default_inductor_dir(monkeypatch, tmp_path):
     """siblings == 1 (every pod not running the split): NO override — the
     default is untouched, byte-identical to today."""
-    from gen_worker.entrypoint import _isolate_group_inductor_cache
+    from gen_worker.worker_main import _isolate_group_inductor_cache
     import os as _o
 
     monkeypatch.setenv("TENSORHUB_CACHE_DIR", str(tmp_path))

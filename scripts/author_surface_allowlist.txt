@@ -86,11 +86,11 @@ convert.svdq.fetch_svdq_checkpoint	training-endpoints/conversion/src/conversion/
 convert.svdq.svdq_flavor_label	training-endpoints/conversion/src/conversion/quant/h3_svdq.py:126	PROD
 convert.writer.streaming_fp8_snapshot	training-endpoints/tests/test_fuse_lora.py:317	TEST
 convert.writer.verify_w8a8_snapshot	training-endpoints/conversion/src/conversion/quant/modelopt.py:872	PROD
-# pgw#1372: the ship-code-as-is serving context surface. The production
-# caller is the endpoint AUTHOR — the target-state contract file Paul reviews
-# (serverless-endpoints sdxl main_v2.py) reads these off ctx; the worker only
-# provides them. They join gen_worker.api's class when the author-surface
-# lane re-points RequestContext at the serving context (pgw#1373 hardcut).
-serving.context.ServeContext.checkpoint_defaults	serverless-endpoints/sdxl/src/sdxl/main_v2.py:125	PROD
-serving.context.ServeContext.step_callback	serverless-endpoints/sdxl/src/sdxl/main_v2.py:136	PROD
+# pgw#1382: the serving RequestContext surface. The production caller is the
+# endpoint AUTHOR — the contract file Paul reviews (serverless-endpoints sdxl
+# main_v2.py) reads it off ctx; the worker only provides it.
+serving.context.RequestContext.step_callback	serverless-endpoints/sdxl/src/sdxl/main_v2.py:163	PROD
 release.trace_context.TraceRequestContext.step_callback	serverless-endpoints/sdxl/src/sdxl/main_v2.py:197	PROD
+# pgw#1377 seam: the LoRA overlay vocabulary — authors read SDXL.Lora.Defaults
+# for the adapter recipe (the contract file's turbo branch).
+models.model_types.SDXL.Lora	serverless-endpoints/sdxl/src/sdxl/main_v2.py:208	PROD

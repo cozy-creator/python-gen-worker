@@ -8,7 +8,7 @@ import sys
 PROG = r'''
 import faulthandler, os, signal, sys, threading, time
 sys.path.insert(0, %r)
-from gen_worker.entrypoint import _install_stack_dump_handler
+from gen_worker.worker_main import _install_stack_dump_handler
 
 def spin():
     time.sleep(30)

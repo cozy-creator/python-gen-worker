@@ -79,7 +79,7 @@ def _parser() -> argparse.ArgumentParser:
                         help="active lane contract handle (the deploy's pick)")
     parser.add_argument("--output-dir", default="outputs")
     parser.add_argument("--invoke", action="append", default=[],
-                        help="handler name to invoke (repeatable, pairs with --payload)")
+                        help="entrypoint name to invoke (repeatable, pairs with --payload)")
     parser.add_argument("--payload", action="append", default=[],
                         help="JSON payload for the matching --invoke")
     # Adoption sources, mutually exclusive; absent = the eager bridge.

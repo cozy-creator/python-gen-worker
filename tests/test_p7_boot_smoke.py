@@ -1,4 +1,4 @@
-"""P7 (th#960/pgw#609 design table): ``python -m gen_worker.entrypoint`` as a
+"""P7 (th#960/pgw#609 design table): ``python -m gen_worker.worker_main`` as a
 real subprocess, table-driven over ``tests/harness/subprocess_runner.py``
 (gw#591 pattern, kept per the design: "already greenfield-shaped"). No GPU,
 no network. See ``tests/test_boot_smoke_gw591.py`` for the original

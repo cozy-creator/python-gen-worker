@@ -118,7 +118,7 @@ ENV_LOCAL_CELLS_DIR = "GEN_WORKER_LOCAL_CELLS_DIR"
 DURABLE_KEYSET_DIRNAME = "keysets"
 
 #: The baked-image location, beside ``endpoint.lock``
-#: (``gen_worker.entrypoint.MANIFEST_PATH``'s directory — restated rather than
+#: (``gen_worker.worker_main.MANIFEST_PATH``'s directory — restated rather than
 #: imported so reading a key set never drags the entrypoint's import graph onto
 #: a serve pod).
 IMAGE_KEYSET_DIR = Path("/app/.tensorhub")

@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from gen_worker import entrypoint, env_seal
+from gen_worker import env_seal, worker_main as entrypoint
 
 import torch
 from typing import Iterator

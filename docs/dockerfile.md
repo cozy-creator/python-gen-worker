@@ -29,10 +29,10 @@ You satisfy three contract points; everything else is up to you.
    This serializes every `@endpoint` object's `Resources`, bindings, and
    payload schemas. The control plane reads the lock from the built image.
 
-3. **The entrypoint runs `gen_worker.entrypoint`.**
+3. **The entrypoint runs `gen_worker.worker_main`.**
 
    ```dockerfile
-   ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
+   ENTRYPOINT ["python", "-m", "gen_worker.worker_main"]
    ```
 
    The entrypoint reads `endpoint.lock`, connects to the orchestrator, and
@@ -49,7 +49,7 @@ COPY . /app
 RUN pip install -e .
 RUN mkdir -p /app/.tensorhub \
     && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
-ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
+ENTRYPOINT ["python", "-m", "gen_worker.worker_main"]
 ```
 
 No `ARG BASE_IMAGE`, no version pass-throughs. The endpoint's `pyproject.toml`
@@ -81,7 +81,7 @@ COPY . /app
 RUN pip install -e .
 RUN mkdir -p /app/.tensorhub \
     && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
-ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
+ENTRYPOINT ["python", "-m", "gen_worker.worker_main"]
 ```
 
 Use a common upstream default matching the profile so local builds behave like
@@ -336,7 +336,7 @@ RUN uv pip install --no-cache --link-mode copy \
     && mkdir -p /app/.tensorhub \
     && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
 
-ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
+ENTRYPOINT ["python", "-m", "gen_worker.worker_main"]
 ```
 
 Use this shape for GPU endpoints. For CPU-only endpoints, `python:3.12-slim`

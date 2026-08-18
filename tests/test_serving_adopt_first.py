@@ -2,13 +2,14 @@
 
 Integration, no mocks: the fixture endpoint under
 ``tests/fixtures/serving_v2_endpoint`` is shaped exactly like the
-serverless-endpoints sdxl ``main_v2.py`` (``class ...(Endpoint)``, imperative
-``self.pipe.unet = ctx.compile(self.pipe.unet)`` marking, handlers on the
-serving context surface). It boots from a CONFIG-ONLY checkpoint (fake
-weights), serves real requests end-to-end on CPU, and the adopt path runs
-real publish-time discovery output through a real ``LocalGraphStore`` — only
-the artifact loader is a stub, because bytes-to-callable is the AOTInductor
-runtime's job on the target GPU.
+serverless-endpoints sdxl ``main_v2.py`` under the pgw#1382 split
+(``SdxlModel(Model[SDXL], lanes=…)``, one stateless ``@entrypoint``,
+imperative ``self.pipe.unet = ctx.compile(self.pipe.unet)`` marking). It
+boots from a CONFIG-ONLY checkpoint (fake weights), serves real requests
+end-to-end on CPU, and the adopt path runs real publish-time discovery
+output through a real ``LocalGraphStore`` — only the artifact loader is a
+stub, because bytes-to-callable is the AOTInductor runtime's job on the
+target GPU.
 """
 
 from __future__ import annotations
@@ -27,11 +28,10 @@ from gen_worker._vendor.torchcg import EnvironmentMismatch
 from gen_worker._vendor.torchcg.discovery import discover_lane
 from gen_worker._vendor.torchcg.document import GraphSetDocument
 from gen_worker._vendor.torchcg.graph_identity import EnvIdentity, closure_hash
-from gen_worker._vendor.torchcg.lane import LaneRef
 from gen_worker._vendor.torchcg.requirements import RequirementsManifest
 from gen_worker._vendor.torchcg.store import LocalGraphStore, StoreError
 from gen_worker.serving import (
-    BoundAdapter,
+    Adapter,
     DeployBinding,
     EndpointHost,
     EndpointLoadError,
@@ -41,10 +41,19 @@ from gen_worker.serving import (
 from gen_worker.serving.hub_store import HubGraphStore
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "serving_v2_endpoint"
+LANE = "sdxl.diffusers-bf16@1"
 SM = "sm_89"
 INSTALLED = {"torch": torch.__version__}
 CLOSURE = closure_hash(INSTALLED)
 ENV = EnvIdentity(closure=CLOSURE, sm=SM)
+
+#: Hub per-checkpoint overrides — mutable deploy state, decoded by
+#: ``LoadContext.defaults()`` against ``SDXL.Defaults``. Small step knob so
+#: the CPU loop stays tiny.
+OVERRIDES: dict[str, Any] = {
+    "steps": {"default": 2, "lo": 1, "hi": 8, "field": "num_inference_steps"},
+    "guidance": {"default": 6.0, "lo": 1.5, "hi": 8.0, "field": "guidance_scale"},
+}
 
 
 @pytest.fixture(autouse=True)
@@ -70,15 +79,14 @@ def binding(checkpoint: Path) -> DeployBinding:
     return DeployBinding(
         checkpoint_ref="ckpt:tiny@1",
         checkpoint_dir=checkpoint,
-        # Hub per-checkpoint overrides — mutable deploy state, typed by
-        # ctx.checkpoint_defaults(TinyDefaults) against the author's schema.
-        defaults={"steps": 2, "max_guidance": 8.0},
+        defaults=dict(OVERRIDES),
     )
 
 
 def fresh_host(binding: DeployBinding, tmp_path: Path) -> EndpointHost:
     loaded = load_endpoint(FIXTURE_DIR)
-    return EndpointHost(loaded, binding, output_dir=tmp_path / "outputs")
+    return EndpointHost(
+        loaded, binding, lane_contract=LANE, output_dir=tmp_path / "outputs")
 
 
 @pytest.fixture()
@@ -88,23 +96,29 @@ def host(binding: DeployBinding, tmp_path: Path) -> EndpointHost:
     return booted
 
 
+def fixture_model(host: EndpointHost) -> Any:
+    (instance,) = host.instances.values()
+    return instance.model
+
+
 # --- the eager path: standalone, first --------------------------------------
 
 
 def test_eager_boot_serves_a_request_end_to_end(host: EndpointHost, tmp_path: Path) -> None:
-    # setup() ran the author's own from_pretrained against ctx.checkpoint_dir
-    # under ctx.lane.dtype, and typed the hub overrides.
-    assert host.instance.pipe.dtype is torch.float32
-    assert host.instance.defaults.steps == 2  # hub override beat the schema default
-    assert host.instance.defaults.guidance == 6.0  # schema default survived
+    # load() ran the author's ctx.load against the checkpoint tree under the
+    # active lane's dtype, and ctx.defaults() typed the hub overrides.
+    model = fixture_model(host)
+    assert model.pipe.dtype is torch.float32
+    assert model.defaults.steps.default == 2  # hub override beat the platform value
+    assert model.defaults.cfg is True  # platform default survived
     # ctx.compile with no adoption source is a transparent pass-through: the
     # marked module carries no swapped forward.
-    assert "forward" not in host.instance.pipe.unet.__dict__
+    assert "forward" not in model.pipe.unet.__dict__
 
     ctx = host.make_context("req-1")
     out = host.dispatch(
         "generate",
-        {"prompt": "hello", "aspect_ratio": "1:1", "guidance_scale": 12.0, "seed": 3},
+        {"prompt": "hello", "aspect_ratio": "1:1", "guidance_scale": 12.0},
         request_id="req-1",
         ctx=ctx,
     )
@@ -112,11 +126,11 @@ def test_eager_boot_serves_a_request_end_to_end(host: EndpointHost, tmp_path: Pa
     saved = tmp_path / "outputs" / out.image.ref
     assert saved.is_file() and saved.stat().st_size > 0
 
-    # The clamp surface recorded the caller-visible adjustment (12 -> 8).
+    # The Knob clamp recorded the caller-visible adjustment (12 -> 8).
     rows = [row for row in ctx.adjustments if row["field"] == "guidance_scale"]
     assert rows and rows[0]["requested"] == "12.0" and rows[0]["applied"] == "8.0"
 
-    # The boot recorded a model_load span for the author's setup, and no
+    # The boot recorded a model_load span for the author's load, and no
     # adopt_pull span — nothing was offered to adopt.
     stages = [span.stage.value for span in boot_stages.recorded()]
     assert "model_load" in stages
@@ -132,106 +146,58 @@ def test_dispatch_refusals_are_typed_before_author_code_runs(host: EndpointHost)
         host.dispatch("generate", {"prompt": "x", "unknown_field": 1}, request_id="r")
 
 
-def test_adapter_gate_and_trace_flag_shape_the_turbo_handler(
+def test_the_deployment_decides_the_mode(
     host: EndpointHost, binding: DeployBinding, tmp_path: Path
 ) -> None:
-    # No adapter bound, not a trace: the author's own refusal fires.
-    with pytest.raises(ValidationError, match="no distillation adapter"):
-        host.dispatch("generate_turbo", {"prompt": "x"}, request_id="r")
-    # The trace drive relaxes it (ctx.is_trace) — publish-time discovery runs
-    # the same handler with no deploy state.
-    ctx = host.make_context("trace", is_trace=True)
-    out = host.dispatch("generate_turbo", {"prompt": "x"}, request_id="trace", ctx=ctx)
-    assert out.model_used == "ckpt:tiny@1"
-    # A bound adapter serves and stamps the recipe name.
+    """Paul's merge ruling: one entrypoint; adapter bound -> turbo branch."""
+    # A bound distillation adapter serves turbo and stamps the recipe name.
+    from gen_worker.models import SDXL
+
     host.rebind(
         DeployBinding(
             checkpoint_ref=binding.checkpoint_ref,
             checkpoint_dir=binding.checkpoint_dir,
             defaults=binding.defaults,
-            adapter=BoundAdapter(name="lightning-4step", path=tmp_path / "lora"),
+            adapter=Adapter(
+                name="lightning-4step", path=tmp_path / "lora",
+                defaults=SDXL.Lora.Defaults(),
+            ),
         )
     )
-    out = host.dispatch("generate_turbo", {"prompt": "x"}, request_id="r2")
+    out = host.dispatch("generate", {"prompt": "x"}, request_id="r2")
     assert out.model_used == "ckpt:tiny@1+lightning-4step"
+    # Explicit guidance on a distilled serving is a typed refusal, never
+    # silently ignored.
+    with pytest.raises(ValidationError, match="guidance_scale is not accepted"):
+        host.dispatch(
+            "generate", {"prompt": "x", "guidance_scale": 7.0}, request_id="r3")
+    with pytest.raises(ValidationError, match="negative_prompt is not accepted"):
+        host.dispatch(
+            "generate", {"prompt": "x", "negative_prompt": "bad"}, request_id="r4")
 
 
 def test_loader_states_the_surface_and_refuses_typed(tmp_path: Path) -> None:
     loaded = load_endpoint(FIXTURE_DIR)
     assert loaded.module_name == "serving_v2_fixture.main"
-    # setup/teardown are the base-class hooks, never routable handlers.
-    assert sorted(loaded.handlers) == ["generate", "generate_turbo"]
-    lane = loaded.lane()
-    assert lane.contract == "tiny.plain-fp32@1"
+    assert sorted(loaded.entrypoints) == ["generate"]
+    (model_cls,) = loaded.models
+    lane = loaded.lane(model_cls, LANE)
+    assert lane.contract == LANE
     assert lane.dtype is torch.float32
-    assert loaded.declaration.samples is not None
-    payloads = loaded.declaration.samples()
-    assert len(payloads) == 2  # every bucket through the handler
+    # Two declared lanes: the active one is the deploy's pick, never a default.
+    with pytest.raises(EndpointLoadError, match="the active lane must be named"):
+        loaded.lane(model_cls)
     with pytest.raises(EndpointLoadError, match="no lane 'other.fp8@1'"):
-        loaded.lane("other.fp8@1")
+        loaded.lane(model_cls, "other.fp8@1")
     with pytest.raises(EndpointLoadError, match="no endpoint.toml"):
         load_endpoint(tmp_path)
 
 
-def test_the_endpoint_base_class_is_required_and_hooks_are_verified(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "rogue"
-    (root / "src" / "rogue_ep").mkdir(parents=True)
-    (root / "endpoint.toml").write_text('main = "rogue_ep.main"\n')
-    (root / "src" / "rogue_ep" / "__init__.py").write_text("")
-    (root / "src" / "rogue_ep" / "main.py").write_text(
-        "import msgspec\n"
-        "class In(msgspec.Struct):\n    prompt: str\n"
-        "class Rogue:\n"
-        "    def setup(self, ctx):\n        pass\n"
-        "    def generate(self, ctx, payload: In):\n        return payload\n"
-    )
-    # No Endpoint subclass in the module: the base is REQUIRED, named error.
-    with pytest.raises(EndpointLoadError, match="Endpoint"):
-        load_endpoint(root)
-    # A DECORATED class that skips the base is refused by name too — the
-    # marker does not exempt anyone from the behavior contract.
-    (root / "src" / "rogue_ep" / "main.py").write_text(
-        "import msgspec\n"
-        "from gen_worker.serving.loader import EndpointDeclaration\n"
-        "class In(msgspec.Struct):\n    prompt: str\n"
-        "class Rogue:\n"
-        "    def setup(self, ctx):\n        pass\n"
-        "    def generate(self, ctx, payload: In):\n        return payload\n"
-        "Rogue.__cozy_endpoint__ = EndpointDeclaration()\n"
-    )
-    import importlib
-    import rogue_ep.main
-
-    importlib.reload(rogue_ep.main)
-    from gen_worker.serving.loader import load_endpoint_module
-
-    with pytest.raises(EndpointLoadError, match="does not inherit"):
-        load_endpoint_module("rogue_ep.main")
-    # A subclass whose hook breaks the (self, ctx) contract is refused too:
-    # framework capabilities arrive via ctx ONLY.
-    (root / "src" / "rogue_ep" / "main.py").write_text(
-        "import msgspec\n"
-        "from gen_worker import Endpoint\n"
-        "class In(msgspec.Struct):\n    prompt: str\n"
-        "class Rogue(Endpoint):\n"
-        "    def setup(self, ctx, extra_toolbox):\n        pass\n"
-        "    def generate(self, ctx, payload: In):\n        return payload\n"
-    )
-    importlib.reload(rogue_ep.main)
-    with pytest.raises(EndpointLoadError, match=r"exactly \(self, ctx\)"):
-        load_endpoint_module("rogue_ep.main")
-
-
-def test_teardown_hook_runs_through_the_base_class_contract(
-    host: EndpointHost,
-) -> None:
-    instance = host.instance
-    assert not hasattr(instance, "torn_down")
+def test_unload_runs_through_drain_then_call(host: EndpointHost) -> None:
+    (model_cls,) = host.loaded.models
+    assert model_cls in host.instances
     host.teardown()
-    assert instance.torn_down is True
-    assert host.instance is None
+    assert host.instances == {}
 
 
 # --- the adopt path: publish-time discovery, store pull, ctx.compile --------
@@ -240,19 +206,20 @@ def test_teardown_hook_runs_through_the_base_class_contract(
 def publish_document(host: EndpointHost) -> GraphSetDocument:
     """The publish-time derive, run for real: discovery hooks the marked
     module on the author's live pipeline and drives the author's own
-    handlers with the declared sample payloads."""
-    lane: LaneRef = host.loaded.lane()
-    samples_fn = host.loaded.declaration.samples
-    assert samples_fn is not None
-    samples = samples_fn()
+    entrypoint with schema-enumerated payloads (both aspect-ratio buckets)."""
+    from serving_v2_fixture.main import AspectRatio
+
+    model = fixture_model(host)
 
     def drive() -> None:
-        for index, payload in enumerate(samples):
+        for index, ratio in enumerate(AspectRatio):
             ctx = host.make_context(f"trace-{index}", is_trace=True)
-            host.dispatch("generate", payload, request_id=f"trace-{index}", ctx=ctx)
+            host.dispatch(
+                "generate", {"prompt": "trace", "aspect_ratio": str(ratio)},
+                request_id=f"trace-{index}", ctx=ctx,
+            )
 
-    lane_graphs = discover_lane(
-        lane, ("unet",), {"unet": host.instance.pipe.unet}, drive)
+    lane_graphs = discover_lane(LANE, ("unet",), {"unet": model.pipe.unet}, drive)
     return GraphSetDocument(closure=CLOSURE, lanes=(lane_graphs,))
 
 
@@ -341,8 +308,8 @@ def test_exact_env_mismatch_refuses_loudly_before_author_code(
             artifacts_dir=tmp_path / "adopted",
             installed={"torch": "0.0.0-divergent"},
         )
-    # The audit fired BEFORE the author's class was even instantiated.
-    assert refused.instance is None
+    # The audit fired BEFORE any author model was even instantiated.
+    assert refused.instances == {}
     spans = [s for s in boot_stages.recorded() if s.stage.value == "adopt_pull"]
     assert spans and spans[-1].attrs["refusal"] == "environment_mismatch"
 
@@ -418,7 +385,7 @@ def test_hub_store_partial_hit_verifies_digests_and_misses_clean(
         "misses": [hole.graph],
     }
     transport = StubTransport(answer, {"https://presigned.example/hit": payload})
-    store = HubGraphStore(transport, "release-1", "tiny.plain-fp32@1", SM)
+    store = HubGraphStore(transport, "release-1", LANE, SM)
 
     calls: list = []
     adopted_host = fresh_host(binding, tmp_path)
@@ -438,7 +405,7 @@ def test_hub_store_partial_hit_verifies_digests_and_misses_clean(
     # A lying digest is a StoreError -> a HOLE with the reason stated, never
     # an adopted artifact and never a boot failure (partial-hit everywhere).
     transport.blobs["https://presigned.example/hit"] = b"tampered"
-    tampered_store = HubGraphStore(transport, "release-1", "tiny.plain-fp32@1", SM)
+    tampered_store = HubGraphStore(transport, "release-1", LANE, SM)
     tampered_host = fresh_host(binding, tmp_path)
     tampered_host.setup(
         store=tampered_store, document=tampered_store.get_graphs("release-1"),

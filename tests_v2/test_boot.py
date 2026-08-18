@@ -2,7 +2,7 @@
 
 Scenario shape: each test is a WALK that asserts many behaviors of one real
 boot — an in-process Worker over the hub double, or a real
-``python -m gen_worker.entrypoint`` subprocess dialing a live scheduler
+``python -m gen_worker.worker_main`` subprocess dialing a live scheduler
 socket. Refusals are first-class: the matrix at the bottom pins the typed,
 named, hub-visible failure of every boot gate.
 """

@@ -171,7 +171,7 @@ def test_RED_a_new_family_copying_the_minimum_viable_dockerfile_is_REFUSED(
         "RUN pip install -e .\n"
         "RUN mkdir -p /app/.tensorhub \\\n"
         "    && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock\n"
-        'ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]\n')
+        'ENTRYPOINT ["python", "-m", "gen_worker.worker_main"]\n')
     main = src / "src" / "newfam" / "main.py"
     main.write_text(
         "@endpoint(\n"
@@ -226,7 +226,7 @@ def test_a_comment_ABOUT_a_step_is_not_the_step(tmp_path: Path) -> None:
         "# and g++, which it does not install either.\n"
         "RUN mkdir -p /app/.tensorhub \\\n"
         "    && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock\n"
-        'ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]\n')
+        'ENTRYPOINT ["python", "-m", "gen_worker.worker_main"]\n')
     assert sorted(f.guarantee for f in bg.check_endpoint(src)) == [
         "cuda_root", "cxx_toolchain"]
 
@@ -241,7 +241,7 @@ def test_the_BAN_reads_comments_because_the_hub_does() -> None:
     text = ("FROM python:3.12-slim\n"
             "# RUN --mount=type=cache,target=/root/.cache pip install .\n"
             "RUN python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock\n"
-            'ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]\n')
+            'ENTRYPOINT ["python", "-m", "gen_worker.worker_main"]\n')
     assert [f.guarantee for f in bg.check_dockerfile(text, aot=False)] == [
         "buildkit_cache_mount"]
     assert bg.guarantee("buildkit_cache_mount").reads_comments is True

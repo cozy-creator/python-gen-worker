@@ -5,7 +5,7 @@ This is the main entry point for running a Cozy worker. It loads the manifest,
 discovers user functions, and starts the worker loop.
 
 Usage:
-    python -m gen_worker.entrypoint
+    python -m gen_worker.worker_main
 """
 
 import os

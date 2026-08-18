@@ -55,7 +55,7 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
-from gen_worker import entrypoint
+from gen_worker import worker_main as entrypoint
 from gen_worker.cuda_probe import CudaProbeResult, should_probe_cuda
 # The SAME class object `entrypoint` holds (`from .worker import Worker`), so
 # patching it here is patching what the boot constructs.
