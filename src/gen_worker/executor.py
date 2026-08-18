@@ -8136,9 +8136,18 @@ class Executor:
         RUNNING on the wire for the whole background build (the hub's
         minting classification consumes exactly that) and terminates here —
         COMPLETED on arm or clean abandonment, FAILED on disproof/error
-        (serving stays eager either way; a mint failure never un-serves)."""
+        (serving stays eager either way; a mint failure never un-serves).
+
+        pgw#1383: and it TERMINALISES ON EVERY EXIT. The ``finally`` emits
+        exactly one typed ``self_mint_*`` event naming what this mint ended
+        as, including *"I am not going to publish"* — a mint whose compile
+        children all finished and whose publish was then declined used to end
+        with no terminus event at all, so the hub read the pod as busy on
+        background work and it billed until a human deleted it ($0.35 on
+        ``j56tate13oav13``). The hub's policy is right; it needed a fact."""
         act = bg.act
         assert act is not None
+        end, reason, detail = "", "", ""
         try:
             with activity_mod.watchdog(act):
                 await self._supervise_mint(rec, bg, act)
@@ -8149,14 +8158,13 @@ class Executor:
                 "background mint for %s abandoned cleanly (%s: %s); serving "
                 "continues at its current tier",
                 bg.spec.name, bg.abandon_code, bg.abandon_reason)
-            activity_mod.emit_event(
-                "self_mint_abort",
+            end = fleet_compiled_graphs_mod.MINT_END_ABANDONED
+            reason = f"abandoned_{bg.abandon_code}"
+            detail = (
                 f"background mint for {bg.spec.name} abandoned "
                 f"({bg.abandon_code}"
                 + (f": {bg.abandon_reason}" if bg.abandon_reason else "")
-                + "); serving continues at its current tier",
-                phase=f"abandoned_{bg.abandon_code}",
-            )
+                + "); serving continues at its current tier")
             act.completed()
         except Exception as exc:
             # pgw#737: free_targets — a failed mint that leaves its wrappers
@@ -8168,12 +8176,10 @@ class Executor:
                 "for this process", bg.spec.name, type(exc).__name__, exc)
             # pgw#677 reopen: the abort cause rides the wire typed and
             # countable, in addition to the FAILED activity terminal.
-            activity_mod.emit_event(
-                "self_mint_abort",
+            end, reason = fleet_compiled_graphs_mod.MINT_END_ABORTED, "error"
+            detail = (
                 f"background mint for {bg.spec.name} failed: "
-                f"{type(exc).__name__}: {exc}",
-                phase="error",
-            )
+                f"{type(exc).__name__}: {exc}")
             act.failed(exc)
         else:
             act.completed()
@@ -8185,6 +8191,7 @@ class Executor:
             self._assert_mint_termini(
                 bg.spec, list(bg.pendings.values()),
                 driver_owns_delegated=False)
+            self._report_mint_end(bg, end, reason, detail)
             if rec.background_mint is bg:
                 rec.background_mint = None
             # pgw#789: WARM-COMPLETE. The eager-first boot (pgw#671) advertises
@@ -8199,6 +8206,39 @@ class Executor:
             # `ensure_setup` — see `_mark_warm_complete`.
             self._mark_warm_complete(rec, bg.spec.name)
             self._on_state_change()
+
+    def _report_mint_end(
+        self, bg: "_BackgroundMint", end: str, reason: str, detail: str,
+    ) -> None:
+        """pgw#1383: ONE typed terminal event per mint, on EVERY exit path.
+
+        The driver's branches name the ends only THEY know (abandoned, error);
+        every other end is folded from the obligations' own recorded termini,
+        so a publish the hub refused, a withheld partial pack and an
+        arm-refused-all-classes mint each terminate under their own reason
+        rather than under a shared silence. ``published`` needs no event of its
+        own — ``self_mint_publish phase=published`` already is that terminus,
+        and a second row would double-count the only end that shipped.
+        """
+        if not end:
+            pendings = list({id(p): p for p in bg.pendings.values()}.values())
+            end, reason = fleet_compiled_graphs_mod.mint_end(pendings)
+        if end == fleet_compiled_graphs_mod.MINT_END_PUBLISHED:
+            return
+        kind = (
+            "self_mint_abort"
+            if end in (fleet_compiled_graphs_mod.MINT_END_ABORTED,
+                       fleet_compiled_graphs_mod.MINT_END_ABANDONED)
+            else "self_mint_skipped")
+        activity_mod.emit_event(
+            kind,
+            detail or (
+                f"the background mint for {bg.spec.name} ended {end} "
+                f"({reason}) and published nothing; serving continues at its "
+                f"current tier and this pod owes the fleet no further work "
+                f"for it"),
+            phase=reason or end,
+        )
 
     async def _await_publish_durable(self, act: Any) -> None:
         """Keep the mint's activity RUNNING until its compiled graph is DURABLE.
