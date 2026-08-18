@@ -1248,8 +1248,18 @@ def main() -> None:
     if not val.ok:
         _fail_build_input(*(f"error: {err}" for err in val.errors))
 
-    if not manifest.get("functions") and not manifest.get("jobs"):
-        print("warning: no @endpoint or @job objects found", file=sys.stderr)
+    # th#2146/pgw#1387: `entrypoints[]` counts. `validate_endpoint_lock` folds it
+    # into `functions` at its own one site, so it went quiet for a v2 release —
+    # this second, standalone check did not, and every SUCCESSFUL v2 build
+    # printed "no @endpoint or @job objects found" over a manifest that declares
+    # its entrypoints perfectly well. The wording is also now wrong: `@endpoint`
+    # is the surface v2 replaced, so the line named the OLD decorator as missing
+    # while the NEW one was present and discovered.
+    if not any(manifest.get(k) for k in ("functions", "entrypoints", "jobs")):
+        print(
+            "warning: no @entrypoint, @endpoint or @job objects found",
+            file=sys.stderr,
+        )
 
     sys.stdout.write(msgspec.toml.encode(_strip_none(manifest)).decode("utf-8"))
     if not sys.stdout.isatty():
