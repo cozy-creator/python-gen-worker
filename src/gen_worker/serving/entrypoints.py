@@ -19,6 +19,13 @@ ruling, 2026-08-17 — one parameter-order rule across the SDK, matching
     def transform(ctx: RequestContext, payload: TransformInput
                   ) -> TransformOutput: ...
 
+    @entrypoint(resources=Resources(  # the STAFFING ENVELOPE (pgw#1396)
+        vcpus=16, max_gpu_count=4, max_gpus_per_execution_group=4,
+        parallel=("sequence",),
+        requires=LayoutRequirements(recommended="ram96g")))
+    def generate(ctx: RequestContext, payload: GenerateInput,
+                 video: H3Model) -> GenerateOutput: ...
+
 * first: ``ctx`` annotated :class:`~gen_worker.serving.context.RequestContext`
 * second: the payload, a ``msgspec.Struct`` — the wire schema
 * remaining, in any order and **possibly none**: model SLOTS (params
@@ -45,7 +52,9 @@ import inspect
 import types
 import typing
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Literal, Tuple, Type, TypeVar, get_type_hints
+from typing import (
+    Any, Callable, Dict, Literal, Tuple, Type, TypeVar, get_type_hints, overload,
+)
 
 import msgspec
 
@@ -91,6 +100,12 @@ class EntrypointSpec:
     payload_type: Type[msgspec.Struct]
     slots: Tuple[SlotSpec, ...]
     return_type: Type[msgspec.Struct]
+    #: The declared :class:`~gen_worker.api.decorators.Resources`, or ``None``.
+    #: se#755/pgw#1396: the STAFFING ENVELOPE — the machine this function is
+    #: placed on. Function scope because the hub's unit of placement is the
+    #: function (pgw#1394) and because `music-analysis` declares three
+    #: different vCPU floors across three functions of one endpoint.
+    resources: Any = None
 
     @property
     def model_params(self) -> Tuple[Tuple[str, type], ...]:
@@ -169,17 +184,72 @@ def _slot_of(fn: Callable[..., Any], name: str, annotation: Any) -> SlotSpec:
     )
 
 
-def entrypoint(fn: F) -> F:
-    """Mark a module-level function as an entrypoint (contract above)."""
+@overload
+def entrypoint(fn: F) -> F: ...
+@overload
+def entrypoint(*, resources: Any) -> Callable[[F], F]: ...
+
+
+def entrypoint(
+    fn: F | None = None, *, resources: Any = None
+) -> F | Callable[[F], F]:
+    """Mark a module-level function as an entrypoint (contract above).
+
+    ``resources=`` is the ONE kwarg this decorator takes, and it is the
+    STAFFING ENVELOPE (se#755/pgw#1396): the machine this function is placed
+    on — ``Resources(vcpus=…, max_gpu_count=…,
+    max_gpus_per_execution_group=…, parallel=…, requires=…)``. It is FUNCTION
+    scope for three reasons, none of them convenience:
+
+    * the hub's unit of placement IS the function — pgw#1394 folded the
+      per-lane VRAM floor to function scope for exactly this reason
+      (*"a function is placed on a single machine before anything knows which
+      lane it will serve"*), and every term here is placed by that same code;
+    * one endpoint's functions legitimately differ: ``music-analysis``
+      declares ``vcpus=2``, ``vcpus=8``, ``vcpus=8`` across three functions,
+      and a single endpoint- or model-scoped number is a silent over- or
+      under-buy of two of them;
+    * a WEIGHTLESS entrypoint (pgw#1392) has no ``Model`` class to hang it on,
+      and weightless endpoints are precisely the ones a CPU floor unblocks.
+
+    This does NOT reopen pgw#1382. That hardcut moved the *weight and lane*
+    declarations (``model=``, ``lanes=``) onto the ``Model`` class header
+    because they are properties of the WEIGHTS. A machine ask is a property of
+    the CODE THAT RUNS, which is this function.
+
+    ``vcpus`` is NOT a ``requires=`` term and must never become one: the hub
+    already reads ``resources.vcpus`` and normalizes it to ``min_vcpus``
+    itself, so a second spelling would land in one payload key from two
+    directions. The asymmetry with ``min_host_ram_gb`` (which IS a
+    ``requires=`` term, at ``recommended`` only) is deliberate: vCPUs are
+    selectable and filterable at both providers, host RAM on a RunPod GPU pod
+    is neither, so a host-RAM MINIMUM stays forbidden (Paul, 2026-07-11).
+    """
+
+    if fn is None:
+        def bind(inner: F) -> F:
+            return entrypoint(inner, resources=resources)  # type: ignore[call-overload,no-any-return]
+        return bind
 
     from .context import RequestContext
 
     if not inspect.isfunction(fn):
         raise EntrypointDeclarationError(
             f"@entrypoint marks module-level functions, got "
-            f"{type(fn).__name__} — decorator kwargs died with @endpoint "
-            "(pgw#1382); the Model class header carries lanes="
+            f"{type(fn).__name__} — the only kwarg is resources= "
+            "(pgw#1396); the Model class header carries lanes="
         )
+    if resources is not None:
+        from ..api.decorators import Resources
+
+        if not isinstance(resources, Resources):
+            raise _refuse(
+                fn,
+                f"resources= takes a gen_worker.Resources, got "
+                f"{type(resources).__name__} — the staffing envelope is a "
+                "typed declaration so its refusals name your line, not a "
+                "manifest key",
+            )
     if "." in fn.__qualname__:
         raise _refuse(
             fn,
@@ -257,6 +327,7 @@ def entrypoint(fn: F) -> F:
         payload_type=payload_type,
         slots=slots,
         return_type=return_type,
+        resources=resources,
     )
     setattr(fn, ENTRYPOINT_ATTR, spec)
     return fn
