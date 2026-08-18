@@ -237,6 +237,26 @@ def _parse_lanes(
             declared = parse_layout_requirements(floor, where=site)
             _refuse_non_vram_terms(declared, where=site)
 
+        # A lane with no dtype cannot state a capability floor, and a floor is
+        # the one place failing OPEN is invisible: an absent `min_sm` reads to
+        # the resolver as "runs anywhere", which is th#1754's shape with a new
+        # cause. `lane_dtype` already refuses a dtypeless contract — EXCEPT for
+        # a handle in `DTYPELESS_UPSTREAM_LANES`, where it answers None. That
+        # escape hatch predates the derivation and would now buy silence rather
+        # than the loud load crash it was traded for, so a floor closes it
+        # here: fail closed, exactly as the tuple-vs-dict hardcut does.
+        if not dtype:
+            raise ModelDeclarationError(
+                f"{site}: lane {handle} declares no load dtype, so no "
+                "compute-capability floor can be derived for it. A lane that "
+                "cannot state `min_sm` would publish a floor the resolver "
+                "reads as 'runs anywhere' — silently, which is worse than the "
+                "load crash a dtypeless contract used to cause. Declare the "
+                "dtype on the tensorfs contract document (a fused-QKV or "
+                "text-encoder COMPONENT layout is usually not a serve lane at "
+                "all, and the fix is then to name the real lane document)."
+            )
+
         # The capability floor falls out of the CONTRACT, never the header.
         min_sm = capability_floor_for_dtype(dtype)
         if declared is None and not min_sm:
