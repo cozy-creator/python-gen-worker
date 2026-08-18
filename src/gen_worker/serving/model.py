@@ -25,6 +25,7 @@ typed skeleton, not a toolbox; nothing else goes on it without a Paul ruling.
 from __future__ import annotations
 
 import typing
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, runtime_checkable
 
 if TYPE_CHECKING:  # keep the base import-weightless
@@ -36,6 +37,7 @@ MT = TypeVar("MT")
 #: read surface.
 MODEL_TYPE_ATTR = "__cozy_model_type__"
 LANES_ATTR = "__cozy_lanes__"
+REQUIRES_ATTR = "__cozy_requires__"
 
 
 class ModelDeclarationError(TypeError):
@@ -68,6 +70,50 @@ def lane_handle(lane: Any) -> str:
     )
 
 
+def _parse_requires(
+    cls: type, requires: Mapping[Any, Any], lanes: tuple[Any, ...] | None
+) -> dict[str, Any]:
+    """``requires={contract: "vram12g, sm80+"}`` -> ``{handle: LayoutRequirements}``.
+
+    Keyed by LANE, because what a deployment needs of a machine is a property
+    of the weight format it runs: the bf16 lane's VRAM floor is not the fp8
+    lane's. Values speak the ie#740 requirement grammar (``"vram12g"``,
+    ``"sm90+, vram80g"``, ``{"minimum": ..., "recommended": ...}``), parsed
+    HERE so the refusal names the author's own class header, and statically
+    extractable at publish so placement never has to run author code.
+    """
+    from ..models.tensor_layout_contract import parse_layout_requirements
+
+    where = f"{cls.__qualname__} requires="
+    if not isinstance(requires, Mapping):
+        raise ModelDeclarationError(
+            f"{where} must be a mapping of lane contract -> requirement, "
+            f"got {type(requires).__name__}"
+        )
+    if not requires:
+        raise ModelDeclarationError(
+            f"{where}{{}} declares nothing. Omit it to leave placement "
+            "UNDECLARED; an empty mapping is not a statement that this model "
+            "runs anywhere."
+        )
+    # `lanes=` omitted (None) means the canonical contract, resolved lazily —
+    # there is nothing to check the keys against yet. `lanes=()` IS a
+    # declaration, and every floor over it guards nothing.
+    declared = None if lanes is None else {lane_handle(lane) for lane in lanes}
+    out: dict[str, Any] = {}
+    for lane, value in requires.items():
+        handle = lane if isinstance(lane, str) else lane_handle(lane)
+        if declared is not None and handle not in declared:
+            raise ModelDeclarationError(
+                f"{where}[{handle!r}] guards a lane this model does not "
+                f"declare. Its lanes are {sorted(declared)} — add the "
+                "contract to lanes= or drop the requirement; a requirement "
+                "over nothing is never checked."
+            )
+        out[handle] = parse_layout_requirements(value, where=f"{where}[{handle!r}]")
+    return out
+
+
 def _declared_model_type(cls: type) -> type | None:
     """The ``X`` in ``class C(Model[X])`` — from ``__orig_bases__``, no
     author code executed. ``None`` for a still-generic intermediate."""
@@ -98,16 +144,32 @@ class Model(Generic[MT]):
             def load(self, ctx: LoadContext[SDXL]) -> None: ...
 
     ``lanes=`` omitted means one lane — the model type's canonical contract;
-    ``lanes=()`` states eager-permanent explicitly. ``__init__`` stays FREE
+    ``lanes=()`` states eager-permanent explicitly. ``requires=`` states what
+    each lane needs of the machine in the ie#740 grammar, keyed by the same
+    contract objects::
+
+        class SdxlModel(
+            Model[SDXL],
+            lanes=(contracts.SDXL_DIFFUSERS_BF16,),
+            requires={contracts.SDXL_DIFFUSERS_BF16: "vram12g"},
+        ): ...
+
+    Omitting it leaves placement UNDECLARED, and the platform's default floor
+    is what a deployment then gets. ``__init__`` stays FREE
     (no GPU, no weights): construction and loading are separate moments, and
     derive/introspection instantiate without weights.
     """
 
     __cozy_model_type__: ClassVar[Any] = None
     __cozy_lanes__: ClassVar[tuple[Any, ...] | None] = None
+    __cozy_requires__: ClassVar[dict[str, Any]] = {}
 
     def __init_subclass__(
-        cls, *, lanes: tuple[Any, ...] | None = None, **kwargs: Any
+        cls,
+        *,
+        lanes: tuple[Any, ...] | None = None,
+        requires: Mapping[Any, Any] | None = None,
+        **kwargs: Any,
     ) -> None:
         super().__init_subclass__(**kwargs)
         if Model in cls.__bases__ and _declared_model_type(cls) is None and not any(
@@ -139,6 +201,8 @@ class Model(Generic[MT]):
                     )
                 lane_handle(lane)
             cls.__cozy_lanes__ = tuple(lanes)
+        if requires is not None:
+            cls.__cozy_requires__ = _parse_requires(cls, requires, lanes)
 
     # -- lifecycle hooks (the load/unload contract, pgw#1382) ---------------
 
@@ -193,11 +257,22 @@ def model_lanes(cls: type) -> tuple[Any, ...]:
     return (canonical,)
 
 
+def model_requires(cls: type) -> dict[str, Any]:
+    """The model class's per-lane machine requirements — publish-time
+    extraction, ``{}`` when the header declares none (placement then falls to
+    the platform default, which is what ie#740's floors exist to replace)."""
+
+    model_type(cls)  # validates cls
+    return dict(getattr(cls, REQUIRES_ATTR, None) or {})
+
+
 __all__ = [
     "LANES_ATTR",
     "LaneContract",
     "MODEL_TYPE_ATTR",
     "Model",
+    "REQUIRES_ATTR",
+    "model_requires",
     "ModelDeclarationError",
     "lane_handle",
     "model_lanes",

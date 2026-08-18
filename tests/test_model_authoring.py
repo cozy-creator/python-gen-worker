@@ -37,6 +37,7 @@ from gen_worker.serving import (
     lane_handle,
     load_endpoint,
     model_lanes,
+    model_requires,
     model_type,
 )
 
@@ -102,6 +103,13 @@ def test_fixture_imports_clean_and_extracts_the_declared_surface() -> None:
     ]
     assert len(lanes) == 2
 
+    # ie#740 placement floors, per lane, from the same header — statically
+    # extractable, so a deployment is sized without running author code.
+    assert {h: r.render() for h, r in model_requires(SdxlModel).items()} == {
+        "sdxl.diffusers-bf16@1": "vram12g",
+        "cozy.sdxl-fp8-rowwise@1": "sm89+, vram8g",
+    }
+
 
 def test_model_header_declarations_and_refusals() -> None:
     with pytest.raises(ModelDeclarationError, match=r"Model\[SDXL\]"):
@@ -129,6 +137,11 @@ def test_model_header_declarations_and_refusals() -> None:
     (canonical,) = model_lanes(OmittedLanes)
     assert canonical is SDXL.canonical_contract
     assert lane_handle(canonical) == "sdxl.diffusers-bf16@1"
+
+    # A floor over a lane this model does not declare guards nothing.
+    with pytest.raises(ModelDeclarationError, match="does not.*declare"):
+        class StrayFloor(Model[SDXL], lanes=(), requires={"sdxl.other@1": "vram8g"}):
+            pass
 
     # Cheap __init__: constructing a model does not load anything.
     instance = EagerPermanent()

@@ -70,6 +70,7 @@ from .model import (
     ModelDeclarationError,
     lane_handle,
     model_lanes,
+    model_requires,
     model_type,
 )
 
@@ -112,5 +113,6 @@ __all__ = [
     "load_endpoint",
     "load_endpoint_module",
     "model_lanes",
+    "model_requires",
     "model_type",
 ]
