@@ -1474,29 +1474,30 @@ def test_th1364_a_still_image_job_is_not_a_billing_divergence():
 # incident: a cpu-class Hello from a pod whose probe then passes.
 
 
-def _census(monkeypatch, *, devices: bool, readings: list) -> dict:
+def _census(
+    monkeypatch: pytest.MonkeyPatch, *, devices: bool, readings: List[Any]
+) -> Dict[str, Any]:
     """Drive `measure()` with the two facts that decide the arm."""
-    from gen_worker import hostfacts
     from gen_worker.procsplit import measure as measure_mod
 
     monkeypatch.setattr(measure_mod, "gpu_devices_present", lambda: devices)
-    monkeypatch.setattr(measure_mod.os.path, "exists", lambda p: devices)
-    monkeypatch.setattr(measure_mod.time, "sleep", lambda _s: None)
+    # By TARGET STRING, not `measure_mod.os`: the module imports `os` for its
+    # own use and does not re-export it, so reaching through it is a fact about
+    # this test's imports rather than about the code under test.
+    monkeypatch.setattr("os.path.exists", lambda _p: devices)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
     calls = iter(readings)
     monkeypatch.setattr(measure_mod, "probe_hardware", lambda: next(calls))
-    # The canary and version arms are not the subject.
-    monkeypatch.setattr(
-        measure_mod, "_CENSUS_RETRIES", 3, raising=False)
     return measure_mod.measure()
 
 
-def _blank_facts():
+def _blank_facts() -> Any:
     from gen_worker.hostfacts import HostFacts
 
     return HostFacts()
 
 
-def _real_facts():
+def _real_facts() -> Any:
     from gen_worker.hostfacts import HostFacts
 
     return HostFacts(gpu_count=1, gpu_name="NVIDIA GeForce RTX 4090",
