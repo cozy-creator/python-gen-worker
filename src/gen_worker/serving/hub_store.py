@@ -3,26 +3,40 @@
 One ask per boot — ``GET /v1/worker/releases/<release>/compiled-graphs
 ?lane=<lane>&sm=<sm>`` — answers, for every graph in the release's lane, the
 artifact for THIS release's exact env + this sm (content digest, presigned
-transport URL, the mint's requirements manifest) or a per-graph MISS.
+transport manifest, the mint's requirements manifest) or a per-graph MISS.
 PARTIAL-HIT is the wire contract; exact-env is the ruling (no compat
 ranking on this route).
 
-The TRANSPORT is a seam (:class:`ReleaseGraphTransport`): the route lands in
-th#2133 and the worker's HTTP/procsplit wiring follows it — this store only
-states the answer shape and the verification. Publishing never happens here:
-the boot-side store is read-only, and mint publishes ride pgw#1371's
+The TRANSPORT is a seam (:class:`ReleaseGraphTransport`) with two
+implementations that live here because both are two-liners over machinery
+that already exists: :class:`BrokerReleaseGraphTransport` (production — the
+call is parent-mediated, since the compute child holds no credential) and
+``__main__``'s plain-HTTP one (cozy-local / CI). Publishing never happens
+here: the boot-side store is read-only, and mint publishes ride pgw#1371's
 publisher.
 
-Answer shape (built to th#2133's spec; the route is the authority once
-merged)::
+THE ANSWER SHAPE IS th#2133's, verbatim — this module was written against a
+SPECULATED ``{document, artifacts, misses}`` shape before the route landed,
+and the route answers something else::
 
-    {
-      "document":  {...GraphSetDocument...},
-      "artifacts": {"cg-graph-v1-...": {"digest": "<sha256 hex>",
-                                        "url": "<presigned>",
-                                        "manifest": {...RequirementsManifest...}}},
-      "misses":    ["cg-graph-v1-..."]
-    }
+    {"object": "release_compiled_graphs", "release_id": "...",
+     "binding_generation": 0, "env_lockfile_hash": "<64hex>",
+     "lane": "sdxl.diffusers-bf16@1", "lane_stamped": true,
+     "lane_contract": {"stamp": ..., "contract_digest": ..., "document": {...},
+                       "requires": ...},
+     "sm": "sm_89", "empty": false, "hits": 30, "misses": 6,
+     "graphs": [{"graph_hash": "cg-graph-v1:...", "graph_class": "...",
+                 "status": "hit"|"miss"|"transport_unavailable",
+                 "found": true, "program": "sha256:...",
+                 "module_path": "...", "ingress": {...},
+                 "content_digest": "...", "artifact_path": "...",
+                 "requirements_manifest": {...},
+                 "transport": {"snapshot_digest": ..., "files": [...]}}, ...],
+     "targets": [...], "unobserved_targets": [...]}
+
+The lane's graph document is REBUILT from that answer rather than shipped
+whole: the hub stores the derive's rows, not the derive's bytes, and the
+rebuild is the one place that knows it.
 """
 
 from __future__ import annotations
@@ -31,12 +45,32 @@ import hashlib
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Mapping, Optional, Protocol
+from typing import Any, Iterable, Mapping, Optional, Protocol
 
 from .._vendor.torchcg.document import DocumentError, GraphSetDocument
 from .._vendor.torchcg.graph_identity import EnvIdentity
 from .._vendor.torchcg.requirements import RequirementsError, RequirementsManifest
 from .._vendor.torchcg.store import PublishOutcome, StoreError
+
+#: One explicit budget per hub hop; a hung boot pull must fail visibly.
+HTTP_TIMEOUT_S = 60.0
+
+#: The route's own path, one spelling. ``procsplit.actions`` allowlists this
+#: shape and the parent refuses anything else, so the two must not drift.
+ADOPT_PATH = "/v1/worker/releases/{release_id}/compiled-graphs"
+
+#: A hit's per-graph row states these; a miss states only the fetch key.
+HIT = "hit"
+
+
+class ReleaseNotStamped(Exception):
+    """The release carries no stamped compiled-graph document.
+
+    NOT an error: an un-stamped release has no adopt-first story (th#2134
+    gates that), and the worker's answer is its eager path. The hub says it
+    with a typed 404 rather than an empty document, and this is that fact
+    crossing the transport seam.
+    """
 
 
 class ReleaseGraphTransport(Protocol):
@@ -45,12 +79,82 @@ class ReleaseGraphTransport(Protocol):
     def release_compiled_graphs(
         self, release_id: str, lane: str, sm: str
     ) -> Mapping[str, Any]:
-        """The one boot ask: the release's graph document + per-graph answer."""
+        """The one boot ask: the release's per-graph adopt answer.
+
+        Raises :class:`ReleaseNotStamped` when the hub answers its typed 404.
+        """
         ...
 
     def fetch_blob(self, url: str) -> bytes:
         """Follow one presigned artifact URL."""
         ...
+
+
+class BrokerReleaseGraphTransport:
+    """The PRODUCTION transport: the adopt ask, parent-mediated.
+
+    ``procsplit.broker.request`` is the one call shape for both execution
+    modes — it dials directly when the split is off and rides the seam when
+    it is on — so this class has no split-mode branch for a bug to hide in.
+    The ARTIFACT bytes do not ride the seam: presigned URLs are fetched by
+    this process directly, which is the same division the compiled-graph
+    resolve already uses ("the seam carries control, not data").
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str = "",
+        bearer: str = "",
+        timeout_s: float = HTTP_TIMEOUT_S,
+    ) -> None:
+        # Used ONLY in single-process mode; under the split the parent
+        # supplies both and ignores whatever this passed.
+        self.base_url = base_url.rstrip("/")
+        self.bearer = bearer
+        self.timeout_s = timeout_s
+
+    def release_compiled_graphs(
+        self, release_id: str, lane: str, sm: str
+    ) -> Mapping[str, Any]:
+        from ..procsplit import broker
+
+        response = broker.request(
+            "GET",
+            ADOPT_PATH.format(release_id=str(release_id)),
+            base_url=self.base_url,
+            bearer=self.bearer,
+            params={"lane": str(lane), "sm": str(sm)},
+            timeout=self.timeout_s,
+        )
+        if response.status_code == 404:
+            raise ReleaseNotStamped(
+                f"release {release_id} carries no stamped compiled-graph "
+                f"document; serving eager"
+            )
+        if response.status_code != 200:
+            raise StoreError(
+                f"adopt route answered {response.status_code} for release "
+                f"{release_id} lane={lane} sm={sm}: {response.text[:400]}"
+            )
+        payload = response.json()
+        if not isinstance(payload, Mapping):
+            raise StoreError("adopt route answered non-object JSON")
+        return payload
+
+    def fetch_blob(self, url: str) -> bytes:
+        import requests
+
+        got = requests.get(url, timeout=self.timeout_s)
+        got.raise_for_status()
+        return bytes(got.content)
+
+
+def _graph_rows(answer: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
+    rows = answer.get("graphs")
+    if not isinstance(rows, list):
+        return ()
+    return tuple(row for row in rows if isinstance(row, Mapping))
 
 
 class HubGraphStore:
@@ -65,6 +169,7 @@ class HubGraphStore:
         self._sm = str(sm)
         self._answer: Optional[Mapping[str, Any]] = None
         self._document: Optional[GraphSetDocument] = None
+        self._rows: Optional[dict[str, Mapping[str, Any]]] = None
 
     # -- the one ask --------------------------------------------------------
 
@@ -81,6 +186,30 @@ class HubGraphStore:
             self._answer = answer
         return self._answer
 
+    def _row(self, graph: str) -> Optional[Mapping[str, Any]]:
+        if self._rows is None:
+            self._rows = {
+                str(row.get("graph_hash") or ""): row
+                for row in _graph_rows(self._resolve())
+            }
+        return self._rows.get(str(graph))
+
+    @property
+    def misses(self) -> tuple[str, ...]:
+        """The graph hashes this env still needs, in answer order.
+
+        The hub already counted them; this is the ORDERED list behind the
+        count, which is what pgw#1371's background mint takes as ``holes``.
+        A ``transport_unavailable`` row is NOT a hole — the artifact exists
+        and the transport is retryable — so it is excluded deliberately.
+        """
+
+        return tuple(
+            str(row.get("graph_hash") or "")
+            for row in _graph_rows(self._resolve())
+            if str(row.get("status") or "") == "miss"
+        )
+
     def _env(self) -> EnvIdentity:
         document = self.get_graphs(self._release_id)
         if document is None:
@@ -92,25 +221,76 @@ class HubGraphStore:
             # This store holds exactly one env — the release's own. Any other
             # ask is a clean miss, never a compat answer (exact-env ruling).
             return None
-        artifacts = self._resolve().get("artifacts")
-        entry = artifacts.get(graph) if isinstance(artifacts, Mapping) else None
-        return entry if isinstance(entry, Mapping) else None
+        row = self._row(graph)
+        if row is None or str(row.get("status") or "") != HIT:
+            return None
+        return row
 
     # -- GraphStore ---------------------------------------------------------
 
     def get_graphs(self, name: str) -> Optional[GraphSetDocument]:
+        """Rebuild THIS lane's graph document out of the adopt answer.
+
+        The answer is per-(release, lane, sm), so the rebuilt document holds
+        exactly one lane — which is all the boot's AdoptSession reads. An
+        ``empty`` answer rebuilds the EXPLICIT eager-permanent document
+        (no lanes), never ``None``: absent and eager-permanent are different
+        facts and the route states which one it means.
+        """
+
         if name != self._release_id:
             return None
-        if self._document is None:
-            raw = self._resolve().get("document")
-            if raw is None:
-                return None
-            try:
-                self._document = GraphSetDocument.decode(raw)
-            except DocumentError as exc:
-                raise StoreError(
-                    f"release {self._release_id} graph document is unreadable: {exc}"
-                ) from exc
+        if self._document is not None:
+            return self._document
+        try:
+            answer = self._resolve()
+        except ReleaseNotStamped:
+            return None
+        closure = str(answer.get("env_lockfile_hash") or "")
+        lanes: list[dict[str, Any]] = []
+        if not answer.get("empty") and answer.get("lane_stamped"):
+            records: list[dict[str, Any]] = []
+            for row in _graph_rows(answer):
+                ingress = row.get("ingress")
+                if not isinstance(ingress, Mapping):
+                    raise StoreError(
+                        f"release {self._release_id} graph "
+                        f"{row.get('graph_hash')!r} carries no ingress contract; "
+                        f"the adopt answer cannot be dispatched against"
+                    )
+                records.append({
+                    "graph": str(row.get("graph_hash") or ""),
+                    "target": str(row.get("module_path") or ""),
+                    "ingress": ingress,
+                    "program": str(row.get("program") or ""),
+                })
+            observed = {record["target"] for record in records}
+            declared = [
+                str(target) for target in (answer.get("targets") or [])
+                if isinstance(target, str)
+            ]
+            unobserved = [
+                str(target) for target in (answer.get("unobserved_targets") or [])
+                if isinstance(target, str)
+            ]
+            # A lane that states no target list still has one: every target a
+            # graph names. Stating it beats refusing an otherwise-adoptable
+            # answer over a field the row set already implies.
+            targets = sorted(observed | set(declared) | set(unobserved))
+            lanes.append({
+                "contract": str(answer.get("lane") or self._lane),
+                "targets": targets,
+                "graphs": records,
+                "unobserved_targets": sorted(set(unobserved) - observed),
+            })
+        try:
+            self._document = GraphSetDocument.decode(
+                {"v": 1, "closure": closure, "lanes": lanes}
+            )
+        except DocumentError as exc:
+            raise StoreError(
+                f"release {self._release_id} graph document is unreadable: {exc}"
+            ) from exc
         return self._document
 
     def put_graphs(self, name: str, document: GraphSetDocument) -> None:
@@ -128,19 +308,19 @@ class HubGraphStore:
         entry = self._entry(graph, env)
         if entry is None:
             return None
-        url = str(entry.get("url") or "")
-        digest = str(entry.get("digest") or "")
-        if not url or not digest:
+        digest = str(entry.get("content_digest") or "")
+        artifact_path = str(entry.get("artifact_path") or "")
+        if not digest or not artifact_path:
             raise StoreError(
                 f"artifact ({graph}, {env.value}): the answer row is missing "
-                f"its url or digest"
+                f"its content digest or artifact path"
             )
-        payload = self._transport.fetch_blob(url)
+        payload = self._fetch_from_transport(graph, env, entry, artifact_path)
         observed = hashlib.sha256(payload).hexdigest()
-        if observed != digest:
+        if observed != digest.removeprefix("sha256:"):
             raise StoreError(
                 f"artifact ({graph}, {env.value}) failed digest verification: "
-                f"answer said {digest[:16]}..., bytes hash {observed[:16]}..."
+                f"answer said {digest[:23]}..., bytes hash {observed[:16]}..."
             )
         target = Path(destination)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -154,6 +334,50 @@ class HubGraphStore:
         finally:
             Path(temporary_name).unlink(missing_ok=True)
         return target
+
+    def _fetch_from_transport(
+        self,
+        graph: str,
+        env: EnvIdentity,
+        entry: Mapping[str, Any],
+        artifact_path: str,
+    ) -> bytes:
+        """Pull one artifact out of the hit's presigned snapshot manifest.
+
+        The transport is the same checkpoint file manifest the per-key
+        resolve builds — the artifact is ONE file inside it, addressed by
+        ``artifact_path``, and possibly chunked.
+        """
+
+        transport = entry.get("transport")
+        files = transport.get("files") if isinstance(transport, Mapping) else None
+        if not isinstance(files, list):
+            raise StoreError(
+                f"artifact ({graph}, {env.value}) answered a hit with no "
+                f"transport manifest"
+            )
+        for row in files:
+            if not isinstance(row, Mapping) or str(row.get("path") or "") != artifact_path:
+                continue
+            chunks = row.get("chunks")
+            if isinstance(chunks, list) and chunks:
+                blob = bytearray()
+                for chunk in chunks:
+                    if not isinstance(chunk, Mapping):
+                        continue
+                    blob += self._transport.fetch_blob(str(chunk.get("url") or ""))
+                return bytes(blob)
+            url = str(row.get("url") or "")
+            if not url:
+                raise StoreError(
+                    f"artifact ({graph}, {env.value}): transport row "
+                    f"{artifact_path!r} carries neither url nor chunks"
+                )
+            return self._transport.fetch_blob(url)
+        raise StoreError(
+            f"artifact ({graph}, {env.value}): the transport manifest names no "
+            f"file {artifact_path!r}"
+        )
 
     def publish_artifact(
         self,
@@ -173,7 +397,7 @@ class HubGraphStore:
         entry = self._entry(graph, env)
         if entry is None:
             return None
-        raw = entry.get("manifest")
+        raw = entry.get("requirements_manifest")
         if raw is None:
             return None
         try:
@@ -184,4 +408,10 @@ class HubGraphStore:
             ) from exc
 
 
-__all__ = ["HubGraphStore", "ReleaseGraphTransport"]
+__all__ = [
+    "ADOPT_PATH",
+    "BrokerReleaseGraphTransport",
+    "HubGraphStore",
+    "ReleaseGraphTransport",
+    "ReleaseNotStamped",
+]

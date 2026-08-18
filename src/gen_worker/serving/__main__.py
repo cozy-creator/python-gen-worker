@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -40,10 +41,19 @@ HTTP_TIMEOUT_S = 60.0
 
 
 class HttpReleaseGraphTransport:
-    """The thin th#2133 wire: one GET for the answer, one per presigned URL."""
+    """The thin th#2133 wire: one GET for the answer, one per presigned URL.
 
-    def __init__(self, base_url: str, timeout_s: float = HTTP_TIMEOUT_S) -> None:
+    The cozy-local / CI transport. In production the ask is parent-mediated
+    (``serving.hub_store.BrokerReleaseGraphTransport``) because the compute
+    child holds no credential — this one names a host and a bearer, which is
+    exactly what the split exists to take away from a serving process.
+    """
+
+    def __init__(
+        self, base_url: str, bearer: str = "", timeout_s: float = HTTP_TIMEOUT_S
+    ) -> None:
         self.base_url = base_url.rstrip("/")
+        self.bearer = bearer
         self.timeout_s = timeout_s
 
     def release_compiled_graphs(
@@ -54,8 +64,24 @@ class HttpReleaseGraphTransport:
             f"{self.base_url}/v1/worker/releases/"
             f"{urllib.parse.quote(release_id, safe='')}/compiled-graphs?{query}"
         )
-        with urllib.request.urlopen(url, timeout=self.timeout_s) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+        request = urllib.request.Request(url)
+        if self.bearer:
+            request.add_header("Authorization", f"Bearer {self.bearer}")
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                from .hub_store import ReleaseNotStamped
+
+                raise ReleaseNotStamped(
+                    f"release {release_id} carries no stamped compiled-graph "
+                    f"document; serving eager"
+                ) from exc
+            raise SystemExit(
+                f"adopt route answered {exc.code} from {url}: "
+                f"{exc.read().decode('utf-8', 'replace')[:400]}"
+            ) from exc
         if not isinstance(payload, dict):
             raise SystemExit(f"adopt route answered non-object JSON from {url}")
         return payload
@@ -103,6 +129,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--hub-base-url", default="",
                         help="hub base URL for the th#2133 adopt route")
     parser.add_argument("--release", default="", help="endpoint-release id (hub adopt)")
+    parser.add_argument("--hub-token", default="",
+                        help="worker bearer for the adopt route (local/CI only; "
+                             "in production the parent holds the credential)")
+    parser.add_argument("--via-broker", action="store_true",
+                        help="make the adopt ask through procsplit's action "
+                             "broker — the PRODUCTION path, allowlisted as "
+                             "`release.compiled_graphs`")
     parser.add_argument("--sm", default="", help="this GPU's sm (e.g. sm_89)")
     parser.add_argument("--artifacts-dir", default=".compiled-graphs")
     return parser
@@ -117,15 +150,30 @@ def _adoption_source(
     if not args.sm:
         raise SystemExit("--sm is required to adopt (artifacts are per-sm)")
     if args.hub_base_url:
-        from .hub_store import HubGraphStore
+        from .hub_store import (
+            BrokerReleaseGraphTransport,
+            HubGraphStore,
+            ReleaseNotStamped,
+        )
 
         if not args.release:
             raise SystemExit("--release is required with --hub-base-url")
-        store: Any = HubGraphStore(
-            HttpReleaseGraphTransport(args.hub_base_url), args.release,
-            args.lane, args.sm,
+        transport: Any = (
+            BrokerReleaseGraphTransport(
+                base_url=args.hub_base_url, bearer=args.hub_token
+            )
+            if args.via_broker
+            else HttpReleaseGraphTransport(args.hub_base_url, args.hub_token)
         )
-        return store, store.get_graphs(args.release)
+        store: Any = HubGraphStore(transport, args.release, args.lane, args.sm)
+        try:
+            document = store.get_graphs(args.release)
+        except ReleaseNotStamped as exc:
+            # NOT a boot failure: an un-stamped release serves eager, which is
+            # the whole eager bridge. Say it, then take it.
+            print(f"adopt: {exc}", file=sys.stderr)
+            return None, None
+        return store, document
     from .._vendor.tensorfs import LocalCAS
     from .._vendor.torchcg.store import LocalGraphStore
 
@@ -213,16 +261,19 @@ def main(argv: list[str] | None = None) -> int:
         loader=_aoti_loader, artifacts_dir=Path(args.artifacts_dir),
     )
     if host.adoption is not None:
-        print(
-            json.dumps({
-                "adopted": [record.graph for record in host.adoption.adopted],
-                "holes": [
-                    {"graph": hole.record.graph, "reason": hole.reason}
-                    for hole in host.holes
-                ],
-            }),
-            file=sys.stderr,
-        )
+        report: dict[str, Any] = {
+            "adopted": [record.graph for record in host.adoption.adopted],
+            "holes": [
+                {"graph": hole.record.graph, "reason": hole.reason}
+                for hole in host.holes
+            ],
+        }
+        # The hub's own miss list, when the store is the hub: the ORDERED
+        # holes pgw#1371's background mint takes as `enable_compiled(holes=)`.
+        answered = getattr(store, "misses", None)
+        if answered is not None:
+            report["answered_misses"] = list(answered)
+        print(json.dumps(report), file=sys.stderr)
     for index, (function, raw) in enumerate(zip(args.invoke, args.payload)):
         result = host.dispatch(function, json.loads(raw), request_id=f"local-{index}")
         sys.stdout.buffer.write(msgspec.json.encode(result))
