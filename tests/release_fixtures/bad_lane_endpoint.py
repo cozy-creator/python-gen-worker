@@ -10,14 +10,10 @@ from __future__ import annotations
 from typing import Any
 
 import msgspec
-import torch
 from diffusers import StableDiffusionPipeline
 
-from gen_worker import Model, entrypoint
-from gen_worker.models.model_types import register_contract_dtype
-
-LANE = "tiny.diffusers-fp32@1"
-register_contract_dtype(LANE, torch.float32)
+from gen_worker import LoadContext, Model, RequestContext, entrypoint
+from lane_contracts import TINY_DIFFUSERS_FP32
 
 
 class In(msgspec.Struct):
@@ -28,14 +24,14 @@ class Out(msgspec.Struct):
     model_used: str
 
 
-class BadMark(Model[Any], lanes=(LANE,)):
-    def load(self, ctx: Any) -> None:
+class BadMark(Model[Any], lanes=(TINY_DIFFUSERS_FP32,)):
+    def load(self, ctx: LoadContext[Any]) -> None:
         self.pipe = ctx.load(StableDiffusionPipeline)
         self.pipe.does_not_exist = ctx.compile(self.pipe.does_not_exist)
 
 
-@entrypoint  # type: ignore[operator]
-def generate(payload: In, model: BadMark, ctx: Any) -> Out:
+@entrypoint
+def generate(ctx: RequestContext, payload: In, model: BadMark) -> Out:
     model.pipe(
         prompt=payload.prompt, num_inference_steps=2, guidance_scale=0.0,
         height=32, width=32, output_type="pil",

@@ -8,10 +8,6 @@ from typing import IO, Any, Dict, Literal, Optional
 import msgspec
 
 
-#: The image encodings ``ctx.save_image`` accepts (pgw#1370 author surface).
-ImageFormat = Literal["webp", "png", "jpg"]
-
-
 class Asset(msgspec.Struct):
     """Reference to a file in the invoking owner's file store.
 

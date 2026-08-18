@@ -1,11 +1,13 @@
 """A main_v2-shaped Model + entrypoints over the tiny pipeline (derive fixture).
 
 Deliberately spelled like the Paul-reviewed sdxl ``main_v2.py``: the stateful
-half is a ``Model[SDXL]`` subclass with ``lanes=`` class kwargs and an
-imperative ``ctx.compile`` mark inside ``load``; the stateless half is free
-``@entrypoint`` functions ``(payload, model, ctx)``. Trace coverage is
-auto-enumerated from the payload schemas (the ``Size`` enum is this
-fixture's aspect-ratio analogue); no samples surface, no catalog.
+half is a ``Model[SDXL]`` subclass with contract-object ``lanes=`` class
+kwargs and an imperative ``ctx.compile`` mark inside ``load``; the stateless
+half is free ctx-first ``@entrypoint`` functions with platform-injected
+adapter slots (``turbo: DistillationAdapter | None`` — the typed-takeover
+guard; ``loras: list[Adapter]``). Trace coverage is auto-enumerated from the
+payload schemas (the ``Size`` enum is this fixture's aspect-ratio analogue);
+no samples surface, no catalog.
 """
 
 from __future__ import annotations
@@ -17,12 +19,18 @@ import msgspec
 import torch
 from diffusers import StableDiffusionPipeline
 
-from gen_worker import Adapter, ImageAsset, Model, RequestContext, ValidationError, entrypoint
+from gen_worker import (
+    Adapter,
+    DistillationAdapter,
+    ImageAsset,
+    LoadContext,
+    Model,
+    RequestContext,
+    ValidationError,
+    entrypoint,
+)
 from gen_worker.models import SDXL
-from gen_worker.models.model_types import register_contract_dtype
-
-LANE = "tiny.diffusers-fp32@1"
-register_contract_dtype(LANE, torch.float32)
+from lane_contracts import TINY_DIFFUSERS_FP32
 
 
 class Size(StrEnum):
@@ -50,8 +58,8 @@ class ImageOutput(msgspec.Struct):
     model_used: str
 
 
-class TinyModel(Model[SDXL], lanes=(LANE,)):
-    def load(self, ctx: Any) -> None:
+class TinyModel(Model[SDXL], lanes=(TINY_DIFFUSERS_FP32,)):
+    def load(self, ctx: LoadContext[SDXL]) -> None:
         self.pipe = ctx.load(StableDiffusionPipeline)
         self.pipe.unet = ctx.compile(self.pipe.unet)
         self.defaults = ctx.defaults()
@@ -72,10 +80,11 @@ def _run(model: TinyModel, ctx: Any, *, steps: int, guidance: float,
     return ctx.save_image(result.images[0], format="png")
 
 
-@entrypoint  # type: ignore[operator]
+@entrypoint
 def generate(ctx: RequestContext, payload: GenerateInput, model: TinyModel,
-             turbo: Adapter | None, loras: list[Adapter]) -> ImageOutput:
-    """Contract-file shape: ctx-first order, platform-injected facts.
+             turbo: DistillationAdapter | None,
+             loras: list[Adapter]) -> ImageOutput:
+    """Contract-file shape: ctx-first order, platform-injected adapter slots.
 
     A riding distillation adapter (or a cfg-off checkpoint) serves the
     guidance-free batch-1 arm -- the derive's binding enumeration reaches it
@@ -88,18 +97,18 @@ def generate(ctx: RequestContext, payload: GenerateInput, model: TinyModel,
             "this checkpoint is already distilled; a distillation adapter "
             "cannot be stacked on it"
         )
-    recipe = turbo.defaults if turbo is not None else d
-    distilled = not recipe.cfg
-    steps = recipe.steps.resolve(payload.num_inference_steps or 2, ctx)
+    config = turbo.defaults if turbo is not None else d
+    distilled = not config.cfg
+    steps = config.steps.resolve(payload.num_inference_steps or 16, ctx)
     guidance = 0.0 if distilled else d.guidance.resolve(payload.guidance_scale, ctx)
     image = _run(model, ctx, steps=int(steps), guidance=guidance,
                  side=_BUCKETS[payload.size], prompt=payload.prompt.strip())
-    # checkpoint_ref lands on the serving RequestContext with pgw#1372.
-    return ImageOutput(image=image, model_used=ctx.checkpoint_ref)  # type: ignore[attr-defined]
+    return ImageOutput(image=image, model_used=ctx.checkpoint_ref)
 
 
-@entrypoint  # type: ignore[operator]
-def generate_turbo(payload: TurboInput, model: TinyModel, ctx: Any) -> ImageOutput:
+@entrypoint
+def generate_turbo(ctx: RequestContext, payload: TurboInput,
+                   model: TinyModel) -> ImageOutput:
     ctx.raise_if_cancelled()
     image = _run(model, ctx, steps=2, guidance=0.0,
                  side=_BUCKETS[payload.size], prompt=payload.prompt.strip())
