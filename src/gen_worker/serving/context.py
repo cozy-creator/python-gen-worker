@@ -268,6 +268,23 @@ class RequestContext(_BaseRequestContext[D]):
 
         return diffusers_step_callback(self, num_inference_steps, **kwargs)
 
+    def warn(self, message: str) -> None:
+        """A caller-visible WARNING into the response envelope — the
+        generalization of clamp visibility, same delivery path (the
+        adjustment ledger rides ``JobResult.adjustments`` + the hub's
+        request record/events). Warn-and-serve: for a request aspect that
+        cannot apply on this serving (e.g. guidance on a cfg-free recipe),
+        never a silent drop and never an aborted request."""
+        self.adjusted("", None, None, str(message))
+
+    @property
+    def warnings(self) -> tuple[str, ...]:
+        """The accumulated :meth:`warn` messages, in emission order (the
+        field-less rows of the adjustment ledger)."""
+        return tuple(
+            row["reason"] for row in self.adjustments if not row["field"]
+        )
+
 
 __all__ = [
     "Adapter",

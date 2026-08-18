@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Callable, Literal, Optional, TypedDict, Unpack
@@ -255,81 +255,85 @@ def _run(model: SdxlModel, ctx: RequestContext, *, steps: int,
 @entrypoint
 def generate(ctx: RequestContext, payload: TextToImageInput, model: SdxlModel,
              turbo: Adapter | None, loras: list[Adapter]) -> ImageOutput:
-    """One entrypoint; the DEPLOYMENT and the request's picks decide the mode.
-    A bound distillation adapter or a step-distilled checkpoint (cfg off)
-    serves turbo — fewer steps, distilled scheduler, guidance pinned 0.
-    `loras` are the request's style/character picks (envelope-resolved,
-    classification-gated to SDXL, scales clamped through each LoRA's strength
-    knob) and compose with either mode."""
+    """One entrypoint; behavior is driven by the ACTIVE RECIPE's typed fields,
+    not a mode flag. The recipe is the distillation adapter's defaults when one
+    rides, else the checkpoint's own. Its fields are independent axes:
+    cfg (batch-2 guidance vs none), schedule (None = keep the checkpoint's own
+    scheduler), steps/guidance knobs, pinned timesteps."""
+
     ctx.raise_if_cancelled()
+
     width, height = _BUCKETS[payload.aspect_ratio]
     d = model.defaults
 
     if turbo is not None and not d.cfg:
         raise ValidationError(
-            "this checkpoint is already step-distilled; a distillation "
-            "adapter cannot be stacked on it"
+            "this checkpoint is already distilled; a distillation adapter "
+            "cannot be stacked on it"
         )
-    distilled = turbo is not None or not d.cfg
+    # Whichever source it came from, what we hold is a SERVING RECIPE —
+    # both Defaults types inherit SDXL.Recipe, so this is one type, not a
+    # union.
+    recipe: SDXL.Recipe = turbo.defaults if turbo is not None else d
     riding: list[Adapter] = ([turbo] if turbo is not None else []) + loras
+    steps = recipe.steps.resolve(payload.num_inference_steps, ctx)
 
-    if distilled:
-        # Guidance and negative prompts are meaningless at guidance 0 —
-        # refuse explicit values rather than silently ignoring them.
-        if payload.guidance_scale is not None:
-            raise ValidationError(
-                "guidance_scale is not accepted on a distilled serving "
-                "(guidance is pinned to 0)"
-            )
-        if payload.negative_prompt:
-            raise ValidationError(
-                "negative_prompt is not accepted on a distilled serving "
-                "(no unconditional branch exists at guidance 0)"
-            )
-        recipe: SDXL.Lora.Defaults | SDXL.Defaults = (
-            turbo.defaults if turbo is not None else d
-        )
-        steps = recipe.steps.resolve(payload.num_inference_steps, ctx)
-        sched_scope = (
-            model.scheduler(LCMScheduler)  # type: ignore[arg-type]
-            if recipe.schedule == "lcm"
-            else model.scheduler(EulerDiscreteScheduler,  # type: ignore[arg-type]
-                                 timestep_spacing="trailing")
-        )
-        prompt = payload.prompt.strip()
-        with model.adapters(riding), sched_scope:
-            image = _run(
-                model, ctx, steps=steps, fmt=payload.output_format,
-                seed=payload.seed, prompt=prompt, prompt_2=prompt,
-                guidance_scale=0.0, width=width, height=height,
-                timesteps=list(recipe.timesteps) or None,
-            )
-    else:
-        steps = d.steps.resolve(payload.num_inference_steps, ctx)
-        guidance = d.guidance.resolve(payload.guidance_scale, ctx)
+    prompt = payload.prompt.strip()
+    negative = payload.negative_prompt.strip()
+    # The positive preamble applies in every mode; the negative preamble is
+    # CFG-only (no unconditional branch exists without CFG).
+    if payload.enhance_prompt and d.positive_preamble \
+            and d.positive_preamble not in prompt:
+        prompt = f"{d.positive_preamble}, {prompt}"
+    call_kwargs: _PipeCall = dict(width=width, height=height)
 
-        prompt = payload.prompt.strip()
-        negative = payload.negative_prompt.strip()
-        if payload.enhance_prompt:
-            if d.positive_preamble and d.positive_preamble not in prompt:
-                prompt = f"{d.positive_preamble}, {prompt}"
-            if d.negative_preamble and d.negative_preamble not in negative:
-                negative = f"{d.negative_preamble}, {negative}" if negative else d.negative_preamble
-
-        call_kwargs: _PipeCall = dict(
-            prompt=prompt, prompt_2=prompt,
-            negative_prompt=negative, negative_prompt_2=negative,
-            guidance_scale=guidance, width=width, height=height,
-        )
+    if recipe.cfg:
+        guidance = recipe.guidance.resolve(payload.guidance_scale, ctx)
+        if payload.enhance_prompt and d.negative_preamble \
+                and d.negative_preamble not in negative:
+            negative = f"{d.negative_preamble}, {negative}" if negative else d.negative_preamble
+        call_kwargs.update({
+            "negative_prompt": negative, "negative_prompt_2": negative,
+            "guidance_scale": guidance,
+        })
         # The checkpoint's own scheduler config drives objective handling;
         # v-prediction needs the zero-terminal-SNR rescale at call time.
         if model.pipe.scheduler.config.get(  # type: ignore[attr-defined]
                 "prediction_type") == "v_prediction":
             call_kwargs["guidance_rescale"] = 0.7
+    else:
+        # No unconditional branch exists: explicit guidance/negatives are
+        # IGNORED, caller-visibly (a warning in the response envelope, never
+        # a silent drop and never an aborted request).
+        if payload.guidance_scale is not None:
+            ctx.warn(
+                "guidance_scale ignored: this serving runs without "
+                "classifier-free guidance"
+            )
+        if payload.negative_prompt:
+            ctx.warn(
+                "negative_prompt ignored: no unconditional branch exists "
+                "without classifier-free guidance"
+            )
+        call_kwargs.update({"guidance_scale": 0.0})
+        if recipe.timesteps:
+            call_kwargs["timesteps"] = list(recipe.timesteps)
 
-        with model.adapters(riding):
-            image = _run(model, ctx, steps=steps, fmt=payload.output_format,
-                         seed=payload.seed, **call_kwargs)
+    call_kwargs.update({"prompt": prompt, "prompt_2": prompt})
+
+    # schedule=None means: keep the checkpoint's own scheduler untouched.
+    sched_scope = (
+        model.scheduler(LCMScheduler)  # type: ignore[arg-type]
+        if recipe.schedule == "lcm"
+        else model.scheduler(EulerDiscreteScheduler,  # type: ignore[arg-type]
+                             timestep_spacing="trailing")
+        if recipe.schedule == "euler_trailing"
+        else nullcontext()
+    )
+
+    with model.adapters(riding), sched_scope:
+        image = _run(model, ctx, steps=steps, fmt=payload.output_format,
+                     seed=payload.seed, **call_kwargs)
 
     return ImageOutput(
         image=image,

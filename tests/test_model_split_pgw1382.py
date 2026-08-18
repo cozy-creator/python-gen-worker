@@ -252,6 +252,12 @@ def test_request_context_facts() -> None:
     # The salvaged base surface rides along (clamp records caller-visibly).
     assert bound.clamp("x", 5.0, hi=2.0) == 2.0
     assert bound.adjustments and bound.adjustments[0]["field"] == "x"
+    # ctx.warn: the caller-visible warning channel — same delivery path as
+    # clamp notes (the adjustment ledger), accumulated per-request.
+    bound.warn("first")
+    bound.warn("second")
+    assert bound.warnings == ("first", "second")
+    assert len(bound.adjustments) == 3  # clamp row + two warn rows, one ledger
 
 
 # --- end-to-end: fake-checkpoint load + serve, mutation scopes, turbo -------

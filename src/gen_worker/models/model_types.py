@@ -104,42 +104,54 @@ class ModelType(Generic[DT_co]):
 class SDXL(ModelType["SDXL.Defaults"]):
     name = "sdxl"
 
-    class Defaults(msgspec.Struct, frozen=True):
-        """SDXL serving defaults — Paul's launch fields (pgw#1377 point 2).
-
-        ``scheduler`` is deliberately NOT a field: endpoint code owns
-        schedulers (the main_v2 turbo pattern). ``schedule``/``timesteps``
-        are the checkpoint's OWN distilled recipe, used when ``cfg`` is off
-        (a fused step-distilled merge) — distillation is EITHER-OR (Paul
-        ruling): recipe from the adapter OR from these fields; stacking is a
-        typed refusal, endpoint-side. Declared name-and-type compatible with
-        ``SDXL.Lora.Defaults`` so entrypoints type a recipe as
-        ``SDXL.Lora.Defaults | SDXL.Defaults`` and read the shared fields.
-        """
+    class Recipe(msgspec.Struct, frozen=True):
+        """The SERVING RECIPE — the typed fields that drive an entrypoint's
+        behavior, whichever source they came from (the checkpoint's own row
+        or a distillation adapter's overlay): both Defaults types INHERIT
+        this, so an entrypoint holds ONE type, never a union (Paul's
+        recipe-not-mode-flag ruling). Fields are independent axes: ``cfg``
+        (batch-2 guidance vs none), ``schedule`` (``None`` = keep the
+        checkpoint's own scheduler; construction stays endpoint code),
+        ``steps``/``guidance`` knobs, pinned ``timesteps``."""
 
         steps: Knob[int] = Knob(30, lo=15, hi=60, field="num_inference_steps")
         guidance: Knob[float] = Knob(6.0, lo=1.5, hi=12.0, field="guidance_scale")
         cfg: bool = True
-        positive_preamble: str = ""
-        negative_preamble: str = ""
         schedule: Schedule | None = None
         timesteps: tuple[int, ...] = ()
 
+    class Defaults(Recipe, frozen=True):
+        """SDXL per-checkpoint serving defaults (pgw#1377 point 2): the
+        Recipe axes plus the prompt-enhancement vocabulary. Zero-arg
+        construction is the platform fallback AND the trace fixture."""
+
+        positive_preamble: str = ""
+        negative_preamble: str = ""
+
     class Lora:
-        """Adapter-of-base scoping: ``SDXL.Lora.Defaults`` (wire ``sdxl.lora``)."""
+        """Adapter-of-base scoping: ``SDXL.Lora.Defaults`` (wire ``sdxl.lora``).
+
+        The Defaults class is bound below the SDXL body (a nested class body
+        cannot see the enclosing class scope to inherit ``Recipe`` directly).
+        """
 
         name = "sdxl.lora"
+        Defaults: ClassVar[type["SdxlLoraDefaults"]]
 
-        class Defaults(msgspec.Struct, frozen=True):
-            """LoRA overlay defaults (pgw#1377 point 7). Zero-arg
-            construction is the trace fixture: Lightning-4-step-ish
-            servable platform values."""
 
-            trigger_words: tuple[str, ...] = ()
-            strength: Knob[float] = Knob(1.0, lo=0.0, hi=2.0, field="strength")
-            steps: Knob[int] = Knob(4, lo=1, hi=12, field="num_inference_steps")
-            schedule: Schedule = "euler_trailing"
-            timesteps: tuple[int, ...] = ()  # empty = derive from steps
+class SdxlLoraDefaults(SDXL.Recipe, frozen=True):
+    """``SDXL.Lora.Defaults`` — a :class:`SDXL.Recipe` (the adapter's
+    distillation recipe; zero-arg = Lightning-4-step-ish servable
+    trace-fixture values) plus adapter-only fields (pgw#1377 point 7)."""
+
+    steps: Knob[int] = Knob(4, lo=1, hi=12, field="num_inference_steps")
+    cfg: bool = False
+    schedule: Schedule | None = "euler_trailing"
+    trigger_words: tuple[str, ...] = ()
+    strength: Knob[float] = Knob(1.0, lo=0.0, hi=2.0, field="strength")
+
+
+SDXL.Lora.Defaults = SdxlLoraDefaults
 
 
 __all__ = [

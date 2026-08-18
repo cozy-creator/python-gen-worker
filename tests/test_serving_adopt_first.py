@@ -22,7 +22,7 @@ import msgspec
 import pytest
 import torch
 
-from gen_worker import ValidationError, boot_stages
+from gen_worker import boot_stages
 from gen_worker._vendor.tensorfs import LocalCAS
 from gen_worker._vendor.torchcg import EnvironmentMismatch
 from gen_worker._vendor.torchcg.discovery import discover_lane
@@ -166,14 +166,18 @@ def test_the_deployment_decides_the_mode(
     )
     out = host.dispatch("generate", {"prompt": "x"}, request_id="r2")
     assert out.model_used == "ckpt:tiny@1+lightning-4step"
-    # Explicit guidance on a distilled serving is a typed refusal, never
-    # silently ignored.
-    with pytest.raises(ValidationError, match="guidance_scale is not accepted"):
-        host.dispatch(
-            "generate", {"prompt": "x", "guidance_scale": 7.0}, request_id="r3")
-    with pytest.raises(ValidationError, match="negative_prompt is not accepted"):
-        host.dispatch(
-            "generate", {"prompt": "x", "negative_prompt": "bad"}, request_id="r4")
+    # Explicit guidance/negatives on a cfg-free serving are IGNORED
+    # caller-visibly — ctx.warn rows in the response envelope, never a
+    # silent drop and never an aborted request (Paul's warn ruling).
+    ctx = host.make_context("r3")
+    out = host.dispatch(
+        "generate",
+        {"prompt": "x", "guidance_scale": 7.0, "negative_prompt": "bad"},
+        request_id="r3", ctx=ctx,
+    )
+    assert out.model_used == "ckpt:tiny@1+lightning-4step"
+    assert [w for w in ctx.warnings if "guidance_scale ignored" in w]
+    assert [w for w in ctx.warnings if "negative_prompt ignored" in w]
 
 
 def test_loader_states_the_surface_and_refuses_typed(tmp_path: Path) -> None:
