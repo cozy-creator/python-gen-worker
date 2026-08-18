@@ -85,6 +85,18 @@ def _parser() -> argparse.ArgumentParser:
                         help="entrypoint name to invoke (repeatable, pairs with --payload)")
     parser.add_argument("--payload", action="append", default=[],
                         help="JSON payload for the matching --invoke")
+    parser.add_argument("--envelope", action="append", default=[],
+                        help="full request envelope JSON for the matching --invoke "
+                             "(signature-derived: model/models, adapters, input); "
+                             "runs the ServeLoop with residency leases instead of "
+                             "the direct-args host dispatch")
+    parser.add_argument("--vram-budget-gb", type=float, default=0.0,
+                        help="envelope mode: the residency VRAM budget; 0 = size "
+                             "the budget to the checkpoint (fit exactly one)")
+    parser.add_argument("--weight-bytes", type=int, default=0,
+                        help="envelope mode: this checkpoint's manifest weight "
+                             "bytes (the tensorfs manifest states this in "
+                             "production; 0 = stat the local tree)")
     # Adoption sources, mutually exclusive; absent = the eager bridge.
     parser.add_argument("--graph-store", default="",
                         help="local compiled-graph CAS root (cozy-local shape)")
@@ -130,8 +142,58 @@ def _aoti_loader(path: Path, record: Any) -> Any:
     return torch._inductor.aoti_load_package(str(path))
 
 
+def _serve_envelopes(args: argparse.Namespace, loaded: Any) -> int:
+    """Envelope mode: the production dispatch loop, locally — the
+    signature-derived envelope through ServeLoop with residency leases
+    (admission before allocation) around every invocation."""
+    from .residency import ResidencyManager
+    from .serve_loop import ServeLoop, manifest_sizer
+
+    tree = Path(args.checkpoint)
+    weight = args.weight_bytes or sum(
+        f.stat().st_size for f in tree.rglob("*") if f.is_file()
+    ) or 1
+    headroom = max(weight // 4, 1)
+    budget = int(args.vram_budget_gb * (1024**3)) or (weight + headroom)
+
+    class _LocalResolver:
+        def resolve(self, model_cls: type, checkpoint_ref: str) -> DeployBinding:
+            return DeployBinding(
+                checkpoint_ref=checkpoint_ref,
+                checkpoint_dir=tree,
+                defaults=json.loads(args.defaults),
+            )
+
+        def default_pick(self, model_cls: type, slot_name: str) -> str:
+            return str(args.checkpoint_ref)
+
+    loop = ServeLoop(
+        loaded,
+        residency=ResidencyManager(
+            budget,
+            manifest_sizer({args.checkpoint_ref: weight}, headroom_bytes=headroom),
+        ),
+        resolver=_LocalResolver(),
+        lane_contract=args.lane,
+        output_dir=Path(args.output_dir),
+    )
+    for index, (function, raw) in enumerate(zip(args.invoke, args.envelope)):
+        outcome = loop.invoke(function, json.loads(raw), request_id=f"local-{index}")
+        for warning in outcome.warnings:
+            print(f"warn: {warning}", file=sys.stderr)
+        sys.stdout.buffer.write(msgspec.json.encode(outcome.result))
+        sys.stdout.buffer.write(b"\n")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.envelope and args.payload:
+        raise SystemExit("--payload and --envelope are two modes; pick one")
+    if args.envelope:
+        if len(args.invoke) != len(args.envelope):
+            raise SystemExit("--invoke and --envelope must pair up")
+        return _serve_envelopes(args, load_endpoint(Path(args.endpoint_dir)))
     if len(args.invoke) != len(args.payload):
         raise SystemExit("--invoke and --payload must pair up")
     loaded = load_endpoint(Path(args.endpoint_dir))

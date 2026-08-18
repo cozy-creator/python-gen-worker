@@ -30,6 +30,12 @@ from .context import (
     LoaderEngine,
     RequestContext,
 )
+from .envelope import (
+    AdapterRow,
+    DecodedRequest,
+    EnvelopeError,
+    decode_envelope,
+)
 from .entrypoints import (
     ENTRYPOINT_ATTR,
     EntrypointDeclarationError,
@@ -44,6 +50,20 @@ from .loader import (
     load_endpoint,
     load_endpoint_module,
 )
+from .residency import (
+    InstanceSizer,
+    Lease,
+    ModelBackend,
+    NeverFits,
+    ResidencyError,
+    ResidencyManager,
+)
+from .serve_loop import (
+    BindingResolver,
+    InvokeOutcome,
+    ServeLoop,
+    manifest_sizer,
+)
 from .model import (
     LaneContract,
     Model,
@@ -54,6 +74,20 @@ from .model import (
 )
 
 __all__ = [
+    "manifest_sizer",
+    "decode_envelope",
+    "ServeLoop",
+    "ResidencyManager",
+    "ResidencyError",
+    "NeverFits",
+    "ModelBackend",
+    "Lease",
+    "InvokeOutcome",
+    "InstanceSizer",
+    "EnvelopeError",
+    "DecodedRequest",
+    "BindingResolver",
+    "AdapterRow",
     "ENTRYPOINT_ATTR",
     "Adapter",
     "DefaultsError",
