@@ -88,6 +88,17 @@ CHILD_ONLY: Dict[str, str] = {
         "banned calls all sit under `_export_entry`, which only "
         "`trace_for_key` reaches and only a child calls."
     ),
+    "_vendor.torchcg.discovery": (
+        "the trace-once-at-publish instrumented derive (tcg#41/pgw#1370): "
+        "torch.export runs per OBSERVED call to hash graph classes into the "
+        "release document. It executes at PUBLISH time — the derive driver's "
+        "CPU pass inside the release image (pgw#1370/th#2134), never on a "
+        "serving pod (the ruling: serving pods are ADOPT-ONLY, no trace, no "
+        "derivation). The serving path consumes `_vendor.torchcg.adopt`, "
+        "which holds no export; nothing in the boot or dispatch flow imports "
+        "this module. The export here is fake-tensor shape arithmetic (the "
+        "model.export precedent), not inductor orchestration."
+    ),
     "model.export": (
         "pgw#1332's DECLARATION-TIME export. It is not reached from a serving "
         "process at all, and the claim is structural rather than a promise: "
