@@ -433,15 +433,11 @@ jobs:
       # declaration registries any more — `api/export_contract`, `registry` and
       # the catalog are gone — so the property it guarded no longer exists.
 
-      # GATING (pgw#1332): the catalog commits two halves per family — the
-      # declaration-time export and the bindings generated from it — and an
-      # endpoint compiles against the second while a pod arms what the first
-      # describes. Codegen is a pure function of the document, so proving they
-      # still agree is a byte comparison with no torch, no GPU and no network:
-      # sub-second, which is why it belongs in the REQUIRED job rather than
-      # behind the fifteen-minute one.
-      - name: pgw#1332 guard - family bindings match their exports
-        run: uv run python scripts/check_model_bindings.py
+      # pgw#1373: the pgw#1332 family-bindings gate is DELETED. It compared a
+      # catalog family's declaration-time export against the bindings codegen
+      # produced from it — `gen_worker.model.codegen`, `model/catalog/` and
+      # `model/catalog/_generated/` — and all three are gone. There are no two
+      # halves left to disagree.
 
       # GATING (th#1914 / pgw#1237 / cl#56): this public corpus is the
       # authority both sides bind to real path behavior. PGW pins it offline;
@@ -709,4 +705,7 @@ jobs:
       # since a red suite is exactly when the skip set tends to move.
       - name: pgw#966 guard - the skip census
         if: ${{ !cancelled() }}
-        run: uv run python scripts/lint_skip_census.py --ci .skip-census-v1.json .skip-census-v2.json
+        # pgw#1373: `.skip-census-v2.json` came from the `tests_v2/` run, and
+        # that suite is deleted — asking for a census file nothing writes is
+        # a gate that fails on its own missing input.
+        run: uv run python scripts/lint_skip_census.py --ci .skip-census-v1.json
