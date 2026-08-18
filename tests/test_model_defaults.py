@@ -43,15 +43,17 @@ def test_sdxl_zero_arg_is_the_platform_opinion() -> None:
     # Paul's ruling: the quality vocabulary lives HERE, not in endpoint code.
     assert d.positive_preamble == "masterpiece, best quality"
     assert d.negative_preamble == "worst quality, low quality"
-    # sampler None = trust the tree's shipped scheduler config (layer 3).
-    assert d.sampler is None
+    # scheduler None = trust the tree's shipped scheduler config (layer 3).
+    assert d.scheduler is None
     assert d.timesteps == ()
+    # Checkpoint-level fact, decoupled from cfg (the guidance axis).
+    assert d.step_distilled is False
 
 
 def test_sdxl_lora_zero_arg_is_lightning_shaped() -> None:
     d = SDXL.Lora.Defaults()
     assert d.cfg is False
-    assert d.sampler == "euler_trailing"
+    assert d.scheduler == "euler_trailing"
     assert d.steps.default == 4
     assert d.timesteps == ()
     assert d.strength == Knob(1.0, lo=-4.0, hi=4.0, name="strength")
@@ -117,7 +119,7 @@ def test_full_row_overrides_every_field() -> None:
         "cfg": False,
         "positive_preamble": "",
         "negative_preamble": "",
-        "sampler": "lcm",
+        "scheduler": "lcm",
         "timesteps": [999, 749, 499, 249],
     }
     d = decode_model_defaults(SDXL, model="sdxl", defaults=row)
@@ -125,7 +127,7 @@ def test_full_row_overrides_every_field() -> None:
     assert d.guidance == Knob(2.0, lo=1.5, hi=3.0, name="guidance")
     assert d.cfg is False
     assert d.positive_preamble == ""
-    assert d.sampler == "lcm"
+    assert d.scheduler == "lcm"
     assert d.timesteps == (999, 749, 499, 249)
 
 
@@ -155,7 +157,7 @@ def test_a_row_default_outside_the_merged_range_is_pulled_inside() -> None:
         ({"steps": "fast"}, "steps"),
         ({"steps": {"default": 8.5}}, "steps"),
         ({"cfg": "yes"}, "cfg"),
-        ({"sampler": "ddim_trailing"}, "sampler"),
+        ({"scheduler": "ddim_trailing"}, "scheduler"),
         ({"timesteps": ["a"]}, "timesteps"),
     ],
 )
@@ -198,14 +200,14 @@ def test_a_lora_row_decodes_through_the_adapter_surface() -> None:
             "trigger_words": ["dmd2"],
             "strength": {"default": 0.8},
             "steps": {"default": 4},
-            "sampler": "lcm",
+            "scheduler": "lcm",
             "timesteps": [999, 749, 499, 249],
         },
     )
     assert d.trigger_words == ("dmd2",)
     assert d.strength.default == 0.8
     assert (d.strength.lo, d.strength.hi) == (-4.0, 4.0)
-    assert d.sampler == "lcm"
+    assert d.scheduler == "lcm"
     assert d.timesteps == (999, 749, 499, 249)
 
 
@@ -288,7 +290,7 @@ def test_the_contract_files_exact_usage_holds() -> None:
     """Every ``main_v2.py`` defaults expression over fixture hub rows: the
     recipe-driven single entrypoint — ``recipe: SDXL.Recipe`` from the
     distillation adapter's defaults when one rides, else the checkpoint's own;
-    ``recipe.cfg`` gates guidance/negatives, ``recipe.sampler`` gates the
+    ``recipe.cfg`` gates guidance/negatives, ``recipe.scheduler`` gates the
     scheduler swap (None = keep the checkpoint's own), pinned timesteps ride
     the cfg-off arm."""
     ctx: RequestContext[GenerationDefaults] = RequestContext("req-main-v2")
@@ -298,8 +300,20 @@ def test_the_contract_files_exact_usage_holds() -> None:
         defaults={"guidance": {"default": 5.0, "hi": 9.0}},
     )
 
-    # The stacking gate: an adapter may not ride an already-distilled base.
-    assert d.cfg  # `if turbo is not None and not d.cfg: raise ...`
+    # The stacking gate is step_distilled, NOT cfg (`if turbo is not None and
+    # d.step_distilled: ctx.warn(...); turbo = None` — warn-and-serve, never
+    # an error): a guidance-distilled full-step checkpoint (cfg=False,
+    # step_distilled=False) MAY take a turbo LoRA.
+    assert not d.step_distilled
+    guidance_distilled = decode_model_defaults(
+        SDXL, model="sdxl", defaults={"cfg": False}
+    )
+    assert not guidance_distilled.cfg and not guidance_distilled.step_distilled
+    fused_merge = decode_model_defaults(
+        SDXL, model="sdxl",
+        defaults={"cfg": False, "step_distilled": True, "scheduler": "lcm"},
+    )
+    assert fused_merge.step_distilled  # -> the adapter is ignored with a warn
 
     # No adapter: the recipe is the checkpoint's own Defaults — one nominal
     # type, both Defaults inherit SDXL.Recipe.
@@ -326,17 +340,17 @@ def test_the_contract_files_exact_usage_holds() -> None:
     assert again == prompt
 
     # schedule=None means: keep the checkpoint's own scheduler (nullcontext).
-    assert recipe.sampler is None
+    assert recipe.scheduler is None
 
     # A distillation adapter rides: its defaults ARE the recipe.
     turbo = decode_model_defaults(
         SDXL.Lora,
         model="sdxl.lora",
-        defaults={"sampler": "lcm", "timesteps": [999, 749, 499, 249]},
+        defaults={"scheduler": "lcm", "timesteps": [999, 749, 499, 249]},
     )
     recipe = turbo
     assert not recipe.cfg  # the cfg-off arm: no guidance, no negatives
-    assert recipe.sampler == "lcm"  # -> LCMScheduler swap
+    assert recipe.scheduler == "lcm"  # -> LCMScheduler swap
     assert list(recipe.timesteps) == [999, 749, 499, 249]  # pinned ladder
     assert recipe.steps.resolve(None, ctx) == 4
 
@@ -372,6 +386,31 @@ def test_contract_stamps_classify_through_the_fingerprint() -> None:
     assert model_type_for_contract("sd15.diffusers-bf16@1") is SD15
     # Unrecognized = unclassified, legal and visible — never a guess.
     assert model_type_for_contract("minimax.h3-dit-native@1") is None
+
+
+def test_canonical_scheduler_configs_are_the_training_schedules() -> None:
+    """The ingest-synthesis data (Paul's ruling: a bare scheduler class
+    carries library-default betas, not the family's training schedule)."""
+    import json
+
+    sdxl = SDXL.canonical_scheduler_config
+    assert (sdxl["beta_start"], sdxl["beta_end"]) == (0.00085, 0.012)
+    assert sdxl["beta_schedule"] == "scaled_linear"
+    assert sdxl["prediction_type"] == "epsilon"
+    assert sdxl["_class_name"] == "EulerDiscreteScheduler"
+    sd15 = SD15.canonical_scheduler_config
+    assert (sd15["beta_start"], sd15["beta_end"]) == (0.00085, 0.012)
+    # JSON-serializable as-is: ingest writes it verbatim as
+    # scheduler_config.json into a classified tree that ships none.
+    for mt in MODEL_TYPES:
+        json.dumps(dict(mt.canonical_scheduler_config))
+    # No canonical recorded for these yet — ingest synthesizes nothing
+    # (flagged in the tracker; do not invent a family's noise schedule).
+    from gen_worker.models import HiDreamO1, SD2, Wan22
+
+    assert SD2.canonical_scheduler_config == {}
+    assert HiDreamO1.canonical_scheduler_config == {}
+    assert Wan22.canonical_scheduler_config == {}
 
 
 def test_model_types_are_vocabularies_not_values() -> None:

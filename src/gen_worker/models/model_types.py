@@ -26,6 +26,7 @@ system replaces, ``tensorhub internal/modelfamily/inferencedefaults/families/
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from fnmatch import fnmatchcase
 from typing import (
     ClassVar,
@@ -131,6 +132,42 @@ class PendingContract(msgspec.Struct, frozen=True):
         return f"{self.name}@{self.version}"
 
 
+#: stabilityai/stable-diffusion-xl-base-1.0 scheduler_config.json — SDXL's
+#: training-time noise schedule (scaled_linear 0.00085/0.012, epsilon).
+SDXL_SCHEDULER_CONFIG: Final[Mapping[str, object]] = {
+    "_class_name": "EulerDiscreteScheduler",
+    "beta_start": 0.00085,
+    "beta_end": 0.012,
+    "beta_schedule": "scaled_linear",
+    "num_train_timesteps": 1000,
+    "prediction_type": "epsilon",
+    "steps_offset": 1,
+    "timestep_spacing": "leading",
+    "interpolation_type": "linear",
+    "trained_betas": None,
+    "use_karras_sigmas": False,
+    "sample_max_value": 1.0,
+    "set_alpha_to_one": False,
+    "skip_prk_steps": True,
+    "clip_sample": False,
+}
+
+#: runwayml/stable-diffusion-v1-5 scheduler_config.json — SD1.x's
+#: training-time noise schedule (same betas, PNDM-class shipping config).
+SD15_SCHEDULER_CONFIG: Final[Mapping[str, object]] = {
+    "_class_name": "PNDMScheduler",
+    "beta_start": 0.00085,
+    "beta_end": 0.012,
+    "beta_schedule": "scaled_linear",
+    "num_train_timesteps": 1000,
+    "prediction_type": "epsilon",
+    "steps_offset": 1,
+    "trained_betas": None,
+    "set_alpha_to_one": False,
+    "skip_prk_steps": True,
+    "clip_sample": False,
+}
+
 SDXL_DIFFUSERS_BF16: Final = PendingContract("sdxl.diffusers-bf16", 1)
 SD15_DIFFUSERS_BF16: Final = PendingContract("sd15.diffusers-bf16", 1)
 SD2_DIFFUSERS_BF16: Final = PendingContract("sd2.diffusers-bf16", 1)
@@ -163,6 +200,18 @@ class ModelType(Generic[D_co]):
     name: ClassVar[str] = ""
     contracts: ClassVar[tuple[str, ...]] = ()
     canonical_contract: ClassVar[TensorLayoutContract]
+    #: The architecture's TRAINING-TIME scheduler config (the standard
+    #: scheduler_config.json content) — an architecture fact beside the
+    #: fingerprint (Paul's ruling, 2026-08-18: the endpoint layer-3 scheduler
+    #: backstop is DELETED; a bare scheduler class carries library-default
+    #: betas, not the family's training schedule). CONSUMER: INGEST — a
+    #: classified tree missing scheduler_config.json gets this synthesized
+    #: into its config snapshot (single-file imports), so the pipeline
+    #: constructor's scheduler invariant always holds and no endpoint ever
+    #: guesses a noise schedule (executes hub-side with classification
+    #: pre-fill, th#2140). Empty = no canonical recorded; ingest synthesizes
+    #: nothing.
+    canonical_scheduler_config: ClassVar[Mapping[str, object]] = {}
 
     def __init__(self) -> None:
         raise TypeError(f"{type(self).__name__} is a vocabulary, not a value")
@@ -182,7 +231,7 @@ class LoraOverlay:
         raise TypeError(f"{type(self).__name__} is a vocabulary, not a value")
 
 
-SamplerName = Literal[
+SchedulerName = Literal[
     "dpmpp_2m_karras",
     "dpmpp_2m",
     "euler",
@@ -192,9 +241,9 @@ SamplerName = Literal[
     "ddim",
     "lcm",
 ]
-"""The PLATFORM-WIDE sampler-name vocabulary (Paul's three-layer sampler
+"""The PLATFORM-WIDE scheduler-name vocabulary (Paul's three-layer scheduler
 ruling, pgw#1376 point 6): checkpoint metadata rows write these names; the
-additive-only evolution rule applies (a new community sampler is a new
+additive-only evolution rule applies (a new community scheduler is a new
 member, never a changed one). Endpoints own their SUPPORTED SUBSET and the
 name→scheduler-constructor tables (author code, like lanes — never here);
 a metadata name an endpoint doesn't serve warns and falls through to the
@@ -210,8 +259,8 @@ class SdxlRecipe(msgspec.Struct, frozen=True):
     ``recipe: SDXL.Recipe``, never a union). The axes are INDEPENDENT:
     ``cfg`` (CFG on/off) and few-step are separate facts — guidance-distilled
     models are cfg-off at FULL steps, Hyper-SD CFG-preserving LoRAs are
-    few-step with CFG ON at 5-8. ``sampler`` is the checkpoint-metadata layer
-    of the three-layer sampler chain (request > this > the tree's shipped
+    few-step with CFG ON at 5-8. ``scheduler`` is the checkpoint-metadata layer
+    of the three-layer scheduler chain (request > this > the tree's shipped
     scheduler config > endpoint load-time default): ``None`` = trust the tree;
     a distill recipe expresses euler_trailing/lcm through the same field.
     ``timesteps`` empty = derive from steps (a pinned ladder like DMD2's
@@ -224,7 +273,7 @@ class SdxlRecipe(msgspec.Struct, frozen=True):
     steps: Knob[int] = Knob(28, lo=1, hi=80, name="steps")
     guidance: Knob[float] = Knob(6.0, lo=1.5, hi=15.0, name="guidance")
     cfg: bool = True
-    sampler: SamplerName | None = None
+    scheduler: SchedulerName | None = None
     timesteps: tuple[int, ...] = ()
 
 
@@ -235,10 +284,18 @@ class SdxlDefaults(SdxlRecipe, frozen=True):
     "masterpiece, best quality" vocabulary lives HERE, banned from endpoint
     code); ``negative_preamble`` is its symmetric counterpart. A fused
     step-distilled merge (DMD2/Lightning full checkpoint) carries its recipe
-    in the inherited fields (cfg=False, sampler, pinned timesteps)."""
+    in the inherited fields (cfg=False, scheduler, pinned timesteps)."""
 
     positive_preamble: str = "masterpiece, best quality"
     negative_preamble: str = "worst quality, low quality"
+    #: CHECKPOINT-level fact, deliberately NOT on Recipe: is this checkpoint
+    #: itself a step-distillation product (fused DMD2/Lightning/LCM merge)?
+    #: Decoupled from ``cfg`` (purely the guidance axis): a guidance-distilled
+    #: full-step checkpoint is cfg=False + step_distilled=False and MAY take a
+    #: turbo LoRA; step_distilled=True is what makes stacking a distillation
+    #: adapter harmful — the endpoint warns and ignores the adapter (never an
+    #: error). Ingest may infer True from the merge classification.
+    step_distilled: bool = False
 
 
 class SdxlLoraDefaults(SdxlRecipe, frozen=True):
@@ -253,14 +310,14 @@ class SdxlLoraDefaults(SdxlRecipe, frozen=True):
 
     steps: Knob[int] = Knob(4, lo=1, hi=150, name="steps")
     cfg: bool = False
-    sampler: SamplerName | None = "euler_trailing"
+    scheduler: SchedulerName | None = "euler_trailing"
     strength: Knob[float] = Knob(1.0, lo=-4.0, hi=4.0, name="strength")
     trigger_words: tuple[str, ...] = ()
 
 
 class Sd15Recipe(msgspec.Struct, frozen=True):
     """SD1.x serving recipe — same five axes and semantics as
-    :class:`SdxlRecipe` (``sampler=None`` = trust the tree's shipped
+    :class:`SdxlRecipe` (``scheduler=None`` = trust the tree's shipped
     scheduler). Platform values from the live sd15.schema.json registry
     entry: steps 30 (bounds 1..80, the family payload envelope), guidance
     7.0 (schema minimum 0, no declared max)."""
@@ -268,7 +325,7 @@ class Sd15Recipe(msgspec.Struct, frozen=True):
     steps: Knob[int] = Knob(30, lo=1, hi=80, name="steps")
     guidance: Knob[float] = Knob(7.0, lo=0.0, name="guidance")
     cfg: bool = True
-    sampler: SamplerName | None = None
+    scheduler: SchedulerName | None = None
     timesteps: tuple[int, ...] = ()
 
 
@@ -280,13 +337,13 @@ class Sd15Defaults(Sd15Recipe, frozen=True):
 class Sd15LoraDefaults(Sd15Recipe, frozen=True):
     """The adapter row. Zero-arg = LCM-LoRA-SD1.5-ish 4-step platform values
     (sd15.lora.schema.json records the 4-step distilled recipe shape;
-    Hyper-SD15's ``ddim_trailing`` is outside the launch SamplerName vocabulary —
+    Hyper-SD15's ``ddim_trailing`` is outside the launch SchedulerName vocabulary —
     flagged in the pgw#1377 tracker section, not invented here). Bounds from
     the same file (recommended_weight −4..4, num_inference_steps 1..80)."""
 
     steps: Knob[int] = Knob(4, lo=1, hi=80, name="steps")
     cfg: bool = False
-    sampler: SamplerName | None = "lcm"
+    scheduler: SchedulerName | None = "lcm"
     strength: Knob[float] = Knob(1.0, lo=-4.0, hi=4.0, name="strength")
     trigger_words: tuple[str, ...] = ()
 
@@ -328,6 +385,7 @@ class SDXL(ModelType[SdxlDefaults]):
     name = "sdxl"
     contracts = ("sdxl.*",)
     canonical_contract = SDXL_DIFFUSERS_BF16
+    canonical_scheduler_config = SDXL_SCHEDULER_CONFIG
     # TypeAlias so `recipe: SDXL.Recipe` is a valid annotation (main_v2.py).
     Recipe: TypeAlias = SdxlRecipe
     Defaults = SdxlDefaults
@@ -343,6 +401,7 @@ class SD15(ModelType[Sd15Defaults]):
     name = "sd15"
     contracts = ("sd15.*",)
     canonical_contract = SD15_DIFFUSERS_BF16
+    canonical_scheduler_config = SD15_SCHEDULER_CONFIG
     Recipe: TypeAlias = Sd15Recipe
     Defaults = Sd15Defaults
 
@@ -472,7 +531,7 @@ __all__ = [
     "ModelType",
     "PendingContract",
     "SD15",
-    "SamplerName",
+    "SchedulerName",
     "SD15_DIFFUSERS_BF16",
     "SD2",
     "SD2_DIFFUSERS_BF16",

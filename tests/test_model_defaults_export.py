@@ -121,8 +121,8 @@ def test_the_cli_decodes_a_row_with_the_worker_verdict(
     assert decoded["positive_preamble"] == "masterpiece, best quality"
 
     # The LoRA overlay decodes through the same surface.
-    assert cli_main(["models", "decode", "sdxl.lora", "--row", '{"sampler": "lcm"}']) == 0
-    assert json.loads(capsys.readouterr().out)["sampler"] == "lcm"
+    assert cli_main(["models", "decode", "sdxl.lora", "--row", '{"scheduler": "lcm"}']) == 0
+    assert json.loads(capsys.readouterr().out)["scheduler"] == "lcm"
 
     # A typed refusal names the field and exits 1.
     assert cli_main(["models", "decode", "sdxl", "--row", '{"steps": "fast"}']) == 1
