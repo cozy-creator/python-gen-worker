@@ -57,14 +57,33 @@ def validate_endpoint_lock(lock_dict: Dict[str, Any]) -> EndpointLockValidationR
     errors: List[str] = []
     warnings: List[str] = []
 
-    functions = lock_dict.get("functions") if isinstance(lock_dict, dict) else None
+    raw = lock_dict if isinstance(lock_dict, dict) else {}
+    functions = raw.get("functions")
+    # th#2146: `entrypoints[]` is functions[]' SUCCESSOR SPELLING and a FLAT
+    # list of the same item shape — so it folds into `functions` HERE, at this
+    # one site, exactly as `builder.ParseManifest` folds it hub-side. Every
+    # walk below then keeps asking one question. Reading it as a wrapped object
+    # (or not folding it) scores every v2 release as empty.
+    entrypoints = raw.get("entrypoints")
+    if isinstance(entrypoints, list) and entrypoints:
+        if isinstance(functions, list) and functions:
+            return EndpointLockValidationResult(
+                ok=False,
+                errors=(
+                    "endpoint lock declares BOTH functions[] and "
+                    "entrypoints[]: entrypoints[] is the successor spelling, "
+                    "emit one",
+                ),
+            )
+        functions = entrypoints
+    if functions is None and isinstance(raw.get("jobs"), list):
+        functions = []
     if not isinstance(functions, list):
         return EndpointLockValidationResult(
             ok=False,
             errors=("endpoint lock missing 'functions' list",),
         )
-    v2 = (lock_dict.get("entrypoints") or {}).get("entrypoints") or ()
-    if len(functions) == 0 and not (lock_dict.get("jobs") or ()) and not v2:
+    if len(functions) == 0 and not (lock_dict.get("jobs") or ()):
         # Jobs-aware (pgw#1354): a jobs-only release is legal (th#2049) and
         # advertises 27 things, so the bare function count must not call it
         # empty. pgw#1382-aware (pgw#1387): so is an entrypoints-only release,
