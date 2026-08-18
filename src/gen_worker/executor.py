@@ -8147,7 +8147,10 @@ class Executor:
         ``j56tate13oav13``). The hub's policy is right; it needed a fact."""
         act = bg.act
         assert act is not None
-        end, reason, detail = "", "", ""
+        # NOT named `reason`/`detail`: `test_fn_unavailable_vocabulary_th1563`
+        # scans this module for `reason = "..."` bindings feeding the
+        # FnUnavailable slot, and a same-named local anywhere pollutes it.
+        end, end_reason, end_detail = "", "", ""
         try:
             with activity_mod.watchdog(act):
                 await self._supervise_mint(rec, bg, act)
@@ -8159,8 +8162,8 @@ class Executor:
                 "continues at its current tier",
                 bg.spec.name, bg.abandon_code, bg.abandon_reason)
             end = fleet_compiled_graphs_mod.MINT_END_ABANDONED
-            reason = f"abandoned_{bg.abandon_code}"
-            detail = (
+            end_reason = f"abandoned_{bg.abandon_code}"
+            end_detail = (
                 f"background mint for {bg.spec.name} abandoned "
                 f"({bg.abandon_code}"
                 + (f": {bg.abandon_reason}" if bg.abandon_reason else "")
@@ -8176,8 +8179,9 @@ class Executor:
                 "for this process", bg.spec.name, type(exc).__name__, exc)
             # pgw#677 reopen: the abort cause rides the wire typed and
             # countable, in addition to the FAILED activity terminal.
-            end, reason = fleet_compiled_graphs_mod.MINT_END_ABORTED, "error"
-            detail = (
+            end = fleet_compiled_graphs_mod.MINT_END_ABORTED
+            end_reason = "error"
+            end_detail = (
                 f"background mint for {bg.spec.name} failed: "
                 f"{type(exc).__name__}: {exc}")
             act.failed(exc)
@@ -8191,7 +8195,7 @@ class Executor:
             self._assert_mint_termini(
                 bg.spec, list(bg.pendings.values()),
                 driver_owns_delegated=False)
-            self._report_mint_end(bg, end, reason, detail)
+            self._report_mint_end(bg, end, end_reason, end_detail)
             if rec.background_mint is bg:
                 rec.background_mint = None
             # pgw#789: WARM-COMPLETE. The eager-first boot (pgw#671) advertises
@@ -8208,7 +8212,7 @@ class Executor:
             self._on_state_change()
 
     def _report_mint_end(
-        self, bg: "_BackgroundMint", end: str, reason: str, detail: str,
+        self, bg: "_BackgroundMint", end: str, why: str, detail: str,
     ) -> None:
         """pgw#1383: ONE typed terminal event per mint, on EVERY exit path.
 
@@ -8222,7 +8226,7 @@ class Executor:
         """
         if not end:
             pendings = list({id(p): p for p in bg.pendings.values()}.values())
-            end, reason = fleet_compiled_graphs_mod.mint_end(pendings)
+            end, why = fleet_compiled_graphs_mod.mint_end(pendings)
         if end == fleet_compiled_graphs_mod.MINT_END_PUBLISHED:
             return
         kind = (
@@ -8234,10 +8238,10 @@ class Executor:
             kind,
             detail or (
                 f"the background mint for {bg.spec.name} ended {end} "
-                f"({reason}) and published nothing; serving continues at its "
+                f"({why}) and published nothing; serving continues at its "
                 f"current tier and this pod owes the fleet no further work "
                 f"for it"),
-            phase=reason or end,
+            phase=why or end,
         )
 
     async def _await_publish_durable(self, act: Any) -> None:
