@@ -27,7 +27,7 @@ def build_pipe() -> Any:
     from transformers import CLIPTextConfig, CLIPTextModel, CLIPTokenizer
 
     torch.manual_seed(0)
-    unet = UNet2DConditionModel(
+    unet: Any = UNet2DConditionModel(
         sample_size=8,
         in_channels=4,
         out_channels=4,
@@ -39,7 +39,7 @@ def build_pipe() -> Any:
         attention_head_dim=2,
         norm_num_groups=4,
     )
-    vae = AutoencoderKL(
+    vae: Any = AutoencoderKL(
         in_channels=3,
         out_channels=3,
         down_block_types=("DownEncoderBlock2D",),

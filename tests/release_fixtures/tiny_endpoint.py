@@ -12,13 +12,13 @@ this fixture's aspect-ratio analogue), the generic ``Endpoint[SDXL]`` header + n
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Optional
+from typing import Any, Optional
 
 import msgspec
 import torch
 from diffusers import StableDiffusionPipeline
 
-from gen_worker import Endpoint, ImageAsset, RequestContext, endpoint
+from gen_worker import Endpoint, ImageAsset, endpoint
 from gen_worker.models import SDXL
 from gen_worker.models.model_types import register_contract_dtype
 
@@ -57,15 +57,15 @@ class ImageOutput(msgspec.Struct):
     # 2 CFG batch-2 graphs + 2 batch-1 graphs = 4 graph classes.
 )
 class TinyDiffusion(Endpoint[SDXL]):
-    def setup(self, ctx: RequestContext) -> None:
+    def setup(self, ctx: Any) -> None:
         self.pipe = StableDiffusionPipeline.from_pretrained(
             ctx.checkpoint_dir, torch_dtype=ctx.lane.dtype
         ).to("cuda")
         self.pipe.unet = ctx.compile(self.pipe.unet)
         self.defaults = ctx.defaults()
 
-    def _run(self, ctx: RequestContext, *, steps: int, seed: Optional[int],
-             **call_kwargs) -> ImageAsset:
+    def _run(self, ctx: Any, *, steps: int, seed: Optional[int],
+             **call_kwargs: Any) -> ImageAsset:
         generator = (
             torch.Generator("cuda").manual_seed(seed) if seed is not None else None
         )
@@ -79,7 +79,7 @@ class TinyDiffusion(Endpoint[SDXL]):
             )
         return ctx.save_image(result.images[0], format="png")
 
-    def generate(self, ctx: RequestContext, payload: GenerateInput) -> ImageOutput:
+    def generate(self, ctx: Any, payload: GenerateInput) -> ImageOutput:
         ctx.raise_if_cancelled()
         d = self.defaults
         steps = d.steps.resolve(payload.num_inference_steps or 2, ctx)
@@ -92,7 +92,7 @@ class TinyDiffusion(Endpoint[SDXL]):
         )
         return ImageOutput(image=image, model_used=ctx.checkpoint_ref)
 
-    def generate_turbo(self, ctx: RequestContext, payload: TurboInput) -> ImageOutput:
+    def generate_turbo(self, ctx: Any, payload: TurboInput) -> ImageOutput:
         ctx.raise_if_cancelled()
         side = _BUCKETS[payload.size]
         image = self._run(

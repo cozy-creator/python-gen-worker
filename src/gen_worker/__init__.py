@@ -67,6 +67,9 @@ if TYPE_CHECKING:  # pragma: no cover - the eager spelling, for type checkers on
         variant_of,
         worker_function,
     )
+    from .api.endpoint_base import (
+        Endpoint,
+    )
     from .api.derive import (
         DeclarationMismatch,
         assert_blockers,
