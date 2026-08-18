@@ -1015,7 +1015,7 @@ class ResolvedCompute(_message.Message):
     def __init__(self, accelerator: _Optional[str] = ..., gpu_index: _Optional[int] = ...) -> None: ...
 
 class ModelBinding(_message.Message):
-    __slots__ = ("slot", "ref", "loras", "inference_defaults", "objective", "distilled", "distilled_status", "manifest_digest")
+    __slots__ = ("slot", "ref", "loras", "inference_defaults", "objective", "distilled", "distilled_status", "model", "manifest_digest")
     SLOT_FIELD_NUMBER: _ClassVar[int]
     REF_FIELD_NUMBER: _ClassVar[int]
     LORAS_FIELD_NUMBER: _ClassVar[int]
@@ -1023,6 +1023,7 @@ class ModelBinding(_message.Message):
     OBJECTIVE_FIELD_NUMBER: _ClassVar[int]
     DISTILLED_FIELD_NUMBER: _ClassVar[int]
     DISTILLED_STATUS_FIELD_NUMBER: _ClassVar[int]
+    MODEL_FIELD_NUMBER: _ClassVar[int]
     MANIFEST_DIGEST_FIELD_NUMBER: _ClassVar[int]
     slot: str
     ref: str
@@ -1031,18 +1032,21 @@ class ModelBinding(_message.Message):
     objective: str
     distilled: bool
     distilled_status: str
+    model: str
     manifest_digest: str
-    def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., loras: _Optional[_Iterable[_Union[LoraOverlay, _Mapping]]] = ..., inference_defaults: _Optional[str] = ..., objective: _Optional[str] = ..., distilled: _Optional[bool] = ..., distilled_status: _Optional[str] = ..., manifest_digest: _Optional[str] = ...) -> None: ...
+    def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., loras: _Optional[_Iterable[_Union[LoraOverlay, _Mapping]]] = ..., inference_defaults: _Optional[str] = ..., objective: _Optional[str] = ..., distilled: _Optional[bool] = ..., distilled_status: _Optional[str] = ..., model: _Optional[str] = ..., manifest_digest: _Optional[str] = ...) -> None: ...
 
 class LoraOverlay(_message.Message):
-    __slots__ = ("ref", "weight", "inference_defaults")
+    __slots__ = ("ref", "weight", "inference_defaults", "model")
     REF_FIELD_NUMBER: _ClassVar[int]
     WEIGHT_FIELD_NUMBER: _ClassVar[int]
     INFERENCE_DEFAULTS_FIELD_NUMBER: _ClassVar[int]
+    MODEL_FIELD_NUMBER: _ClassVar[int]
     ref: str
     weight: float
     inference_defaults: str
-    def __init__(self, ref: _Optional[str] = ..., weight: _Optional[float] = ..., inference_defaults: _Optional[str] = ...) -> None: ...
+    model: str
+    def __init__(self, ref: _Optional[str] = ..., weight: _Optional[float] = ..., inference_defaults: _Optional[str] = ..., model: _Optional[str] = ...) -> None: ...
 
 class Snapshot(_message.Message):
     __slots__ = ("digest", "files", "provenance")

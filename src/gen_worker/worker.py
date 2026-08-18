@@ -236,6 +236,11 @@ class _Pick:
     slot: str
     ref: str
     manifest_digest: str
+    #: The hub's two-column defaults pair, RAW and TOGETHER (th#2140): the
+    #: recognized model name and its JSONB row. They travel as a pair because
+    #: the name is what chooses the schema the row decodes against — split
+    #: them and the row is undecodable, which is pgw#1415's whole defect.
+    model: str
     inference_defaults: str
 
 
@@ -262,6 +267,7 @@ def _picks_of(run: pb.RunJob) -> _DispatchPicks:
             slot=str(binding.slot),
             ref=str(binding.ref),
             manifest_digest=str(binding.manifest_digest),
+            model=str(binding.model).strip(),
             inference_defaults=str(binding.inference_defaults),
         )
         by_ref[pick.ref] = pick
@@ -330,9 +336,29 @@ class HubBindingResolver:
                     f"{checkpoint_ref!r} is {type(parsed).__name__}, not an object"
                 )
             defaults = parsed
+        # pgw#1415's FENCE. The hub's `model` column is NOT NULL beside the
+        # defaults JSONB (th#2140 migration 0104), so a row WITHOUT a name
+        # cannot be a checkpoint the hub left unclassified — it is a pair that
+        # broke in transit, which is exactly how this defect served 28-step
+        # CFG-on for a 4-step guidance-free Turbo checkpoint for a week. The
+        # unclassified arm (no name, NO row) keeps warn-and-serve, pgw#1377's
+        # read-side matrix, untouched; THIS arm refuses, because serving
+        # platform fallbacks while holding the checkpoint's own tuned row is
+        # the one outcome nobody can want.
+        if defaults and not pick.model:
+            raise CheckpointUnresolved(
+                f"{model_cls.__name__}: the binding for {checkpoint_ref!r} "
+                f"carries an inference_defaults row but no `model` "
+                f"classification. The hub's two-column defaults surface stores "
+                f"the two together (`model` is NOT NULL beside the JSONB), so "
+                f"this is a broken pair on the wire, not an unclassified "
+                f"checkpoint — serving type fallbacks here would silently "
+                f"discard this checkpoint's own tuned defaults"
+            )
         return DeployBinding(
             checkpoint_ref=pick.ref,
             checkpoint_dir=self.tree_for(model_cls, checkpoint_ref),
+            model=pick.model or None,
             defaults=defaults,
         )
 

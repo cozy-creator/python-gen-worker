@@ -3,7 +3,7 @@
 # BOTH repos commit this same digest, so a one-sided edit fails scripts/proto-drift-check.sh
 # offline, in the repo where it happened. Regenerate with:
 #   sha256sum internal/orchestrator/grpc/proto/worker_scheduler.proto
-20d0e5f548426bb0045af455295aa1c43f250afc7d6392881bb3f8c110726ee7
+3a71e8f1587cceb624c5097ceb2e2567ccb4034454ee57a39dcbbedcf6f7de64
 
 # th#2082: `RunJob.output_mode` -> `media_bytes`, enum `OutputMode` ->
 # `MediaBytes` (`MEDIA_BYTES_UNSPECIFIED|URL|INLINE`). NAME ONLY — field 9 and
@@ -30,3 +30,17 @@
 # identically to tensorhub's canonical hunk. ADDITIVE. This is the credential's
 # ONE home for a job: the compute child that runs job N+1 on a held-open pod is
 # a process the hub never HelloAck'd, so pod-lifetime state cannot carry it.
+
+# pgw#1415: th#2140's `ModelBinding.model = 9` and `LoraOverlay.model = 4`
+# applied surgically (NOT vendor-proto.sh, which would delete th#1941's hunks),
+# byte-identically to tensorhub's canonical hunk at `b7ac3ac49`. This is a
+# LATE vendor and it cost a fleet-wide defect: tensorhub shipped `model = 9`
+# on 2026-08-18 while this copy still called 9 `manifest_digest`, so the hub
+# stamped a model NAME into a field this worker read as a fetch POINTER, and
+# every v2 checkpoint's per-checkpoint defaults row was parsed and discarded.
+#
+# The collision breaks toward the hub: it is the only SENDER of either field
+# (`scheduler_dispatch.go` stamps `mb.Model` on every dispatch; nothing has
+# ever stamped `manifest_digest` — th#2116 still owes it). So th#1941's
+# `manifest_digest` moves 9 -> 10 here, and tensorhub's th#2116 leg must land
+# the sender at 10.

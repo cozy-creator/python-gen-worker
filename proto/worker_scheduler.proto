@@ -937,10 +937,30 @@ message ModelBinding {
   string objective = 6;
   bool   distilled = 7;
   string distilled_status = 8;
+  // th#2140 (pgw#1376): the resolved checkpoint's recognized MODEL NAME from
+  // the hub's two-column defaults row ("" = unset/unclassified). Travels RAW
+  // beside inference_defaults — (model, defaults) per bound checkpoint — and
+  // the worker's read-side typed decode (`ctx.defaults`, pgw#1377) is the
+  // authority on the pair; the hub never interprets either. Additive.
+  //
+  // pgw#1415: NUMBER 9 IS THE HUB'S, and it is the SHIPPING one. th#1941 took
+  // 9 here for `manifest_digest` while tensorhub still had 8 free, th#2140 then
+  // took 9 there for `model`, and the two protos meant different things by the
+  // same tag — the hub stamped a model name that this worker read as a fetch
+  // pointer. The tie breaks toward the field that has a SENDER: tensorhub
+  // stamps `model` on every dispatch (scheduler_dispatch.go, `mb.Model`),
+  // and NOTHING has ever sent `manifest_digest` (th#2116, still owed). So this
+  // side moves, and the hub's number stands.
+  string model = 9;
   // The composed manifest digest this slot fetches (th#1941). Key into
   // DesiredResidency.snapshots / RunJob.snapshots. `ref` above survives as
   // the display/audit label; THIS is the fetch pointer.
-  string manifest_digest = 9;
+  //
+  // pgw#1415: moved 9 -> 10 (see above). tensorhub owes the SENDER at THIS
+  // number — th#2116. Until it lands, a v2 dispatch carries no fetch pointer
+  // and `HubBindingResolver` refuses naming it, which is the correct state:
+  // the alternative was reading the hub's `model` string as a digest.
+  string manifest_digest = 10;
 }
 
 // One LoRA adapter overlay: a resolved tensorhub ref + its adapter weight.
@@ -959,6 +979,10 @@ message LoraOverlay {
   // precedence `ModelBinding.inference_defaults` uses. Additive: old
   // workers ignore this field.
   string inference_defaults = 3;
+  // th#2140: THIS adapter's recognized model name (`sdxl.lora` —
+  // adapter-of-base spelling) from its two-column defaults row ("" = unset).
+  // Same raw-pair contract as ModelBinding.model. Additive.
+  string model = 4;
 }
 
 // A pinned tensorhub repo snapshot with presigned download URLs. The worker
