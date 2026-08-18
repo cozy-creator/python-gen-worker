@@ -241,30 +241,33 @@ SchedulerName = Literal[
     "ddim",
     "lcm",
 ]
-"""The PLATFORM-WIDE scheduler-name vocabulary (Paul's three-layer scheduler
-ruling, pgw#1376 point 6): checkpoint metadata rows write these names; the
-additive-only evolution rule applies (a new community scheduler is a new
-member, never a changed one). Endpoints own their SUPPORTED SUBSET and the
-name→scheduler-constructor tables (author code, like lanes — never here);
-a metadata name an endpoint doesn't serve warns and falls through to the
-tree's shipped scheduler."""
+"""The PLATFORM-WIDE scheduler-name vocabulary (Paul's scheduler rulings,
+pgw#1376 point 6; naming chain schedule→sampler→scheduler): ADAPTER metadata
+rows write these names — checkpoints carry NO scheduler metadata at all (the
+tree IS their choice; ingest's canonical synthesis covers trees shipping
+none). The additive-only evolution rule applies (a new community scheduler
+is a new member, never a changed one). Endpoints own their SUPPORTED SUBSET
+and the name→scheduler-constructor tables (author code, like lanes — never
+here); a demanded name an endpoint doesn't serve warns and falls through to
+the tree's shipped scheduler."""
 
 
 # ── the launch defaults structs (field defaults = PLATFORM VALUES) ───────────
 
 
 class SdxlRecipe(msgspec.Struct, frozen=True):
-    """The SERVING RECIPE — the five axes both SDXL defaults types share, as
-    ONE nominal type (Paul's refinement: the endpoint annotates
+    """The SERVING RECIPE — the axes both SDXL defaults types share, as ONE
+    nominal type (Paul's refinement: the endpoint annotates
     ``recipe: SDXL.Recipe``, never a union). The axes are INDEPENDENT:
     ``cfg`` (CFG on/off) and few-step are separate facts — guidance-distilled
     models are cfg-off at FULL steps, Hyper-SD CFG-preserving LoRAs are
-    few-step with CFG ON at 5-8. ``scheduler`` is the checkpoint-metadata layer
-    of the three-layer scheduler chain (request > this > the tree's shipped
-    scheduler config > endpoint load-time default): ``None`` = trust the tree;
-    a distill recipe expresses euler_trailing/lcm through the same field.
-    ``timesteps`` empty = derive from steps (a pinned ladder like DMD2's
-    999/749/499/249 goes here).
+    few-step with CFG ON at 5-8. ``scheduler`` is deliberately NOT here
+    (Paul's tree-only ruling): CHECKPOINTS CARRY NO SCHEDULER METADATA — the
+    tree IS the checkpoint's choice (ingest's canonical-synthesis guarantee
+    covers trees shipping none); only the adapter overlay declares a
+    scheduler demand. ``timesteps`` empty = derive from steps (a pinned
+    ladder like DMD2's 999/749/499/249 goes here — a fused merge keeps its
+    ladder HERE while its scheduler ships in its tree).
 
     Platform values: steps 28 / guidance 6.0 from the live sdxl.schema.json
     registry entry; [lo, hi] soft ranges mirror the contract file's endpoint
@@ -273,7 +276,6 @@ class SdxlRecipe(msgspec.Struct, frozen=True):
     steps: Knob[int] = Knob(28, lo=1, hi=80, name="steps")
     guidance: Knob[float] = Knob(6.0, lo=1.5, hi=15.0, name="guidance")
     cfg: bool = True
-    scheduler: SchedulerName | None = None
     timesteps: tuple[int, ...] = ()
 
 
@@ -284,7 +286,8 @@ class SdxlDefaults(SdxlRecipe, frozen=True):
     "masterpiece, best quality" vocabulary lives HERE, banned from endpoint
     code); ``negative_preamble`` is its symmetric counterpart. A fused
     step-distilled merge (DMD2/Lightning full checkpoint) carries its recipe
-    in the inherited fields (cfg=False, scheduler, pinned timesteps)."""
+    in the inherited fields (cfg=False, pinned timesteps) — its
+    scheduler ships in its TREE (a proper DMD2 export carries LCMScheduler)."""
 
     positive_preamble: str = "masterpiece, best quality"
     negative_preamble: str = "worst quality, low quality"
@@ -310,22 +313,29 @@ class SdxlLoraDefaults(SdxlRecipe, frozen=True):
 
     steps: Knob[int] = Knob(4, lo=1, hi=150, name="steps")
     cfg: bool = False
+    #: The riding distillation's scheduler DEMAND — the base tree cannot know
+    #: a LoRA needs trailing-Euler/LCM. None = no demand, the tree stands.
     scheduler: SchedulerName | None = "euler_trailing"
     strength: Knob[float] = Knob(1.0, lo=-4.0, hi=4.0, name="strength")
     trigger_words: tuple[str, ...] = ()
+    #: Classification marker: is this adapter a step/guidance DISTILLATION
+    #: (Lightning/DMD2/LCM/Hyper-SD rows set True; style/character LoRAs stay
+    #: False)? The hub refuses a distillation-slot pick whose row lacks it
+    #: (th#2140 envelope validation); ingest pre-fills from known distill
+    #: fingerprints; curators may set it.
+    distillation: bool = False
 
 
 class Sd15Recipe(msgspec.Struct, frozen=True):
-    """SD1.x serving recipe — same five axes and semantics as
-    :class:`SdxlRecipe` (``scheduler=None`` = trust the tree's shipped
-    scheduler). Platform values from the live sd15.schema.json registry
+    """SD1.x serving recipe — same shared axes and semantics as
+    :class:`SdxlRecipe` (scheduler is adapter-only, tree-only for
+    checkpoints). Platform values from the live sd15.schema.json registry
     entry: steps 30 (bounds 1..80, the family payload envelope), guidance
     7.0 (schema minimum 0, no declared max)."""
 
     steps: Knob[int] = Knob(30, lo=1, hi=80, name="steps")
     guidance: Knob[float] = Knob(7.0, lo=0.0, name="guidance")
     cfg: bool = True
-    scheduler: SchedulerName | None = None
     timesteps: tuple[int, ...] = ()
 
 
@@ -346,6 +356,7 @@ class Sd15LoraDefaults(Sd15Recipe, frozen=True):
     scheduler: SchedulerName | None = "lcm"
     strength: Knob[float] = Knob(1.0, lo=-4.0, hi=4.0, name="strength")
     trigger_words: tuple[str, ...] = ()
+    distillation: bool = False
 
 
 class Sd2Defaults(msgspec.Struct, frozen=True):

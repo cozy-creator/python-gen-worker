@@ -4,13 +4,16 @@
   `SD15.Lora` overlays) — each a name + frozen `Defaults` struct whose field
   defaults ARE the platform fallback values (zero-arg = servable trace fixture)
   + a tensorfs contract-pattern ingest fingerprint. `SDXL.Recipe`/`SD15.Recipe`
-  carry the five independent serving axes (cfg, steps, guidance, scheduler,
+  carry the shared independent serving axes (cfg, steps, guidance,
   timesteps — cfg and few-step are separate facts) and BOTH defaults types
   inherit them, so an endpoint annotates `recipe: SDXL.Recipe` — one nominal
-  type, no union. `SchedulerName` is the platform-wide scheduler vocabulary
-  (checkpoint metadata layer of the request > metadata > tree > endpoint-default
-  chain; None = trust the tree's shipped scheduler; endpoints own their served
-  subset and constructor tables). `SDXL.Defaults.step_distilled` is the
+  type, no union. `SchedulerName` is the platform-wide scheduler vocabulary —
+  ADAPTER metadata only: checkpoints carry NO scheduler metadata (the tree IS
+  their choice), while `SDXL.Lora.Defaults.scheduler` is the riding
+  distillation's demand (chain: request > adapter demand > the tree stands;
+  endpoints own their served subset and constructor tables).
+  `SDXL.Lora.Defaults.distillation` marks a step/guidance-distillation adapter
+  (hub-validated for distillation slots; style LoRAs stay False). `SDXL.Defaults.step_distilled` is the
   checkpoint-level fused-merge fact, decoupled from `cfg` (the guidance axis) —
   it is what makes stacking a distillation adapter harmful (endpoints warn and
   ignore). Each model type also carries `canonical_scheduler_config` — the

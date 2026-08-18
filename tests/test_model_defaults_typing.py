@@ -104,14 +104,12 @@ def test_the_recipe_is_one_nominal_type() -> None:
     assert_type(recipe.steps, Knob[int])
     assert_type(recipe.guidance, Knob[float])
     assert_type(recipe.timesteps, tuple[int, ...])
-    scheduler: SchedulerName | None = recipe.scheduler
-
     steps = recipe.steps.resolve(None, rctx)
     assert_type(steps, int)
     guidance = recipe.guidance.resolve(None, rctx)
     assert_type(guidance, float)
 
-    assert recipe.cfg is False and scheduler == "euler_trailing"
+    assert recipe.cfg is False
     assert (steps, guidance) == (4, 6.0)
     assert turbo is not None
     assert isinstance(d, SdxlRecipe) and isinstance(turbo.defaults, SdxlRecipe)
@@ -120,3 +118,7 @@ def test_the_recipe_is_one_nominal_type() -> None:
     assert_type(lora, SdxlLoraDefaults)
     assert_type(lora.strength, Knob[float])
     assert_type(lora.trigger_words, tuple[str, ...])
+    assert_type(lora.distillation, bool)
+    # The scheduler demand lives on the ADAPTER overlay only.
+    scheduler: SchedulerName | None = lora.scheduler
+    assert scheduler == "euler_trailing"

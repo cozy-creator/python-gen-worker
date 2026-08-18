@@ -43,8 +43,9 @@ def test_sdxl_zero_arg_is_the_platform_opinion() -> None:
     # Paul's ruling: the quality vocabulary lives HERE, not in endpoint code.
     assert d.positive_preamble == "masterpiece, best quality"
     assert d.negative_preamble == "worst quality, low quality"
-    # scheduler None = trust the tree's shipped scheduler config (layer 3).
-    assert d.scheduler is None
+    # Checkpoints carry NO scheduler metadata — the tree IS the choice
+    # (Paul's tree-only ruling; ingest synthesis covers scheduler-less trees).
+    assert not hasattr(d, "scheduler")
     assert d.timesteps == ()
     # Checkpoint-level fact, decoupled from cfg (the guidance axis).
     assert d.step_distilled is False
@@ -53,7 +54,8 @@ def test_sdxl_zero_arg_is_the_platform_opinion() -> None:
 def test_sdxl_lora_zero_arg_is_lightning_shaped() -> None:
     d = SDXL.Lora.Defaults()
     assert d.cfg is False
-    assert d.scheduler == "euler_trailing"
+    assert d.scheduler == "euler_trailing"  # the adapter's scheduler DEMAND
+    assert d.distillation is False  # rows for distill adapters set it True
     assert d.steps.default == 4
     assert d.timesteps == ()
     assert d.strength == Knob(1.0, lo=-4.0, hi=4.0, name="strength")
@@ -119,15 +121,19 @@ def test_full_row_overrides_every_field() -> None:
         "cfg": False,
         "positive_preamble": "",
         "negative_preamble": "",
-        "scheduler": "lcm",
+        "step_distilled": True,
         "timesteps": [999, 749, 499, 249],
+        # Checkpoints carry no scheduler metadata: a stray key is an UNKNOWN
+        # field the evolution rule ignores, never a refusal.
+        "scheduler": "lcm",
     }
     d = decode_model_defaults(SDXL, model="sdxl", defaults=row)
     assert d.steps == Knob(6, lo=4, hi=10, name="steps")
     assert d.guidance == Knob(2.0, lo=1.5, hi=3.0, name="guidance")
     assert d.cfg is False
     assert d.positive_preamble == ""
-    assert d.scheduler == "lcm"
+    assert d.step_distilled is True
+    assert not hasattr(d, "scheduler")
     assert d.timesteps == (999, 749, 499, 249)
 
 
@@ -157,7 +163,6 @@ def test_a_row_default_outside_the_merged_range_is_pulled_inside() -> None:
         ({"steps": "fast"}, "steps"),
         ({"steps": {"default": 8.5}}, "steps"),
         ({"cfg": "yes"}, "cfg"),
-        ({"scheduler": "ddim_trailing"}, "scheduler"),
         ({"timesteps": ["a"]}, "timesteps"),
     ],
 )
@@ -192,6 +197,16 @@ def test_a_base_mismatched_adapter_is_refused_at_bind() -> None:
         decode_model_defaults(SDXL.Lora, model="sd15.lora", defaults=None)
 
 
+def test_an_out_of_vocabulary_adapter_scheduler_is_refused() -> None:
+    # ddim_trailing is outside the launch SchedulerName vocabulary (additive
+    # evolution can admit it); an out-of-vocabulary DEMAND is typed garbage.
+    with pytest.raises(DefaultsDecodeError) as caught:
+        decode_model_defaults(
+            SDXL.Lora, model="sdxl.lora", defaults={"scheduler": "ddim_trailing"}
+        )
+    assert caught.value.field == "scheduler"
+
+
 def test_a_lora_row_decodes_through_the_adapter_surface() -> None:
     d = decode_model_defaults(
         SDXL.Lora,
@@ -202,8 +217,10 @@ def test_a_lora_row_decodes_through_the_adapter_surface() -> None:
             "steps": {"default": 4},
             "scheduler": "lcm",
             "timesteps": [999, 749, 499, 249],
+            "distillation": True,
         },
     )
+    assert d.distillation is True
     assert d.trigger_words == ("dmd2",)
     assert d.strength.default == 0.8
     assert (d.strength.lo, d.strength.hi) == (-4.0, 4.0)
@@ -290,9 +307,9 @@ def test_the_contract_files_exact_usage_holds() -> None:
     """Every ``main_v2.py`` defaults expression over fixture hub rows: the
     recipe-driven single entrypoint — ``recipe: SDXL.Recipe`` from the
     distillation adapter's defaults when one rides, else the checkpoint's own;
-    ``recipe.cfg`` gates guidance/negatives, ``recipe.scheduler`` gates the
-    scheduler swap (None = keep the checkpoint's own), pinned timesteps ride
-    the cfg-off arm."""
+    ``recipe.cfg`` gates guidance/negatives; the scheduler chain is
+    request > adapter demand > the tree stands (checkpoints carry no
+    scheduler metadata); pinned timesteps ride the cfg-off arm."""
     ctx: RequestContext[GenerationDefaults] = RequestContext("req-main-v2")
     d = decode_model_defaults(
         SDXL,
@@ -311,7 +328,7 @@ def test_the_contract_files_exact_usage_holds() -> None:
     assert not guidance_distilled.cfg and not guidance_distilled.step_distilled
     fused_merge = decode_model_defaults(
         SDXL, model="sdxl",
-        defaults={"cfg": False, "step_distilled": True, "scheduler": "lcm"},
+        defaults={"cfg": False, "step_distilled": True},
     )
     assert fused_merge.step_distilled  # -> the adapter is ignored with a warn
 
@@ -339,18 +356,22 @@ def test_the_contract_files_exact_usage_holds() -> None:
         again = f"{d.positive_preamble}, {again}"
     assert again == prompt
 
-    # schedule=None means: keep the checkpoint's own scheduler (nullcontext).
-    assert recipe.scheduler is None
+    # _pick_scheduler chain, no adapter: request None + no demand -> None,
+    # the tree's shipped scheduler stands (nullcontext arm).
+    assert not hasattr(recipe, "scheduler")
 
-    # A distillation adapter rides: its defaults ARE the recipe.
+    # A distillation adapter rides: its defaults ARE the recipe, and its
+    # scheduler DEMAND drives the swap (the base tree cannot know it).
     turbo = decode_model_defaults(
         SDXL.Lora,
         model="sdxl.lora",
-        defaults={"scheduler": "lcm", "timesteps": [999, 749, 499, 249]},
+        defaults={"scheduler": "lcm", "timesteps": [999, 749, 499, 249],
+                  "distillation": True},
     )
     recipe = turbo
     assert not recipe.cfg  # the cfg-off arm: no guidance, no negatives
-    assert recipe.scheduler == "lcm"  # -> LCMScheduler swap
+    assert turbo.scheduler == "lcm"  # adapter demand -> LCMScheduler swap
+    assert turbo.distillation  # the distillation-slot marker (hub-validated)
     assert list(recipe.timesteps) == [999, 749, 499, 249]  # pinned ladder
     assert recipe.steps.resolve(None, ctx) == 4
 
