@@ -122,3 +122,21 @@ def test_the_config_is_one_nominal_type() -> None:
     # The scheduler demand lives on the ADAPTER overlay only.
     scheduler: SchedulerName | None = lora.scheduler
     assert scheduler == "euler_trailing"
+
+
+def test_the_h3_contract_files_exact_usage_holds() -> None:
+    """`main_v2.py` (minimax-h3): `Model[MiniMaxH3]` / `Model[Rife]`, and
+    `d = ctx.defaults()` projecting `MiniMaxH3.Defaults` — video_shift /
+    audio_shift, no guidance or steps knob (H3-Base is guidance-distilled)."""
+    from gen_worker.models import MiniMaxH3, Rife
+    from gen_worker.models.model_types import MiniMaxH3Defaults, RifeDefaults
+
+    d = _LoadContext(MiniMaxH3, model="minimax-h3", defaults={"video_shift": 9.0}).defaults()
+    assert_type(d, MiniMaxH3Defaults)
+    assert_type(d.video_shift, float)
+    assert_type(d.audio_shift, float)
+    assert (d.video_shift, d.audio_shift) == (9.0, 3.0)
+
+    r = _LoadContext(Rife, model="rife", defaults=None).defaults()
+    assert_type(r, RifeDefaults)
+    assert MiniMaxH3.Defaults is MiniMaxH3Defaults and Rife.Defaults is RifeDefaults

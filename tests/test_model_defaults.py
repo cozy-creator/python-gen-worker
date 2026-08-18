@@ -465,7 +465,7 @@ def test_the_serving_interaction_matrix(
 
 def test_the_launch_vocabulary_is_the_ruled_set() -> None:
     assert [mt.name for mt in MODEL_TYPES] == [
-        "sdxl", "sd15", "sd2", "hidream-o1", "wan22",
+        "sdxl", "sd15", "sd2", "hidream-o1", "wan22", "minimax-h3", "rife",
     ]
     assert [ov.name for ov in LORA_OVERLAYS] == ["sdxl.lora", "sd15.lora"]
     assert model_type_by_name("sdxl") is SDXL
@@ -476,8 +476,14 @@ def test_contract_stamps_classify_through_the_fingerprint() -> None:
     # A real registered stamp from tensorfs's built-in contracts.
     assert model_type_for_contract("sdxl.clip-g-fused-qkv@1") is SDXL
     assert model_type_for_contract("sd15.diffusers-bf16@1") is SD15
+    # Both packaged H3 layouts classify to the one H3 vocabulary.
+    from gen_worker.models import MiniMaxH3, Rife
+
+    assert model_type_for_contract("minimax.h3-dit-native@1") is MiniMaxH3
+    assert model_type_for_contract("minimax.h3-dit-diffusers@1") is MiniMaxH3
+    assert model_type_for_contract("rife.flownet@1") is Rife
     # Unrecognized = unclassified, legal and visible — never a guess.
-    assert model_type_for_contract("minimax.h3-dit-native@1") is None
+    assert model_type_for_contract("flux.diffusers-bf16@1") is None
 
 
 def test_canonical_scheduler_configs_are_the_training_schedules() -> None:
@@ -500,9 +506,17 @@ def test_canonical_scheduler_configs_are_the_training_schedules() -> None:
     # (flagged in the tracker; do not invent a family's noise schedule).
     from gen_worker.models import HiDreamO1, SD2, Wan22
 
+    from gen_worker.models import MiniMaxH3, Rife
+
     assert SD2.canonical_scheduler_config == {}
     assert HiDreamO1.canonical_scheduler_config == {}
     assert Wan22.canonical_scheduler_config == {}
+    assert MiniMaxH3.canonical_scheduler_config == {}
+    assert Rife.canonical_scheduler_config == {}
+    # Rife is the one AUXILIARY type: no canonical lane, and inventing a
+    # tensorfs contract name for its diffusers-layout artifact would be a guess.
+    assert Rife.canonical_contract is None
+    assert MiniMaxH3.canonical_contract is not None
 
 
 def test_model_types_are_vocabularies_not_values() -> None:
