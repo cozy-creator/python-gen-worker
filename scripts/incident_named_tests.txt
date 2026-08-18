@@ -13,7 +13,7 @@ tests/test_adopt_compile_attribution_pgw1262.py
 tests/test_adopt_fit_pgw1265.py
 tests/test_adopt_only_serve_role_pgw1328.py
 tests/test_adopt_seam_budget_pgw1168.py
-tests/test_adopted_cell_warm_proof_pgw1141.py
+tests/test_adopted_graph_warm_proof_pgw1141.py
 tests/test_adoption_key_pgw686.py
 tests/test_ambient_census_pgw1049.py
 tests/test_anima_pgw1346.py
@@ -52,10 +52,10 @@ tests/test_cancel_at_grant_pgw845.py
 tests/test_cancel_unwind_pgw687.py
 tests/test_cancelled_setup_leak_gw624.py
 tests/test_candidate_publish_parity_pgw749.py
-tests/test_cell_adoption_measurement_pgw923.py
-tests/test_cell_declare_bound_th1645_pgw987.py
-tests/test_cell_publish_v2_pgw807.py
-tests/test_cell_resolve_pgw1090.py
+tests/test_compiled_graph_adoption_measurement_pgw923.py
+tests/test_compiled_graph_declare_bound_th1645_pgw987.py
+tests/test_compiled_graph_publish_v2_pgw807.py
+tests/test_compiled_graph_resolve_pgw1090.py
 tests/test_cgkey_as_data_pgw1327.py
 tests/test_changelog_attribution_pgw1339.py
 tests/test_changelog_consumption_pgw1226.py
@@ -300,7 +300,7 @@ tests/test_seal_lib_memo_pgw832.py
 tests/test_seal_record_derivation_pgw1095.py
 tests/test_seal_unmeasurable_pgw1276.py
 tests/test_sequence_parallel_pgw748.py
-tests/test_serve_eager_pinned_cell_pgw888.py
+tests/test_serve_eager_pinned_graph_pgw888.py
 tests/test_serve_finalize_pgw672.py
 tests/test_serving_stall_evidence_th1779.py
 tests/test_serving_tasks_th1257.py
