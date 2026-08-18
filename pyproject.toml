@@ -122,14 +122,17 @@ dev = [
     "pytest-xdist>=3.8.0",
     "types-PyYAML>=6.0.12.20250915",
     "types-requests>=2.32.4.20250913",
-    # pgw#1370: the release-derive tests drive REAL torchcg discovery (the
-    # derive imports torchcg from the env it runs in — in production that is
-    # the RELEASE env's own pin, never a gen-worker dependency). DEV-ONLY by
-    # design: the pin below is stripped from the published wheel, and that is
-    # correct here — the wheel must NOT carry torchcg (pgw#1310's lesson
-    # applies to runtime deps; this one is a test dependency).
-    "torchcg",
 ]
+
+# pgw#1370: the release-derive tests drive REAL torchcg discovery — the derive
+# imports torchcg from the env it RUNS IN (in production, the release env's
+# own pin; never a gen-worker dependency). A PEP 735 dependency GROUP, not an
+# extra: groups are NOT published in wheel metadata, so `pip install
+# gen-worker[dev]` from an index never asks PyPI for the deleted project —
+# which is the exact wound pgw#1310's fence guards. uv installs the `dev`
+# group by default on every `uv sync`.
+[dependency-groups]
+dev = ["torchcg"]
 
 [build-system]
 requires = ["hatchling"]

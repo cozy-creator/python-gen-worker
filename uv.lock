@@ -599,7 +599,6 @@ dev = [
     { name = "pytest" },
     { name = "pytest-xdist" },
     { name = "ruff" },
-    { name = "torchcg" },
     { name = "transformers" },
     { name = "types-pyyaml" },
     { name = "types-requests" },
@@ -624,6 +623,11 @@ video = [
 vision = [
     { name = "torchvision", version = "0.28.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "torchvision", version = "0.28.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "torchcg" },
 ]
 
 [package.metadata]
@@ -663,7 +667,6 @@ requires-dist = [
     { name = "tomli-w", specifier = ">=1.0.0" },
     { name = "torch", marker = "(sys_platform == 'linux' and extra == 'torch') or (sys_platform == 'win32' and extra == 'torch')", specifier = ">=2.13.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'torch'", specifier = ">=2.13.0" },
-    { name = "torchcg", marker = "extra == 'dev'", git = "https://github.com/cozy-creator/torchcg?rev=7102d60e2786fe1f78c75b10b0edb8dabdddc7e0" },
     { name = "torchvision", marker = "(sys_platform == 'linux' and extra == 'vision') or (sys_platform == 'win32' and extra == 'vision')", specifier = ">=0.28.0", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torchvision", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'vision'", specifier = ">=0.28.0" },
     { name = "transformers", marker = "extra == 'dev'", specifier = ">=5.13" },
@@ -671,6 +674,9 @@ requires-dist = [
     { name = "types-requests", marker = "extra == 'dev'", specifier = ">=2.32.4.20250913" },
 ]
 provides-extras = ["torch", "vision", "images", "audio", "video", "signing", "dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "torchcg", git = "https://github.com/cozy-creator/torchcg?rev=7102d60e2786fe1f78c75b10b0edb8dabdddc7e0" }]
 
 [[package]]
 name = "gguf"

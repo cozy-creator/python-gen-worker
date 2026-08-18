@@ -85,36 +85,48 @@ def test_derive_discovers_the_auto_enumerated_graph_set(
 def test_document_is_byte_stable_across_a_subprocess_fence(
     config_only_tree: Path, tmp_path: Path
 ) -> None:
+    """Two FRESH interpreters derive identical bytes.
+
+    The production artifact is what the CLI process emits, so the fence
+    compares subprocess against subprocess. (In-process determinism is
+    covered separately below; comparing in-process against subprocess would
+    make this test assert that every OTHER test sharing this interpreter
+    left torch's global state untouched, which is not this test's claim.)
+    """
+
     first = tmp_path / "first.json"
     again = tmp_path / "again.json"
     assert _derive("tiny_endpoint", config_only_tree, first) == 0
     assert _derive("tiny_endpoint", config_only_tree, again) == 0
     assert first.read_bytes() == again.read_bytes()
 
-    fenced = tmp_path / "fenced.json"
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "gen_worker.cli",
-            "release",
-            "derive",
-            "--dir",
-            str(FIXTURES),
-            "--module",
-            "tiny_endpoint",
-            "--checkpoint",
-            str(config_only_tree),
-            "--out",
-            str(fenced),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=600,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr[-2000:]
-    assert fenced.read_bytes() == first.read_bytes()
+    fenced: list[bytes] = []
+    for run_name in ("fence-a.json", "fence-b.json"):
+        out = tmp_path / run_name
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "gen_worker.cli",
+                "release",
+                "derive",
+                "--dir",
+                str(FIXTURES),
+                "--module",
+                "tiny_endpoint",
+                "--checkpoint",
+                str(config_only_tree),
+                "--out",
+                str(out),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr[-2000:]
+        fenced.append(out.read_bytes())
+    assert fenced[0] == fenced[1]
 
 
 def test_a_lane_naming_a_missing_path_fails_red_with_the_path(
