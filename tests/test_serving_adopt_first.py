@@ -355,11 +355,19 @@ def test_a_store_less_boot_still_forms_the_full_mint_worklist(
     assert out.model == "ckpt:tiny@1"
 
 
-# --- the hub-backed store: th#2133's answer shape, transport stubbed --------
+# --- the hub-backed store: th#2133's REAL answer shape ----------------------
+#
+# This block used to can a `{document, artifacts, misses}` payload that the
+# route never emitted — it was written before th#2133 landed, and it made the
+# store look tested while `hub_store` could not have parsed one real answer.
+# What is canned below is the shape a live hub actually returned on
+# `GET /v1/worker/releases/<id>/compiled-graphs?lane=&sm=`: per-graph rows with
+# a `status`, the observed `ingress` CONTRACT (not just its digest — torchcg
+# dispatches on the rows), and a presigned snapshot manifest under `transport`.
 
 
 class StubTransport:
-    """The th#2133 route answer, canned; the wiring lands with the route."""
+    """The th#2133 route answer, canned in the shape the route emits."""
 
     def __init__(self, answer: Mapping[str, Any], blobs: Mapping[str, bytes]) -> None:
         self.answer = answer
@@ -376,32 +384,88 @@ class StubTransport:
         return self.blobs[url]
 
 
+def _adopt_answer(document, hit, hole, payload: bytes) -> dict:
+    """One th#2133 answer: `hit` minted for this env, `hole` not."""
+    import hashlib
+
+    lane = document.lanes[0]
+
+    def row(record, status: str) -> dict:
+        base = {
+            "graph_hash": record.graph,
+            "graph_class": "",
+            "program": record.program,
+            "module_path": record.target,
+            "ingress_digest": record.ingress.digest(),
+            # THE CONTRACT ITSELF. Without it the lane document cannot be
+            # rebuilt and no artifact can legally arm (th#2134's migration).
+            "ingress": record.ingress.as_dict(),
+            "status": status,
+            "found": status == "hit",
+        }
+        if status != "hit":
+            return base
+        base.update({
+            "content_digest": hashlib.sha256(payload).hexdigest(),
+            "artifact_path": "compiled/graph.so",
+            "size_bytes": len(payload),
+            "checkpoint_id": "sha256:deadbeef",
+            "artifact_kind": "aoti",
+            "requirements_manifest": manifest().as_dict(),
+            "transport": {
+                "snapshot_digest": "sha256:deadbeef",
+                "files": [{
+                    "path": "compiled/graph.so",
+                    "size_bytes": len(payload),
+                    "digest": hashlib.sha256(payload).hexdigest(),
+                    "url": "https://presigned.example/hit",
+                }],
+            },
+        })
+        return base
+
+    return {
+        "object": "release_compiled_graphs",
+        "release_id": "release-1",
+        "binding_generation": 0,
+        "env_lockfile_hash": document.closure,
+        "lane": lane.contract,
+        "lane_stamped": True,
+        "lane_contract": {"stamp": lane.contract, "contract_digest": "",
+                          "document": None, "requires": ""},
+        "sm": SM,
+        "empty": False,
+        "targets": list(lane.targets),
+        "unobserved_targets": list(lane.unobserved_targets),
+        "graphs": [row(hit, "hit"), row(hole, "miss")],
+        "hits": 1,
+        "misses": 1,
+    }
+
+
 def test_hub_store_partial_hit_verifies_digests_and_misses_clean(
     host: EndpointHost, binding: DeployBinding, tmp_path: Path
 ) -> None:
-    import hashlib
-
     document = publish_document(host)
     hit, hole = document.lanes[0].graphs
     payload = b"presigned-compiled-bytes"
-    answer = {
-        "document": document.as_dict(),
-        "artifacts": {
-            hit.graph: {
-                "digest": hashlib.sha256(payload).hexdigest(),
-                "url": "https://presigned.example/hit",
-                "manifest": manifest().as_dict(),
-            }
-        },
-        "misses": [hole.graph],
-    }
+    answer = _adopt_answer(document, hit, hole, payload)
     transport = StubTransport(answer, {"https://presigned.example/hit": payload})
     store = HubGraphStore(transport, "release-1", LANE, SM)
+
+    # The document is REBUILT from the answer — the hub stores the derive's
+    # rows, not the derive's bytes.
+    rebuilt = store.get_graphs("release-1")
+    assert rebuilt is not None and rebuilt.closure == document.closure
+    assert [r.graph for r in rebuilt.lanes[0].graphs] == sorted(
+        [hit.graph, hole.graph], key=lambda g: g)
+    # The ORDERED hole list pgw#1371's background mint consumes.
+    assert store.misses == (hole.graph,)
 
     calls: list = []
     adopted_host = fresh_host(binding, tmp_path)
     adopted_host.setup(
-        store=store, document=store.get_graphs("release-1"), sm=SM,
+        store=store, document=rebuilt, sm=SM,
         loader=counting_loader(calls),
         artifacts_dir=tmp_path / "adopted",
         installed=INSTALLED,
@@ -431,3 +495,38 @@ def test_hub_store_partial_hit_verifies_digests_and_misses_clean(
     # The boot-side store is read-only by construction.
     with pytest.raises(StoreError, match="read-only"):
         store.publish_artifact(hit.graph, ENV, tmp_path / "x.so", manifest())
+
+
+def test_the_adopt_route_is_allowlisted_in_procsplit_pgw1372() -> None:
+    """WITHOUT THIS ENTRY THE WHOLE ADOPT BOOT IS DEAD ON EVERY FLEET POD.
+
+    The split parent refuses any path not in the table, `hub_store` treats a
+    refusal as a miss (correctly — it must never block a boot), and every pod
+    serves eager forever while every test that patches `broker.request` stays
+    green. pgw#1353's keyset tier, exactly. So the assertion is on the TABLE.
+    """
+    from gen_worker.procsplit import actions
+
+    action, query, _ = actions.authorize({
+        "method": "GET",
+        "path": "/v1/worker/releases/rel-123/compiled-graphs",
+        "query": {"lane": LANE, "sm": SM},
+    })
+    assert action.name == "release.compiled_graphs"
+    assert query == {"lane": LANE, "sm": SM}
+
+    # An unlisted query key is a refusal, not an ignored field.
+    with pytest.raises(actions.ActionRefused, match="org_id"):
+        actions.authorize({
+            "method": "GET",
+            "path": "/v1/worker/releases/rel-123/compiled-graphs",
+            "query": {"lane": LANE, "sm": SM, "org_id": "someone-elses"},
+        })
+
+    # The path grammar is pinned: a release id is an identifier, never a path.
+    with pytest.raises(actions.ActionRefused, match="not an allowlisted"):
+        actions.authorize({
+            "method": "GET",
+            "path": "/v1/worker/releases/rel-123/extra/compiled-graphs",
+            "query": {"lane": LANE, "sm": SM},
+        })
