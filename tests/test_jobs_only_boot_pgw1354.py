@@ -388,9 +388,12 @@ def test_declarations_without_modules_dial_a_typed_fatal(
     assert phase == "no_user_modules"
     assert kw.get("settings") is not None, (
         "without settings the dial is a silent no-op — the exact defect")
-    assert "1 function(s) and 2 job(s)" in message, (
+    # pgw#1395: the summary is DERIVED from DECLARATION_BLOCKS, so a refusal
+    # can never again name a subset of the blocks the walk reads.
+    assert "1 functions, 0 entrypoints, 2 jobs" in message, (
         "the fatal must name the gap it found, not merely that it exited")
-    assert "functions, jobs" in message, "and which blocks this build walks"
+    assert "functions, entrypoints, jobs" in message, (
+        "and which blocks this build walks")
     (detail,) = observed["dialed"]
     assert "no_user_modules" in detail and "exit_code=1" in detail
 
@@ -409,3 +412,101 @@ def test_a_missing_manifest_dials_the_same_typed_fatal(
     assert "no baked manifest" in message
     assert "gen_worker.discovery" in message
     assert observed["dialed"], "the hub must hear about this one too"
+
+
+# --------------------------------------------------------------------------
+# 4. pgw#1395 — the SAME defect, one hardcut later: the v2 `entrypoints[]`
+#    block. Everything below is the jobs case re-run against the shape every
+#    endpoint has AFTER the pgw#1382 cutover.
+# --------------------------------------------------------------------------
+
+_V2_SOURCE = """
+import msgspec
+from gen_worker import RequestContext, entrypoint
+
+class In_(msgspec.Struct):
+    steps: int = 1
+
+class Out_(msgspec.Struct):
+    ok: bool = True
+
+@entrypoint
+def generate(ctx: RequestContext, payload: In_) -> Out_:
+    return Out_()
+"""
+
+
+@pytest.fixture(scope="module")
+def entrypoints_only(tmp_path_factory: pytest.TempPathFactory) -> Tuple[Path, Path]:
+    """The pgw#1382 shape: ONE module-level `@entrypoint`, no `@endpoint`
+    class, no `@job` — what sdxl and minimax-h3 already are on
+    serverless-endpoints master."""
+    root = tmp_path_factory.mktemp("v2_only")
+    pkg = root / "v2_only"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "main.py").write_text(_V2_SOURCE)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "v2_only"\nversion = "0.0.0"\n'
+        '[tool.gen_worker]\nmain = "v2_only.main"\n'
+    )
+    return root, _bake(root)
+
+
+def test_the_baked_v2_lock_really_is_entrypoints_only(
+    entrypoints_only: Tuple[Path, Path],
+) -> None:
+    """The fixture is the defect's shape, stated by the artifact. Note
+    `functions = []` is emitted UNCONDITIONALLY beside the real rows — which
+    is exactly why a walk that reads `functions` alone scores this release at
+    zero declarations instead of refusing."""
+    manifest = _manifest(entrypoints_only[1])
+    assert manifest.get("functions") in (None, [])
+    assert manifest.get("jobs") in (None, [])
+    assert len(manifest["entrypoints"]) == 1
+
+
+def test_a_v2_manifest_yields_its_modules(
+    entrypoints_only: Tuple[Path, Path],
+) -> None:
+    """THE headline, pgw#1395. RED on master: `[]` — a v2-only image imports
+    NOTHING, is never CUDA-probed, and dies naming the wrong gap."""
+    assert entrypoint.get_modules_from_manifest(
+        _manifest(entrypoints_only[1])) == ["v2_only.main"]
+
+
+def test_the_probe_predicate_reads_the_v2_block_too() -> None:
+    """gw#529's bad-host guard reaches a v2 GPU image. A model-bearing v2
+    entrypoint emits `resources.gpu = true` (`entrypoints_v2._resources`), so
+    the predicate has the same fact to read — it just has to look."""
+    gpu_v2 = {"entrypoints": [{"module": "m", "resources": {"gpu": True}}]}
+    cpu_v2 = {"entrypoints": [{"module": "m", "resources": {}}]}
+    assert should_probe_cuda(gpu_v2, cuda_build=False) is True
+    assert should_probe_cuda(cpu_v2, cuda_build=True) is False
+
+
+def test_a_v2_boot_clears_the_module_wall_and_names_the_next_one(
+    monkeypatch: pytest.MonkeyPatch, entrypoints_only: Tuple[Path, Path],
+) -> None:
+    """What this fix does and does NOT buy, stated rather than assumed.
+
+    The module-load wall is gone: the boot imports the author's module instead
+    of dying `no_user_modules` over a manifest declaring an entrypoint. The
+    NEXT wall is the v1 serve registry — `registry.extract_specs` reads
+    `__gen_worker_endpoint__` and `@entrypoint` stamps `__cozy_entrypoint__`,
+    so `Worker.__init__` still finds no serve surface. That wall belongs to the
+    pgw#1367/pgw#1373 serving cutover, and this arm exists so it is a NAMED
+    refusal in the record rather than a discovery nobody makes twice.
+    """
+    root, lock = entrypoints_only
+    observed = _boot(monkeypatch, root, lock)
+
+    assert observed["code"] == 1
+    phases = [phase for phase, _m, _kw in observed["fatals"]]
+    assert "no_user_modules" not in phases, (
+        "the module-load wall is what pgw#1395 removes")
+    (phase, message, _kw), = observed["fatals"]
+    assert phase == "runtime"
+    assert "no @endpoint classes and no @job functions found" in message
+    assert "v2_only.main" in message, (
+        "the module WAS imported — the gap is the serve registry, not the walk")

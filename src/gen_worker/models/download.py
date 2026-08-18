@@ -30,6 +30,7 @@ from urllib.parse import parse_qs, urlparse
 from ..api.errors import ValidationError
 from ..bounded_stream import copy_bounded, free_space_bound
 from ..config import Settings, current_or
+from ..manifest_blocks import declaration_rows
 
 _STANDALONE = Settings()
 from ..stall import ProgressFloor, SilenceWindow
@@ -130,16 +131,15 @@ def build_provider_index_from_manifest(manifest: Optional[Mapping[str, Any]]) ->
 
     th#1987: the release rides the ref, so there is no side-channel field to
     fold — the entry's ref is normalized through the ONE grammar module before
-    keying and ``set_provider_index`` adds the repo-identity fallback keys."""
+    keying and ``set_provider_index`` adds the repo-identity fallback keys.
+
+    pgw#1395: reads EVERY declaration block, not ``functions[]`` alone. A
+    binding on a v2 ``entrypoints[]`` row would otherwise index to nothing and
+    every ref in it would silently fall back to the default provider."""
     index: dict[str, str] = {}
     if not isinstance(manifest, Mapping):
         return index
-    functions = manifest.get("functions")
-    if not isinstance(functions, list):
-        return index
-    for fn in functions:
-        if not isinstance(fn, dict):
-            continue
+    for fn in declaration_rows(manifest):
         for entry in _collect_binding_entries(fn.get("bindings")):
             ref = str(entry.get("ref") or "").strip()
             if not ref:
