@@ -1459,3 +1459,82 @@ def test_th1364_a_still_image_job_is_not_a_billing_divergence():
         "this fires on most of the fleet's work and each one dials the "
         "pod-killing carrier (th#1364)"
     )
+
+
+# -- the host census: "no GPU" vs "a GPU I failed to see" (pgw#1414) ---------
+#
+# Measured on a rented 4090 (pod 3ntpe1zwbksuwo, $0.336): the census came back
+# `driver="" gpu="" count=0`, the worker registered `class=cpu gpu=0`, and the
+# hub declined placement with `compute_class_mismatch` 703+ times in a loop
+# with no terminal state while the pod billed. ZERO errors anywhere — because a
+# swallowed census and a genuinely cardless box produce byte-identical output.
+#
+# This census runs in the PARENT before any endpoint import; the child's CUDA
+# probe runs later. A driver mount landing between them yields exactly that
+# incident: a cpu-class Hello from a pod whose probe then passes.
+
+
+def _census(
+    monkeypatch: pytest.MonkeyPatch, *, devices: bool, readings: List[Any]
+) -> Dict[str, Any]:
+    """Drive `measure()` with the two facts that decide the arm."""
+    from gen_worker.procsplit import measure as measure_mod
+
+    monkeypatch.setattr(measure_mod, "gpu_devices_present", lambda: devices)
+    # By TARGET STRING, not `measure_mod.os`: the module imports `os` for its
+    # own use and does not re-export it, so reaching through it is a fact about
+    # this test's imports rather than about the code under test.
+    monkeypatch.setattr("os.path.exists", lambda _p: devices)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    calls = iter(readings)
+    monkeypatch.setattr(measure_mod, "probe_hardware", lambda: next(calls))
+    return measure_mod.measure()
+
+
+def _blank_facts() -> Any:
+    from gen_worker.hostfacts import HostFacts
+
+    return HostFacts()
+
+
+def _real_facts() -> Any:
+    from gen_worker.hostfacts import HostFacts
+
+    return HostFacts(gpu_count=1, gpu_name="NVIDIA GeForce RTX 4090",
+                     driver_version="550.54", vram_total_bytes=24 << 30)
+
+
+def test_an_empty_census_beside_gpu_device_nodes_is_UNREADABLE_pgw1414(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE INCIDENT. Device nodes exist, so a card was ASSIGNED to this
+    container — the census failing to see it is not evidence of a cardless
+    box, and registering cpu-class off it is what cost 703 declines."""
+    out = _census(monkeypatch, devices=True,
+                  readings=[_blank_facts(), _blank_facts(), _blank_facts()])
+    assert out.get("census_unreadable"), out
+    assert "may be present and not answering" in out["census_unreadable"]
+    assert "must NOT be registered as cpu-class" in out["census_unreadable"]
+
+
+def test_the_retry_wins_when_the_driver_mount_was_merely_LATE_pgw1414(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The timing hypothesis, and the reason the retry is not decoration: a
+    cold-start driver mount that lands on the second look leaves NO typed
+    state, because there is nothing wrong with this host."""
+    out = _census(monkeypatch, devices=True,
+                  readings=[_blank_facts(), _real_facts()])
+    assert "census_unreadable" not in out, out
+    assert out["hardware"]["gpu_name"] == "NVIDIA GeForce RTX 4090"
+
+
+def test_a_genuinely_CARDLESS_host_stays_quiet_pgw1414(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The opposite behaviour, and the half that must NOT regress: no device
+    nodes means no card was assigned, which is the any-machine ruling's
+    warn-and-serve CPU case. One census attempt, no retry, no typed state."""
+    out = _census(monkeypatch, devices=False, readings=[_blank_facts()])
+    assert "census_unreadable" not in out, out
+    assert not out["hardware"].get("gpu_count")

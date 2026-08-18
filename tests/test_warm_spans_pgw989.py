@@ -172,27 +172,6 @@ def test_a_failing_warm_job_still_lands_in_the_ledger(
 # the phase rename, and the parent's emission
 # ---------------------------------------------------------------------------
 
-def test_the_drain_phase_no_longer_calls_itself_a_compile() -> None:
-    """RED on master: ``mint_child`` framed ``_drain_router`` — which waited out
-    a queue the fleet mint armed EMPTY — as ``inductor_compile``, so every
-    dynamo mint's phase table carried ``'inductor_compile': 0.0`` beside a
-    ``warmup_forward`` row holding the entire compile. (pgw#1010 deleted
-    ``_drain_router`` with the dynamo recipe; the phase vocabulary it forced
-    apart is what this asserts, and that survives.)"""
-    from gen_worker import activity, mint_child
-
-    source = __import__("inspect").getsource(mint_child)
-    assert '"inductor_compile"' not in source
-    assert warm_spans.PHASE_ROUTER_DRAIN == "router_drain"
-    # One definition, re-exported where the phase vocabulary lives.
-    assert activity.PHASE_ROUTER_DRAIN is warm_spans.PHASE_ROUTER_DRAIN
-    assert activity.PHASE_INDUCTOR_COMPILE != activity.PHASE_ROUTER_DRAIN
+# pgw#1373: case deleted with the module it drove (mint_child).
 
 
-# The parent's warm-ledger emission (`mint_supervisor._emit_warm_ledger`
-# and its `_emit_jit_compile` caller) is deleted with the recipe it measured —
-# the mint child no longer runs a JIT warm plan, so a ledger from one can never
-# reach the parent. `WarmLedger` itself stays: the child still drives the
-# endpoint's warm plan for the pgw#984 proof forward, and the ledger is how that
-# span is measured honestly. What the wire carries for a JIT compile now is the
-# INTAKE event, covered in `test_compile_duration_th1322.py`.

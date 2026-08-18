@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.parse
@@ -97,7 +98,10 @@ def _parser() -> argparse.ArgumentParser:
         description="Boot an author endpoint eagerly; adopt compiled graphs when offered.",
     )
     parser.add_argument("endpoint_dir", help="directory holding endpoint.toml")
-    parser.add_argument("--checkpoint", required=True, help="local checkpoint tree")
+    parser.add_argument("--checkpoint", default="",
+                        help="local checkpoint tree. REQUIRED exactly when the "
+                             "endpoint declares a model slot; a weightless "
+                             "entrypoint (pgw#1392) has no checkpoint to name")
     parser.add_argument("--checkpoint-ref", default="local/checkpoint")
     parser.add_argument("--model", default="",
                         help="the hub row's `model` classification (e.g. sdxl); "
@@ -139,6 +143,35 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--sm", default="", help="this GPU's sm (e.g. sm_89)")
     parser.add_argument("--artifacts-dir", default=".compiled-graphs")
     return parser
+
+
+
+def _checkpoint_tree(args: argparse.Namespace, loaded: Any) -> Path:
+    """The checkpoint tree, or a typed refusal naming what wanted one.
+
+    pgw#1409: `--checkpoint` was `required=True`, which is wrong for the shape
+    pgw#1392 made legal — a WEIGHTLESS entrypoint declares zero model slots, so
+    nothing ever reads `DeployBinding.checkpoint_dir` and the caller was forced
+    to invent a path to satisfy argparse. Inventing one is worse than it looks:
+    it is indistinguishable at the call site from a real tree, so the day the
+    endpoint grows a model slot the invented path is what gets loaded.
+
+    `loaded.models` is the exact signal — the model classes the entrypoints
+    reference, empty for a weightless endpoint. So absence is legal exactly
+    when nothing can consume it, and refused BY NAME the moment something can.
+    """
+    given = str(args.checkpoint or "").strip()
+    if given:
+        return Path(given)
+    if loaded.models:
+        raise SystemExit(
+            f"--checkpoint is required: {loaded.module_name} declares model "
+            f"slot(s) on {', '.join(sorted(m.__name__ for m in loaded.models))}, "
+            f"and a model slot is loaded FROM a checkpoint tree. Only a "
+            f"weightless endpoint (zero model slots, pgw#1392) may omit it."
+        )
+    # Weightless: nothing reads this, and it must not look like a real tree.
+    return Path(os.devnull).parent / "__weightless__"
 
 
 def _adoption_source(
@@ -197,7 +230,7 @@ def _serve_envelopes(args: argparse.Namespace, loaded: Any) -> int:
     from .residency import ResidencyManager
     from .serve_loop import ServeLoop, manifest_sizer
 
-    tree = Path(args.checkpoint)
+    tree = _checkpoint_tree(args, loaded)
     weight = args.weight_bytes or sum(
         f.stat().st_size for f in tree.rglob("*") if f.is_file()
     ) or 1
@@ -248,7 +281,7 @@ def main(argv: list[str] | None = None) -> int:
     loaded = load_endpoint(Path(args.endpoint_dir))
     binding = DeployBinding(
         checkpoint_ref=args.checkpoint_ref,
-        checkpoint_dir=Path(args.checkpoint),
+        checkpoint_dir=_checkpoint_tree(args, loaded),
         model=args.model or None,
         defaults=json.loads(args.defaults),
     )

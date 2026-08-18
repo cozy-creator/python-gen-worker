@@ -53,7 +53,7 @@ def _clean_index():
 
 def _manifest(*binding_blocks: dict) -> dict:
     return {
-        "functions": [
+        "entrypoints": [
             {"name": f"fn{i}", "bindings": b} for i, b in enumerate(binding_blocks)
         ]
     }
@@ -92,9 +92,9 @@ def test_provider_index_extracted_from_manifest(block: dict, expect: dict) -> No
         assert index.get(ref) == provider, (ref, index)
 
     assert build_provider_index_from_manifest(None) == {}
-    assert build_provider_index_from_manifest({"functions": []}) == {}
+    assert build_provider_index_from_manifest({"entrypoints": []}) == {}
     bad = build_provider_index_from_manifest({
-        "functions": [
+        "entrypoints": [
             {"bindings": {"pipeline": {"kind": "fixed", "provider": "hf"}}},  # no ref
             {"bindings": "not-a-dict"},
             {"bindings": {"pipeline": {"kind": "fixed", "provider": "hf", "ref": "ok/ref"}}},

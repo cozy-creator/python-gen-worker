@@ -260,3 +260,93 @@ def test_reservation_accounting_includes_headroom_and_reads_back() -> None:
         vram, host = m.reserved_bytes()
         assert vram == 4 * GB  # 3 weights + 1 headroom
         assert host == 0
+
+
+# -- the BUDGET the manager admits against (pgw#1411) ------------------------
+#
+# `Worker.__init__` chose it inline, so which arm ran was a property of the
+# machine running the suite — and the arms disagree about whether a host can
+# serve at all. Measured on this workspace's dev box and on CI, they cover the
+# decision between them like this:
+#
+#     dev box   cuda_ready() True,  headroom 7.7 GiB  -> the headroom arm
+#     CI        cuda_ready() False, headroom None     -> the host-RAM arm
+#     NOWHERE   cuda_ready() True,  headroom None     -> THE REFUSAL
+#
+# The refusal shipped having never executed anywhere, because no environment
+# could reach it. So the arms are chosen here by naming the two readings rather
+# than by hoping for a machine.
+
+import pytest as _pytest_budget
+
+from gen_worker import hostfacts as _hostfacts
+from gen_worker.worker import WorkerBootError as _WorkerBootError
+from gen_worker.worker import residency_budget as _residency_budget
+
+
+def _readings(
+    monkeypatch: _pytest_budget.MonkeyPatch, *, headroom: int | None, cuda: bool
+) -> None:
+    monkeypatch.setattr(_hostfacts, "headroom_bytes", lambda *a, **k: headroom)
+    monkeypatch.setattr(_hostfacts, "cuda_ready", lambda *a, **k: cuda)
+
+
+def test_a_stated_budget_wins_over_every_reading(
+    monkeypatch: _pytest_budget.MonkeyPatch,
+) -> None:
+    """The caller owns it: a stated budget is a CONFIG, so it is not
+    second-guessed by a card that happens to be readable."""
+    _readings(monkeypatch, headroom=99, cuda=True)
+    assert _residency_budget(4096) == 4096
+
+
+def test_the_cards_headroom_is_the_budget_when_it_reads(
+    monkeypatch: _pytest_budget.MonkeyPatch,
+) -> None:
+    _readings(monkeypatch, headroom=8 << 30, cuda=True)
+    assert _residency_budget() == 8 << 30
+
+
+def test_no_cuda_at_all_sizes_from_host_ram(
+    monkeypatch: _pytest_budget.MonkeyPatch,
+) -> None:
+    """cozy-local, CI and every fake-weights drive are this arm. Refusing here
+    made the worker unbootable on all three while `python -m gen_worker.serving`
+    served happily beside it — two paths in one repo disagreeing about whether
+    a host can serve."""
+    _readings(monkeypatch, headroom=None, cuda=False)
+    monkeypatch.setattr(
+        "gen_worker.models.memory.get_available_ram_gb", lambda: 32.0
+    )
+    assert _residency_budget() == int(32.0 * (1024 ** 3))
+
+
+def test_a_card_we_can_SEE_but_not_MEASURE_refuses(
+    monkeypatch: _pytest_budget.MonkeyPatch,
+) -> None:
+    """THE ARM NO ENVIRONMENT REACHES, which is why it is written down here.
+
+    A visible card whose memory cannot be read is the one genuinely unknown
+    case: sizing from host RAM would hand the residency manager a budget in
+    the wrong memory entirely, and admission happens BEFORE allocation, so the
+    error would surface as an OOM on a rented pod rather than as a refusal."""
+    _readings(monkeypatch, headroom=None, cuda=True)
+    with _pytest_budget.raises(_WorkerBootError) as caught:
+        _residency_budget()
+    message = str(caught.value)
+    assert "card it can see" in message, message
+    assert "mem_get_info" in message, message
+
+
+def test_an_unreadable_host_refuses_rather_than_admitting_against_zero(
+    monkeypatch: _pytest_budget.MonkeyPatch,
+) -> None:
+    """A zero budget admits nothing and would read as "this model never fits",
+    which is a lie about the model rather than about the reading."""
+    _readings(monkeypatch, headroom=None, cuda=False)
+    monkeypatch.setattr(
+        "gen_worker.models.memory.get_available_ram_gb", lambda: 0.0
+    )
+    with _pytest_budget.raises(_WorkerBootError) as caught:
+        _residency_budget()
+    assert "no readable host RAM" in str(caught.value)

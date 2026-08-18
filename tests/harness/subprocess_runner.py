@@ -32,7 +32,12 @@ BLACKHOLE_ADDR = "192.0.2.1:1"
 
 
 def write_manifest(path: Path, functions: List[Dict[str, Any]]) -> None:
-    path.write_bytes(msgspec.toml.encode({"functions": functions}))
+    """pgw#1373: the block is ``entrypoints``. It was ``functions``, and the
+    boot now refuses a manifest that declares no ``entrypoints`` — so every
+    boot-smoke subject here (startup phases, the CUDA probe, the hardware
+    report) died at "this image publishes nothing" before reaching the thing
+    under test. The row SHAPE is unchanged; only the key moved."""
+    path.write_bytes(msgspec.toml.encode({"entrypoints": functions}))
 
 
 def gpu_manifest_entry(*, module: str = "harness_smoke_nonexistent_module") -> Dict[str, Any]:

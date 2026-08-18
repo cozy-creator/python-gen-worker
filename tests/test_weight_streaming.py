@@ -342,3 +342,62 @@ def _drop_tensor(path: Path) -> str:
         rebuilt += body[start:end]
     _write_container(path, header, bytes(rebuilt))
     return victim
+
+
+# -- pgw#1410: the skeleton must carry what the loader is about to fill ------
+
+
+def test_a_pipeline_that_drops_its_components_is_refused_pgw1410(
+    article: dict[str, Any],
+) -> None:
+    """A `ModularPipeline` fails OPEN without this, and expensively.
+
+    `ModularPipeline.__init__` routes `**kwargs` to `load_config` and drops
+    every component, then registers each one as None. The skeleton returned a
+    pipeline whose components were all None while `modules` held the real
+    objects; `StreamingLoader` then streamed the whole checkpoint into those
+    ORPHANS. `meta_survivors` passed — it is per-module and the modules were
+    fine; it was the PIPELINE that was empty — so every layer reported success
+    and the defect surfaced as `None` where a component belongs, on a rented
+    pod, after a full weight load had been paid for.
+
+    The stand-in reproduces the SHAPE (accept the components, keep none) rather
+    than importing `ModularPipeline`, so the guard is proven against the
+    contract violation itself and not against one vendor class.
+    """
+    from gen_worker.serving.streaming import skeleton as skeleton_mod
+
+    base_cls = article["pipeline_cls"]
+
+    class _DropsComponents(base_cls):  # type: ignore[valid-type, misc]
+        def __init__(self, **kwargs: Any) -> None:  # noqa: D107
+            super().__init__(**kwargs)
+            for name in list(kwargs):
+                object.__setattr__(self, name, None)
+
+    with pytest.raises(skeleton_mod.SkeletonError) as caught:
+        skeleton_mod.build(_DropsComponents, checkpoint_dir=article["tree"])
+
+    message = str(caught.value)
+    assert "did not keep the component" in message, message
+    # It must NAME them — a refusal that says only "something is wrong" leaves
+    # the author exactly where the silent None did.
+    assert "unet" in message, message
+    assert "update_components" in message, message
+
+
+def test_a_well_behaved_pipeline_still_builds_pgw1410(
+    article: dict[str, Any],
+) -> None:
+    """The red control's twin: the guard must not refuse the normal shape.
+
+    Without this, deleting the check entirely would leave the suite green.
+    """
+    from gen_worker.serving.streaming import skeleton as skeleton_mod
+
+    built = skeleton_mod.build(
+        article["pipeline_cls"], checkpoint_dir=article["tree"]
+    )
+    for name, module in built.modules.items():
+        if name:
+            assert getattr(built.pipeline, name) is module

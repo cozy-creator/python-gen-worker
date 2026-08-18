@@ -170,6 +170,37 @@ def build(
             f"{sorted(kwargs)} named by {index_path}: {exc}"
         ) from exc
 
+    # pgw#1410: THE PIPELINE MUST ACTUALLY CARRY WHAT WE ARE ABOUT TO STREAM.
+    #
+    # `pipeline_cls(**kwargs)` is the classic `DiffusionPipeline.__init__`
+    # contract. `ModularPipeline.__init__` routes `**kwargs` to `load_config`
+    # and DROPS every component, then `register_components` sets each one to
+    # None. Nothing raised: the skeleton returned a pipeline whose components
+    # are all None while `modules` held the real objects, `StreamingLoader`
+    # streamed the entire checkpoint into those ORPHANS, `meta_survivors`
+    # passed (it is per-module, and the modules were fine — it was the PIPELINE
+    # that was empty), and the failure surfaced as `None` where a component
+    # belongs, on a rented pod, after a full weight load had been paid for.
+    #
+    # Identity, not truthiness: a pipeline that rebuilt or copied the component
+    # would stream into the copy we hold and serve the one it holds.
+    orphans = [
+        name for name, module in modules.items()
+        if name and getattr(pipeline, name, None) is not module
+    ]
+    if orphans:
+        raise SkeletonError(
+            f"{pipeline_cls.__name__} did not keep the component(s) "
+            f"{sorted(orphans)} it was constructed with — the pipeline carries "
+            f"something else (or None) under those names, so streaming would "
+            f"fill objects this pipeline never reads and serving would find "
+            f"them empty. A `ModularPipeline` does exactly this: its "
+            f"`__init__` sends **kwargs to `load_config` and registers every "
+            f"component as None. Give the class an `__init__` that calls "
+            f"`update_components(...)` after `super().__init__()`, or hand "
+            f"`ctx.load` a pipeline class that keeps its constructor arguments."
+        )
+
     logger.info(
         "ctx.load: meta skeleton %s built from configs — %d module component(s), "
         "%d passthrough, 0 tensor bytes read",

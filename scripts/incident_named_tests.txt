@@ -6,11 +6,9 @@
 tests/test_absent_stall_window_refuses_pgw973.py
 tests/test_adapter_fidelity_pgw794.py
 tests/test_adopt_compile_attribution_pgw1262.py
-tests/test_adopt_fit_pgw1265.py
 tests/test_adopt_seam_budget_pgw1168.py
 tests/test_adoption_key_pgw686.py
 tests/test_ambient_census_pgw1049.py
-tests/test_aot_compile_pool_pgw809.py
 tests/test_aot_variable_chunks_th1931.py
 tests/test_behaviour_gate_visitor_th1887.py
 tests/test_boot_config_absent_gw668.py
@@ -18,7 +16,6 @@ tests/test_boot_fatal_frame_bound_pgw1013.py
 tests/test_boot_stages_pgw1355.py
 tests/test_call_endpoint_semver_major_pgw1293.py
 tests/test_cancel_at_grant_pgw845.py
-tests/test_compiled_graph_resolve_pgw1090.py
 tests/test_changelog_consumption_pgw1226.py
 tests/test_child_code_identity_pgw840.py
 tests/test_chokepoint_projects_pgw1308.py
@@ -68,7 +65,6 @@ tests/test_materialized_view_pgw1308.py
 tests/test_media_upload_orgless_pgw1138.py
 tests/test_meta_instantiation_pgw1080.py
 tests/test_mint_liveness_pgw964.py
-tests/test_mint_memory_fit_pgw848.py
 tests/test_mint_process_pgw784.py
 tests/test_moe_branch_gw679.py
 tests/test_nccl_nvls_pgw773.py
