@@ -360,16 +360,44 @@ class Worker:
 
         self.loaded = harvest_entrypoints(list(user_module_names))
         self.resolver = HubBindingResolver()
-        # `vram_budget_bytes` is a CONFIG (the caller states the budget),
-        # never a logic gate: a CPU/fake-weights drive has no card to read and
-        # says so explicitly. Absent AND unreadable is still a refusal.
-        budget = int(vram_budget_bytes) or hostfacts.headroom_bytes()
+        # THE RESIDENCY BUDGET, in the order the answers are trustworthy:
+        # a stated budget (a CONFIG the caller owns), then the card's own
+        # headroom, then — on a host with NO CUDA at all — available host RAM.
+        #
+        # The CPU arm is not a fallback papering over a missing reading; it is
+        # the correct budget for a machine that serves on the CPU, which
+        # cozy-local, CI and every fake-weights drive are. Refusing here made
+        # the worker unbootable on all three while `python -m gen_worker.serving`
+        # served happily beside it — the two paths must not disagree about
+        # whether this host can serve. What stays a refusal is the case that is
+        # genuinely unknown: a host that HAS a card whose memory cannot be read.
+        budget = int(vram_budget_bytes)
+        if not budget:
+            headroom = hostfacts.headroom_bytes()
+            if headroom:
+                budget = int(headroom)
+            elif hostfacts.cuda_ready():
+                raise WorkerBootError(
+                    "this host has CUDA but no VRAM reading "
+                    "(torch.cuda.mem_get_info gave nothing) and no "
+                    "vram_budget_bytes was stated: residency admits before it "
+                    "allocates, and it cannot make that decision against an "
+                    "unknown budget on a card it can see"
+                )
+            else:
+                from .models.memory import get_available_ram_gb
+
+                budget = int(get_available_ram_gb() * (1024 ** 3))
+                logger.warning(
+                    "no CUDA on this host: sizing the residency budget from "
+                    "AVAILABLE HOST RAM (%.1f GiB). This is a CPU serving "
+                    "process — correct for cozy-local and CI, and never what a "
+                    "GPU pod should be doing.", budget / (1024 ** 3),
+                )
         if not budget:
             raise WorkerBootError(
-                "no VRAM reading on this host (torch.cuda.mem_get_info gave "
-                "nothing) and no vram_budget_bytes was stated: residency "
-                "admits before it allocates, and it cannot make that "
-                "decision against an unknown budget"
+                "no VRAM reading and no readable host RAM: residency admits "
+                "before it allocates and has no budget to admit against"
             )
         self.residency = ResidencyManager(int(budget), SnapshotSizer(self.resolver))
         try:
@@ -398,21 +426,15 @@ class Worker:
             backoff_cap_s=backoff_cap_s,
         )
 
-        claims: Dict[str, Any] = {}
-        boot_jwt = (settings.bootstrap_worker_jwt or "").strip()
-        if boot_jwt:
-            from .request_context._helpers import _decode_unverified_jwt_claims
-
-            claims = _decode_unverified_jwt_claims(boot_jwt)
+        # pgw#763 delta 1: this process is the COMPUTE CHILD and holds no
+        # credential, so reading a bootstrap JWT for identity refuses on every
+        # real serving pod. The parent RELAYS the two claims as WORKER_ID /
+        # WORKER_RELEASE_ID; those are the identity, and their absence is a
+        # named pid fallback rather than a silent empty string.
         self.worker_id = (
-            settings.worker_id
-            or str(claims.get("sub") or "").strip()
-            or f"py-worker-{os.getpid()}"
+            settings.worker_id.strip() or f"py-worker-{os.getpid()}"
         )
-        self.release_id = (
-            str(claims.get("release_id") or "").strip()
-            or settings.worker_release_id.strip()
-        )
+        self.release_id = settings.worker_release_id.strip()
         self.worker_session_id = uuid.uuid4().hex
         self.file_base_url = ""
 

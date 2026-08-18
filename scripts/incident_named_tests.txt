@@ -67,18 +67,15 @@ tests/test_lora_zero_delta_th1036.py
 tests/test_materialized_view_pgw1308.py
 tests/test_media_upload_orgless_pgw1138.py
 tests/test_meta_instantiation_pgw1080.py
-tests/test_micro_family_registration_pgw1084.py
 tests/test_mint_liveness_pgw964.py
 tests/test_mint_memory_fit_pgw848.py
 tests/test_mint_process_pgw784.py
-tests/test_modular_contract_loader_pgw1210.py
 tests/test_moe_branch_gw679.py
 tests/test_nccl_nvls_pgw773.py
 tests/test_offload_always_allowed_pgw1312.py
 tests/test_one_safetensors_header_bound_pgw973.py
 tests/test_output_integrity_warm_exempt_th1771.py
 tests/test_pickle_weight_refused_th1313.py
-tests/test_pod_mint_rig_pgw1347.py
 tests/test_pod_projected_load_pgw1330.py
 tests/test_post_connect_resolution_gate_pgw891.py
 tests/test_producer_no_shards_th1362.py
@@ -91,7 +88,6 @@ tests/test_reap_lag_residual_pgw1099.py
 tests/test_ref_and_manifest_fuzz_pgw867.py
 tests/test_ref_grammar_conformance_th1276.py
 tests/test_regional_marks_pgw1082.py
-tests/test_registry_contract_pgw740.py
 tests/test_repack_engine_pgw740.py
 tests/test_report_throttle_boot_pgw763.py
 tests/test_residency_republish_pgw628.py

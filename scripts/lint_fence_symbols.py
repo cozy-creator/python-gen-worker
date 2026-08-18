@@ -52,7 +52,8 @@ FENCES: Tuple[str, ...] = (
     "scripts/lint_serving_process_compiles.py",
     "scripts/lint_arm_state_feeders.py",
     "scripts/lint_unreached_surface.py",
-    "tests/test_compiled_graph_key_pgw1059.py",
+    # pgw#1373: `tests/test_compiled_graph_key_pgw1059.py` was deleted with
+    # the v1 keyset/declaration key space it fenced.
 )
 
 #: Only literals that LOOK like this repo's identity/arm vocabulary are

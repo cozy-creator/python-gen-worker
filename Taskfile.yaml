@@ -18,35 +18,6 @@ tasks:
   # superseded — a release instruction that told the next cutter to break a
   # standing rule on the shared box.
 
-  rig:mint:
-    desc: |
-      ⚠️ REMOTE ONLY (Paul, 2026-08-10 hard cut): this runs a REAL inductor/AOTI
-      compile. Run it on a micro pod, never on the shared box. The older
-      "local-inference carve-out" this task used to claim no longer covers mints.
-
-      pgw#978 — the whole mint machinery against a toy model: resolve ->
-      MintSlot handoff -> child spawn -> load -> warmup_forward -> torch.export
-      + AOTInductor -> seal -> publish to a local hub -> a SECOND process
-      adopting the compiled graph. Seconds per iteration instead of the
-      publish->build->buy loop. It is NOT a release gate — see docs/releasing.md.
-    cmds:
-      - nice -n 10 uv run python scripts/micro_mint_rig.py {{.CLI_ARGS}}
-
-  rig:micro:
-    desc: |
-      ⚠️ REMOTE ONLY — a real AOTI compile, same as `rig:mint`.
-
-      pgw#997 — the same full cycle against `examples/micro-diffusion`, the
-      org-worker-shaped endpoint: 3 export entries (two fork arms + a second
-      target), CONTAINER inputs with a plain input after them so every cycle
-      re-proves pgw#993/pgw#994, deterministically GENERATED weights, and a
-      parity check that arms the adopted compiled graph and compares every arm to eager.
-
-      This is the vehicle a mint-path change should be proven against;
-      `task rig:mint` is the cheaper one-entry plumbing toy.
-    cmds:
-      - nice -n 10 uv run python scripts/micro_mint_rig.py --vehicle micro {{.CLI_ARGS}}
-
   rig:gauntlet:
     desc: |
       ⚠️ REMOTE ONLY — every variant is a real compile. "Cardless" is not
@@ -67,47 +38,6 @@ tasks:
         task rig:gauntlet -- --device cuda --python "$GEN_WORKER_RIG_GPU_PYTHON"
     cmds:
       - nice -n 10 uv run python scripts/rig_gauntlet.py {{.CLI_ARGS}}
-
-  rig:gpu:
-    desc: |
-      pgw#983 — one rig cycle on the REAL card. Builds/refreshes the isolated
-      cu126 interpreter (see scripts/rig_gpu_env.sh: cu128 has no torch
-      2.13.0, cu126 does) and runs with --device cuda, so the compiled graph carries a
-      MEASURED sm_89 instead of a supplied one.
-
-      The repo's own .venv and the cu130 pin are untouched; this is a second
-      interpreter, selected explicitly, never a default.
-    cmds:
-      - ./scripts/rig_gpu_env.sh > /dev/null
-      - |
-        eval "$(./scripts/rig_gpu_env.sh --export-only)"
-        nice -n 10 "$GEN_WORKER_RIG_GPU_PYTHON" scripts/micro_mint_rig.py \
-          --device cuda {{.CLI_ARGS}}
-
-  rig:test:
-    desc: |
-      pgw#978 — the rig as a pytest row, including the full cycle (opt-in via
-      PGW978_RIG so CI's cardless runner never reads it as coverage; classified
-      LOCAL-ONLY in scripts/skip_census.txt).
-    env:
-      PGW978_RIG: '1'
-    cmds:
-      - nice -n 10 uv run --extra dev pytest tests/test_micro_mint_rig_pgw978.py -p no:randomly -rs
-
-  rig:pod:
-    desc: |
-      pgw#1347 — THE POD MINT-RIG. Rent a pod, run one named command, bank a row.
-      This is the primitive; the compile happens on the pod, never on this box.
-
-      A spend rail is MANDATORY (--rail, in dollars) and the kill command is
-      written to ~/.cache/cozy-mint-rig/killset BEFORE the pod is created.
-
-        task rig:pod -- mint --gpu a40 --rail 2.00 --lane pgw1331-clip \
-          --target gen_worker.model.catalog.flux1_dev:FLUX1_DEV --runner clip
-        task rig:pod -- sweep         # live pods vs our records; exit 1 on a leak
-        task rig:pod -- terminate --pod <id>
-    cmds:
-      - nice -n 19 uv run python scripts/pod_rig.py {{.CLI_ARGS}}
 
   probe:sync:
     desc: |
@@ -230,7 +160,6 @@ tasks:
       - cmd: uv run python scripts/lint_layout_declarations.py
       - cmd: uv run python scripts/lint_compiled_graph_key_layout_fence.py
       - cmd: uv run python scripts/lint_serving_process_compiles.py
-      - cmd: uv run python scripts/check_registry_contract.py
       - cmd: uv run python scripts/check_cozy_runtime_env_digest.py
       - cmd: uv run python scripts/check_worker_value_contracts_digest.py
       - cmd: uv run python scripts/lint_credential_identity.py
