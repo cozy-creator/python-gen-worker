@@ -113,7 +113,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-from gen_worker._vendor.torchcg import ARTIFACT_KIND, is_compiled_graph_key
+from gen_worker._vendor.torchcg.identity import ARTIFACT_KIND, is_compiled_graph_key
 from gen_worker._vendor.torchcg.identity import KEY_SCHEME
 
 if TYPE_CHECKING:  # pragma: no cover - typing only

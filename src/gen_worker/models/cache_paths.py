@@ -60,7 +60,7 @@ def open_worker_engine(root: Path | None = None) -> Engine:
     no caller can silently introduce a second compiled-graph store.  The import
     stays lazy because model-only commands do not require TCG at startup.
     """
-    from gen_worker._vendor.torchcg import Engine
+    from gen_worker._vendor.torchcg.engine import Engine
 
     return Engine(open_worker_cas(root))
 
