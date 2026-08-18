@@ -883,20 +883,30 @@ def _torch_dtype(value: Any) -> Any:
     raise DeriveError(f"contract dtype {value!r} names no torch dtype")
 
 
-def _contract_document(owner: str, lane: Any) -> dict[str, Any]:
-    """The lane contract's canonical layout document. Required, not optional.
+def _contract_document(
+    owner: str, lane: Any, warnings: list[str]
+) -> Optional[dict[str, Any]]:
+    """The lane contract's canonical layout document.
 
     The whole point of contract OBJECTS (Paul, 2026-08-18) is that the full
-    document TRAVELS in the release metadata, so the platform needs no prior
-    knowledge of the layout. tensorfs#111 spells it as ``Contract.document``,
-    a canonical JSON **string** -- an earlier duck-typed reader here accepted
+    layout TRAVELS in the release metadata, so the platform needs no prior
+    knowledge of it. tensorfs#111 spells it as ``Contract.document``, a
+    canonical JSON **STRING** — an earlier duck-typed reader here accepted
     only a ``dict`` and therefore shipped ``"document": null`` on every lane
-    while the stamp looked correct. A lane whose document cannot be read is a
-    typed refusal: a stamp with no layout behind it is worse than no row.
+    while the stamp looked correct.
+
+    A lane that CLAIMS a document must produce a readable one (typed
+    refusal: a stamp with an unreadable layout behind it is worse than no
+    row). A lane object that exposes none at all — a resolved ``LaneRef``
+    stand-in — travels stamp-only with a WARNING naming it, never silently.
     """
 
+    claimed = False
     for attribute in ("document", "as_dict", "to_dict"):
         value = getattr(lane, attribute, None)
+        if value is None:
+            continue
+        claimed = True
         if callable(value):
             value = value()
         if isinstance(value, dict):
@@ -908,12 +918,19 @@ def _contract_document(owner: str, lane: Any) -> dict[str, Any]:
                 continue
             if isinstance(parsed, dict):
                 return parsed
-    raise DeriveError(
-        f"{owner}: lane {lane!r} carries no readable layout document. A lane "
-        f"IS a tensorfs Contract object and its document travels in the "
-        f"release metadata (canonical JSON via .document); a stamp alone "
-        f"leaves the platform guessing the layout."
+    if claimed:
+        raise DeriveError(
+            f"{owner}: lane {lane!r} exposes a layout document that cannot "
+            f"be read as JSON. The document travels in the release metadata; "
+            f"a stamp with an unreadable layout behind it is worse than no "
+            f"row."
+        )
+    warnings.append(
+        f"{owner}: lane {lane_handle(lane)} carries NO layout document, so "
+        f"the release ships its stamp alone and the platform must already "
+        f"know the layout. Import a tensorfs Contract object."
     )
+    return None
 
 
 def _resolve_lane(torchcg: ModuleType, cls: type, lane: Any) -> Any:
@@ -1179,7 +1196,7 @@ def derive_release(
             lane_contracts[lane_graphs.contract] = {
                 "stamp": lane_graphs.contract,
                 "document": _contract_document(
-                    f"class {cls.__name__!r}", lane
+                    f"class {cls.__name__!r}", lane, warnings
                 ),
             }
 

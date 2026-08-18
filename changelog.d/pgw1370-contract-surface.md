@@ -9,5 +9,6 @@
   that the full canonical layout ships inside the release metadata, so the platform needs no prior
   knowledge of it — but `Contract.document` is a canonical JSON **string** and the reader accepted
   only a `dict`, so every lane emitted a correct-looking `stamp` beside `"document": null`. It now
-  parses the string, and a lane whose document cannot be read is a typed refusal: a stamp with no
-  layout behind it is worse than no row.
+  parses the string; a lane that CLAIMS a document must produce a readable one (typed refusal —
+  a stamp with an unreadable layout behind it is worse than no row), and a lane object exposing
+  none at all travels stamp-only with a WARNING naming it, never silently.
