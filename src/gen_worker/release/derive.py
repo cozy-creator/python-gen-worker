@@ -308,7 +308,6 @@ _SLOT_ORDER = ("ctx", "payload", "model", "adapter")
 def _entrypoints(module: ModuleType, model_cls: type) -> list[_Entrypoint]:
     import msgspec
 
-    from ..api.model_base import Model
     from ..request_context import RequestContext
 
     out: list[_Entrypoint] = []
@@ -884,12 +883,16 @@ def _torch_dtype(value: Any) -> Any:
     raise DeriveError(f"contract dtype {value!r} names no torch dtype")
 
 
-def _contract_document(lane: Any) -> Optional[dict[str, Any]]:
-    """The lane contract's canonical document, when the object carries one.
+def _contract_document(owner: str, lane: Any) -> dict[str, Any]:
+    """The lane contract's canonical layout document. Required, not optional.
 
-    Duck-typed against tensorfs#111's Contract surface (in design): the full
-    document travels in the release metadata so the platform needs no prior
-    knowledge of the layout. A bare handle string carries no document.
+    The whole point of contract OBJECTS (Paul, 2026-08-18) is that the full
+    document TRAVELS in the release metadata, so the platform needs no prior
+    knowledge of the layout. tensorfs#111 spells it as ``Contract.document``,
+    a canonical JSON **string** -- an earlier duck-typed reader here accepted
+    only a ``dict`` and therefore shipped ``"document": null`` on every lane
+    while the stamp looked correct. A lane whose document cannot be read is a
+    typed refusal: a stamp with no layout behind it is worse than no row.
     """
 
     for attribute in ("document", "as_dict", "to_dict"):
@@ -898,7 +901,19 @@ def _contract_document(lane: Any) -> Optional[dict[str, Any]]:
             value = value()
         if isinstance(value, dict):
             return value
-    return None
+        if isinstance(value, (str, bytes)):
+            try:
+                parsed = json.loads(value)
+            except ValueError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+    raise DeriveError(
+        f"{owner}: lane {lane!r} carries no readable layout document. A lane "
+        f"IS a tensorfs Contract object and its document travels in the "
+        f"release metadata (canonical JSON via .document); a stamp alone "
+        f"leaves the platform guessing the layout."
+    )
 
 
 def _resolve_lane(torchcg: ModuleType, cls: type, lane: Any) -> Any:
@@ -1163,7 +1178,9 @@ def derive_release(
             lanes.append(lane_graphs)
             lane_contracts[lane_graphs.contract] = {
                 "stamp": lane_graphs.contract,
-                "document": _contract_document(lane),
+                "document": _contract_document(
+                    f"class {cls.__name__!r}", lane
+                ),
             }
 
     graphs_document = torchcg.GraphSetDocument(closure=closure, lanes=tuple(lanes))
