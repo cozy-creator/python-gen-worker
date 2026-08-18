@@ -24,11 +24,26 @@ graphs it is missing. Four properties, each load-bearing:
    getting this wrong: a 36-class mint at 2-on-7 starved serving so badly
    that a 15m50s invocation never returned in 65 minutes.
 
-4. **PROGRESS-GATED LIVENESS.** The guard reads what the mint has ACHIEVED —
-   graphs completed, and the mint tree's own CPU — never a clock against the
-   job. A mint that lands graphs is never condemned however long it takes; a
-   mint that lands nothing AND burns no CPU is condemned inside its window.
-   No window is ever enlarged to make a stall look healthy.
+4. **PROGRESS-GATED LIVENESS, AND IT REPORTS.** The guard reads what the mint
+   has ACHIEVED — graphs completed, and the mint tree's own CPU — never a
+   clock against the job. A mint that lands graphs is never condemned however
+   long it takes; a mint that lands nothing AND burns no CPU is condemned
+   inside its window. No window is ever enlarged to make a stall look healthy.
+   And every verdict it reaches goes on the WIRE (pgw#1383): a serve pod's
+   stdout goes nowhere (pgw#760), so a condemnation that only reaches
+   ``logger.error`` is, from the hub's side, a mint that stopped emitting.
+
+**THE PROPERTY THAT MADE THE OLD PATH INVISIBLE, stated so it is not
+re-lost.** pgw#1383 root-caused pod ``j56tate13oav13``: the retired supervisor
+ran its terminus adopt — an arm plus a numerics verify per graph class, on the
+live pipeline — straight from a coroutine, and ``activity._emit``'s bound sink
+ships every report as a task on THAT event loop. The seal phase it had just
+declared was created and never ran; neither did any heartbeat or any abort. The
+hub read ``inductor_compile step 2/2`` for thirty billed minutes because that
+genuinely was the last thing to reach it. **The arm may never run on a loop
+that also ships the worker's reports**, and here it does not: every arm runs on
+a mint worker thread under ``arm_lock``, and the guard samples on its own
+cadence beside them.
 """
 
 from __future__ import annotations
@@ -43,6 +58,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from .. import activity as activity_mod
 from .. import compile_posture
 from ..stall import SilenceWindow
 
@@ -61,6 +77,20 @@ DEFAULT_SILENCE_WINDOW_S = 600.0
 
 #: Below this the CPU axis has not moved (sampling jitter, not work).
 _CPU_EVIDENCE_EPS = 0.5
+
+#: pgw#1383: the typed defect this worker reports about ITSELF when its own
+#: mint stops making measured progress. A serve pod exposes no logs (pgw#760),
+#: so `logger.error` is not a report — it is the mint dying in private, which
+#: is the exact shape that cost `j56tate13oav13` thirty billed minutes and a
+#: manual `DELETE /v1/admin/pods`. The hub's stall detector was right every
+#: time it fired there; what it lacked was a fact from the worker to join to.
+KIND_MINT_WEDGED = "self_mint_wedged"
+
+#: A graph that is MINTED and PUBLISHED but did not arm on this pod's live
+#: dispatch. Not a failure of the mint — the fleet has the bytes — but it is
+#: why this pod keeps serving eager for a graph it just paid to compile, and
+#: that is a wire fact rather than a pod-log line.
+KIND_ARM_MISSED = "self_mint_arm_missed"
 
 
 class MintCondemned(RuntimeError):
@@ -854,6 +884,18 @@ class BackgroundMint:
                 # interrupted from here, and it must not be allowed to hold
                 # the serving worker hostage while it is judged dead.
                 logger.error("runtime-mint: %s", exc)
+                # ...and SAY SO on the wire (pgw#1383). A serve pod's stdout
+                # goes nowhere, so a condemnation nobody can read is a mint
+                # that stopped emitting — which is precisely the defect the
+                # hub could see and could not attribute.
+                activity_mod.emit_event(
+                    KIND_MINT_WEDGED,
+                    f"{len(holes)} hole(s), {width} worker(s), "
+                    f"{progress.completed} landed, "
+                    f"{time.monotonic() - started:.0f}s elapsed: {exc}",
+                    phase="no_measured_progress",
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                )
                 stop.set()
                 break
             idle.wait(sample_s)
@@ -921,6 +963,15 @@ class BackgroundMint:
             logger.warning(
                 "runtime-mint: %s published but did not arm live: %s",
                 record.graph, exc,
+            )
+            activity_mod.emit_event(
+                KIND_ARM_MISSED,
+                f"graph {record.graph} ({record.target}) is minted and in the "
+                f"store, but this pod's live dispatch did not take it "
+                f"({type(exc).__name__}: {exc}). A successor adopts it at "
+                f"boot; this worker keeps serving eager for it.",
+                phase=type(exc).__name__,
+                graph_class=str(record.graph)[:300],
             )
 
         return MintedHole(
@@ -1011,6 +1062,8 @@ def mint_holes(
 
 __all__ = [
     "BackgroundMint",
+    "KIND_ARM_MISSED",
+    "KIND_MINT_WEDGED",
     "Compiler",
     "DEFAULT_SILENCE_WINDOW_S",
     "MintCondemned",
