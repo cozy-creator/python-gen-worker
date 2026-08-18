@@ -151,6 +151,19 @@ DEFINED_LABELS: Set[str] = set()
 # allowlists follow, and what stops this table becoming the place dead code
 # goes to be forgotten.
 EXEMPT_TARGETS: dict[str, str] = {
+    # pgw#1372: the residency engine (Paul's admission-before-allocation
+    # ruling). Its production caller is the entrypoint DISPATCH LOOP, which
+    # wraps every invocation in ResidencyManager.lease — that loop builds on
+    # the SDK-core Model/entrypoint primitives (pgw#1382) and is the
+    # pgw#1372 follow-up that wires it; these rows die with that wiring.
+    "gen_worker.serving.residency.ResidencyManager":
+        "dispatch-loop wiring owed by the pgw#1372 follow-up atop pgw#1382's "
+        "Model primitives",
+    "gen_worker.serving.residency.ResidencyManager.lease":
+        "dispatch-loop wiring owed by the pgw#1372 follow-up atop pgw#1382's "
+        "Model primitives",
+    "gen_worker.serving.residency.ResidencyManager.tier_of":
+        "operator/telemetry read; wired with the same dispatch-loop follow-up",
     # pgw#1372: the adopt-first boot's hub store. Its LIFECYCLE caller is the
     # vendored torchcg adopt path (`_vendor/torchcg/adopt.py` calls
     # `store.fetch_artifact` through the GraphStore protocol), which this
