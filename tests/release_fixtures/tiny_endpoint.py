@@ -17,7 +17,7 @@ import msgspec
 import torch
 from diffusers import StableDiffusionPipeline
 
-from gen_worker import ImageAsset, Model, entrypoint
+from gen_worker import Adapter, ImageAsset, Model, RequestContext, entrypoint
 from gen_worker.models import SDXL
 from gen_worker.models.model_types import register_contract_dtype
 
@@ -73,14 +73,18 @@ def _run(model: TinyModel, ctx: Any, *, steps: int, guidance: float,
 
 
 @entrypoint  # type: ignore[operator]
-def generate(payload: GenerateInput, model: TinyModel, ctx: Any) -> ImageOutput:
+def generate(ctx: RequestContext, payload: GenerateInput, model: TinyModel,
+             turbo: Adapter | None, loras: list[Adapter]) -> ImageOutput:
+    """Contract-file shape: ctx-first order, platform-injected facts."""
+    assert turbo is None and loras == []  # no adapter is ever bound at trace
     ctx.raise_if_cancelled()
     d = model.defaults
     steps = d.steps.resolve(payload.num_inference_steps or 2, ctx)
     guidance = d.guidance.resolve(payload.guidance_scale, ctx)
     image = _run(model, ctx, steps=int(steps), guidance=guidance,
                  side=_BUCKETS[payload.size], prompt=payload.prompt.strip())
-    return ImageOutput(image=image, model_used=ctx.checkpoint_ref)
+    # checkpoint_ref lands on the serving RequestContext with pgw#1372.
+    return ImageOutput(image=image, model_used=ctx.checkpoint_ref)  # type: ignore[attr-defined]
 
 
 @entrypoint  # type: ignore[operator]
