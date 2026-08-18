@@ -874,13 +874,11 @@ __all__ = [
 
 # --- the operator/one-shot request, built parent-side --------------------
 #
-# pgw#1215 step 4 moved these here from `mint_delegate`, which is DELETED.
-# That module existed to make the SERVING parent spawn a mint child; the
-# serving parent now supervises compile children directly
-# (`mint_supervisor`), so its driver — a retry loop that gave every attempt a
-# fresh `child-N` directory and therefore re-paid every finished graph class —
-# is gone rather than relocated. What survives is the request VOCABULARY, and
-# it belongs to the module that owns the child protocol: `scripts/
+# pgw#1215 step 4: the serving parent supervises compile children directly
+# (`mint_supervisor`), so there is no `mint_delegate` retry loop giving every
+# attempt a fresh `child-N` directory and re-paying every finished graph class.
+# What survives is the request VOCABULARY, and it belongs to the module that
+# owns the child protocol: `scripts/
 # micro_mint_rig.py` (the pre-publish proof harness) and any operator running
 # `python -m gen_worker.mint_child` by hand build a `MintRequest` through it.
 

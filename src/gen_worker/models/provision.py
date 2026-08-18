@@ -467,12 +467,10 @@ def arm_aot(
                     "lifted artifact will refuse at assert_lifted_contract",
                     module_name, exc)
     # pgw#1168: THE ADOPT'S DEVICE COST, MEASURED AT THE ONE SEAM EVERY ARM
-    # ROUTE PASSES. pgw#1164 measured this in `fleet_compiled_graphs.adopt_delegated_mint`
-    # — the SELF-MINT adopt only — so the boot adopt, the local-store adopt and
-    # the re-arm ran the identical `aot_serve.enable` -> `load_and_wrap` and
-    # reported nothing. That is this program's most common defect shape (an
-    # emitter wired on one of N paths), and the fix is one emitter here rather
-    # than a second call site there.
+    # ROUTE PASSES — the boot adopt, the local-store adopt and the re-arm all run
+    # the identical `aot_serve.enable` -> `load_and_wrap`. An emitter wired on one
+    # of N paths is this program's most common defect shape; one emitter here
+    # beats a second call site there.
     #
     # The two terms are measured SEPARATELY because they answer different
     # questions, and the split is what decides whether the COMPILED GRAPH or the GATE is
@@ -494,11 +492,10 @@ def arm_aot(
     # route passes; its ATTRIBUTION was never wired at all. The two device
     # spans below (the load, and the §4.32 gate's forwards) are the adopt's
     # whole GPU surface, and until now neither held a compile in-flight marker
-    # — so a signal death in either was charged to whatever tenant request was
-    # running, `postmortem.compile_crash_rows()` stayed empty, and pgw#714's
-    # eager-only reboot never fired. Measured 2026-08-14: a z-image pod booked
-    # its adopt SIGSEGV against `generate`, restarted the same two arm_keys and
-    # crash-looped while th#1326 paid to hold it.
+    # — so without a marker a signal death in either is charged to whatever tenant
+    # request was running, `postmortem.compile_crash_rows()` stays empty, and
+    # pgw#714's eager-only reboot never fires (measured 2026-08-14: a z-image pod
+    # booked its adopt SIGSEGV against `generate` and crash-looped).
     _adopt_label = "adopt:" + (
         str((meta or {}).get("family") or getattr(cfg, "family", "") or "")
         or "unknown")
@@ -638,18 +635,15 @@ def arm_aot(
         # that it must not serve. Staying eager is the ordinary miss policy
         # every other adopt gate uses, so the tenant keeps being served.
         #
-        # pgw#923: and the ADOPT ledger agrees with it by CONSTRUCTION now.
-        # `enable` used to announce `aot_adopt phase=armed` before the gate
-        # ran, so a reader counting armed adoptions over-counted every numerics
-        # refusal and a second closing row existed only to correct the first.
-        # Nothing is announced until the arm is final, so the refusal is simply
-        # what this function returns; the numbers still ride `compiled_graph_numerics`.
+        # pgw#923: the ADOPT ledger agrees with it by CONSTRUCTION. Nothing is
+        # announced until the arm is FINAL — announcing `phase=armed` before the gate
+        # runs over-counts every numerics refusal — so the refusal is simply what this
+        # function returns; the numbers still ride `compiled_graph_numerics`.
         meta = aot_serve.armed_metadata(pipe)
-        # pgw#1176: THE PARITY REFUSAL IS PER ENTRY. This used to `unwrap` the
-        # whole pipeline, which was correct while the gate's subject was a
-        # 36-class compiled graph and is wrong now: the probe measures ONE graph class
-        # against the eager callable it was traced from, so a divergence
-        # condemns that class and says nothing about its siblings. The refused
+        # pgw#1176: THE PARITY REFUSAL IS PER ENTRY, never an `unwrap` of the whole
+        # pipeline: the probe measures ONE graph class against the eager callable it
+        # was traced from, so a divergence condemns that class and says nothing about
+        # its siblings. The refused
         # entry de-arms sticky, its siblings keep serving compiled, and it is
         # not published.
         graph_class = meta.get(GRAPH_CLASS_BLOCK) or {}
@@ -861,10 +855,9 @@ def enable_compiled(
                 return aot
             refused = aot
             artifact = None  # unusable artifact: fall through to eager policy
-    # pgw#1181: `compile_cache.enable` no longer takes an artifact — the
-    # `torch-inductor-cache` format it seeded has had no writer since pgw#1178
-    # and is deleted. Everything delivered is dispatched above by
-    # `metadata.json`'s `kind`; what reaches here is the JIT lane.
+    # pgw#1181: `compile_cache.enable` takes no artifact — the
+    # `torch-inductor-cache` format is deleted. Everything delivered is dispatched
+    # above by `metadata.json`'s `kind`; what reaches here is the JIT lane.
     armed = compile_cache.enable(pipe, cfg)
     if bucket and not armed:
         compile_cache.drop_lora_execution_lane(pipe)

@@ -538,12 +538,11 @@ def _run_main() -> int:
         logger.info("  Local Model Cache Dir: %s", cache_cfg["local_model_cache_dir"])
 
     if not user_modules:
-        # pgw#1354: this exit used to be a bare `logger.error` + `return 1`.
-        # RunPod exposes no container-logs API, so the hub saw `exit:1` with no
-        # reason class and condemned the pod `[hardware-unsuitable]` with empty
-        # driver/gpu — a boot bug wearing a hardware verdict, and it cost a paid
-        # pod to find. Every other fatal in this function dials typed; so does
-        # this one. The message DISCRIMINATES the two gaps, because they have
+        # pgw#1354: dial TYPED, like every other fatal in this function. RunPod
+        # exposes no container-logs API, so a bare `return 1` reaches the hub as
+        # `exit:1` with no reason class and is condemned `[hardware-unsuitable]` —
+        # a boot bug wearing a hardware verdict. The message DISCRIMINATES the two
+        # gaps, because they have
         # different owners: no manifest at all is a Dockerfile that never ran
         # discovery, while declarations-without-modules is a manifest this wheel
         # cannot read (a block it does not walk, or rows with no `module`).

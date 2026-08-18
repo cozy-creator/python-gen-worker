@@ -1,10 +1,9 @@
 """Versioned cross-repo contract corpora shipped with this package.
 
 th#1947 §4.2. These corpora are the AUTHORITY for values that two repositories
-must agree on. They used to live only under ``tests/testdata/``, which the wheel
-and sdist do not carry — so a consumer that pinned ``{authority, version,
-sha256}`` had nothing to consume, and the only way to read them was to vendor a
-byte copy and fence it with a drift script that fetched a moving branch tip.
+must agree on, and they ship IN THE PACKAGE: a consumer that pins
+``{authority, version, sha256}`` must be able to consume it without vendoring a
+byte copy fenced against a moving branch tip.
 
 Shipping them here makes the pin possible: a consumer installs a pinned version
 and reads the exact bytes it pinned. The accessor shape deliberately matches

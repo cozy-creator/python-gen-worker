@@ -926,11 +926,8 @@ def pipeline_weight_lane(pipeline: Any) -> str:
 # runtime quants; if we're really memory-constrained then we should be
 # fetching the quant we need"). Armed on CUDA hosts (gw#420: fitting is the
 # runtime's job, not a flag).
-# th#1867 deleted FP8_STORAGE_FIT_FACTOR. It was a resident factor expressed
-# against the DECLARED card size (`resources.vram_gb`), consumed only by
-# `variant_fit`'s size arm to predict whether fp8 storage would fit. Both the
-# declaration and the prediction are gone; the fp8-storage rung is now entered
-# from a measured load, not from a factor times a guess.
+# th#1867: there is no fp8-storage fit FACTOR. The rung is entered from a
+# measured load, never from a factor times a declared card size.
 _EMERGENCY_MARGIN_GB = 2.0
 
 
@@ -2117,10 +2114,8 @@ def snapshot_component_weight_bytes(model_path: Path) -> Dict[str, int]:
     return {k: v for k, v in out.items() if v > 0}
 
 
-# th#1867 deleted `specialized_weight_layout`. Its own docstring named its only
-# consumer — "pgw#1117 asks exactly one question of it" — and pgw#1117's envelope
-# precondition is deleted with the two declarations it compared. The lane
-# detectors it wrapped are unchanged and still live in the loader itself.
+# th#1867 deleted `specialized_weight_layout` with pgw#1117's envelope
+# precondition. The lane detectors it wrapped live in the loader itself.
 
 def _adaptive_fit_rung(
     cls: Any, path: Path, *, fp8_planned: bool, compute_dtype: Any = None

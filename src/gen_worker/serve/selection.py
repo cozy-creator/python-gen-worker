@@ -1,13 +1,11 @@
 """pgw#1328 x tcg#37: ingress selection is READ FROM THE CONTRACT, not re-derived.
 
 Ranking several armed graph classes against one live call — which admits, which
-is closest, which normalizations a feed needs — used to live only in
-``aot_serve``'s ``EntryDispatch.select`` / ``ingress_report`` /
-``miss_distance`` / ``recast_gap`` / ``alignment_gap``. tcg#37 published exactly
-that as ``ingress_selection_v1``: a schema, a rung table, two normalization
-domains and 20 vectors, with ``torchcg.selection`` as the torch-free reference
-implementation. This module is gen-worker ADOPTING it, which tcg#37 recorded as
-its own follow-on and pgw#1328 owns.
+is closest, which normalizations a feed needs — is tcg#37's
+``ingress_selection_v1``: a schema, a rung table, two normalization domains and
+20 vectors, with ``torchcg.selection`` as the torch-free reference
+implementation. This module is gen-worker ADOPTING it (pgw#1328), rather than a
+second ranking inside ``aot_serve``.
 
 WHAT MOVES AND WHAT STAYS
 -------------------------

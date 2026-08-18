@@ -575,12 +575,11 @@ class ModelSpec:
     def _register(self) -> None:
         """Publish this family's tuned schema(s) under its own name.
 
-        The registration the retired ``@family("sdxl")`` decorator used to do,
-        moved onto the object that owns the schema. The registry itself is
-        unchanged — tensorhub still validates repo metadata against the
-        exported JSON Schema and ``gen-worker families export-schemas`` still
-        finds it — but a family can no longer be registered by a struct that
-        does not belong to one, which is the collision Paul ruled on.
+        Registration lives on the object that OWNS the schema, so a family cannot
+        be registered by a struct that does not belong to one — the collision Paul
+        ruled on. The registry is otherwise unchanged: tensorhub validates repo
+        metadata against the exported JSON Schema and
+        ``gen-worker families export-schemas`` finds it.
         """
 
         if self.tuned is None:

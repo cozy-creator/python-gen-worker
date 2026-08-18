@@ -6,13 +6,11 @@ family's exception: ``sdxl.py`` is the DECLARATION and imports diffusers inside
 its ``build`` callables; this module is what the request path reads, and it
 imports nothing above ``torch``.
 
-pgw#1346 B2 closed the gap this module's first draft recorded. SDXL used to
-stop at "tuned schemas and latent arithmetic" because ``euler_discrete`` was
-declared and unimplemented, so ``Sdxl`` had no ``scheduler()`` method at all.
-It has one now: :class:`~gen_worker.model.scheduler.EulerDiscrete` reproduces
+pgw#1346 B2: ``Sdxl.scheduler()`` is
+:class:`~gen_worker.model.scheduler.EulerDiscrete`, which reproduces
 ``diffusers``' ladder BIT-EXACTLY, and the declaration beside this module
-carries the four-runner tree (both text towers, the U-Net, the VAE decoder)
-rather than two thirds of it.
+carries the whole four-runner tree (both text towers, the U-Net, the VAE
+decoder).
 """
 
 from __future__ import annotations

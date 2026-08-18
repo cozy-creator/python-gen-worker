@@ -87,9 +87,9 @@ from .mint_process import (
 
 logger = logging.getLogger(__name__)
 
-#: pgw#1010: the child builds ONE artifact kind. The dynamo recipe it used to
-#: also run produced a compiled graph with no consumer, and it is deleted rather than
-#: kept behind a request field nobody may set.
+#: pgw#1010: the child builds ONE artifact kind. A dynamo recipe would produce
+#: a compiled graph with no consumer, so it is deleted rather than kept behind a
+#: request field nobody may set.
 RECIPE_AOT = "aot"
 
 
@@ -337,12 +337,10 @@ def _mint_aot(
     compiled graph that filter rejects. Every pod missed, "re-minted" the wrong kind, and
     the next pod missed identically.
 
-    pgw#1215 (th#1834 Phase 3 keystone) changed WHERE the export happens. This
-    process used to trace every declared class itself and ship each
-    ``ExportedProgram`` to a compile child on disk — 36.04 s of
-    ``torch.export.load`` per class (pgw#1216). It now hands the compile
-    children the RECIPE and they trace their own share, so nothing is
-    serialized. What this process still owes the mint is everything only it can
+    pgw#1215 (th#1834 Phase 3 keystone): this process hands the compile children
+    the RECIPE and they trace their own share, so no ``ExportedProgram`` is ever
+    serialized (which cost 36.04 s of ``torch.export.load`` per class,
+    pgw#1216). What this process still owes the mint is everything only it can
     do: the kernel-lane A/B on a real card (pgw#947), the traceable-as-loaded
     refusal, the declared-blocker gate, the class ENUMERATION (the adapter fork
     depends on the composed pipeline), and moving the packed artifacts into the
@@ -356,14 +354,11 @@ def _mint_aot(
     out_dir = target.parent / "aot"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # pgw#824: `aot_mint.mint` used to be ONE opaque call spanning the family's
-    # whole declared class set (sdxl: 18), so this function framed `trace_graph`
-    # once and then said nothing at all until `seal_publish` below. A real
-    # export measured ~5 minutes of complete wire silence; the parent's only
-    # evidence that the child was working was that its CPU was warm, which
-    # proves alive, not progressing. Every entry now rides the frame protocol
-    # that already exists -- no new wire, and the parent's `_on_frame` lands it
-    # on the same self_mint_compile activity the hub already reads.
+    # pgw#824: EVERY ENTRY rides the frame protocol, never one opaque call
+    # spanning the family's whole declared class set. A warm CPU proves alive,
+    # not progressing, so a five-minute silence between `trace_graph` and
+    # `seal_publish` is not evidence. No new wire — the parent's `_on_frame`
+    # lands it on the same self_mint_compile activity the hub already reads.
     def _progress(phase: str, step: int, total: int, note: str) -> None:
         frame(phase=phase, step=step, total=total, note=note)
 
@@ -412,11 +407,9 @@ def _mint_aot(
     # pgw#1053, preserved across the keystone: from here on this process
     # neither exports nor serves — the children compose their own targets —
     # so its residents are dead weight on the card the children are about to
-    # compile on. It used to be `aot_mint.mint(release_residents=True)`, whose
-    # release fired when the parent's export producer was exhausted; there is
-    # no parent-side producer any more, so the same release is stated here at
-    # the same moment: after the last read of `pipe` (the class enumeration
-    # above) and before the first child spawns. It matters most on the
+    # compile on. The release is stated HERE: after the last read of `pipe`
+    # (the class enumeration above) and before the first child spawns. It
+    # matters most on the
     # REAL-WEIGHT FALLBACK path, where this process is holding a whole
     # checkpoint.
     released = _release_compile_recipe_residents(pipe)
@@ -537,13 +530,11 @@ def mint(request: MintRequest) -> MintReport:
     bind_slots(siblings, request.slots)
     assert_slots_resolvable(
         siblings, request.slots, what=mint_identity(request))
-    # pgw#1034: the wire struct IS the cfg. It used to be re-inflated into a
-    # `registry.CompileContract` to keep `contract_facts()` byte-identical for a
-    # key the child computed — the child has computed no key since pgw#758, so
-    # the rebuild only manufactured a CompileContract whose contract axes were
-    # whatever the wire happened to carry. Every consumer here reads the
-    # declared facts by name (family, targets, shapes, text_lens, guidance,
-    # lora_bucket) and the spec carries exactly those.
+    # pgw#1034: the wire struct IS the cfg — never re-inflated into a
+    # `registry.CompileContract`, whose contract axes would be whatever the wire
+    # happened to carry. Every consumer here reads the declared facts by name
+    # (family, targets, shapes, text_lens, guidance, lora_bucket) and the spec
+    # carries exactly those.
     cfg = request.cfg
 
     # pgw#1115: FAIL CLOSED on a declared mint blocker, here — after discovery

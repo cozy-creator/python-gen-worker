@@ -247,10 +247,10 @@ def cpu_quota_cores() -> Optional[float]:
 def effective_cpu_count() -> int:
     """Honest usable-core count: host cores min'd with affinity and quota.
 
-    ``floor``, not ``int(x + 0.5)``: this used to round a 2.5-core quota UP to
-    3 while ``cpu_budget.cpu_allowance`` kept 2.5, so the fleet planned against
-    3 and torch ran 2.5 cores' worth of threads under a throttling kernel. The
-    integer derivation is stated once, in :class:`hostfacts.CpuAllowance`.
+    ``floor``, not ``int(x + 0.5)``: rounding a 2.5-core quota UP to 3 while
+    ``cpu_budget.cpu_allowance`` keeps 2.5 makes the fleet plan against 3 while
+    torch runs under a throttling kernel. The integer derivation is stated once,
+    in :class:`hostfacts.CpuAllowance`.
     """
     return hostfacts.cpu_allowance().whole_cores
 

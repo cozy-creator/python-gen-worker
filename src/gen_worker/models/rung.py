@@ -1,10 +1,9 @@
 """THE degrade ladder (pgw#1206 A2) — one ordered ``Rung``, one walk, one price.
 
-Degrade-don't-OOM (Paul, 2026-07-10) used to span three vocabularies in five
-files, joined by f-strings: plan-time ``serve_fit.RUN_*`` (hub wire), placement
-modes in ``memory`` (``model_offload``/``group_offload``/``sequential``), and
-bare ``"fp8"`` load-rung strings through the executor's bookkeepers. This
-module is the single ordered ladder they all project from.
+Degrade-don't-OOM (Paul, 2026-07-10) as ONE ordered ladder. Plan-time
+``serve_fit.RUN_*`` (hub wire), ``memory``'s placement modes and the load-rung
+strings the executor's bookkeepers carry are all PROJECTIONS of it, never three
+vocabularies joined by f-strings.
 
 **No rung quantizes at runtime** (Paul, 2026-08-13, pgw#1206 D: *"We shouldn't
 be doing runtime quants; if we're really memory-constrained then we should be
@@ -86,11 +85,9 @@ PLACEMENT_LADDER: tuple[str, ...] = tuple(
 _BY_NAME = {r.name: r for r in LADDER}
 
 
-# pgw#1315 DELETED ``FLOOR_CPU_RUNG_UNEXECUTABLE``. It said the reactive walk
-# stopped one rung above ``cpu`` because this build could not execute that rung,
-# which made the always-runs guarantee true at plan time and FALSE on a descent
-# that reached the bottom. The refusal named our own code rather than the card,
-# which is what made it actionable: the fix is to execute the rung
+# pgw#1315: there is NO floor above ``cpu``. A reactive walk that stops one
+# rung short makes the always-runs guarantee true at plan time and false on a
+# descent that reaches the bottom; the fix is to execute the rung
 # (``memory.apply_low_vram_config`` mode ``cpu``), not to soften the wording.
 # A floor whose cause is gone must not be left pointing somewhere else.
 

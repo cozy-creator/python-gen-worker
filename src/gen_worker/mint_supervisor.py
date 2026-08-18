@@ -4,18 +4,13 @@ compile children, per graph class.
     "...if miss then begin compiling and serve eager until the local compiled graph is
     available; then switch over to using that."
 
-**Two tiers, not three.** What stood here was a nested stack: the serving
-parent spawned ONE mint child (``mint_delegate.build_compiled_graph`` ->
-``mint_process.run_mint`` -> ``mint_child``), which loaded a second
-weight-free pipeline and then itself drove the K-wide compile pool. The
-middle tier existed to hold a pipeline the parent already holds a real copy
-of, and to buy th#1299's property — *"no inductor on the serving loop"* —
-with a whole extra process. th#1299's defect was inductor's GIL-holding
-orchestration starving the one asyncio task that carries the 10 s beat and
-eager serving; spawn / poll / collect / digest / CAS-write / publish are I/O
-and supervision and do not starve it. So the property is bought by a
-structural fence instead (``scripts/lint_serving_process_compiles.py``) and
-the middle tier is gone.
+**Two tiers, not three.** A middle tier holding a second weight-free pipeline
+the parent already has a real copy of buys nothing: th#1299's property — *"no
+inductor on the serving loop"* — is about inductor's GIL-holding orchestration
+starving the asyncio task that carries the 10 s beat, and spawn / poll /
+collect / digest / CAS-write / publish are I/O and supervision that do not
+starve it. The property is bought by a structural fence instead
+(``scripts/lint_serving_process_compiles.py``).
 
 What this module owns, and it is all supervision:
 
@@ -853,18 +848,12 @@ def _mint_phase_table_of(result: Any) -> Dict[str, Any]:
     (it is the RESULT's view, never the packed envelope's — the artifact
     deliberately carries no wall clocks), so any entry answers.
 
-    pgw#1356: READ OFF THE TYPED FIELD, which is where the writer has always
-    put it. This read ``entry.metadata["mint_phases"]`` — and ``metadata`` is
-    TCG's CLOSED artifact vocabulary, which has no such field and cannot be
-    extended (``test_tcg_mint_parent_pgw1270`` asserts ``"mint_phases" not in
-    survivor.metadata`` by name). So the reader could never find the table,
-    ``phase_table`` fell through to the on-disk snapshot on EVERY successful
-    mint, and the roll-up on the wire announced a completed mint as
-    ``status=in_flight`` — ``in_flight`` being the terminus
-    :func:`aot_mint.write_phase_snapshot` stamps on a beat. Measured on the
-    2026-08-17 A40 mint: 36 of 36 classes ``status=compiled exit=0``, roll-up
-    ``aot_mint_phases in_flight n_entries=0``, and the operator reading it
-    could not tell a finished mint from a killed one.
+    pgw#1356: READ OFF THE TYPED FIELD, which is where the writer puts it.
+    ``entry.metadata`` is TCG's CLOSED artifact vocabulary and can carry no
+    ``mint_phases`` (``test_tcg_mint_parent_pgw1270`` asserts its absence by
+    name), so reading it there falls through to the on-disk snapshot on every
+    successful mint and announces a completed mint as ``status=in_flight`` —
+    the terminus :func:`aot_mint.write_phase_snapshot` stamps on a beat.
     """
     for entry in getattr(result, "entries", ()):
         rows = getattr(entry, "mint_phases", None)

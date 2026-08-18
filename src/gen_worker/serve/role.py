@@ -79,15 +79,12 @@ class ServeRole(StrEnum):
 #: (pgw#1331). 67 of the role's 76 roots; the other nine are named, with their
 #: two causes, in :data:`MODEL_BEARING_SERVE_MODULES` directly below.
 #:
-#: This used to be 14 — the typed family surface alone — because two PACKAGE
-#: ROOTS dragged the eager-capable worker's guts into every closure that named
-#: them. ``gen_worker/__init__`` eagerly re-exported ``view`` and
-#: ``models.provision``; ``gen_worker/models/__init__`` eagerly re-exported
-#: ``residency`` and through it ``loading``. Both are PEP 562 lazy now, so
-#: importing a package costs nothing and asking for a name costs exactly the
-#: submodule that defines it. ``serving_mode`` separately stopped importing
-#: ``compile_cache`` — 3,100 lines of arming brain — to read two facts, which
-#: now live in :mod:`gen_worker.compile_facts`.
+#: What keeps the number high is PEP 562 laziness at the two package roots
+#: (``gen_worker/__init__``, ``gen_worker/models/__init__``): an eager
+#: re-export there drags the eager-capable worker's guts into every closure
+#: that names them. ``serving_mode`` likewise reads its two facts from
+#: :mod:`gen_worker.compile_facts` rather than importing ``compile_cache`` —
+#: 3,100 lines of arming brain.
 MODEL_FREE_MODULES: Tuple[str, ...] = (
     # The role itself.
     "gen_worker.serve",

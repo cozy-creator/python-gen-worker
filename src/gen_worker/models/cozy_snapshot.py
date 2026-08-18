@@ -13,9 +13,9 @@ and boot observability.
 **A snapshot this module publishes is a PROJECTED tree** (pgw#1308 step ⑥):
 symlinks into ``objects/`` for everything that is not a tensor container,
 ~128 B TFSSTUB1 pointer stubs for everything that is, and no tensor byte at
-any path in it. Whole-tree materialization -- the second complete copy this
-used to write -- has no caller left in this repo, and
-``scripts/lint_materialization_hatch.py`` refuses its return.
+any path in it. Whole-tree materialization -- a second complete copy -- has no
+caller in this repo, and ``scripts/lint_materialization_hatch.py`` refuses its
+return.
 """
 
 from __future__ import annotations
@@ -292,12 +292,12 @@ def _publish_snapshot(
 ) -> Path:
     """Project one snapshot tree under its process-shared lock.
 
-    **This is pgw#1308 step ⑥ — the chokepoint.** It used to ask the store for
-    a whole-tree materialization, writing a complete second copy of every byte
-    the store already held, so a resident model occupied disk twice
-    (pgw#1296(a)). It now projects: non-tensor files are relative symlinks
-    into ``objects/``, tensor containers are ~128 B TFSSTUB1 pointer stubs,
-    and the tensors are read out of the CAS through
+    **This is pgw#1308 step ⑥ — the chokepoint.** It PROJECTS rather than asking
+    the store for a whole-tree materialization, which writes a complete second copy
+    of every byte the store already holds (pgw#1296(a) measured the 2.000x):
+    non-tensor files are relative symlinks into ``objects/``, tensor containers are
+    ~128 B TFSSTUB1 pointer stubs, and the tensors are read out of the CAS
+    through
     :func:`gen_worker.models.tensor_source.open_tensor_source`.
 
     ``symlinks`` is the caller's ONE probe of the target filesystem, passed

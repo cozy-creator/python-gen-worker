@@ -28,9 +28,9 @@ that hands a DIRECTORY to a third-party loader is handing it pointer stubs.
 Those loaders fail at their own parse site, correctly and loudly, and there
 is nothing this repo can change in them.
 
-Materialization used to be UNCONDITIONAL and WHOLE-TREE: every snapshot on
-every pod carried a complete second copy, whether or not anything ever handed
-a directory to a third party (pgw#1296(a) measured the 2.000x). Now:
+Materialization is neither unconditional nor whole-tree: a complete second copy
+on every pod costs 2.000x the disk (pgw#1296(a)) whether or not anything ever
+hands a directory to a third party. So:
 
 *   nothing is copied until a tier-3 site actually asks;
 *   only the SUBTREE it asks for is copied — a `from_pretrained` on one

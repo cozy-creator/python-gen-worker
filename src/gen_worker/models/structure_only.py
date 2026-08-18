@@ -296,11 +296,10 @@ def _refuse_artifact_lanes(root: Path, component: str, cls: Any) -> None:
 def _init_empty_weights(component: str = "") -> Any:
     """The meta-init seam, PROVEN on this process before it is used.
 
-    pgw#1123: this used to import ``accelerate`` — undeclared, absent from the
-    fleet's own probe image, and refusing under the same token a stranded
-    family refuses under. Both halves are fixed: the mechanism is owned
-    (:mod:`.meta_init`), and if it is ever unavailable anyway the refusal names
-    the missing CAPABILITY under its own token.
+    pgw#1123: the mechanism is OWNED (:mod:`.meta_init`) rather than an
+    undeclared ``accelerate`` import absent from the fleet's own probe image, and
+    if it is ever unavailable the refusal names the missing CAPABILITY under its
+    own token rather than the one a stranded family refuses under.
     """
     from . import meta_init
 

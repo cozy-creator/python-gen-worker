@@ -41,16 +41,12 @@ The weight-free premise is FENCED, not assumed (pgw#1173)
 ---------------------------------------------------------
 Every VRAM conclusion in the compile loop follows from "compilation is
 weight-free", so this child proves it about the pipeline it is about to trace
-rather than inferring it from the absence of a complaint. Two guards used to
-stand here and neither could see the case they were named for: a
-``place=False`` load puts real weights on the HOST, where
-:func:`off_host_tensors` cannot see them, and
-``structure_only.structure_only_components`` is satisfied by ANY one virtual
-component, so a family declaring two targets passed with one of them stranded
-on real weights. :func:`gen_worker.models.structure_only.assert_weight_free`
-is the ALL-of check over the declared targets, device-blind, typed
-``StructureNotHonored`` — the type that already means exactly this and that
-this path is required to treat as fatal.
+rather than inferring it from the absence of a complaint.
+:func:`gen_worker.models.structure_only.assert_weight_free` is the ALL-of check
+over the declared targets, device-blind, typed ``StructureNotHonored``. A
+device-scoped guard cannot do it — a ``place=False`` load puts real weights on
+the HOST — and an ANY-of guard passes a family whose second target is stranded
+on real weights.
 """
 
 from __future__ import annotations

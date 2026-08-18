@@ -276,11 +276,9 @@ def replan(
     hub switches on. A cast that could not apply passes ``wanted``/``ran``
     dtype tokens with no ``run_mode`` change.
 
-    th#1867: this is now the ONLY producer of the honest degradation warning.
-    It used to be written at plan time from the author's declared card size;
-    the transition it describes here is one that ACTUALLY HAPPENED, which is
-    the loud-and-quantified evidence §1.36's amendment asks for and the
-    declared number never was.
+    th#1867: the ONLY producer of the honest degradation warning, and the
+    transition it describes ACTUALLY HAPPENED — which is the loud-and-quantified
+    evidence §1.36's amendment asks for and a declared card size never was.
     """
     base = plan if plan is not None else ServePlan(
         serveable=True, run_mode=RUN_NATIVE, fit="", wanted="bf16", ran="bf16",

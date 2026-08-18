@@ -387,12 +387,10 @@ def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
     accepted — callers must split prefix/payload upstream and pass them
     in explicitly.
 
-    Accepts either spelling of the huggingface provider — the short
-    internal form ``"hf"`` and the pgw#511 wire form ``"huggingface"``
-    (``ModelRef.source``, since pgw#523 deleted the ``.provider`` alias
-    that used to narrow it before callers got here) — and always returns
-    ``ParsedModelRef(provider="hf", ...)`` so every existing ``== "hf"``
-    comparison downstream keeps working unchanged.
+    Accepts either spelling of the huggingface provider — the short internal
+    form ``"hf"`` and the wire form ``"huggingface"`` (``ModelRef.source``) —
+    and always returns ``ParsedModelRef(provider="hf", ...)``, so every
+    ``== "hf"`` comparison downstream reads one spelling.
     """
     s = (raw or "").strip()
     if not s:

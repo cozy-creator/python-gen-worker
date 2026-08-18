@@ -641,11 +641,9 @@ def _axis_member(text: str, *, axis: str, where: str) -> str | None:
 
 # ── A19: the declaration is MANDATORY, and absence is not the tri-state ──────
 #
-# `layouts=None` used to mean UNDECLARED — a legitimate third rung that made
-# the hub's gate fall back to the image-wide decoder census. Measured
-# fleet-wide, that rung was not a considered choice anywhere: it was the
-# default, so "this slot has no opinion" and "nobody wrote the line" were one
-# state and no refusal could tell them apart.
+# `layouts=None` is NOT an UNDECLARED third rung. Measured fleet-wide, that
+# rung was never a considered choice: it was the default, so "this slot has no
+# opinion" and "nobody wrote the line" were one state no refusal could split.
 #
 # A19 (Paul, 2026-08-15) cuts the default away. A model slot states what it
 # consumes, or it states — with a reason — that no registered handle describes

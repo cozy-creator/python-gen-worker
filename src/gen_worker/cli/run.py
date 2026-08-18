@@ -609,11 +609,9 @@ def run_setup(
         params = inspect.signature(setup_fn).parameters
     except (TypeError, ValueError):
         # Odd callables without an inspectable signature (decorated,
-        # C-implemented, wrapped). pgw#1307: this used to swallow the TypeError
-        # and re-call `setup_fn()` with NO models, silently dropping every
-        # resolved slot — the exact blanket arm this function's docstring
-        # forbids. A setup we cannot satisfy is an authoring error; let it
-        # raise, naming the models we resolved.
+        # C-implemented, wrapped). pgw#1307: never swallow the TypeError and
+        # re-call `setup_fn()` with NO models — a setup we cannot satisfy is an
+        # authoring error; let it raise, naming the models we resolved.
         setup_fn(**resolved_models)
         return {} if return_loaded else None
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):

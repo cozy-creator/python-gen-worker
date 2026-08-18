@@ -317,12 +317,9 @@ def _collect_authorities(
         found = _fleet_floors_authority(path)
         if found:
             authorities.append(found)
-    # ENDPOINT dists only. `gen-worker` used to be appended here as a
-    # last-resort authority, which made the SDK certify its own floor: the
-    # requirement it declares is the requirement the rig is installed against,
-    # so every rig passed, and `FleetLineUnknown` — the finding this function
-    # exists to produce — was unreachable on any machine with gen-worker
-    # installed, i.e. every machine that can run a rig.
+    # ENDPOINT dists only — never `gen-worker` itself. The SDK certifying its own
+    # floor means every rig passes and `FleetLineUnknown`, the finding this
+    # function exists to produce, is unreachable on any machine that can run one.
     for dist in endpoint_dists:
         found = _metadata_authority(dist)
         if found:

@@ -199,13 +199,11 @@ _streams: dict = {}
 def copy_stream(device: Optional[Any] = None) -> Optional[Any]:
     """The dedicated H2D copy stream FOR ONE DEVICE; ``None`` off-CUDA.
 
-    this used to be a process-wide singleton created on the
-    first caller's device — device 0 in practice — so a promote onto
-    ``cuda:3`` queued its copies on card 0's stream context (falling through
-    to card 3's DEFAULT/compute stream) and then synchronized card 0: the
-    overlap-with-compute property was silently lost for every group but 0,
-    and the ``finally`` sync guarded the wrong card. One stream per device,
-    keyed by the target.
+    ONE STREAM PER DEVICE, keyed by the target. A process-wide singleton created
+    on the first caller's device queues a promote onto ``cuda:3`` in card 0's
+    stream context (falling through to card 3's DEFAULT/compute stream) and then
+    synchronizes card 0 — the overlap-with-compute property is silently lost for
+    every group but 0, and the ``finally`` sync guards the wrong card.
 
     ``device`` may be a ``torch.device``, an index, or ``None`` (= the
     thread-current device, which handler threads pin per group).

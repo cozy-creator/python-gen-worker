@@ -191,8 +191,7 @@ def _handle_export(args: argparse.Namespace) -> int:
         return 2
     # An EAGER declaration takes the torch-free path: it has no graph classes,
     # so there is nothing to trace and `eager_model_v1` is what it can honestly
-    # state (pgw#1346 B5). The refusal this replaces was correct about the
-    # graph tier and wrong to leave the eager tier with no export at all.
+    # state (pgw#1346 B5).
     document: Any
     if isinstance(family, GraphModelSpec):
         from ..model.export import export_model
