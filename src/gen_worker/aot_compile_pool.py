@@ -63,7 +63,7 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from typing import (
     Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple)
@@ -91,6 +91,20 @@ ENTRY_CHILD_MODULE = "gen_worker.aot_compile_child"
 
 #: Report file each entry child writes before exiting.
 ENTRY_REPORT_NAME = "report.json"
+
+#: pgw#1371: per-class progress the child STREAMS while it works. A share is
+#: up to 36/K classes at 156-509 s each, and the report above lands once, at
+#: the end — so on the two 2026-08-18 fleet pods a pool 46 minutes into real
+#: compile work rolled up as `pool_busy_s 0 / n_entries 0` and was read as
+#: "the pool never dispatches" (pgw#1371's blocking-defect header; disproved
+#: against pod zco8e1bx0t1jgk, which completed the identical 36-class shape at
+#: 0.9989 efficiency in 3608 s). The child therefore writes one row per packed
+#: class into ``<slot>/classes/NNN.json`` the moment the artifact is on disk,
+#: and a position file at every phase boundary; the parent harvests both every
+#: poll. Progress rows are TELEMETRY AND LIVENESS EVIDENCE, never identity:
+#: the report stays the share's terminus and the artifact stays the atom.
+CLASS_ROW_DIRNAME = "classes"
+POSITION_NAME = "position.json"
 
 #: pgw#840: the directory that must be on the child's path for
 #: ``-m gen_worker.aot_compile_child`` to mean THIS gen_worker.
@@ -808,6 +822,16 @@ class _Running:
     #: than the child exiting under its own power. The exit code is then the
     #: parent's signal and says nothing about the compile — read the report.
     reaped_at_terminus: bool = False
+    #: pgw#1371: what this share has STREAMED so far — one row per class the
+    #: child packed, harvested live off ``<slot>/classes/``. The report at the
+    #: share's terminus remains authoritative; these exist so a mint that dies
+    #: mid-share still names what landed, and so the silence window judges
+    #: progress toward the GOAL rather than only CPU heat.
+    classes_landed: List[PackedGraphClass] = dataclass_field(
+        default_factory=list)
+    #: The child's last position beat (verbatim file content) and when the
+    #: parent saw it change.
+    position: str = ""
 
 
 @dataclass
@@ -865,6 +889,18 @@ class PoolLedger:
     #: which is the pass every CHILD used to pay.
     seal_seed_s: float = 0.0
     entries: int = 0
+    #: pgw#1371: graph classes the children have streamed as PACKED, live.
+    #: ``busy_s`` above counts only REAPED shares — on the 2026-08-18 fleet
+    #: pods that read a 46-minute, ~full-utilization pool as `pool_busy_s 0 /
+    #: pool_efficiency 0.0` because no 18-class share had reached its report
+    #: yet. This counts the goal instead of the reap.
+    classes_landed: int = 0
+    #: pgw#1371: CPU seconds the live children's process trees were OBSERVED
+    #: to burn (high-water per share, summed at the terminus). It is the
+    #: number that distinguishes "the pool did nothing" from "the pool was
+    #: torn down mid-flight" on a roll-up whose busy_s is 0 — exactly the
+    #: mis-read pgw#1371's blocking-defect header was.
+    child_cpu_s: float = 0.0
     @property
     def idle_s(self) -> float:
         return round(
@@ -893,6 +929,8 @@ class PoolLedger:
             "pool_entries": int(self.entries),
             "pool_workers": int(self.workers),
             "pool_workers_initial": int(self.workers_initial),
+            "pool_classes_landed": int(self.classes_landed),
+            "pool_child_cpu_s": round(self.child_cpu_s, 1),
         }
 
 
@@ -1014,6 +1052,13 @@ def arm_parent_death_signal() -> bool:
 def _read_report(path: Path) -> Optional[EntryReport]:
     try:
         return msgspec.json.decode(path.read_bytes(), type=EntryReport)
+    except (OSError, msgspec.DecodeError, msgspec.ValidationError):
+        return None
+
+
+def _read_class_row(path: Path) -> Optional[PackedGraphClass]:
+    try:
+        return msgspec.json.decode(path.read_bytes(), type=PackedGraphClass)
     except (OSError, msgspec.DecodeError, msgspec.ValidationError):
         return None
 
@@ -1234,7 +1279,15 @@ class EntryCompilePool:
         #: and inductor phase split, as the child measured them. The pool's
         #: other tables are per SHARE, and a share is several classes — the
         #: only granularity anybody asks about a compile is the class.
+        #: pgw#1371: fed LIVE from the children's streamed per-class rows as
+        #: well as from reaped reports, so the phase snapshot a killed mint
+        #: leaves behind names what actually landed instead of `n_entries=0`.
         self.class_spans: Dict[str, Dict[str, float]] = {}
+        #: pgw#1371: per-class landing callback for the CURRENT `compile()`
+        #: run, and the last per-share tree-CPU sample — the ledger's
+        #: `child_cpu_s` at the terminus.
+        self._on_class: Optional[Callable[[str, int, int], None]] = None
+        self._share_cpu_s: Dict[str, float] = {}
         # pgw#830: parent-side per-share spans (writing the job + spawn) and
         # the pool-level idle split. Kept separate from `entry_phases` because
         # they are NOT inside `compile_s`: they happen in the parent while
@@ -1323,6 +1376,7 @@ class EntryCompilePool:
     def compile(
         self, template: EntryJob,
         *, on_share: Optional[Callable[[str, int, int], None]] = None,
+        on_class: Optional[Callable[[str, int, int], None]] = None,
         should_abandon: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, PackedGraphClass]:
         """Dispatch this mint's declared classes K-wide and collect what the
@@ -1345,6 +1399,13 @@ class EntryCompilePool:
         reporting is best-effort by construction: a raising callback must never
         cost the mint the classes it already has.
 
+        ``on_class(name, landed, goal)`` (pgw#1371) fires as each GRAPH CLASS
+        lands — harvested live from the child's streamed rows, ``goal`` being
+        ``width.entries`` (the classes this attempt set out to mint). A share
+        is up to 36/K classes and reports once, so per-share progress on the
+        fleet meant the first beat arrived ~an hour in; per-class beats are
+        what keep the hub's stall rule honest for the whole mint.
+
         ``should_abandon()`` (pgw#1215 step 4) is polled in the same drain loop
         and raises :class:`EntryCompileAbandoned`, so the ``finally`` below
         group-kills every live child. The supervisor drives this pool from a
@@ -1366,6 +1427,7 @@ class EntryCompilePool:
         # named line (`seal_seed_s`) and never inside the capacity identity.
         self._seed_seal_memo()
         self.ledger.entries = width
+        self._on_class = on_class
 
         def _cb(name: str) -> None:
             if on_share is not None:
@@ -1408,8 +1470,8 @@ class EntryCompilePool:
                     raise EntryCompileAbandoned(
                         f"the supervisor abandoned this mint with "
                         f"{len(running)} of {width} share(s) still compiling; "
-                        f"{len(done)} graph class(es) are already packed and "
-                        f"stay on disk")
+                        f"{max(len(done), self.ledger.classes_landed)} graph "
+                        f"class(es) are already packed and stay on disk")
                 finished = self._reap(running)
                 if finished is None:
                     time.sleep(_POLL_S)
@@ -1454,6 +1516,16 @@ class EntryCompilePool:
         finally:
             self.ledger.wall_s = round(time.monotonic() - pool_t0, 3)
             self.ledger.busy_s = round(sum(self.entry_seconds.values()), 3)
+            # pgw#1371: one last harvest, then close the observed-CPU line.
+            # Ordered BEFORE the group kills below, so classes packed in the
+            # children's final seconds are named rather than lost, and the
+            # ledger of a torn-down pool says what its children were doing.
+            for row in running:
+                try:
+                    self._harvest_progress(row)
+                except Exception:  # noqa: BLE001 — telemetry never fails a mint
+                    logger.debug("aot-pool: final harvest failed", exc_info=True)
+            self.ledger.child_cpu_s = sum(self._share_cpu_s.values())
             # Closed at the LIVE width for the final interval, then rounded —
             # `charge` has been accumulating it all along (see there).
             charge("idle_other_s", 0)
@@ -1651,6 +1723,11 @@ class EntryCompilePool:
             row.peak_rss_bytes = max(
                 row.peak_rss_bytes, _peak_rss_bytes(row.proc))
             self.peak_rss_bytes = max(self.peak_rss_bytes, row.peak_rss_bytes)
+            # pgw#1371: harvest the child's streamed per-class rows and its
+            # position beat BEFORE the exit/report/liveness checks — landed
+            # classes are the pool's progress toward its goal, and they are
+            # evidence for the silence window below.
+            progressed = self._harvest_progress(row)
             if row.proc.poll() is not None:
                 return row
             # pgw#1243: A CHILD'S TERMINUS IS ITS REPORT, NOT ITS EXIT.
@@ -1670,10 +1747,63 @@ class EntryCompilePool:
                 row.reaped_at_terminus = True
                 _terminate_group(row.proc)
                 return row
-            self._judge_entry_liveness(row)
+            self._judge_entry_liveness(row, progressed=progressed)
         return None
 
-    def _judge_entry_liveness(self, row: _Running) -> None:
+    def _harvest_progress(self, row: _Running) -> bool:
+        """Read what this share has STREAMED since the last poll (pgw#1371).
+
+        Two files, both written by the child and both best-effort: one row per
+        packed class under ``<slot>/classes/``, and a position beat rewritten
+        at every phase boundary. Harvesting them is what turns "a share
+        reports once, at the end" into live per-class truth: ``class_spans``
+        (and through it every phase snapshot and aborted table), the ledger's
+        ``classes_landed``, and the ``on_class`` beat all advance the moment
+        an artifact is on disk. Returns whether anything advanced, which the
+        silence window counts as progress — a class landing IS the goal.
+        """
+        advanced = False
+        slot = Path(row.job.report).parent
+        rows_dir = slot / CLASS_ROW_DIRNAME
+        try:
+            names = sorted(
+                p for p in rows_dir.iterdir() if p.suffix == ".json")
+        except OSError:
+            names = []
+        for path in names[len(row.classes_landed):]:
+            packed = _read_class_row(path)
+            if packed is None:
+                # A row mid-write; the next poll gets it. Stop rather than
+                # skip so the count stays aligned with the sorted order.
+                break
+            row.classes_landed.append(packed)
+            if packed.name not in self.class_spans:
+                self.ledger.classes_landed += 1
+            self.class_spans[packed.name] = dict(packed.spans or {})
+            advanced = True
+            logger.info(
+                "aot-pool: %s landed graph class %s live (%d landed pool-wide)",
+                row.entry, packed.name, self.ledger.classes_landed)
+            if self._on_class is not None:
+                try:
+                    self._on_class(
+                        packed.name, self.ledger.classes_landed,
+                        int(self.width.entries))
+                except Exception:  # noqa: BLE001 — telemetry never fails a mint
+                    logger.debug(
+                        "entry-pool class callback failed", exc_info=True)
+        try:
+            position = (slot / POSITION_NAME).read_text()
+        except OSError:
+            position = ""
+        if position and position != row.position:
+            row.position = position
+            advanced = True
+        return advanced
+
+    def _judge_entry_liveness(
+        self, row: _Running, *, progressed: bool = False,
+    ) -> None:
         """Condemn a share that has stopped making MEASURED progress.
 
         pgw#1243. Until this existed the drain loop had no give-up test at
@@ -1682,20 +1812,31 @@ class EntryCompilePool:
         supervisor watched this whole process tree — and pgw#1215 step 4
         deleted that tier without moving the watch down with it.
 
-        Progress is MEASURED (process-tree CPU plus bytes written), never a
-        clock and never a frame the child could print while wedged, and the two
-        signals keep separate high-water marks so a quiet one cannot cancel a
-        moving one (pgw#964). A child inside a forty-minute `aot_compile`
-        advances this every poll and is never touched.
+        Progress is MEASURED, never a clock, and the signals keep separate
+        high-water marks so a quiet one cannot cancel a moving one (pgw#964):
+        process-tree CPU, bytes written, and — pgw#1371 — the share's OWN
+        streamed evidence (``progressed``: a class landing on disk, or the
+        child's position beat moving). The last two are the goal-anchored
+        half: they are what let a torn-down mint be read as "mid-flight, N
+        classes landed" instead of the `pool_busy_s 0` that the 2026-08-18
+        fleet pods rolled up. A child inside a forty-minute `aot_compile`
+        advances the CPU axis every poll and is never touched.
         """
         if row.window is None:
             row.window = SilenceWindow(self.entry_silence_window_s)
         cpu = _tree_cpu_seconds(row.proc.pid)
         mib = _dir_mib(Path(row.job.work))
-        advanced = False
+        advanced = bool(progressed)
         if cpu is not None and (
                 row.cpu_s is None or cpu - row.cpu_s >= _ENTRY_EVIDENCE_EPS):
             row.cpu_s, advanced = cpu, True
+        if cpu is not None:
+            # The ledger's observed-CPU line (pgw#1371): a high-water sample
+            # per share, kept even for a share that is later condemned or
+            # torn down — it is the number that says what the pool was doing
+            # when busy_s reads 0.
+            self._share_cpu_s[row.entry] = max(
+                self._share_cpu_s.get(row.entry, 0.0), float(cpu))
         if mib is not None and (
                 row.work_mib is None
                 or mib - row.work_mib >= _ENTRY_EVIDENCE_EPS):
@@ -1715,7 +1856,11 @@ class EntryCompilePool:
             f"{'unreadable' if row.cpu_s is None else f'{row.cpu_s:.1f}s'} "
             f"and its work dir "
             f"{'unreadable' if row.work_mib is None else f'{row.work_mib:.1f}MiB'} "
-            f"are both flat. It is wedged, not compiling; this build FAILS and "
+            f"are both flat, no graph class landed and its position beat is "
+            f"silent ({len(row.classes_landed)} class(es) landed before the "
+            f"silence; last position "
+            f"{row.position.strip()[:120] or '<none>'}). It is wedged, not "
+            f"compiling; this build FAILS and "
             f"this worker keeps serving eager",
             peak_rss_bytes=row.peak_rss_bytes)
 
@@ -1781,6 +1926,11 @@ class EntryCompilePool:
         # here, per child, would refuse the legitimate case and give the
         # illegitimate one the wrong name.
         if code == EXIT_COMPILED and report is not None:
+            # pgw#1371: the ledger's landed count is reconciled against the
+            # report, so a child too old to stream rows (or a report carrying
+            # classes a poll never saw) still counts every class exactly once.
+            self.ledger.classes_landed += sum(
+                1 for c in report.classes if c.name not in self.class_spans)
             if report.peak_rss_bytes:
                 self.peak_rss_bytes = max(
                     self.peak_rss_bytes, int(report.peak_rss_bytes))
@@ -1817,10 +1967,18 @@ class EntryCompilePool:
         # names what exists so a caller is never told the share produced
         # nothing when it produced most of a compiled graph.
         if report is not None and report.classes:
+            self.ledger.classes_landed += sum(
+                1 for c in report.classes if c.name not in self.class_spans)
             for packed in report.classes:
                 self.class_spans[packed.name] = dict(packed.spans or {})
             self.refused_classes[row.entry] = list(report.classes)
             self.entry_declared[row.entry] = int(report.declared_classes or 0)
+        elif report is None and row.classes_landed:
+            # pgw#1371: a share that died without a report still STREAMED the
+            # classes it packed, and they are on disk — name them exactly as a
+            # refusing report's are named, so "this share produced nothing"
+            # and "this share died on class k of n" stop reading the same.
+            self.refused_classes[row.entry] = list(row.classes_landed)
         detail = report.detail if report is not None else ""
         if not detail:
             detail = _stderr_tail(row.stderr_path)
@@ -2005,8 +2163,10 @@ def _exit_note(code: Optional[int]) -> str:
 
 
 __all__ = [
+    "CLASS_ROW_DIRNAME",
     "CODE_DIGEST",
     "COMPILED",
+    "POSITION_NAME",
     "CPUS_PER_ENTRY_WORKER",
     "DEFAULT_ENTRY_PEAK_RSS_BYTES",
     "ENTRY_CHILD_MODULE",

@@ -1614,19 +1614,35 @@ def mint_graph_classes(
     # serial driver that fed `MintProgress.minted`.
     progress.class_spans = pool.class_spans
     progress.share_overlays = pool.entry_overlays
+    # pgw#1371: the bounded axis is GRAPH CLASSES, not shares. A share is up
+    # to 36/K classes and reports once — with share-granular beats the first
+    # progress of a real fleet mint arrived ~an hour in, the on-disk snapshot
+    # stayed the t=0 beat, and the hub's stall rule read a healthy mint as
+    # `self_stalled=t` for its entire life (pods rzz5p4e7b2kcpp /
+    # c7bx4yxbh3wx87, 2026-08-18). Every class landing beats, so the counter,
+    # the snapshot and podguard all advance at the granularity the work
+    # actually completes at.
+    goal = max(1, int(width.entries))
     progress.beat(
-        PHASE_INDUCTOR_COMPILE, 0, width.workers,
-        f"{width.workers} compile child(ren), one share each — {width.reason}")
+        PHASE_INDUCTOR_COMPILE, 0, goal,
+        f"{width.workers} compile child(ren), {goal} graph class(es) — "
+        f"{width.reason}")
     try:
         packed = pool.compile(
             template,
-            on_share=lambda name, done, total: progress.beat(
-                PHASE_INDUCTOR_COMPILE, done, total, name),
+            on_class=lambda name, done, total: progress.beat(
+                PHASE_INDUCTOR_COMPILE, done, max(total, goal), name),
             should_abandon=should_abandon)
     except aot_compile_pool.EntryCompileAbandoned:
         # Not a failure and not this mint's fault: the ledger still has to
         # survive, because the next attempt sizes K off it (pgw#848).
         progress.pool_ledger = _pool_facts(pool)
+        # pgw#1371: one terminal beat so the on-disk snapshot carries the
+        # final ledger (classes landed, observed child CPU) instead of the
+        # last mid-flight one — the abandoned table is precisely the one a
+        # reader needs to distinguish "torn down mid-flight" from "did
+        # nothing".
+        _final_beat(progress, pool, goal, "abandoned: the ledger is final")
         raise
     except aot_compile_pool.EntryCompileFailed as exc:
         # pgw#848: the pool's ledger and its MEASURED peak have to survive the
@@ -1634,6 +1650,7 @@ def mint_graph_classes(
         # and re-sizes K from. Without this the OOM'd attempt teaches the
         # retry nothing and attempt 2 runs the identical width.
         progress.pool_ledger = _pool_facts(pool)
+        _final_beat(progress, pool, goal, "failed: the ledger is final")
         if exc.resource:
             raise MintResourceExhausted(
                 str(exc), entry=exc.entry, basis=exc.basis,
@@ -1828,6 +1845,22 @@ def _device_peak_provenance() -> Dict[str, str]:
         "gen_worker": str(version),
         "phase": DEVICE_PEAK_PHASE,
     }
+
+
+def _final_beat(
+    progress: MintProgress, pool: Any, goal: int, note: str,
+) -> None:
+    """pgw#1371: stamp the terminal position off the pool's own ledger.
+
+    A guarded read, because telemetry never fails a mint and test doubles of
+    the pool legitimately carry no ledger.
+    """
+    ledger = getattr(pool, "ledger", None)
+    if ledger is None:
+        return
+    progress.beat(
+        PHASE_INDUCTOR_COMPILE,
+        int(getattr(ledger, "classes_landed", 0) or 0), int(goal), note)
 
 
 def _pool_facts(pool: aot_compile_pool.EntryCompilePool) -> Dict[str, Any]:

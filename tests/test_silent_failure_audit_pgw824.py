@@ -334,12 +334,14 @@ def _drive_tcg_pool(
             pass
 
         def compile(self, *_args: Any, **kwargs: Any) -> dict[str, Any]:
-            on_share = kwargs["on_share"]
-            on_share("share-a", 1, 2)
+            # pgw#1371: the production driver beats per GRAPH CLASS now, off
+            # the child's streamed rows, and no longer passes `on_share`.
+            on_class = kwargs["on_class"]
+            on_class("cls/dim=0", 1, 2)
             if fail_after_first:
                 raise aot_compile_pool.EntryCompileFailed(
                     "share-b", "TCG refused share-b")
-            on_share("share-b", 2, 2)
+            on_class("cls/dim=1", 2, 2)
             return {}
 
     monkeypatch.setattr(aot_compile_pool, "EntryCompilePool", _Pool)
@@ -375,7 +377,11 @@ def test_the_tcg_pool_reports_every_share_as_it_lands(
     ]
     assert [beat[1] for beat in compile_beats] == [0, 1, 2]
     assert all(beat[2] == 2 for beat in compile_beats)
-    assert [beat[3] for beat in compile_beats[1:]] == ["share-a", "share-b"]
+    # pgw#1371: the beats name GRAPH CLASSES as they land, not shares — a
+    # share is up to 36/K classes and lands once, which on the fleet meant the
+    # first beat of a real mint arrived ~an hour in.
+    assert [beat[3] for beat in compile_beats[1:]] == [
+        "cls/dim=0", "cls/dim=1"]
 
 
 def test_a_tcg_pool_refusal_preserves_the_last_completed_share(
@@ -399,7 +405,7 @@ def test_a_tcg_pool_refusal_preserves_the_last_completed_share(
         "phase": aot_mint.PHASE_INDUCTOR_COMPILE,
         "step": 1,
         "total": 2,
-        "note": "share-a",
+        "note": "cls/dim=0",
     }
 
 
