@@ -170,6 +170,13 @@ class Stage(StrEnum):
     #: pgw#1353 measured `keys_from=traced` costing 805 s on every sdxl pod,
     #: against milliseconds for a read.
     KEYSET = "keyset"
+    #: pgw#1372 adopt-first boot: the release graph document read plus the
+    #: per-graph `[release x sm]` artifact pull and swap-in. The NEW flow's
+    #: replacement for `keyset` — there is no derive to time, so the span
+    #: carries `graphs_from=release` and per-outcome counts
+    #: (`artifact_from_store` / `artifact_from_eager`); `keyset` survives
+    #: only until the old boot ladder is deleted (pgw#1373).
+    ADOPT_PULL = "adopt_pull"
     #: Getting a compiled graph: the boot-adopt decision, the fetch it orders
     #: and the staging/verification before the first dlopen.
     ADOPT = "adopt"

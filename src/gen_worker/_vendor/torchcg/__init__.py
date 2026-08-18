@@ -1,5 +1,12 @@
 """Mint and reuse verified PyTorch AOTInductor graphs through tensorfs."""
 
+from .adopt import (
+    AdoptError,
+    ArtifactLoader,
+    Hole,
+    LaneAdoption,
+    adopt_lane,
+)
 from .artifact import ARTIFACT_METADATA_FIELDS, COMPILED_GRAPH_FORMAT, ArtifactError
 from .compiler import CompileError
 from .declaration import (
@@ -8,11 +15,29 @@ from .declaration import (
     GraphClassSpec,
     RuntimeCompatibility,
 )
+from .discovery import DiscoveryError, discover_lane
+from .document import (
+    DOCUMENT_FORMAT,
+    DocumentError,
+    GraphRecord,
+    GraphSetDocument,
+    LaneGraphs,
+)
 from .engine import (
     AdmissionError,
     Engine,
     EnsureOutcome,
     EnsureResult,
+)
+from .graph_identity import (
+    ENV_SCHEME,
+    GRAPH_SCHEME,
+    EnvIdentity,
+    GraphIdentityError,
+    closure_hash,
+    graph_hash,
+    installed_closure,
+    is_graph_hash,
 )
 from .identity import (
     ARTIFACT_KIND,
@@ -28,6 +53,15 @@ from .ingress import (
     IngressError,
     build_call_ingress,
     exported_input_name,
+)
+from .lane import Lane, LaneError, resolve_target
+from .requirements import (
+    ArtifactCandidate,
+    EnvironmentMismatch,
+    RequirementsError,
+    RequirementsManifest,
+    assert_exact_env,
+    rank,
 )
 from .runner import CompiledGraphRunner, ConstantBindingError
 from .selection import (
@@ -53,14 +87,49 @@ from .storage import (
     StoreOutcome,
     StoreResult,
 )
+from .store import GraphStore, LocalGraphStore, PublishOutcome, StoreError, holes
 
 __all__ = [
     "ARTIFACT_KIND",
     "ARTIFACT_METADATA_FIELDS",
     "AdmissionError",
+    "AdoptError",
+    "ArtifactCandidate",
     "ArtifactError",
+    "ArtifactLoader",
     "CompileError",
     "COMPILED_GRAPH_FORMAT",
+    "DOCUMENT_FORMAT",
+    "DiscoveryError",
+    "DocumentError",
+    "ENV_SCHEME",
+    "EnvIdentity",
+    "EnvironmentMismatch",
+    "Lane",
+    "GRAPH_SCHEME",
+    "GraphIdentityError",
+    "GraphRecord",
+    "GraphSetDocument",
+    "GraphStore",
+    "Hole",
+    "LaneAdoption",
+    "LaneError",
+    "LaneGraphs",
+    "LocalGraphStore",
+    "PublishOutcome",
+    "RequirementsError",
+    "RequirementsManifest",
+    "StoreError",
+    "adopt_lane",
+    "assert_exact_env",
+    "closure_hash",
+    "discover_lane",
+    "graph_hash",
+    "holes",
+    "installed_closure",
+    "is_graph_hash",
+    "rank",
+    "resolve_target",
     "CompiledGraphKey",
     "CompiledGraphRunner",
     "CallIngress",

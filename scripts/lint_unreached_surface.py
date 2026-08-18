@@ -150,7 +150,31 @@ DEFINED_LABELS: Set[str] = set()
 # `stale_exemptions`) — the same rule the config-reads and settings-writers
 # allowlists follow, and what stops this table becoming the place dead code
 # goes to be forgotten.
-EXEMPT_TARGETS: dict[str, str] = {}
+EXEMPT_TARGETS: dict[str, str] = {
+    # pgw#1372: the adopt-first boot's hub store. Its LIFECYCLE caller is the
+    # vendored torchcg adopt path (`_vendor/torchcg/adopt.py` calls
+    # `store.fetch_artifact` through the GraphStore protocol), which this
+    # guard rightly does not count as owned reach; its BOOT wiring into the
+    # worker executor is owed by the pgw#1372 follow-up that lands when
+    # th#2133's route merges hub-side. `put_graphs`/`publish_artifact` are
+    # the protocol's write half, REFUSAL ARMS by design (the document is
+    # stamped by the publish pipeline; mints publish via pgw#1371's
+    # publisher) — wired or deleted with that same follow-up.
+    "gen_worker.serving.hub_store.HubGraphStore.fetch_artifact":
+        "reached via the GraphStore protocol from _vendor/torchcg/adopt.py; "
+        "executor wiring owed by the pgw#1372 boot-cutover follow-up",
+    "gen_worker.serving.hub_store.HubGraphStore.put_graphs":
+        "protocol refusal arm (documents are publish-pipeline-stamped, th#2134); "
+        "dies or wires with the pgw#1372 boot-cutover follow-up",
+    "gen_worker.serving.hub_store.HubGraphStore.publish_artifact":
+        "protocol refusal arm (mints publish via pgw#1371's publisher); "
+        "dies or wires with the pgw#1372 boot-cutover follow-up",
+    # pgw#1372: the deploy-binding push. The hub's rebind order reaches the
+    # worker through the executor cutover (same follow-up); a rebind's new
+    # graphs are holes the mint fills (partial-hit).
+    "gen_worker.serving.host.EndpointHost.rebind":
+        "deploy-binding push wiring owed by the pgw#1372 boot-cutover follow-up",
+}
 
 # Decorators meaning "something else calls this, by table not by name".
 DYNAMIC_DECORATORS = {
