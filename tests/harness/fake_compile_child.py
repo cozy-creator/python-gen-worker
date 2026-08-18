@@ -68,15 +68,60 @@ else:
 
 out = Path(job["out_dir"])
 out.mkdir(parents=True, exist_ok=True)
+
+
+def _position(phase, detail=""):
+    # pgw#1371: the real child's position beat, faked with the same file
+    # protocol so the parent's harvest is exercised for real.
+    path = report.parent / "position.json"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(json.dumps(
+        {{"phase": phase, "detail": detail, "epoch": time.time()}}).encode())
+    os.replace(tmp, path)
+
+
+def _stream_row(idx, row):
+    rows = report.parent / "classes"
+    rows.mkdir(parents=True, exist_ok=True)
+    tmp = rows / f".{{idx:03d}}.tmp"
+    tmp.write_bytes(json.dumps(row).encode())
+    os.replace(tmp, rows / f"{{idx:03d}}.json")
+
+
+_position("start")
+if mode == "slow-positions":
+    # pgw#1371: flat on every pgw#1243 axis — ~no CPU, no bytes in the work
+    # dir — but honestly beating its position while it "works". The window
+    # must admit the beat as evidence or it condemns a live share.
+    for i in range(12):
+        time.sleep(0.75)
+        _position("working", str(i))
 classes = []
+stream_hang_after = int(os.environ.get("PGW_FAKE_STREAM_HANG_AFTER", "-1"))
+if mode == "stream-then-hang":
+    # Burn a parent-visible sliver of CPU first, like a real compile child
+    # does from its first second — it is what the pool's observed-CPU ledger
+    # line (pgw#1371) records for a share that never reaches its report.
+    acc, t_burn = 0, time.time()
+    while time.time() - t_burn < 0.6:
+        acc += 1
 for name in names:
+    if mode == "stream-then-hang" and len(classes) == max(0, stream_hang_after):
+        # pgw#1371: the mid-flight shape — some classes landed and streamed,
+        # the share never reaches its report. The parent must already know
+        # everything this child packed.
+        while True:
+            time.sleep(60)
     artifact = out / (name.replace("/", "__") + ".tar.gz")
     artifact.write_text("packed graph class " + name)
-    classes.append({{
+    row = {{
         "name": name, "key": "ek1-" + name.replace("/", "-"),
         "artifact": str(artifact), "metadata": json.dumps({{"name": name}}),
         "spans": {{"export_s": 1.0, "compile_s": 2.0}},
-    }})
+    }}
+    classes.append(row)
+    _stream_row(len(classes) - 1, row)
+    _position("packed", name)
 
 now = time.time()
 refused = mode == "refuse-midway"

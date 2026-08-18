@@ -95,7 +95,7 @@ class _Pool:
         part-way has to leave the landed rows behind it — pinned by
         :func:`test_a_killed_mint_leaves_the_classes_that_landed_on_disk`.
         """
-        on_share = kwargs.get("on_share")
+        on_share = kwargs.get("on_class")  # pgw#1371: per-class beats
         packed: Dict[str, aot_compile_pool.PackedGraphClass] = {}
         for index, name in enumerate(_CLASSES):
             key = "cg-key-v1-" + f"{index}".rjust(56, "0")

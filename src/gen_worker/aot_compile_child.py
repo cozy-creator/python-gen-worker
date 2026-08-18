@@ -82,9 +82,11 @@ from gen_worker._vendor.torchcg.spans import (
 )
 
 from .aot_compile_pool import (
+    CLASS_ROW_DIRNAME,
     CODE_DIGEST,
     COMPILED,
     PACKAGE_ROOT,
+    POSITION_NAME,
     arm_parent_death_signal,
     EXIT_BAD_JOB,
     EXIT_COMPILED,
@@ -137,6 +139,48 @@ def _write(path: Path, report: EntryReport) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_bytes(msgspec.json.encode(report))
     os.replace(tmp, path)
+
+
+def _mark_position(job: EntryJob, phase: str, *, detail: str = "") -> None:
+    """The child's position beat (pgw#1371), rewritten at phase boundaries.
+
+    A share is up to 36/K classes and its report lands once, at the very end
+    — so from the parent's side a 46-minute healthy share and a wedged one
+    read identically until the terminus (the 2026-08-18 fleet signature).
+    This file is the child SAYING where it is: the parent counts a CHANGED
+    position as silence-window evidence and quotes the last one when it
+    condemns. Best-effort by construction — telemetry never fails a mint.
+    """
+    try:
+        path = Path(job.report).parent / POSITION_NAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_bytes(json.dumps({
+            "phase": phase, "detail": detail[:200],
+            "epoch": round(time.time(), 3),
+        }).encode())
+        os.replace(tmp, path)
+    except OSError:
+        logger.debug("aot-compile: position beat failed", exc_info=True)
+
+
+def _stream_class_row(job: EntryJob, index: int, packed: PackedGraphClass) -> None:
+    """One packed class, streamed to the parent THE MOMENT it is on disk.
+
+    pgw#1371: the artifact itself already lands per class (pgw#1183's
+    durability atom); this row is the parent-visible half — it feeds the live
+    `class_spans`, the pool ledger's `classes_landed`, the per-class beat the
+    hub's stall rule reads, and the silence window. Written atomically and
+    named by index so the parent can harvest strictly in order.
+    """
+    try:
+        rows = Path(job.report).parent / CLASS_ROW_DIRNAME
+        rows.mkdir(parents=True, exist_ok=True)
+        tmp = rows / f".{index:03d}.tmp"
+        tmp.write_bytes(msgspec.json.encode(packed))
+        os.replace(tmp, rows / f"{index:03d}.json")
+    except OSError:
+        logger.debug("aot-compile: class row stream failed", exc_info=True)
 
 
 def _peak_rss() -> int:
@@ -507,6 +551,9 @@ def run(job: EntryJob) -> int:
     # serving pod must never be left burning CPU on a compiled graph nobody is waiting
     # for any more.
     _install_posture(job)
+    # The FIRST beat, before anything that can take minutes: a child whose
+    # position file never appears did not reach its own code.
+    _mark_position(job, "start")
     # The seal is the parent's — re-established, not re-derived, because this
     # process emits the very bytes the seal describes. A child that sealed
     # differently would produce an artifact the parent's verify() rejects on
@@ -517,6 +564,7 @@ def run(job: EntryJob) -> int:
     with ledger.span("child_seal_s"):
         env_seal.establish()
     seal_detail = dict(env_seal.LAST_ESTABLISH_SPANS)
+    _mark_position(job, "sealed")
     # Before ANY compile touches the card: every inductor GPU benchmark in
     # this process goes through the pool-wide lock, so K concurrent children
     # cannot time kernels against each other and bake contention-chosen
@@ -541,6 +589,7 @@ def run(job: EntryJob) -> int:
         # before anyone can argue about a persistent worker.
         with ledger.span("child_torch_import_s"):
             import torch
+        _mark_position(job, "torch_imported")
 
         # pgw#1215: this is what replaced `child_program_load_s`. The child
         # composes the weight-free target it is about to trace instead of
@@ -548,6 +597,7 @@ def run(job: EntryJob) -> int:
         with ledger.span("child_setup_s"):
             pipeline, spec, decl = build_pipeline(job)
             env_seal.assert_seal_unchanged("aot compile child setup")
+        _mark_position(job, "pipeline_composed")
     except PreflightRefused as exc:
         return _refuse(str(exc))
     except Exception as exc:  # noqa: BLE001
@@ -588,6 +638,9 @@ def run(job: EntryJob) -> int:
         for traced in _trace_share(aot_mint, pipeline, spec, decl, job):
             current_class = traced.name
             declared = int(traced.declared) or declared
+            _mark_position(
+                job, "compile", detail=f"{traced.name} "
+                f"({len(packed) + 1} of this share, {declared} declared)")
             timings = dict(traced.timings or {})
             row_trace = float(timings.get("export_s", 0.0))
             trace_s += row_trace
@@ -618,6 +671,13 @@ def run(job: EntryJob) -> int:
                 metadata=result.packed.metadata,
                 spans=spans,
             ))
+            # pgw#1371: the parent learns of the class NOW, not at the
+            # share's report — the artifact is already on disk, which is the
+            # durability bound (pgw#1183) this row makes visible.
+            _stream_class_row(job, len(packed) - 1, packed[-1])
+            _mark_position(
+                job, "packed", detail=f"{traced.name} "
+                f"({len(packed)} of this share, {declared} declared)")
     except aot_mint.MintRefused as exc:
         # NOT a discard. Every class this child already packed is on disk and
         # is named in the report — a share is not all-or-nothing, which is the
