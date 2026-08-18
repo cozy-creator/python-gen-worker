@@ -313,8 +313,9 @@ def test_the_tuned_schema_carries_every_field_the_endpoint_stamps() -> None:
 def test_the_scheduler_block_is_the_checkpoints_own_static_shift() -> None:
     """Both checkpoints publish the identical block, so one declaration carries it."""
 
-    assert ERNIE.scheduler is not None
-    assert ERNIE.scheduler.name == "flow_match_euler_discrete"
+    # A set of ONE, keyed by sampler (pgw#1346 K10).
+    assert list(ERNIE.schedulers) == ["flow_match_euler"]
+    assert ERNIE.schedulers["flow_match_euler"].name == "flow_match_euler_discrete"
     assert SCHEDULER["shift"] == 4.0
     assert SCHEDULER["use_dynamic_shifting"] is False
     # `shift_terminal` is published as null and is therefore ABSENT: a block

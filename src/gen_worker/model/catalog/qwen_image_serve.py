@@ -183,7 +183,12 @@ def schedule_for(instance: QwenImage, *, steps: int, shape: int) -> Schedule:
     step count.
     """
 
-    return FlowMatchLadder.from_block(instance.SCHEDULER_PARAMETERS).schedule(
+    # Indexed by SAMPLER (pgw#1346 K10): `SCHEDULER_PARAMETERS` is keyed by the
+    # name a checkpoint is stamped with. This family declares exactly one, so
+    # the key is a constant here rather than a checkpoint fact.
+    return FlowMatchLadder.from_block(
+        instance.SCHEDULER_PARAMETERS["flow_match_euler"]
+    ).schedule(
         steps, image_seq_len=packed_tokens(shape)
     )
 

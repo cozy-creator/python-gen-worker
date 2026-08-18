@@ -232,7 +232,10 @@ QWEN_IMAGE: Final = GraphModelSpec(
     # bottom to 1, because the turbo lane's fixed 8-step distill regime and the
     # boot warm-up's single step both run through the same family parameter.
     parameters=(Parameter("steps", minimum=1, maximum=80),),
-    scheduler=Scheduler("flow_match_euler_discrete", SCHEDULER),
+    # A set of ONE (pgw#1346 K10): this family's tuned schema names no sampler
+    # because it serves exactly this schedule, so `inst.scheduler()` still
+    # takes no argument and still returns the concrete class.
+    schedulers={"flow_match_euler": Scheduler("flow_match_euler_discrete", SCHEDULER)},
 )
 
 __all__ = [

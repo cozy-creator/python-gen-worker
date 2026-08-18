@@ -312,7 +312,6 @@ def export_model(family: GraphModelSpec) -> ModelExport:
             )
         )
     loop = family.staged_loop
-    scheduler = family.scheduler
     return ModelExport(
         family=FamilyName(family.name),
         buckets=tuple(
@@ -343,13 +342,17 @@ def export_model(family: GraphModelSpec) -> ModelExport:
             )
             for parameter in family.parameters
         ),
-        scheduler=None
-        if scheduler is None
-        else ExportedScheduler(
-            name=scheduler.name,
-            parameters=tuple(
-                (ParameterName(name), value) for name, value in scheduler.parameters.items()
-            ),
+        # `GraphModelSpec._validate_schedulers` already sorted the set by
+        # sampler, which is the order the export's own invariant wants.
+        schedulers=tuple(
+            ExportedScheduler(
+                sampler=sampler,
+                name=scheduler.name,
+                parameters=tuple(
+                    (ParameterName(name), value) for name, value in scheduler.parameters.items()
+                ),
+            )
+            for sampler, scheduler in family.schedulers.items()
         ),
         lora_tuned=None if family.lora_tuned is None else _tuned_ref(family.lora_tuned),
     )

@@ -388,8 +388,16 @@ def test_the_generated_class_carries_the_class_level_facts_and_no_others(
     assert toy_binding.EXPORT_DIGEST == toy_export.digest()
     assert toy_binding.LOOP == (("denoiser", "counted", "steps"), ("decoder", "once", ""))
     assert toy_binding.LOOP_KIND == "staged"
-    assert toy_binding.SCHEDULER == "euler_discrete"
-    assert dict(toy_binding.SCHEDULER_PARAMETERS) == {"shift": 3.0}
+    # The scheduler SET, keyed by sampler (pgw#1346 K10). Two names, two
+    # kinds, and the blocks keyed the same way.
+    assert dict(toy_binding.SCHEDULERS) == {
+        "euler": "euler_discrete",
+        "euler_a": "euler_ancestral_discrete",
+    }
+    assert {name: dict(block) for name, block in toy_binding.SCHEDULER_PARAMETERS.items()} == {
+        "euler": {"timestep_spacing": "trailing"},
+        "euler_a": {"timestep_spacing": "trailing"},
+    }
     assert toy_binding.PARAMETERS == (("steps", 1, 100),)
     assert toy_binding.Tuned is ToyTuned
 
@@ -710,8 +718,6 @@ def _recipe_from(export: ModelExport, *, drift: bool = False) -> Any:
         Recipe,
         RecipeParameter,
         RecipeRunner,
-        SchedulerName,
-        Scheduler as RecipeScheduler,
     )
 
     runners = []
@@ -750,14 +756,11 @@ def _recipe_from(export: ModelExport, *, drift: bool = False) -> Any:
             RecipeParameter(name=row.name, minimum=row.minimum, maximum=row.maximum)
             for row in export.parameters
         ),
-        scheduler=(
-            None
-            if export.scheduler is None
-            else RecipeScheduler(
-                name=SchedulerName(export.scheduler.name),
-                parameters=export.scheduler.parameters,
-            )
-        ),
+        # `recipe_v1` records ONE scheduler and the declaration now carries a
+        # SET keyed by sampler (pgw#1346 K10), so there is no faithful
+        # projection — a mint emits no scheduler and `assert_recipe` compares
+        # none, which is why this is `None` rather than an arbitrary member.
+        scheduler=None,
     )
 
 
@@ -804,10 +807,14 @@ def test_payload_values_win_over_tuned_and_none_falls_through() -> None:
     assert resolve_tuned(_TunedIn(steps=8), tuned, tuned_fields(ToyTuned)) == {
         "steps": 8,
         "guidance": 6.0,
+        # The toy's sampler field (pgw#1346 K10) resolves the same way every
+        # other tuned value does — it is not special-cased anywhere.
+        "scheduler": "euler",
     }
     assert resolve_tuned(_TunedIn(), tuned, tuned_fields(ToyTuned)) == {
         "steps": 28,
         "guidance": 6.0,
+        "scheduler": "euler",
     }
 
 
@@ -842,7 +849,7 @@ def test_resolve_takes_a_payload_and_an_instance_and_needs_no_field_list(
 
 
 def test_tuned_fields_excludes_the_version_stamp() -> None:
-    assert tuned_fields(ToyTuned) == ("steps", "guidance")
+    assert tuned_fields(ToyTuned) == ("steps", "guidance", "scheduler")
 
 
 def test_catalog_values_decode_onto_the_instance_and_loras_overlay_them(
@@ -1291,7 +1298,17 @@ def test_every_catalog_family_is_callable_hubless(family: str) -> None:
 def test_the_catalog_index_and_its_exports_agree() -> None:
     from gen_worker.model import catalog
 
-    assert sorted(catalog.__all__) == sorted(catalog._FAMILIES)
+    # NO REPEATS, asserted rather than eyeballed (pgw#1346 B4's finding). This
+    # index is an ADDITIVE file that every family lane appends to, so union
+    # rebases accumulate duplicates — and only half of that class is
+    # gate-visible: ruff's F601 catches a repeated dict KEY, but a repeated
+    # string in a list or tuple changes no behaviour and passes every gate. A
+    # length comparison is what catches the half nothing else does.
+    assert len(catalog.__all__) == len(set(catalog.__all__)), sorted(
+        name for name in catalog.__all__ if catalog.__all__.count(name) > 1
+    )
+    assert len(catalog._FAMILIES) == len(catalog.__all__)
+    assert set(catalog.__all__) ^ set(catalog._FAMILIES) == set()
     for name in catalog.__all__:
         assert getattr(catalog, name) is not None
     with pytest.raises(AttributeError, match="the catalog has no"):

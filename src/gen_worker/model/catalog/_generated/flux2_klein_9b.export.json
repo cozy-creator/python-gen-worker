@@ -948,18 +948,21 @@
       ]
     }
   ],
-  "scheduler": {
-    "name": "flow_match_euler_discrete",
-    "parameters": {
-      "base_image_seq_len": 256,
-      "base_shift": 0.5,
-      "max_image_seq_len": 4096,
-      "max_shift": 1.15,
-      "num_train_timesteps": 1000,
-      "shift": 3.0,
-      "use_dynamic_shifting": true
+  "schedulers": [
+    {
+      "name": "flow_match_euler_discrete",
+      "parameters": {
+        "base_image_seq_len": 256,
+        "base_shift": 0.5,
+        "max_image_seq_len": 4096,
+        "max_shift": 1.15,
+        "num_train_timesteps": 1000,
+        "shift": 3.0,
+        "use_dynamic_shifting": true
+      },
+      "sampler": "flow_match_euler"
     }
-  },
+  ],
   "tuned": {
     "module": "gen_worker.model.catalog.flux2_klein_9b_serve",
     "qualname": "Flux2Klein9bTuned"

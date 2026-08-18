@@ -203,14 +203,17 @@
       ]
     }
   ],
-  "scheduler": {
-    "name": "flow_match_euler_discrete",
-    "parameters": {
-      "num_train_timesteps": 1000,
-      "shift": 6.0,
-      "use_dynamic_shifting": false
+  "schedulers": [
+    {
+      "name": "flow_match_euler_discrete",
+      "parameters": {
+        "num_train_timesteps": 1000,
+        "shift": 6.0,
+        "use_dynamic_shifting": false
+      },
+      "sampler": "flow_match_euler"
     }
-  },
+  ],
   "tuned": {
     "module": "gen_worker.model.catalog.z_image_serve",
     "qualname": "ZImageTuned"

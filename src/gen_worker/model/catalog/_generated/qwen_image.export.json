@@ -1239,20 +1239,23 @@
       ]
     }
   ],
-  "scheduler": {
-    "name": "flow_match_euler_discrete",
-    "parameters": {
-      "base_image_seq_len": 256,
-      "base_shift": 0.5,
-      "max_image_seq_len": 8192,
-      "max_shift": 0.9,
-      "num_train_timesteps": 1000,
-      "shift": 1.0,
-      "shift_terminal": 0.02,
-      "time_shift_type": "exponential",
-      "use_dynamic_shifting": true
+  "schedulers": [
+    {
+      "name": "flow_match_euler_discrete",
+      "parameters": {
+        "base_image_seq_len": 256,
+        "base_shift": 0.5,
+        "max_image_seq_len": 8192,
+        "max_shift": 0.9,
+        "num_train_timesteps": 1000,
+        "shift": 1.0,
+        "shift_terminal": 0.02,
+        "time_shift_type": "exponential",
+        "use_dynamic_shifting": true
+      },
+      "sampler": "flow_match_euler"
     }
-  },
+  ],
   "tuned": {
     "module": "gen_worker.model.catalog.qwen_image_serve",
     "qualname": "QwenImageTuned"

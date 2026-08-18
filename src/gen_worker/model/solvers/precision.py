@@ -142,6 +142,41 @@ def sigma_table(
     asks for the same one.
     """
 
+    return tuple(
+        f32(math.sqrt(f32(f32(1.0 - alpha) / alpha)))
+        for alpha in alphas_cumprod(
+            num_train_timesteps,
+            beta_start,
+            beta_end,
+            beta_schedule,
+            rescale_betas_zero_snr,
+            True,
+        )
+    )
+
+
+@lru_cache(maxsize=32)
+def alphas_cumprod(
+    num_train_timesteps: int,
+    beta_start: float,
+    beta_end: float,
+    beta_schedule: str,
+    rescale_betas_zero_snr: bool,
+    clamp_terminal: bool,
+) -> tuple[float, ...]:
+    """The trained ``alphas_cumprod`` table — the root every kind descends from.
+
+    ``clamp_terminal`` is NOT a preference, and it is the one place the
+    diffusion-objective kinds genuinely disagree about the same table
+    (pgw#1346 K10). Under zero-terminal-SNR rescaling the euler schedulers and
+    the multistep solvers overwrite the LAST entry with the smallest positive
+    fp16 subnormal so the first SIGMA is finite; ``DDIMScheduler`` does not,
+    because it walks alphas rather than sigmas and has no infinity to avoid.
+    Reading one class's table into another is a silently different first step —
+    the one furthest from the data manifold, so the most visible one — which is
+    why the flag is a parameter here rather than a constant.
+    """
+
     if beta_schedule == "scaled_linear":
         roots = linspace_f32(math.sqrt(beta_start), math.sqrt(beta_end), num_train_timesteps)
         betas = [f32(root * root) for root in roots]
@@ -152,16 +187,15 @@ def sigma_table(
         betas = rescale_zero_terminal_snr(betas)
 
     cumulative = 1.0
-    alphas_cumprod: list[float] = []
+    table: list[float] = []
     for beta in betas:
         cumulative *= f32(1.0 - beta)
-        alphas_cumprod.append(f32(cumulative))
-    if rescale_betas_zero_snr:
+        table.append(f32(cumulative))
+    if rescale_betas_zero_snr and clamp_terminal:
         # Close to zero without being zero, so the first sigma is not inf.
         # Upstream's value verbatim: the smallest positive fp16 subnormal.
-        alphas_cumprod[-1] = 2.0**-24
-
-    return tuple(f32(math.sqrt(f32(f32(1.0 - alpha) / alpha))) for alpha in alphas_cumprod)
+        table[-1] = 2.0**-24
+    return tuple(table)
 
 
 def rescale_zero_terminal_snr(betas: list[float]) -> list[float]:
@@ -187,6 +221,7 @@ def rescale_zero_terminal_snr(betas: list[float]) -> list[float]:
 
 
 __all__ = [
+    "alphas_cumprod",
     "f32",
     "linspace_f32",
     "linspace_f64",

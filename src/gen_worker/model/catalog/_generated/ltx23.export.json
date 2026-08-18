@@ -895,12 +895,15 @@
       ]
     }
   ],
-  "scheduler": {
-    "name": "flow_match_euler_discrete",
-    "parameters": {
-      "num_train_timesteps": 1000
+  "schedulers": [
+    {
+      "name": "flow_match_euler_discrete",
+      "parameters": {
+        "num_train_timesteps": 1000
+      },
+      "sampler": "flow_match_euler"
     }
-  },
+  ],
   "tuned": {
     "module": "gen_worker.model.catalog.ltx23_serve",
     "qualname": "Ltx23Tuned"

@@ -235,7 +235,10 @@ Z_IMAGE: Final = GraphModelSpec(
     # The base function's declared payload range. The two turbo functions cap
     # at 16, and a family parameter bounds the family rather than either lane.
     parameters=(Parameter("steps", minimum=1, maximum=80),),
-    scheduler=Scheduler("flow_match_euler_discrete", SCHEDULER),
+    # A set of ONE (pgw#1346 K10): this family's tuned schema names no sampler
+    # because it serves exactly this schedule, so `inst.scheduler()` still
+    # takes no argument and still returns the concrete class.
+    schedulers={"flow_match_euler": Scheduler("flow_match_euler_discrete", SCHEDULER)},
 )
 
 __all__ = [

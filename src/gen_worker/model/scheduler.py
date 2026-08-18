@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, ClassVar, Final, Protocol, Self
 
@@ -49,10 +49,13 @@ from .solvers.block import choice as _choice
 from .solvers.block import count as _count
 from .solvers.block import flag as _flag
 from .solvers.block import real as _real
+from .solvers.block import only as _only
 from .solvers.block import refuse as _refuse
+from .solvers.ladders import interpolate_table as _interpolate
 from .solvers.dpm_multistep import DPMSolverMultistep, DpmSolverSchedule, MultistepHistory
 from .solvers.precision import f32 as _f32
 from .solvers.precision import round_half_even as _round_half_even
+from .solvers.precision import alphas_cumprod as _alphas_cumprod
 from .solvers.precision import sigma_table as _sigma_table
 from .solvers.unipc_multistep import UniPCMultistep, UniPcHistory, UniPcSchedule
 
@@ -83,6 +86,14 @@ class SchedulerKind(StrEnum):
     #: measured -81% sharpness. Implemented by :class:`UniPCMultistep`
     #: (pgw#1346 B3).
     UNIPC_MULTISTEP = "unipc_multistep"
+    #: Euler with an ancestral (stochastic) step — SDXL's DEFAULT sampler,
+    #: reached as ``euler_a``. Implemented by :class:`EulerAncestralDiscrete`
+    #: (pgw#1346 K10). It CONSUMES NOISE per step; see that class.
+    EULER_ANCESTRAL_DISCRETE = "euler_ancestral_discrete"
+    #: Deterministic DDIM (eta=0), reached as ``ddim`` / ``ddim_trailing``.
+    #: Implemented by :class:`Ddim` (pgw#1346 K10). Alone among these it walks
+    #: ALPHAS rather than sigmas, which is why it has its own schedule type.
+    DDIM = "ddim"
 
 
 def parse_kind(value: object) -> SchedulerKind:
@@ -96,8 +107,6 @@ def parse_kind(value: object) -> SchedulerKind:
             f"scheduler {value!r} is not one of {[kind.value for kind in SchedulerKind]!r}; "
             "the host implements the named scheduler and this one has no name here",
         ) from None
-
-
 class Step(Protocol):
     """The one operation a denoising loop performs per step.
 
@@ -217,6 +226,26 @@ class FlowMatchEulerDiscrete:
     #: dataclass does not take it for a field with a mutable default.
     KIND: ClassVar[SchedulerKind] = SchedulerKind.FLOW_MATCH_EULER_DISCRETE
 
+    #: Every parameter the ``flow_match_euler_discrete`` KIND admits — which is
+    #: wider than what THIS class reads, and deliberately so. The kind has two
+    #: readers over one declared block: this class, and
+    #: :class:`~gen_worker.model.flow_ladders.FlowMatchLadder`, which projects
+    #: the same block plus ``shift_terminal`` / ``time_shift_type`` (pgw#1346
+    #: B3a). The admissible key set belongs to the KIND, not to whichever reader
+    #: a family happens to reach first — otherwise a legal declaration would
+    #: refuse depending on which class read it (pgw#1346 K10).
+    PARAMETERS: ClassVar[tuple[str, ...]] = (
+        "base_image_seq_len",
+        "base_shift",
+        "max_image_seq_len",
+        "max_shift",
+        "num_train_timesteps",
+        "shift",
+        "shift_terminal",
+        "time_shift_type",
+        "use_dynamic_shifting",
+    )
+
     def __post_init__(self) -> None:
         if self.num_train_timesteps < 1:
             raise ModelError(
@@ -238,6 +267,7 @@ class FlowMatchEulerDiscrete:
     def from_block(cls, block: SchedulerBlock) -> Self:
         """Build one from a declaration's scheduler parameter block."""
 
+        _only(block, cls.PARAMETERS)
         return cls(
             num_train_timesteps=_count(block, "num_train_timesteps", 1000),
             shift=_real(block, "shift", 1.0),
@@ -374,13 +404,22 @@ class FlowMatchEulerDiscrete:
 
 
 @dataclass(frozen=True, slots=True)
-class DiscreteSchedule:
-    """One request's resolved sigma ladder for a variance-exploding schedule.
+class VarianceExploding:
+    """One request's resolved sigma ladder, without the step that walks it.
 
     The flow-match :class:`Schedule` derives its timesteps from its sigmas;
     this one cannot, because the two are related through a trained table and
     not by a constant — so ``timesteps`` is carried rather than computed, and
     ``__post_init__`` is what keeps the pair from drifting apart.
+
+    **The ladder and the step are separate facts, and this class is the
+    evidence.** ``euler`` and ``euler_a`` resolve BIT-IDENTICAL sigmas from the
+    same trained table and the same spacing, and then walk them differently:
+    one deterministically, one by contracting to ``sigma_down`` and adding
+    ``sigma_up`` of fresh noise. Everything they share lives here so the two
+    cannot drift; ``step`` lives on the subclasses because its SIGNATURE
+    differs — an ancestral step consumes noise and a deterministic one must not
+    be able to accept it and ignore it.
 
     Immutable and request-scoped, for the same reason :class:`Schedule` is:
     there is no ``self._step_index`` here for two concurrent requests to share.
@@ -444,6 +483,34 @@ class DiscreteSchedule:
         sigma = self._sigma(index)
         return sample / _f32(math.sqrt(_f32(_f32(sigma * sigma) + 1.0)))
 
+    def predicted(self, index: int, model_output: Tensor, sample: Tensor) -> Tensor:
+        """The denoised sample this step predicts — ``x_0``.
+
+        Shared by both steps below because both reference implementations
+        compute it identically, and because the ``v_prediction`` arm is the one
+        piece of this arithmetic nobody rederives correctly from memory.
+        """
+
+        sigma = self._sigma(index)
+        if self.prediction_type == "epsilon":
+            return sample - sigma * model_output
+        variance = _f32(_f32(sigma * sigma) + 1.0)
+        return model_output * _f32(-sigma / _f32(math.sqrt(variance))) + (sample / variance)
+
+    def scale_noise(self, noise: Tensor, sample: Tensor, index: int = 0) -> Tensor:
+        """Add noise to a clean sample at one point on the ladder.
+
+        ``x + sigma * noise`` — the variance-EXPLODING forward, where the
+        flow-match schedule interpolates. img2img and inpaint need exactly it.
+        """
+
+        return sample + noise * self._sigma(index)
+
+
+@dataclass(frozen=True, slots=True)
+class DiscreteSchedule(VarianceExploding):
+    """The DETERMINISTIC Euler walk down a variance-exploding ladder."""
+
     def step(self, index: int, model_output: Tensor, sample: Tensor) -> Tensor:
         """One Euler step down the ladder.
 
@@ -465,37 +532,185 @@ class DiscreteSchedule:
         """
 
         sigma = self._sigma(index)
-        if self.prediction_type == "epsilon":
-            predicted = sample - sigma * model_output
-        else:
-            variance = _f32(_f32(sigma * sigma) + 1.0)
-            predicted = model_output * _f32(-sigma / _f32(math.sqrt(variance))) + (
-                sample / variance
-            )
-        derivative = (sample - predicted) / sigma
+        derivative = (sample - self.predicted(index, model_output, sample)) / sigma
         return sample + derivative * _f32(self.sigmas[index + 1] - sigma)
-
-    def scale_noise(self, noise: Tensor, sample: Tensor, index: int = 0) -> Tensor:
-        """Add noise to a clean sample at one point on the ladder.
-
-        ``x + sigma * noise`` — the variance-EXPLODING forward, where the
-        flow-match schedule interpolates. img2img and inpaint need exactly it.
-        """
-
-        return sample + noise * self._sigma(index)
 
 
 @dataclass(frozen=True, slots=True)
-class EulerDiscrete:
-    """The U-Net families' Euler schedule, as bare typed math.
+class AncestralSchedule(VarianceExploding):
+    """The ANCESTRAL walk: contract to ``sigma_down``, then re-noise.
 
-    Every field is a DECLARED family fact read out of the recipe's scheduler
+    An ancestral sampler does not step along the ODE to the next sigma. It
+    steps to a SMALLER one (``sigma_down``) and adds back exactly the noise
+    (``sigma_up``) that restores the variance the ladder expects — so the
+    trajectory is stochastic and the sampler explores rather than descends.
+    That is why ``euler_a`` is the default an SDXL request gets and why its
+    output is not ``euler``'s output at the same seed.
+
+    **The noise is a PARAMETER, never a source this object owns**, and the
+    reason is the whole reproducibility argument this module is built on: a
+    scheduler holding an RNG is a scheduler whose two concurrent requests share
+    a stream, and this module imports no array library and could not seed one
+    honestly anyway. The caller supplies the noise, and the catalog's serving
+    half supplies it CPU-seeded and keyed by ``(request seed, step index)`` —
+    see ``sdxl_serve.step_noise``, which states the keying — so two pods
+    replaying one receipt draw the same tensor at step ``k`` regardless of what
+    the loop around it did.
+    """
+
+    def ancestral(self, index: int) -> tuple[float, float]:
+        """``(sigma_down, sigma_up)`` for one step.
+
+        ``sigma_up`` is the variance handed back to the noise and ``sigma_down``
+        is what is left for the deterministic move; ``sigma_up**2 +
+        sigma_down**2 == sigma_next**2`` up to float32. Both are resolved in the
+        reference's own float32 op order rather than folded, for the reason the
+        module header gives at length.
+        """
+
+        near = self._sigma(index)
+        far = self.sigmas[index + 1]
+        near2 = _f32(near * near)
+        far2 = _f32(far * far)
+        up = _f32(math.sqrt(_f32(_f32(far2 * _f32(near2 - far2)) / near2)))
+        down = _f32(math.sqrt(_f32(far2 - _f32(up * up))))
+        return down, up
+
+    def step(self, index: int, model_output: Tensor, sample: Tensor, noise: Tensor) -> Tensor:
+        """One ancestral Euler step. ``noise`` is REQUIRED, never defaulted.
+
+        Defaulting it to zeros would silently turn this into a worse
+        :class:`DiscreteSchedule` — same signature, plausible image, wrong
+        sampler — which is exactly the failure a required parameter costs
+        nothing to prevent.
+        """
+
+        sigma = self._sigma(index)
+        down, up = self.ancestral(index)
+        derivative = (sample - self.predicted(index, model_output, sample)) / sigma
+        return sample + derivative * _f32(down - sigma) + noise * up
+
+
+@dataclass(frozen=True, slots=True)
+class DdimSchedule:
+    """One request's resolved DDIM trajectory. It walks ALPHAS, not sigmas.
+
+    The odd one out on purpose, and the difference is not cosmetic:
+    ``DDIMScheduler`` never forms a sigma ladder at all. It reads
+    ``alphas_cumprod`` at the current and previous timestep and moves in the
+    variance-PRESERVING parameterisation, which is why its ``init_noise_sigma``
+    is 1.0 and its ``scale_model_input`` is the identity. Serving a DDIM
+    trajectory through :class:`DiscreteSchedule`'s API would pre-scale the
+    latents by ``1/sqrt(sigma**2+1)`` and start them at ~10x too much
+    variance — no error, just a ruined image — so the two are different types.
+
+    ``eta`` is fixed at 0: the deterministic sampler. Both endpoint names that
+    reach DDIM (``ddim``, ``ddim_trailing``) are the deterministic one, and an
+    ``eta > 0`` arm would be a noise-consuming step nothing declares.
+    """
+
+    #: The INTEGER train timesteps this trajectory visits, descending. Integer
+    #: and not float: DDIM indexes ``alphas_cumprod`` with them directly, where
+    #: the euler family interpolates a table at a fractional position.
+    timesteps: tuple[int, ...]
+    #: ``(alpha_prod_t, alpha_prod_t_prev)`` per step, resolved once.
+    alphas: tuple[tuple[float, float], ...]
+    num_train_timesteps: int
+    prediction_type: str
+    #: Always 1.0 — a variance-PRESERVING trajectory starts at unit variance.
+    #: Carried rather than assumed so a loop can read it off any schedule.
+    init_noise_sigma: float = 1.0
+
+    def __post_init__(self) -> None:
+        if not self.timesteps:
+            raise ModelError(
+                ModelRefusal.SCHEDULER_INVALID, "a schedule needs at least one step"
+            )
+        if len(self.alphas) != len(self.timesteps):
+            raise ModelError(
+                ModelRefusal.SCHEDULER_INVALID,
+                f"{len(self.alphas)} alpha pairs do not walk "
+                f"{len(self.timesteps)} timesteps",
+            )
+
+    def __len__(self) -> int:
+        return len(self.timesteps)
+
+    def _alphas(self, index: int) -> tuple[float, float]:
+        if not 0 <= index < len(self):
+            raise ModelError(
+                ModelRefusal.SCHEDULER_INVALID,
+                f"step {index} is outside this schedule's {len(self)} steps",
+            )
+        return self.alphas[index]
+
+    def scale_model_input(self, index: int, sample: Tensor) -> Tensor:
+        """The IDENTITY, and it is here so a loop does not have to know that.
+
+        ``DDIMScheduler.scale_model_input`` returns its argument: the
+        variance-preserving parameterisation keeps the sample at unit scale, so
+        there is nothing to divide out. Present rather than absent because the
+        alternative is a caller branching on which scheduler it got, which is
+        the branch that eventually forgets one.
+        """
+
+        self._alphas(index)
+        return sample
+
+    def predicted(self, index: int, model_output: Tensor, sample: Tensor) -> Tensor:
+        """The denoised sample this step predicts — ``x_0``."""
+
+        alpha, _ = self._alphas(index)
+        beta = _f32(1.0 - alpha)
+        if self.prediction_type == "epsilon":
+            return (sample - _f32(math.sqrt(beta)) * model_output) / _f32(math.sqrt(alpha))
+        return _f32(math.sqrt(alpha)) * sample - _f32(math.sqrt(beta)) * model_output
+
+    def step(self, index: int, model_output: Tensor, sample: Tensor) -> Tensor:
+        """One deterministic DDIM step — formula (12) of arXiv:2010.02502.
+
+        ``x_{t-1} = sqrt(a_prev) * x_0_hat + sqrt(1 - a_prev) * eps_hat``, with
+        ``eta = 0`` so the variance term vanishes. Written in the reference's
+        own moves rather than simplified, for the same reason the Euler step is.
+        """
+
+        alpha, previous = self._alphas(index)
+        original = self.predicted(index, model_output, sample)
+        if self.prediction_type == "epsilon":
+            residual = model_output
+        else:
+            beta = _f32(1.0 - alpha)
+            residual = _f32(math.sqrt(alpha)) * model_output + _f32(math.sqrt(beta)) * sample
+        direction = _f32(math.sqrt(_f32(1.0 - previous))) * residual
+        return _f32(math.sqrt(previous)) * original + direction
+
+    def scale_noise(self, noise: Tensor, sample: Tensor, index: int = 0) -> Tensor:
+        """The variance-PRESERVING forward: ``sqrt(a) * x + sqrt(1-a) * noise``.
+
+        Not ``x + sigma * noise``. Using the exploding form on an alpha
+        trajectory produces a plausible, wrong img2img strength.
+        """
+
+        alpha, _ = self._alphas(index)
+        return _f32(math.sqrt(alpha)) * sample + _f32(math.sqrt(_f32(1.0 - alpha))) * noise
+
+
+@dataclass(frozen=True, slots=True)
+class Trained:
+    """The trained noise schedule the three U-Net-family kinds descend from.
+
+    Every field is a DECLARED family fact read out of a recipe's scheduler
     block. The defaults are ``diffusers``' own class defaults and NOT
     Stable Diffusion's — a family that wants SD's trained noise schedule
     declares ``beta_start``/``beta_end``/``beta_schedule`` explicitly, exactly
     as FLUX declares its shift constants. Silently defaulting to SD's numbers
     would put a family fact in this module, which is the drift
     ``check_model_bindings.py`` exists to refuse one level up.
+
+    Shared by :class:`EulerDiscrete`, :class:`EulerAncestralDiscrete` and
+    :class:`Ddim` because they are three walks over ONE table, and a family
+    declaring several of them (pgw#1346 K10 — the sampler is a tuned value)
+    must not be able to state the same trained schedule three different ways.
     """
 
     num_train_timesteps: int = 1000
@@ -506,16 +721,24 @@ class EulerDiscrete:
     timestep_spacing: str = "linspace"
     steps_offset: int = 0
     rescale_betas_zero_snr: bool = False
-    final_sigmas_type: str = "zero"
-
-    KIND: ClassVar[SchedulerKind] = SchedulerKind.EULER_DISCRETE
 
     #: The closed sets. Every one of these is a value that changes the LADDER,
     #: so an unrecognised spelling refuses instead of falling through.
     BETA_SCHEDULES: ClassVar[tuple[str, ...]] = ("linear", "scaled_linear")
     PREDICTION_TYPES: ClassVar[tuple[str, ...]] = ("epsilon", "v_prediction")
     SPACINGS: ClassVar[tuple[str, ...]] = ("linspace", "leading", "trailing")
-    FINAL_SIGMAS: ClassVar[tuple[str, ...]] = ("zero", "sigma_min")
+
+    #: The parameters every kind below reads, before its own are added.
+    TRAINED_PARAMETERS: ClassVar[tuple[str, ...]] = (
+        "beta_end",
+        "beta_schedule",
+        "beta_start",
+        "num_train_timesteps",
+        "prediction_type",
+        "rescale_betas_zero_snr",
+        "steps_offset",
+        "timestep_spacing",
+    )
 
     def __post_init__(self) -> None:
         if self.num_train_timesteps < 1:
@@ -533,26 +756,26 @@ class EulerDiscrete:
             ("beta_schedule", self.beta_schedule, self.BETA_SCHEDULES),
             ("prediction_type", self.prediction_type, self.PREDICTION_TYPES),
             ("timestep_spacing", self.timestep_spacing, self.SPACINGS),
-            ("final_sigmas_type", self.final_sigmas_type, self.FINAL_SIGMAS),
         ):
             if value not in allowed:
                 raise _refuse(name, f"one of {list(allowed)!r}", value)
 
     @classmethod
-    def from_block(cls, block: SchedulerBlock) -> Self:
-        """Build one from a declaration's scheduler parameter block."""
+    def _trained_kwargs(cls, block: SchedulerBlock) -> dict[str, SchedulerValue]:
+        """The trained-schedule half of a block, parsed. Shared by every kind."""
 
-        return cls(
-            num_train_timesteps=_count(block, "num_train_timesteps", 1000),
-            beta_start=_real(block, "beta_start", 0.0001),
-            beta_end=_real(block, "beta_end", 0.02),
-            beta_schedule=_choice(block, "beta_schedule", "linear", cls.BETA_SCHEDULES),
-            prediction_type=_choice(block, "prediction_type", "epsilon", cls.PREDICTION_TYPES),
-            timestep_spacing=_choice(block, "timestep_spacing", "linspace", cls.SPACINGS),
-            steps_offset=_count(block, "steps_offset", 0),
-            rescale_betas_zero_snr=_flag(block, "rescale_betas_zero_snr", False),
-            final_sigmas_type=_choice(block, "final_sigmas_type", "zero", cls.FINAL_SIGMAS),
-        )
+        return {
+            "num_train_timesteps": _count(block, "num_train_timesteps", 1000),
+            "beta_start": _real(block, "beta_start", 0.0001),
+            "beta_end": _real(block, "beta_end", 0.02),
+            "beta_schedule": _choice(block, "beta_schedule", "linear", cls.BETA_SCHEDULES),
+            "prediction_type": _choice(
+                block, "prediction_type", "epsilon", cls.PREDICTION_TYPES
+            ),
+            "timestep_spacing": _choice(block, "timestep_spacing", "linspace", cls.SPACINGS),
+            "steps_offset": _count(block, "steps_offset", 0),
+            "rescale_betas_zero_snr": _flag(block, "rescale_betas_zero_snr", False),
+        }
 
     def objective(self, prediction_type: str) -> Self:
         """This scheduler with the checkpoint's stamped objective applied.
@@ -567,27 +790,22 @@ class EulerDiscrete:
         """
 
         if prediction_type not in self.PREDICTION_TYPES:
-            raise _refuse("prediction_type", f"one of {list(self.PREDICTION_TYPES)!r}",
-                          prediction_type)
+            raise _refuse(
+                "prediction_type", f"one of {list(self.PREDICTION_TYPES)!r}", prediction_type
+            )
         if prediction_type == self.prediction_type and not (
             prediction_type == "v_prediction" and not self.rescale_betas_zero_snr
         ):
             return self
-        return type(self)(
-            num_train_timesteps=self.num_train_timesteps,
-            beta_start=self.beta_start,
-            beta_end=self.beta_end,
-            beta_schedule=self.beta_schedule,
+        return replace(
+            self,
             prediction_type=prediction_type,
-            timestep_spacing=self.timestep_spacing,
-            steps_offset=self.steps_offset,
             rescale_betas_zero_snr=(
                 True if prediction_type == "v_prediction" else self.rescale_betas_zero_snr
             ),
-            final_sigmas_type=self.final_sigmas_type,
         )
 
-    def _timesteps(self, steps: int) -> tuple[float, ...]:
+    def _grid(self, steps: int) -> tuple[float, ...]:
         """The discrete timestep grid one spacing produces. Table 2 of
         arXiv:2305.08891, and the three spellings are not interchangeable:
         `leading` starts a step below the top of the ladder and `trailing`
@@ -616,17 +834,16 @@ class EulerDiscrete:
         span = total / steps
         count = math.ceil(total / span)
         return tuple(
-            _f32(_f32(_round_half_even(total - index * span)) - 1.0)
-            for index in range(count)
+            _f32(_f32(_round_half_even(total - index * span)) - 1.0) for index in range(count)
         )
 
-    def schedule(self, steps: int) -> DiscreteSchedule:
-        """The resolved sigma ladder for one request.
+    def _ladder(self, steps: int) -> tuple[tuple[float, ...], tuple[float, ...]]:
+        """``(timesteps, sigmas)`` for the two variance-EXPLODING kinds.
 
         No ``image_seq_len``: unlike the flow-match schedule, this ladder does
         not consult the resolution at all — the same 28 sigmas serve a
         1024x1024 render and a 1536x640 one. Stated because the opposite is
-        true one class up and the asymmetry is otherwise a trap.
+        true for FLUX and the asymmetry is otherwise a trap.
         """
 
         if steps < 1:
@@ -640,61 +857,275 @@ class EulerDiscrete:
             self.beta_schedule,
             self.rescale_betas_zero_snr,
         )
-        timesteps = self._timesteps(steps)
-        # FLOAT64 interpolation over the float32 table — numpy's `interp`
-        # promotes, and matching it is what makes the ladder bit-exact.
-        last = len(table) - 1
-        sigmas = []
-        for timestep in timesteps:
-            if timestep <= 0.0:
-                sigmas.append(table[0])
-            elif timestep >= last:
-                sigmas.append(table[last])
-            else:
-                low = int(timestep)
-                sigmas.append(table[low] + (table[low + 1] - table[low]) * (timestep - low))
-        terminal = 0.0 if self.final_sigmas_type == "zero" else table[0]
-        resolved = tuple(_f32(sigma) for sigma in sigmas)
-        maximum = max(resolved)
+        timesteps = self._grid(steps)
+        return timesteps, _interpolate(table, timesteps)
+
+    def _init_noise_sigma(self, sigmas: tuple[float, ...]) -> float:
+        """``sigma_max`` under trailing/linspace and ``sqrt(sigma_max**2 + 1)``
+        under leading — a fact of the SPACING, resolved once and carried."""
+
+        maximum = max(sigmas)
+        if self.timestep_spacing in ("linspace", "trailing"):
+            return maximum
+        return _f32(math.sqrt(_f32(_f32(maximum * maximum) + 1.0)))
+
+
+@dataclass(frozen=True, slots=True)
+class EulerDiscrete(Trained):
+    """The U-Net families' DETERMINISTIC Euler schedule, as bare typed math.
+
+    Reached as the ``euler`` and ``euler_trailing`` samplers. Everything about
+    the trained noise schedule is :class:`Trained`'s; this class adds one
+    parameter of its own, ``final_sigmas_type``, and the deterministic walk.
+    """
+
+    final_sigmas_type: str = "zero"
+
+    KIND: ClassVar[SchedulerKind] = SchedulerKind.EULER_DISCRETE
+    FINAL_SIGMAS: ClassVar[tuple[str, ...]] = ("zero", "sigma_min")
+    PARAMETERS: ClassVar[tuple[str, ...]] = (
+        *Trained.TRAINED_PARAMETERS,
+        "final_sigmas_type",
+    )
+
+    def __post_init__(self) -> None:
+        Trained.__post_init__(self)
+        if self.final_sigmas_type not in self.FINAL_SIGMAS:
+            raise _refuse(
+                "final_sigmas_type", f"one of {list(self.FINAL_SIGMAS)!r}", self.final_sigmas_type
+            )
+
+    @classmethod
+    def from_block(cls, block: SchedulerBlock) -> Self:
+        """Build one from a declaration's scheduler parameter block."""
+
+        _only(block, cls.PARAMETERS)
+        return cls(
+            **cls._trained_kwargs(block),  # type: ignore[arg-type]
+            final_sigmas_type=_choice(block, "final_sigmas_type", "zero", cls.FINAL_SIGMAS),
+        )
+
+    def schedule(self, steps: int) -> DiscreteSchedule:
+        """The resolved sigma ladder for one request."""
+
+        timesteps, sigmas = self._ladder(steps)
+        # `sigma_min` keeps the smallest TRAINED sigma as the terminal rather
+        # than landing on 0, which is a different final step and not a rounding
+        # choice — a distilled recipe that names it is destroyed by `zero`.
+        terminal = (
+            0.0
+            if self.final_sigmas_type == "zero"
+            else _sigma_table(
+                self.num_train_timesteps,
+                self.beta_start,
+                self.beta_end,
+                self.beta_schedule,
+                self.rescale_betas_zero_snr,
+            )[0]
+        )
         return DiscreteSchedule(
-            sigmas=(*resolved, _f32(terminal)),
+            sigmas=(*sigmas, _f32(terminal)),
             timesteps=timesteps,
             num_train_timesteps=self.num_train_timesteps,
             prediction_type=self.prediction_type,
-            init_noise_sigma=(
-                maximum if self.timestep_spacing in ("linspace", "trailing")
-                else _f32(math.sqrt(_f32(_f32(maximum * maximum) + 1.0)))
-            ),
+            init_noise_sigma=self._init_noise_sigma(sigmas),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class EulerAncestralDiscrete(Trained):
+    """``euler_a`` — SDXL's DEFAULT sampler, and the one that consumes noise.
+
+    Its LADDER is :class:`EulerDiscrete`'s, value for value: same trained
+    table, same three spacings, same interpolation. Two things differ, and both
+    are load-bearing:
+
+    * there is **no** ``final_sigmas_type``. ``EulerAncestralDiscreteScheduler``
+      always terminates at 0.0 and offers no choice, so declaring one here
+      would be a parameter that changes nothing — refused by :func:`_only`
+      rather than accepted and ignored;
+    * the STEP contracts to ``sigma_down`` and adds ``sigma_up`` of fresh
+      noise, which makes the trajectory stochastic. See
+      :class:`AncestralSchedule` for where that noise comes from and how it is
+      keyed, because "reproducible" is a claim about the noise and not about
+      the ladder.
+
+    This is the class pgw#1346 K10 exists for: SDXL's declared block was its
+    TRAINED schedule under ``euler_discrete``, which is not the sampler most
+    requests get — ``SdxlTuned.scheduler`` defaults to ``euler_a``.
+    """
+
+    KIND: ClassVar[SchedulerKind] = SchedulerKind.EULER_ANCESTRAL_DISCRETE
+    PARAMETERS: ClassVar[tuple[str, ...]] = Trained.TRAINED_PARAMETERS
+
+    @classmethod
+    def from_block(cls, block: SchedulerBlock) -> Self:
+        """Build one from a declaration's scheduler parameter block."""
+
+        _only(block, cls.PARAMETERS)
+        return cls(**cls._trained_kwargs(block))  # type: ignore[arg-type]
+
+    def schedule(self, steps: int) -> AncestralSchedule:
+        """The resolved sigma ladder for one request. Terminates at 0.0."""
+
+        timesteps, sigmas = self._ladder(steps)
+        return AncestralSchedule(
+            sigmas=(*sigmas, 0.0),
+            timesteps=timesteps,
+            num_train_timesteps=self.num_train_timesteps,
+            prediction_type=self.prediction_type,
+            init_noise_sigma=self._init_noise_sigma(sigmas),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class Ddim(Trained):
+    """``ddim`` / ``ddim_trailing`` — deterministic, and NOT a sigma walk.
+
+    Reached by three endpoint paths that pgw#1346 B2 enumerated: sd15's payload
+    enum offers ``ddim``, sd15's ``generate_hyper`` pins ``ddim_trailing``
+    unconditionally, and sdxl's enum offers ``ddim_trailing``. B2 recorded them
+    and could not implement any of them, because the declaration held ONE
+    scheduler; K10 is the change that lets a family declare this one BESIDE its
+    euler entries.
+
+    Two of its parameters are its own, and both are silent when wrong:
+
+    * ``set_alpha_to_one`` decides whether the trajectory's LAST step targets
+      ``alpha_bar = 1`` (a perfectly clean sample) or ``alphas_cumprod[0]``.
+      Stable Diffusion's shipped ``scheduler_config.json`` says ``false`` and
+      ``DDIMScheduler``'s class default says ``true``, so an omitted value
+      resolves to the opposite of what every SD checkpoint was configured with;
+    * ``clip_sample`` clamps the predicted ``x_0``. Every SD config sets it
+      false. It is DECLARABLE and only ``false`` is implementable here — see
+      :meth:`from_block` — because a true arm needs a tensor clamp with a
+      declared range, and no endpoint on this fleet asks for one.
+    """
+
+    set_alpha_to_one: bool = True
+    clip_sample: bool = False
+
+    KIND: ClassVar[SchedulerKind] = SchedulerKind.DDIM
+    PARAMETERS: ClassVar[tuple[str, ...]] = (
+        *Trained.TRAINED_PARAMETERS,
+        "clip_sample",
+        "set_alpha_to_one",
+    )
+
+    def __post_init__(self) -> None:
+        Trained.__post_init__(self)
+        if self.clip_sample:
+            raise ModelError(
+                ModelRefusal.SCHEDULER_INVALID,
+                "clip_sample=True is declarable and not implemented: it needs a declared "
+                "clip range and no endpoint on this fleet configures one. Declare it false "
+                "or file the range, rather than getting an unclamped trajectory silently",
+            )
+
+    @classmethod
+    def from_block(cls, block: SchedulerBlock) -> Self:
+        """Build one from a declaration's scheduler parameter block."""
+
+        _only(block, cls.PARAMETERS)
+        return cls(
+            **cls._trained_kwargs(block),  # type: ignore[arg-type]
+            set_alpha_to_one=_flag(block, "set_alpha_to_one", True),
+            clip_sample=_flag(block, "clip_sample", False),
+        )
+
+    def _grid(self, steps: int) -> tuple[float, ...]:
+        """DDIM's INTEGER timestep grid, which is not euler's float one.
+
+        ``leading`` and ``trailing`` agree with the euler family. ``linspace``
+        does NOT: ``DDIMScheduler`` rounds it to integers and the euler
+        schedulers keep the fractional position and interpolate their table at
+        it. Sharing one grid would put a half-step error into every linspace
+        DDIM request — visible as a slightly wrong image and nothing else.
+        """
+
+        total = self.num_train_timesteps
+        if self.timestep_spacing == "linspace":
+            if steps == 1:
+                return (0.0,)
+            span = (total - 1) / (steps - 1)
+            return tuple(_round_half_even(index * span) for index in reversed(range(steps)))
+        return Trained._grid(self, steps)
+
+    def schedule(self, steps: int) -> DdimSchedule:
+        """The resolved alpha trajectory for one request."""
+
+        if steps < 1:
+            raise ModelError(
+                ModelRefusal.SCHEDULER_INVALID, f"a schedule needs at least one step, got {steps}"
+            )
+        if steps > self.num_train_timesteps:
+            raise ModelError(
+                ModelRefusal.SCHEDULER_INVALID,
+                f"DDIM walks the trained grid, so {steps} steps cannot exceed its "
+                f"{self.num_train_timesteps} timesteps",
+            )
+        # `clamp_terminal` FALSE: `DDIMScheduler` does not overwrite the last
+        # alpha under zero-terminal-SNR rescaling, where the euler schedulers
+        # do. See `_alphas_cumprod`.
+        table = _alphas_cumprod(
+            self.num_train_timesteps,
+            self.beta_start,
+            self.beta_end,
+            self.beta_schedule,
+            self.rescale_betas_zero_snr,
+            False,
+        )
+        final = 1.0 if self.set_alpha_to_one else table[0]
+        stride = self.num_train_timesteps // steps
+        timesteps = tuple(int(value) for value in self._grid(steps))
+        alphas = tuple(
+            (table[timestep], table[timestep - stride] if timestep - stride >= 0 else final)
+            for timestep in timesteps
+        )
+        return DdimSchedule(
+            timesteps=timesteps,
+            alphas=alphas,
+            num_train_timesteps=self.num_train_timesteps,
+            prediction_type=self.prediction_type,
         )
 
 
 #: Which class implements which name. Read by the BINDING GENERATOR to pick a
 #: return annotation, and by nothing at request time — a handler reaches its
 #: scheduler through the generated ``inst.scheduler()``, whose return type is
-#: the concrete class, so no request-path code indexes this table.
+#: the concrete class (or the closed UNION of the ones the family declares), so
+#: no request-path code indexes this table.
 IMPLEMENTED: Final[Mapping[SchedulerKind, str]] = {
     SchedulerKind.FLOW_MATCH_EULER_DISCRETE: "FlowMatchEulerDiscrete",
     SchedulerKind.EULER_DISCRETE: "EulerDiscrete",
     SchedulerKind.DPMSOLVER_MULTISTEP: "DPMSolverMultistep",
     SchedulerKind.UNIPC_MULTISTEP: "UniPCMultistep",
+    SchedulerKind.EULER_ANCESTRAL_DISCRETE: "EulerAncestralDiscrete",
+    SchedulerKind.DDIM: "Ddim",
 }
 
 
 __all__ = [
-    "IMPLEMENTED",
+    "AncestralSchedule",
     "DPMSolverMultistep",
+    "Ddim",
+    "DdimSchedule",
     "DiscreteSchedule",
     "DpmSolverSchedule",
+    "EulerAncestralDiscrete",
     "EulerDiscrete",
     "FlowMatchEulerDiscrete",
+    "IMPLEMENTED",
     "MultistepHistory",
     "Schedule",
     "SchedulerBlock",
     "SchedulerKind",
     "SchedulerValue",
     "Step",
+    "Trained",
     "UniPCMultistep",
     "UniPcHistory",
     "UniPcSchedule",
+    "VarianceExploding",
     "parse_kind",
 ]

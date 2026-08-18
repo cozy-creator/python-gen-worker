@@ -173,8 +173,9 @@ def test_the_scheduler_block_is_the_checkpoints_own() -> None:
     """
 
     published = _fixture("scheduler.scheduler_config.json")
-    scheduler = FLUX2_KLEIN_9B.scheduler
-    assert scheduler is not None
+    # A set of ONE, keyed by sampler (pgw#1346 K10).
+    assert list(FLUX2_KLEIN_9B.schedulers) == ["flow_match_euler"]
+    scheduler = FLUX2_KLEIN_9B.schedulers["flow_match_euler"]
     assert scheduler.name == "flow_match_euler_discrete"
     for field, value in scheduler.parameters.items():
         assert value == published[field], field

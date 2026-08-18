@@ -364,7 +364,10 @@ FLUX1_DEV: Final = GraphModelSpec(
         )
     ),
     parameters=(Parameter("steps", minimum=1, maximum=100),),
-    scheduler=Scheduler("flow_match_euler_discrete", SCHEDULER),
+    # A set of ONE: FLUX.1-dev's tuned schema names no sampler because the
+    # family serves exactly this schedule, so `inst.scheduler()` still takes no
+    # argument and still returns the concrete class (pgw#1346 K10).
+    schedulers={"flow_match_euler": Scheduler("flow_match_euler_discrete", SCHEDULER)},
 )
 
 __all__ = [

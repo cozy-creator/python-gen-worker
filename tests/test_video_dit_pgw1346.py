@@ -296,34 +296,49 @@ def test_the_wan_models_decline_to_name_a_scheduler() -> None:
     """
 
     for model in (WAN22_T2V_A14B, WAN22_I2V_A14B, WAN22_TI2V_5B):
-        assert model.scheduler is None
+        assert model.schedulers == {}
     for binding in (Wan22T2vA14b, Wan22I2vA14b, Wan22Ti2v5b):
         assert not hasattr(binding, "scheduler")
 
-    # LTX, by contrast, has ONE honest answer and declares it.
-    assert LTX23.scheduler is not None
-    assert LTX23.scheduler.name == "flow_match_euler_discrete"
+    # LTX, by contrast, has ONE honest answer and declares it — as a set of
+    # one, keyed by sampler (pgw#1346 K10).
+    assert list(LTX23.schedulers) == ["flow_match_euler"]
+    assert LTX23.schedulers["flow_match_euler"].name == "flow_match_euler_discrete"
     assert hasattr(Ltx23, "scheduler")
 
 
 def test_k10_is_now_a_declaration_limit_and_not_a_missing_implementation() -> None:
-    """The sharpest form of K10: BOTH of Wan's solvers are implemented today.
+    """K10's sharpest form — and the LIMIT IS GONE. What remains is authoring.
 
     B3-math (pgw#923) landed `unipc_multistep` as bare typed math and verified
     the flow lane at all three served `flow_shift` values; B4 proves above that
     the distilled lane's ladder is `flow_match_euler_discrete` exactly. So the
-    obstacle was never a missing scheduler kind — it is that
-    `GraphModelSpec.scheduler` is ONE block and codegen emits ONE
-    `scheduler()`. A family whose CHECKPOINT chooses the solver has nowhere to
-    put the second one.
+    obstacle was never a missing scheduler kind — it was that
+    `GraphModelSpec.scheduler` was ONE block and codegen emitted ONE
+    `scheduler()`, leaving a family whose CHECKPOINT chooses the solver nowhere
+    to put the second one.
+
+    pgw#1346 K10 replaced that field with a SET keyed by the sampler a
+    checkpoint is stamped with, so this test inverts: both solvers are
+    implemented AND the declaration can now hold both. **What Wan still owes is
+    the KEY**, not the mechanism — `Wan22Tuned` declares no sampler field, so
+    there is no stamped value for `inst.scheduler()` to resolve. Adding it by
+    value from the endpoint (the same by-value migration `SdxlTuned` made) is
+    the whole of the remaining work, and it is B4's authoring call rather than
+    a declaration-surface one.
     """
 
     assert SchedulerKind.UNIPC_MULTISTEP in IMPLEMENTED
     assert SchedulerKind.FLOW_MATCH_EULER_DISCRETE in IMPLEMENTED
-    # ...and the field that would have to hold both is singular.
-    assert WAN22_T2V_A14B.scheduler is None
-    field = type(WAN22_T2V_A14B).__dataclass_fields__["scheduler"]
-    assert "Scheduler | None" in str(field.type)
+    # The field that has to hold both is now a SET, and it is empty rather than
+    # wrong: an empty set declares nothing, where a single-valued field would
+    # have had to name one of the two solvers and be wrong for every checkpoint
+    # served by the other.
+    assert WAN22_T2V_A14B.schedulers == {}
+    field = type(WAN22_T2V_A14B).__dataclass_fields__["schedulers"]
+    assert "Mapping[str, Scheduler]" in str(field.type)
+    # The key Wan owes: no sampler field to resolve against yet.
+    assert "scheduler" not in WAN22_T2V_A14B.tuned.__struct_fields__  # type: ignore[union-attr]
 
 
 def test_the_h3_eager_binding_is_a_type_with_no_runners() -> None:

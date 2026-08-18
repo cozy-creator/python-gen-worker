@@ -534,26 +534,36 @@ class ExportedParameter:
 
 @dataclass(frozen=True, slots=True)
 class ExportedScheduler:
-    """The named scheduler and its parameter block, recorded and uninterpreted."""
+    """One SAMPLER, the scheduler kind it names, and that kind's block.
 
+    ``sampler`` is the key a checkpoint is stamped with (``inst.tuned.
+    scheduler``) and ``name`` is the scheduler KIND the host implements. They
+    are two different vocabularies and conflating them is the defect pgw#1346
+    K10 records: ``euler`` and ``euler_trailing`` are one kind under two
+    spacings, and ``euler_a`` is a different kind entirely.
+    """
+
+    sampler: str
     name: str
     parameters: tuple[tuple[ParameterName, SchedulerValue], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "sampler": str(self.sampler),
             "name": str(self.name),
             "parameters": {str(name): value for name, value in self.parameters},
         }
 
     @classmethod
     def decode(cls, raw: object) -> ExportedScheduler:
-        row = _fields("scheduler", raw, frozenset(("name", "parameters")))
+        row = _fields("scheduler", raw, frozenset(("sampler", "name", "parameters")))
         parameters = row["parameters"]
         if not isinstance(parameters, Mapping):
             raise ModelError(
                 ModelRefusal.SNAPSHOT_INVALID, "scheduler parameters must be an object"
             )
         return cls(
+            sampler=_parse("sampler name", row["sampler"], parse_parameter_name),
             name=_parse("scheduler name", row["name"], parse_scheduler_name),
             parameters=tuple(
                 sorted(
@@ -615,7 +625,9 @@ class ModelExport:
     loop: ExportedLoop
     tuned: TunedRef
     parameters: tuple[ExportedParameter, ...] = ()
-    scheduler: ExportedScheduler | None = None
+    #: The scheduler SET, sorted by sampler name (pgw#1346 K10). Empty when the
+    #: family declares no scheduler.
+    schedulers: tuple[ExportedScheduler, ...] = ()
     lora_tuned: TunedRef | None = None
 
     def __post_init__(self) -> None:
@@ -674,6 +686,11 @@ class ModelExport:
                 ModelRefusal.SNAPSHOT_INVALID,
                 f"runner {str(unused[0])!r} is exported but no loop stage runs it",
             )
+        samplers = tuple(row.sampler for row in self.schedulers)
+        if samplers != tuple(sorted(set(samplers))):
+            raise ModelError(
+                ModelRefusal.SNAPSHOT_INVALID, "schedulers must be sorted by sampler and unique"
+            )
 
     # ---------------------------------------------------------------- reading
 
@@ -709,8 +726,8 @@ class ModelExport:
             "parameters": [parameter.as_dict() for parameter in self.parameters],
             "tuned": self.tuned.as_dict(),
         }
-        if self.scheduler is not None:
-            document["scheduler"] = self.scheduler.as_dict()
+        if self.schedulers:
+            document["schedulers"] = [row.as_dict() for row in self.schedulers]
         if self.lora_tuned is not None:
             document["lora_tuned"] = self.lora_tuned.as_dict()
         return document
@@ -736,7 +753,7 @@ class ModelExport:
             "family export",
             raw,
             frozenset(("v", "family", "buckets", "runners", "loop", "parameters", "tuned")),
-            frozenset(("scheduler", "lora_tuned")),
+            frozenset(("schedulers", "lora_tuned")),
         )
         version = row["v"]
         if type(version) is not int or version != EXPORT_VERSION:
@@ -764,7 +781,11 @@ class ModelExport:
                     tuple(int(value) for value in values),
                 )
             )
-        scheduler = row.get("scheduler")
+        schedulers = row.get("schedulers")
+        if schedulers is not None and not isinstance(schedulers, list):
+            raise ModelError(
+                ModelRefusal.SNAPSHOT_INVALID, "family export schedulers must be an array"
+            )
         lora = row.get("lora_tuned")
         return cls(
             family=FamilyName(str(row["family"])),
@@ -773,7 +794,9 @@ class ModelExport:
             loop=ExportedLoop.decode(row["loop"]),
             tuned=TunedRef.decode(row["tuned"]),
             parameters=tuple(ExportedParameter.decode(item) for item in row["parameters"]),
-            scheduler=None if scheduler is None else ExportedScheduler.decode(scheduler),
+            schedulers=()
+            if schedulers is None
+            else tuple(ExportedScheduler.decode(row) for row in schedulers),
             lora_tuned=None if lora is None else TunedRef.decode(lora),
         )
 

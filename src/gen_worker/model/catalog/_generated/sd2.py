@@ -11,13 +11,15 @@ against that export; it does not produce it.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from importlib import resources
 from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
 from gen_worker.model.catalog.sd15_serve import Sd2Tuned
+from gen_worker.model.errors import ModelError, ModelRefusal
 from gen_worker.model.runtime import Model
-from gen_worker.model.scheduler import EulerDiscrete, SchedulerBlock, SchedulerKind
+from gen_worker.model.scheduler import DPMSolverMultistep, Ddim, EulerAncestralDiscrete, EulerDiscrete, SchedulerBlock, SchedulerKind, UniPCMultistep
 from gen_worker.model.snapshot import ModelExport
 from gen_worker.model.spec import ModelSpec
 
@@ -51,6 +53,9 @@ def _declaration() -> ModelSpec | None:
 _SPEC = _declaration()
 
 
+#: Every sampler this family declares AND this SDK implements. Total: every value resolves.
+Sd2DeclaredSampler = Literal['ddim', 'ddim_trailing', 'dpmpp_2m', 'dpmpp_2m_karras', 'dpmpp_2m_sde_karras', 'euler', 'euler_a', 'unipc']
+
 #: Every declared shape bucket. Exhaustive: every value resolves.
 Sd2Shape = Literal[4320768, 4800640, 5120512, 5120768, 6400480, 7680432, 7680512]
 
@@ -74,7 +79,7 @@ class Sd2(Model):
     __slots__ = ()
 
     FAMILY: ClassVar[str] = 'sd2'
-    EXPORT_DIGEST: ClassVar[str] = '6ce2561bc0dd4aac3e59e6c8c460b7fa'
+    EXPORT_DIGEST: ClassVar[str] = 'c91eacb4b9dce903bf20e4c9e286122a'
     EXPORT: ClassVar[ModelExport] = _EXPORT
     Tuned: ClassVar[type[Sd2Tuned]] = Sd2Tuned
     SPEC: ClassVar[ModelSpec | None] = _SPEC
@@ -87,30 +92,166 @@ class Sd2(Model):
     )
     LOOP_KIND: ClassVar[str] = 'staged'
     SESSION_STATE: ClassVar[str] = 'none'
-    SCHEDULER: ClassVar[SchedulerKind] = SchedulerKind.EULER_DISCRETE
-    SCHEDULER_PARAMETERS: ClassVar[SchedulerBlock] = MappingProxyType({
-        'beta_end': 0.012,
-        'beta_schedule': 'scaled_linear',
-        'beta_start': 0.00085,
-        'final_sigmas_type': 'zero',
-        'num_train_timesteps': 1000,
-        'prediction_type': 'epsilon',
-        'steps_offset': 1,
-        'timestep_spacing': 'leading',
+    #: Every SAMPLER this family declares a scheduler for, and the KIND
+    #: each one names. Keyed by the value a checkpoint is stamped with.
+    SCHEDULERS: ClassVar[Mapping[str, SchedulerKind]] = MappingProxyType({
+        'ddim': SchedulerKind.DDIM,
+        'ddim_trailing': SchedulerKind.DDIM,
+        'dpmpp_2m': SchedulerKind.DPMSOLVER_MULTISTEP,
+        'dpmpp_2m_karras': SchedulerKind.DPMSOLVER_MULTISTEP,
+        'dpmpp_2m_sde_karras': SchedulerKind.DPMSOLVER_MULTISTEP,
+        'euler': SchedulerKind.EULER_DISCRETE,
+        'euler_a': SchedulerKind.EULER_ANCESTRAL_DISCRETE,
+        'unipc': SchedulerKind.UNIPC_MULTISTEP,
+    })
+    SCHEDULER_PARAMETERS: ClassVar[Mapping[str, SchedulerBlock]] = MappingProxyType({
+        'ddim': MappingProxyType({
+            'beta_end': 0.012,
+            'beta_schedule': 'scaled_linear',
+            'beta_start': 0.00085,
+            'clip_sample': False,
+            'num_train_timesteps': 1000,
+            'prediction_type': 'epsilon',
+            'set_alpha_to_one': False,
+            'steps_offset': 1,
+            'timestep_spacing': 'leading',
+        }),
+        'ddim_trailing': MappingProxyType({
+            'beta_end': 0.012,
+            'beta_schedule': 'scaled_linear',
+            'beta_start': 0.00085,
+            'clip_sample': False,
+            'num_train_timesteps': 1000,
+            'prediction_type': 'epsilon',
+            'set_alpha_to_one': False,
+            'steps_offset': 0,
+            'timestep_spacing': 'trailing',
+        }),
+        'dpmpp_2m': MappingProxyType({
+            'beta_end': 0.012,
+            'beta_schedule': 'scaled_linear',
+            'beta_start': 0.00085,
+            'final_sigmas_type': 'zero',
+            'num_train_timesteps': 1000,
+            'prediction_type': 'epsilon',
+            'solver_order': 2,
+            'steps_offset': 1,
+            'timestep_spacing': 'leading',
+        }),
+        'dpmpp_2m_karras': MappingProxyType({
+            'beta_end': 0.012,
+            'beta_schedule': 'scaled_linear',
+            'beta_start': 0.00085,
+            'final_sigmas_type': 'zero',
+            'num_train_timesteps': 1000,
+            'prediction_type': 'epsilon',
+            'solver_order': 2,
+            'steps_offset': 1,
+            'timestep_spacing': 'leading',
+            'use_karras_sigmas': True,
+        }),
+        'dpmpp_2m_sde_karras': MappingProxyType({
+            'algorithm_type': 'sde-dpmsolver++',
+            'beta_end': 0.012,
+            'beta_schedule': 'scaled_linear',
+            'beta_start': 0.00085,
+            'final_sigmas_type': 'zero',
+            'num_train_timesteps': 1000,
+            'prediction_type': 'epsilon',
+            'solver_order': 2,
+            'steps_offset': 1,
+            'timestep_spacing': 'leading',
+            'use_karras_sigmas': True,
+        }),
+        'euler': MappingProxyType({
+            'beta_end': 0.012,
+            'beta_schedule': 'scaled_linear',
+            'beta_start': 0.00085,
+            'final_sigmas_type': 'zero',
+            'num_train_timesteps': 1000,
+            'prediction_type': 'epsilon',
+            'steps_offset': 1,
+            'timestep_spacing': 'leading',
+        }),
+        'euler_a': MappingProxyType({
+            'beta_end': 0.012,
+            'beta_schedule': 'scaled_linear',
+            'beta_start': 0.00085,
+            'num_train_timesteps': 1000,
+            'prediction_type': 'epsilon',
+            'steps_offset': 1,
+            'timestep_spacing': 'leading',
+        }),
+        'unipc': MappingProxyType({
+            'beta_end': 0.012,
+            'beta_schedule': 'scaled_linear',
+            'beta_start': 0.00085,
+            'num_train_timesteps': 1000,
+            'prediction_type': 'epsilon',
+            'steps_offset': 1,
+            'timestep_spacing': 'leading',
+        }),
     })
     #: Declared loop counts: (name, minimum, maximum), inclusive bounds.
     PARAMETERS: ClassVar[tuple[tuple[str, int, int], ...]] = (
         ('steps', 1, 100),
     )
 
-    def scheduler(self) -> EulerDiscrete:
-        """This family's declared scheduler, as bare typed math.
+    def scheduler(self, name: Sd2DeclaredSampler | None = None) -> DPMSolverMultistep | Ddim | EulerAncestralDiscrete | EulerDiscrete | UniPCMultistep:
+        """The scheduler this checkpoint's SAMPLER names, as bare typed math.
 
-        Built from ``SCHEDULER_PARAMETERS`` above, which rides the export
-        digest — so a re-declared schedule changes this family's identity
-        instead of silently changing every request.
+        ``name`` defaults to ``self.tuned.scheduler`` — the value the
+        catalog stamped for THIS checkpoint — because the sampler is a
+        checkpoint fact and not a family constant. Pass it explicitly only
+        to override, and only with a sampler this family declares: the
+        parameter's type is the closed declared set, so anything else is a
+        type error before it is a runtime one.
+
+        A STAMPED sampler outside the declared set is refused, never
+        substituted. The tuned schema may admit more names than the SDK
+        implements schedulers for, and serving one of the others in its
+        place would render a different image than the recipe asked for,
+        silently and plausibly.
         """
-        return EulerDiscrete.from_block(self.SCHEDULER_PARAMETERS)
+        chosen = cast("Sd2Tuned", self.tuned).scheduler if name is None else name
+        if chosen == 'ddim':
+            return Ddim.from_block(
+                self.SCHEDULER_PARAMETERS['ddim']
+            )
+        if chosen == 'ddim_trailing':
+            return Ddim.from_block(
+                self.SCHEDULER_PARAMETERS['ddim_trailing']
+            )
+        if chosen == 'dpmpp_2m':
+            return DPMSolverMultistep.from_block(
+                self.SCHEDULER_PARAMETERS['dpmpp_2m']
+            )
+        if chosen == 'dpmpp_2m_karras':
+            return DPMSolverMultistep.from_block(
+                self.SCHEDULER_PARAMETERS['dpmpp_2m_karras']
+            )
+        if chosen == 'dpmpp_2m_sde_karras':
+            return DPMSolverMultistep.from_block(
+                self.SCHEDULER_PARAMETERS['dpmpp_2m_sde_karras']
+            )
+        if chosen == 'euler':
+            return EulerDiscrete.from_block(
+                self.SCHEDULER_PARAMETERS['euler']
+            )
+        if chosen == 'euler_a':
+            return EulerAncestralDiscrete.from_block(
+                self.SCHEDULER_PARAMETERS['euler_a']
+            )
+        if chosen == 'unipc':
+            return UniPCMultistep.from_block(
+                self.SCHEDULER_PARAMETERS['unipc']
+            )
+        raise ModelError(
+            ModelRefusal.SCHEDULER_UNDECLARED,
+            f"sd2 is stamped with sampler {chosen!r}, which this SDK "
+            f"implements no scheduler for; it serves "
+            f"['ddim', 'ddim_trailing', 'dpmpp_2m', 'dpmpp_2m_karras', 'dpmpp_2m_sde_karras', 'euler', 'euler_a', 'unipc']",
+        )
 
     def clip(
         self,
@@ -197,4 +338,4 @@ class Sd2(Model):
         )
 
 
-__all__ = ['Sd2', 'Sd2Layout', 'Sd2Shape']
+__all__ = ['Sd2', 'Sd2DeclaredSampler', 'Sd2Layout', 'Sd2Shape']

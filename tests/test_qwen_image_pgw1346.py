@@ -188,8 +188,9 @@ def test_the_weight_lane_is_not_a_traced_graph_variant() -> None:
 def test_the_declared_block_is_the_checkpoints_own_including_the_stretch() -> None:
     """Two of these keys are read by nothing else in the SDK, and both matter."""
 
-    assert QWEN_IMAGE.scheduler is not None
-    assert QWEN_IMAGE.scheduler.name == "flow_match_euler_discrete"
+    # A set of ONE, keyed by sampler (pgw#1346 K10).
+    assert list(QWEN_IMAGE.schedulers) == ["flow_match_euler"]
+    assert QWEN_IMAGE.schedulers["flow_match_euler"].name == "flow_match_euler_discrete"
     assert SCHEDULER["use_dynamic_shifting"] is True
     assert SCHEDULER["shift_terminal"] == 0.02
     assert SCHEDULER["max_image_seq_len"] == 8192
