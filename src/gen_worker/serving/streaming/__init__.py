@@ -61,6 +61,11 @@ def engine_for(
     from ...models import materialized_view
 
     materialized_view.no_fill_serving(True)
+    logger.info(
+        "ctx.load: streaming %s through the %s byte source",
+        checkpoint_dir,
+        getattr(store, "KIND", type(store).__name__),
+    )
     return StreamingLoader(store, device=device, io=io)
 
 

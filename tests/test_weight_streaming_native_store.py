@@ -32,6 +32,15 @@ native = pytest.importorskip(
     reason="the tensorfs#57 wheel is not installed; tensorfs#115's native "
            "stream surface is what this suite exercises",
 )
+if not hasattr(native, "TensorStreamReader"):
+    # Presence of the PACKAGE is not the question, and asking only that is why
+    # this suite was RED rather than skipped: pgw resolves a tensorfs
+    # transitively through torchcg, pinned BELOW #115. Ask for the surface.
+    pytest.skip(
+        "the installed tensorfs predates tensorfs#115 — it carries no "
+        "TensorStreamReader, which is the whole subject of this suite",
+        allow_module_level=True,
+    )
 
 from gen_worker.serving.streaming import NativeWeightStore, StreamingLoader  # noqa: E402
 from gen_worker.serving.streaming.skeleton import meta_survivors  # noqa: E402
@@ -188,3 +197,62 @@ def test_the_native_reader_satisfies_the_engines_protocol(
     first = stream.tensors[0]
     for member in ("name", "dtype", "shape", "offset", "nbytes"):
         assert hasattr(first, member), f"StreamTensor lost {member}"
+
+
+def test_store_for_selects_the_native_reader_over_a_projected_tree(
+    tmp_path: Path,
+) -> None:
+    """The wiring, not the reader: what a WORKER resolving a real projected
+    snapshot tree actually gets back.
+
+    ``NativeWeightStore`` was constructible long before it was constructed —
+    ``store_for`` returned the bridge unconditionally, so an image carrying a
+    real tensorfs (se#756) still served every request through the GIL-bound
+    copy. This asserts the selection itself, over a store written by the
+    vendored plane the worker really uses: the two planes share
+    ``objects/sha256/aa/bb/<hex>`` exactly, so the native reader maps the very
+    objects the projection wrote.
+    """
+    from gen_worker._vendor.tensorfs.local import LocalCAS
+    from gen_worker._vendor.tensorfs.project import project_snapshot
+    from gen_worker.serving.streaming import BridgeWeightStore, store_for
+    from gen_worker.serving.streaming.source import native_available
+
+    assert native_available()
+
+    source = tmp_path / "source-model"
+    pipeline_cls = build_source(source)
+    expected = source_tensors(source)
+
+    cas = LocalCAS(tmp_path / "store")
+    manifest = cas.ingest_repository(source)
+    cas.compare_and_swap_ref(
+        "snapshot:demo", cas.store_manifest(manifest), expected=None
+    )
+    tree = project_snapshot(cas, manifest, tmp_path / "store/snapshots/demo")
+
+    selected = store_for(tree)
+    assert isinstance(selected, NativeWeightStore), (
+        f"a projected tree with a real tensorfs installed resolved "
+        f"{type(selected).__name__} — the ~10x is being left on the floor"
+    )
+    assert sorted(selected.containers()) == sorted(
+        BridgeWeightStore(cas, manifest).containers()
+    ), "the two planes disagree about which files are tensor containers"
+
+    loader = StreamingLoader(selected, device="cpu", buffer_bytes=WINDOW, buffers=3)
+    pipeline = loader.build(pipeline_cls, checkpoint_dir=tree, lane=Lane())
+    report = loader.last_report
+    assert report is not None and report.source == "native"
+    for component, tensors in expected.items():
+        module = getattr(pipeline, component)
+        live = dict(module.named_parameters(remove_duplicate=False))
+        live.update(dict(module.named_buffers(remove_duplicate=False)))
+        for name, want in tensors.items():
+            assert torch.equal(
+                live[name].reshape(-1).view(torch.uint8),
+                want.reshape(-1).view(torch.uint8),
+            ), f"{component}/{name} is not byte-equal through the native store"
+
+    # The bridge stays reachable, because it is the fallback.
+    assert isinstance(store_for(tree, native=False), BridgeWeightStore)

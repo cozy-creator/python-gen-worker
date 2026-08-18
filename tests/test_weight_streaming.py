@@ -318,8 +318,27 @@ def _append_tensor(path: Path, name: str) -> None:
 
 
 def _drop_tensor(path: Path) -> str:
+    """Rewrite the container WITHOUT one tensor — a real checkpoint that is
+    missing a name, not a malformed one.
+
+    The body is rebuilt and every surviving span reindexed, because popping a
+    header key alone leaves the victim's bytes in the body addressed by
+    nothing. The vendored reader shrugs at that gap; the native reader refuses
+    the file outright ("these records are not a tensor container"), and it is
+    right to — safetensors spans tile the body. Leaving the gap in would test
+    the store's tolerance for a corrupt file rather than the engine's refusal
+    to serve meta.
+    """
     header, body = _read_header(path)
     victim = sorted(key for key in header if key != "__metadata__")[0]
     header.pop(victim)
-    _write_container(path, header, body)
+    rebuilt = bytearray()
+    for name in sorted(
+        (key for key in header if key != "__metadata__"),
+        key=lambda key: header[key]["data_offsets"][0],
+    ):
+        start, end = header[name]["data_offsets"]
+        header[name]["data_offsets"] = [len(rebuilt), len(rebuilt) + (end - start)]
+        rebuilt += body[start:end]
+    _write_container(path, header, bytes(rebuilt))
     return victim
