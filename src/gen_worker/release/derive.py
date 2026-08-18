@@ -111,6 +111,10 @@ class ReleaseDeriveResult:
     endpoint: str
     lane_graphs: dict[str, tuple[str, ...]]  # lane contract -> graph hashes
     warnings: tuple[str, ...] = ()
+    #: pgw#1392: NO model class anywhere, so there is nothing to hold at all.
+    #: Distinct from eager-permanent, which holds a model and compiles none —
+    #: both land on "no lanes", and a log that conflates them lies.
+    weightless: bool = False
 
     @property
     def eager_permanent(self) -> bool:
@@ -1293,6 +1297,10 @@ def derive_release(
             for lane in graphs_document.lanes
         },
         warnings=tuple(warnings),
+        # No lane class AND entrypoints still derived => every one of them
+        # declared zero model slots. An eager-permanent module also has no
+        # lane class, but its entrypoints carry slots and derive no plan.
+        weightless=cls is None and bool(plans),
     )
 
 

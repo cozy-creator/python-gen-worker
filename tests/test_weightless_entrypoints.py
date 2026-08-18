@@ -164,6 +164,20 @@ def test_derive_renders_an_envelope_with_no_model_field(
     assert schema["required"] == ["input"]
     assert "model" not in json.dumps(schema)
 
+    # "No lanes" has two causes and the log may not conflate them: a model
+    # held eagerly (lanes=()) vs NO MODEL AT ALL.
+    assert result.eager_permanent and result.weightless
+
+    sys.path.insert(0, str(FIXTURES))
+    try:
+        eager = derive_release(
+            importlib.import_module("eager_endpoint"), checkpoint_dir=tmp_path
+        )
+    finally:
+        sys.path.remove(str(FIXTURES))
+    assert eager.eager_permanent and not eager.weightless
+    assert json.loads(eager.document)["entrypoints"] == {}
+
 
 # -- serve ------------------------------------------------------------------
 
