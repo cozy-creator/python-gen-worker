@@ -80,45 +80,64 @@ def _seed_sdxl_contracts() -> None:
     register_contract_dtype("cozy.sdxl-fp8-rowwise@1", torch.bfloat16)
 
 
+class _SdxlRecipe(msgspec.Struct, frozen=True):
+    """One SERVING RECIPE: the typed axes that drive a request, whichever
+    source it came from (the checkpoint's own defaults, or a riding
+    distillation adapter's). Both Defaults types inherit it, so endpoint
+    code holds ONE type, never a union (main_v2 pattern)."""
+
+    # cfg=False -> guidance-off serving (batch-1; no unconditional branch).
+    cfg: bool = True
+    steps: Knob = msgspec.field(
+        default_factory=lambda: Knob(
+            default=28, lo=1, hi=80, name="num_inference_steps"
+        )
+    )
+    guidance: Knob = msgspec.field(
+        default_factory=lambda: Knob(
+            default=6.0, lo=1.0, hi=15.0, name="guidance_scale"
+        )
+    )
+    # None = keep the checkpoint's own scheduler untouched.
+    schedule: Optional[str] = None  # "euler_trailing" | "lcm" | None
+    timesteps: tuple[int, ...] = ()
+
+
+class _SdxlDefaults(_SdxlRecipe, frozen=True):
+    """Per-checkpoint deploy row over platform fallbacks; zero-arg = the
+    platform opinion (the schema the release exports)."""
+
+    positive_preamble: str = ""
+    negative_preamble: str = ""
+
+
+class _SdxlLoraDefaults(_SdxlRecipe, frozen=True):
+    """A distillation adapter's own recipe metadata."""
+
+    cfg: bool = False
+    steps: Knob = msgspec.field(
+        default_factory=lambda: Knob(
+            default=4, lo=1, hi=12, name="num_inference_steps"
+        )
+    )
+    schedule: Optional[str] = "euler_trailing"
+
+
 class SDXL:
-    """The SDXL model type: today, its checkpoint-defaults schema."""
+    """The SDXL model type: today, its recipe/defaults schema."""
 
     #: The canonical layout contract (what omitting lanes= means).
     CANONICAL_CONTRACT = "sdxl.diffusers-bf16@1"
 
+    Recipe = _SdxlRecipe
+    Defaults = _SdxlDefaults
+
     class Lora:
         """SDXL adapter metadata (distillation LoRAs et al.)."""
 
-        class Defaults(msgspec.Struct, frozen=True):
-            # The turbo recipe is the ADAPTER'S metadata; endpoint code only
-            # maps schedule -> scheduler construction (main_v2 pattern).
-            schedule: str = "euler_trailing"  # "euler_trailing" | "lcm"
-            steps: Knob = msgspec.field(
-                default_factory=lambda: Knob(
-                    default=4, lo=1, hi=12, name="num_inference_steps"
-                )
-            )
-            timesteps: tuple[int, ...] = ()
+        Defaults = _SdxlLoraDefaults
 
-    class Defaults(msgspec.Struct, frozen=True):
-        # cfg=False marks a step-distilled checkpoint (guidance-off serving);
-        # such a checkpoint carries its OWN recipe fields (schedule/timesteps),
-        # same vocabulary as an adapter's Lora.Defaults.
-        cfg: bool = True
-        steps: Knob = msgspec.field(
-            default_factory=lambda: Knob(
-                default=28, lo=1, hi=80, name="num_inference_steps"
-            )
-        )
-        guidance: Knob = msgspec.field(
-            default_factory=lambda: Knob(
-                default=6.0, lo=1.0, hi=15.0, name="guidance_scale"
-            )
-        )
-        positive_preamble: str = ""
-        negative_preamble: str = ""
-        schedule: str = "euler_trailing"  # "euler_trailing" | "lcm"
-        timesteps: tuple[int, ...] = ()
+
 
 
 _seed_sdxl_contracts()
