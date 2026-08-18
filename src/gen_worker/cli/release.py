@@ -51,6 +51,13 @@ def add_subparser(sub: Any) -> None:
         "installed distribution set of THIS env)",
     )
     derive.add_argument(
+        "--graph-cas",
+        default=None,
+        help="tensorfs CAS root to store each discovered graph's SERIALIZED "
+        "ExportedProgram in (the miner downloads the graph and runs inductor; "
+        "it never re-traces). The digests travel in the document.",
+    )
+    derive.add_argument(
         "--out",
         default=None,
         help="write the document bytes here (default: stdout)",
@@ -84,6 +91,7 @@ def _run_derive(args: argparse.Namespace) -> int:
             module,
             checkpoint_dir=checkpoint,
             lockfile=Path(args.lockfile).resolve() if args.lockfile else None,
+            graph_cas=Path(args.graph_cas).resolve() if args.graph_cas else None,
         )
     except DeriveError as exc:
         print(f"derive error: {exc}", file=sys.stderr)

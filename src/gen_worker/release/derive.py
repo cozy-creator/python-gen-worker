@@ -62,7 +62,11 @@ from ..serving.model import (
     model_lanes,
 )
 from ..serving.model import model_type as _strict_model_type
-from .trace_context import TraceLoadContext, TraceRequestContext
+from .trace_context import (
+    StepBudgetReached,
+    TraceLoadContext,
+    TraceRequestContext,
+)
 
 DOCUMENT_KIND = "gen-worker.release-metadata@1"
 
@@ -70,6 +74,12 @@ DOCUMENT_KIND = "gen-worker.release-metadata@1"
 #: deterministic prefix (field declaration order x enum declaration order);
 #: the rest is first-encounter discovery.
 ENUM_CAP = 64
+
+#: Denoise steps per enumerated pass. Every step of a diffusion loop runs the
+#: SAME shapes, so one is the whole observation; the derive re-drives
+#: unbudgeted when a marked module has still not been reached (post-loop
+#: modules like a marked VAE decoder). None = the author's own step count.
+TRACE_STEP_BUDGET: Optional[int] = 1
 
 
 class DeriveError(RuntimeError):
@@ -117,6 +127,96 @@ def _torchcg() -> ModuleType:
             "environment; gen-worker deliberately does not bundle it."
         ) from exc
     return torchcg
+
+
+def _hollow() -> ModuleType:
+    """The publish-time hollow session module, imported BY ITS OWN NAME.
+
+    torchcg deliberately does not re-export ``hollow`` from the package root
+    (it names diffusers/transformers loaders; a root export would put them on
+    every serve-role import closure).
+    """
+
+    import importlib
+
+    _torchcg()
+    return importlib.import_module("torchcg.hollow")
+
+
+def _graph_artifact_sink(cas_root: Optional[Path]) -> Optional[Any]:
+    """Store each discovered graph's SERIALIZED ExportedProgram in the CAS.
+
+    Paul's ruling (2026-08-20): the derive keeps THE WHOLE TRACED GRAPH, not
+    just its hash -- "we only ever need to run trace() once" now holds
+    literally. The runtime miner downloads this blob and runs inductor on
+    it; it never re-traces and never executes author code at mint time.
+
+    Bytes-at-rest is tensorfs's charter (LIBRARY-BOUNDARIES), so the blob
+    goes into a tensorfs ``LocalCAS`` and only its digest travels in the
+    release document, beside the cg-graph-v1 hash and the ingress spec.
+    Portability needs no new fence: an ExportedProgram is torch-coupled and
+    the document's own lockfile closure pins torch -- the same validity rule
+    compiled artifacts already live under.
+    """
+
+    if cas_root is None:
+        return None
+
+    import io
+
+    import torch
+    from tensorfs import LocalCAS
+
+    cas = LocalCAS(Path(cas_root))
+
+    def sink(graph: str, program: Any) -> str:
+        _demote_fakes_to_meta(torch, program)
+        buffer = io.BytesIO()
+        torch.export.save(program, buffer)
+        del graph
+        return str(cas.put_bytes(buffer.getvalue()))
+
+    return sink
+
+
+def _demote_fakes_to_meta(torch: Any, program: Any) -> None:
+    """Replace the traced program's FAKE tensors with META tensors.
+
+    A derive traces under ``FakeTensorMode``, and ``torch.export.save`` writes
+    a fake tensor's PHANTOM storage -- the archive then claims a shape whose
+    bytes are not there, and ``torch.export.load`` dies with
+    ``setStorage: ... out of bounds for storage of size N`` (measured on the
+    real SDXL UNet: a [1280, 320] bf16 parameter wanting 819,200 bytes over a
+    23,040-byte storage). Meta tensors are shape+dtype ONLY, which is exactly
+    what a graph artifact should carry: the miner binds the checkpoint's real
+    weights before it compiles. So this is the honest serialization, not a
+    workaround -- and it is the same reason the blob holds no weights.
+
+    Buffers hollow_session computed for REAL are left alone; only fakes move.
+    """
+
+    from torch._subclasses.fake_tensor import FakeTensor
+
+    def demote(value: Any) -> Any:
+        if not isinstance(value, FakeTensor):
+            return value
+        meta = torch.empty_strided(
+            value.shape, value.stride(), dtype=value.dtype, device="meta"
+        )
+        if isinstance(value, torch.nn.Parameter):
+            return torch.nn.Parameter(meta, requires_grad=False)
+        return meta
+
+    for holder in (
+        getattr(program, "state_dict", None),
+        getattr(program, "constants", None),
+    ):
+        if not isinstance(holder, dict):
+            continue
+        for name, value in list(holder.items()):
+            demoted = demote(value)
+            if demoted is not value:
+                holder[name] = demoted
 
 
 def _lane_model_class(module: ModuleType) -> Optional[type]:
@@ -171,6 +271,10 @@ class _Entrypoint:
     ctx_param: str
     #: (param name, annotation, base trace value) per platform-injected fact.
     injected: tuple[tuple[str, Any, Any], ...]
+    #: Every model slot in signature order: (param name = SLOT NAME, class).
+    #: The lane-declaring class may fill more than one slot (h3's `video` and
+    #: `video_ref` are two checkpoints of one model type).
+    model_slots: tuple[tuple[str, type], ...] = ()
 
 
 def _injected_trace_value(name: str, parameter_name: str, annotation: Any) -> Any:
@@ -195,9 +299,16 @@ def _injected_trace_value(name: str, parameter_name: str, annotation: Any) -> An
     )
 
 
+#: The RULED signature order (Paul, 2026-08-19 line review; pgw#1382): one
+#: rule with ``load(self, ctx)``. Malformed order is a typed refusal HERE, at
+#: derive/publish, not a runtime surprise.
+_SLOT_ORDER = ("ctx", "payload", "model", "adapter")
+
+
 def _entrypoints(module: ModuleType, model_cls: type) -> list[_Entrypoint]:
     import msgspec
 
+    from ..api.model_base import Model
     from ..request_context import RequestContext
 
     out: list[_Entrypoint] = []
@@ -209,18 +320,28 @@ def _entrypoints(module: ModuleType, model_cls: type) -> list[_Entrypoint]:
         payload_param = model_param = ctx_param = None
         payload_type: Any = None
         rest: list[tuple[str, Any]] = []
+        model_slots: list[tuple[str, type]] = []
+        roles: list[tuple[str, str]] = []
         for parameter in parameters:
             annotation = _strip_annotated(hints.get(parameter.name))
             if isinstance(annotation, type) and issubclass(annotation, msgspec.Struct):
                 payload_param, payload_type = parameter.name, annotation
-            elif annotation is model_cls:
-                model_param = parameter.name
+                roles.append((parameter.name, "payload"))
+            elif isinstance(annotation, type) and issubclass(annotation, Model):
+                # Every Model-annotated parameter is a SLOT; its NAME is the
+                # slot name in the request envelope (th#2140 5c).
+                model_slots.append((parameter.name, annotation))
+                if annotation is model_cls and model_param is None:
+                    model_param = parameter.name
+                roles.append((parameter.name, "model"))
             elif typing.get_origin(annotation) is RequestContext or (
                 isinstance(annotation, type) and issubclass(annotation, RequestContext)
             ):
                 ctx_param = parameter.name
+                roles.append((parameter.name, "ctx"))
             else:
                 rest.append((parameter.name, hints.get(parameter.name)))
+                roles.append((parameter.name, "adapter"))
         if model_param is None:
             continue
         if payload_param is None:
@@ -233,12 +354,17 @@ def _entrypoints(module: ModuleType, model_cls: type) -> list[_Entrypoint]:
             # parameter is ctx (the minimal (payload, model, ctx) shape).
             if len(rest) == 1:
                 ctx_param = rest.pop(0)[0]
+                roles = [
+                    (item[0], "ctx" if item[0] == ctx_param else item[1])
+                    for item in roles
+                ]
             else:
                 raise DeriveError(
                     f"@entrypoint {name}: cannot identify the ctx parameter "
                     f"among {[item[0] for item in rest]!r}; annotate it "
                     f"RequestContext"
                 )
+        _check_slot_order(name, roles)
         injected = tuple(
             (
                 parameter_name,
@@ -256,6 +382,7 @@ def _entrypoints(module: ModuleType, model_cls: type) -> list[_Entrypoint]:
                 model_param=model_param,
                 ctx_param=ctx_param,
                 injected=injected,
+                model_slots=tuple(model_slots),
             )
         )
     if not out:
@@ -264,6 +391,24 @@ def _entrypoints(module: ModuleType, model_cls: type) -> list[_Entrypoint]:
             f"(the model parameter's annotation is the binding)"
         )
     return out
+
+
+def _check_slot_order(name: str, roles: list[tuple[str, str]]) -> None:
+    """ctx-FIRST: ``(ctx, payload, model(s), adapter(s))`` -- a typed refusal.
+
+    One rule with ``load(self, ctx)`` (Paul, 2026-08-19). The derive still
+    calls by KEYWORD; the order is a READABILITY contract the publish gate
+    enforces so every endpoint in the fleet reads the same way.
+    """
+
+    ranks = [_SLOT_ORDER.index(role) for _, role in roles]
+    if ranks != sorted(ranks):
+        spelled = ", ".join(f"{param}: {role}" for param, role in roles)
+        raise DeriveError(
+            f"@entrypoint {name}: parameters are out of the ruled order. "
+            f"An entrypoint reads (ctx, payload, model(s), adapter(s)); got "
+            f"({spelled})"
+        )
 
 
 def _strip_annotated(annotation: Any) -> Any:
@@ -302,6 +447,51 @@ def _synthesize_field(owner: str, name: str, annotation: Any) -> Any:
     )
 
 
+def _literal_axis(annotation: Any) -> Optional[list[Any]]:
+    """A ``Literal[...]`` field's values -- a PRESET axis, same as an enum.
+
+    Shape-rich packed models state their reachable QUANTITIES as numeric
+    Literals rather than enums (h3's ``StepPreset = Literal[20, 30, 50]``,
+    ``DurationS = Literal[5, 10]``, ``Fps = Literal[24, 48, 60]``): the API
+    boundary refuses everything else, so the Literal IS the preset-reachable
+    set, and enumerating it is exactly the lazy-coverage rule -- enumerate
+    what presets reach, discover the rest on first encounter.
+
+    NUMERIC literals only, deliberately. A numeric preset is a quantity the
+    model RUNS at (it reaches the graph's ingress: sequence length, frame
+    count, step ladder); a STRING literal names a host-side policy
+    (``SdxlScheduler``, ``ImageFormat``) that never changes a marked
+    module's shapes, and cross-producting it would explode the enumeration
+    for zero graph classes. A string axis that DOES bear shape is spelled as
+    a StrEnum, which enumerates on the branch above.
+    """
+
+    stripped = _strip_annotated(annotation)
+    if typing.get_origin(stripped) is typing.Literal:
+        values = list(typing.get_args(stripped))
+    else:
+        origin = typing.get_origin(stripped)
+        if origin is not typing.Union and origin is not types.UnionType:
+            return None
+        values = []
+        for argument in typing.get_args(stripped):
+            inner = _strip_annotated(argument)
+            if typing.get_origin(inner) is typing.Literal:
+                values.extend(typing.get_args(inner))
+            elif inner is type(None):
+                values.append(None)
+            else:
+                return None
+    if not values:
+        return None
+    if not all(
+        value is None or (isinstance(value, (int, float)) and not isinstance(value, bool))
+        for value in values
+    ):
+        return None
+    return values
+
+
 def _auto_payloads(owner: str, payload_type: type) -> tuple[tuple[Any, ...], bool]:
     """Auto-enumerated trace payloads for one entrypoint, plus the capped flag.
 
@@ -333,22 +523,140 @@ def _auto_payloads(owner: str, payload_type: type) -> tuple[tuple[Any, ...], boo
                 )
             enum_axes.append((field.name, values))
             continue
+        literal_values = _literal_axis(annotation)
+        if literal_values is not None:
+            if not literal_values:
+                raise DeriveError(
+                    f"{owner}: payload field {field.name!r} enumerates an "
+                    f"EMPTY Literal"
+                )
+            enum_axes.append((field.name, literal_values))
+            continue
         if field.required:
             base[field.name] = _synthesize_field(owner, field.name, annotation)
 
     if not enum_axes:
         return (payload_type(**base),), False
 
+    # pgw#1384: the DEFAULT-parameter combination comes FIRST -- the serving
+    # hole list inherits document order and the miner mints in that order,
+    # so the class an all-defaults payload exercises must lead. Then enum
+    # declaration order for the rest.
+    default_combo = tuple(
+        field.default if field.default in values else values[0]
+        for (name, values), field in zip(
+            enum_axes,
+            [
+                next(f for f in struct_fields if f.name == name)
+                for name, _ in enum_axes
+            ],
+        )
+    )
     names = [name for name, _ in enum_axes]
-    combos = itertools.product(*[values for _, values in enum_axes])
+    ordered_combos = itertools.chain(
+        [default_combo],
+        (
+            combo
+            for combo in itertools.product(*[values for _, values in enum_axes])
+            if combo != default_combo
+        ),
+    )
     payloads: list[Any] = []
     capped = False
-    for index, combo in enumerate(combos):
+    for index, combo in enumerate(ordered_combos):
         if index >= ENUM_CAP:
             capped = True
             break
         payloads.append(payload_type(**base, **dict(zip(names, combo))))
     return tuple(payloads), capped
+
+
+#: One adapter pick on the wire: the fully-pinned hub ref plus its strength.
+_ADAPTER_PICK: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "ref": {"type": "string", "description": "org/repo@release"},
+        "scale": {"type": "number", "default": 1.0},
+    },
+    "required": ["ref"],
+    "additionalProperties": False,
+}
+
+
+def _envelope_schema(plan: "_Entrypoint") -> dict[str, Any]:
+    """The request envelope's JSON Schema, DERIVED FROM THE SIGNATURE.
+
+    Parameter name IS slot name (th#2140 5c): an author naming a parameter
+    ``turbo`` publishes the envelope key ``adapters.turbo``; a model
+    parameter named ``video_ref`` publishes ``models.video_ref``. Renaming a
+    parameter is therefore a VISIBLE API BREAK and publish flags it exactly
+    as it flags a disappearing lane. The hub publishes this schema as the
+    entrypoint's auto-generated docs.
+    """
+
+    import msgspec
+
+    models: dict[str, Any] = {}
+    for slot_name, slot_cls in plan.model_slots:
+        models[slot_name] = {
+            "type": "string",
+            "description": (
+                f"pinned hub ref of the checkpoint bound to this "
+                f"{slot_cls.__name__} slot"
+            ),
+        }
+
+    adapters: dict[str, Any] = {}
+    required_adapters: list[str] = []
+    for parameter_name, annotation, _base in plan.injected:
+        adapter_cls = _adapter_arm_class(annotation)
+        stripped = _strip_annotated(annotation)
+        if adapter_cls is None:
+            continue
+        origin = typing.get_origin(stripped)
+        if origin in (list, tuple) or any(
+            typing.get_origin(argument) in (list, tuple)
+            for argument in typing.get_args(stripped)
+        ):
+            adapters[parameter_name] = {
+                "type": "array",
+                "items": _ADAPTER_PICK,
+                "default": [],
+                "x-adapter-type": adapter_cls.__name__,
+            }
+        else:
+            entry = dict(_ADAPTER_PICK)
+            entry["x-adapter-type"] = adapter_cls.__name__
+            if _optional_none(stripped):
+                adapters[parameter_name] = {"anyOf": [entry, {"type": "null"}],
+                                            "default": None}
+            else:
+                adapters[parameter_name] = entry
+                required_adapters.append(parameter_name)
+
+    properties: dict[str, Any] = {"input": msgspec.json.schema(plan.payload_type)}
+    required = ["input"]
+    if models:
+        properties["models"] = {
+            "type": "object",
+            "properties": models,
+            "additionalProperties": False,
+        }
+    if adapters:
+        properties["adapters"] = {
+            "type": "object",
+            "properties": adapters,
+            "required": sorted(required_adapters),
+            "additionalProperties": False,
+        }
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": plan.name,
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": False,
+    }
 
 
 def _fake_adapter(
@@ -378,15 +686,19 @@ def _fake_adapter(
 
 
 def _adapter_arm_class(annotation: Any) -> Optional[type]:
-    """The Adapter subclass an adapter-shaped fact declares, else None."""
+    """The Adapter subclass an adapter-shaped fact declares, else None.
+
+    ``DistillationAdapter | None`` and ``list[Adapter]`` both answer their
+    ELEMENT type, so the synthesized fake is the slot's own kind.
+    """
     from ..serving.context import Adapter
 
-    stripped = _strip_annotated(annotation)
-    if isinstance(stripped, type) and issubclass(stripped, Adapter):
-        return stripped
-    for argument in typing.get_args(stripped):
-        if isinstance(argument, type) and issubclass(argument, Adapter):
-            return argument
+    stack = [_strip_annotated(annotation)]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, type) and issubclass(current, Adapter):
+            return current
+        stack.extend(_strip_annotated(argument) for argument in typing.get_args(current))
     return None
 
 
@@ -401,12 +713,13 @@ def _injected_axes(
 
     axes: list[list[tuple[str, Any]]] = []
     for parameter_name, annotation, base_value in plan.injected:
-        arm_cls = _adapter_arm_class(annotation)
-        if arm_cls is not None:
+        adapter_cls = _adapter_arm_class(annotation)
+        if adapter_cls is not None:
+            fake = _fake_adapter(model_type, adapter_cls)
             if _optional_none(_strip_annotated(annotation)):
-                values: list[Any] = [None, _fake_adapter(model_type, arm_cls)]
+                values: list[Any] = [None, fake]
             else:
-                values = [base_value, [_fake_adapter(model_type, arm_cls)]]
+                values = [base_value, [fake]]
             axes.append([(parameter_name, value) for value in values])
         else:
             axes.append([(parameter_name, base_value)])
@@ -598,7 +911,14 @@ def _resolve_lane(torchcg: ModuleType, cls: type, lane: Any) -> Any:
     """
 
     handle = lane_contract_handle(f"class {cls.__name__!r}", lane)
-    dtype = getattr(lane, "dtype", None)
+    try:
+        # tensorfs#113's `dtype` is a PROPERTY that RAISES on a contract
+        # declaring none (minimax.h3-dit-diffusers today), so this is a try,
+        # never a getattr default -- otherwise the refusal below is bypassed
+        # by an un-caught MissingDtype traceback.
+        dtype = getattr(lane, "dtype", None)
+    except Exception:
+        dtype = None
     if dtype is None:
         raise DeriveError(
             f"lane {handle!r}: the contract object carries no dtype. A lane "
@@ -615,6 +935,7 @@ def _derive_lane(
     plans: list[tuple[_Entrypoint, tuple[Any, ...]]],
     checkpoint_dir: Path,
     warnings: list[str],
+    artifact_sink: Optional[Any] = None,
 ) -> Any:
     """One lane's instrumented runs, merged across defaults variants.
 
@@ -628,6 +949,7 @@ def _derive_lane(
 
     from ..api.errors import ValidationError
 
+    hollow = _hollow()
     handle = lane_contract_handle(f"class {cls.__name__!r}", lane)
     resolved = _resolve_lane(torchcg, cls, lane)
     model_type = model_model_type(cls)
@@ -645,13 +967,19 @@ def _derive_lane(
             model_type=model_type,
             defaults_instance=defaults_instance,
         )
+        # TRACE_STEP_BUDGET: every step of a denoise loop runs the same
+        # shapes, so one step per enumerated pass observes the whole set.
+        # Modules that run after the loop are caught by the unbudgeted
+        # re-drive below.
         request_ctx = TraceRequestContext(
-            lane=resolved, checkpoint_ref=f"trace:{checkpoint_dir.name}"
+            lane=resolved,
+            checkpoint_ref=f"trace:{checkpoint_dir.name}",
+            step_budget=TRACE_STEP_BUDGET,
         )
-        with torchcg.hollow_session():
+        with hollow.hollow_session():
             try:
                 model.load(load_ctx)
-            except torchcg.HollowError as exc:
+            except hollow.HollowError as exc:
                 raise DeriveError(f"lane {handle!r}: {exc}") from exc
             except Exception as exc:
                 raise DeriveError(
@@ -666,20 +994,59 @@ def _derive_lane(
                 )
             modules = _named_marked_modules(model, load_ctx.marked_modules)
 
+            # Secondary model slots (an auxiliary model with its own
+            # checkpoint, e.g. h3's RIFE interpolator): a fresh instance per
+            # slot, loaded under the SAME hollow session. Every slot named in
+            # a signature must be fillable at trace or the release cannot
+            # state its graph set.
+            aides: dict[str, Any] = {}
+            for plan, _payloads in plans:
+                for slot_name, slot_cls in plan.model_slots:
+                    if slot_cls is cls or slot_name in aides:
+                        continue
+                    aide = slot_cls()
+                    try:
+                        aide.load(
+                            TraceLoadContext(
+                                lane=resolved,
+                                checkpoint_dir=checkpoint_dir,
+                                model_type=model_model_type(slot_cls),
+                                defaults_instance=None,
+                            )
+                        )
+                    except Exception as exc:
+                        raise DeriveError(
+                            f"lane {handle!r}: entrypoint {plan.name!r} slot "
+                            f"{slot_name!r} ({slot_cls.__name__}) failed to "
+                            f"load under the trace session: "
+                            f"{type(exc).__name__}: {exc}"
+                        ) from exc
+                    aides[slot_name] = aide
+
             def drive() -> None:
                 nonlocal refused, total_combos
                 for plan, payloads in plans:
                     axes = _injected_axes(plan, model_type)
+                    slots = {
+                        slot_name: (
+                            model if slot_cls is cls else aides[slot_name]
+                        )
+                        for slot_name, slot_cls in plan.model_slots
+                    }
                     for binding in itertools.product(*axes) if axes else [()]:
                         for index, payload in enumerate(payloads):
                             total_combos += 1
                             try:
                                 plan.fn(**{
                                     plan.payload_param: payload,
-                                    plan.model_param: model,
                                     plan.ctx_param: request_ctx,
+                                    **slots,
                                     **dict(binding),
                                 })
+                            except StepBudgetReached:
+                                # The pass observed its shapes; the remaining
+                                # denoise steps repeat them.
+                                pass
                             except ValidationError:
                                 # The author refusing an impossible serving
                                 # combination is correct behavior, not a
@@ -696,7 +1063,19 @@ def _derive_lane(
                                 ) from exc
 
             try:
-                lane_graphs = torchcg.discover_modules(handle, modules, drive)
+                lane_graphs = torchcg.discover_modules(
+                    handle, modules, drive, artifact_sink=artifact_sink
+                )
+                if set(lane_graphs.targets) - {
+                    record.target for record in lane_graphs.graphs
+                }:
+                    # A marked module the budgeted drive never reached (it
+                    # runs AFTER the denoise loop). Re-drive unbudgeted
+                    # before calling it unobserved.
+                    request_ctx.step_budget = None
+                    lane_graphs = torchcg.discover_modules(
+                        handle, modules, drive, artifact_sink=artifact_sink
+                    )
             except DeriveError:
                 raise
             except torchcg.DiscoveryError as exc:
@@ -735,10 +1114,12 @@ def derive_release(
     *,
     checkpoint_dir: Path,
     lockfile: Optional[Path] = None,
+    graph_cas: Optional[Path] = None,
 ) -> ReleaseDeriveResult:
     """Derive the release metadata document for one endpoint module."""
 
     torchcg = _torchcg()
+    artifact_sink = _graph_artifact_sink(graph_cas)
 
     if lockfile is not None:
         closure = torchcg.closure_hash(_closure_entries_from_lockfile(lockfile))
@@ -750,6 +1131,7 @@ def derive_release(
 
     lanes: list[Any] = []
     lane_contracts: dict[str, Any] = {}
+    entrypoints: dict[str, Any] = {}
     warnings: list[str] = []
     if cls is not None:
         plans: list[tuple[_Entrypoint, tuple[Any, ...]]] = []
@@ -764,10 +1146,19 @@ def derive_release(
                     f"mint)"
                 )
             plans.append((plan, payloads))
+            entrypoints[plan.name] = {
+                "envelope_schema": _envelope_schema(plan),
+                "model_slots": {
+                    slot_name: slot_cls.__name__
+                    for slot_name, slot_cls in plan.model_slots
+                },
+                "traced_passes": len(payloads),
+            }
 
         for lane in model_lanes(cls):
             lane_graphs = _derive_lane(
-                torchcg, cls, lane, plans, checkpoint_dir, warnings
+                torchcg, cls, lane, plans, checkpoint_dir, warnings,
+                artifact_sink=artifact_sink,
             )
             lanes.append(lane_graphs)
             lane_contracts[lane_graphs.contract] = {
@@ -782,6 +1173,11 @@ def derive_release(
         "endpoint": endpoint_name,
         "graphs": graphs_document.as_dict(),
         "lane_contracts": lane_contracts,
+        # The per-entrypoint request envelope, DERIVED FROM THE SIGNATURE
+        # (parameter name = slot name). The hub publishes these as the
+        # release's auto-generated API docs; a renamed parameter is a
+        # visible API break, flagged like a disappearing lane.
+        "entrypoints": entrypoints,
         "checkpoint_defaults_schema": _defaults_schema(
             model_model_type(cls) if cls is not None else None
         ),

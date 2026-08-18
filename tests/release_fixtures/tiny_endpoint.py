@@ -43,7 +43,9 @@ _BUCKETS: dict[Size, int] = {Size.SMALL: 32, Size.LARGE: 64}
 
 class GenerateInput(msgspec.Struct, forbid_unknown_fields=True):
     prompt: str
-    size: Size = Size.SMALL
+    # LARGE deliberately: the payload DEFAULT differs from enum declaration
+    # order, so pgw#1384's default-first document ordering is observable.
+    size: Size = Size.LARGE
     guidance_scale: float | None = None
     num_inference_steps: int | None = None
 

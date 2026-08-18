@@ -74,6 +74,15 @@ def test_derive_discovers_the_auto_enumerated_graph_set(
     )
     assert batches == [1, 1, 2, 2]
 
+    # pgw#1384: the DEFAULT-parameter class LEADS the document -- the serving
+    # hole list inherits document order and the miner mints in it, so the
+    # class an all-defaults request needs is the first one published.
+    # GenerateInput defaults size=LARGE (64px; the tiny VAE has ONE block, so
+    # the latent equals the pixel size) under the platform (cfg-on) row: the
+    # first row is the batch-2 latent-64 class even though SMALL precedes
+    # LARGE in enum declaration order.
+    assert lane["graphs"][0]["ingress"]["inputs"][0]["shape"] == [2, 4, 64, 64]
+
     # The exported defaults schema: the successor of the hub-embedded
     # per-family defaults registry (one schema per release, endpoint-owned).
     schema = document["checkpoint_defaults_schema"]
