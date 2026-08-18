@@ -88,7 +88,9 @@ HIGH_WATER: Dict[str, Tuple[int, int]] = {
     # 255 -> 242: pgw#1362 wave 1 folded 27 incident-named hub-wire test
     # modules into 5 domain modules and typed them clean, so the 13 of them
     # that were unchecked came off the list and nothing went back on.
-    "ignore_errors": (242, 2016),
+    # 242 -> 238: wave 2 did the same to the cli/config/sdk cluster (9 modules
+    # -> 3, plus one rename), taking four more off.
+    "ignore_errors": (238, 2016),
 }
 
 #: WILDCARD patterns are structural policy, not debt, so they are not counted
