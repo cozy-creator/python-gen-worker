@@ -23,8 +23,10 @@ window in which tenant code has run and the measurement has not.
 from __future__ import annotations
 
 import json
+import os
 import logging
 import sys
+import time
 from typing import TYPE_CHECKING, Any, Dict
 
 if TYPE_CHECKING:  # heavy edges stay off this module's import scope
@@ -36,10 +38,56 @@ logger = logging.getLogger(__name__)
 def measure() -> Dict[str, Any]:
     """Hardware facts, the boot host canary, and the build identity."""
     out: Dict[str, Any] = {"hardware": {}, "canary": None, "gen_worker_version": ""}
-    try:
-        out["hardware"] = probe_hardware().as_dict()
-    except Exception as exc:  # never fatal: an unmeasured axis is a zero
-        out["hardware_error"] = f"{type(exc).__name__}: {exc}"
+    # pgw#1414: RETRY AN EMPTY CENSUS WHEN THE CONTAINER HOLDS GPU DEVICE
+    # NODES, and if it stays empty say so LOUDLY instead of shipping a clean
+    # cpu-class answer. Measured on a rented 4090 (pod 3ntpe1zwbksuwo): the
+    # census read `driver="" gpu="" count=0`, the worker registered
+    # `class=cpu gpu=0`, and the hub then declined placement with
+    # `compute_class_mismatch` 703+ times in a loop with NO terminal state
+    # while the pod billed. Zero errors anywhere — because a swallowed census
+    # and a genuinely cardless box produce byte-identical output.
+    #
+    # This census runs in the PARENT before any endpoint import; the child's
+    # CUDA probe runs later. A driver mount landing between them gives exactly
+    # that incident — a cpu Hello from a pod whose probe then passes — which is
+    # why the retry is likely to fix it outright.
+    attempts = _CENSUS_RETRIES if gpu_devices_present() else 1
+    for attempt in range(attempts):
+        try:
+            facts = probe_hardware()
+        except Exception as exc:  # never fatal: an unmeasured axis is a zero
+            out["hardware_error"] = f"{type(exc).__name__}: {exc}"
+            break
+        out.pop("hardware_error", None)
+        out["hardware"] = facts.as_dict()
+        if not _census_is_empty(facts) or attempt == attempts - 1:
+            break
+        logger.warning(
+            "host census empty on attempt %d/%d while %s exists — a GPU was "
+            "assigned to this container, so this is UNREADABLE, not absent; "
+            "retrying in %.1fs (pgw#1414)",
+            attempt + 1, attempts,
+            next((n for n in _GPU_DEVICE_NODES if os.path.exists(n)), "?"),
+            _CENSUS_BACKOFF_S,
+        )
+        time.sleep(_CENSUS_BACKOFF_S)
+
+    if "hardware_error" not in out and gpu_devices_present():
+        facts_dict = out.get("hardware") or {}
+        if not (facts_dict.get("gpu_count") or facts_dict.get("gpu_name")
+                or facts_dict.get("driver_version")):
+            # THE TYPED STATE. Not `hardware_error` — nothing raised — and not
+            # silence, which is what let a cpu-class Hello leave this host.
+            out["census_unreadable"] = (
+                f"GPU device nodes exist "
+                f"({', '.join(n for n in _GPU_DEVICE_NODES if os.path.exists(n))}) "
+                f"but {attempts} census attempt(s) read no driver, no device "
+                f"and no name. A card may be present and not answering — this "
+                f"host must NOT be registered as cpu-class."
+            )
+            logger.error(
+                "census_unreadable: %s (pgw#1414)", out["census_unreadable"]
+            )
     try:
         from ..host_canary import get_host_canary
 
@@ -100,6 +148,42 @@ if __name__ == "__main__":
 # shipped a measurement with no gpu_name, no gpu_count and no torch version,
 # and every consumer read those zeros as a CPU-only box instead of as a missing
 # measurement.
+
+
+
+#: The container's own evidence that a GPU was ASSIGNED to it, independent of
+#: whether the driver or CUDA runtime is answering yet. The NVIDIA container
+#: runtime creates these nodes at container start; `privdrop.py` already
+#: relaxes their modes for the dropped child, so the repo knows them.
+_GPU_DEVICE_NODES = ("/dev/nvidiactl", "/dev/nvidia0", "/dev/nvidia-uvm")
+
+#: pgw#1414: a cold-start driver mount can lose a race with this census.
+#: Bounded, and short: the parent's whole measurement runs under
+#: `_MEASURE_TIMEOUT_S`, and a pod waiting here is a pod not serving.
+_CENSUS_RETRIES = 3
+_CENSUS_BACKOFF_S = 1.5
+
+
+def gpu_devices_present() -> bool:
+    """Whether this container was handed GPU device nodes.
+
+    THE DISCRIMINATOR pgw#1414 turns on: "this host has no GPU" and "this host
+    has a GPU I could not read" need OPPOSITE behaviour, and every other signal
+    conflates them. `nvidia-smi` missing, NVML failing and `device_count() == 0`
+    look identical on a cardless box and on a 4090 whose driver mount has not
+    landed yet — which is exactly the pod that billed while the scheduler
+    declined it 703 times.
+
+    Device nodes are the one fact that does not depend on the driver working:
+    the runtime creates them because a card was ASSIGNED, so their presence
+    beside an empty census means "unreadable", never "absent".
+    """
+    return any(os.path.exists(node) for node in _GPU_DEVICE_NODES)
+
+
+def _census_is_empty(facts: "HostFacts") -> bool:
+    """Nothing was learned about the silicon — not "a small GPU", nothing."""
+    return not facts.gpu_count and not facts.gpu_name and not facts.driver_version
 
 
 def probe_hardware() -> "HostFacts":
